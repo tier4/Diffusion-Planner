@@ -121,7 +121,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             total_result_dict[f"ego_{key}"].append(val[:, 0, :])  # (B, T)
 
     avg_loss_ego = total_loss_ego / total_samples_ego
-    avg_loss_neighbor = total_loss_neighbor / total_samples_neighbor
+    avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)
     loss_ego = torch.cat(loss_ego_list, dim=0)
 
     for key, val in total_result_dict.items():
