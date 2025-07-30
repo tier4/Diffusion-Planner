@@ -39,6 +39,7 @@ if __name__ == "__main__":
             # add batch size axis
             data[key] = torch.tensor(np.expand_dims(value, axis=0))
         data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
+        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
         data = config_obj.observation_normalizer(data)
 
         visualize_inputs(data, config_obj.observation_normalizer, save_path)
