@@ -184,13 +184,13 @@ class DiffusionPlannerNode(Node):
         # pub(1a)[main] trajectory
         self.pub_trajectory = self.create_publisher(
             PlanningTrajectory,
-            "/planning/scenario_planning/lane_driving/trajectory",
+            "/planning/diffusion_planner/trajectory",
             pub_qos,
         )
         # pub(1b)[new_planning_framework] trajectories
         self.pub_trajectories = self.create_publisher(
             CandidateTrajectories,
-            "/diffusion_planner/trajectories",
+            "/planning/generator/diffusion_planner/candidate_trajectories",
             pub_qos,
         )
 
