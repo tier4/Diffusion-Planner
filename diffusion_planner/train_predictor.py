@@ -305,8 +305,9 @@ def model_training(args):
         valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
         mean_ego_loss_dict = mean_ego_loss(valid_dict)
         valid_loss_ego_position_lat_loss = mean_ego_loss_dict["valid_loss/ego_position_lat_loss"]
+        valid_loss_ego_position_lon_loss = mean_ego_loss_dict["valid_loss/ego_position_lon_loss"]
         print(
-            f"{valid_loss_ego=:.3f}, {valid_loss_neighbor=:.3f}, {valid_loss_ego_position_lat_loss=:.3f}"
+            f"{valid_loss_ego=:.3f}, {valid_loss_neighbor=:.3f}, {valid_loss_ego_position_lat_loss=:.3f}, {valid_loss_ego_position_lon_loss=:.3f}"
         )
 
         if global_rank == 0:
@@ -328,6 +329,7 @@ def model_training(args):
                 "valid_loss_ego": valid_loss_ego,
                 "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
+                "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
             }
             data_list.append(curr_data)
             df = pd.DataFrame(data_list)
