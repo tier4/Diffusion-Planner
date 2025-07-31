@@ -66,12 +66,12 @@ def diffusion_loss_func(
     if model_type == "score":
         dpm_loss = torch.sum((model_output * std + z) ** 2, dim=-1)
     elif model_type == "x_start":
-        dpm_loss = torch.sum((model_output - all_gt[:, :, 1:, :]) ** 2, dim=-1)
-        # loss_dict = loss_func(model_output, all_gt[:, :, 1:, :])
-        # heading_l2_loss = loss_dict["heading_l2_loss"]
-        # position_lat_loss = loss_dict["position_lat_loss"]
-        # position_lon_loss = loss_dict["position_lon_loss"]
-        # dpm_loss = position_lat_loss + position_lon_loss + heading_l2_loss
+        # dpm_loss = torch.sum((model_output - all_gt[:, :, 1:, :]) ** 2, dim=-1)
+        loss_dict = loss_func(model_output, all_gt[:, :, 1:, :])
+        heading_l2_loss = loss_dict["heading_l2_loss"]
+        position_lat_loss = loss_dict["position_lat_loss"]
+        position_lon_loss = loss_dict["position_lon_loss"]
+        dpm_loss = position_lat_loss + position_lon_loss + heading_l2_loss
     elif model_type == "flow_matching":
         target_v = all_gt[:, :, 1:, :] - z
         dpm_loss = torch.sum((model_output - target_v) ** 2, dim=-1)
