@@ -88,8 +88,8 @@ def get_args():
     parser.add_argument("--encoder_mixer_depth", type=int, default=3)
     parser.add_argument("--encoder_fusion_depth", type=int, default=3)
     parser.add_argument("--decoder_depth", type=int, help="number of decoding layers", default=3)
-    parser.add_argument("--num_heads", type=int, help="number of multi-head", default=6)
-    parser.add_argument("--hidden_dim", type=int, help="hidden dimension", default=192)
+    parser.add_argument("--num_heads", type=int, help="number of multi-head", default=8)
+    parser.add_argument("--hidden_dim", type=int, help="hidden dimension", default=256)
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
