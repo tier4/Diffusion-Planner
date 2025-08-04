@@ -78,6 +78,10 @@ def get_args():
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=False)
 
+    parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
+    parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
+    parser.add_argument("--coeff_heading_l2_loss", type=float, default=1.0)
+
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
 
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
@@ -259,7 +263,7 @@ def model_training(args):
 
         # Override learning rate with the new value
         for param_group in optimizer.param_groups:
-            param_group['lr'] = args.learning_rate
+            param_group["lr"] = args.learning_rate
         print(f"Learning rate reset to {args.learning_rate}")
 
     else:

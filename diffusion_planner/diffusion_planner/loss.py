@@ -1,9 +1,8 @@
+from argparse import Namespace
 from typing import Callable, Dict, Tuple
 
 import torch
 import torch.nn as nn
-
-from diffusion_planner.utils.normalizer import StateNormalizer
 
 
 def diffusion_loss_func(
@@ -11,10 +10,12 @@ def diffusion_loss_func(
     inputs: Dict[str, torch.Tensor],
     marginal_prob: Callable[[torch.Tensor], torch.Tensor],
     futures: Tuple[torch.Tensor, torch.Tensor],
-    norm: StateNormalizer,
-    model_type: str,
+    args: Namespace,
     eps: float = 1e-3,
 ):
+    norm = args.state_normalizer
+    model_type = args.diffusion_model_type
+
     ego_future, neighbors_future, neighbor_future_mask = futures
     neighbors_future_valid = ~neighbor_future_mask  # [B, P, V]
 
@@ -71,7 +72,11 @@ def diffusion_loss_func(
         heading_l2_loss = loss_dict["heading_l2_loss"]
         position_lat_loss = loss_dict["position_lat_loss"]
         position_lon_loss = loss_dict["position_lon_loss"]
-        dpm_loss = position_lat_loss + position_lon_loss + heading_l2_loss
+        dpm_loss = (
+            args.coeff_position_lat_loss * position_lat_loss
+            + args.coeff_position_lon_loss * position_lon_loss
+            + args.coeff_heading_l2_loss * heading_l2_loss
+        )
     elif model_type == "flow_matching":
         target_v = all_gt[:, :, 1:, :] - z
         dpm_loss = torch.sum((model_output - target_v) ** 2, dim=-1)

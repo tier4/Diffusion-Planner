@@ -99,8 +99,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
                 inputs,
                 ddp.get_model(model, args.ddp).sde.marginal_prob,
                 (ego_future, neighbors_future, mask),
-                args.state_normalizer,
-                args.diffusion_model_type,
+                args,
             )
 
             loss["loss"] = (
