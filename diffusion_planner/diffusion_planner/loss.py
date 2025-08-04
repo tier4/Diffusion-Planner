@@ -24,6 +24,7 @@ def diffusion_loss_func(
         inputs["ego_current_state"][:, :4],
         inputs["neighbor_agents_past"][:, :Pn, -1, :4],
     )
+    longtitudinal_velocity = inputs["ego_current_state"][:, 4:5]
     neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
     neighbor_mask = torch.concat(
         (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
@@ -72,6 +73,11 @@ def diffusion_loss_func(
         heading_l2_loss = loss_dict["heading_l2_loss"]
         position_lat_loss = loss_dict["position_lat_loss"]
         position_lon_loss = loss_dict["position_lon_loss"]
+        velocity_weight = longtitudinal_velocity * args.coeff_velocity
+        velocity_weight = torch.clamp_min(velocity_weight, 1.0)
+        # apply velocity weight only to longitudinal position loss
+        velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
+        position_lon_loss = position_lon_loss * velocity_weight
         dpm_loss = (
             args.coeff_position_lat_loss * position_lat_loss
             + args.coeff_position_lon_loss * position_lon_loss

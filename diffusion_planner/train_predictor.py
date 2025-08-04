@@ -81,6 +81,7 @@ def get_args():
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
     parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
     parser.add_argument("--coeff_heading_l2_loss", type=float, default=1.0)
+    parser.add_argument("--coeff_velocity", type=float, default=1.0)
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
 
