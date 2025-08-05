@@ -5,7 +5,13 @@ from pathlib import Path
 
 import rclpy
 import yaml
+from autoware_perception_msgs.msg import (
+    TrafficLightElement,
+    TrafficLightGroup,
+    TrafficLightGroupArray,
+)
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from tier4_simulation_msgs.msg import DummyObject
 from unique_identifier_msgs.msg import UUID
@@ -33,6 +39,37 @@ if __name__ == "__main__":
     pub_checkpoint = node.create_publisher(PoseStamped, "/planning/mission_planning/checkpoint", 10)
     pub_pedestrian = node.create_publisher(
         DummyObject, "/simulation/dummy_perception_publisher/object_info", 10
+    )
+    pub_traffic_light = node.create_publisher(
+        TrafficLightGroupArray, "/perception/traffic_light_recognition/traffic_signals", 10
+    )
+
+    def callback_kinematic_state(msg: Odometry):
+        stamp = msg.header.stamp
+        node.get_logger().info(f"Received kinematic state at {stamp.sec}.{stamp.nanosec}")
+        stamp.sec += 1
+        pub_traffic_light.publish(
+            TrafficLightGroupArray(
+                stamp=stamp,
+                traffic_light_groups=[
+                    TrafficLightGroup(
+                        traffic_light_group_id=10583,
+                        elements=[
+                            TrafficLightElement(
+                                color=1,  # RED
+                                shape=1,  # CIRCLE
+                                status=2,  # SOLID_ON
+                                confidence=1.0,
+                            )
+                        ],
+                        predictions=[],
+                    )
+                ],
+            )
+        )
+
+    sub_kinematic_state = node.create_subscription(
+        Odometry, "/localization/kinematic_state", callback_kinematic_state, 10
     )
     node.get_logger().info("Publishers created.")
 
@@ -113,3 +150,6 @@ if __name__ == "__main__":
         pedestrian.action = 0
         pub_pedestrian.publish(pedestrian)
         node.get_logger().info(f"Published pedestrian pose: {pedestrian}")
+
+    # start spin
+    rclpy.spin(node)
