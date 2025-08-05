@@ -74,10 +74,11 @@ def diffusion_loss_func(
         position_lat_loss = loss_dict["position_lat_loss"]
         position_lon_loss = loss_dict["position_lon_loss"]
         velocity_weight = longtitudinal_velocity * args.coeff_velocity
+        velocity_weight = torch.abs(velocity_weight)
         velocity_weight = torch.clamp_min(velocity_weight, 1.0)
         # apply velocity weight only to longitudinal position loss
         velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
-        position_lon_loss = position_lon_loss * velocity_weight
+        position_lon_loss = position_lon_loss / velocity_weight
         dpm_loss = (
             args.coeff_position_lat_loss * position_lat_loss
             + args.coeff_position_lon_loss * position_lon_loss
