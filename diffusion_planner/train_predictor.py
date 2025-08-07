@@ -82,6 +82,12 @@ def get_args():
     parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
     parser.add_argument("--coeff_heading_l2_loss", type=float, default=1.0)
     parser.add_argument("--coeff_velocity", type=float, default=1.0)
+    parser.add_argument(
+        "--coeff_timestep",
+        type=list,
+        default=[1.0, 1.0, 1.0, 1.0],
+        help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
+    )
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
 
@@ -381,6 +387,8 @@ def model_training(args):
 
 if __name__ == "__main__":
     args = get_args()
+
+    assert len(args.coeff_timestep) == 4
 
     # Run
     model_training(args)

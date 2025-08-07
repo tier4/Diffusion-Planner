@@ -73,12 +73,25 @@ def diffusion_loss_func(
         heading_l2_loss = loss_dict["heading_l2_loss"]
         position_lat_loss = loss_dict["position_lat_loss"]
         position_lon_loss = loss_dict["position_lon_loss"]
+
+        # velocity weight
         velocity_weight = longtitudinal_velocity * args.coeff_velocity
         velocity_weight = torch.abs(velocity_weight)
         velocity_weight = torch.clamp_min(velocity_weight, 1.0)
-        # apply velocity weight only to longitudinal position loss
         velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
         position_lon_loss = position_lon_loss / velocity_weight
+
+        # timestep weight
+        timestep_weight = args.coeff_timestep
+        assert T % len(timestep_weight) == 0, (
+            f"Timestep {T} is not divisible by the number of timestep weights {len(timestep_weight)}"
+        )
+        unit = T // len(timestep_weight)
+        for i in range(len(timestep_weight)):
+            position_lat_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+            position_lon_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+            heading_l2_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+
         dpm_loss = (
             args.coeff_position_lat_loss * position_lat_loss
             + args.coeff_position_lon_loss * position_lon_loss
