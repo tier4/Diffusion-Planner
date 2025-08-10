@@ -212,10 +212,14 @@ def visualize_inputs_cv2(
 
 if __name__ == "__main__":
     import argparse
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
+
+    from tqdm import tqdm
 
     parser = argparse.ArgumentParser()
     parser.add_argument("target", type=Path)
+    parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
     target = args.target
 
@@ -228,7 +232,7 @@ if __name__ == "__main__":
         )
         npz_path_list = [target]
 
-    for npz_path in npz_path_list:
+    def process_one(npz_path: Path) -> None:
         loaded = np.load(npz_path)
 
         data = {}
@@ -243,4 +247,8 @@ if __name__ == "__main__":
         # Save image instead of displaying due to OpenCV GUI support issue
         output_path = npz_path.with_suffix(".png")
         cv2.imwrite(str(output_path), img)
-        print(f"Visualization saved to: {output_path}")
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(process_one, npz_path): npz_path for npz_path in npz_path_list}
+        for _ in tqdm(as_completed(futures), total=len(futures)):
+            pass
