@@ -177,24 +177,6 @@ def visualize_inputs_cv2(
         if np.sqrt(vel_x**2 + vel_y**2) > 0.1:
             draw_arrow(img, n_x, n_y, n_x + vel_x / 2, n_y + vel_y / 2, (0, 165, 255), 2)
 
-        # Draw future trajectory (simplified - single color)
-        if "neighbor_agents_future" in inputs:
-            neighbor_future = inputs["neighbor_agents_future"][0][i]
-            neighbor_future_points = []
-            for j in range(0, neighbor_future.shape[0], 5):
-                future_x = neighbor_future[j, 0]
-                future_y = neighbor_future[j, 1]
-                if future_x == 0 and future_y == 0:
-                    break
-
-                pt = world_to_image(future_x, future_y)
-                neighbor_future_points.append(pt)
-
-            if neighbor_future_points:
-                cv2.polylines(
-                    img, [np.array(neighbor_future_points, np.int32)], False, (128, 0, 128), 2
-                )
-
     # ==== Ego past trajectory ====
     if "ego_agent_past" in inputs:
         ego_past = inputs["ego_agent_past"][0]
@@ -214,16 +196,6 @@ def visualize_inputs_cv2(
 
     # Draw ego vehicle as a filled rectangle
     draw_rotated_rect(img, ego_x, ego_y, car_length, car_width, ego_heading, (0, 0, 255))
-
-    # ==== Ego future trajectory ====
-    if "ego_agent_future" in inputs:
-        ego_future = inputs["ego_agent_future"][0]
-        for i in range(0, ego_future.shape[0], 10):  # Sample every 10 points for performance
-            future_x = ego_future[i, 0]
-            future_y = ego_future[i, 1]
-
-            pt = world_to_image(future_x, future_y)
-            cv2.circle(img, pt, 3, (255, 0, 255), -1)  # Magenta color
 
     # ==== Goal pose ====
     if "goal_pose" in inputs:
