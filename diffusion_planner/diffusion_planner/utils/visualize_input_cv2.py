@@ -191,7 +191,9 @@ def visualize_inputs_cv2(
                 neighbor_future_points.append(pt)
 
             if neighbor_future_points:
-                cv2.polylines(img, [np.array(neighbor_future_points, np.int32)], False, (128, 0, 128), 2)
+                cv2.polylines(
+                    img, [np.array(neighbor_future_points, np.int32)], False, (128, 0, 128), 2
+                )
 
     # ==== Ego past trajectory ====
     if "ego_agent_past" in inputs:
@@ -241,21 +243,32 @@ if __name__ == "__main__":
     from pathlib import Path
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("npz_path", type=Path)
-    npz_path = parser.parse_args().npz_path
+    parser.add_argument("target", type=Path)
+    args = parser.parse_args()
+    target = args.target
 
-    loaded = np.load(npz_path)
+    if target.is_dir():
+        # すべてのnpzファイルを取得
+        npz_path_list = sorted(target.glob("*.npz"))
+    else:
+        assert target.suffix == ".npz", (
+            "Target must be a .npz file or a directory containing .npz files"
+        )
+        npz_path_list = [target]
 
-    data = {}
-    for key, value in loaded.items():
-        if key == "map_name" or key == "token":
-            continue
-        # add batch size axis
-        data[key] = torch.tensor(np.expand_dims(value, axis=0))
+    for npz_path in npz_path_list:
+        loaded = np.load(npz_path)
 
-    img = visualize_inputs_cv2(data)
+        data = {}
+        for key, value in loaded.items():
+            if key == "map_name" or key == "token":
+                continue
+            # add batch size axis
+            data[key] = torch.tensor(np.expand_dims(value, axis=0))
 
-    # Save image instead of displaying due to OpenCV GUI support issue
-    output_path = npz_path.with_suffix(".png")
-    cv2.imwrite(output_path, img)
-    print(f"Visualization saved to: {output_path}")
+        img = visualize_inputs_cv2(data)
+
+        # Save image instead of displaying due to OpenCV GUI support issue
+        output_path = npz_path.with_suffix(".png")
+        cv2.imwrite(str(output_path), img)
+        print(f"Visualization saved to: {output_path}")
