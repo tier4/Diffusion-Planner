@@ -225,7 +225,7 @@ if __name__ == "__main__":
 
     if target.is_dir():
         # すべてのnpzファイルを取得
-        npz_path_list = sorted(target.glob("*.npz"))
+        npz_path_list = sorted(target.glob("**/*.npz"))
     else:
         assert target.suffix == ".npz", (
             "Target must be a .npz file or a directory containing .npz files"
