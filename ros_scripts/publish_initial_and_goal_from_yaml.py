@@ -1,10 +1,14 @@
 import argparse
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
+
+import numpy as np
 
 import rclpy
 import yaml
+from autoware_internal_debug_msgs.msg import ProcessingTimeTree
 from autoware_perception_msgs.msg import (
     TrafficLightElement,
     TrafficLightGroup,
@@ -46,7 +50,6 @@ if __name__ == "__main__":
 
     def callback_kinematic_state(msg: Odometry):
         stamp = msg.header.stamp
-        node.get_logger().info(f"Received kinematic state at {stamp.sec}.{stamp.nanosec}")
         stamp.sec += 1
         pub_traffic_light.publish(
             TrafficLightGroupArray(
@@ -72,6 +75,25 @@ if __name__ == "__main__":
         Odometry, "/localization/kinematic_state", callback_kinematic_state, 10
     )
     node.get_logger().info("Publishers created.")
+
+    time_list = defaultdict(list)
+
+    def callback_processing_time_tree(msg: ProcessingTimeTree):
+        nodes = msg.nodes
+        for node in nodes:
+            time_list[node.name].append(float(node.processing_time))
+
+        for key, value in time_list.items():
+            mean = np.mean(value)
+            std = np.std(value)
+            print(f"{key}\t {mean:.1f} ± {std:.1f} msec")
+
+    sub_processing_time_tree = node.create_subscription(
+        ProcessingTimeTree,
+        "/planning/trajectory_generator/diffusion_planner_node/debug/processing_time_detail_ms",
+        callback_processing_time_tree,
+        10,
+    )
 
     initialpose = PoseWithCovarianceStamped()
     initialpose.header.frame_id = "map"
