@@ -182,13 +182,22 @@ if __name__ == "__main__":
 
     if not test_only:
         print(f"creating a new onnx model: {onnx_path}")
+        # Define dynamic axes for both inputs and outputs
+        dynamic_axes = {}
+        # Add dynamic batch dimension for inputs
+        for name in input_names:
+            dynamic_axes[name] = {0: "batch"}
+        # Add dynamic batch dimension for outputs
+        dynamic_axes["prediction"] = {0: "batch"}
+        dynamic_axes["turn_indicator_logit"] = {0: "batch"}
+
         onnx_model = torch.onnx.export(
             wrapper,
             torch_input_tuple,
             onnx_path,
             input_names=input_names,
             output_names=["prediction", "turn_indicator_logit"],
-            dynamic_axes={name: {0: "batch"} for name in input_names},  # optional, but useful
+            dynamic_axes=dynamic_axes,
             opset_version=20,
         )
 
