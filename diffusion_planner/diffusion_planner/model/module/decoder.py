@@ -34,13 +34,6 @@ class Decoder(nn.Module):
             dropout=dpr,
             model_type=config.diffusion_model_type,
         )
-        self.route_encoder = RouteEncoder(
-            config.route_num,
-            config.lane_len,
-            drop_path_rate=config.encoder_drop_path_rate,
-            hidden_dim=config.hidden_dim,
-        )
-
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, 4
         )
@@ -105,8 +98,9 @@ class Decoder(nn.Module):
 
         # Extract context encoding
         encoding = encoder_outputs["encoding"]
-        route_lanes = inputs["route_lanes"]
-        route_encoding = self.route_encoder(route_lanes)
+
+        # Pool encoding to get a fixed-size representation
+        encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]
 
         if self.training:
             sampled_trajectories = inputs["sampled_trajectories"].reshape(
@@ -118,7 +112,7 @@ class Decoder(nn.Module):
             ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(
                 B, 2 * (self._future_len // 10)
             )
-            turn_indicator_input = torch.cat([ego_trajectory, route_encoding], dim=-1)
+            turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
             turn_indicator_logit = self.turn_indicator_predictor(turn_indicator_input)
 
             return {
@@ -153,7 +147,7 @@ class Decoder(nn.Module):
                 turn_indicator_input = torch.cat(
                     [
                         x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10)),
-                        route_encoding,
+                        encoding_pooled,
                     ],
                     dim=-1,
                 )
@@ -204,83 +198,11 @@ class Decoder(nn.Module):
             x0 = x0.reshape(B, P, (1 + self._future_len) * 4)
             x = x0.reshape(B, P, (1 + self._future_len), 4)
             x = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-            turn_indicator_input = torch.cat([x, route_encoding], dim=-1)
+            turn_indicator_input = torch.cat([x, encoding_pooled], dim=-1)
             turn_indicator_logit = self.turn_indicator_predictor(turn_indicator_input)
             x0 = self._state_normalizer.inverse(x0.reshape(B, P, -1, 4))[:, :, 1:]
 
             return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
-
-
-class RouteEncoder(nn.Module):
-    def __init__(
-        self,
-        route_num,
-        lane_len,
-        drop_path_rate=0.3,
-        hidden_dim=192,
-        tokens_mlp_dim=32,
-        channels_mlp_dim=64,
-    ):
-        super().__init__()
-
-        self._channel = channels_mlp_dim
-
-        self.channel_pre_project = Mlp(
-            in_features=4,
-            hidden_features=channels_mlp_dim,
-            out_features=channels_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-        self.token_pre_project = Mlp(
-            in_features=route_num * lane_len,
-            hidden_features=tokens_mlp_dim,
-            out_features=tokens_mlp_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-
-        self.Mixer = MixerBlock(tokens_mlp_dim, channels_mlp_dim, drop_path_rate)
-
-        self.norm = nn.LayerNorm(channels_mlp_dim)
-        self.emb_project = Mlp(
-            in_features=channels_mlp_dim,
-            hidden_features=hidden_dim,
-            out_features=hidden_dim,
-            act_layer=nn.GELU,
-            drop=drop_path_rate,
-        )
-
-    def forward(self, x):
-        """
-        x: B, P, V, D
-        """
-        # only x and x->x' vector, no boundary, no speed limit, no traffic light
-        x = x[..., :4]
-
-        B, P, V, _ = x.shape
-        mask_v = torch.sum(torch.ne(x[..., :4], 0), dim=-1).to(x.device) == 0
-        mask_p = torch.sum(~mask_v, dim=-1) == 0
-        mask_b = torch.sum(~mask_p, dim=-1) == 0
-        x = x.view(B, P * V, -1)
-
-        valid_indices = ~mask_b.view(-1)
-        x = x[valid_indices]
-
-        x = self.channel_pre_project(x)
-        x = x.permute(0, 2, 1)
-        x = self.token_pre_project(x)
-        x = x.permute(0, 2, 1)
-        x = self.Mixer(x)
-
-        x = torch.mean(x, dim=1)
-
-        x = self.emb_project(self.norm(x))
-
-        x_result = torch.zeros((B, x.shape[-1]), device=x.device)
-        x_result[valid_indices] = x  # Fill in valid parts
-
-        return x_result.view(B, -1)
 
 
 class DiT(nn.Module):
