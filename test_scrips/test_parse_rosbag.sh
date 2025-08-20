@@ -18,7 +18,7 @@ python3 ./ros_scripts/parse_rosbag.py \
 python3 ./diffusion_planner/util_scripts/create_train_set_path.py ${result_dir}/tmp
 
 python3 ./diffusion_planner/util_scripts/visualize_input.py ${result_dir}/path_list.json \
-    /home/ubuntu/sakoda/Diffusion-Planner_npf/diffusion_planner/training_log/diffusion-planner-training/20250611-145217_with_psim_20250610/args.json \
+    /mnt/nvme0/sakoda/training_result/20250723-221429_with_random_psim_data/args.json \
     --save_path ${result_dir}/visualize_result
 
 ~/misc/ffmpeg_lib/make_mp4_from_unsequential_png.sh ${result_dir}/visualize_result
