@@ -50,7 +50,7 @@ def main(
     if result.returncode != 0:
         print(f"C++ binary execution failed with return code {result.returncode}")
         print(f"stderr: {result.stderr}")
-        sys.exit(1)
+        return
 
     print("C++ binary execution completed successfully.")
 
