@@ -8,12 +8,17 @@ result_dir=/mnt/nvme0/sakoda/test/$(date +%Y%m%d_%H%M%S)_test_parse_rosbag
 rm -rf ${result_dir}
 mkdir -p ${result_dir}/tmp
 
-python3 ./ros_scripts/parse_rosbag.py \
-    /mnt/nvme3/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag/2025-06-12/10-19-35 \
+SECONDS=0
+
+python3 ./ros_scripts/parse_rosbag_by_cpp.py \
+    /home/ubuntu/autoware/build/autoware_diffusion_planner/data_converter \
+    /mnt/nvme3/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_mcap/2025-06-12/10-19-35 \
     /mnt/nvme3/sakoda/nas_copy/tieriv_dataset/driving_dataset/map/2025-06-12/10-19-35/lanelet2_map.osm \
     ${result_dir}/tmp \
     --limit 30000000 \
     --min_frames 0 2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
+
+echo $SECONDS
 
 python3 ./diffusion_planner/util_scripts/create_train_set_path.py ${result_dir}/tmp
 
