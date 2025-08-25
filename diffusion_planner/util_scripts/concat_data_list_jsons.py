@@ -1,4 +1,4 @@
-"""This script performes recursive glob *.npz files and creates a train set path file."""
+"""This script performs recursive glob *.npz files and creates a train set path file."""
 
 import argparse
 import json
