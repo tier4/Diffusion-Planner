@@ -252,6 +252,9 @@ def process_single_file(input_file: Path, output_dir: Path) -> None:
         # npz形式で保存
         reader.save_as_npz(data, str(output_file), token)
 
+        # 変換後に元のbinファイルを削除
+        input_file.unlink()
+
     except Exception as e:
         print(f"Error processing {input_file}: {e}")
 
