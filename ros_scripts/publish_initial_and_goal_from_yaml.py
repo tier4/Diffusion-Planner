@@ -41,7 +41,7 @@ if __name__ == "__main__":
     pub_initialpose = node.create_publisher(PoseWithCovarianceStamped, "/initialpose", 10)
     pub_goal = node.create_publisher(PoseStamped, "/planning/mission_planning/goal", 10)
     pub_checkpoint = node.create_publisher(PoseStamped, "/planning/mission_planning/checkpoint", 10)
-    pub_pedestrian = node.create_publisher(
+    pub_object = node.create_publisher(
         DummyObject, "/simulation/dummy_perception_publisher/object_info", 10
     )
     pub_traffic_light = node.create_publisher(
@@ -170,8 +170,42 @@ if __name__ == "__main__":
         pedestrian.max_velocity = +33.29999923706055
         pedestrian.min_velocity = -33.29999923706055
         pedestrian.action = 0
-        pub_pedestrian.publish(pedestrian)
+        pub_object.publish(pedestrian)
         node.get_logger().info(f"Published pedestrian pose: {pedestrian}")
+
+    if "bus" in data:
+        time.sleep(1)
+        bus = DummyObject()
+        bus.header.frame_id = "map"
+        bus.header.stamp = node.get_clock().now().to_msg()
+        bus.id = UUID()
+        for i in range(16):
+            bus.id.uuid[i] = i
+        pose = bus.initial_state.pose_covariance.pose
+        pose.position.x = data["bus"]["pose"]["position"]["x"]
+        pose.position.y = data["bus"]["pose"]["position"]["y"]
+        pose.position.z = data["bus"]["pose"]["position"]["z"]
+        pose.orientation.x = data["bus"]["pose"]["orientation"]["x"]
+        pose.orientation.y = data["bus"]["pose"]["orientation"]["y"]
+        pose.orientation.z = data["bus"]["pose"]["orientation"]["z"]
+        pose.orientation.w = data["bus"]["pose"]["orientation"]["w"]
+        cov = bus.initial_state.pose_covariance.covariance
+        cov[0] = 0.0008999999845400453
+        cov[7] = 0.0008999999845400453
+        cov[14] = 0.0008999999845400453
+        cov[35] = 0.007615434937179089
+        bus.classification.label = 3
+        bus.classification.probability = 1.0
+        bus.shape.type = 0  # BOX
+        bus.shape.footprint.points = []
+        bus.shape.dimensions.x = 10.5
+        bus.shape.dimensions.y = 2.5
+        bus.shape.dimensions.z = 3.5
+        bus.max_velocity = +33.29999923706055
+        bus.min_velocity = -33.29999923706055
+        bus.action = 0
+        pub_object.publish(bus)
+        node.get_logger().info(f"Published bus pose: {bus}")
 
     # start spin
     rclpy.spin(node)
