@@ -7,14 +7,12 @@ cd $(dirname $0)
 # source ~/pilot-auto.xx1/install/setup.bash
 # set -eux
 
-data_root_real=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver22_realdata
-data_root_psim=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver22_psimdata
+data_root_real=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver24_realdata
+data_root_psim=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver24_psimdata
 
 python3 ./parse_rosbag_for_directory.py \
-    /mnt/nvme0/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag/ \
     /mnt/nvme1/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/ \
-    /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag/ \
-    /mnt/nvme3/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag/ \
+    /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/ \
     --save_root $data_root_real \
     --step 1 \
     --limit -1 \
@@ -36,6 +34,11 @@ python3 ../diffusion_planner/util_scripts/create_train_set_path.py \
     $data_root_real/2025-06-09 \
     $data_root_real/2025-07-02 \
     $data_root_real/2025-07-15 \
+    $data_root_real/2025-07-23 \
+    $data_root_real/2025-07-29 \
+    $data_root_real/2025-08-08 \
+    $data_root_real/2025-08-13 \
+    $data_root_real/2025-08-20 \
     --save_path $data_root_real/path_list_train.json
 
 python3 ../diffusion_planner/util_scripts/create_train_set_path.py \
