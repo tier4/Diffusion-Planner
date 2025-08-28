@@ -45,7 +45,7 @@ class TrainingDataReader:
             "ego_current_state": 10,
             "ego_agent_future": self.FUTURE_TIME_STEPS * 4,
             "neighbor_agents_past": self.NEIGHBOR_NUM * self.PAST_TIME_STEPS * 11,
-            "neighbor_agents_future": self.NEIGHBOR_NUM * self.FUTURE_TIME_STEPS * 3,
+            "neighbor_agents_future": self.NEIGHBOR_NUM * self.FUTURE_TIME_STEPS * 4,
             "static_objects": self.STATIC_NUM * 10,
             "lanes": self.LANE_NUM * self.LANE_LEN * self.SEGMENT_POINT_DIM,
             "lanes_speed_limit": self.LANE_NUM,
@@ -123,9 +123,16 @@ class TrainingDataReader:
         # neighbor_agents_future (32, 80, 3)
         size = self.sizes["neighbor_agents_future"]
         neighbor_future_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
-        result["neighbor_agents_future"] = np.array(neighbor_future_flat, dtype=np.float32).reshape(
-            self.NEIGHBOR_NUM, self.FUTURE_TIME_STEPS, 3
+        neighbor_future_array = np.array(neighbor_future_flat).reshape(
+            self.NEIGHBOR_NUM, self.FUTURE_TIME_STEPS, 4
         )
+        # cos(yaw), sin(yaw) から yaw を計算
+        x = neighbor_future_array[:, :, 0]
+        y = neighbor_future_array[:, :, 1]
+        cos_yaw = neighbor_future_array[:, :, 2]
+        sin_yaw = neighbor_future_array[:, :, 3]
+        yaw = np.arctan2(sin_yaw, cos_yaw)
+        result["neighbor_agents_future"] = np.stack([x, y, yaw], axis=-1).astype(np.float32)
         offset += size * 4
 
         # static_objects (5, 10)
