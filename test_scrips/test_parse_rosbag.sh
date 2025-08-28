@@ -12,8 +12,8 @@ SECONDS=0
 
 python3 ./ros_scripts/parse_rosbag_by_cpp.py \
     /home/ubuntu/autoware/build/autoware_diffusion_planner/data_converter \
-    /mnt/nvme3/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_mcap/2025-06-12/10-19-35 \
-    /mnt/nvme3/sakoda/nas_copy/tieriv_dataset/driving_dataset/map/2025-06-12/10-19-35/lanelet2_map.osm \
+    /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/2025-06-12/10-19-35 \
+    /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/map/2025-06-12/10-19-35/lanelet2_map.osm \
     ${result_dir}/tmp \
     --limit 30000000 \
     --min_frames 0 2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
