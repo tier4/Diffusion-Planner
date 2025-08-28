@@ -352,6 +352,8 @@ def visualize_inputs(
 
     # print status
     def turn_indicator_int_to_str(turn_indicator):
+        if turn_indicator == 0:
+            return "turn_indicator=0"
         if turn_indicator == 1:
             return "None"
         elif turn_indicator == 2:
