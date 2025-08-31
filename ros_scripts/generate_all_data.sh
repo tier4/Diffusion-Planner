@@ -7,8 +7,8 @@ cd $(dirname $0)
 # source ~/pilot-auto.xx1/install/setup.bash
 # set -eux
 
-data_root_real=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver24_realdata
-data_root_psim=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver24_psimdata
+data_root_real=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver27_realdata_cpp
+data_root_psim=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver27_psimdata_cpp
 
 python3 ./parse_rosbag_for_directory.py \
     /mnt/nvme1/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/ \
@@ -48,11 +48,11 @@ python3 ../diffusion_planner/util_scripts/create_train_set_path.py \
 
 # psimdata
 python3 ./parse_rosbag_for_directory.py \
-    /mnt/nvme0/sakoda/nas_copy/psim_dataset/odaiba_20250709/bag \
+    /mnt/nvme0/sakoda/nas_copy/psim_dataset/simulation_session_20250806_190003/bag \
     --save_root $data_root_psim \
     --step 1 \
     --limit -1 \
-    --min_frames 1800 \
+    --min_frames 0 \
     --search_nearest_route 0
 
 python3 ../diffusion_planner/util_scripts/create_train_set_path.py \
