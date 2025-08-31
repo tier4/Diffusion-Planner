@@ -53,7 +53,7 @@ class TrainingDataReader:
             "route_lanes": self.ROUTE_NUM * self.ROUTE_LEN * self.SEGMENT_POINT_DIM,
             "route_lanes_speed_limit": self.ROUTE_NUM,
             "route_lanes_has_speed_limit": self.ROUTE_NUM,
-            "goal_pose": 3,
+            "goal_pose": 4,
             "turn_indicator": 1,
         }
 
@@ -120,7 +120,7 @@ class TrainingDataReader:
         )
         offset += size * 4
 
-        # neighbor_agents_future (32, 80, 3)
+        # neighbor_agents_future (32, 80, 4) -> (32, 80, 3)
         size = self.sizes["neighbor_agents_future"]
         neighbor_future_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         neighbor_future_array = np.array(neighbor_future_flat).reshape(
@@ -185,11 +185,18 @@ class TrainingDataReader:
         result["route_lanes_has_speed_limit"] = np.array(route_has_flat, dtype=bool).reshape(-1, 1)
         offset += size * 4
 
-        # goal_pose (3,)
+        # goal_pose (4,) -> (3,)
         size = self.sizes["goal_pose"]
         goal_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
-        result["goal_pose"] = np.array(goal_flat, dtype=np.float32)
+        goal_flat = np.array(goal_flat, dtype=np.float32)
         offset += size * 4
+        # cos(yaw), sin(yaw) から yaw を計算
+        x = goal_flat[0]
+        y = goal_flat[1]
+        cos_yaw = goal_flat[2]
+        sin_yaw = goal_flat[3]
+        yaw = np.arctan2(sin_yaw, cos_yaw)
+        result["goal_pose"] = np.array([x, y, yaw], dtype=np.float32)
 
         # turn_indicator (scalar) - int32_t
         result["turn_indicator"] = struct.unpack("<i", data[offset : offset + 4])[0]
