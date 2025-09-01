@@ -18,7 +18,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("input_path", type=Path)
     parser.add_argument("--output_dir", type=Path)
-    parser.add_argument("--map_name", type=str, default="unknown")
     parser.add_argument("--num_workers", type=int, default=8)
     return parser.parse_args()
 
