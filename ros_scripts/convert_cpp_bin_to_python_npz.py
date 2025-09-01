@@ -22,6 +22,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def cos_sin_to_heading(x: np.ndarray) -> np.ndarray:
+    """
+        Convert heading angle to cosine and sine.
+    Args:
+        x: [B, T, 4] where last dimension is (x, y, cos(heading), sin(heading))
+    Output:
+        x: [B, T, 3] where last dimension is (x, y, heading)
+    """
+    heading = np.arctan2(x[..., 3], x[..., 2])
+    heading = np.expand_dims(heading, axis=-1)
+    return np.concatenate([x[..., :2], heading], axis=-1).astype(np.float32)
+
+
 class TrainingDataReader:
     """バイナリファイルから学習データを読み込むクラス"""
 
@@ -82,13 +95,7 @@ class TrainingDataReader:
         size = self.sizes["ego_agent_past"]
         ego_past_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         ego_past_array = np.array(ego_past_flat).reshape(self.PAST_TIME_STEPS, 4)
-        # cos(yaw), sin(yaw) から yaw を計算
-        x = ego_past_array[:, 0]
-        y = ego_past_array[:, 1]
-        cos_yaw = ego_past_array[:, 2]
-        sin_yaw = ego_past_array[:, 3]
-        yaw = np.arctan2(sin_yaw, cos_yaw)
-        result["ego_agent_past"] = np.column_stack([x, y, yaw]).astype(np.float32)
+        result["ego_agent_past"] = cos_sin_to_heading(ego_past_array)
         offset += size * 4
 
         # ego_current_state (10,)
@@ -102,13 +109,7 @@ class TrainingDataReader:
         size = self.sizes["ego_agent_future"]
         ego_future_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         ego_future_array = np.array(ego_future_flat).reshape(self.FUTURE_TIME_STEPS, 4)
-        # cos(yaw), sin(yaw) から yaw を計算
-        x = ego_future_array[:, 0]
-        y = ego_future_array[:, 1]
-        cos_yaw = ego_future_array[:, 2]
-        sin_yaw = ego_future_array[:, 3]
-        yaw = np.arctan2(sin_yaw, cos_yaw)
-        result["ego_agent_future"] = np.column_stack([x, y, yaw]).astype(np.float32)
+        result["ego_agent_future"] = cos_sin_to_heading(ego_future_array)
         offset += size * 4
 
         # neighbor_agents_past (32, 21, 11)
@@ -125,13 +126,7 @@ class TrainingDataReader:
         neighbor_future_array = np.array(neighbor_future_flat).reshape(
             self.NEIGHBOR_NUM, self.FUTURE_TIME_STEPS, 4
         )
-        # cos(yaw), sin(yaw) から yaw を計算
-        x = neighbor_future_array[:, :, 0]
-        y = neighbor_future_array[:, :, 1]
-        cos_yaw = neighbor_future_array[:, :, 2]
-        sin_yaw = neighbor_future_array[:, :, 3]
-        yaw = np.arctan2(sin_yaw, cos_yaw)
-        result["neighbor_agents_future"] = np.stack([x, y, yaw], axis=-1).astype(np.float32)
+        result["neighbor_agents_future"] = cos_sin_to_heading(neighbor_future_array)
         offset += size * 4
 
         # static_objects (5, 10)
@@ -187,15 +182,9 @@ class TrainingDataReader:
         # goal_pose (4,) -> (3,)
         size = self.sizes["goal_pose"]
         goal_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
-        goal_flat = np.array(goal_flat, dtype=np.float32)
+        goal_flat = np.array(goal_flat, dtype=np.float32).reshape(1, 4)
+        result["goal_pose"] = cos_sin_to_heading(goal_flat).reshape(3)
         offset += size * 4
-        # cos(yaw), sin(yaw) から yaw を計算
-        x = goal_flat[0]
-        y = goal_flat[1]
-        cos_yaw = goal_flat[2]
-        sin_yaw = goal_flat[3]
-        yaw = np.arctan2(sin_yaw, cos_yaw)
-        result["goal_pose"] = np.array([x, y, yaw], dtype=np.float32)
 
         # turn_indicator (scalar) - int32_t
         result["turn_indicator"] = struct.unpack("<i", data[offset : offset + 4])[0]
@@ -287,7 +276,7 @@ if __name__ == "__main__":
             print(f"Error: {input_path} is not a .bin file")
     elif input_path.is_dir():
         # ディレクトリ内のすべての.binファイルを処理
-        bin_files = list(input_path.glob("*.bin"))
+        bin_files = sorted(input_path.glob("*.bin"))
         if not bin_files:
             print(f"No .bin files found in {input_path}")
             sys.exit(1)
