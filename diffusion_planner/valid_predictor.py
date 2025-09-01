@@ -303,12 +303,22 @@ if __name__ == "__main__":
     valid_dict = validate_model(diffusion_planner, valid_loader, config_obj, return_pred=True)
     loss_ego = valid_dict["loss_ego"]
     avg_loss_ego = valid_dict["avg_loss_ego"]
-    ave_loss_neighbor = valid_dict["avg_loss_neighbor"]
+    avg_loss_neighbor = valid_dict["avg_loss_neighbor"]
     predictions = valid_dict["predictions"]
     turn_indicators = valid_dict["turn_indicators"]
-    print(f"{avg_loss_ego=:.4f} {ave_loss_neighbor=:.4f}")
+    print(f"{avg_loss_ego=:.4f} {avg_loss_neighbor=:.4f}")
     print(f"{predictions.shape=}")
     print(f"{turn_indicators.shape=}")
+
+    valid_dict_to_save = {
+        "avg_loss_ego": avg_loss_ego,
+        "avg_loss_neighbor": avg_loss_neighbor,
+    }
+    for key, val in valid_dict.items():
+        if key.startswith("ego_"):
+            valid_dict_to_save[f"{key}"] = val.mean().item()
+    with open(Path(args.resume_model_path).parent / "valid_dict.json", "w") as f:
+        json.dump(valid_dict_to_save, f, indent=4)
 
     if args.save_predictions_dir is None:
         exit(0)
