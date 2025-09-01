@@ -7,7 +7,7 @@ import torch
 from diffusion_planner.utils.normalizer import ObservationNormalizer
 
 
-def draw_bounding_box(ax, x, y, heading, len_x, len_y, color, alpha=0.5):
+def draw_bounding_box(ax, x, y, heading, len_x, len_y, color, alpha):
     """
     Draw a bounding box at the specified position with given dimensions and heading.
 
@@ -147,6 +147,23 @@ def visualize_inputs(
                 s=20,
             )
 
+        # Draw bounding boxes at 4 seconds and 8 seconds for ego vehicle
+        for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
+            ego_future_x = ego_future[j, 0]
+            ego_future_y = ego_future[j, 1]
+            if ego_future_x == 0 and ego_future_y == 0:
+                continue
+            draw_bounding_box(
+                ax,
+                ego_future_x,
+                ego_future_y,
+                ego_future[j, 2],
+                car_length,
+                car_width,
+                "orange",
+                0.1,
+            )
+
     # ==== Neighbor agents ====
     neighbors = inputs["neighbor_agents_past"][0]  # Use the first sample in the batch
     last_timestep = neighbors.shape[1] - 1
@@ -261,7 +278,14 @@ def visualize_inputs(
 
         # Draw bounding box
         draw_bounding_box(
-            ax, n_x, n_y, n_heading, len_x, len_y, color, alpha=0.5,
+            ax,
+            n_x,
+            n_y,
+            n_heading,
+            len_x,
+            len_y,
+            color,
+            alpha=0.5,
         )
 
     # ==== Static objects ====
