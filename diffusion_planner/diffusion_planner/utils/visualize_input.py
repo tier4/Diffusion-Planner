@@ -7,6 +7,43 @@ import torch
 from diffusion_planner.utils.normalizer import ObservationNormalizer
 
 
+def draw_bounding_box(ax, x, y, heading, len_x, len_y, color, alpha=0.5):
+    """
+    Draw a bounding box at the specified position with given dimensions and heading.
+
+    Args:
+        ax: matplotlib axis
+        x, y: center position
+        heading: orientation in radians
+        len_x, len_y: length and width of the bounding box
+        color: color of the bounding box
+        alpha: transparency
+    """
+    dx_coeff = [+1, +1, -1, -1]
+    dy_coeff = [+1, -1, -1, +1]
+    for d in range(4):
+        curr_dx = dx_coeff[(d + 0) % 4] * (len_x / 2)
+        curr_dy = dy_coeff[(d + 0) % 4] * (len_y / 2)
+        next_dx = dx_coeff[(d + 1) % 4] * (len_x / 2)
+        next_dy = dy_coeff[(d + 1) % 4] * (len_y / 2)
+        # rotate
+        rot_cdx = curr_dx * np.cos(heading) - curr_dy * np.sin(heading)
+        rot_cdy = curr_dx * np.sin(heading) + curr_dy * np.cos(heading)
+        rot_ndx = next_dx * np.cos(heading) - next_dy * np.sin(heading)
+        rot_ndy = next_dx * np.sin(heading) + next_dy * np.cos(heading)
+
+        line_color = "red" if (d == 0) else color
+        ax.add_line(
+            plt.Line2D(
+                [x + rot_cdx, x + rot_ndx],
+                [y + rot_cdy, y + rot_ndy],
+                color=line_color,
+                alpha=alpha,
+                linewidth=1,
+            )
+        )
+
+
 def visualize_inputs(
     inputs: dict,
     obs_normalizer: ObservationNormalizer,
@@ -170,6 +207,25 @@ def visualize_inputs(
                     alpha=0.5,
                     s=10,
                 )
+
+            # Draw bounding boxes at 4 seconds and 8 seconds
+            # Assuming 10Hz frequency, 4 seconds = index 40, 8 seconds = index 80
+            for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
+                neighbor_future_x = neighbor_future[j, 0]
+                neighbor_future_y = neighbor_future[j, 1]
+                if neighbor_future_x == 0 and neighbor_future_y == 0:
+                    continue
+                draw_bounding_box(
+                    ax,
+                    neighbor_future_x,
+                    neighbor_future_y,
+                    neighbor_future[j, 2],
+                    neighbor[7],
+                    neighbor[6],
+                    color,
+                    alpha=0.1,
+                )
+
             neighbor_future_x = neighbor_future[0, 0]
             neighbor_future_y = neighbor_future[0, 1]
             # if (
@@ -204,26 +260,9 @@ def visualize_inputs(
         )
 
         # Draw bounding box
-        dx_coeff = [+1, +1, -1, -1]
-        dy_coeff = [+1, -1, -1, +1]
-        for d in range(4):
-            curr_dx = dx_coeff[(d + 0) % 4] * (len_x / 2)
-            curr_dy = dy_coeff[(d + 0) % 4] * (len_y / 2)
-            next_dx = dx_coeff[(d + 1) % 4] * (len_x / 2)
-            next_dy = dy_coeff[(d + 1) % 4] * (len_y / 2)
-            # rotate
-            rot_cdx = curr_dx * np.cos(n_heading) - curr_dy * np.sin(n_heading)
-            rot_cdy = curr_dx * np.sin(n_heading) + curr_dy * np.cos(n_heading)
-            rot_ndx = next_dx * np.cos(n_heading) - next_dy * np.sin(n_heading)
-            rot_ndy = next_dx * np.sin(n_heading) + next_dy * np.cos(n_heading)
-            ax.add_line(
-                plt.Line2D(
-                    [n_x + rot_cdx, n_x + rot_ndx],
-                    [n_y + rot_cdy, n_y + rot_ndy],
-                    color=("red" if d == 0 else color),
-                    alpha=0.5,
-                )
-            )
+        draw_bounding_box(
+            ax, n_x, n_y, n_heading, len_x, len_y, color, alpha=0.5,
+        )
 
     # ==== Static objects ====
     static_objects = inputs["static_objects"][0]  # Use the first sample in the batch
