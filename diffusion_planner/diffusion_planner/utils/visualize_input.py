@@ -53,7 +53,7 @@ def visualize_inputs(
     """
     draw the input data of the diffusion_planner model on the xy plane
     """
-    view_range = 55
+    view_range = 60
     inputs = obs_normalizer.inverse(inputs)
 
     # Function to convert PyTorch tensors to NumPy arrays
