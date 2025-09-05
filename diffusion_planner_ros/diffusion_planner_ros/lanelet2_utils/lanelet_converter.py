@@ -15,6 +15,7 @@ from .static_map import (
     AWMLStaticMap,
     LaneSegment,
     Polyline,
+    LineType,
 )
 from .uuid import uuid
 
@@ -22,7 +23,10 @@ from .uuid import uuid
 def _interpolate_points(line, num_point):
     line = LineString(line)
     new_line = np.concatenate(
-        [line.interpolate(d).coords._coords for d in np.linspace(0, line.length, num_point)]
+        [
+            line.interpolate(d).coords._coords
+            for d in np.linspace(0, line.length, num_point)
+        ]
     )
     return new_line
 
@@ -76,7 +80,9 @@ def _get_boundary_type(linestring: lanelet2.core.LineString3d) -> BoundaryType:
 
 def _get_boundary_segment(linestring: lanelet2.core.LineString3d) -> Polyline:
     boundary_type = _get_boundary_type(linestring)
-    waypoints = _interpolate_lane(np.array([(line.x, line.y, line.z) for line in linestring]))
+    waypoints = _interpolate_lane(
+        np.array([(line.x, line.y, line.z) for line in linestring])
+    )
     return Polyline(polyline_type=boundary_type, waypoints=waypoints)
 
 
@@ -104,11 +110,15 @@ def _interpolate_lane(waypoints: NDArray):
     # Compute cumulative distances (arc length)
     distances = np.zeros(len(waypoints))
     for i in range(1, len(waypoints)):
-        distances[i] = distances[i - 1] + np.linalg.norm(waypoints[i] - waypoints[i - 1])
+        distances[i] = distances[i - 1] + np.linalg.norm(
+            waypoints[i] - waypoints[i - 1]
+        )
 
     # Generate new arc lengths with fixed spacing (0.5 meters)
     new_distances = np.arange(0, distances[-1], 0.5)
-    new_distances = np.append(new_distances, distances[-1])  # Ensure last point is included
+    new_distances = np.append(
+        new_distances, distances[-1]
+    )  # Ensure last point is included
 
     # Interpolate x, y, z separately
     interp_x = interp1d(distances, waypoints[:, 0], kind="linear")
@@ -131,7 +141,9 @@ def _interpolate_lane(waypoints: NDArray):
     return new_waypoints
 
 
-def _identify_current_light_status(turn_direction: int, traffic_light_elements: list) -> int:
+def _identify_current_light_status(
+    turn_direction: int, traffic_light_elements: list
+) -> int:
     """
     Identify the current traffic light status based on turn direction and traffic light elements.
     ref: https://github.com/tier4/lanelet2_python_api_for_autoware/blob/rosless_lanelet2/interaction_with_cache_json.ipynb
@@ -145,7 +157,9 @@ def _identify_current_light_status(turn_direction: int, traffic_light_elements: 
         int: The color of the relevant traffic light (0=UNKNOWN, 1=RED, 2=AMBER, 3=GREEN, 4=WHITE)
     """
     # Filter out ineffective elements (color == 0)
-    effective_elements = [element for element in traffic_light_elements if element.color != 0]
+    effective_elements = [
+        element for element in traffic_light_elements if element.color != 0
+    ]
 
     # If no effective elements, return UNKNOWN (0)
     if not effective_elements:
@@ -166,13 +180,17 @@ def _identify_current_light_status(turn_direction: int, traffic_light_elements: 
     target_shape = direction_to_shape_map.get(turn_direction, 0)
 
     # First priority: Find elements with exactly matching direction
-    matching_elements = [element for element in effective_elements if element.shape == target_shape]
+    matching_elements = [
+        element for element in effective_elements if element.shape == target_shape
+    ]
     if matching_elements:
         # If multiple matching elements, take the one with highest confidence
         return max(matching_elements, key=lambda x: x.confidence).color
 
     # Second priority: Find circle elements
-    circle_elements = [element for element in effective_elements if element.shape == 1]  # CIRCLE
+    circle_elements = [
+        element for element in effective_elements if element.shape == 1
+    ]  # CIRCLE
     if circle_elements:
         # If multiple circle elements, take the one with highest confidence
         return max(circle_elements, key=lambda x: x.confidence).color
@@ -214,7 +232,9 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             )
             lane_polyline = Polyline(polyline_type=lane_type, waypoints=lane_waypoints)
 
-            turn_direction_str = _get_attribute(lanelet.attributes, "turn_direction", "unknown")
+            turn_direction_str = _get_attribute(
+                lanelet.attributes, "turn_direction", "unknown"
+            )
             turn_direction_int = {
                 "unknown": -1,
                 "straight": 0,
@@ -222,15 +242,22 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
                 "right": 2,
             }[turn_direction_str]
 
+            line_type_left = _get_attribute(lanelet.leftBound.attributes, "type", "")
+            line_type_left = LineType.from_str(line_type_left)
+            line_type_right = _get_attribute(lanelet.rightBound.attributes, "type", "")
+            line_type_right = LineType.from_str(line_type_right)
+
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
                 polyline=lane_polyline,
                 left_boundary=_get_boundary_segment(lanelet.leftBound),
+                left_line_type=line_type_left,
                 right_boundary=_get_boundary_segment(lanelet.rightBound),
+                right_line_type=line_type_right,
                 speed_limit_mph=_get_speed_limit_mph(lanelet),
                 traffic_lights=lanelet.trafficLights(),
                 turn_direction=turn_direction_int,
-                center=np.mean(lane_waypoints[:, 0:2], axis=0)
+                center=np.mean(lane_waypoints[:, 0:2], axis=0),
             )
 
     print(f"{len(lane_segments)} lane segments are loaded.")
@@ -291,7 +318,9 @@ def process_segment(
     left_boundaries_4xN = np.vstack((left_boundary.T, np.ones(left_boundary.shape[0])))
     left_boundaries_ego = inv_transform_matrix_4x4 @ left_boundaries_4xN
     left_boundary = left_boundaries_ego[:3, :].T
-    right_boundaries_4xN = np.vstack((right_boundary.T, np.ones(right_boundary.shape[0])))
+    right_boundaries_4xN = np.vstack(
+        (right_boundary.T, np.ones(right_boundary.shape[0]))
+    )
     right_boundaries_ego = inv_transform_matrix_4x4 @ right_boundaries_4xN
     right_boundary = right_boundaries_ego[:3, :].T
 
@@ -312,7 +341,9 @@ def process_segment(
         traffic_light_id = segment.traffic_lights[0].id
         if traffic_light_id in traffic_light_recognition:
             elements = traffic_light_recognition[traffic_light_id]
-            traffic_light_color = _identify_current_light_status(segment.turn_direction, elements)
+            traffic_light_color = _identify_current_light_status(
+                segment.turn_direction, elements
+            )
             # https://github.com/autowarefoundation/autoware_msgs/blob/main/autoware_perception_msgs/msg/TrafficLightElement.msg
             if traffic_light_color == 0:  # UNKNOWN
                 traffic_light[3] = 1
@@ -385,9 +416,15 @@ def create_lane_tensor(
 
     result_list = result_list[0:num_segments]
 
-    lanes_tensor = torch.zeros((1, num_segments, 20, 13), dtype=torch.float32, device=dev)
-    lanes_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.float32, device=dev)
-    lanes_has_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.bool, device=dev)
+    lanes_tensor = torch.zeros(
+        (1, num_segments, 20, 13), dtype=torch.float32, device=dev
+    )
+    lanes_speed_limit = torch.zeros(
+        (1, num_segments, 1), dtype=torch.float32, device=dev
+    )
+    lanes_has_speed_limit = torch.zeros(
+        (1, num_segments, 1), dtype=torch.bool, device=dev
+    )
 
     for i, result_list in enumerate(result_list):
         line_data, speed_limit = result_list

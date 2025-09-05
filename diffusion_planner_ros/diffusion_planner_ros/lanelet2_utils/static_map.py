@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import EnumInt
 from typing import TYPE_CHECKING
 
 from attr import define
@@ -32,13 +33,36 @@ class AWMLStaticMap:
         )
 
 
+class LineType(EnumInt):
+    LINE_THIN = 0
+    LINE_THICK = 1
+    VIRTUAL = 2
+    ROAD_BORDER = 3
+    NUM = 4
+
+    @classmethod
+    def from_str(cls, type_str: str) -> LineType:
+        return cls._line_type_mapping[type_str]
+
+
+# クラス定義の後にマッピングを定義
+LineType._line_type_mapping = {
+    "line_thin": LineType.LINE_THIN,
+    "line_thick": LineType.LINE_THICK,
+    "virtual": LineType.VIRTUAL,
+    "road_border": LineType.ROAD_BORDER,
+}
+
+
 @define
 class LaneSegment:
     id: int
     turn_direction: int
     polyline: Polyline
     left_boundary: Polyline
+    left_line_type: LineType
     right_boundary: Polyline
+    right_line_type: LineType
     speed_limit_mph: float | None
     center: NDArrayF32
     traffic_lights: list
