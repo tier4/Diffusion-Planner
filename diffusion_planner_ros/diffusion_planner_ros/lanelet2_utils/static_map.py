@@ -34,10 +34,6 @@ class AWMLStaticMap:
         )
 
 
-def _to_boundary_segment(x: list[dict | BoundarySegment]) -> list[BoundarySegment]:
-    return [BoundarySegment.from_dict(v) if isinstance(v, dict) else v for v in x]
-
-
 @define
 class LaneSegment:
     """Represents a lane segment.
@@ -57,8 +53,8 @@ class LaneSegment:
     polyline: Polyline = field(
         converter=lambda x: Polyline.from_dict(x) if isinstance(x, dict) else x
     )
-    left_boundaries: list[BoundarySegment] = field(converter=_to_boundary_segment, factory=list)
-    right_boundaries: list[BoundarySegment] = field(converter=_to_boundary_segment, factory=list)
+    left_boundary: BoundarySegment
+    right_boundary: BoundarySegment
     speed_limit_mph: float | None = field(default=None)
     center: NDArrayF32 = field(init=False)
     traffic_lights: list = field(default=None)

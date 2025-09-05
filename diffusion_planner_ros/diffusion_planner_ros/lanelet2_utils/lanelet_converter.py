@@ -263,8 +263,8 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
                 polyline=lane_polyline,
-                left_boundaries=[left_boundary],
-                right_boundaries=[right_boundary],
+                left_boundary=left_boundary,
+                right_boundary=right_boundary,
                 speed_limit_mph=speed_limit_mph,
                 traffic_lights=lanelet.trafficLights(),
                 turn_direction=turn_direction_int,
@@ -288,13 +288,13 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
 def _fix_point_num(map: AWMLStaticMap):
     for segment_id, segment in map.lane_segments.items():
         centerlines = segment.polyline.waypoints
-        left_boundaries = segment.left_boundaries[0].polyline.waypoints
-        right_boundaries = segment.right_boundaries[0].polyline.waypoints
+        left_boundary = segment.left_boundary.polyline.waypoints
+        right_boundary = segment.right_boundary.polyline.waypoints
 
         # Fix the number of points to 20
         segment.polyline.waypoints = _interpolate_points(centerlines, 20)
-        segment.left_boundaries[0].polyline.waypoints = _interpolate_points(left_boundaries, 20)
-        segment.right_boundaries[0].polyline.waypoints = _interpolate_points(right_boundaries, 20)
+        segment.left_boundary.polyline.waypoints = _interpolate_points(left_boundary, 20)
+        segment.right_boundary.polyline.waypoints = _interpolate_points(right_boundary, 20)
 
         # To crop the map faster, we need to set the center of the segment
         segment.center = np.mean(centerlines[:, 0:2], axis=0)
@@ -310,8 +310,8 @@ def process_segment(
     traffic_light_recognition,
 ):
     centerlines = segment.polyline.waypoints
-    left_boundaries = segment.left_boundaries[0].polyline.waypoints
-    right_boundaries = segment.right_boundaries[0].polyline.waypoints
+    left_boundary = segment.left_boundary.polyline.waypoints
+    right_boundary = segment.right_boundary.polyline.waypoints
 
     def judge_inside(x, y):
         return (
@@ -331,15 +331,15 @@ def process_segment(
     centerlines_4xN = np.vstack((centerlines.T, np.ones(centerlines.shape[0])))
     centerlines_ego = inv_transform_matrix_4x4 @ centerlines_4xN
     centerlines = centerlines_ego[:3, :].T
-    left_boundaries_4xN = np.vstack((left_boundaries.T, np.ones(left_boundaries.shape[0])))
+    left_boundaries_4xN = np.vstack((left_boundary.T, np.ones(left_boundary.shape[0])))
     left_boundaries_ego = inv_transform_matrix_4x4 @ left_boundaries_4xN
-    left_boundaries = left_boundaries_ego[:3, :].T
-    right_boundaries_4xN = np.vstack((right_boundaries.T, np.ones(right_boundaries.shape[0])))
+    left_boundary = left_boundaries_ego[:3, :].T
+    right_boundaries_4xN = np.vstack((right_boundary.T, np.ones(right_boundary.shape[0])))
     right_boundaries_ego = inv_transform_matrix_4x4 @ right_boundaries_4xN
-    right_boundaries = right_boundaries_ego[:3, :].T
+    right_boundary = right_boundaries_ego[:3, :].T
 
-    left_boundaries -= centerlines
-    right_boundaries -= centerlines
+    left_boundary -= centerlines
+    right_boundary -= centerlines
 
     diff_centerlines = centerlines[1:] - centerlines[:-1]
     diff_centerlines = np.insert(diff_centerlines, diff_centerlines.shape[0], 0, axis=0)
@@ -377,8 +377,8 @@ def process_segment(
         (
             centerlines[:, 0:2],  # xy
             diff_centerlines[:, 0:2],  # xy
-            left_boundaries[:, 0:2],  # xy
-            right_boundaries[:, 0:2],  # xy
+            left_boundary[:, 0:2],  # xy
+            right_boundary[:, 0:2],  # xy
             traffic_light,
         ),
         axis=1,
