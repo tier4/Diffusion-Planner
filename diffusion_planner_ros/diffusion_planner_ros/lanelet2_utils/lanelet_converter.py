@@ -226,13 +226,6 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
             )
             lane_polyline = Polyline(polyline_type=lane_type, waypoints=lane_waypoints)
-            speed_limit_mph = _get_speed_limit_mph(lanelet)
-
-            # road line or road edge
-            left_linestring = lanelet.leftBound
-            right_linestring = lanelet.rightBound
-            left_boundary = _get_boundary_segment(left_linestring)
-            right_boundary = _get_boundary_segment(right_linestring)
 
             turn_direction_str = _get_attribute(lanelet.attributes, "turn_direction", "unknown")
             turn_direction_int = {
@@ -245,12 +238,14 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
                 polyline=lane_polyline,
-                left_boundary=left_boundary,
-                right_boundary=right_boundary,
-                speed_limit_mph=speed_limit_mph,
+                left_boundary=_get_boundary_segment(lanelet.leftBound),
+                right_boundary=_get_boundary_segment(lanelet.rightBound),
+                speed_limit_mph=_get_speed_limit_mph(lanelet),
                 traffic_lights=lanelet.trafficLights(),
                 turn_direction=turn_direction_int,
             )
+
+    print(f"{len(lane_segments)} lane segments are loaded.")
 
     # generate uuid from map filepath
     map_id = uuid(filename, digit=16)
