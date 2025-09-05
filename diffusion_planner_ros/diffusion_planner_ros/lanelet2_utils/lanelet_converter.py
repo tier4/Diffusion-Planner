@@ -215,7 +215,6 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
     lanelet_map = lanelet2.io.load(filename, projection)
 
     lane_segments: dict[int, LaneSegment] = {}
-    taken_boundary_ids: list[int] = []
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
 
@@ -234,7 +233,6 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             right_linestring = lanelet.rightBound
             left_boundary = _get_boundary_segment(left_linestring)
             right_boundary = _get_boundary_segment(right_linestring)
-            taken_boundary_ids.extend((left_linestring.id, right_linestring.id))
 
             turn_direction_str = _get_attribute(lanelet.attributes, "turn_direction", "unknown")
             turn_direction_int = {
@@ -253,14 +251,6 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
                 traffic_lights=lanelet.trafficLights(),
                 turn_direction=turn_direction_int,
             )
-
-    boundary_segments: dict[int, BoundarySegment] = {}
-    for linestring in lanelet_map.lineStringLayer:
-        type_name: str = _get_attribute(linestring.attributes, "type", "")
-        if (
-            type_name in T4_ROADEDGE or type_name in T4_ROADLINE
-        ) and linestring.id not in taken_boundary_ids:
-            boundary_segments[linestring.id] = _get_boundary_segment(linestring)
 
     # generate uuid from map filepath
     map_id = uuid(filename, digit=16)
