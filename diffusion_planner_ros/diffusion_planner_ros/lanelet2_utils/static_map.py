@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import EnumInt
+from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from attr import define
@@ -33,7 +33,7 @@ class AWMLStaticMap:
         )
 
 
-class LineType(EnumInt):
+class LineType(IntEnum):
     LINE_THIN = 0
     LINE_THICK = 1
     VIRTUAL = 2
@@ -66,3 +66,5 @@ class LaneSegment:
     speed_limit_mph: float | None
     center: NDArrayF32
     traffic_lights: list
+
+    TENSOR_DIM = 21

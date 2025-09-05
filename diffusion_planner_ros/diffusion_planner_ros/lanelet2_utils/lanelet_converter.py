@@ -285,6 +285,13 @@ def _fix_point_num(map: AWMLStaticMap):
     return map
 
 
+def one_hot_encode(class_index: int, num_class: int) -> NDArray:
+    assert 0 <= class_index < num_class, "class_index out of range"
+    one_hot = np.zeros(num_class, dtype=np.float32)
+    one_hot[class_index] = 1.0
+    return one_hot
+
+
 def process_segment(
     segment,
     inv_transform_matrix_4x4,
@@ -361,6 +368,13 @@ def process_segment(
             traffic_light[3] = 1
     traffic_light = np.tile(traffic_light, (centerline.shape[0], 1))
 
+    left_line_type = segment.left_line_type
+    right_line_type = segment.right_line_type
+    left_line_type_onehot = one_hot_encode(left_line_type.value, LineType.NUM.value)
+    right_line_type_onehot = one_hot_encode(right_line_type.value, LineType.NUM.value)
+    left_line_type_onehot = np.tile(left_line_type_onehot, (centerline.shape[0], 1))
+    right_line_type_onehot = np.tile(right_line_type_onehot, (centerline.shape[0], 1))
+
     line_data = np.concatenate(
         (
             centerline[:, 0:2],  # xy
@@ -368,9 +382,12 @@ def process_segment(
             left_boundary[:, 0:2],  # xy
             right_boundary[:, 0:2],  # xy
             traffic_light,
+            left_line_type_onehot,
+            right_line_type_onehot,
         ),
         axis=1,
     )
+    assert line_data.shape == (20, LaneSegment.TENSOR_DIM)
 
     # convert from miles per hour to meters per second
     speed_limit_mps = segment.speed_limit_mph * 0.44704
@@ -417,7 +434,7 @@ def create_lane_tensor(
     result_list = result_list[0:num_segments]
 
     lanes_tensor = torch.zeros(
-        (1, num_segments, 20, 13), dtype=torch.float32, device=dev
+        (1, num_segments, 20, LaneSegment.TENSOR_DIM), dtype=torch.float32, device=dev
     )
     lanes_speed_limit = torch.zeros(
         (1, num_segments, 1), dtype=torch.float32, device=dev
