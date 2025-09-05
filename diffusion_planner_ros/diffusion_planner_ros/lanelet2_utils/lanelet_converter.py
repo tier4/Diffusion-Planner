@@ -51,62 +51,6 @@ def _get_attribute(attribute_map, key: str, default: str) -> str:
         return default
 
 
-def _is_virtual_linestring(line_type: str, line_subtype: str) -> bool:
-    """Indicate whether input linestring type and subtype is virtual.
-
-    Args:
-    ----
-        line_type (str): Line type name.
-        line_subtype (str): Line subtype name.
-
-    Returns:
-    -------
-        bool: Return True if line type is `virtual` and subtype is `""`.
-
-    """
-    return line_type == "virtual" and line_subtype == ""
-
-
-def _is_roadedge_linestring(line_type: str, _line_subtype: str) -> bool:
-    """Indicate whether input linestring type and subtype is supported RoadEdge.
-
-    Args:
-    ----
-        line_type (str): Line type name.
-        _line_subtype (str): Line subtype name.
-
-    Returns:
-    -------
-        bool: Return True if line type is contained in T4_ROADEDGE.
-
-    Note:
-    ----
-        Currently `_line_subtype` is not used, but it might be used in the future.
-
-    """
-    return line_type in T4_ROADEDGE
-
-
-def _is_roadline_linestring(_line_type: str, line_subtype: str) -> bool:
-    """Indicate whether input linestring type and subtype is supported RoadLine.
-
-    Args:
-    ----
-        _line_type (str): Line type name.
-        line_subtype (str): Line subtype name.
-
-    Returns:
-    -------
-        bool: Return True if line subtype is contained in T4_RoadLine.
-
-    Note:
-    ----
-        Currently `_line_type` is not used, but it might be used in the future.
-
-    """
-    return line_subtype in T4_ROADLINE
-
-
 def _get_boundary_type(linestring: lanelet2.core.LineString3d) -> BoundaryType:
     """Return the `BoundaryType` from linestring.
 
@@ -121,16 +65,13 @@ def _get_boundary_type(linestring: lanelet2.core.LineString3d) -> BoundaryType:
     """
     line_type = _get_attribute(linestring.attributes, "type", "")
     line_subtype = _get_attribute(linestring.attributes, "subtype", "")
-    if _is_virtual_linestring(line_type, line_subtype):
+    if line_type == "virtual" and line_subtype == "":
         return MapType.UNKNOWN
-    elif _is_roadedge_linestring(line_type, line_subtype):
+    elif line_type in T4_ROADEDGE:
         return MAP_TYPE_MAPPING[line_type]
-    elif _is_roadline_linestring(line_type, line_subtype):
+    elif line_subtype in T4_ROADLINE:
         return MAP_TYPE_MAPPING[line_subtype]
     else:
-        # logging.warning(
-        #     f"[Boundary]: id={linestring.id}, type={line_type}, subtype={line_subtype}, MapType.UNKNOWN is used.",
-        # )
         return MapType.UNKNOWN
 
 
