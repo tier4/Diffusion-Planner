@@ -13,7 +13,6 @@ from .map import MapType
 from .polylines_base import BoundaryType
 from .static_map import (
     AWMLStaticMap,
-    BoundarySegment,
     LaneSegment,
     Polyline,
 )
@@ -75,22 +74,10 @@ def _get_boundary_type(linestring: lanelet2.core.LineString3d) -> BoundaryType:
         return MapType.UNKNOWN
 
 
-def _get_boundary_segment(linestring: lanelet2.core.LineString3d) -> BoundarySegment:
-    """Return the `BoundarySegment` from linestring.
-
-    Args:
-    ----
-        linestring (lanelet2.core.LineString3d): LineString instance.
-
-    Returns:
-    -------
-        BoundarySegment: BoundarySegment instance.
-
-    """
+def _get_boundary_segment(linestring: lanelet2.core.LineString3d) -> Polyline:
     boundary_type = _get_boundary_type(linestring)
     waypoints = _interpolate_lane(np.array([(line.x, line.y, line.z) for line in linestring]))
-    polyline = Polyline(polyline_type=boundary_type, waypoints=waypoints)
-    return BoundarySegment(linestring.id, polyline)
+    return Polyline(polyline_type=boundary_type, waypoints=waypoints)
 
 
 def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
@@ -258,13 +245,13 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
 def _fix_point_num(map: AWMLStaticMap):
     for segment_id, segment in map.lane_segments.items():
         centerlines = segment.polyline.waypoints
-        left_boundary = segment.left_boundary.polyline.waypoints
-        right_boundary = segment.right_boundary.polyline.waypoints
+        left_boundary = segment.left_boundary.waypoints
+        right_boundary = segment.right_boundary.waypoints
 
         # Fix the number of points to 20
         segment.polyline.waypoints = _interpolate_points(centerlines, 20)
-        segment.left_boundary.polyline.waypoints = _interpolate_points(left_boundary, 20)
-        segment.right_boundary.polyline.waypoints = _interpolate_points(right_boundary, 20)
+        segment.left_boundary.waypoints = _interpolate_points(left_boundary, 20)
+        segment.right_boundary.waypoints = _interpolate_points(right_boundary, 20)
 
         # To crop the map faster, we need to set the center of the segment
         segment.center = np.mean(centerlines[:, 0:2], axis=0)
@@ -279,9 +266,9 @@ def process_segment(
     mask_range,
     traffic_light_recognition,
 ):
-    centerlines = segment.polyline.waypoints
-    left_boundary = segment.left_boundary.polyline.waypoints
-    right_boundary = segment.right_boundary.polyline.waypoints
+    centerline = segment.polyline.waypoints
+    left_boundary = segment.left_boundary.waypoints
+    right_boundary = segment.right_boundary.waypoints
 
     def judge_inside(x, y):
         return (
@@ -292,15 +279,15 @@ def process_segment(
         )
 
     inside_center = judge_inside(segment.center[0], segment.center[1])
-    inside_first = judge_inside(centerlines[0, 0], centerlines[0, 1])
-    inside_last = judge_inside(centerlines[-1, 0], centerlines[-1, 1])
+    inside_first = judge_inside(centerline[0, 0], centerline[0, 1])
+    inside_last = judge_inside(centerline[-1, 0], centerline[-1, 1])
     if (not inside_center) and (not inside_first) and (not inside_last):
         return None
 
     # Convert to base_link
-    centerlines_4xN = np.vstack((centerlines.T, np.ones(centerlines.shape[0])))
-    centerlines_ego = inv_transform_matrix_4x4 @ centerlines_4xN
-    centerlines = centerlines_ego[:3, :].T
+    centerline_4xN = np.vstack((centerline.T, np.ones(centerline.shape[0])))
+    centerline_ego = inv_transform_matrix_4x4 @ centerline_4xN
+    centerline = centerline_ego[:3, :].T
     left_boundaries_4xN = np.vstack((left_boundary.T, np.ones(left_boundary.shape[0])))
     left_boundaries_ego = inv_transform_matrix_4x4 @ left_boundaries_4xN
     left_boundary = left_boundaries_ego[:3, :].T
@@ -308,11 +295,11 @@ def process_segment(
     right_boundaries_ego = inv_transform_matrix_4x4 @ right_boundaries_4xN
     right_boundary = right_boundaries_ego[:3, :].T
 
-    left_boundary -= centerlines
-    right_boundary -= centerlines
+    left_boundary -= centerline
+    right_boundary -= centerline
 
-    diff_centerlines = centerlines[1:] - centerlines[:-1]
-    diff_centerlines = np.insert(diff_centerlines, diff_centerlines.shape[0], 0, axis=0)
+    diff_centerline = centerline[1:] - centerline[:-1]
+    diff_centerline = np.insert(diff_centerline, diff_centerline.shape[0], 0, axis=0)
 
     traffic_light = [0, 0, 0, 0, 0]  # (green, yellow, red, unknown, no traffic light)
     if len(segment.traffic_lights) == 0:
@@ -341,12 +328,12 @@ def process_segment(
                 assert False, f"Unexpected traffic light color: {traffic_light_color}"
         else:
             traffic_light[3] = 1
-    traffic_light = np.tile(traffic_light, (centerlines.shape[0], 1))
+    traffic_light = np.tile(traffic_light, (centerline.shape[0], 1))
 
     line_data = np.concatenate(
         (
-            centerlines[:, 0:2],  # xy
-            diff_centerlines[:, 0:2],  # xy
+            centerline[:, 0:2],  # xy
+            diff_centerline[:, 0:2],  # xy
             left_boundary[:, 0:2],  # xy
             right_boundary[:, 0:2],  # xy
             traffic_light,
