@@ -113,23 +113,6 @@ def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
         return None
 
 
-def _get_left_and_right_linestring(
-    lanelet: lanelet2.core.Lanelet,
-) -> tuple[lanelet2.core.LineString3d, lanelet2.core.LineString3d]:
-    """Return the left and right boundaries from lanelet.
-
-    Args:
-    ----
-        lanelet (lanelet2.core.Lanelet): Lanelet instance.
-
-    Returns:
-    -------
-        tuple[lanelet2.core.LineString3d, lanelet2.core.LineString3d]: Left and right boundaries.
-
-    """
-    return lanelet.leftBound, lanelet.rightBound
-
-
 def _interpolate_lane(waypoints: NDArray):
     # Compute cumulative distances (arc length)
     distances = np.zeros(len(waypoints))
@@ -247,7 +230,8 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             speed_limit_mph = _get_speed_limit_mph(lanelet)
 
             # road line or road edge
-            left_linestring, right_linestring = _get_left_and_right_linestring(lanelet)
+            left_linestring = lanelet.leftBound
+            right_linestring = lanelet.rightBound
             left_boundary = _get_boundary_segment(left_linestring)
             right_boundary = _get_boundary_segment(right_linestring)
             taken_boundary_ids.extend((left_linestring.id, right_linestring.id))
