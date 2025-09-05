@@ -50,14 +50,12 @@ class LaneSegment:
 
     id: int
     turn_direction: int
-    polyline: Polyline = field(
-        converter=lambda x: Polyline.from_dict(x) if isinstance(x, dict) else x
-    )
+    polyline: Polyline
     left_boundary: BoundarySegment
     right_boundary: BoundarySegment
-    speed_limit_mph: float | None = field(default=None)
-    center: NDArrayF32 = field(init=False)
-    traffic_lights: list = field(default=None)
+    speed_limit_mph: float | None
+    center: NDArrayF32
+    traffic_lights: list
 
     @property
     def lane_type(self) -> MapType:

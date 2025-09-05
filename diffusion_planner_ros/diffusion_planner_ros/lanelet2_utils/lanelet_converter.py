@@ -243,6 +243,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
                 speed_limit_mph=_get_speed_limit_mph(lanelet),
                 traffic_lights=lanelet.trafficLights(),
                 turn_direction=turn_direction_int,
+                center=np.mean(lane_waypoints[:, 0:2], axis=0)
             )
 
     print(f"{len(lane_segments)} lane segments are loaded.")
