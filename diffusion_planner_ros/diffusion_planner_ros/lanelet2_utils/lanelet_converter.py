@@ -31,58 +31,24 @@ def _interpolate_points(line, num_point):
 # cspell: ignore MGRS
 
 
-def _get_lanelet_subtype(lanelet: lanelet2.core.Lanelet) -> str:
-    """Return subtype name from lanelet.
+def _get_attribute(attribute_map, key: str, default: str) -> str:
+    """Return attribute value from AttributeMap with default fallback.
 
     Args:
     ----
-        lanelet (lanelet2.core.Lanelet): Lanelet instance.
+        attribute_map: AttributeMap object.
+        key (str): Attribute key to retrieve.
+        default (str): Default value if key is not found.
 
     Returns:
     -------
-        str: Subtype name. Return "" if it has no attribute named subtype.
+        str: Attribute value or default if key is not found.
 
     """
-    if "subtype" in lanelet.attributes:
-        return lanelet.attributes["subtype"]
+    if key in attribute_map:
+        return attribute_map[key]
     else:
-        return ""
-
-
-def _get_linestring_type(linestring: lanelet2.core.LineString3d) -> str:
-    """Return type name from linestring.
-
-    Args:
-    ----
-        linestring (lanelet2.core.LineString3d): Linestring instance.
-
-    Returns:
-    -------
-        str: Type name. Return "" if it has no attribute named type.
-
-    """
-    if "type" in linestring.attributes:
-        return linestring.attributes["type"]
-    else:
-        return ""
-
-
-def _get_linestring_subtype(linestring: lanelet2.core.LineString3d) -> str:
-    """Return subtype name from linestring.
-
-    Args:
-    ----
-        linestring (lanelet2.core.LineString3d): Linestring instance.
-
-    Returns:
-    -------
-        str: Subtype name. Return "" if it has no attribute named subtype.
-
-    """
-    if "subtype" in linestring.attributes:
-        return linestring.attributes["subtype"]
-    else:
-        return ""
+        return default
 
 
 def _is_virtual_linestring(line_type: str, line_subtype: str) -> bool:
@@ -153,8 +119,8 @@ def _get_boundary_type(linestring: lanelet2.core.LineString3d) -> BoundaryType:
         BoundaryType: BoundaryType instance.
 
     """
-    line_type = _get_linestring_type(linestring)
-    line_subtype = _get_linestring_subtype(linestring)
+    line_type = _get_attribute(linestring.attributes, "type", "")
+    line_subtype = _get_attribute(linestring.attributes, "subtype", "")
     if _is_virtual_linestring(line_type, line_subtype):
         return MapType.UNKNOWN
     elif _is_roadedge_linestring(line_type, line_subtype):
@@ -199,9 +165,9 @@ def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
 
     """
     kph2mph = 0.621371
-    if "speed_limit" in lanelet.attributes:
-        # NOTE: attributes of ["speed_limit"] is str
-        return float(lanelet.attributes["speed_limit"]) * kph2mph
+    speed_limit_str = _get_attribute(lanelet.attributes, "speed_limit", "")
+    if speed_limit_str:
+        return float(speed_limit_str) * kph2mph
     else:
         return None
 
@@ -327,7 +293,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
     lane_segments: dict[int, LaneSegment] = {}
     taken_boundary_ids: list[int] = []
     for lanelet in lanelet_map.laneletLayer:
-        lanelet_subtype = _get_lanelet_subtype(lanelet)
+        lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
 
         # NOTE: skip walkway because it contains stop_line as boundary
         if lanelet_subtype in T4_LANE:
@@ -345,11 +311,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             right_boundary = _get_boundary_segment(right_linestring)
             taken_boundary_ids.extend((left_linestring.id, right_linestring.id))
 
-            turn_direction_str = (
-                lanelet.attributes["turn_direction"]
-                if "turn_direction" in lanelet.attributes
-                else "unknown"
-            )
+            turn_direction_str = _get_attribute(lanelet.attributes, "turn_direction", "unknown")
             turn_direction_int = {
                 "unknown": -1,
                 "straight": 0,
@@ -369,7 +331,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
 
     boundary_segments: dict[int, BoundarySegment] = {}
     for linestring in lanelet_map.lineStringLayer:
-        type_name: str = _get_linestring_type(linestring)
+        type_name: str = _get_attribute(linestring.attributes, "type", "")
         if (
             type_name in T4_ROADEDGE or type_name in T4_ROADLINE
         ) and linestring.id not in taken_boundary_ids:
