@@ -387,7 +387,7 @@ def process_segment(
         ),
         axis=1,
     )
-    assert line_data.shape == (20, LaneSegment.TENSOR_DIM)
+    assert line_data.shape == (20, LaneSegment.TENSOR_DIM), f"Unexpected shape: {line_data.shape}"
 
     # convert from miles per hour to meters per second
     speed_limit_mps = segment.speed_limit_mph * 0.44704

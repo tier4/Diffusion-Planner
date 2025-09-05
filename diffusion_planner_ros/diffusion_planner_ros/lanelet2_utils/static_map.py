@@ -28,9 +28,9 @@ class AWMLStaticMap:
     lane_segments: dict[int, LaneSegment]
 
     def __post_init__(self) -> None:
-        assert all(isinstance(item, LaneSegment) for _, item in self.lane_segments.items()), (
-            "Expected all items are LaneSegments."
-        )
+        assert all(
+            isinstance(item, LaneSegment) for _, item in self.lane_segments.items()
+        ), "Expected all items are LaneSegments."
 
 
 class LineType(IntEnum):
@@ -38,7 +38,10 @@ class LineType(IntEnum):
     LINE_THICK = 1
     VIRTUAL = 2
     ROAD_BORDER = 3
-    NUM = 4
+    ROAD_SHOULDER = 4
+    GUARD_RAIL = 5
+    CURBSTONE = 6
+    NUM = 7
 
     @classmethod
     def from_str(cls, type_str: str) -> LineType:
@@ -51,6 +54,9 @@ LineType._line_type_mapping = {
     "line_thick": LineType.LINE_THICK,
     "virtual": LineType.VIRTUAL,
     "road_border": LineType.ROAD_BORDER,
+    "road_shoulder": LineType.ROAD_SHOULDER,
+    "guard_rail": LineType.GUARD_RAIL,
+    "curbstone": LineType.CURBSTONE,
 }
 
 
@@ -67,4 +73,4 @@ class LaneSegment:
     center: NDArrayF32
     traffic_lights: list
 
-    TENSOR_DIM = 21
+    TENSOR_DIM = 27
