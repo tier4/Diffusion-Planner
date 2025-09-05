@@ -34,14 +34,17 @@ class AWMLStaticMap:
 
 
 class LineType(IntEnum):
-    LINE_THIN = 0
-    LINE_THICK = 1
-    VIRTUAL = 2
-    ROAD_BORDER = 3
-    ROAD_SHOULDER = 4
-    GUARD_RAIL = 5
-    CURBSTONE = 6
-    NUM = 7
+    CROSSWALK = 0
+    CURBSTONE = 1
+    GUARD_RAIL = 2
+    LINE_THICK = 3
+    LINE_THIN = 4
+    PEDESTRIAN_MARKING = 5
+    ROAD_BORDER = 6
+    ROAD_SHOULDER = 7
+    VIRTUAL = 8
+    ZEBRA_MARKING = 9
+    NUM = 10
 
     @classmethod
     def from_str(cls, type_str: str) -> LineType:
@@ -50,13 +53,16 @@ class LineType(IntEnum):
 
 # クラス定義の後にマッピングを定義
 LineType._line_type_mapping = {
-    "line_thin": LineType.LINE_THIN,
+    "crosswalk": LineType.CROSSWALK,
+    "curbstone": LineType.CURBSTONE,
+    "guard_rail": LineType.GUARD_RAIL,
     "line_thick": LineType.LINE_THICK,
-    "virtual": LineType.VIRTUAL,
+    "line_thin": LineType.LINE_THIN,
+    "pedestrian_marking": LineType.PEDESTRIAN_MARKING,
     "road_border": LineType.ROAD_BORDER,
     "road_shoulder": LineType.ROAD_SHOULDER,
-    "guard_rail": LineType.GUARD_RAIL,
-    "curbstone": LineType.CURBSTONE,
+    "virtual": LineType.VIRTUAL,
+    "zebra_marking": LineType.ZEBRA_MARKING,
 }
 
 
@@ -73,4 +79,4 @@ class LaneSegment:
     center: NDArrayF32
     traffic_lights: list
 
-    TENSOR_DIM = 27
+    TENSOR_DIM = 13 + 2 * LineType.NUM.value
