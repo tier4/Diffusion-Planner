@@ -31,22 +31,6 @@ def _interpolate_points(line, num_point):
 # cspell: ignore MGRS
 
 
-def _load_osm(filename: str) -> lanelet2.core.LaneletMap:
-    """Load lanelet map from osm file.
-
-    Args:
-    ----
-        filename (str): Path to osm file.
-
-    Returns:
-    -------
-        lanelet2.core.LaneletMap: Loaded lanelet map.
-
-    """
-    projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
-    return lanelet2.io.load(filename, projection)
-
-
 def _get_lanelet_subtype(lanelet: lanelet2.core.Lanelet) -> str:
     """Return subtype name from lanelet.
 
@@ -337,7 +321,8 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
         AWMLStaticMap: Static map data.
 
     """
-    lanelet_map = _load_osm(filename)
+    projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
+    lanelet_map = lanelet2.io.load(filename, projection)
 
     lane_segments: dict[int, LaneSegment] = {}
     taken_boundary_ids: list[int] = []
