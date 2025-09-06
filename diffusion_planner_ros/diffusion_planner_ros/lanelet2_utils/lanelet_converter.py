@@ -14,8 +14,8 @@ from .polylines_base import BoundaryType
 from .static_map import (
     AWMLStaticMap,
     LaneSegment,
-    Polyline,
     LineType,
+    Polyline,
 )
 from .uuid import uuid
 
