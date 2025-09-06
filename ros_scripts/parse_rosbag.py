@@ -515,7 +515,7 @@ def main(
                 )
                 break
 
-            is_red_light = route_tensor[:, 1, 0, -3].item()  # next segment
+            is_red_light = route_tensor[:, 1, 0, 8 + 2].item()  # next segment
             sum_mileage = 0.0
             for j in range(FUTURE_TIME_STEPS - 1):
                 sum_mileage += np.linalg.norm(ego_future_np[j, :2] - ego_future_np[j + 1, :2])
