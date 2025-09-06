@@ -426,7 +426,7 @@ class LaneEncoder(nn.Module):
 
         self.speed_limit_emb = nn.Linear(1, channels_mlp_dim)
         self.unknown_speed_emb = nn.Embedding(1, channels_mlp_dim)
-        self.traffic_emb = nn.Linear(5, channels_mlp_dim)
+        self.attribute_emb = nn.Linear(5 + 2 * 10, channels_mlp_dim) # traffic_light and line type
 
         self.channel_pre_project = Mlp(
             in_features=8,
@@ -458,11 +458,11 @@ class LaneEncoder(nn.Module):
 
     def forward(self, x, speed_limit, has_speed_limit):
         """
-        x: B, P, V, D (x, y, x'-x, y'-y, x_left-x, y_left-y, x_right-x, y_right-y, traffic(5))
+        x: B, P, V, D (x, y, x'-x, y'-y, x_left-x, y_left-y, x_right-x, y_right-y, traffic(5) + line_type(2 * 10))
         speed_limit: B, P, 1
         has_speed_limit: B, P, 1
         """
-        traffic = x[:, :, 0, 8:]
+        attribute = x[:, :, 0, 8:]
         x = x[..., :8]
 
         pos = x[:, :, int(self._lane_len / 2), :4].clone()  # x, y, x'-x, y'-y
@@ -493,7 +493,7 @@ class LaneEncoder(nn.Module):
         # Reshape speed_limit and traffic to match flattened dimensions
         speed_limit = speed_limit.view(B * P, 1)
         has_speed_limit = has_speed_limit.view(B * P, 1)
-        traffic = traffic.view(B * P, -1)
+        attribute = attribute.view(B * P, -1)
 
         # Create embeddings for all positions
         speed_limit_emb = self.speed_limit_emb(speed_limit)
@@ -503,7 +503,7 @@ class LaneEncoder(nn.Module):
         speed_limit_embedding = torch.where(has_speed_limit, speed_limit_emb, unknown_speed_emb)
 
         # Process traffic lights for all positions
-        traffic_light_embedding = self.traffic_emb(traffic)
+        traffic_light_embedding = self.attribute_emb(attribute)
 
         x = x + speed_limit_embedding + traffic_light_embedding
         x = self.emb_project(self.norm(x))
