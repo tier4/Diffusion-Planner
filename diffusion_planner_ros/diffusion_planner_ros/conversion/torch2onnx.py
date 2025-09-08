@@ -25,9 +25,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt", type=str, default="latest.pth", help="Checkpoint file path")
     parser.add_argument("--onnx_path", type=str, default="model.onnx", help="ONNX model file path")
     parser.add_argument(
-        "--sample_input_path", type=str, default="sample_input.npz", help="Sample input path"
-    )
-    parser.add_argument(
         "--wrap_with_onnx_functions",
         action="store_true",
         help="Wether to replace some original functions with onnx-friendly ones",
@@ -120,7 +117,6 @@ if __name__ == "__main__":
     config_json_path = args.config
     ckpt_path = args.ckpt
     onnx_path = args.onnx_path
-    sample_input_path = args.sample_input_path
     wrap_with_onnx = args.wrap_with_onnx_functions
     test_only = args.test_only
 
@@ -134,24 +130,19 @@ if __name__ == "__main__":
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    sample_input_file = np.load(sample_input_path)
     inputs = {}
-    for key in sample_input_file.keys():
-        if key in [
-            "map_name",
-            "token",
-            "ego_agent_future",
-            "neighbor_agents_future",
-            "turn_indicator",
-        ]:
-            continue
-        inputs[key] = torch.tensor(sample_input_file[key], dtype=torch.float32).unsqueeze(0)
-
-    inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-    inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+    inputs["ego_agent_past"] = torch.randn(1, 21, 4, dtype=torch.float32)
+    inputs["ego_current_state"] = torch.randn(1, 10, dtype=torch.float32)
+    inputs["neighbor_agents_past"] = torch.randn(1, 32, 21, 11, dtype=torch.float32)
+    inputs["static_objects"] = torch.randn(1, 5, 10, dtype=torch.float32)
+    inputs["lanes"] = torch.randn(1, 70, 20, 33, dtype=torch.float32)
+    inputs["lanes_speed_limit"] = torch.randn(1, 70, 1, dtype=torch.float32)
+    inputs["lanes_has_speed_limit"] = torch.ones(1, 70, 1, dtype=torch.bool)
+    inputs["route_lanes"] = torch.randn(1, 25, 20, 33, dtype=torch.float32)
+    inputs["route_lanes_speed_limit"] = torch.randn(1, 25, 1, dtype=torch.float32)
+    inputs["route_lanes_has_speed_limit"] = torch.ones(1, 25, 1, dtype=torch.bool)
+    inputs["goal_pose"] = torch.randn(1, 4, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
-    inputs["lanes_has_speed_limit"] = inputs["lanes_has_speed_limit"].bool()
-    inputs["route_lanes_has_speed_limit"] = inputs["route_lanes_has_speed_limit"].bool()
 
     for key in inputs.keys():
         print(f"{key}: {inputs[key].shape}, {inputs[key].dtype}")
