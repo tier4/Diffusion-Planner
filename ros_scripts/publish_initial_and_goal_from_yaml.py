@@ -5,7 +5,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-
 import rclpy
 import yaml
 from autoware_internal_debug_msgs.msg import ProcessingTimeTree
@@ -59,7 +58,8 @@ if __name__ == "__main__":
                         traffic_light_group_id=10583,
                         elements=[
                             TrafficLightElement(
-                                color=1,  # RED
+                                # color=1,  # RED
+                                color=3,  # GREEN
                                 shape=1,  # CIRCLE
                                 status=2,  # SOLID_ON
                                 confidence=1.0,
@@ -173,7 +173,7 @@ if __name__ == "__main__":
         pub_object.publish(pedestrian)
         node.get_logger().info(f"Published pedestrian pose: {pedestrian}")
 
-    if "bus" in data:
+    if "bus" in data and False:
         time.sleep(1)
         bus = DummyObject()
         bus.header.frame_id = "map"
