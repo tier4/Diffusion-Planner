@@ -47,19 +47,62 @@ if __name__ == "__main__":
         TrafficLightGroupArray, "/perception/traffic_light_recognition/traffic_signals", 10
     )
 
+    # RED = 1, YELLOW = 2, GREEN = 3
+    RED = 1
+    YELLOW = 2
+    GREEN = 3
+    traffic_light_status = GREEN
+    counter = 0
+
     def callback_kinematic_state(msg: Odometry):
         stamp = msg.header.stamp
         stamp.sec += 1
+        global counter, traffic_light_status
+        counter += 1
+        if counter % 150 == 0:
+            counter = 0
+            if traffic_light_status == RED:
+                traffic_light_status = GREEN
+            elif traffic_light_status == YELLOW:
+                traffic_light_status = RED
+            elif traffic_light_status == GREEN:
+                traffic_light_status = YELLOW
+
+        traffic_light_group_id_list = [
+            10221,
+            10222,
+            10249,
+            10250,
+            10267,
+            10270,
+            10276,
+            10307,
+            10309,
+            10323,
+            10324,
+            10583,
+            10584,
+            179518,
+            179596,
+            179970,
+            190343,
+            190426,
+            2118985,
+            2119347,
+            2119369,
+            2119402,
+            2119414,
+            2119540,
+        ]
         pub_traffic_light.publish(
             TrafficLightGroupArray(
                 stamp=stamp,
                 traffic_light_groups=[
                     TrafficLightGroup(
-                        traffic_light_group_id=10583,
+                        traffic_light_group_id=id,
                         elements=[
                             TrafficLightElement(
-                                # color=1,  # RED
-                                color=3,  # GREEN
+                                color=traffic_light_status,
                                 shape=1,  # CIRCLE
                                 status=2,  # SOLID_ON
                                 confidence=1.0,
@@ -67,6 +110,7 @@ if __name__ == "__main__":
                         ],
                         predictions=[],
                     )
+                    for id in traffic_light_group_id_list
                 ],
             )
         )
