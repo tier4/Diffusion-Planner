@@ -1,13 +1,15 @@
+import argparse
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-import torch
 
-from diffusion_planner.train_epoch import heading_to_cos_sin
+parser = argparse.ArgumentParser()
+parser.add_argument("target_dir2", type=Path)
+args = parser.parse_args()
 
 target_dir1 = Path("/mnt/nvme0/sakoda/test/20250828_131552_test_parse_rosbag_py/tmp")
-target_dir2 = Path("/mnt/nvme0/sakoda/test/20250904_103454_test_parse_rosbag_double/tmp")
+target_dir2 = args.target_dir2
 
 npz_list1 = sorted(target_dir1.glob("*.npz"))
 npz_list2 = sorted(target_dir2.glob("*.npz"))
@@ -37,7 +39,7 @@ for f1, f2 in zip(npz_list1, npz_list2):
             continue
         diff = np.abs(npz1[key].astype(np.float32) - npz2[key].astype(np.float32))
         max_diff = np.max(diff)
-        judge = ("NG" if max_diff > 1e-5 else "OK")
+        judge = "NG" if max_diff > 1e-5 else "OK"
         print(judge, key, max_diff, npz1[key].shape, npz2[key].shape)
         result_map[key].append(max_diff < 1e-5)
 
