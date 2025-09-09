@@ -8,11 +8,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("target_dir2", type=Path)
 args = parser.parse_args()
 
-target_dir1 = Path("/mnt/nvme0/sakoda/test/20250828_131552_test_parse_rosbag_py/tmp")
+target_dir1 = Path("/mnt/nvme0/sakoda/test/20250828_131552_test_parse_rosbag_py")
 target_dir2 = args.target_dir2
 
-npz_list1 = sorted(target_dir1.glob("*.npz"))
-npz_list2 = sorted(target_dir2.glob("*.npz"))
+npz_list1 = sorted(target_dir1.glob("**/*.npz"))
+npz_list2 = sorted(target_dir2.glob("**/*.npz"))
 
 filename_list1 = [f.name for f in npz_list1]
 filename_list2 = [f.name for f in npz_list2]
