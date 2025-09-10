@@ -9,7 +9,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("target_dir2", type=Path)
 args = parser.parse_args()
 
-target_dir1 = Path("/mnt/nvme0/sakoda/test/20250907_080900_test_parse_rosbag_py")
+target_dir1 = Path("/mnt/nvme0/sakoda/test/baseline_test_parse_rosbag_py")
 target_dir2 = args.target_dir2
 
 png_list1 = sorted(target_dir1.glob("**/*.png"))

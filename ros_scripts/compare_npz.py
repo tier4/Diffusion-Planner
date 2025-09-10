@@ -2,13 +2,14 @@ import argparse
 from collections import defaultdict
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 parser = argparse.ArgumentParser()
 parser.add_argument("target_dir2", type=Path)
 args = parser.parse_args()
 
-target_dir1 = Path("/mnt/nvme0/sakoda/test/20250909_183510_test_parse_rosbag_py")
+target_dir1 = Path("/mnt/nvme0/sakoda/test/baseline_test_parse_rosbag_py")
 target_dir2 = args.target_dir2
 
 npz_list1 = sorted(target_dir1.glob("**/*.npz"))
@@ -34,24 +35,35 @@ for f1, f2 in zip(npz_list1, npz_list2):
     npz2 = np.load(f2)
 
     print(f"\n{f1}, {f2}")
+    save_dir = f2.parent.parent / "compare"
+    save_dir.mkdir(exist_ok=True, parents=True)
     for key in npz1.keys():
-        if key == "map_name" or key == "token":
+        if key == "map_name" or key == "token" or key != "lanes":
             continue
-        diff = np.abs(npz1[key].astype(np.float32) - npz2[key].astype(np.float32))
+        data1 = npz1[key]
+        diff = np.abs(data1.astype(np.float32) - npz2[key].astype(np.float32))
         max_diff = np.max(diff)
         judge = "NG" if max_diff > 1e-5 else "OK"
-        print(judge, key, max_diff, npz1[key].shape, npz2[key].shape)
+        print(judge, key, max_diff, data1.shape, npz2[key].shape)
         result_map[key].append(max_diff < 1e-5)
 
-        # is_there_diff = False
-        # for i in range(diff.shape[0]):
-        #     if np.any(diff[i, 0, 8:] > 1e-5):
-        #         is_there_diff = True
-        # for i in range(diff.shape[0]):
-        #     if is_there_diff:
-        #         print("  ", i, diff[i, 0, 8:], npz1[key][i, 0, 8:], npz2[key][i, 0, 8:])
-        # if is_there_diff:
-        #     a = input()
+        num_segment, num_points, num_features = data1.shape
+        for i in range(num_segment):
+            for j in range(num_points):
+                for k in range(num_features):
+                    if diff[i, j, k] < 1e-1:
+                        continue
+                    print(
+                        f"  {i:02d}, {j:02d}, {k:02d}: {data1[i, j, k]:.3f} -> {npz2[key][i, j, k]:.3f} (diff: {diff[i, j, k]:.3f})"
+                    )
+            plt.plot(data1[i, :, 0], data1[i, :, 1], "o-", label="data1")
+            plt.plot(npz2[key][i, :, 0], npz2[key][i, :, 1], "x--", label="data2")
+            plt.legend()
+            plt.savefig(save_dir / f"{key}_segment_{i:02d}.png")
+            print(save_dir / f"{key}_segment_{i:02d}.png")
+            plt.clf()
+
+    break
 
 for key, val in result_map.items():
     total_num = len(val)
