@@ -48,7 +48,7 @@ class TrainingDataReader:
         self.LANE_LEN = 20
         self.ROUTE_NUM = 25
         self.ROUTE_LEN = 20
-        self.SEGMENT_POINT_DIM = 13
+        self.SEGMENT_POINT_DIM = 33
 
         # 各配列のサイズを計算
         self.sizes = {
@@ -137,7 +137,7 @@ class TrainingDataReader:
         )
         offset += size * 4
 
-        # lanes (70, 20, 13)
+        # lanes (70, 20, SEGMENT_POINT_DIM)
         size = self.sizes["lanes"]
         lanes_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         result["lanes"] = np.array(lanes_flat, dtype=np.float32).reshape(
@@ -157,7 +157,7 @@ class TrainingDataReader:
         result["lanes_has_speed_limit"] = np.array(lanes_has_flat, dtype=bool).reshape(-1, 1)
         offset += size * 4
 
-        # route_lanes (25, 20, 13)
+        # route_lanes (25, 20, SEGMENT_POINT_DIM)
         size = self.sizes["route_lanes"]
         route_lanes_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         result["route_lanes"] = np.array(route_lanes_flat, dtype=np.float32).reshape(
