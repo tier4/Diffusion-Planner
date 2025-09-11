@@ -102,10 +102,10 @@ class Decoder(nn.Module):
         # Pool encoding to get a fixed-size representation
         encoding_pooled = torch.mean(encoding, dim=1).detach()  # [B, D]
 
+        sampled_trajectories = inputs["sampled_trajectories"].reshape(
+            B, P, (1 + self._future_len) * 4
+        )
         if self.training:
-            sampled_trajectories = inputs["sampled_trajectories"].reshape(
-                B, P, (1 + self._future_len) * 4
-            )
             diffusion_time = inputs["diffusion_time"]
 
             gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
@@ -127,13 +127,7 @@ class Decoder(nn.Module):
         else:
             if self._model_type == "flow_matching":
                 # [B, 1 + predicted_neighbor_num, (1 + self._future_len) * 4]
-                x = torch.cat(
-                    [
-                        current_states[:, :, None],
-                        torch.randn(B, P, self._future_len, 4).to(current_states.device),
-                    ],
-                    dim=2,
-                ).reshape(B, P, -1)
+                x = sampled_trajectories
                 NUM_STEP = 10
                 func = partial(
                     self.dit,
@@ -156,13 +150,7 @@ class Decoder(nn.Module):
                 return {"prediction": x, "turn_indicator_logit": turn_indicator_logit}
 
             # [B, 1 + predicted_neighbor_num, (1 + self._future_len) * 4]
-            xT = torch.cat(
-                [
-                    current_states[:, :, None],
-                    torch.randn(B, P, self._future_len, 4).to(current_states.device) * 0.5,
-                ],
-                dim=2,
-            ).reshape(B, P, -1)
+            xT = sampled_trajectories
 
             def initial_state_constraint(xt, t, step):
                 xt = xt.reshape(B, P, -1, 4)

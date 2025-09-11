@@ -6,7 +6,6 @@ import numpy as np
 import onnxruntime as ort
 import torch
 import torch.nn as nn
-
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 
@@ -58,6 +57,7 @@ class ONNXWrapper(nn.Module):
 
     def forward(
         self,
+        sampled_trajectories,
         ego_agent_past,
         ego_current_state,
         neighbor_agents_past,
@@ -72,6 +72,7 @@ class ONNXWrapper(nn.Module):
         ego_shape,
     ):
         inputs = {
+            "sampled_trajectories": sampled_trajectories,
             "ego_agent_past": ego_agent_past,
             "ego_current_state": ego_current_state,
             "neighbor_agents_past": neighbor_agents_past,
@@ -131,6 +132,7 @@ if __name__ == "__main__":
     torch.manual_seed(seed)
 
     inputs = {}
+    inputs["sampled_trajectories"] = torch.ones(1, 33, 81, 4, dtype=torch.float32)
     inputs["ego_agent_past"] = torch.randn(1, 21, 4, dtype=torch.float32)
     inputs["ego_current_state"] = torch.randn(1, 10, dtype=torch.float32)
     inputs["neighbor_agents_past"] = torch.randn(1, 32, 21, 11, dtype=torch.float32)
@@ -210,11 +212,10 @@ if __name__ == "__main__":
     torch_input_tuple = tuple(normalized_inputs.values())
     onnx_inputs = {k: v.cpu().numpy() for k, v in normalized_inputs.items() if k in input_names}
 
-    # Run torch inference
-    with torch.no_grad():
-        output = wrapper(*torch_input_tuple)
-        torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
-    onnx_output = ort_session.run(None, onnx_inputs)
-
-    print("Compare outputs using normalized input")
-    compare_outputs(torch_output, onnx_output)
+    for i in range(3):
+        print(f"\nTest {i + 1} with normalized random input")
+        with torch.no_grad():
+            output = wrapper(*torch_input_tuple)
+            torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
+        onnx_output = ort_session.run(None, onnx_inputs)
+        compare_outputs(torch_output, onnx_output)
