@@ -59,14 +59,19 @@ if __name__ == "__main__":
         stamp.sec += 1
         global counter, traffic_light_status
         counter += 1
-        if counter % 150 == 0:
-            counter = 0
-            if traffic_light_status == RED:
-                traffic_light_status = GREEN
-            elif traffic_light_status == YELLOW:
-                traffic_light_status = RED
-            elif traffic_light_status == GREEN:
+        # 各色で遷移時間を変える
+        if traffic_light_status == GREEN:
+            if counter % 400 == -0:
+                counter = 0
                 traffic_light_status = YELLOW
+        elif traffic_light_status == YELLOW:
+            if counter % 300 == 0:
+                counter = 0
+                traffic_light_status = RED
+        elif traffic_light_status == RED:
+            if counter % 600 == 0:
+                counter = 0
+                traffic_light_status = GREEN
 
         traffic_light_group_id_list = [
             10221,
