@@ -6,12 +6,6 @@ import sys
 import pandas as pd
 import torch
 import wandb
-from timm.utils import ModelEma
-from torch import optim
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
-from valid_predictor import validate_model
-
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
@@ -20,6 +14,11 @@ from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.train_utils import resume_model, set_seed
+from timm.utils import ModelEma
+from torch import optim
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+from valid_predictor import validate_model
 
 
 def boolean(v):
@@ -163,6 +162,7 @@ def model_training(args):
             k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
             for k, v in args_dict.items()
         }
+        args_dict["major_version"] = 1
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
