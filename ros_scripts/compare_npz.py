@@ -4,12 +4,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 parser = argparse.ArgumentParser()
 parser.add_argument("target_dir2", type=Path)
 args = parser.parse_args()
 
-target_dir1 = Path("/mnt/nvme0/sakoda/test/baseline_test_parse_rosbag_py")
+target_dir1 = Path("/mnt/nvme0/sakoda/test/baseline_test_parse_rosbag_20250612_101935_py")
 target_dir2 = args.target_dir2
 
 npz_list1 = sorted(target_dir1.glob("**/*.npz"))
@@ -41,23 +42,49 @@ for f1, f2 in zip(npz_list1, npz_list2):
         if key == "map_name" or key == "token" or key != "lanes":
             continue
         data1 = npz1[key]
-        diff = np.abs(data1.astype(np.float32) - npz2[key].astype(np.float32))
+        data2 = npz2[key]
+        diff = np.abs(data1.astype(np.float32) - data2.astype(np.float32))
         max_diff = np.max(diff)
         judge = "NG" if max_diff > 1e-5 else "OK"
-        print(judge, key, max_diff, data1.shape, npz2[key].shape)
+        print(judge, key, max_diff, data1.shape, data2.shape)
         result_map[key].append(max_diff < 1e-5)
 
         num_segment, num_points, num_features = data1.shape
+
+        # セグメント間の平均距離を計算（より効率的な方法）
+        distance = np.zeros((num_segment, num_segment))
+
+        for i1 in range(num_segment):
+            for i2 in range(num_segment):
+                # 各セグメント間のすべてのポイント間距離の最小値を計算
+                segment1 = data1[i1]  # shape: (num_points, num_features)
+                segment2 = data2[i2]  # shape: (num_points, num_features)
+
+                # ブロードキャストを使用して効率的に距離行列を計算
+                diff = (
+                    segment1[:, np.newaxis, :2] - segment2[np.newaxis, :, :2]
+                )  # (num_points, num_points, num_features)
+                point_distances = np.linalg.norm(diff, axis=2)  # (num_points, num_points)
+
+                # セグメント間の距離として最小値を使用
+                distance[i1, i2] = np.mean(point_distances)
+
+        # 最小二部マッチング
+        row_ind, col_ind = linear_sum_assignment(distance)
+
         for i in range(num_segment):
+            idx1 = row_ind[i]
+            idx2 = col_ind[i]
             for j in range(num_points):
                 for k in range(num_features):
-                    if diff[i, j, k] < 1e-1:
+                    curr_diff = data1[idx1, j, k] - data2[idx2, j, k]
+                    if curr_diff < 1e-1:
                         continue
                     print(
-                        f"  {i:02d}, {j:02d}, {k:02d}: {data1[i, j, k]:.3f} -> {npz2[key][i, j, k]:.3f} (diff: {diff[i, j, k]:.3f})"
+                        f"  {i:02d}, {j:02d}, {k:02d}: {data1[idx1, j, k]:.3f} -> {data2[idx2, j, k]:.3f} (diff: {curr_diff:.3f})"
                     )
-            plt.plot(data1[i, :, 0], data1[i, :, 1], "o-", label="data1")
-            plt.plot(npz2[key][i, :, 0], npz2[key][i, :, 1], "x--", label="data2")
+            plt.plot(data1[idx1, :, 0], data1[idx1, :, 1], "o-", label="py")
+            plt.plot(data2[idx2, :, 0], data2[idx2, :, 1], "x--", label="cpp")
             plt.legend()
             plt.savefig(save_dir / f"{key}_segment_{i:02d}.png")
             print(save_dir / f"{key}_segment_{i:02d}.png")
