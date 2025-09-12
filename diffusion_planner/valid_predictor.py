@@ -5,11 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from timm.utils import ModelEma
-from torch import optim
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
-
 from diffusion_planner.loss import loss_func
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import heading_to_cos_sin
@@ -18,6 +13,10 @@ from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.train_utils import resume_model, set_seed
+from timm.utils import ModelEma
+from torch import optim
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 
 
 @torch.no_grad()
@@ -54,6 +53,8 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         }
 
         B = inputs["ego_current_state"].shape[0]
+
+        inputs["sampled_trajectories"] = 0.5 * torch.randn(B, 33, 81, 4, dtype=torch.float32)
 
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
