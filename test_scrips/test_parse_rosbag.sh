@@ -2,21 +2,31 @@
 set -eux
 
 cd $(dirname $0)/..
+converter_type=${1}  # python or cpp
 
-result_dir=/mnt/nvme0/sakoda/test/$(date +%Y%m%d_%H%M%S)_test_parse_rosbag
+result_dir=/mnt/nvme0/sakoda/test/$(date +%Y%m%d_%H%M%S)_test_parse_rosbag_${converter_type}
 
 rm -rf ${result_dir}
 mkdir -p ${result_dir}/tmp
 
 SECONDS=0
 
-python3 ./ros_scripts/parse_rosbag_by_cpp.py \
-    /home/ubuntu/autoware/build/autoware_diffusion_planner/data_converter \
-    /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/2025-06-12/10-19-35 \
-    /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/map/2025-06-12/10-19-35/lanelet2_map.osm \
-    ${result_dir}/tmp \
-    --limit 30000000 \
-    --min_frames 0 2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
+if [ "$converter_type" = "python" ]; then
+    python3 ./ros_scripts/parse_rosbag.py \
+        /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/2025-06-12/10-24-57 \
+        /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/map/2025-06-12/10-24-57/lanelet2_map.osm \
+        ${result_dir}/tmp \
+        --limit 30000000 \
+        --min_frames 0 2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
+elif [ "$converter_type" = "cpp" ]; then
+    python3 ./ros_scripts/parse_rosbag_by_cpp.py \
+        /home/ubuntu/autoware/build/autoware_diffusion_planner/data_converter \
+        /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/2025-06-12/10-24-57 \
+        /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/map/2025-06-12/10-24-57/lanelet2_map.osm \
+        ${result_dir}/tmp \
+        --limit 30000000 \
+        --min_frames 0 2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
+fi
 
 echo $SECONDS
 
