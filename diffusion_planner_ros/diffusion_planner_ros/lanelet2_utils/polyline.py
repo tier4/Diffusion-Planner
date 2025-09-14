@@ -18,7 +18,7 @@ __all__ = ["Polyline"]
 
 def to_np_f32(x):
     """Convert an array like object to a numpy float32 array."""
-    return np.array(x, dtype=np.float32)
+    return np.array(x, dtype=np.float64)
 
 
 @define

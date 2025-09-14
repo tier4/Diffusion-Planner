@@ -107,17 +107,21 @@ def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
 
 
 def _interpolate_lane(waypoints: NDArray):
+    # zは小数点第5位を四捨五入
+    waypoints[:, 2] = np.round(waypoints[:, 2], 5)
+
     if len(waypoints) < 2:
         return waypoints
 
     target_n = 20
-    if target_n < 2:
-        return waypoints
 
     # Compute cumulative distances (arc length)
     distances = np.zeros(len(waypoints))
     for i in range(1, len(waypoints)):
-        distances[i] = distances[i - 1] + np.linalg.norm(waypoints[i] - waypoints[i - 1])
+        diff = waypoints[i] - waypoints[i - 1]
+        norm = np.sqrt(np.sum(diff ** 2))
+        distances[i] = distances[i - 1] + norm
+        # print(f"distance {i}: {distances[i]:.6f} (m) {waypoints[i][0]:.6f}, {waypoints[i][1]:.6f}, {waypoints[i][2]:.6f}")
 
     total_length = distances[-1]
 
@@ -126,12 +130,6 @@ def _interpolate_lane(waypoints: NDArray):
 
     # Always include the first point
     result.append(waypoints[0])
-
-    # Generate interior points
-    if target_n == 2:
-        # Always include the last point
-        result.append(waypoints[-1])
-        return np.array(result)
 
     step = total_length / (target_n - 1)
     seg_idx = 0
@@ -251,17 +249,24 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
     lanelet_map = lanelet2.io.load(filename, projection)
 
     lane_segments: dict[int, LaneSegment] = {}
+    i = 0
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
+
+        # print(len(lanelet.centerline), len(lanelet.leftBound), len(lanelet.rightBound))
 
         # NOTE: skip walkway because it contains stop_line as boundary
         if lanelet_subtype in T4_LANE:
             # lane
             lane_type = MAP_TYPE_MAPPING[lanelet_subtype]
-            lane_waypoints = _interpolate_lane(
+            centerline = _interpolate_lane(
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
             )
-            lane_polyline = Polyline(polyline_type=lane_type, waypoints=lane_waypoints)
+            centerline = Polyline(polyline_type=lane_type, waypoints=centerline)
+
+            # for j in range(len(centerline.waypoints)):
+            #     print(f"{centerline.waypoints[j][0]:.6f}, {centerline.waypoints[j][1]:.6f}, {centerline.waypoints[j][2]:.6f}")
+            # print(i, "center")
 
             turn_direction_str = _get_attribute(
                 lanelet.attributes, "turn_direction", "unknown"
@@ -279,14 +284,24 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             line_type_right = LineType.from_str(line_type_right)
 
             left_boundary = _get_boundary_segment(lanelet.leftBound)
+            # for j in range(len(left_boundary.waypoints)):
+            #     print(f"{left_boundary.waypoints[j][0]:.6f}, {left_boundary.waypoints[j][1]:.6f}, {left_boundary.waypoints[j][2]:.6f}")
+            # print(i, "left")
             right_boundary = _get_boundary_segment(lanelet.rightBound)
+            # for j in range(len(right_boundary.waypoints)):
+            #     print(f"{right_boundary.waypoints[j][0]:.6f}, {right_boundary.waypoints[j][1]:.6f}, {right_boundary.waypoints[j][2]:.6f}")
+            # print(i, "right")
+
+            # i += 1
+            # if i >= 5:
+            #     exit(1)
 
             # left_boundary.waypoints = _interpolate_points(left_boundary.waypoints, 20)
             # right_boundary.waypoints = _interpolate_points(right_boundary.waypoints, 20)
 
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
-                polyline=lane_polyline,
+                polyline=centerline,
                 left_boundary=left_boundary,
                 left_line_type=line_type_left,
                 right_boundary=right_boundary,
@@ -294,7 +309,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
                 speed_limit_mph=_get_speed_limit_mph(lanelet),
                 traffic_lights=lanelet.trafficLights(),
                 turn_direction=turn_direction_int,
-                center=np.mean(lane_waypoints[:, 0:2], axis=0),
+                center=np.mean(centerline.waypoints[:, 0:2], axis=0),
             )
 
     print(f"{len(lane_segments)} lane segments are loaded.")
@@ -339,9 +354,17 @@ def process_segment(
         return None
 
     # Convert to base_link
+    # print(inv_transform_matrix_4x4)
+    # print("before")
+    # for i in range(centerline.shape[0]):
+    #     print(f"{centerline[i][0]:.6f}, {centerline[i][1]:.6f}, {centerline[i][2]:.6f}")
     centerline_4xN = np.vstack((centerline.T, np.ones(centerline.shape[0])))
     centerline_ego = inv_transform_matrix_4x4 @ centerline_4xN
     centerline = centerline_ego[:3, :].T
+    # print("after")
+    # for i in range(centerline.shape[0]):
+    #     print(f"{centerline[i][0]:.6f}, {centerline[i][1]:.6f}, {centerline[i][2]:.6f}")
+    # exit(1)
     left_boundaries_4xN = np.vstack((left_boundary.T, np.ones(left_boundary.shape[0])))
     left_boundaries_ego = inv_transform_matrix_4x4 @ left_boundaries_4xN
     left_boundary = left_boundaries_ego[:3, :].T
@@ -443,10 +466,7 @@ def create_lane_tensor(
     # sort by distance from the first and last point
     def key_func(item):
         line_data, speed_limit_mps = item
-        return min(
-            np.sum(line_data[0, :2] ** 2),
-            np.sum(line_data[-1, :2] ** 2),
-        )
+        return np.sum(line_data[:, :2] ** 2) / 20
 
     if do_sort:
         result_list = sorted(result_list, key=key_func)
