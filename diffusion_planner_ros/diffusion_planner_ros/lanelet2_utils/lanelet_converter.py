@@ -107,37 +107,68 @@ def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
 
 
 def _interpolate_lane(waypoints: NDArray):
+    if len(waypoints) < 2:
+        return waypoints
+
+    target_n = 20
+    if target_n < 2:
+        return waypoints
+
     # Compute cumulative distances (arc length)
     distances = np.zeros(len(waypoints))
     for i in range(1, len(waypoints)):
-        distances[i] = distances[i - 1] + np.linalg.norm(
-            waypoints[i] - waypoints[i - 1]
-        )
+        distances[i] = distances[i - 1] + np.linalg.norm(waypoints[i] - waypoints[i - 1])
 
-    # Generate new arc lengths with fixed spacing (0.5 meters)
-    new_distances = np.arange(0, distances[-1], 0.5)
-    new_distances = np.append(
-        new_distances, distances[-1]
-    )  # Ensure last point is included
+    total_length = distances[-1]
 
-    # Interpolate x, y, z separately
-    interp_x = interp1d(distances, waypoints[:, 0], kind="linear")
-    interp_y = interp1d(distances, waypoints[:, 1], kind="linear")
-    interp_z = interp1d(distances, waypoints[:, 2], kind="linear")
+    # Generate target arc lengths
+    result = []
 
-    # Compute new waypoints
-    new_waypoints = np.vstack(
-        (interp_x(new_distances), interp_y(new_distances), interp_z(new_distances))
-    ).T
+    # Always include the first point
+    result.append(waypoints[0])
 
-    # Ensure the first and last points remain unchanged
-    # Ensure the first waypoint is exactly the same without duplication
-    if not np.allclose(new_waypoints[0], waypoints[0]):
-        new_waypoints = np.vstack((waypoints[0], new_waypoints))
+    # Generate interior points
+    if target_n == 2:
+        # Always include the last point
+        result.append(waypoints[-1])
+        return np.array(result)
 
-    # Ensure the last waypoint is exactly the same without duplication
-    if not np.allclose(new_waypoints[-1], waypoints[-1]):
-        new_waypoints = np.vstack((new_waypoints, waypoints[-1]))
+    step = total_length / (target_n - 1)
+    seg_idx = 0
+
+    for i in range(1, target_n - 1):
+        target = i * step
+
+        # Find the correct segment containing the target arc length
+        while seg_idx + 1 < len(distances) and distances[seg_idx + 1] < target:
+            seg_idx += 1
+
+        # Ensure we don't go past the last segment
+        if seg_idx >= len(distances) - 1:
+            seg_idx = len(distances) - 2
+
+        # Interpolate between waypoints[seg_idx] and waypoints[seg_idx + 1]
+        seg_start = distances[seg_idx]
+        seg_end = distances[seg_idx + 1]
+        seg_length = seg_end - seg_start
+
+        # Calculate interpolation parameter, handling zero-length segments
+        safe_seg_length = max(seg_length, 1e-6)
+        t = (target - seg_start) / safe_seg_length
+        # Clamp t to [0, 1] to ensure we don't extrapolate
+        t = max(0.0, min(1.0, t))
+
+        # Linear interpolation
+        interpolated_point = waypoints[seg_idx] + t * (waypoints[seg_idx + 1] - waypoints[seg_idx])
+        result.append(interpolated_point)
+
+    # Always include the last point
+    result.append(waypoints[-1])
+
+    new_waypoints = np.array(result)
+    assert new_waypoints.shape[0] == target_n, (
+        f"Unexpected number of waypoints: {new_waypoints.shape[0]}"
+    )
     return new_waypoints
 
 
@@ -247,12 +278,18 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             line_type_right = _get_attribute(lanelet.rightBound.attributes, "type", "")
             line_type_right = LineType.from_str(line_type_right)
 
+            left_boundary = _get_boundary_segment(lanelet.leftBound)
+            right_boundary = _get_boundary_segment(lanelet.rightBound)
+
+            # left_boundary.waypoints = _interpolate_points(left_boundary.waypoints, 20)
+            # right_boundary.waypoints = _interpolate_points(right_boundary.waypoints, 20)
+
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
                 polyline=lane_polyline,
-                left_boundary=_get_boundary_segment(lanelet.leftBound),
+                left_boundary=left_boundary,
                 left_line_type=line_type_left,
-                right_boundary=_get_boundary_segment(lanelet.rightBound),
+                right_boundary=right_boundary,
                 right_line_type=line_type_right,
                 speed_limit_mph=_get_speed_limit_mph(lanelet),
                 traffic_lights=lanelet.trafficLights(),
@@ -265,23 +302,6 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
     # generate uuid from map filepath
     map_id = uuid(filename, digit=16)
     map = AWMLStaticMap(map_id, lane_segments=lane_segments)
-    map = _fix_point_num(map)
-    return map
-
-
-def _fix_point_num(map: AWMLStaticMap):
-    for segment_id, segment in map.lane_segments.items():
-        centerlines = segment.polyline.waypoints
-        left_boundary = segment.left_boundary.waypoints
-        right_boundary = segment.right_boundary.waypoints
-
-        # Fix the number of points to 20
-        segment.polyline.waypoints = _interpolate_points(centerlines, 20)
-        segment.left_boundary.waypoints = _interpolate_points(left_boundary, 20)
-        segment.right_boundary.waypoints = _interpolate_points(right_boundary, 20)
-
-        # To crop the map faster, we need to set the center of the segment
-        segment.center = np.mean(centerlines[:, 0:2], axis=0)
     return map
 
 
@@ -424,8 +444,8 @@ def create_lane_tensor(
     def key_func(item):
         line_data, speed_limit_mps = item
         return min(
-            np.linalg.norm(line_data[0, :2]),
-            np.linalg.norm(line_data[-1, :2]),
+            np.sum(line_data[0, :2] ** 2),
+            np.sum(line_data[-1, :2] ** 2),
         )
 
     if do_sort:
