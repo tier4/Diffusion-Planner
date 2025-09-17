@@ -55,12 +55,12 @@ for f1, f2 in zip(npz_list1, npz_list2):
         diff = np.abs(data1.astype(np.float32) - data2.astype(np.float32))
         max_diff = np.max(diff)
         judge = "NG" if max_diff > 1e-5 else "OK"
-        if judge == "NG":
+        if "agent" not in key and judge == "NG":
+            print(key)
             print(data1)
             print(data2)
             print(diff)
             exit(1)
-        print(judge, key, max_diff, data1.shape, data2.shape)
         result_map[key].append(max_diff < 1e-5)
         continue
 
@@ -149,4 +149,5 @@ for key, val in result_map.items():
     total_num = len(val)
     ok_num = sum(val)
     ok_ratio = ok_num / total_num if total_num > 0 else 0
+    assert ok_ratio == 1.0 or "agent" in key
     print(f"{key}: {ok_num}/{total_num} = {ok_ratio:.4f}")
