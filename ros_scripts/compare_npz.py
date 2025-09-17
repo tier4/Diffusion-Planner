@@ -6,11 +6,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+# カラーパレットを定義
+colors = plt.cm.tab10.colors  # 10色のカラーパレット
+
 parser = argparse.ArgumentParser()
 parser.add_argument("target_dir2", type=Path)
 args = parser.parse_args()
 
-target_dir1 = Path("/mnt/nvme0/sakoda/test/baseline_test_parse_rosbag_20250612_101935_py_3")
+target_dir1 = Path("/mnt/nvme0/sakoda/test/baseline_test_parse_rosbag_py_2")
 target_dir2 = args.target_dir2
 
 npz_list1 = sorted(target_dir1.glob("**/*.npz"))
@@ -31,6 +34,7 @@ npz_list2 = [f for f in npz_list2 if f.name in and_list]
 
 result_map = defaultdict(list)
 
+itr = 0
 for f1, f2 in zip(npz_list1, npz_list2):
     npz1 = np.load(f1)
     npz2 = np.load(f2)
@@ -38,16 +42,27 @@ for f1, f2 in zip(npz_list1, npz_list2):
     print(f"\n{f1}, {f2}")
     save_dir = f2.parent.parent / "compare"
     save_dir.mkdir(exist_ok=True, parents=True)
+    itr += 1
+    plt.figure(figsize=(12, 9))  # デフォルト(8, 6)から(8, 12)に変更
+
     for key in npz1.keys():
-        if key != "neighbor_agents_past" and key != "neighbor_agents_future":
+        if key == "map_name" or key == "token":
             continue
+        # if key != "neighbor_agents_past" and key != "neighbor_agents_future":
+        #     continue
         data1 = npz1[key]
         data2 = npz2[key]
         diff = np.abs(data1.astype(np.float32) - data2.astype(np.float32))
         max_diff = np.max(diff)
         judge = "NG" if max_diff > 1e-5 else "OK"
+        if judge == "NG":
+            print(data1)
+            print(data2)
+            print(diff)
+            exit(1)
         print(judge, key, max_diff, data1.shape, data2.shape)
         result_map[key].append(max_diff < 1e-5)
+        continue
 
         num_agents, num_timesteps, num_features = data1.shape
 
@@ -70,13 +85,13 @@ for f1, f2 in zip(npz_list1, npz_list2):
                 distance[i1, i2] = np.mean(point_distances)
 
         # 最小二部マッチング
-        row_ind, col_ind = linear_sum_assignment(distance)
+        # row_ind, col_ind = linear_sum_assignment(distance)
 
         for i in range(num_agents):
-            idx1 = row_ind[i]
-            idx2 = col_ind[i]
-            curr_data1 = data1[idx1]
-            curr_data2 = data2[idx2]
+            # idx1 = row_ind[i]
+            # idx2 = col_ind[i]
+            curr_data1 = data1[i]
+            curr_data2 = data2[i]
             for j in range(num_timesteps):
                 for k in range(num_features):
                     curr_diff = curr_data1[j, k] - curr_data2[j, k]
@@ -87,17 +102,48 @@ for f1, f2 in zip(npz_list1, npz_list2):
                     )
             nonzero1 = curr_data1[curr_data1[:, 0] != 0]
             nonzero2 = curr_data2[curr_data2[:, 0] != 0]
-            plt.plot(nonzero1[:, 0], nonzero1[:, 1], "o-", label="py")
-            plt.plot(nonzero2[:, 0], nonzero2[:, 1], "x--", label="cpp")
-            RANGE = 25
+            if len(nonzero1) == 0 and len(nonzero2) == 0:
+                break
+
+            # カラーパレットから色を選択 (indexに基づく)
+            color = colors[i % len(colors)]
+
+            # マーカーを決定 (pastは'o', futureは'x')
+            marker = "o" if "past" in key else "x"
+
+            # 上下に分けてプロット
+            plt.subplot(2, 1, 1)  # 上側: Python
+            plt.plot(
+                nonzero1[:, 0],
+                nonzero1[:, 1],
+                marker=marker,
+                color=color,
+                label=f"py_{key}_{i}",
+            )
+            RANGE = 50
             plt.xlim(-RANGE, RANGE)
             plt.ylim(-RANGE, RANGE)
-            plt.legend()
-            plt.savefig(save_dir / f"{key}_{i:02d}.png")
-            print(save_dir / f"{key}_{i:02d}.png")
-            plt.clf()
+            plt.legend(loc="upper left", bbox_to_anchor=(1, 1), ncol=2)
+            plt.title("Python")
 
-    break
+            plt.subplot(2, 1, 2)  # 下側: C++
+            plt.plot(
+                nonzero2[:, 0],
+                nonzero2[:, 1],
+                marker=marker,
+                color=color,
+                label=f"cpp_{key}_{i}",
+            )
+            plt.xlim(-RANGE, RANGE)
+            plt.ylim(-RANGE, RANGE)
+            plt.legend(loc="upper left", bbox_to_anchor=(1, 1), ncol=2)
+            plt.title("C++")
+
+    # 全体的なレイアウト調整
+    plt.tight_layout()
+    plt.savefig(save_dir / f"{itr:08d}.png", bbox_inches="tight")
+    print(save_dir / f"{itr:08d}.png")
+    plt.clf()
 
 for key, val in result_map.items():
     total_num = len(val)
