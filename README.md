@@ -14,10 +14,6 @@ source ./.venv/bin/activate
 ### Install libraries
 
 ```bash
-# nuplan-devkit
-git clone https://github.com/motional/nuplan-devkit.git && cd nuplan-devkit
-pip install -e .
-
 # Diffusion-Planner
 cd diffusion_planner
 python -m pip install pip==24.1
