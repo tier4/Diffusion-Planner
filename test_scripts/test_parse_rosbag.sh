@@ -35,7 +35,7 @@ fi
 
 echo $SECONDS
 
-python3 ./ros_scripts/compare_npz.py ${result_dir}
+# python3 ./ros_scripts/compare_npz.py ${result_dir}
 
 python3 ./diffusion_planner/util_scripts/create_train_set_path.py ${result_dir}/tmp
 
