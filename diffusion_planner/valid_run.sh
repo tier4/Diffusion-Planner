@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 # Set training data path
 MODEL_DIR=${1}
-VALID_SET_LIST_PATH="/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver20_realdata/path_list_valid_with_psim_data.json"
+VALID_SET_LIST_PATH="/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver45_realdata_cpp/path_list_valid.json"
 MODEL_PATH="$MODEL_DIR/best_model.pth"
 ARGS_JSON_PATH="$MODEL_DIR/args.json"
 SAVE_DIR=$MODEL_DIR/$DIR_NAME/predictions
