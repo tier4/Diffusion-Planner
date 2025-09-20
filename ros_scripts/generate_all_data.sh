@@ -7,8 +7,8 @@ cd $(dirname $0)
 # source ~/pilot-auto.xx1/install/setup.bash
 # set -eux
 
-data_root_real=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver27_realdata_cpp
-data_root_psim=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver27_psimdata_cpp
+data_root_real=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver45_realdata_cpp
+data_root_psim=/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver45_psimdata_cpp
 
 python3 ./parse_rosbag_for_directory.py \
     /mnt/nvme1/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/ \
