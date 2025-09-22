@@ -484,7 +484,7 @@ def main(
 
             # ego
             ego_past_np = create_ego_sequence(
-                data_list, i - PAST_TIME_STEPS + 1, PAST_TIME_STEPS, map2bl_matrix_4x4
+                data_list, i - PAST_TIME_STEPS, PAST_TIME_STEPS, map2bl_matrix_4x4
             )
             ego_tensor = create_current_ego_state(
                 data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.79
