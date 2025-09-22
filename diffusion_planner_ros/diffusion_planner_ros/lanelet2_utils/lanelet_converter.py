@@ -101,11 +101,15 @@ def _interpolate_lane(waypoints: NDArray):
     # Compute cumulative distances (arc length)
     distances = np.zeros(len(waypoints))
     for i in range(1, len(waypoints)):
-        distances[i] = distances[i - 1] + np.linalg.norm(waypoints[i] - waypoints[i - 1])
+        distances[i] = distances[i - 1] + np.linalg.norm(
+            waypoints[i] - waypoints[i - 1]
+        )
 
     # Generate new arc lengths with fixed spacing (0.5 meters)
     new_distances = np.arange(0, distances[-1], 0.5)
-    new_distances = np.append(new_distances, distances[-1])  # Ensure last point is included
+    new_distances = np.append(
+        new_distances, distances[-1]
+    )  # Ensure last point is included
 
     # Interpolate x, y, z separately
     interp_x = interp1d(distances, waypoints[:, 0], kind="linear")
@@ -125,6 +129,9 @@ def _interpolate_lane(waypoints: NDArray):
     # Ensure the last waypoint is exactly the same without duplication
     if not np.allclose(new_waypoints[-1], waypoints[-1]):
         new_waypoints = np.vstack((new_waypoints, waypoints[-1]))
+
+    new_waypoints = np.array(new_waypoints, dtype=np.float32)
+    new_waypoints = _interpolate_points(new_waypoints, 20)
     return new_waypoints
 
 
@@ -207,7 +214,6 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
     lanelet_map = lanelet2.io.load(filename, projection)
 
     lane_segments: dict[int, LaneSegment] = {}
-    i = 0
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
 
@@ -219,10 +225,12 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             centerline = _interpolate_lane(
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
             )
-
-            # for j in range(len(centerline.waypoints)):
-            #     print(f"{centerline.waypoints[j][0]:.6f}, {centerline.waypoints[j][1]:.6f}, {centerline.waypoints[j][2]:.6f}")
-            # print(i, "center")
+            left_boundary = _interpolate_lane(
+                np.array([(line.x, line.y, line.z) for line in lanelet.leftBound])
+            )
+            right_boundary = _interpolate_lane(
+                np.array([(line.x, line.y, line.z) for line in lanelet.rightBound])
+            )
 
             turn_direction_str = _get_attribute(
                 lanelet.attributes, "turn_direction", "unknown"
@@ -238,35 +246,6 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             line_type_left = LineType.from_str(line_type_left)
             line_type_right = _get_attribute(lanelet.rightBound.attributes, "type", "")
             line_type_right = LineType.from_str(line_type_right)
-
-            left_boundary = _interpolate_lane(
-                np.array([(line.x, line.y, line.z) for line in lanelet.leftBound])
-            )
-            # for j in range(len(left_boundary.waypoints)):
-            #     print(f"{left_boundary.waypoints[j][0]:.6f}, {left_boundary.waypoints[j][1]:.6f}, {left_boundary.waypoints[j][2]:.6f}")
-            # print(i, "left")
-            right_boundary = _interpolate_lane(
-                np.array([(line.x, line.y, line.z) for line in lanelet.rightBound])
-            )
-            # for j in range(len(right_boundary.waypoints)):
-            #     print(f"{right_boundary.waypoints[j][0]:.6f}, {right_boundary.waypoints[j][1]:.6f}, {right_boundary.waypoints[j][2]:.6f}")
-            # print(i, "right")
-
-            # i += 1
-            # if i >= 5:
-            #     exit(1)
-
-            centerline = centerline.astype(np.float32)
-            left_boundary = left_boundary.astype(np.float32)
-            right_boundary = right_boundary.astype(np.float32)
-
-            centerline = _interpolate_points(centerline, 20)
-            left_boundary = _interpolate_points(left_boundary, 20)
-            right_boundary = _interpolate_points(right_boundary, 20)
-
-            # centerline = centerline.astype(np.float32)
-            # left_boundary = left_boundary.astype(np.float32)
-            # right_boundary = right_boundary.astype(np.float32)
 
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
@@ -399,7 +378,9 @@ def process_segment(
         ),
         axis=1,
     )
-    assert line_data.shape == (20, LaneSegment.TENSOR_DIM), f"Unexpected shape: {line_data.shape}"
+    assert line_data.shape == (20, LaneSegment.TENSOR_DIM), (
+        f"Unexpected shape: {line_data.shape}"
+    )
 
     # convert from miles per hour to meters per second
     speed_limit_mps = segment.speed_limit_mph * 0.44704
