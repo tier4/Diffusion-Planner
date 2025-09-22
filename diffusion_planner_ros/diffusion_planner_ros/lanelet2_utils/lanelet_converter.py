@@ -107,66 +107,33 @@ def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
 
 
 def _interpolate_lane(waypoints: NDArray):
-    # zは小数点第5位を四捨五入
-    waypoints[:, 2] = np.round(waypoints[:, 2], 5)
-
-    if len(waypoints) < 2:
-        return waypoints
-
-    target_n = 20
-
     # Compute cumulative distances (arc length)
     distances = np.zeros(len(waypoints))
     for i in range(1, len(waypoints)):
-        diff = waypoints[i] - waypoints[i - 1]
-        norm = np.sqrt(np.sum(diff ** 2))
-        distances[i] = distances[i - 1] + norm
-        # print(f"distance {i}: {distances[i]:.6f} (m) {waypoints[i][0]:.6f}, {waypoints[i][1]:.6f}, {waypoints[i][2]:.6f}")
+        distances[i] = distances[i - 1] + np.linalg.norm(waypoints[i] - waypoints[i - 1])
 
-    total_length = distances[-1]
+    # Generate new arc lengths with fixed spacing (0.5 meters)
+    new_distances = np.arange(0, distances[-1], 0.5)
+    new_distances = np.append(new_distances, distances[-1])  # Ensure last point is included
 
-    # Generate target arc lengths
-    result = []
+    # Interpolate x, y, z separately
+    interp_x = interp1d(distances, waypoints[:, 0], kind="linear")
+    interp_y = interp1d(distances, waypoints[:, 1], kind="linear")
+    interp_z = interp1d(distances, waypoints[:, 2], kind="linear")
 
-    # Always include the first point
-    result.append(waypoints[0])
+    # Compute new waypoints
+    new_waypoints = np.vstack(
+        (interp_x(new_distances), interp_y(new_distances), interp_z(new_distances))
+    ).T
 
-    step = total_length / (target_n - 1)
-    seg_idx = 0
+    # Ensure the first and last points remain unchanged
+    # Ensure the first waypoint is exactly the same without duplication
+    if not np.allclose(new_waypoints[0], waypoints[0]):
+        new_waypoints = np.vstack((waypoints[0], new_waypoints))
 
-    for i in range(1, target_n - 1):
-        target = i * step
-
-        # Find the correct segment containing the target arc length
-        while seg_idx + 1 < len(distances) and distances[seg_idx + 1] < target:
-            seg_idx += 1
-
-        # Ensure we don't go past the last segment
-        if seg_idx >= len(distances) - 1:
-            seg_idx = len(distances) - 2
-
-        # Interpolate between waypoints[seg_idx] and waypoints[seg_idx + 1]
-        seg_start = distances[seg_idx]
-        seg_end = distances[seg_idx + 1]
-        seg_length = seg_end - seg_start
-
-        # Calculate interpolation parameter, handling zero-length segments
-        safe_seg_length = max(seg_length, 1e-6)
-        t = (target - seg_start) / safe_seg_length
-        # Clamp t to [0, 1] to ensure we don't extrapolate
-        t = max(0.0, min(1.0, t))
-
-        # Linear interpolation
-        interpolated_point = waypoints[seg_idx] + t * (waypoints[seg_idx + 1] - waypoints[seg_idx])
-        result.append(interpolated_point)
-
-    # Always include the last point
-    result.append(waypoints[-1])
-
-    new_waypoints = np.array(result)
-    assert new_waypoints.shape[0] == target_n, (
-        f"Unexpected number of waypoints: {new_waypoints.shape[0]}"
-    )
+    # Ensure the last waypoint is exactly the same without duplication
+    if not np.allclose(new_waypoints[-1], waypoints[-1]):
+        new_waypoints = np.vstack((new_waypoints, waypoints[-1]))
     return new_waypoints
 
 
@@ -296,8 +263,9 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             # if i >= 5:
             #     exit(1)
 
-            # left_boundary.waypoints = _interpolate_points(left_boundary.waypoints, 20)
-            # right_boundary.waypoints = _interpolate_points(right_boundary.waypoints, 20)
+            centerline.waypoints = _interpolate_points(centerline.waypoints, 20)
+            left_boundary.waypoints = _interpolate_points(left_boundary.waypoints, 20)
+            right_boundary.waypoints = _interpolate_points(right_boundary.waypoints, 20)
 
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
@@ -466,7 +434,10 @@ def create_lane_tensor(
     # sort by distance from the first and last point
     def key_func(item):
         line_data, speed_limit_mps = item
-        return np.sum(line_data[:, :2] ** 2) / 20
+        return min(
+            np.linalg.norm(line_data[0, :2]),
+            np.linalg.norm(line_data[-1, :2]),
+        )
 
     if do_sort:
         result_list = sorted(result_list, key=key_func)
