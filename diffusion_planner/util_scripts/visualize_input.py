@@ -6,11 +6,10 @@ from shutil import rmtree
 
 import numpy as np
 import torch
-from tqdm import tqdm
-
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
+from tqdm import tqdm
 
 
 def parse_args():

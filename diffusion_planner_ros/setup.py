@@ -3,7 +3,7 @@ from glob import glob
 
 from setuptools import find_packages, setup
 
-package_name = 'diffusion_planner_ros'
+package_name = "diffusion_planner_ros"
 
 setup(
     name=package_name,

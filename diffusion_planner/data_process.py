@@ -3,12 +3,11 @@ import json
 import os
 import pickle
 
+from diffusion_planner.data_process.data_processor import DataProcessor
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import NuPlanScenarioBuilder
 from nuplan.planning.scenario_builder.scenario_filter import ScenarioFilter
 from nuplan.planning.utils.multithreading.worker_parallel import SingleMachineParallelExecutor
 from tqdm.contrib.concurrent import process_map
-
-from diffusion_planner.data_process.data_processor import DataProcessor
 
 
 def get_filter_parameters(

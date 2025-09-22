@@ -18,6 +18,8 @@ from autoware_perception_msgs.msg import TrackedObjects, TrafficLightGroupArray
 from autoware_planning_msgs.msg import LaneletRoute
 from autoware_planning_msgs.msg import Trajectory as PlanningTrajectory
 from autoware_vehicle_msgs.msg import TurnIndicatorsCommand
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
 from geometry_msgs.msg import AccelWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.executors import SingleThreadedExecutor
@@ -29,9 +31,6 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
 )
 from visualization_msgs.msg import MarkerArray
-
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.config import Config
 
 from .lanelet2_utils.lanelet_converter import (
     convert_lanelet,

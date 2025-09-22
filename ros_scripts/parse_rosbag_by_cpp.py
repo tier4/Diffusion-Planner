@@ -32,7 +32,9 @@ def main(
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
-    print(f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route}")
+    print(
+        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route}"
+    )
     result = subprocess.run(
         [
             str(cpp_binary_path),

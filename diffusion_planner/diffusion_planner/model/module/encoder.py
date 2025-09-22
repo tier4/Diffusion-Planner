@@ -426,7 +426,7 @@ class LaneEncoder(nn.Module):
 
         self.speed_limit_emb = nn.Linear(1, channels_mlp_dim)
         self.unknown_speed_emb = nn.Embedding(1, channels_mlp_dim)
-        self.attribute_emb = nn.Linear(5 + 2 * 10, channels_mlp_dim) # traffic_light and line type
+        self.attribute_emb = nn.Linear(5 + 2 * 10, channels_mlp_dim)  # traffic_light and line type
 
         self.channel_pre_project = Mlp(
             in_features=8,

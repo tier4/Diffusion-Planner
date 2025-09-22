@@ -8,12 +8,11 @@ from shutil import rmtree
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from parse_prediction_results import calc_loss
-from tqdm import tqdm
-
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
+from parse_prediction_results import calc_loss
+from tqdm import tqdm
 
 
 def parse_args():

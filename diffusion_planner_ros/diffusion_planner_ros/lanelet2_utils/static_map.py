@@ -26,9 +26,9 @@ class AWMLStaticMap:
     lane_segments: dict[int, LaneSegment]
 
     def __post_init__(self) -> None:
-        assert all(
-            isinstance(item, LaneSegment) for _, item in self.lane_segments.items()
-        ), "Expected all items are LaneSegments."
+        assert all(isinstance(item, LaneSegment) for _, item in self.lane_segments.items()), (
+            "Expected all items are LaneSegments."
+        )
 
 
 class LineType(IntEnum):

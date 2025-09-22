@@ -2,7 +2,7 @@ from abc import abstractmethod
 
 from .base import LabelBaseType
 
-__all__ = ("BoundaryType")
+__all__ = "BoundaryType"
 
 
 class BoundaryType(LabelBaseType):
