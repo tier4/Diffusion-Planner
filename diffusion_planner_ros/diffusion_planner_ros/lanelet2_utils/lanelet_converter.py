@@ -94,6 +94,69 @@ def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
         return None
 
 
+def _interpolate_lane_cpp(waypoints: NDArray):
+    # zは小数点第5位を四捨五入
+    waypoints[:, 2] = np.round(waypoints[:, 2], 5)
+
+    if len(waypoints) < 2:
+        return waypoints
+
+    target_n = 20
+
+    # Compute cumulative distances (arc length)
+    distances = np.zeros(len(waypoints))
+    for i in range(1, len(waypoints)):
+        diff = waypoints[i] - waypoints[i - 1]
+        norm = np.sqrt(np.sum(diff**2))
+        distances[i] = distances[i - 1] + norm
+
+    total_length = distances[-1]
+
+    # Generate target arc lengths
+    result = []
+
+    # Always include the first point
+    result.append(waypoints[0])
+
+    step = total_length / (target_n - 1)
+    seg_idx = 0
+
+    for i in range(1, target_n - 1):
+        target = i * step
+
+        # Find the correct segment containing the target arc length
+        while seg_idx + 1 < len(distances) and distances[seg_idx + 1] < target:
+            seg_idx += 1
+
+        # Ensure we don't go past the last segment
+        if seg_idx >= len(distances) - 1:
+            seg_idx = len(distances) - 2
+
+        # Interpolate between waypoints[seg_idx] and waypoints[seg_idx + 1]
+        seg_start = distances[seg_idx]
+        seg_end = distances[seg_idx + 1]
+        seg_length = seg_end - seg_start
+
+        # Calculate interpolation parameter, handling zero-length segments
+        safe_seg_length = max(seg_length, 1e-6)
+        t = (target - seg_start) / safe_seg_length
+        # Clamp t to [0, 1] to ensure we don't extrapolate
+        t = max(0.0, min(1.0, t))
+
+        # Linear interpolation
+        interpolated_point = waypoints[seg_idx] + t * (waypoints[seg_idx + 1] - waypoints[seg_idx])
+        result.append(interpolated_point)
+
+    # Always include the last point
+    result.append(waypoints[-1])
+
+    new_waypoints = np.array(result)
+    assert new_waypoints.shape[0] == target_n, (
+        f"Unexpected number of waypoints: {new_waypoints.shape[0]}"
+    )
+    return new_waypoints
+
+
 def _interpolate_lane(waypoints: NDArray):
     # Compute cumulative distances (arc length)
     distances = np.zeros(len(waypoints))
@@ -207,13 +270,13 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
         # NOTE: skip walkway because it contains stop_line as boundary
         if lanelet_subtype in T4_LANE:
             # lane
-            centerline = _interpolate_lane(
+            centerline = _interpolate_lane_cpp(
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
             )
-            left_boundary = _interpolate_lane(
+            left_boundary = _interpolate_lane_cpp(
                 np.array([(line.x, line.y, line.z) for line in lanelet.leftBound])
             )
-            right_boundary = _interpolate_lane(
+            right_boundary = _interpolate_lane_cpp(
                 np.array([(line.x, line.y, line.z) for line in lanelet.rightBound])
             )
 
