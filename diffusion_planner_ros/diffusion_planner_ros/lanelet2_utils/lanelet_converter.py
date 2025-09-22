@@ -458,7 +458,7 @@ def create_lane_tensor(
         line_data, speed_limit_mps = item
         return min(
             np.linalg.norm(line_data[0, :2]),
-            np.linalg.norm(line_data[-1, :2]),
+            np.linalg.norm(line_data[-2, :2]),  # -1 is the same as next first point, so use -2
         )
 
     if do_sort:
