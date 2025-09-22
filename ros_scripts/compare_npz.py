@@ -13,7 +13,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("target_dir2", type=Path)
 args = parser.parse_args()
 
-target_dir1 = Path("/mnt/nvme0/sakoda/test/baseline_test_parse_rosbag_py_2")
+target_dir1 = Path("/mnt/nvme0/sakoda/test/baseline_ver38")
 target_dir2 = args.target_dir2
 
 npz_list1 = sorted(target_dir1.glob("**/*.npz"))
@@ -57,9 +57,7 @@ for f1, f2 in zip(npz_list1, npz_list2):
         judge = "NG" if max_diff > 1e-5 else "OK"
         if "agent" not in key and judge == "NG":
             print(key)
-            print(data1)
-            print(data2)
-            print(diff)
+            print(max_diff)
             exit(1)
         result_map[key].append(max_diff < 1e-5)
         continue
