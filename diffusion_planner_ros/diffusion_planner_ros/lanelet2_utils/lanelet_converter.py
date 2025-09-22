@@ -15,7 +15,6 @@ from .static_map import (
     AWMLStaticMap,
     LaneSegment,
     LineType,
-    Polyline,
 )
 from .uuid import uuid
 
@@ -76,14 +75,6 @@ def _get_boundary_type(linestring: lanelet2.core.LineString3d) -> BoundaryType:
         return MAP_TYPE_MAPPING[line_subtype]
     else:
         return MapType.UNKNOWN
-
-
-def _get_boundary_segment(linestring: lanelet2.core.LineString3d) -> Polyline:
-    boundary_type = _get_boundary_type(linestring)
-    waypoints = _interpolate_lane(
-        np.array([(line.x, line.y, line.z) for line in linestring])
-    )
-    return Polyline(waypoints=waypoints)
 
 
 def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
@@ -228,7 +219,6 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             centerline = _interpolate_lane(
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
             )
-            centerline = Polyline(waypoints=centerline)
 
             # for j in range(len(centerline.waypoints)):
             #     print(f"{centerline.waypoints[j][0]:.6f}, {centerline.waypoints[j][1]:.6f}, {centerline.waypoints[j][2]:.6f}")
@@ -249,11 +239,15 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             line_type_right = _get_attribute(lanelet.rightBound.attributes, "type", "")
             line_type_right = LineType.from_str(line_type_right)
 
-            left_boundary = _get_boundary_segment(lanelet.leftBound)
+            left_boundary = _interpolate_lane(
+                np.array([(line.x, line.y, line.z) for line in lanelet.leftBound])
+            )
             # for j in range(len(left_boundary.waypoints)):
             #     print(f"{left_boundary.waypoints[j][0]:.6f}, {left_boundary.waypoints[j][1]:.6f}, {left_boundary.waypoints[j][2]:.6f}")
             # print(i, "left")
-            right_boundary = _get_boundary_segment(lanelet.rightBound)
+            right_boundary = _interpolate_lane(
+                np.array([(line.x, line.y, line.z) for line in lanelet.rightBound])
+            )
             # for j in range(len(right_boundary.waypoints)):
             #     print(f"{right_boundary.waypoints[j][0]:.6f}, {right_boundary.waypoints[j][1]:.6f}, {right_boundary.waypoints[j][2]:.6f}")
             # print(i, "right")
@@ -262,9 +256,17 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
             # if i >= 5:
             #     exit(1)
 
-            centerline.waypoints = _interpolate_points(centerline.waypoints, 20)
-            left_boundary.waypoints = _interpolate_points(left_boundary.waypoints, 20)
-            right_boundary.waypoints = _interpolate_points(right_boundary.waypoints, 20)
+            centerline = centerline.astype(np.float32)
+            left_boundary = left_boundary.astype(np.float32)
+            right_boundary = right_boundary.astype(np.float32)
+
+            centerline = _interpolate_points(centerline, 20)
+            left_boundary = _interpolate_points(left_boundary, 20)
+            right_boundary = _interpolate_points(right_boundary, 20)
+
+            # centerline = centerline.astype(np.float32)
+            # left_boundary = left_boundary.astype(np.float32)
+            # right_boundary = right_boundary.astype(np.float32)
 
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
@@ -276,7 +278,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
                 speed_limit_mph=_get_speed_limit_mph(lanelet),
                 traffic_lights=lanelet.trafficLights(),
                 turn_direction=turn_direction_int,
-                center=np.mean(centerline.waypoints[:, 0:2], axis=0),
+                center=np.mean(centerline[:, 0:2], axis=0),
             )
 
     print(f"{len(lane_segments)} lane segments are loaded.")
@@ -302,9 +304,9 @@ def process_segment(
     mask_range,
     traffic_light_recognition,
 ):
-    centerline = segment.polyline.waypoints
-    left_boundary = segment.left_boundary.waypoints
-    right_boundary = segment.right_boundary.waypoints
+    centerline = segment.polyline
+    left_boundary = segment.left_boundary
+    right_boundary = segment.right_boundary
 
     def judge_inside(x, y):
         return (

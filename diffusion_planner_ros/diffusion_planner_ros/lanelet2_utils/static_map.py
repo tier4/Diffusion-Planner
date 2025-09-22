@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING
 
 from attr import define
 
-from .polyline import Polyline
-
 if TYPE_CHECKING:
     from .typing import NDArrayF32
 
@@ -70,10 +68,10 @@ LineType._line_type_mapping = {
 class LaneSegment:
     id: int
     turn_direction: int
-    polyline: Polyline
-    left_boundary: Polyline
+    polyline: NDArrayF32
+    left_boundary: NDArrayF32
     left_line_type: LineType
-    right_boundary: Polyline
+    right_boundary: NDArrayF32
     right_line_type: LineType
     speed_limit_mph: float | None
     center: NDArrayF32

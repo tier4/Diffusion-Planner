@@ -376,7 +376,7 @@ def filter_target_segments(target_segments, curr_kinematic_state):
     closest_distance = float("inf")
     closest_index = -1
     for j, segment in enumerate(target_segments):
-        centerlines = segment.polyline.waypoints
+        centerlines = segment.polyline
         diff_x = centerlines[:, 0] - curr_kinematic_state.pose.pose.position.x
         diff_y = centerlines[:, 1] - curr_kinematic_state.pose.pose.position.y
         diff = np.sqrt(diff_x**2 + diff_y**2)
