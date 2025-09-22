@@ -83,7 +83,7 @@ def _get_boundary_segment(linestring: lanelet2.core.LineString3d) -> Polyline:
     waypoints = _interpolate_lane(
         np.array([(line.x, line.y, line.z) for line in linestring])
     )
-    return Polyline(polyline_type=boundary_type, waypoints=waypoints)
+    return Polyline(waypoints=waypoints)
 
 
 def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
@@ -225,11 +225,10 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
         # NOTE: skip walkway because it contains stop_line as boundary
         if lanelet_subtype in T4_LANE:
             # lane
-            lane_type = MAP_TYPE_MAPPING[lanelet_subtype]
             centerline = _interpolate_lane(
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
             )
-            centerline = Polyline(polyline_type=lane_type, waypoints=centerline)
+            centerline = Polyline(waypoints=centerline)
 
             # for j in range(len(centerline.waypoints)):
             #     print(f"{centerline.waypoints[j][0]:.6f}, {centerline.waypoints[j][1]:.6f}, {centerline.waypoints[j][2]:.6f}")

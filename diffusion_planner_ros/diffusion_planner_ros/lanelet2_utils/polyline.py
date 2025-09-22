@@ -27,12 +27,10 @@ class Polyline:
 
     Attributes
     ----------
-        polyline_type (MapType): Type of polyline.
         waypoints (NDArrayF32): Waypoints of polyline.
 
     """
 
-    polyline_type: MapType = field()
     waypoints: NDArrayF32 = field(converter=to_np_f32)
 
     # NOTE: For the 1DArray indices must be a list.
@@ -40,11 +38,6 @@ class Polyline:
     XY_IDX: ClassVar[list[int]] = [0, 1]
     FULL_DIM3D: ClassVar[int] = 7
     FULL_DIM2D: ClassVar[int] = 5
-
-    @polyline_type.validator
-    def _check_type(self, attr, value) -> None:
-        if not isinstance(value, MapType):
-            raise TypeError(f"Unexpected type of {attr.name}: {type(value)}")
 
     @waypoints.validator
     def _check_dim(self, attribute, value) -> None:
@@ -138,36 +131,3 @@ class Polyline:
 
         """
         return len(self.waypoints) == 0
-
-    def as_array(self, *, full: bool = False, as_3d: bool = True) -> NDArrayF32:
-        """Return the polyline as `NDArray`.
-
-        Args:
-        ----
-            full (bool, optional): Indicates whether to return `(x, y, z, dx, dy, dz, type_id)`.
-                If `False`, returns `(x, y, z)`. Defaults to False.
-            as_3d (bool, optional): If `True` returns array containing 3D coordinates.
-                Otherwise, 2D coordinates. Defaults to True.
-
-        Returns:
-        -------
-            NDArrayF32: Polyline array.
-
-        """
-        if full:
-            if self.is_empty():
-                return (
-                    np.empty((0, self.FULL_DIM3D), dtype=np.float32)
-                    if as_3d
-                    else np.empty((0, self.FULL_DIM2D), dtype=np.float32)
-                )
-
-            shape = self.waypoints.shape[:-1]
-            type_id = np.full((*shape, 1), self.polyline_type.value)
-            return (
-                np.concatenate([self.xyz, self.dxyz, type_id], axis=1, dtype=np.float32)
-                if as_3d
-                else np.concatenate([self.xy, self.dxy, type_id], axis=1, dtype=np.float32)
-            )
-        else:
-            return self.xyz if as_3d else self.xy
