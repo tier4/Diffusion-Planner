@@ -4,7 +4,7 @@ set -eux
 cd $(dirname $0)/..
 converter_type=${1}  # python or cpp
 
-result_dir=/mnt/nvme0/sakoda/test/$(date +%Y%m%d_%H%M%S)_test_parse_rosbag_${converter_type}
+result_dir=/mnt/nvme0/sakoda/test/$(date +%Y%m%d_%H%M%S)_test_${converter_type}
 
 rm -rf ${result_dir}
 mkdir -p ${result_dir}/tmp
