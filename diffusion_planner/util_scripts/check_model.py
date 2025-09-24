@@ -1,12 +1,10 @@
 import argparse
-import json
 import time
-from pathlib import Path
 
 import numpy as np
 import torch
+from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.config import Config
 
 
 def parse_args():
@@ -21,9 +19,9 @@ if __name__ == "__main__":
     args.use_ego_history = False
     args.agent_num = 32
     args.static_objects_num = 5
-    args.lane_num = 70
+    args.lane_num = NUM_SEGMENTS_IN_LANE
     args.lane_len = 20
-    args.route_num = 25
+    args.route_num = NUM_SEGMENTS_IN_ROUTE
     args.route_len = 20
     args.time_len = 21
     args.encoder_drop_path_rate = 0.1
