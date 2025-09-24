@@ -25,11 +25,7 @@ def _get_attribute(attribute_map, key: str, default: str) -> str:
 
 
 def _interpolate_lane_cpp(waypoints: NDArray):
-    # zは小数点第5位を四捨五入
-    waypoints[:, 2] = np.round(waypoints[:, 2], 5)
-
-    if len(waypoints) < 2:
-        return waypoints
+    assert len(waypoints) >= 2, "At least two waypoints are required"
 
     target_n = 20
 
@@ -197,6 +193,9 @@ def convert_lanelet(filename: str) -> VectorMap:
     projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
     lanelet_map = lanelet2.io.load(filename, projection)
 
+    interpolate_func = _interpolate_lane_cpp
+    interpolate_func = _interpolate_lane
+
     lane_segments: dict[int, LaneSegment] = {}
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
@@ -206,13 +205,13 @@ def convert_lanelet(filename: str) -> VectorMap:
         # NOTE: skip walkway because it contains stop_line as boundary
         if lanelet_subtype in ("road", "highway", "road_shoulder", "bicycle_lane"):
             # lane
-            centerline = _interpolate_lane(
+            centerline = interpolate_func(
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
             )
-            left_boundary = _interpolate_lane(
+            left_boundary = interpolate_func(
                 np.array([(line.x, line.y, line.z) for line in lanelet.leftBound])
             )
-            right_boundary = _interpolate_lane(
+            right_boundary = interpolate_func(
                 np.array([(line.x, line.y, line.z) for line in lanelet.rightBound])
             )
 
