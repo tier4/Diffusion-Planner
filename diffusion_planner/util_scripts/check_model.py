@@ -23,6 +23,8 @@ if __name__ == "__main__":
     args.lane_len = 20
     args.route_num = NUM_SEGMENTS_IN_ROUTE
     args.route_len = 20
+    args.line_num = NUM_LINES
+    args.line_len = 20
     args.time_len = 21
     args.encoder_drop_path_rate = 0.1
     args.decoder_drop_path_rate = 0.1
@@ -65,6 +67,7 @@ if __name__ == "__main__":
         "route_lanes_has_speed_limit": torch.zeros(
             (batch_size, 25, 1), dtype=torch.bool, device=dev
         ),
+        "lines": torch.zeros((batch_size, NUM_LINES, 20, 4 + 5), dtype=torch.float32, device=dev),
         "static_objects": torch.zeros((batch_size, 5, 10), device=dev),
         "goal_pose": torch.zeros((batch_size, 4), device=dev),
         "ego_shape": torch.zeros((batch_size, 3), device=dev),

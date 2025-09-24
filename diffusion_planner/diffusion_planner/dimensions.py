@@ -1,5 +1,6 @@
 NUM_SEGMENTS_IN_LANE = 70
 NUM_SEGMENTS_IN_ROUTE = 25
+NUM_LINES = 50
 MAX_NUM_NEIGHBORS = 32
 MAX_NUM_AGENTS = MAX_NUM_NEIGHBORS + 1  # Including ego
 POINTS_PER_SEGMENT = 20  #!< Number of points in each lane segment.
