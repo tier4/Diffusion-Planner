@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING
 from attr import define
 
 if TYPE_CHECKING:
-    from .typing import NDArrayF32
+    import numpy as np
+    from numpy.typing import NDArray
+
+    NDArrayF32 = NDArray[np.float32]
+
 
 __all__ = ("AWMLStaticMap", "LaneSegment")
 
