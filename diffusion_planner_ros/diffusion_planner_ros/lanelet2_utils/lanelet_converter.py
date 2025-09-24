@@ -14,15 +14,6 @@ from .vector_map import (
     VectorMap,
 )
 
-
-def _interpolate_points(line, num_point):
-    line = LineString(line)
-    new_line = np.concatenate(
-        [line.interpolate(d).coords._coords for d in np.linspace(0, line.length, num_point)]
-    )
-    return new_line
-
-
 # cspell: ignore MGRS
 
 
@@ -158,8 +149,14 @@ def _interpolate_lane(waypoints: NDArray):
     if not np.allclose(new_waypoints[-1], waypoints[-1]):
         new_waypoints = np.vstack((new_waypoints, waypoints[-1]))
 
+    # Resample to exactly 20 points using shapely
     new_waypoints = np.array(new_waypoints, dtype=np.float32)
-    new_waypoints = _interpolate_points(new_waypoints, 20)
+    line = LineString(new_waypoints)
+    num_point = 20
+    new_waypoints = np.concatenate(
+        [line.interpolate(d).coords._coords for d in np.linspace(0, line.length, num_point)]
+    )
+
     return new_waypoints
 
 
