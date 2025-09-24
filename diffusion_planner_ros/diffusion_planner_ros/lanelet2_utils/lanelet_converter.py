@@ -8,7 +8,6 @@ from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 from shapely import LineString
 
-from .uuid import uuid
 from .vector_map import (
     LaneSegment,
     LineType,
@@ -281,9 +280,7 @@ def convert_lanelet(filename: str) -> VectorMap:
 
     print(f"{len(lane_segments)} lane segments are loaded.")
 
-    # generate uuid from map filepath
-    map_id = uuid(filename, digit=16)
-    map = VectorMap(map_id, lane_segments=lane_segments)
+    map = VectorMap(lane_segments=lane_segments)
     return map
 
 
