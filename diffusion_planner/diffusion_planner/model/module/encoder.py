@@ -234,7 +234,6 @@ class EgoEncoder(nn.Module):
         channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
-        self._channel = channels_mlp_dim
 
         self.channel_pre_project = Mlp(
             in_features=4,
@@ -298,7 +297,6 @@ class NeighborEncoder(nn.Module):
         channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
-        self._channel = channels_mlp_dim
 
         self.type_emb = nn.Linear(3, channels_mlp_dim)
 
@@ -422,7 +420,6 @@ class LaneEncoder(nn.Module):
 
         self._lane_len = lane_len
         self._class_type = class_type
-        self._channel = channels_mlp_dim
 
         self.speed_limit_emb = nn.Linear(1, channels_mlp_dim)
         self.unknown_speed_emb = nn.Embedding(1, channels_mlp_dim)
@@ -520,7 +517,6 @@ class GoalPoseEncoder(nn.Module):
         channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
-        self._channel = channels_mlp_dim
 
         self.channel_pre_project = Mlp(
             in_features=4,
@@ -564,7 +560,6 @@ class EgoShapeEncoder(nn.Module):
         channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
-        self._channel = channels_mlp_dim
 
         self.channel_pre_project = Mlp(
             in_features=3,
