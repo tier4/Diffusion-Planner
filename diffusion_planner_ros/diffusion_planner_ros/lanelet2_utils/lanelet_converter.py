@@ -16,6 +16,8 @@ from .vector_map import (
 
 # cspell: ignore MGRS
 
+CPP_MODE = False
+
 
 def _get_attribute(attribute_map, key: str, default: str) -> str:
     if key in attribute_map:
@@ -193,8 +195,7 @@ def convert_lanelet(filename: str) -> VectorMap:
     projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
     lanelet_map = lanelet2.io.load(filename, projection)
 
-    interpolate_func = _interpolate_lane_cpp
-    interpolate_func = _interpolate_lane
+    interpolate_func = _interpolate_lane_cpp if CPP_MODE else _interpolate_lane
 
     lane_segments: dict[int, LaneSegment] = {}
     for lanelet in lanelet_map.laneletLayer:
@@ -393,9 +394,10 @@ def create_lane_tensor(
     # sort by distance from the first and last point
     def key_func(item):
         line_data, speed_limit_mps = item
+        back_index = -2 if CPP_MODE else -1  # -1 is the same as next first point, so use -2
         return min(
             np.linalg.norm(line_data[0, :2]),
-            np.linalg.norm(line_data[-2, :2]),  # -1 is the same as next first point, so use -2
+            np.linalg.norm(line_data[back_index, :2]),
         )
 
     if do_sort:
