@@ -8,12 +8,12 @@ from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 from shapely import LineString
 
-from .static_map import (
+from .uuid import uuid
+from .vector_map import (
     LaneSegment,
     LineType,
     VectorMap,
 )
-from .uuid import uuid
 
 
 def _interpolate_points(line, num_point):
