@@ -270,13 +270,13 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
         # NOTE: skip walkway because it contains stop_line as boundary
         if lanelet_subtype in T4_LANE:
             # lane
-            centerline = _interpolate_lane_cpp(
+            centerline = _interpolate_lane(
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
             )
-            left_boundary = _interpolate_lane_cpp(
+            left_boundary = _interpolate_lane(
                 np.array([(line.x, line.y, line.z) for line in lanelet.leftBound])
             )
-            right_boundary = _interpolate_lane_cpp(
+            right_boundary = _interpolate_lane(
                 np.array([(line.x, line.y, line.z) for line in lanelet.rightBound])
             )
 
