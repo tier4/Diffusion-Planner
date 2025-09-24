@@ -8,7 +8,6 @@ from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 from shapely import LineString
 
-from .constant import T4_LANE
 from .static_map import (
     AWMLStaticMap,
     LaneSegment,
@@ -242,7 +241,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
         # print(len(lanelet.centerline), len(lanelet.leftBound), len(lanelet.rightBound))
 
         # NOTE: skip walkway because it contains stop_line as boundary
-        if lanelet_subtype in T4_LANE:
+        if lanelet_subtype in ("road", "highway", "road_shoulder", "bicycle_lane"):
             # lane
             centerline = _interpolate_lane(
                 np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
