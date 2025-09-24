@@ -9,9 +9,9 @@ from scipy.interpolate import interp1d
 from shapely import LineString
 
 from .static_map import (
-    AWMLStaticMap,
     LaneSegment,
     LineType,
+    VectorMap,
 )
 from .uuid import uuid
 
@@ -214,7 +214,7 @@ def _identify_current_light_status(turn_direction: int, traffic_light_elements: 
     return max(effective_elements, key=lambda x: x.confidence).color
 
 
-def convert_lanelet(filename: str) -> AWMLStaticMap:
+def convert_lanelet(filename: str) -> VectorMap:
     """Convert lanelet (.osm) to map info.
 
     Note:
@@ -228,7 +228,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
 
     Returns:
     -------
-        AWMLStaticMap: Static map data.
+        VectorMap: Map data.
 
     """
     projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
@@ -283,7 +283,7 @@ def convert_lanelet(filename: str) -> AWMLStaticMap:
 
     # generate uuid from map filepath
     map_id = uuid(filename, digit=16)
-    map = AWMLStaticMap(map_id, lane_segments=lane_segments)
+    map = VectorMap(map_id, lane_segments=lane_segments)
     return map
 
 

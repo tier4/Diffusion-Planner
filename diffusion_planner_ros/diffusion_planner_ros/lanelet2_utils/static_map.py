@@ -13,11 +13,8 @@ if TYPE_CHECKING:
     NDArrayF32 = NDArray[np.float32]
 
 
-__all__ = ("AWMLStaticMap", "LaneSegment")
-
-
 @dataclass(frozen=True)
-class AWMLStaticMap:
+class VectorMap:
     """Represents a static map information.
 
     Attributes
