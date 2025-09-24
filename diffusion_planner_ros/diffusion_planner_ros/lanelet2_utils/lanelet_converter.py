@@ -8,9 +8,7 @@ from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 from shapely import LineString
 
-from .constant import MAP_TYPE_MAPPING, T4_LANE, T4_ROADEDGE, T4_ROADLINE
-from .map import MapType
-from .polylines_base import BoundaryType
+from .constant import T4_LANE
 from .static_map import (
     AWMLStaticMap,
     LaneSegment,
@@ -48,30 +46,6 @@ def _get_attribute(attribute_map, key: str, default: str) -> str:
         return attribute_map[key]
     else:
         return default
-
-
-def _get_boundary_type(linestring: lanelet2.core.LineString3d) -> BoundaryType:
-    """Return the `BoundaryType` from linestring.
-
-    Args:
-    ----
-        linestring (lanelet2.core.LineString3d): LineString instance.
-
-    Returns:
-    -------
-        BoundaryType: BoundaryType instance.
-
-    """
-    line_type = _get_attribute(linestring.attributes, "type", "")
-    line_subtype = _get_attribute(linestring.attributes, "subtype", "")
-    if line_type == "virtual" and line_subtype == "":
-        return MapType.UNKNOWN
-    elif line_type in T4_ROADEDGE:
-        return MAP_TYPE_MAPPING[line_type]
-    elif line_subtype in T4_ROADLINE:
-        return MAP_TYPE_MAPPING[line_subtype]
-    else:
-        return MapType.UNKNOWN
 
 
 def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
