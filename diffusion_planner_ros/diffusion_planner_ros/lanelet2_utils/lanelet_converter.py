@@ -18,43 +18,10 @@ from .vector_map import (
 
 
 def _get_attribute(attribute_map, key: str, default: str) -> str:
-    """Return attribute value from AttributeMap with default fallback.
-
-    Args:
-    ----
-        attribute_map: AttributeMap object.
-        key (str): Attribute key to retrieve.
-        default (str): Default value if key is not found.
-
-    Returns:
-    -------
-        str: Attribute value or default if key is not found.
-
-    """
     if key in attribute_map:
         return attribute_map[key]
     else:
         return default
-
-
-def _get_speed_limit_mph(lanelet: lanelet2.core.Lanelet) -> float | None:
-    """Return the lane speed limit in miles per hour (mph).
-
-    Args:
-    ----
-        lanelet (lanelet2.core.Lanelet): Lanelet instance.
-
-    Returns:
-    -------
-        float | None: If the lane has the speed limit return float, otherwise None.
-
-    """
-    kph2mph = 0.621371
-    speed_limit_str = _get_attribute(lanelet.attributes, "speed_limit", "")
-    if speed_limit_str:
-        return float(speed_limit_str) * kph2mph
-    else:
-        return None
 
 
 def _interpolate_lane_cpp(waypoints: NDArray):
@@ -262,6 +229,10 @@ def convert_lanelet(filename: str) -> VectorMap:
             line_type_right = _get_attribute(lanelet.rightBound.attributes, "type", "")
             line_type_right = LineType.from_str(line_type_right)
 
+            kph2mph = 0.621371
+            speed_limit_str = _get_attribute(lanelet.attributes, "speed_limit", "")
+            speed_limit = float(speed_limit_str) * kph2mph if speed_limit_str else None
+
             lane_segments[lanelet.id] = LaneSegment(
                 id=lanelet.id,
                 polyline=centerline,
@@ -269,7 +240,7 @@ def convert_lanelet(filename: str) -> VectorMap:
                 left_line_type=line_type_left,
                 right_boundary=right_boundary,
                 right_line_type=line_type_right,
-                speed_limit_mph=_get_speed_limit_mph(lanelet),
+                speed_limit_mph=speed_limit,
                 traffic_lights=lanelet.trafficLights(),
                 turn_direction=turn_direction_int,
                 center=np.mean(centerline[:, 0:2], axis=0),
