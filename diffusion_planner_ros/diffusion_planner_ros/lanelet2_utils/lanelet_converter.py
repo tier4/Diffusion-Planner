@@ -5,6 +5,7 @@ import numpy as np
 import shapely
 import torch
 from autoware_lanelet2_extension_python.projection import MGRSProjector
+from diffusion_planner.dimensions import *
 from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 
@@ -31,8 +32,6 @@ def _get_attribute(attribute_map, key: str, default: str) -> str:
 def _interpolate_lane_cpp(waypoints: NDArray):
     assert len(waypoints) >= 2, "At least two waypoints are required"
 
-    target_n = 20
-
     # Compute cumulative distances (arc length)
     distances = np.zeros(len(waypoints))
     for i in range(1, len(waypoints)):
@@ -48,10 +47,10 @@ def _interpolate_lane_cpp(waypoints: NDArray):
     # Always include the first point
     result.append(waypoints[0])
 
-    step = total_length / (target_n - 1)
+    step = total_length / (POINTS_PER_SEGMENT - 1)
     seg_idx = 0
 
-    for i in range(1, target_n - 1):
+    for i in range(1, POINTS_PER_SEGMENT - 1):
         target = i * step
 
         # Find the correct segment containing the target arc length
@@ -81,7 +80,7 @@ def _interpolate_lane_cpp(waypoints: NDArray):
     result.append(waypoints[-1])
 
     new_waypoints = np.array(result)
-    assert new_waypoints.shape[0] == target_n, (
+    assert new_waypoints.shape[0] == POINTS_PER_SEGMENT, (
         f"Unexpected number of waypoints: {new_waypoints.shape[0]}"
     )
     return new_waypoints
@@ -116,12 +115,14 @@ def _interpolate_lane(waypoints: NDArray):
     if not np.allclose(new_waypoints[-1], waypoints[-1]):
         new_waypoints = np.vstack((new_waypoints, waypoints[-1]))
 
-    # Resample to exactly 20 points using shapely
+    # Resample to exactly POINTS_PER_SEGMENT points using shapely
     new_waypoints = np.array(new_waypoints, dtype=np.float32)
     line = shapely.LineString(new_waypoints)
-    num_point = 20
     new_waypoints = np.concatenate(
-        [line.interpolate(d).coords._coords for d in np.linspace(0, line.length, num_point)]
+        [
+            line.interpolate(d).coords._coords
+            for d in np.linspace(0, line.length, POINTS_PER_SEGMENT)
+        ]
     )
 
     return new_waypoints
@@ -393,7 +394,9 @@ def process_lanelet(
         ),
         axis=1,
     )
-    assert line_data.shape == (20, Lanelet.TENSOR_DIM), f"Unexpected shape: {line_data.shape}"
+    assert line_data.shape == (POINTS_PER_SEGMENT, Lanelet.TENSOR_DIM), (
+        f"Unexpected shape: {line_data.shape}"
+    )
 
     # convert from miles per hour to meters per second
     speed_limit_mps = lanelet.speed_limit_mph * 0.44704
@@ -441,7 +444,7 @@ def create_lane_tensor(
     result_list = result_list[0:num_segments]
 
     lanes_tensor = torch.zeros(
-        (1, num_segments, 20, Lanelet.TENSOR_DIM), dtype=torch.float32, device=dev
+        (1, num_segments, POINTS_PER_SEGMENT, Lanelet.TENSOR_DIM), dtype=torch.float32, device=dev
     )
     lanes_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.float32, device=dev)
     lanes_has_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.bool, device=dev)
