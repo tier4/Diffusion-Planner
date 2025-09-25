@@ -55,7 +55,7 @@ LineType._line_type_mapping = {
 class Lanelet:
     id: int
     turn_direction: int
-    polyline: NDArrayF32
+    centerline: NDArrayF32
     left_boundary: NDArrayF32
     left_line_type: LineType
     right_boundary: NDArrayF32

@@ -236,7 +236,7 @@ def convert_lanelet(filename: str) -> LaneletMap:
 
         lanelets[lanelet.id] = Lanelet(
             id=lanelet.id,
-            polyline=centerline,
+            centerline=centerline,
             left_boundary=left_boundary,
             left_line_type=line_type_left,
             right_boundary=right_boundary,
@@ -268,7 +268,7 @@ def process_segment(
     mask_range,
     traffic_light_recognition,
 ):
-    centerline = segment.polyline
+    centerline = segment.centerline
     left_boundary = segment.left_boundary
     right_boundary = segment.right_boundary
 
