@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import lanelet2
 import numpy as np
+import shapely
 import torch
 from autoware_lanelet2_extension_python.projection import MGRSProjector
 from numpy.typing import NDArray
 from scipy.interpolate import interp1d
-from shapely import LineString
 
 from .lanelet_map import (
     Lanelet,
     LaneletMap,
+    LineString,
     LineType,
+    Polygon,
 )
 
 # cspell: ignore MGRS
@@ -116,7 +118,7 @@ def _interpolate_lane(waypoints: NDArray):
 
     # Resample to exactly 20 points using shapely
     new_waypoints = np.array(new_waypoints, dtype=np.float32)
-    line = LineString(new_waypoints)
+    line = shapely.LineString(new_waypoints)
     num_point = 20
     new_waypoints = np.concatenate(
         [line.interpolate(d).coords._coords for d in np.linspace(0, line.length, num_point)]
@@ -247,9 +249,23 @@ def convert_lanelet(filename: str) -> LaneletMap:
             center=np.mean(centerline[:, 0:2], axis=0),
         )
 
+    polygons: dict[int, Polygon] = {}
+    for polygon in lanelet_map.polygonLayer:
+        polygon_type = _get_attribute(polygon.attributes, "type", "")
+        polygon_subtype = _get_attribute(polygon.attributes, "subtype", "")
+        print(f"polygon: id={polygon.id}, type={polygon_type}, subtype={polygon_subtype}")
+
+    line_strings: dict[int, LineString] = {}
+    for linestring in lanelet_map.lineStringLayer:
+        linestring_type = _get_attribute(linestring.attributes, "type", "")
+        linestring_subtype = _get_attribute(linestring.attributes, "subtype", "")
+        print(
+            f"linestring: id={linestring.id}, type={linestring_type}, subtype={linestring_subtype}"
+        )
+
     print(f"{len(lanelets)} lanelets are loaded.")
 
-    map = LaneletMap(lanelets=lanelets)
+    map = LaneletMap(lanelets=lanelets, polygons=polygons, line_strings=line_strings)
     return map
 
 

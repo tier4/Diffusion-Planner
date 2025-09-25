@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class LaneletMap:
     lanelets: dict[int, Lanelet]
+    polygons: dict[int, Polygon]
+    line_strings: dict[int, LineString]
 
 
 class LineType(IntEnum):
@@ -65,3 +67,17 @@ class Lanelet:
     traffic_lights: list
 
     TENSOR_DIM = 13 + 2 * LineType.NUM.value
+
+@define
+class Polygon:
+    id: int
+    polyline: NDArrayF32
+    type: str
+    subtype: str
+
+@define
+class LineString:
+    id: int
+    polyline: NDArrayF32
+    type: str
+    subtype: str
