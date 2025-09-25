@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 from shapely import LineString
 
-from .vector_map import (
+from .lanelet_map import (
     Lanelet,
     LaneletMap,
     LineType,
