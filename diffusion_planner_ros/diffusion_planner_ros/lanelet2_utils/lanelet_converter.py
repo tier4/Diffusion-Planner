@@ -197,58 +197,59 @@ def convert_lanelet(filename: str) -> LaneletMap:
 
     interpolate_func = _interpolate_lane_cpp if CPP_MODE else _interpolate_lane
 
-    lane_segments: dict[int, Lanelet] = {}
+    lanelets: dict[int, Lanelet] = {}
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
 
         # print(len(lanelet.centerline), len(lanelet.leftBound), len(lanelet.rightBound))
 
         # NOTE: skip walkway because it contains stop_line as boundary
-        if lanelet_subtype in ("road", "highway", "road_shoulder", "bicycle_lane"):
-            # lane
-            centerline = interpolate_func(
-                np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
-            )
-            left_boundary = interpolate_func(
-                np.array([(line.x, line.y, line.z) for line in lanelet.leftBound])
-            )
-            right_boundary = interpolate_func(
-                np.array([(line.x, line.y, line.z) for line in lanelet.rightBound])
-            )
+        if lanelet_subtype not in ("road", "highway", "road_shoulder", "bicycle_lane"):
+            continue
+        # lane
+        centerline = interpolate_func(
+            np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
+        )
+        left_boundary = interpolate_func(
+            np.array([(line.x, line.y, line.z) for line in lanelet.leftBound])
+        )
+        right_boundary = interpolate_func(
+            np.array([(line.x, line.y, line.z) for line in lanelet.rightBound])
+        )
 
-            turn_direction_str = _get_attribute(lanelet.attributes, "turn_direction", "unknown")
-            turn_direction_int = {
-                "unknown": -1,
-                "straight": 0,
-                "left": 1,
-                "right": 2,
-            }[turn_direction_str]
+        turn_direction_str = _get_attribute(lanelet.attributes, "turn_direction", "unknown")
+        turn_direction_int = {
+            "unknown": -1,
+            "straight": 0,
+            "left": 1,
+            "right": 2,
+        }[turn_direction_str]
 
-            line_type_left = _get_attribute(lanelet.leftBound.attributes, "type", "")
-            line_type_left = LineType.from_str(line_type_left)
-            line_type_right = _get_attribute(lanelet.rightBound.attributes, "type", "")
-            line_type_right = LineType.from_str(line_type_right)
+        line_type_left = _get_attribute(lanelet.leftBound.attributes, "type", "")
+        line_type_left = LineType.from_str(line_type_left)
+        line_type_right = _get_attribute(lanelet.rightBound.attributes, "type", "")
+        line_type_right = LineType.from_str(line_type_right)
 
-            kph2mph = 0.621371
-            speed_limit_str = _get_attribute(lanelet.attributes, "speed_limit", "")
-            speed_limit = float(speed_limit_str) * kph2mph if speed_limit_str else None
+        kph2mph = 0.621371
+        speed_limit_str = _get_attribute(lanelet.attributes, "speed_limit", "")
+        speed_limit = float(speed_limit_str) * kph2mph if speed_limit_str else None
 
-            lane_segments[lanelet.id] = Lanelet(
-                id=lanelet.id,
-                polyline=centerline,
-                left_boundary=left_boundary,
-                left_line_type=line_type_left,
-                right_boundary=right_boundary,
-                right_line_type=line_type_right,
-                speed_limit_mph=speed_limit,
-                traffic_lights=lanelet.trafficLights(),
-                turn_direction=turn_direction_int,
-                center=np.mean(centerline[:, 0:2], axis=0),
-            )
+        lanelets[lanelet.id] = Lanelet(
+            id=lanelet.id,
+            polyline=centerline,
+            left_boundary=left_boundary,
+            left_line_type=line_type_left,
+            right_boundary=right_boundary,
+            right_line_type=line_type_right,
+            speed_limit_mph=speed_limit,
+            traffic_lights=lanelet.trafficLights(),
+            turn_direction=turn_direction_int,
+            center=np.mean(centerline[:, 0:2], axis=0),
+        )
 
-    print(f"{len(lane_segments)} lane segments are loaded.")
+    print(f"{len(lanelets)} lanelets are loaded.")
 
-    map = LaneletMap(lane_segments=lane_segments)
+    map = LaneletMap(lanelets=lanelets)
     return map
 
 

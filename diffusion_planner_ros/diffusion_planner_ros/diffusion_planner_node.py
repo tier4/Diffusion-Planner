@@ -308,7 +308,7 @@ class DiffusionPlannerNode(Node):
         # Lane
         start = time.time()
         lanes_tensor, lanes_speed_limit, lanes_has_speed_limit = create_lane_tensor(
-            self.static_map.lane_segments.values(),
+            self.static_map.lanelets.values(),
             map2bl_mat4x4=map2bl_matrix_4x4,
             center_x=curr_kinematic_state.pose.pose.position.x,
             center_y=curr_kinematic_state.pose.pose.position.y,
@@ -325,7 +325,7 @@ class DiffusionPlannerNode(Node):
         # Route
         start = time.time()
         target_segments = [
-            self.static_map.lane_segments[segment.preferred_primitive.id]
+            self.static_map.lanelets[segment.preferred_primitive.id]
             for segment in self.route.segments
         ]
         target_segments = filter_target_segments(target_segments, curr_kinematic_state)

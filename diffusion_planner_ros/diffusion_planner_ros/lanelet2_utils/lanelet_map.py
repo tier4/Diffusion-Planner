@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class LaneletMap:
-    lane_segments: dict[int, Lanelet]
+    lanelets: dict[int, Lanelet]
 
 
 class LineType(IntEnum):

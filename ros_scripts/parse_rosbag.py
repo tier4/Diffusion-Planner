@@ -451,7 +451,7 @@ def main(
 
             # lanes
             lanes_tensor, lanes_speed_limit, lanes_has_speed_limit = create_lane_tensor(
-                vector_map.lane_segments.values(),
+                vector_map.lanelets.values(),
                 map2bl_mat4x4=map2bl_matrix_4x4,
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
@@ -464,7 +464,7 @@ def main(
 
             # routes
             target_segments = [
-                vector_map.lane_segments[segment.preferred_primitive.id]
+                vector_map.lanelets[segment.preferred_primitive.id]
                 for segment in data_list[i].route.segments
             ]
             target_segments = filter_target_segments(target_segments, data_list[i].kinematic_state)
