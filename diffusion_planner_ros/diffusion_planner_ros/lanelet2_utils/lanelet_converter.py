@@ -9,9 +9,9 @@ from scipy.interpolate import interp1d
 from shapely import LineString
 
 from .vector_map import (
-    LaneSegment,
+    Lanelet,
+    LaneletMap,
     LineType,
-    VectorMap,
 )
 
 # cspell: ignore MGRS
@@ -175,7 +175,7 @@ def _identify_current_light_status(turn_direction: int, traffic_light_elements: 
     return max(effective_elements, key=lambda x: x.confidence).color
 
 
-def convert_lanelet(filename: str) -> VectorMap:
+def convert_lanelet(filename: str) -> LaneletMap:
     """Convert lanelet (.osm) to map info.
 
     Note:
@@ -189,7 +189,7 @@ def convert_lanelet(filename: str) -> VectorMap:
 
     Returns:
     -------
-        VectorMap: Map data.
+        LaneletMap: Map data.
 
     """
     projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
@@ -197,7 +197,7 @@ def convert_lanelet(filename: str) -> VectorMap:
 
     interpolate_func = _interpolate_lane_cpp if CPP_MODE else _interpolate_lane
 
-    lane_segments: dict[int, LaneSegment] = {}
+    lane_segments: dict[int, Lanelet] = {}
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
 
@@ -233,7 +233,7 @@ def convert_lanelet(filename: str) -> VectorMap:
             speed_limit_str = _get_attribute(lanelet.attributes, "speed_limit", "")
             speed_limit = float(speed_limit_str) * kph2mph if speed_limit_str else None
 
-            lane_segments[lanelet.id] = LaneSegment(
+            lane_segments[lanelet.id] = Lanelet(
                 id=lanelet.id,
                 polyline=centerline,
                 left_boundary=left_boundary,
@@ -248,7 +248,7 @@ def convert_lanelet(filename: str) -> VectorMap:
 
     print(f"{len(lane_segments)} lane segments are loaded.")
 
-    map = VectorMap(lane_segments=lane_segments)
+    map = LaneletMap(lane_segments=lane_segments)
     return map
 
 
@@ -358,7 +358,7 @@ def process_segment(
         ),
         axis=1,
     )
-    assert line_data.shape == (20, LaneSegment.TENSOR_DIM), f"Unexpected shape: {line_data.shape}"
+    assert line_data.shape == (20, Lanelet.TENSOR_DIM), f"Unexpected shape: {line_data.shape}"
 
     # convert from miles per hour to meters per second
     speed_limit_mps = segment.speed_limit_mph * 0.44704
@@ -406,7 +406,7 @@ def create_lane_tensor(
     result_list = result_list[0:num_segments]
 
     lanes_tensor = torch.zeros(
-        (1, num_segments, 20, LaneSegment.TENSOR_DIM), dtype=torch.float32, device=dev
+        (1, num_segments, 20, Lanelet.TENSOR_DIM), dtype=torch.float32, device=dev
     )
     lanes_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.float32, device=dev)
     lanes_has_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.bool, device=dev)

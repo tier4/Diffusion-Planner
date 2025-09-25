@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class VectorMap:
-    lane_segments: dict[int, LaneSegment]
+class LaneletMap:
+    lane_segments: dict[int, Lanelet]
 
 
 class LineType(IntEnum):
@@ -52,7 +52,7 @@ LineType._line_type_mapping = {
 
 
 @define
-class LaneSegment:
+class Lanelet:
     id: int
     turn_direction: int
     polyline: NDArrayF32
