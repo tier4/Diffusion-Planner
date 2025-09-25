@@ -13,7 +13,7 @@ from autoware_perception_msgs.msg import (
     TrafficLightGroup,
     TrafficLightGroupArray,
 )
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovariance, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from tier4_simulation_msgs.msg import DummyObject
@@ -188,6 +188,21 @@ if __name__ == "__main__":
         pub_checkpoint.publish(checkpoint)
         node.get_logger().info(f"Published checkpoint pose: {checkpoint}")
 
+    def get_pose(name: str):
+        pose = PoseWithCovariance()
+        pose.pose.position.x = data[name]["pose"]["position"]["x"]
+        pose.pose.position.y = data[name]["pose"]["position"]["y"]
+        pose.pose.position.z = data[name]["pose"]["position"]["z"]
+        pose.pose.orientation.x = data[name]["pose"]["orientation"]["x"]
+        pose.pose.orientation.y = data[name]["pose"]["orientation"]["y"]
+        pose.pose.orientation.z = data[name]["pose"]["orientation"]["z"]
+        pose.pose.orientation.w = data[name]["pose"]["orientation"]["w"]
+        pose.covariance[0] = 0.0008999999845400453
+        pose.covariance[7] = 0.0008999999845400453
+        pose.covariance[14] = 0.0008999999845400453
+        pose.covariance[35] = 0.007615434937179089
+        return pose
+
     if "pedestrian" in data:
         time.sleep(1)
         pedestrian = DummyObject()
@@ -196,19 +211,7 @@ if __name__ == "__main__":
         pedestrian.id = UUID()
         for i in range(16):
             pedestrian.id.uuid[i] = i
-        pose = pedestrian.initial_state.pose_covariance.pose
-        pose.position.x = data["pedestrian"]["pose"]["position"]["x"]
-        pose.position.y = data["pedestrian"]["pose"]["position"]["y"]
-        pose.position.z = data["pedestrian"]["pose"]["position"]["z"]
-        pose.orientation.x = data["pedestrian"]["pose"]["orientation"]["x"]
-        pose.orientation.y = data["pedestrian"]["pose"]["orientation"]["y"]
-        pose.orientation.z = data["pedestrian"]["pose"]["orientation"]["z"]
-        pose.orientation.w = data["pedestrian"]["pose"]["orientation"]["w"]
-        cov = pedestrian.initial_state.pose_covariance.covariance
-        cov[0] = 0.0008999999845400453
-        cov[7] = 0.0008999999845400453
-        cov[14] = 0.0008999999845400453
-        cov[35] = 0.007615434937179089
+        pedestrian.initial_state.pose_covariance = get_pose("pedestrian")
         pedestrian.classification.label = 7
         pedestrian.classification.probability = 1.0
         pedestrian.shape.type = 1  # BOX
@@ -222,7 +225,7 @@ if __name__ == "__main__":
         pub_object.publish(pedestrian)
         node.get_logger().info(f"Published pedestrian pose: {pedestrian}")
 
-    if "bus" in data and False:
+    if "bus_avoidance" in data:
         time.sleep(1)
         bus = DummyObject()
         bus.header.frame_id = "map"
@@ -230,19 +233,7 @@ if __name__ == "__main__":
         bus.id = UUID()
         for i in range(16):
             bus.id.uuid[i] = i
-        pose = bus.initial_state.pose_covariance.pose
-        pose.position.x = data["bus"]["pose"]["position"]["x"]
-        pose.position.y = data["bus"]["pose"]["position"]["y"]
-        pose.position.z = data["bus"]["pose"]["position"]["z"]
-        pose.orientation.x = data["bus"]["pose"]["orientation"]["x"]
-        pose.orientation.y = data["bus"]["pose"]["orientation"]["y"]
-        pose.orientation.z = data["bus"]["pose"]["orientation"]["z"]
-        pose.orientation.w = data["bus"]["pose"]["orientation"]["w"]
-        cov = bus.initial_state.pose_covariance.covariance
-        cov[0] = 0.0008999999845400453
-        cov[7] = 0.0008999999845400453
-        cov[14] = 0.0008999999845400453
-        cov[35] = 0.007615434937179089
+        bus.initial_state.pose_covariance = get_pose("bus_avoidance")
         bus.classification.label = 3
         bus.classification.probability = 1.0
         bus.shape.type = 0  # BOX
