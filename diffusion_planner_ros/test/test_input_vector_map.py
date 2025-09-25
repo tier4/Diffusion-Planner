@@ -49,7 +49,6 @@ if __name__ == "__main__":
         map2bl_mat4x4,
         ego_x,
         ego_y,
-        RANGE,
         {},
         70,
         "cpu",

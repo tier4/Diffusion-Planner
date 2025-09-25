@@ -203,13 +203,9 @@ def convert_lanelet(filename: str) -> LaneletMap:
     lanelets: dict[int, Lanelet] = {}
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
-
-        # print(len(lanelet.centerline), len(lanelet.leftBound), len(lanelet.rightBound))
-
-        # NOTE: skip walkway because it contains stop_line as boundary
         if lanelet_subtype not in ("road", "highway", "road_shoulder", "bicycle_lane"):
             continue
-        # lane
+
         centerline = interpolate_func(
             np.array([(line.x, line.y, line.z) for line in lanelet.centerline])
         )
@@ -409,12 +405,12 @@ def create_lane_tensor(
     map2bl_mat4x4: NDArray,
     center_x: float,
     center_y: float,
-    mask_range: float,
     traffic_light_recognition: dict,
     num_segments: int,
     dev: torch.device,
     do_sort: bool,
 ) -> list[np.ndarray]:
+    mask_range = 100.0
     result_list = []
     for lanelet in lanelets:
         curr_data = process_lanelet(
