@@ -291,29 +291,37 @@ def one_hot_encode(class_index: int, num_class: int) -> NDArray:
     return one_hot
 
 
+def judge_inside(center_x, center_y, x, y):
+    mask_range = 100.0
+    return (
+        (x > center_x - mask_range)
+        & (x < center_x + mask_range)
+        & (y > center_y - mask_range)
+        & (y < center_y + mask_range)
+    )
+
+
+def transform(inv_transform_matrix_4x4, points):
+    points_4xN = np.vstack((points.T, np.ones(points.shape[0])))
+    points_ego = inv_transform_matrix_4x4 @ points_4xN
+    points = points_ego[:3, :].T
+    return points
+
+
 def process_lanelet(
     lanelet,
     inv_transform_matrix_4x4,
     center_x,
     center_y,
-    mask_range,
     traffic_light_recognition,
 ):
     centerline = lanelet.centerline
     left_boundary = lanelet.left_boundary
     right_boundary = lanelet.right_boundary
 
-    def judge_inside(x, y):
-        return (
-            (x > center_x - mask_range)
-            & (x < center_x + mask_range)
-            & (y > center_y - mask_range)
-            & (y < center_y + mask_range)
-        )
-
-    inside_center = judge_inside(lanelet.center[0], lanelet.center[1])
-    inside_first = judge_inside(centerline[0, 0], centerline[0, 1])
-    inside_last = judge_inside(centerline[-1, 0], centerline[-1, 1])
+    inside_center = judge_inside(center_x, center_y, lanelet.center[0], lanelet.center[1])
+    inside_first = judge_inside(center_x, center_y, centerline[0, 0], centerline[0, 1])
+    inside_last = judge_inside(center_x, center_y, centerline[-1, 0], centerline[-1, 1])
     if (not inside_center) and (not inside_first) and (not inside_last):
         return None
 
@@ -322,19 +330,13 @@ def process_lanelet(
     # print("before")
     # for i in range(centerline.shape[0]):
     #     print(f"{centerline[i][0]:.6f}, {centerline[i][1]:.6f}, {centerline[i][2]:.6f}")
-    centerline_4xN = np.vstack((centerline.T, np.ones(centerline.shape[0])))
-    centerline_ego = inv_transform_matrix_4x4 @ centerline_4xN
-    centerline = centerline_ego[:3, :].T
+    centerline = transform(inv_transform_matrix_4x4, centerline)
     # print("after")
     # for i in range(centerline.shape[0]):
     #     print(f"{centerline[i][0]:.6f}, {centerline[i][1]:.6f}, {centerline[i][2]:.6f}")
     # exit(1)
-    left_boundaries_4xN = np.vstack((left_boundary.T, np.ones(left_boundary.shape[0])))
-    left_boundaries_ego = inv_transform_matrix_4x4 @ left_boundaries_4xN
-    left_boundary = left_boundaries_ego[:3, :].T
-    right_boundaries_4xN = np.vstack((right_boundary.T, np.ones(right_boundary.shape[0])))
-    right_boundaries_ego = inv_transform_matrix_4x4 @ right_boundaries_4xN
-    right_boundary = right_boundaries_ego[:3, :].T
+    left_boundary = transform(inv_transform_matrix_4x4, left_boundary)
+    right_boundary = transform(inv_transform_matrix_4x4, right_boundary)
 
     left_boundary -= centerline
     right_boundary -= centerline
@@ -401,7 +403,7 @@ def process_lanelet(
 
 
 def create_lane_tensor(
-    lanelets: list,
+    lanelets: dict[int, Lanelet],
     map2bl_mat4x4: NDArray,
     center_x: float,
     center_y: float,
@@ -410,7 +412,6 @@ def create_lane_tensor(
     dev: torch.device,
     do_sort: bool,
 ) -> list[np.ndarray]:
-    mask_range = 100.0
     result_list = []
     for lanelet in lanelets:
         curr_data = process_lanelet(
@@ -418,7 +419,6 @@ def create_lane_tensor(
             map2bl_mat4x4,
             center_x,
             center_y,
-            mask_range,
             traffic_light_recognition,
         )
         if curr_data is None:
@@ -453,3 +453,39 @@ def create_lane_tensor(
         lanes_has_speed_limit[0, i] = speed_limit is not None
 
     return lanes_tensor, lanes_speed_limit, lanes_has_speed_limit
+
+
+def create_polygon_tensor(
+    polygons: dict[int, Polygon],
+    map2bl_mat4x4: NDArray,
+    center_x: float,
+    center_y: float,
+    dev: torch.device,
+) -> list[np.ndarray]:
+    result_list = []
+    for polygon in polygons:
+        polyline = polygon.polyline
+        inside_at_least_one = False
+        for point in polyline:
+            if judge_inside(center_x, center_y, point[0], point[1]):
+                inside_at_least_one = True
+                break
+        if not inside_at_least_one:
+            continue
+        polyline = transform(map2bl_mat4x4, polyline)
+        result_list.append(polyline[:, 0:2])
+
+    # sort by distance from the first and last point
+    def key_func(item):
+        return np.linalg.norm(item[:, 0:2], axis=1).min()
+
+    result_list = sorted(result_list, key=key_func)
+    result_list = result_list[0:NUM_POLYGONS]
+    result_list += [np.zeros((POINTS_PER_SEGMENT, 2), dtype=np.float32)] * (
+        NUM_POLYGONS - len(result_list)
+    )
+    result_list = np.array(result_list, dtype=np.float32)
+    tensor_data = torch.from_numpy(result_list, dtype=torch.float32, device=dev).reshape(
+        (1, NUM_POLYGONS, POINTS_PER_SEGMENT, 2)
+    )
+    return tensor_data
