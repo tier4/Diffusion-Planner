@@ -46,7 +46,7 @@ def ddp_setup_universal(verbose=False, args=None):
         backend=dist_backend,
         world_size=world_size,
         rank=rank,
-        timeout=timedelta(seconds=10),
+        timeout=timedelta(seconds=100),
     )
     torch.distributed.barrier()
     if verbose:
