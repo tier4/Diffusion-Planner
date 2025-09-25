@@ -61,7 +61,7 @@ if __name__ == "__main__":
         counter += 1
         # 各色で遷移時間を変える
         if traffic_light_status == GREEN:
-            if counter % 400 == -0:
+            if counter % 400 == 0:
                 counter = 0
                 traffic_light_status = YELLOW
         elif traffic_light_status == YELLOW:
@@ -69,7 +69,7 @@ if __name__ == "__main__":
                 counter = 0
                 traffic_light_status = RED
         elif traffic_light_status == RED:
-            if counter % 600 == 0:
+            if counter % 1400 == 0:
                 counter = 0
                 traffic_light_status = GREEN
 
