@@ -411,18 +411,20 @@ def visualize_inputs(
         )
 
     # ==== Polygons ====
-    for i in range(inputs["polygons"].shape[1]):
-        polygon = inputs["polygons"][0, i]
-        if np.sum(np.abs(polygon)) < 1e-6:
-            continue
-        ax.fill(polygon[:, 0], polygon[:, 1], color="gray", alpha=0.5)
+    if "polygons" in inputs:
+        for i in range(inputs["polygons"].shape[1]):
+            polygon = inputs["polygons"][0, i]
+            if np.sum(np.abs(polygon)) < 1e-6:
+                continue
+            ax.fill(polygon[:, 0], polygon[:, 1], color="gray", alpha=0.5)
 
     # ==== Line Strings ====
-    for i in range(inputs["line_strings"].shape[1]):
-        line_string = inputs["line_strings"][0, i]
-        if np.sum(np.abs(line_string)) < 1e-6:
-            continue
-        ax.plot(line_string[:, 0], line_string[:, 1], color="red")
+    if "line_strings" in inputs:
+        for i in range(inputs["line_strings"].shape[1]):
+            line_string = inputs["line_strings"][0, i]
+            if np.sum(np.abs(line_string)) < 1e-6:
+                continue
+            ax.plot(line_string[:, 0], line_string[:, 1], color="red")
 
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
