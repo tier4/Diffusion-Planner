@@ -253,17 +253,35 @@ def convert_lanelet(filename: str) -> LaneletMap:
     for polygon in lanelet_map.polygonLayer:
         polygon_type = _get_attribute(polygon.attributes, "type", "")
         polygon_subtype = _get_attribute(polygon.attributes, "subtype", "")
-        print(f"polygon: id={polygon.id}, type={polygon_type}, subtype={polygon_subtype}")
+        if polygon_type not in ("intersection_area"):
+            continue
+        polygon_points = np.array([(point.x, point.y, point.z) for point in polygon])
+        polygon_points = interpolate_func(polygon_points)
+        polygons[polygon.id] = Polygon(
+            id=polygon.id,
+            polyline=polygon_points,
+            type=polygon_type,
+            subtype=polygon_subtype,
+        )
 
     line_strings: dict[int, LineString] = {}
-    for linestring in lanelet_map.lineStringLayer:
-        linestring_type = _get_attribute(linestring.attributes, "type", "")
-        linestring_subtype = _get_attribute(linestring.attributes, "subtype", "")
-        print(
-            f"linestring: id={linestring.id}, type={linestring_type}, subtype={linestring_subtype}"
+    for line_string in lanelet_map.lineStringLayer:
+        line_string_type = _get_attribute(line_string.attributes, "type", "")
+        line_string_subtype = _get_attribute(line_string.attributes, "subtype", "")
+        if line_string_type not in ("stop_line"):
+            continue
+        line_string_points = np.array([(point.x, point.y, point.z) for point in line_string])
+        line_string_points = interpolate_func(line_string_points)
+        line_strings[line_string.id] = LineString(
+            id=line_string.id,
+            polyline=line_string_points,
+            type=line_string_type,
+            subtype=line_string_subtype,
         )
 
     print(f"{len(lanelets)} lanelets are loaded.")
+    print(f"{len(polygons)} polygons are loaded.")
+    print(f"{len(line_strings)} line strings are loaded.")
 
     map = LaneletMap(lanelets=lanelets, polygons=polygons, line_strings=line_strings)
     return map
