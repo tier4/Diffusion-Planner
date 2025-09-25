@@ -68,12 +68,14 @@ class Lanelet:
 
     TENSOR_DIM = 13 + 2 * LineType.NUM.value
 
+
 @define
 class Polygon:
     id: int
     polyline: NDArrayF32
     type: str
     subtype: str
+
 
 @define
 class LineString:
