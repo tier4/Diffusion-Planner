@@ -23,7 +23,7 @@ from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
 from diffusion_planner_ros.utils import (
     convert_tracked_objects_to_tensor,
     create_current_ego_state,
-    filter_target_segments,
+    filter_route_lanelets,
     get_nearest_msg,
     get_transform_matrix,
     parse_timestamp,
@@ -463,13 +463,13 @@ def main(
             )
 
             # routes
-            target_segments = [
+            route_lanelets = [
                 vector_map.lanelets[segment.preferred_primitive.id]
                 for segment in data_list[i].route.segments
             ]
-            target_segments = filter_target_segments(target_segments, data_list[i].kinematic_state)
+            route_lanelets = filter_route_lanelets(route_lanelets, data_list[i].kinematic_state)
             route_tensor, route_speed_limit, route_has_speed_limit = create_lane_tensor(
-                target_segments,
+                route_lanelets,
                 map2bl_mat4x4=map2bl_matrix_4x4,
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,

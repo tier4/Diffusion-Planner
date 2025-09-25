@@ -367,16 +367,16 @@ def parse_traffic_light_recognition(msg: TrafficLightGroupArray):
     return traffic_light_recognition
 
 
-def filter_target_segments(target_segments, curr_kinematic_state):
+def filter_route_lanelets(route_lanelets, curr_kinematic_state):
     """
-    Filter target segments to only include forward segments.
-    This function assumes that the target segments are ordered in the direction of travel.
-    It finds the segment closest to the current kinematic state and returns all segments from that point onward.
+    Filter route lanelets to only include forward lanelets.
+    This function assumes that the target lanelets are ordered in the direction of travel.
+    It finds the lanelet closest to the current kinematic state and returns all lanelets from that point onward.
     """
     closest_distance = float("inf")
     closest_index = -1
-    for j, segment in enumerate(target_segments):
-        centerline = segment.centerline
+    for j, lanelet in enumerate(route_lanelets):
+        centerline = lanelet.centerline
         diff_x = centerline[:, 0] - curr_kinematic_state.pose.pose.position.x
         diff_y = centerline[:, 1] - curr_kinematic_state.pose.pose.position.y
         diff = np.sqrt(diff_x**2 + diff_y**2)
@@ -384,4 +384,4 @@ def filter_target_segments(target_segments, curr_kinematic_state):
         if distance < closest_distance:
             closest_distance = distance
             closest_index = j
-    return target_segments[closest_index:]
+    return route_lanelets[closest_index:]

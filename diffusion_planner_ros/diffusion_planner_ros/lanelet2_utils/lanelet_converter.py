@@ -294,17 +294,17 @@ def one_hot_encode(class_index: int, num_class: int) -> NDArray:
     return one_hot
 
 
-def process_segment(
-    segment,
+def process_lanelet(
+    lanelet,
     inv_transform_matrix_4x4,
     center_x,
     center_y,
     mask_range,
     traffic_light_recognition,
 ):
-    centerline = segment.centerline
-    left_boundary = segment.left_boundary
-    right_boundary = segment.right_boundary
+    centerline = lanelet.centerline
+    left_boundary = lanelet.left_boundary
+    right_boundary = lanelet.right_boundary
 
     def judge_inside(x, y):
         return (
@@ -314,7 +314,7 @@ def process_segment(
             & (y < center_y + mask_range)
         )
 
-    inside_center = judge_inside(segment.center[0], segment.center[1])
+    inside_center = judge_inside(lanelet.center[0], lanelet.center[1])
     inside_first = judge_inside(centerline[0, 0], centerline[0, 1])
     inside_last = judge_inside(centerline[-1, 0], centerline[-1, 1])
     if (not inside_center) and (not inside_first) and (not inside_last):
@@ -346,17 +346,17 @@ def process_segment(
     diff_centerline = np.insert(diff_centerline, diff_centerline.shape[0], 0, axis=0)
 
     traffic_light = [0, 0, 0, 0, 0]  # (green, yellow, red, unknown, no traffic light)
-    if len(segment.traffic_lights) == 0:
+    if len(lanelet.traffic_lights) == 0:
         traffic_light = [0, 0, 0, 0, 1]  # no traffic light
     else:
-        if len(segment.traffic_lights) > 1:
+        if len(lanelet.traffic_lights) > 1:
             print(
-                f"Warning: more than one traffic light in segment {segment.id}, using the first one."
+                f"Warning: more than one traffic light in lanelet {lanelet.id}, using the first one."
             )
-        traffic_light_id = segment.traffic_lights[0].id
+        traffic_light_id = lanelet.traffic_lights[0].id
         if traffic_light_id in traffic_light_recognition:
             elements = traffic_light_recognition[traffic_light_id]
-            traffic_light_color = _identify_current_light_status(segment.turn_direction, elements)
+            traffic_light_color = _identify_current_light_status(lanelet.turn_direction, elements)
             # https://github.com/autowarefoundation/autoware_msgs/blob/main/autoware_perception_msgs/msg/TrafficLightElement.msg
             if traffic_light_color == 0:  # UNKNOWN
                 traffic_light[3] = 1
@@ -374,8 +374,8 @@ def process_segment(
             traffic_light[3] = 1
     traffic_light = np.tile(traffic_light, (centerline.shape[0], 1))
 
-    left_line_type = segment.left_line_type
-    right_line_type = segment.right_line_type
+    left_line_type = lanelet.left_line_type
+    right_line_type = lanelet.right_line_type
     left_line_type_onehot = one_hot_encode(left_line_type.value, LineType.NUM.value)
     right_line_type_onehot = one_hot_encode(right_line_type.value, LineType.NUM.value)
     left_line_type_onehot = np.tile(left_line_type_onehot, (centerline.shape[0], 1))
@@ -396,13 +396,13 @@ def process_segment(
     assert line_data.shape == (20, Lanelet.TENSOR_DIM), f"Unexpected shape: {line_data.shape}"
 
     # convert from miles per hour to meters per second
-    speed_limit_mps = segment.speed_limit_mph * 0.44704
+    speed_limit_mps = lanelet.speed_limit_mph * 0.44704
 
     return line_data, speed_limit_mps
 
 
 def create_lane_tensor(
-    lane_segments: list,
+    lanelets: list,
     map2bl_mat4x4: NDArray,
     center_x: float,
     center_y: float,
@@ -413,9 +413,9 @@ def create_lane_tensor(
     do_sort: bool,
 ) -> list[np.ndarray]:
     result_list = []
-    for segment in lane_segments:
-        curr_data = process_segment(
-            segment,
+    for lanelet in lanelets:
+        curr_data = process_lanelet(
+            lanelet,
             map2bl_mat4x4,
             center_x,
             center_y,

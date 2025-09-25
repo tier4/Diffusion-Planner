@@ -41,7 +41,7 @@ from .utils import (
     convert_tracked_objects_to_tensor,
     create_current_ego_state,
     create_ego_agent_past,
-    filter_target_segments,
+    filter_route_lanelets,
     get_nearest_msg,
     get_transform_matrix,
     parse_traffic_light_recognition,
@@ -328,7 +328,7 @@ class DiffusionPlannerNode(Node):
             self.static_map.lanelets[segment.preferred_primitive.id]
             for segment in self.route.segments
         ]
-        target_segments = filter_target_segments(target_segments, curr_kinematic_state)
+        target_segments = filter_route_lanelets(target_segments, curr_kinematic_state)
 
         route_tensor, route_speed_limit, route_has_speed_limit = create_lane_tensor(
             target_segments,
