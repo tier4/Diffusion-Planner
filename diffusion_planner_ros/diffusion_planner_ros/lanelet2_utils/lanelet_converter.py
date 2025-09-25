@@ -250,7 +250,7 @@ def convert_lanelet(filename: str) -> LaneletMap:
     for polygon in lanelet_map.polygonLayer:
         polygon_type = _get_attribute(polygon.attributes, "type", "")
         polygon_subtype = _get_attribute(polygon.attributes, "subtype", "")
-        if polygon_type not in ("intersection_area"):
+        if polygon_type not in ("intersection_area",):
             continue
         polygon_points = np.array([(point.x, point.y, point.z) for point in polygon])
         polygon_points = interpolate_func(polygon_points)
@@ -265,7 +265,7 @@ def convert_lanelet(filename: str) -> LaneletMap:
     for line_string in lanelet_map.lineStringLayer:
         line_string_type = _get_attribute(line_string.attributes, "type", "")
         line_string_subtype = _get_attribute(line_string.attributes, "subtype", "")
-        if line_string_type not in ("stop_line"):
+        if line_string_type not in ("stop_line",):
             continue
         line_string_points = np.array([(point.x, point.y, point.z) for point in line_string])
         line_string_points = interpolate_func(line_string_points)
