@@ -485,7 +485,10 @@ def create_polygon_tensor(
         NUM_POLYGONS - len(result_list)
     )
     result_list = np.array(result_list, dtype=np.float32)
-    tensor_data = torch.from_numpy(result_list, dtype=torch.float32, device=dev).reshape(
-        (1, NUM_POLYGONS, POINTS_PER_SEGMENT, 2)
+    tensor_data = (
+        torch.from_numpy(result_list)
+        .reshape((1, NUM_POLYGONS, POINTS_PER_SEGMENT, 2))
+        .to(torch.float32)
+        .to(dev)
     )
     return tensor_data
