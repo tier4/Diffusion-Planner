@@ -550,8 +550,6 @@ def main(
             neighbor_future_tensor = neighbor_future_tensor[:, :, :3]
 
             curr_data = {
-                "map_name": map_name,
-                "token": token,
                 "ego_agent_past": ego_past_np,
                 "ego_current_state": ego_tensor.numpy(),
                 "ego_agent_future": ego_future_np,
