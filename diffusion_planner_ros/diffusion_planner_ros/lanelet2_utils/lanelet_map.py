@@ -35,7 +35,7 @@ class LineType(IntEnum):
 
     @classmethod
     def from_str(cls, type_str: str) -> LineType:
-        return cls._line_type_mapping[type_str]
+        return cls._line_type_mapping.get(type_str, LineType.VIRTUAL)
 
 
 # クラス定義の後にマッピングを定義
