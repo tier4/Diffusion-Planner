@@ -58,7 +58,7 @@ def get_args():
     parser.add_argument("--route_len", type=int, help="number of route lane points", default=20)
 
     # DataLoader parameters
-    parser.add_argument("--use_data_augment", default=False, type=boolean)
+    parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, help="augmentation probability", default=0.5)
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=4, type=int)
