@@ -16,10 +16,11 @@ from autoware_perception_msgs.msg import (
 )
 from autoware_planning_msgs.msg import LaneletRoute
 from autoware_vehicle_msgs.msg import TurnIndicatorsReport
+from diffusion_planner.dimensions import *
 from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
     convert_lanelet,
     create_lane_tensor,
-    create_polygon_tensor,
+    create_line_tensor,
 )
 from diffusion_planner_ros.utils import (
     convert_tracked_objects_to_tensor,
@@ -549,20 +550,24 @@ def main(
             neighbor_future_tensor = neighbor_future_tensor[:, :, :3]
 
             # polygon
-            polygon_tensor = create_polygon_tensor(
+            polygon_tensor = create_line_tensor(
                 vector_map.polygons.values(),
                 map2bl_matrix_4x4,
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
+                num_elements=NUM_POLYGONS,
+                num_points=POINTS_PER_POLYGON,
                 dev="cpu",
             )
 
             # line_string
-            line_string_tensor = create_polygon_tensor(
+            line_string_tensor = create_line_tensor(
                 vector_map.line_strings.values(),
                 map2bl_matrix_4x4,
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
+                num_elements=NUM_LINE_STRINGS,
+                num_points=POINTS_PER_LINE_STRING,
                 dev="cpu",
             )
 
