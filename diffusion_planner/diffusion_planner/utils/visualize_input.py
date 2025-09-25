@@ -83,6 +83,8 @@ def visualize_inputs(
     route_lanes_has_speed_limit=(1, 25, 1)
     turn_indicator=(1,)
     goal_pose=(1, 4)
+    polygons,
+    line_strings
     """
 
     # initialize the figure
@@ -407,6 +409,20 @@ def visualize_inputs(
             alpha=0.7,
             label="Goal Pose",
         )
+
+    # ==== Polygons ====
+    for i in range(inputs["polygons"].shape[1]):
+        polygon = inputs["polygons"][0, i]
+        if np.sum(np.abs(polygon)) < 1e-6:
+            continue
+        ax.fill(polygon[:, 0], polygon[:, 1], color="gray", alpha=0.5)
+
+    # ==== Line Strings ====
+    for i in range(inputs["line_strings"].shape[1]):
+        line_string = inputs["line_strings"][0, i]
+        if np.sum(np.abs(line_string)) < 1e-6:
+            continue
+        ax.plot(line_string[:, 0], line_string[:, 1], color="red")
 
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
