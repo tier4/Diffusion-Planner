@@ -6,6 +6,7 @@ import sys
 import pandas as pd
 import torch
 import wandb
+from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
@@ -56,6 +57,12 @@ def get_args():
 
     parser.add_argument("--route_num", type=int, help="number of route lanes", default=25)
     parser.add_argument("--route_len", type=int, help="number of route lane points", default=20)
+
+    parser.add_argument("--polygon_num", type=int, default=NUM_POLYGONS)
+    parser.add_argument("--polygon_len", type=int, default=POINTS_PER_POLYGON)
+
+    parser.add_argument("--line_string_num", type=int, default=NUM_LINE_STRINGS)
+    parser.add_argument("--line_string_len", type=int, default=POINTS_PER_LINE_STRING)
 
     # DataLoader parameters
     parser.add_argument("--use_data_augment", default=True, type=boolean)

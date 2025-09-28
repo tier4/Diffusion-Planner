@@ -10,10 +10,11 @@ CLASS_TYPE_NEIGHBOR = 1
 CLASS_TYPE_STATIC = 2
 CLASS_TYPE_LANE = 3
 CLASS_TYPE_ROUTE = 4
-CLASS_TYPE_LINE = 5
-CLASS_TYPE_GOAL_POSE = 6
-CLASS_TYPE_EGO_SHAPE = 7
-CLASS_TYPE_NUM = 8
+CLASS_TYPE_POLYGON = 5
+CLASS_TYPE_LINE_STRING = 6
+CLASS_TYPE_GOAL_POSE = 7
+CLASS_TYPE_EGO_SHAPE = 8
+CLASS_TYPE_NUM = 9
 
 
 def add_class_type(x, class_type):
@@ -49,7 +50,8 @@ class Encoder(nn.Module):
             + config.static_objects_num
             + config.lane_num
             + config.route_num
-            + config.line_num
+            + config.polygon_num
+            + config.line_string_num
             + goal_pose_num
             + ego_shape_num
         )
@@ -85,8 +87,16 @@ class Encoder(nn.Module):
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
         )
-        self.line_encoder = LineEncoder(
-            config.line_len,
+        self.polygon_encoder = LineEncoder(
+            config.polygon_len,
+            class_type=CLASS_TYPE_POLYGON,
+            drop_path_rate=config.encoder_drop_path_rate,
+            hidden_dim=config.hidden_dim,
+            depth=config.encoder_mixer_depth,
+        )
+        self.line_string_encoder = LineEncoder(
+            config.line_string_len,
+            class_type=CLASS_TYPE_LINE_STRING,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
@@ -139,8 +149,11 @@ class Encoder(nn.Module):
         route_speed_limit = inputs["route_lanes_speed_limit"]  # (B, P=25, V=20, D=1)
         route_has_speed_limit = inputs["route_lanes_has_speed_limit"]  # (B, P=25, V=20, D=1)
 
-        # line
-        line = inputs["lines"]  # (B, P=70, V=20, D=5)
+        # polygons
+        polygons = inputs["polygons"]  # (B, P=10, V=40, D=2)
+
+        # line strings
+        line_strings = inputs["line_strings"]  # (B, P=10, V=20, D=2)
 
         # goal pose
         goal_pose = inputs["goal_pose"]  # (B, D=4)
@@ -159,7 +172,10 @@ class Encoder(nn.Module):
         encoding_route, route_mask, route_pos = self.route_encoder(
             route, route_speed_limit, route_has_speed_limit
         )
-        encoding_line, line_mask, line_pos = self.line_encoder(line)
+        encoding_polygon, polygon_mask, polygon_pos = self.polygon_encoder(polygons)
+        encoding_line_string, line_string_mask, line_string_pos = self.line_string_encoder(
+            line_strings
+        )
 
         # add positional embedding for route
         route_num = encoding_route.shape[1]
@@ -180,7 +196,8 @@ class Encoder(nn.Module):
                 encoding_static,
                 encoding_lanes,
                 encoding_route,
-                encoding_line,
+                encoding_polygon,
+                encoding_line_string,
                 encoding_goal_pose,
                 encoding_ego_shape,
             ],
@@ -194,7 +211,8 @@ class Encoder(nn.Module):
                 static_mask,
                 lanes_mask,
                 route_mask,
-                line_mask,
+                polygon_mask,
+                line_string_mask,
                 goal_pose_mask,
                 ego_shape_mask,
             ],
@@ -208,7 +226,8 @@ class Encoder(nn.Module):
                 static_pos,
                 lane_pos,
                 route_pos,
-                line_pos,
+                polygon_pos,
+                line_string_pos,
                 goal_pose_pos,
                 ego_shape_pos,
             ],
@@ -535,8 +554,9 @@ class LaneEncoder(nn.Module):
 
 
 class LineEncoder(nn.Module):
-    def __init__(self, line_len, drop_path_rate, hidden_dim, depth):
+    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth):
         super().__init__()
+        self._class_type = class_type
         tokens_mlp_dim = 64
         channels_mlp_dim = 128
 
@@ -574,17 +594,23 @@ class LineEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, P, V, D(x, y, x'-x, y'-y, line_type)
+        x: B, P, V, D(x, y)
         """
-        print(x.shape)
-        attribute = x[:, :, 0, 4:]
-        x = x[..., :4]
+        B, P, V, D = x.shape
+        # diffを取る
+        diff_x = x[:, :, 1:, 0] - x[:, :, :-1, 0]  # (B, P, V-1)
+        diff_y = x[:, :, 1:, 1] - x[:, :, :-1, 1]  # (B, P, V-1)
+        diff_x = torch.cat([diff_x, torch.zeros_like(diff_x[:, :, :1])], dim=2)  # (B, P, V)
+        diff_x = diff_x.view(B, P, V, 1)
+        diff_y = torch.cat([diff_y, torch.zeros_like(diff_y[:, :, :1])], dim=2)  # (B, P, V)
+        diff_y = diff_y.view(B, P, V, 1)
+        x = torch.concat([x, diff_x, diff_y], dim=-1)  # (B, P, V, 4)
 
         pos = x[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
         heading = torch.atan2(pos[..., 3], pos[..., 2])
         pos[..., 2] = torch.cos(heading)
         pos[..., 3] = torch.sin(heading)
-        pos = add_class_type(pos, CLASS_TYPE_LINE)
+        pos = add_class_type(pos, self._class_type)
 
         B, P, V, _ = x.shape
         mask_v = torch.sum(torch.ne(x[..., :4], 0), dim=-1).to(x.device) == 0
@@ -597,7 +623,6 @@ class LineEncoder(nn.Module):
         x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
 
         x = self.channel_pre_project(x)
-        print(x.shape)
         x = x.permute(0, 2, 1)
         x = self.token_pre_project(x)
         x = x.permute(0, 2, 1)
@@ -606,11 +631,6 @@ class LineEncoder(nn.Module):
 
         x = torch.mean(x, dim=1)
 
-        attribute = attribute.view(B * P, -1)
-        print(attribute.shape)
-        attribute_embedding = self.attribute_emb(attribute)
-
-        x = x + attribute_embedding
         x = self.emb_project(self.norm(x))
 
         # Apply mask to zero out invalid positions

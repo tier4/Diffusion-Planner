@@ -32,6 +32,9 @@ class DiffusionPlannerData(Dataset):
         route_lanes_speed_limit = data["route_lanes_speed_limit"]
         route_lanes_has_speed_limit = data["route_lanes_has_speed_limit"]
 
+        polygons = data["polygons"]
+        line_strings = data["line_strings"]
+
         static_objects = data["static_objects"]
 
         turn_indicator = data["turn_indicator"]
@@ -53,6 +56,8 @@ class DiffusionPlannerData(Dataset):
             "route_lanes": route_lanes,
             "route_lanes_speed_limit": route_lanes_speed_limit,
             "route_lanes_has_speed_limit": route_lanes_has_speed_limit,
+            "polygons": polygons,
+            "line_strings": line_strings,
             "static_objects": static_objects,
             "turn_indicator": turn_indicator,
             "goal_pose": goal_pose,
