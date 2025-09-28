@@ -45,11 +45,10 @@ if __name__ == "__main__":
     map2bl_mat4x4 = np.linalg.inv(map2bl_mat4x4)
 
     lanes_tensor, lanes_speed_limit, lanes_has_speed_limit = create_lane_tensor(
-        vector_map.lane_segments.values(),
+        vector_map.lanelets.values(),
         map2bl_mat4x4,
         ego_x,
         ego_y,
-        RANGE,
         {},
         70,
         "cpu",

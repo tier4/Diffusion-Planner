@@ -7,28 +7,17 @@ from typing import TYPE_CHECKING
 from attr import define
 
 if TYPE_CHECKING:
-    from .typing import NDArrayF32
+    import numpy as np
+    from numpy.typing import NDArray
 
-__all__ = ("AWMLStaticMap", "LaneSegment")
+    NDArrayF32 = NDArray[np.float32]
 
 
 @dataclass(frozen=True)
-class AWMLStaticMap:
-    """Represents a static map information.
-
-    Attributes
-    ----------
-        id (str): Unique ID associated with this map.
-        lane_segments (dict[int, LaneSegment]): Container of lanes stored by its id.
-    """
-
-    id: str
-    lane_segments: dict[int, LaneSegment]
-
-    def __post_init__(self) -> None:
-        assert all(isinstance(item, LaneSegment) for _, item in self.lane_segments.items()), (
-            "Expected all items are LaneSegments."
-        )
+class LaneletMap:
+    lanelets: dict[int, Lanelet]
+    polygons: dict[int, Polygon]
+    line_strings: dict[int, LineString]
 
 
 class LineType(IntEnum):
@@ -46,7 +35,7 @@ class LineType(IntEnum):
 
     @classmethod
     def from_str(cls, type_str: str) -> LineType:
-        return cls._line_type_mapping[type_str]
+        return cls._line_type_mapping.get(type_str, LineType.VIRTUAL)
 
 
 # クラス定義の後にマッピングを定義
@@ -65,10 +54,10 @@ LineType._line_type_mapping = {
 
 
 @define
-class LaneSegment:
+class Lanelet:
     id: int
     turn_direction: int
-    polyline: NDArrayF32
+    centerline: NDArrayF32
     left_boundary: NDArrayF32
     left_line_type: LineType
     right_boundary: NDArrayF32
@@ -78,3 +67,19 @@ class LaneSegment:
     traffic_lights: list
 
     TENSOR_DIM = 13 + 2 * LineType.NUM.value
+
+
+@define
+class Polygon:
+    id: int
+    polyline: NDArrayF32
+    type: str
+    subtype: str
+
+
+@define
+class LineString:
+    id: int
+    polyline: NDArrayF32
+    type: str
+    subtype: str

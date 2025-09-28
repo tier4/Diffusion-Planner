@@ -16,14 +16,16 @@ from autoware_perception_msgs.msg import (
 )
 from autoware_planning_msgs.msg import LaneletRoute
 from autoware_vehicle_msgs.msg import TurnIndicatorsReport
+from diffusion_planner.dimensions import *
 from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
     convert_lanelet,
     create_lane_tensor,
+    create_line_tensor,
 )
 from diffusion_planner_ros.utils import (
     convert_tracked_objects_to_tensor,
     create_current_ego_state,
-    filter_target_segments,
+    filter_route_lanelets,
     get_nearest_msg,
     get_transform_matrix,
     parse_timestamp,
@@ -451,11 +453,10 @@ def main(
 
             # lanes
             lanes_tensor, lanes_speed_limit, lanes_has_speed_limit = create_lane_tensor(
-                vector_map.lane_segments.values(),
+                vector_map.lanelets.values(),
                 map2bl_mat4x4=map2bl_matrix_4x4,
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
-                mask_range=100,
                 traffic_light_recognition=traffic_light_recognition,
                 num_segments=70,
                 dev="cpu",
@@ -463,17 +464,16 @@ def main(
             )
 
             # routes
-            target_segments = [
-                vector_map.lane_segments[segment.preferred_primitive.id]
+            route_lanelets = [
+                vector_map.lanelets[segment.preferred_primitive.id]
                 for segment in data_list[i].route.segments
             ]
-            target_segments = filter_target_segments(target_segments, data_list[i].kinematic_state)
+            route_lanelets = filter_route_lanelets(route_lanelets, data_list[i].kinematic_state)
             route_tensor, route_speed_limit, route_has_speed_limit = create_lane_tensor(
-                target_segments,
+                route_lanelets,
                 map2bl_mat4x4=map2bl_matrix_4x4,
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
-                mask_range=100,
                 traffic_light_recognition=traffic_light_recognition,
                 num_segments=25,
                 dev="cpu",
@@ -549,9 +549,29 @@ def main(
             )
             neighbor_future_tensor = neighbor_future_tensor[:, :, :3]
 
+            # polygon
+            polygon_tensor = create_line_tensor(
+                vector_map.polygons.values(),
+                map2bl_matrix_4x4,
+                center_x=data_list[i].kinematic_state.pose.pose.position.x,
+                center_y=data_list[i].kinematic_state.pose.pose.position.y,
+                num_elements=NUM_POLYGONS,
+                num_points=POINTS_PER_POLYGON,
+                dev="cpu",
+            )
+
+            # line_string
+            line_string_tensor = create_line_tensor(
+                vector_map.line_strings.values(),
+                map2bl_matrix_4x4,
+                center_x=data_list[i].kinematic_state.pose.pose.position.x,
+                center_y=data_list[i].kinematic_state.pose.pose.position.y,
+                num_elements=NUM_LINE_STRINGS,
+                num_points=POINTS_PER_LINE_STRING,
+                dev="cpu",
+            )
+
             curr_data = {
-                "map_name": map_name,
-                "token": token,
                 "ego_agent_past": ego_past_np,
                 "ego_current_state": ego_tensor.numpy(),
                 "ego_agent_future": ego_future_np,
@@ -566,6 +586,8 @@ def main(
                 "route_lanes_has_speed_limit": route_has_speed_limit.squeeze(0).numpy(),
                 "turn_indicator": data_list[i].turn_indicator.report,
                 "goal_pose": goal_pose_bl,
+                "polygons": polygon_tensor.squeeze(0).numpy(),
+                "line_strings": line_string_tensor.squeeze(0).numpy(),
             }
             # save the data
             save_dir.mkdir(parents=True, exist_ok=True)

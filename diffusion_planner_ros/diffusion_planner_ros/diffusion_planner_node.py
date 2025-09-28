@@ -41,7 +41,7 @@ from .utils import (
     convert_tracked_objects_to_tensor,
     create_current_ego_state,
     create_ego_agent_past,
-    filter_target_segments,
+    filter_route_lanelets,
     get_nearest_msg,
     get_transform_matrix,
     parse_traffic_light_recognition,
@@ -308,11 +308,10 @@ class DiffusionPlannerNode(Node):
         # Lane
         start = time.time()
         lanes_tensor, lanes_speed_limit, lanes_has_speed_limit = create_lane_tensor(
-            self.static_map.lane_segments.values(),
+            self.static_map.lanelets.values(),
             map2bl_mat4x4=map2bl_matrix_4x4,
             center_x=curr_kinematic_state.pose.pose.position.x,
             center_y=curr_kinematic_state.pose.pose.position.y,
-            mask_range=100,
             traffic_light_recognition=traffic_light_recognition,
             num_segments=70,
             dev=dev,
@@ -325,17 +324,16 @@ class DiffusionPlannerNode(Node):
         # Route
         start = time.time()
         target_segments = [
-            self.static_map.lane_segments[segment.preferred_primitive.id]
+            self.static_map.lanelets[segment.preferred_primitive.id]
             for segment in self.route.segments
         ]
-        target_segments = filter_target_segments(target_segments, curr_kinematic_state)
+        target_segments = filter_route_lanelets(target_segments, curr_kinematic_state)
 
         route_tensor, route_speed_limit, route_has_speed_limit = create_lane_tensor(
             target_segments,
             map2bl_mat4x4=map2bl_matrix_4x4,
             center_x=curr_kinematic_state.pose.pose.position.x,
             center_y=curr_kinematic_state.pose.pose.position.y,
-            mask_range=100,
             traffic_light_recognition=traffic_light_recognition,
             num_segments=25,
             dev=dev,
