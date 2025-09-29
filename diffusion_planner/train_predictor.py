@@ -169,7 +169,7 @@ def model_training(args):
             k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
             for k, v in args_dict.items()
         }
-        args_dict["major_version"] = 1
+        args_dict["major_version"] = 2
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
