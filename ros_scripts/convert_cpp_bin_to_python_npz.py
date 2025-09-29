@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
+from diffusion_planner.dimensions import *
 from tqdm import tqdm
 
 
@@ -40,32 +41,27 @@ class TrainingDataReader:
 
     def __init__(self):
         # データ構造のサイズ定義（C++の構造体と同じ）
-        self.PAST_TIME_STEPS = 21
-        self.FUTURE_TIME_STEPS = 80
-        self.NEIGHBOR_NUM = 32
+        self.PAST_TIME_STEPS = INPUT_T + 1
         self.STATIC_NUM = 5
-        self.LANE_NUM = 70
-        self.LANE_LEN = 20
-        self.ROUTE_NUM = 25
-        self.ROUTE_LEN = 20
-        self.SEGMENT_POINT_DIM = 33
 
         # 各配列のサイズを計算
         self.sizes = {
             "version": 1,
-            "ego_agent_past": self.PAST_TIME_STEPS * 4,
+            "ego_agent_past": self.PAST_TIME_STEPS * POSE_DIM,
             "ego_current_state": 10,
-            "ego_agent_future": self.FUTURE_TIME_STEPS * 4,
-            "neighbor_agents_past": self.NEIGHBOR_NUM * self.PAST_TIME_STEPS * 11,
-            "neighbor_agents_future": self.NEIGHBOR_NUM * self.FUTURE_TIME_STEPS * 4,
+            "ego_agent_future": OUTPUT_T * POSE_DIM,
+            "neighbor_agents_past": MAX_NUM_NEIGHBORS * self.PAST_TIME_STEPS * 11,
+            "neighbor_agents_future": MAX_NUM_NEIGHBORS * OUTPUT_T * POSE_DIM,
             "static_objects": self.STATIC_NUM * 10,
-            "lanes": self.LANE_NUM * self.LANE_LEN * self.SEGMENT_POINT_DIM,
-            "lanes_speed_limit": self.LANE_NUM,
-            "lanes_has_speed_limit": self.LANE_NUM,
-            "route_lanes": self.ROUTE_NUM * self.ROUTE_LEN * self.SEGMENT_POINT_DIM,
-            "route_lanes_speed_limit": self.ROUTE_NUM,
-            "route_lanes_has_speed_limit": self.ROUTE_NUM,
-            "goal_pose": 4,
+            "lanes": NUM_SEGMENTS_IN_LANE * POINTS_PER_LANELET * SEGMENT_POINT_DIM,
+            "lanes_speed_limit": NUM_SEGMENTS_IN_LANE,
+            "lanes_has_speed_limit": NUM_SEGMENTS_IN_LANE,
+            "route_lanes": NUM_SEGMENTS_IN_ROUTE * POINTS_PER_LANELET * SEGMENT_POINT_DIM,
+            "route_lanes_speed_limit": NUM_SEGMENTS_IN_ROUTE,
+            "route_lanes_has_speed_limit": NUM_SEGMENTS_IN_ROUTE,
+            "polygons": NUM_POLYGONS * POINTS_PER_POLYGON * 2,
+            "line_strings": NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * 2,
+            "goal_pose": POSE_DIM,
             "turn_indicator": 1,
         }
 
@@ -108,7 +104,7 @@ class TrainingDataReader:
         # 4次元: [x, y, cos(yaw), sin(yaw)] -> 3次元: [x, y, yaw]
         size = self.sizes["ego_agent_future"]
         ego_future_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
-        ego_future_array = np.array(ego_future_flat).reshape(self.FUTURE_TIME_STEPS, 4)
+        ego_future_array = np.array(ego_future_flat).reshape(OUTPUT_T, 4)
         result["ego_agent_future"] = cos_sin_to_heading(ego_future_array)
         offset += size * 4
 
@@ -116,7 +112,7 @@ class TrainingDataReader:
         size = self.sizes["neighbor_agents_past"]
         neighbor_past_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         result["neighbor_agents_past"] = np.array(neighbor_past_flat, dtype=np.float32).reshape(
-            self.NEIGHBOR_NUM, self.PAST_TIME_STEPS, 11
+            MAX_NUM_NEIGHBORS, self.PAST_TIME_STEPS, 11
         )
         offset += size * 4
 
@@ -124,7 +120,7 @@ class TrainingDataReader:
         size = self.sizes["neighbor_agents_future"]
         neighbor_future_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         neighbor_future_array = np.array(neighbor_future_flat).reshape(
-            self.NEIGHBOR_NUM, self.FUTURE_TIME_STEPS, 4
+            MAX_NUM_NEIGHBORS, OUTPUT_T, 4
         )
         result["neighbor_agents_future"] = cos_sin_to_heading(neighbor_future_array)
         offset += size * 4
@@ -141,7 +137,7 @@ class TrainingDataReader:
         size = self.sizes["lanes"]
         lanes_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         result["lanes"] = np.array(lanes_flat, dtype=np.float32).reshape(
-            self.LANE_NUM, self.LANE_LEN, self.SEGMENT_POINT_DIM
+            NUM_SEGMENTS_IN_LANE, POINTS_PER_LANELET, SEGMENT_POINT_DIM
         )
         offset += size * 4
 
@@ -161,7 +157,7 @@ class TrainingDataReader:
         size = self.sizes["route_lanes"]
         route_lanes_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         result["route_lanes"] = np.array(route_lanes_flat, dtype=np.float32).reshape(
-            self.ROUTE_NUM, self.ROUTE_LEN, self.SEGMENT_POINT_DIM
+            NUM_SEGMENTS_IN_ROUTE, POINTS_PER_LANELET, SEGMENT_POINT_DIM
         )
         offset += size * 4
 
@@ -179,6 +175,22 @@ class TrainingDataReader:
         result["route_lanes_has_speed_limit"] = np.array(route_has_flat, dtype=bool).reshape(-1, 1)
         offset += size * 4
 
+        # polygons (10, 40, 2)
+        size = self.sizes["polygons"]
+        polygons_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
+        result["polygons"] = np.array(polygons_flat, dtype=np.float32).reshape(
+            NUM_POLYGONS, POINTS_PER_POLYGON, 2
+        )
+        offset += size * 4
+
+        # line_strings (10, 20, 2)
+        size = self.sizes["line_strings"]
+        line_strings_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
+        result["line_strings"] = np.array(line_strings_flat, dtype=np.float32).reshape(
+            NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 2
+        )
+        offset += size * 4
+
         # goal_pose (4,) -> (3,)
         size = self.sizes["goal_pose"]
         goal_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
@@ -191,42 +203,6 @@ class TrainingDataReader:
         offset += 4
 
         return result
-
-    def save_as_npz(
-        self,
-        data: Dict[str, Any],
-        output_path: str,
-        token: str = "00000000",
-    ) -> None:
-        """
-        データをnpz形式で保存する (parse_rosbag.pyと同じ形式)
-
-        Args:
-            data: 読み込んだデータの辞書
-            output_path: 出力ファイルのパス
-            token: トークン
-        """
-        # parse_rosbag.pyと同じ形式でデータを準備
-        npz_data = {
-            "token": token,
-            "ego_agent_past": data["ego_agent_past"],  # (21, 3)
-            "ego_current_state": data["ego_current_state"],  # (10,)
-            "ego_agent_future": data["ego_agent_future"],  # (80, 3)
-            "neighbor_agents_past": data["neighbor_agents_past"],  # (32, 21, 11)
-            "neighbor_agents_future": data["neighbor_agents_future"],  # (32, 80, 3)
-            "static_objects": data["static_objects"],  # (5, 10)
-            "lanes": data["lanes"],  # (70, 20, 13)
-            "lanes_speed_limit": data["lanes_speed_limit"],  # (70, 1)
-            "lanes_has_speed_limit": data["lanes_has_speed_limit"],  # (70, 1)
-            "route_lanes": data["route_lanes"],  # (25, 20, 13)
-            "route_lanes_speed_limit": data["route_lanes_speed_limit"],  # (25, 1)
-            "route_lanes_has_speed_limit": data["route_lanes_has_speed_limit"],  # (25, 1)
-            "turn_indicator": data["turn_indicator"],  # scalar
-            "goal_pose": data["goal_pose"],  # (3,)
-        }
-
-        # npzファイルとして保存
-        np.savez(output_path, **npz_data)
 
 
 def process_single_file_worker(args):
@@ -252,7 +228,7 @@ def process_single_file(input_file: Path, output_dir: Path) -> None:
         output_file = output_dir / f"{token}.npz"
 
         # npz形式で保存
-        reader.save_as_npz(data, str(output_file), token)
+        np.savez(str(output_file), **data)
 
         # 元のバイナリファイルを削除
         input_file.unlink()
