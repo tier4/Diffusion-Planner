@@ -1,5 +1,5 @@
 #!/bin/bash
-set -x
+set -ux
 cd $(dirname $0)
 export CUDA_VISIBLE_DEVICES=0
 
@@ -9,10 +9,10 @@ export CUDA_VISIBLE_DEVICES=0
 
 # Set training data path
 MODEL_DIR=${1}
-VALID_SET_LIST_PATH="/mnt/nvme0/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver45_realdata_cpp/path_list_valid.json"
+VALID_SET_LIST_PATH=${2}
 MODEL_PATH="$MODEL_DIR/best_model.pth"
 ARGS_JSON_PATH="$MODEL_DIR/args.json"
-SAVE_DIR=$MODEL_DIR/$DIR_NAME/predictions
+SAVE_DIR=$MODEL_DIR/predictions
 
 rm -f /tmp/tmp_dist_init
 

@@ -1,20 +1,57 @@
 from pathlib import Path
 
+import matplotlib
+
+# 高速化のためAggバックエンドを使用（GUIなし、ファイル出力特化）
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.collections import LineCollection
 
+from diffusion_planner.dimensions import *
 from diffusion_planner.utils.normalizer import ObservationNormalizer
 
 
-def draw_bounding_box(ax, x, y, heading, len_x, len_y, color, alpha):
+def get_traffic_light_color(traffic_light):
+    """Get traffic light color from traffic light array."""
+    if traffic_light[TRAFFIC_LIGHT_GREEN - TRAFFIC_LIGHT] == 1:
+        return "green"
+    elif traffic_light[TRAFFIC_LIGHT_YELLOW - TRAFFIC_LIGHT] == 1:
+        return "yellow"
+    elif traffic_light[TRAFFIC_LIGHT_RED - TRAFFIC_LIGHT] == 1:
+        return "red"
+    elif traffic_light[TRAFFIC_LIGHT_WHITE - TRAFFIC_LIGHT] == 1:
+        return "purple"
+    elif traffic_light[TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT - TRAFFIC_LIGHT] == 1:
+        return "black"
+    else:
+        return "purple"
+        # raise ValueError(f"Unknown traffic light state: {traffic_light}")
+
+
+def turn_indicator_int_to_str(turn_indicator):
+    """Convert turn indicator integer to string."""
+    if turn_indicator == 0:
+        return "turn_indicator=0"
+    if turn_indicator == 1:
+        return "None"
+    elif turn_indicator == 2:
+        return "<-"
+    elif turn_indicator == 3:
+        return "->"
+    else:
+        raise ValueError(f"Unknown turn command: {turn_indicator}")
+
+
+def draw_bounding_box(ax, x, y, cos, sin, len_x, len_y, color, alpha):
     """
     Draw a bounding box at the specified position with given dimensions and heading.
 
     Args:
         ax: matplotlib axis
         x, y: center position
-        heading: orientation in radians
+        cos, sin: orientation in radians
         len_x, len_y: length and width of the bounding box
         color: color of the bounding box
         alpha: transparency
@@ -27,10 +64,10 @@ def draw_bounding_box(ax, x, y, heading, len_x, len_y, color, alpha):
         next_dx = dx_coeff[(d + 1) % 4] * (len_x / 2)
         next_dy = dy_coeff[(d + 1) % 4] * (len_y / 2)
         # rotate
-        rot_cdx = curr_dx * np.cos(heading) - curr_dy * np.sin(heading)
-        rot_cdy = curr_dx * np.sin(heading) + curr_dy * np.cos(heading)
-        rot_ndx = next_dx * np.cos(heading) - next_dy * np.sin(heading)
-        rot_ndy = next_dx * np.sin(heading) + next_dy * np.cos(heading)
+        rot_cdx = curr_dx * cos - curr_dy * sin
+        rot_cdy = curr_dx * sin + curr_dy * cos
+        rot_ndx = next_dx * cos - next_dy * sin
+        rot_ndy = next_dx * sin + next_dy * cos
 
         line_color = "red" if (d == 0) else color
         ax.add_line(
@@ -44,67 +81,15 @@ def draw_bounding_box(ax, x, y, heading, len_x, len_y, color, alpha):
         )
 
 
-def visualize_inputs(
-    inputs: dict,
-    obs_normalizer: ObservationNormalizer,
-    save_path: Path | None = None,
-    ax: None = None,
-):
-    """
-    draw the input data of the diffusion_planner model on the xy plane
-    """
-    view_range = 60
-    inputs = obs_normalizer.inverse(inputs)
-
-    # Function to convert PyTorch tensors to NumPy arrays
-    def to_numpy(tensor):
-        if isinstance(tensor, torch.Tensor):
-            return tensor.detach().cpu().numpy()
-        return tensor
-
-    for key in inputs:
-        inputs[key] = to_numpy(inputs[key])
-
-    """
-    for key in inputs:
-        print(f"{key}={inputs[key].shape}")
-
-    ego_agent_past=(1, 20, 3)
-    ego_current_state=(1, 10)
-    ego_agent_future=(1, 80, 3)
-    neighbor_agents_past=(1, 32, 21, 11)
-    neighbor_agents_future=(1, 32, 80, 3)
-    static_objects=(1, 5, 10)
-    lanes=(1, 70, 20, 13)
-    lanes_speed_limit=(1, 70, 1)
-    lanes_has_speed_limit=(1, 70, 1)
-    route_lanes=(1, 25, 20, 13)
-    route_lanes_speed_limit=(1, 25, 1)
-    route_lanes_has_speed_limit=(1, 25, 1)
-    turn_indicator=(1,)
-    goal_pose=(1, 4)
-    polygons,
-    line_strings
-    """
-
-    # initialize the figure
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(10, 8))
-
-    # ==== Ego ====
-    ego_state = inputs["ego_current_state"][0]  # Use the first sample in the batch
+def draw_ego_vehicle(ax, inputs):
+    """Draw ego vehicle, its past and future trajectories."""
+    ego_state = inputs["ego_current_state"][0]
     ego_x, ego_y = ego_state[0], ego_state[1]
     ego_heading = np.arctan2(ego_state[3], ego_state[2])
-    ego_vel_x = ego_state[4]
-    ego_vel_y = ego_state[5]
-    ego_acc_x = ego_state[6]
-    ego_acc_y = ego_state[7]
-    ego_steering = ego_state[8]
-    ego_yaw_rate = ego_state[9]
 
     # Ego vehicle's length and width
-    car_length = 4.5  # Assumed value for vehicle length
-    car_width = 2.0  # Assumed value for vehicle width
+    car_length = 4.5
+    car_width = 2.0
     dx = car_length / 2 * np.cos(ego_heading)
     dy = car_length / 2 * np.sin(ego_heading)
 
@@ -122,181 +107,140 @@ def visualize_inputs(
         alpha=0.7,
     )
 
+    # Draw past trajectory
     if "ego_agent_past" in inputs:
-        ego_past = inputs["ego_agent_past"][0]  # Use the first sample in the batch
-        ego_past_x = ego_past[:, 0]
-        ego_past_y = ego_past[:, 1]
+        ego_past = inputs["ego_agent_past"][0]
         ax.plot(
-            ego_past_x,
-            ego_past_y,
+            ego_past[:, 0],
+            ego_past[:, 1],
             color="orange",
             alpha=0.5,
             linestyle="--",
             label="Ego Past Trajectory",
         )
 
+    # Draw future trajectory
     if "ego_agent_future" in inputs:
         ego_future = inputs["ego_agent_future"][0]
-        for i in range(ego_future.shape[0]):
-            ego_future_x = ego_future[i, 0]
-            ego_future_y = ego_future[i, 1]
-            t = i / (ego_future.shape[0] - 1)
-            ax.scatter(
-                ego_future_x,
-                ego_future_y,
-                color=[1.0 * t, 0.0, 1.0 * (1 - t)],
-                alpha=0.5,
-                s=20,
-            )
+        valid_indices = ~((ego_future[:, 0] == 0) & (ego_future[:, 1] == 0))
+        if np.any(valid_indices):
+            valid_future = ego_future[valid_indices]
+            t_values = np.linspace(0, 1, len(valid_future))
+            colors = [[1.0 * t, 0.0, 1.0 * (1 - t)] for t in t_values]
+            ax.scatter(valid_future[:, 0], valid_future[:, 1], c=colors, alpha=0.5, s=20)
 
-        # Draw bounding boxes at 4 seconds and 8 seconds for ego vehicle
+        # Draw bounding boxes at 4 seconds and 8 seconds
         for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
-            ego_future_x = ego_future[j, 0]
-            ego_future_y = ego_future[j, 1]
-            if ego_future_x == 0 and ego_future_y == 0:
+            if ego_future[j, 0] == 0 and ego_future[j, 1] == 0:
                 continue
+            cos = np.cos(ego_future[j, 2])
+            sin = np.sin(ego_future[j, 2])
             draw_bounding_box(
                 ax,
-                ego_future_x,
-                ego_future_y,
-                ego_future[j, 2],
+                ego_future[j, 0],
+                ego_future[j, 1],
+                cos,
+                sin,
                 car_length,
                 car_width,
                 "orange",
                 0.1,
             )
 
-    # ==== Neighbor agents ====
-    neighbors = inputs["neighbor_agents_past"][0]  # Use the first sample in the batch
+    return ego_x, ego_y, ego_state
+
+
+def draw_neighbor_agents(ax, inputs):
+    """Draw neighbor agents with their trajectories and bounding boxes."""
+    neighbors = inputs["neighbor_agents_past"][0]
     last_timestep = neighbors.shape[1] - 1
+
+    past_lines = []
+    past_colors = []
+    current_boxes = []
+    velocity_arrows = []
+    future_scatter_x = []
+    future_scatter_y = []
+    future_scatter_colors = []
 
     for i in range(neighbors.shape[0]):
         neighbor = neighbors[i, last_timestep]
-
-        # Skip zero vectors (masked objects)
         if np.sum(np.abs(neighbor[:4])) < 1e-6:
             continue
 
         n_x, n_y = neighbor[0], neighbor[1]
-        n_heading = np.arctan2(neighbor[3], neighbor[2])
+        n_cos, n_sin = neighbor[2], neighbor[3]
         vel_x, vel_y = neighbor[4], neighbor[5]
         len_y, len_x = neighbor[6], neighbor[7]
 
-        # Set color and shape dimensions based on the vehicle type
+        # Set color based on vehicle type
         vehicle_type = np.argmax(neighbor[8:11]) if neighbor.shape[0] > 8 else 0
-        if vehicle_type == 0:  # Vehicle
-            color = "blue"
-        elif vehicle_type == 1:  # Pedestrian
-            color = "green"
-        else:  # Bicycle
-            color = "purple"
+        color = ["blue", "green", "purple"][vehicle_type] if vehicle_type < 3 else "blue"
 
-        # Draw the past trajectory as a dashed line
-        past_x = [neighbors[i, t, 0] for t in range(last_timestep + 1)]
-        past_y = [neighbors[i, t, 1] for t in range(last_timestep + 1)]
-        ax.plot(past_x, past_y, color=color, alpha=0.9, linestyle="--")
+        # Collect past trajectory
+        past_points = np.array(
+            [[neighbors[i, t, 0], neighbors[i, t, 1]] for t in range(last_timestep + 1)]
+        )
+        if len(past_points) > 1:
+            past_lines.append(past_points)
+            past_colors.append(color)
 
-        # Draw the current position as an arrow
-        dx = len_x / 2 * np.cos(n_heading)
-        dy = len_x / 2 * np.sin(n_heading)
+        # Collect bounding box lines
+        draw_bounding_box(ax, n_x, n_y, n_cos, n_sin, len_x, len_y, color, 0.5)
 
-        # if -view_range <= n_x <= view_range and -view_range <= n_y <= view_range:
-        #     ax.text(
-        #         n_x + 2.5,
-        #         n_y + 5,
-        #         f"Agent {i}",
-        #         fontsize=8,
-        #         color=color,
-        #         ha="center",
-        #         va="center",
-        #     )
-
+        # Collect future trajectory
         if "neighbor_agents_future" in inputs:
             neighbor_future = inputs["neighbor_agents_future"][0][i]
-            for j in range(neighbor_future.shape[0]):
-                neighbor_future_x = neighbor_future[j, 0]
-                neighbor_future_y = neighbor_future[j, 1]
-                if neighbor_future_x == 0 and neighbor_future_y == 0:
-                    break
-                t = j / (neighbor_future.shape[0] - 1)
-                ax.scatter(
-                    neighbor_future_x,
-                    neighbor_future_y,
-                    color=[1.0 * t, 0.0, 1.0 * (1 - t)],
-                    alpha=0.5,
-                    s=10,
-                )
+            valid_indices = ~((neighbor_future[:, 0] == 0) & (neighbor_future[:, 1] == 0))
+            if np.any(valid_indices):
+                valid_future = neighbor_future[valid_indices]
+                future_scatter_x.extend(valid_future[:, 0])
+                future_scatter_y.extend(valid_future[:, 1])
+                t_values = np.linspace(0, 1, len(valid_future))
+                colors = [[1.0 * t, 0.0, 1.0 * (1 - t)] for t in t_values]
+                future_scatter_colors.extend(colors)
 
-            # Draw bounding boxes at 4 seconds and 8 seconds
-            # Assuming 10Hz frequency, 4 seconds = index 40, 8 seconds = index 80
-            for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
-                neighbor_future_x = neighbor_future[j, 0]
-                neighbor_future_y = neighbor_future[j, 1]
-                if neighbor_future_x == 0 and neighbor_future_y == 0:
-                    continue
-                draw_bounding_box(
-                    ax,
-                    neighbor_future_x,
-                    neighbor_future_y,
-                    neighbor_future[j, 2],
-                    neighbor[7],
-                    neighbor[6],
-                    color,
-                    alpha=0.1,
-                )
+        # Collect velocity arrows
+        v = np.sqrt(vel_x**2 + vel_y**2)
+        if v > 0.1:
+            velocity_arrows.append((n_x, n_y, vel_x / 2, vel_y / 2))
 
-            neighbor_future_x = neighbor_future[0, 0]
-            neighbor_future_y = neighbor_future[0, 1]
-            # if (
-            #     (neighbor_future_x != 0 or neighbor_future_y != 0)
-            #     and -view_range <= neighbor_future_x <= view_range
-            #     and -view_range <= neighbor_future_y <= view_range
-            # ):
-            #     ax.text(
-            #         neighbor_future_x + 5,
-            #         neighbor_future_y + 2.5,
-            #         f"Future {i}",
-            #         fontsize=8,
-            #         color=color,
-            #         ha="center",
-            #         va="center",
-            #     )
+    # Batch drawing
+    if past_lines:
+        lc_past = LineCollection(
+            past_lines, colors=past_colors, alpha=0.6, linewidths=1, linestyles="--"
+        )
+        ax.add_collection(lc_past)
 
-        # Draw the velocity as an arrow
-        v = np.sqrt(vel_x**2 + vel_y**2) / 10
+    if current_boxes:
+        lc_boxes = LineCollection(current_boxes, colors="gray", alpha=0.5, linewidths=1)
+        ax.add_collection(lc_boxes)
+
+    if future_scatter_x:
+        ax.scatter(future_scatter_x, future_scatter_y, c=future_scatter_colors, alpha=0.5, s=8)
+
+    # Draw velocity arrows
+    for x, y, dx, dy in velocity_arrows:
         ax.arrow(
-            n_x,
-            n_y,
-            vel_x / 2,
-            vel_y / 2,
-            width=v / 2,
-            head_width=v,
-            head_length=v / 2,
-            length_includes_head=True,
+            x,
+            y,
+            dx,
+            dy,
+            width=0.2,
+            head_width=0.5,
+            head_length=0.3,
             fc="orange",
             ec="orange",
-            alpha=0.5,
+            alpha=0.6,
         )
 
-        # Draw bounding box
-        draw_bounding_box(
-            ax,
-            n_x,
-            n_y,
-            n_heading,
-            len_x,
-            len_y,
-            color,
-            alpha=0.5,
-        )
 
-    # ==== Static objects ====
-    static_objects = inputs["static_objects"][0]  # Use the first sample in the batch
+def draw_static_objects(ax, inputs):
+    """Draw static objects."""
+    static_objects = inputs["static_objects"][0]
 
     for i in range(static_objects.shape[0]):
         obj = static_objects[i]
-
-        # Skip zero vectors (masked objects)
         if np.sum(np.abs(obj[:4])) < 1e-6:
             continue
 
@@ -305,12 +249,10 @@ def visualize_inputs(
         obj_width = obj[4] if obj.shape[0] > 4 else 1.0
         obj_length = obj[5] if obj.shape[0] > 5 else 1.0
 
-        # Set color based on the object type
         obj_type = np.argmax(obj[-4:]) if obj.shape[0] >= 10 else 0
         colors = ["orange", "gray", "yellow", "brown"]
         obj_color = colors[obj_type % len(colors)]
 
-        # Draw the object as a rectangle
         rect = plt.Rectangle(
             (obj_x - obj_length / 2, obj_y - obj_width / 2),
             obj_length,
@@ -321,58 +263,39 @@ def visualize_inputs(
         )
         ax.add_patch(rect)
 
-    def get_traffic_light_color(traffic_light):
-        if traffic_light[0] == 1:
-            return "green"
-        elif traffic_light[1] == 1:
-            return "yellow"
-        elif traffic_light[2] == 1:
-            return "red"
-        elif traffic_light[3] == 1:
-            return "gray"
-        elif traffic_light[4] == 1:
-            return "black"
-        return "purple"
 
-    # ==== Lanes ====
-    lanes = inputs["lanes"][0]  # Use the first sample in the batch
-    lanes_speed_limit = inputs["lanes_speed_limit"][0]
-    lanes_has_speed_limit = inputs["lanes_has_speed_limit"][0]
+def draw_lanes(ax, inputs):
+    """Draw lane boundaries."""
+    lanes = inputs["lanes"][0]
+    lane_lines = []
+    lane_colors = []
 
     for i in range(lanes.shape[0]):
         traffic_light = lanes[i, 0, 8:13]
         color = get_traffic_light_color(traffic_light)
 
-        # center line
-        # ax.plot(lanes[i, :, 0], lanes[i, :, 1], alpha=0.1, linewidth=1, color=color)
-
-        # left right lane boundaries
+        # Left boundary
         lx = lanes[i, :, 0] + lanes[i, :, 4]
         ly = lanes[i, :, 1] + lanes[i, :, 5]
-        ax.plot(lx, ly, alpha=0.25, linewidth=1, color=color)
+        lane_lines.append(np.array([lx, ly]).T)
+        lane_colors.append(color)
+
+        # Right boundary
         rx = lanes[i, :, 0] + lanes[i, :, 6]
         ry = lanes[i, :, 1] + lanes[i, :, 7]
-        ax.plot(rx, ry, alpha=0.25, linewidth=1, color=color)
+        lane_lines.append(np.array([rx, ry]).T)
+        lane_colors.append(color)
 
-        # print speed limit
-        # ax.text(
-        #     (left_x + next_left_x) / 2,
-        #     (left_y + next_left_y) / 2,
-        #     f"Limit({lanes_has_speed_limit[i][0]})={lanes_speed_limit[i][0]:.1f}",
-        #     fontsize=8,
-        #     color=color,
-        # )
+    if lane_lines:
+        lc_lanes = LineCollection(lane_lines, colors=lane_colors, alpha=0.25, linewidths=1)
+        ax.add_collection(lc_lanes)
 
-    # ==== Route ====
-    route_lanes = inputs["route_lanes"][0]  # Use the first sample in the batch
-    route_lanes_speed_limit = inputs["route_lanes_speed_limit"][0]
-    route_lanes_has_speed_limit = inputs["route_lanes_has_speed_limit"][0]
+
+def draw_route(ax, inputs):
+    """Draw route lanes."""
+    route_lanes = inputs["route_lanes"][0]
 
     for i in range(route_lanes.shape[0]):
-        traffic_light = route_lanes[i, 0, 8:13]
-        color = get_traffic_light_color(traffic_light)
-
-        # center line
         ax.plot(
             route_lanes[i, :, 0],
             route_lanes[i, :, 1],
@@ -382,16 +305,9 @@ def visualize_inputs(
             linestyle="--",
         )
 
-        # print speed limit
-        # ax.text(
-        #     (left_x + next_left_x) / 2,
-        #     (left_y + next_left_y) / 2,
-        #     f"Limit({route_lanes_has_speed_limit[i][0]})={route_lanes_speed_limit[i][0]:.1f}",
-        #     fontsize=8,
-        #     color="black",
-        # )
 
-    # ==== Goal Pose ====
+def draw_goal_pose(ax, inputs):
+    """Draw goal pose."""
     if "goal_pose" in inputs:
         goal_x, goal_y, goal_cos, goal_sin = inputs["goal_pose"][0]
         goal_dx = 2 * goal_cos
@@ -410,7 +326,9 @@ def visualize_inputs(
             label="Goal Pose",
         )
 
-    # ==== Polygons ====
+
+def draw_polygons_and_lines(ax, inputs):
+    """Draw polygons and line strings."""
     if "polygons" in inputs:
         for i in range(inputs["polygons"].shape[1]):
             polygon = inputs["polygons"][0, i]
@@ -418,7 +336,6 @@ def visualize_inputs(
                 continue
             ax.fill(polygon[:, 0], polygon[:, 1], color="gray", alpha=0.5)
 
-    # ==== Line Strings ====
     if "line_strings" in inputs:
         for i in range(inputs["line_strings"].shape[1]):
             line_string = inputs["line_strings"][0, i]
@@ -426,35 +343,33 @@ def visualize_inputs(
                 continue
             ax.plot(line_string[:, 0], line_string[:, 1], color="red")
 
+
+def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs=None):
+    """Setup axis properties and add status text."""
+    ego_vel_x, ego_vel_y = ego_state[4], ego_state[5]
+    ego_acc_x, ego_acc_y = ego_state[6], ego_state[7]
+    ego_steering = ego_state[8]
+    ego_yaw_rate = ego_state[9]
+
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3)
+    ax.set_xlim(ego_x - view_range, ego_x + view_range)
+    ax.set_ylim(ego_y - view_range, ego_y + view_range)
 
-    # print status
-    def turn_indicator_int_to_str(turn_indicator):
-        if turn_indicator == 0:
-            return "turn_indicator=0"
-        if turn_indicator == 1:
-            return "None"
-        elif turn_indicator == 2:
-            return "<-"
-        elif turn_indicator == 3:
-            return "->"
-        else:
-            raise ValueError(f"Unknown turn command: {turn_indicator}")
+    # Handle turn indicator
+    turn_indicator_text_gt = "There is no turn command"
+    turn_indicator_text_pred = "There is no predicted turn command"
 
-    if "turn_indicator" in inputs:
-        turn_indicator = inputs["turn_indicator"][0]
-        turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
-    else:
-        turn_indicator_text_gt = "There is no turn command"
+    if inputs is not None:
+        if "turn_indicator" in inputs:
+            turn_indicator = inputs["turn_indicator"][0]
+            turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
 
-    if "turn_indicator_pred" in inputs:
-        turn_indicator_pred = inputs["turn_indicator_pred"]
-        turn_indicator_text_pred = turn_indicator_int_to_str(turn_indicator_pred)
-    else:
-        turn_indicator_text_pred = "There is no predicted turn command"
+        if "turn_indicator_pred" in inputs:
+            turn_indicator_pred = inputs["turn_indicator_pred"]
+            turn_indicator_text_pred = turn_indicator_int_to_str(turn_indicator_pred)
 
     ax.text(
         view_range - 1,
@@ -473,12 +388,86 @@ def visualize_inputs(
         va="top",
     )
 
-    ax.set_xlim(ego_x - view_range, ego_x + view_range)
-    ax.set_ylim(ego_y - view_range, ego_y + view_range)
 
-    if save_path is None:
+def visualize_inputs(
+    inputs: dict,
+    obs_normalizer: ObservationNormalizer,
+    save_path: Path | None = None,
+    ax: None = None,
+    view_ranges: list = None,
+):
+    """
+    Draw the input data of the diffusion_planner model on the xy plane.
+
+    Args:
+        inputs: Input data dictionary
+        obs_normalizer: Observation normalizer
+        save_path: Path to save the visualization
+        ax: Matplotlib axis (for single plot compatibility)
+        view_ranges: List of view ranges in meters [60, 120] for multi-range visualization
+
+    Returns:
+        For single range: ax
+        For multi-range: (fig, axes)
+    """
+    # Default behavior: single 60m range for backward compatibility
+    if view_ranges is None:
+        view_ranges = [60]
+
+    # Prepare data
+    inputs = obs_normalizer.inverse(inputs)
+
+    def to_numpy(tensor):
+        if isinstance(tensor, torch.Tensor):
+            return tensor.detach().cpu().numpy()
+        return tensor
+
+    for key in inputs:
+        inputs[key] = to_numpy(inputs[key])
+
+    # Handle single axis case for backward compatibility
+    if ax is not None and len(view_ranges) == 1:
+        # Single plot mode
+        ego_x, ego_y, ego_state = draw_ego_vehicle(ax, inputs)
+        draw_neighbor_agents(ax, inputs)
+        draw_static_objects(ax, inputs)
+        draw_lanes(ax, inputs)
+        draw_route(ax, inputs)
+        draw_goal_pose(ax, inputs)
+        draw_polygons_and_lines(ax, inputs)
+        setup_axis(ax, ego_x, ego_y, ego_state, view_ranges[0], inputs)
+
+        if save_path is not None:
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=100, bbox_inches="tight")
+            plt.close()
         return ax
 
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=100, bbox_inches="tight")
-    plt.close()
+    # Multi-plot mode
+    fig, axes = plt.subplots(1, len(view_ranges), figsize=(10 * len(view_ranges), 8))
+    if len(view_ranges) == 1:
+        axes = [axes]
+
+    for i, view_range in enumerate(view_ranges):
+        current_ax = axes[i]
+
+        # Draw all components
+        ego_x, ego_y, ego_state = draw_ego_vehicle(current_ax, inputs)
+        draw_neighbor_agents(current_ax, inputs)
+        draw_static_objects(current_ax, inputs)
+        draw_lanes(current_ax, inputs)
+        draw_route(current_ax, inputs)
+        draw_goal_pose(current_ax, inputs)
+        draw_polygons_and_lines(current_ax, inputs)
+        setup_axis(current_ax, ego_x, ego_y, ego_state, view_range, inputs)
+
+        # Add title to distinguish different ranges
+        current_ax.set_title(f"View Range: {view_range}m")
+
+    if save_path is not None:
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=100, bbox_inches="tight")
+        plt.close()
+        return fig, axes
+
+    return fig, axes
