@@ -1,8 +1,13 @@
 from pathlib import Path
 
+import matplotlib
+
+# 高速化のためAggバックエンドを使用（GUIなし、ファイル出力特化）
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.collections import LineCollection
 
 from diffusion_planner.utils.normalizer import ObservationNormalizer
 
@@ -137,17 +142,16 @@ def visualize_inputs(
 
     if "ego_agent_future" in inputs:
         ego_future = inputs["ego_agent_future"][0]
-        for i in range(ego_future.shape[0]):
-            ego_future_x = ego_future[i, 0]
-            ego_future_y = ego_future[i, 1]
-            t = i / (ego_future.shape[0] - 1)
-            ax.scatter(
-                ego_future_x,
-                ego_future_y,
-                color=[1.0 * t, 0.0, 1.0 * (1 - t)],
-                alpha=0.5,
-                s=20,
-            )
+
+        # 有効な未来軌跡点のみを抽出
+        valid_indices = ~((ego_future[:, 0] == 0) & (ego_future[:, 1] == 0))
+        if np.any(valid_indices):
+            valid_future = ego_future[valid_indices]
+
+            # 一括scatter描画
+            t_values = np.linspace(0, 1, len(valid_future))
+            colors = [[1.0 * t, 0.0, 1.0 * (1 - t)] for t in t_values]
+            ax.scatter(valid_future[:, 0], valid_future[:, 1], c=colors, alpha=0.5, s=20)
 
         # Draw bounding boxes at 4 seconds and 8 seconds for ego vehicle
         for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
@@ -170,6 +174,15 @@ def visualize_inputs(
     neighbors = inputs["neighbor_agents_past"][0]  # Use the first sample in the batch
     last_timestep = neighbors.shape[1] - 1
 
+    # データを事前に収集して一括描画
+    past_lines = []
+    past_colors = []
+    current_boxes = []
+    velocity_arrows = []
+    future_scatter_x = []
+    future_scatter_y = []
+    future_scatter_colors = []
+
     for i in range(neighbors.shape[0]):
         neighbor = neighbors[i, last_timestep]
 
@@ -191,103 +204,82 @@ def visualize_inputs(
         else:  # Bicycle
             color = "purple"
 
-        # Draw the past trajectory as a dashed line
-        past_x = [neighbors[i, t, 0] for t in range(last_timestep + 1)]
-        past_y = [neighbors[i, t, 1] for t in range(last_timestep + 1)]
-        ax.plot(past_x, past_y, color=color, alpha=0.9, linestyle="--")
+        # 過去の軌跡データを収集（LineCollectionで使用）
+        past_points = np.array(
+            [[neighbors[i, t, 0], neighbors[i, t, 1]] for t in range(last_timestep + 1)]
+        )
+        if len(past_points) > 1:
+            past_lines.append(past_points)
+            past_colors.append(color)
 
-        # Draw the current position as an arrow
-        dx = len_x / 2 * np.cos(n_heading)
-        dy = len_x / 2 * np.sin(n_heading)
+        # Bounding boxの線を収集
+        box_lines = []
+        dx_coeff = [+1, +1, -1, -1]
+        dy_coeff = [+1, -1, -1, +1]
+        for d in range(4):
+            curr_dx = dx_coeff[d] * (len_x / 2)
+            curr_dy = dy_coeff[d] * (len_y / 2)
+            next_dx = dx_coeff[(d + 1) % 4] * (len_x / 2)
+            next_dy = dy_coeff[(d + 1) % 4] * (len_y / 2)
 
-        # if -view_range <= n_x <= view_range and -view_range <= n_y <= view_range:
-        #     ax.text(
-        #         n_x + 2.5,
-        #         n_y + 5,
-        #         f"Agent {i}",
-        #         fontsize=8,
-        #         color=color,
-        #         ha="center",
-        #         va="center",
-        #     )
+            rot_cdx = curr_dx * np.cos(n_heading) - curr_dy * np.sin(n_heading)
+            rot_cdy = curr_dx * np.sin(n_heading) + curr_dy * np.cos(n_heading)
+            rot_ndx = next_dx * np.cos(n_heading) - next_dy * np.sin(n_heading)
+            rot_ndy = next_dx * np.sin(n_heading) + next_dy * np.cos(n_heading)
 
+            box_lines.append([[n_x + rot_cdx, n_y + rot_cdy], [n_x + rot_ndx, n_y + rot_ndy]])
+        current_boxes.extend(box_lines)
+
+        # 未来の軌跡データを収集
         if "neighbor_agents_future" in inputs:
             neighbor_future = inputs["neighbor_agents_future"][0][i]
-            for j in range(neighbor_future.shape[0]):
-                neighbor_future_x = neighbor_future[j, 0]
-                neighbor_future_y = neighbor_future[j, 1]
-                if neighbor_future_x == 0 and neighbor_future_y == 0:
-                    break
-                t = j / (neighbor_future.shape[0] - 1)
-                ax.scatter(
-                    neighbor_future_x,
-                    neighbor_future_y,
-                    color=[1.0 * t, 0.0, 1.0 * (1 - t)],
-                    alpha=0.5,
-                    s=10,
-                )
+            valid_indices = ~((neighbor_future[:, 0] == 0) & (neighbor_future[:, 1] == 0))
+            if np.any(valid_indices):
+                valid_future = neighbor_future[valid_indices]
+                future_scatter_x.extend(valid_future[:, 0])
+                future_scatter_y.extend(valid_future[:, 1])
 
-            # Draw bounding boxes at 4 seconds and 8 seconds
-            # Assuming 10Hz frequency, 4 seconds = index 40, 8 seconds = index 80
-            for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
-                neighbor_future_x = neighbor_future[j, 0]
-                neighbor_future_y = neighbor_future[j, 1]
-                if neighbor_future_x == 0 and neighbor_future_y == 0:
-                    continue
-                draw_bounding_box(
-                    ax,
-                    neighbor_future_x,
-                    neighbor_future_y,
-                    neighbor_future[j, 2],
-                    neighbor[7],
-                    neighbor[6],
-                    color,
-                    alpha=0.1,
-                )
+                # 色のグラデーション
+                t_values = np.linspace(0, 1, len(valid_future))
+                colors = [[1.0 * t, 0.0, 1.0 * (1 - t)] for t in t_values]
+                future_scatter_colors.extend(colors)
 
-            neighbor_future_x = neighbor_future[0, 0]
-            neighbor_future_y = neighbor_future[0, 1]
-            # if (
-            #     (neighbor_future_x != 0 or neighbor_future_y != 0)
-            #     and -view_range <= neighbor_future_x <= view_range
-            #     and -view_range <= neighbor_future_y <= view_range
-            # ):
-            #     ax.text(
-            #         neighbor_future_x + 5,
-            #         neighbor_future_y + 2.5,
-            #         f"Future {i}",
-            #         fontsize=8,
-            #         color=color,
-            #         ha="center",
-            #         va="center",
-            #     )
+        # 速度矢印データを収集（簡略化）
+        v = np.sqrt(vel_x**2 + vel_y**2)
+        if v > 0.1:  # 最小速度閾値
+            velocity_arrows.append((n_x, n_y, vel_x / 2, vel_y / 2))
 
-        # Draw the velocity as an arrow
-        v = np.sqrt(vel_x**2 + vel_y**2) / 10
+    # 一括描画の実行
+    if past_lines:
+        # 過去の軌跡をLineCollectionで一括描画
+        lc_past = LineCollection(
+            past_lines, colors=past_colors, alpha=0.6, linewidths=1, linestyles="--"
+        )
+        ax.add_collection(lc_past)
+
+    if current_boxes:
+        # Bounding boxesをLineCollectionで一括描画
+        lc_boxes = LineCollection(current_boxes, colors="gray", alpha=0.5, linewidths=1)
+        ax.add_collection(lc_boxes)
+
+    if future_scatter_x:
+        # 未来の軌跡を一括scatter描画
+        ax.scatter(future_scatter_x, future_scatter_y, c=future_scatter_colors, alpha=0.5, s=8)
+
+    # 速度矢印（数を制限して描画）
+    for arrow_data in velocity_arrows[:10]:  # 最大10個まで
+        x, y, dx, dy = arrow_data
         ax.arrow(
-            n_x,
-            n_y,
-            vel_x / 2,
-            vel_y / 2,
-            width=v / 2,
-            head_width=v,
-            head_length=v / 2,
-            length_includes_head=True,
+            x,
+            y,
+            dx,
+            dy,
+            width=0.2,
+            head_width=0.5,
+            head_length=0.3,
             fc="orange",
             ec="orange",
-            alpha=0.5,
-        )
-
-        # Draw bounding box
-        draw_bounding_box(
-            ax,
-            n_x,
-            n_y,
-            n_heading,
-            len_x,
-            len_y,
-            color,
-            alpha=0.5,
+            alpha=0.6,
         )
 
     # ==== Static objects ====
@@ -336,32 +328,32 @@ def visualize_inputs(
 
     # ==== Lanes ====
     lanes = inputs["lanes"][0]  # Use the first sample in the batch
-    lanes_speed_limit = inputs["lanes_speed_limit"][0]
-    lanes_has_speed_limit = inputs["lanes_has_speed_limit"][0]
+
+    # Lane境界線をLineCollectionで一括描画
+    lane_lines = []
+    lane_colors = []
 
     for i in range(lanes.shape[0]):
         traffic_light = lanes[i, 0, 8:13]
         color = get_traffic_light_color(traffic_light)
 
-        # center line
-        # ax.plot(lanes[i, :, 0], lanes[i, :, 1], alpha=0.1, linewidth=1, color=color)
-
-        # left right lane boundaries
+        # 左境界線
         lx = lanes[i, :, 0] + lanes[i, :, 4]
         ly = lanes[i, :, 1] + lanes[i, :, 5]
-        ax.plot(lx, ly, alpha=0.25, linewidth=1, color=color)
+        left_points = np.array([lx, ly]).T
+        lane_lines.append(left_points)
+        lane_colors.append(color)
+
+        # 右境界線
         rx = lanes[i, :, 0] + lanes[i, :, 6]
         ry = lanes[i, :, 1] + lanes[i, :, 7]
-        ax.plot(rx, ry, alpha=0.25, linewidth=1, color=color)
+        right_points = np.array([rx, ry]).T
+        lane_lines.append(right_points)
+        lane_colors.append(color)
 
-        # print speed limit
-        # ax.text(
-        #     (left_x + next_left_x) / 2,
-        #     (left_y + next_left_y) / 2,
-        #     f"Limit({lanes_has_speed_limit[i][0]})={lanes_speed_limit[i][0]:.1f}",
-        #     fontsize=8,
-        #     color=color,
-        # )
+    if lane_lines:
+        lc_lanes = LineCollection(lane_lines, colors=lane_colors, alpha=0.25, linewidths=1)
+        ax.add_collection(lc_lanes)
 
     # ==== Route ====
     route_lanes = inputs["route_lanes"][0]  # Use the first sample in the batch
