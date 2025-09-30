@@ -219,8 +219,8 @@ def draw_neighbor_agents(ax, inputs):
     if future_scatter_x:
         ax.scatter(future_scatter_x, future_scatter_y, c=future_scatter_colors, alpha=0.5, s=8)
 
-    # Draw velocity arrows (limited to 10)
-    for x, y, dx, dy in velocity_arrows[:10]:
+    # Draw velocity arrows
+    for x, y, dx, dy in velocity_arrows:
         ax.arrow(
             x,
             y,
