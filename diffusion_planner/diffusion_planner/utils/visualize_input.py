@@ -9,22 +9,25 @@ import numpy as np
 import torch
 from matplotlib.collections import LineCollection
 
+from diffusion_planner.dimensions import *
 from diffusion_planner.utils.normalizer import ObservationNormalizer
 
 
 def get_traffic_light_color(traffic_light):
     """Get traffic light color from traffic light array."""
-    if traffic_light[0] == 1:
+    if traffic_light[TRAFFIC_LIGHT_GREEN - TRAFFIC_LIGHT] == 1:
         return "green"
-    elif traffic_light[1] == 1:
+    elif traffic_light[TRAFFIC_LIGHT_YELLOW - TRAFFIC_LIGHT] == 1:
         return "yellow"
-    elif traffic_light[2] == 1:
+    elif traffic_light[TRAFFIC_LIGHT_RED - TRAFFIC_LIGHT] == 1:
         return "red"
-    elif traffic_light[3] == 1:
-        return "gray"
-    elif traffic_light[4] == 1:
+    elif traffic_light[TRAFFIC_LIGHT_WHITE - TRAFFIC_LIGHT] == 1:
+        return "purple"
+    elif traffic_light[TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT - TRAFFIC_LIGHT] == 1:
         return "black"
-    return "purple"
+    else:
+        return "purple"
+        # raise ValueError(f"Unknown traffic light state: {traffic_light}")
 
 
 def turn_indicator_int_to_str(turn_indicator):
@@ -41,14 +44,14 @@ def turn_indicator_int_to_str(turn_indicator):
         raise ValueError(f"Unknown turn command: {turn_indicator}")
 
 
-def draw_bounding_box(ax, x, y, heading, len_x, len_y, color, alpha):
+def draw_bounding_box(ax, x, y, cos, sin, len_x, len_y, color, alpha):
     """
     Draw a bounding box at the specified position with given dimensions and heading.
 
     Args:
         ax: matplotlib axis
         x, y: center position
-        heading: orientation in radians
+        cos, sin: orientation in radians
         len_x, len_y: length and width of the bounding box
         color: color of the bounding box
         alpha: transparency
@@ -61,10 +64,10 @@ def draw_bounding_box(ax, x, y, heading, len_x, len_y, color, alpha):
         next_dx = dx_coeff[(d + 1) % 4] * (len_x / 2)
         next_dy = dy_coeff[(d + 1) % 4] * (len_y / 2)
         # rotate
-        rot_cdx = curr_dx * np.cos(heading) - curr_dy * np.sin(heading)
-        rot_cdy = curr_dx * np.sin(heading) + curr_dy * np.cos(heading)
-        rot_ndx = next_dx * np.cos(heading) - next_dy * np.sin(heading)
-        rot_ndy = next_dx * np.sin(heading) + next_dy * np.cos(heading)
+        rot_cdx = curr_dx * cos - curr_dy * sin
+        rot_cdy = curr_dx * sin + curr_dy * cos
+        rot_ndx = next_dx * cos - next_dy * sin
+        rot_ndy = next_dx * sin + next_dy * cos
 
         line_color = "red" if (d == 0) else color
         ax.add_line(
@@ -130,11 +133,14 @@ def draw_ego_vehicle(ax, inputs):
         for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
             if ego_future[j, 0] == 0 and ego_future[j, 1] == 0:
                 continue
+            cos = np.cos(ego_future[j, 2])
+            sin = np.sin(ego_future[j, 2])
             draw_bounding_box(
                 ax,
                 ego_future[j, 0],
                 ego_future[j, 1],
-                ego_future[j, 2],
+                cos,
+                sin,
                 car_length,
                 car_width,
                 "orange",
@@ -163,7 +169,7 @@ def draw_neighbor_agents(ax, inputs):
             continue
 
         n_x, n_y = neighbor[0], neighbor[1]
-        n_heading = np.arctan2(neighbor[3], neighbor[2])
+        n_cos, n_sin = neighbor[2], neighbor[3]
         vel_x, vel_y = neighbor[4], neighbor[5]
         len_y, len_x = neighbor[6], neighbor[7]
 
@@ -180,20 +186,7 @@ def draw_neighbor_agents(ax, inputs):
             past_colors.append(color)
 
         # Collect bounding box lines
-        dx_coeff = [+1, +1, -1, -1]
-        dy_coeff = [+1, -1, -1, +1]
-        for d in range(4):
-            curr_dx = dx_coeff[d] * (len_x / 2)
-            curr_dy = dy_coeff[d] * (len_y / 2)
-            next_dx = dx_coeff[(d + 1) % 4] * (len_x / 2)
-            next_dy = dy_coeff[(d + 1) % 4] * (len_y / 2)
-
-            rot_cdx = curr_dx * np.cos(n_heading) - curr_dy * np.sin(n_heading)
-            rot_cdy = curr_dx * np.sin(n_heading) + curr_dy * np.cos(n_heading)
-            rot_ndx = next_dx * np.cos(n_heading) - next_dy * np.sin(n_heading)
-            rot_ndy = next_dx * np.sin(n_heading) + next_dy * np.cos(n_heading)
-
-            current_boxes.append([[n_x + rot_cdx, n_y + rot_cdy], [n_x + rot_ndx, n_y + rot_ndy]])
+        draw_bounding_box(ax, n_x, n_y, n_cos, n_sin, len_x, len_y, color, 0.5)
 
         # Collect future trajectory
         if "neighbor_agents_future" in inputs:
