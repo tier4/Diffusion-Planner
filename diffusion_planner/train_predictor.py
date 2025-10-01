@@ -43,20 +43,20 @@ def get_args():
     parser.add_argument("--train_set_list", type=str, help="data list of train data", default=None)
     parser.add_argument("--valid_set_list", type=str, help="data list of valid data", default=None)
 
-    parser.add_argument("--future_len", type=int, help="number of time point", default=80)
-    parser.add_argument("--time_len", type=int, help="number of time point", default=21)
+    parser.add_argument("--future_len", type=int, default=OUTPUT_T)
+    parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
 
     parser.add_argument("--agent_state_dim", type=int, help="past state dim for agents", default=11)
-    parser.add_argument("--agent_num", type=int, help="number of agents", default=32)
+    parser.add_argument("--agent_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--static_objects_state_dim", type=int, default=10)
     parser.add_argument("--static_objects_num", type=int, default=5)
 
-    parser.add_argument("--lane_num", type=int, help="number of lanes", default=70)
-    parser.add_argument("--lane_len", type=int, help="number of lane points", default=20)
+    parser.add_argument("--lane_num", type=int, default=NUM_SEGMENTS_IN_LANE)
+    parser.add_argument("--lane_len", type=int, default=POINTS_PER_LANELET)
 
-    parser.add_argument("--route_num", type=int, help="number of route lanes", default=25)
-    parser.add_argument("--route_len", type=int, help="number of route lane points", default=20)
+    parser.add_argument("--route_num", type=int, default=NUM_SEGMENTS_IN_ROUTE)
+    parser.add_argument("--route_len", type=int, default=POINTS_PER_LANELET)
 
     parser.add_argument("--polygon_num", type=int, default=NUM_POLYGONS)
     parser.add_argument("--polygon_len", type=int, default=POINTS_PER_POLYGON)
