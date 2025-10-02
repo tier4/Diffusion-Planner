@@ -390,7 +390,6 @@ def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
 
 def visualize_inputs(
     inputs: dict,
-    obs_normalizer: ObservationNormalizer,
     save_path: Path | None = None,
     ax: None = None,
     view_ranges: list = None,
@@ -400,7 +399,6 @@ def visualize_inputs(
 
     Args:
         inputs: Input data dictionary
-        obs_normalizer: Observation normalizer
         save_path: Path to save the visualization
         ax: Matplotlib axis (for single plot compatibility)
         view_ranges: List of view ranges in meters [60, 120] for multi-range visualization
@@ -412,9 +410,6 @@ def visualize_inputs(
     # Default behavior: single 60m range for backward compatibility
     if view_ranges is None:
         view_ranges = [60]
-
-    # Prepare data
-    inputs = obs_normalizer.inverse(inputs)
 
     def to_numpy(tensor):
         if isinstance(tensor, torch.Tensor):
