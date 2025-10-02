@@ -100,7 +100,7 @@ class Decoder(nn.Module):
         encoding = encoder_outputs["encoding"]
 
         # Pool encoding to get a fixed-size representation
-        encoding_pooled = torch.mean(encoding, dim=1).detach()  # [B, D]
+        encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(
             B, P, (1 + self._future_len) * 4
