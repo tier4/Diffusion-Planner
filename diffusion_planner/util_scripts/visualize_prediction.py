@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.train_epoch import heading_to_cos_sin
-from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from parse_prediction_results import calc_loss
 from tqdm import tqdm
@@ -18,7 +17,6 @@ from tqdm import tqdm
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--predictions_dir", type=Path, required=True)
-    parser.add_argument("--args_json", type=Path, required=True)
     parser.add_argument("--valid_data_list", type=Path, required=True)
     parser.add_argument("--save_dir", type=Path, default=None)
     parser.add_argument("--only_top_p", type=float, default=1.0)
@@ -28,15 +26,12 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     predictions_dir = args.predictions_dir
-    args_json = args.args_json
     valid_data_list = args.valid_data_list
     save_dir = args.save_dir
     only_top_p = args.only_top_p
 
     if save_dir is None:
         save_dir = predictions_dir.parent / f"visualization"
-
-    config_obj = Config(args_json)
 
     with open(valid_data_list, "r") as f:
         valid_data_path_list = json.load(f)

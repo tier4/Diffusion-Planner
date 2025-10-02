@@ -24,5 +24,4 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 1 --standalone vali
 
 python3 util_scripts/visualize_prediction.py \
   --predictions_dir $SAVE_DIR \
-  --args_json $ARGS_JSON_PATH \
   --valid_data_list $VALID_SET_LIST_PATH
