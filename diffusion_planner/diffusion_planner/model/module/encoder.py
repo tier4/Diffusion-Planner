@@ -562,8 +562,6 @@ class LineEncoder(nn.Module):
 
         self._line_len = line_len
 
-        self.attribute_emb = nn.Linear(5, channels_mlp_dim)  # num of line type
-
         self.channel_pre_project = Mlp(
             in_features=4,
             hidden_features=channels_mlp_dim,
