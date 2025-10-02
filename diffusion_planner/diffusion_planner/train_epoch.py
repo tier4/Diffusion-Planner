@@ -35,52 +35,13 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         torch.cuda.synchronize()
 
     with tqdm(data_loader, desc="Training", unit="batch") as data_epoch:
-        for batch in data_epoch:
-            """
-            data structure in batch: Tuple(Tensor)
-
-            ego_current_state,
-            ego_future_gt,
-
-            neighbor_agents_past,
-            neighbors_future_gt,
-
-            lanes,
-            lanes_speed_limit,
-            lanes_has_speed_limit,
-
-            route_lanes,
-            route_lanes_speed_limit,
-            route_lanes_has_speed_limit,
-
-            static_objects,
-
-            """
-
-            # prepare data
-            inputs = {
-                "ego_agent_past": batch[0].to(args.device),
-                "ego_current_state": batch[1].to(args.device),
-                "neighbor_agents_past": batch[3].to(args.device),
-                "lanes": batch[5].to(args.device),
-                "lanes_speed_limit": batch[6].to(args.device),
-                "lanes_has_speed_limit": batch[7].to(args.device),
-                "route_lanes": batch[8].to(args.device),
-                "route_lanes_speed_limit": batch[9].to(args.device),
-                "route_lanes_has_speed_limit": batch[10].to(args.device),
-                "polygons": batch[11].to(args.device),
-                "line_strings": batch[12].to(args.device),
-                "static_objects": batch[13].to(args.device),
-                "turn_indicator": batch[14].to(args.device),
-                "goal_pose": batch[15].to(args.device),
-                "ego_shape": batch[16].to(args.device),
-            }
-
+        for inputs in data_epoch:
+            inputs = {key: value.to(args.device) for key, value in inputs.items()}
             inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
             inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
-            ego_future = batch[2].to(args.device)
-            neighbors_future = batch[4].to(args.device)
+            ego_future = inputs["ego_agent_future"]
+            neighbors_future = inputs["neighbor_agents_future"]
             # Normalize to ego-centric
             if aug is not None:
                 inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)

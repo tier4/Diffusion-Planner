@@ -35,25 +35,8 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
     total_result_dict = defaultdict(list)
 
-    for batch in val_loader:
-        # データの準備
-        inputs = {
-            "ego_agent_past": batch[0].to(device),
-            "ego_current_state": batch[1].to(device),
-            "neighbor_agents_past": batch[3].to(device),
-            "lanes": batch[5].to(device),
-            "lanes_speed_limit": batch[6].to(device),
-            "lanes_has_speed_limit": batch[7].to(device),
-            "route_lanes": batch[8].to(device),
-            "route_lanes_speed_limit": batch[9].to(device),
-            "route_lanes_has_speed_limit": batch[10].to(device),
-            "polygons": batch[11].to(device),
-            "line_strings": batch[12].to(device),
-            "static_objects": batch[13].to(device),
-            "goal_pose": batch[15].to(args.device),
-            "ego_shape": batch[16].to(args.device),
-        }
-
+    for inputs in val_loader:
+        inputs = {key: value.to(device) for key, value in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
 
         inputs["sampled_trajectories"] = 0.5 * torch.randn(B, 33, 81, 4, dtype=torch.float32)
@@ -61,9 +44,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
-        ego_future = batch[2].to(device)
+        ego_future = inputs["ego_agent_future"]
         ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)
-        neighbors_future = batch[4].to(device)
+        neighbors_future = inputs["neighbor_agents_future"]
         neighbor_future_mask = (
             torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
         )  # (B, Pn, T)
@@ -177,7 +160,7 @@ def get_args():
     # Training
     parser.add_argument("--seed", type=int, help="fix random seed", default=3407)
     parser.add_argument("--train_epochs", type=int, help="epochs of training", default=500)
-    parser.add_argument("--batch_size", type=int, help="batch size (default: 2048)", default=1024)
+    parser.add_argument("--batch_size", type=int, help="batch size (default: 2048)", default=32)
 
     parser.add_argument(
         "--device", type=str, help="run on which device (default: cuda)", default="cuda"
@@ -232,12 +215,7 @@ if __name__ == "__main__":
     batch_size = args.batch_size
 
     # set up data loaders
-    valid_set = DiffusionPlannerData(
-        args.valid_set_list,
-        args.agent_num,
-        args.predicted_neighbor_num,
-        args.future_len,
-    )
+    valid_set = DiffusionPlannerData(args.valid_set_list)
     valid_sampler = DistributedSampler(
         valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
     )

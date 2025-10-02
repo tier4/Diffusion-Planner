@@ -122,7 +122,6 @@ if __name__ == "__main__":
             valid_data_dict[key] = torch.tensor(np.expand_dims(value, axis=0))
         valid_data_dict["ego_agent_past"] = heading_to_cos_sin(valid_data_dict["ego_agent_past"])
         valid_data_dict["goal_pose"] = heading_to_cos_sin(valid_data_dict["goal_pose"])
-        valid_data_dict = config_obj.observation_normalizer(valid_data_dict)
 
         prediction = output_dict["prediction"]  # (1 + P, T, D)
         turn_indicator = int(output_dict["turn_indicator"])  # ()
@@ -145,9 +144,7 @@ if __name__ == "__main__":
         loss_ego_mean = np.mean(loss_ego)
 
         fig, ax = plt.subplots(1, 2, figsize=(8, 5), gridspec_kw={"width_ratios": [2, 1]})
-        visualize_inputs(
-            valid_data_dict, config_obj.observation_normalizer, save_path=None, ax=ax[0]
-        )
+        visualize_inputs(valid_data_dict, save_path=None, ax=ax[0])
 
         # plot prediction
         # Ego
@@ -174,7 +171,7 @@ if __name__ == "__main__":
         neighbors = valid_data_dict["neighbor_agents_past"][0]
         for i in range(prediction.shape[0] - 1):
             neighbor = neighbors[i, -1]
-            if torch.sum(torch.abs(neighbor[:4])).item() < 1e-6:
+            if np.sum(np.abs(neighbor[:4])).item() < 1e-6:
                 continue
             ax[0].plot(
                 prediction[i + 1, :, 0],

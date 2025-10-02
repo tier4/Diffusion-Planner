@@ -191,9 +191,7 @@ def model_training(args):
         if args.use_data_augment
         else None
     )
-    data_set = DiffusionPlannerData(
-        args.train_set_list, args.agent_num, args.predicted_neighbor_num, args.future_len
-    )
+    data_set = DiffusionPlannerData(args.train_set_list)
 
     # prepare validation set
     if args.valid_set_list is None:
@@ -203,9 +201,7 @@ def model_training(args):
         train_set, valid_set = torch.utils.data.random_split(data_set, [train_size, valid_size])
     else:
         train_set = data_set
-        valid_set = DiffusionPlannerData(
-            args.valid_set_list, args.agent_num, args.predicted_neighbor_num, args.future_len
-        )
+        valid_set = DiffusionPlannerData(args.valid_set_list)
     print(f"Train set size: {len(train_set)}, Valid set size: {len(valid_set)}")
 
     train_sampler = DistributedSampler(

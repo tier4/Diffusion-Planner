@@ -115,7 +115,9 @@ def diffusion_loss_func(
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
     turn_indicator_logit = decoder_output["turn_indicator_logit"]  # [B, 4]
-    turn_indicator_gt = inputs["turn_indicator"]
+    turn_indicator_gt = inputs["turn_indicators"]  # [B, INPUT_T + 1]
+    turn_indicator_gt = turn_indicator_gt[:, -1]  # [B,]
+    turn_indicator_gt = turn_indicator_gt.long()
     turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_logit, turn_indicator_gt, reduction="mean"
     )
