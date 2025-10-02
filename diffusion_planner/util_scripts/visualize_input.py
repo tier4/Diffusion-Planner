@@ -7,7 +7,6 @@ from shutil import rmtree
 import numpy as np
 import torch
 from diffusion_planner.train_epoch import heading_to_cos_sin
-from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from tqdm import tqdm
 
@@ -15,7 +14,6 @@ from tqdm import tqdm
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_path", type=Path)
-    parser.add_argument("args_json", type=Path)
     parser.add_argument("--save_path", type=Path, default=None)
     return parser.parse_args()
 
@@ -23,11 +21,9 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     input_path = args.input_path
-    args_json = args.args_json
     save_path = args.save_path
 
     ext = input_path.suffix
-    config_obj = Config(args_json)
 
     def process_one_data(input_path: Path, save_path: Path):
         loaded = np.load(input_path)
@@ -39,9 +35,8 @@ if __name__ == "__main__":
             data[key] = torch.tensor(np.expand_dims(value, axis=0))
         data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
         data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
-        data = config_obj.observation_normalizer(data)
 
-        visualize_inputs(data, config_obj.observation_normalizer, save_path, view_ranges=[60, 150])
+        visualize_inputs(data, save_path, view_ranges=[60, 150])
 
     if ext == ".npz":
         process_one_data(input_path, save_path)

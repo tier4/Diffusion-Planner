@@ -40,7 +40,6 @@ echo $SECONDS
 python3 ./diffusion_planner/util_scripts/create_train_set_path.py ${result_dir}/tmp
 
 python3 ./diffusion_planner/util_scripts/visualize_input.py ${result_dir}/path_list.json \
-    /mnt/nvme0/sakoda/training_result/20250908-094817_add_line_type_ver38/args.json \
     --save_path ${result_dir}/visualize_result
 
 ~/misc/ffmpeg_lib/make_mp4_from_unsequential_png.sh ${result_dir}/visualize_result
