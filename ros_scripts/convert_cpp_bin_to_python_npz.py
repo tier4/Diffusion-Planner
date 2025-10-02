@@ -62,7 +62,7 @@ class TrainingDataReader:
             "polygons": NUM_POLYGONS * POINTS_PER_POLYGON * 2,
             "line_strings": NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * 2,
             "goal_pose": POSE_DIM,
-            "turn_indicator": 1,
+            "turn_indicators": self.PAST_TIME_STEPS,
         }
 
     def read_binary_file(self, filepath: str) -> Dict[str, Any]:
@@ -198,9 +198,11 @@ class TrainingDataReader:
         result["goal_pose"] = cos_sin_to_heading(goal_flat).reshape(3)
         offset += size * 4
 
-        # turn_indicator (scalar) - int32_t
-        result["turn_indicator"] = struct.unpack("<i", data[offset : offset + 4])[0]
-        offset += 4
+        # turn_indicators (scalar) - int32_t
+        size = self.sizes["turn_indicators"]
+        turn_flat = struct.unpack(f"<{size}i", data[offset : offset + size * 4])
+        result["turn_indicators"] = np.array(turn_flat, dtype=np.int32)
+        offset += size * 4
 
         return result
 

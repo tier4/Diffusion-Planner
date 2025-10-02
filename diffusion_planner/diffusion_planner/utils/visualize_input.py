@@ -344,7 +344,7 @@ def draw_polygons_and_lines(ax, inputs):
             ax.plot(line_string[:, 0], line_string[:, 1], color="red")
 
 
-def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs=None):
+def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
     """Setup axis properties and add status text."""
     ego_vel_x, ego_vel_y = ego_state[4], ego_state[5]
     ego_acc_x, ego_acc_y = ego_state[6], ego_state[7]
@@ -362,14 +362,13 @@ def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs=None):
     turn_indicator_text_gt = "There is no turn command"
     turn_indicator_text_pred = "There is no predicted turn command"
 
-    if inputs is not None:
-        if "turn_indicator" in inputs:
-            turn_indicator = inputs["turn_indicator"][0]
-            turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
+    if "turn_indicators" in inputs:
+        turn_indicator = inputs["turn_indicators"][0][-1]
+        turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
 
-        if "turn_indicator_pred" in inputs:
-            turn_indicator_pred = inputs["turn_indicator_pred"]
-            turn_indicator_text_pred = turn_indicator_int_to_str(turn_indicator_pred)
+    if "turn_indicator_pred" in inputs:
+        turn_indicator_pred = inputs["turn_indicator_pred"]
+        turn_indicator_text_pred = turn_indicator_int_to_str(turn_indicator_pred)
 
     ax.text(
         view_range - 1,
