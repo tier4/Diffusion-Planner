@@ -147,5 +147,5 @@ for key, val in result_map.items():
     total_num = len(val)
     ok_num = sum(val)
     ok_ratio = ok_num / total_num if total_num > 0 else 0
-    assert ok_ratio == 1.0 or "agent" in key
+    assert ok_ratio == 1.0 or "agent" in key, f"{key} has {ok_ratio}"
     print(f"{key}: {ok_num}/{total_num} = {ok_ratio:.4f}")
