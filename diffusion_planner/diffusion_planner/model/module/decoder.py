@@ -51,17 +51,12 @@ class Decoder(nn.Module):
     def sde(self):
         return self._sde
 
-    def forward(self, encoder_outputs, inputs):
+    def forward(self, encoding, inputs):
         """
         Diffusion decoder process.
 
         Args:
-            encoder_outputs: Dict
-                {
-                    ...
-                    "encoding": agents, static objects and lanes context encoding
-                    ...
-                }
+            encoding: torch.Tensor
             inputs: Dict
                 {
                     ...
@@ -95,9 +90,6 @@ class Decoder(nn.Module):
 
         B, P, _ = current_states.shape
         assert P == (1 + self._predicted_neighbor_num)
-
-        # Extract context encoding
-        encoding = encoder_outputs["encoding"]
 
         # Pool encoding to get a fixed-size representation
         encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]

@@ -136,8 +136,6 @@ class Encoder(nn.Module):
         )
 
     def forward(self, inputs):
-        encoder_outputs = {}
-
         # ego agent
         ego = inputs["ego_agent_past"]  # (B, T=21, D=4)
         if not self.use_ego_history:
@@ -259,7 +257,7 @@ class Encoder(nn.Module):
 
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
-        encoder_outputs["encoding"] = self.fusion(
+        encoder_outputs = self.fusion(
             encoding_input, encoding_mask.view(B, self.token_num)
         )
 
