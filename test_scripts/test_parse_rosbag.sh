@@ -13,8 +13,8 @@ SECONDS=0
 
 time=10-19-35
 # time=10-24-57
-bag=/mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/2025-06-12/${time}
-map=/mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/map/2025-06-12/${time}/lanelet2_map.osm
+bag=/mnt/nvme1/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/2025-06-12/${time}
+map=/mnt/nvme1/sakoda/nas_copy/tieriv_dataset/driving_dataset/map/2025-06-12/${time}/lanelet2_map.osm
 
 if [ "$converter_type" = "python" ]; then
     python3 ./ros_scripts/parse_rosbag.py \
