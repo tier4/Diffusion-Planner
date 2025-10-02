@@ -47,9 +47,11 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             "route_lanes": batch[8].to(device),
             "route_lanes_speed_limit": batch[9].to(device),
             "route_lanes_has_speed_limit": batch[10].to(device),
-            "static_objects": batch[11].to(device),
-            "goal_pose": batch[13].to(args.device),
-            "ego_shape": batch[14].to(args.device),
+            "polygons": batch[11].to(device),
+            "line_strings": batch[12].to(device),
+            "static_objects": batch[13].to(device),
+            "goal_pose": batch[15].to(args.device),
+            "ego_shape": batch[16].to(args.device),
         }
 
         B = inputs["ego_current_state"].shape[0]

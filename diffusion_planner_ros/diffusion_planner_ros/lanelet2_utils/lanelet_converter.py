@@ -23,7 +23,7 @@ from .lanelet_map import (
 
 # cspell: ignore MGRS
 
-CPP_MODE = False
+CPP_MODE = True
 
 
 def _get_attribute(attribute_map, key: str, default: str) -> str:

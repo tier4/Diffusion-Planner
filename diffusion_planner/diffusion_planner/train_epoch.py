@@ -68,10 +68,12 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
                 "route_lanes": batch[8].to(args.device),
                 "route_lanes_speed_limit": batch[9].to(args.device),
                 "route_lanes_has_speed_limit": batch[10].to(args.device),
-                "static_objects": batch[11].to(args.device),
-                "turn_indicator": batch[12].to(args.device),
-                "goal_pose": batch[13].to(args.device),
-                "ego_shape": batch[14].to(args.device),
+                "polygons": batch[11].to(args.device),
+                "line_strings": batch[12].to(args.device),
+                "static_objects": batch[13].to(args.device),
+                "turn_indicator": batch[14].to(args.device),
+                "goal_pose": batch[15].to(args.device),
+                "ego_shape": batch[16].to(args.device),
             }
 
             inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])

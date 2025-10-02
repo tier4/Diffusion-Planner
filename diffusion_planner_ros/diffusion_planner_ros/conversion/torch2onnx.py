@@ -6,6 +6,7 @@ import numpy as np
 import onnxruntime as ort
 import torch
 import torch.nn as nn
+from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 
@@ -68,6 +69,8 @@ class ONNXWrapper(nn.Module):
         route_lanes,
         route_lanes_speed_limit,
         route_lanes_has_speed_limit,
+        polygons,
+        line_strings,
         goal_pose,
         ego_shape,
     ):
@@ -83,6 +86,8 @@ class ONNXWrapper(nn.Module):
             "route_lanes": route_lanes,
             "route_lanes_speed_limit": route_lanes_speed_limit,
             "route_lanes_has_speed_limit": route_lanes_has_speed_limit,
+            "polygons": polygons,
+            "line_strings": line_strings,
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
         }
@@ -132,18 +137,34 @@ if __name__ == "__main__":
     torch.manual_seed(seed)
 
     inputs = {}
-    inputs["sampled_trajectories"] = torch.ones(1, 33, 81, 4, dtype=torch.float32)
-    inputs["ego_agent_past"] = torch.randn(1, 21, 4, dtype=torch.float32)
+    inputs["sampled_trajectories"] = torch.ones(
+        1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+    )
+    inputs["ego_agent_past"] = torch.randn(1, INPUT_T + 1, POSE_DIM, dtype=torch.float32)
     inputs["ego_current_state"] = torch.randn(1, 10, dtype=torch.float32)
-    inputs["neighbor_agents_past"] = torch.randn(1, 32, 21, 11, dtype=torch.float32)
+    inputs["neighbor_agents_past"] = torch.randn(
+        1, MAX_NUM_NEIGHBORS, INPUT_T + 1, 11, dtype=torch.float32
+    )
     inputs["static_objects"] = torch.randn(1, 5, 10, dtype=torch.float32)
-    inputs["lanes"] = torch.randn(1, 70, 20, 33, dtype=torch.float32)
-    inputs["lanes_speed_limit"] = torch.randn(1, 70, 1, dtype=torch.float32)
-    inputs["lanes_has_speed_limit"] = torch.ones(1, 70, 1, dtype=torch.bool)
-    inputs["route_lanes"] = torch.randn(1, 25, 20, 33, dtype=torch.float32)
-    inputs["route_lanes_speed_limit"] = torch.randn(1, 25, 1, dtype=torch.float32)
-    inputs["route_lanes_has_speed_limit"] = torch.ones(1, 25, 1, dtype=torch.bool)
-    inputs["goal_pose"] = torch.randn(1, 4, dtype=torch.float32)
+    inputs["lanes"] = torch.randn(
+        1, NUM_SEGMENTS_IN_LANE, POINTS_PER_LANELET, SEGMENT_POINT_DIM, dtype=torch.float32
+    )
+    inputs["lanes_speed_limit"] = torch.randn(1, NUM_SEGMENTS_IN_LANE, 1, dtype=torch.float32)
+    inputs["lanes_has_speed_limit"] = torch.ones(1, NUM_SEGMENTS_IN_LANE, 1, dtype=torch.bool)
+    inputs["route_lanes"] = torch.randn(
+        1, NUM_SEGMENTS_IN_ROUTE, POINTS_PER_LANELET, SEGMENT_POINT_DIM, dtype=torch.float32
+    )
+    inputs["route_lanes_speed_limit"] = torch.randn(
+        1, NUM_SEGMENTS_IN_ROUTE, 1, dtype=torch.float32
+    )
+    inputs["route_lanes_has_speed_limit"] = torch.ones(
+        1, NUM_SEGMENTS_IN_ROUTE, 1, dtype=torch.bool
+    )
+    inputs["polygons"] = torch.randn(1, NUM_POLYGONS, POINTS_PER_POLYGON, 2, dtype=torch.float32)
+    inputs["line_strings"] = torch.randn(
+        1, NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 2, dtype=torch.float32
+    )
+    inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
 
     for key in inputs.keys():
