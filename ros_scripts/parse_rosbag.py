@@ -60,14 +60,7 @@ route_lanes_speed_limit     float32 (25, 1)
 route_lanes_has_speed_limit bool    (25, 1)
 turn_indicator              int32   (1)
 """
-PAST_TIME_STEPS = 21
-FUTURE_TIME_STEPS = 80
-NEIGHBOR_NUM = 32
-STATIC_NUM = 5
-LANE_NUM = 70
-LANE_LEN = 20
-ROUTE_NUM = 25
-ROUTE_LEN = 20
+PAST_TIME_STEPS = INPUT_T + 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,11 +97,11 @@ class SequenceData:
     route: LaneletRoute
 
 
-def create_ego_sequence(data_list, i, future_time_steps, map2bl_matrix_4x4):
+def create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4):
     ego_future_x = []
     ego_future_y = []
     ego_future_yaw = []
-    for j in range(future_time_steps):
+    for j in range(OUTPUT_T):
         index = min(i + j + 1, len(data_list) - 1)
         x = data_list[index].kinematic_state.pose.pose.position.x
         y = data_list[index].kinematic_state.pose.pose.position.y
@@ -214,7 +207,7 @@ def tracking_past_and_future(data_list, i, map2bl_matrix_4x4):
         tracking_future[key].shape_list = tracking_future[key].shape_list[-1:]
         tracking_future[key].kinematics_list = tracking_future[key].kinematics_list[-1:]
     # tracking
-    for frame_data in data_list[i : i + FUTURE_TIME_STEPS]:
+    for frame_data in data_list[i : i + OUTPUT_T]:
         tracking_future = tracking_one_step(
             frame_data.tracked_objects,
             tracking_future,
@@ -437,7 +430,7 @@ def main(
             continue
 
         # list[FrameData] -> npz
-        progress = tqdm(total=(n - PAST_TIME_STEPS - FUTURE_TIME_STEPS) // step)
+        progress = tqdm(total=(n - PAST_TIME_STEPS - OUTPUT_T) // step)
         stopping_count = 0
         for i in range(PAST_TIME_STEPS, n, step):
             progress.update(1)
@@ -458,7 +451,7 @@ def main(
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
                 traffic_light_recognition=traffic_light_recognition,
-                num_segments=70,
+                num_segments=NUM_SEGMENTS_IN_LANE,
                 dev="cpu",
                 do_sort=True,
             )
@@ -475,7 +468,7 @@ def main(
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
                 traffic_light_recognition=traffic_light_recognition,
-                num_segments=25,
+                num_segments=NUM_SEGMENTS_IN_ROUTE,
                 dev="cpu",
                 do_sort=False,
             )
@@ -489,7 +482,7 @@ def main(
             ego_tensor = create_current_ego_state(
                 data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.79
             ).squeeze(0)
-            ego_future_np = create_ego_sequence(data_list, i, FUTURE_TIME_STEPS, map2bl_matrix_4x4)
+            ego_future_np = create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4)
 
             # (1)自車が止まっている
             # (2)目の前のlanelet segmentが赤信号である
@@ -516,7 +509,7 @@ def main(
 
             is_red_light = route_tensor[:, 1, 0, 8 + 2].item()  # next segment
             sum_mileage = 0.0
-            for j in range(FUTURE_TIME_STEPS - 1):
+            for j in range(OUTPUT_T - 1):
                 sum_mileage += np.linalg.norm(ego_future_np[j, :2] - ego_future_np[j + 1, :2])
             is_future_forward = sum_mileage > 0.1
             if is_stop and is_red_light and is_future_forward:
@@ -532,14 +525,14 @@ def main(
             neighbor_past_tensor = convert_tracked_objects_to_tensor(
                 tracked_objs=tracking_past,
                 map2bl_matrix_4x4=map2bl_matrix_4x4,
-                max_num_objects=NEIGHBOR_NUM,
+                max_num_objects=MAX_NUM_NEIGHBORS,
                 max_timesteps=PAST_TIME_STEPS,
             ).squeeze(0)
             neighbor_future_tensor = create_neighbor_future(
                 tracked_objs=tracking_future,
                 map2bl_matrix_4x4=map2bl_matrix_4x4,
-                max_num_objects=NEIGHBOR_NUM,
-                max_timesteps=FUTURE_TIME_STEPS,
+                max_num_objects=MAX_NUM_NEIGHBORS,
+                max_timesteps=OUTPUT_T,
             ).squeeze(0)
             # (32, 80, 11) -> (32, 80, 3)
             neighbor_future_tensor = neighbor_future_tensor[:, :, :4]
@@ -572,12 +565,13 @@ def main(
             )
 
             curr_data = {
+                "version": 2,
                 "ego_agent_past": ego_past_np,
                 "ego_current_state": ego_tensor.numpy(),
                 "ego_agent_future": ego_future_np,
                 "neighbor_agents_past": neighbor_past_tensor.numpy(),
                 "neighbor_agents_future": neighbor_future_tensor.numpy(),
-                "static_objects": np.zeros((STATIC_NUM, 10), dtype=np.float32),
+                "static_objects": np.zeros((5, 10), dtype=np.float32),
                 "lanes": lanes_tensor.squeeze(0).numpy(),
                 "lanes_speed_limit": lanes_speed_limit.squeeze(0).numpy(),
                 "lanes_has_speed_limit": lanes_has_speed_limit.squeeze(0).numpy(),
