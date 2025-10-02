@@ -12,7 +12,6 @@ from diffusion_planner.model.flow_matching_utils.ode_solver import (
     rk4_integration,
 )
 from diffusion_planner.model.module.dit import DiTBlock, FinalLayer, TimestepEmbedder
-from diffusion_planner.model.module.mixer import MixerBlock
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
