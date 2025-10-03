@@ -47,6 +47,14 @@
       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
     ]
   },
+  "polygons": {
+    "mean": [10, 0],
+    "std": [20, 20]
+  },
+  "line_strings": {
+    "mean": [10, 0],
+    "std": [20, 20]
+  },
   "route_lanes_speed_limit": {
     "mean": [0],
     "std": [20]

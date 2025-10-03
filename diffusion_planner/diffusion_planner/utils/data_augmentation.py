@@ -205,6 +205,16 @@ class StatePerturbation:
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
 
+        # ego past xy
+        mask = torch.sum(torch.ne(inputs["ego_agent_past"][..., :6], 0), dim=-1) == 0
+        inputs["ego_agent_past"][..., :2] = vector_transform(
+            inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
+        )
+        # ego past cos sin
+        inputs["ego_agent_past"][..., 2:4] = vector_transform(
+            inputs["ego_agent_past"][..., 2:4], transform_matrix
+        )
+
         # neighbor past xy
         mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
         inputs["neighbor_agents_past"][..., :2] = vector_transform(
@@ -253,6 +263,20 @@ class StatePerturbation:
             inputs["route_lanes"][..., 6:8], transform_matrix
         )
         inputs["route_lanes"][mask] = 0.0
+
+        # polygons
+        mask = torch.sum(torch.ne(inputs["polygons"], 0), dim=-1) == 0
+        inputs["polygons"][..., :2] = vector_transform(
+            inputs["polygons"][..., :2], transform_matrix, center_xy
+        )
+        inputs["polygons"][mask] = 0.0
+
+        # line_strings
+        mask = torch.sum(torch.ne(inputs["line_strings"], 0), dim=-1) == 0
+        inputs["line_strings"][..., :2] = vector_transform(
+            inputs["line_strings"][..., :2], transform_matrix, center_xy
+        )
+        inputs["line_strings"][mask] = 0.0
 
         # static objects xy
         mask = torch.sum(torch.ne(inputs["static_objects"][..., :10], 0), dim=-1) == 0

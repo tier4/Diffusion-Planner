@@ -16,8 +16,8 @@ rm -f /tmp/tmp_dist_init
 
 SAVE_DIR="/mnt/nvme0/sakoda/training_result"
 
-TRAIN_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver51_realdata_cpp_num140/path_list_train_with_psim_data_without_shiojiri.json"
-VALID_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver51_realdata_cpp_num140/path_list_valid.json"
+TRAIN_SET_LIST="/mnt/nvme3/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver52_realdata_cpp_turn_indicators/path_list_train_with_psim_data_without_shiojiri.json"
+VALID_SET_LIST="/mnt/nvme3/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver52_realdata_cpp_turn_indicators/path_list_valid.json"
 
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
 --exp_name ${exp_name} \
