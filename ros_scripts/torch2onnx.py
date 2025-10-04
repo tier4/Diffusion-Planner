@@ -137,7 +137,7 @@ if __name__ == "__main__":
     )
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
-    inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.int64)
+    inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
 
     for key in inputs.keys():
         print(f"{key}: {inputs[key].shape}, {inputs[key].dtype}")
