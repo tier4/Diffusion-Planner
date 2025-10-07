@@ -390,6 +390,9 @@ if __name__ == "__main__":
     from copy import deepcopy
     from pathlib import Path
 
+    import matplotlib.patches as patches
+    import matplotlib.pyplot as plt
+
     from diffusion_planner.train_epoch import heading_to_cos_sin
     from diffusion_planner.utils.visualize_input import visualize_inputs
 
@@ -405,9 +408,6 @@ if __name__ == "__main__":
     loaded = np.load(target_npz)
     data = {}
     for key, value in loaded.items():
-        if key in ["ego_agent_future", "neighbor_agents_future"]:
-            # Skip future trajectories for now
-            continue
         data[key] = torch.tensor(value).unsqueeze(0)
         if key == "goal_pose":
             data[key] = heading_to_cos_sin(data[key])
@@ -416,10 +416,38 @@ if __name__ == "__main__":
     ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
     neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
 
-    # Save original data visualization (use deepcopy to avoid side effects)
-    visualize_inputs(deepcopy(data), save_dir / "original.png", view_ranges=[60])
-
     aug = StatePerturbation(augment_prob=1.0, device="cpu")
+
+    # Save original data visualization with augmentation range rectangle
+    original_save_path = save_dir / "original.png"
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    # Visualize inputs on the ax
+    visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[60])
+
+    # Get augmentation ranges from the aug object
+    lo = aug._low.cpu().numpy()[0]  # Extract from tuple
+    hi = aug._high.cpu().numpy()[0]  # Extract from tuple
+    x_min, y_min = lo[0], lo[1]
+    x_max, y_max = hi[0], hi[1]
+
+    # Draw the augmentation range rectangle
+    rect = patches.Rectangle(
+        (x_min, y_min),
+        x_max - x_min,
+        y_max - y_min,
+        linewidth=2,
+        edgecolor="red",
+        facecolor="none",
+        linestyle="--",
+        label="Augmentation Range",
+    )
+    ax.add_patch(rect)
+    ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(original_save_path, dpi=100)
+    plt.close()
 
     trial_num = 10
     for i in range(trial_num):
@@ -438,6 +466,8 @@ if __name__ == "__main__":
         # Add future trajectories with consistent naming
         data_dict["ego_agent_future"] = aug_ego_future.squeeze(0).detach().cpu().numpy()
         data_dict["neighbor_agents_future"] = aug_neighbors_future.squeeze(0).detach().cpu().numpy()
+        aug_data["ego_agent_future"] = aug_ego_future
+        aug_data["neighbor_agents_future"] = aug_neighbors_future
 
         # Save to npz file
         output_path = save_dir / f"augmented_{i:08d}.npz"
