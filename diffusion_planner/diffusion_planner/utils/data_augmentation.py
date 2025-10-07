@@ -50,7 +50,6 @@ class StatePerturbation:
     def __init__(
         self,
         augment_prob: float = 0.5,
-        normalize=True,
         wheel_base: float = 2.75,
         device: Optional[torch.device] = "cpu",
     ) -> None:
@@ -61,7 +60,6 @@ class StatePerturbation:
         :param augment_prob: probability between 0 and 1 of applying the data augmentation
         """
         self._augment_prob = augment_prob
-        self._normalize = normalize
         self._device = torch.device(device)
         lo: List[float] = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
         hi: List[float] = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
@@ -95,12 +93,24 @@ class StatePerturbation:
 
     def __call__(self, inputs, ego_future, neighbors_future):
         aug_flag, aug_ego_current_state = self.augment(inputs)
+
+        # Interpolate future trajectory
         interpolated_ego_future = self.interpolation_future_trajectory(
             aug_ego_current_state, ego_future
         )
 
+        # Interpolate past trajectory by reversing time
+        # Flip the past trajectory to treat it as future
+        ego_past = inputs["ego_agent_past"]
+        ego_past_reversed = torch.flip(ego_past, dims=[1])
+        interpolated_ego_past_reversed = self.interpolation_future_trajectory(
+            aug_ego_current_state, ego_past_reversed
+        )
+        interpolated_ego_past = torch.flip(interpolated_ego_past_reversed, dims=[1])
+
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
+        inputs["ego_agent_past"][aug_flag] = interpolated_ego_past[aug_flag]
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
@@ -205,15 +215,13 @@ class StatePerturbation:
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
 
-        # ego past xy
-        # mask = torch.sum(torch.ne(inputs["ego_agent_past"][..., :6], 0), dim=-1) == 0
-        # inputs["ego_agent_past"][..., :2] = vector_transform(
-        #     inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
-        # )
-        # # ego past cos sin
-        # inputs["ego_agent_past"][..., 2:4] = vector_transform(
-        #     inputs["ego_agent_past"][..., 2:4], transform_matrix
-        # )
+        # ego past
+        inputs["ego_agent_past"][..., :2] = vector_transform(
+            inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
+        )
+        inputs["ego_agent_past"][..., 2] = heading_transform(
+            inputs["ego_agent_past"][..., 2], transform_matrix
+        )
 
         # neighbor past xy
         mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
