@@ -3,8 +3,7 @@ from typing import List, Optional, Union
 import numpy as np
 import torch
 
-NUM_REFINE = 20
-REFINE_HORIZON = 2.0
+NUM_REFINE = 10
 TIME_INTERVAL = 0.1
 
 
@@ -67,9 +66,10 @@ class StatePerturbation:
         self._high = torch.tensor(hi).to(self._device)
         self._wheel_base = wheel_base
 
-        self.refine_horizon = REFINE_HORIZON
         self.num_refine = NUM_REFINE
         self.time_interval = TIME_INTERVAL
+
+        REFINE_HORIZON = NUM_REFINE * TIME_INTERVAL
 
         T = REFINE_HORIZON + TIME_INTERVAL
         self.coeff_matrix = torch.linalg.inv(
@@ -313,7 +313,6 @@ class StatePerturbation:
 
         P = self.num_refine
         dt = self.time_interval
-        T = self.refine_horizon
         B = aug_current_state.shape[0]
         M_t = self.t_matrix.unsqueeze(0).expand(B, -1, -1)
         A = self.coeff_matrix.unsqueeze(0).expand(B, -1, -1)
