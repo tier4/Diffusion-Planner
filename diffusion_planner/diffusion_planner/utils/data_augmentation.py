@@ -452,7 +452,7 @@ if __name__ == "__main__":
     trial_num = 10
     for i in range(trial_num):
         aug_data, aug_ego_future, aug_neighbors_future = aug(
-            data, ego_future.clone(), neighbors_future.clone()
+            deepcopy(data), ego_future.clone(), neighbors_future.clone()
         )
 
         # Save augmented data to npz file
