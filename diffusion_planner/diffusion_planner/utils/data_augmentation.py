@@ -109,7 +109,7 @@ class StatePerturbation:
         ego_current_state = inputs["ego_current_state"].clone()
 
         B = ego_current_state.shape[0]
-        aug_flag = (torch.rand(B) >= self._augment_prob).bool().to(self._device) & ~(
+        aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
             abs(ego_current_state[:, 4]) < 2.0
         )
 
@@ -383,3 +383,67 @@ class StatePerturbation:
             [torch.cat([traj_x, traj_y, traj_heading[..., None]], axis=-1), ego_future[:, P:, :]],
             axis=1,
         )
+
+
+if __name__ == "__main__":
+    import argparse
+    from copy import deepcopy
+    from pathlib import Path
+
+    from diffusion_planner.train_epoch import heading_to_cos_sin
+    from diffusion_planner.utils.visualize_input import visualize_inputs
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("target_npz", type=Path)
+    args = parser.parse_args()
+
+    target_npz = args.target_npz
+
+    save_dir = target_npz.parent / "augmented"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    loaded = np.load(target_npz)
+    data = {}
+    for key, value in loaded.items():
+        if key in ["ego_agent_future", "neighbor_agents_future"]:
+            # Skip future trajectories for now
+            continue
+        data[key] = torch.tensor(value).unsqueeze(0)
+        if key == "goal_pose":
+            data[key] = heading_to_cos_sin(data[key])
+
+    # Load future trajectories separately
+    ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
+    neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
+
+    # Save original data visualization (use deepcopy to avoid side effects)
+    visualize_inputs(deepcopy(data), save_dir / "original.png", view_ranges=[60])
+
+    aug = StatePerturbation(augment_prob=1.0, device="cpu")
+
+    trial_num = 10
+    for i in range(trial_num):
+        aug_data, aug_ego_future, aug_neighbors_future = aug(
+            data, ego_future.clone(), neighbors_future.clone()
+        )
+
+        # Save augmented data to npz file
+        data_dict = {}
+        for key, value in aug_data.items():
+            if isinstance(value, torch.Tensor):
+                data_dict[key] = value.squeeze(0).detach().cpu().numpy()
+            else:
+                data_dict[key] = value
+
+        # Add future trajectories with consistent naming
+        data_dict["ego_agent_future"] = aug_ego_future.squeeze(0).detach().cpu().numpy()
+        data_dict["neighbor_agents_future"] = aug_neighbors_future.squeeze(0).detach().cpu().numpy()
+
+        # Save to npz file
+        output_path = save_dir / f"augmented_{i:08d}.npz"
+        np.savez(output_path, **data_dict)
+
+        # Use deepcopy to avoid side effects from visualize_inputs
+        visualize_inputs(deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[60])
+
+    print(f"Augmented data saved: {trial_num} files to {save_dir}")
