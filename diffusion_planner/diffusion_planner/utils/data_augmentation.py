@@ -3,7 +3,7 @@ from typing import List, Optional, Union
 import numpy as np
 import torch
 
-NUM_REFINE = 10
+NUM_REFINE = 5
 TIME_INTERVAL = 0.1
 
 
@@ -60,8 +60,8 @@ class StatePerturbation:
         """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
-        lo: List[float] = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
-        hi: List[float] = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
+        lo: List[float] = ([0.0, -1.50, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
+        hi: List[float] = ([0.0, +1.50, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
         self._high = torch.tensor(hi).to(self._device)
         self._wheel_base = wheel_base
@@ -102,11 +102,36 @@ class StatePerturbation:
         # Interpolate past trajectory by reversing time
         # Flip the past trajectory to treat it as future
         ego_past = inputs["ego_agent_past"]
-        ego_past_reversed = torch.flip(ego_past, dims=[1])
+
+        # Convert past from [x, y, cos, sin] to [x, y, heading]
+        ego_past_heading = torch.cat([
+            ego_past[..., :2],  # x, y
+            torch.atan2(ego_past[..., 3], ego_past[..., 2]).unsqueeze(-1)  # heading from cos, sin
+        ], dim=-1)
+
+        ego_past_reversed = torch.flip(ego_past_heading, dims=[1])
         interpolated_ego_past_reversed = self.interpolation_future_trajectory(
-            aug_ego_current_state, ego_past_reversed
+            aug_ego_current_state, ego_past_reversed, keep_remaining=False
         )
-        interpolated_ego_past = torch.flip(interpolated_ego_past_reversed, dims=[1])
+        # Flip back to get the past trajectory
+        interpolated_ego_past_heading = torch.flip(interpolated_ego_past_reversed, dims=[1])
+
+        # Convert back to [x, y, cos, sin]
+        interpolated_ego_past_4d = torch.cat([
+            interpolated_ego_past_heading[..., :2],  # x, y
+            torch.cos(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # cos
+            torch.sin(interpolated_ego_past_heading[..., 2]).unsqueeze(-1)   # sin
+        ], dim=-1)
+
+        # Concatenate with remaining past trajectory to match original length
+        P = self.num_refine
+        if ego_past.shape[1] > P:
+            interpolated_ego_past = torch.cat([
+                ego_past[:, :-(P), :],  # Keep older past
+                interpolated_ego_past_4d  # Replace recent past with interpolated
+            ], dim=1)
+        else:
+            interpolated_ego_past = interpolated_ego_past_4d
 
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
@@ -219,8 +244,8 @@ class StatePerturbation:
         inputs["ego_agent_past"][..., :2] = vector_transform(
             inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
         )
-        inputs["ego_agent_past"][..., 2] = heading_transform(
-            inputs["ego_agent_past"][..., 2], transform_matrix
+        inputs["ego_agent_past"][..., 2:4] = vector_transform(
+            inputs["ego_agent_past"][..., 2:4], transform_matrix
         )
 
         # neighbor past xy
@@ -299,13 +324,14 @@ class StatePerturbation:
 
         return inputs, ego_future, neighbors_future
 
-    def interpolation_future_trajectory(self, aug_current_state, ego_future):
+    def interpolation_future_trajectory(self, aug_current_state, ego_future, keep_remaining=True):
         """
         refine future trajectory with quintic spline interpolation
 
         Args:
             aug_current_state: (B, 16) current state of the ego vehicle after augmentation
-            ego_future:        (B, 80, 3) future trajectory of the ego vehicle
+            ego_future:        (B, T, 3) future trajectory of the ego vehicle
+            keep_remaining:    If True, keep the remaining trajectory after P frames (default: True)
 
         Returns:
             ego_future: refined future trajectory of the ego vehicle
@@ -386,10 +412,12 @@ class StatePerturbation:
             dim=1,
         )
 
-        return torch.concatenate(
-            [torch.cat([traj_x, traj_y, traj_heading[..., None]], axis=-1), ego_future[:, P:, :]],
-            axis=1,
-        )
+        interpolated = torch.cat([traj_x, traj_y, traj_heading[..., None]], axis=-1)
+
+        if keep_remaining and ego_future.shape[1] > P:
+            return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
+        else:
+            return interpolated
 
 
 if __name__ == "__main__":
@@ -416,7 +444,7 @@ if __name__ == "__main__":
     data = {}
     for key, value in loaded.items():
         data[key] = torch.tensor(value).unsqueeze(0)
-        if key == "goal_pose":
+        if key == "goal_pose" or key == "ego_agent_past":
             data[key] = heading_to_cos_sin(data[key])
 
     # Load future trajectories separately
