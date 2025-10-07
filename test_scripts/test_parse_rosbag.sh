@@ -25,7 +25,7 @@ if [ "$converter_type" = "python" ]; then
         --min_frames 0 2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
 elif [ "$converter_type" = "cpp" ]; then
     python3 ./ros_scripts/parse_rosbag_by_cpp.py \
-        /home/ubuntu/autoware/build/autoware_diffusion_planner/data_converter \
+        $HOME/autoware/build/autoware_diffusion_planner/data_converter \
         ${bag} \
         ${map} \
         ${result_dir}/tmp \
