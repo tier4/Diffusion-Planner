@@ -75,7 +75,7 @@ class TrafficLightStateMachine:
         elif self.traffic_light_status == self.GREEN:
             self.green_time += dt
             # 緑から黄色への遷移
-            if self.green_time >= 10.0:
+            if self.green_time >= 20.0:
                 self.traffic_light_status = self.YELLOW
                 self.stopped_time = 0.0
                 self.green_time = 0.0
@@ -83,7 +83,7 @@ class TrafficLightStateMachine:
         elif self.traffic_light_status == self.YELLOW:
             self.yellow_time += dt
             # 黄色から赤への遷移
-            if self.yellow_time >= 10.0:
+            if self.yellow_time >= 5.0:
                 self.traffic_light_status = self.RED
                 self.stopped_time = 0.0
                 self.green_time = 0.0
