@@ -326,7 +326,7 @@ class StatePerturbation:
 
     def interpolation_future_trajectory(self, aug_current_state, ego_future, keep_remaining=True):
         """
-        refine future trajectory with quintic spline interpolation
+        refine future trajectory with quintic Hermite interpolation
 
         Args:
             aug_current_state: (B, 16) current state of the ego vehicle after augmentation
