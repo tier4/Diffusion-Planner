@@ -475,7 +475,8 @@ if __name__ == "__main__":
     fig, ax = plt.subplots(figsize=(10, 10))
 
     # Visualize inputs on the ax
-    visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[60])
+    view_range = 20
+    visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
 
     # Get augmentation ranges from the aug object
     lo = aug._low.cpu().numpy()[0]  # Extract from tuple
@@ -526,6 +527,8 @@ if __name__ == "__main__":
         np.savez(output_path, **data_dict)
 
         # Use deepcopy to avoid side effects from visualize_inputs
-        visualize_inputs(deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[20])
+        visualize_inputs(
+            deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[view_range]
+        )
 
     print(f"Augmented data saved: {trial_num} files to {save_dir}")
