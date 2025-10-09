@@ -104,10 +104,15 @@ class StatePerturbation:
         ego_past = inputs["ego_agent_past"]
 
         # Convert past from [x, y, cos, sin] to [x, y, heading]
-        ego_past_heading = torch.cat([
-            ego_past[..., :2],  # x, y
-            torch.atan2(ego_past[..., 3], ego_past[..., 2]).unsqueeze(-1)  # heading from cos, sin
-        ], dim=-1)
+        ego_past_heading = torch.cat(
+            [
+                ego_past[..., :2],  # x, y
+                torch.atan2(ego_past[..., 3], ego_past[..., 2]).unsqueeze(
+                    -1
+                ),  # heading from cos, sin
+            ],
+            dim=-1,
+        )
 
         ego_past_reversed = torch.flip(ego_past_heading, dims=[1])
         interpolated_ego_past_reversed = self.interpolation_future_trajectory(
@@ -118,22 +123,30 @@ class StatePerturbation:
 
         # rotate 180 degrees to align with the ego's current heading
         interpolated_ego_past_heading[..., 2] += np.pi
-        interpolated_ego_past_heading[..., 2] = self.normalize_angle(interpolated_ego_past_heading[..., 2])
+        interpolated_ego_past_heading[..., 2] = self.normalize_angle(
+            interpolated_ego_past_heading[..., 2]
+        )
 
         # Convert back to [x, y, cos, sin]
-        interpolated_ego_past_4d = torch.cat([
-            interpolated_ego_past_heading[..., :2],  # x, y
-            torch.cos(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # cos
-            torch.sin(interpolated_ego_past_heading[..., 2]).unsqueeze(-1)   # sin
-        ], dim=-1)
+        interpolated_ego_past_4d = torch.cat(
+            [
+                interpolated_ego_past_heading[..., :2],  # x, y
+                torch.cos(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # cos
+                torch.sin(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # sin
+            ],
+            dim=-1,
+        )
 
         # Concatenate with remaining past trajectory to match original length
         P = self.num_refine
         if ego_past.shape[1] > P:
-            interpolated_ego_past = torch.cat([
-                ego_past[:, :-(P), :],  # Keep older past
-                interpolated_ego_past_4d  # Replace recent past with interpolated
-            ], dim=1)
+            interpolated_ego_past = torch.cat(
+                [
+                    ego_past[:, :-(P), :],  # Keep older past
+                    interpolated_ego_past_4d,  # Replace recent past with interpolated
+                ],
+                dim=1,
+            )
         else:
             interpolated_ego_past = interpolated_ego_past_4d
 
