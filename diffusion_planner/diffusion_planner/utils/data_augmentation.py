@@ -513,6 +513,6 @@ if __name__ == "__main__":
         np.savez(output_path, **data_dict)
 
         # Use deepcopy to avoid side effects from visualize_inputs
-        visualize_inputs(deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[60])
+        visualize_inputs(deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[20])
 
     print(f"Augmented data saved: {trial_num} files to {save_dir}")
