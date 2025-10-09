@@ -119,6 +119,23 @@ def draw_ego_vehicle(ax, inputs):
             label="Ego Past Trajectory",
         )
 
+        # plot as arrow
+        # for t in range(0, ego_past.shape[0], 4):
+        #     cos = ego_past[t, 2]
+        #     sin = ego_past[t, 3]
+        #     ax.arrow(
+        #         ego_past[t, 0],
+        #         ego_past[t, 1],
+        #         cos,
+        #         sin,
+        #         width=0.3,
+        #         head_width=0.8,
+        #         head_length=0.3,
+        #         fc="orange",
+        #         ec="orange",
+        #         alpha=0.5,
+        #     )
+
     # Draw future trajectory
     if "ego_agent_future" in inputs:
         ego_future = inputs["ego_agent_future"][0]
@@ -128,6 +145,25 @@ def draw_ego_vehicle(ax, inputs):
             t_values = np.linspace(0, 1, len(valid_future))
             colors = [[1.0 * t, 0.0, 1.0 * (1 - t)] for t in t_values]
             ax.scatter(valid_future[:, 0], valid_future[:, 1], c=colors, alpha=0.5, s=20)
+
+        # plot as arrow
+        # for t in range(0, ego_future.shape[0], 4):
+        #     if ego_future[t, 0] == 0 and ego_future[t, 1] == 0:
+        #         continue
+        #     cos = np.cos(ego_future[t, 2])
+        #     sin = np.sin(ego_future[t, 2])
+        #     ax.arrow(
+        #         ego_future[t, 0],
+        #         ego_future[t, 1],
+        #         cos,
+        #         sin,
+        #         width=0.3,
+        #         head_width=0.8,
+        #         head_length=0.3,
+        #         fc="blue",
+        #         ec="blue",
+        #         alpha=0.5,
+        #     )
 
         # Draw bounding boxes at 4 seconds and 8 seconds
         for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
