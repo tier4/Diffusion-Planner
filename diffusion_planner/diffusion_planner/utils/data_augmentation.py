@@ -116,6 +116,10 @@ class StatePerturbation:
         # Flip back to get the past trajectory
         interpolated_ego_past_heading = torch.flip(interpolated_ego_past_reversed, dims=[1])
 
+        # rotate 180 degrees to align with the ego's current heading
+        interpolated_ego_past_heading[..., 2] += np.pi
+        interpolated_ego_past_heading[..., 2] = self.normalize_angle(interpolated_ego_past_heading[..., 2])
+
         # Convert back to [x, y, cos, sin]
         interpolated_ego_past_4d = torch.cat([
             interpolated_ego_past_heading[..., :2],  # x, y
