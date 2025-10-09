@@ -139,8 +139,12 @@ class StatePerturbation:
                 tck, u = splprep(curr_xy, u=time_fixed, s=0.0, k=3)
                 out = splev(time_to_interpolate, tck)
 
-                concatenated[b, ~flag_to_remain, 0] = torch.tensor(out[0], dtype=torch.float32)
-                concatenated[b, ~flag_to_remain, 1] = torch.tensor(out[1], dtype=torch.float32)
+                concatenated[b, ~flag_to_remain, 0] = torch.tensor(
+                    out[0], dtype=torch.float32, device=concatenated.device
+                )
+                concatenated[b, ~flag_to_remain, 1] = torch.tensor(
+                    out[1], dtype=torch.float32, device=concatenated.device
+                )
 
                 # fixed heading
                 for i in range(0, concatenated_fixed.shape[1]):
