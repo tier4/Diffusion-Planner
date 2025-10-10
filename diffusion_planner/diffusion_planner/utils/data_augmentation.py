@@ -30,7 +30,6 @@ def heading_transform(heading, transform_mat):
     """
     B = heading.shape[0]
     shape = heading.shape
-    nexpand = heading.ndim - 1
     heading = heading.reshape(B, -1)
     transform_mat = transform_mat.reshape(B, 1, 2, 2)
     return torch.atan2(
@@ -95,7 +94,7 @@ class StatePerturbation:
     def __call__(self, inputs, ego_future, neighbors_future):
         aug_flag, aug_ego_current_state = self.augment(inputs)
 
-        use_new_interpolation = True
+        use_new_interpolation = False
 
         # Interpolate past trajectory by reversing time
         # Flip the past trajectory to treat it as future
@@ -220,7 +219,7 @@ class StatePerturbation:
 
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
-        inputs["ego_agent_past"][aug_flag] = interpolated_ego_past[aug_flag]
+        # inputs["ego_agent_past"][aug_flag] = interpolated_ego_past[aug_flag]
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
@@ -326,12 +325,12 @@ class StatePerturbation:
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
 
         # ego past
-        inputs["ego_agent_past"][..., :2] = vector_transform(
-            inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
-        )
-        inputs["ego_agent_past"][..., 2:4] = vector_transform(
-            inputs["ego_agent_past"][..., 2:4], transform_matrix
-        )
+        # inputs["ego_agent_past"][..., :2] = vector_transform(
+        #     inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
+        # )
+        # inputs["ego_agent_past"][..., 2:4] = vector_transform(
+        #     inputs["ego_agent_past"][..., 2:4], transform_matrix
+        # )
 
         # neighbor past xy
         mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
