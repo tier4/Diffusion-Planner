@@ -54,7 +54,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
             neighbors_future[mask] = 0.0
             inputs = args.observation_normalizer(inputs)
 
-            # call the mdoel
+            # call the model
             optimizer.zero_grad()
 
             loss = diffusion_loss_func(
