@@ -183,7 +183,7 @@ def model_training(args):
     # training parameters
     train_epochs = args.train_epochs
     batch_size = args.batch_size
-    save_utd = max(train_epochs // 25, 1)
+    save_utd = max(train_epochs // 50, 1)
 
     # set up data loaders
     aug = (
