@@ -5,6 +5,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from diffusion_planner.model.guidance.collision import (
+    batch_signed_distance_rect,
+    center_rect_to_points,
+)
+
 
 def diffusion_loss_func(
     model: nn.Module,
@@ -326,52 +331,63 @@ def lane_boundary_penalty(
 
 
 def neighbor_clearance_penalty(
-    ego_center_xy: torch.Tensor,
-    ego_length: torch.Tensor,
-    ego_width: torch.Tensor,
+    ego_bbox_corners: torch.Tensor,
     neighbors_future: torch.Tensor,
     neighbors_future_valid: torch.Tensor,
     denorm_inputs: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    """Compute neighbor clearance penalty."""
+    """Compute neighbor clearance penalty using oriented rectangles."""
 
-    neighbor_xy = neighbors_future[..., :2]
-    valid_mask = neighbors_future_valid.to(ego_center_xy.dtype)
+    B, T, _, _ = ego_bbox_corners.shape
+    P = neighbors_future.shape[1]
 
-    B = ego_center_xy.shape[0]
-    device = ego_center_xy.device
-    dtype = ego_center_xy.dtype
+    neighbor_sizes = denorm_inputs["neighbor_agents_past"][:, :P, -1, :]
+    neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3)
+    neighbor_length = torch.clamp(neighbor_sizes[..., 7], min=1e-3)
 
-    neighbor_sizes = denorm_inputs.get("neighbor_agents_past")
-    if neighbor_sizes is not None:
-        neighbor_sizes = neighbor_sizes[:, : neighbor_xy.shape[1], -1, :]
-        neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3)
-        neighbor_length = torch.clamp(neighbor_sizes[..., 7], min=1e-3)
-        neighbor_radius = 0.5 * torch.sqrt(neighbor_width**2 + neighbor_length**2)
-    else:
-        neighbor_radius = torch.zeros((B, neighbor_xy.shape[1]), device=device, dtype=dtype)
+    neighbor_pos = neighbors_future[..., :2]
+    neighbor_cos = neighbors_future[..., 2]
+    neighbor_sin = neighbors_future[..., 3]
+    orientation_norm = torch.sqrt(neighbor_cos**2 + neighbor_sin**2).clamp_min(1e-6)
+    neighbor_cos = neighbor_cos / orientation_norm
+    neighbor_sin = neighbor_sin / orientation_norm
 
-    ego_radius = 0.5 * torch.sqrt(
-        torch.clamp(ego_length, min=1e-3) ** 2 + torch.clamp(ego_width, min=1e-3) ** 2
-    )
+    neighbor_length = neighbor_length[..., None].expand(-1, -1, T)
+    neighbor_width = neighbor_width[..., None].expand(-1, -1, T)
 
-    delta = ego_center_xy.unsqueeze(1) - neighbor_xy
-    dist = torch.linalg.norm(delta, dim=-1)
-    clearance = dist - (ego_radius[:, None, None] + neighbor_radius[:, :, None])
+    neighbor_rect = torch.stack(
+        [
+            neighbor_pos[..., 0],
+            neighbor_pos[..., 1],
+            neighbor_cos,
+            neighbor_sin,
+            neighbor_length,
+            neighbor_width,
+        ],
+        dim=-1,
+    )  # [B, P, T, 6]
+
+    ego_flat = ego_bbox_corners.reshape(B * T, 4, 2)
+    neighbor_flat = neighbor_rect.reshape(B * T, P, 6)
+    valid_mask = neighbors_future_valid.reshape(B * T, P)
+
+    ego_pts = ego_flat.unsqueeze(1).expand(-1, P, 4, 2).reshape(-1, 4, 2)
+    neighbor_pts = center_rect_to_points(neighbor_flat.reshape(-1, 6))
+    distances = batch_signed_distance_rect(ego_pts, neighbor_pts)
+    distances = distances.reshape(B * T, P)
+
+    inf_tensor = torch.full_like(distances, float("inf"))
+    distances = torch.where(valid_mask, distances, inf_tensor)
+
+    min_distance, _ = distances.min(dim=1)
+    min_distance = min_distance.reshape(B, T)
 
     neighbor_margin = 0.5
-    neighbor_weight = 1.0
-    neighbor_violation = F.relu(neighbor_margin - clearance) * valid_mask
-    valid_count = valid_mask.sum(dim=1)
-    aggregated = neighbor_violation.sum(dim=1)
-    neighbor_penalty = torch.where(
-        valid_count > 0,
-        aggregated / (valid_count + 1e-6),
-        torch.zeros_like(aggregated),
-    )
-    neighbor_penalty = neighbor_weight * neighbor_penalty
+    penalty = torch.zeros_like(min_distance)
+    finite_mask = torch.isfinite(min_distance)
+    penalty[finite_mask] = F.relu(neighbor_margin - min_distance[finite_mask])
 
-    return neighbor_penalty
+    return penalty
 
 
 def compute_safety_penalty(
@@ -428,9 +444,7 @@ def compute_safety_penalty(
 
     lane_penalty = lane_boundary_penalty(ego_bbox_corners, denorm_inputs["route_lanes"])
     neighbor_penalty = neighbor_clearance_penalty(
-        ego_center_xy,
-        ego_length,
-        ego_width,
+        ego_bbox_corners,
         neighbors_future,
         neighbors_future_valid,
         denorm_inputs,
