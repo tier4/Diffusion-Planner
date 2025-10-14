@@ -57,6 +57,8 @@ if __name__ == "__main__":
     trajectory_dict_y = defaultdict(list)
     loss_3sec_dict = defaultdict(list)
     loss_ego_position_lat = defaultdict(list)
+    loss_ego_lane_boundary_margin_loss = defaultdict(list)
+    loss_ego_neighbor_margin_loss = defaultdict(list)
     loss_list = []
     for info_path, loss_path in zip(info_path_list, loss_path_list):
         assert info_path.is_file()
@@ -70,6 +72,10 @@ if __name__ == "__main__":
         loss_3sec_dict[time_str].append(loss_data["loss_ego_3sec"])
         loss_list.append(loss_data["loss_ego_3sec"])
         loss_ego_position_lat[time_str].append(loss_data["ego_position_lat_loss"])
+        loss_ego_lane_boundary_margin_loss[time_str].append(
+            loss_data["ego_lane_boundary_margin_loss"]
+        )
+        loss_ego_neighbor_margin_loss[time_str].append(loss_data["ego_neighbor_margin_loss"])
 
     assert len(prediction_path_list) == len(valid_data_path_list)
 
@@ -98,10 +104,14 @@ if __name__ == "__main__":
             return
         valid_data_path = Path(valid_data_path)
         prediction_path = Path(prediction_path)
+        valid_loss_path = (
+            prediction_path.parent / f"{prediction_path.stem.replace('prediction', 'loss')}.json"
+        )
         info_data_path = valid_data_path.parent / f"{valid_data_path.stem}.json"
         valid_data = np.load(valid_data_path)
         output_dict = np.load(prediction_path)
         info_data = json.load(open(info_data_path, "r"))
+        valid_loss = json.load(open(valid_loss_path, "r"))
         ego_x = info_data["x"]
         ego_y = info_data["y"]
 
@@ -161,6 +171,7 @@ if __name__ == "__main__":
                     f"\nloss{timestep // 10}sec={diff_m:.2f}[m]\n"
                     f"lat={lat_error_ego[index]:.2f}[m], lon={lon_error_ego[index]:.2f}[m], angle={angle_error_ego[index]:.2f}[rad]"
                 )
+        title += f"\nego_lane_boundary_margin_loss={valid_loss['ego_lane_boundary_margin_loss']:.2f}, ego_neighbor_margin_loss={valid_loss['ego_neighbor_margin_loss']:.2f}"
 
         # Neighbors
         neighbors = valid_data_dict["neighbor_agents_past"][0]

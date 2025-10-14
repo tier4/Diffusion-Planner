@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.loss import loss_func
+from diffusion_planner.loss import compute_safety_penalty, loss_func
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
@@ -105,6 +105,18 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         for key, val in loss_dict.items():
             # val : (B, Pn + 1, T)
             total_result_dict[f"ego_{key}"].append(val[:, 0, :])  # (B, T)
+
+        safety_penalty, _, (lane_penalty, neighbor_penalty) = compute_safety_penalty(
+            args.state_normalizer(prediction),
+            inputs,
+            neighbors_future,
+            neighbors_future_valid,
+            args,
+            return_components=True,
+        )
+        total_result_dict["ego_safety_margin_loss"].append(safety_penalty)
+        total_result_dict["ego_lane_boundary_margin_loss"].append(lane_penalty)
+        total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty)
 
     avg_loss_ego = total_loss_ego / total_samples_ego
     avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)
@@ -290,6 +302,20 @@ if __name__ == "__main__":
     print(f"{avg_loss_ego=:.4f} {avg_loss_neighbor=:.4f}")
     print(f"{predictions.shape=}")
     print(f"{turn_indicators.shape=}")
+    if "ego_safety_margin_loss" in valid_dict:
+        print(
+            f"ego_safety_margin_loss_mean={valid_dict['ego_safety_margin_loss'].mean().item():.4f}"
+        )
+    if "ego_lane_boundary_margin_loss" in valid_dict:
+        print(
+            "ego_lane_boundary_margin_loss_mean="
+            f"{valid_dict['ego_lane_boundary_margin_loss'].mean().item():.4f}"
+        )
+    if "ego_neighbor_margin_loss" in valid_dict:
+        print(
+            "ego_neighbor_margin_loss_mean="
+            f"{valid_dict['ego_neighbor_margin_loss'].mean().item():.4f}"
+        )
 
     valid_dict_to_save = {
         "avg_loss_ego": avg_loss_ego,
