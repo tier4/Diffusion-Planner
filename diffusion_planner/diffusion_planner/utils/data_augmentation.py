@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from scipy.interpolate import splev, splprep
 
-NUM_REFINE = 5
+NUM_REFINE = 20
 TIME_INTERVAL = 0.1
 
 
