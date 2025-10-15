@@ -34,56 +34,56 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     if args.ddp:
         torch.cuda.synchronize()
 
-    with tqdm(data_loader, desc="Training", unit="batch") as data_epoch:
-        for inputs in data_epoch:
-            inputs = {key: value.to(args.device) for key, value in inputs.items()}
-            inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-            inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+    if ddp.get_rank() == 0:
+        data_loader = tqdm(data_loader, desc="Training", unit="batch")
 
-            ego_future = inputs["ego_agent_future"]
-            neighbors_future = inputs["neighbor_agents_future"]
-            # Normalize to ego-centric
-            if aug is not None:
-                inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
+    for inputs in data_loader:
+        inputs = {key: value.to(args.device) for key, value in inputs.items()}
+        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
+        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
-            # heading to cos sin
-            ego_future = heading_to_cos_sin(ego_future)
+        ego_future = inputs["ego_agent_future"]
+        neighbors_future = inputs["neighbor_agents_future"]
+        # Normalize to ego-centric
+        if aug is not None:
+            inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
 
-            mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
-            neighbors_future = heading_to_cos_sin(neighbors_future)
-            neighbors_future[mask] = 0.0
-            inputs = args.observation_normalizer(inputs)
+        # heading to cos sin
+        ego_future = heading_to_cos_sin(ego_future)
 
-            # call the model
-            optimizer.zero_grad()
+        mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+        neighbors_future = heading_to_cos_sin(neighbors_future)
+        neighbors_future[mask] = 0.0
+        inputs = args.observation_normalizer(inputs)
 
-            loss = diffusion_loss_func(
-                model,
-                inputs,
-                ddp.get_model(model, args.ddp).sde.marginal_prob,
-                (ego_future, neighbors_future, mask),
-                args,
-            )
+        # call the model
+        optimizer.zero_grad()
 
-            loss["loss"] = (
-                loss["neighbor_prediction_loss"]
-                + args.alpha_planning_loss * loss["ego_planning_loss"]
-                + loss["turn_indicator_loss"]
-            )
+        loss = diffusion_loss_func(
+            model,
+            inputs,
+            ddp.get_model(model, args.ddp).sde.marginal_prob,
+            (ego_future, neighbors_future, mask),
+            args,
+        )
 
-            # loss backward
-            loss["loss"].backward()
+        loss["loss"] = (
+            loss["neighbor_prediction_loss"]
+            + args.alpha_planning_loss * loss["ego_planning_loss"]
+            + loss["turn_indicator_loss"]
+        )
 
-            nn.utils.clip_grad_norm_(model.parameters(), 5)
-            optimizer.step()
+        # loss backward
+        loss["loss"].backward()
 
-            ema.update(model)
+        nn.utils.clip_grad_norm_(model.parameters(), 5)
+        optimizer.step()
 
-            if args.ddp:
-                torch.cuda.synchronize()
+        ema.update(model)
 
-            data_epoch.set_postfix(loss="{:.4f}".format(loss["loss"].item()))
-            epoch_loss.append(loss)
+        if args.ddp:
+            torch.cuda.synchronize()
+        epoch_loss.append(loss)
 
     epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
 
