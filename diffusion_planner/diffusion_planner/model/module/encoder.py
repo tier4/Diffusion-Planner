@@ -42,6 +42,7 @@ class Encoder(nn.Module):
         self.hidden_dim = config.hidden_dim
 
         self.use_ego_history = config.use_ego_history
+        self.use_turn_indicators = config.use_turn_indicators
 
         ego_num = 1
         goal_pose_num = 1
@@ -172,6 +173,8 @@ class Encoder(nn.Module):
         # turn indicator
         turn_indicator = inputs["turn_indicators"][:, :-1]  # (B, T)
         turn_indicator = turn_indicator.float()
+        if not self.use_turn_indicators:
+            turn_indicator = torch.zeros_like(turn_indicator)
 
         B = neighbors.shape[0]
 
