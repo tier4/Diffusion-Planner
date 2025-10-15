@@ -26,4 +26,4 @@ python3 util_scripts/visualize_prediction.py \
   --predictions_dir $SAVE_DIR \
   --valid_data_list $VALID_SET_LIST_PATH
 
-~/misc/ffmpeg_lib/process_subdir.sh $SAVE_DIR/visualization
+~/misc/ffmpeg_lib/process_subdir.sh $SAVE_DIR/../visualization
