@@ -55,7 +55,7 @@ if __name__ == "__main__":
     ]
     trajectory_dict_x = defaultdict(list)
     trajectory_dict_y = defaultdict(list)
-    loss_3sec_dict = defaultdict(list)
+    loss_ego_3sec = defaultdict(list)
     loss_ego_position_lat = defaultdict(list)
     loss_ego_lane_boundary_margin_loss = defaultdict(list)
     loss_ego_neighbor_margin_loss = defaultdict(list)
@@ -69,7 +69,7 @@ if __name__ == "__main__":
         trajectory_dict_y[time_str].append(pose_data["y"])
 
         loss_data = json.load(open(loss_path, "r"))
-        loss_3sec_dict[time_str].append(loss_data["loss_ego_3sec"])
+        loss_ego_3sec[time_str].append(loss_data["loss_ego_3sec"])
         loss_list.append(loss_data["loss_ego_3sec"])
         loss_ego_position_lat[time_str].append(loss_data["ego_position_lat_loss"])
         loss_ego_lane_boundary_margin_loss[time_str].append(
