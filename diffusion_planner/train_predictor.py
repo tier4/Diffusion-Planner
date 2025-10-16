@@ -362,17 +362,24 @@ def model_training(args):
             torch.save(model_dict, f"{save_path}/latest.pth")
 
             if (epoch + 1) % save_utd == 0:
-                torch.save(
-                    model_dict,
-                    f"{save_path}/model_epoch_{epoch + 1:06d}_loss_{valid_loss_ego:.4f}.pth",
-                )
+                curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
+                os.makedirs(curr_dir, exist_ok=True)
+                torch.save(model_dict, f"{curr_dir}/best_model.pth")
+                with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
+                    json.dump(curr_data, f, indent=4)
+                with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
+                    json.dump(args_dict, f, indent=4)
 
             if valid_loss_ego_position_lat_loss < best_loss:
-                torch.save(model_dict, f"{save_path}/best_model.pth")
+                curr_dir = os.path.join(save_path, "best_model")
+                os.makedirs(curr_dir, exist_ok=True)
+                torch.save(model_dict, f"{curr_dir}/best_model.pth")
                 best_loss = valid_loss_ego_position_lat_loss
                 curr_data["best_loss"] = best_loss
-                with open(os.path.join(save_path, "best_model_info.json"), "w") as f:
+                with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
                     json.dump(curr_data, f, indent=4)
+                with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
+                    json.dump(args_dict, f, indent=4)
                 no_improvement_count = 0
             else:
                 no_improvement_count += 1
