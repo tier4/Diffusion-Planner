@@ -34,10 +34,16 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     loss_ego_list = []
 
     total_result_dict = defaultdict(list)
+    turn_indicator_correct = 0.0
+    turn_indicator_total = 0
+    turn_indicator_change_correct = 0.0
+    turn_indicator_change_total = 0
 
     for inputs in val_loader:
         inputs = {key: value.to(device) for key, value in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
+
+        turn_indicator_seq = inputs["turn_indicators"]
 
         inputs["sampled_trajectories"] = 0.5 * torch.randn(B, 33, 81, 4, dtype=torch.float32)
 
@@ -83,6 +89,15 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         prediction = outputs["prediction"]
         turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
+        turn_indicator_gt = turn_indicator_seq[:, -1].long()
+        correct = (turn_indicator == turn_indicator_gt).long()
+        turn_indicator_correct += correct.sum().item()
+        turn_indicator_total += correct.numel()
+        change_mask = turn_indicator_seq[:, -1] != turn_indicator_seq[:, -2]
+        change_count = change_mask.sum().item()
+        if change_count > 0:
+            turn_indicator_change_correct += correct[change_mask].sum().item()
+            turn_indicator_change_total += change_count
         if return_pred:
             predictions.append(prediction)
             turn_indicators.append(turn_indicator)
@@ -128,12 +143,23 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     if return_pred:
         predictions = torch.cat(predictions, dim=0)
         turn_indicators = torch.cat(turn_indicators, dim=0)
+    turn_indicator_accuracy = (
+        turn_indicator_correct / turn_indicator_total if turn_indicator_total > 0 else 0.0
+    )
+    turn_indicator_change_accuracy = (
+        turn_indicator_change_correct / turn_indicator_change_total
+        if turn_indicator_change_total > 0
+        else 0.0
+    )
     return {
         "avg_loss_ego": avg_loss_ego,
         "avg_loss_neighbor": avg_loss_neighbor,
         "loss_ego": loss_ego,
         "predictions": predictions,
         "turn_indicators": turn_indicators,
+        "turn_indicator_accuracy": turn_indicator_accuracy,
+        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+        "turn_indicator_change_total": turn_indicator_change_total,
         **total_result_dict,
     }
 
@@ -299,9 +325,17 @@ if __name__ == "__main__":
     avg_loss_neighbor = valid_dict["avg_loss_neighbor"]
     predictions = valid_dict["predictions"]
     turn_indicators = valid_dict["turn_indicators"]
+    turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
+    turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
+    turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
     print(f"{avg_loss_ego=:.4f} {avg_loss_neighbor=:.4f}")
     print(f"{predictions.shape=}")
     print(f"{turn_indicators.shape=}")
+    print(f"{turn_indicator_accuracy=:.4f}")
+    if turn_indicator_change_total > 0:
+        print(f"{turn_indicator_change_accuracy=:.4f} ({turn_indicator_change_total=:d})")
+    else:
+        print("turn_indicator_change_accuracy=0.0000 (num_samples=0)")
     if "ego_safety_margin_loss" in valid_dict:
         print(
             f"ego_safety_margin_loss_mean={valid_dict['ego_safety_margin_loss'].mean().item():.4f}"
@@ -320,6 +354,9 @@ if __name__ == "__main__":
     valid_dict_to_save = {
         "avg_loss_ego": avg_loss_ego,
         "avg_loss_neighbor": avg_loss_neighbor,
+        "turn_indicator_accuracy": turn_indicator_accuracy,
+        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+        "turn_indicator_change_total": turn_indicator_change_total,
     }
     for key, val in valid_dict.items():
         if key.startswith("ego_"):
