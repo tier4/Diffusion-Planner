@@ -99,6 +99,9 @@ def diffusion_loss_func(
             position_lon_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
             heading_l2_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
 
+        # mask neighbors' heading loss
+        # heading_l2_loss[:, 1:] *= 0.0
+
         dpm_loss = (
             args.coeff_position_lat_loss * position_lat_loss
             + args.coeff_position_lon_loss * position_lon_loss
