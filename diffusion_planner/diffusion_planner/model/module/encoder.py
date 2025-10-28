@@ -204,7 +204,9 @@ class Encoder(nn.Module):
 
         encoding_goal_pose, goal_pose_mask, goal_pose_pos = self.goal_pose_encoder(goal_pose)
         encoding_ego_shape, ego_shape_mask, ego_shape_pos = self.ego_shape_encoder(ego_shape)
-        encoding_turn_indicator, turn_indicator_mask, turn_indicator_pos = self.turn_indicator_encoder(turn_indicator)
+        encoding_turn_indicator, turn_indicator_mask, turn_indicator_pos = (
+            self.turn_indicator_encoder(turn_indicator)
+        )
 
         encoding_input = torch.cat(
             [
@@ -261,9 +263,7 @@ class Encoder(nn.Module):
 
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
-        encoder_outputs = self.fusion(
-            encoding_input, encoding_mask.view(B, self.token_num)
-        )
+        encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
 
         return encoder_outputs
 
