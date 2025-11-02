@@ -321,8 +321,10 @@ def model_training(args):
         mean_ego_loss_dict = mean_ego_loss(valid_dict)
         valid_loss_ego_position_lat_loss = mean_ego_loss_dict["valid_loss/ego_position_lat_loss"]
         valid_loss_ego_position_lon_loss = mean_ego_loss_dict["valid_loss/ego_position_lon_loss"]
+        turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
+        turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
         print(
-            f"{valid_loss_ego=:.3f}, {valid_loss_neighbor=:.3f}, {valid_loss_ego_position_lat_loss=:.3f}, {valid_loss_ego_position_lon_loss=:.3f}"
+            f"{valid_loss_ego=:.3f}, {valid_loss_neighbor=:.3f}, {valid_loss_ego_position_lat_loss=:.3f}, {valid_loss_ego_position_lon_loss=:.3f}, {turn_indicator_accuracy=:.3f}, {turn_indicator_change_accuracy=:.3f}"
         )
 
         if global_rank == 0:
@@ -333,6 +335,8 @@ def model_training(args):
                     **{f"lr/{k}": v for k, v in lr_dict.items()},
                     "valid_loss/ego": valid_loss_ego,
                     "valid_loss/neighbors": valid_loss_neighbor,
+                    "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
+                    "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                     **mean_ego_loss_dict,
                 },
                 step=epoch + 1,
