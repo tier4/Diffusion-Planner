@@ -5,10 +5,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_KEEP
 from diffusion_planner.model.guidance.collision import (
     batch_signed_distance_rect,
     center_rect_to_points,
 )
+
+
+def make_turn_indicator_gt(
+    turn_indicators: torch.Tensor,  # # [B, INPUT_T + 1]
+) -> torch.Tensor:
+    turn_indicators_gt = turn_indicators.long()  # [B, INPUT_T + 1]
+    turn_indicators_gt_keep = turn_indicators_gt[:, -1] == turn_indicators_gt[:, -2]  # [B,]
+    turn_indicators_gt = turn_indicators_gt[:, -1] * ~turn_indicators_gt_keep  # change to 0 if keep
+    turn_indicators_gt = turn_indicators_gt + turn_indicators_gt_keep * TURN_INDICATOR_OUTPUT_KEEP
+    return turn_indicators_gt
 
 
 def diffusion_loss_func(
@@ -137,10 +148,8 @@ def diffusion_loss_func(
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
-    turn_indicator_logit = decoder_output["turn_indicator_logit"]  # [B, 4]
-    turn_indicator_gt = inputs["turn_indicators"]  # [B, INPUT_T + 1]
-    turn_indicator_gt = turn_indicator_gt[:, -1]  # [B,]
-    turn_indicator_gt = turn_indicator_gt.long()
+    turn_indicator_logit = decoder_output["turn_indicator_logit"]  # [B, TURN_INDICATOR_OUTPUT_KEEP]
+    turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
     turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_logit, turn_indicator_gt, reduction="mean"
     )

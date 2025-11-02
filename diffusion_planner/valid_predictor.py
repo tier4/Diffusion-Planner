@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.loss import compute_safety_penalty, loss_func
+from diffusion_planner.loss import compute_safety_penalty, loss_func, make_turn_indicator_gt
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
@@ -89,7 +89,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         prediction = outputs["prediction"]
         turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
-        turn_indicator_gt = turn_indicator_seq[:, -1].long()
+        turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
         correct = (turn_indicator == turn_indicator_gt).long()
         turn_indicator_correct += correct.sum().item()
         turn_indicator_total += correct.numel()

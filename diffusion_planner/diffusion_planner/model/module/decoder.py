@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from timm.models.layers import Mlp
 
+from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
 from diffusion_planner.model.diffusion_utils.sampling import dpm_sampler
 from diffusion_planner.model.diffusion_utils.sde import SDE, VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
@@ -34,7 +35,7 @@ class Decoder(nn.Module):
             model_type=config.diffusion_model_type,
         )
         self.turn_indicator_predictor = nn.Linear(
-            2 * (self._future_len // 10) + config.hidden_dim, 4
+            2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
         )
 
         self._state_normalizer: StateNormalizer = config.state_normalizer
