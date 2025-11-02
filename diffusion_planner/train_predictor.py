@@ -77,14 +77,14 @@ def get_args():
     parser.add_argument("--seed", type=int, help="fix random seed", default=3407)
     parser.add_argument("--train_epochs", type=int, help="epochs of training", default=500)
     parser.add_argument(
-        "--early_stop_tolerance", type=int, help="early stop tolerance", default=100
+        "--early_stop_tolerance", type=int, help="early stop tolerance", default=50
     )
     parser.add_argument("--batch_size", type=int, help="batch size (default: 2048)", default=2048)
     parser.add_argument("--learning_rate", type=float, help="learning rate", default=5e-4)
     parser.add_argument("--warm_up_epoch", type=int, help="number of warm up", default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
-    parser.add_argument("--use_ego_history", type=boolean, default=True)
+    parser.add_argument("--use_ego_history", type=boolean, default=False)
     parser.add_argument("--use_turn_indicators", type=boolean, default=False)
 
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
