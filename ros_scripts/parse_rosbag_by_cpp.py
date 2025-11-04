@@ -17,6 +17,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
     parser.add_argument("--search_nearest_route", type=int, default=1)
+    parser.add_argument("--convert_yellow", type=int, default=0)
+    parser.add_argument("--convert_red", type=int, default=0)
     return parser.parse_args()
 
 
@@ -29,11 +31,13 @@ def main(
     limit: int,
     min_frames: int,
     search_nearest_route: bool,
+    convert_red: int,
+    convert_yellow: int,
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
     print(
-        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route}"
+        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route} {convert_red} {convert_yellow}"
     )
     result = subprocess.run(
         [
@@ -45,6 +49,8 @@ def main(
             f"--limit={limit}",
             f"--min_frames={min_frames}",
             f"--search_nearest_route={search_nearest_route}",
+            f"--convert_red={convert_red}",
+            f"--convert_yellow={convert_yellow}",
         ],
         capture_output=True,
         text=True,
