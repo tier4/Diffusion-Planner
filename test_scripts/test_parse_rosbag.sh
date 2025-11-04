@@ -24,7 +24,8 @@ if [ "$converter_type" = "python" ]; then
         ${map} \
         ${npz_dir} \
         --limit 30000000 \
-        --min_frames 0 2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
+        --min_frames 0 \
+        2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
 elif [ "$converter_type" = "cpp" ]; then
     python3 ./ros_scripts/parse_rosbag_by_cpp.py \
         $HOME/autoware/build/autoware_diffusion_planner/data_converter \
@@ -32,7 +33,9 @@ elif [ "$converter_type" = "cpp" ]; then
         ${map} \
         ${npz_dir} \
         --limit 30000000 \
-        --min_frames 0 2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
+        --min_frames 0 \
+        --convert_yellow 0 \
+        2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
 fi
 
 echo $SECONDS
