@@ -10,7 +10,6 @@ import torch
 from matplotlib.collections import LineCollection
 
 from diffusion_planner.dimensions import *
-from diffusion_planner.utils.normalizer import ObservationNormalizer
 
 
 def get_traffic_light_color(traffic_light):
@@ -40,6 +39,8 @@ def turn_indicator_int_to_str(turn_indicator):
         return "<-"
     elif turn_indicator == 3:
         return "->"
+    elif turn_indicator == 4:
+        return "Keep"
     else:
         raise ValueError(f"Unknown turn command: {turn_indicator}")
 
@@ -400,6 +401,8 @@ def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
 
     if "turn_indicators" in inputs:
         turn_indicator = inputs["turn_indicators"][0][-1]
+        if inputs["turn_indicators"][0][-2] == turn_indicator:
+            turn_indicator = TURN_INDICATOR_OUTPUT_KEEP
         turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
 
     if "turn_indicator_pred" in inputs:
