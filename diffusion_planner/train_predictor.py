@@ -323,8 +323,15 @@ def model_training(args):
         valid_loss_ego_position_lon_loss = mean_ego_loss_dict["valid_loss/ego_position_lon_loss"]
         turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
         turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
+        turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
         print(
-            f"{valid_loss_ego=:.3f}, {valid_loss_neighbor=:.3f}, {valid_loss_ego_position_lat_loss=:.3f}, {valid_loss_ego_position_lon_loss=:.3f}, {turn_indicator_accuracy=:.3f}, {turn_indicator_change_accuracy=:.3f}"
+            f"{valid_loss_ego=:.3f}\n"
+            f"{valid_loss_neighbor=:.3f}\n"
+            f"{valid_loss_ego_position_lat_loss=:.3f}\n"
+            f"{valid_loss_ego_position_lon_loss=:.3f}\n"
+            f"{turn_indicator_accuracy=:.3f}\n"
+            f"{turn_indicator_change_accuracy=:.3f}\n"
+            f"{turn_indicator_change_total=:.3f}"
         )
 
         if global_rank == 0:
