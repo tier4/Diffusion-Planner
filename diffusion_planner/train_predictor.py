@@ -320,7 +320,6 @@ def model_training(args):
         turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
         turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
         print(
-            f"Epoch {epoch + 1}/{train_epochs}\n"
             f"{valid_loss_ego=:.3f}\n"
             f"{valid_loss_neighbor=:.3f}\n"
             f"{valid_loss_ego_position_lat_loss=:.3f}\n"
