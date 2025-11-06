@@ -222,7 +222,7 @@ def model_training(args):
     if global_rank == 0:
         valid_loader = DataLoader(
             valid_set,
-            batch_size=batch_size,
+            batch_size=batch_size // 2,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
