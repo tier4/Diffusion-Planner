@@ -171,7 +171,7 @@ if __name__ == "__main__":
                     f"\nloss{timestep // 10}sec={diff_m:.2f}[m]\n"
                     f"lat={lat_error_ego[index]:.2f}[m], lon={lon_error_ego[index]:.2f}[m], angle={angle_error_ego[index]:.2f}[rad]"
                 )
-        title += f"\nego_lane_boundary_margin_loss={valid_loss['ego_lane_boundary_margin_loss']:.2f}, ego_neighbor_margin_loss={valid_loss['ego_neighbor_margin_loss']:.2f}"
+        # title += f"\nego_lane_boundary_margin_loss={valid_loss['ego_lane_boundary_margin_loss']:.2f}, ego_neighbor_margin_loss={valid_loss['ego_neighbor_margin_loss']:.2f}"
 
         # Neighbors
         neighbors = valid_data_dict["neighbor_agents_past"][0]
