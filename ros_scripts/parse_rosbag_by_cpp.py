@@ -31,13 +31,13 @@ def main(
     limit: int,
     min_frames: int,
     search_nearest_route: bool,
-    convert_red: int,
     convert_yellow: int,
+    convert_red: int,
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
     print(
-        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route} {convert_red} {convert_yellow}"
+        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route} {convert_yellow} {convert_red}"
     )
     result = subprocess.run(
         [
@@ -49,8 +49,8 @@ def main(
             f"--limit={limit}",
             f"--min_frames={min_frames}",
             f"--search_nearest_route={search_nearest_route}",
-            f"--convert_red={convert_red}",
             f"--convert_yellow={convert_yellow}",
+            f"--convert_red={convert_red}",
         ],
         capture_output=True,
         text=True,

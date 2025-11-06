@@ -305,13 +305,30 @@ def model_training(args):
     best_loss = float("inf")
     no_improvement_count = 0
 
-    # Initial validation (only on rank 0)
     if global_rank == 0:
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
         valid_loss_ego = valid_dict["avg_loss_ego"]
         valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
         mean_ego_loss_dict = mean_ego_loss(valid_dict)
-        print(mean_ego_loss_dict)
+        valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
+            "valid_loss/ego_position_lat_loss", 0.0
+        )
+        valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
+            "valid_loss/ego_position_lon_loss", 0.0
+        )
+        turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
+        turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
+        turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
+        print(
+            f"Epoch {epoch + 1}/{train_epochs}\n"
+            f"{valid_loss_ego=:.3f}\n"
+            f"{valid_loss_neighbor=:.3f}\n"
+            f"{valid_loss_ego_position_lat_loss=:.3f}\n"
+            f"{valid_loss_ego_position_lon_loss=:.3f}\n"
+            f"{turn_indicator_accuracy=:.3f}\n"
+            f"{turn_indicator_change_accuracy=:.3f}\n"
+            f"{turn_indicator_change_total=:.3f}"
+        )
 
     # begin training
     for epoch in range(init_epoch, train_epochs):

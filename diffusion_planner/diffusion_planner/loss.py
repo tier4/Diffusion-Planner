@@ -153,13 +153,9 @@ def diffusion_loss_func(
     turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_logit, turn_indicator_gt, reduction="none"
     )
-    turn_indicator_mask = turn_indicator_gt == TURN_INDICATOR_OUTPUT_KEEP
-    turn_indicator_loss = (
-        0.01 * turn_indicator_loss * turn_indicator_mask
-        + 1.0 * turn_indicator_loss * ~turn_indicator_mask
-    )
-    turn_indicator_loss = turn_indicator_loss.mean()
-
+    turn_indicator_change = inputs["turn_indicators"][:, -2] == inputs["turn_indicators"][:, -1]
+    turn_indicator_coeff = torch.where(turn_indicator_change, 1.0, 0.001)
+    turn_indicator_loss = (turn_indicator_loss * turn_indicator_coeff).mean()
     loss["turn_indicator_loss"] = turn_indicator_loss
 
     with torch.no_grad():
