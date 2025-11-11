@@ -361,13 +361,14 @@ if __name__ == "__main__":
     for key, val in valid_dict.items():
         if key.startswith("ego_"):
             valid_dict_to_save[f"{key}"] = val.mean().item()
+
     if args.save_predictions_dir is None:
         exit(0)
 
     save_predictions_dir = Path(args.save_predictions_dir)
     save_predictions_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(save_predictions_dir / "valid_dict.json", "w") as f:
+    with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:
         json.dump(valid_dict_to_save, f, indent=4)
 
     for i in range(predictions.shape[0]):
