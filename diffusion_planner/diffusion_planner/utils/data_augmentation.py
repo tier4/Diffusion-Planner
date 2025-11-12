@@ -221,6 +221,15 @@ class StatePerturbation:
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
         # inputs["ego_agent_past"][aug_flag] = interpolated_ego_past[aug_flag]
 
+        # Added noises to inputs["ego_agent_past"][aug_flag]
+        time_steps = (
+            torch.arange(ego_past.shape[1], device=ego_past.device).unsqueeze(0).unsqueeze(-1)
+        )
+        noise_scale = time_steps * 0.1
+        noise = (torch.rand_like(inputs["ego_agent_past"][aug_flag]) * 2 - 1) * noise_scale
+        noise[:, 0:2] *= 0  # remove noise for first 2 timesteps
+        inputs["ego_agent_past"][aug_flag] = inputs["ego_agent_past"][aug_flag] + noise
+
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
     def augment(self, inputs):
