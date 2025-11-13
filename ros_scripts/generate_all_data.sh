@@ -39,10 +39,6 @@ python3 ../diffusion_planner/util_scripts/create_train_set_path.py \
     $data_root_real/2025-08-08 \
     $data_root_real/2025-08-13 \
     $data_root_real/2025-08-20 \
-    $data_root_real/2025-08-27 \
-    $data_root_real/2025-09-03 \
-    $data_root_real/2025-09-25 \
-    $data_root_real/2025-10-08 \
     --save_path $data_root_real/path_list_train.json
 
 python3 ../diffusion_planner/util_scripts/create_train_set_path.py \
