@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from timm.layers import DropPath
 from timm.models.layers import Mlp
 
@@ -42,6 +43,7 @@ class Encoder(nn.Module):
         self.hidden_dim = config.hidden_dim
 
         self.use_ego_history = config.use_ego_history
+        self.ego_history_dropout_rate = config.ego_history_dropout_rate
         self.use_turn_indicators = config.use_turn_indicators
 
         ego_num = 1
@@ -180,6 +182,12 @@ class Encoder(nn.Module):
         B = neighbors.shape[0]
 
         encoding_ego, ego_mask, ego_pos = self.ego_encoder(ego)
+
+        # Apply dropout to ego history features (both during training and inference)
+        # This helps prevent over-reliance on ego history
+        if self.ego_history_dropout_rate > 0:
+            encoding_ego = F.dropout(encoding_ego, p=self.ego_history_dropout_rate, training=True)
+
         encoding_neighbors, neighbors_mask, neighbor_pos = self.neighbor_encoder(neighbors)
         encoding_static, static_mask, static_pos = self.static_encoder(static)
         encoding_lanes, lanes_mask, lane_pos = self.lane_encoder(
