@@ -4,10 +4,12 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import lanelet2
 import numpy as np
 import rclpy
 import yaml
 from autoware_internal_debug_msgs.msg import ProcessingTimeTree
+from autoware_lanelet2_extension_python.projection import MGRSProjector
 from autoware_perception_msgs.msg import (
     TrafficLightElement,
     TrafficLightGroup,
@@ -92,6 +94,13 @@ class TrafficLightStateMachine:
         return self.traffic_light_status
 
 
+def _get_attribute(attribute_map, key: str, default: str) -> str:
+    if key in attribute_map:
+        return attribute_map[key]
+    else:
+        return default
+
+
 if __name__ == "__main__":
     args = parse_args()
     yaml_path = args.yaml_path
@@ -116,7 +125,21 @@ if __name__ == "__main__":
     # 信号の状態機械を初期化
     traffic_light_sm = TrafficLightStateMachine()
 
+    osm_path = Path(
+        "/media/shintarosakoda/sandisk4t/data/nas_copy/tieriv_dataset/driving_dataset/map/2025-07-29/23-34-26_new/lanelet2_map.osm"
+    )
+    projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
+    lanelet_map = lanelet2.io.load(str(osm_path), projection)
+    traffic_light_group_ids = set()
+    for regulatory in lanelet_map.regulatoryElementLayer:
+        reg_subtype = _get_attribute(regulatory.attributes, "subtype", "")
+        if reg_subtype == "traffic_light":
+            traffic_light_group_ids.add(regulatory.id)
+
+    traffic_light_group_id_list = sorted(traffic_light_group_ids)
+
     def callback_kinematic_state(msg: Odometry):
+        global traffic_light_group_id_list
         stamp = msg.header.stamp
         stamp.sec += 1
 
@@ -135,32 +158,6 @@ if __name__ == "__main__":
         # 信号の色を更新
         traffic_light_sm.update_traffic_light_color(vx, dt)
 
-        traffic_light_group_id_list = [
-            10221,
-            10222,
-            10249,
-            10250,
-            10267,
-            10270,
-            10276,
-            10307,
-            10309,
-            10323,
-            10324,
-            10583,
-            10584,
-            179518,
-            179596,
-            179970,
-            190343,
-            190426,
-            2118985,
-            2119347,
-            2119369,
-            2119402,
-            2119414,
-            2119540,
-        ]
         pub_traffic_light.publish(
             TrafficLightGroupArray(
                 stamp=stamp,
