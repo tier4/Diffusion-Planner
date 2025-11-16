@@ -183,10 +183,10 @@ class Encoder(nn.Module):
 
         encoding_ego, ego_mask, ego_pos = self.ego_encoder(ego)
 
-        # Apply dropout to ego history features (both during training and inference)
-        # This helps prevent over-reliance on ego history
         if self.ego_history_dropout_rate > 0:
-            encoding_ego = F.dropout(encoding_ego, p=self.ego_history_dropout_rate, training=True)
+            encoding_ego = F.dropout(
+                encoding_ego, p=self.ego_history_dropout_rate, training=self.training
+            )
 
         encoding_neighbors, neighbors_mask, neighbor_pos = self.neighbor_encoder(neighbors)
         encoding_static, static_mask, static_pos = self.static_encoder(static)
