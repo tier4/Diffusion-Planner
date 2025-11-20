@@ -406,9 +406,9 @@ def create_lane_tensor(
     lanes_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.float32, device=dev)
     lanes_has_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.bool, device=dev)
 
-    for i, result_list in enumerate(result_list):
-        line_data, speed_limit = result_list
-        lanes_tensor[0, i] = torch.from_numpy(line_data).cuda()
+    for i, result in enumerate(result_list):
+        line_data, speed_limit = result
+        lanes_tensor[0, i] = torch.from_numpy(line_data).to(device=dev)
         assert speed_limit is not None
         lanes_speed_limit[0, i] = speed_limit
         lanes_has_speed_limit[0, i] = speed_limit is not None
