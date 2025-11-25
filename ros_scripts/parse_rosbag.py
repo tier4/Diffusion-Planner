@@ -175,7 +175,7 @@ def create_neighbor_future(
             neighbor[0, i, j, 5] = twist_in_bl[1]  # velocity y
             # I don't know why but sometimes the length and width from autoware are 0
             neighbor[0, i, j, 6] = max(shape.dimensions.y, 1.0)  # width
-            neighbor[0, i, j, 7] = max(shape.dimensions.x, 1.0)  # lendth
+            neighbor[0, i, j, 7] = max(shape.dimensions.x, 1.0)  # length
             neighbor[0, i, j, 8] = label_in_model == 0  # vehicle
             neighbor[0, i, j, 9] = label_in_model == 1  # pedestrian
             neighbor[0, i, j, 10] = label_in_model == 2  # bicycle
@@ -217,7 +217,7 @@ def tracking_past_and_future(data_list, i, map2bl_matrix_4x4):
         tracking_future = {
             key: value for key, value in tracking_future.items() if key in tracking_past
         }
-    # erase losting from tracking_future
+    # erase losing from tracking_future
     for key, val in tracking_future.items():
         total = len(val.kinematics_list)
         lost_time = val.lost_time

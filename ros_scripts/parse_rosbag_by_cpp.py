@@ -62,7 +62,8 @@ def main(
     if result.returncode != 0:
         print(f"C++ binary execution failed with return code {result.returncode}")
         print(f"stderr: {result.stderr}")
-        return
+        print(f"{rosbag_path} processing failed.")
+        raise RuntimeError("C++ binary execution failed")
 
     print("C++ binary execution completed successfully.")
 

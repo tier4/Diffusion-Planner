@@ -56,7 +56,7 @@ def process_single_bag(args_tuple):
         use_cpp = True
         if use_cpp:
             parse_rosbag_main_cpp(
-                Path("/home/ubuntu/autoware/build/autoware_diffusion_planner/data_converter"),
+                Path("~/autoware/build/autoware_diffusion_planner/data_converter").expanduser(),
                 rosbag_path=bag_path,
                 vector_map_path=vector_map_path,
                 save_dir=save_dir,

@@ -82,8 +82,9 @@ def get_args():
     parser.add_argument("--warm_up_epoch", type=int, help="number of warm up", default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
-    parser.add_argument("--use_ego_history", type=boolean, default=False)
-    parser.add_argument("--use_turn_indicators", type=boolean, default=True)
+    parser.add_argument("--use_ego_history", type=boolean, default=True)
+    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.6)
+    parser.add_argument("--use_turn_indicators", type=boolean, default=False)
 
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
     parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
@@ -222,7 +223,7 @@ def model_training(args):
     if global_rank == 0:
         valid_loader = DataLoader(
             valid_set,
-            batch_size=batch_size,
+            batch_size=batch_size // 2,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
@@ -320,7 +321,6 @@ def model_training(args):
         turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
         turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
         print(
-            f"Epoch {epoch + 1}/{train_epochs}\n"
             f"{valid_loss_ego=:.3f}\n"
             f"{valid_loss_neighbor=:.3f}\n"
             f"{valid_loss_ego_position_lat_loss=:.3f}\n"
