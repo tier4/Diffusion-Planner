@@ -17,11 +17,10 @@ import torch.nn.functional as F
 import wandb
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.train_utils import set_seed
+from generate_dpo_data_rule_based import load_model, load_npz_data
 from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -78,12 +77,12 @@ class DPODataset(Dataset):
         self.preferences = preferences
         self.device = device
 
-        # Filter out equal preferences for now (can be used with label smoothing)
-        self.valid_preferences = [
-            p for p in preferences if p["preference"] in ["trajectory_1", "trajectory_2"]
-        ]
+        # Filter out equal preferences (if any)
+        self.valid_preferences = [p for p in preferences if p.get("score_w") != p.get("score_l")]
 
-        print(f"Loaded {len(self.valid_preferences)} preferences (filtered from {len(preferences)})")
+        print(
+            f"Loaded {len(self.valid_preferences)} preferences (filtered from {len(preferences)})"
+        )
 
     def __len__(self):
         return len(self.valid_preferences)
@@ -101,56 +100,29 @@ class DPODataset(Dataset):
 
         return {
             "npz_path": pref["npz_path"],
-            "trajectory_1_info": pref["trajectory_1"],
-            "trajectory_2_info": pref["trajectory_2"],
-            "preference": 0 if pref["preference"] == "trajectory_1" else 1,
+            "trajectory_w": pref["trajectory_w"],
+            "trajectory_l": pref["trajectory_l"],
         }
 
 
-def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch.Tensor]:
-    """Load and preprocess NPZ file."""
-    loaded = np.load(str(npz_path))
-    data = {}
-
-    for key, value in loaded.items():
-        if key == "map_name" or key == "token":
-            continue
-        data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
-
-    # Convert heading to cos/sin
-    if "goal_pose" in data:
-        data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
-    if "ego_agent_past" in data:
-        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
-
-    return data
-
-
-def collate_fn(batch, device):
-    """Custom collate function for DPO data."""
-    # For simplicity, process one sample at a time (batch size of actual training can be accumulated)
-    return batch
-
-
 @torch.no_grad()
-def compute_trajectory_log_prob(
+def compute_trajectory_loss(
     model: Diffusion_Planner,
     data: dict[str, torch.Tensor],
-    trajectory_info: dict,
+    trajectory: np.ndarray,
     model_args,
 ) -> torch.Tensor:
     """
-    Compute log probability of a trajectory under the model.
-
-    This is a simplified implementation using negative MSE loss as proxy for log probability.
-    For proper DPO, you should implement the actual log likelihood computation.
+    Compute MSE loss of a trajectory under the model.
     """
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
     # Generate random noise
-    data["sampled_trajectories"] = 0.5 * torch.randn(B, P, future_len + 1, 4).to(data["ego_current_state"].device)
+    data["sampled_trajectories"] = 0.5 * torch.randn(B, P, future_len + 1, 4).to(
+        data["ego_current_state"].device
+    )
 
     # Normalize inputs
     data = model_args.observation_normalizer(data)
@@ -160,13 +132,12 @@ def compute_trajectory_log_prob(
     prediction = outputs["prediction"][:, 0]  # [B, T, 4] - ego only
 
     # Target trajectory
-    target = torch.tensor(trajectory_info["prediction"]).float().to(prediction.device).unsqueeze(0)  # [1, T, 4]
+    target = torch.tensor(trajectory).float().to(prediction.device).unsqueeze(0)  # [1, T, 4]
 
-    # Compute MSE loss (negative log likelihood proxy)
+    # Compute MSE loss
     mse_loss = F.mse_loss(prediction, target, reduction="mean")
-    log_prob = -mse_loss
 
-    return log_prob
+    return mse_loss
 
 
 def compute_dpo_loss(
@@ -203,47 +174,50 @@ def compute_dpo_loss(
         data = load_npz_data(sample["npz_path"], device)
 
         # Determine which is preferred
-        preference = sample["preference"]  # 0 or 1
-        if preference == 0:
-            preferred_traj = sample["trajectory_1_info"]
-            dispreferred_traj = sample["trajectory_2_info"]
-        else:
-            preferred_traj = sample["trajectory_2_info"]
-            dispreferred_traj = sample["trajectory_1_info"]
+        traj_wi = sample["trajectory_w"]
+        traj_lo = sample["trajectory_l"]
 
-        # Compute log probabilities under policy model
-        log_pi_preferred = compute_trajectory_log_prob(
-            policy_model, data, preferred_traj, model_args
-        )
-        log_pi_dispreferred = compute_trajectory_log_prob(
-            policy_model, data, dispreferred_traj, model_args
-        )
+        # Compute losses under policy model
+        l_w = compute_trajectory_loss(policy_model, data, traj_wi, model_args)
+        l_l = compute_trajectory_loss(policy_model, data, traj_lo, model_args)
 
-        # Compute log probabilities under reference model
+        # Compute losses under reference model
         with torch.no_grad():
-            log_pi_ref_preferred = compute_trajectory_log_prob(
-                reference_model, data, preferred_traj, model_args
-            )
-            log_pi_ref_dispreferred = compute_trajectory_log_prob(
-                reference_model, data, dispreferred_traj, model_args
-            )
+            l_ref_w = compute_trajectory_loss(reference_model, data, traj_wi, model_args)
+            l_ref_l = compute_trajectory_loss(reference_model, data, traj_lo, model_args)
 
-        # Compute log ratio
-        log_ratio = (
-            (log_pi_preferred - log_pi_dispreferred)
-            - (log_pi_ref_preferred - log_pi_ref_dispreferred)
-        )
+        # Compute DPO loss
+        # Loss = -log(sigmoid( -beta * ( (l_w - l_ref_w) - (l_l - l_ref_l) ) ))
+        # Note: The user specified formula: log sigma - coeff( l(x_w) - l_ref(x_w) - (l(x_l) - l_ref(x_l)) )
+        # This corresponds to maximizing the margin. Since we minimize loss, we take negative.
+        # Also, l(x) is loss (MSE), so lower is better.
+        # Original DPO maximizes log_prob (higher is better).
+        # Here we want to minimize l_w relative to l_l.
+        # So the "reward" is -l(x).
+        # reward_w = -l_w, reward_l = -l_l
+        # log_ratio = (reward_w - reward_ref_w) - (reward_l - reward_ref_l)
+        #           = (-l_w - (-l_ref_w)) - (-l_l - (-l_ref_l))
+        #           = -(l_w - l_ref_w) + (l_l - l_ref_l)
+        #           = - ( (l_w - l_ref_w) - (l_l - l_ref_l) )
 
-        # DPO loss
-        loss = -F.logsigmoid(args.beta * log_ratio)
+        diff_w = l_w - l_ref_w
+        diff_l = l_l - l_ref_l
+
+        # We want diff_w to be smaller than diff_l (i.e. policy improves on winner more than loser)
+        # The term inside sigmoid should be positive when we are doing well.
+        # - (diff_w - diff_l) should be positive => diff_l > diff_w
+
+        loss_diff = -(diff_w - diff_l)
+
+        loss = -F.logsigmoid(args.beta * loss_diff)
         total_loss += loss
 
         # Metrics
         with torch.no_grad():
-            reward_margin = args.beta * log_ratio
+            reward_margin = args.beta * loss_diff
             metrics["avg_reward_margin"] += reward_margin.item()
-            metrics["avg_log_ratio"] += log_ratio.item()
-            metrics["accuracy"] += (log_ratio > 0).float().item()
+            metrics["avg_log_ratio"] += loss_diff.item()
+            metrics["accuracy"] += (loss_diff > 0).float().item()
 
     # Average over batch
     batch_size = len(batch)
@@ -270,9 +244,7 @@ def validate_model(
     num_batches = 0
 
     for batch in tqdm(valid_loader, desc="Validation"):
-        loss, metrics = compute_dpo_loss(
-            policy_model, reference_model, batch, args, model_args
-        )
+        loss, metrics = compute_dpo_loss(policy_model, reference_model, batch, args, model_args)
 
         total_loss += loss.item()
         total_accuracy += metrics["accuracy"]
@@ -307,9 +279,7 @@ def train_epoch(
         optimizer.zero_grad()
 
         # Compute DPO loss
-        loss, metrics = compute_dpo_loss(
-            policy_model, reference_model, batch, args, model_args
-        )
+        loss, metrics = compute_dpo_loss(policy_model, reference_model, batch, args, model_args)
 
         # Backward and optimize
         loss.backward()
@@ -367,7 +337,6 @@ def main():
     num_train = len(preferences) - num_valid
 
     # Shuffle
-    import random
     random.seed(args.seed)
     random.shuffle(preferences)
 
@@ -396,46 +365,11 @@ def main():
     )
 
     # Load policy model
-    print(f"Loading policy model from {args.model_path}")
-    checkpoint = torch.load(args.model_path, map_location=device)
-
-    model_dir = args.model_path.parent
-    args_path = model_dir / "args.json"
-
-    # Use Config class to load configuration (handles normalizers automatically)
-    model_args = Config(str(args_path), guidance_fn=None)
-
-    policy_model = Diffusion_Planner(model_args)
-
-    if "model" in checkpoint:
-        state_dict = {k.replace("module.", ""): v for k, v in checkpoint["model"].items()}
-        policy_model.load_state_dict(state_dict, strict=False)
-    elif "ema_state_dict" in checkpoint:
-        policy_model.load_state_dict(checkpoint["ema_state_dict"], strict=False)
-    else:
-        policy_model.load_state_dict(checkpoint, strict=False)
-
-    policy_model.to(device)
+    policy_model, model_args = load_model(args.model_path, device)
 
     # Load reference model (frozen)
     if args.reference_model_path is not None:
-        print(f"Loading reference model from {args.reference_model_path}")
-        ref_checkpoint = torch.load(args.reference_model_path, map_location=device)
-
-        # Load reference model config
-        ref_model_dir = args.reference_model_path.parent
-        ref_args_path = ref_model_dir / "args.json"
-        ref_model_args = Config(str(ref_args_path), guidance_fn=None)
-
-        reference_model = Diffusion_Planner(ref_model_args)
-
-        if "model" in ref_checkpoint:
-            state_dict = {k.replace("module.", ""): v for k, v in ref_checkpoint["model"].items()}
-            reference_model.load_state_dict(state_dict, strict=False)
-        elif "ema_state_dict" in ref_checkpoint:
-            reference_model.load_state_dict(ref_checkpoint["ema_state_dict"], strict=False)
-        else:
-            reference_model.load_state_dict(ref_checkpoint, strict=False)
+        reference_model, _ = load_model(args.reference_model_path, device)
     else:
         print("Using initial policy model as reference model")
         reference_model = Diffusion_Planner(model_args)
@@ -547,11 +481,13 @@ def main():
                 break
 
             # Save training log
-            train_log.append({
-                "epoch": epoch + 1,
-                **{f"train_{k}": v for k, v in train_metrics.items()},
-                **{f"valid_{k}": v for k, v in valid_metrics.items()},
-            })
+            train_log.append(
+                {
+                    "epoch": epoch + 1,
+                    **{f"train_{k}": v for k, v in train_metrics.items()},
+                    **{f"valid_{k}": v for k, v in valid_metrics.items()},
+                }
+            )
             df = pd.DataFrame(train_log)
             df.to_csv(os.path.join(save_path, "dpo_train_log.tsv"), sep="\t", index=False)
 

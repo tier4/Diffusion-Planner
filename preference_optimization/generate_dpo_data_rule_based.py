@@ -19,6 +19,38 @@ from diffusion_planner.utils.config import Config
 from tqdm import tqdm
 
 
+def load_model(model_path: Path, device: torch.device) -> tuple[Diffusion_Planner, Config]:
+    """Load Diffusion Planner model and args."""
+    print(f"Loading model from {model_path}")
+    checkpoint = torch.load(model_path, map_location=device)
+
+    # Load args from checkpoint using Config class
+    model_dir = model_path.parent
+    args_path = model_dir / "args.json"
+
+    # Use Config class to load configuration (handles normalizers automatically)
+    model_args = Config(str(args_path), guidance_fn=None)
+
+    # Initialize model
+    model = Diffusion_Planner(model_args)
+
+    # Load checkpoint weights (following diffusion_planner_node.py)
+    if "model" in checkpoint:
+        # Handle DDP checkpoint
+        state_dict = checkpoint["model"]
+        # Remove 'module.' prefix if present
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict, strict=False)
+    elif "ema_state_dict" in checkpoint:
+        print("Loading EMA weights")
+        model.load_state_dict(checkpoint["ema_state_dict"], strict=False)
+    else:
+        model.load_state_dict(checkpoint, strict=False)
+
+    model.to(device)
+    return model, model_args
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=Path, required=True)
@@ -42,36 +74,8 @@ class DPODataGenerator:
         print(f"Random seed: {seed}")
 
         # Load model
-        print(f"Loading model from {args.model_path}")
-        checkpoint = torch.load(args.model_path, map_location=self.device)
-
-        # Load args from checkpoint using Config class
-        model_dir = args.model_path.parent
-        args_path = model_dir / "args.json"
-
-        # Use Config class to load configuration (handles normalizers automatically)
-        model_args = Config(str(args_path), guidance_fn=None)
-
-        # Initialize model
-        self.model = Diffusion_Planner(model_args)
-
-        # Load checkpoint weights (following diffusion_planner_node.py)
-        if "model" in checkpoint:
-            # Handle DDP checkpoint
-            state_dict = checkpoint["model"]
-            # Remove 'module.' prefix if present
-            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-            self.model.load_state_dict(state_dict, strict=False)
-        elif "ema_state_dict" in checkpoint:
-            print("Loading EMA weights")
-            self.model.load_state_dict(checkpoint["ema_state_dict"], strict=False)
-        else:
-            self.model.load_state_dict(checkpoint, strict=False)
-
-        self.model.to(self.device)
+        self.model, self.model_args = load_model(args.model_path, self.device)
         self.model.eval()
-
-        self.model_args = model_args
 
         # Load NPZ file list
         with open(args.npz_list, "r") as f:
@@ -111,16 +115,6 @@ class DPODataGenerator:
             tuple: (trajectory_1, trajectory_2)
                 Each is a numpy array of shape [T, 4] representing the predicted trajectory
         """
-        # Add ego_shape if not present (following diffusion_planner_node.py:365-367)
-        if "ego_shape" not in data:
-            # Default values for ego vehicle shape
-            wheel_base = 2.79
-            ego_length = 4.34
-            ego_width = 1.70
-            data["ego_shape"] = torch.tensor(
-                [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=self.device
-            )
-
         # Normalize inputs once
         data = self.model_args.observation_normalizer(data)
 
@@ -182,6 +176,16 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
         data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
     if "ego_agent_past" in data:
         data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
+
+    # Add ego_shape if not present (following diffusion_planner_node.py:365-367)
+    if "ego_shape" not in data:
+        # Default values for ego vehicle shape
+        wheel_base = 2.79
+        ego_length = 4.34
+        ego_width = 1.70
+        data["ego_shape"] = torch.tensor(
+            [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=device
+        )
 
     return data
 
