@@ -43,13 +43,10 @@ def get_args():
     parser.add_argument("--preference_json", type=Path, required=True)
     parser.add_argument("--valid_split", type=float, default=0.1)
     parser.add_argument("--beta", type=float, default=0.1)
-    parser.add_argument("--label_smoothing", type=float, default=0.0)
-    parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--train_epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--notes", type=str, default="")
     return parser.parse_args()
 
 
@@ -274,9 +271,6 @@ def main():
     args = get_args()
 
     device = torch.device(args.device)
-
-    # Set seed
-    set_seed(args.seed)
 
     # Create save directory
     time = datetime.now()
