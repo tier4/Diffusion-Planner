@@ -11,13 +11,18 @@ import random
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+
+matplotlib.use("Agg")  # Use non-interactive backend
+import matplotlib.pyplot as plt
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.train_utils import set_seed
+from diffusion_planner.utils.visualize_input import visualize_inputs
 from generate_dpo_data_rule_based import load_model, load_npz_data
 from torch import optim
 from torch.utils.data import DataLoader, Dataset
@@ -199,34 +204,88 @@ def compute_dpo_loss(
 
 
 @torch.no_grad()
-def validate_model(
+def visualize_validation(
     policy_model: Diffusion_Planner,
-    reference_model: Diffusion_Planner,
     valid_loader: DataLoader,
-    args,
     model_args,
-) -> dict:
-    """Validate the model on the validation set."""
+    save_dir: Path,
+    epoch: int,
+):
+    """
+    Visualize validation predictions and save as images.
+    """
     policy_model.eval()
 
-    total_loss = 0.0
-    total_accuracy = 0.0
-    total_reward_margin = 0.0
-    num_batches = 0
+    vis_dir = save_dir / "validation_vis" / f"epoch_{epoch:03d}"
+    vis_dir.mkdir(parents=True, exist_ok=True)
 
-    for batch in tqdm(valid_loader, desc="Validation"):
-        loss, metrics = compute_dpo_loss(policy_model, reference_model, batch, args, model_args)
+    sample_count = 0
+    for batch in valid_loader:
+        for sample in batch:
+            # Load input data
+            data = load_npz_data(sample["npz_path"], next(policy_model.parameters()).device)
 
-        total_loss += loss.item()
-        total_accuracy += metrics["accuracy"]
-        total_reward_margin += metrics["avg_reward_margin"]
-        num_batches += 1
+            B = data["ego_current_state"].shape[0]
+            P = 1 + model_args.predicted_neighbor_num
+            future_len = model_args.future_len
 
-    return {
-        "loss": total_loss / num_batches,
-        "accuracy": total_accuracy / num_batches,
-        "reward_margin": total_reward_margin / num_batches,
-    }
+            # Generate random noise
+            data["sampled_trajectories"] = 0.5 * torch.randn(B, P, future_len + 1, 4).to(
+                data["ego_current_state"].device
+            )
+
+            # Normalize inputs
+            data = model_args.observation_normalizer(data)
+
+            # Run model
+            _, outputs = policy_model(data)
+            prediction = outputs["prediction"][0].cpu().numpy()  # [P+1, T, 4]
+
+            # Create visualization
+            fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+
+            # Visualize input (map, past trajectories, etc.)
+            # Convert data back to unnormalized for visualization
+            vis_data = {}
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor):
+                    vis_data[k] = v.cpu()
+                else:
+                    vis_data[k] = v
+            visualize_inputs(vis_data, save_path=None, ax=ax)
+
+            # Plot ego prediction
+            ax.plot(
+                prediction[0, :, 0],
+                prediction[0, :, 1],
+                color="orange",
+                label="Ego Prediction",
+                linewidth=2,
+            )
+
+            # Plot neighbor predictions
+            for i in range(1, prediction.shape[0]):
+                ax.plot(
+                    prediction[i, :, 0],
+                    prediction[i, :, 1],
+                    color="teal",
+                    alpha=0.5,
+                    linewidth=1,
+                )
+
+            ax.legend()
+            ax.set_title(f"Epoch {epoch} - Sample {sample_count + 1}")
+
+            # Save figure
+            npz_stem = Path(sample["npz_path"]).stem
+            plt.savefig(
+                vis_dir / f"sample_{sample_count:03d}_{npz_stem}.png", dpi=100, bbox_inches="tight"
+            )
+            plt.close()
+
+            sample_count += 1
+
+    print(f"Saved {sample_count} validation visualizations to {vis_dir}")
 
 
 def train_epoch(
@@ -291,7 +350,6 @@ def main():
     num_train = len(preferences) - num_valid
 
     # Shuffle
-    random.seed(args.seed)
     random.shuffle(preferences)
 
     train_preferences = preferences[:num_train]
@@ -338,7 +396,6 @@ def main():
         json.dump(args_dict, f, indent=4)
 
     # Training loop
-    best_accuracy = 0.0
     train_log = []
 
     for epoch in range(args.train_epochs):
@@ -347,15 +404,12 @@ def main():
             policy_model, reference_model, train_loader, optimizer, args, model_args
         )
 
-        # Validate
-        valid_metrics = validate_model(
-            policy_model, reference_model, valid_loader, args, model_args
-        )
+        # Visualize validation samples
+        visualize_validation(policy_model, valid_loader, model_args, save_path, epoch)
 
         print(
             f"Epoch {epoch + 1}/{args.train_epochs}\n"
-            f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}\n"
-            f"  Valid Loss: {valid_metrics['loss']:.4f}, Acc: {valid_metrics['accuracy']:.4f}"
+            f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}"
         )
 
         # Save checkpoint
@@ -369,18 +423,15 @@ def main():
 
         torch.save(checkpoint_data, os.path.join(save_path, "latest.pth"))
 
-        # Save best model
-        if valid_metrics["accuracy"] > best_accuracy:
-            best_accuracy = valid_metrics["accuracy"]
-            torch.save(checkpoint_data, os.path.join(save_path, "best_model.pth"))
-            print(f"  New best accuracy: {best_accuracy:.4f}")
+        # Save checkpoint every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            torch.save(checkpoint_data, os.path.join(save_path, f"epoch_{epoch + 1:03d}.pth"))
 
         # Save training log
         train_log.append(
             {
                 "epoch": epoch + 1,
                 **{f"train_{k}": v for k, v in train_metrics.items()},
-                **{f"valid_{k}": v for k, v in valid_metrics.items()},
             }
         )
         df = pd.DataFrame(train_log)
@@ -388,7 +439,7 @@ def main():
 
         scheduler.step()
 
-    print(f"\nTraining complete! Best validation accuracy: {best_accuracy:.4f}")
+    print(f"\nTraining complete!")
 
 
 if __name__ == "__main__":
