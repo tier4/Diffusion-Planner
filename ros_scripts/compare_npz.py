@@ -143,9 +143,14 @@ for f1, f2 in zip(npz_list1, npz_list2):
     print(save_dir / f"{itr:08d}.png")
     plt.clf()
 
+all_ok = True
 for key, val in result_map.items():
     total_num = len(val)
     ok_num = sum(val)
     ok_ratio = ok_num / total_num if total_num > 0 else 0
-    assert ok_ratio == 1.0 or "agent" in key
-    print(f"{key}: {ok_num}/{total_num} = {ok_ratio:.4f}")
+    if not (ok_ratio == 1.0 or "agent" in key):
+        print(f"{key} has NG results {ok_ratio:.4f}")
+        all_ok = False
+
+assert all_ok, "Some keys have NG results"
+print("All keys are OK")

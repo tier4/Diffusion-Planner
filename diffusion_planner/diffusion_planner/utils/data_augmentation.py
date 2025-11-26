@@ -2,9 +2,9 @@ from typing import List, Optional, Union
 
 import numpy as np
 import torch
+from scipy.interpolate import splev, splprep
 
 NUM_REFINE = 20
-REFINE_HORIZON = 2.0
 TIME_INTERVAL = 0.1
 
 
@@ -30,7 +30,6 @@ def heading_transform(heading, transform_mat):
     """
     B = heading.shape[0]
     shape = heading.shape
-    nexpand = heading.ndim - 1
     heading = heading.reshape(B, -1)
     transform_mat = transform_mat.reshape(B, 1, 2, 2)
     return torch.atan2(
@@ -50,7 +49,6 @@ class StatePerturbation:
     def __init__(
         self,
         augment_prob: float = 0.5,
-        normalize=True,
         wheel_base: float = 2.75,
         device: Optional[torch.device] = "cpu",
     ) -> None:
@@ -61,7 +59,6 @@ class StatePerturbation:
         :param augment_prob: probability between 0 and 1 of applying the data augmentation
         """
         self._augment_prob = augment_prob
-        self._normalize = normalize
         self._device = torch.device(device)
         lo: List[float] = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
         hi: List[float] = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
@@ -69,9 +66,10 @@ class StatePerturbation:
         self._high = torch.tensor(hi).to(self._device)
         self._wheel_base = wheel_base
 
-        self.refine_horizon = REFINE_HORIZON
         self.num_refine = NUM_REFINE
         self.time_interval = TIME_INTERVAL
+
+        REFINE_HORIZON = NUM_REFINE * TIME_INTERVAL
 
         T = REFINE_HORIZON + TIME_INTERVAL
         self.coeff_matrix = torch.linalg.inv(
@@ -95,12 +93,133 @@ class StatePerturbation:
 
     def __call__(self, inputs, ego_future, neighbors_future):
         aug_flag, aug_ego_current_state = self.augment(inputs)
+
+        use_new_interpolation = False
+
+        # Interpolate past trajectory by reversing time
+        # Flip the past trajectory to treat it as future
+        ego_past = inputs["ego_agent_past"]
+
+        # Convert past from [x, y, cos, sin] to [x, y, heading]
+        ego_past_heading = torch.cat(
+            [
+                ego_past[..., :2],  # x, y
+                torch.atan2(ego_past[..., 3], ego_past[..., 2]).unsqueeze(
+                    -1
+                ),  # heading from cos, sin
+            ],
+            dim=-1,
+        )
+
+        if use_new_interpolation:
+            # use scipy.interpolate splprep
+            INPUT_T = ego_past_heading.shape[1] - 1
+            OUTPUT_T = ego_future.shape[1]
+            concatenated = torch.cat(
+                [ego_past_heading, ego_future], dim=1
+            )  # (B, INPUT_T + 1 + OUTPUT_T, 3)
+            time = np.linspace(0, 1, INPUT_T + 1 + OUTPUT_T) * self.time_interval
+            flag_to_remain = np.array([True] * concatenated.shape[1])
+            # INPUT_Tの前後num_refineフレームを落とす
+            flag_to_remain[INPUT_T - self.num_refine : INPUT_T + self.num_refine] = False
+            flag_to_remain[INPUT_T] = True  # 現在時刻は残す
+
+            concatenated[:, INPUT_T, 0:2] = aug_ego_current_state[:, 0:2]
+
+            concatenated_fixed = concatenated[:, flag_to_remain]
+            time_fixed = time[flag_to_remain]
+
+            time_to_interpolate = time[~flag_to_remain]
+            B = concatenated_fixed.shape[0]
+            for b in range(B):
+                if not aug_flag[b]:
+                    continue
+                curr_xy = concatenated_fixed[b].cpu().numpy().T[:2]
+                tck, u = splprep(curr_xy, u=time_fixed, s=0.0, k=3)
+                out = splev(time_to_interpolate, tck)
+
+                concatenated[b, ~flag_to_remain, 0] = torch.tensor(
+                    out[0], dtype=torch.float32, device=concatenated.device
+                )
+                concatenated[b, ~flag_to_remain, 1] = torch.tensor(
+                    out[1], dtype=torch.float32, device=concatenated.device
+                )
+
+                # fixed heading
+                for i in range(0, concatenated_fixed.shape[1]):
+                    if flag_to_remain[i]:
+                        continue
+                    concatenated[b, i, 2] = torch.arctan2(
+                        concatenated[b, i, 1] - concatenated[b, i - 1, 1],
+                        concatenated[b, i, 0] - concatenated[b, i - 1, 0],
+                    )
+                cos = torch.cos(concatenated[b, INPUT_T, 2])
+                sin = torch.sin(concatenated[b, INPUT_T, 2])
+                aug_ego_current_state[b, 2] = cos
+                aug_ego_current_state[b, 3] = sin
+
+            interpolated_ego_future = concatenated[:, INPUT_T + 1 :, :]
+            interpolated_ego_past_heading = concatenated[:, : INPUT_T + 1, :]
+            # fixed to cos, sin
+            interpolated_ego_past_4d = torch.cat(
+                [
+                    interpolated_ego_past_heading[..., :2],  # x, y
+                    torch.cos(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # cos
+                    torch.sin(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # sin
+                ],
+                dim=-1,
+            )
+
+            inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
+            ego_future[aug_flag] = interpolated_ego_future[aug_flag]
+            inputs["ego_agent_past"][aug_flag] = interpolated_ego_past_4d[aug_flag]
+
+            return self.centric_transform(inputs, ego_future, neighbors_future)
+
+        # Interpolate future trajectory
         interpolated_ego_future = self.interpolation_future_trajectory(
             aug_ego_current_state, ego_future
         )
 
+        ego_past_reversed = torch.flip(ego_past_heading, dims=[1])
+        interpolated_ego_past_reversed = self.interpolation_future_trajectory(
+            aug_ego_current_state, ego_past_reversed, keep_remaining=False
+        )
+        # Flip back to get the past trajectory
+        interpolated_ego_past_heading = torch.flip(interpolated_ego_past_reversed, dims=[1])
+
+        # rotate 180 degrees to align with the ego's current heading
+        interpolated_ego_past_heading[..., 2] += np.pi
+        interpolated_ego_past_heading[..., 2] = self.normalize_angle(
+            interpolated_ego_past_heading[..., 2]
+        )
+
+        # Convert back to [x, y, cos, sin]
+        interpolated_ego_past_4d = torch.cat(
+            [
+                interpolated_ego_past_heading[..., :2],  # x, y
+                torch.cos(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # cos
+                torch.sin(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # sin
+            ],
+            dim=-1,
+        )
+
+        # Concatenate with remaining past trajectory to match original length
+        P = self.num_refine
+        if ego_past.shape[1] > P:
+            interpolated_ego_past = torch.cat(
+                [
+                    ego_past[:, :-(P), :],  # Keep older past
+                    interpolated_ego_past_4d,  # Replace recent past with interpolated
+                ],
+                dim=1,
+            )
+        else:
+            interpolated_ego_past = interpolated_ego_past_4d
+
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
+        # inputs["ego_agent_past"][aug_flag] = interpolated_ego_past[aug_flag]
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
@@ -109,7 +228,7 @@ class StatePerturbation:
         ego_current_state = inputs["ego_current_state"].clone()
 
         B = ego_current_state.shape[0]
-        aug_flag = (torch.rand(B) >= self._augment_prob).bool().to(self._device) & ~(
+        aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
             abs(ego_current_state[:, 4]) < 2.0
         )
 
@@ -205,6 +324,14 @@ class StatePerturbation:
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
 
+        # ego past
+        # inputs["ego_agent_past"][..., :2] = vector_transform(
+        #     inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
+        # )
+        # inputs["ego_agent_past"][..., 2:4] = vector_transform(
+        #     inputs["ego_agent_past"][..., 2:4], transform_matrix
+        # )
+
         # neighbor past xy
         mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
         inputs["neighbor_agents_past"][..., :2] = vector_transform(
@@ -254,6 +381,20 @@ class StatePerturbation:
         )
         inputs["route_lanes"][mask] = 0.0
 
+        # polygons
+        mask = torch.sum(torch.ne(inputs["polygons"], 0), dim=-1) == 0
+        inputs["polygons"][..., :2] = vector_transform(
+            inputs["polygons"][..., :2], transform_matrix, center_xy
+        )
+        inputs["polygons"][mask] = 0.0
+
+        # line_strings
+        mask = torch.sum(torch.ne(inputs["line_strings"], 0), dim=-1) == 0
+        inputs["line_strings"][..., :2] = vector_transform(
+            inputs["line_strings"][..., :2], transform_matrix, center_xy
+        )
+        inputs["line_strings"][mask] = 0.0
+
         # static objects xy
         mask = torch.sum(torch.ne(inputs["static_objects"][..., :10], 0), dim=-1) == 0
         inputs["static_objects"][..., :2] = vector_transform(
@@ -267,13 +408,14 @@ class StatePerturbation:
 
         return inputs, ego_future, neighbors_future
 
-    def interpolation_future_trajectory(self, aug_current_state, ego_future):
+    def interpolation_future_trajectory(self, aug_current_state, ego_future, keep_remaining=True):
         """
-        refine future trajectory with quintic spline interpolation
+        refine future trajectory with quintic Hermite interpolation
 
         Args:
             aug_current_state: (B, 16) current state of the ego vehicle after augmentation
-            ego_future:        (B, 80, 3) future trajectory of the ego vehicle
+            ego_future:        (B, T, 3) future trajectory of the ego vehicle
+            keep_remaining:    If True, keep the remaining trajectory after P frames (default: True)
 
         Returns:
             ego_future: refined future trajectory of the ego vehicle
@@ -281,7 +423,6 @@ class StatePerturbation:
 
         P = self.num_refine
         dt = self.time_interval
-        T = self.refine_horizon
         B = aug_current_state.shape[0]
         M_t = self.t_matrix.unsqueeze(0).expand(B, -1, -1)
         A = self.coeff_matrix.unsqueeze(0).expand(B, -1, -1)
@@ -355,7 +496,106 @@ class StatePerturbation:
             dim=1,
         )
 
-        return torch.concatenate(
-            [torch.cat([traj_x, traj_y, traj_heading[..., None]], axis=-1), ego_future[:, P:, :]],
-            axis=1,
+        interpolated = torch.cat([traj_x, traj_y, traj_heading[..., None]], axis=-1)
+
+        if keep_remaining and ego_future.shape[1] > P:
+            return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
+        else:
+            return interpolated
+
+
+if __name__ == "__main__":
+    import argparse
+    from copy import deepcopy
+    from pathlib import Path
+
+    import matplotlib.patches as patches
+    import matplotlib.pyplot as plt
+
+    from diffusion_planner.train_epoch import heading_to_cos_sin
+    from diffusion_planner.utils.visualize_input import visualize_inputs
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("target_npz", type=Path)
+    args = parser.parse_args()
+
+    target_npz = args.target_npz
+
+    save_dir = target_npz.parent / "augmented"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    loaded = np.load(target_npz)
+    data = {}
+    for key, value in loaded.items():
+        data[key] = torch.tensor(value).unsqueeze(0)
+        if key == "goal_pose" or key == "ego_agent_past":
+            data[key] = heading_to_cos_sin(data[key])
+
+    # Load future trajectories separately
+    ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
+    neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
+
+    aug = StatePerturbation(augment_prob=1.0, device="cpu")
+
+    # Save original data visualization with augmentation range rectangle
+    original_save_path = save_dir / "original.png"
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    # Visualize inputs on the ax
+    view_range = 20
+    visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
+
+    # Get augmentation ranges from the aug object
+    lo = aug._low.cpu().numpy()[0]  # Extract from tuple
+    hi = aug._high.cpu().numpy()[0]  # Extract from tuple
+    x_min, y_min = lo[0], lo[1]
+    x_max, y_max = hi[0], hi[1]
+
+    # Draw the augmentation range rectangle
+    rect = patches.Rectangle(
+        (x_min, y_min),
+        x_max - x_min,
+        y_max - y_min,
+        linewidth=2,
+        edgecolor="red",
+        facecolor="none",
+        linestyle="--",
+        label="Augmentation Range",
+    )
+    ax.add_patch(rect)
+    ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(original_save_path, dpi=100)
+    plt.close()
+
+    trial_num = 10
+    for i in range(trial_num):
+        aug_data, aug_ego_future, aug_neighbors_future = aug(
+            deepcopy(data), ego_future.clone(), neighbors_future.clone()
         )
+
+        # Save augmented data to npz file
+        data_dict = {}
+        for key, value in aug_data.items():
+            if isinstance(value, torch.Tensor):
+                data_dict[key] = value.squeeze(0).detach().cpu().numpy()
+            else:
+                data_dict[key] = value
+
+        # Add future trajectories with consistent naming
+        data_dict["ego_agent_future"] = aug_ego_future.squeeze(0).detach().cpu().numpy()
+        data_dict["neighbor_agents_future"] = aug_neighbors_future.squeeze(0).detach().cpu().numpy()
+        aug_data["ego_agent_future"] = aug_ego_future
+        aug_data["neighbor_agents_future"] = aug_neighbors_future
+
+        # Save to npz file
+        output_path = save_dir / f"augmented_{i:08d}.npz"
+        np.savez(output_path, **data_dict)
+
+        # Use deepcopy to avoid side effects from visualize_inputs
+        visualize_inputs(
+            deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[view_range]
+        )
+
+    print(f"Augmented data saved: {trial_num} files to {save_dir}")

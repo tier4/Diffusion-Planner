@@ -16,8 +16,8 @@ rm -f /tmp/tmp_dist_init
 
 SAVE_DIR="/mnt/nvme0/sakoda/training_result"
 
-TRAIN_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver51_realdata_cpp_num140/path_list_train_with_psim_data_without_shiojiri.json"
-VALID_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver51_realdata_cpp_num140/path_list_valid.json"
+TRAIN_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver55_realdata_cpp_INPUT_T_plus5/path_list_train_to_20250820_with_psim_data.json"
+VALID_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver55_realdata_cpp_INPUT_T_plus5/path_list_valid.json"
 
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
 --exp_name ${exp_name} \
@@ -29,4 +29,4 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
 
 save_dir_name=$(ls $SAVE_DIR | tail -n 1)
-./valid_run.sh $SAVE_DIR/$save_dir_name $VALID_SET_LIST
+./valid_run.sh $SAVE_DIR/$save_dir_name/best_model $VALID_SET_LIST

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.loss import loss_func
+from diffusion_planner.loss import compute_safety_penalty, loss_func
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
@@ -34,36 +34,25 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     loss_ego_list = []
 
     total_result_dict = defaultdict(list)
+    turn_indicator_correct = 0.0
+    turn_indicator_total = 0
+    turn_indicator_change_correct = 0.0
+    turn_indicator_change_total = 0
 
-    for batch in val_loader:
-        # データの準備
-        inputs = {
-            "ego_agent_past": batch[0].to(device),
-            "ego_current_state": batch[1].to(device),
-            "neighbor_agents_past": batch[3].to(device),
-            "lanes": batch[5].to(device),
-            "lanes_speed_limit": batch[6].to(device),
-            "lanes_has_speed_limit": batch[7].to(device),
-            "route_lanes": batch[8].to(device),
-            "route_lanes_speed_limit": batch[9].to(device),
-            "route_lanes_has_speed_limit": batch[10].to(device),
-            "polygons": batch[11].to(device),
-            "line_strings": batch[12].to(device),
-            "static_objects": batch[13].to(device),
-            "goal_pose": batch[15].to(args.device),
-            "ego_shape": batch[16].to(args.device),
-        }
-
+    for inputs in val_loader:
+        inputs = {key: value.to(device) for key, value in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
+
+        turn_indicator_seq = inputs["turn_indicators"]
 
         inputs["sampled_trajectories"] = 0.5 * torch.randn(B, 33, 81, 4, dtype=torch.float32)
 
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
-        ego_future = batch[2].to(device)
+        ego_future = inputs["ego_agent_future"]
         ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)
-        neighbors_future = batch[4].to(device)
+        neighbors_future = inputs["neighbor_agents_future"]
         neighbor_future_mask = (
             torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
         )  # (B, Pn, T)
@@ -100,6 +89,15 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         prediction = outputs["prediction"]
         turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
+        turn_indicator_gt = turn_indicator_seq[:, -1].long()
+        correct = (turn_indicator == turn_indicator_gt).long()
+        turn_indicator_correct += correct.sum().item()
+        turn_indicator_total += correct.numel()
+        change_mask = turn_indicator_seq[:, -1] != turn_indicator_seq[:, -2]
+        change_count = change_mask.sum().item()
+        if change_count > 0:
+            turn_indicator_change_correct += correct[change_mask].sum().item()
+            turn_indicator_change_total += change_count
         if return_pred:
             predictions.append(prediction)
             turn_indicators.append(turn_indicator)
@@ -123,6 +121,18 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             # val : (B, Pn + 1, T)
             total_result_dict[f"ego_{key}"].append(val[:, 0, :])  # (B, T)
 
+        safety_penalty, _, (lane_penalty, neighbor_penalty) = compute_safety_penalty(
+            args.state_normalizer(prediction),
+            inputs,
+            neighbors_future,
+            neighbors_future_valid,
+            args,
+            return_components=True,
+        )
+        total_result_dict["ego_safety_margin_loss"].append(safety_penalty)
+        total_result_dict["ego_lane_boundary_margin_loss"].append(lane_penalty)
+        total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty)
+
     avg_loss_ego = total_loss_ego / total_samples_ego
     avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)
     loss_ego = torch.cat(loss_ego_list, dim=0)
@@ -133,12 +143,23 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     if return_pred:
         predictions = torch.cat(predictions, dim=0)
         turn_indicators = torch.cat(turn_indicators, dim=0)
+    turn_indicator_accuracy = (
+        turn_indicator_correct / turn_indicator_total if turn_indicator_total > 0 else 0.0
+    )
+    turn_indicator_change_accuracy = (
+        turn_indicator_change_correct / turn_indicator_change_total
+        if turn_indicator_change_total > 0
+        else 0.0
+    )
     return {
         "avg_loss_ego": avg_loss_ego,
         "avg_loss_neighbor": avg_loss_neighbor,
         "loss_ego": loss_ego,
         "predictions": predictions,
         "turn_indicators": turn_indicators,
+        "turn_indicator_accuracy": turn_indicator_accuracy,
+        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+        "turn_indicator_change_total": turn_indicator_change_total,
         **total_result_dict,
     }
 
@@ -177,7 +198,7 @@ def get_args():
     # Training
     parser.add_argument("--seed", type=int, help="fix random seed", default=3407)
     parser.add_argument("--train_epochs", type=int, help="epochs of training", default=500)
-    parser.add_argument("--batch_size", type=int, help="batch size (default: 2048)", default=1024)
+    parser.add_argument("--batch_size", type=int, help="batch size (default: 2048)", default=32)
 
     parser.add_argument(
         "--device", type=str, help="run on which device (default: cuda)", default="cuda"
@@ -232,12 +253,7 @@ if __name__ == "__main__":
     batch_size = args.batch_size
 
     # set up data loaders
-    valid_set = DiffusionPlannerData(
-        args.valid_set_list,
-        args.agent_num,
-        args.predicted_neighbor_num,
-        args.future_len,
-    )
+    valid_set = DiffusionPlannerData(args.valid_set_list)
     valid_sampler = DistributedSampler(
         valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
     )
@@ -309,25 +325,52 @@ if __name__ == "__main__":
     avg_loss_neighbor = valid_dict["avg_loss_neighbor"]
     predictions = valid_dict["predictions"]
     turn_indicators = valid_dict["turn_indicators"]
+    turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
+    turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
+    turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
     print(f"{avg_loss_ego=:.4f} {avg_loss_neighbor=:.4f}")
     print(f"{predictions.shape=}")
     print(f"{turn_indicators.shape=}")
+    print(f"{turn_indicator_accuracy=:.4f}")
+    if turn_indicator_change_total > 0:
+        print(f"{turn_indicator_change_accuracy=:.4f} ({turn_indicator_change_total=:d})")
+    else:
+        print("turn_indicator_change_accuracy=0.0000 (num_samples=0)")
+    if "ego_safety_margin_loss" in valid_dict:
+        print(
+            f"ego_safety_margin_loss_mean={valid_dict['ego_safety_margin_loss'].mean().item():.4f}"
+        )
+    if "ego_lane_boundary_margin_loss" in valid_dict:
+        print(
+            "ego_lane_boundary_margin_loss_mean="
+            f"{valid_dict['ego_lane_boundary_margin_loss'].mean().item():.4f}"
+        )
+    if "ego_neighbor_margin_loss" in valid_dict:
+        print(
+            "ego_neighbor_margin_loss_mean="
+            f"{valid_dict['ego_neighbor_margin_loss'].mean().item():.4f}"
+        )
 
     valid_dict_to_save = {
         "avg_loss_ego": avg_loss_ego,
         "avg_loss_neighbor": avg_loss_neighbor,
+        "turn_indicator_accuracy": turn_indicator_accuracy,
+        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+        "turn_indicator_change_total": turn_indicator_change_total,
     }
     for key, val in valid_dict.items():
         if key.startswith("ego_"):
             valid_dict_to_save[f"{key}"] = val.mean().item()
-    with open(Path(args.resume_model_path).parent / "valid_dict.json", "w") as f:
-        json.dump(valid_dict_to_save, f, indent=4)
 
     if args.save_predictions_dir is None:
         exit(0)
 
     save_predictions_dir = Path(args.save_predictions_dir)
     save_predictions_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:
+        json.dump(valid_dict_to_save, f, indent=4)
+
     for i in range(predictions.shape[0]):
         np.savez(
             save_predictions_dir / f"prediction{i:08d}.npz",

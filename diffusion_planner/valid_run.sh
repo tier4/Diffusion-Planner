@@ -12,7 +12,7 @@ MODEL_DIR=${1}
 VALID_SET_LIST_PATH=${2}
 MODEL_PATH="$MODEL_DIR/best_model.pth"
 ARGS_JSON_PATH="$MODEL_DIR/args.json"
-SAVE_DIR=$MODEL_DIR/predictions
+SAVE_DIR=$MODEL_DIR/validation_result/predictions
 
 rm -f /tmp/tmp_dist_init
 
@@ -24,5 +24,6 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 1 --standalone vali
 
 python3 util_scripts/visualize_prediction.py \
   --predictions_dir $SAVE_DIR \
-  --args_json $ARGS_JSON_PATH \
   --valid_data_list $VALID_SET_LIST_PATH
+
+~/misc/ffmpeg_lib/process_subdir.sh $SAVE_DIR/../visualization

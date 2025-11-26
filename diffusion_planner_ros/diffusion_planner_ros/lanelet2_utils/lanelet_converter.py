@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import lanelet2
 import numpy as np
-import shapely
 import torch
 from autoware_lanelet2_extension_python.projection import MGRSProjector
 from diffusion_planner.dimensions import (
@@ -11,7 +10,6 @@ from diffusion_planner.dimensions import (
     POINTS_PER_POLYGON,
 )
 from numpy.typing import NDArray
-from scipy.interpolate import interp1d
 
 from .lanelet_map import (
     Lanelet,
@@ -23,8 +21,6 @@ from .lanelet_map import (
 
 # cspell: ignore MGRS
 
-CPP_MODE = True
-
 
 def _get_attribute(attribute_map, key: str, default: str) -> str:
     if key in attribute_map:
@@ -33,7 +29,7 @@ def _get_attribute(attribute_map, key: str, default: str) -> str:
         return default
 
 
-def _interpolate_lane_cpp(waypoints: NDArray, num_points: int):
+def _interpolate_lane(waypoints: NDArray, num_points: int):
     assert len(waypoints) >= 2, "At least two waypoints are required"
 
     # Compute cumulative distances (arc length)
@@ -77,9 +73,7 @@ def _interpolate_lane_cpp(waypoints: NDArray, num_points: int):
         t = max(0.0, min(1.0, t))
 
         # Linear interpolation
-        interpolated_point = waypoints[seg_idx] + t * (
-            waypoints[seg_idx + 1] - waypoints[seg_idx]
-        )
+        interpolated_point = waypoints[seg_idx] + t * (waypoints[seg_idx + 1] - waypoints[seg_idx])
         result.append(interpolated_point)
 
     # Always include the last point
@@ -92,55 +86,7 @@ def _interpolate_lane_cpp(waypoints: NDArray, num_points: int):
     return new_waypoints
 
 
-def _interpolate_lane(waypoints: NDArray, num_points: int):
-    # Compute cumulative distances (arc length)
-    distances = np.zeros(len(waypoints))
-    for i in range(1, len(waypoints)):
-        distances[i] = distances[i - 1] + np.linalg.norm(
-            waypoints[i] - waypoints[i - 1]
-        )
-
-    # Generate new arc lengths with fixed spacing (0.5 meters)
-    new_distances = np.arange(0, distances[-1], 0.5)
-    new_distances = np.append(
-        new_distances, distances[-1]
-    )  # Ensure last point is included
-
-    # Interpolate x, y, z separately
-    interp_x = interp1d(distances, waypoints[:, 0], kind="linear")
-    interp_y = interp1d(distances, waypoints[:, 1], kind="linear")
-    interp_z = interp1d(distances, waypoints[:, 2], kind="linear")
-
-    # Compute new waypoints
-    new_waypoints = np.vstack(
-        (interp_x(new_distances), interp_y(new_distances), interp_z(new_distances))
-    ).T
-
-    # Ensure the first and last points remain unchanged
-    # Ensure the first waypoint is exactly the same without duplication
-    if not np.allclose(new_waypoints[0], waypoints[0]):
-        new_waypoints = np.vstack((waypoints[0], new_waypoints))
-
-    # Ensure the last waypoint is exactly the same without duplication
-    if not np.allclose(new_waypoints[-1], waypoints[-1]):
-        new_waypoints = np.vstack((new_waypoints, waypoints[-1]))
-
-    # Resample to exactly num_points points using shapely
-    new_waypoints = np.array(new_waypoints, dtype=np.float32)
-    line = shapely.LineString(new_waypoints)
-    new_waypoints = np.concatenate(
-        [
-            line.interpolate(d).coords._coords
-            for d in np.linspace(0, line.length, num_points)
-        ]
-    )
-
-    return new_waypoints
-
-
-def _identify_current_light_status(
-    turn_direction: int, traffic_light_elements: list
-) -> int:
+def _identify_current_light_status(turn_direction: int, traffic_light_elements: list) -> int:
     """
     Identify the current traffic light status based on turn direction and traffic light elements.
     ref: https://github.com/tier4/lanelet2_python_api_for_autoware/blob/rosless_lanelet2/interaction_with_cache_json.ipynb
@@ -154,9 +100,7 @@ def _identify_current_light_status(
         int: The color of the relevant traffic light (0=UNKNOWN, 1=RED, 2=AMBER, 3=GREEN, 4=WHITE)
     """
     # Filter out ineffective elements (color == 0)
-    effective_elements = [
-        element for element in traffic_light_elements if element.color != 0
-    ]
+    effective_elements = [element for element in traffic_light_elements if element.color != 0]
 
     # If no effective elements, return UNKNOWN (0)
     if not effective_elements:
@@ -177,17 +121,13 @@ def _identify_current_light_status(
     target_shape = direction_to_shape_map.get(turn_direction, 0)
 
     # First priority: Find elements with exactly matching direction
-    matching_elements = [
-        element for element in effective_elements if element.shape == target_shape
-    ]
+    matching_elements = [element for element in effective_elements if element.shape == target_shape]
     if matching_elements:
         # If multiple matching elements, take the one with highest confidence
         return max(matching_elements, key=lambda x: x.confidence).color
 
     # Second priority: Find circle elements
-    circle_elements = [
-        element for element in effective_elements if element.shape == 1
-    ]  # CIRCLE
+    circle_elements = [element for element in effective_elements if element.shape == 1]  # CIRCLE
     if circle_elements:
         # If multiple circle elements, take the one with highest confidence
         return max(circle_elements, key=lambda x: x.confidence).color
@@ -216,30 +156,26 @@ def convert_lanelet(filename: str) -> LaneletMap:
     projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
     lanelet_map = lanelet2.io.load(filename, projection)
 
-    interpolate_func = _interpolate_lane_cpp if CPP_MODE else _interpolate_lane
-
     lanelets: dict[int, Lanelet] = {}
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
         if lanelet_subtype not in ("road", "highway", "road_shoulder", "bicycle_lane"):
             continue
 
-        centerline = interpolate_func(
+        centerline = _interpolate_lane(
             np.array([(line.x, line.y, line.z) for line in lanelet.centerline]),
             POINTS_PER_LANELET,
         )
-        left_boundary = interpolate_func(
+        left_boundary = _interpolate_lane(
             np.array([(line.x, line.y, line.z) for line in lanelet.leftBound]),
             POINTS_PER_LANELET,
         )
-        right_boundary = interpolate_func(
+        right_boundary = _interpolate_lane(
             np.array([(line.x, line.y, line.z) for line in lanelet.rightBound]),
             POINTS_PER_LANELET,
         )
 
-        turn_direction_str = _get_attribute(
-            lanelet.attributes, "turn_direction", "unknown"
-        )
+        turn_direction_str = _get_attribute(lanelet.attributes, "turn_direction", "unknown")
         turn_direction_int = {
             "unknown": -1,
             "straight": 0,
@@ -276,7 +212,7 @@ def convert_lanelet(filename: str) -> LaneletMap:
         if polygon_type not in ("intersection_area",):
             continue
         polygon_points = np.array([(point.x, point.y, point.z) for point in polygon])
-        polygon_points = interpolate_func(polygon_points, POINTS_PER_POLYGON)
+        polygon_points = _interpolate_lane(polygon_points, POINTS_PER_POLYGON)
         polygons[polygon.id] = Polygon(
             id=polygon.id,
             polyline=polygon_points,
@@ -290,12 +226,8 @@ def convert_lanelet(filename: str) -> LaneletMap:
         line_string_subtype = _get_attribute(line_string.attributes, "subtype", "")
         if line_string_type not in ("stop_line",):
             continue
-        line_string_points = np.array(
-            [(point.x, point.y, point.z) for point in line_string]
-        )
-        line_string_points = interpolate_func(
-            line_string_points, POINTS_PER_LINE_STRING
-        )
+        line_string_points = np.array([(point.x, point.y, point.z) for point in line_string])
+        line_string_points = _interpolate_lane(line_string_points, POINTS_PER_LINE_STRING)
         line_strings[line_string.id] = LineString(
             id=line_string.id,
             polyline=line_string_points,
@@ -346,9 +278,7 @@ def process_lanelet(
     left_boundary = lanelet.left_boundary
     right_boundary = lanelet.right_boundary
 
-    inside_center = judge_inside(
-        center_x, center_y, lanelet.center[0], lanelet.center[1]
-    )
+    inside_center = judge_inside(center_x, center_y, lanelet.center[0], lanelet.center[1])
     inside_first = judge_inside(center_x, center_y, centerline[0, 0], centerline[0, 1])
     inside_last = judge_inside(center_x, center_y, centerline[-1, 0], centerline[-1, 1])
     if (not inside_center) and (not inside_first) and (not inside_last):
@@ -384,9 +314,7 @@ def process_lanelet(
         traffic_light_id = lanelet.traffic_lights[0].id
         if traffic_light_id in traffic_light_recognition:
             elements = traffic_light_recognition[traffic_light_id]
-            traffic_light_color = _identify_current_light_status(
-                lanelet.turn_direction, elements
-            )
+            traffic_light_color = _identify_current_light_status(lanelet.turn_direction, elements)
             # https://github.com/autowarefoundation/autoware_msgs/blob/main/autoware_perception_msgs/msg/TrafficLightElement.msg
             if traffic_light_color == 0:  # UNKNOWN
                 traffic_light[3] = 1
@@ -459,9 +387,7 @@ def create_lane_tensor(
     # sort by distance from the first and last point
     def key_func(item):
         line_data, speed_limit_mps = item
-        back_index = (
-            -2 if CPP_MODE else -1
-        )  # -1 is the same as next first point, so use -2
+        back_index = -2  # -1 is sometimes the same as next first point, so use -2
         return min(
             np.linalg.norm(line_data[0, :2]),
             np.linalg.norm(line_data[back_index, :2]),
@@ -477,16 +403,12 @@ def create_lane_tensor(
         dtype=torch.float32,
         device=dev,
     )
-    lanes_speed_limit = torch.zeros(
-        (1, num_segments, 1), dtype=torch.float32, device=dev
-    )
-    lanes_has_speed_limit = torch.zeros(
-        (1, num_segments, 1), dtype=torch.bool, device=dev
-    )
+    lanes_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.float32, device=dev)
+    lanes_has_speed_limit = torch.zeros((1, num_segments, 1), dtype=torch.bool, device=dev)
 
-    for i, result_list in enumerate(result_list):
-        line_data, speed_limit = result_list
-        lanes_tensor[0, i] = torch.from_numpy(line_data).cuda()
+    for i, result in enumerate(result_list):
+        line_data, speed_limit = result
+        lanes_tensor[0, i] = torch.from_numpy(line_data).to(device=dev)
         assert speed_limit is not None
         lanes_speed_limit[0, i] = speed_limit
         lanes_has_speed_limit[0, i] = speed_limit is not None
@@ -522,9 +444,7 @@ def create_line_tensor(
 
     result_list = sorted(result_list, key=key_func)
     result_list = result_list[0:num_elements]
-    result_list += [np.zeros((num_points, 2), dtype=np.float32)] * (
-        num_elements - len(result_list)
-    )
+    result_list += [np.zeros((num_points, 2), dtype=np.float32)] * (num_elements - len(result_list))
     result_list = np.array(result_list, dtype=np.float32)
     tensor_data = (
         torch.from_numpy(result_list)

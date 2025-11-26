@@ -15,40 +15,11 @@ torch.backends.mha.set_fastpath_enabled(False)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert torch model to onnx")
-    parser.add_argument(
-        "--test_only",
-        action="store_true",
-        help="If set, only test the output of the existing ONNX model",
-    )
-
     parser.add_argument("--config", type=str, default="args.json", help="Config file path")
     parser.add_argument("--ckpt", type=str, default="latest.pth", help="Checkpoint file path")
     parser.add_argument("--onnx_path", type=str, default="model.onnx", help="ONNX model file path")
-    parser.add_argument(
-        "--wrap_with_onnx_functions",
-        action="store_true",
-        help="Wether to replace some original functions with onnx-friendly ones",
-    )
     args = parser.parse_args()
     return args
-
-
-def heading_to_cos_sin(x):
-    """
-    Convert heading angle to cosine and sine.
-    Args:
-        x: [B, T, 3] where last dimension is (x, y, heading)
-    Output:
-        x: [B, T, 4] where last dimension is (x, y, cos(heading), sin(heading))
-    """
-    return torch.cat(
-        [
-            x[..., :2],
-            x[..., 2:3].cos(),
-            x[..., 2:3].sin(),
-        ],
-        dim=-1,
-    )
 
 
 class ONNXWrapper(nn.Module):
@@ -73,6 +44,7 @@ class ONNXWrapper(nn.Module):
         line_strings,
         goal_pose,
         ego_shape,
+        turn_indicators,
     ):
         inputs = {
             "sampled_trajectories": sampled_trajectories,
@@ -90,6 +62,7 @@ class ONNXWrapper(nn.Module):
             "line_strings": line_strings,
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
+            "turn_indicators": turn_indicators,
         }
         encoder_outputs, decoder_outputs = self.model(inputs)
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
@@ -123,8 +96,6 @@ if __name__ == "__main__":
     config_json_path = args.config
     ckpt_path = args.ckpt
     onnx_path = args.onnx_path
-    wrap_with_onnx = args.wrap_with_onnx_functions
-    test_only = args.test_only
 
     # Load config
     with open(config_json_path, "r") as f:
@@ -166,6 +137,7 @@ if __name__ == "__main__":
     )
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
+    inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
 
     for key in inputs.keys():
         print(f"{key}: {inputs[key].shape}, {inputs[key].dtype}")
@@ -194,26 +166,25 @@ if __name__ == "__main__":
     print(f"{input_names=}")
     onnx_inputs = {k: v.cpu().numpy() for k, v in inputs.items() if k in input_names}
 
-    if not test_only:
-        print(f"creating a new onnx model: {onnx_path}")
-        # Define dynamic axes for both inputs and outputs
-        dynamic_axes = {}
-        # Add dynamic batch dimension for inputs
-        for name in input_names:
-            dynamic_axes[name] = {0: "batch"}
-        # Add dynamic batch dimension for outputs
-        dynamic_axes["prediction"] = {0: "batch"}
-        dynamic_axes["turn_indicator_logit"] = {0: "batch"}
+    print(f"creating a new onnx model: {onnx_path}")
+    # Define dynamic axes for both inputs and outputs
+    dynamic_axes = {}
+    # Add dynamic batch dimension for inputs
+    for name in input_names:
+        dynamic_axes[name] = {0: "batch"}
+    # Add dynamic batch dimension for outputs
+    dynamic_axes["prediction"] = {0: "batch"}
+    dynamic_axes["turn_indicator_logit"] = {0: "batch"}
 
-        onnx_model = torch.onnx.export(
-            wrapper,
-            torch_input_tuple,
-            onnx_path,
-            input_names=input_names,
-            output_names=["prediction", "turn_indicator_logit"],
-            dynamic_axes=dynamic_axes,
-            opset_version=20,
-        )
+    onnx_model = torch.onnx.export(
+        wrapper,
+        torch_input_tuple,
+        onnx_path,
+        input_names=input_names,
+        output_names=["prediction", "turn_indicator_logit"],
+        dynamic_axes=dynamic_axes,
+        opset_version=20,
+    )
 
     sess_options = ort.SessionOptions()
     # sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC

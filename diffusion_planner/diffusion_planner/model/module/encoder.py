@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from timm.layers import DropPath
 from timm.models.layers import Mlp
 
+from diffusion_planner.dimensions import *
 from diffusion_planner.model.module.mixer import MixerBlock
 
 CLASS_TYPE_EGO = 0
@@ -14,7 +16,8 @@ CLASS_TYPE_POLYGON = 5
 CLASS_TYPE_LINE_STRING = 6
 CLASS_TYPE_GOAL_POSE = 7
 CLASS_TYPE_EGO_SHAPE = 8
-CLASS_TYPE_NUM = 9
+CLASS_TYPE_TURN_INDICATOR = 9
+CLASS_TYPE_NUM = 10
 
 
 def add_class_type(x, class_type):
@@ -40,10 +43,13 @@ class Encoder(nn.Module):
         self.hidden_dim = config.hidden_dim
 
         self.use_ego_history = config.use_ego_history
+        self.ego_history_dropout_rate = config.ego_history_dropout_rate
+        self.use_turn_indicators = config.use_turn_indicators
 
         ego_num = 1
         goal_pose_num = 1
         ego_shape_num = 1
+        turn_indicator_num = 1
         self.token_num = (
             ego_num
             + config.agent_num
@@ -54,6 +60,7 @@ class Encoder(nn.Module):
             + config.line_string_num
             + goal_pose_num
             + ego_shape_num
+            + turn_indicator_num
         )
 
         self.ego_encoder = EgoEncoder(
@@ -105,7 +112,13 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
-        self.ego_shape_encoder = EgoShapeEncoder(
+        self.ego_shape_encoder = FloatsEncoder(
+            num_float=3,
+            drop_path_rate=config.encoder_drop_path_rate,
+            hidden_dim=config.hidden_dim,
+        )
+        self.turn_indicator_encoder = FloatsEncoder(
+            num_float=INPUT_T,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
@@ -126,12 +139,11 @@ class Encoder(nn.Module):
         )
 
     def forward(self, inputs):
-        encoder_outputs = {}
-
         # ego agent
-        ego = inputs["ego_agent_past"]  # (B, T=21, D=4)
+        ego = inputs["ego_agent_past"]  # (B, T=INPUT_T + 1, D=4)
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
+        ego[:, 6:] *= 0.0  # Only keep the current + first 5 steps of ego history
 
         # agents
         neighbors = inputs["neighbor_agents_past"]  # (B, N=32, T=21, D=11)
@@ -161,9 +173,21 @@ class Encoder(nn.Module):
         # ego shape
         ego_shape = inputs["ego_shape"]  # (B, D=3)
 
+        # turn indicator
+        turn_indicator = inputs["turn_indicators"][:, :-1]  # (B, T)
+        turn_indicator = turn_indicator.float()
+        if not self.use_turn_indicators:
+            turn_indicator = torch.zeros_like(turn_indicator)
+
         B = neighbors.shape[0]
 
         encoding_ego, ego_mask, ego_pos = self.ego_encoder(ego)
+
+        if self.ego_history_dropout_rate > 0:
+            encoding_ego = F.dropout(
+                encoding_ego, p=self.ego_history_dropout_rate, training=self.training
+            )
+
         encoding_neighbors, neighbors_mask, neighbor_pos = self.neighbor_encoder(neighbors)
         encoding_static, static_mask, static_pos = self.static_encoder(static)
         encoding_lanes, lanes_mask, lane_pos = self.lane_encoder(
@@ -188,6 +212,9 @@ class Encoder(nn.Module):
 
         encoding_goal_pose, goal_pose_mask, goal_pose_pos = self.goal_pose_encoder(goal_pose)
         encoding_ego_shape, ego_shape_mask, ego_shape_pos = self.ego_shape_encoder(ego_shape)
+        encoding_turn_indicator, turn_indicator_mask, turn_indicator_pos = (
+            self.turn_indicator_encoder(turn_indicator)
+        )
 
         encoding_input = torch.cat(
             [
@@ -200,6 +227,7 @@ class Encoder(nn.Module):
                 encoding_line_string,
                 encoding_goal_pose,
                 encoding_ego_shape,
+                encoding_turn_indicator,
             ],
             dim=1,
         )
@@ -215,6 +243,7 @@ class Encoder(nn.Module):
                 line_string_mask,
                 goal_pose_mask,
                 ego_shape_mask,
+                turn_indicator_mask,
             ],
             dim=1,
         ).view(-1)
@@ -230,6 +259,7 @@ class Encoder(nn.Module):
                 line_string_pos,
                 goal_pose_pos,
                 ego_shape_pos,
+                turn_indicator_pos,
             ],
             dim=1,
         ).view(B * self.token_num, -1)
@@ -241,9 +271,7 @@ class Encoder(nn.Module):
 
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
-        encoder_outputs["encoding"] = self.fusion(
-            encoding_input, encoding_mask.view(B, self.token_num)
-        )
+        encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
 
         return encoder_outputs
 
@@ -680,15 +708,15 @@ class GoalPoseEncoder(nn.Module):
         return x, mask, pos
 
 
-class EgoShapeEncoder(nn.Module):
-    def __init__(self, drop_path_rate, hidden_dim):
+class FloatsEncoder(nn.Module):
+    def __init__(self, num_float, drop_path_rate, hidden_dim):
         super().__init__()
         channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
 
         self.channel_pre_project = Mlp(
-            in_features=3,
+            in_features=num_float,
             hidden_features=channels_mlp_dim,
             out_features=channels_mlp_dim,
             act_layer=nn.GELU,
@@ -706,7 +734,7 @@ class EgoShapeEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, D=3 (wheel_base, ego_length, ego_width)
+        x: B, D
         """
         B, D = x.shape
         pos = torch.zeros((B, 4), device=x.device)  # (B, D=4[x, y, cos, sin])

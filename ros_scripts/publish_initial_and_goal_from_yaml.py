@@ -4,10 +4,12 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import lanelet2
 import numpy as np
 import rclpy
 import yaml
 from autoware_internal_debug_msgs.msg import ProcessingTimeTree
+from autoware_lanelet2_extension_python.projection import MGRSProjector
 from autoware_perception_msgs.msg import (
     TrafficLightElement,
     TrafficLightGroup,
@@ -24,6 +26,79 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("yaml_path", type=Path)
     return parser.parse_args()
+
+
+class TrafficLightStateMachine:
+    """信号の状態を管理するクラス"""
+
+    # RED = 1, YELLOW = 2, GREEN = 3
+    RED = 1
+    YELLOW = 2
+    GREEN = 3
+    VELOCITY_THRESHOLD = 0.1  # m/s, 静止とみなす閾値
+
+    def __init__(self):
+        self.traffic_light_status = self.YELLOW
+        self.is_moving = False
+        self.stopped_time = 0.0
+        self.green_time = 0.0
+        self.yellow_time = 0.0
+        self.last_callback_time = None
+
+    def update_traffic_light_color(self, vx: float, dt: float) -> int:
+        """
+        速度と時間差分に基づいて信号の色を決定する
+
+        Args:
+            vx: 車両の速度 (m/s)
+            dt: 前回からの時間差分 (秒)
+
+        Returns:
+            信号の色 (RED=1, YELLOW=2, GREEN=3)
+        """
+        if self.traffic_light_status == self.RED:
+            if abs(vx) > self.VELOCITY_THRESHOLD:
+                self.is_moving = True
+                self.stopped_time = 0.0
+            else:
+                # 静止している
+                if self.is_moving:
+                    # 動いている状態から静止状態への遷移
+                    self.is_moving = False
+                    self.stopped_time = 0.0
+
+                self.stopped_time += dt
+                # 静止していくらか経ったら緑
+                if self.stopped_time >= 3.0:
+                    self.traffic_light_status = self.GREEN
+                    self.stopped_time = 0.0
+                    self.green_time = 0.0
+                    self.yellow_time = 0.0
+        elif self.traffic_light_status == self.GREEN:
+            self.green_time += dt
+            # 緑から黄色への遷移
+            if self.green_time >= 20.0:
+                self.traffic_light_status = self.YELLOW
+                self.stopped_time = 0.0
+                self.green_time = 0.0
+                self.yellow_time = 0.0
+        elif self.traffic_light_status == self.YELLOW:
+            self.yellow_time += dt
+            # 黄色から赤への遷移
+            if self.yellow_time >= 5.0:
+                self.traffic_light_status = self.RED
+                self.stopped_time = 0.0
+                self.green_time = 0.0
+                self.yellow_time = 0.0
+
+        return self.traffic_light_status
+
+
+def _get_attribute(attribute_map, key: str, default: str) -> str:
+    if key in attribute_map:
+        return attribute_map[key]
+    else:
+        return default
 
 
 if __name__ == "__main__":
@@ -47,58 +122,42 @@ if __name__ == "__main__":
         TrafficLightGroupArray, "/perception/traffic_light_recognition/traffic_signals", 10
     )
 
-    # RED = 1, YELLOW = 2, GREEN = 3
-    RED = 1
-    YELLOW = 2
-    GREEN = 3
-    traffic_light_status = GREEN
-    counter = 0
+    # 信号の状態機械を初期化
+    traffic_light_sm = TrafficLightStateMachine()
+
+    osm_path = Path(
+        "/media/shintarosakoda/sandisk4t/data/nas_copy/tieriv_dataset/driving_dataset/map/2025-07-29/23-34-26_new/lanelet2_map.osm"
+    )
+    projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
+    lanelet_map = lanelet2.io.load(str(osm_path), projection)
+    traffic_light_group_ids = set()
+    for regulatory in lanelet_map.regulatoryElementLayer:
+        reg_subtype = _get_attribute(regulatory.attributes, "subtype", "")
+        if reg_subtype == "traffic_light":
+            traffic_light_group_ids.add(regulatory.id)
+
+    traffic_light_group_id_list = sorted(traffic_light_group_ids)
 
     def callback_kinematic_state(msg: Odometry):
+        global traffic_light_group_id_list
         stamp = msg.header.stamp
         stamp.sec += 1
-        global counter, traffic_light_status
-        counter += 1
-        # 各色で遷移時間を変える
-        if traffic_light_status == GREEN:
-            if counter % 400 == 0:
-                counter = 0
-                traffic_light_status = YELLOW
-        elif traffic_light_status == YELLOW:
-            if counter % 300 == 0:
-                counter = 0
-                traffic_light_status = RED
-        elif traffic_light_status == RED:
-            if counter % 1400 == 0:
-                counter = 0
-                traffic_light_status = GREEN
 
-        traffic_light_group_id_list = [
-            10221,
-            10222,
-            10249,
-            10250,
-            10267,
-            10270,
-            10276,
-            10307,
-            10309,
-            10323,
-            10324,
-            10583,
-            10584,
-            179518,
-            179596,
-            179970,
-            190343,
-            190426,
-            2118985,
-            2119347,
-            2119369,
-            2119402,
-            2119414,
-            2119540,
-        ]
+        # 速度を取得
+        vx = msg.twist.twist.linear.x
+
+        # 時間差分を計算
+        current_time = time.time()
+        if traffic_light_sm.last_callback_time is None:
+            traffic_light_sm.last_callback_time = current_time
+            dt = 0.0
+        else:
+            dt = current_time - traffic_light_sm.last_callback_time
+            traffic_light_sm.last_callback_time = current_time
+
+        # 信号の色を更新
+        traffic_light_sm.update_traffic_light_color(vx, dt)
+
         pub_traffic_light.publish(
             TrafficLightGroupArray(
                 stamp=stamp,
@@ -107,7 +166,7 @@ if __name__ == "__main__":
                         traffic_light_group_id=id,
                         elements=[
                             TrafficLightElement(
-                                color=traffic_light_status,
+                                color=traffic_light_sm.traffic_light_status,
                                 shape=1,  # CIRCLE
                                 status=2,  # SOLID_ON
                                 confidence=1.0,

@@ -15,12 +15,23 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
     parser.add_argument("--search_nearest_route", type=int, default=1)
+    parser.add_argument("--convert_yellow", type=int, default=0)
+    parser.add_argument("--convert_red", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=32)
     return parser.parse_args()
 
 
 def process_single_bag(args_tuple):
-    (bag_path, save_root, step, limit, min_frames, search_nearest_route) = args_tuple
+    (
+        bag_path,
+        save_root,
+        step,
+        limit,
+        min_frames,
+        search_nearest_route,
+        convert_yellow,
+        convert_red,
+    ) = args_tuple
 
     logging.info(f"Processing bag: {bag_path}")
 
@@ -45,7 +56,7 @@ def process_single_bag(args_tuple):
         use_cpp = True
         if use_cpp:
             parse_rosbag_main_cpp(
-                Path("/home/ubuntu/autoware/build/autoware_diffusion_planner/data_converter"),
+                Path("~/autoware/build/autoware_diffusion_planner/data_converter").expanduser(),
                 rosbag_path=bag_path,
                 vector_map_path=vector_map_path,
                 save_dir=save_dir,
@@ -53,6 +64,8 @@ def process_single_bag(args_tuple):
                 limit=limit,
                 min_frames=min_frames,
                 search_nearest_route=search_nearest_route,
+                convert_yellow=convert_yellow,
+                convert_red=convert_red,
             )
         else:
             parse_rosbag_main(
@@ -78,6 +91,8 @@ if __name__ == "__main__":
     limit = args.limit
     min_frames = args.min_frames
     search_nearest_route = args.search_nearest_route
+    convert_yellow = args.convert_yellow
+    convert_red = args.convert_red
     num_workers = args.num_workers or cpu_count()
 
     save_root = save_root.resolve()
@@ -106,7 +121,18 @@ if __name__ == "__main__":
     # Prepare arguments for parallel processing
     process_args = []
     for bag_path in bag_dir_list:
-        process_args.append((bag_path, save_root, step, limit, min_frames, search_nearest_route))
+        process_args.append(
+            (
+                bag_path,
+                save_root,
+                step,
+                limit,
+                min_frames,
+                search_nearest_route,
+                convert_yellow,
+                convert_red,
+            )
+        )
 
     # Process bags in parallel
     with Pool(processes=num_workers) as pool:

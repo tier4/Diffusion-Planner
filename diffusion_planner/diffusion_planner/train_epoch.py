@@ -34,95 +34,56 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     if args.ddp:
         torch.cuda.synchronize()
 
-    with tqdm(data_loader, desc="Training", unit="batch") as data_epoch:
-        for batch in data_epoch:
-            """
-            data structure in batch: Tuple(Tensor)
+    if ddp.get_rank() == 0:
+        data_loader = tqdm(data_loader, desc="Training", unit="batch")
 
-            ego_current_state,
-            ego_future_gt,
+    for inputs in data_loader:
+        inputs = {key: value.to(args.device) for key, value in inputs.items()}
+        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
+        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
-            neighbor_agents_past,
-            neighbors_future_gt,
+        ego_future = inputs["ego_agent_future"]
+        neighbors_future = inputs["neighbor_agents_future"]
+        # Normalize to ego-centric
+        if aug is not None:
+            inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
 
-            lanes,
-            lanes_speed_limit,
-            lanes_has_speed_limit,
+        # heading to cos sin
+        ego_future = heading_to_cos_sin(ego_future)
 
-            route_lanes,
-            route_lanes_speed_limit,
-            route_lanes_has_speed_limit,
+        mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+        neighbors_future = heading_to_cos_sin(neighbors_future)
+        neighbors_future[mask] = 0.0
+        inputs = args.observation_normalizer(inputs)
 
-            static_objects,
+        # call the model
+        optimizer.zero_grad()
 
-            """
+        loss = diffusion_loss_func(
+            model,
+            inputs,
+            ddp.get_model(model, args.ddp).sde.marginal_prob,
+            (ego_future, neighbors_future, mask),
+            args,
+        )
 
-            # prepare data
-            inputs = {
-                "ego_agent_past": batch[0].to(args.device),
-                "ego_current_state": batch[1].to(args.device),
-                "neighbor_agents_past": batch[3].to(args.device),
-                "lanes": batch[5].to(args.device),
-                "lanes_speed_limit": batch[6].to(args.device),
-                "lanes_has_speed_limit": batch[7].to(args.device),
-                "route_lanes": batch[8].to(args.device),
-                "route_lanes_speed_limit": batch[9].to(args.device),
-                "route_lanes_has_speed_limit": batch[10].to(args.device),
-                "polygons": batch[11].to(args.device),
-                "line_strings": batch[12].to(args.device),
-                "static_objects": batch[13].to(args.device),
-                "turn_indicator": batch[14].to(args.device),
-                "goal_pose": batch[15].to(args.device),
-                "ego_shape": batch[16].to(args.device),
-            }
+        loss["loss"] = (
+            loss["neighbor_prediction_loss"]
+            + args.alpha_planning_loss * loss["ego_planning_loss"]
+            + loss["turn_indicator_loss"]
+        )
 
-            inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-            inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+        # loss backward
+        loss["loss"].backward()
 
-            ego_future = batch[2].to(args.device)
-            neighbors_future = batch[4].to(args.device)
-            # Normalize to ego-centric
-            if aug is not None:
-                inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
+        nn.utils.clip_grad_norm_(model.parameters(), 5)
+        optimizer.step()
 
-            # heading to cos sin
-            ego_future = heading_to_cos_sin(ego_future)
+        ema.update(model)
 
-            mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
-            neighbors_future = heading_to_cos_sin(neighbors_future)
-            neighbors_future[mask] = 0.0
-            inputs = args.observation_normalizer(inputs)
-
-            # call the mdoel
-            optimizer.zero_grad()
-
-            loss = diffusion_loss_func(
-                model,
-                inputs,
-                ddp.get_model(model, args.ddp).sde.marginal_prob,
-                (ego_future, neighbors_future, mask),
-                args,
-            )
-
-            loss["loss"] = (
-                loss["neighbor_prediction_loss"]
-                + args.alpha_planning_loss * loss["ego_planning_loss"]
-                + loss["turn_indicator_loss"]
-            )
-
-            # loss backward
-            loss["loss"].backward()
-
-            nn.utils.clip_grad_norm_(model.parameters(), 5)
-            optimizer.step()
-
-            ema.update(model)
-
-            if args.ddp:
-                torch.cuda.synchronize()
-
-            data_epoch.set_postfix(loss="{:.4f}".format(loss["loss"].item()))
-            epoch_loss.append(loss)
+        if args.ddp:
+            torch.cuda.synchronize()
+        epoch_loss.append(loss)
 
     epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
 

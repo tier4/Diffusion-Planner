@@ -44,30 +44,22 @@ from tqdm import tqdm
 """
 This script makes npz files from a rosbag.
 [Contents of a npz file]
-map_name                    <U26    ()
-token                       <U16    ()
-ego_agent_past              float32 (21, 3)
+version                     int32   ()
+ego_agent_past              float32 (INPUT_T + 1, 3)
 ego_current_state           float32 (10,)
-ego_agent_future            float32 (80, 3)
-neighbor_agents_past        float32 (32, 21, 11)
-neighbor_agents_future      float32 (32, 80, 3)
+ego_agent_future            float32 (OUTPUT_T, 3)
+neighbor_agents_past        float32 (MAX_NUM_NEIGHBORS, INPUT_T + 1, 11)
+neighbor_agents_future      float32 (MAX_NUM_NEIGHBORS, OUTPUT_T, 3)
 static_objects              float32 (5, 10)
-lanes                       float32 (70, 20, 21)
-lanes_speed_limit           float32 (70, 1)
-lanes_has_speed_limit       bool    (70, 1)
-route_lanes                 float32 (25, 20, 21)
-route_lanes_speed_limit     float32 (25, 1)
-route_lanes_has_speed_limit bool    (25, 1)
-turn_indicator              int32   (1)
+lanes                       float32 (NUM_SEGMENTS_IN_LANE, POINTS_PER_LANELET, SEGMENT_POINT_DIM)
+lanes_speed_limit           float32 (NUM_SEGMENTS_IN_LANE, 1)
+lanes_has_speed_limit       bool    (NUM_SEGMENTS_IN_LANE, 1)
+route_lanes                 float32 (NUM_SEGMENTS_IN_ROUTE, POINTS_PER_LANELET, SEGMENT_POINT_DIM)
+route_lanes_speed_limit     float32 (NUM_SEGMENTS_IN_ROUTE, 1)
+route_lanes_has_speed_limit bool    (NUM_SEGMENTS_IN_ROUTE, 1)
+turn_indicators             int32   (INPUT_T + 1)
 """
-PAST_TIME_STEPS = 21
-FUTURE_TIME_STEPS = 80
-NEIGHBOR_NUM = 32
-STATIC_NUM = 5
-LANE_NUM = 70
-LANE_LEN = 20
-ROUTE_NUM = 25
-ROUTE_LEN = 20
+PAST_TIME_STEPS = INPUT_T + 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,11 +96,11 @@ class SequenceData:
     route: LaneletRoute
 
 
-def create_ego_sequence(data_list, i, future_time_steps, map2bl_matrix_4x4):
+def create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4):
     ego_future_x = []
     ego_future_y = []
     ego_future_yaw = []
-    for j in range(future_time_steps):
+    for j in range(OUTPUT_T):
         index = min(i + j + 1, len(data_list) - 1)
         x = data_list[index].kinematic_state.pose.pose.position.x
         y = data_list[index].kinematic_state.pose.pose.position.y
@@ -183,7 +175,7 @@ def create_neighbor_future(
             neighbor[0, i, j, 5] = twist_in_bl[1]  # velocity y
             # I don't know why but sometimes the length and width from autoware are 0
             neighbor[0, i, j, 6] = max(shape.dimensions.y, 1.0)  # width
-            neighbor[0, i, j, 7] = max(shape.dimensions.x, 1.0)  # lendth
+            neighbor[0, i, j, 7] = max(shape.dimensions.x, 1.0)  # length
             neighbor[0, i, j, 8] = label_in_model == 0  # vehicle
             neighbor[0, i, j, 9] = label_in_model == 1  # pedestrian
             neighbor[0, i, j, 10] = label_in_model == 2  # bicycle
@@ -214,7 +206,7 @@ def tracking_past_and_future(data_list, i, map2bl_matrix_4x4):
         tracking_future[key].shape_list = tracking_future[key].shape_list[-1:]
         tracking_future[key].kinematics_list = tracking_future[key].kinematics_list[-1:]
     # tracking
-    for frame_data in data_list[i : i + FUTURE_TIME_STEPS]:
+    for frame_data in data_list[i : i + OUTPUT_T]:
         tracking_future = tracking_one_step(
             frame_data.tracked_objects,
             tracking_future,
@@ -225,7 +217,7 @@ def tracking_past_and_future(data_list, i, map2bl_matrix_4x4):
         tracking_future = {
             key: value for key, value in tracking_future.items() if key in tracking_past
         }
-    # erase losting from tracking_future
+    # erase losing from tracking_future
     for key, val in tracking_future.items():
         total = len(val.kinematics_list)
         lost_time = val.lost_time
@@ -437,7 +429,7 @@ def main(
             continue
 
         # list[FrameData] -> npz
-        progress = tqdm(total=(n - PAST_TIME_STEPS - FUTURE_TIME_STEPS) // step)
+        progress = tqdm(total=(n - PAST_TIME_STEPS - OUTPUT_T) // step)
         stopping_count = 0
         for i in range(PAST_TIME_STEPS, n, step):
             progress.update(1)
@@ -458,7 +450,7 @@ def main(
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
                 traffic_light_recognition=traffic_light_recognition,
-                num_segments=70,
+                num_segments=NUM_SEGMENTS_IN_LANE,
                 dev="cpu",
                 do_sort=True,
             )
@@ -475,7 +467,7 @@ def main(
                 center_x=data_list[i].kinematic_state.pose.pose.position.x,
                 center_y=data_list[i].kinematic_state.pose.pose.position.y,
                 traffic_light_recognition=traffic_light_recognition,
-                num_segments=25,
+                num_segments=NUM_SEGMENTS_IN_ROUTE,
                 dev="cpu",
                 do_sort=False,
             )
@@ -489,7 +481,7 @@ def main(
             ego_tensor = create_current_ego_state(
                 data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.79
             ).squeeze(0)
-            ego_future_np = create_ego_sequence(data_list, i, FUTURE_TIME_STEPS, map2bl_matrix_4x4)
+            ego_future_np = create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4)
 
             # (1)自車が止まっている
             # (2)目の前のlanelet segmentが赤信号である
@@ -516,7 +508,7 @@ def main(
 
             is_red_light = route_tensor[:, 1, 0, 8 + 2].item()  # next segment
             sum_mileage = 0.0
-            for j in range(FUTURE_TIME_STEPS - 1):
+            for j in range(OUTPUT_T - 1):
                 sum_mileage += np.linalg.norm(ego_future_np[j, :2] - ego_future_np[j + 1, :2])
             is_future_forward = sum_mileage > 0.1
             if is_stop and is_red_light and is_future_forward:
@@ -532,14 +524,14 @@ def main(
             neighbor_past_tensor = convert_tracked_objects_to_tensor(
                 tracked_objs=tracking_past,
                 map2bl_matrix_4x4=map2bl_matrix_4x4,
-                max_num_objects=NEIGHBOR_NUM,
+                max_num_objects=MAX_NUM_NEIGHBORS,
                 max_timesteps=PAST_TIME_STEPS,
             ).squeeze(0)
             neighbor_future_tensor = create_neighbor_future(
                 tracked_objs=tracking_future,
                 map2bl_matrix_4x4=map2bl_matrix_4x4,
-                max_num_objects=NEIGHBOR_NUM,
-                max_timesteps=FUTURE_TIME_STEPS,
+                max_num_objects=MAX_NUM_NEIGHBORS,
+                max_timesteps=OUTPUT_T,
             ).squeeze(0)
             # (32, 80, 11) -> (32, 80, 3)
             neighbor_future_tensor = neighbor_future_tensor[:, :, :4]
@@ -571,20 +563,30 @@ def main(
                 dev="cpu",
             )
 
+            # turn_indicators
+            turn_indicators = np.array(
+                [
+                    data_list[max(0, i - INPUT_T + j)].turn_indicator.report
+                    for j in range(INPUT_T + 1)
+                ],
+                dtype=np.int32,
+            )
+
             curr_data = {
+                "version": 2,
                 "ego_agent_past": ego_past_np,
                 "ego_current_state": ego_tensor.numpy(),
                 "ego_agent_future": ego_future_np,
                 "neighbor_agents_past": neighbor_past_tensor.numpy(),
                 "neighbor_agents_future": neighbor_future_tensor.numpy(),
-                "static_objects": np.zeros((STATIC_NUM, 10), dtype=np.float32),
+                "static_objects": np.zeros((5, 10), dtype=np.float32),
                 "lanes": lanes_tensor.squeeze(0).numpy(),
                 "lanes_speed_limit": lanes_speed_limit.squeeze(0).numpy(),
                 "lanes_has_speed_limit": lanes_has_speed_limit.squeeze(0).numpy(),
                 "route_lanes": route_tensor.squeeze(0).numpy(),
                 "route_lanes_speed_limit": route_speed_limit.squeeze(0).numpy(),
                 "route_lanes_has_speed_limit": route_has_speed_limit.squeeze(0).numpy(),
-                "turn_indicator": data_list[i].turn_indicator.report,
+                "turn_indicators": turn_indicators,
                 "goal_pose": goal_pose_bl,
                 "polygons": polygon_tensor.squeeze(0).numpy(),
                 "line_strings": line_string_tensor.squeeze(0).numpy(),

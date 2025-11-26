@@ -12,7 +12,6 @@ from diffusion_planner.model.flow_matching_utils.ode_solver import (
     rk4_integration,
 )
 from diffusion_planner.model.module.dit import DiTBlock, FinalLayer, TimestepEmbedder
-from diffusion_planner.model.module.mixer import MixerBlock
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
@@ -51,17 +50,12 @@ class Decoder(nn.Module):
     def sde(self):
         return self._sde
 
-    def forward(self, encoder_outputs, inputs):
+    def forward(self, encoding, inputs):
         """
         Diffusion decoder process.
 
         Args:
-            encoder_outputs: Dict
-                {
-                    ...
-                    "encoding": agents, static objects and lanes context encoding
-                    ...
-                }
+            encoding: torch.Tensor
             inputs: Dict
                 {
                     ...
@@ -96,11 +90,8 @@ class Decoder(nn.Module):
         B, P, _ = current_states.shape
         assert P == (1 + self._predicted_neighbor_num)
 
-        # Extract context encoding
-        encoding = encoder_outputs["encoding"]
-
         # Pool encoding to get a fixed-size representation
-        encoding_pooled = torch.mean(encoding, dim=1).detach()  # [B, D]
+        encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(
             B, P, (1 + self._future_len) * 4

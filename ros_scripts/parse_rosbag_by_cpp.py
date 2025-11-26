@@ -17,6 +17,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
     parser.add_argument("--search_nearest_route", type=int, default=1)
+    parser.add_argument("--convert_yellow", type=int, default=0)
+    parser.add_argument("--convert_red", type=int, default=0)
     return parser.parse_args()
 
 
@@ -29,11 +31,13 @@ def main(
     limit: int,
     min_frames: int,
     search_nearest_route: bool,
+    convert_yellow: int,
+    convert_red: int,
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
     print(
-        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route}"
+        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route} {convert_yellow} {convert_red}"
     )
     result = subprocess.run(
         [
@@ -45,6 +49,8 @@ def main(
             f"--limit={limit}",
             f"--min_frames={min_frames}",
             f"--search_nearest_route={search_nearest_route}",
+            f"--convert_yellow={convert_yellow}",
+            f"--convert_red={convert_red}",
         ],
         capture_output=True,
         text=True,
@@ -56,7 +62,8 @@ def main(
     if result.returncode != 0:
         print(f"C++ binary execution failed with return code {result.returncode}")
         print(f"stderr: {result.stderr}")
-        return
+        print(f"{rosbag_path} processing failed.")
+        raise RuntimeError("C++ binary execution failed")
 
     print("C++ binary execution completed successfully.")
 

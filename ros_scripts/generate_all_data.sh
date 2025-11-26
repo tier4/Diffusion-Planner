@@ -7,11 +7,12 @@ cd $(dirname $0)
 # source ~/pilot-auto.xx1/install/setup.bash
 # set -eux
 
-data_root_real=/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver51_realdata_cpp_num140
-data_root_psim=/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver51_psimdata_cpp_num140
+data_root_real=/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver55_realdata_cpp_INPUT_T_plus5
+data_root_psim=/mnt/nvme2/sakoda/nas_copy/private_workspace/diffusion_planner/preprocessed_ver55_psimdata_cpp_INPUT_T_plus5
 
 python3 ./parse_rosbag_for_directory.py \
     /mnt/nvme1/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/ \
+    /mnt/nvme2/sakoda/nas_copy/tieriv_dataset/driving_dataset/bag_filtered/ \
     --save_root $data_root_real \
     --step 1 \
     --limit -1 \
@@ -62,3 +63,7 @@ python3 ../diffusion_planner/util_scripts/concat_data_list_jsons.py \
     $data_root_psim/path_list.json \
     $data_root_real/path_list_train.json \
     --save_path $data_root_real/path_list_train_with_psim_data.json
+
+python3 ../diffusion_planner/util_scripts/filter_json.py \
+    $data_root_real/path_list_train_with_psim_data.json \
+    --string_filter shiojiri

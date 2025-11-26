@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.train_epoch import heading_to_cos_sin
-from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from parse_prediction_results import calc_loss
 from tqdm import tqdm
@@ -18,7 +17,6 @@ from tqdm import tqdm
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--predictions_dir", type=Path, required=True)
-    parser.add_argument("--args_json", type=Path, required=True)
     parser.add_argument("--valid_data_list", type=Path, required=True)
     parser.add_argument("--save_dir", type=Path, default=None)
     parser.add_argument("--only_top_p", type=float, default=1.0)
@@ -28,15 +26,12 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     predictions_dir = args.predictions_dir
-    args_json = args.args_json
     valid_data_list = args.valid_data_list
     save_dir = args.save_dir
     only_top_p = args.only_top_p
 
     if save_dir is None:
         save_dir = predictions_dir.parent / f"visualization"
-
-    config_obj = Config(args_json)
 
     with open(valid_data_list, "r") as f:
         valid_data_path_list = json.load(f)
@@ -60,8 +55,10 @@ if __name__ == "__main__":
     ]
     trajectory_dict_x = defaultdict(list)
     trajectory_dict_y = defaultdict(list)
-    loss_3sec_dict = defaultdict(list)
+    loss_ego_3sec = defaultdict(list)
     loss_ego_position_lat = defaultdict(list)
+    loss_ego_lane_boundary_margin_loss = defaultdict(list)
+    loss_ego_neighbor_margin_loss = defaultdict(list)
     loss_list = []
     for info_path, loss_path in zip(info_path_list, loss_path_list):
         assert info_path.is_file()
@@ -72,9 +69,13 @@ if __name__ == "__main__":
         trajectory_dict_y[time_str].append(pose_data["y"])
 
         loss_data = json.load(open(loss_path, "r"))
-        loss_3sec_dict[time_str].append(loss_data["loss_ego_3sec"])
+        loss_ego_3sec[time_str].append(loss_data["loss_ego_3sec"])
         loss_list.append(loss_data["loss_ego_3sec"])
         loss_ego_position_lat[time_str].append(loss_data["ego_position_lat_loss"])
+        loss_ego_lane_boundary_margin_loss[time_str].append(
+            loss_data["ego_lane_boundary_margin_loss"]
+        )
+        loss_ego_neighbor_margin_loss[time_str].append(loss_data["ego_neighbor_margin_loss"])
 
     assert len(prediction_path_list) == len(valid_data_path_list)
 
@@ -103,10 +104,14 @@ if __name__ == "__main__":
             return
         valid_data_path = Path(valid_data_path)
         prediction_path = Path(prediction_path)
+        valid_loss_path = (
+            prediction_path.parent / f"{prediction_path.stem.replace('prediction', 'loss')}.json"
+        )
         info_data_path = valid_data_path.parent / f"{valid_data_path.stem}.json"
         valid_data = np.load(valid_data_path)
         output_dict = np.load(prediction_path)
         info_data = json.load(open(info_data_path, "r"))
+        valid_loss = json.load(open(valid_loss_path, "r"))
         ego_x = info_data["x"]
         ego_y = info_data["y"]
 
@@ -122,7 +127,6 @@ if __name__ == "__main__":
             valid_data_dict[key] = torch.tensor(np.expand_dims(value, axis=0))
         valid_data_dict["ego_agent_past"] = heading_to_cos_sin(valid_data_dict["ego_agent_past"])
         valid_data_dict["goal_pose"] = heading_to_cos_sin(valid_data_dict["goal_pose"])
-        valid_data_dict = config_obj.observation_normalizer(valid_data_dict)
 
         prediction = output_dict["prediction"]  # (1 + P, T, D)
         turn_indicator = int(output_dict["turn_indicator"])  # ()
@@ -145,9 +149,7 @@ if __name__ == "__main__":
         loss_ego_mean = np.mean(loss_ego)
 
         fig, ax = plt.subplots(1, 2, figsize=(8, 5), gridspec_kw={"width_ratios": [2, 1]})
-        visualize_inputs(
-            valid_data_dict, config_obj.observation_normalizer, save_path=None, ax=ax[0]
-        )
+        visualize_inputs(valid_data_dict, save_path=None, ax=ax[0])
 
         # plot prediction
         # Ego
@@ -169,12 +171,13 @@ if __name__ == "__main__":
                     f"\nloss{timestep // 10}sec={diff_m:.2f}[m]\n"
                     f"lat={lat_error_ego[index]:.2f}[m], lon={lon_error_ego[index]:.2f}[m], angle={angle_error_ego[index]:.2f}[rad]"
                 )
+        # title += f"\nego_lane_boundary_margin_loss={valid_loss['ego_lane_boundary_margin_loss']:.2f}, ego_neighbor_margin_loss={valid_loss['ego_neighbor_margin_loss']:.2f}"
 
         # Neighbors
         neighbors = valid_data_dict["neighbor_agents_past"][0]
         for i in range(prediction.shape[0] - 1):
             neighbor = neighbors[i, -1]
-            if torch.sum(torch.abs(neighbor[:4])).item() < 1e-6:
+            if np.sum(np.abs(neighbor[:4])).item() < 1e-6:
                 continue
             ax[0].plot(
                 prediction[i + 1, :, 0],
