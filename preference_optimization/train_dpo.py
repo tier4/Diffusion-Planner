@@ -49,7 +49,7 @@ def get_args():
     parser.add_argument("--excluded_json", type=Path, default=None)
     parser.add_argument("--valid_split", type=float, default=0.01)
     parser.add_argument("--beta", type=float, default=0.1)
-    parser.add_argument("--train_epochs", type=int, default=1)
+    parser.add_argument("--train_epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--device", type=str, default="cuda")
@@ -243,7 +243,9 @@ class DPODataGenerator:
                 self.save_preferences()
 
         self.save_preferences()
-        print(f"Annotation complete! Saved {len(self.preferences)} preferences to {self.output_json}")
+        print(
+            f"Annotation complete! Saved {len(self.preferences)} preferences to {self.output_json}"
+        )
         return self.output_json
 
 
@@ -636,7 +638,7 @@ def main():
 
     print(f"Saving artifacts to {run_dir}")
 
-    def run_cycle():
+    def run_cycle(epoch: int):
         preference_json = save_dir / "dpo_preferences_rule_based.json"
         excluded_path = args.excluded_json or (
             preference_json.parent / "dpo_excluded_rule_based.json"
@@ -716,43 +718,40 @@ def main():
         # Training loop
         train_log = []
 
-        for epoch in range(1, args.train_epochs + 1):
-            train_metrics = train_epoch(
-                policy_model, reference_model, train_loader, optimizer, args, model_args
-            )
+        train_metrics = train_epoch(
+            policy_model, reference_model, train_loader, optimizer, args, model_args
+        )
 
-            visualize_validation(policy_model, valid_loader, model_args, save_path, epoch)
+        visualize_validation(policy_model, valid_loader, model_args, save_path, epoch)
 
-            print(
-                f"Epoch {epoch}/{args.train_epochs}\n"
-                f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}"
-            )
+        print(
+            f"Epoch {epoch}/{args.train_epochs}\n"
+            f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}"
+        )
 
-            checkpoint_data = {
+        checkpoint_data = {
+            "epoch": epoch,
+            "model": policy_model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "args": args_dict,
+        }
+
+        torch.save(checkpoint_data, latest_ckpt)
+
+        if epoch % 10 == 0:
+            torch.save(checkpoint_data, os.path.join(save_path, f"epoch_{epoch:03d}.pth"))
+
+        train_log.append(
+            {
                 "epoch": epoch,
-                "model": policy_model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "args": args_dict,
+                **{f"train_{k}": v for k, v in train_metrics.items()},
             }
+        )
+        df = pd.DataFrame(train_log)
+        df.to_csv(os.path.join(save_path, "dpo_train_log.tsv"), sep="\t", index=False)
 
-            torch.save(checkpoint_data, latest_ckpt)
-
-            if epoch % 10 == 0:
-                torch.save(checkpoint_data, os.path.join(save_path, f"epoch_{epoch:03d}.pth"))
-
-            train_log.append(
-                {
-                    "epoch": epoch,
-                    **{f"train_{k}": v for k, v in train_metrics.items()},
-                }
-            )
-            df = pd.DataFrame(train_log)
-            df.to_csv(os.path.join(save_path, "dpo_train_log.tsv"), sep="\t", index=False)
-
-        print(f"\nTraining complete!")
-
-    while True:
-        run_cycle()
+    for epoch in range(1, args.train_epochs + 1):
+        run_cycle(epoch)
 
 
 if __name__ == "__main__":
