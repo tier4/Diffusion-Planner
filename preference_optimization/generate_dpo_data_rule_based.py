@@ -19,6 +19,15 @@ from diffusion_planner.utils.config import Config
 from tqdm import tqdm
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", type=Path, required=True)
+    parser.add_argument("--npz_list", type=Path, required=True)
+    parser.add_argument("--output_json", type=Path, default=Path("dpo_preferences_rule_based.json"))
+    parser.add_argument("--excluded_json", type=Path, default=Path("dpo_excluded_rule_based.json"))
+    return parser.parse_args()
+
+
 def load_model(model_path: Path, device: torch.device) -> tuple[Diffusion_Planner, Config]:
     """Load Diffusion Planner model and args."""
     print(f"Loading model from {model_path}")
@@ -49,15 +58,6 @@ def load_model(model_path: Path, device: torch.device) -> tuple[Diffusion_Planne
 
     model.to(device)
     return model, model_args
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=Path, required=True)
-    parser.add_argument("--npz_list", type=Path, required=True)
-    parser.add_argument("--output_json", type=Path, default=Path("dpo_preferences_rule_based.json"))
-    parser.add_argument("--excluded_json", type=Path, default=Path("dpo_excluded_rule_based.json"))
-    return parser.parse_args()
 
 
 class DPODataGenerator:
