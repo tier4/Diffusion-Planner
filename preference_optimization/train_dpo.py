@@ -38,7 +38,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exp_name", type=str, default="test")
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--npz_list", type=Path, required=True)
-    parser.add_argument("--excluded_json", type=Path, default=None)
     parser.add_argument("--valid_split", type=float, default=0.01)
     parser.add_argument("--beta", type=float, default=0.1)
     parser.add_argument("--train_epochs", type=int, default=10)
@@ -135,24 +134,9 @@ def _generate_trajectory_pair(
 
 
 def generate_rule_based_preferences(
-    policy_model: Diffusion_Planner,
-    model_args,
-    npz_list: Path,
-    output_json: Path,
-    excluded_json: Path,
-    overwrite: bool = True,
-):
+    policy_model: Diffusion_Planner, model_args, npz_list: Path
+) -> list[dict]:
     """Generate preference annotations using the provided policy model."""
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    excluded_json.parent.mkdir(parents=True, exist_ok=True)
-
-    if overwrite:
-        print("Overwriting existing preference/excluded files.")
-        if output_json.exists():
-            output_json.unlink()
-        if excluded_json.exists():
-            excluded_json.unlink()
-
     seed = random.randint(0, 2**32 - 1)
     torch.manual_seed(seed)
     np.random.seed(seed % (2**32))
@@ -161,36 +145,15 @@ def generate_rule_based_preferences(
     with open(npz_list, "r") as f:
         npz_paths = json.load(f)
 
-    preferences = []
-    excluded = []
+    preferences: list[dict] = []
 
-    if output_json.exists():
-        print(f"Resuming from {output_json}")
-        with open(output_json, "r") as f:
-            preferences = json.load(f)
-
-    if excluded_json.exists():
-        print(f"Loading excluded list from {excluded_json}")
-        with open(excluded_json, "r") as f:
-            excluded = json.load(f)
-
-    annotated_paths = {pref["npz_path"] for pref in preferences}
-    excluded_paths = set(excluded)
-    remaining_paths = [p for p in npz_paths if p not in annotated_paths and p not in excluded_paths]
-
-    print(f"Total NPZ files to annotate: {len(remaining_paths)}")
+    print(f"Total NPZ files to annotate: {len(npz_paths)}")
 
     was_training = policy_model.training
     policy_model.eval()
 
-    def flush():
-        with open(output_json, "w") as f:
-            json.dump(preferences, f, indent=2)
-        with open(excluded_json, "w") as f:
-            json.dump(excluded, f, indent=2)
-
     print("Starting rule-based annotation...")
-    for i, npz_path in enumerate(tqdm(remaining_paths)):
+    for npz_path in tqdm(npz_paths):
         data = load_npz_data(npz_path)
         traj_1, traj_2 = _generate_trajectory_pair(policy_model, model_args, data)
         score_1 = calculate_path_length(traj_1)
@@ -212,16 +175,12 @@ def generate_rule_based_preferences(
         }
         preferences.append(preference_data)
 
-        if (i + 1) % 100 == 0:
-            flush()
-
-    flush()
-    print(f"Annotation complete! Saved {len(preferences)} preferences to {output_json}")
+    print(f"Annotation complete! Generated {len(preferences)} preferences")
 
     if was_training:
         policy_model.train()
 
-    return output_json
+    return preferences
 
 
 class DPODataset(Dataset):
@@ -617,25 +576,13 @@ def main():
     train_log: list[dict] = []
 
     for epoch in range(1, args.train_epochs + 1):
-        preference_json = save_dir / "dpo_preferences_rule_based.json"
-        excluded_path = args.excluded_json or (
-            preference_json.parent / "dpo_excluded_rule_based.json"
-        )
-
-        generate_rule_based_preferences(
+        preferences = generate_rule_based_preferences(
             policy_model,
             model_args,
             args.npz_list,
-            preference_json,
-            excluded_path,
-            overwrite=True,
         )
 
         save_path = run_dir
-
-        print(f"Loading preferences from {preference_json}")
-        with open(preference_json, "r") as f:
-            preferences = json.load(f)
 
         print(f"Loaded {len(preferences)} preference annotations")
 
