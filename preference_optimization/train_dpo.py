@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -21,8 +22,9 @@ matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.train_epoch import heading_to_cos_sin
+from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from generate_dpo_data_rule_based import load_model, load_npz_data
 from torch import optim
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -43,7 +45,8 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default="test")
     parser.add_argument("--model_path", type=Path, required=True)
-    parser.add_argument("--preference_json", type=Path, required=True)
+    parser.add_argument("--npz_list", type=Path, required=True)
+    parser.add_argument("--excluded_json", type=Path, default=None)
     parser.add_argument("--valid_split", type=float, default=0.01)
     parser.add_argument("--beta", type=float, default=0.1)
     parser.add_argument("--train_epochs", type=int, default=1)
@@ -51,6 +54,197 @@ def get_args():
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--device", type=str, default="cuda")
     return parser.parse_args()
+
+
+def load_model(model_path: Path, device: torch.device) -> tuple[Diffusion_Planner, Config]:
+    """Load Diffusion Planner model and its configuration."""
+    print(f"Loading model from {model_path}")
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+
+    model_dir = model_path.parent
+    args_path = model_dir / "args.json"
+    model_args = Config(str(args_path), guidance_fn=None)
+
+    model = Diffusion_Planner(model_args)
+
+    if "model" in checkpoint:
+        state_dict = {k.replace("module.", ""): v for k, v in checkpoint["model"].items()}
+        model.load_state_dict(state_dict, strict=False)
+    elif "ema_state_dict" in checkpoint:
+        print("Loading EMA weights")
+        model.load_state_dict(checkpoint["ema_state_dict"], strict=False)
+    else:
+        model.load_state_dict(checkpoint, strict=False)
+
+    model.to(device)
+    return model, model_args
+
+
+def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch.Tensor]:
+    """Load and preprocess NPZ file."""
+    loaded = np.load(str(npz_path))
+    data = {}
+
+    for key, value in loaded.items():
+        if key in {"map_name", "token"}:
+            continue
+        data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
+
+    if "goal_pose" in data:
+        data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
+    if "ego_agent_past" in data:
+        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
+
+    if "ego_shape" not in data:
+        wheel_base = 2.79
+        ego_length = 4.34
+        ego_width = 1.70
+        data["ego_shape"] = torch.tensor(
+            [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=device
+        )
+
+    return data
+
+
+def calculate_path_length(trajectory: np.ndarray) -> float:
+    """Calculate negative path length (longer paths become smaller values)."""
+    xy = trajectory[:, :2]
+    diffs = np.diff(xy, axis=0)
+    dists = np.linalg.norm(diffs, axis=1)
+    return float(-np.sum(dists))
+
+
+class DPODataGenerator:
+    """Generates trajectory pairs and manages annotation."""
+
+    def __init__(
+        self,
+        model_path: Path,
+        npz_list: Path,
+        output_json: Path,
+        excluded_json: Path,
+        device: torch.device,
+        overwrite: bool = False,
+    ):
+        self.model_path = model_path
+        self.npz_list = npz_list
+        self.output_json = output_json
+        self.excluded_json = excluded_json
+        self.device = device
+
+        self.output_json.parent.mkdir(parents=True, exist_ok=True)
+        self.excluded_json.parent.mkdir(parents=True, exist_ok=True)
+
+        if overwrite:
+            print("Overwriting existing preference/excluded files.")
+            if self.output_json.exists():
+                self.output_json.unlink()
+            if self.excluded_json.exists():
+                self.excluded_json.unlink()
+
+        seed = random.randint(0, 2**32 - 1)
+        torch.manual_seed(seed)
+        np.random.seed(seed % (2**32))
+        print(f"Random seed: {seed}")
+
+        self.model, self.model_args = load_model(self.model_path, self.device)
+        self.model.eval()
+
+        with open(self.npz_list, "r") as f:
+            self.npz_paths = json.load(f)
+
+        self.preferences = []
+        self.excluded = []
+
+        if self.output_json.exists():
+            print(f"Resuming from {self.output_json}")
+            with open(self.output_json, "r") as f:
+                self.preferences = json.load(f)
+
+        if self.excluded_json.exists():
+            print(f"Loading excluded list from {self.excluded_json}")
+            with open(self.excluded_json, "r") as f:
+                self.excluded = json.load(f)
+
+        annotated_paths = {pref["npz_path"] for pref in self.preferences}
+        excluded_paths = set(self.excluded)
+        self.npz_paths = [
+            p for p in self.npz_paths if p not in annotated_paths and p not in excluded_paths
+        ]
+
+        print(f"Total NPZ files to annotate: {len(self.npz_paths)}")
+
+    @torch.no_grad()
+    def generate_trajectory_pair(
+        self, data: dict[str, torch.Tensor]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        data = self.model_args.observation_normalizer(data)
+        B = data["ego_current_state"].shape[0]
+        P = 1 + self.model_args.predicted_neighbor_num
+        future_len = self.model_args.future_len
+
+        batch_data = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor):
+                batch_data[k] = v.repeat(2, *([1] * (v.dim() - 1)))
+            else:
+                batch_data[k] = v
+
+        batch_data["sampled_trajectories"] = 2.5 * torch.randn(2 * B, P, future_len + 1, 4).to(
+            self.device
+        )
+
+        _, outputs = self.model(batch_data)
+        prediction = outputs["prediction"]
+
+        trajectories = []
+        for i in range(2):
+            ego_prediction = prediction[i, 0].cpu().numpy()
+            trajectories.append(ego_prediction)
+
+        return trajectories[0], trajectories[1]
+
+    def save_preferences(self):
+        with open(self.output_json, "w") as f:
+            json.dump(self.preferences, f, indent=2)
+
+        with open(self.excluded_json, "w") as f:
+            json.dump(self.excluded, f, indent=2)
+
+    def run(self):
+        print("Starting rule-based annotation...")
+        for i, npz_path in enumerate(tqdm(self.npz_paths)):
+            data = load_npz_data(npz_path, self.device)
+            traj_1, traj_2 = self.generate_trajectory_pair(data)
+            score_1 = calculate_path_length(traj_1)
+            score_2 = calculate_path_length(traj_2)
+
+            if score_1 > score_2:
+                traj_w = traj_1
+                traj_l = traj_2
+                score_w = score_1
+                score_l = score_2
+            else:
+                traj_w = traj_2
+                traj_l = traj_1
+                score_w = score_2
+                score_l = score_1
+
+            preference_data = {
+                "npz_path": npz_path,
+                "trajectory_w": traj_w.tolist(),
+                "trajectory_l": traj_l.tolist(),
+                "score_w": score_w,
+                "score_l": score_l,
+            }
+            self.preferences.append(preference_data)
+
+            if (i + 1) % 100 == 0:
+                self.save_preferences()
+
+        self.save_preferences()
+        print(f"Annotation complete! Saved {len(self.preferences)} preferences to {self.output_json}")
+        return self.output_json
 
 
 class DPODataset(Dataset):
@@ -423,113 +617,142 @@ def main():
 
     device = torch.device(args.device)
 
-    # Create save directory
-    time = datetime.now()
-    time = time.strftime("%Y%m%d-%H%M%S")
-    save_dir = args.preference_json.parent
-    save_path = save_dir / f"{time}_{args.exp_name}"
-    save_path.mkdir(parents=True, exist_ok=True)
-    print(f"Saving to {save_path}")
+    save_dir = args.npz_list.parent
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = save_dir / f"{timestamp}_{args.exp_name}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    latest_ckpt = run_dir / "latest.pth"
 
-    # Load preference data
-    print(f"Loading preferences from {args.preference_json}")
-    with open(args.preference_json, "r") as f:
-        preferences = json.load(f)
+    initial_model_path = Path(args.model_path)
+    if not initial_model_path.exists():
+        raise FileNotFoundError(f"Model checkpoint not found: {initial_model_path}")
 
-    print(f"Loaded {len(preferences)} preference annotations")
+    initial_args_path = initial_model_path.parent / "args.json"
+    if not initial_args_path.exists():
+        raise FileNotFoundError(f"args.json not found next to model: {initial_args_path}")
 
-    # Split into train/valid
-    num_valid = int(round(len(preferences) * args.valid_split))
-    num_train = len(preferences) - num_valid
+    shutil.copy2(initial_model_path, latest_ckpt)
+    shutil.copy2(initial_args_path, run_dir / "args.json")
 
-    # Shuffle
-    random.shuffle(preferences)
+    print(f"Saving artifacts to {run_dir}")
 
-    train_preferences = preferences[:num_train]
-    valid_preferences = preferences[num_train:]
-
-    # Create datasets
-    train_dataset = DPODataset(train_preferences, device)
-    valid_dataset = DPODataset(valid_preferences, device)
-
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0,  # Set to 0 for simplicity with custom data loading
-        collate_fn=lambda x: x,
-    )
-
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=0,
-        collate_fn=lambda x: x,
-    )
-
-    # Load policy model
-    policy_model, model_args = load_model(args.model_path, device)
-
-    # Load reference model (frozen copy of policy model)
-    print("Using initial policy model as reference model")
-    reference_model, _ = load_model(args.model_path, device)
-    reference_model.eval()
-    for param in reference_model.parameters():
-        param.requires_grad = False
-
-    # Optimizer
-    optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
-
-    # Save args (convert Path to str for JSON serialization)
-    args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
-    with open(save_path / "dpo_args.json", "w") as f:
-        json.dump(args_dict, f, indent=4)
-
-    visualize_validation(policy_model, valid_loader, model_args, save_path, 0)
-
-    # Training loop
-    train_log = []
-
-    for epoch in range(1, args.train_epochs + 1):
-        # Train
-        train_metrics = train_epoch(
-            policy_model, reference_model, train_loader, optimizer, args, model_args
+    def run_cycle():
+        preference_json = save_dir / "dpo_preferences_rule_based.json"
+        excluded_path = args.excluded_json or (
+            preference_json.parent / "dpo_excluded_rule_based.json"
         )
 
-        # Visualize validation samples
-        visualize_validation(policy_model, valid_loader, model_args, save_path, epoch)
+        generator = DPODataGenerator(
+            model_path=latest_ckpt,
+            npz_list=args.npz_list,
+            output_json=preference_json,
+            excluded_json=excluded_path,
+            device=device,
+            overwrite=True,
+        )
+        generator.run()
 
-        print(
-            f"Epoch {epoch}/{args.train_epochs}\n"
-            f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}"
+        # Create save directory
+        save_path = run_dir
+
+        # Load preference data
+        print(f"Loading preferences from {preference_json}")
+        with open(preference_json, "r") as f:
+            preferences = json.load(f)
+
+        print(f"Loaded {len(preferences)} preference annotations")
+
+        # Split into train/valid
+        num_valid = int(round(len(preferences) * args.valid_split))
+        num_train = len(preferences) - num_valid
+
+        # Shuffle
+        random.shuffle(preferences)
+
+        train_preferences = preferences[:num_train]
+        valid_preferences = preferences[num_train:]
+
+        # Create datasets
+        train_dataset = DPODataset(train_preferences, device)
+        valid_dataset = DPODataset(valid_preferences, device)
+
+        # Create data loaders
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,
+            collate_fn=lambda x: x,
         )
 
-        # Save checkpoint
-        checkpoint_data = {
-            "epoch": epoch + 1,
-            "model": policy_model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-        }
+        valid_loader = DataLoader(
+            valid_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=lambda x: x,
+        )
 
-        torch.save(checkpoint_data, args.model_path)
+        # Load policy model
+        policy_model, model_args = load_model(latest_ckpt, device)
 
-        # Save checkpoint every 10 epochs
-        if (epoch + 1) % 10 == 0:
-            torch.save(checkpoint_data, os.path.join(save_path, f"epoch_{epoch + 1:03d}.pth"))
+        # Load reference model (frozen copy of policy model)
+        print("Using initial policy model as reference model")
+        reference_model, _ = load_model(latest_ckpt, device)
+        reference_model.eval()
+        for param in reference_model.parameters():
+            param.requires_grad = False
 
-        # Save training log
-        train_log.append(
-            {
-                "epoch": epoch + 1,
-                **{f"train_{k}": v for k, v in train_metrics.items()},
+        # Optimizer
+        optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
+
+        # Save args (convert Path to str for JSON serialization)
+        args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+        with open(save_path / "dpo_args.json", "w") as f:
+            json.dump(args_dict, f, indent=4)
+
+        visualize_validation(policy_model, valid_loader, model_args, save_path, 0)
+
+        # Training loop
+        train_log = []
+
+        for epoch in range(1, args.train_epochs + 1):
+            train_metrics = train_epoch(
+                policy_model, reference_model, train_loader, optimizer, args, model_args
+            )
+
+            visualize_validation(policy_model, valid_loader, model_args, save_path, epoch)
+
+            print(
+                f"Epoch {epoch}/{args.train_epochs}\n"
+                f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}"
+            )
+
+            checkpoint_data = {
+                "epoch": epoch,
+                "model": policy_model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "args": args_dict,
             }
-        )
-        df = pd.DataFrame(train_log)
-        df.to_csv(os.path.join(save_path, "dpo_train_log.tsv"), sep="\t", index=False)
 
-    print(f"\nTraining complete!")
+            torch.save(checkpoint_data, latest_ckpt)
+
+            if epoch % 10 == 0:
+                torch.save(checkpoint_data, os.path.join(save_path, f"epoch_{epoch:03d}.pth"))
+
+            train_log.append(
+                {
+                    "epoch": epoch,
+                    **{f"train_{k}": v for k, v in train_metrics.items()},
+                }
+            )
+            df = pd.DataFrame(train_log)
+            df.to_csv(os.path.join(save_path, "dpo_train_log.tsv"), sep="\t", index=False)
+
+        print(f"\nTraining complete!")
+
+    while True:
+        run_cycle()
 
 
 if __name__ == "__main__":
