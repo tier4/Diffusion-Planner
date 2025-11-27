@@ -44,9 +44,9 @@ def get_args():
     parser.add_argument("--exp_name", type=str, default="test")
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--preference_json", type=Path, required=True)
-    parser.add_argument("--valid_split", type=float, default=0.1)
+    parser.add_argument("--valid_split", type=float, default=0.01)
     parser.add_argument("--beta", type=float, default=0.1)
-    parser.add_argument("--train_epochs", type=int, default=100)
+    parser.add_argument("--train_epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--device", type=str, default="cuda")
@@ -435,7 +435,7 @@ def main():
     print(f"Loaded {len(preferences)} preference annotations")
 
     # Split into train/valid
-    num_valid = int(len(preferences) * args.valid_split)
+    num_valid = int(round(len(preferences) * args.valid_split))
     num_train = len(preferences) - num_valid
 
     # Shuffle
@@ -444,11 +444,9 @@ def main():
     train_preferences = preferences[:num_train]
     valid_preferences = preferences[num_train:]
 
-    preferences = [preferences[0] for _ in range(100)]  # Use only train prefs for dataset
-
     # Create datasets
-    train_dataset = DPODataset(preferences, device)
-    valid_dataset = DPODataset(preferences[0:1], device)
+    train_dataset = DPODataset(train_preferences, device)
+    valid_dataset = DPODataset(valid_preferences, device)
 
     # Create data loaders
     train_loader = DataLoader(
@@ -507,10 +505,9 @@ def main():
             "epoch": epoch + 1,
             "model": policy_model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "args": vars(args),
         }
 
-        torch.save(checkpoint_data, os.path.join(save_path, "latest.pth"))
+        torch.save(checkpoint_data, args.model_path)
 
         # Save checkpoint every 10 epochs
         if (epoch + 1) % 10 == 0:
