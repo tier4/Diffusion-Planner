@@ -204,19 +204,14 @@ class DPODataset(Dataset):
         return len(self.valid_preferences)
 
     def __getitem__(self, idx):
-        """
-        Returns:
-            dict with keys:
-                - npz_path: path to input data
-                - trajectory_w: winning trajectory (ground truth)
-                - trajectory_l: losing trajectory (ground truth)
-        """
+        """Return tensors and trajectories."""
         pref = self.valid_preferences[idx]
+        data = load_npz_data(pref["npz_path"])
 
         return {
-            "npz_path": pref["npz_path"],
-            "trajectory_w": pref["trajectory_w"],
-            "trajectory_l": pref["trajectory_l"],
+            "data": data,
+            "trajectory_w": np.asarray(pref["trajectory_w"], dtype=np.float32),
+            "trajectory_l": np.asarray(pref["trajectory_l"], dtype=np.float32),
         }
 
 
@@ -353,12 +348,10 @@ def compute_dpo_loss(
     }
 
     for sample in batch:
-        # Load input data
-        data_raw = load_npz_data(sample["npz_path"])
-
         # Determine which is preferred
-        traj_wi = np.array(sample["trajectory_w"])
-        traj_lo = np.array(sample["trajectory_l"])
+        data_raw = sample["data"]
+        traj_wi = sample["trajectory_w"]
+        traj_lo = sample["trajectory_l"]
 
         # Sample shared diffusion time but separate noise for winner and loser
         B = data_raw["ego_current_state"].shape[0]
@@ -441,8 +434,11 @@ def visualize_validation(
     sample_count = 0
     for batch in valid_loader:
         for sample in batch:
-            # Load input data
-            data = load_npz_data(sample["npz_path"])
+            # Use preloaded input data
+            data = {
+                k: v.clone() if isinstance(v, torch.Tensor) else v
+                for k, v in sample["data"].items()
+            }
 
             B = data["ego_current_state"].shape[0]
             P = 1 + model_args.predicted_neighbor_num
@@ -492,9 +488,8 @@ def visualize_validation(
             ax.set_title(f"Epoch {epoch} - Sample {sample_count + 1}")
 
             # Save figure
-            npz_stem = Path(sample["npz_path"]).stem
             plt.savefig(
-                vis_dir / f"sample_{sample_count:03d}_{npz_stem}_{epoch:04d}.png",
+                vis_dir / f"sample_{sample_count:03d}_{epoch:04d}.png",
                 dpi=100,
                 bbox_inches="tight",
             )
