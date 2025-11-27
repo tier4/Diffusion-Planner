@@ -23,8 +23,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--npz_list", type=Path, required=True)
-    parser.add_argument("--output_json", type=Path, default=Path("dpo_preferences_rule_based.json"))
-    parser.add_argument("--excluded_json", type=Path, default=Path("dpo_excluded_rule_based.json"))
+    parser.add_argument("--output_json", type=Path, default=None)
+    parser.add_argument("--excluded_json", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -63,8 +63,11 @@ def load_model(model_path: Path, device: torch.device) -> tuple[Diffusion_Planne
 class DPODataGenerator:
     """Generates trajectory pairs and manages the annotation process."""
 
-    def __init__(self, args):
-        self.args = args
+    def __init__(self, model_path: Path, npz_list: Path, output_json: Path, excluded_json: Path):
+        self.model_path = model_path
+        self.npz_list = npz_list
+        self.output_json = output_json
+        self.excluded_json = excluded_json
         self.device = torch.device("cuda")
 
         # Set random seed once for the entire session
@@ -74,25 +77,25 @@ class DPODataGenerator:
         print(f"Random seed: {seed}")
 
         # Load model
-        self.model, self.model_args = load_model(args.model_path, self.device)
+        self.model, self.model_args = load_model(self.model_path, self.device)
         self.model.eval()
 
         # Load NPZ file list
-        with open(args.npz_list, "r") as f:
+        with open(self.npz_list, "r") as f:
             self.npz_paths = json.load(f)
 
         # Load existing annotations if resuming
         self.preferences = []
         self.excluded = []
 
-        if args.output_json.exists():
-            print(f"Resuming from {args.output_json}")
-            with open(args.output_json, "r") as f:
+        if self.output_json.exists():
+            print(f"Resuming from {self.output_json}")
+            with open(self.output_json, "r") as f:
                 self.preferences = json.load(f)
 
-        if args.excluded_json.exists():
-            print(f"Loading excluded list from {args.excluded_json}")
-            with open(args.excluded_json, "r") as f:
+        if self.excluded_json.exists():
+            print(f"Loading excluded list from {self.excluded_json}")
+            with open(self.excluded_json, "r") as f:
                 self.excluded = json.load(f)
 
         # Filter out already annotated and excluded files
@@ -153,10 +156,10 @@ class DPODataGenerator:
 
     def save_preferences(self):
         """Save current preferences and excluded list to JSON."""
-        with open(self.args.output_json, "w") as f:
+        with open(self.output_json, "w") as f:
             json.dump(self.preferences, f, indent=2)
 
-        with open(self.args.excluded_json, "w") as f:
+        with open(self.excluded_json, "w") as f:
             json.dump(self.excluded, f, indent=2)
 
 
@@ -205,11 +208,29 @@ def calculate_path_length(trajectory: np.ndarray) -> float:
     return float(-np.sum(dists))
 
 
-def main():
+if __name__ == "__main__":
     args = parse_args()
+    model_path = args.model_path
+    npz_list = args.npz_list
+    output_json = args.output_json
+    if output_json is None:
+        output_json = npz_list.parent / "dpo_preferences_rule_based.json"
+    excluded_json = args.excluded_json
+    if excluded_json is None:
+        excluded_json = npz_list.parent / "dpo_excluded_rule_based.json"
+
+    print(f"Model path: {model_path}")
+    print(f"NPZ list: {npz_list}")
+    print(f"Output JSON: {output_json}")
+    print(f"Excluded JSON: {excluded_json}")
 
     # Create data generator
-    generator = DPODataGenerator(args)
+    generator = DPODataGenerator(
+        model_path=model_path,
+        npz_list=npz_list,
+        output_json=output_json,
+        excluded_json=excluded_json,
+    )
 
     print("Starting rule-based annotation...")
 
@@ -255,7 +276,3 @@ def main():
     # Final save
     generator.save_preferences()
     print("Annotation complete!")
-
-
-if __name__ == "__main__":
-    main()
