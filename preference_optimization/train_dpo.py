@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 
-def get_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default="test")
     parser.add_argument("--model_path", type=Path, required=True)
@@ -593,7 +593,7 @@ def train_epoch(
 
 
 def main():
-    args = get_args()
+    args = parse_args()
 
     device = torch.device(args.device)
 
