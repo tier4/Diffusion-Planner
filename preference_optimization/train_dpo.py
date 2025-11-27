@@ -320,7 +320,7 @@ def visualize_validation(
             future_len = model_args.future_len
 
             # Generate random noise
-            data["sampled_trajectories"] = 0.5 * torch.randn(B, P, future_len + 1, 4).to(
+            data["sampled_trajectories"] = 0.0 * torch.randn(B, P, future_len + 1, 4).to(
                 data["ego_current_state"].device
             )
 
@@ -444,9 +444,11 @@ def main():
     train_preferences = preferences[:num_train]
     valid_preferences = preferences[num_train:]
 
+    preferences = [preferences[0] for _ in range(100)]  # Use only train prefs for dataset
+
     # Create datasets
-    train_dataset = DPODataset(train_preferences, device)
-    valid_dataset = DPODataset(valid_preferences, device)
+    train_dataset = DPODataset(preferences, device)
+    valid_dataset = DPODataset(preferences[0:1], device)
 
     # Create data loaders
     train_loader = DataLoader(
