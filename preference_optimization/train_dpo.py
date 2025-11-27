@@ -479,7 +479,6 @@ def main():
 
     # Optimizer
     optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.train_epochs)
 
     # Save args (convert Path to str for JSON serialization)
     args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
@@ -508,7 +507,6 @@ def main():
             "epoch": epoch + 1,
             "model": policy_model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
             "args": vars(args),
         }
 
@@ -527,8 +525,6 @@ def main():
         )
         df = pd.DataFrame(train_log)
         df.to_csv(os.path.join(save_path, "dpo_train_log.tsv"), sep="\t", index=False)
-
-        scheduler.step()
 
     print(f"\nTraining complete!")
 
