@@ -256,8 +256,12 @@ def compute_dpo_loss(
 
         # Compute losses under reference model (with same noise as policy)
         with torch.no_grad():
-            data_ref_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
-            data_ref_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+            data_ref_w = {
+                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()
+            }
+            data_ref_l = {
+                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()
+            }
 
             l_ref_w = compute_trajectory_loss(
                 reference_model, data_ref_w, traj_wi, model_args, noise_w.clone(), t
@@ -483,10 +487,12 @@ def main():
     with open(save_path / "dpo_args.json", "w") as f:
         json.dump(args_dict, f, indent=4)
 
+    visualize_validation(policy_model, valid_loader, model_args, save_path, 0)
+
     # Training loop
     train_log = []
 
-    for epoch in range(args.train_epochs):
+    for epoch in range(1, args.train_epochs + 1):
         # Train
         train_metrics = train_epoch(
             policy_model, reference_model, train_loader, optimizer, args, model_args
@@ -496,7 +502,7 @@ def main():
         visualize_validation(policy_model, valid_loader, model_args, save_path, epoch)
 
         print(
-            f"Epoch {epoch + 1}/{args.train_epochs}\n"
+            f"Epoch {epoch}/{args.train_epochs}\n"
             f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}"
         )
 
