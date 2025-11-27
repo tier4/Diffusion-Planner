@@ -92,7 +92,6 @@ class DPODataset(Dataset):
         }
 
 
-@torch.no_grad()
 def compute_trajectory_loss(
     model: Diffusion_Planner,
     data: dict[str, torch.Tensor],
@@ -119,7 +118,11 @@ def compute_trajectory_loss(
 
     # Convert trajectory to tensor and normalize
     gt_trajectory = torch.tensor(trajectory).float().to(device).unsqueeze(0)  # [1, T, 4]
-    gt_trajectory_norm = model_args.state_normalizer(gt_trajectory)  # [1, T, 4]
+
+    # Normalize using ego stats only (StateNormalizer broadcasts to [P, T, 4] which causes shape mismatch)
+    ego_mean = model_args.state_normalizer.mean[0].to(device)
+    ego_std = model_args.state_normalizer.std[0].to(device)
+    gt_trajectory_norm = (gt_trajectory - ego_mean) / ego_std  # [1, T, 4]
 
     # Create full gt with ego + neighbors (neighbors are zeros)
     gt_future = torch.zeros(B, P, future_len, 4, device=device)
@@ -138,7 +141,7 @@ def compute_trajectory_loss(
     all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, 1+T, 4]
 
     # Add noise to future part only
-    mean, std = model_args.sde.marginal_prob(all_gt[..., 1:, :], t)
+    mean, std = model.sde.marginal_prob(all_gt[..., 1:, :], t)
     std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
 
     if model_args.diffusion_model_type == "flow_matching":
@@ -150,17 +153,29 @@ def compute_trajectory_loss(
     # Concatenate current state with noisy future
     xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)  # [B, P, 1+T, 4]
 
-    # Prepare model inputs
-    merged_inputs = {
-        **data,
-        "gt_trajectories": all_gt,
-        "sampled_trajectories": xT_full,
-        "diffusion_time": t,
-    }
+    # Clone data before normalization to avoid inplace modifications
+    data_for_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+
+    # Normalize observations (important: this should not modify data inplace)
+    data_normalized = model_args.observation_normalizer(data_for_norm)
+
+    # Prepare model inputs - create new dict to avoid modifying original
+    merged_inputs = {}
+    for k, v in data_normalized.items():
+        merged_inputs[k] = v
+    merged_inputs["gt_trajectories"] = all_gt
+    merged_inputs["sampled_trajectories"] = xT_full
+    merged_inputs["diffusion_time"] = t
 
     # Run model
     _, outputs = model(merged_inputs)
-    model_output = outputs["model_output"][:, 0, 1:, :]  # [B, T, 4] - ego only
+    if "model_output" in outputs:
+        outputs = outputs["model_output"]
+        outputs = outputs[:, 0, 1:, :]  # [B, T, 4] - ego only
+    else:
+        outputs = outputs["prediction"]
+        outputs = outputs[:, 0, :, :]  # [B, T, 4] - ego only
+    model_output = outputs  # [B, T, 4]
 
     # Compute loss based on model type
     if model_args.diffusion_model_type == "score":
@@ -172,7 +187,7 @@ def compute_trajectory_loss(
         )
     elif model_args.diffusion_model_type == "x_start":
         # Direct prediction loss
-        mse_loss = F.mse_loss(model_output, gt_trajectory_norm[0], reduction="mean")
+        mse_loss = F.mse_loss(model_output, gt_trajectory_norm, reduction="mean")
     elif model_args.diffusion_model_type == "flow_matching":
         # Flow matching loss
         target_v = all_gt[:, 0, 1:, :] - noise[:, 0]
@@ -214,14 +229,14 @@ def compute_dpo_loss(
 
     for sample in batch:
         # Load input data
-        data = load_npz_data(sample["npz_path"], device)
+        data_raw = load_npz_data(sample["npz_path"], device)
 
         # Determine which is preferred
         traj_wi = np.array(sample["trajectory_w"])
         traj_lo = np.array(sample["trajectory_l"])
 
         # Sample shared diffusion time but separate noise for winner and loser
-        B = data["ego_current_state"].shape[0]
+        B = data_raw["ego_current_state"].shape[0]
         P = 1 + model_args.predicted_neighbor_num
         future_len = model_args.future_len
 
@@ -232,16 +247,23 @@ def compute_dpo_loss(
         t = torch.rand(B, device=device) * (1 - eps) + eps
 
         # Compute losses under policy model (with different noise)
-        l_w = compute_trajectory_loss(policy_model, data.copy(), traj_wi, model_args, noise_w, t)
-        l_l = compute_trajectory_loss(policy_model, data.copy(), traj_lo, model_args, noise_l, t)
+        # Deep copy data to avoid inplace modifications affecting gradient computation
+        data_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+        data_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+
+        l_w = compute_trajectory_loss(policy_model, data_w, traj_wi, model_args, noise_w, t)
+        l_l = compute_trajectory_loss(policy_model, data_l, traj_lo, model_args, noise_l, t)
 
         # Compute losses under reference model (with same noise as policy)
         with torch.no_grad():
+            data_ref_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+            data_ref_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+
             l_ref_w = compute_trajectory_loss(
-                reference_model, data.copy(), traj_wi, model_args, noise_w, t
+                reference_model, data_ref_w, traj_wi, model_args, noise_w.clone(), t
             )
             l_ref_l = compute_trajectory_loss(
-                reference_model, data.copy(), traj_lo, model_args, noise_l, t
+                reference_model, data_ref_l, traj_lo, model_args, noise_l.clone(), t
             )
 
         # Compute DPO loss
