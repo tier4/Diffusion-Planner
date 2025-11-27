@@ -24,12 +24,13 @@ from tkinter import messagebox
 class AnnotationGUI:
     """Tkinter GUI for annotating trajectory preferences."""
 
-    def __init__(self, policy_model, model_args, npz_paths: Sequence[str]):
+    def __init__(self, policy_model, model_args, npz_paths: Sequence[str], target_count: int):
         self.policy_model = policy_model
         self.model_args = model_args
         self.device = next(policy_model.parameters()).device
         self.npz_paths = list(npz_paths)
         self.preferences: list[dict] = []
+        self.target_count = target_count
 
         seed = random.randint(0, 2**32 - 1)
         torch.manual_seed(seed)
@@ -43,12 +44,13 @@ class AnnotationGUI:
 
         self.root = tk.Tk()
         self.root.title("Trajectory Annotation")
-        self.root.geometry("1400x1100")
+        self.root.geometry("1400x1200")
+        self.root.minsize(1400, 1200)
 
         self._build_ui()
 
         if self.npz_paths:
-            self._load_next()
+            self._show_current_sample()
         else:
             messagebox.showinfo("Complete", "No samples to annotate!")
             self.root.destroy()
@@ -67,7 +69,35 @@ class AnnotationGUI:
         self.canvas = FigureCanvasTkAgg(self.fig, master=viz_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        button_frame = tk.Frame(self.root, height=200)
+        self.pref_label = tk.Label(info_frame, text="Preferences: 0", font=("Arial", 12), anchor="e")
+        self.pref_label.pack(side=tk.RIGHT)
+
+        control_frame = tk.Frame(self.root, height=120)
+        control_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+        control_frame.pack_propagate(False)
+
+        back_buttons = tk.Frame(control_frame)
+        back_buttons.pack(side=tk.LEFT, padx=10)
+
+        for step in [1, 10, 30]:
+            tk.Button(
+                back_buttons,
+                text=f"← {step}",
+                command=lambda s=step: self._jump(-s),
+                width=8,
+            ).pack(side=tk.LEFT, padx=5)
+
+        forward_buttons = tk.Frame(control_frame)
+        forward_buttons.pack(side=tk.RIGHT, padx=10)
+        for step in [1, 10, 30]:
+            tk.Button(
+                forward_buttons,
+                text=f"{step} →",
+                command=lambda s=step: self._jump(s),
+                width=8,
+            ).pack(side=tk.LEFT, padx=5)
+
+        button_frame = tk.Frame(self.root, height=240)
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=20)
         button_frame.pack_propagate(False)
 
@@ -92,24 +122,8 @@ class AnnotationGUI:
             btn.pack(side=tk.LEFT, expand=True, padx=5)
 
     def _load_next(self):
-        if self.current_index >= len(self.npz_paths):
-            messagebox.showinfo("Complete", "Annotation complete!")
-            self.root.destroy()
-            return
-
-        npz_path = self.npz_paths[self.current_index]
-        self.info_label.config(
-            text=f"Sample {self.current_index + 1}/{len(self.npz_paths)} - {npz_path}"
-        )
-
-        try:
-            self.current_data = load_npz_data(npz_path, self.device)
-            self._regenerate_pair(update_index=False)
-        except Exception as exc:  # pragma: no cover - GUI path
-            messagebox.showerror("Error", f"Failed to load sample:\n{str(exc)}")
-            print(f"Error loading {npz_path}: {exc}")
-            self.current_index += 1
-            self._load_next()
+        self.current_index = min(self.current_index + 1, len(self.npz_paths) - 1)
+        self._show_current_sample()
 
     def _visualize(self):
         self.fig.clear()
@@ -149,8 +163,15 @@ class AnnotationGUI:
         )
         print(f"Recorded preference for {npz_path}")
 
-        self.current_index += 1
-        self._load_next()
+        if len(self.preferences) >= self.target_count:
+            messagebox.showinfo(
+                "Complete", f"Annotation complete! Collected {len(self.preferences)} samples."
+            )
+            self.root.destroy()
+            return
+
+        self.current_index = (self.current_index + 1) % len(self.npz_paths)
+        self._show_current_sample()
 
     def _regenerate_pair(self, update_index: bool = True):
         if self.current_data is None:
@@ -167,8 +188,40 @@ class AnnotationGUI:
     def run(self):
         self.root.mainloop()
 
+    def _update_status(self, npz_path: str | None = None):
+        total = max(len(self.npz_paths), 1)
+        current = min(self.current_index + 1, total)
+        path = npz_path or (self.npz_paths[self.current_index] if self.npz_paths else "")
+        self.info_label.config(text=f"Sample {current}/{total} - {path}")
+        self.pref_label.config(text=f"Preferences: {len(self.preferences)}")
 
-def collect_preferences_gui(policy_model, model_args, npz_list: Path) -> list[dict]:
+    def _jump(self, delta: int):
+        if not self.npz_paths:
+            return
+        self.current_index = max(0, min(self.current_index + delta, len(self.npz_paths) - 1))
+        self._show_current_sample()
+
+    def _show_current_sample(self):
+        if not self.npz_paths:
+            messagebox.showinfo("Complete", "No samples to annotate!")
+            self.root.destroy()
+            return
+
+        self.current_index = max(0, min(self.current_index, len(self.npz_paths) - 1))
+        npz_path = self.npz_paths[self.current_index]
+        self._update_status(npz_path)
+
+        try:
+            self.current_data = load_npz_data(npz_path, self.device)
+            self._regenerate_pair(update_index=False)
+        except Exception as exc:  # pragma: no cover - GUI path
+            messagebox.showerror("Error", f"Failed to load sample:\n{str(exc)}")
+            print(f"Error loading {npz_path}: {exc}")
+            self.current_index = min(self.current_index + 1, len(self.npz_paths) - 1)
+            self._show_current_sample()
+
+
+def collect_preferences_gui(policy_model, model_args, npz_list: Path, target_count: int) -> list[dict]:
     """Run GUI preference collection and return annotations."""
     with open(npz_list, "r") as f:
         npz_paths = json.load(f)
@@ -176,7 +229,7 @@ def collect_preferences_gui(policy_model, model_args, npz_list: Path) -> list[di
     was_training = policy_model.training
     policy_model.eval()
 
-    gui = AnnotationGUI(policy_model, model_args, npz_paths)
+    gui = AnnotationGUI(policy_model, model_args, npz_paths, target_count=target_count)
     gui.run()
     prefs = gui.preferences
 

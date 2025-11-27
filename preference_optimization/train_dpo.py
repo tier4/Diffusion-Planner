@@ -127,24 +127,6 @@ def generate_rule_based_preferences(
     return preferences
 
 
-def _convert_gui_preferences(raw_preferences: list[dict]) -> list[dict]:
-    converted = []
-    for pref in raw_preferences:
-        choice = pref.get("preference")
-        if choice not in {"trajectory_1", "trajectory_2"}:
-            continue
-        traj1 = pref["trajectory_1"]
-        traj2 = pref["trajectory_2"]
-        npz_path = pref.get("npz_path")
-        if npz_path is None:
-            continue
-        if choice == "trajectory_1":
-            traj_w, traj_l = traj1, traj2
-        else:
-            traj_w, traj_l = traj2, traj1
-        converted.append({"npz_path": npz_path, "trajectory_w": traj_w, "trajectory_l": traj_l})
-    return converted
-
 
 class DPODataset(Dataset):
     def __init__(self, preferences: list[dict]):
@@ -526,6 +508,8 @@ def main():
     with open(run_dir / "dpo_args.json", "w") as f:
         json.dump(args_dict, f, indent=4)
 
+    with open(args.train_npz_list, "r") as f:
+        train_npz_paths = json.load(f)
     with open(args.valid_npz_list, "r") as f:
         valid_npz_paths = json.load(f)
     valid_dataset = NPZDataset(valid_npz_paths)
@@ -543,8 +527,9 @@ def main():
 
     for epoch in range(1, args.train_epochs + 1):
         if args.preference_mode == "gui":
-            gui_preferences = collect_preferences_gui(policy_model, model_args, args.train_npz_list)
-            preferences = _convert_gui_preferences(gui_preferences)
+            preferences = collect_preferences_gui(
+                policy_model, model_args, args.train_npz_list, target_count=len(train_npz_paths)
+            )
         else:
             preferences = generate_rule_based_preferences(
                 policy_model,
