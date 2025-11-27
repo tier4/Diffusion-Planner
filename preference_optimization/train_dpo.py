@@ -336,12 +336,10 @@ def visualize_validation(
 
             # Visualize input (map, past trajectories, etc.)
             # Convert data back to unnormalized for visualization
-            vis_data = {}
-            for k, v in data.items():
+            vis_data = model_args.observation_normalizer.inverse(data)
+            for k, v in vis_data.items():
                 if isinstance(v, torch.Tensor):
                     vis_data[k] = v.cpu()
-                else:
-                    vis_data[k] = v
             visualize_inputs(vis_data, save_path=None, ax=ax)
 
             # Plot ego prediction
