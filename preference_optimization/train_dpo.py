@@ -184,28 +184,15 @@ def generate_rule_based_preferences(
 
 
 class DPODataset(Dataset):
-    """Dataset for DPO training."""
-
     def __init__(self, preferences: list[dict]):
-        """
-        Args:
-            preferences: List of preference dictionaries from annotation
-        """
         self.preferences = preferences
 
-        # Filter out equal preferences (if any)
-        self.valid_preferences = [p for p in preferences if p.get("score_w") != p.get("score_l")]
-
-        print(
-            f"Loaded {len(self.valid_preferences)} preferences (filtered from {len(preferences)})"
-        )
-
     def __len__(self):
-        return len(self.valid_preferences)
+        return len(self.preferences)
 
     def __getitem__(self, idx):
         """Return tensors and trajectories."""
-        pref = self.valid_preferences[idx]
+        pref = self.preferences[idx]
         data = load_npz_data(pref["npz_path"])
 
         return {
