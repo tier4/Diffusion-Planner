@@ -30,6 +30,8 @@ from torch import optim
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+DEVICE = torch.device("cuda")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -42,14 +44,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--device", type=str, default="cuda")
     return parser.parse_args()
 
 
-def load_model(model_path: Path, device: torch.device) -> tuple[Diffusion_Planner, Config]:
+def load_model(model_path: Path) -> tuple[Diffusion_Planner, Config]:
     """Load Diffusion Planner model and its configuration."""
     print(f"Loading model from {model_path}")
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=False)
 
     model_dir = model_path.parent
     args_path = model_dir / "args.json"
@@ -66,11 +67,11 @@ def load_model(model_path: Path, device: torch.device) -> tuple[Diffusion_Planne
     else:
         model.load_state_dict(checkpoint, strict=False)
 
-    model.to(device)
+    model.to(DEVICE)
     return model, model_args
 
 
-def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch.Tensor]:
+def load_npz_data(npz_path: str | Path) -> dict[str, torch.Tensor]:
     """Load and preprocess NPZ file."""
     loaded = np.load(str(npz_path))
     data = {}
@@ -78,7 +79,7 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
     for key, value in loaded.items():
         if key in {"map_name", "token"}:
             continue
-        data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
+        data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(DEVICE)
 
     if "goal_pose" in data:
         data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
@@ -90,7 +91,7 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
         ego_length = 4.34
         ego_width = 1.70
         data["ego_shape"] = torch.tensor(
-            [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=device
+            [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=DEVICE
         )
 
     return data
@@ -108,7 +109,6 @@ def _generate_trajectory_pair(
     policy_model: Diffusion_Planner,
     model_args,
     data: dict[str, torch.Tensor],
-    device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate two trajectories using the same inputs but different noise."""
     data = model_args.observation_normalizer(data)
@@ -123,7 +123,7 @@ def _generate_trajectory_pair(
         else:
             batch_data[k] = v
 
-    batch_data["sampled_trajectories"] = 2.5 * torch.randn(2 * B, P, future_len + 1, 4).to(device)
+    batch_data["sampled_trajectories"] = 2.5 * torch.randn(2 * B, P, future_len + 1, 4).to(DEVICE)
 
     with torch.no_grad():
         _, outputs = policy_model(batch_data)
@@ -140,7 +140,6 @@ def generate_rule_based_preferences(
     npz_list: Path,
     output_json: Path,
     excluded_json: Path,
-    device: torch.device,
     overwrite: bool = True,
 ):
     """Generate preference annotations using the provided policy model."""
@@ -192,8 +191,8 @@ def generate_rule_based_preferences(
 
     print("Starting rule-based annotation...")
     for i, npz_path in enumerate(tqdm(remaining_paths)):
-        data = load_npz_data(npz_path, device)
-        traj_1, traj_2 = _generate_trajectory_pair(policy_model, model_args, data, device)
+        data = load_npz_data(npz_path)
+        traj_1, traj_2 = _generate_trajectory_pair(policy_model, model_args, data)
         score_1 = calculate_path_length(traj_1)
         score_2 = calculate_path_length(traj_2)
 
@@ -228,14 +227,12 @@ def generate_rule_based_preferences(
 class DPODataset(Dataset):
     """Dataset for DPO training."""
 
-    def __init__(self, preferences: list[dict], device: str = "cuda"):
+    def __init__(self, preferences: list[dict]):
         """
         Args:
             preferences: List of preference dictionaries from annotation
-            device: Device to load data on
         """
         self.preferences = preferences
-        self.device = device
 
         # Filter out equal preferences (if any)
         self.valid_preferences = [p for p in preferences if p.get("score_w") != p.get("score_l")]
@@ -286,18 +283,16 @@ def compute_trajectory_loss(
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
-    device = data["ego_current_state"].device
-
     # Convert trajectory to tensor and normalize
-    gt_trajectory = torch.tensor(trajectory).float().to(device).unsqueeze(0)  # [1, T, 4]
+    gt_trajectory = torch.tensor(trajectory).float().to(DEVICE).unsqueeze(0)  # [1, T, 4]
 
     # Normalize using ego stats only (StateNormalizer broadcasts to [P, T, 4] which causes shape mismatch)
-    ego_mean = model_args.state_normalizer.mean[0].to(device)
-    ego_std = model_args.state_normalizer.std[0].to(device)
+    ego_mean = model_args.state_normalizer.mean[0].to(DEVICE)
+    ego_std = model_args.state_normalizer.std[0].to(DEVICE)
     gt_trajectory_norm = (gt_trajectory - ego_mean) / ego_std  # [1, T, 4]
 
     # Create full gt with ego + neighbors (neighbors are zeros)
-    gt_future = torch.zeros(B, P, future_len, 4, device=device)
+    gt_future = torch.zeros(B, P, future_len, 4, device=DEVICE)
     gt_future[:, 0, :, :] = gt_trajectory_norm  # Only ego has ground truth
 
     # Current states
@@ -305,7 +300,7 @@ def compute_trajectory_loss(
     neighbors_current = (
         data["neighbor_agents_past"][:, : P - 1, -1, :4]
         if P > 1
-        else torch.zeros(B, 0, 4, device=device)
+        else torch.zeros(B, 0, 4, device=DEVICE)
     )
     current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
@@ -391,7 +386,6 @@ def compute_dpo_loss(
         - beta: regularization parameter
         - sigma: sigmoid function
     """
-    device = next(policy_model.parameters()).device
     total_loss = 0.0
     metrics = {
         "accuracy": 0.0,
@@ -401,7 +395,7 @@ def compute_dpo_loss(
 
     for sample in batch:
         # Load input data
-        data_raw = load_npz_data(sample["npz_path"], device)
+        data_raw = load_npz_data(sample["npz_path"])
 
         # Determine which is preferred
         traj_wi = np.array(sample["trajectory_w"])
@@ -413,10 +407,10 @@ def compute_dpo_loss(
         future_len = model_args.future_len
 
         # Separate noise for winner and loser
-        noise_w = torch.randn(B, P, future_len, 4, device=device)
-        noise_l = torch.randn(B, P, future_len, 4, device=device)
+        noise_w = torch.randn(B, P, future_len, 4, device=DEVICE)
+        noise_l = torch.randn(B, P, future_len, 4, device=DEVICE)
         eps = 1e-3
-        t = torch.rand(B, device=device) * (1 - eps) + eps
+        t = torch.rand(B, device=DEVICE) * (1 - eps) + eps
 
         # Compute losses under policy model (with different noise)
         # Deep copy data to avoid inplace modifications affecting gradient computation
@@ -489,16 +483,14 @@ def visualize_validation(
     for batch in valid_loader:
         for sample in batch:
             # Load input data
-            data = load_npz_data(sample["npz_path"], next(policy_model.parameters()).device)
+            data = load_npz_data(sample["npz_path"])
 
             B = data["ego_current_state"].shape[0]
             P = 1 + model_args.predicted_neighbor_num
             future_len = model_args.future_len
 
             # Generate random noise
-            data["sampled_trajectories"] = 0.0 * torch.randn(B, P, future_len + 1, 4).to(
-                data["ego_current_state"].device
-            )
+            data["sampled_trajectories"] = 0.0 * torch.randn(B, P, future_len + 1, 4).to(DEVICE)
 
             # Normalize inputs
             data = model_args.observation_normalizer(data)
@@ -595,8 +587,6 @@ def train_epoch(
 def main():
     args = parse_args()
 
-    device = torch.device(args.device)
-
     save_dir = args.npz_list.parent
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = save_dir / f"{timestamp}_{args.exp_name}"
@@ -616,7 +606,7 @@ def main():
 
     print(f"Saving artifacts to {run_dir}")
 
-    policy_model, model_args = load_model(latest_ckpt, device)
+    policy_model, model_args = load_model(latest_ckpt)
     policy_model.train()
     optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
 
@@ -638,7 +628,6 @@ def main():
             args.npz_list,
             preference_json,
             excluded_path,
-            device,
             overwrite=True,
         )
 
@@ -658,8 +647,8 @@ def main():
         train_preferences = preferences[:num_train]
         valid_preferences = preferences[num_train:]
 
-        train_dataset = DPODataset(train_preferences, device)
-        valid_dataset = DPODataset(valid_preferences, device)
+        train_dataset = DPODataset(train_preferences)
+        valid_dataset = DPODataset(valid_preferences)
 
         train_loader = DataLoader(
             train_dataset,
