@@ -21,14 +21,14 @@ import torch.nn.functional as F
 
 matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
-from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
+from generate_dpo_data import collect_preferences_gui
 from torch import optim
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+from utils import calculate_path_length, generate_trajectory_pair, load_npz_data
 
 DEVICE = torch.device("cuda")
 
@@ -39,6 +39,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--train_npz_list", type=Path, required=True)
     parser.add_argument("--valid_npz_list", type=Path, required=True)
+    parser.add_argument(
+        "--preference_mode",
+        type=str,
+        choices=["rule", "gui"],
+        default="rule",
+        help="Use rule-based scoring or GUI annotation to collect preferences.",
+    )
     parser.add_argument("--beta", type=float, default=0.1)
     parser.add_argument("--train_epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -70,69 +77,6 @@ def load_model(model_path: Path) -> tuple[Diffusion_Planner, Config]:
     return model, model_args
 
 
-def load_npz_data(npz_path: str | Path) -> dict[str, torch.Tensor]:
-    """Load and preprocess NPZ file."""
-    loaded = np.load(str(npz_path))
-    data = {}
-
-    for key, value in loaded.items():
-        if key in {"map_name", "token"}:
-            continue
-        data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(DEVICE)
-
-    if "goal_pose" in data:
-        data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
-    if "ego_agent_past" in data:
-        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
-
-    if "ego_shape" not in data:
-        wheel_base = 2.79
-        ego_length = 4.34
-        ego_width = 1.70
-        data["ego_shape"] = torch.tensor(
-            [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=DEVICE
-        )
-
-    return data
-
-
-def calculate_path_length(trajectory: np.ndarray) -> float:
-    """Calculate negative path length (longer paths become smaller values)."""
-    xy = trajectory[:, :2]
-    diffs = np.diff(xy, axis=0)
-    dists = np.linalg.norm(diffs, axis=1)
-    return float(-np.sum(dists))
-
-
-def _generate_trajectory_pair(
-    policy_model: Diffusion_Planner,
-    model_args,
-    data: dict[str, torch.Tensor],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Generate two trajectories using the same inputs but different noise."""
-    data = model_args.observation_normalizer(data)
-    B = data["ego_current_state"].shape[0]
-    P = 1 + model_args.predicted_neighbor_num
-    future_len = model_args.future_len
-
-    batch_data = {}
-    for k, v in data.items():
-        if isinstance(v, torch.Tensor):
-            batch_data[k] = v.repeat(2, *([1] * (v.dim() - 1)))
-        else:
-            batch_data[k] = v
-
-    batch_data["sampled_trajectories"] = 2.5 * torch.randn(2 * B, P, future_len + 1, 4).to(DEVICE)
-
-    with torch.no_grad():
-        _, outputs = policy_model(batch_data)
-    prediction = outputs["prediction"]
-
-    traj_1 = prediction[0, 0].cpu().numpy()
-    traj_2 = prediction[1, 0].cpu().numpy()
-    return traj_1, traj_2
-
-
 def generate_rule_based_preferences(
     policy_model: Diffusion_Planner, model_args, npz_list: Path
 ) -> list[dict]:
@@ -154,8 +98,8 @@ def generate_rule_based_preferences(
 
     print("Starting rule-based annotation...")
     for npz_path in tqdm(npz_paths):
-        data = load_npz_data(npz_path)
-        traj_1, traj_2 = _generate_trajectory_pair(policy_model, model_args, data)
+        data = load_npz_data(npz_path, DEVICE)
+        traj_1, traj_2 = generate_trajectory_pair(policy_model, model_args, data, device=DEVICE)
         score_1 = calculate_path_length(traj_1)
         score_2 = calculate_path_length(traj_2)
 
@@ -183,6 +127,25 @@ def generate_rule_based_preferences(
     return preferences
 
 
+def _convert_gui_preferences(raw_preferences: list[dict]) -> list[dict]:
+    converted = []
+    for pref in raw_preferences:
+        choice = pref.get("preference")
+        if choice not in {"trajectory_1", "trajectory_2"}:
+            continue
+        traj1 = pref["trajectory_1"]
+        traj2 = pref["trajectory_2"]
+        npz_path = pref.get("npz_path")
+        if npz_path is None:
+            continue
+        if choice == "trajectory_1":
+            traj_w, traj_l = traj1, traj2
+        else:
+            traj_w, traj_l = traj2, traj1
+        converted.append({"npz_path": npz_path, "trajectory_w": traj_w, "trajectory_l": traj_l})
+    return converted
+
+
 class DPODataset(Dataset):
     def __init__(self, preferences: list[dict]):
         self.preferences = preferences
@@ -194,7 +157,7 @@ class DPODataset(Dataset):
         """Return tensors and trajectories."""
         pref = self.preferences[idx]
         return {
-            "data": load_npz_data(pref["npz_path"]),
+            "data": load_npz_data(pref["npz_path"], DEVICE),
             "trajectory_w": np.asarray(pref["trajectory_w"], dtype=np.float32),
             "trajectory_l": np.asarray(pref["trajectory_l"], dtype=np.float32),
         }
@@ -210,7 +173,7 @@ class NPZDataset(Dataset):
         return len(self.npz_paths)
 
     def __getitem__(self, idx):
-        return load_npz_data(self.npz_paths[idx])
+        return load_npz_data(self.npz_paths[idx], DEVICE)
 
 
 def compute_trajectory_loss(
@@ -579,11 +542,19 @@ def main():
     visualize_validation(policy_model, valid_loader, model_args, run_dir, 0)
 
     for epoch in range(1, args.train_epochs + 1):
-        preferences = generate_rule_based_preferences(
-            policy_model,
-            model_args,
-            args.train_npz_list,
-        )
+        if args.preference_mode == "gui":
+            gui_preferences = collect_preferences_gui(policy_model, model_args, args.train_npz_list)
+            preferences = _convert_gui_preferences(gui_preferences)
+        else:
+            preferences = generate_rule_based_preferences(
+                policy_model,
+                model_args,
+                args.train_npz_list,
+            )
+
+        if not preferences:
+            print("No preferences collected this epoch. Skipping training step.")
+            continue
 
         print(f"Loaded {len(preferences)} preference annotations")
 
