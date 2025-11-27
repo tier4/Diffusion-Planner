@@ -21,7 +21,6 @@ matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.train_utils import set_seed
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from generate_dpo_data_rule_based import load_model, load_npz_data
 from torch import optim
@@ -42,8 +41,7 @@ def boolean(v):
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp_name", type=str, required=True)
-    parser.add_argument("--save_dir", type=Path, default=Path("."))
+    parser.add_argument("--exp_name", type=str, default="test")
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--preference_json", type=Path, required=True)
     parser.add_argument("--valid_split", type=float, default=0.1)
@@ -82,9 +80,8 @@ class DPODataset(Dataset):
         Returns:
             dict with keys:
                 - npz_path: path to input data
-                - trajectory_1_info: dict with trajectory and intermediate steps
-                - trajectory_2_info: dict with trajectory and intermediate steps
-                - preference: 0 for trajectory_1, 1 for trajectory_2
+                - trajectory_w: winning trajectory (ground truth)
+                - trajectory_l: losing trajectory (ground truth)
         """
         pref = self.valid_preferences[idx]
 
@@ -405,7 +402,8 @@ def main():
     # Create save directory
     time = datetime.now()
     time = time.strftime("%Y%m%d-%H%M%S")
-    save_path = args.save_dir / f"{time}_{args.exp_name}"
+    save_dir = args.preference_json.parent
+    save_path = save_dir / f"{time}_{args.exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
     print(f"Saving to {save_path}")
 
