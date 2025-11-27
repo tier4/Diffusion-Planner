@@ -101,31 +101,87 @@ def compute_trajectory_loss(
     data: dict[str, torch.Tensor],
     trajectory: np.ndarray,
     model_args,
+    noise: torch.Tensor,
+    t: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Compute MSE loss of a trajectory under the model.
+    Compute MSE loss of a trajectory under the model using diffusion training.
+
+    Args:
+        model: The diffusion model
+        data: Input data dictionary
+        trajectory: Ground truth trajectory [T, 4]
+        model_args: Model arguments
+        noise: Pre-generated noise [1, P, T, 4]
+        t: Diffusion time [1]
     """
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
+    device = data["ego_current_state"].device
 
-    # Generate random noise
-    data["sampled_trajectories"] = 0.5 * torch.randn(B, P, future_len + 1, 4).to(
-        data["ego_current_state"].device
+    # Convert trajectory to tensor and normalize
+    gt_trajectory = torch.tensor(trajectory).float().to(device).unsqueeze(0)  # [1, T, 4]
+    gt_trajectory_norm = model_args.state_normalizer(gt_trajectory)  # [1, T, 4]
+
+    # Create full gt with ego + neighbors (neighbors are zeros)
+    gt_future = torch.zeros(B, P, future_len, 4, device=device)
+    gt_future[:, 0, :, :] = gt_trajectory_norm  # Only ego has ground truth
+
+    # Current states
+    ego_current = data["ego_current_state"][:, :4]
+    neighbors_current = (
+        data["neighbor_agents_past"][:, : P - 1, -1, :4]
+        if P > 1
+        else torch.zeros(B, 0, 4, device=device)
     )
+    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
-    # Normalize inputs
-    data = model_args.observation_normalizer(data)
+    # Concatenate current state with future
+    all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, 1+T, 4]
+
+    # Add noise to future part only
+    mean, std = model_args.sde.marginal_prob(all_gt[..., 1:, :], t)
+    std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
+
+    if model_args.diffusion_model_type == "flow_matching":
+        t_expanded = t.reshape(-1, *([1] * (len(all_gt.shape) - 1)))  # [B, 1, 1, 1]
+        xT = (1 - t_expanded) * noise + t_expanded * all_gt[:, :, 1:, :]  # [B, P, T, 4]
+    else:
+        xT = mean + std * noise
+
+    # Concatenate current state with noisy future
+    xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)  # [B, P, 1+T, 4]
+
+    # Prepare model inputs
+    merged_inputs = {
+        **data,
+        "gt_trajectories": all_gt,
+        "sampled_trajectories": xT_full,
+        "diffusion_time": t,
+    }
 
     # Run model
-    _, outputs = model(data)
-    prediction = outputs["prediction"][:, 0]  # [B, T, 4] - ego only
+    _, outputs = model(merged_inputs)
+    model_output = outputs["model_output"][:, 0, 1:, :]  # [B, T, 4] - ego only
 
-    # Target trajectory
-    target = torch.tensor(trajectory).float().to(prediction.device).unsqueeze(0)  # [1, T, 4]
-
-    # Compute MSE loss
-    mse_loss = F.mse_loss(prediction, target, reduction="mean")
+    # Compute loss based on model type
+    if model_args.diffusion_model_type == "score":
+        # Score matching loss
+        mse_loss = F.mse_loss(
+            (model_output * std[:, 0] + noise[:, 0]),
+            torch.zeros_like(model_output),
+            reduction="mean",
+        )
+    elif model_args.diffusion_model_type == "x_start":
+        # Direct prediction loss
+        mse_loss = F.mse_loss(model_output, gt_trajectory_norm[0], reduction="mean")
+    elif model_args.diffusion_model_type == "flow_matching":
+        # Flow matching loss
+        target_v = all_gt[:, 0, 1:, :] - noise[:, 0]
+        mse_loss = F.mse_loss(model_output, target_v, reduction="mean")
+    else:
+        raise ValueError(f"Unknown model type: {model_args.diffusion_model_type}")
 
     return mse_loss
 
@@ -164,17 +220,32 @@ def compute_dpo_loss(
         data = load_npz_data(sample["npz_path"], device)
 
         # Determine which is preferred
-        traj_wi = sample["trajectory_w"]
-        traj_lo = sample["trajectory_l"]
+        traj_wi = np.array(sample["trajectory_w"])
+        traj_lo = np.array(sample["trajectory_l"])
 
-        # Compute losses under policy model
-        l_w = compute_trajectory_loss(policy_model, data, traj_wi, model_args)
-        l_l = compute_trajectory_loss(policy_model, data, traj_lo, model_args)
+        # Sample shared diffusion time but separate noise for winner and loser
+        B = data["ego_current_state"].shape[0]
+        P = 1 + model_args.predicted_neighbor_num
+        future_len = model_args.future_len
 
-        # Compute losses under reference model
+        # Separate noise for winner and loser
+        noise_w = torch.randn(B, P, future_len, 4, device=device)
+        noise_l = torch.randn(B, P, future_len, 4, device=device)
+        eps = 1e-3
+        t = torch.rand(B, device=device) * (1 - eps) + eps
+
+        # Compute losses under policy model (with different noise)
+        l_w = compute_trajectory_loss(policy_model, data.copy(), traj_wi, model_args, noise_w, t)
+        l_l = compute_trajectory_loss(policy_model, data.copy(), traj_lo, model_args, noise_l, t)
+
+        # Compute losses under reference model (with same noise as policy)
         with torch.no_grad():
-            l_ref_w = compute_trajectory_loss(reference_model, data, traj_wi, model_args)
-            l_ref_l = compute_trajectory_loss(reference_model, data, traj_lo, model_args)
+            l_ref_w = compute_trajectory_loss(
+                reference_model, data.copy(), traj_wi, model_args, noise_w, t
+            )
+            l_ref_l = compute_trajectory_loss(
+                reference_model, data.copy(), traj_lo, model_args, noise_l, t
+            )
 
         # Compute DPO loss
         # User's formula: -log(sigma(-beta * ((l_w - l_ref_w) - (l_l - l_ref_l))))
