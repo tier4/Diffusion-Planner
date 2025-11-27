@@ -582,8 +582,6 @@ def main():
             args.npz_list,
         )
 
-        save_path = run_dir
-
         print(f"Loaded {len(preferences)} preference annotations")
 
         num_valid = int(round(len(preferences) * args.valid_split))
@@ -623,7 +621,7 @@ def main():
             policy_model, reference_model, train_loader, optimizer, args, model_args
         )
 
-        visualize_validation(policy_model, valid_loader, model_args, save_path, epoch)
+        visualize_validation(policy_model, valid_loader, model_args, run_dir, epoch)
 
         print(
             f"Epoch {epoch}/{args.train_epochs}\n"
@@ -640,7 +638,7 @@ def main():
         torch.save(checkpoint_data, latest_ckpt)
 
         if epoch % 10 == 0:
-            torch.save(checkpoint_data, os.path.join(save_path, f"epoch_{epoch:03d}.pth"))
+            torch.save(checkpoint_data, os.path.join(run_dir, f"epoch_{epoch:03d}.pth"))
 
         train_log.append(
             {
@@ -649,7 +647,7 @@ def main():
             }
         )
         df = pd.DataFrame(train_log)
-        df.to_csv(os.path.join(save_path, "dpo_train_log.tsv"), sep="\t", index=False)
+        df.to_csv(os.path.join(run_dir, "dpo_train_log.tsv"), sep="\t", index=False)
 
 
 if __name__ == "__main__":
