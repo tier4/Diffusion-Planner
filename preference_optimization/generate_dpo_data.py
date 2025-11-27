@@ -74,6 +74,7 @@ class AnnotationGUI:
         buttons = [
             ("Trajectory 1 (Green) is Better", self._select_1, "green"),
             ("Trajectory 2 (Orange) is Better", self._select_2, "orange"),
+            ("Regenerate Pair", self._regenerate_pair, "purple"),
             ("Cannot Judge", self._select_skip, "blue"),
             ("Save & Quit", self._save_and_quit, "gray"),
         ]
@@ -107,12 +108,7 @@ class AnnotationGUI:
 
         try:
             self.current_data = load_npz_data(npz_path, self.device)
-            traj_1, traj_2 = generate_trajectory_pair(
-                self.policy_model, self.model_args, self.current_data, device=self.device
-            )
-            self.trajectory_1 = traj_1.tolist()
-            self.trajectory_2 = traj_2.tolist()
-            self._visualize()
+            self._regenerate_pair(update_index=False)
         except Exception as exc:  # pragma: no cover - GUI path
             messagebox.showerror("Error", f"Failed to load sample:\n{str(exc)}")
             print(f"Error loading {npz_path}: {exc}")
@@ -163,6 +159,18 @@ class AnnotationGUI:
 
         self.current_index += 1
         self._load_next()
+
+    def _regenerate_pair(self, update_index: bool = True):
+        if self.current_data is None:
+            return
+        traj_1, traj_2 = generate_trajectory_pair(
+            self.policy_model, self.model_args, self.current_data, device=self.device
+        )
+        self.trajectory_1 = traj_1.tolist()
+        self.trajectory_2 = traj_2.tolist()
+        self._visualize()
+        if update_index:
+            print("Regenerated trajectory pair for current sample.")
 
     def _save_and_quit(self):
         self.root.destroy()
