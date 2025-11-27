@@ -75,8 +75,6 @@ class AnnotationGUI:
             ("Trajectory 1 (Green) is Better", self._select_1, "green"),
             ("Trajectory 2 (Orange) is Better", self._select_2, "orange"),
             ("Regenerate Pair", self._regenerate_pair, "purple"),
-            ("Cannot Judge", self._select_skip, "blue"),
-            ("Save & Quit", self._save_and_quit, "gray"),
         ]
         for text, command, color in buttons:
             btn = tk.Button(
@@ -95,10 +93,8 @@ class AnnotationGUI:
 
     def _load_next(self):
         if self.current_index >= len(self.npz_paths):
-            messagebox.showinfo(
-                "Complete", f"Annotation complete! Annotated {len(self.preferences)} samples."
-            )
-            self._save_and_quit()
+            messagebox.showinfo("Complete", "Annotation complete!")
+            self.root.destroy()
             return
 
         npz_path = self.npz_paths[self.current_index]
@@ -137,10 +133,6 @@ class AnnotationGUI:
     def _select_2(self):
         self._record("trajectory_2")
 
-    def _select_skip(self):
-        self.current_index += 1
-        self._load_next()
-
     def _record(self, winner: str):
         npz_path = self.npz_paths[self.current_index]
         if winner == "trajectory_1":
@@ -171,9 +163,6 @@ class AnnotationGUI:
         self._visualize()
         if update_index:
             print("Regenerated trajectory pair for current sample.")
-
-    def _save_and_quit(self):
-        self.root.destroy()
 
     def run(self):
         self.root.mainloop()
