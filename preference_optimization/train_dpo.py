@@ -506,7 +506,7 @@ def visualize_validation(
     """
     policy_model.eval()
 
-    vis_dir = save_dir / "validation_vis" / f"epoch_{epoch:03d}"
+    vis_dir = save_dir / "validation_vis"
     vis_dir.mkdir(parents=True, exist_ok=True)
 
     sample_count = 0
@@ -567,7 +567,9 @@ def visualize_validation(
             # Save figure
             npz_stem = Path(sample["npz_path"]).stem
             plt.savefig(
-                vis_dir / f"sample_{sample_count:03d}_{npz_stem}.png", dpi=100, bbox_inches="tight"
+                vis_dir / f"sample_{sample_count:03d}_{npz_stem}_{epoch:04d}.png",
+                dpi=100,
+                bbox_inches="tight",
             )
             plt.close()
 
@@ -638,7 +640,7 @@ def main():
 
     print(f"Saving artifacts to {run_dir}")
 
-    def run_cycle(epoch: int):
+    for epoch in range(1, args.train_epochs + 1):
         preference_json = save_dir / "dpo_preferences_rule_based.json"
         excluded_path = args.excluded_json or (
             preference_json.parent / "dpo_excluded_rule_based.json"
@@ -749,9 +751,6 @@ def main():
         )
         df = pd.DataFrame(train_log)
         df.to_csv(os.path.join(save_path, "dpo_train_log.tsv"), sep="\t", index=False)
-
-    for epoch in range(1, args.train_epochs + 1):
-        run_cycle(epoch)
 
 
 if __name__ == "__main__":
