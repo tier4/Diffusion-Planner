@@ -5,6 +5,7 @@ This program trains the Diffusion Planner model using DPO based on human prefere
 """
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -114,139 +115,125 @@ def calculate_path_length(trajectory: np.ndarray) -> float:
     return float(-np.sum(dists))
 
 
-class DPODataGenerator:
-    """Generates trajectory pairs and manages annotation."""
+def _generate_trajectory_pair(
+    policy_model: Diffusion_Planner,
+    model_args,
+    data: dict[str, torch.Tensor],
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate two trajectories using the same inputs but different noise."""
+    data = model_args.observation_normalizer(data)
+    B = data["ego_current_state"].shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
 
-    def __init__(
-        self,
-        model_path: Path,
-        npz_list: Path,
-        output_json: Path,
-        excluded_json: Path,
-        device: torch.device,
-        overwrite: bool = False,
-    ):
-        self.model_path = model_path
-        self.npz_list = npz_list
-        self.output_json = output_json
-        self.excluded_json = excluded_json
-        self.device = device
+    batch_data = {}
+    for k, v in data.items():
+        if isinstance(v, torch.Tensor):
+            batch_data[k] = v.repeat(2, *([1] * (v.dim() - 1)))
+        else:
+            batch_data[k] = v
 
-        self.output_json.parent.mkdir(parents=True, exist_ok=True)
-        self.excluded_json.parent.mkdir(parents=True, exist_ok=True)
+    batch_data["sampled_trajectories"] = 2.5 * torch.randn(2 * B, P, future_len + 1, 4).to(device)
 
-        if overwrite:
-            print("Overwriting existing preference/excluded files.")
-            if self.output_json.exists():
-                self.output_json.unlink()
-            if self.excluded_json.exists():
-                self.excluded_json.unlink()
+    with torch.no_grad():
+        _, outputs = policy_model(batch_data)
+    prediction = outputs["prediction"]
 
-        seed = random.randint(0, 2**32 - 1)
-        torch.manual_seed(seed)
-        np.random.seed(seed % (2**32))
-        print(f"Random seed: {seed}")
+    traj_1 = prediction[0, 0].cpu().numpy()
+    traj_2 = prediction[1, 0].cpu().numpy()
+    return traj_1, traj_2
 
-        self.model, self.model_args = load_model(self.model_path, self.device)
-        self.model.eval()
 
-        with open(self.npz_list, "r") as f:
-            self.npz_paths = json.load(f)
+def generate_rule_based_preferences(
+    policy_model: Diffusion_Planner,
+    model_args,
+    npz_list: Path,
+    output_json: Path,
+    excluded_json: Path,
+    device: torch.device,
+    overwrite: bool = True,
+):
+    """Generate preference annotations using the provided policy model."""
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    excluded_json.parent.mkdir(parents=True, exist_ok=True)
 
-        self.preferences = []
-        self.excluded = []
+    if overwrite:
+        print("Overwriting existing preference/excluded files.")
+        if output_json.exists():
+            output_json.unlink()
+        if excluded_json.exists():
+            excluded_json.unlink()
 
-        if self.output_json.exists():
-            print(f"Resuming from {self.output_json}")
-            with open(self.output_json, "r") as f:
-                self.preferences = json.load(f)
+    seed = random.randint(0, 2**32 - 1)
+    torch.manual_seed(seed)
+    np.random.seed(seed % (2**32))
+    print(f"Random seed: {seed}")
 
-        if self.excluded_json.exists():
-            print(f"Loading excluded list from {self.excluded_json}")
-            with open(self.excluded_json, "r") as f:
-                self.excluded = json.load(f)
+    with open(npz_list, "r") as f:
+        npz_paths = json.load(f)
 
-        annotated_paths = {pref["npz_path"] for pref in self.preferences}
-        excluded_paths = set(self.excluded)
-        self.npz_paths = [
-            p for p in self.npz_paths if p not in annotated_paths and p not in excluded_paths
-        ]
+    preferences = []
+    excluded = []
 
-        print(f"Total NPZ files to annotate: {len(self.npz_paths)}")
+    if output_json.exists():
+        print(f"Resuming from {output_json}")
+        with open(output_json, "r") as f:
+            preferences = json.load(f)
 
-    @torch.no_grad()
-    def generate_trajectory_pair(
-        self, data: dict[str, torch.Tensor]
-    ) -> tuple[np.ndarray, np.ndarray]:
-        data = self.model_args.observation_normalizer(data)
-        B = data["ego_current_state"].shape[0]
-        P = 1 + self.model_args.predicted_neighbor_num
-        future_len = self.model_args.future_len
+    if excluded_json.exists():
+        print(f"Loading excluded list from {excluded_json}")
+        with open(excluded_json, "r") as f:
+            excluded = json.load(f)
 
-        batch_data = {}
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor):
-                batch_data[k] = v.repeat(2, *([1] * (v.dim() - 1)))
-            else:
-                batch_data[k] = v
+    annotated_paths = {pref["npz_path"] for pref in preferences}
+    excluded_paths = set(excluded)
+    remaining_paths = [p for p in npz_paths if p not in annotated_paths and p not in excluded_paths]
 
-        batch_data["sampled_trajectories"] = 2.5 * torch.randn(2 * B, P, future_len + 1, 4).to(
-            self.device
-        )
+    print(f"Total NPZ files to annotate: {len(remaining_paths)}")
 
-        _, outputs = self.model(batch_data)
-        prediction = outputs["prediction"]
+    was_training = policy_model.training
+    policy_model.eval()
 
-        trajectories = []
-        for i in range(2):
-            ego_prediction = prediction[i, 0].cpu().numpy()
-            trajectories.append(ego_prediction)
+    def flush():
+        with open(output_json, "w") as f:
+            json.dump(preferences, f, indent=2)
+        with open(excluded_json, "w") as f:
+            json.dump(excluded, f, indent=2)
 
-        return trajectories[0], trajectories[1]
+    print("Starting rule-based annotation...")
+    for i, npz_path in enumerate(tqdm(remaining_paths)):
+        data = load_npz_data(npz_path, device)
+        traj_1, traj_2 = _generate_trajectory_pair(policy_model, model_args, data, device)
+        score_1 = calculate_path_length(traj_1)
+        score_2 = calculate_path_length(traj_2)
 
-    def save_preferences(self):
-        with open(self.output_json, "w") as f:
-            json.dump(self.preferences, f, indent=2)
+        if score_1 > score_2:
+            traj_w, traj_l = traj_1, traj_2
+            score_w, score_l = score_1, score_2
+        else:
+            traj_w, traj_l = traj_2, traj_1
+            score_w, score_l = score_2, score_1
 
-        with open(self.excluded_json, "w") as f:
-            json.dump(self.excluded, f, indent=2)
+        preference_data = {
+            "npz_path": npz_path,
+            "trajectory_w": traj_w.tolist(),
+            "trajectory_l": traj_l.tolist(),
+            "score_w": score_w,
+            "score_l": score_l,
+        }
+        preferences.append(preference_data)
 
-    def run(self):
-        print("Starting rule-based annotation...")
-        for i, npz_path in enumerate(tqdm(self.npz_paths)):
-            data = load_npz_data(npz_path, self.device)
-            traj_1, traj_2 = self.generate_trajectory_pair(data)
-            score_1 = calculate_path_length(traj_1)
-            score_2 = calculate_path_length(traj_2)
+        if (i + 1) % 100 == 0:
+            flush()
 
-            if score_1 > score_2:
-                traj_w = traj_1
-                traj_l = traj_2
-                score_w = score_1
-                score_l = score_2
-            else:
-                traj_w = traj_2
-                traj_l = traj_1
-                score_w = score_2
-                score_l = score_1
+    flush()
+    print(f"Annotation complete! Saved {len(preferences)} preferences to {output_json}")
 
-            preference_data = {
-                "npz_path": npz_path,
-                "trajectory_w": traj_w.tolist(),
-                "trajectory_l": traj_l.tolist(),
-                "score_w": score_w,
-                "score_l": score_l,
-            }
-            self.preferences.append(preference_data)
+    if was_training:
+        policy_model.train()
 
-            if (i + 1) % 100 == 0:
-                self.save_preferences()
-
-        self.save_preferences()
-        print(
-            f"Annotation complete! Saved {len(self.preferences)} preferences to {self.output_json}"
-        )
-        return self.output_json
+    return output_json
 
 
 class DPODataset(Dataset):
@@ -640,47 +627,51 @@ def main():
 
     print(f"Saving artifacts to {run_dir}")
 
+    policy_model, model_args = load_model(latest_ckpt, device)
+    policy_model.train()
+    optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
+
+    args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    with open(run_dir / "dpo_args.json", "w") as f:
+        json.dump(args_dict, f, indent=4)
+
+    train_log: list[dict] = []
+
     for epoch in range(1, args.train_epochs + 1):
         preference_json = save_dir / "dpo_preferences_rule_based.json"
         excluded_path = args.excluded_json or (
             preference_json.parent / "dpo_excluded_rule_based.json"
         )
 
-        generator = DPODataGenerator(
-            model_path=latest_ckpt,
-            npz_list=args.npz_list,
-            output_json=preference_json,
-            excluded_json=excluded_path,
-            device=device,
+        generate_rule_based_preferences(
+            policy_model,
+            model_args,
+            args.npz_list,
+            preference_json,
+            excluded_path,
+            device,
             overwrite=True,
         )
-        generator.run()
 
-        # Create save directory
         save_path = run_dir
 
-        # Load preference data
         print(f"Loading preferences from {preference_json}")
         with open(preference_json, "r") as f:
             preferences = json.load(f)
 
         print(f"Loaded {len(preferences)} preference annotations")
 
-        # Split into train/valid
         num_valid = int(round(len(preferences) * args.valid_split))
         num_train = len(preferences) - num_valid
 
-        # Shuffle
         random.shuffle(preferences)
 
         train_preferences = preferences[:num_train]
         valid_preferences = preferences[num_train:]
 
-        # Create datasets
         train_dataset = DPODataset(train_preferences, device)
         valid_dataset = DPODataset(valid_preferences, device)
 
-        # Create data loaders
         train_loader = DataLoader(
             train_dataset,
             batch_size=args.batch_size,
@@ -697,29 +688,12 @@ def main():
             collate_fn=lambda x: x,
         )
 
-        # Load policy model
-        policy_model, model_args = load_model(latest_ckpt, device)
-
-        # Load reference model (frozen copy of policy model)
-        print("Using initial policy model as reference model")
-        reference_model, _ = load_model(latest_ckpt, device)
+        reference_model = copy.deepcopy(policy_model)
         reference_model.eval()
         for param in reference_model.parameters():
             param.requires_grad = False
 
-        # Optimizer
-        optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
-
-        # Save args (convert Path to str for JSON serialization)
-        args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
-        with open(save_path / "dpo_args.json", "w") as f:
-            json.dump(args_dict, f, indent=4)
-
-        visualize_validation(policy_model, valid_loader, model_args, save_path, 0)
-
-        # Training loop
-        train_log = []
-
+        policy_model.train()
         train_metrics = train_epoch(
             policy_model, reference_model, train_loader, optimizer, args, model_args
         )
