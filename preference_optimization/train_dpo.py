@@ -193,10 +193,8 @@ class DPODataset(Dataset):
     def __getitem__(self, idx):
         """Return tensors and trajectories."""
         pref = self.preferences[idx]
-        data = load_npz_data(pref["npz_path"])
-
         return {
-            "data": data,
+            "data": load_npz_data(pref["npz_path"]),
             "trajectory_w": np.asarray(pref["trajectory_w"], dtype=np.float32),
             "trajectory_l": np.asarray(pref["trajectory_l"], dtype=np.float32),
         }
