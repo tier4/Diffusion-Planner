@@ -37,8 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default="test")
     parser.add_argument("--model_path", type=Path, required=True)
-    parser.add_argument("--npz_list", type=Path, required=True)
-    parser.add_argument("--valid_split", type=float, default=0.01)
+    parser.add_argument("--train_npz_list", type=Path, required=True)
+    parser.add_argument("--valid_npz_list", type=Path, required=True)
     parser.add_argument("--beta", type=float, default=0.1)
     parser.add_argument("--train_epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -198,6 +198,19 @@ class DPODataset(Dataset):
             "trajectory_w": np.asarray(pref["trajectory_w"], dtype=np.float32),
             "trajectory_l": np.asarray(pref["trajectory_l"], dtype=np.float32),
         }
+
+
+class NPZDataset(Dataset):
+    """Dataset that loads NPZ inputs for visualization/evaluation."""
+
+    def __init__(self, npz_paths: list[str]):
+        self.npz_paths = npz_paths
+
+    def __len__(self):
+        return len(self.npz_paths)
+
+    def __getitem__(self, idx):
+        return load_npz_data(self.npz_paths[idx])
 
 
 def compute_trajectory_loss(
@@ -420,10 +433,7 @@ def visualize_validation(
     for batch in valid_loader:
         for sample in batch:
             # Use preloaded input data
-            data = {
-                k: v.clone() if isinstance(v, torch.Tensor) else v
-                for k, v in sample["data"].items()
-            }
+            data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in sample.items()}
 
             B = data["ego_current_state"].shape[0]
             P = 1 + model_args.predicted_neighbor_num
@@ -526,7 +536,7 @@ def train_epoch(
 def main():
     args = parse_args()
 
-    save_dir = args.npz_list.parent
+    save_dir = args.train_npz_list.parent
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = save_dir / f"{timestamp}_{args.exp_name}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -553,40 +563,37 @@ def main():
     with open(run_dir / "dpo_args.json", "w") as f:
         json.dump(args_dict, f, indent=4)
 
+    with open(args.valid_npz_list, "r") as f:
+        valid_npz_paths = json.load(f)
+    valid_dataset = NPZDataset(valid_npz_paths)
+    valid_loader = DataLoader(
+        valid_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=lambda x: x,
+    )
+
     train_log: list[dict] = []
+
+    visualize_validation(policy_model, valid_loader, model_args, run_dir, 0)
 
     for epoch in range(1, args.train_epochs + 1):
         preferences = generate_rule_based_preferences(
             policy_model,
             model_args,
-            args.npz_list,
+            args.train_npz_list,
         )
 
         print(f"Loaded {len(preferences)} preference annotations")
 
-        num_valid = int(round(len(preferences) * args.valid_split))
-        num_train = len(preferences) - num_valid
-
         random.shuffle(preferences)
-
-        train_preferences = preferences[:num_train]
-        valid_preferences = preferences[num_train:]
-
-        train_dataset = DPODataset(train_preferences)
-        valid_dataset = DPODataset(valid_preferences)
+        train_dataset = DPODataset(preferences)
 
         train_loader = DataLoader(
             train_dataset,
             batch_size=args.batch_size,
             shuffle=True,
-            num_workers=0,
-            collate_fn=lambda x: x,
-        )
-
-        valid_loader = DataLoader(
-            valid_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
             num_workers=0,
             collate_fn=lambda x: x,
         )
