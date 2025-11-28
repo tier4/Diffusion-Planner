@@ -21,10 +21,10 @@ import torch.nn.functional as F
 
 matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
+from annotation_gui import collect_preferences_gui
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from generate_dpo_data import collect_preferences_gui
 from torch import optim
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
