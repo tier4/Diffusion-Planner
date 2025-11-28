@@ -5,7 +5,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Union
+from typing import List, Sequence, Union
 
 import numpy as np
 import torch
@@ -37,6 +37,10 @@ from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DT = 0.1
 MAP_DEVICE = torch.device("cpu")
+TURN_INDICATOR_DISABLE = 1
+TURN_INDICATOR_LEFT = 2
+TURN_INDICATOR_RIGHT = 3
+TURN_HEADING_THRESHOLD = math.radians(8.0)
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,6 +78,65 @@ def transform_to_local(
     x_local = cos_yaw * dx + sin_yaw * dy
     y_local = -sin_yaw * dx + cos_yaw * dy
     return np.stack([x_local, y_local], axis=-1)
+
+
+def transform_velocity_to_local(
+    vx_map: np.ndarray,
+    vy_map: np.ndarray,
+    anchor_yaw: float,
+) -> np.ndarray:
+    cos_yaw = math.cos(anchor_yaw)
+    sin_yaw = math.sin(anchor_yaw)
+    vx_local = cos_yaw * vx_map + sin_yaw * vy_map
+    vy_local = -sin_yaw * vx_map + cos_yaw * vy_map
+    return np.stack([vx_local, vy_local], axis=-1)
+
+
+def compute_global_velocity(series_x: np.ndarray, series_y: np.ndarray, dt: float) -> np.ndarray:
+    vx = np.zeros_like(series_x, dtype=np.float32)
+    vy = np.zeros_like(series_y, dtype=np.float32)
+    if len(series_x) > 1:
+        vx[1:] = (series_x[1:] - series_x[:-1]) / dt
+        vy[1:] = (series_y[1:] - series_y[:-1]) / dt
+        vx[0] = vx[1]
+        vy[0] = vy[1]
+    return np.stack([vx, vy], axis=1)
+
+
+def infer_turn_indicator(future_yaw: np.ndarray) -> int:
+    if len(future_yaw) == 0:
+        return TURN_INDICATOR_DISABLE
+    yaw_change = future_yaw[-1]
+    if yaw_change > TURN_HEADING_THRESHOLD:
+        return TURN_INDICATOR_LEFT
+    if yaw_change < -TURN_HEADING_THRESHOLD:
+        return TURN_INDICATOR_RIGHT
+    return TURN_INDICATOR_DISABLE
+
+
+def select_route_lanelets(
+    vector_map,
+    lanelet_center_cache: dict[int, np.ndarray],
+    future_points: np.ndarray,
+) -> Sequence:
+    ordered_ids: list[int] = []
+    for point in future_points:
+        px, py = point
+        point_vec = np.array([px, py], dtype=np.float32)
+        best_id = None
+        best_dist = float("inf")
+        for lane_id, centerline in lanelet_center_cache.items():
+            dist = np.min(np.linalg.norm(centerline - point_vec, axis=1))
+            if dist < best_dist:
+                best_dist = dist
+                best_id = lane_id
+        if best_id is not None and best_id not in ordered_ids:
+            ordered_ids.append(best_id)
+        if len(ordered_ids) >= NUM_SEGMENTS_IN_ROUTE:
+            break
+    if not ordered_ids:
+        ordered_ids = list(lanelet_center_cache.keys())[:NUM_SEGMENTS_IN_ROUTE]
+    return [vector_map.lanelets[lane_id] for lane_id in ordered_ids]
 
 
 def create_transform_matrices(
@@ -210,6 +273,8 @@ def build_current_state(
 def save_sequences(
     simulation: SimulationSeries,
     vector_map,
+    lanelet_center_cache: dict[int, np.ndarray],
+    velocity_cache: dict[int, np.ndarray],
     save_dir: Path,
     dataset_name: str,
     step_stride: int,
@@ -288,15 +353,27 @@ def save_sequences(
                 dev=MAP_DEVICE,
                 do_sort=True,
             )
+            route_reference_idx = np.concatenate(
+                (np.array([center_idx], dtype=int), future_idx)
+            )
+            future_points_map = np.column_stack(
+                (x_series[route_reference_idx], y_series[route_reference_idx])
+            )
+            # Build a lightweight route by following the ego's upcoming map-frame positions.
+            route_lanelets = select_route_lanelets(
+                vector_map,
+                lanelet_center_cache,
+                future_points_map,
+            )
             route_tensor, route_speed_limit, route_has_speed_limit = create_lane_tensor(
-                vector_map.lanelets.values(),
+                route_lanelets,
                 map2bl_mat4x4=map2bl_matrix,
                 center_x=anchor_x,
                 center_y=anchor_y,
                 traffic_light_recognition=traffic_light_recognition,
                 num_segments=NUM_SEGMENTS_IN_ROUTE,
                 dev=MAP_DEVICE,
-                do_sort=True,
+                do_sort=False,
             )
             polygon_tensor = create_line_tensor(
                 vector_map.polygons.values(),
@@ -331,7 +408,65 @@ def save_sequences(
             neighbor_future = np.zeros(
                 (MAX_NUM_NEIGHBORS, output_t, 3), dtype=np.float32
             )
-            turn_indicators = np.zeros(past_steps, dtype=np.int32)
+            other_candidates = []
+            for other_idx in range(simulation.num_agents):
+                if other_idx == agent_idx:
+                    continue
+                dx = simulation.pos_x[center_idx, other_idx] - anchor_x
+                dy = simulation.pos_y[center_idx, other_idx] - anchor_y
+                distance = math.hypot(dx, dy)
+                other_candidates.append((distance, other_idx))
+            other_candidates.sort(key=lambda item: item[0])
+            for slot, (_, neighbor_idx) in enumerate(other_candidates[:MAX_NUM_NEIGHBORS]):
+                neighbor_x_series = simulation.pos_x[:, neighbor_idx]
+                neighbor_y_series = simulation.pos_y[:, neighbor_idx]
+                neighbor_yaw_series = simulation.yaw[:, neighbor_idx]
+                neighbor_velocity_series = velocity_cache[neighbor_idx]
+
+                past_xy_neighbor = transform_to_local(
+                    neighbor_x_series[past_idx],
+                    neighbor_y_series[past_idx],
+                    anchor_x,
+                    anchor_y,
+                    anchor_yaw,
+                ).astype(np.float32)
+                rel_past_yaw = wrap_angle(neighbor_yaw_series[past_idx] - anchor_yaw)
+                vel_map = neighbor_velocity_series[past_idx]
+                vel_local = transform_velocity_to_local(
+                    vel_map[:, 0],
+                    vel_map[:, 1],
+                    anchor_yaw,
+                ).astype(np.float32)
+
+                neighbor_past[slot, :, 0:2] = past_xy_neighbor
+                neighbor_past[slot, :, 2] = np.cos(rel_past_yaw)
+                neighbor_past[slot, :, 3] = np.sin(rel_past_yaw)
+                neighbor_past[slot, :, 4:6] = vel_local
+                width = simulation.vehicle_width[center_idx, neighbor_idx]
+                length = simulation.vehicle_length[center_idx, neighbor_idx]
+                neighbor_past[slot, :, 6] = width
+                neighbor_past[slot, :, 7] = length
+                # GPUDRIVE data treats every peer as a vehicle-class agent.
+                neighbor_past[slot, :, 8] = 1.0
+                neighbor_past[slot, :, 9] = 0.0
+                neighbor_past[slot, :, 10] = 0.0
+
+                future_xy_neighbor = transform_to_local(
+                    neighbor_x_series[future_idx],
+                    neighbor_y_series[future_idx],
+                    anchor_x,
+                    anchor_y,
+                    anchor_yaw,
+                ).astype(np.float32)
+                future_yaw_neighbor = wrap_angle(
+                    neighbor_yaw_series[future_idx] - anchor_yaw
+                ).astype(np.float32)
+                neighbor_future[slot, :, 0:2] = future_xy_neighbor
+                neighbor_future[slot, :, 2] = future_yaw_neighbor
+
+            # Approximate indicator status from the cumulative heading change.
+            turn_label = infer_turn_indicator(ego_future[:, 2])
+            turn_indicators = np.full(past_steps, turn_label, dtype=np.int32)
 
             sample = {
                 "version": 2,
@@ -367,10 +502,24 @@ def main() -> None:
     )
     simulation = load_simulation_series(args.simulation_data_path)
     vector_map = convert_lanelet(str(args.vector_map_path))
+    lanelet_center_cache = {
+        lane_id: lanelet.centerline[:, 0:2].astype(np.float32)
+        for lane_id, lanelet in vector_map.lanelets.items()
+    }
+    velocity_cache = {
+        agent_idx: compute_global_velocity(
+            simulation.pos_x[:, agent_idx],
+            simulation.pos_y[:, agent_idx],
+            DEFAULT_DT,
+        )
+        for agent_idx in range(simulation.num_agents)
+    }
     dataset_name = args.simulation_data_path.stem
     total_samples = save_sequences(
         simulation=simulation,
         vector_map=vector_map,
+        lanelet_center_cache=lanelet_center_cache,
+        velocity_cache=velocity_cache,
         save_dir=args.save_dir,
         dataset_name=dataset_name,
         step_stride=args.step,
