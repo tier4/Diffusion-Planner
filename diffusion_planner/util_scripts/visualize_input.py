@@ -14,7 +14,7 @@ from tqdm import tqdm
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_path", type=Path)
-    parser.add_argument("--save_path", type=Path, default=None)
+    parser.add_argument("save_path", type=Path)
     return parser.parse_args()
 
 
