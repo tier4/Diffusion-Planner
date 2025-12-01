@@ -195,6 +195,7 @@ class AnnotationGUI:
         )
         ax_vel.set_xlabel("Time Step")
         ax_vel.set_ylabel("Velocity (km/h)")
+        ax_vel.set_ylim(0, 60)
         ax_vel.set_title("Velocity Comparison")
         ax_vel.legend(loc="upper right")
         ax_vel.grid(True, alpha=0.3)
