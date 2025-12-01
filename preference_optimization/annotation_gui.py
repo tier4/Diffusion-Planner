@@ -13,7 +13,7 @@ import torch
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-from utils import generate_trajectory_pair, load_npz_data
+from utils import generate_deterministic_trajectory, generate_trajectory_pair, load_npz_data
 
 matplotlib.use("TkAgg")
 
@@ -41,6 +41,7 @@ class AnnotationGUI:
         self.current_data = None
         self.trajectory_1 = None
         self.trajectory_2 = None
+        self.trajectory_reference = None
 
         self.root = tk.Tk()
         self.root.title("Trajectory Annotation")
@@ -162,6 +163,18 @@ class AnnotationGUI:
 
         data_cpu = {k: v.cpu() for k, v in self.current_data.items()}
         visualize_inputs(data_cpu, save_path=None, ax=ax_traj, view_ranges=[60])
+
+        if self.trajectory_reference is not None:
+            traj_ref_np = np.array(self.trajectory_reference)
+            ax_traj.plot(
+                traj_ref_np[:, 0],
+                traj_ref_np[:, 1],
+                "b-",
+                linewidth=2,
+                alpha=0.5,
+                label="Reference (Temp=0)",
+            )
+
         ax_traj.plot(
             traj_1_np[:, 0], traj_1_np[:, 1], "g-", linewidth=3, alpha=0.7, label="Trajectory 1"
         )
@@ -184,6 +197,15 @@ class AnnotationGUI:
         )
 
         time_steps = np.arange(len(vel_1))
+
+        if self.trajectory_reference is not None:
+            vel_ref = self._calculate_velocities(
+                self.trajectory_reference, self.current_data["ego_current_state"]
+            )
+            ax_vel.plot(
+                time_steps, vel_ref, "b-", linewidth=1.5, alpha=0.5, label="Reference Velocity"
+            )
+
         ax_vel.plot(time_steps, vel_1, "g-", linewidth=2, alpha=0.7, label="Trajectory 1 Velocity")
         ax_vel.plot(
             time_steps, vel_2, color="orange", linewidth=2, alpha=0.7, label="Trajectory 2 Velocity"
@@ -235,8 +257,12 @@ class AnnotationGUI:
         traj_1, traj_2 = generate_trajectory_pair(
             self.policy_model, self.model_args, self.current_data, device=self.device
         )
+        traj_ref = generate_deterministic_trajectory(
+            self.policy_model, self.model_args, self.current_data, device=self.device
+        )
         self.trajectory_1 = traj_1.tolist()
         self.trajectory_2 = traj_2.tolist()
+        self.trajectory_reference = traj_ref.tolist()
         self._visualize()
         if update_index:
             print("Regenerated trajectory pair for current sample.")
