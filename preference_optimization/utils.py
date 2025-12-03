@@ -40,6 +40,28 @@ def calculate_path_length(trajectory: np.ndarray) -> float:
 
 
 @torch.no_grad()
+def generate_deterministic_trajectory(
+    policy_model,
+    model_args,
+    data: dict[str, torch.Tensor],
+    device: torch.device | None = None,
+) -> np.ndarray:
+    """Generate a deterministic trajectory with temperature 0 (no noise)."""
+    device = device or next(policy_model.parameters()).device
+    data = {k: v.clone().to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    data = model_args.observation_normalizer(data)
+    B = data["ego_current_state"].shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+
+    data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4).to(device)
+    _, outputs = policy_model(data)
+    ego_prediction = outputs["prediction"][0, 0].cpu().numpy()
+
+    return ego_prediction
+
+
+@torch.no_grad()
 def generate_trajectory_pair(
     policy_model,
     model_args,
@@ -47,20 +69,24 @@ def generate_trajectory_pair(
     noise_scale: float = 2.5,
     device: torch.device | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Generate two trajectories using identical inputs but different noise."""
+    """Generate two trajectories: first with temperature 0, second with noise."""
     device = device or next(policy_model.parameters()).device
-    data = {
-        k: v.clone().to(device) if isinstance(v, torch.Tensor) else v
-        for k, v in data.items()
-    }
+    data = {k: v.clone().to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     data = model_args.observation_normalizer(data)
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
     trajectories = []
-    for _ in range(2):
-        data["sampled_trajectories"] = noise_scale * torch.randn(B, P, future_len + 1, 4).to(device)
+    for i in range(2):
+        if i == 0:
+            # First trajectory: temperature 0 (deterministic)
+            data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4).to(device)
+        else:
+            # Second trajectory: with random noise
+            data["sampled_trajectories"] = noise_scale * torch.randn(B, P, future_len + 1, 4).to(
+                device
+            )
         _, outputs = policy_model(data)
         ego_prediction = outputs["prediction"][0, 0].cpu().numpy()
         trajectories.append(ego_prediction)

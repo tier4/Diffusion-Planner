@@ -69,7 +69,9 @@ class AnnotationGUI:
         self.canvas = FigureCanvasTkAgg(self.fig, master=viz_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        self.pref_label = tk.Label(info_frame, text="Preferences: 0", font=("Arial", 12), anchor="e")
+        self.pref_label = tk.Label(
+            info_frame, text="Preferences: 0", font=("Arial", 12), anchor="e"
+        )
         self.pref_label.pack(side=tk.RIGHT)
 
         control_frame = tk.Frame(self.root, height=120)
@@ -125,18 +127,78 @@ class AnnotationGUI:
         self.current_index = min(self.current_index + 1, len(self.npz_paths) - 1)
         self._show_current_sample()
 
+    def _calculate_velocities(
+        self, trajectory: list, ego_current_state: torch.Tensor
+    ) -> np.ndarray:
+        """Calculate velocities in km/h from trajectory points and initial ego state.
+
+        Assumes 1 time step = 0.1 seconds.
+        """
+        traj_np = np.array(trajectory)
+        ego_state = ego_current_state.cpu().numpy()[0]
+
+        positions = np.vstack([ego_state[:2], traj_np[:, :2]])
+        velocities = []
+
+        for i in range(len(positions) - 1):
+            dx = positions[i + 1, 0] - positions[i, 0]
+            dy = positions[i + 1, 1] - positions[i, 1]
+            # Distance in meters per 0.1 second -> m/s -> km/h
+            velocity_m_per_step = np.sqrt(dx**2 + dy**2)
+            velocity_m_per_s = velocity_m_per_step / 0.1
+            velocity_km_per_h = velocity_m_per_s * 3.6
+            velocities.append(velocity_km_per_h)
+
+        return np.array(velocities)
+
     def _visualize(self):
         self.fig.clear()
-        ax = self.fig.add_subplot(1, 1, 1)
+        gs = self.fig.add_gridspec(1, 2, width_ratios=[2, 1])
+        ax_traj = self.fig.add_subplot(gs[0])
+        ax_vel = self.fig.add_subplot(gs[1])
 
         traj_1_np = np.array(self.trajectory_1)
         traj_2_np = np.array(self.trajectory_2)
 
         data_cpu = {k: v.cpu() for k, v in self.current_data.items()}
-        visualize_inputs(data_cpu, save_path=None, ax=ax, view_ranges=[60])
-        ax.plot(traj_1_np[:, 0], traj_1_np[:, 1], "g-", linewidth=3, alpha=0.7, label="Trajectory 1")
-        ax.plot(traj_2_np[:, 0], traj_2_np[:, 1], color="orange", linewidth=3, alpha=0.7, label="Trajectory 2")
-        ax.legend(loc="upper left")
+        visualize_inputs(data_cpu, save_path=None, ax=ax_traj, view_ranges=[60])
+        ax_traj.plot(
+            traj_1_np[:, 0],
+            traj_1_np[:, 1],
+            "g-",
+            linewidth=3,
+            alpha=0.7,
+            label="Trajectory 1 (Temp=0)",
+        )
+        ax_traj.plot(
+            traj_2_np[:, 0],
+            traj_2_np[:, 1],
+            color="orange",
+            linewidth=3,
+            alpha=0.7,
+            label="Trajectory 2",
+        )
+        ax_traj.legend(loc="upper left")
+        ax_traj.set_title("Trajectories")
+
+        vel_1 = self._calculate_velocities(
+            self.trajectory_1, self.current_data["ego_current_state"]
+        )
+        vel_2 = self._calculate_velocities(
+            self.trajectory_2, self.current_data["ego_current_state"]
+        )
+
+        time_steps = np.arange(len(vel_1))
+        ax_vel.plot(time_steps, vel_1, "g-", linewidth=2, alpha=0.7, label="Trajectory 1 Velocity")
+        ax_vel.plot(
+            time_steps, vel_2, color="orange", linewidth=2, alpha=0.7, label="Trajectory 2 Velocity"
+        )
+        ax_vel.set_xlabel("Time Step")
+        ax_vel.set_ylabel("Velocity (km/h)")
+        ax_vel.set_ylim(0, 60)
+        ax_vel.set_title("Velocity Comparison")
+        ax_vel.legend(loc="upper right")
+        ax_vel.grid(True, alpha=0.3)
 
         self.fig.tight_layout()
         self.canvas.draw()
@@ -221,7 +283,9 @@ class AnnotationGUI:
             self._show_current_sample()
 
 
-def collect_preferences_gui(policy_model, model_args, npz_list: Path, target_count: int) -> list[dict]:
+def collect_preferences_gui(
+    policy_model, model_args, npz_list: Path, target_count: int
+) -> list[dict]:
     """Run GUI preference collection and return annotations."""
     with open(npz_list, "r") as f:
         npz_paths = json.load(f)
