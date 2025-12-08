@@ -112,7 +112,7 @@ def get_args():
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
-        choices=["score", "x_start", "flow_matching"],
+        choices=["x_start", "flow_matching"],
         default="x_start",
     )
     parser.add_argument("--predicted_neighbor_num", type=int, default=32)

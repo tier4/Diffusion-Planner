@@ -1,19 +1,45 @@
 from functools import partial
+from typing import Dict
 
 import torch
 import torch.nn as nn
-from timm.models.layers import Mlp
 
+import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
-from diffusion_planner.model.diffusion_utils.sampling import dpm_sampler
 from diffusion_planner.model.diffusion_utils.sde import SDE, VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
     euler_integration,
     heun_integration,
     rk4_integration,
 )
-from diffusion_planner.model.module.dit import DiTBlock, FinalLayer, TimestepEmbedder
+from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+
+
+@torch.no_grad()
+def dpm_sampler(
+    model: torch.nn.Module,
+    model_type: str,
+    x_T: torch.Tensor,
+    other_model_params: Dict,
+    model_wrapper_params: Dict,
+    dpm_solver_params: Dict,
+):
+    noise_schedule = dpm.NoiseScheduleVP()
+
+    model_fn = dpm.model_wrapper(
+        model,
+        noise_schedule,
+        model_type=model_type,
+        model_kwargs=other_model_params,
+        **model_wrapper_params,
+    )
+
+    dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, **dpm_solver_params)
+
+    sample_dpm = dpm_solver.sample(x_T, steps=10, skip_type="logSNR")
+
+    return sample_dpm
 
 
 class Decoder(nn.Module):
@@ -26,13 +52,11 @@ class Decoder(nn.Module):
         self._sde = VPSDE_linear()
 
         self.dit = DiT(
-            sde=self._sde,
             depth=config.decoder_depth,
             output_dim=(config.future_len + 1) * 4,  # x, y, cos, sin
             hidden_dim=config.hidden_dim,
             heads=config.num_heads,
             dropout=dpr,
-            model_type=config.diffusion_model_type,
         )
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
@@ -72,7 +96,7 @@ class Decoder(nn.Module):
             decoder_outputs: Dict
                 {
                     ...
-                    [training-only] "score": Predicted future states, [B, P, 1 + self._future_len, 4]
+                    [training-only] "model_output": Predicted future states, [B, P, 1 + self._future_len, 4]
                     [inference-only] "prediction": Predicted future states, [B, P, self._future_len, 4]
                     ...
                 }
@@ -151,6 +175,7 @@ class Decoder(nn.Module):
 
             x0 = dpm_sampler(
                 self.dit,
+                self._model_type,
                 xT,
                 other_model_params={
                     "cross_c": encoding,
@@ -183,82 +208,3 @@ class Decoder(nn.Module):
             x0 = self._state_normalizer.inverse(x0.reshape(B, P, -1, 4))[:, :, 1:]
 
             return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
-
-
-class DiT(nn.Module):
-    def __init__(
-        self,
-        sde: SDE,
-        depth,
-        output_dim,
-        hidden_dim=192,
-        heads=6,
-        dropout=0.1,
-        mlp_ratio=4.0,
-        model_type="x_start",
-    ):
-        super().__init__()
-
-        assert model_type in ["score", "x_start", "flow_matching"], (
-            f"Unknown model type: {model_type}"
-        )
-        self._model_type = model_type
-        self.agent_embedding = nn.Embedding(2, hidden_dim)
-        self.preproj = Mlp(
-            in_features=output_dim,
-            hidden_features=512,
-            out_features=hidden_dim,
-            act_layer=nn.GELU,
-            drop=0.0,
-        )
-        self.t_embedder = TimestepEmbedder(hidden_dim)
-        self.blocks = nn.ModuleList(
-            [DiTBlock(hidden_dim, heads, dropout, mlp_ratio) for i in range(depth)]
-        )
-        self.final_layer = FinalLayer(hidden_dim, output_dim)
-        self._sde = sde
-        self.marginal_prob_std = self._sde.marginal_prob_std
-
-    @property
-    def model_type(self):
-        return self._model_type
-
-    def forward(self, x, t, cross_c, neighbor_current_mask):
-        """
-        Forward pass of DiT.
-        x: (B, P, output_dim)   -> Embedded out of DiT
-        t: (B,)
-        cross_c: (B, N, D)      -> Cross-Attention context
-        """
-        B, P, _ = x.shape
-
-        x = self.preproj(x)
-
-        x_embedding = torch.cat(
-            [
-                self.agent_embedding.weight[0][None, :],
-                self.agent_embedding.weight[1][None, :].expand(P - 1, -1),
-            ],
-            dim=0,
-        )  # (P, D)
-        x_embedding = x_embedding[None, :, :].expand(B, -1, -1)  # (B, P, D)
-        x = x + x_embedding
-
-        y = self.t_embedder(t)
-
-        attn_mask = torch.zeros((B, P), dtype=torch.bool, device=x.device)
-        attn_mask[:, 1:] = neighbor_current_mask
-
-        for block in self.blocks:
-            x = block(x, cross_c, y, attn_mask)
-
-        x = self.final_layer(x, y)
-
-        if self._model_type == "score":
-            return x / (self.marginal_prob_std(t)[:, None, None] + 1e-6)
-        elif self._model_type == "x_start":
-            return x
-        elif self._model_type == "flow_matching":
-            return x
-        else:
-            raise ValueError(f"Unknown model type: {self._model_type}")

@@ -83,9 +83,7 @@ def diffusion_loss_func(
     model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
     safety_loss_terms: Dict[str, torch.Tensor] = {}
 
-    if model_type == "score":
-        dpm_loss = torch.sum((model_output * std + z) ** 2, dim=-1)
-    elif model_type == "x_start":
+    if model_type == "x_start":
         # dpm_loss = torch.sum((model_output - all_gt[:, :, 1:, :]) ** 2, dim=-1)
         loss_dict = loss_func(model_output, all_gt[:, :, 1:, :])
         heading_l2_loss = loss_dict["heading_l2_loss"]
