@@ -1,5 +1,5 @@
 from argparse import Namespace
-from typing import Callable, Dict, Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn

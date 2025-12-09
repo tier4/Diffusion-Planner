@@ -6,7 +6,6 @@ import torch.nn as nn
 
 import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
-from diffusion_planner.model.diffusion_utils.sde import SDE, VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
     euler_integration,
     heun_integration,
@@ -49,7 +48,6 @@ class Decoder(nn.Module):
         dpr = config.decoder_drop_path_rate
         self._predicted_neighbor_num = config.predicted_neighbor_num
         self._future_len = config.future_len
-        self._sde = VPSDE_linear()
 
         self.dit = DiT(
             depth=config.decoder_depth,
@@ -71,10 +69,6 @@ class Decoder(nn.Module):
         )
         self._model_type = config.diffusion_model_type
 
-    @property
-    def sde(self):
-        return self._sde
-
     def forward(self, encoding, inputs):
         """
         Diffusion decoder process.
@@ -87,7 +81,7 @@ class Decoder(nn.Module):
                     "ego_current_state": current ego states,
                     "neighbor_agent_past": past and current neighbor states,
 
-                    [training-only] "sampled_trajectories": sampled current-future ego & neighbor states,        [B, P, 1 + self._future_len, 4]
+                    "sampled_trajectories": sampled current-future ego & neighbor states,        [B, P, 1 + self._future_len, 4]
                     [training-only] "diffusion_time": timestep of diffusion process $t \in [0, 1]$,              [B]
                     ...
                 }
