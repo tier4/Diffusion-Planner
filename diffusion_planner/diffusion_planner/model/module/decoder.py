@@ -1,6 +1,5 @@
 from argparse import Namespace
 from functools import partial
-from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -23,9 +22,9 @@ def dpm_sampler(
     model: torch.nn.Module,
     model_type: str,
     x_T: torch.Tensor,
-    other_model_params: Dict,
-    model_wrapper_params: Dict,
-    dpm_solver_params: Dict,
+    other_model_params: dict,
+    model_wrapper_params: dict,
+    dpm_solver_params: dict,
 ):
     noise_schedule = dpm.NoiseScheduleVP()
 
@@ -46,8 +45,8 @@ def dpm_sampler(
 
 def compute_training_loss(
     model: nn.Module,
-    inputs: Dict[str, torch.Tensor],
-    futures: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    inputs: dict[str, torch.Tensor],
+    futures: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     args: Namespace,
 ):
     norm = args.state_normalizer

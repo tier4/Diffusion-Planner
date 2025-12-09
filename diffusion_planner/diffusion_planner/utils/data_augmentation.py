@@ -1,5 +1,3 @@
-from typing import List, Optional, Union
-
 import numpy as np
 import torch
 from scipy.interpolate import splev, splprep
@@ -50,7 +48,7 @@ class StatePerturbation:
         self,
         augment_prob: float = 0.5,
         wheel_base: float = 2.75,
-        device: Optional[torch.device] = "cpu",
+        device: torch.device | str = "cpu",
     ) -> None:
         """
         Initialize the augmentor,
@@ -60,8 +58,8 @@ class StatePerturbation:
         """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
-        lo: List[float] = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
-        hi: List[float] = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
+        lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
+        hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
         self._high = torch.tensor(hi).to(self._device)
         self._wheel_base = wheel_base
@@ -271,9 +269,7 @@ class StatePerturbation:
 
         return aug_flag, ego_current_state
 
-    def normalize_angle(
-        self, angle: Union[np.ndarray, torch.Tensor]
-    ) -> Union[np.ndarray, torch.Tensor]:
+    def normalize_angle(self, angle: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
         return (angle + np.pi) % (2 * np.pi) - np.pi
 
     def get_transform_matrix_batch(self, cur_state):

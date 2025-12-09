@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import TYPE_CHECKING
 
+import numpy as np
 from attr import define
+from numpy.typing import NDArray
 
-if TYPE_CHECKING:
-    import numpy as np
-    from numpy.typing import NDArray
-
-    NDArrayF32 = NDArray[np.float32]
+NDArrayF32 = NDArray[np.float32]
 
 
 @dataclass(frozen=True)

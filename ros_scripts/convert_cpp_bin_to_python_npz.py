@@ -8,7 +8,6 @@ import struct
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Any, Dict
 
 import numpy as np
 from diffusion_planner.dimensions import *
@@ -65,7 +64,7 @@ class TrainingDataReader:
             "turn_indicators": self.PAST_TIME_STEPS,
         }
 
-    def read_binary_file(self, filepath: str) -> Dict[str, Any]:
+    def read_binary_file(self, filepath: str) -> dict[str, object]:
         """
         バイナリファイルを読み込んでデータを辞書として返す
 

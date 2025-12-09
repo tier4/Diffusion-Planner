@@ -1,5 +1,4 @@
 from argparse import Namespace
-from typing import Dict, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -93,7 +92,7 @@ def _lane_corner_clearance(
     width_left: torch.Tensor,
     width_right: torch.Tensor,
     valid_mask: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Calculate lateral distances from points to the nearest lane boundary.
 
@@ -203,7 +202,7 @@ def neighbor_clearance_penalty(
     ego_bbox_corners: torch.Tensor,
     neighbors_future: torch.Tensor,
     neighbors_future_valid: torch.Tensor,
-    denorm_inputs: Dict[str, torch.Tensor],
+    denorm_inputs: dict[str, torch.Tensor],
 ) -> torch.Tensor:
     """Compute neighbor clearance penalty using oriented rectangles."""
 
@@ -261,7 +260,7 @@ def neighbor_clearance_penalty(
 
 def compute_safety_penalty(
     trajectory_pred: torch.Tensor,
-    inputs: Dict[str, torch.Tensor],
+    inputs: dict[str, torch.Tensor],
     neighbors_future: torch.Tensor,
     neighbors_future_valid: torch.Tensor,
     args: Namespace,
@@ -320,7 +319,7 @@ def compute_safety_penalty(
     )
 
     total_penalty = lane_penalty + neighbor_penalty
-    logs: Dict[str, torch.Tensor] = {}
+    logs: dict[str, torch.Tensor] = {}
     logs["ego_safety_margin_loss"] = total_penalty.mean()
     logs["lane_boundary_margin_loss"] = lane_penalty.mean()
     logs["neighbor_margin_loss"] = neighbor_penalty.mean()
