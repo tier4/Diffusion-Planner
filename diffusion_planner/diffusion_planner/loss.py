@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_KEEP
+from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.guidance.collision import (
     batch_signed_distance_rect,
     center_rect_to_points,
@@ -25,10 +26,8 @@ def make_turn_indicator_gt(
 def diffusion_loss_func(
     model: nn.Module,
     inputs: Dict[str, torch.Tensor],
-    marginal_prob: Callable[[torch.Tensor], torch.Tensor],
     futures: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     args: Namespace,
-    eps: float = 1e-3,
 ):
     norm = args.state_normalizer
     model_type = args.diffusion_model_type
@@ -52,6 +51,7 @@ def diffusion_loss_func(
     )  # [B, P = 1 + 1 + neighbor, T, 4]
     current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
+    eps = 1e-3
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
@@ -59,7 +59,7 @@ def diffusion_loss_func(
     all_gt[:, 1:][neighbor_mask] = 0.0
 
     if model_type == "x_start":
-        mean, std = marginal_prob(all_gt[..., 1:, :], t)
+        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t)
         std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
         xT = mean + std * z
 
