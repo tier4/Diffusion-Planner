@@ -159,46 +159,52 @@ class Decoder(nn.Module):
                 x = self._state_normalizer.inverse(x.reshape(B, P, -1, 4))[:, :, 1:]
                 return {"prediction": x, "turn_indicator_logit": turn_indicator_logit}
 
-            # [B, 1 + predicted_neighbor_num, (1 + self._future_len) * 4]
-            xT = sampled_trajectories
+            elif self._model_type == "x_start":
+                # [B, 1 + predicted_neighbor_num, (1 + self._future_len) * 4]
+                xT = sampled_trajectories
 
-            def initial_state_constraint(xt, t, step):
-                xt = xt.reshape(B, P, -1, 4)
-                xt[:, :, 0, :] = current_states
-                return xt.reshape(B, P, -1)
+                def initial_state_constraint(xt, t, step):
+                    xt = xt.reshape(B, P, -1, 4)
+                    xt[:, :, 0, :] = current_states
+                    return xt.reshape(B, P, -1)
 
-            x0 = dpm_sampler(
-                self.dit,
-                self._model_type,
-                xT,
-                other_model_params={
-                    "cross_c": encoding,
-                    "neighbor_current_mask": neighbor_current_mask,
-                },
-                dpm_solver_params={
-                    "correcting_xt_fn": initial_state_constraint,
-                },
-                model_wrapper_params={
-                    "classifier_fn": self._guidance_fn,
-                    "classifier_kwargs": {
-                        "model": self.dit,
-                        "model_condition": {
-                            "cross_c": encoding,
-                            "neighbor_current_mask": neighbor_current_mask,
-                        },
-                        "inputs": inputs,
-                        "observation_normalizer": self._observation_normalizer,
-                        "state_normalizer": self._state_normalizer,
+                x0 = dpm_sampler(
+                    self.dit,
+                    self._model_type,
+                    xT,
+                    other_model_params={
+                        "cross_c": encoding,
+                        "neighbor_current_mask": neighbor_current_mask,
                     },
-                    "guidance_scale": 0.5,
-                    "guidance_type": "classifier" if self._guidance_fn is not None else "uncond",
-                },
-            )
-            x0 = x0.reshape(B, P, (1 + self._future_len) * 4)
-            x = x0.reshape(B, P, (1 + self._future_len), 4)
-            x = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-            turn_indicator_input = torch.cat([x, encoding_pooled], dim=-1)
-            turn_indicator_logit = self.turn_indicator_predictor(turn_indicator_input)
-            x0 = self._state_normalizer.inverse(x0.reshape(B, P, -1, 4))[:, :, 1:]
+                    dpm_solver_params={
+                        "correcting_xt_fn": initial_state_constraint,
+                    },
+                    model_wrapper_params={
+                        "classifier_fn": self._guidance_fn,
+                        "classifier_kwargs": {
+                            "model": self.dit,
+                            "model_condition": {
+                                "cross_c": encoding,
+                                "neighbor_current_mask": neighbor_current_mask,
+                            },
+                            "inputs": inputs,
+                            "observation_normalizer": self._observation_normalizer,
+                            "state_normalizer": self._state_normalizer,
+                        },
+                        "guidance_scale": 0.5,
+                        "guidance_type": "classifier"
+                        if self._guidance_fn is not None
+                        else "uncond",
+                    },
+                )
+                x0 = x0.reshape(B, P, (1 + self._future_len) * 4)
+                x = x0.reshape(B, P, (1 + self._future_len), 4)
+                x = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
+                turn_indicator_input = torch.cat([x, encoding_pooled], dim=-1)
+                turn_indicator_logit = self.turn_indicator_predictor(turn_indicator_input)
+                x0 = self._state_normalizer.inverse(x0.reshape(B, P, -1, 4))[:, :, 1:]
 
-            return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
+                return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
+
+            else:
+                raise NotImplementedError(f"Unknown model type {self._model_type}")
