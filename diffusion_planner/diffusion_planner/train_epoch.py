@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
-from diffusion_planner.loss import diffusion_loss_func
+from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
@@ -59,12 +59,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # call the model
         optimizer.zero_grad()
 
-        loss = diffusion_loss_func(
-            model,
-            inputs,
-            (ego_future, neighbors_future, mask),
-            args,
-        )
+        loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
 
         loss["loss"] = (
             loss["neighbor_prediction_loss"]

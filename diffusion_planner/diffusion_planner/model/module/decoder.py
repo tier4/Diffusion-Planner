@@ -1,11 +1,14 @@
+from argparse import Namespace
 from functools import partial
-from typing import Dict
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
 
 import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
+from diffusion_planner.loss import loss_func, make_turn_indicator_gt
+from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
     euler_integration,
     heun_integration,
@@ -39,6 +42,152 @@ def dpm_sampler(
     sample_dpm = dpm_solver.sample(x_T, steps=10, skip_type="logSNR")
 
     return sample_dpm
+
+
+def compute_training_loss(
+    model: nn.Module,
+    inputs: Dict[str, torch.Tensor],
+    futures: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    args: Namespace,
+):
+    norm = args.state_normalizer
+    model_type = args.diffusion_model_type
+
+    ego_future, neighbors_future, neighbor_future_mask = futures
+    neighbors_future_valid = ~neighbor_future_mask  # [B, P, V]
+
+    B, Pn, T, _ = neighbors_future.shape
+    ego_current, neighbors_current = (
+        inputs["ego_current_state"][:, :4],
+        inputs["neighbor_agents_past"][:, :Pn, -1, :4],
+    )
+    longitudinal_velocity = inputs["ego_current_state"][:, 4:5]
+    neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
+    neighbor_mask = torch.concat(
+        (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
+    )
+
+    gt_future = torch.cat(
+        [ego_future[:, None, :, :], neighbors_future[..., :]], dim=1
+    )  # [B, P = 1 + 1 + neighbor, T, 4]
+    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
+
+    eps = 1e-3
+    t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
+    z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
+
+    all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
+    all_gt[:, 1:][neighbor_mask] = 0.0
+
+    if model_type == "x_start":
+        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t)
+        std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
+        xT = mean + std * z
+
+        xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+        merged_inputs = {
+            **inputs,
+            "gt_trajectories": all_gt,
+            "sampled_trajectories": xT,
+            "diffusion_time": t,
+        }
+        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
+        model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
+
+        # dpm_loss = torch.sum((model_output - all_gt[:, :, 1:, :]) ** 2, dim=-1)
+        loss_dict = loss_func(model_output, all_gt[:, :, 1:, :])
+        heading_l2_loss = loss_dict["heading_l2_loss"]
+        position_lat_loss = loss_dict["position_lat_loss"]
+        position_lon_loss = loss_dict["position_lon_loss"]
+
+        # velocity weight
+        velocity_weight = longitudinal_velocity * args.coeff_velocity
+        velocity_weight = torch.abs(velocity_weight)
+        velocity_weight = torch.clamp_min(velocity_weight, 1.0)
+        velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
+        position_lon_loss = position_lon_loss / velocity_weight
+
+        # timestep weight
+        timestep_weight = args.coeff_timestep
+        assert T % len(timestep_weight) == 0, (
+            f"Timestep {T} is not divisible by the number of timestep weights {len(timestep_weight)}"
+        )
+        unit = T // len(timestep_weight)
+        for i in range(len(timestep_weight)):
+            position_lat_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+            position_lon_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+            heading_l2_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+
+        # mask neighbors' heading loss
+        # heading_l2_loss[:, 1:] *= 0.0
+
+        dpm_loss = (
+            args.coeff_position_lat_loss * position_lat_loss
+            + args.coeff_position_lon_loss * position_lon_loss
+            + args.coeff_heading_l2_loss * heading_l2_loss
+        )
+        # safety_penalty, safety_logs, _ = compute_safety_penalty(
+        #     model_output,
+        #     inputs,
+        #     neighbors_future,
+        #     neighbors_future_valid,
+        #     args,
+        #     return_components=True,
+        # )
+        # if safety_penalty is not None:
+        #     dpm_loss[:, 0, :] = dpm_loss[:, 0, :] + safety_penalty
+        #     safety_loss_terms.update(safety_logs)
+    elif model_type == "flow_matching":
+        # t=0 is noise, t=1 is data
+        t = t.reshape(-1, *([1] * (len(all_gt.shape) - 1)))  # [B, 1, 1, 1]
+        xT = (1 - t) * z + t * all_gt[:, :, 1:, :]  # [B, P, T, 4]
+        t = t.reshape(-1)  # [B,]
+
+        xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+        merged_inputs = {
+            **inputs,
+            "gt_trajectories": all_gt,
+            "sampled_trajectories": xT,
+            "diffusion_time": t,
+        }
+        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
+        model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
+
+        target_v = all_gt[:, :, 1:, :] - z
+        dpm_loss = torch.sum((model_output - target_v) ** 2, dim=-1)
+    else:
+        raise NotImplementedError(f"Unknown diffusion model type: {model_type}")
+
+    masked_prediction_loss = dpm_loss[:, 1:, :][neighbors_future_valid]
+
+    loss = {}
+
+    if masked_prediction_loss.numel() > 0:
+        loss["neighbor_prediction_loss"] = masked_prediction_loss.mean()
+    else:
+        loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
+
+    loss["ego_planning_loss"] = dpm_loss[:, 0, :].mean()
+
+    assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
+
+    turn_indicator_logit = decoder_output["turn_indicator_logit"]  # [B, TURN_INDICATOR_OUTPUT_KEEP]
+    turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
+    turn_indicator_loss = nn.functional.cross_entropy(
+        turn_indicator_logit, turn_indicator_gt, reduction="none"
+    )
+    turn_indicator_change = inputs["turn_indicators"][:, -2] != inputs["turn_indicators"][:, -1]
+    turn_indicator_coeff = torch.where(turn_indicator_change, 1.0, 0.05)
+    turn_indicator_loss = (turn_indicator_loss * turn_indicator_coeff).mean()
+    loss["turn_indicator_loss"] = turn_indicator_loss
+
+    with torch.no_grad():
+        turn_indicator_accuracy = (
+            (turn_indicator_logit.argmax(dim=-1) == turn_indicator_gt).float().mean()
+        )
+        loss["turn_indicator_accuracy"] = turn_indicator_accuracy
+
+    return loss
 
 
 class Decoder(nn.Module):
