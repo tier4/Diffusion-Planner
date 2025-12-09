@@ -217,12 +217,224 @@ class Decoder(nn.Module):
         )
         self._model_type = config.diffusion_model_type
 
+    def _prepare_current_states(self, inputs):
+        """Extract and prepare current states for ego and neighbors.
+
+        Args:
+            inputs: Dict containing ego_current_state and neighbor_agents_past
+
+        Returns:
+            Tuple of (current_states, neighbor_current_mask, ego_current, neighbors_current)
+                - current_states: [B, P, 4] concatenated ego and neighbor current states
+                - neighbor_current_mask: [B, Pn] mask for invalid neighbors
+                - ego_current: [B, 1, 4] ego current state
+                - neighbors_current: [B, Pn, 4] neighbor current states
+        """
+        ego_current = inputs["ego_current_state"][:, None, :4]
+        neighbors_current = inputs["neighbor_agents_past"][
+            :, : self._predicted_neighbor_num, -1, :4
+        ]
+        neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
+        inputs["neighbor_current_mask"] = neighbor_current_mask
+
+        current_states = torch.cat([ego_current, neighbors_current], dim=1)  # [B, P, 4]
+
+        return current_states, neighbor_current_mask, ego_current, neighbors_current
+
+    def _compute_turn_indicator(self, ego_trajectory, encoding_pooled):
+        """Compute turn indicator logit from ego trajectory and encoding.
+
+        Args:
+            ego_trajectory: [B, 2 * (T // 10)] flattened ego trajectory positions
+            encoding_pooled: [B, D] pooled encoding
+
+        Returns:
+            turn_indicator_logit: [B, TURN_INDICATOR_OUTPUT_DIM]
+        """
+        turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
+        return self.turn_indicator_predictor(turn_indicator_input)
+
+    def _forward_training(self, encoding, inputs, neighbor_current_mask, encoding_pooled):
+        """Forward pass for training mode.
+
+        Args:
+            encoding: [B, N, D] encoded features
+            inputs: Dict containing sampled_trajectories, gt_trajectories, diffusion_time, etc.
+            neighbor_current_mask: [B, Pn] mask for invalid neighbors
+            encoding_pooled: [B, D] pooled encoding
+
+        Returns:
+            Dict containing model_output and turn_indicator_logit
+        """
+        B = encoding.shape[0]
+        P = 1 + self._predicted_neighbor_num
+
+        sampled_trajectories = inputs["sampled_trajectories"].reshape(
+            B, P, (1 + self._future_len) * 4
+        )
+        diffusion_time = inputs["diffusion_time"]
+
+        gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
+        ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(
+            B, 2 * (self._future_len // 10)
+        )
+        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
+
+        return {
+            "model_output": self.dit(
+                sampled_trajectories,
+                diffusion_time,
+                encoding,
+                neighbor_current_mask,
+            ).reshape(B, P, -1, 4),
+            "turn_indicator_logit": turn_indicator_logit,
+        }
+
+    def _inference_flow_matching(
+        self, encoding, inputs, neighbor_current_mask, encoding_pooled, sampled_trajectories
+    ):
+        """Inference using Flow Matching approach.
+
+        Args:
+            encoding: [B, N, D] encoded features
+            inputs: Dict containing input data
+            neighbor_current_mask: [B, Pn] mask for invalid neighbors
+            encoding_pooled: [B, D] pooled encoding
+            sampled_trajectories: [B, P, (1 + T) * 4] sampled trajectories
+
+        Returns:
+            Dict containing prediction and turn_indicator_logit
+        """
+        B = encoding.shape[0]
+        P = 1 + self._predicted_neighbor_num
+
+        x = sampled_trajectories
+        NUM_STEP = 10
+        func = partial(
+            self.dit,
+            cross_c=encoding,
+            neighbor_current_mask=neighbor_current_mask,
+        )
+        x = euler_integration(func, x, NUM_STEP)
+        # x = heun_integration(func, x, NUM_STEP)
+        # x = rk4_integration(func, x, NUM_STEP)
+        x = x.reshape(B, P, (1 + self._future_len), 4)
+        ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
+        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
+        x = self._state_normalizer.inverse(x)[:, :, 1:]
+        return {"prediction": x, "turn_indicator_logit": turn_indicator_logit}
+
+    def _inference_x_start(
+        self,
+        encoding,
+        inputs,
+        current_states,
+        neighbor_current_mask,
+        encoding_pooled,
+        sampled_trajectories,
+    ):
+        """Inference using X-Start (DPM Solver) approach.
+
+        Args:
+            encoding: [B, N, D] encoded features
+            inputs: Dict containing input data
+            current_states: [B, P, 4] current states
+            neighbor_current_mask: [B, Pn] mask for invalid neighbors
+            encoding_pooled: [B, D] pooled encoding
+            sampled_trajectories: [B, P, (1 + T) * 4] sampled trajectories
+
+        Returns:
+            Dict containing prediction and turn_indicator_logit
+        """
+        B = encoding.shape[0]
+        P = 1 + self._predicted_neighbor_num
+
+        xT = sampled_trajectories
+
+        def initial_state_constraint(xt, t, step):
+            xt = xt.reshape(B, P, -1, 4)
+            xt[:, :, 0, :] = current_states
+            return xt.reshape(B, P, -1)
+
+        x0 = dpm_sampler(
+            self.dit,
+            self._model_type,
+            xT,
+            other_model_params={
+                "cross_c": encoding,
+                "neighbor_current_mask": neighbor_current_mask,
+            },
+            dpm_solver_params={
+                "correcting_xt_fn": initial_state_constraint,
+            },
+            model_wrapper_params={
+                "classifier_fn": self._guidance_fn,
+                "classifier_kwargs": {
+                    "model": self.dit,
+                    "model_condition": {
+                        "cross_c": encoding,
+                        "neighbor_current_mask": neighbor_current_mask,
+                    },
+                    "inputs": inputs,
+                    "observation_normalizer": self._observation_normalizer,
+                    "state_normalizer": self._state_normalizer,
+                },
+                "guidance_scale": 0.5,
+                "guidance_type": "classifier" if self._guidance_fn is not None else "uncond",
+            },
+        )
+        x0 = x0.reshape(B, P, (1 + self._future_len) * 4)
+        x = x0.reshape(B, P, (1 + self._future_len), 4)
+        ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
+        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
+        x0 = self._state_normalizer.inverse(x0.reshape(B, P, -1, 4))[:, :, 1:]
+
+        return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
+
+    def _forward_inference(
+        self, encoding, inputs, current_states, neighbor_current_mask, encoding_pooled
+    ):
+        """Forward pass for inference mode.
+
+        Args:
+            encoding: [B, N, D] encoded features
+            inputs: Dict containing input data
+            current_states: [B, P, 4] current states
+            neighbor_current_mask: [B, Pn] mask for invalid neighbors
+            encoding_pooled: [B, D] pooled encoding
+
+        Returns:
+            Dict containing prediction and turn_indicator_logit
+        """
+        B = encoding.shape[0]
+        P = 1 + self._predicted_neighbor_num
+
+        sampled_trajectories = inputs["sampled_trajectories"].reshape(
+            B, P, (1 + self._future_len) * 4
+        )
+
+        if self._model_type == "flow_matching":
+            return self._inference_flow_matching(
+                encoding, inputs, neighbor_current_mask, encoding_pooled, sampled_trajectories
+            )
+        elif self._model_type == "x_start":
+            return self._inference_x_start(
+                encoding,
+                inputs,
+                current_states,
+                neighbor_current_mask,
+                encoding_pooled,
+                sampled_trajectories,
+            )
+        else:
+            raise NotImplementedError(f"Unknown model type {self._model_type}")
+
     def forward(self, encoding, inputs):
         """
         Diffusion decoder process.
 
         Args:
-            encoding: torch.Tensor
+            encoding: [B, N, D] encoded features
             inputs: Dict
                 {
                     ...
@@ -240,19 +452,15 @@ class Decoder(nn.Module):
                     ...
                     [training-only] "model_output": Predicted future states, [B, P, 1 + self._future_len, 4]
                     [inference-only] "prediction": Predicted future states, [B, P, self._future_len, 4]
+                    "turn_indicator_logit": Turn indicator prediction, [B, TURN_INDICATOR_OUTPUT_DIM]
                     ...
                 }
 
         """
-        # Extract ego & neighbor current states
-        ego_current = inputs["ego_current_state"][:, None, :4]
-        neighbors_current = inputs["neighbor_agents_past"][
-            :, : self._predicted_neighbor_num, -1, :4
-        ]
-        neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
-        inputs["neighbor_current_mask"] = neighbor_current_mask
-
-        current_states = torch.cat([ego_current, neighbors_current], dim=1)  # [B, P, 4]
+        # Common preprocessing
+        current_states, neighbor_current_mask, ego_current, neighbors_current = (
+            self._prepare_current_states(inputs)
+        )
 
         B, P, _ = current_states.shape
         assert P == (1 + self._predicted_neighbor_num)
@@ -260,99 +468,10 @@ class Decoder(nn.Module):
         # Pool encoding to get a fixed-size representation
         encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]
 
-        sampled_trajectories = inputs["sampled_trajectories"].reshape(
-            B, P, (1 + self._future_len) * 4
-        )
+        # Dispatch to training or inference
         if self.training:
-            diffusion_time = inputs["diffusion_time"]
-
-            gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
-            ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(
-                B, 2 * (self._future_len // 10)
-            )
-            turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
-            turn_indicator_logit = self.turn_indicator_predictor(turn_indicator_input)
-
-            return {
-                "model_output": self.dit(
-                    sampled_trajectories,
-                    diffusion_time,
-                    encoding,
-                    neighbor_current_mask,
-                ).reshape(B, P, -1, 4),
-                "turn_indicator_logit": turn_indicator_logit,
-            }
+            return self._forward_training(encoding, inputs, neighbor_current_mask, encoding_pooled)
         else:
-            if self._model_type == "flow_matching":
-                # [B, 1 + predicted_neighbor_num, (1 + self._future_len) * 4]
-                x = sampled_trajectories
-                NUM_STEP = 10
-                func = partial(
-                    self.dit,
-                    cross_c=encoding,
-                    neighbor_current_mask=neighbor_current_mask,
-                )
-                x = euler_integration(func, x, NUM_STEP)
-                # x = heun_integration(func, x, NUM_STEP)
-                # x = rk4_integration(func, x, NUM_STEP)
-                x = x.reshape(B, P, (1 + self._future_len) * 4)
-                turn_indicator_input = torch.cat(
-                    [
-                        x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10)),
-                        encoding_pooled,
-                    ],
-                    dim=-1,
-                )
-                turn_indicator_logit = self.turn_indicator_predictor(turn_indicator_input)
-                x = self._state_normalizer.inverse(x.reshape(B, P, -1, 4))[:, :, 1:]
-                return {"prediction": x, "turn_indicator_logit": turn_indicator_logit}
-
-            elif self._model_type == "x_start":
-                # [B, 1 + predicted_neighbor_num, (1 + self._future_len) * 4]
-                xT = sampled_trajectories
-
-                def initial_state_constraint(xt, t, step):
-                    xt = xt.reshape(B, P, -1, 4)
-                    xt[:, :, 0, :] = current_states
-                    return xt.reshape(B, P, -1)
-
-                x0 = dpm_sampler(
-                    self.dit,
-                    self._model_type,
-                    xT,
-                    other_model_params={
-                        "cross_c": encoding,
-                        "neighbor_current_mask": neighbor_current_mask,
-                    },
-                    dpm_solver_params={
-                        "correcting_xt_fn": initial_state_constraint,
-                    },
-                    model_wrapper_params={
-                        "classifier_fn": self._guidance_fn,
-                        "classifier_kwargs": {
-                            "model": self.dit,
-                            "model_condition": {
-                                "cross_c": encoding,
-                                "neighbor_current_mask": neighbor_current_mask,
-                            },
-                            "inputs": inputs,
-                            "observation_normalizer": self._observation_normalizer,
-                            "state_normalizer": self._state_normalizer,
-                        },
-                        "guidance_scale": 0.5,
-                        "guidance_type": "classifier"
-                        if self._guidance_fn is not None
-                        else "uncond",
-                    },
-                )
-                x0 = x0.reshape(B, P, (1 + self._future_len) * 4)
-                x = x0.reshape(B, P, (1 + self._future_len), 4)
-                x = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-                turn_indicator_input = torch.cat([x, encoding_pooled], dim=-1)
-                turn_indicator_logit = self.turn_indicator_predictor(turn_indicator_input)
-                x0 = self._state_normalizer.inverse(x0.reshape(B, P, -1, 4))[:, :, 1:]
-
-                return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
-
-            else:
-                raise NotImplementedError(f"Unknown model type {self._model_type}")
+            return self._forward_inference(
+                encoding, inputs, current_states, neighbor_current_mask, encoding_pooled
+            )
