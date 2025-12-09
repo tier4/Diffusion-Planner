@@ -52,36 +52,27 @@ def diffusion_loss_func(
     )  # [B, P = 1 + 1 + neighbor, T, 4]
     current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
-    P = gt_future.shape[1]
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
 
-    if model_type == "flow_matching":
-        # t=0 is noise, t=1 is data
-        t = t.reshape(-1, *([1] * (len(all_gt.shape) - 1)))  # [B, 1, 1, 1]
-        xT = (1 - t) * z + t * all_gt[:, :, 1:, :]  # [B, P, T, 4]
-        t = t.reshape(-1)  # [B,]
-    else:
+    if model_type == "x_start":
         mean, std = marginal_prob(all_gt[..., 1:, :], t)
         std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
         xT = mean + std * z
 
-    xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+        xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+        merged_inputs = {
+            **inputs,
+            "gt_trajectories": all_gt,
+            "sampled_trajectories": xT,
+            "diffusion_time": t,
+        }
+        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
+        model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
 
-    merged_inputs = {
-        **inputs,
-        "gt_trajectories": all_gt,
-        "sampled_trajectories": xT,
-        "diffusion_time": t,
-    }
-
-    _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
-    model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
-
-    if model_type == "x_start":
         # dpm_loss = torch.sum((model_output - all_gt[:, :, 1:, :]) ** 2, dim=-1)
         loss_dict = loss_func(model_output, all_gt[:, :, 1:, :])
         heading_l2_loss = loss_dict["heading_l2_loss"]
@@ -126,8 +117,25 @@ def diffusion_loss_func(
         #     dpm_loss[:, 0, :] = dpm_loss[:, 0, :] + safety_penalty
         #     safety_loss_terms.update(safety_logs)
     elif model_type == "flow_matching":
+        # t=0 is noise, t=1 is data
+        t = t.reshape(-1, *([1] * (len(all_gt.shape) - 1)))  # [B, 1, 1, 1]
+        xT = (1 - t) * z + t * all_gt[:, :, 1:, :]  # [B, P, T, 4]
+        t = t.reshape(-1)  # [B,]
+
+        xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+        merged_inputs = {
+            **inputs,
+            "gt_trajectories": all_gt,
+            "sampled_trajectories": xT,
+            "diffusion_time": t,
+        }
+        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
+        model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
+
         target_v = all_gt[:, :, 1:, :] - z
         dpm_loss = torch.sum((model_output - target_v) ** 2, dim=-1)
+    else:
+        raise NotImplementedError(f"Unknown diffusion model type: {model_type}")
 
     masked_prediction_loss = dpm_loss[:, 1:, :][neighbors_future_valid]
 
