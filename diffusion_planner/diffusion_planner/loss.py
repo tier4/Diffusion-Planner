@@ -59,15 +59,14 @@ def diffusion_loss_func(
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
 
-    mean, std = marginal_prob(all_gt[..., 1:, :], t)
-    std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
-
     if model_type == "flow_matching":
         # t=0 is noise, t=1 is data
         t = t.reshape(-1, *([1] * (len(all_gt.shape) - 1)))  # [B, 1, 1, 1]
         xT = (1 - t) * z + t * all_gt[:, :, 1:, :]  # [B, P, T, 4]
         t = t.reshape(-1)  # [B,]
     else:
+        mean, std = marginal_prob(all_gt[..., 1:, :], t)
+        std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
         xT = mean + std * z
 
     xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
@@ -81,7 +80,6 @@ def diffusion_loss_func(
 
     _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
     model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
-    safety_loss_terms: Dict[str, torch.Tensor] = {}
 
     if model_type == "x_start":
         # dpm_loss = torch.sum((model_output - all_gt[:, :, 1:, :]) ** 2, dim=-1)
@@ -141,8 +139,6 @@ def diffusion_loss_func(
         loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
 
     loss["ego_planning_loss"] = dpm_loss[:, 0, :].mean()
-    if safety_loss_terms:
-        loss.update(safety_loss_terms)
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
