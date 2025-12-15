@@ -217,6 +217,35 @@ class Decoder(nn.Module):
         )
         self._model_type = config.diffusion_model_type
 
+        # Initialize transformer layers:
+        def _basic_init(m):
+            if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
+                if isinstance(m, nn.Linear) and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+        self.apply(_basic_init)
+
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.dit.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.dit.t_embedder.mlp[2].weight, std=0.02)
+
+        # Zero-out adaLN modulation layers in DiT blocks:
+        for block in self.dit.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        # Zero-out output layers:
+        nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
+        nn.init.constant_(self.dit.final_layer.proj[-1].bias, 0)
+
     def _prepare_current_states(self, inputs):
         """Extract and prepare current states for ego and neighbors.
 

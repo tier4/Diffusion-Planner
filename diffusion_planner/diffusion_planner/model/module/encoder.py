@@ -138,6 +138,26 @@ class Encoder(nn.Module):
             torch.randn(1, config.route_num, config.hidden_dim)
         )
 
+        # Initialize transformer layers:
+        def _basic_init(m):
+            if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
+                if isinstance(m, nn.Linear) and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+        self.apply(_basic_init)
+
+        # Initialize embedding MLP:
+        nn.init.normal_(self.pos_emb.weight, std=0.02)
+        nn.init.normal_(self.neighbor_encoder.type_emb.weight, std=0.02)
+        nn.init.normal_(self.lane_encoder.speed_limit_emb.weight, std=0.02)
+        nn.init.normal_(self.lane_encoder.attribute_emb.weight, std=0.02)
+
     def forward(self, inputs):
         # ego agent
         ego = inputs["ego_agent_past"]  # (B, T=INPUT_T + 1, D=4)
