@@ -3,7 +3,6 @@ import logging
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
-from parse_rosbag import main as parse_rosbag_main
 from parse_rosbag_by_cpp import main as parse_rosbag_main_cpp
 
 
@@ -53,30 +52,18 @@ def process_single_bag(args_tuple):
         return f"Skipped (already exists): {save_dir}"
 
     try:
-        use_cpp = True
-        if use_cpp:
-            parse_rosbag_main_cpp(
-                Path("~/autoware/build/autoware_diffusion_planner/data_converter").expanduser(),
-                rosbag_path=bag_path,
-                vector_map_path=vector_map_path,
-                save_dir=save_dir,
-                step=step,
-                limit=limit,
-                min_frames=min_frames,
-                search_nearest_route=search_nearest_route,
-                convert_yellow=convert_yellow,
-                convert_red=convert_red,
-            )
-        else:
-            parse_rosbag_main(
-                rosbag_path=bag_path,
-                vector_map_path=vector_map_path,
-                save_dir=save_dir,
-                step=step,
-                limit=limit,
-                min_frames=min_frames,
-                search_nearest_route=search_nearest_route,
-            )
+        parse_rosbag_main_cpp(
+            Path("~/autoware/build/autoware_diffusion_planner/data_converter").expanduser(),
+            rosbag_path=bag_path,
+            vector_map_path=vector_map_path,
+            save_dir=save_dir,
+            step=step,
+            limit=limit,
+            min_frames=min_frames,
+            search_nearest_route=search_nearest_route,
+            convert_yellow=convert_yellow,
+            convert_red=convert_red,
+        )
         logging.info(f"Completed: {save_dir}")
     except Exception as e:
         error_msg = f"Error processing {bag_path}: {str(e)}"
