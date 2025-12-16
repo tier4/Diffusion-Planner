@@ -12,8 +12,7 @@ OUTPUT_ROSBAG_DIR=$2
 
 cd $SCRIPT_DIR
 set +eu
-source ~/pilot-auto.xx1/install/setup.bash
-source ./extension_ws/install/setup.bash
+source ~/autoware/install/setup.bash
 set -eu
 
 declare -a TOPICS=(
