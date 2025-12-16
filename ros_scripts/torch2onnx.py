@@ -148,9 +148,9 @@ if __name__ == "__main__":
     # Init model
     model = Diffusion_Planner(config_obj)
     model.eval()
-    model.encoder.encoder.eval()
-    model.decoder.decoder.eval()
-    model.decoder.decoder.training = False
+    model.encoder.eval()
+    model.decoder.eval()
+    model.decoder.training = False
 
     ckpt = torch.load(ckpt_path)
     state_dict = ckpt["model"]
