@@ -44,7 +44,8 @@ echo $SECONDS
 
 python3 ./diffusion_planner/util_scripts/create_train_set_path.py ${npz_dir}
 
-python3 ./diffusion_planner/util_scripts/visualize_input.py ${result_dir}/path_list.json \
-    --save_path ${result_dir}/visualize_result
+python3 ./diffusion_planner/util_scripts/visualize_input.py \
+    ${result_dir}/path_list.json \
+    ${result_dir}/visualize_result
 
 ~/misc/ffmpeg_lib/make_mp4_from_unsequential_png.sh ${result_dir}/visualize_result
