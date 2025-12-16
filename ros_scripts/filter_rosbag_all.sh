@@ -1,5 +1,5 @@
 #!/bin/bash
-set -eux
+set -ux
 
 TARGET_DIR=$(readlink -f $1)
 # metadata.yamlを探すので、TARGET_DIRに与えるのは
