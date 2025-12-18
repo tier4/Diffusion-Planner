@@ -426,12 +426,15 @@ if __name__ == "__main__":
 
     target_npz = args.target_npz
 
-    save_dir = target_npz.parent / "augmented"
+    save_dir = target_npz.parent.parent / "augmented"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     loaded = np.load(target_npz)
     data = {}
     for key, value in loaded.items():
+        if key == "token":
+            continue
+        print(f"{key=}")
         data[key] = torch.tensor(value).unsqueeze(0)
         if key == "goal_pose" or key == "ego_agent_past":
             data[key] = heading_to_cos_sin(data[key])
