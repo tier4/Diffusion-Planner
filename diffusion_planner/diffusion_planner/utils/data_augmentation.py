@@ -92,8 +92,6 @@ class StatePerturbation:
     def __call__(self, inputs, ego_future, neighbors_future):
         aug_flag, aug_ego_current_state = self.augment(inputs)
 
-        use_new_interpolation = False
-
         # Interpolate past trajectory by reversing time
         # Flip the past trajectory to treat it as future
         ego_past = inputs["ego_agent_past"]
@@ -108,71 +106,6 @@ class StatePerturbation:
             ],
             dim=-1,
         )
-
-        if use_new_interpolation:
-            # use scipy.interpolate splprep
-            INPUT_T = ego_past_heading.shape[1] - 1
-            OUTPUT_T = ego_future.shape[1]
-            concatenated = torch.cat(
-                [ego_past_heading, ego_future], dim=1
-            )  # (B, INPUT_T + 1 + OUTPUT_T, 3)
-            time = np.linspace(0, 1, INPUT_T + 1 + OUTPUT_T) * self.time_interval
-            flag_to_remain = np.array([True] * concatenated.shape[1])
-            # INPUT_Tの前後num_refineフレームを落とす
-            flag_to_remain[INPUT_T - self.num_refine : INPUT_T + self.num_refine] = False
-            flag_to_remain[INPUT_T] = True  # 現在時刻は残す
-
-            concatenated[:, INPUT_T, 0:2] = aug_ego_current_state[:, 0:2]
-
-            concatenated_fixed = concatenated[:, flag_to_remain]
-            time_fixed = time[flag_to_remain]
-
-            time_to_interpolate = time[~flag_to_remain]
-            B = concatenated_fixed.shape[0]
-            for b in range(B):
-                if not aug_flag[b]:
-                    continue
-                curr_xy = concatenated_fixed[b].cpu().numpy().T[:2]
-                tck, u = splprep(curr_xy, u=time_fixed, s=0.0, k=3)
-                out = splev(time_to_interpolate, tck)
-
-                concatenated[b, ~flag_to_remain, 0] = torch.tensor(
-                    out[0], dtype=torch.float32, device=concatenated.device
-                )
-                concatenated[b, ~flag_to_remain, 1] = torch.tensor(
-                    out[1], dtype=torch.float32, device=concatenated.device
-                )
-
-                # fixed heading
-                for i in range(0, concatenated_fixed.shape[1]):
-                    if flag_to_remain[i]:
-                        continue
-                    concatenated[b, i, 2] = torch.arctan2(
-                        concatenated[b, i, 1] - concatenated[b, i - 1, 1],
-                        concatenated[b, i, 0] - concatenated[b, i - 1, 0],
-                    )
-                cos = torch.cos(concatenated[b, INPUT_T, 2])
-                sin = torch.sin(concatenated[b, INPUT_T, 2])
-                aug_ego_current_state[b, 2] = cos
-                aug_ego_current_state[b, 3] = sin
-
-            interpolated_ego_future = concatenated[:, INPUT_T + 1 :, :]
-            interpolated_ego_past_heading = concatenated[:, : INPUT_T + 1, :]
-            # fixed to cos, sin
-            interpolated_ego_past_4d = torch.cat(
-                [
-                    interpolated_ego_past_heading[..., :2],  # x, y
-                    torch.cos(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # cos
-                    torch.sin(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # sin
-                ],
-                dim=-1,
-            )
-
-            inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
-            ego_future[aug_flag] = interpolated_ego_future[aug_flag]
-            inputs["ego_agent_past"][aug_flag] = interpolated_ego_past_4d[aug_flag]
-
-            return self.centric_transform(inputs, ego_future, neighbors_future)
 
         # Interpolate future trajectory
         interpolated_ego_future = self.interpolation_future_trajectory(
@@ -192,32 +125,8 @@ class StatePerturbation:
             interpolated_ego_past_heading[..., 2]
         )
 
-        # Convert back to [x, y, cos, sin]
-        interpolated_ego_past_4d = torch.cat(
-            [
-                interpolated_ego_past_heading[..., :2],  # x, y
-                torch.cos(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # cos
-                torch.sin(interpolated_ego_past_heading[..., 2]).unsqueeze(-1),  # sin
-            ],
-            dim=-1,
-        )
-
-        # Concatenate with remaining past trajectory to match original length
-        P = self.num_refine
-        if ego_past.shape[1] > P:
-            interpolated_ego_past = torch.cat(
-                [
-                    ego_past[:, :-(P), :],  # Keep older past
-                    interpolated_ego_past_4d,  # Replace recent past with interpolated
-                ],
-                dim=1,
-            )
-        else:
-            interpolated_ego_past = interpolated_ego_past_4d
-
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
-        # inputs["ego_agent_past"][aug_flag] = interpolated_ego_past[aug_flag]
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
