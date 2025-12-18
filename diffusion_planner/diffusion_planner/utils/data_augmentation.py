@@ -434,7 +434,6 @@ if __name__ == "__main__":
     for key, value in loaded.items():
         if key == "token":
             continue
-        print(f"{key=}")
         data[key] = torch.tensor(value).unsqueeze(0)
         if key == "goal_pose" or key == "ego_agent_past":
             data[key] = heading_to_cos_sin(data[key])
