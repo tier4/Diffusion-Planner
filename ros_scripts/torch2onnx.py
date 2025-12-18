@@ -185,6 +185,7 @@ def convert_model(config_json_path: str, ckpt_path: str, onnx_path: str):
         output_names=["prediction", "turn_indicator_logit"],
         dynamic_axes=dynamic_axes,
         opset_version=20,
+        dynamo=False,
     )
 
     sess_options = ort.SessionOptions()

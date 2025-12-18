@@ -29,4 +29,6 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
 
 save_dir_name=$(ls $SAVE_DIR | tail -n 1)
-./valid_run.sh $SAVE_DIR/$save_dir_name/best_model $VALID_SET_LIST
+
+# Convert the trained PyTorch model to ONNX format
+python3 ../ros_scripts/torch2onnx.py $SAVE_DIR/$save_dir_name
