@@ -1,6 +1,7 @@
 import argparse
 import json
 import random
+from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
@@ -14,10 +15,8 @@ torch.backends.mha.set_fastpath_enabled(False)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert torch model to onnx")
-    parser.add_argument("--config", type=str, default="args.json", help="Config file path")
-    parser.add_argument("--ckpt", type=str, default="latest.pth", help="Checkpoint file path")
-    parser.add_argument("--onnx_path", type=str, default="model.onnx", help="ONNX model file path")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("root_dir", type=Path)
     args = parser.parse_args()
     return args
 
@@ -91,11 +90,13 @@ def compare_outputs(torch_output, onnx_output):
     )
 
 
-if __name__ == "__main__":
-    args = parse_args()
-    config_json_path = args.config
-    ckpt_path = args.ckpt
-    onnx_path = args.onnx_path
+def convert_model(config_json_path: str, ckpt_path: str, onnx_path: str):
+    """Convert a single PyTorch model to ONNX format."""
+    print(f"\n{'=' * 80}")
+    print(f"Converting: {ckpt_path}")
+    print(f"Config: {config_json_path}")
+    print(f"Output: {onnx_path}")
+    print(f"{'=' * 80}\n")
 
     # Load config
     with open(config_json_path, "r") as f:
@@ -211,3 +212,51 @@ if __name__ == "__main__":
             torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
         onnx_output = ort_session.run(None, onnx_inputs)
         compare_outputs(torch_output, onnx_output)
+
+    print(f"\n✓ Successfully converted to ONNX: {onnx_path}\n")
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    root_dir = Path(args.root_dir)
+
+    if not root_dir.exists():
+        print(f"Error: Directory '{root_dir}' does not exist")
+        exit(1)
+
+    if not root_dir.is_dir():
+        print(f"Error: '{root_dir}' is not a directory")
+        exit(1)
+
+    # Find all .pth files recursively
+    pth_files = list(root_dir.rglob("*.pth"))
+
+    print(f"Found {len(pth_files)} .pth file(s) in '{root_dir}'")
+
+    skipped_count = 0
+
+    for pth_file in pth_files:
+        pth_dir = pth_file.parent
+        config_file = pth_dir / "args.json"
+        onnx_file = pth_dir / "model.onnx"
+
+        print(f"\n{'#' * 80}")
+        print(f"Processing: {pth_file.relative_to(root_dir)}")
+
+        # Check if args.json exists in the same directory
+        if not config_file.exists():
+            print(f"⚠ Skipping: args.json not found in {pth_dir}")
+            skipped_count += 1
+            continue
+
+        # Convert the model
+        convert_model(
+            config_json_path=str(config_file), ckpt_path=str(pth_file), onnx_path=str(onnx_file)
+        )
+
+    # Print summary
+    print(f"\n{'=' * 80}")
+    print(f"Conversion Summary:")
+    print(f"  Total found: {len(pth_files)}")
+    print(f"  Skipped (no args.json): {skipped_count}")
+    print(f"{'=' * 80}")
