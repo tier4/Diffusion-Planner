@@ -1,6 +1,7 @@
 import numpy as np
 import torch
-from scipy.interpolate import splev, splprep
+
+from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
 NUM_REFINE = 20
 TIME_INTERVAL = 0.1
@@ -92,37 +93,9 @@ class StatePerturbation:
     def __call__(self, inputs, ego_future, neighbors_future):
         aug_flag, aug_ego_current_state = self.augment(inputs)
 
-        # Interpolate past trajectory by reversing time
-        # Flip the past trajectory to treat it as future
-        ego_past = inputs["ego_agent_past"]
-
-        # Convert past from [x, y, cos, sin] to [x, y, heading]
-        ego_past_heading = torch.cat(
-            [
-                ego_past[..., :2],  # x, y
-                torch.atan2(ego_past[..., 3], ego_past[..., 2]).unsqueeze(
-                    -1
-                ),  # heading from cos, sin
-            ],
-            dim=-1,
-        )
-
         # Interpolate future trajectory
         interpolated_ego_future = self.interpolation_future_trajectory(
             aug_ego_current_state, ego_future
-        )
-
-        ego_past_reversed = torch.flip(ego_past_heading, dims=[1])
-        interpolated_ego_past_reversed = self.interpolation_future_trajectory(
-            aug_ego_current_state, ego_past_reversed, keep_remaining=False
-        )
-        # Flip back to get the past trajectory
-        interpolated_ego_past_heading = torch.flip(interpolated_ego_past_reversed, dims=[1])
-
-        # rotate 180 degrees to align with the ego's current heading
-        interpolated_ego_past_heading[..., 2] += np.pi
-        interpolated_ego_past_heading[..., 2] = self.normalize_angle(
-            interpolated_ego_past_heading[..., 2]
         )
 
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
@@ -236,6 +209,38 @@ class StatePerturbation:
         # inputs["ego_agent_past"][..., 2:4] = vector_transform(
         #     inputs["ego_agent_past"][..., 2:4], transform_matrix
         # )
+
+        ego_past4d = torch.cat(
+            [
+                inputs["ego_agent_past"][..., :2],  # x, y
+                torch.cos(inputs["ego_agent_past"][..., 2:3]),  # cos
+                torch.sin(inputs["ego_agent_past"][..., 2:3]),  # sin
+            ],
+            dim=-1,
+        )
+        ego_future4d = torch.cat(
+            [
+                ego_future[..., :2],  # x, y
+                torch.cos(ego_future[..., 2:3]),  # cos
+                torch.sin(ego_future[..., 2:3]),  # sin
+            ],
+            dim=-1,
+        )
+
+        ego_future4d = smoothing_future_trajectory(
+            ego_past4d, inputs["ego_current_state"], ego_future4d
+        )
+
+        ego_future = torch.cat(
+            [
+                ego_future4d[..., :2],  # x, y
+                torch.atan2(ego_future4d[..., 3], ego_future4d[..., 2]).unsqueeze(
+                    -1
+                ),  # heading from cos, sin
+            ],
+            dim=-1,
+        )
+        inputs["ego_agent_future"] = ego_future
 
         # neighbor past xy
         mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
