@@ -78,6 +78,7 @@ def get_args():
     parser.add_argument("--train_epochs", type=int, help="epochs of training", default=100)
     parser.add_argument("--early_stop_tolerance", type=int, help="early stop tolerance", default=100)
     parser.add_argument("--batch_size", type=int, help="batch size (default: 2048)", default=2048)
+    parser.add_argument("--save_utd", type=int, help="save every n epochs", default=10)
     parser.add_argument("--learning_rate", type=float, help="learning rate", default=2e-4)
     parser.add_argument("--warm_up_epoch", type=int, help="number of warm up", default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
@@ -185,7 +186,7 @@ def model_training(args):
     # training parameters
     train_epochs = args.train_epochs
     batch_size = args.batch_size
-    save_utd = max(train_epochs // 10, 1)
+    save_utd = args.save_utd
 
     # set up data loaders
     aug = (
