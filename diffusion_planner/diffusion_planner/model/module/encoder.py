@@ -434,6 +434,7 @@ class NeighborEncoder(nn.Module):
         mask_p = torch.sum(~mask_v, dim=-1) == 0
         x = torch.cat([x, (~mask_v).float().unsqueeze(-1)], dim=-1)
         x = x.view(B * P, V, -1)
+        x[..., 4:6] *= 0.0  # Zero out velocity features
 
         valid_indices = ~mask_p.view(-1)
         x = x[valid_indices]
