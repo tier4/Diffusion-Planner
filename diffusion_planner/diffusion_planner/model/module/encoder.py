@@ -167,6 +167,7 @@ class Encoder(nn.Module):
 
         # agents
         neighbors = inputs["neighbor_agents_past"]  # (B, N=32, T=21, D=11)
+        neighbors[:, :, :-6] *= 0.0  # Only keep the current + first 5 steps of history
 
         # static objects
         static = inputs["static_objects"]  # (B, P=5, D=10)
