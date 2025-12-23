@@ -18,7 +18,9 @@ SAVE_DIR="/mnt/nvme0/sakoda/training_result"
 
 TRAIN_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/dataset_ver58/path_list_train_with_psim_data.json"
 VALID_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/dataset_ver58/path_list_valid.json"
+SFT_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/dataset_ver58/path_list_train_sft_in_time_range.json"
 
+# pretraining
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
 --exp_name ${exp_name} \
 --train_set_list $TRAIN_SET_LIST \
@@ -29,6 +31,17 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
 
 save_dir_name=$(ls $SAVE_DIR | tail -n 1)
+
+# sft
+python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
+--exp_name ${exp_name}_sft \
+--train_set_list $SFT_SET_LIST \
+--valid_set_list $VALID_SET_LIST \
+--use_wandb True \
+--diffusion_model_type "x_start" \
+--save_dir $SAVE_DIR \
+--resume_model_path $SAVE_DIR/$save_dir_name/best_model \
+2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
 
 # Convert the trained PyTorch model to ONNX format
 python3 ../ros_scripts/torch2onnx.py $SAVE_DIR/$save_dir_name
