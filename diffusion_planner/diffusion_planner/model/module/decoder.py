@@ -95,9 +95,9 @@ def compute_training_loss(
 
         # dpm_loss = torch.sum((model_output - all_gt[:, :, 1:, :]) ** 2, dim=-1)
         loss_dict = loss_func(model_output, all_gt[:, :, 1:, :])
-        heading_l2_loss = loss_dict["heading_l2_loss"]
-        position_lat_loss = loss_dict["position_lat_loss"]
-        position_lon_loss = loss_dict["position_lon_loss"]
+        heading_l2_loss = loss_dict["heading_l2_loss"]  # [B, P, T]
+        position_lat_loss = loss_dict["position_lat_loss"]  # [B, P, T]
+        position_lon_loss = loss_dict["position_lon_loss"]  # [B, P, T]
 
         # velocity weight
         velocity_weight = longitudinal_velocity * args.coeff_velocity
@@ -124,7 +124,7 @@ def compute_training_loss(
             args.coeff_position_lat_loss * position_lat_loss
             + args.coeff_position_lon_loss * position_lon_loss
             + args.coeff_heading_l2_loss * heading_l2_loss
-        )
+        )  # [B, P, T]
         # safety_penalty, safety_logs, _ = compute_safety_penalty(
         #     model_output,
         #     inputs,
@@ -166,7 +166,7 @@ def compute_training_loss(
     else:
         loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
 
-    loss["ego_planning_loss"] = dpm_loss[:, 0, :].mean()
+    loss["ego_planning_loss"] = dpm_loss[:, 0, :args.ego_prediction_horizon].mean()
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 

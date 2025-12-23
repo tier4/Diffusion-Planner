@@ -45,6 +45,7 @@ def get_args():
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
+    parser.add_argument("--ego_prediction_horizon", type=int, default=OUTPUT_T)
 
     parser.add_argument("--agent_state_dim", type=int, help="past state dim for agents", default=11)
     parser.add_argument("--agent_num", type=int, default=MAX_NUM_NEIGHBORS)
