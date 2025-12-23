@@ -40,8 +40,8 @@ def get_args():
     parser.add_argument("--save_dir", type=str, help="save dir for model ckpt", default=".")
 
     # Data
-    parser.add_argument("--train_set_list", type=str, help="data list of train data", default=None)
-    parser.add_argument("--valid_set_list", type=str, help="data list of valid data", default=None)
+    parser.add_argument("--train_set_list", type=str, required=True)
+    parser.add_argument("--valid_set_list", type=str, required=True)
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
@@ -193,18 +193,10 @@ def model_training(args):
         if args.use_data_augment
         else None
     )
-    data_set = DiffusionPlannerData(args.train_set_list)
 
-    # prepare validation set
-    if args.valid_set_list is None:
-        total_size = len(data_set)
-        valid_size = int(total_size * 0.1)
-        train_size = total_size - valid_size
-        train_set, valid_set = torch.utils.data.random_split(data_set, [train_size, valid_size])
-    else:
-        train_set = data_set
-        valid_set = DiffusionPlannerData(args.valid_set_list)
-    print(f"Train set size: {len(train_set)}, Valid set size: {len(valid_set)}")
+    # prepare dataset
+    train_set = DiffusionPlannerData(args.train_set_list)
+    valid_set = DiffusionPlannerData(args.valid_set_list)
 
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
