@@ -395,7 +395,7 @@ def model_training(args):
             }
             torch.save(model_dict, f"{save_path}/latest.pth")
 
-            if (epoch + 1) % save_utd == 0:
+            if (epoch + 1 - init_epoch) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
