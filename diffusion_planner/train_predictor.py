@@ -77,7 +77,7 @@ def get_args():
     parser.add_argument("--seed", type=int, help="fix random seed", default=3407)
     parser.add_argument("--train_epochs", type=int, help="epochs of training", default=100)
     parser.add_argument("--early_stop_tolerance", type=int, help="early stop tolerance", default=100)
-    parser.add_argument("--batch_size", type=int, help="batch size (default: 2048)", default=2048)
+    parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--save_utd", type=int, help="save every n epochs", default=10)
     parser.add_argument("--learning_rate", type=float, help="learning rate", default=2e-4)
     parser.add_argument("--warm_up_epoch", type=int, help="number of warm up", default=5)
@@ -105,8 +105,8 @@ def get_args():
     parser.add_argument("--use_ema", default=True, type=boolean)
 
     # Model
-    parser.add_argument("--encoder_mixer_depth", type=int, default=3)
-    parser.add_argument("--encoder_fusion_depth", type=int, default=3)
+    parser.add_argument("--encoder_mixer_depth", type=int, default=6)
+    parser.add_argument("--encoder_fusion_depth", type=int, default=6)
     parser.add_argument("--decoder_depth", type=int, help="number of decoding layers", default=3)
     parser.add_argument("--num_heads", type=int, help="number of multi-head", default=8)
     parser.add_argument("--hidden_dim", type=int, help="hidden dimension", default=256)
