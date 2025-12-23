@@ -76,7 +76,6 @@ def get_args():
     # Training
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--train_epochs", type=int, default=100)
-    parser.add_argument("--early_stop_tolerance", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--save_utd", type=int, default=10)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
@@ -305,7 +304,6 @@ def model_training(args):
 
     data_list = []
     best_loss = float("inf")
-    no_improvement_count = 0
 
     if global_rank == 0:
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
@@ -423,17 +421,6 @@ def model_training(args):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
-                no_improvement_count = 0
-            else:
-                no_improvement_count += 1
-
-            if no_improvement_count >= args.early_stop_tolerance:
-                print(f"No improvement for {args.early_stop_tolerance} epochs, stopping training.")
-                if args.ddp:
-                    torch.cuda.synchronize()
-                    torch.distributed.destroy_process_group()
-                    torch.cuda.synchronize()
-                sys.exit(0)
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
