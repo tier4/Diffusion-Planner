@@ -28,11 +28,18 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --use_wandb True \
 --diffusion_model_type "x_start" \
 --save_dir $SAVE_DIR \
+--train_epochs 100 \
+--save_utd 10 \
 2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
 
 save_dir_name=$(ls $SAVE_DIR | tail -n 1)
 
 # sft
+# best_model/best_model_info.jsonから "epoch"を読み取る
+init_epoch=$(cat $SAVE_DIR/$save_dir_name/best_model/best_model_info.json | grep '"epoch"' | head -n 1 | awk -F ': ' '{print $2}' | sed 's/,//')
+# 10エポック分追加で学習
+last_epoch=$((init_epoch + 10))
+
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
 --exp_name ${exp_name}_sft \
 --train_set_list $SFT_SET_LIST \
@@ -41,6 +48,8 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --diffusion_model_type "x_start" \
 --save_dir $SAVE_DIR \
 --resume_model_path $SAVE_DIR/$save_dir_name/best_model \
+--train_epochs $last_epoch \
+--save_utd 1 \
 2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
 
 # Convert the trained PyTorch model to ONNX format
