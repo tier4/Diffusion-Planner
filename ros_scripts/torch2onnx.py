@@ -22,9 +22,10 @@ def parse_args() -> argparse.Namespace:
 
 
 class ONNXWrapper(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, args):
         super().__init__()
         self.model = model
+        self.args = args
 
     def forward(
         self,
@@ -63,6 +64,7 @@ class ONNXWrapper(nn.Module):
             "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
         }
+        inputs = self.args.observation_normalizer(inputs)
         encoder_outputs, decoder_outputs = self.model(inputs)
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
 
@@ -99,8 +101,6 @@ def convert_model(config_json_path: str, ckpt_path: str, onnx_path: str):
     print(f"{'=' * 80}\n")
 
     # Load config
-    with open(config_json_path, "r") as f:
-        config_json = json.load(f)
     config_obj = Config(config_json_path)
 
     seed = 42
@@ -159,7 +159,12 @@ def convert_model(config_json_path: str, ckpt_path: str, onnx_path: str):
     model.load_state_dict(new_state_dict)
 
     # Wrap model for onnx compatibility
-    wrapper = ONNXWrapper(model).eval()
+    wrapper = ONNXWrapper(model, config_obj).eval()
+
+    # test inference
+    with torch.no_grad():
+        output = wrapper(*tuple(inputs.values()))
+    print(f"Test inference successful. Output shapes: {[o.shape for o in output]}")
 
     # Prepare input
     torch_input_tuple = tuple(inputs.values())

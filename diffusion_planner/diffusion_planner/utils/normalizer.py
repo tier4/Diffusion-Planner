@@ -58,7 +58,9 @@ class ObservationNormalizer:
                 continue
             mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
             norm_data[k] = (data[k] - v["mean"].to(data[k].device)) / v["std"].to(data[k].device)
-            norm_data[k][mask] = 0
+            # Align mask rank with data before zeroing to keep ONNX shapes compatible
+            mask_expanded = mask.unsqueeze(-1).expand_as(norm_data[k]) if mask.dim() < norm_data[k].dim() else mask
+            norm_data[k][mask_expanded] = 0
         return norm_data
 
     def inverse(self, data):
@@ -68,7 +70,8 @@ class ObservationNormalizer:
                 continue
             mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
             norm_data[k] = data[k] * v["std"].to(data[k].device) + v["mean"].to(data[k].device)
-            norm_data[k][mask] = 0
+            mask_expanded = mask.unsqueeze(-1).expand_as(norm_data[k]) if mask.dim() < norm_data[k].dim() else mask
+            norm_data[k][mask_expanded] = 0
         return norm_data
 
     def to_dict(self):
