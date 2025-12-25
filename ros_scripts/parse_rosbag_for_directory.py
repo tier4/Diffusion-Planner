@@ -16,6 +16,9 @@ def parse_args():
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
     parser.add_argument("--convert_red", type=int, default=0)
+    parser.add_argument("--ego_wheel_base", type=float, default=2.75)
+    parser.add_argument("--ego_length", type=float, default=4.34)
+    parser.add_argument("--ego_width", type=float, default=1.70)
     parser.add_argument("--num_workers", type=int, default=32)
     return parser.parse_args()
 
@@ -30,6 +33,9 @@ def process_single_bag(args_tuple):
         search_nearest_route,
         convert_yellow,
         convert_red,
+        ego_wheel_base,
+        ego_length,
+        ego_width,
     ) = args_tuple
 
     logging.info(f"Processing bag: {bag_path}")
@@ -63,6 +69,9 @@ def process_single_bag(args_tuple):
             search_nearest_route=search_nearest_route,
             convert_yellow=convert_yellow,
             convert_red=convert_red,
+            ego_wheel_base=ego_wheel_base,
+            ego_length=ego_length,
+            ego_width=ego_width,
         )
         logging.info(f"Completed: {save_dir}")
     except Exception as e:
@@ -80,6 +89,9 @@ if __name__ == "__main__":
     search_nearest_route = args.search_nearest_route
     convert_yellow = args.convert_yellow
     convert_red = args.convert_red
+    ego_wheel_base = args.ego_wheel_base
+    ego_length = args.ego_length
+    ego_width = args.ego_width
     num_workers = args.num_workers or cpu_count()
 
     save_root = save_root.resolve()
@@ -118,6 +130,9 @@ if __name__ == "__main__":
                 search_nearest_route,
                 convert_yellow,
                 convert_red,
+                ego_wheel_base,
+                ego_length,
+                ego_width,
             )
         )
 

@@ -14,8 +14,4 @@ class DiffusionPlannerData(Dataset):
     def __getitem__(self, idx):
         data = np.load(self.data_list[idx], allow_pickle=True)
         data = dict(data)  # npz to dict
-
-        # added ego_shape (wheel_base, length, width)
-        data["ego_shape"] = np.array([2.75, 4.34, 1.70], dtype=np.float32)
-
         return data

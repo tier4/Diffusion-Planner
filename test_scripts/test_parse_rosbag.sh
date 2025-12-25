@@ -35,6 +35,9 @@ elif [ "$converter_type" = "cpp" ]; then
         --limit 30000000 \
         --min_frames 0 \
         --convert_yellow 0 \
+        --ego_wheel_base 2.75 \
+        --ego_length 4.34 \
+        --ego_width 1.70 \
         2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
 fi
 
