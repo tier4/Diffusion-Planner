@@ -17,8 +17,8 @@ torch.backends.mha.set_fastpath_enabled(False)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--eval_npz", type=Path, default=None)
     parser.add_argument("root_dir", type=Path)
+    parser.add_argument("--eval_npz", type=Path, default=None)
     args = parser.parse_args()
     return args
 
