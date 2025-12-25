@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 
 torch.backends.mha.set_fastpath_enabled(False)
@@ -16,6 +17,7 @@ torch.backends.mha.set_fastpath_enabled(False)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--eval_npz", type=Path, default=None)
     parser.add_argument("root_dir", type=Path)
     args = parser.parse_args()
     return args
@@ -90,7 +92,54 @@ def compare_outputs(torch_output, onnx_output):
     )
 
 
-def convert_model(config_json_path: str, ckpt_path: str, onnx_path: str):
+def build_inputs_from_npz(npz_path: Path) -> dict:
+    data = np.load(npz_path, allow_pickle=True)
+    inputs = {}
+    inputs["sampled_trajectories"] = 0.5 * torch.randn(
+        1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+    )
+    inputs["ego_agent_past"] = heading_to_cos_sin(
+        torch.tensor(data["ego_agent_past"], dtype=torch.float32).unsqueeze(0)
+    )
+    inputs["ego_current_state"] = torch.tensor(
+        data["ego_current_state"], dtype=torch.float32
+    ).unsqueeze(0)
+    inputs["neighbor_agents_past"] = torch.tensor(
+        data["neighbor_agents_past"], dtype=torch.float32
+    ).unsqueeze(0)
+    inputs["static_objects"] = torch.tensor(data["static_objects"], dtype=torch.float32).unsqueeze(
+        0
+    )
+    inputs["lanes"] = torch.tensor(data["lanes"], dtype=torch.float32).unsqueeze(0)
+    inputs["lanes_speed_limit"] = torch.tensor(
+        data["lanes_speed_limit"], dtype=torch.float32
+    ).unsqueeze(0)
+    inputs["lanes_has_speed_limit"] = torch.tensor(
+        data["lanes_has_speed_limit"], dtype=torch.bool
+    ).unsqueeze(0)
+    inputs["route_lanes"] = torch.tensor(data["route_lanes"], dtype=torch.float32).unsqueeze(0)
+    inputs["route_lanes_speed_limit"] = torch.tensor(
+        data["route_lanes_speed_limit"], dtype=torch.float32
+    ).unsqueeze(0)
+    inputs["route_lanes_has_speed_limit"] = torch.tensor(
+        data["route_lanes_has_speed_limit"], dtype=torch.bool
+    ).unsqueeze(0)
+    inputs["polygons"] = torch.tensor(data["polygons"], dtype=torch.float32).unsqueeze(0)
+    inputs["line_strings"] = torch.tensor(data["line_strings"], dtype=torch.float32).unsqueeze(0)
+    goal_pose = torch.tensor(data["goal_pose"], dtype=torch.float32).unsqueeze(0)
+    if goal_pose.shape[-1] == 3:
+        goal_pose = heading_to_cos_sin(goal_pose)
+    inputs["goal_pose"] = goal_pose
+    inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
+    inputs["turn_indicators"] = torch.tensor(
+        data["turn_indicators"], dtype=torch.float32
+    ).unsqueeze(0)
+    return inputs
+
+
+def convert_model(
+    config_json_path: str, ckpt_path: str, onnx_path: str, eval_npz_path: Path | None
+):
     """Convert a single PyTorch model to ONNX format."""
     print(f"\n{'=' * 80}")
     print(f"Converting: {ckpt_path}")
@@ -99,8 +148,6 @@ def convert_model(config_json_path: str, ckpt_path: str, onnx_path: str):
     print(f"{'=' * 80}\n")
 
     # Load config
-    with open(config_json_path, "r") as f:
-        config_json = json.load(f)
     config_obj = Config(config_json_path)
 
     seed = 42
@@ -214,6 +261,19 @@ def convert_model(config_json_path: str, ckpt_path: str, onnx_path: str):
         onnx_output = ort_session.run(None, onnx_inputs)
         compare_outputs(torch_output, onnx_output)
 
+    if eval_npz_path and eval_npz_path.exists():
+        print(f"\nTest with eval NPZ input: {eval_npz_path}")
+        eval_inputs = build_inputs_from_npz(eval_npz_path)
+        torch_eval_tuple = tuple(eval_inputs[name] for name in input_names)
+        onnx_eval_inputs = {k: v.cpu().numpy() for k, v in eval_inputs.items() if k in input_names}
+        with torch.no_grad():
+            output = wrapper(*torch_eval_tuple)
+            torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
+        onnx_output = ort_session.run(None, onnx_eval_inputs)
+        compare_outputs(torch_output, onnx_output)
+    elif eval_npz_path:
+        print(f"\n⚠ Eval NPZ not found, skipped: {eval_npz_path}")
+
     print(f"\n✓ Successfully converted to ONNX: {onnx_path}\n")
 
 
@@ -252,7 +312,10 @@ if __name__ == "__main__":
 
         # Convert the model
         convert_model(
-            config_json_path=str(config_file), ckpt_path=str(pth_file), onnx_path=str(onnx_file)
+            config_json_path=str(config_file),
+            ckpt_path=str(pth_file),
+            onnx_path=str(onnx_file),
+            eval_npz_path=args.eval_npz,
         )
 
     # Print summary
