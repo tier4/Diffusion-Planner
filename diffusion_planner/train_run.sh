@@ -47,7 +47,7 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --use_wandb True \
 --diffusion_model_type "x_start" \
 --save_dir $SAVE_DIR \
---resume_model_path $SAVE_DIR/$save_dir_name/best_model \
+--resume_model_path $SAVE_DIR/$save_dir_name/best_model/best_model.pth \
 --train_epochs $last_epoch \
 --save_utd 1 \
 2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
