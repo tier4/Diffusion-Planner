@@ -1,6 +1,6 @@
 aioboto3
 aiofiles
-bokeh==2.4.3  # Used in the nuBoard dashboard
+bokeh==3.8.2  # Used in the nuBoard dashboard
 boto3==1.24.59  # Used in s3_store.py to download data from S3.
 cachetools  # Used widely
 casadi  # Used for optimization solving
