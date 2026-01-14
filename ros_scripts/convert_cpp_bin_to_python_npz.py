@@ -8,7 +8,6 @@ import struct
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Any, Dict
 
 import numpy as np
 from diffusion_planner.dimensions import *
@@ -63,9 +62,10 @@ class TrainingDataReader:
             "line_strings": NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * 2,
             "goal_pose": POSE_DIM,
             "turn_indicators": self.PAST_TIME_STEPS,
+            "ego_shape": 3,  # (wheel_base, length, width)
         }
 
-    def read_binary_file(self, filepath: str) -> Dict[str, Any]:
+    def read_binary_file(self, filepath: str) -> dict[str, object]:
         """
         バイナリファイルを読み込んでデータを辞書として返す
 
@@ -202,6 +202,12 @@ class TrainingDataReader:
         size = self.sizes["turn_indicators"]
         turn_flat = struct.unpack(f"<{size}i", data[offset : offset + size * 4])
         result["turn_indicators"] = np.array(turn_flat, dtype=np.int32)
+        offset += size * 4
+
+        # ego_shape (3,)
+        size = self.sizes["ego_shape"]
+        shape_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
+        result["ego_shape"] = np.array(shape_flat, dtype=np.float32)
         offset += size * 4
 
         return result

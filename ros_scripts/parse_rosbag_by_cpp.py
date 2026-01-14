@@ -19,6 +19,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
     parser.add_argument("--convert_red", type=int, default=0)
+    parser.add_argument("--ego_wheel_base", type=float, default=2.75)
+    parser.add_argument("--ego_length", type=float, default=4.34)
+    parser.add_argument("--ego_width", type=float, default=1.70)
     return parser.parse_args()
 
 
@@ -33,11 +36,14 @@ def main(
     search_nearest_route: bool,
     convert_yellow: int,
     convert_red: int,
+    ego_wheel_base: float,
+    ego_length: float,
+    ego_width: float,
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
     print(
-        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route} {convert_yellow} {convert_red}"
+        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {search_nearest_route} {convert_yellow} {convert_red} {ego_wheel_base} {ego_length} {ego_width}"
     )
     result = subprocess.run(
         [
@@ -51,6 +57,9 @@ def main(
             f"--search_nearest_route={search_nearest_route}",
             f"--convert_yellow={convert_yellow}",
             f"--convert_red={convert_red}",
+            f"--ego_wheel_base={ego_wheel_base}",
+            f"--ego_length={ego_length}",
+            f"--ego_width={ego_width}",
         ],
         capture_output=True,
         text=True,

@@ -138,6 +138,26 @@ class Encoder(nn.Module):
             torch.randn(1, config.route_num, config.hidden_dim)
         )
 
+        # Initialize transformer layers:
+        def _basic_init(m):
+            if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
+                if isinstance(m, nn.Linear) and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+        self.apply(_basic_init)
+
+        # Initialize embedding MLP:
+        nn.init.normal_(self.pos_emb.weight, std=0.02)
+        nn.init.normal_(self.neighbor_encoder.type_emb.weight, std=0.02)
+        nn.init.normal_(self.lane_encoder.speed_limit_emb.weight, std=0.02)
+        nn.init.normal_(self.lane_encoder.attribute_emb.weight, std=0.02)
+
     def forward(self, inputs):
         # ego agent
         ego = inputs["ego_agent_past"]  # (B, T=INPUT_T + 1, D=4)
@@ -147,6 +167,7 @@ class Encoder(nn.Module):
 
         # agents
         neighbors = inputs["neighbor_agents_past"]  # (B, N=32, T=21, D=11)
+        neighbors[:, :, :-6] *= 0.0  # Only keep the current + first 5 steps of history
 
         # static objects
         static = inputs["static_objects"]  # (B, P=5, D=10)
@@ -413,6 +434,7 @@ class NeighborEncoder(nn.Module):
         mask_p = torch.sum(~mask_v, dim=-1) == 0
         x = torch.cat([x, (~mask_v).float().unsqueeze(-1)], dim=-1)
         x = x.view(B * P, V, -1)
+        x[..., 4:6] *= 0.0  # Zero out velocity features
 
         valid_indices = ~mask_p.view(-1)
         x = x[valid_indices]

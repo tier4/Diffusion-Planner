@@ -138,3 +138,62 @@ class FinalLayer(nn.Module):
         x = modulate(self.norm_final(x), shift, scale)
         x = self.proj(x)
         return x
+
+
+class DiT(nn.Module):
+    def __init__(
+        self,
+        depth,
+        output_dim,
+        hidden_dim=192,
+        heads=6,
+        dropout=0.1,
+        mlp_ratio=4.0,
+    ):
+        super().__init__()
+
+        self.agent_embedding = nn.Embedding(2, hidden_dim)
+        self.preproj = Mlp(
+            in_features=output_dim,
+            hidden_features=512,
+            out_features=hidden_dim,
+            act_layer=nn.GELU,
+            drop=0.0,
+        )
+        self.t_embedder = TimestepEmbedder(hidden_dim)
+        self.blocks = nn.ModuleList(
+            [DiTBlock(hidden_dim, heads, dropout, mlp_ratio) for i in range(depth)]
+        )
+        self.final_layer = FinalLayer(hidden_dim, output_dim)
+
+    def forward(self, x, t, cross_c, neighbor_current_mask):
+        """
+        Forward pass of DiT.
+        x: (B, P, output_dim)   -> Embedded out of DiT
+        t: (B,)
+        cross_c: (B, N, D)      -> Cross-Attention context
+        """
+        B, P, _ = x.shape
+
+        x = self.preproj(x)
+
+        x_embedding = torch.cat(
+            [
+                self.agent_embedding.weight[0][None, :],
+                self.agent_embedding.weight[1][None, :].expand(P - 1, -1),
+            ],
+            dim=0,
+        )  # (P, D)
+        x_embedding = x_embedding[None, :, :].expand(B, -1, -1)  # (B, P, D)
+        x = x + x_embedding
+
+        y = self.t_embedder(t)
+
+        attn_mask = torch.zeros((B, P), dtype=torch.bool, device=x.device)
+        attn_mask[:, 1:] = neighbor_current_mask
+
+        for block in self.blocks:
+            x = block(x, cross_c, y, attn_mask)
+
+        x = self.final_layer(x, y)
+        return x

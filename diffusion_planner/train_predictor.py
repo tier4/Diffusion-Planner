@@ -40,11 +40,12 @@ def get_args():
     parser.add_argument("--save_dir", type=str, help="save dir for model ckpt", default=".")
 
     # Data
-    parser.add_argument("--train_set_list", type=str, help="data list of train data", default=None)
-    parser.add_argument("--valid_set_list", type=str, help="data list of valid data", default=None)
+    parser.add_argument("--train_set_list", type=str, required=True)
+    parser.add_argument("--valid_set_list", type=str, required=True)
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
+    parser.add_argument("--ego_prediction_horizon", type=int, default=OUTPUT_T)
 
     parser.add_argument("--agent_state_dim", type=int, help="past state dim for agents", default=11)
     parser.add_argument("--agent_num", type=int, default=MAX_NUM_NEIGHBORS)
@@ -74,17 +75,17 @@ def get_args():
     parser.set_defaults(pin_mem=True)
 
     # Training
-    parser.add_argument("--seed", type=int, help="fix random seed", default=3407)
-    parser.add_argument("--train_epochs", type=int, help="epochs of training", default=500)
-    parser.add_argument("--early_stop_tolerance", type=int, help="early stop tolerance", default=50)
-    parser.add_argument("--batch_size", type=int, help="batch size (default: 2048)", default=2048)
-    parser.add_argument("--learning_rate", type=float, help="learning rate", default=5e-4)
-    parser.add_argument("--warm_up_epoch", type=int, help="number of warm up", default=5)
+    parser.add_argument("--seed", type=int, default=3407)
+    parser.add_argument("--train_epochs", type=int, default=100)
+    parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--save_utd", type=int, default=10)
+    parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--warm_up_epoch", type=int, default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
     parser.add_argument("--ego_history_dropout_rate", type=float, default=0.6)
-    parser.add_argument("--use_turn_indicators", type=boolean, default=False)
+    parser.add_argument("--use_turn_indicators", type=boolean, default=True)
 
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
     parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
@@ -104,15 +105,15 @@ def get_args():
     parser.add_argument("--use_ema", default=True, type=boolean)
 
     # Model
-    parser.add_argument("--encoder_mixer_depth", type=int, default=3)
-    parser.add_argument("--encoder_fusion_depth", type=int, default=3)
+    parser.add_argument("--encoder_mixer_depth", type=int, default=6)
+    parser.add_argument("--encoder_fusion_depth", type=int, default=6)
     parser.add_argument("--decoder_depth", type=int, help="number of decoding layers", default=3)
     parser.add_argument("--num_heads", type=int, help="number of multi-head", default=8)
     parser.add_argument("--hidden_dim", type=int, help="hidden dimension", default=256)
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
-        choices=["score", "x_start", "flow_matching"],
+        choices=["x_start", "flow_matching"],
         default="x_start",
     )
     parser.add_argument("--predicted_neighbor_num", type=int, default=32)
@@ -171,7 +172,7 @@ def model_training(args):
             k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
             for k, v in args_dict.items()
         }
-        args_dict["major_version"] = 2
+        args_dict["major_version"] = 3
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
@@ -185,7 +186,7 @@ def model_training(args):
     # training parameters
     train_epochs = args.train_epochs
     batch_size = args.batch_size
-    save_utd = max(train_epochs // 50, 1)
+    save_utd = args.save_utd
 
     # set up data loaders
     aug = (
@@ -193,18 +194,10 @@ def model_training(args):
         if args.use_data_augment
         else None
     )
-    data_set = DiffusionPlannerData(args.train_set_list)
 
-    # prepare validation set
-    if args.valid_set_list is None:
-        total_size = len(data_set)
-        valid_size = int(total_size * 0.1)
-        train_size = total_size - valid_size
-        train_set, valid_set = torch.utils.data.random_split(data_set, [train_size, valid_size])
-    else:
-        train_set = data_set
-        valid_set = DiffusionPlannerData(args.valid_set_list)
-    print(f"Train set size: {len(train_set)}, Valid set size: {len(valid_set)}")
+    # prepare dataset
+    train_set = DiffusionPlannerData(args.train_set_list)
+    valid_set = DiffusionPlannerData(args.valid_set_list)
 
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
@@ -304,7 +297,6 @@ def model_training(args):
 
     data_list = []
     best_loss = float("inf")
-    no_improvement_count = 0
 
     if global_rank == 0:
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
@@ -403,7 +395,7 @@ def model_training(args):
             }
             torch.save(model_dict, f"{save_path}/latest.pth")
 
-            if (epoch + 1) % save_utd == 0:
+            if (epoch + 1 - init_epoch) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
@@ -422,17 +414,6 @@ def model_training(args):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
-                no_improvement_count = 0
-            else:
-                no_improvement_count += 1
-
-            if no_improvement_count >= args.early_stop_tolerance:
-                print(f"No improvement for {args.early_stop_tolerance} epochs, stopping training.")
-                if args.ddp:
-                    torch.cuda.synchronize()
-                    torch.distributed.destroy_process_group()
-                    torch.cuda.synchronize()
-                sys.exit(0)
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)

@@ -3,9 +3,9 @@ import json
 import logging
 import math
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence, Union
 
 import numpy as np
 import torch
@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-ArrayOrFloat = Union[np.ndarray, float]
+ArrayOrFloat = np.ndarray | float
 
 
 def wrap_angle(angle: ArrayOrFloat) -> ArrayOrFloat:
@@ -171,7 +171,7 @@ def tensor_to_numpy(tensor: torch.Tensor) -> np.ndarray:
 
 @dataclass
 class SimulationSeries:
-    step_keys: List[str]
+    step_keys: list[str]
     pos_x: np.ndarray
     pos_y: np.ndarray
     pos_z: np.ndarray
@@ -192,7 +192,7 @@ class SimulationSeries:
         return self.pos_x.shape[1]
 
 
-def _stack_field(step_items: List[tuple[str, dict]], field_name: str) -> np.ndarray:
+def _stack_field(step_items: list[tuple[str, dict]], field_name: str) -> np.ndarray:
     arrays = []
     for _, data in step_items:
         global_state = data.get("global_ego_state")

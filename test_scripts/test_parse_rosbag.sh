@@ -35,6 +35,9 @@ elif [ "$converter_type" = "cpp" ]; then
         --limit 30000000 \
         --min_frames 0 \
         --convert_yellow 0 \
+        --ego_wheel_base 2.75 \
+        --ego_length 4.34 \
+        --ego_width 1.70 \
         2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
 fi
 
@@ -44,7 +47,8 @@ echo $SECONDS
 
 python3 ./diffusion_planner/util_scripts/create_train_set_path.py ${npz_dir}
 
-python3 ./diffusion_planner/util_scripts/visualize_input.py ${result_dir}/path_list.json \
-    --save_path ${result_dir}/visualize_result
+python3 ./diffusion_planner/util_scripts/visualize_input.py \
+    ${result_dir}/path_list.json \
+    ${result_dir}/visualize_result
 
 ~/misc/ffmpeg_lib/make_mp4_from_unsequential_png.sh ${result_dir}/visualize_result

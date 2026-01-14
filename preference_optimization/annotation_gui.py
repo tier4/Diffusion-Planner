@@ -4,8 +4,8 @@ GUI-based preference annotation utilities for DPO training.
 
 import json
 import random
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import matplotlib
 import numpy as np
