@@ -6,6 +6,7 @@ from timm.models.layers import Mlp
 
 
 def modulate(x, shift, scale, only_first=False):
+    print(f"{x.shape=} {shift.shape=} {scale.shape=}")
     if only_first:
         x_first, x_rest = x[:, :1], x[:, 1:]
         x = torch.cat([x_first * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1), x_rest], dim=1)
@@ -43,8 +44,7 @@ class TimestepEmbedder(nn.Module):
     def timestep_embedding(t, dim, max_period=10000):
         """
         Create sinusoidal timestep embeddings.
-        :param t: a 1-D Tensor of N indices, one per batch element.
-                          These may be fractional.
+        :param t: (B, 1, T)
         :param dim: the dimension of the output.
         :param max_period: controls the minimum frequency of the embeddings.
         :return: an (N, D) Tensor of positional embeddings.
@@ -54,7 +54,8 @@ class TimestepEmbedder(nn.Module):
         freqs = torch.exp(
             -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
         ).to(device=t.device)
-        args = t[:, None].float() * freqs[None]
+        print(f"{t.shape=} {freqs.shape=}")
+        args = t.float() * freqs.reshape(1, 1, 1, -1)
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
@@ -91,9 +92,10 @@ class DiTBlock(nn.Module):
         )
 
     def forward(self, x, cross_c, y, attn_mask):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
-            y
-        ).chunk(6, dim=1)
+        y_c = self.adaLN_modulation(y)
+        print(f"{y_c.shape=}")
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = y_c.chunk(6, dim=3)
+        print(f"{shift_msa.shape=} {scale_msa.shape=} {gate_msa.shape=}")
 
         modulated_x = modulate(self.norm1(x), shift_msa, scale_msa)
         x = (
@@ -169,12 +171,16 @@ class DiT(nn.Module):
     def forward(self, x, t, cross_c, neighbor_current_mask):
         """
         Forward pass of DiT.
-        x: (B, P, output_dim)   -> Embedded out of DiT
-        t: (B,)
+        x: (B, P, T, D)   -> Embedded out of DiT
+        t: (B, 1, T, 1)         -> Timestep embedding
         cross_c: (B, N, D)      -> Cross-Attention context
         """
-        B, P, _ = x.shape
+        assert x.dim() == 4, f"{x.dim()=}"
+        assert t.dim() == 4, f"{t.dim()=}"
+        assert x.shape[2] == t.shape[2], f"{x.shape[2]=} {t.shape[2]=}"
+        B, P, T, D = x.shape
 
+        x = x.reshape(B, P, T * D)
         x = self.preproj(x)
 
         x_embedding = torch.cat(
@@ -187,7 +193,8 @@ class DiT(nn.Module):
         x_embedding = x_embedding[None, :, :].expand(B, -1, -1)  # (B, P, D)
         x = x + x_embedding
 
-        y = self.t_embedder(t)
+        y = self.t_embedder(t)  # (B, 1, T, D)
+        print(f"{y.shape=}")
 
         attn_mask = torch.zeros((B, P), dtype=torch.bool, device=x.device)
         attn_mask[:, 1:] = neighbor_current_mask

@@ -39,13 +39,19 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     turn_indicator_change_correct = 0.0
     turn_indicator_change_total = 0
 
+    delay = 2
+    T = 81
+
     for inputs in val_loader:
         inputs = {key: value.to(device) for key, value in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
 
         turn_indicator_seq = inputs["turn_indicators"]
 
-        inputs["sampled_trajectories"] = 0.5 * torch.randn(B, 33, 81, 4, dtype=torch.float32)
+        inputs["sampled_trajectories"] = 0.5 * torch.randn(B, 33, T, 4, dtype=torch.float32)
+        inputs["prefix_mask"] = (
+            torch.arange(T, device=device)[None, None, :, None] < delay
+        ).expand(B, 1, T, 1)
 
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
