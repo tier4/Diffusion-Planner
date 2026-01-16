@@ -387,8 +387,8 @@ class Decoder(nn.Module):
             delay = torch.clamp(delay, 0, total_steps).reshape(B, 1, 1, 1)
             step_ids = torch.arange(total_steps, device=xt.device).view(1, 1, -1, 1)
             mask = step_ids <= delay
-            xt[:, :, 0, :] = torch.where(
-                mask[:, :, 0, :], action_prefix[:, :, 0, :], xt[:, :, 0, :]
+            xt[:, 0, :, :] = torch.where(
+                mask[:, 0, :, :], action_prefix[:, 0, :, :], xt[:, 0, :, :]
             )
             return xt.reshape(B, P, -1)
 
