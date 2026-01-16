@@ -46,6 +46,7 @@ class ONNXWrapper(nn.Module):
         goal_pose,
         ego_shape,
         turn_indicators,
+        delay,
     ):
         inputs = {
             "sampled_trajectories": sampled_trajectories,
@@ -64,6 +65,7 @@ class ONNXWrapper(nn.Module):
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
+            "delay": delay,
         }
         encoder_outputs, decoder_outputs = self.model(inputs)
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
@@ -134,6 +136,7 @@ def build_inputs_from_npz(npz_path: Path) -> dict:
     inputs["turn_indicators"] = torch.tensor(
         data["turn_indicators"], dtype=torch.float32
     ).unsqueeze(0)
+    inputs["delay"] = torch.zeros(1, 1, dtype=torch.int64)
     return inputs
 
 
@@ -186,6 +189,7 @@ def convert_model(
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
     inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
+    inputs["delay"] = torch.zeros(inputs["ego_current_state"].shape[0], 1, dtype=torch.int64)
 
     for key in inputs.keys():
         print(f"{key}: {inputs[key].shape}, {inputs[key].dtype}")
@@ -219,6 +223,8 @@ def convert_model(
     dynamic_axes = {}
     # Add dynamic batch dimension for inputs
     for name in input_names:
+        if name == "delay":
+            continue
         dynamic_axes[name] = {0: "batch"}
     # Add dynamic batch dimension for outputs
     dynamic_axes["prediction"] = {0: "batch"}
@@ -240,11 +246,16 @@ def convert_model(
     ort_session = ort.InferenceSession(
         onnx_path, sess_options, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
     )
+    onnx_input_names = [inp.name for inp in ort_session.get_inputs()]
+    if set(onnx_input_names) != set(input_names):
+        print(f"ONNX input names: {onnx_input_names}")
 
     with torch.no_grad():
         output = wrapper(*torch_input_tuple)
         torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
-    onnx_output = ort_session.run(None, onnx_inputs)
+    onnx_output = ort_session.run(
+        None, {k: v for k, v in onnx_inputs.items() if k in onnx_input_names}
+    )
     print("Compare outputs using the creation input")
     compare_outputs(torch_output, onnx_output)
 
@@ -258,7 +269,9 @@ def convert_model(
         with torch.no_grad():
             output = wrapper(*torch_input_tuple)
             torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
-        onnx_output = ort_session.run(None, onnx_inputs)
+        onnx_output = ort_session.run(
+            None, {k: v for k, v in onnx_inputs.items() if k in onnx_input_names}
+        )
         compare_outputs(torch_output, onnx_output)
 
     if eval_npz_path and eval_npz_path.exists():
@@ -269,7 +282,9 @@ def convert_model(
         with torch.no_grad():
             output = wrapper(*torch_eval_tuple)
             torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
-        onnx_output = ort_session.run(None, onnx_eval_inputs)
+        onnx_output = ort_session.run(
+            None, {k: v for k, v in onnx_eval_inputs.items() if k in onnx_input_names}
+        )
         compare_outputs(torch_output, onnx_output)
     elif eval_npz_path:
         print(f"\n⚠ Eval NPZ not found, skipped: {eval_npz_path}")

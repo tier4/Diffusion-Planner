@@ -166,7 +166,7 @@ def compute_training_loss(
     else:
         loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
 
-    loss["ego_planning_loss"] = dpm_loss[:, 0, :args.ego_prediction_horizon].mean()
+    loss["ego_planning_loss"] = dpm_loss[:, 0, : args.ego_prediction_horizon].mean()
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
@@ -304,9 +304,7 @@ class Decoder(nn.Module):
         diffusion_time = inputs["diffusion_time"]
 
         gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
-        ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(
-            B, 2 * (self._future_len // 10)
-        )
+        ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
         return {
@@ -379,10 +377,19 @@ class Decoder(nn.Module):
         P = 1 + self._predicted_neighbor_num
 
         xT = sampled_trajectories
+        action_prefix = sampled_trajectories.reshape(B, P, -1, 4)
+        action_prefix[:, :, 0, :] = current_states
 
         def initial_state_constraint(xt, t, step):
             xt = xt.reshape(B, P, -1, 4)
-            xt[:, :, 0, :] = current_states
+            total_steps = xt.shape[2]
+            delay = inputs["delay"].to(device=xt.device)
+            delay = torch.clamp(delay, 0, total_steps).reshape(B, 1, 1, 1)
+            step_ids = torch.arange(total_steps, device=xt.device).view(1, 1, -1, 1)
+            mask = step_ids <= delay
+            xt[:, :, 0, :] = torch.where(
+                mask[:, :, 0, :], action_prefix[:, :, 0, :], xt[:, :, 0, :]
+            )
             return xt.reshape(B, P, -1)
 
         x0 = dpm_sampler(
@@ -471,6 +478,7 @@ class Decoder(nn.Module):
                     "neighbor_agent_past": past and current neighbor states,
 
                     "sampled_trajectories": sampled current-future ego & neighbor states,        [B, P, 1 + self._future_len, 4]
+                    "delay": number of initial steps to keep fixed (>=0),
                     [training-only] "diffusion_time": timestep of diffusion process $t \in [0, 1]$,              [B]
                     ...
                 }
