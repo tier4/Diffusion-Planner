@@ -17,32 +17,6 @@ from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
-@torch.no_grad()
-def dpm_sampler(
-    model: torch.nn.Module,
-    model_type: str,
-    x_T: torch.Tensor,
-    other_model_params: dict,
-    model_wrapper_params: dict,
-    dpm_solver_params: dict,
-):
-    noise_schedule = dpm.NoiseScheduleVP()
-
-    model_fn = dpm.model_wrapper(
-        model,
-        noise_schedule,
-        model_type=model_type,
-        model_kwargs=other_model_params,
-        **model_wrapper_params,
-    )
-
-    dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, **dpm_solver_params)
-
-    sample_dpm = dpm_solver.sample(x_T, steps=10, skip_type="logSNR")
-
-    return sample_dpm
-
-
 def compute_training_loss(
     model: nn.Module,
     inputs: dict[str, torch.Tensor],
@@ -75,13 +49,26 @@ def compute_training_loss(
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
+    max_delay = 20
+    delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
+    prefix_mask = torch.arange(T + 1, device=gt_future.device)[None, :] <= delay[:, None]  # [B, T]
+    prefix_mask = prefix_mask[:, None, :].expand(B, 1 + Pn, T + 1)  # [B, P, T]
+    t_future = torch.where(
+        prefix_mask[:, 0, :],
+        torch.zeros((B, T + 1), device=gt_future.device, dtype=t.dtype),
+        t[:, None].expand(B, T + 1),
+    )
+    t = t_future.unsqueeze(1)  # [B, 1, T + 1]
+    t = t.unsqueeze(-1)  # [B, 1, T + 1, 1]
+
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
 
     if model_type == "x_start":
-        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t)
-        std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
+        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+        # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
         xT = mean + std * z
+        xT = torch.where(prefix_mask[..., 1:].unsqueeze(-1), all_gt[:, :, 1:, :], xT)
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         merged_inputs = {
@@ -89,6 +76,7 @@ def compute_training_loss(
             "gt_trajectories": all_gt,
             "sampled_trajectories": xT,
             "diffusion_time": t,
+            "prefix_mask": prefix_mask,
         }
         _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
@@ -148,6 +136,7 @@ def compute_training_loss(
             "gt_trajectories": all_gt,
             "sampled_trajectories": xT,
             "diffusion_time": t,
+            "prefix_mask": prefix_mask,
         }
         _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
@@ -299,7 +288,7 @@ class Decoder(nn.Module):
         P = 1 + self._predicted_neighbor_num
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(
-            B, P, (1 + self._future_len) * 4
+            B, P, (1 + self._future_len), 4
         )
         diffusion_time = inputs["diffusion_time"]
 
@@ -380,45 +369,49 @@ class Decoder(nn.Module):
         action_prefix = sampled_trajectories.reshape(B, P, -1, 4)
         action_prefix[:, :, 0, :] = current_states
 
-        def initial_state_constraint(xt, t, step):
+        B, P, T_plus_1, D = action_prefix.shape
+
+        delay = inputs["delay"].to(device=action_prefix.device)
+        delay = torch.clamp(delay, 0, T_plus_1).reshape(B, 1, 1, 1)
+        step_ids = torch.arange(T_plus_1, device=action_prefix.device).view(1, 1, -1, 1)
+        mask = step_ids <= delay
+
+        def prefix_constraint(xt, t, step):
             xt = xt.reshape(B, P, -1, 4)
-            total_steps = xt.shape[2]
-            delay = inputs["delay"].to(device=xt.device)
-            delay = torch.clamp(delay, 0, total_steps).reshape(B, 1, 1, 1)
-            step_ids = torch.arange(total_steps, device=xt.device).view(1, 1, -1, 1)
-            mask = step_ids <= delay
             xt[:, 0, :, :] = torch.where(
                 mask[:, 0, :, :], action_prefix[:, 0, :, :], xt[:, 0, :, :]
             )
             return xt.reshape(B, P, -1)
 
-        x0 = dpm_sampler(
+        noise_schedule = dpm.NoiseScheduleVP()
+
+        model_fn = dpm.model_wrapper(
             self.dit,
-            self._model_type,
-            xT,
-            other_model_params={
+            noise_schedule,
+            model_type=self._model_type,
+            model_kwargs={
                 "cross_c": encoding,
                 "neighbor_current_mask": neighbor_current_mask,
             },
-            dpm_solver_params={
-                "correcting_xt_fn": initial_state_constraint,
-            },
-            model_wrapper_params={
-                "classifier_fn": self._guidance_fn,
-                "classifier_kwargs": {
-                    "model": self.dit,
-                    "model_condition": {
-                        "cross_c": encoding,
-                        "neighbor_current_mask": neighbor_current_mask,
-                    },
-                    "inputs": inputs,
-                    "observation_normalizer": self._observation_normalizer,
-                    "state_normalizer": self._state_normalizer,
+            guidance_type="classifier" if self._guidance_fn is not None else "uncond",
+            guidance_scale=0.5,
+            classifier_fn=self._guidance_fn,
+            classifier_kwargs={
+                "model": self.dit,
+                "model_condition": {
+                    "cross_c": encoding,
+                    "neighbor_current_mask": neighbor_current_mask,
                 },
-                "guidance_scale": 0.5,
-                "guidance_type": "classifier" if self._guidance_fn is not None else "uncond",
+                "inputs": inputs,
+                "observation_normalizer": self._observation_normalizer,
+                "state_normalizer": self._state_normalizer,
             },
         )
+
+        dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint)
+
+        x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
+
         x0 = x0.reshape(B, P, (1 + self._future_len) * 4)
         x = x0.reshape(B, P, (1 + self._future_len), 4)
         ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))

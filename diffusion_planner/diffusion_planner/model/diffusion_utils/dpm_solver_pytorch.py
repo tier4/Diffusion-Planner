@@ -181,6 +181,7 @@ def model_wrapper(
 
     def noise_pred_fn(x, t_continuous, cond=None):
         if cond is None:
+            x = x.reshape(x.shape[0], x.shape[1], -1, 4)
             output = model(x, t_continuous, **model_kwargs)
         else:
             output = model(x, t_continuous, cond, **model_kwargs)
@@ -191,7 +192,7 @@ def model_wrapper(
                 noise_schedule.marginal_alpha(t_continuous),
                 noise_schedule.marginal_std(t_continuous),
             )
-            return (x - expand_dims(alpha_t, x.dim()) * output) / expand_dims(sigma_t, x.dim())
+            return (x - alpha_t * output) / sigma_t
         elif model_type == "v":
             alpha_t, sigma_t = (
                 noise_schedule.marginal_alpha(t_continuous),
@@ -305,7 +306,7 @@ class DPM_Solver:
             Burcu Karagol Ayan, S Sara Mahdavi, Rapha Gontijo Lopes, et al. Photorealistic text-to-image diffusion models
             with deep language understanding. arXiv preprint arXiv:2205.11487, 2022b.
         """
-        self.model = lambda x, t: model_fn(x, t.expand((x.shape[0])))
+        self.model = model_fn
         self.noise_schedule = noise_schedule
         if correcting_x0_fn == "dynamic_thresholding":
             self.correcting_x0_fn = self.dynamic_thresholding_fn
@@ -333,6 +334,7 @@ class DPM_Solver:
         Return the data prediction model (with corrector).
         """
         noise = self.model(x, t)
+        x = x.reshape(x.shape[0], x.shape[1], -1, 4)
         alpha_t, sigma_t = (
             self.noise_schedule.marginal_alpha(t),
             self.noise_schedule.marginal_std(t),
@@ -477,6 +479,7 @@ class DPM_Solver:
         phi_1 = torch.expm1(-h)
         if model_s is None:
             model_s = self.model_fn(x, s)
+        model_s = model_s.reshape(x.shape)
         x_t = sigma_t / sigma_s * x - alpha_t * phi_1 * model_s
         if return_intermediate:
             return x_t, {"model_s": model_s}
@@ -515,6 +518,7 @@ class DPM_Solver:
         r0 = h_0 / h
         D1_0 = (1.0 / r0) * (model_prev_0 - model_prev_1)
         phi_1 = torch.expm1(-h)
+        x = x.reshape(x.shape[0], x.shape[1], -1, 4)
         x_t = (
             (sigma_t / sigma_prev_0) * x
             - (alpha_t * phi_1) * model_prev_0
@@ -542,7 +546,7 @@ class DPM_Solver:
         else:
             raise ValueError("Solver order must be 1 or 2, got {}".format(order))
 
-    def sample(self, x, steps, skip_type="time_uniform"):
+    def sample(self, x, steps, prefix_mask, skip_type="time_uniform"):
         """
         Compute the sample at time `t_end` by DPM-Solver, given the initial `x` at time `t_start`.
 
@@ -579,9 +583,9 @@ class DPM_Solver:
 
         =====================================================
         Args:
-            x: A pytorch tensor. The initial value at time `t_start`
-                e.g. if `t_start` == T, then `x` is a sample from the standard normal distribution.
+            x: (B, P, T, D)
             steps: A `int`. The total number of function evaluations (NFE).
+            prefix_mask: (B, 1, T, 1)
             skip_type: A `str`. The type for the spacing of the time steps. 'time_uniform' or 'logSNR' or 'time_quadratic'.
         Returns:
             x_end: A pytorch tensor. The approximated solution at time `t_end`.
@@ -602,6 +606,9 @@ class DPM_Solver:
                 "Cannot use adaptive solver when correcting_xt_fn is not None"
             )
         device = x.device
+        T = 81
+        x = x.reshape(x.shape[0], x.shape[1], T, -1)
+        t_shape = (x.shape[0], 1, T, 1)
         with torch.no_grad():
             assert steps >= order
             timesteps = self.get_time_steps(
@@ -611,21 +618,24 @@ class DPM_Solver:
             # Init the initial values.
             step = 0
             t = timesteps[step]
+            t_B1T1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
             t_prev_list = [t]
-            model_prev_list = [self.model_fn(x, t)]
+            model_prev_list = [self.model_fn(x, t_B1T1 * prefix_mask)]
             if self.correcting_xt_fn is not None:
                 x = self.correcting_xt_fn(x, t, step)
             # Init the first `order` values by lower order multistep DPM-Solver.
             for step in range(1, order):
                 t = timesteps[step]
+                t_B1T1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
                 x = self.multistep_dpm_solver_update(x, model_prev_list, t_prev_list, t, step)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step)
                 t_prev_list.append(t)
-                model_prev_list.append(self.model_fn(x, t))
+                model_prev_list.append(self.model_fn(x, t_B1T1 * prefix_mask))
             # Compute the remaining values by `order`-th order multistep DPM-Solver.
             for step in range(order, steps + 1):
                 t = timesteps[step]
+                t_B1T1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
                 # We only use lower order for steps < 10
                 if steps < 10:
                     step_order = min(order, steps + 1 - step)
@@ -640,10 +650,11 @@ class DPM_Solver:
                 t_prev_list[-1] = t
                 # We do not need to evaluate the final model value.
                 if step < steps:
-                    model_prev_list[-1] = self.model_fn(x, t)
+                    model_prev_list[-1] = self.model_fn(x, t_B1T1 * prefix_mask)
             if denoise_to_zero:
                 t = torch.ones((1,)).to(device) * t_0
-                x = self.data_prediction_fn(x, t)
+                t_B1T1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+                x = self.data_prediction_fn(x, t_B1T1 * prefix_mask)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step + 1)
         return x
