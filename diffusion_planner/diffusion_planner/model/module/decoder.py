@@ -68,9 +68,10 @@ def compute_training_loss(
         mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
         # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
         xT = mean + std * z
-        xT = torch.where(prefix_mask[..., 1:].unsqueeze(-1), all_gt[:, :, 1:, :], xT)
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+        xT = torch.where(prefix_mask.unsqueeze(-1), all_gt, xT)  # [B, P, 1 + T, 4]
+
         merged_inputs = {
             **inputs,
             "gt_trajectories": all_gt,
