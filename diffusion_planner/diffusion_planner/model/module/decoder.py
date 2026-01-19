@@ -27,9 +27,10 @@ def compute_training_loss(
     model_type = args.diffusion_model_type
 
     ego_future, neighbors_future, neighbor_future_mask = futures
-    neighbors_future_valid = ~neighbor_future_mask  # [B, P, V]
+    neighbors_future_valid = ~neighbor_future_mask  # [B, Pn, V]
 
     B, Pn, T, _ = neighbors_future.shape
+    P = 1 + Pn
     ego_current, neighbors_current = (
         inputs["ego_current_state"][:, :4],
         inputs["neighbor_agents_past"][:, :Pn, -1, :4],
@@ -42,13 +43,13 @@ def compute_training_loss(
 
     gt_future = torch.cat(
         [ego_future[:, None, :, :], neighbors_future[..., :]], dim=1
-    )  # [B, P = 1 + 1 + neighbor, T, 4]
+    )  # [B, P, T, 4]
     current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
     eps = 1e-3
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
     t = t.view(B, 1, 1, 1)
-    t = t.expand(-1, 1, T + 1, 1)  # [B, 1, T, 1]
+    t = t.expand(-1, P, T + 1, 1)  # [B, P, T, 1]
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
@@ -211,14 +212,7 @@ class Decoder(nn.Module):
         nn.init.normal_(self.dit.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.dit.t_embedder.mlp[2].weight, std=0.02)
 
-        # Zero-out adaLN modulation layers in DiT blocks:
-        for block in self.dit.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-
         # Zero-out output layers:
-        nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].bias, 0)
 
