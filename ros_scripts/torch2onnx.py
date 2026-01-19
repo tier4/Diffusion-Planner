@@ -136,7 +136,7 @@ def build_inputs_from_npz(npz_path: Path) -> dict:
     inputs["turn_indicators"] = torch.tensor(
         data["turn_indicators"], dtype=torch.float32
     ).unsqueeze(0)
-    inputs["delay"] = torch.zeros(1, 1, dtype=torch.int64)
+    inputs["delay"] = torch.zeros(1, 1, dtype=torch.float32)
     return inputs
 
 
@@ -189,7 +189,7 @@ def convert_model(
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
     inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
-    inputs["delay"] = torch.zeros(inputs["ego_current_state"].shape[0], 1, dtype=torch.int64)
+    inputs["delay"] = torch.zeros(inputs["ego_current_state"].shape[0], 1, dtype=torch.float32)
 
     for key in inputs.keys():
         print(f"{key}: {inputs[key].shape}, {inputs[key].dtype}")
