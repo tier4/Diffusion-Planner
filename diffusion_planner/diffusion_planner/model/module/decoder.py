@@ -114,6 +114,7 @@ def compute_training_loss(
             + args.coeff_position_lon_loss * position_lon_loss
             + args.coeff_heading_l2_loss * heading_l2_loss
         )  # [B, P, T]
+        dpm_loss[prefix_mask[:, :, 1:]] = 0.0
         # safety_penalty, safety_logs, _ = compute_safety_penalty(
         #     model_output,
         #     inputs,
