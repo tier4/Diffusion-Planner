@@ -17,32 +17,6 @@ from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
-@torch.no_grad()
-def dpm_sampler(
-    model: torch.nn.Module,
-    model_type: str,
-    x_T: torch.Tensor,
-    other_model_params: dict,
-    model_wrapper_params: dict,
-    dpm_solver_params: dict,
-):
-    noise_schedule = dpm.NoiseScheduleVP()
-
-    model_fn = dpm.model_wrapper(
-        model,
-        noise_schedule,
-        model_type=model_type,
-        model_kwargs=other_model_params,
-        **model_wrapper_params,
-    )
-
-    dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, **dpm_solver_params)
-
-    sample_dpm = dpm_solver.sample(x_T, steps=10, skip_type="logSNR")
-
-    return sample_dpm
-
-
 def compute_training_loss(
     model: nn.Module,
     inputs: dict[str, torch.Tensor],
@@ -166,7 +140,7 @@ def compute_training_loss(
     else:
         loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
 
-    loss["ego_planning_loss"] = dpm_loss[:, 0, :args.ego_prediction_horizon].mean()
+    loss["ego_planning_loss"] = dpm_loss[:, 0, : args.ego_prediction_horizon].mean()
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
@@ -304,9 +278,7 @@ class Decoder(nn.Module):
         diffusion_time = inputs["diffusion_time"]
 
         gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
-        ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(
-            B, 2 * (self._future_len // 10)
-        )
+        ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
         return {
@@ -385,33 +357,41 @@ class Decoder(nn.Module):
             xt[:, :, 0, :] = current_states
             return xt.reshape(B, P, -1)
 
-        x0 = dpm_sampler(
+        model_wrapper_params = {
+            "classifier_fn": self._guidance_fn,
+            "classifier_kwargs": {
+                "model": self.dit,
+                "model_condition": {
+                    "cross_c": encoding,
+                    "neighbor_current_mask": neighbor_current_mask,
+                },
+                "inputs": inputs,
+                "observation_normalizer": self._observation_normalizer,
+                "state_normalizer": self._state_normalizer,
+            },
+            "guidance_scale": 0.5,
+            "guidance_type": "classifier" if self._guidance_fn is not None else "uncond",
+        }
+
+        noise_schedule = dpm.NoiseScheduleVP()
+
+        model_fn = dpm.model_wrapper(
             self.dit,
-            self._model_type,
-            xT,
-            other_model_params={
+            noise_schedule,
+            model_type=self._model_type,
+            model_kwargs={
                 "cross_c": encoding,
                 "neighbor_current_mask": neighbor_current_mask,
             },
-            dpm_solver_params={
-                "correcting_xt_fn": initial_state_constraint,
-            },
-            model_wrapper_params={
-                "classifier_fn": self._guidance_fn,
-                "classifier_kwargs": {
-                    "model": self.dit,
-                    "model_condition": {
-                        "cross_c": encoding,
-                        "neighbor_current_mask": neighbor_current_mask,
-                    },
-                    "inputs": inputs,
-                    "observation_normalizer": self._observation_normalizer,
-                    "state_normalizer": self._state_normalizer,
-                },
-                "guidance_scale": 0.5,
-                "guidance_type": "classifier" if self._guidance_fn is not None else "uncond",
-            },
+            **model_wrapper_params,
         )
+
+        dpm_solver = dpm.DPM_Solver(
+            model_fn, noise_schedule, correcting_xt_fn=initial_state_constraint
+        )
+
+        x0 = dpm_solver.sample(xT, steps=10, skip_type="logSNR")
+
         x0 = x0.reshape(B, P, (1 + self._future_len) * 4)
         x = x0.reshape(B, P, (1 + self._future_len), 4)
         ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
