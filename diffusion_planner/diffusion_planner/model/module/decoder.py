@@ -47,14 +47,16 @@ def compute_training_loss(
 
     eps = 1e-3
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
+    t = t.view(B, 1, 1, 1)
+    t = t.expand(-1, 1, T + 1, 1)  # [B, 1, T, 1]
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
 
     if model_type == "x_start":
-        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t)
-        std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
+        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+        # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
         xT = mean + std * z
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
@@ -273,7 +275,7 @@ class Decoder(nn.Module):
         P = 1 + self._predicted_neighbor_num
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(
-            B, P, (1 + self._future_len) * 4
+            B, P, (1 + self._future_len), 4
         )
         diffusion_time = inputs["diffusion_time"]
 
