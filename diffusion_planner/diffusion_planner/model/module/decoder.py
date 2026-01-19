@@ -385,6 +385,22 @@ class Decoder(nn.Module):
             )
             return xt.reshape(B, P, -1)
 
+        model_wrapper_params = {
+            "classifier_fn": self._guidance_fn,
+            "classifier_kwargs": {
+                "model": self.dit,
+                "model_condition": {
+                    "cross_c": encoding,
+                    "neighbor_current_mask": neighbor_current_mask,
+                },
+                "inputs": inputs,
+                "observation_normalizer": self._observation_normalizer,
+                "state_normalizer": self._state_normalizer,
+            },
+            "guidance_scale": 0.5,
+            "guidance_type": "classifier" if self._guidance_fn is not None else "uncond",
+        }
+
         noise_schedule = dpm.NoiseScheduleVP()
 
         model_fn = dpm.model_wrapper(
@@ -395,19 +411,7 @@ class Decoder(nn.Module):
                 "cross_c": encoding,
                 "neighbor_current_mask": neighbor_current_mask,
             },
-            guidance_type="classifier" if self._guidance_fn is not None else "uncond",
-            guidance_scale=0.5,
-            classifier_fn=self._guidance_fn,
-            classifier_kwargs={
-                "model": self.dit,
-                "model_condition": {
-                    "cross_c": encoding,
-                    "neighbor_current_mask": neighbor_current_mask,
-                },
-                "inputs": inputs,
-                "observation_normalizer": self._observation_normalizer,
-                "state_normalizer": self._state_normalizer,
-            },
+            **model_wrapper_params,
         )
 
         dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint)
