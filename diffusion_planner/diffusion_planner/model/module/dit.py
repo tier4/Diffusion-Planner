@@ -144,7 +144,8 @@ class DiT(nn.Module):
         P = 33
         D = 4
 
-        self.agent_embedding = nn.Embedding(2, hidden_dim)
+        self.agent_embedding = nn.Embedding(2, D)
+        self.time_embedding = nn.Embedding(100, hidden_dim)
         self.preproj = Mlp(
             in_features=P * D,
             hidden_features=512,
@@ -170,6 +171,17 @@ class DiT(nn.Module):
         assert x.shape[2] == t.shape[2], f"{x.shape[2]=} {t.shape[2]=}"
         B, P, T, D = x.shape
 
+        # Add agent type embedding
+        agent_embedding = torch.cat(
+            [
+                self.agent_embedding.weight[0][None, :],
+                self.agent_embedding.weight[1][None, :].expand(P - 1, -1),
+            ],
+            dim=0,
+        )  # (P, D)
+        agent_embedding = agent_embedding[None, :, None, :].expand(B, -1, -1, -1)  # (B, P, 1, D)
+        x = x + agent_embedding
+
         x = x.permute(0, 2, 1, 3)  # (B, T, P, D)
         t = t.permute(0, 2, 1, 3)  # (B, T, 1, 1)
 
@@ -178,6 +190,10 @@ class DiT(nn.Module):
         y = self.t_embedder(t)  # (B, T, D)
 
         x = self.preproj(x)
+
+        # Added time embedding
+        time_embedding = self.time_embedding.weight[:T]  # (T, D)
+        x = x + time_embedding[None, :, :]
 
         for block in self.blocks:
             x = block(x, cross_c, y)
