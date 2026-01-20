@@ -208,10 +208,6 @@ class Decoder(nn.Module):
 
         self.apply(_basic_init)
 
-        # Initialize timestep embedding MLP:
-        nn.init.normal_(self.dit.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.dit.t_embedder.mlp[2].weight, std=0.02)
-
         # Zero-out output layers:
         nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].bias, 0)
