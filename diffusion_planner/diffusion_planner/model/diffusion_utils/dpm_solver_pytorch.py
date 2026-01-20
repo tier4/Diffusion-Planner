@@ -608,7 +608,7 @@ class DPM_Solver:
         device = x.device
         T = 81
         x = x.reshape(x.shape[0], x.shape[1], T, -1)
-        t_shape = (x.shape[0], 1, T, 1)
+        t_shape = (x.shape[0], x.shape[1], T, 1)
         with torch.no_grad():
             assert steps >= order
             timesteps = self.get_time_steps(
@@ -618,30 +618,30 @@ class DPM_Solver:
             # Init the initial values.
             step = 0
             t = timesteps[step]
-            t_B1T1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-            t_B1T1 = t_B1T1 * prefix_mask
-            t_B1T1 = torch.where(t_B1T1 == 0, t_0, t_B1T1)
+            t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+            t_BPT1 = t_BPT1 * prefix_mask
+            t_BPT1 = torch.where(t_BPT1 == 0, t_0, t_BPT1)
             t_prev_list = [t]
-            model_prev_list = [self.model_fn(x, t_B1T1)]
+            model_prev_list = [self.model_fn(x, t_BPT1)]
             if self.correcting_xt_fn is not None:
                 x = self.correcting_xt_fn(x, t, step)
             # Init the first `order` values by lower order multistep DPM-Solver.
             for step in range(1, order):
                 t = timesteps[step]
-                t_B1T1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_B1T1 = t_B1T1 * prefix_mask
-                t_B1T1 = torch.where(t_B1T1 == 0, t_0, t_B1T1)
+                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+                t_BPT1 = t_BPT1 * prefix_mask
+                t_BPT1 = torch.where(t_BPT1 == 0, t_0, t_BPT1)
                 x = self.multistep_dpm_solver_update(x, model_prev_list, t_prev_list, t, step)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step)
                 t_prev_list.append(t)
-                model_prev_list.append(self.model_fn(x, t_B1T1))
+                model_prev_list.append(self.model_fn(x, t_BPT1))
             # Compute the remaining values by `order`-th order multistep DPM-Solver.
             for step in range(order, steps + 1):
                 t = timesteps[step]
-                t_B1T1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_B1T1 = t_B1T1 * prefix_mask
-                t_B1T1 = torch.where(t_B1T1 == 0, t_0, t_B1T1)
+                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+                t_BPT1 = t_BPT1 * prefix_mask
+                t_BPT1 = torch.where(t_BPT1 == 0, t_0, t_BPT1)
                 # We only use lower order for steps < 10
                 if steps < 10:
                     step_order = min(order, steps + 1 - step)
@@ -656,13 +656,13 @@ class DPM_Solver:
                 t_prev_list[-1] = t
                 # We do not need to evaluate the final model value.
                 if step < steps:
-                    model_prev_list[-1] = self.model_fn(x, t_B1T1)
+                    model_prev_list[-1] = self.model_fn(x, t_BPT1)
             if denoise_to_zero:
                 t = torch.ones((1,)).to(device) * t_0
-                t_B1T1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_B1T1 = t_B1T1 * prefix_mask
-                t_B1T1 = torch.where(t_B1T1 == 0, t_0, t_B1T1)
-                x = self.data_prediction_fn(x, t_B1T1)
+                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+                t_BPT1 = t_BPT1 * prefix_mask
+                t_BPT1 = torch.where(t_BPT1 == 0, t_0, t_BPT1)
+                x = self.data_prediction_fn(x, t_BPT1)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step + 1)
         return x
