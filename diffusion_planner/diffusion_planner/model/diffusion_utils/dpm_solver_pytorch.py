@@ -619,8 +619,7 @@ class DPM_Solver:
             step = 0
             t = timesteps[step]
             t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-            t_BPT1 = t_BPT1 * prefix_mask
-            t_BPT1 = torch.where(t_BPT1 == 0, t_0, t_BPT1)
+            t_BPT1 = torch.where(prefix_mask, t_0, t_BPT1)
             t_prev_list = [t]
             model_prev_list = [self.model_fn(x, t_BPT1)]
             if self.correcting_xt_fn is not None:
@@ -629,8 +628,7 @@ class DPM_Solver:
             for step in range(1, order):
                 t = timesteps[step]
                 t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = t_BPT1 * prefix_mask
-                t_BPT1 = torch.where(t_BPT1 == 0, t_0, t_BPT1)
+                t_BPT1 = torch.where(prefix_mask, t_0, t_BPT1)
                 x = self.multistep_dpm_solver_update(x, model_prev_list, t_prev_list, t, step)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step)
@@ -640,8 +638,7 @@ class DPM_Solver:
             for step in range(order, steps + 1):
                 t = timesteps[step]
                 t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = t_BPT1 * prefix_mask
-                t_BPT1 = torch.where(t_BPT1 == 0, t_0, t_BPT1)
+                t_BPT1 = torch.where(prefix_mask, t_0, t_BPT1)
                 # We only use lower order for steps < 10
                 if steps < 10:
                     step_order = min(order, steps + 1 - step)
@@ -660,8 +657,7 @@ class DPM_Solver:
             if denoise_to_zero:
                 t = torch.ones((1,)).to(device) * t_0
                 t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = t_BPT1 * prefix_mask
-                t_BPT1 = torch.where(t_BPT1 == 0, t_0, t_BPT1)
+                t_BPT1 = torch.where(prefix_mask, t_0, t_BPT1)
                 x = self.data_prediction_fn(x, t_BPT1)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step + 1)
