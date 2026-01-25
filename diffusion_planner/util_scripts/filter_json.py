@@ -143,10 +143,6 @@ if __name__ == "__main__":
             print(f"Saving to {parent_dir / f'{stem}_in_time_range.json'}")
             json.dump(files_in_time_range, f, indent=4)
 
-        with open(parent_dir / f"{stem}_out_of_time_range.json", "w") as f:
-            print(f"Saving to {parent_dir / f'{stem}_out_of_time_range.json'}")
-            json.dump(files_out_of_time_range, f, indent=4)
-
     # prefix filter
     if string_filter is not None:
         files_with_str = [f for f in files if string_filter in f]
