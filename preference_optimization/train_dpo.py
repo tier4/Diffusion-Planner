@@ -22,6 +22,7 @@ import torch.nn.functional as F
 matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from annotation_gui import collect_preferences_gui
+from annotation_gui_gradio import collect_preferences_gui_gradio
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.visualize_input import visualize_inputs
@@ -45,6 +46,13 @@ def parse_args() -> argparse.Namespace:
         choices=["rule", "gui"],
         default="rule",
         help="Use rule-based scoring or GUI annotation to collect preferences.",
+    )
+    parser.add_argument(
+        "--ui_framework",
+        type=str,
+        choices=["tkinter", "gradio"],
+        default="tkinter",
+        help="UI framework for preference annotation.",
     )
     parser.add_argument("--beta", type=float, default=0.1)
     parser.add_argument("--train_epochs", type=int, default=10)
@@ -527,9 +535,20 @@ def main():
 
     for epoch in range(1, args.train_epochs + 1):
         if args.preference_mode == "gui":
-            preferences = collect_preferences_gui(
-                policy_model, model_args, args.train_npz_list, target_count=len(train_npz_paths)
-            )
+            if args.ui_framework == "gradio":
+                preferences = collect_preferences_gui_gradio(
+                    policy_model,
+                    model_args,
+                    args.train_npz_list,
+                    target_count=len(train_npz_paths),
+                )
+            else:
+                preferences = collect_preferences_gui(
+                    policy_model,
+                    model_args,
+                    args.train_npz_list,
+                    target_count=len(train_npz_paths),
+                )
         else:
             preferences = generate_rule_based_preferences(
                 policy_model,

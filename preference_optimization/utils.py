@@ -39,6 +39,22 @@ def calculate_path_length(trajectory: np.ndarray) -> float:
     return float(-np.sum(dists))
 
 
+def calculate_fde(trajectory_1: np.ndarray, trajectory_2: np.ndarray) -> float:
+    """Calculate Final Displacement Error between two trajectories.
+
+    Args:
+        trajectory_1: First trajectory [T, 4] (x, y, heading, velocity)
+        trajectory_2: Second trajectory [T, 4]
+
+    Returns:
+        FDE: Euclidean distance between final positions
+    """
+    final_pos_1 = trajectory_1[-1, :2]  # Last x, y position
+    final_pos_2 = trajectory_2[-1, :2]
+    fde = np.linalg.norm(final_pos_1 - final_pos_2)
+    return float(fde)
+
+
 @torch.no_grad()
 def generate_deterministic_trajectory(
     policy_model,
@@ -92,3 +108,69 @@ def generate_trajectory_pair(
         trajectories.append(ego_prediction)
 
     return trajectories[0], trajectories[1]
+
+
+@torch.no_grad()
+def generate_trajectory_pair_with_retry(
+    policy_model,
+    model_args,
+    data: dict[str, torch.Tensor],
+    noise_scale: float = 2.5,
+    fde_threshold: float = 2.0,
+    max_retries: int = 50,
+    device: torch.device | None = None,
+) -> tuple[np.ndarray, np.ndarray, float, int]:
+    """Generate two trajectories with FDE-based retry logic.
+
+    Args:
+        policy_model: The diffusion planner model
+        model_args: Model arguments
+        data: Input observation data
+        noise_scale: Noise scale for second trajectory
+        fde_threshold: Minimum FDE required between trajectories
+        max_retries: Maximum number of generation attempts
+        device: Computation device
+
+    Returns:
+        tuple: (trajectory_1, trajectory_2, final_fde, attempts_used)
+    """
+    device = device or next(policy_model.parameters()).device
+    data = {k: v.clone().to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    data = model_args.observation_normalizer(data)
+
+    B = data["ego_current_state"].shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+
+    best_fde = 0.0
+    best_pair = None
+
+    for attempt in range(max_retries):
+        trajectories = []
+        for i in range(2):
+            if i == 0:
+                # First trajectory: temperature 0 (deterministic)
+                data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4).to(device)
+            else:
+                # Second trajectory: with random noise
+                data["sampled_trajectories"] = noise_scale * torch.randn(B, P, future_len + 1, 4).to(
+                    device
+                )
+            _, outputs = policy_model(data)
+            ego_prediction = outputs["prediction"][0, 0].cpu().numpy()
+            trajectories.append(ego_prediction)
+
+        traj_1, traj_2 = trajectories[0], trajectories[1]
+        fde = calculate_fde(traj_1, traj_2)
+
+        # Update best pair
+        if fde > best_fde:
+            best_fde = fde
+            best_pair = (traj_1, traj_2)
+
+        # Check if threshold is met
+        if fde >= fde_threshold:
+            return traj_1, traj_2, fde, attempt + 1
+
+    # Max retries reached, return best pair
+    return best_pair[0], best_pair[1], best_fde, max_retries

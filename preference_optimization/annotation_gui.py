@@ -24,13 +24,27 @@ from tkinter import messagebox
 class AnnotationGUI:
     """Tkinter GUI for annotating trajectory preferences."""
 
-    def __init__(self, policy_model, model_args, npz_paths: Sequence[str], target_count: int):
+    def __init__(
+        self,
+        policy_model,
+        model_args,
+        npz_paths: Sequence[str],
+        target_count: int,
+        noise_scale: float = 2.5,
+        fde_threshold: float = 2.0,
+        max_retries: int = 50,
+    ):
         self.policy_model = policy_model
         self.model_args = model_args
         self.device = next(policy_model.parameters()).device
         self.npz_paths = list(npz_paths)
         self.preferences: list[dict] = []
         self.target_count = target_count
+        self.noise_scale = noise_scale
+        self.fde_threshold = fde_threshold
+        self.max_retries = max_retries
+        self.current_fde = 0.0
+        self.current_attempts = 0
 
         seed = random.randint(0, 2**32 - 1)
         torch.manual_seed(seed)
@@ -73,6 +87,64 @@ class AnnotationGUI:
             info_frame, text="Preferences: 0", font=("Arial", 12), anchor="e"
         )
         self.pref_label.pack(side=tk.RIGHT)
+
+        # Parameter controls frame
+        param_frame = tk.Frame(self.root)
+        param_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+
+        # Noise scale
+        tk.Label(param_frame, text="Noise Scale:", font=("Arial", 10)).grid(
+            row=0, column=0, padx=5
+        )
+        self.noise_scale_var = tk.DoubleVar(value=self.noise_scale)
+        tk.Scale(
+            param_frame,
+            from_=0.5,
+            to=5.0,
+            resolution=0.1,
+            orient=tk.HORIZONTAL,
+            variable=self.noise_scale_var,
+            length=200,
+        ).grid(row=0, column=1, padx=5)
+
+        # FDE threshold
+        tk.Label(param_frame, text="FDE Threshold:", font=("Arial", 10)).grid(
+            row=1, column=0, padx=5
+        )
+        self.fde_threshold_var = tk.DoubleVar(value=self.fde_threshold)
+        tk.Scale(
+            param_frame,
+            from_=0.5,
+            to=10.0,
+            resolution=0.1,
+            orient=tk.HORIZONTAL,
+            variable=self.fde_threshold_var,
+            length=200,
+        ).grid(row=1, column=1, padx=5)
+
+        # Max retries
+        tk.Label(param_frame, text="Max Retries:", font=("Arial", 10)).grid(
+            row=2, column=0, padx=5
+        )
+        self.max_retries_var = tk.IntVar(value=self.max_retries)
+        tk.Scale(
+            param_frame,
+            from_=10,
+            to=200,
+            resolution=10,
+            orient=tk.HORIZONTAL,
+            variable=self.max_retries_var,
+            length=200,
+        ).grid(row=2, column=1, padx=5)
+
+        # FDE display
+        self.fde_label = tk.Label(
+            param_frame,
+            text=f"Current FDE: 0.00 (Attempts: 0)",
+            font=("Arial", 11, "bold"),
+            fg="blue",
+        )
+        self.fde_label.grid(row=3, column=0, columnspan=2, pady=5)
 
         control_frame = tk.Frame(self.root, height=120)
         control_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
@@ -238,14 +310,36 @@ class AnnotationGUI:
     def _regenerate_pair(self, update_index: bool = True):
         if self.current_data is None:
             return
-        traj_1, traj_2 = generate_trajectory_pair(
-            self.policy_model, self.model_args, self.current_data, device=self.device
+
+        # Get current parameter values
+        noise_scale = self.noise_scale_var.get()
+        fde_threshold = self.fde_threshold_var.get()
+        max_retries = self.max_retries_var.get()
+
+        # Import the new function
+        from utils import generate_trajectory_pair_with_retry
+
+        traj_1, traj_2, fde, attempts = generate_trajectory_pair_with_retry(
+            self.policy_model,
+            self.model_args,
+            self.current_data,
+            noise_scale=noise_scale,
+            fde_threshold=fde_threshold,
+            max_retries=max_retries,
+            device=self.device,
         )
+
         self.trajectory_1 = traj_1.tolist()
         self.trajectory_2 = traj_2.tolist()
+        self.current_fde = fde
+        self.current_attempts = attempts
+
+        # Update FDE display
+        self.fde_label.config(text=f"Current FDE: {fde:.2f}m (Attempts: {attempts})")
+
         self._visualize()
         if update_index:
-            print("Regenerated trajectory pair for current sample.")
+            print(f"Regenerated trajectory pair. FDE: {fde:.2f}m, Attempts: {attempts}")
 
     def run(self):
         self.root.mainloop()
@@ -284,7 +378,13 @@ class AnnotationGUI:
 
 
 def collect_preferences_gui(
-    policy_model, model_args, npz_list: Path, target_count: int
+    policy_model,
+    model_args,
+    npz_list: Path,
+    target_count: int,
+    noise_scale: float = 2.5,
+    fde_threshold: float = 2.0,
+    max_retries: int = 50,
 ) -> list[dict]:
     """Run GUI preference collection and return annotations."""
     with open(npz_list, "r") as f:
@@ -293,7 +393,15 @@ def collect_preferences_gui(
     was_training = policy_model.training
     policy_model.eval()
 
-    gui = AnnotationGUI(policy_model, model_args, npz_paths, target_count=target_count)
+    gui = AnnotationGUI(
+        policy_model,
+        model_args,
+        npz_paths,
+        target_count=target_count,
+        noise_scale=noise_scale,
+        fde_threshold=fde_threshold,
+        max_retries=max_retries,
+    )
     gui.run()
     prefs = gui.preferences
 
