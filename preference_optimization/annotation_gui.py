@@ -1,214 +1,273 @@
-"""
-GUI-based preference annotation utilities for DPO training.
-"""
+"""Gradio-based preference annotation UI for trajectory comparison."""
 
 import json
 import random
-from collections.abc import Sequence
 from pathlib import Path
 
-import matplotlib
+import gradio as gr
 import numpy as np
 import torch
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+
 from utils import generate_trajectory_pair, load_npz_data
 
-matplotlib.use("TkAgg")
 
-import tkinter as tk
-from tkinter import messagebox
+class PreferenceAnnotator:
+    """Manages state and logic for trajectory preference annotation."""
 
+    def __init__(self, policy_model, model_args, npz_paths: list[str], target_count: int):
+        """Initialize the annotator.
 
-class AnnotationGUI:
-    """Tkinter GUI for annotating trajectory preferences."""
-
-    def __init__(
-        self,
-        policy_model,
-        model_args,
-        npz_paths: Sequence[str],
-        target_count: int,
-        noise_scale: float = 2.5,
-        fde_threshold: float = 2.0,
-        max_retries: int = 50,
-    ):
+        Args:
+            policy_model: The diffusion planner model
+            model_args: Model configuration arguments
+            npz_paths: List of paths to NPZ observation files
+            target_count: Target number of preferences to collect
+        """
         self.policy_model = policy_model
         self.model_args = model_args
         self.device = next(policy_model.parameters()).device
-        self.npz_paths = list(npz_paths)
-        self.preferences: list[dict] = []
+        self.npz_paths = npz_paths
         self.target_count = target_count
-        self.noise_scale = noise_scale
-        self.fde_threshold = fde_threshold
-        self.max_retries = max_retries
-        self.current_fde = 0.0
-        self.current_attempts = 0
 
-        seed = random.randint(0, 2**32 - 1)
-        torch.manual_seed(seed)
-        np.random.seed(seed % (2**32))
-        print(f"GUI annotation seed: {seed}")
-
+        # Annotation state
+        self.preferences: list[dict] = []
         self.current_index = 0
         self.current_data = None
         self.trajectory_1 = None
         self.trajectory_2 = None
+        self.current_fde = 0.0
+        self.current_attempts = 0
 
-        self.root = tk.Tk()
-        self.root.title("Trajectory Annotation")
-        self.root.geometry("1400x1200")
-        self.root.minsize(1400, 1200)
+        # Set random seed for reproducibility
+        seed = random.randint(0, 2**32 - 1)
+        torch.manual_seed(seed)
+        np.random.seed(seed % (2**32))
+        print(f"Annotation seed: {seed}")
 
-        self._build_ui()
+    def load_sample(
+        self, noise_scale: float, fde_threshold: float, max_retries: int
+    ) -> tuple[Figure, Figure, str, str]:
+        """Load current sample and generate trajectory pair.
 
-        if self.npz_paths:
-            self._show_current_sample()
+        Args:
+            noise_scale: Noise scale for trajectory generation
+            fde_threshold: Minimum FDE threshold
+            max_retries: Maximum retry attempts
+
+        Returns:
+            Tuple of (trajectory_plot, velocity_plot, fde_text, progress_text)
+        """
+        if not self.npz_paths or self.current_index >= len(self.npz_paths):
+            return None, None, "No samples available", "Complete"
+
+        npz_path = self.npz_paths[self.current_index]
+        self.current_data = load_npz_data(npz_path, self.device)
+
+        # Generate trajectory pair
+        traj_1, traj_2, fde, attempts = generate_trajectory_pair(
+            self.policy_model,
+            self.model_args,
+            self.current_data,
+            noise_scale=noise_scale,
+            fde_threshold=fde_threshold,
+            max_retries=int(max_retries),
+            device=self.device,
+        )
+
+        self.trajectory_1 = traj_1.tolist()
+        self.trajectory_2 = traj_2.tolist()
+        self.current_fde = fde
+        self.current_attempts = attempts
+
+        # Create visualizations
+        traj_plot = self._create_trajectory_plot()
+        vel_plot = self._create_velocity_plot()
+
+        # Create status text
+        progress_text = (
+            f"Sample {self.current_index + 1}/{len(self.npz_paths)} - {npz_path}\n"
+            f"Preferences: {len(self.preferences)}/{self.target_count}"
+        )
+        fde_text = f"FDE: {fde:.2f}m (Attempts: {attempts})"
+
+        return traj_plot, vel_plot, fde_text, progress_text
+
+    def regenerate(
+        self, noise_scale: float, fde_threshold: float, max_retries: int
+    ) -> tuple[Figure, Figure, str, None]:
+        """Regenerate trajectory pair with current parameters.
+
+        Args:
+            noise_scale: Noise scale for trajectory generation
+            fde_threshold: Minimum FDE threshold
+            max_retries: Maximum retry attempts
+
+        Returns:
+            Tuple of (trajectory_plot, velocity_plot, fde_text, None)
+        """
+        if self.current_data is None:
+            return None, None, "No data loaded", None
+
+        # Generate new pair
+        traj_1, traj_2, fde, attempts = generate_trajectory_pair(
+            self.policy_model,
+            self.model_args,
+            self.current_data,
+            noise_scale=noise_scale,
+            fde_threshold=fde_threshold,
+            max_retries=int(max_retries),
+            device=self.device,
+        )
+
+        self.trajectory_1 = traj_1.tolist()
+        self.trajectory_2 = traj_2.tolist()
+        self.current_fde = fde
+        self.current_attempts = attempts
+
+        traj_plot = self._create_trajectory_plot()
+        vel_plot = self._create_velocity_plot()
+        fde_text = f"FDE: {fde:.2f}m (Attempts: {attempts})"
+
+        print(f"Regenerated pair. FDE: {fde:.2f}m, Attempts: {attempts}")
+
+        return traj_plot, vel_plot, fde_text, None
+
+    def select_winner(
+        self, winner: str, noise_scale: float, fde_threshold: float, max_retries: int
+    ) -> tuple[Figure | None, Figure | None, str, str]:
+        """Record preference and move to next sample.
+
+        Args:
+            winner: Either "trajectory_1" or "trajectory_2"
+            noise_scale: Noise scale for next sample
+            fde_threshold: Minimum FDE threshold
+            max_retries: Maximum retry attempts
+
+        Returns:
+            Tuple of (trajectory_plot, velocity_plot, fde_text, progress_text)
+        """
+        if self.current_data is None:
+            return None, None, "No data loaded", "Error"
+
+        npz_path = self.npz_paths[self.current_index]
+
+        # Determine winner and loser
+        if winner == "trajectory_1":
+            traj_w, traj_l = self.trajectory_1, self.trajectory_2
         else:
-            messagebox.showinfo("Complete", "No samples to annotate!")
-            self.root.destroy()
+            traj_w, traj_l = self.trajectory_2, self.trajectory_1
 
-    def _build_ui(self):
-        info_frame = tk.Frame(self.root)
-        info_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
-
-        self.info_label = tk.Label(info_frame, text="Loading...", font=("Arial", 12), anchor="w")
-        self.info_label.pack(side=tk.LEFT)
-
-        viz_frame = tk.Frame(self.root)
-        viz_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        self.fig = Figure(figsize=(14, 9))
-        self.canvas = FigureCanvasTkAgg(self.fig, master=viz_frame)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-        self.pref_label = tk.Label(
-            info_frame, text="Preferences: 0", font=("Arial", 12), anchor="e"
+        # Record preference
+        self.preferences.append(
+            {"npz_path": npz_path, "trajectory_w": traj_w, "trajectory_l": traj_l}
         )
-        self.pref_label.pack(side=tk.RIGHT)
 
-        # Parameter controls frame
-        param_frame = tk.Frame(self.root)
-        param_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+        print(f"Recorded preference for {npz_path} (Winner: {winner})")
 
-        # Noise scale
-        tk.Label(param_frame, text="Noise Scale:", font=("Arial", 10)).grid(
-            row=0, column=0, padx=5
-        )
-        self.noise_scale_var = tk.DoubleVar(value=self.noise_scale)
-        tk.Scale(
-            param_frame,
-            from_=0.5,
-            to=5.0,
-            resolution=0.1,
-            orient=tk.HORIZONTAL,
-            variable=self.noise_scale_var,
-            length=200,
-        ).grid(row=0, column=1, padx=5)
-
-        # FDE threshold
-        tk.Label(param_frame, text="FDE Threshold:", font=("Arial", 10)).grid(
-            row=1, column=0, padx=5
-        )
-        self.fde_threshold_var = tk.DoubleVar(value=self.fde_threshold)
-        tk.Scale(
-            param_frame,
-            from_=0.5,
-            to=10.0,
-            resolution=0.1,
-            orient=tk.HORIZONTAL,
-            variable=self.fde_threshold_var,
-            length=200,
-        ).grid(row=1, column=1, padx=5)
-
-        # Max retries
-        tk.Label(param_frame, text="Max Retries:", font=("Arial", 10)).grid(
-            row=2, column=0, padx=5
-        )
-        self.max_retries_var = tk.IntVar(value=self.max_retries)
-        tk.Scale(
-            param_frame,
-            from_=10,
-            to=200,
-            resolution=10,
-            orient=tk.HORIZONTAL,
-            variable=self.max_retries_var,
-            length=200,
-        ).grid(row=2, column=1, padx=5)
-
-        # FDE display
-        self.fde_label = tk.Label(
-            param_frame,
-            text=f"Current FDE: 0.00 (Attempts: 0)",
-            font=("Arial", 11, "bold"),
-            fg="blue",
-        )
-        self.fde_label.grid(row=3, column=0, columnspan=2, pady=5)
-
-        control_frame = tk.Frame(self.root, height=120)
-        control_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
-        control_frame.pack_propagate(False)
-
-        back_buttons = tk.Frame(control_frame)
-        back_buttons.pack(side=tk.LEFT, padx=10)
-
-        for step in [1, 10, 30]:
-            tk.Button(
-                back_buttons,
-                text=f"← {step}",
-                command=lambda s=step: self._jump(-s),
-                width=8,
-            ).pack(side=tk.LEFT, padx=5)
-
-        forward_buttons = tk.Frame(control_frame)
-        forward_buttons.pack(side=tk.RIGHT, padx=10)
-        for step in [1, 10, 30]:
-            tk.Button(
-                forward_buttons,
-                text=f"{step} →",
-                command=lambda s=step: self._jump(s),
-                width=8,
-            ).pack(side=tk.LEFT, padx=5)
-
-        button_frame = tk.Frame(self.root, height=240)
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=20)
-        button_frame.pack_propagate(False)
-
-        buttons = [
-            ("Trajectory 1 (Green) is Better", self._select_1, "green"),
-            ("Trajectory 2 (Orange) is Better", self._select_2, "orange"),
-            ("Regenerate Pair", self._regenerate_pair, "purple"),
-        ]
-        for text, command, color in buttons:
-            btn = tk.Button(
-                button_frame,
-                text=text,
-                command=command,
-                font=("Arial", 14, "bold"),
-                bg=color,
-                fg="white",
-                activebackground=color,
-                activeforeground="white",
-                width=25,
-                height=3,
+        # Check if complete
+        if len(self.preferences) >= self.target_count:
+            return (
+                None,
+                None,
+                f"Annotation complete! Collected {len(self.preferences)} samples.",
+                f"Complete: {len(self.preferences)}/{self.target_count}",
             )
-            btn.pack(side=tk.LEFT, expand=True, padx=5)
 
-    def _load_next(self):
-        self.current_index = min(self.current_index + 1, len(self.npz_paths) - 1)
-        self._show_current_sample()
+        # Move to next sample
+        self.current_index = (self.current_index + 1) % len(self.npz_paths)
+        return self.load_sample(noise_scale, fde_threshold, max_retries)
 
-    def _calculate_velocities(
-        self, trajectory: list, ego_current_state: torch.Tensor
-    ) -> np.ndarray:
-        """Calculate velocities in km/h from trajectory points and initial ego state.
+    def jump(
+        self, delta: int, noise_scale: float, fde_threshold: float, max_retries: int
+    ) -> tuple[Figure | None, Figure | None, str, str]:
+        """Jump to a different sample.
+
+        Args:
+            delta: Number of samples to jump (positive or negative)
+            noise_scale: Noise scale for trajectory generation
+            fde_threshold: Minimum FDE threshold
+            max_retries: Maximum retry attempts
+
+        Returns:
+            Tuple of (trajectory_plot, velocity_plot, fde_text, progress_text)
+        """
+        if not self.npz_paths:
+            return None, None, "No samples available", "Error"
+
+        self.current_index = max(0, min(self.current_index + delta, len(self.npz_paths) - 1))
+        return self.load_sample(noise_scale, fde_threshold, max_retries)
+
+    def _create_trajectory_plot(self) -> Figure:
+        """Create trajectory visualization plot."""
+        fig = Figure(figsize=(10, 8))
+        ax = fig.add_subplot(111)
+
+        traj_1_np = np.array(self.trajectory_1)
+        traj_2_np = np.array(self.trajectory_2)
+
+        # Visualize map and context
+        data_cpu = {k: v.cpu() for k, v in self.current_data.items()}
+        visualize_inputs(data_cpu, save_path=None, ax=ax, view_ranges=[60])
+
+        # Plot trajectories
+        ax.plot(
+            traj_1_np[:, 0],
+            traj_1_np[:, 1],
+            "g-",
+            linewidth=3,
+            alpha=0.7,
+            label="Trajectory 1 (Deterministic)",
+        )
+        ax.plot(
+            traj_2_np[:, 0],
+            traj_2_np[:, 1],
+            color="orange",
+            linewidth=3,
+            alpha=0.7,
+            label="Trajectory 2 (Stochastic)",
+        )
+        ax.legend(loc="upper left")
+        ax.set_title("Trajectory Comparison")
+
+        return fig
+
+    def _create_velocity_plot(self) -> Figure:
+        """Create velocity comparison plot."""
+        fig = Figure(figsize=(6, 8))
+        ax = fig.add_subplot(111)
+
+        vel_1 = self._calculate_velocities(self.trajectory_1)
+        vel_2 = self._calculate_velocities(self.trajectory_2)
+
+        time_steps = np.arange(len(vel_1))
+        ax.plot(time_steps, vel_1, "g-", linewidth=2, alpha=0.7, label="Trajectory 1")
+        ax.plot(time_steps, vel_2, color="orange", linewidth=2, alpha=0.7, label="Trajectory 2")
+        ax.set_xlabel("Time Step")
+        ax.set_ylabel("Velocity (km/h)")
+        ax.set_ylim(0, 60)
+        ax.set_title("Velocity Comparison")
+        ax.legend(loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+        return fig
+
+    def _calculate_velocities(self, trajectory: list) -> np.ndarray:
+        """Calculate velocities from trajectory points.
 
         Assumes 1 time step = 0.1 seconds.
+
+        Args:
+            trajectory: List of trajectory points [[x, y, heading, velocity], ...]
+
+        Returns:
+            Array of velocities in km/h
         """
         traj_np = np.array(trajectory)
-        ego_state = ego_current_state.cpu().numpy()[0]
+        ego_state = self.current_data["ego_current_state"].cpu().numpy()[0]
 
+        # Include initial ego position
         positions = np.vstack([ego_state[:2], traj_np[:, :2]])
         velocities = []
 
@@ -223,189 +282,170 @@ class AnnotationGUI:
 
         return np.array(velocities)
 
-    def _visualize(self):
-        self.fig.clear()
-        gs = self.fig.add_gridspec(1, 2, width_ratios=[2, 1])
-        ax_traj = self.fig.add_subplot(gs[0])
-        ax_vel = self.fig.add_subplot(gs[1])
 
-        traj_1_np = np.array(self.trajectory_1)
-        traj_2_np = np.array(self.trajectory_2)
+def create_interface(
+    policy_model, model_args, npz_list: Path, target_count: int
+) -> tuple[gr.Blocks, PreferenceAnnotator]:
+    """Create Gradio interface for preference annotation.
 
-        data_cpu = {k: v.cpu() for k, v in self.current_data.items()}
-        visualize_inputs(data_cpu, save_path=None, ax=ax_traj, view_ranges=[60])
-        ax_traj.plot(
-            traj_1_np[:, 0],
-            traj_1_np[:, 1],
-            "g-",
-            linewidth=3,
-            alpha=0.7,
-            label="Trajectory 1 (Temp=0)",
-        )
-        ax_traj.plot(
-            traj_2_np[:, 0],
-            traj_2_np[:, 1],
-            color="orange",
-            linewidth=3,
-            alpha=0.7,
-            label="Trajectory 2",
-        )
-        ax_traj.legend(loc="upper left")
-        ax_traj.set_title("Trajectories")
+    Args:
+        policy_model: The diffusion planner model
+        model_args: Model configuration arguments
+        npz_list: Path to JSON file containing list of NPZ paths
+        target_count: Target number of preferences to collect
 
-        vel_1 = self._calculate_velocities(
-            self.trajectory_1, self.current_data["ego_current_state"]
-        )
-        vel_2 = self._calculate_velocities(
-            self.trajectory_2, self.current_data["ego_current_state"]
-        )
-
-        time_steps = np.arange(len(vel_1))
-        ax_vel.plot(time_steps, vel_1, "g-", linewidth=2, alpha=0.7, label="Trajectory 1 Velocity")
-        ax_vel.plot(
-            time_steps, vel_2, color="orange", linewidth=2, alpha=0.7, label="Trajectory 2 Velocity"
-        )
-        ax_vel.set_xlabel("Time Step")
-        ax_vel.set_ylabel("Velocity (km/h)")
-        ax_vel.set_ylim(0, 60)
-        ax_vel.set_title("Velocity Comparison")
-        ax_vel.legend(loc="upper right")
-        ax_vel.grid(True, alpha=0.3)
-
-        self.fig.tight_layout()
-        self.canvas.draw()
-
-    def _select_1(self):
-        self._record("trajectory_1")
-
-    def _select_2(self):
-        self._record("trajectory_2")
-
-    def _record(self, winner: str):
-        npz_path = self.npz_paths[self.current_index]
-        if winner == "trajectory_1":
-            traj_w, traj_l = self.trajectory_1, self.trajectory_2
-        else:
-            traj_w, traj_l = self.trajectory_2, self.trajectory_1
-
-        self.preferences.append(
-            {
-                "npz_path": npz_path,
-                "trajectory_w": traj_w,
-                "trajectory_l": traj_l,
-            }
-        )
-        print(f"Recorded preference for {npz_path}")
-
-        if len(self.preferences) >= self.target_count:
-            messagebox.showinfo(
-                "Complete", f"Annotation complete! Collected {len(self.preferences)} samples."
-            )
-            self.root.destroy()
-            return
-
-        self.current_index = (self.current_index + 1) % len(self.npz_paths)
-        self._show_current_sample()
-
-    def _regenerate_pair(self, update_index: bool = True):
-        if self.current_data is None:
-            return
-
-        # Get current parameter values
-        noise_scale = self.noise_scale_var.get()
-        fde_threshold = self.fde_threshold_var.get()
-        max_retries = self.max_retries_var.get()
-
-        # Import the new function
-        from utils import generate_trajectory_pair_with_retry
-
-        traj_1, traj_2, fde, attempts = generate_trajectory_pair_with_retry(
-            self.policy_model,
-            self.model_args,
-            self.current_data,
-            noise_scale=noise_scale,
-            fde_threshold=fde_threshold,
-            max_retries=max_retries,
-            device=self.device,
-        )
-
-        self.trajectory_1 = traj_1.tolist()
-        self.trajectory_2 = traj_2.tolist()
-        self.current_fde = fde
-        self.current_attempts = attempts
-
-        # Update FDE display
-        self.fde_label.config(text=f"Current FDE: {fde:.2f}m (Attempts: {attempts})")
-
-        self._visualize()
-        if update_index:
-            print(f"Regenerated trajectory pair. FDE: {fde:.2f}m, Attempts: {attempts}")
-
-    def run(self):
-        self.root.mainloop()
-
-    def _update_status(self, npz_path: str | None = None):
-        total = max(len(self.npz_paths), 1)
-        current = min(self.current_index + 1, total)
-        path = npz_path or (self.npz_paths[self.current_index] if self.npz_paths else "")
-        self.info_label.config(text=f"Sample {current}/{total} - {path}")
-        self.pref_label.config(text=f"Preferences: {len(self.preferences)}")
-
-    def _jump(self, delta: int):
-        if not self.npz_paths:
-            return
-        self.current_index = max(0, min(self.current_index + delta, len(self.npz_paths) - 1))
-        self._show_current_sample()
-
-    def _show_current_sample(self):
-        if not self.npz_paths:
-            messagebox.showinfo("Complete", "No samples to annotate!")
-            self.root.destroy()
-            return
-
-        self.current_index = max(0, min(self.current_index, len(self.npz_paths) - 1))
-        npz_path = self.npz_paths[self.current_index]
-        self._update_status(npz_path)
-
-        try:
-            self.current_data = load_npz_data(npz_path, self.device)
-            self._regenerate_pair(update_index=False)
-        except Exception as exc:  # pragma: no cover - GUI path
-            messagebox.showerror("Error", f"Failed to load sample:\n{str(exc)}")
-            print(f"Error loading {npz_path}: {exc}")
-            self.current_index = min(self.current_index + 1, len(self.npz_paths) - 1)
-            self._show_current_sample()
-
-
-def collect_preferences_gui(
-    policy_model,
-    model_args,
-    npz_list: Path,
-    target_count: int,
-    noise_scale: float = 2.5,
-    fde_threshold: float = 2.0,
-    max_retries: int = 50,
-) -> list[dict]:
-    """Run GUI preference collection and return annotations."""
+    Returns:
+        Tuple of (gradio_interface, annotator_instance)
+    """
     with open(npz_list, "r") as f:
         npz_paths = json.load(f)
 
+    annotator = PreferenceAnnotator(policy_model, model_args, npz_paths, target_count)
+
+    with gr.Blocks(title="Trajectory Preference Annotation", theme=gr.themes.Soft()) as demo:
+        gr.Markdown("# Trajectory Preference Annotation")
+        gr.Markdown("Select the better trajectory, or regenerate to get a new pair.")
+
+        # Status display
+        with gr.Row():
+            progress_text = gr.Textbox(
+                label="Progress", value="Loading...", interactive=False, scale=2
+            )
+            fde_text = gr.Textbox(
+                label="Current FDE", value="FDE: 0.00m", interactive=False, scale=1
+            )
+
+        # Parameter controls
+        gr.Markdown("## Generation Parameters")
+        with gr.Row():
+            noise_scale = gr.Slider(
+                minimum=0.5,
+                maximum=5.0,
+                value=2.5,
+                step=0.1,
+                label="Noise Scale",
+                info="Controls diversity of stochastic trajectory",
+            )
+            fde_threshold = gr.Slider(
+                minimum=0.5,
+                maximum=10.0,
+                value=2.0,
+                step=0.1,
+                label="FDE Threshold (m)",
+                info="Minimum endpoint distance between trajectories",
+            )
+            max_retries = gr.Slider(
+                minimum=10,
+                maximum=200,
+                value=50,
+                step=10,
+                label="Max Retries",
+                info="Maximum attempts to meet FDE threshold",
+            )
+
+        # Visualizations
+        gr.Markdown("## Trajectory Visualization")
+        with gr.Row():
+            trajectory_plot = gr.Plot(label="Trajectory Comparison")
+            velocity_plot = gr.Plot(label="Velocity Comparison")
+
+        # Action buttons
+        gr.Markdown("## Select Preferred Trajectory")
+        with gr.Row():
+            select_1_btn = gr.Button("✓ Trajectory 1 (Green) is Better", variant="primary", size="lg")
+            select_2_btn = gr.Button("✓ Trajectory 2 (Orange) is Better", variant="primary", size="lg")
+            regenerate_btn = gr.Button("🔄 Regenerate Pair", variant="secondary", size="lg")
+
+        # Navigation
+        gr.Markdown("## Navigation")
+        with gr.Row():
+            prev_30_btn = gr.Button("← 30")
+            prev_10_btn = gr.Button("← 10")
+            prev_1_btn = gr.Button("← 1")
+            next_1_btn = gr.Button("1 →")
+            next_10_btn = gr.Button("10 →")
+            next_30_btn = gr.Button("30 →")
+
+        # Event handlers
+        select_1_btn.click(
+            fn=lambda ns, ft, mr: annotator.select_winner("trajectory_1", ns, ft, mr),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+
+        select_2_btn.click(
+            fn=lambda ns, ft, mr: annotator.select_winner("trajectory_2", ns, ft, mr),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+
+        regenerate_btn.click(
+            fn=lambda ns, ft, mr: annotator.regenerate(ns, ft, mr),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+
+        # Navigation handlers
+        for delta, btn in [
+            (-30, prev_30_btn),
+            (-10, prev_10_btn),
+            (-1, prev_1_btn),
+            (1, next_1_btn),
+            (10, next_10_btn),
+            (30, next_30_btn),
+        ]:
+            btn.click(
+                fn=lambda d=delta, ns=noise_scale, ft=fde_threshold, mr=max_retries: annotator.jump(
+                    d, ns, ft, mr
+                ),
+                inputs=[noise_scale, fde_threshold, max_retries],
+                outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+            )
+
+        # Load first sample on startup
+        demo.load(
+            fn=lambda ns, ft, mr: annotator.load_sample(ns, ft, mr),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+
+    return demo, annotator
+
+
+def collect_preferences(
+    policy_model, model_args, npz_list: Path, target_count: int
+) -> list[dict]:
+    """Collect trajectory preferences via Gradio GUI.
+
+    This function launches a web-based interface for annotating trajectory preferences.
+    The interface will block until the user completes annotation or closes the window.
+
+    Args:
+        policy_model: The diffusion planner model
+        model_args: Model configuration arguments
+        npz_list: Path to JSON file containing list of NPZ observation files
+        target_count: Target number of preferences to collect
+
+    Returns:
+        List of preference dictionaries, each containing:
+            - npz_path: Path to the observation file
+            - trajectory_w: Winning trajectory (as list)
+            - trajectory_l: Losing trajectory (as list)
+    """
     was_training = policy_model.training
     policy_model.eval()
 
-    gui = AnnotationGUI(
-        policy_model,
-        model_args,
-        npz_paths,
-        target_count=target_count,
-        noise_scale=noise_scale,
-        fde_threshold=fde_threshold,
-        max_retries=max_retries,
-    )
-    gui.run()
-    prefs = gui.preferences
+    demo, annotator = create_interface(policy_model, model_args, npz_list, target_count)
+
+    print("Launching Gradio interface...")
+    print("Complete the annotation in your browser. Close the tab when finished.")
+
+    demo.launch(share=False, inbrowser=True)
+
+    preferences = annotator.preferences
 
     if was_training:
         policy_model.train()
 
-    return prefs
+    print(f"Collected {len(preferences)} preferences.")
+    return preferences
