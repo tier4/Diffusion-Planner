@@ -17,6 +17,33 @@ from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
+def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> torch.Tensor:
+    """Generates a prefix mask based on a delay tensor.
+
+    Args:
+        delay: A 1D tensor of shape (B,) with delay values.
+        num_agents: The number of agents (P).
+        max_len: The maximum length of the sequence (T+1 or T_plus_1).
+
+    Returns:
+        A 4D boolean tensor of shape (B, num_agents, max_len, 1) where mask[i, :, j, 0] is True if j <= delay[i].
+    """
+    # Create steps tensor (1, 1, max_len, 1)
+    steps = torch.arange(max_len, device=delay.device).view(1, 1, -1, 1)
+    # Reshape delay to (B, 1, 1, 1) for broadcasting
+    reshaped_delay = delay.reshape(delay.shape[0], 1, 1, 1)
+    # Perform the comparison, result is (B, 1, max_len, 1)
+    mask = steps <= reshaped_delay
+    # Expand to include the num_agents dimension
+    mask = mask.expand(-1, num_agents, -1, -1)  # (B, num_agents, max_len, 1)
+
+    # Always predict for neighbors by setting their mask to False
+    result = torch.zeros_like(mask, dtype=torch.bool)
+    result[:, 0, :, :] = mask[:, 0, :, :]
+
+    return result
+
+
 def compute_training_loss(
     model: nn.Module,
     inputs: dict[str, torch.Tensor],
@@ -48,17 +75,14 @@ def compute_training_loss(
 
     eps = 1e-3
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
-    t = t.unsqueeze(-1).unsqueeze(-1)  # [B, 1, 1]
-    t = t.expand(B, P, T + 1)  # [B, P, T + 1]
+    t = t.view(B, 1, 1, 1)
+    t = t.expand(B, P, T + 1, 1)
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
     max_delay = 20
     delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
-    prefix_mask = torch.arange(T + 1, device=gt_future.device)[None, :] <= delay[:, None]  # [B, T + 1]
-    prefix_mask = prefix_mask[:, None, :].expand(B, 1 + Pn, T + 1)  # [B, P, T + 1]
-    prefix_mask[:, 1:] = False  # always predict for neighbors
+    prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
     t = torch.where(prefix_mask, 0.0, t)
-    t = t.unsqueeze(-1)  # [B, P, T + 1, 1]
 
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
@@ -69,7 +93,7 @@ def compute_training_loss(
         xT = mean + std * z
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
-        xT = torch.where(prefix_mask.unsqueeze(-1), all_gt, xT)  # [B, P, 1 + T, 4]
+        xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, 4]
 
         merged_inputs = {
             **inputs,
@@ -113,7 +137,7 @@ def compute_training_loss(
             + args.coeff_position_lon_loss * position_lon_loss
             + args.coeff_heading_l2_loss * heading_l2_loss
         )  # [B, P, T]
-        dpm_loss[prefix_mask[:, :, 1:]] = 0.0
+        dpm_loss[prefix_mask[:, :, 1:, 0]] = 0.0
         # safety_penalty, safety_logs, _ = compute_safety_penalty(
         #     model_output,
         #     inputs,
@@ -362,9 +386,7 @@ class Decoder(nn.Module):
         B, P, T_plus_1, D = action_prefix.shape
 
         delay = inputs["delay"].to(device=action_prefix.device)
-        delay = torch.clamp(delay, 0, T_plus_1).reshape(B, 1, 1, 1)
-        step_ids = torch.arange(T_plus_1, device=action_prefix.device).view(1, 1, -1, 1)
-        mask = step_ids <= delay
+        mask = generate_prefix_mask(delay, P, T_plus_1)  # (B, P, T_plus_1, 1)
 
         def prefix_constraint(xt, t, step):
             xt = xt.reshape(B, P, -1, 4)
