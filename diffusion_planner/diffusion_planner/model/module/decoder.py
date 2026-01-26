@@ -82,7 +82,7 @@ def compute_training_loss(
     max_delay = 20
     delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
     prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
-    t = torch.where(prefix_mask, 0.0, t)
+    t = torch.where(prefix_mask, eps, t)
 
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
