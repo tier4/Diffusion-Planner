@@ -39,7 +39,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     turn_indicator_change_correct = 0.0
     turn_indicator_change_total = 0
 
-    delay = 2
+    delay = 0
 
     for inputs in val_loader:
         inputs = {key: value.to(device) for key, value in inputs.items()}
