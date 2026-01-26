@@ -585,7 +585,7 @@ class DPM_Solver:
         Args:
             x: (B, P, T, D)
             steps: A `int`. The total number of function evaluations (NFE).
-            prefix_mask: (B, 1, T, 1)
+            prefix_mask: (B, P, T, 1)
             skip_type: A `str`. The type for the spacing of the time steps. 'time_uniform' or 'logSNR' or 'time_quadratic'.
         Returns:
             x_end: A pytorch tensor. The approximated solution at time `t_end`.
