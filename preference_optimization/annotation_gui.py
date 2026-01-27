@@ -10,7 +10,7 @@ import torch
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from matplotlib.figure import Figure
 
-from utils import generate_trajectory_pair, load_npz_data
+from preference_optimization.utils import generate_trajectory_pair, load_npz_data
 
 
 class PreferenceAnnotator:
@@ -39,6 +39,7 @@ class PreferenceAnnotator:
         self.trajectory_2 = None
         self.current_fde = 0.0
         self.current_attempts = 0
+        self.annotation_complete = False
 
         # Set random seed for reproducibility
         seed = random.randint(0, 2**32 - 1)
@@ -59,6 +60,9 @@ class PreferenceAnnotator:
         Returns:
             Tuple of (trajectory_plot, velocity_plot, fde_text, progress_text)
         """
+        if self.annotation_complete:
+            return None, None, "Annotation complete!", self._format_progress()
+
         if not self.npz_paths or self.current_index >= len(self.npz_paths):
             return None, None, "No samples available", "Complete"
 
@@ -70,8 +74,8 @@ class PreferenceAnnotator:
             self.policy_model,
             self.model_args,
             self.current_data,
-            noise_scale=noise_scale,
-            fde_threshold=fde_threshold,
+            noise_scale=float(noise_scale),
+            fde_threshold=float(fde_threshold),
             max_retries=int(max_retries),
             device=self.device,
         )
@@ -86,17 +90,14 @@ class PreferenceAnnotator:
         vel_plot = self._create_velocity_plot()
 
         # Create status text
-        progress_text = (
-            f"Sample {self.current_index + 1}/{len(self.npz_paths)} - {npz_path}\n"
-            f"Preferences: {len(self.preferences)}/{self.target_count}"
-        )
         fde_text = f"FDE: {fde:.2f}m (Attempts: {attempts})"
+        progress_text = self._format_progress()
 
         return traj_plot, vel_plot, fde_text, progress_text
 
     def regenerate(
         self, noise_scale: float, fde_threshold: float, max_retries: int
-    ) -> tuple[Figure, Figure, str, None]:
+    ) -> tuple[Figure, Figure, str, str]:
         """Regenerate trajectory pair with current parameters.
 
         Args:
@@ -105,18 +106,18 @@ class PreferenceAnnotator:
             max_retries: Maximum retry attempts
 
         Returns:
-            Tuple of (trajectory_plot, velocity_plot, fde_text, None)
+            Tuple of (trajectory_plot, velocity_plot, fde_text, progress_text)
         """
         if self.current_data is None:
-            return None, None, "No data loaded", None
+            return None, None, "No data loaded", self._format_progress()
 
         # Generate new pair
         traj_1, traj_2, fde, attempts = generate_trajectory_pair(
             self.policy_model,
             self.model_args,
             self.current_data,
-            noise_scale=noise_scale,
-            fde_threshold=fde_threshold,
+            noise_scale=float(noise_scale),
+            fde_threshold=float(fde_threshold),
             max_retries=int(max_retries),
             device=self.device,
         )
@@ -129,10 +130,11 @@ class PreferenceAnnotator:
         traj_plot = self._create_trajectory_plot()
         vel_plot = self._create_velocity_plot()
         fde_text = f"FDE: {fde:.2f}m (Attempts: {attempts})"
+        progress_text = self._format_progress()
 
         print(f"Regenerated pair. FDE: {fde:.2f}m, Attempts: {attempts}")
 
-        return traj_plot, vel_plot, fde_text, None
+        return traj_plot, vel_plot, fde_text, progress_text
 
     def select_winner(
         self, winner: str, noise_scale: float, fde_threshold: float, max_retries: int
@@ -168,12 +170,30 @@ class PreferenceAnnotator:
 
         # Check if complete
         if len(self.preferences) >= self.target_count:
-            return (
-                None,
-                None,
-                f"Annotation complete! Collected {len(self.preferences)} samples.",
-                f"Complete: {len(self.preferences)}/{self.target_count}",
+            self.annotation_complete = True
+            complete_msg = (
+                f"✅ Annotation complete!\n\n"
+                f"Collected {len(self.preferences)} preferences.\n\n"
+                f"The server will close automatically in 3 seconds.\n"
+                f"Training will start automatically."
             )
+            print(f"\n{'='*60}")
+            print("ANNOTATION COMPLETE!")
+            print(f"Collected {len(self.preferences)} preferences")
+            print(f"{'='*60}\n")
+
+            # Schedule server shutdown
+            import threading
+            def shutdown_server():
+                import time
+                time.sleep(3)
+                if hasattr(self, '_demo') and self._demo is not None:
+                    print("Closing Gradio server...")
+                    self._demo.close()
+
+            threading.Thread(target=shutdown_server, daemon=True).start()
+
+            return None, None, complete_msg, f"Complete: {len(self.preferences)}/{self.target_count}"
 
         # Move to next sample
         self.current_index = (self.current_index + 1) % len(self.npz_paths)
@@ -196,8 +216,22 @@ class PreferenceAnnotator:
         if not self.npz_paths:
             return None, None, "No samples available", "Error"
 
+        # Ensure delta is integer
+        delta = int(delta)
         self.current_index = max(0, min(self.current_index + delta, len(self.npz_paths) - 1))
         return self.load_sample(noise_scale, fde_threshold, max_retries)
+
+    def _format_progress(self) -> str:
+        """Format progress text."""
+        if not self.npz_paths:
+            return "No samples"
+
+        npz_path = self.npz_paths[self.current_index] if self.current_index < len(self.npz_paths) else ""
+        return (
+            f"Sample: {self.current_index + 1}/{len(self.npz_paths)}\n"
+            f"File: {npz_path}\n"
+            f"Preferences collected: {len(self.preferences)}/{self.target_count}"
+        )
 
     def _create_trajectory_plot(self) -> Figure:
         """Create trajectory visualization plot."""
@@ -302,21 +336,37 @@ def create_interface(
 
     annotator = PreferenceAnnotator(policy_model, model_args, npz_paths, target_count)
 
-    with gr.Blocks(title="Trajectory Preference Annotation", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# Trajectory Preference Annotation")
-        gr.Markdown("Select the better trajectory, or regenerate to get a new pair.")
+    with gr.Blocks(title="Trajectory Preference Annotation") as demo:
+        gr.Markdown("# 🚗 Trajectory Preference Annotation")
+        gr.Markdown(
+            "**Instructions:** Compare two trajectories and select which one is better. "
+            "Consider safety, comfort, and efficiency."
+        )
 
         # Status display
         with gr.Row():
             progress_text = gr.Textbox(
-                label="Progress", value="Loading...", interactive=False, scale=2
+                label="📊 Progress",
+                value="Loading...",
+                interactive=False,
+                scale=2,
+                lines=3,
             )
             fde_text = gr.Textbox(
-                label="Current FDE", value="FDE: 0.00m", interactive=False, scale=1
+                label="📏 Final Displacement Error",
+                value="FDE: 0.00m",
+                interactive=False,
+                scale=1,
+                lines=3,
             )
 
         # Parameter controls
-        gr.Markdown("## Generation Parameters")
+        gr.Markdown("## ⚙️ Generation Parameters")
+        gr.Markdown(
+            "**Noise Scale:** Controls diversity of the stochastic trajectory\n\n"
+            "**FDE Threshold:** Minimum distance between trajectory endpoints (meters)\n\n"
+            "**Max Retries:** Maximum attempts to meet FDE threshold"
+        )
         with gr.Row():
             noise_scale = gr.Slider(
                 minimum=0.5,
@@ -324,7 +374,6 @@ def create_interface(
                 value=2.5,
                 step=0.1,
                 label="Noise Scale",
-                info="Controls diversity of stochastic trajectory",
             )
             fde_threshold = gr.Slider(
                 minimum=0.5,
@@ -332,7 +381,6 @@ def create_interface(
                 value=2.0,
                 step=0.1,
                 label="FDE Threshold (m)",
-                info="Minimum endpoint distance between trajectories",
             )
             max_retries = gr.Slider(
                 minimum=10,
@@ -340,31 +388,42 @@ def create_interface(
                 value=50,
                 step=10,
                 label="Max Retries",
-                info="Maximum attempts to meet FDE threshold",
             )
 
         # Visualizations
-        gr.Markdown("## Trajectory Visualization")
+        gr.Markdown("## 🎨 Trajectory Visualization")
         with gr.Row():
             trajectory_plot = gr.Plot(label="Trajectory Comparison")
             velocity_plot = gr.Plot(label="Velocity Comparison")
 
         # Action buttons
-        gr.Markdown("## Select Preferred Trajectory")
+        gr.Markdown("## ✅ Select Preferred Trajectory")
         with gr.Row():
-            select_1_btn = gr.Button("✓ Trajectory 1 (Green) is Better", variant="primary", size="lg")
-            select_2_btn = gr.Button("✓ Trajectory 2 (Orange) is Better", variant="primary", size="lg")
-            regenerate_btn = gr.Button("🔄 Regenerate Pair", variant="secondary", size="lg")
+            select_1_btn = gr.Button(
+                "✓ Trajectory 1 (Green) is Better",
+                variant="primary",
+                size="lg",
+            )
+            select_2_btn = gr.Button(
+                "✓ Trajectory 2 (Orange) is Better",
+                variant="primary",
+                size="lg",
+            )
+            regenerate_btn = gr.Button(
+                "🔄 Regenerate Pair",
+                variant="secondary",
+                size="lg",
+            )
 
         # Navigation
-        gr.Markdown("## Navigation")
+        gr.Markdown("## 🧭 Navigation (Jump between samples)")
         with gr.Row():
-            prev_30_btn = gr.Button("← 30")
-            prev_10_btn = gr.Button("← 10")
-            prev_1_btn = gr.Button("← 1")
-            next_1_btn = gr.Button("1 →")
-            next_10_btn = gr.Button("10 →")
-            next_30_btn = gr.Button("30 →")
+            prev_30_btn = gr.Button("← 30", size="sm")
+            prev_10_btn = gr.Button("← 10", size="sm")
+            prev_1_btn = gr.Button("← 1", size="sm")
+            next_1_btn = gr.Button("1 →", size="sm")
+            next_10_btn = gr.Button("10 →", size="sm")
+            next_30_btn = gr.Button("30 →", size="sm")
 
         # Event handlers
         select_1_btn.click(
@@ -385,22 +444,40 @@ def create_interface(
             outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
         )
 
-        # Navigation handlers
-        for delta, btn in [
-            (-30, prev_30_btn),
-            (-10, prev_10_btn),
-            (-1, prev_1_btn),
-            (1, next_1_btn),
-            (10, next_10_btn),
-            (30, next_30_btn),
-        ]:
-            btn.click(
-                fn=lambda d=delta, ns=noise_scale, ft=fde_threshold, mr=max_retries: annotator.jump(
-                    d, ns, ft, mr
-                ),
-                inputs=[noise_scale, fde_threshold, max_retries],
-                outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
-            )
+        # Navigation handlers - fix lambda closure issue
+        def make_jump_fn(delta_val):
+            return lambda ns, ft, mr: annotator.jump(delta_val, ns, ft, mr)
+
+        prev_30_btn.click(
+            fn=make_jump_fn(-30),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+        prev_10_btn.click(
+            fn=make_jump_fn(-10),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+        prev_1_btn.click(
+            fn=make_jump_fn(-1),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+        next_1_btn.click(
+            fn=make_jump_fn(1),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+        next_10_btn.click(
+            fn=make_jump_fn(10),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
+        next_30_btn.click(
+            fn=make_jump_fn(30),
+            inputs=[noise_scale, fde_threshold, max_retries],
+            outputs=[trajectory_plot, velocity_plot, fde_text, progress_text],
+        )
 
         # Load first sample on startup
         demo.load(
@@ -418,7 +495,7 @@ def collect_preferences(
     """Collect trajectory preferences via Gradio GUI.
 
     This function launches a web-based interface for annotating trajectory preferences.
-    The interface will block until the user completes annotation or closes the window.
+    The interface will block until annotation is complete.
 
     Args:
         policy_model: The diffusion planner model
@@ -427,20 +504,48 @@ def collect_preferences(
         target_count: Target number of preferences to collect
 
     Returns:
-        List of preference dictionaries, each containing:
-            - npz_path: Path to the observation file
-            - trajectory_w: Winning trajectory (as list)
-            - trajectory_l: Losing trajectory (as list)
+        List of preference dictionaries
     """
+    import time
+
     was_training = policy_model.training
     policy_model.eval()
 
     demo, annotator = create_interface(policy_model, model_args, npz_list, target_count)
 
-    print("Launching Gradio interface...")
-    print("Complete the annotation in your browser. Close the tab when finished.")
+    # Store demo reference in annotator for shutdown
+    annotator._demo = demo
 
-    demo.launch(share=False, inbrowser=True)
+    print("Launching Gradio interface...")
+    print("Complete the annotation in your browser.")
+    print("The server will close automatically when annotation is complete.")
+    print("(Or press Ctrl+C to interrupt)")
+
+    try:
+        # Launch without blocking
+        demo.launch(
+            share=False,
+            inbrowser=True,
+            prevent_thread_lock=True,  # Don't block
+            show_error=True,
+        )
+
+        # Poll for completion
+        print("\nWaiting for annotation to complete...")
+        while not annotator.annotation_complete:
+            time.sleep(1)
+
+        # Wait a bit for the final message to display
+        time.sleep(3)
+
+    except KeyboardInterrupt:
+        print("\nAnnotation interrupted by user.")
+    finally:
+        try:
+            demo.close()
+            print("Gradio server closed.")
+        except:
+            pass
 
     preferences = annotator.preferences
 

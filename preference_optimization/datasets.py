@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils import load_npz_data
+from preference_optimization.utils import load_npz_data
 
 
 class DPODataset(Dataset):

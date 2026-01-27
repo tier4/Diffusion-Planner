@@ -1,21 +1,36 @@
 """Direct Preference Optimization (DPO) Training for Diffusion Planner.
 
 This script trains a trajectory planning model using human preferences via DPO.
+
+Usage:
+    cd /path/to/Diffusion-Planner
+    python3 -m preference_optimization.train_dpo [args]
+
+Or:
+    cd /path/to/Diffusion-Planner/preference_optimization
+    python3 train_dpo.py [args]
 """
 
 import argparse
 import json
+import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# Ensure parent directory is in path for diffusion_planner imports
+parent_dir = Path(__file__).resolve().parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
 
 import torch
 from torch import optim
 
-from annotation_gui import collect_preferences
-from model_utils import load_model
-from preference_collection import generate_rule_based_preferences
-from trainer import DPOTrainer
+from preference_optimization.annotation_gui import collect_preferences
+from preference_optimization.model_utils import load_model
+from preference_optimization.preference_collection import generate_rule_based_preferences
+from preference_optimization.trainer import DPOTrainer
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -63,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--train_epochs",
         type=int,
-        default=10,
+        default=3,
         help="Number of training epochs",
     )
     parser.add_argument(

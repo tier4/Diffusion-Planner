@@ -12,9 +12,9 @@ from torch import optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from datasets import DPODataset, NPZDataset
-from dpo_loss import compute_dpo_loss
-from visualization import visualize_validation
+from preference_optimization.datasets import DPODataset, NPZDataset
+from preference_optimization.dpo_loss import compute_dpo_loss
+from preference_optimization.visualization import visualize_validation
 
 
 class DPOTrainer:

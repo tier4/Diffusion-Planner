@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 
 
 def compute_trajectory_loss(
@@ -57,7 +58,8 @@ def compute_trajectory_loss(
     all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, 1+T, 4]
 
     # Add noise to future part only
-    mean, std = model.sde.marginal_prob(all_gt[..., 1:, :], t)
+    # Use VPSDE for marginal probability (matching training code in decoder.py)
+    mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t)
     std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
 
     if model_args.diffusion_model_type == "flow_matching":
