@@ -390,9 +390,12 @@ class Decoder(nn.Module):
 
         def prefix_constraint(xt, t, step):
             xt = xt.reshape(B, P, -1, 4)
+            # Apply prefix constraint to ego (index 0)
             xt[:, 0, :, :] = torch.where(
                 mask[:, 0, :, :], action_prefix[:, 0, :, :], xt[:, 0, :, :]
             )
+            # Also ensure initial state constraint for all agents (neighbors included)
+            xt[:, :, 0, :] = current_states
             return xt.reshape(B, P, -1)
 
         model_wrapper_params = {
