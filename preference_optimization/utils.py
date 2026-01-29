@@ -109,6 +109,8 @@ def generate_trajectory_pair(
     device = device or next(policy_model.parameters()).device
     data = {k: v.clone().to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     data = model_args.observation_normalizer(data)
+    
+    ego_shape = data["ego_shape"]
 
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
@@ -144,7 +146,7 @@ def generate_trajectory_pair(
 
         # Check if threshold is met
         if fde >= fde_threshold:
-            return traj_1, traj_2, fde, attempt + 1
+            return traj_1, traj_2, fde, attempt + 1, ego_shape
 
     # Max retries reached, return best pair found
-    return best_pair[0], best_pair[1], best_fde, max_retries
+    return best_pair[0], best_pair[1], best_fde, max_retries, ego_shape
