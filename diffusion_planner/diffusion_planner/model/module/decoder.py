@@ -79,7 +79,7 @@ def compute_training_loss(
     t = t.expand(B, P, T + 1, 1)
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
-    max_delay = 20
+    max_delay = 5
     delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
     prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
     t = torch.where(prefix_mask, eps, t)
