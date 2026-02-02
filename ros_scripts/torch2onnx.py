@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("root_dir", type=Path)
     parser.add_argument("--eval_npz", type=Path, default=None)
+    parser.add_argument("--use_ema", action="store_true")
     args = parser.parse_args()
     return args
 
@@ -141,13 +142,18 @@ def build_inputs_from_npz(npz_path: Path) -> dict:
 
 
 def convert_model(
-    config_json_path: str, ckpt_path: str, onnx_path: str, eval_npz_path: Path | None
+    config_json_path: str,
+    ckpt_path: str,
+    onnx_path: str,
+    eval_npz_path: Path | None,
+    use_ema: bool = False,
 ):
     """Convert a single PyTorch model to ONNX format."""
     print(f"\n{'=' * 80}")
     print(f"Converting: {ckpt_path}")
     print(f"Config: {config_json_path}")
     print(f"Output: {onnx_path}")
+    print(f"Using EMA: {use_ema}")
     print(f"{'=' * 80}\n")
 
     # Load config
@@ -205,7 +211,14 @@ def convert_model(
     model.decoder.training = False
 
     ckpt = torch.load(ckpt_path)
-    state_dict = ckpt["model"]
+    if use_ema:
+        if "ema_state_dict" not in ckpt:
+            raise ValueError(f"EMA state dict not found in checkpoint: {ckpt_path}")
+        state_dict = ckpt["ema_state_dict"]
+        print("Loading EMA model weights")
+    else:
+        state_dict = ckpt["model"]
+        print("Loading regular model weights")
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
 
@@ -314,7 +327,8 @@ if __name__ == "__main__":
     for pth_file in pth_files:
         pth_dir = pth_file.parent
         config_file = pth_dir / "args.json"
-        onnx_file = pth_dir / "model.onnx"
+        onnx_filename = "model_ema.onnx" if args.use_ema else "model.onnx"
+        onnx_file = pth_dir / onnx_filename
 
         print(f"\n{'#' * 80}")
         print(f"Processing: {pth_file.relative_to(root_dir)}")
@@ -331,6 +345,7 @@ if __name__ == "__main__":
             ckpt_path=str(pth_file),
             onnx_path=str(onnx_file),
             eval_npz_path=args.eval_npz,
+            use_ema=args.use_ema,
         )
 
     # Print summary
