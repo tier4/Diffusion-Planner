@@ -48,15 +48,17 @@ class PreferenceAnnotator:
         print(f"Annotation seed: {seed}")
 
     def load_sample(
-        self, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5
+        self, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = False
     ) -> tuple[Figure, Figure, Figure, str, str, str]:
         """Load current sample and generate trajectory pair.
 
         Args:
             noise_scale: Noise scale for trajectory generation
-            fde_threshold: Minimum FDE threshold
+            fde_threshold: FDE threshold (min between trajectories or max to GT)
             max_retries: Maximum retry attempts
             zoom_level: Zoom level 1-10 (1=zoomed out, 10=zoomed in)
+            gt_similarity_mode: If True, find stochastic trajectory close to GT
 
         Returns:
             Tuple of (trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_text)
@@ -70,6 +72,14 @@ class PreferenceAnnotator:
         npz_path = self.npz_paths[self.current_index]
         self.current_data = load_npz_data(npz_path, self.device)
 
+        # Get ground truth trajectory for GT-similarity mode
+        gt_trajectory = None
+        if gt_similarity_mode and "ego_agent_future" in self.current_data:
+            gt_trajectory = self.current_data["ego_agent_future"][0].cpu().numpy()
+
+        # Store mode for status display
+        self.gt_similarity_mode = gt_similarity_mode
+
         # Generate trajectory pair
         traj_1, traj_2, fde, attempts, ego_shape = generate_trajectory_pair(
             self.policy_model,
@@ -79,6 +89,8 @@ class PreferenceAnnotator:
             fde_threshold=float(fde_threshold),
             max_retries=int(max_retries),
             device=self.device,
+            gt_similarity_mode=gt_similarity_mode,
+            gt_trajectory=gt_trajectory,
         )
 
         self.ego_shape = ego_shape.tolist() # [1, 3] wheel_base length, width
@@ -95,29 +107,42 @@ class PreferenceAnnotator:
         vel_plot = self._create_velocity_plot(time_step=default_time)
         lat_plot = self._create_lateral_curvature_plot(time_step=default_time)
 
-        # Create status text
-        fde_text = f"FDE: {fde:.2f}m (Attempts: {attempts})"
+        # Create status text based on mode
+        if gt_similarity_mode:
+            fde_text = f"FDE (vs GT): {fde:.2f}m (Attempts: {attempts})"
+        else:
+            fde_text = f"FDE (vs Det.): {fde:.2f}m (Attempts: {attempts})"
         progress_text = self._format_progress()
         metrics_text = self._format_metrics_comparison()
 
         return traj_plot, vel_plot, lat_plot, fde_text, progress_text, metrics_text
 
     def regenerate(
-        self, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5
+        self, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = False
     ) -> tuple[Figure, Figure, Figure, str, str, str]:
         """Regenerate trajectory pair with current parameters.
 
         Args:
             noise_scale: Noise scale for trajectory generation
-            fde_threshold: Minimum FDE threshold
+            fde_threshold: FDE threshold (min between trajectories or max to GT)
             max_retries: Maximum retry attempts
             zoom_level: Zoom level 1-10 (1=zoomed out, 10=zoomed in)
+            gt_similarity_mode: If True, find stochastic trajectory close to GT
 
         Returns:
             Tuple of (trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_text)
         """
         if self.current_data is None:
             return None, None, None, "No data loaded", self._format_progress(), ""
+
+        # Get ground truth trajectory for GT-similarity mode
+        gt_trajectory = None
+        if gt_similarity_mode and "ego_agent_future" in self.current_data:
+            gt_trajectory = self.current_data["ego_agent_future"][0].cpu().numpy()
+
+        # Store mode for status display
+        self.gt_similarity_mode = gt_similarity_mode
 
         # Generate new pair
         traj_1, traj_2, fde, attempts, ego_shape = generate_trajectory_pair(
@@ -128,6 +153,8 @@ class PreferenceAnnotator:
             fde_threshold=float(fde_threshold),
             max_retries=int(max_retries),
             device=self.device,
+            gt_similarity_mode=gt_similarity_mode,
+            gt_trajectory=gt_trajectory,
         )
 
         self.ego_shape = ego_shape.tolist()
@@ -143,7 +170,12 @@ class PreferenceAnnotator:
         traj_plot = self._create_trajectory_plot(time_step=default_time, view_range=view_range)
         vel_plot = self._create_velocity_plot(time_step=default_time)
         lat_plot = self._create_lateral_curvature_plot(time_step=default_time)
-        fde_text = f"FDE: {fde:.2f}m (Attempts: {attempts})"
+
+        # Create status text based on mode
+        if gt_similarity_mode:
+            fde_text = f"FDE (vs GT): {fde:.2f}m (Attempts: {attempts})"
+        else:
+            fde_text = f"FDE (vs Det.): {fde:.2f}m (Attempts: {attempts})"
         progress_text = self._format_progress()
         metrics_text = self._format_metrics_comparison()
 
@@ -152,16 +184,18 @@ class PreferenceAnnotator:
         return traj_plot, vel_plot, lat_plot, fde_text, progress_text, metrics_text
 
     def select_winner(
-        self, winner: str, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5
+        self, winner: str, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = False
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str]:
         """Record preference and move to next sample.
 
         Args:
             winner: Either "trajectory_1" or "trajectory_2"
             noise_scale: Noise scale for next sample
-            fde_threshold: Minimum FDE threshold
+            fde_threshold: FDE threshold (min between trajectories or max to GT)
             max_retries: Maximum retry attempts
             zoom_level: Zoom level 1-10 (1=zoomed out, 10=zoomed in)
+            gt_similarity_mode: If True, find stochastic trajectory close to GT
 
         Returns:
             Tuple of (trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_text)
@@ -213,19 +247,21 @@ class PreferenceAnnotator:
 
         # Move to next sample
         self.current_index = (self.current_index + 1) % len(self.npz_paths)
-        return self.load_sample(noise_scale, fde_threshold, max_retries, zoom_level)
+        return self.load_sample(noise_scale, fde_threshold, max_retries, zoom_level, gt_similarity_mode)
 
     def jump(
-        self, delta: int, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5
+        self, delta: int, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = False
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str]:
         """Jump to a different sample.
 
         Args:
             delta: Number of samples to jump (positive or negative)
             noise_scale: Noise scale for trajectory generation
-            fde_threshold: Minimum FDE threshold
+            fde_threshold: FDE threshold (min between trajectories or max to GT)
             max_retries: Maximum retry attempts
             zoom_level: Zoom level 1-10 (1=zoomed out, 10=zoomed in)
+            gt_similarity_mode: If True, find stochastic trajectory close to GT
 
         Returns:
             Tuple of (trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_text)
@@ -236,7 +272,7 @@ class PreferenceAnnotator:
         # Ensure delta is integer
         delta = int(delta)
         self.current_index = max(0, min(self.current_index + delta, len(self.npz_paths) - 1))
-        return self.load_sample(noise_scale, fde_threshold, max_retries, zoom_level)
+        return self.load_sample(noise_scale, fde_threshold, max_retries, zoom_level, gt_similarity_mode)
 
     def update_time_display(
         self, time_step: int, zoom_level: int = 5
@@ -997,7 +1033,7 @@ def create_interface(
         gr.Markdown("## ⚙️ Generation Parameters")
         gr.Markdown(
             "**Noise Scale:** Controls diversity of the stochastic trajectory\n\n"
-            "**FDE Threshold:** Minimum distance between trajectory endpoints (meters)\n\n"
+            "**FDE Threshold:** Min FDE between trajectories (diversity mode) OR max FDE to GT (GT mode)\n\n"
             "**Max Retries:** Maximum attempts to meet FDE threshold"
         )
         with gr.Row():
@@ -1021,6 +1057,14 @@ def create_interface(
                 value=50,
                 step=10,
                 label="Max Retries",
+            )
+        
+        # GT Similarity Mode toggle
+        with gr.Row():
+            gt_similarity_checkbox = gr.Checkbox(
+                value=False,
+                label="🎯 GT Similarity Mode (find stochastic trajectory close to ground truth)",
+                info="When enabled: retry until FDE(stochastic, GT) <= threshold. When disabled: retry until FDE(det., stochastic) >= threshold."
             )
 
         # Visualizations - Trajectory with zoom slider in one column
@@ -1089,14 +1133,14 @@ def create_interface(
         # Event handlers
         # Orange (stochastic) is selected as winner, green (deterministic) as loser
         select_orange_btn.click(
-            fn=lambda ns, ft, mr, zl: annotator.select_winner("trajectory_2", ns, ft, mr, zl),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            fn=lambda ns, ft, mr, zl, gt: annotator.select_winner("trajectory_2", ns, ft, mr, zl, gt),
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
 
         regenerate_btn.click(
-            fn=lambda ns, ft, mr, zl: annotator.regenerate(ns, ft, mr, zl),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            fn=lambda ns, ft, mr, zl, gt: annotator.regenerate(ns, ft, mr, zl, gt),
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
 
@@ -1116,43 +1160,43 @@ def create_interface(
 
         # Navigation handlers - fix lambda closure issue
         def make_jump_fn(delta_val):
-            return lambda ns, ft, mr, zl: annotator.jump(delta_val, ns, ft, mr, zl)
+            return lambda ns, ft, mr, zl, gt: annotator.jump(delta_val, ns, ft, mr, zl, gt)
 
         prev_30_btn.click(
             fn=make_jump_fn(-30),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
         prev_10_btn.click(
             fn=make_jump_fn(-10),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
         prev_1_btn.click(
             fn=make_jump_fn(-1),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
         next_1_btn.click(
             fn=make_jump_fn(1),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
         next_10_btn.click(
             fn=make_jump_fn(10),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
         next_30_btn.click(
             fn=make_jump_fn(30),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
 
         # Load first sample on startup
         demo.load(
-            fn=lambda ns, ft, mr, zl: annotator.load_sample(ns, ft, mr, zl),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider],
+            fn=lambda ns, ft, mr, zl, gt: annotator.load_sample(ns, ft, mr, zl, gt),
+            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
             outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
         )
 
