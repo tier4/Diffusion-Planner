@@ -72,6 +72,24 @@ def calculate_fde(trajectory_1: np.ndarray, trajectory_2: np.ndarray) -> float:
     return float(fde)
 
 
+def calculate_ade(trajectory_1: np.ndarray, trajectory_2: np.ndarray) -> float:
+    """Calculate Average Displacement Error between two trajectories.
+
+    ADE is the mean Euclidean distance across all timesteps.
+
+    Args:
+        trajectory_1: First trajectory [T, 4] (x, y, cos, sin)
+        trajectory_2: Second trajectory [T, 4] or [T, 3] (x, y, heading)
+
+    Returns:
+        Mean Euclidean distance across all timesteps (in meters)
+    """
+    positions_1 = trajectory_1[:, :2]
+    positions_2 = trajectory_2[:, :2]
+    displacements = np.sqrt(np.sum((positions_1 - positions_2) ** 2, axis=1))
+    return float(np.mean(displacements))
+
+
 @torch.no_grad()
 def generate_trajectory_pair(
     policy_model,
@@ -79,20 +97,21 @@ def generate_trajectory_pair(
     data: dict[str, torch.Tensor],
     noise_scale: float = 2.5,
     fde_threshold: float = 2.0,
+    ade_threshold: float = 1.0,
     max_retries: int = 50,
     device: torch.device | None = None,
-    gt_similarity_mode: bool = False,
+    gt_similarity_mode: bool = True,
     gt_trajectory: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, int, torch.Tensor]:
-    """Generate two diverse trajectories with FDE-based retry logic.
+    """Generate two diverse trajectories with threshold-based retry logic.
 
     Generates pairs of trajectories:
     - First trajectory: deterministic (temperature=0)
     - Second trajectory: stochastic (with noise)
 
     Two modes available:
-    - Diversity mode (default): Retry until FDE between trajectories >= threshold
-    - GT-similarity mode: Retry until FDE between stochastic and GT <= threshold
+    - Diversity mode: Retry until FDE between trajectories >= fde_threshold
+    - GT-similarity mode (default): Retry until ADE between stochastic and GT <= ade_threshold
 
     Args:
         policy_model: The diffusion planner model
@@ -100,17 +119,17 @@ def generate_trajectory_pair(
         data: Input observation data
         noise_scale: Noise scale for second trajectory (default: 2.5)
         fde_threshold: FDE threshold - minimum between trajectories (diversity mode)
-                       or maximum to GT (GT-similarity mode)
+        ade_threshold: ADE threshold - maximum to GT (GT-similarity mode)
         max_retries: Maximum number of generation attempts (default: 50)
         device: Computation device (default: model's device)
-        gt_similarity_mode: If True, find stochastic trajectory close to GT
+        gt_similarity_mode: If True (default), find stochastic trajectory close to GT using ADE
         gt_trajectory: Ground truth trajectory [T, 3] (x, y, heading) for GT-similarity mode
 
     Returns:
-        Tuple of (trajectory_1, trajectory_2, final_fde, attempts_used, ego_shape)
+        Tuple of (trajectory_1, trajectory_2, final_metric, attempts_used, ego_shape)
         - trajectory_1: Deterministic trajectory [T, 4]
         - trajectory_2: Stochastic trajectory [T, 4]
-        - final_fde: Final displacement error achieved (vs det or vs GT depending on mode)
+        - final_metric: ADE to GT (GT mode) or FDE between trajectories (diversity mode)
         - attempts_used: Number of attempts used
         - ego_shape: Vehicle shape parameters
     """
@@ -131,11 +150,11 @@ def generate_trajectory_pair(
 
     # Initialize best tracking based on mode
     if gt_similarity_mode and gt_trajectory is not None:
-        # GT-similarity mode: minimize FDE to GT
-        best_fde = float("inf")
+        # GT-similarity mode: minimize ADE to GT
+        best_metric = float("inf")
     else:
         # Diversity mode: maximize FDE between trajectories
-        best_fde = 0.0
+        best_metric = 0.0
     best_traj_2 = None
 
     for attempt in range(max_retries):
@@ -147,25 +166,25 @@ def generate_trajectory_pair(
         traj_2 = outputs["prediction"][0, 0].cpu().numpy()
 
         if gt_similarity_mode and gt_trajectory is not None:
-            # GT-similarity mode: calculate FDE to ground truth
+            # GT-similarity mode: calculate ADE to ground truth
             # GT trajectory is [T, 3] (x, y, heading), we only need (x, y)
-            fde = calculate_fde(traj_2, gt_trajectory)
+            ade = calculate_ade(traj_2, gt_trajectory)
 
-            # Update best (minimize FDE to GT)
-            if fde < best_fde:
-                best_fde = fde
+            # Update best (minimize ADE to GT)
+            if ade < best_metric:
+                best_metric = ade
                 best_traj_2 = traj_2
 
-            # Check if threshold is met (FDE to GT <= threshold)
-            if fde <= fde_threshold:
-                return traj_1, traj_2, fde, attempt + 1, ego_shape
+            # Check if threshold is met (ADE to GT <= threshold)
+            if ade <= ade_threshold:
+                return traj_1, traj_2, ade, attempt + 1, ego_shape
         else:
             # Diversity mode: calculate FDE between trajectories
             fde = calculate_fde(traj_1, traj_2)
 
             # Update best (maximize FDE between trajectories)
-            if fde > best_fde:
-                best_fde = fde
+            if fde > best_metric:
+                best_metric = fde
                 best_traj_2 = traj_2
 
             # Check if threshold is met (FDE between trajectories >= threshold)
@@ -173,4 +192,4 @@ def generate_trajectory_pair(
                 return traj_1, traj_2, fde, attempt + 1, ego_shape
 
     # Max retries reached, return best pair found
-    return traj_1, best_traj_2, best_fde, max_retries, ego_shape
+    return traj_1, best_traj_2, best_metric, max_retries, ego_shape

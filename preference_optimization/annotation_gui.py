@@ -10,7 +10,7 @@ import torch
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from matplotlib.figure import Figure
 
-from preference_optimization.utils import generate_trajectory_pair, load_npz_data
+from preference_optimization.utils import calculate_ade, generate_trajectory_pair, load_npz_data
 
 
 class PreferenceAnnotator:
@@ -41,6 +41,14 @@ class PreferenceAnnotator:
         self.current_attempts = 0
         self.annotation_complete = False
 
+        # Navigation and tracking state
+        self.current_jump_size = 1  # Tracks the last navigation button click
+        self.labeled_indices: set[int] = set()  # Tracks which samples have been labeled
+        self.labeled_history: list[int] = []  # Tracks last 10 labeled sample indices (most recent first)
+        self.auto_skip_labeled = False  # Toggle for auto-skipping labeled samples
+        self.original_npz_paths = npz_paths  # Keep original list for filtering
+        self.current_filter = "All"  # Current filter: "All", "Finished", "Unfinished"
+
         # Set random seed for reproducibility
         seed = random.randint(0, 2**32 - 1)
         torch.manual_seed(seed)
@@ -48,26 +56,27 @@ class PreferenceAnnotator:
         print(f"Annotation seed: {seed}")
 
     def load_sample(
-        self, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5,
-        gt_similarity_mode: bool = False
-    ) -> tuple[Figure, Figure, Figure, str, str, str]:
+        self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = True
+    ) -> tuple[Figure, Figure, Figure, str, str, str, str, str]:
         """Load current sample and generate trajectory pair.
 
         Args:
             noise_scale: Noise scale for trajectory generation
-            fde_threshold: FDE threshold (min between trajectories or max to GT)
+            fde_threshold: FDE threshold - min between trajectories (diversity mode)
+            ade_threshold: ADE threshold - max to GT (GT-similarity mode)
             max_retries: Maximum retry attempts
             zoom_level: Zoom level 1-10 (1=zoomed out, 10=zoomed in)
-            gt_similarity_mode: If True, find stochastic trajectory close to GT
+            gt_similarity_mode: If True (default), find stochastic trajectory close to GT using ADE
 
         Returns:
-            Tuple of (trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_text)
+            Tuple of (trajectory_plot, velocity_plot, lateral_plot, metric_text, progress_text, metrics_text, sidebar_status, history_display)
         """
         if self.annotation_complete:
-            return None, None, None, "Annotation complete!", self._format_progress(), ""
+            return None, None, None, "Annotation complete!", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
 
         if not self.npz_paths or self.current_index >= len(self.npz_paths):
-            return None, None, None, "No samples available", "Complete", ""
+            return None, None, None, "No samples available", "Complete", "", self.get_sidebar_state(), self.get_labeled_history_display()
 
         npz_path = self.npz_paths[self.current_index]
         self.current_data = load_npz_data(npz_path, self.device)
@@ -81,12 +90,13 @@ class PreferenceAnnotator:
         self.gt_similarity_mode = gt_similarity_mode
 
         # Generate trajectory pair
-        traj_1, traj_2, fde, attempts, ego_shape = generate_trajectory_pair(
+        traj_1, traj_2, metric, attempts, ego_shape = generate_trajectory_pair(
             self.policy_model,
             self.model_args,
             self.current_data,
             noise_scale=float(noise_scale),
             fde_threshold=float(fde_threshold),
+            ade_threshold=float(ade_threshold),
             max_retries=int(max_retries),
             device=self.device,
             gt_similarity_mode=gt_similarity_mode,
@@ -96,7 +106,7 @@ class PreferenceAnnotator:
         self.ego_shape = ego_shape.tolist() # [1, 3] wheel_base length, width
         self.trajectory_1 = traj_1.tolist()
         self.trajectory_2 = traj_2.tolist()
-        self.current_fde = fde
+        self.current_metric = metric
         self.current_attempts = attempts
 
         # Create visualizations with default time_step=40 (middle of trajectory)
@@ -109,32 +119,33 @@ class PreferenceAnnotator:
 
         # Create status text based on mode
         if gt_similarity_mode:
-            fde_text = f"FDE (vs GT): {fde:.2f}m (Attempts: {attempts})"
+            metric_text = f"ADE (vs GT): {metric:.2f}m (Attempts: {attempts})"
         else:
-            fde_text = f"FDE (vs Det.): {fde:.2f}m (Attempts: {attempts})"
+            metric_text = f"FDE (vs Det.): {metric:.2f}m (Attempts: {attempts})"
         progress_text = self._format_progress()
         metrics_text = self._format_metrics_comparison()
 
-        return traj_plot, vel_plot, lat_plot, fde_text, progress_text, metrics_text
+        return traj_plot, vel_plot, lat_plot, metric_text, progress_text, metrics_text, self.get_sidebar_state(), self.get_labeled_history_display()
 
     def regenerate(
-        self, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5,
-        gt_similarity_mode: bool = False
-    ) -> tuple[Figure, Figure, Figure, str, str, str]:
+        self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = True
+    ) -> tuple[Figure, Figure, Figure, str, str, str, str, str]:
         """Regenerate trajectory pair with current parameters.
 
         Args:
             noise_scale: Noise scale for trajectory generation
-            fde_threshold: FDE threshold (min between trajectories or max to GT)
+            fde_threshold: FDE threshold - min between trajectories (diversity mode)
+            ade_threshold: ADE threshold - max to GT (GT-similarity mode)
             max_retries: Maximum retry attempts
             zoom_level: Zoom level 1-10 (1=zoomed out, 10=zoomed in)
-            gt_similarity_mode: If True, find stochastic trajectory close to GT
+            gt_similarity_mode: If True (default), find stochastic trajectory close to GT using ADE
 
         Returns:
-            Tuple of (trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_text)
+            Tuple of (trajectory_plot, velocity_plot, lateral_plot, metric_text, progress_text, metrics_text, sidebar_status, history_display)
         """
         if self.current_data is None:
-            return None, None, None, "No data loaded", self._format_progress(), ""
+            return None, None, None, "No data loaded", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
 
         # Get ground truth trajectory for GT-similarity mode
         gt_trajectory = None
@@ -145,12 +156,13 @@ class PreferenceAnnotator:
         self.gt_similarity_mode = gt_similarity_mode
 
         # Generate new pair
-        traj_1, traj_2, fde, attempts, ego_shape = generate_trajectory_pair(
+        traj_1, traj_2, metric, attempts, ego_shape = generate_trajectory_pair(
             self.policy_model,
             self.model_args,
             self.current_data,
             noise_scale=float(noise_scale),
             fde_threshold=float(fde_threshold),
+            ade_threshold=float(ade_threshold),
             max_retries=int(max_retries),
             device=self.device,
             gt_similarity_mode=gt_similarity_mode,
@@ -160,7 +172,7 @@ class PreferenceAnnotator:
         self.ego_shape = ego_shape.tolist()
         self.trajectory_1 = traj_1.tolist()
         self.trajectory_2 = traj_2.tolist()
-        self.current_fde = fde
+        self.current_metric = metric
         self.current_attempts = attempts
 
         # Create visualizations with default time_step=40 (middle of trajectory)
@@ -173,35 +185,73 @@ class PreferenceAnnotator:
 
         # Create status text based on mode
         if gt_similarity_mode:
-            fde_text = f"FDE (vs GT): {fde:.2f}m (Attempts: {attempts})"
+            metric_text = f"ADE (vs GT): {metric:.2f}m (Attempts: {attempts})"
         else:
-            fde_text = f"FDE (vs Det.): {fde:.2f}m (Attempts: {attempts})"
+            metric_text = f"FDE (vs Det.): {metric:.2f}m (Attempts: {attempts})"
         progress_text = self._format_progress()
         metrics_text = self._format_metrics_comparison()
 
-        print(f"Regenerated pair. FDE: {fde:.2f}m, Attempts: {attempts}")
+        print(f"Regenerated pair. Metric: {metric:.2f}m, Attempts: {attempts}")
 
-        return traj_plot, vel_plot, lat_plot, fde_text, progress_text, metrics_text
+        return traj_plot, vel_plot, lat_plot, metric_text, progress_text, metrics_text, self.get_sidebar_state(), self.get_labeled_history_display()
+
+    def _self_shutdown(self) -> None:
+        """Shutdown the server.
+        The server will close automatically in 3 seconds.
+        Training will start automatically.
+        """
+        # Schedule server shutdown
+        import threading
+        def shutdown_server():
+            import time
+            time.sleep(3)
+            if hasattr(self, '_demo') and self._demo is not None:
+                print("Closing Gradio server...")
+                self._demo.close()
+
+        threading.Thread(target=shutdown_server, daemon=True).start()
+
+
+    def launch_training(self) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+        """Launch training."""
+        print("Launching training...")
+        self.annotation_complete = True
+        complete_msg = (
+            f"✅ Annotation complete!\n\n"
+            f"Collected {len(self.preferences)} preferences.\n\n"
+            f"The server will close automatically in 3 seconds.\n"
+            f"Training will start automatically."
+        )
+        print(f"\n{'='*60}")
+        print("ANNOTATION COMPLETE!")
+        print(f"Collected {len(self.preferences)} preferences")
+        print(f"{'='*60}\n")
+        self._self_shutdown()
+        return None, None, None, "Training launched", "Training launched", "", self.get_sidebar_state(), self.get_labeled_history_display()
 
     def select_winner(
-        self, winner: str, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5,
-        gt_similarity_mode: bool = False
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str]:
+        self, winner: str, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = True
+    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Record preference and move to next sample.
 
         Args:
             winner: Either "trajectory_1" or "trajectory_2"
             noise_scale: Noise scale for next sample
-            fde_threshold: FDE threshold (min between trajectories or max to GT)
+            fde_threshold: FDE threshold - min between trajectories (diversity mode)
+            ade_threshold: ADE threshold - max to GT (GT-similarity mode)
             max_retries: Maximum retry attempts
             zoom_level: Zoom level 1-10 (1=zoomed out, 10=zoomed in)
-            gt_similarity_mode: If True, find stochastic trajectory close to GT
+            gt_similarity_mode: If True (default), find stochastic trajectory close to GT using ADE
 
         Returns:
-            Tuple of (trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_text)
+            Tuple of (trajectory_plot, velocity_plot, lateral_plot, metric_text, progress_text, metrics_text, sidebar_status, history_display)
         """
         if self.current_data is None:
-            return None, None, None, "No data loaded", "Error", ""
+            return None, None, None, "No data loaded", "Error", "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        # Mark current sample as labeled
+        self.mark_as_labeled(self.current_index)
 
         npz_path = self.npz_paths[self.current_index]
 
@@ -232,47 +282,90 @@ class PreferenceAnnotator:
             print(f"Collected {len(self.preferences)} preferences")
             print(f"{'='*60}\n")
 
-            # Schedule server shutdown
-            import threading
-            def shutdown_server():
-                import time
-                time.sleep(3)
-                if hasattr(self, '_demo') and self._demo is not None:
-                    print("Closing Gradio server...")
-                    self._demo.close()
+            self._self_shutdown()
 
-            threading.Thread(target=shutdown_server, daemon=True).start()
+            return None, None, None, complete_msg, f"Complete: {len(self.preferences)}/{self.target_count}", "", self.get_sidebar_state(), self.get_labeled_history_display()
 
-            return None, None, None, complete_msg, f"Complete: {len(self.preferences)}/{self.target_count}", ""
-
-        # Move to next sample
-        self.current_index = (self.current_index + 1) % len(self.npz_paths)
-        return self.load_sample(noise_scale, fde_threshold, max_retries, zoom_level, gt_similarity_mode)
+        # Move to next sample (with auto-skip if enabled)
+        if self.auto_skip_labeled:
+            self.current_index = self.get_next_unlabeled()
+        else:
+            self.current_index = (self.current_index + self.current_jump_size) % len(self.npz_paths)
+        
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
 
     def jump(
-        self, delta: int, noise_scale: float, fde_threshold: float, max_retries: int, zoom_level: int = 5,
-        gt_similarity_mode: bool = False
-    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str]:
+        self, delta: int, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = True
+    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Jump to a different sample.
 
         Args:
             delta: Number of samples to jump (positive or negative)
             noise_scale: Noise scale for trajectory generation
-            fde_threshold: FDE threshold (min between trajectories or max to GT)
+            fde_threshold: FDE threshold - min between trajectories (diversity mode)
+            ade_threshold: ADE threshold - max to GT (GT-similarity mode)
             max_retries: Maximum retry attempts
             zoom_level: Zoom level 1-10 (1=zoomed out, 10=zoomed in)
-            gt_similarity_mode: If True, find stochastic trajectory close to GT
+            gt_similarity_mode: If True (default), find stochastic trajectory close to GT using ADE
 
         Returns:
-            Tuple of (trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_text)
+            Tuple of (trajectory_plot, velocity_plot, lateral_plot, metric_text, progress_text, metrics_text, sidebar_status, history_display)
         """
         if not self.npz_paths:
-            return None, None, None, "No samples available", "Error", ""
+            return None, None, None, "No samples available", "Error", "", self.get_sidebar_state(), self.get_labeled_history_display()
 
         # Ensure delta is integer
         delta = int(delta)
         self.current_index = max(0, min(self.current_index + delta, len(self.npz_paths) - 1))
-        return self.load_sample(noise_scale, fde_threshold, max_retries, zoom_level, gt_similarity_mode)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+
+    def handle_keyboard_navigation(
+        self, direction: str, noise_scale: float, fde_threshold: float, ade_threshold: float, 
+        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True
+    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+        """Handle keyboard navigation (left/right arrow keys).
+
+        Args:
+            direction: "left" or "right"
+            noise_scale: Noise scale for trajectory generation
+            fde_threshold: FDE threshold
+            ade_threshold: ADE threshold
+            max_retries: Maximum retry attempts
+            zoom_level: Zoom level 1-10
+            gt_similarity_mode: GT similarity mode flag
+
+        Returns:
+            Tuple of all visualization outputs plus sidebar states
+        """
+        # Determine delta based on direction and current jump size
+        delta = -self.current_jump_size if direction == "left" else self.current_jump_size
+        return self.jump(delta, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+
+    def jump_to_next_unlabeled(
+        self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, 
+        zoom_level: int = 5, gt_similarity_mode: bool = True
+    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+        """Jump to the next unlabeled sample.
+
+        Args:
+            noise_scale: Noise scale for trajectory generation
+            fde_threshold: FDE threshold
+            ade_threshold: ADE threshold
+            max_retries: Maximum retry attempts
+            zoom_level: Zoom level 1-10
+            gt_similarity_mode: GT similarity mode flag
+
+        Returns:
+            Tuple of all visualization outputs plus sidebar states
+        """
+        next_idx = self.get_next_unlabeled()
+        if next_idx == self.current_index:
+            # All samples are labeled
+            return None, None, None, "All samples labeled!", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
+        
+        self.current_index = next_idx
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
 
     def update_time_display(
         self, time_step: int, zoom_level: int = 5
@@ -316,6 +409,156 @@ class PreferenceAnnotator:
             f"File: {npz_path}\n"
             f"Preferences collected: {len(self.preferences)}/{self.target_count}"
         )
+
+    def update_jump_size(self, delta: int) -> None:
+        """Update the current jump size based on navigation button click.
+
+        Args:
+            delta: The jump size (can be negative)
+        """
+        self.current_jump_size = abs(delta)
+
+    def mark_as_labeled(self, index: int) -> None:
+        """Mark a sample as labeled and update history.
+
+        Args:
+            index: Sample index to mark as labeled
+        """
+        self.labeled_indices.add(index)
+        
+        # Update history (most recent first, max 10 items)
+        if index in self.labeled_history:
+            self.labeled_history.remove(index)
+        self.labeled_history.insert(0, index)
+        if len(self.labeled_history) > 10:
+            self.labeled_history = self.labeled_history[:10]
+
+    def get_next_unlabeled(self) -> int:
+        """Find the next unlabeled sample index.
+
+        Returns:
+            Next unlabeled sample index (wraps around if needed)
+        """
+        if not self.npz_paths:
+            return 0
+
+        # Start from current_index + self.current_jump_size
+        for offset in range(self.current_jump_size, len(self.npz_paths) + 1):
+            candidate = (self.current_index + offset) % len(self.npz_paths)
+            if candidate not in self.labeled_indices:
+                return candidate
+        
+        # All samples are labeled, return current
+        return self.current_index
+
+    def get_sidebar_state(self) -> str:
+        """Get formatted sidebar state display.
+
+        Returns:
+            Markdown formatted string with progress and status
+        """
+        if not self.npz_paths:
+            return "**No samples loaded**"
+
+        status = "Labeled" if self.current_index in self.labeled_indices else "Unlabeled"
+        total_labeled = len(self.labeled_indices)
+        total_samples = len(self.original_npz_paths)
+        
+        lines = [
+            f"### Current Sample",
+            f"**Index:** {self.current_index + 1} / {len(self.npz_paths)}",
+            f"**Status:** {status}",
+            "",
+            f"### Progress",
+            f"**Collected:** {len(self.preferences)} / {self.target_count}",
+            f"**Labeled:** {total_labeled} / {total_samples}",
+            "",
+            f"### Navigation",
+            f"**Jump Size:** {self.current_jump_size}",
+            f"**Filter:** {self.current_filter}",
+        ]
+        
+        return "\n".join(lines)
+
+    def get_labeled_history_display(self) -> str:
+        """Get formatted labeled history display.
+
+        Returns:
+            Markdown formatted string with clickable history items
+        """
+        if not self.labeled_history:
+            return "*No labels yet*"
+
+        lines = []
+        for idx in self.labeled_history:
+            # Show 1-indexed for user display
+            lines.append(f"- Sample #{idx + 1}")
+        
+        return "\n".join(lines)
+
+    def jump_to_index(
+        self, target_index: int, noise_scale: float, fde_threshold: float, ade_threshold: float, 
+        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True
+    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+        """Jump directly to a specific sample index.
+
+        Args:
+            target_index: Target sample index (1-indexed from user input)
+            noise_scale: Noise scale for trajectory generation
+            fde_threshold: FDE threshold
+            ade_threshold: ADE threshold
+            max_retries: Maximum retry attempts
+            zoom_level: Zoom level 1-10
+            gt_similarity_mode: GT similarity mode flag
+
+        Returns:
+            Tuple of all visualization outputs plus sidebar states
+        """
+        if not self.npz_paths:
+            return None, None, None, "No samples available", "Error", "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        # Convert from 1-indexed to 0-indexed and clamp to valid range
+        target_index = int(target_index) - 1
+        target_index = max(0, min(target_index, len(self.npz_paths) - 1))
+        
+        self.current_index = target_index
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+
+    def toggle_filter(
+        self, filter_mode: str, noise_scale: float, fde_threshold: float, ade_threshold: float,
+        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True
+    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+        """Toggle sample filter between All/Finished/Unfinished.
+
+        Args:
+            filter_mode: "All", "Finished", or "Unfinished"
+            noise_scale: Noise scale for trajectory generation
+            fde_threshold: FDE threshold
+            ade_threshold: ADE threshold
+            max_retries: Maximum retry attempts
+            zoom_level: Zoom level 1-10
+            gt_similarity_mode: GT similarity mode flag
+
+        Returns:
+            Tuple of all visualization outputs plus sidebar states
+        """
+        self.current_filter = filter_mode
+        
+        # Apply filter to npz_paths
+        if filter_mode == "Finished":
+            self.npz_paths = [path for i, path in enumerate(self.original_npz_paths) if i in self.labeled_indices]
+        elif filter_mode == "Unfinished":
+            self.npz_paths = [path for i, path in enumerate(self.original_npz_paths) if i not in self.labeled_indices]
+        else:  # "All"
+            self.npz_paths = self.original_npz_paths
+        
+        # Reset to first sample in filtered list
+        self.current_index = 0
+        
+        if not self.npz_paths:
+            return None, None, None, "No samples match filter", "No samples", "", self.get_sidebar_state(), self.get_labeled_history_display()
+        
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
 
     def _draw_vehicle_footprint(
         self, ax, x: float, y: float, heading: float, color: str, alpha: float = 0.8
@@ -395,7 +638,7 @@ class PreferenceAnnotator:
         Returns:
             Matplotlib Figure with trajectory visualization
         """
-        fig = Figure(figsize=(10, 8))
+        fig = Figure(figsize=(10, 11.5))
         ax = fig.add_subplot(111)
 
         traj_1_np = np.array(self.trajectory_1)
@@ -1005,143 +1248,217 @@ def create_interface(
 
     annotator = PreferenceAnnotator(policy_model, model_args, npz_paths, target_count)
 
-    with gr.Blocks(title="Trajectory Preference Annotation") as demo:
-        gr.Markdown("# 🚗 Trajectory Preference Annotation")
-        gr.Markdown(
-            "**Instructions:** Compare two trajectories and select which one is better. "
-            "Consider safety, comfort, and efficiency."
-        )
+    # Load external assets
+    css_path = Path(__file__).parent / "static" / "annotation_styles.css"
+    with open(css_path, "r") as f:
+        css_content = f.read()
 
-        # Status display
-        with gr.Row():
-            progress_text = gr.Textbox(
-                label="📊 Progress",
-                value="Loading...",
-                interactive=False,
-                scale=2,
-                lines=3,
-            )
-            fde_text = gr.Textbox(
-                label="📏 Final Displacement Error",
-                value="FDE: 0.00m",
-                interactive=False,
-                scale=1,
-                lines=3,
-            )
+    js_path = Path(__file__).parent / "static" / "keyboard_handler.js"
+    with open(js_path, "r") as f:
+        js_content = f.read()
 
-        # Parameter controls
-        gr.Markdown("## ⚙️ Generation Parameters")
-        gr.Markdown(
-            "**Noise Scale:** Controls diversity of the stochastic trajectory\n\n"
-            "**FDE Threshold:** Min FDE between trajectories (diversity mode) OR max FDE to GT (GT mode)\n\n"
-            "**Max Retries:** Maximum attempts to meet FDE threshold"
-        )
-        with gr.Row():
-            noise_scale = gr.Slider(
-                minimum=0.5,
-                maximum=5.0,
-                value=2.5,
-                step=0.1,
-                label="Noise Scale",
-            )
-            fde_threshold = gr.Slider(
-                minimum=0.5,
-                maximum=10.0,
-                value=2.0,
-                step=0.1,
-                label="FDE Threshold (m)",
-            )
-            max_retries = gr.Slider(
-                minimum=10,
-                maximum=200,
-                value=50,
-                step=10,
-                label="Max Retries",
-            )
+    # Note: css parameter will move to launch() in future Gradio versions
+    # For now, keeping it here for compatibility
+    with gr.Blocks(title="Trajectory Preference Annotation", css=css_content) as demo:
+        # Hidden textbox to capture keyboard events - must be visible in DOM but hidden via CSS
+        keyboard_input = gr.Textbox(value="", label="Keyboard Input", elem_id="keyboard_capture", container=False)
         
-        # GT Similarity Mode toggle
-        with gr.Row():
-            gt_similarity_checkbox = gr.Checkbox(
-                value=False,
-                label="🎯 GT Similarity Mode (find stochastic trajectory close to ground truth)",
-                info="When enabled: retry until FDE(stochastic, GT) <= threshold. When disabled: retry until FDE(det., stochastic) >= threshold."
-            )
-
-        # Visualizations - Trajectory with zoom slider in one column
-        gr.Markdown("## 🎨 Trajectory Visualization")
-        with gr.Row():
-            # Trajectory plot with zoom slider below it
-            with gr.Column():
-                trajectory_plot = gr.Plot(label="Trajectory Comparison")
-                zoom_slider = gr.Slider(
-                    minimum=1,
-                    maximum=10,
-                    value=5,
-                    step=1,
-                    label="Zoom (1=100m, 10=10m)",
-                )
-            velocity_plot = gr.Plot(label="Velocity & Long. Acceleration")
-            lateral_plot = gr.Plot(label="Lat. Acceleration & Curvature")
-
-        # Time slider for visualization control
-        gr.Markdown("## ⏱️ Time Control")
-        time_slider = gr.Slider(
-            minimum=0,
-            maximum=79,
-            value=40,
-            step=1,
-            label="Time Step (0.1s per step, total 8.0s)",
-        )
-
-        # Metrics and Selection in parallel columns
-        with gr.Row():
-            # Left column: Metrics display
-            with gr.Column(scale=2):
-                metrics_display = gr.Markdown(
-                    value="*Metrics will appear after loading trajectories*",
-                    label="📊 Metrics",
-                )
-
-            # Right column: Selection buttons
-            with gr.Column(scale=1):
-                gr.Markdown("## ✅ Selection")
+        with gr.Row(elem_classes="main-row"):
+            # LEFT SIDEBAR (scale=1) - Fixed position
+            with gr.Column(scale=1, elem_classes="sidebar-column"):
+                gr.Markdown("# 🚗 Annotation")
                 gr.Markdown(
-                    "**Green** = Deterministic (baseline)\n\n"
-                    "**Orange** = Stochastic (candidate)"
+                    "**Instructions:** Compare trajectories and select the better one. "
+                    "Consider safety, comfort, and efficiency."
                 )
-                select_orange_btn = gr.Button(
-                    "✓ Orange (Stochastic) is Better",
-                    variant="primary",
-                    size="lg",
+                
+                gr.Markdown("---")
+                
+                # Integrated Progress and Metric display
+                gr.Markdown("## 📊 Status")
+                progress_text = gr.Textbox(
+                    label="Progress",
+                    value="Loading...",
+                    interactive=False,
+                    lines=2,
                 )
-                regenerate_btn = gr.Button(
-                    "🔄 Regenerate Stochastic",
-                    variant="secondary",
-                    size="lg",
+                fde_text = gr.Textbox(
+                    label="Metric",
+                    value="FDE: 0.00m",
+                    interactive=False,
+                    lines=1,
+                )
+                sidebar_status = gr.Markdown(value="Loading...")
+                
+                gr.Markdown("---")
+                
+                # Jump-to input
+                gr.Markdown("## Quick Jump")
+                jump_to_input = gr.Number(label="Jump to Sample #", precision=0, minimum=1, value=1)
+                jump_to_btn = gr.Button("Go to Sample", size="sm")
+                
+                gr.Markdown("---")
+                
+                # Labeled history
+                gr.Markdown("## Recent Labeled")
+                history_display = gr.Markdown(value="*No labels yet*")
+                
+                gr.Markdown("---")
+                
+                # Filter controls
+                gr.Markdown("## Filters")
+                show_finished_radio = gr.Radio(
+                    choices=["All", "Finished", "Unfinished"],
+                    value="All",
+                    label="Show Samples"
+                )
+                
+                # Next unlabeled navigation
+                next_unlabeled_btn = gr.Button("⏭️ Next Unlabeled", variant="primary", size="sm")
+                auto_skip_checkbox = gr.Checkbox(label="Auto-skip labeled", value=False)
+                
+                gr.Markdown("---")
+                gr.Markdown("**Keyboard:** ⬅️ ➡️ to navigate")
+
+                # Launch Training
+                launch_training_btn = gr.Button("🚀 Launch Training", variant="primary", size="lg")
+            
+            # MAIN CONTENT (scale=4)
+            with gr.Column(scale=4, elem_classes="main-column"):
+                gr.Markdown("# 🚗 Trajectory Comparison")
+
+                # Parameter controls
+                gr.Markdown("## ⚙️ Generation Parameters")
+                with gr.Row():
+                    noise_scale = gr.Slider(
+                        minimum=0.5,
+                        maximum=5.0,
+                        value=2.5,
+                        step=0.1,
+                        label="Noise Scale",
+                        info="Controls diversity of the stochastic trajectory"
+                    )
+                    fde_threshold = gr.Slider(
+                        minimum=0.5,
+                        maximum=10.0,
+                        value=2.0,
+                        step=0.1,
+                        label="FDE Threshold (m)",
+                        info="Min FDE against green (diversity mode)"
+                    )
+                    ade_threshold = gr.Slider(
+                        minimum=0.1,
+                        maximum=5.0,
+                        value=1.0,
+                        step=0.1,
+                        label="ADE Threshold (m)",
+                        info="Max ADE to ground truth (GT mode)"
+                    )
+                    max_retries = gr.Slider(
+                        minimum=10,
+                        maximum=200,
+                        value=50,
+                        step=10,
+                        label="Max Retries",
+                        info="Maximum attempts to meet threshold"
+                    )
+                
+                # GT Similarity Mode toggle - DEFAULT TO TRUE
+                with gr.Row():
+                    gt_similarity_checkbox = gr.Checkbox(
+                        value=True,
+                        label="🎯 GT Similarity Mode (find stochastic trajectory close to ground truth)",
+                        info="When enabled: retry until ADE(stochastic, GT) <= ADE threshold. When disabled: retry until FDE(det., stochastic) >= FDE threshold."
+                    )
+
+                # Visualizations - Trajectory with zoom slider in one column
+                gr.Markdown("## 🎨 Trajectory Visualization")
+                with gr.Row():
+                    # Trajectory plot with zoom slider below it
+                    with gr.Column():
+                        trajectory_plot = gr.Plot(label="Trajectory Comparison")
+                        zoom_slider = gr.Slider(
+                            minimum=1,
+                            maximum=10,
+                            value=5,
+                            step=1,
+                            label="🔍 Zoom (1=100m, 10=10m)",
+                        )
+                    velocity_plot = gr.Plot(label="Velocity & Long. Acceleration")
+                    lateral_plot = gr.Plot(label="Lat. Acceleration & Curvature")
+
+                # Time slider for visualization control
+                gr.Markdown("## ⏱️ Time Control")
+                gr.Markdown(
+                    "*Drag to view vehicle footprints at different times. "
+                    "Also shows sampling points on velocity/acceleration plots.*"
+                )
+                time_slider = gr.Slider(
+                    minimum=0,
+                    maximum=79,
+                    value=40,
+                    step=1,
+                    label="Time Step (0.1s per step, total 8.0s) - Updates footprint & plot markers",
                 )
 
-        # Navigation
-        gr.Markdown("## 🧭 Navigation (Jump between samples)")
-        with gr.Row():
-            prev_30_btn = gr.Button("← 30", size="sm")
-            prev_10_btn = gr.Button("← 10", size="sm")
-            prev_1_btn = gr.Button("← 1", size="sm")
-            next_1_btn = gr.Button("1 →", size="sm")
-            next_10_btn = gr.Button("10 →", size="sm")
-            next_30_btn = gr.Button("30 →", size="sm")
+                # Metrics and Selection in parallel columns
+                with gr.Row():
+                    # Left column: Metrics display
+                    with gr.Column(scale=2):
+                        metrics_display = gr.Markdown(
+                            value="*Metrics will appear after loading trajectories*",
+                            label="📊 Metrics",
+                        )
+
+                    # Right column: Selection buttons
+                    with gr.Column(scale=1):
+                        gr.Markdown("## ✅ Selection")
+                        gr.Markdown(
+                            "**Green** = Deterministic (baseline)\n\n"
+                            "**Orange** = Stochastic (candidate)"
+                        )
+                        select_orange_btn = gr.Button(
+                            "✓ Orange (Stochastic) is Better",
+                            variant="primary",
+                            size="lg",
+                        )
+                        regenerate_btn = gr.Button(
+                            "🔄 Regenerate Stochastic",
+                            variant="secondary",
+                            size="lg",
+                        )
+
+                # Navigation
+                gr.Markdown("## 🧭 Navigation (Jump between samples)")
+                
+                # Define navigation buttons configuration
+                nav_buttons_config = [
+                    {"delta": -30, "label": "← 30"},
+                    {"delta": -10, "label": "← 10"},
+                    {"delta": -1, "label": "← 1"},
+                    {"delta": 1, "label": "1 →"},
+                    {"delta": 10, "label": "10 →"},
+                    {"delta": 30, "label": "30 →"},
+                ]
+                
+                # Create navigation buttons dynamically
+                nav_buttons = {}
+                with gr.Row():
+                    for config in nav_buttons_config:
+                        nav_buttons[config["delta"]] = gr.Button(config["label"], size="sm")
 
         # Event handlers
         # Orange (stochastic) is selected as winner, green (deterministic) as loser
         select_orange_btn.click(
-            fn=lambda ns, ft, mr, zl, gt: annotator.select_winner("trajectory_2", ns, ft, mr, zl, gt),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
+            fn=lambda ns, ft, at, mr, zl, gt: annotator.select_winner("trajectory_2", ns, ft, at, mr, zl, gt),
+            inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
+            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
         )
 
         regenerate_btn.click(
-            fn=lambda ns, ft, mr, zl, gt: annotator.regenerate(ns, ft, mr, zl, gt),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
+            fn=lambda ns, ft, at, mr, zl, gt: annotator.regenerate(ns, ft, at, mr, zl, gt),
+            inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
+            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
         )
 
         # Time slider handler - only redraws, does NOT regenerate trajectories
@@ -1158,46 +1475,95 @@ def create_interface(
             outputs=[trajectory_plot, velocity_plot, lateral_plot],
         )
 
-        # Navigation handlers - fix lambda closure issue
+        # Navigation handlers - fix lambda closure issue and update jump size
         def make_jump_fn(delta_val):
-            return lambda ns, ft, mr, zl, gt: annotator.jump(delta_val, ns, ft, mr, zl, gt)
+            def jump_and_update(ns, ft, at, mr, zl, gt):
+                annotator.update_jump_size(delta_val)
+                return annotator.jump(delta_val, ns, ft, at, mr, zl, gt)
+            return jump_and_update
 
-        prev_30_btn.click(
-            fn=make_jump_fn(-30),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
-        )
-        prev_10_btn.click(
-            fn=make_jump_fn(-10),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
-        )
-        prev_1_btn.click(
-            fn=make_jump_fn(-1),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
-        )
-        next_1_btn.click(
-            fn=make_jump_fn(1),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
-        )
-        next_10_btn.click(
-            fn=make_jump_fn(10),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
-        )
-        next_30_btn.click(
-            fn=make_jump_fn(30),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
+        # Wire up navigation button handlers dynamically
+        for delta, button in nav_buttons.items():
+            button.click(
+                fn=make_jump_fn(delta),
+                inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
+                outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+            )
+
+        # Sidebar event handlers
+        # Jump-to button - only trigger on button click, not on input change
+        jump_to_btn.click(
+            fn=lambda idx, ns, ft, at, mr, zl, gt: annotator.jump_to_index(idx, ns, ft, at, mr, zl, gt),
+            inputs=[jump_to_input, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
+            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
         )
 
-        # Load first sample on startup
+        # Filter radio
+        show_finished_radio.change(
+            fn=lambda filter_mode, ns, ft, at, mr, zl, gt: annotator.toggle_filter(filter_mode, ns, ft, at, mr, zl, gt),
+            inputs=[show_finished_radio, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
+            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+        )
+
+        # Next unlabeled button
+        next_unlabeled_btn.click(
+            fn=lambda ns, ft, at, mr, zl, gt: annotator.jump_to_next_unlabeled(ns, ft, at, mr, zl, gt),
+            inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
+            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+        )
+
+        # Auto-skip checkbox
+        auto_skip_checkbox.change(
+            fn=lambda checked: setattr(annotator, 'auto_skip_labeled', checked),
+            inputs=[auto_skip_checkbox],
+            outputs=[],
+        )
+
+        # Launch Training button
+        launch_training_btn.click(
+            fn=lambda: annotator.launch_training(),
+            inputs=None,
+            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+        )
+
+        # Keyboard navigation handler - only trigger on valid arrow keys
+        def handle_keyboard_event(key, ns, ft, at, mr, zl, gt):
+            print(f"Python handler received key: '{key}'")
+            # Parse the key (format is "ArrowLeft:123" or "ArrowRight:123")
+            actual_key = key.split(':')[0] if ':' in key else key
+            print(f"Parsed key: '{actual_key}'")
+            
+            if actual_key in ["ArrowLeft", "ArrowRight"]:
+                direction = "left" if actual_key == "ArrowLeft" else "right"
+                print(f"Processing {direction} navigation")
+                result = annotator.handle_keyboard_navigation(direction, ns, ft, at, mr, zl, gt)
+                print(f"Navigation complete")
+                return result
+            else:
+                print(f"Ignoring key: '{actual_key}'")
+                # Return gr.update() to not change anything
+                return [gr.update()] * 8
+        
+        keyboard_input.change(
+            fn=handle_keyboard_event,
+            inputs=[keyboard_input, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
+            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+        )
+
+        # Setup keyboard capture on load (load from external JS file)
+        # Wrap the IIFE in a function for Gradio
         demo.load(
-            fn=lambda ns, ft, mr, zl, gt: annotator.load_sample(ns, ft, mr, zl, gt),
-            inputs=[noise_scale, fde_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display],
+            fn=None,
+            inputs=None,
+            outputs=None,
+            js=f"function() {{ {js_content} }}"
+        )
+        
+        # Load first sample on startup (separate from JS)
+        demo.load(
+            fn=lambda ns, ft, at, mr, zl, gt: annotator.load_sample(ns, ft, at, mr, zl, gt),
+            inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
+            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
         )
 
     return demo, annotator
