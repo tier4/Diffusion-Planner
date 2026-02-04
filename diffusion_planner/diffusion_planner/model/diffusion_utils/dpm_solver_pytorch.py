@@ -246,17 +246,12 @@ class DPM_Solver:
         self,
         model_fn,
         noise_schedule,
-        correcting_x0_fn=None,
         correcting_xt_fn=None,
-        thresholding_max_val=1.0,
-        dynamic_thresholding_ratio=0.995,
     ):
         """Construct a DPM-Solver.
 
         We support only DPM-Solver++.
 
-        We also support the "dynamic thresholding" method in Imagen[1]. For pixel-space diffusion models, you
-        can set `correcting_x0_fn="dynamic_thresholding"` to use the dynamic thresholding.
         The "dynamic thresholding" can greatly improve the sample quality for pixel-space
         DPMs with large guidance scales. Note that the thresholding method is **unsuitable** for latent-space
         DPMs (such as stable-diffusion).
@@ -272,20 +267,6 @@ class DPM_Solver:
                 ``
                 The shape of `x` is `(batch_size, **shape)`, and the shape of `t_continuous` is `(batch_size,)`.
             noise_schedule: A noise schedule object, such as NoiseScheduleVP.
-            correcting_x0_fn: A `str` or a function with the following format:
-                ```
-                def correcting_x0_fn(x0, t):
-                    x0_new = ...
-                    return x0_new
-                ```
-                This function is to correct the outputs of the data prediction model at each sampling step. e.g.,
-                ```
-                x0_pred = data_pred_model(xt, t)
-                if correcting_x0_fn is not None:
-                    x0_pred = correcting_x0_fn(x0_pred, t)
-                xt_1 = update(x0_pred, xt, t)
-                ```
-                If `correcting_x0_fn="dynamic_thresholding"`, we use the dynamic thresholding proposed in Imagen[1].
             correcting_xt_fn: A function with the following format:
                 ```
                 def correcting_xt_fn(xt, t, step):
@@ -297,24 +278,13 @@ class DPM_Solver:
                 xt = ...
                 xt = correcting_xt_fn(xt, t, step)
                 ```
-            thresholding_max_val: A `float`. The max value for thresholding.
-                Valid only when use `dpmsolver++` and `correcting_x0_fn="dynamic_thresholding"`.
-            dynamic_thresholding_ratio: A `float`. The ratio for dynamic thresholding (see Imagen[1] for details).
-                Valid only when use `dpmsolver++` and `correcting_x0_fn="dynamic_thresholding"`.
-
         [1] Chitwan Saharia, William Chan, Saurabh Saxena, Lala Li, Jay Whang, Emily Denton, Seyed Kamyar Seyed Ghasemipour,
             Burcu Karagol Ayan, S Sara Mahdavi, Rapha Gontijo Lopes, et al. Photorealistic text-to-image diffusion models
             with deep language understanding. arXiv preprint arXiv:2205.11487, 2022b.
         """
         self.model = model_fn
         self.noise_schedule = noise_schedule
-        if correcting_x0_fn == "dynamic_thresholding":
-            self.correcting_x0_fn = self.dynamic_thresholding_fn
-        else:
-            self.correcting_x0_fn = correcting_x0_fn
         self.correcting_xt_fn = correcting_xt_fn
-        self.dynamic_thresholding_ratio = dynamic_thresholding_ratio
-        self.thresholding_max_val = thresholding_max_val
 
     def dynamic_thresholding_fn(self, x0, t):
         """
@@ -340,8 +310,6 @@ class DPM_Solver:
             self.noise_schedule.marginal_std(t),
         )
         x0 = (x - sigma_t * noise) / alpha_t
-        if self.correcting_x0_fn is not None:
-            x0 = self.correcting_x0_fn(x0, t)
         return x0
 
     def model_fn(self, x, t):
