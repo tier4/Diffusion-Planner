@@ -286,19 +286,6 @@ class DPM_Solver:
         self.noise_schedule = noise_schedule
         self.correcting_xt_fn = correcting_xt_fn
 
-    def dynamic_thresholding_fn(self, x0, t):
-        """
-        The dynamic thresholding method.
-        """
-        dims = x0.dim()
-        p = self.dynamic_thresholding_ratio
-        s = torch.quantile(torch.abs(x0).reshape((x0.shape[0], -1)), p, dim=1)
-        s = expand_dims(
-            torch.maximum(s, self.thresholding_max_val * torch.ones_like(s).to(s.device)), dims
-        )
-        x0 = torch.clamp(x0, -s, s) / s
-        return x0
-
     def data_prediction_fn(self, x, t):
         """
         Return the data prediction model (with corrector).
@@ -356,72 +343,6 @@ class DPM_Solver:
                     skip_type
                 )
             )
-
-    def get_orders_and_timesteps_for_singlestep_solver(
-        self, steps, order, skip_type, t_T, t_0, device
-    ):
-        """
-        Get the order of each step for sampling by the singlestep DPM-Solver.
-
-        We combine both DPM-Solver-1,2,3 to use all the function evaluations, which is named as "DPM-Solver-fast".
-        Given a fixed number of function evaluations by `steps`, the sampling procedure by DPM-Solver-fast is:
-            - If order == 1:
-                We take `steps` of DPM-Solver-1 (i.e. DDIM).
-            - If order == 2:
-                - Denote K = (steps // 2). We take K or (K + 1) intermediate time steps for sampling.
-                - If steps % 2 == 0, we use K steps of DPM-Solver-2.
-                - If steps % 2 == 1, we use K steps of DPM-Solver-2 and 1 step of DPM-Solver-1.
-            - If order == 3:
-                - Denote K = (steps // 3 + 1). We take K intermediate time steps for sampling.
-                - If steps % 3 == 0, we use (K - 2) steps of DPM-Solver-3, and 1 step of DPM-Solver-2 and 1 step of DPM-Solver-1.
-                - If steps % 3 == 1, we use (K - 1) steps of DPM-Solver-3 and 1 step of DPM-Solver-1.
-                - If steps % 3 == 2, we use (K - 1) steps of DPM-Solver-3 and 1 step of DPM-Solver-2.
-
-        ============================================
-        Args:
-            order: A `int`. The max order for the solver (2 or 3).
-            steps: A `int`. The total number of function evaluations (NFE).
-            skip_type: A `str`. The type for the spacing of the time steps. We support three types:
-                - 'logSNR': uniform logSNR for the time steps.
-                - 'time_uniform': uniform time for the time steps. (**Recommended for high-resolutional data**.)
-                - 'time_quadratic': quadratic time for the time steps. (Used in DDIM for low-resolutional data.)
-            t_T: A `float`. The starting time of the sampling (default is T).
-            t_0: A `float`. The ending time of the sampling (default is epsilon).
-            device: A torch device.
-        Returns:
-            orders: A list of the solver order of each step.
-        """
-        if order == 3:
-            K = steps // 3 + 1
-            if steps % 3 == 0:
-                orders = [3] * (K - 2) + [2, 1]
-            elif steps % 3 == 1:
-                orders = [3] * (K - 1) + [1]
-            else:
-                orders = [3] * (K - 1) + [2]
-        elif order == 2:
-            if steps % 2 == 0:
-                K = steps // 2
-                orders = [2] * K
-            else:
-                K = steps // 2 + 1
-                orders = [2] * (K - 1) + [1]
-        elif order == 1:
-            K = steps
-            orders = [1] * steps
-        else:
-            raise ValueError("'order' must be '1' or '2' or '3'.")
-        if skip_type == "logSNR":
-            # To reproduce the results in DPM-Solver paper
-            timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, K, device)
-        else:
-            timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, steps, device)[
-                torch.cumsum(
-                    torch.tensor([0] + orders),
-                    0,
-                ).to(device)
-            ]
-        return timesteps_outer, orders
 
     def dpm_solver_first_update(self, x, s, t, model_s=None, return_intermediate=False):
         """
