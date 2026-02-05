@@ -6,7 +6,6 @@ from shutil import rmtree
 
 import numpy as np
 import torch
-from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from tqdm import tqdm
 
@@ -33,8 +32,6 @@ if __name__ == "__main__":
                 continue
             # add batch size axis
             data[key] = torch.tensor(np.expand_dims(value, axis=0))
-        data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
-        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
 
         visualize_inputs(data, save_path, view_ranges=[60, 150])
 

@@ -221,7 +221,7 @@ def convert_tracked_objects_to_tensor(
     max_num_objects: int,
     max_timesteps: int,
 ) -> torch.Tensor:
-    neighbor = torch.zeros((1, max_num_objects, max_timesteps, 11))
+    neighbor = torch.zeros((1, max_num_objects, max_timesteps, 12))
 
     # Sort tracked objects by distance from ego
     # It is needed because the neighbors are sorted by distance from ego in the original code
@@ -258,18 +258,20 @@ def convert_tracked_objects_to_tensor(
             )
             twist_in_map = pose_in_map_4x4[0:3, 0:3] @ twist_in_local
             twist_in_bl = map2bl_matrix_4x4[0:3, 0:3] @ twist_in_map
-            neighbor[0, i, 20 - j, 0] = pose_in_bl_4x4[0, 3]  # x
-            neighbor[0, i, 20 - j, 1] = pose_in_bl_4x4[1, 3]  # y
-            neighbor[0, i, 20 - j, 2] = cos  # heading cos
-            neighbor[0, i, 20 - j, 3] = sin  # heading sin
-            neighbor[0, i, 20 - j, 4] = twist_in_bl[0]  # velocity x
-            neighbor[0, i, 20 - j, 5] = twist_in_bl[1]  # velocity y
+            t_idx = max_timesteps - 1 - j
+            neighbor[0, i, t_idx, 0] = pose_in_bl_4x4[0, 3]  # x
+            neighbor[0, i, t_idx, 1] = pose_in_bl_4x4[1, 3]  # y
+            neighbor[0, i, t_idx, 2] = cos  # heading cos
+            neighbor[0, i, t_idx, 3] = sin  # heading sin
+            neighbor[0, i, t_idx, 4] = twist_in_bl[0]  # velocity x
+            neighbor[0, i, t_idx, 5] = twist_in_bl[1]  # velocity y
             # I don't know why but sometimes the length and width from autoware are 0
-            neighbor[0, i, 20 - j, 6] = max(shape.dimensions.y, 1.0)  # width
-            neighbor[0, i, 20 - j, 7] = max(shape.dimensions.x, 1.0)  # length
-            neighbor[0, i, 20 - j, 8] = label_in_model == 0  # vehicle
-            neighbor[0, i, 20 - j, 9] = label_in_model == 1  # pedestrian
-            neighbor[0, i, 20 - j, 10] = label_in_model == 2  # bicycle
+            neighbor[0, i, t_idx, 6] = max(shape.dimensions.y, 1.0)  # width
+            neighbor[0, i, t_idx, 7] = max(shape.dimensions.x, 1.0)  # length
+            neighbor[0, i, t_idx, 8] = label_in_model == 0  # vehicle
+            neighbor[0, i, t_idx, 9] = label_in_model == 1  # pedestrian
+            neighbor[0, i, t_idx, 10] = label_in_model == 2  # bicycle
+            neighbor[0, i, t_idx, 11] = 0.0  # timestamp_delta (filled externally)
     return neighbor
 
 
@@ -283,9 +285,12 @@ def create_ego_agent_past(
         map2bl_matrix_4x4: Transform matrix from map to base_link
         max_timesteps: Maximum number of timesteps (default 21)
     Returns:
-        ego_agent_past: Tensor of shape (1, T, 4) with (x, y, cos, sin)
+        ego_agent_past: Tensor of shape (1, T, 5) with (x, y, cos, sin, timestamp_delta)
     """
-    ego_agent_past = torch.zeros((1, max_timesteps, 4))
+    ego_agent_past = torch.zeros((1, max_timesteps, 5))
+
+    # Reference timestamp is the most recent message
+    reference_timestamp = parse_timestamp(ego_history[-1].header.stamp)
 
     # Process ego history from oldest to newest
     start_idx = max(0, len(ego_history) - max_timesteps)
@@ -303,10 +308,15 @@ def create_ego_agent_past(
         y = pose_in_bl_4x4[1, 3]
         cos, sin = rot3x3_to_heading_cos_sin(pose_in_bl_4x4[0:3, 0:3])
 
+        # Compute timestamp delta in seconds
+        msg_timestamp = parse_timestamp(msg.header.stamp)
+        timestamp_delta = (msg_timestamp - reference_timestamp) / 1e9
+
         ego_agent_past[0, i, 0] = x
         ego_agent_past[0, i, 1] = y
         ego_agent_past[0, i, 2] = cos
         ego_agent_past[0, i, 3] = sin
+        ego_agent_past[0, i, 4] = timestamp_delta
 
     return ego_agent_past
 
@@ -333,7 +343,7 @@ def convert_prediction_to_msg(pred: torch.Tensor, bl2map_matrix_4x4: np.array, s
         point.pose.position.z = vec3d[2]
 
         # orientation
-        curr_heading = pred[i, 2]
+        curr_heading = np.arctan2(float(pred[i, 3]), float(pred[i, 2]))
         rot = Rotation.from_euler("z", curr_heading, degrees=False).as_matrix()
         rot = bl2map_matrix_4x4[0:3, 0:3] @ rot
         quat = Rotation.from_matrix(rot).as_quat()

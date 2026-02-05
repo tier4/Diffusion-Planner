@@ -45,11 +45,11 @@ from tqdm import tqdm
 This script makes npz files from a rosbag.
 [Contents of a npz file]
 version                     int32   ()
-ego_agent_past              float32 (INPUT_T + 1, 3)
+ego_agent_past              float32 (INPUT_T + 1, EGO_HISTORY_DIM)  [x, y, cos, sin, timestamp]
 ego_current_state           float32 (10,)
-ego_agent_future            float32 (OUTPUT_T, 3)
-neighbor_agents_past        float32 (MAX_NUM_NEIGHBORS, INPUT_T + 1, 11)
-neighbor_agents_future      float32 (MAX_NUM_NEIGHBORS, OUTPUT_T, 3)
+ego_agent_future            float32 (OUTPUT_T, POSE_DIM)  [x, y, cos, sin]
+neighbor_agents_past        float32 (MAX_NUM_NEIGHBORS, INPUT_T + 1, 12)
+neighbor_agents_future      float32 (MAX_NUM_NEIGHBORS, OUTPUT_T, POSE_DIM)  [x, y, cos, sin]
 static_objects              float32 (5, 10)
 lanes                       float32 (NUM_SEGMENTS_IN_LANE, POINTS_PER_LANELET, SEGMENT_POINT_DIM)
 lanes_speed_limit           float32 (NUM_SEGMENTS_IN_LANE, 1)
@@ -97,9 +97,11 @@ class SequenceData:
 
 
 def create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4):
+    """Create ego sequence as (T, 4) [x, y, cos(yaw), sin(yaw)]."""
     ego_future_x = []
     ego_future_y = []
-    ego_future_yaw = []
+    ego_future_cos = []
+    ego_future_sin = []
     for j in range(OUTPUT_T):
         index = min(i + j + 1, len(data_list) - 1)
         x = data_list[index].kinematic_state.pose.pose.position.x
@@ -118,18 +120,19 @@ def create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4):
         pose_in_bl = map2bl_matrix_4x4 @ pose_in_map
         ego_future_x.append(pose_in_bl[0, 3])
         ego_future_y.append(pose_in_bl[1, 3])
-        rot = Rotation.from_matrix(pose_in_bl[:3, :3])
-        yaw = rot.as_euler("xyz")[2]
-        ego_future_yaw.append(yaw)
+        cos, sin = rot3x3_to_heading_cos_sin(pose_in_bl[:3, :3])
+        ego_future_cos.append(cos)
+        ego_future_sin.append(sin)
 
     ego_future_np = np.concatenate(
         [
             np.array(ego_future_x).reshape(-1, 1),
             np.array(ego_future_y).reshape(-1, 1),
-            np.array(ego_future_yaw).reshape(-1, 1),
+            np.array(ego_future_cos).reshape(-1, 1),
+            np.array(ego_future_sin).reshape(-1, 1),
         ],
         axis=1,
-    )
+    ).astype(np.float32)
     return ego_future_np
 
 
@@ -230,13 +233,13 @@ def tracking_past_and_future(data_list, i, map2bl_matrix_4x4):
 
 
 def get_relative_goal_pose(goal_pose, map2bl_matrix_4x4):
-    """Get the relative goal pose in the base link frame."""
+    """Get the relative goal pose in the base link frame as [x, y, cos, sin]."""
     pose_in_map = pose_to_mat4x4(goal_pose)
     pose_in_bl = map2bl_matrix_4x4 @ pose_in_map
     x = pose_in_bl[0, 3]
     y = pose_in_bl[1, 3]
-    yaw = Rotation.from_matrix(pose_in_bl[0:3, 0:3]).as_euler("xyz")[2]
-    return np.array([x, y, yaw], dtype=np.float32)
+    cos, sin = rot3x3_to_heading_cos_sin(pose_in_bl[0:3, 0:3])
+    return np.array([x, y, cos, sin], dtype=np.float32)
 
 
 def main(
@@ -478,6 +481,18 @@ def main(
             ego_past_np = create_ego_sequence(
                 data_list, i - PAST_TIME_STEPS, PAST_TIME_STEPS, map2bl_matrix_4x4
             )
+            # Add timestamps to ego_past: delta from current frame in seconds
+            reference_timestamp = data_list[i].timestamp
+            ego_timestamps = np.array(
+                [
+                    (data_list[min(i - PAST_TIME_STEPS + 1 + j, len(data_list) - 1)].timestamp
+                     - reference_timestamp) / 1e9
+                    for j in range(PAST_TIME_STEPS)
+                ],
+                dtype=np.float32,
+            ).reshape(-1, 1)
+            ego_past_np = np.concatenate([ego_past_np, ego_timestamps], axis=1)
+
             ego_tensor = create_current_ego_state(
                 data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.79
             ).squeeze(0)
@@ -527,19 +542,20 @@ def main(
                 max_num_objects=MAX_NUM_NEIGHBORS,
                 max_timesteps=PAST_TIME_STEPS,
             ).squeeze(0)
+            # Fill timestamps for neighbor_past (index 11)
+            for t in range(PAST_TIME_STEPS):
+                frame_idx = i - PAST_TIME_STEPS + 1 + t
+                frame_idx = max(0, min(frame_idx, len(data_list) - 1))
+                timestamp_delta = (data_list[frame_idx].timestamp - reference_timestamp) / 1e9
+                neighbor_past_tensor[:, t, 11] = timestamp_delta
             neighbor_future_tensor = create_neighbor_future(
                 tracked_objs=tracking_future,
                 map2bl_matrix_4x4=map2bl_matrix_4x4,
                 max_num_objects=MAX_NUM_NEIGHBORS,
                 max_timesteps=OUTPUT_T,
             ).squeeze(0)
-            # (32, 80, 11) -> (32, 80, 3)
+            # (32, 80, 11) -> (32, 80, 4) [x, y, cos, sin]
             neighbor_future_tensor = neighbor_future_tensor[:, :, :4]
-            # fixed cos(2) sin(3) -> heading
-            neighbor_future_tensor[:, :, 2] = np.arctan2(
-                neighbor_future_tensor[:, :, 3], neighbor_future_tensor[:, :, 2]
-            )
-            neighbor_future_tensor = neighbor_future_tensor[:, :, :3]
 
             # polygon
             polygon_tensor = create_line_tensor(

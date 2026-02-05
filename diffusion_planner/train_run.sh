@@ -4,7 +4,7 @@ cd $(dirname $0)
 
 exp_name=${1}
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0
 
 export NCCL_NVLS_ENABLE=0
 export NCCL_P2P_DISABLE=0
@@ -14,18 +14,19 @@ export NCCL_DEBUG=INFO
 
 rm -f /tmp/tmp_dist_init
 
-SAVE_DIR="/mnt/nvme0/sakoda/training_result"
+SAVE_DIR="/media/shintarosakoda/sandisk4t/data/test/training_result/"
 
-TRAIN_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/dataset_ver58/path_list_train_with_psim_data.json"
-VALID_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/dataset_ver58/path_list_valid.json"
-SFT_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/dataset_ver58/path_list_train_sft_in_time_range.json"
+TRAIN_SET_LIST="/media/shintarosakoda/sandisk4t/data/test/20260113_133724_test_cpp/path_list.json"
+VALID_SET_LIST="/media/shintarosakoda/sandisk4t/data/test/20260113_133724_test_cpp/path_list.json"
+SFT_SET_LIST="/media/shintarosakoda/sandisk4t/data/test/20260113_133724_test_cpp/path_list.json"
 
 # pretraining
-python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
+python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 1 --standalone train_predictor.py \
 --exp_name ${exp_name} \
 --train_set_list $TRAIN_SET_LIST \
 --valid_set_list $VALID_SET_LIST \
---use_wandb True \
+--use_wandb False \
+--batch_size 16 \
 --diffusion_model_type "x_start" \
 --save_dir $SAVE_DIR \
 --train_epochs 100 \
@@ -33,6 +34,8 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
 
 save_dir_name=$(ls $SAVE_DIR | tail -n 1)
+
+exit 0
 
 # sft
 # best_model/best_model_info.jsonから "epoch"を読み取る

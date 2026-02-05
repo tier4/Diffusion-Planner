@@ -22,19 +22,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def cos_sin_to_heading(x: np.ndarray) -> np.ndarray:
-    """
-        Convert heading angle to cosine and sine.
-    Args:
-        x: [B, T, 4] where last dimension is (x, y, cos(heading), sin(heading))
-    Output:
-        x: [B, T, 3] where last dimension is (x, y, heading)
-    """
-    heading = np.arctan2(x[..., 3], x[..., 2])
-    heading = np.expand_dims(heading, axis=-1)
-    return np.concatenate([x[..., :2], heading], axis=-1).astype(np.float32)
-
-
 class TrainingDataReader:
     """バイナリファイルから学習データを読み込むクラス"""
 
@@ -46,10 +33,10 @@ class TrainingDataReader:
         # 各配列のサイズを計算
         self.sizes = {
             "version": 1,
-            "ego_agent_past": self.PAST_TIME_STEPS * POSE_DIM,
+            "ego_agent_past": self.PAST_TIME_STEPS * EGO_HISTORY_DIM,
             "ego_current_state": 10,
             "ego_agent_future": OUTPUT_T * POSE_DIM,
-            "neighbor_agents_past": MAX_NUM_NEIGHBORS * self.PAST_TIME_STEPS * 11,
+            "neighbor_agents_past": MAX_NUM_NEIGHBORS * self.PAST_TIME_STEPS * 12,
             "neighbor_agents_future": MAX_NUM_NEIGHBORS * OUTPUT_T * POSE_DIM,
             "static_objects": self.STATIC_NUM * 10,
             "lanes": NUM_SEGMENTS_IN_LANE * POINTS_PER_LANELET * SEGMENT_POINT_DIM,
@@ -86,12 +73,12 @@ class TrainingDataReader:
         result["version"] = struct.unpack("<I", data[offset : offset + 4])[0]
         offset += 4
 
-        # ego_agent_past (21, 4) -> (21, 3) to match expected format
-        # 4次元: [x, y, cos(yaw), sin(yaw)] -> 3次元: [x, y, yaw]
+        # ego_agent_past (31, 5): [x, y, cos(yaw), sin(yaw), timestamp]
         size = self.sizes["ego_agent_past"]
         ego_past_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
-        ego_past_array = np.array(ego_past_flat).reshape(self.PAST_TIME_STEPS, 4)
-        result["ego_agent_past"] = cos_sin_to_heading(ego_past_array)
+        result["ego_agent_past"] = np.array(ego_past_flat, dtype=np.float32).reshape(
+            self.PAST_TIME_STEPS, EGO_HISTORY_DIM
+        )
         offset += size * 4
 
         # ego_current_state (10,)
@@ -100,29 +87,28 @@ class TrainingDataReader:
         result["ego_current_state"] = np.array(ego_current_flat, dtype=np.float32)
         offset += size * 4
 
-        # ego_agent_future (80, 4) -> (80, 3) to match expected format
-        # 4次元: [x, y, cos(yaw), sin(yaw)] -> 3次元: [x, y, yaw]
+        # ego_agent_future (80, 4): [x, y, cos(yaw), sin(yaw)]
         size = self.sizes["ego_agent_future"]
         ego_future_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
-        ego_future_array = np.array(ego_future_flat).reshape(OUTPUT_T, 4)
-        result["ego_agent_future"] = cos_sin_to_heading(ego_future_array)
+        result["ego_agent_future"] = np.array(ego_future_flat, dtype=np.float32).reshape(
+            OUTPUT_T, POSE_DIM
+        )
         offset += size * 4
 
-        # neighbor_agents_past (32, 21, 11)
+        # neighbor_agents_past (32, 31, 12)
         size = self.sizes["neighbor_agents_past"]
         neighbor_past_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         result["neighbor_agents_past"] = np.array(neighbor_past_flat, dtype=np.float32).reshape(
-            MAX_NUM_NEIGHBORS, self.PAST_TIME_STEPS, 11
+            MAX_NUM_NEIGHBORS, self.PAST_TIME_STEPS, 12
         )
         offset += size * 4
 
-        # neighbor_agents_future (32, 80, 4) -> (32, 80, 3)
+        # neighbor_agents_future (32, 80, 4): [x, y, cos(yaw), sin(yaw)]
         size = self.sizes["neighbor_agents_future"]
         neighbor_future_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
-        neighbor_future_array = np.array(neighbor_future_flat).reshape(
-            MAX_NUM_NEIGHBORS, OUTPUT_T, 4
+        result["neighbor_agents_future"] = np.array(neighbor_future_flat, dtype=np.float32).reshape(
+            MAX_NUM_NEIGHBORS, OUTPUT_T, POSE_DIM
         )
-        result["neighbor_agents_future"] = cos_sin_to_heading(neighbor_future_array)
         offset += size * 4
 
         # static_objects (5, 10)
@@ -191,11 +177,10 @@ class TrainingDataReader:
         )
         offset += size * 4
 
-        # goal_pose (4,) -> (3,)
+        # goal_pose (4,): [x, y, cos(yaw), sin(yaw)]
         size = self.sizes["goal_pose"]
         goal_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
-        goal_flat = np.array(goal_flat, dtype=np.float32).reshape(1, 4)
-        result["goal_pose"] = cos_sin_to_heading(goal_flat).reshape(3)
+        result["goal_pose"] = np.array(goal_flat, dtype=np.float32)
         offset += size * 4
 
         # turn_indicators (scalar) - int32_t

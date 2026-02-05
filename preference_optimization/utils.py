@@ -2,7 +2,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.train_epoch import heading_to_cos_sin
 
 
 def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch.Tensor]:
@@ -14,11 +13,6 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
         if key in {"map_name", "token"}:
             continue
         data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
-
-    if "goal_pose" in data:
-        data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
-    if "ego_agent_past" in data:
-        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
 
     if "ego_shape" not in data:
         wheel_base = 2.79

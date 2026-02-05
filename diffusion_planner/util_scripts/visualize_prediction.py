@@ -8,7 +8,6 @@ from shutil import rmtree
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from parse_prediction_results import calc_loss
 from tqdm import tqdm
@@ -125,8 +124,7 @@ if __name__ == "__main__":
                 continue
             # add batch size axis
             valid_data_dict[key] = torch.tensor(np.expand_dims(value, axis=0))
-        valid_data_dict["ego_agent_past"] = heading_to_cos_sin(valid_data_dict["ego_agent_past"])
-        valid_data_dict["goal_pose"] = heading_to_cos_sin(valid_data_dict["goal_pose"])
+        pass  # Data is already in cos/sin format
 
         prediction = output_dict["prediction"]  # (1 + P, T, D)
         turn_indicator = int(output_dict["turn_indicator"])  # ()

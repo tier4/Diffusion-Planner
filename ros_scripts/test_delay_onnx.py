@@ -38,10 +38,10 @@ def create_test_inputs(seed: int):
     sampled_traj = sampled_traj * 10.0
     inputs["sampled_trajectories"] = sampled_traj
 
-    inputs["ego_agent_past"] = torch.randn(1, INPUT_T + 1, POSE_DIM, dtype=torch.float32)
+    inputs["ego_agent_past"] = torch.randn(1, INPUT_T + 1, EGO_HISTORY_DIM, dtype=torch.float32)
     inputs["ego_current_state"] = torch.randn(1, 10, dtype=torch.float32)
     inputs["neighbor_agents_past"] = torch.randn(
-        1, MAX_NUM_NEIGHBORS, INPUT_T + 1, 11, dtype=torch.float32
+        1, MAX_NUM_NEIGHBORS, INPUT_T + 1, 12, dtype=torch.float32
     )
     inputs["static_objects"] = torch.randn(1, 5, 10, dtype=torch.float32)
     inputs["lanes"] = torch.randn(

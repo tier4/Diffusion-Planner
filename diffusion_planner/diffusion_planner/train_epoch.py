@@ -8,24 +8,6 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
 
 
-def heading_to_cos_sin(x):
-    """
-    Convert heading angle to cosine and sine.
-    Args:
-        x: [B, T, 3] where last dimension is (x, y, heading)
-    Output:
-        x: [B, T, 4] where last dimension is (x, y, cos(heading), sin(heading))
-    """
-    return torch.cat(
-        [
-            x[..., :2],
-            x[..., 2:3].cos(),
-            x[..., 2:3].sin(),
-        ],
-        dim=-1,
-    )
-
-
 def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
     epoch_loss = []
 
@@ -39,8 +21,6 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
     for inputs in data_loader:
         inputs = {key: value.to(args.device) for key, value in inputs.items()}
-        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
         ego_future = inputs["ego_agent_future"]
         neighbors_future = inputs["neighbor_agents_future"]
@@ -48,11 +28,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         if aug is not None:
             inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
 
-        # heading to cos sin
-        ego_future = heading_to_cos_sin(ego_future)
-
-        mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
-        neighbors_future = heading_to_cos_sin(neighbors_future)
+        mask = torch.sum(torch.ne(neighbors_future[..., :4], 0), dim=-1) == 0
         neighbors_future[mask] = 0.0
         inputs = args.observation_normalizer(inputs)
 

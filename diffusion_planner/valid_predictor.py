@@ -7,7 +7,6 @@ import numpy as np
 import torch
 from diffusion_planner.loss import compute_safety_penalty, loss_func, make_turn_indicator_gt
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
@@ -50,16 +49,11 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         inputs["sampled_trajectories"] = 0.5 * torch.randn(B, 33, 81, 4, dtype=torch.float32)
         inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
 
-        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
-
         ego_future = inputs["ego_agent_future"]
-        ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)
         neighbors_future = inputs["neighbor_agents_future"]
         neighbor_future_mask = (
-            torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+            torch.sum(torch.ne(neighbors_future[..., :4], 0), dim=-1) == 0
         )  # (B, Pn, T)
-        neighbors_future = heading_to_cos_sin(neighbors_future)  # (B, Pn, T, 4)
         neighbors_future[neighbor_future_mask] = 0.0
 
         B, Pn, T, _ = neighbors_future.shape

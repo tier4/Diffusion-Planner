@@ -170,8 +170,8 @@ def draw_ego_vehicle(ax, inputs):
         for j in [40 - 1, 80 - 1]:  # 4 seconds and 8 seconds
             if ego_future[j, 0] == 0 and ego_future[j, 1] == 0:
                 continue
-            cos = np.cos(ego_future[j, 2])
-            sin = np.sin(ego_future[j, 2])
+            cos = ego_future[j, 2]
+            sin = ego_future[j, 3]
             draw_bounding_box(
                 ax,
                 ego_future[j, 0],

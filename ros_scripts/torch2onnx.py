@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 
 torch.backends.mha.set_fastpath_enabled(False)
@@ -101,9 +100,9 @@ def build_inputs_from_npz(npz_path: Path) -> dict:
     inputs["sampled_trajectories"] = 0.5 * torch.randn(
         1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
     )
-    inputs["ego_agent_past"] = heading_to_cos_sin(
-        torch.tensor(data["ego_agent_past"], dtype=torch.float32).unsqueeze(0)
-    )
+    inputs["ego_agent_past"] = torch.tensor(
+        data["ego_agent_past"], dtype=torch.float32
+    ).unsqueeze(0)
     inputs["ego_current_state"] = torch.tensor(
         data["ego_current_state"], dtype=torch.float32
     ).unsqueeze(0)
@@ -129,10 +128,7 @@ def build_inputs_from_npz(npz_path: Path) -> dict:
     ).unsqueeze(0)
     inputs["polygons"] = torch.tensor(data["polygons"], dtype=torch.float32).unsqueeze(0)
     inputs["line_strings"] = torch.tensor(data["line_strings"], dtype=torch.float32).unsqueeze(0)
-    goal_pose = torch.tensor(data["goal_pose"], dtype=torch.float32).unsqueeze(0)
-    if goal_pose.shape[-1] == 3:
-        goal_pose = heading_to_cos_sin(goal_pose)
-    inputs["goal_pose"] = goal_pose
+    inputs["goal_pose"] = torch.tensor(data["goal_pose"], dtype=torch.float32).unsqueeze(0)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
     inputs["turn_indicators"] = torch.tensor(
         data["turn_indicators"], dtype=torch.float32
@@ -168,10 +164,10 @@ def convert_model(
     inputs["sampled_trajectories"] = torch.ones(
         1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
     )
-    inputs["ego_agent_past"] = torch.randn(1, INPUT_T + 1, POSE_DIM, dtype=torch.float32)
+    inputs["ego_agent_past"] = torch.randn(1, INPUT_T + 1, EGO_HISTORY_DIM, dtype=torch.float32)
     inputs["ego_current_state"] = torch.randn(1, 10, dtype=torch.float32)
     inputs["neighbor_agents_past"] = torch.randn(
-        1, MAX_NUM_NEIGHBORS, INPUT_T + 1, 11, dtype=torch.float32
+        1, MAX_NUM_NEIGHBORS, INPUT_T + 1, 12, dtype=torch.float32
     )
     inputs["static_objects"] = torch.randn(1, 5, 10, dtype=torch.float32)
     inputs["lanes"] = torch.randn(

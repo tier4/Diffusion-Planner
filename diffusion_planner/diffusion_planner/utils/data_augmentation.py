@@ -198,9 +198,9 @@ class StatePerturbation:
             inputs["ego_current_state"][..., 6:8], transform_matrix
         )
 
-        # ego future xy
+        # ego future xy and cos/sin
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
-        ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
+        ego_future[..., 2:4] = vector_transform(ego_future[..., 2:4], transform_matrix)
 
         # ego past
         # inputs["ego_agent_past"][..., :2] = vector_transform(
@@ -210,36 +210,14 @@ class StatePerturbation:
         #     inputs["ego_agent_past"][..., 2:4], transform_matrix
         # )
 
-        ego_past4d = torch.cat(
-            [
-                inputs["ego_agent_past"][..., :2],  # x, y
-                torch.cos(inputs["ego_agent_past"][..., 2:3]),  # cos
-                torch.sin(inputs["ego_agent_past"][..., 2:3]),  # sin
-            ],
-            dim=-1,
-        )
-        ego_future4d = torch.cat(
-            [
-                ego_future[..., :2],  # x, y
-                torch.cos(ego_future[..., 2:3]),  # cos
-                torch.sin(ego_future[..., 2:3]),  # sin
-            ],
-            dim=-1,
-        )
+        ego_past4d = inputs["ego_agent_past"][..., :4]
+        ego_future4d = ego_future[..., :4]
 
         ego_future4d = smoothing_future_trajectory(
             ego_past4d, inputs["ego_current_state"], ego_future4d
         )
 
-        ego_future = torch.cat(
-            [
-                ego_future4d[..., :2],  # x, y
-                torch.atan2(ego_future4d[..., 3], ego_future4d[..., 2]).unsqueeze(
-                    -1
-                ),  # heading from cos, sin
-            ],
-            dim=-1,
-        )
+        ego_future = ego_future4d
         inputs["ego_agent_future"] = ego_future
 
         # neighbor past xy
@@ -257,12 +235,14 @@ class StatePerturbation:
         )
         inputs["neighbor_agents_past"][mask] = 0.0
 
-        # neighbor future xy
+        # neighbor future xy and cos/sin
         mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
-        neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        neighbors_future[..., 2:4] = vector_transform(
+            neighbors_future[..., 2:4], transform_matrix
+        )
         neighbors_future[mask] = 0.0
 
         # lanes
@@ -323,12 +303,12 @@ class StatePerturbation:
         refine future trajectory with quintic Hermite interpolation
 
         Args:
-            aug_current_state: (B, 16) current state of the ego vehicle after augmentation
-            ego_future:        (B, T, 3) future trajectory of the ego vehicle
+            aug_current_state: (B, 10) current state of the ego vehicle after augmentation
+            ego_future:        (B, T, 4) future trajectory [x, y, cos, sin]
             keep_remaining:    If True, keep the remaining trajectory after P frames (default: True)
 
         Returns:
-            ego_future: refined future trajectory of the ego vehicle
+            ego_future: (B, T, 4) refined future trajectory [x, y, cos, sin]
         """
 
         P = self.num_refine
@@ -351,17 +331,21 @@ class StatePerturbation:
             aug_current_state[:, 9],
         )
 
+        # Convert cos/sin to heading for boundary conditions
+        heading_P = torch.atan2(ego_future[:, P, 3], ego_future[:, P, 2])
+        heading_P_1 = torch.atan2(ego_future[:, P - 1, 3], ego_future[:, P - 1, 2])
+
         xT, yT, thetaT, vT, aT, omegaT = (
             ego_future[:, P, 0],
             ego_future[:, P, 1],
-            ego_future[:, P, 2],
+            heading_P,
             torch.norm(ego_future[:, P, :2] - ego_future[:, P - 1, :2], dim=-1) / dt,
             torch.norm(
                 ego_future[:, P, :2] - 2 * ego_future[:, P - 1, :2] + ego_future[:, P - 2, :2],
                 dim=-1,
             )
             / dt**2,
-            self.normalize_angle(ego_future[:, P, 2] - ego_future[:, P - 1, 2]) / dt,
+            self.normalize_angle(heading_P - heading_P_1) / dt,
         )
 
         # Boundary conditions
@@ -406,7 +390,12 @@ class StatePerturbation:
             dim=1,
         )
 
-        interpolated = torch.cat([traj_x, traj_y, traj_heading[..., None]], axis=-1)
+        # Output as [x, y, cos, sin]
+        interpolated = torch.cat(
+            [traj_x, traj_y, torch.cos(traj_heading).unsqueeze(-1),
+             torch.sin(traj_heading).unsqueeze(-1)],
+            dim=-1,
+        )
 
         if keep_remaining and ego_future.shape[1] > P:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
@@ -422,7 +411,6 @@ if __name__ == "__main__":
     import matplotlib.patches as patches
     import matplotlib.pyplot as plt
 
-    from diffusion_planner.train_epoch import heading_to_cos_sin
     from diffusion_planner.utils.visualize_input import visualize_inputs
 
     parser = argparse.ArgumentParser()
@@ -440,8 +428,6 @@ if __name__ == "__main__":
         if key == "token":
             continue
         data[key] = torch.tensor(value).unsqueeze(0)
-        if key == "goal_pose" or key == "ego_agent_past":
-            data[key] = heading_to_cos_sin(data[key])
 
     # Load future trajectories separately
     ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
