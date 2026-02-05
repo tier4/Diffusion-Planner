@@ -120,22 +120,16 @@ def draw_ego_vehicle(ax, inputs):
             label="Ego Past Trajectory",
         )
 
-        # plot as arrow
-        # for t in range(0, ego_past.shape[0], 4):
-        #     cos = ego_past[t, 2]
-        #     sin = ego_past[t, 3]
-        #     ax.arrow(
-        #         ego_past[t, 0],
-        #         ego_past[t, 1],
-        #         cos,
-        #         sin,
-        #         width=0.3,
-        #         head_width=0.8,
-        #         head_length=0.3,
-        #         fc="orange",
-        #         ec="orange",
-        #         alpha=0.5,
-        #     )
+        # Draw bounding boxes at -3s, -2s, -1s (indices 0, 10, 20)
+        for j in [0, 10, 20]:
+            if ego_past[j, 0] == 0 and ego_past[j, 1] == 0:
+                continue
+            cos = ego_past[j, 2]
+            sin = ego_past[j, 3]
+            draw_bounding_box(
+                ax, ego_past[j, 0], ego_past[j, 1], cos, sin,
+                car_length, car_width, "orange", 0.1,
+            )
 
     # Draw future trajectory
     if "ego_agent_future" in inputs:
@@ -222,6 +216,15 @@ def draw_neighbor_agents(ax, inputs):
             past_lines.append(past_points)
             past_colors.append(color)
 
+        # Draw past bounding boxes at -3s, -2s, -1s (indices 0, 10, 20)
+        for j in [0, 10, 20]:
+            nj = neighbors[i, j]
+            if nj[0] == 0 and nj[1] == 0:
+                continue
+            draw_bounding_box(
+                ax, nj[0], nj[1], nj[2], nj[3], len_x, len_y, color, 0.1,
+            )
+
         # Collect bounding box lines
         draw_bounding_box(ax, n_x, n_y, n_cos, n_sin, len_x, len_y, color, 0.5)
 
@@ -236,6 +239,16 @@ def draw_neighbor_agents(ax, inputs):
                 t_values = np.linspace(0, 1, len(valid_future))
                 colors = [[1.0 * t, 0.0, 1.0 * (1 - t)] for t in t_values]
                 future_scatter_colors.extend(colors)
+
+            # Draw future bounding boxes at 4s and 8s (indices 39, 79)
+            for j in [40 - 1, 80 - 1]:
+                if neighbor_future[j, 0] == 0 and neighbor_future[j, 1] == 0:
+                    continue
+                draw_bounding_box(
+                    ax, neighbor_future[j, 0], neighbor_future[j, 1],
+                    neighbor_future[j, 2], neighbor_future[j, 3],
+                    len_x, len_y, color, 0.1,
+                )
 
         # Collect velocity arrows
         v = np.sqrt(vel_x**2 + vel_y**2)
