@@ -160,13 +160,13 @@ class Encoder(nn.Module):
 
     def forward(self, inputs):
         # ego agent
-        ego = inputs["ego_agent_past"]  # (B, T=INPUT_T + 1, D=4)
+        ego = inputs["ego_agent_past"]  # (B, T=INPUT_T+1, D=EGO_HISTORY_DIM)
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
         ego[:, 6:] *= 0.0  # Only keep the current + first 5 steps of ego history
 
         # agents
-        neighbors = inputs["neighbor_agents_past"]  # (B, N=32, T=21, D=11)
+        neighbors = inputs["neighbor_agents_past"]  # (B, N=32, T=INPUT_T+1, D=12)
         neighbors[:, :, :-6] *= 0.0  # Only keep the current + first 5 steps of history
 
         # static objects
@@ -327,7 +327,7 @@ class EgoEncoder(nn.Module):
         self._hidden_dim = hidden_dim
 
         self.channel_pre_project = Mlp(
-            in_features=4,
+            in_features=EGO_HISTORY_DIM,
             hidden_features=channels_mlp_dim,
             out_features=channels_mlp_dim,
             act_layer=nn.GELU,
@@ -356,10 +356,10 @@ class EgoEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, T=21, D=4 (x, y, cos, sin)
+        x: B, T=INPUT_T+1, D=EGO_HISTORY_DIM (x, y, cos, sin, timestamp)
         """
         B, T, D = x.shape
-        pos = x[:, -1].clone()  # (B, D=4[x, y, cos, sin])
+        pos = x[:, -1, :POSE_DIM].clone()  # (B, D=4[x, y, cos, sin])
         pos = pos.unsqueeze(1)  # (B, 1, D=4)
         pos = add_class_type(pos, CLASS_TYPE_EGO)
 
@@ -392,7 +392,7 @@ class NeighborEncoder(nn.Module):
         self.type_emb = nn.Linear(3, channels_mlp_dim)
 
         self.channel_pre_project = Mlp(
-            in_features=8 + 1,
+            in_features=8 + 1 + 1,  # (x, y, cos, sin, vx, vy, w, l) + mask + timestamp
             hidden_features=channels_mlp_dim,
             out_features=channels_mlp_dim,
             act_layer=nn.GELU,
@@ -421,9 +421,10 @@ class NeighborEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, P, V, D (x, y, cos, sin, vx, vy, w, l, type(3))
+        x: B, P, V, D (x, y, cos, sin, vx, vy, w, l, type(3), timestamp)
         """
-        neighbor_type = x[:, :, -1, 8:]
+        neighbor_type = x[:, :, -1, 8:11]  # (is_vehicle, is_pedestrian, is_bicycle)
+        timestamp = x[..., 11:12]  # (B, P, V, 1)
         x = x[..., :8]
 
         pos = x[:, :, -1, :4].clone()  # x, y, cos, sin
@@ -432,7 +433,7 @@ class NeighborEncoder(nn.Module):
         B, P, V, _ = x.shape
         mask_v = torch.sum(torch.ne(x[..., :8], 0), dim=-1).to(x.device) == 0
         mask_p = torch.sum(~mask_v, dim=-1) == 0
-        x = torch.cat([x, (~mask_v).float().unsqueeze(-1)], dim=-1)
+        x = torch.cat([x, (~mask_v).float().unsqueeze(-1), timestamp], dim=-1)  # (B, P, V, 10)
         x = x.view(B * P, V, -1)
         x[..., 4:6] *= 0.0  # Zero out velocity features
 
