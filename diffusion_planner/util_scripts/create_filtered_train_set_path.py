@@ -93,9 +93,6 @@ if __name__ == "__main__":
 
     # Collect all npz files from root_dir
     root_dir = root_dir.resolve()
-    assert root_dir.is_absolute(), f"{root_dir} is not an absolute path."
-    assert root_dir.exists(), f"{root_dir} does not exist."
-    assert root_dir.is_dir(), f"{root_dir} is not a directory."
 
     all_list = sorted(root_dir.rglob("*.npz"))
     print(f"Found {len(all_list)} npz files in {root_dir}.")
