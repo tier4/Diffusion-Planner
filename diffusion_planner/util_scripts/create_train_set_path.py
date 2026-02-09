@@ -19,6 +19,7 @@ if __name__ == "__main__":
     if save_path is None:
         save_path = root_dir_list[0].parent / "path_list.json"
 
+    save_path.parent.mkdir(parents=True, exist_ok=True)
     log = open(save_path.with_suffix(".log"), "w")
 
     all_list = []

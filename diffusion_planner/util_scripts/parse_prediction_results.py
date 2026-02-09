@@ -13,27 +13,28 @@ def parse_args() -> argparse.Namespace:
 
 
 def calc_loss(inputs, prediction) -> tuple:
-    ego_future = inputs["ego_agent_future"]  # (T, 3)
-    ego_future_original = ego_future.copy()  # 元の角度情報を保持
-    ego_future = np.concatenate(
+    ego_future = inputs["ego_agent_future"]  # (T, 4) - already (x, y, cos(yaw), sin(yaw))
+    # 元の角度情報を復元 (x, y, yaw)
+    ego_future_original = np.concatenate(
         [
-            ego_future[..., :2],
-            np.cos(ego_future[..., 2:3]),
-            np.sin(ego_future[..., 2:3]),
+            ego_future[..., :2],  # x, y
+            np.arctan2(ego_future[..., 3:4], ego_future[..., 2:3]),  # yaw from cos, sin
         ],
         axis=-1,
-    )  # (T, 4)
-    neighbors_future = inputs["neighbor_agents_future"]  # (P32, T, 3)
-    neighbors_future_original = neighbors_future.copy()  # 元の角度情報を保持
-    neighbor_future_mask = np.sum((neighbors_future[..., :3] != 0), axis=-1) == 0  # (P32, T)
-    neighbors_future = np.concatenate(
+    )  # (T, 3)
+
+    neighbors_future = inputs[
+        "neighbor_agents_future"
+    ]  # (P32, T, 4) - already (x, y, cos(yaw), sin(yaw))
+    neighbor_future_mask = np.sum((neighbors_future[..., :4] != 0), axis=-1) == 0  # (P32, T)
+    # 元の角度情報を復元 (x, y, yaw)
+    neighbors_future_original = np.concatenate(
         [
-            neighbors_future[..., :2],
-            np.cos(neighbors_future[..., 2:3]),
-            np.sin(neighbors_future[..., 2:3]),
+            neighbors_future[..., :2],  # x, y
+            np.arctan2(neighbors_future[..., 3:4], neighbors_future[..., 2:3]),  # yaw from cos, sin
         ],
         axis=-1,
-    )  # (P32, T, 4)
+    )  # (P32, T, 3)
     neighbors_future[neighbor_future_mask] = 0.0
 
     P32, T, _ = neighbors_future.shape
@@ -41,8 +42,23 @@ def calc_loss(inputs, prediction) -> tuple:
         inputs["ego_current_state"][:4],
         inputs["neighbor_agents_past"][:P32, -1, :4],
     )
-    ego_current_original = inputs["ego_current_state"][:3]  # 元の角度情報を保持
-    neighbors_current_original = inputs["neighbor_agents_past"][:P32, -1, :3]  # 元の角度情報を保持
+    # 元の角度情報を復元 (x, y, yaw)
+    ego_current_original = np.concatenate(
+        [
+            inputs["ego_current_state"][:2],
+            [np.arctan2(inputs["ego_current_state"][3], inputs["ego_current_state"][2])],
+        ]
+    )  # (3,)
+    neighbors_current_original = np.concatenate(
+        [
+            inputs["neighbor_agents_past"][:P32, -1, :2],
+            np.arctan2(
+                inputs["neighbor_agents_past"][:P32, -1, 3:4],
+                inputs["neighbor_agents_past"][:P32, -1, 2:3],
+            ),
+        ],
+        axis=-1,
+    )  # (P32, 3)
     # inputs = args.observation_normalizer(inputs)
 
     neighbor_current_mask = np.sum((neighbors_current[..., :4] != 0), axis=-1) == 0  # (P32)
