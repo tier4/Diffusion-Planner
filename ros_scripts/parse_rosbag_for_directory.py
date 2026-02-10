@@ -1,5 +1,6 @@
 import argparse
 import logging
+import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
@@ -13,6 +14,7 @@ def parse_args():
     parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
+    parser.add_argument("--min_distance", type=float, default=50.0)
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
     parser.add_argument("--convert_red", type=int, default=0)
@@ -30,6 +32,7 @@ def process_single_bag(args_tuple):
         step,
         limit,
         min_frames,
+        min_distance,
         search_nearest_route,
         convert_yellow,
         convert_red,
@@ -66,6 +69,7 @@ def process_single_bag(args_tuple):
             step=step,
             limit=limit,
             min_frames=min_frames,
+            min_distance=min_distance,
             search_nearest_route=search_nearest_route,
             convert_yellow=convert_yellow,
             convert_red=convert_red,
@@ -80,12 +84,14 @@ def process_single_bag(args_tuple):
 
 
 if __name__ == "__main__":
+    start_time = time.perf_counter()
     args = parse_args()
     target_dir_list = args.target_dir_list
     save_root = args.save_root
     step = args.step
     limit = args.limit
     min_frames = args.min_frames
+    min_distance = args.min_distance
     search_nearest_route = args.search_nearest_route
     convert_yellow = args.convert_yellow
     convert_red = args.convert_red
@@ -127,6 +133,7 @@ if __name__ == "__main__":
                 step,
                 limit,
                 min_frames,
+                min_distance,
                 search_nearest_route,
                 convert_yellow,
                 convert_red,
@@ -139,3 +146,9 @@ if __name__ == "__main__":
     # Process bags in parallel
     with Pool(processes=num_workers) as pool:
         results = pool.map(process_single_bag, process_args)
+
+    elapsed_seconds = int(time.perf_counter() - start_time)
+    hours = elapsed_seconds // 3600
+    minutes = (elapsed_seconds % 3600) // 60
+    seconds = elapsed_seconds % 60
+    print(f"Total elapsed time: {hours:02d}:{minutes:02d}:{seconds:02d}")
