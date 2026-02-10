@@ -13,6 +13,7 @@ def parse_args():
     parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
+    parser.add_argument("--min_distance", type=float, default=50.0)
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
     parser.add_argument("--convert_red", type=int, default=0)
@@ -30,6 +31,7 @@ def process_single_bag(args_tuple):
         step,
         limit,
         min_frames,
+        min_distance,
         search_nearest_route,
         convert_yellow,
         convert_red,
@@ -66,6 +68,7 @@ def process_single_bag(args_tuple):
             step=step,
             limit=limit,
             min_frames=min_frames,
+            min_distance=min_distance,
             search_nearest_route=search_nearest_route,
             convert_yellow=convert_yellow,
             convert_red=convert_red,
@@ -86,6 +89,7 @@ if __name__ == "__main__":
     step = args.step
     limit = args.limit
     min_frames = args.min_frames
+    min_distance = args.min_distance
     search_nearest_route = args.search_nearest_route
     convert_yellow = args.convert_yellow
     convert_red = args.convert_red
@@ -127,6 +131,7 @@ if __name__ == "__main__":
                 step,
                 limit,
                 min_frames,
+                min_distance,
                 search_nearest_route,
                 convert_yellow,
                 convert_red,
