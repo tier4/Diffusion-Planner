@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument("--ego_wheel_base", type=float, default=2.75)
     parser.add_argument("--ego_length", type=float, default=4.34)
     parser.add_argument("--ego_width", type=float, default=1.70)
-    parser.add_argument("--num_workers", type=int, default=32)
+    parser.add_argument("--num_workers", type=int, default=64)
     return parser.parse_args()
 
 
