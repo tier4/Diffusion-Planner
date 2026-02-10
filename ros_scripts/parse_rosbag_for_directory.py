@@ -1,5 +1,6 @@
 import argparse
 import logging
+import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
@@ -83,6 +84,7 @@ def process_single_bag(args_tuple):
 
 
 if __name__ == "__main__":
+    start_time = time.perf_counter()
     args = parse_args()
     target_dir_list = args.target_dir_list
     save_root = args.save_root
@@ -144,3 +146,9 @@ if __name__ == "__main__":
     # Process bags in parallel
     with Pool(processes=num_workers) as pool:
         results = pool.map(process_single_bag, process_args)
+
+    elapsed_seconds = int(time.perf_counter() - start_time)
+    hours = elapsed_seconds // 3600
+    minutes = (elapsed_seconds % 3600) // 60
+    seconds = elapsed_seconds % 60
+    print(f"Total elapsed time: {hours:02d}:{minutes:02d}:{seconds:02d}")
