@@ -151,4 +151,8 @@ if __name__ == "__main__":
     hours = elapsed_seconds // 3600
     minutes = (elapsed_seconds % 3600) // 60
     seconds = elapsed_seconds % 60
-    print(f"Total elapsed time: {hours:02d}:{minutes:02d}:{seconds:02d}")
+    time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    print(f"Total elapsed time: {time_str}")
+
+    with open(save_root / "processing_time.txt", "w") as summary_file:
+        summary_file.write(f"Total elapsed time: {time_str}\n")
