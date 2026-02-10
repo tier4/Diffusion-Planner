@@ -28,6 +28,7 @@ import torch
 from torch import optim
 
 from preference_optimization.annotation_gui import collect_preferences
+from preference_optimization.annotation_ws_server import AnnotationWsServer
 from preference_optimization.model_utils import load_model
 from preference_optimization.preference_collection import generate_rule_based_preferences
 from preference_optimization.trainer import DPOTrainer
@@ -71,10 +72,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preference_mode",
         type=str,
-        choices=["rule", "gui"],
+        choices=["rule", "gui", "lichtblick"],
         default="rule",
         help="Preference collection mode: 'rule' for automatic, 'gui' for manual annotation",
     )
+    parser.add_argument("--lichtblick_host", type=str, default="127.0.0.1", help="Lichtblick websocket host")
+    parser.add_argument("--lichtblick_port", type=int, default=8765, help="Lichtblick websocket port")
     parser.add_argument(
         "--train_epochs",
         type=int,
@@ -149,6 +152,7 @@ def collect_epoch_preferences(
     policy_model,
     model_args,
     train_npz_paths: list[str],
+    ws_server: AnnotationWsServer | None = None,
 ) -> list[dict]:
     """Collect preferences for current epoch.
 
@@ -169,6 +173,18 @@ def collect_epoch_preferences(
             args.train_npz_list,
             target_count=len(train_npz_paths),
         )
+    elif args.preference_mode == "lichtblick":
+        if ws_server is None:
+            raise RuntimeError("Lichtblick mode requires a running AnnotationWsServer.")
+        print("Launching Lichtblick websocket annotation...")
+        ws_server.reset_annotation_round(target_count=len(train_npz_paths))
+        ws_server.update_training_status(
+            phase="annotation",
+            message="Annotate trajectories. If both look poor, click Regenerate first, then select winner and click Launch Training.",
+            epoch=0,
+            total_epochs=args.train_epochs,
+        )
+        preferences = ws_server.wait_for_annotation_complete()
     else:
         print("Generating rule-based preferences...")
         preferences = generate_rule_based_preferences(
@@ -206,6 +222,18 @@ def main():
         beta=args.beta,
     )
 
+    ws_server: AnnotationWsServer | None = None
+    if args.preference_mode == "lichtblick":
+        ws_server = AnnotationWsServer(
+            model_path=checkpoint_path,
+            npz_list=args.train_npz_list,
+            target_count=len(train_npz_paths) if "train_npz_paths" in locals() else None,
+            device=str(DEVICE),
+            host=args.lichtblick_host,
+            port=args.lichtblick_port,
+        )
+        ws_server.start_background()
+
     # Load validation data
     with open(args.valid_npz_list, "r") as f:
         valid_npz_paths = json.load(f)
@@ -234,7 +262,7 @@ def main():
 
         # Collect preferences
         preferences = collect_epoch_preferences(
-            args, policy_model, model_args, train_npz_paths
+            args, policy_model, model_args, train_npz_paths, ws_server=ws_server
         )
 
         if not preferences:
@@ -242,7 +270,32 @@ def main():
             continue
 
         # Train on preferences
-        metrics = trainer.train_epoch(preferences, epoch)
+        if ws_server is not None:
+            ws_server.update_training_status(
+                phase="training",
+                message=f"Training epoch {epoch}/{args.train_epochs}...",
+                epoch=epoch,
+                total_epochs=args.train_epochs,
+            )
+
+        def _progress_cb(progress: dict[str, float]) -> None:
+            if ws_server is None:
+                return
+            ws_server.update_training_status(
+                phase="training",
+                message=f"Training epoch {epoch}/{args.train_epochs}",
+                epoch=epoch,
+                total_epochs=args.train_epochs,
+                batch=int(progress["batch"]),
+                total_batches=int(progress["total_batches"]),
+                metrics={
+                    "loss": float(progress["loss"]),
+                    "accuracy": float(progress["accuracy"]),
+                    "reward_margin": float(progress["reward_margin"]),
+                },
+            )
+
+        metrics = trainer.train_epoch(preferences, epoch, progress_callback=_progress_cb)
 
         # Visualize
         trainer.visualize_epoch(valid_loader, epoch)
@@ -251,12 +304,40 @@ def main():
         trainer.log_metrics(epoch, metrics)
         trainer.save_checkpoint(epoch, args_dict)
 
+        if ws_server is not None:
+            ws_server.update_training_status(
+                phase="training",
+                message=f"Epoch {epoch} complete. Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}",
+                epoch=epoch,
+                total_epochs=args.train_epochs,
+                metrics=metrics,
+            )
+            if epoch < args.train_epochs:
+                ws_server.update_training_status(
+                    phase="annotation",
+                    message=(
+                        f"Epoch {epoch} training finished. Next annotation round is ready. "
+                        "Please click Regenerate when needed, then select winner and Launch Training."
+                    ),
+                    epoch=epoch,
+                    total_epochs=args.train_epochs,
+                    metrics=metrics,
+                )
+
         print("-" * 60)
 
     print("\n" + "=" * 60)
     print("Training complete!")
     print(f"Results saved to: {run_dir}")
     print("=" * 60)
+
+    if ws_server is not None:
+        ws_server.update_training_status(
+            phase="complete",
+            message=f"Training complete. Results: {run_dir}",
+            epoch=args.train_epochs,
+            total_epochs=args.train_epochs,
+        )
 
 
 if __name__ == "__main__":

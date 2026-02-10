@@ -1,0 +1,52 @@
+{
+  "configById": {
+    "Annotation UI.Annotation Sidebar!3okj9ok": {},
+    "Annotation UI.Annotation Controls!41305v": {},
+    "Annotation UI.Annotation Trajectory Plot!1zkpg7p": {},
+    "Annotation UI.Annotation Lateral Plot!1dhw75a": {},
+    "Annotation UI.Annotation Velocity Plot!17zzbzl": {},
+    "Annotation UI.Annotation Metrics Table!3s9nnb8": {},
+    "Annotation UI.Annotation Selection!10btfj6": {},
+    "Annotation UI.Annotation Navigation!zc8hrs": {}
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": {
+      "first": "Annotation UI.Annotation Sidebar!3okj9ok",
+      "second": "Annotation UI.Annotation Controls!41305v",
+      "direction": "column",
+      "splitPercentage": 59.35727788279773
+    },
+    "second": {
+      "first": {
+        "first": "Annotation UI.Annotation Trajectory Plot!1zkpg7p",
+        "second": {
+          "first": "Annotation UI.Annotation Lateral Plot!1dhw75a",
+          "second": "Annotation UI.Annotation Velocity Plot!17zzbzl",
+          "direction": "row",
+          "splitPercentage": 51.265621278782646
+        },
+        "direction": "row",
+        "splitPercentage": 37.1864776444929
+      },
+      "second": {
+        "first": {
+          "first": "Annotation UI.Annotation Metrics Table!3s9nnb8",
+          "second": "Annotation UI.Annotation Selection!10btfj6",
+          "direction": "row",
+          "splitPercentage": 46.56402553511078
+        },
+        "second": "Annotation UI.Annotation Navigation!zc8hrs",
+        "direction": "column"
+      },
+      "direction": "column",
+      "splitPercentage": 61.578449905482046
+    },
+    "direction": "row",
+    "splitPercentage": 15.066378511886386
+  }
+}

@@ -60,7 +60,7 @@ class DPOTrainer:
         self.train_log: list[dict] = []
 
     def train_epoch(
-        self, preferences: list[dict], epoch: int
+        self, preferences: list[dict], epoch: int, progress_callback=None
     ) -> dict[str, float]:
         """Train for one epoch on preference data.
 
@@ -104,7 +104,8 @@ class DPOTrainer:
         total_reward_margin = 0.0
         num_batches = 0
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
+        total_batches = len(train_loader)
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}"), start=1):
             self.optimizer.zero_grad()
 
             # Compute DPO loss
@@ -126,6 +127,18 @@ class DPOTrainer:
             total_accuracy += metrics["accuracy"]
             total_reward_margin += metrics["avg_reward_margin"]
             num_batches += 1
+
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "epoch": epoch,
+                        "batch": batch_idx,
+                        "total_batches": total_batches,
+                        "loss": float(loss.item()),
+                        "accuracy": float(metrics["accuracy"]),
+                        "reward_margin": float(metrics["avg_reward_margin"]),
+                    }
+                )
 
         # Average metrics
         avg_metrics = {
