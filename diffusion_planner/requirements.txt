@@ -1,5 +1,5 @@
 setuptools==78.1.0
-protobuf==5.26.1
+protobuf==5.29.6
 pytorch_lightning==2.0.1
 timm==1.0.10
 wandb
