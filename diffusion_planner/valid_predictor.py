@@ -47,7 +47,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
         turn_indicator_seq = inputs["turn_indicators"]
 
-        inputs["sampled_trajectories"] = 0.5 * torch.randn(B, 33, 81, 4, dtype=torch.float32)
+        inputs["sampled_trajectories"] = torch.zeros(B, 33, 81, 4, dtype=torch.float32)
         inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
 
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
