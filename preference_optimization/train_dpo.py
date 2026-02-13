@@ -28,7 +28,7 @@ import torch
 from torch import optim
 
 from preference_optimization.annotation_gui import collect_preferences
-from preference_optimization.annotation_ws_server import AnnotationWsServer
+from preference_optimization.annotation_ros_node import AnnotationRosServer
 from preference_optimization.model_utils import load_model
 from preference_optimization.preference_collection import generate_rule_based_preferences
 from preference_optimization.trainer import DPOTrainer
@@ -152,7 +152,7 @@ def collect_epoch_preferences(
     policy_model,
     model_args,
     train_npz_paths: list[str],
-    ws_server: AnnotationWsServer | None = None,
+    ros_node: AnnotationRosServer | None = None,
 ) -> list[dict]:
     """Collect preferences for current epoch.
 
@@ -174,17 +174,17 @@ def collect_epoch_preferences(
             target_count=len(train_npz_paths),
         )
     elif args.preference_mode == "lichtblick":
-        if ws_server is None:
-            raise RuntimeError("Lichtblick mode requires a running AnnotationWsServer.")
+        if ros_node is None:
+            raise RuntimeError("Lichtblick mode requires a running AnnotationRosServer.")
         print("Launching Lichtblick websocket annotation...")
-        ws_server.reset_annotation_round(target_count=len(train_npz_paths))
-        ws_server.update_training_status(
+        ros_node.reset_annotation_round(target_count=len(train_npz_paths))
+        ros_node.update_training_status(
             phase="annotation",
             message="Annotate trajectories. If both look poor, click Regenerate first, then select winner and click Launch Training.",
             epoch=0,
             total_epochs=args.train_epochs,
         )
-        preferences = ws_server.wait_for_annotation_complete()
+        preferences = ros_node.wait_for_annotation_complete()
     else:
         print("Generating rule-based preferences...")
         preferences = generate_rule_based_preferences(
@@ -222,17 +222,15 @@ def main():
         beta=args.beta,
     )
 
-    ws_server: AnnotationWsServer | None = None
+    ros_node: AnnotationRosServer | None = None
     if args.preference_mode == "lichtblick":
-        ws_server = AnnotationWsServer(
+        ros_node = AnnotationRosServer(
             model_path=checkpoint_path,
             npz_list=args.train_npz_list,
             target_count=len(train_npz_paths) if "train_npz_paths" in locals() else None,
             device=str(DEVICE),
-            host=args.lichtblick_host,
-            port=args.lichtblick_port,
         )
-        ws_server.start_background()
+        ros_node.start_background()
 
     # Load validation data
     with open(args.valid_npz_list, "r") as f:
@@ -262,7 +260,7 @@ def main():
 
         # Collect preferences
         preferences = collect_epoch_preferences(
-            args, policy_model, model_args, train_npz_paths, ws_server=ws_server
+            args, policy_model, model_args, train_npz_paths, ros_node=ros_node
         )
 
         if not preferences:
@@ -270,8 +268,8 @@ def main():
             continue
 
         # Train on preferences
-        if ws_server is not None:
-            ws_server.update_training_status(
+        if ros_node is not None:
+            ros_node.update_training_status(
                 phase="training",
                 message=f"Training epoch {epoch}/{args.train_epochs}...",
                 epoch=epoch,
@@ -279,9 +277,9 @@ def main():
             )
 
         def _progress_cb(progress: dict[str, float]) -> None:
-            if ws_server is None:
+            if ros_node is None:
                 return
-            ws_server.update_training_status(
+            ros_node.update_training_status(
                 phase="training",
                 message=f"Training epoch {epoch}/{args.train_epochs}",
                 epoch=epoch,
@@ -304,8 +302,8 @@ def main():
         trainer.log_metrics(epoch, metrics)
         trainer.save_checkpoint(epoch, args_dict)
 
-        if ws_server is not None:
-            ws_server.update_training_status(
+        if ros_node is not None:
+            ros_node.update_training_status(
                 phase="training",
                 message=f"Epoch {epoch} complete. Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}",
                 epoch=epoch,
@@ -313,7 +311,7 @@ def main():
                 metrics=metrics,
             )
             if epoch < args.train_epochs:
-                ws_server.update_training_status(
+                ros_node.update_training_status(
                     phase="annotation",
                     message=(
                         f"Epoch {epoch} training finished. Next annotation round is ready. "
@@ -331,8 +329,8 @@ def main():
     print(f"Results saved to: {run_dir}")
     print("=" * 60)
 
-    if ws_server is not None:
-        ws_server.update_training_status(
+    if ros_node is not None:
+        ros_node.update_training_status(
             phase="complete",
             message=f"Training complete. Results: {run_dir}",
             epoch=args.train_epochs,

@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from "react";
-
+import type { PanelExtensionContext } from "@lichtblick/suite";
 import { sendMessage } from "../shared/wsClient";
 import { useWsState } from "../shared/useWsState";
 import { ui } from "../shared/ui";
 
-export function ControlsPanel() {
-  const { params } = useWsState();
+export function ControlsPanel({ context }: { context: PanelExtensionContext }) {
+  const { params } = useWsState(context);
   const [localParams, setLocalParams] = useState(params);
 
   useEffect(() => {

@@ -1,9 +1,9 @@
 import React from "react";
-
+import type { PanelExtensionContext } from "@lichtblick/suite";
 import { useWsState } from "../shared/useWsState";
 
-export function MetricsCompactPanel() {
-  const { texts } = useWsState();
+export function MetricsCompactPanel({ context }: { context: PanelExtensionContext }) {
+  const { texts } = useWsState(context);
 
   return (
     <div style={{ padding: "12px", fontFamily: "sans-serif" }}>

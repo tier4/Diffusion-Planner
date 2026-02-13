@@ -1,11 +1,12 @@
 import React from "react";
+import type { PanelExtensionContext } from "@lichtblick/suite";
 
 import { sendMessage } from "../shared/wsClient";
 import { useWsState } from "../shared/useWsState";
 import { parseHistory, parseProgress, ui } from "../shared/ui";
 
-export function SidebarPanel() {
-  const { texts, status, training, isLoading, loadingLabel, lastUpdateNote } = useWsState();
+export function SidebarPanel({ context }: { context: PanelExtensionContext }) {
+  const { texts, status, training, isLoading, loadingLabel, lastUpdateNote } = useWsState(context);
   const progress = parseProgress(texts.progress);
   const history = parseHistory(texts.history);
 

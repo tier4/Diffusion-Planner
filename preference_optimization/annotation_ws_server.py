@@ -12,6 +12,7 @@ import asyncio
 import base64
 import io
 import json
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -173,6 +174,7 @@ class AnnotationWsServer:
                     "history": self.state.history_display,
                 },
                 "plots": self.state.plots,
+                "trajectory_messages": self._build_trajectory_messages(),
                 "params": {
                     "noise_scale": self.params.noise_scale,
                     "fde_threshold": self.params.fde_threshold,
@@ -200,6 +202,80 @@ class AnnotationWsServer:
                 },
                 "training": self.training_status,
             },
+        }
+
+    @staticmethod
+    def _quat_from_heading(heading: float) -> dict[str, float]:
+        return {
+            "x": 0.0,
+            "y": 0.0,
+            "z": math.sin(heading / 2.0),
+            "w": math.cos(heading / 2.0),
+        }
+
+    def _build_predicted_trajectory_message(self, trajectory: Any, frame_id: str = "map") -> dict | None:
+        if trajectory is None:
+            return None
+        traj_np = torch.tensor(trajectory).cpu().numpy()
+        points: list[dict[str, Any]] = []
+        for i, row in enumerate(traj_np):
+            x, y, cos_h, sin_h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+            heading = math.atan2(sin_h, cos_h)
+            points.append(
+                {
+                    "time_from_start": {"sec": 0, "nsec": int(i * 0.1 * 1e9)},
+                    "pose": {
+                        "position": {"x": x, "y": y, "z": 0.0},
+                        "orientation": self._quat_from_heading(heading),
+                    },
+                    "longitudinal_velocity_mps": 0.0,
+                    "lateral_velocity_mps": 0.0,
+                    "acceleration_mps2": 0.0,
+                    "heading_rate_rps": 0.0,
+                    "front_wheel_angle_rad": 0.0,
+                    "rear_wheel_angle_rad": 0.0,
+                }
+            )
+        return {
+            "header": {"stamp": {"sec": int(time.time()), "nsec": 0}, "frame_id": frame_id},
+            "points": points,
+        }
+
+    def _build_gt_trajectory_message(self, frame_id: str = "map") -> dict | None:
+        if (
+            self.annotator.current_data is None
+            or "ego_agent_future" not in self.annotator.current_data
+        ):
+            return None
+        gt_np = self.annotator.current_data["ego_agent_future"][0].cpu().numpy()
+        points: list[dict[str, Any]] = []
+        for i, row in enumerate(gt_np):
+            x, y, heading = float(row[0]), float(row[1]), float(row[2])
+            points.append(
+                {
+                    "time_from_start": {"sec": 0, "nsec": int(i * 0.1 * 1e9)},
+                    "pose": {
+                        "position": {"x": x, "y": y, "z": 0.0},
+                        "orientation": self._quat_from_heading(heading),
+                    },
+                    "longitudinal_velocity_mps": 0.0,
+                    "lateral_velocity_mps": 0.0,
+                    "acceleration_mps2": 0.0,
+                    "heading_rate_rps": 0.0,
+                    "front_wheel_angle_rad": 0.0,
+                    "rear_wheel_angle_rad": 0.0,
+                }
+            )
+        return {
+            "header": {"stamp": {"sec": int(time.time()), "nsec": 0}, "frame_id": frame_id},
+            "points": points,
+        }
+
+    def _build_trajectory_messages(self) -> dict[str, Any]:
+        return {
+            "deterministic": self._build_predicted_trajectory_message(self.annotator.trajectory_1),
+            "stochastic": self._build_predicted_trajectory_message(self.annotator.trajectory_2),
+            "ground_truth": self._build_gt_trajectory_message(),
         }
 
     def _load_sample(self) -> dict:

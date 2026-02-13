@@ -12,12 +12,12 @@ import { MetricsTablePanel } from "./panels/MetricsTablePanel";
 import { MetricsCompactPanel } from "./panels/MetricsCompactPanel";
 import { SelectionPanel } from "./panels/SelectionPanel";
 
-type PanelComponent = () => JSX.Element;
+type PanelComponent = ({ context }: { context: PanelExtensionContext }) => JSX.Element;
 
 function mountPanel(Component: PanelComponent) {
   return (context: PanelExtensionContext) => {
     const root = createRoot(context.panelElement);
-    root.render(React.createElement(Component));
+    root.render(React.createElement(Component, { context }));
     return () => root.unmount();
   };
 }

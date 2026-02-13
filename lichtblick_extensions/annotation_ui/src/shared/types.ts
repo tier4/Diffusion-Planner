@@ -1,3 +1,5 @@
+import type { Trajectory } from "autoware-lichtblick-plugins/src/msgs/planning/Trajectory";
+
 export interface AnnotationTexts {
   metric: string;
   progress: string;
@@ -52,6 +54,13 @@ export interface AnnotationState {
       accuracy?: number;
       reward_margin?: number;
     };
+  };
+  trajectory_messages?: {
+    deterministic: Trajectory | null;
+    stochastic: Trajectory | null;
+    ground_truth: Trajectory | null;
+    ego_history?: Trajectory | null;
+    gt_snippet?: Trajectory | null;
   };
   isLoading?: boolean;
   loadingLabel?: string;

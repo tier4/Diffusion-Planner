@@ -1,70 +1,99 @@
 # Annotation UI (Lichtblick)
 
-This extension recreates the annotation GUI as multiple Lichtblick panels. It connects to the Python WebSocket server in `preference_optimization/annotation_ws_server.py`.
+This extension recreates the annotation workflow as multiple Lichtblick panels using **ROS2 topics**.
+
+The backend server is:
+
+- `preference_optimization/annotation_ros_node.py`
+
+WebSocket transport is no longer used for panel data/control.
+
+## Architecture
+
+- Python backend runs as a ROS2 node and publishes annotation state + visualization topics.
+- The extension subscribes/publishes through `PanelExtensionContext` ROS topic APIs.
+- For 3D trajectory rendering, use the Autoware Lichtblick converter extension (no local dummy trajectory converter).
+
+## Prerequisite: Install Autoware Lichtblick Plugins First
+
+Before installing this annotation extension, install Tier IV's Autoware converter extension first:
+
+```bash
+git clone https://github.com/tier4/AutowareLichtblickPlugins.git
+cd AutowareLichtblickPlugins
+bash ./install.sh
+```
+
+This provides the planning/perception converters used by the 3D panel, including trajectory visualization.
 
 ## Quick Start
 
-1. Start the WebSocket server:
+1. Start ROS2 and foxglove bridge (example):
 
+```bash
+ros2 run foxglove_bridge foxglove_bridge
 ```
-python preference_optimization/annotation_ws_server.py \
+
+2. Start the annotation ROS node:
+
+```bash
+python -m preference_optimization.annotation_ros_node \
   --model-path /path/to/model.pth \
   --npz-list /path/to/train_npz_list.json \
   --device cuda:0
 ```
 
-2. Install the extension (from this folder):
+3. Install this extension (from this folder):
 
-```
+```bash
 npm install
 npm run local-install
 ```
 
-This uses `lichtblick-extension install` via the locally installed CLI from `create-lichtblick-extension`.
+4. In Lichtblick, add these custom panels:
 
-3. In Lichtblick, add panels:
-   - Annotation Sidebar
-   - Annotation Navigation
-   - Annotation Controls
-   - Annotation Selection
-   - Annotation Trajectory Plot
-   - Annotation Velocity Plot
-   - Annotation Lateral Plot
-   - Annotation Metrics Table
-   - Annotation Metrics Compact
+- Annotation Sidebar
+- Annotation Navigation
+- Annotation Controls
+- Annotation Selection
+- Annotation Trajectory Plot
+- Annotation Velocity Plot
+- Annotation Lateral Plot
+- Annotation Metrics Table
+- Annotation Metrics Compact
 
-## WebSocket API Schema
+## ROS Topic Contract
 
-### Client → Server
+### Command / state
 
-- `get_state`: request current state.
-- `set_params`: update parameters. Payload keys: `noise_scale`, `fde_threshold`, `ade_threshold`, `max_retries`, `zoom_level`, `time_step`, `gt_similarity_mode`.
-- `load_sample`: load current sample and generate trajectories.
-- `regenerate`: regenerate stochastic trajectory.
-- `select_winner`: payload `{ "winner": "trajectory_1" | "trajectory_2" | "green" | "orange" }`.
-- `jump`: payload `{ "delta": int }`.
-- `jump_to_index`: payload `{ "target_index": int }` (1-indexed).
-- `jump_to_next_unlabeled`: no payload.
-- `toggle_filter`: payload `{ "filter_mode": "All" | "Finished" | "Unfinished" }`.
-- `set_auto_skip`: payload `{ "enabled": boolean }`.
-- `update_time`: payload `{ "time_step": int }`.
-- `update_zoom`: payload `{ "zoom_level": int }`.
-- `launch_training`: no payload.
+- `/annotation/cmd` (`std_msgs/msg/String`): panel commands (JSON payload)
+- `/annotation/state` (`std_msgs/msg/String`): serialized UI state (JSON payload)
 
-### Server → Client
+### Trajectory topics
 
-- `state_update`:
-  - `texts`: progress/metric/metrics/sidebar/history strings
-  - `plots`: base64 PNGs for trajectory/velocity/lateral
-  - `params`: current parameters
-  - `status`: annotation status counters
-  - `server`: protocol metadata and uptime
-- `hello_ack`: protocol handshake response
-- `pong`: health check response
-- `error`: payload `{ "message": string }`
+- `/annotation/data/trajectory/deterministic` (`autoware_planning_msgs/msg/Trajectory`)
+- `/annotation/data/trajectory/stochastic` (`autoware_planning_msgs/msg/Trajectory`)
+- `/annotation/data/trajectory/ground_truth` (`autoware_planning_msgs/msg/Trajectory`)
+- `/annotation/data/trajectory/ego_history` (`autoware_planning_msgs/msg/Trajectory`)
+- `/annotation/data/trajectory/gt_snippet` (`autoware_planning_msgs/msg/Trajectory`)
 
-All messages may include `request_id` for request/response correlation.
+### 3D context topics
 
-## ROS Image Panels
+- `/annotation/data/map_markers` (`visualization_msgs/msg/MarkerArray`)
+- `/annotation/data/footprints` (`visualization_msgs/msg/MarkerArray`)
+- `/annotation/data/tracked_objects` (`autoware_perception_msgs/msg/TrackedObjects`)
+- `/tf` (dynamic transforms, including deterministic/stochastic base links)
 
-Use native Lichtblick Image panels for camera topics. These panels do not require the WebSocket server.
+## 3D Panel Notes
+
+- Set fixed frame to `map`.
+- Ensure Autoware converter extension is enabled for:
+  - `autoware_planning_msgs/msg/Trajectory -> foxglove.SceneUpdate`
+- If a trajectory topic is visible but not rendered, verify:
+  - topic has non-empty `points`
+  - `header.frame_id` is valid and present in TF
+  - 3D per-topic setting `viewPath` is enabled
+
+## Image Panels
+
+Use native Lichtblick Image panels for camera topics as needed. These are independent from the annotation extension panels.

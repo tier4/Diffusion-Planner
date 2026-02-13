@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from "react";
-
+import type { PanelExtensionContext } from "@lichtblick/suite";
 import { sendMessage } from "../shared/wsClient";
 import { useWsState } from "../shared/useWsState";
 import { ui } from "../shared/ui";
 
-export function NavigationPanel() {
-  const { status } = useWsState();
+export function NavigationPanel({ context }: { context: PanelExtensionContext }) {
+  const { status } = useWsState(context);
   const [jumpIndex, setJumpIndex] = useState<number>(1);
 
   const jumpButtons = [

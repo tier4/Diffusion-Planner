@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
+import type { PanelExtensionContext } from "@lichtblick/suite";
 
-import { ensureConnected, getState, subscribe } from "./wsClient";
+import { getState, initTopicStore, subscribe } from "./topicStore";
 import type { AnnotationState } from "./types";
 
-export function useWsState(): AnnotationState {
+export function useWsState(context: PanelExtensionContext): AnnotationState {
   const [state, setState] = useState<AnnotationState>(getState());
 
   useEffect(() => {
-    ensureConnected();
+    initTopicStore(context);
     const unsubscribe = subscribe(setState);
     return () => unsubscribe();
-  }, []);
+  }, [context]);
 
   return state;
 }

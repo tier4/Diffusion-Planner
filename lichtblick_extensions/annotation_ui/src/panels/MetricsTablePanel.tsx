@@ -1,10 +1,10 @@
 import React from "react";
-
+import type { PanelExtensionContext } from "@lichtblick/suite";
 import { useWsState } from "../shared/useWsState";
 import { parseMarkdownTable, ui } from "../shared/ui";
 
-export function MetricsTablePanel() {
-  const { texts } = useWsState();
+export function MetricsTablePanel({ context }: { context: PanelExtensionContext }) {
+  const { texts } = useWsState(context);
   const table = parseMarkdownTable(texts.metrics_full_table || texts.metrics);
   const betterRow = (row: string[], idx: number) => {
     const metric = row[0] ?? "";

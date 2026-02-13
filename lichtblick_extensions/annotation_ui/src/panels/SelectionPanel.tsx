@@ -1,11 +1,11 @@
 import React from "react";
-
+import type { PanelExtensionContext } from "@lichtblick/suite";
 import { sendMessage } from "../shared/wsClient";
 import { useWsState } from "../shared/useWsState";
 import { ui } from "../shared/ui";
 
-export function SelectionPanel() {
-  const { status } = useWsState();
+export function SelectionPanel({ context }: { context: PanelExtensionContext }) {
+  const { status } = useWsState(context);
 
   return (
     <div style={ui.page}>
