@@ -62,7 +62,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
 
         loss["loss"] = (
-            loss["neighbor_prediction_loss"]
+            args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
             + args.alpha_planning_loss * loss["ego_planning_loss"]
             + loss["turn_indicator_loss"]
         )

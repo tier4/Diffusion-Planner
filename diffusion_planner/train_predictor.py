@@ -99,6 +99,7 @@ def get_args():
     )
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
+    parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
