@@ -312,6 +312,9 @@ def compute_dpo_loss(
         data_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
         data_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
 
+        data_w["delay"] = torch.zeros(B, device=DEVICE)  # Add dummy delay if model expects it
+        data_l["delay"] = torch.zeros(B, device=DEVICE)
+
         l_w = compute_trajectory_loss(policy_model, data_w, traj_wi, model_args, noise_w, t)
         l_l = compute_trajectory_loss(policy_model, data_l, traj_lo, model_args, noise_l, t)
 
@@ -386,6 +389,8 @@ def visualize_validation(
 
             # Generate random noise
             data["sampled_trajectories"] = 0.0 * torch.randn(B, P, future_len + 1, 4).to(DEVICE)
+
+            data["delay"] = torch.zeros(B, device=DEVICE)  # Add dummy delay if model expects it
 
             # Normalize inputs
             data = model_args.observation_normalizer(data)

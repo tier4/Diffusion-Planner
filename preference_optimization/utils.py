@@ -11,7 +11,7 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
     data: dict[str, torch.Tensor] = {}
 
     for key, value in loaded.items():
-        if key in {"map_name", "token"}:
+        if key in {"map_name", "token", "delay"}:
             continue
         data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
 
@@ -87,6 +87,7 @@ def generate_trajectory_pair(
             data["sampled_trajectories"] = noise_scale * torch.randn(B, P, future_len + 1, 4).to(
                 device
             )
+        data["delay"] = torch.zeros(B, device=device)  # Add dummy delay if model expects it
         _, outputs = policy_model(data)
         ego_prediction = outputs["prediction"][0, 0].cpu().numpy()
         trajectories.append(ego_prediction)
