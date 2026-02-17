@@ -188,9 +188,11 @@ def convert_model(
     inputs["route_lanes_has_speed_limit"] = torch.ones(
         1, NUM_SEGMENTS_IN_ROUTE, 1, dtype=torch.bool
     )
-    inputs["polygons"] = torch.randn(1, NUM_POLYGONS, POINTS_PER_POLYGON, 2, dtype=torch.float32)
+    inputs["polygons"] = torch.randn(
+        1, NUM_POLYGONS, POINTS_PER_POLYGON, 2 + POLYGON_TYPE_NUM, dtype=torch.float32
+    )
     inputs["line_strings"] = torch.randn(
-        1, NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 2, dtype=torch.float32
+        1, NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 2 + LINE_STRING_TYPE_NUM, dtype=torch.float32
     )
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
