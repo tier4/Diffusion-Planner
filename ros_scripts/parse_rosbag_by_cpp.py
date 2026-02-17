@@ -44,26 +44,25 @@ def main(
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
-    print(
-        f"{cpp_binary_path} {rosbag_path} {vector_map_path} {save_dir} {step} {limit} {min_frames} {min_distance} {search_nearest_route} {convert_yellow} {convert_red} {ego_wheel_base} {ego_length} {ego_width}"
-    )
+    command = [
+        str(cpp_binary_path),
+        str(rosbag_path),
+        str(vector_map_path),
+        str(save_dir),
+        f"--step={step}",
+        f"--limit={limit}",
+        f"--min_frames={min_frames}",
+        f"--min_distance={min_distance}",
+        f"--search_nearest_route={search_nearest_route}",
+        f"--convert_yellow={convert_yellow}",
+        f"--convert_red={convert_red}",
+        f"--ego_wheel_base={ego_wheel_base}",
+        f"--ego_length={ego_length}",
+        f"--ego_width={ego_width}",
+    ]
+    print(" ".join(command))
     result = subprocess.run(
-        [
-            str(cpp_binary_path),
-            str(rosbag_path),
-            str(vector_map_path),
-            str(save_dir),
-            f"--step={step}",
-            f"--limit={limit}",
-            f"--min_frames={min_frames}",
-            f"--min_distance={min_distance}",
-            f"--search_nearest_route={search_nearest_route}",
-            f"--convert_yellow={convert_yellow}",
-            f"--convert_red={convert_red}",
-            f"--ego_wheel_base={ego_wheel_base}",
-            f"--ego_length={ego_length}",
-            f"--ego_width={ego_width}",
-        ],
+        command,
         capture_output=True,
         text=True,
     )
