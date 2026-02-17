@@ -1,3 +1,4 @@
+import random
 from argparse import Namespace
 from functools import partial
 
@@ -82,7 +83,9 @@ def compute_training_loss(
     max_delay = 5
     delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
     prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
-    t = torch.where(prefix_mask, eps, t)
+    mask_coeff = random.uniform(0.0, 1.0)
+    curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=gt_future.device))
+    t = torch.where(prefix_mask, curr_mask_time, t)
 
     all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
