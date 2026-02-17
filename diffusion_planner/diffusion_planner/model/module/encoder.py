@@ -100,6 +100,7 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
+            point_dim=2 + POLYGON_TYPE_NUM,
         )
         self.line_string_encoder = LineEncoder(
             config.line_string_len,
@@ -107,6 +108,7 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
+            point_dim=2 + LINE_STRING_TYPE_NUM,
         )
         self.goal_pose_encoder = GoalPoseEncoder(
             drop_path_rate=config.encoder_drop_path_rate,
@@ -604,7 +606,7 @@ class LaneEncoder(nn.Module):
 
 
 class LineEncoder(nn.Module):
-    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth):
+    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth, point_dim=2):
         super().__init__()
         self._class_type = class_type
         tokens_mlp_dim = 64
@@ -613,7 +615,7 @@ class LineEncoder(nn.Module):
         self._line_len = line_len
 
         self.channel_pre_project = Mlp(
-            in_features=4,
+            in_features=point_dim + 2,  # point_dim (x, y, type_one_hot...) + dx + dy
             hidden_features=channels_mlp_dim,
             out_features=channels_mlp_dim,
             act_layer=nn.GELU,
@@ -652,7 +654,7 @@ class LineEncoder(nn.Module):
         diff_x = diff_x.view(B, P, V, 1)
         diff_y = torch.cat([diff_y, torch.zeros_like(diff_y[:, :, :1])], dim=2)  # (B, P, V)
         diff_y = diff_y.view(B, P, V, 1)
-        x = torch.concat([x, diff_x, diff_y], dim=-1)  # (B, P, V, 4)
+        x = torch.concat([x, diff_x, diff_y], dim=-1)  # (B, P, V, D+2)
 
         pos = x[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
         heading = torch.atan2(pos[..., 3], pos[..., 2])
