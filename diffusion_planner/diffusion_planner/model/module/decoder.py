@@ -141,6 +141,14 @@ def compute_training_loss(
             + args.coeff_heading_l2_loss * heading_l2_loss
         )  # [B, P, T]
 
+        # Min-SNR-gamma weighting (Hang et al., 2023)
+        # For x_start prediction, weight by min(SNR(t), gamma) to balance
+        # contributions across diffusion timesteps.
+        # snr_gamma = 5.0
+        # snr = (1.0 - std ** 2) / (std ** 2 + 1e-8)  # [B, P, T, 1]
+        # snr_weight = torch.clamp(snr, max=snr_gamma).squeeze(-1)  # [B, P, T]
+        # dpm_loss = dpm_loss * snr_weight
+
         # Theoretically, we should not compute loss on the prefix part
         # but empirically, it is better to include them.
         # dpm_loss[prefix_mask[:, :, 1:, 0]] = 0.0
