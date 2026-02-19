@@ -50,7 +50,7 @@ npm install
 npm run local-install
 ```
 
-4. In Lichtblick, import the [dpo.json](./dpo.json) as layout configuration.
+4. In Lichtblick, import the [dpo.json](./layouts/dpo.json) as layout configuration.
 
 ## ROS Topic Contract
 
