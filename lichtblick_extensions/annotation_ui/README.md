@@ -50,17 +50,7 @@ npm install
 npm run local-install
 ```
 
-4. In Lichtblick, add these custom panels:
-
-- Annotation Sidebar
-- Annotation Navigation
-- Annotation Controls
-- Annotation Selection
-- Annotation Trajectory Plot
-- Annotation Velocity Plot
-- Annotation Lateral Plot
-- Annotation Metrics Table
-- Annotation Metrics Compact
+4. In Lichtblick, import the [dpo.json](./dpo.json) as layout configuration.
 
 ## ROS Topic Contract
 
