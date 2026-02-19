@@ -1,0 +1,33 @@
+/**
+ * Annotation GUI Styles
+ * 
+ * Custom CSS for the Trajectory Preference Annotation interface.
+ * Provides fixed sidebar layout and responsive design.
+ */
+
+/* Fixed sidebar - stays visible on the left side */
+.sidebar-column {
+    position: fixed !important;
+    top: 0;
+    left: 0;
+    height: 100vh !important;
+    overflow-y: auto !important;
+    width: 20% !important;
+    padding: 1rem;
+    background: var(--background-fill-primary);
+    border-right: 1px solid var(--border-color-primary);
+    z-index: 100;
+}
+
+/* Main content area - offset to account for fixed sidebar */
+.main-column {
+    margin-left: 20% !important;
+    width: 80% !important;
+    padding: 1rem;
+}
+
+/* Hidden keyboard capture input - present in DOM but invisible */
+#keyboard_capture {
+    display: none !important;
+}
+

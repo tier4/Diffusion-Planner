@@ -1,0 +1,190 @@
+{
+  "configById": {
+    "Annotation UI.Annotation Sidebar!3okj9ok": {},
+    "Annotation UI.Annotation Controls!41305v": {},
+    "Annotation UI.Annotation Trajectory Plot!1zkpg7p": {},
+    "Annotation UI.Annotation Lateral Plot!1dhw75a": {},
+    "Annotation UI.Annotation Velocity Plot!17zzbzl": {},
+    "3D!27s9cac": {
+      "cameraState": {
+        "perspective": false,
+        "distance": 58.72652247395408,
+        "phi": 5.194862493130896,
+        "thetaOffset": -3.506696792965936,
+        "targetOffset": [
+          19.80350826412806,
+          -18.086361661609335,
+          -8.757718677972974e-16
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "followTf": "map",
+      "scene": {
+        "enableStats": false,
+        "backgroundColor": "#152314"
+      },
+      "transforms": {
+        "frame:map": {
+          "visible": false
+        },
+        "frame:deterministic_base_link": {
+          "visible": false
+        },
+        "frame:stochastic_base_link": {
+          "visible": false
+        }
+      },
+      "topics": {
+        "/annotation/data/tracked_objects": {
+          "viewPathObjectId": "Off",
+          "showExistenceProb": "Off",
+          "visible": false,
+          "color": "#b7010145"
+        },
+        "/annotation/data/trajectory/deterministic": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off",
+          "visible": true,
+          "color": "#51ff00f2"
+        },
+        "/annotation/data/trajectory/ego_history": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off",
+          "visible": true,
+          "color": "#be171745"
+        },
+        "/annotation/data/trajectory/ground_truth": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off",
+          "visible": true,
+          "color": "#f30e0e8a",
+          "showOutlines": true
+        },
+        "/annotation/data/trajectory/gt_snippet": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off",
+          "visible": false
+        },
+        "/annotation/data/trajectory/stochastic": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off",
+          "visible": true,
+          "color": "#ff8100ff"
+        },
+        "/initialpose": {
+          "visible": true
+        },
+        "/annotation/data/map_markers": {
+          "visible": true
+        },
+        "/annotation/data/footprints": {
+          "visible": true,
+          "color": "#b323ac75",
+          "namespaces": {
+            "ego_footprint": {
+              "visible": true
+            }
+          }
+        }
+      },
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {}
+    },
+    "Annotation UI.Annotation Metrics Table!3s9nnb8": {},
+    "Annotation UI.Annotation Selection!10btfj6": {},
+    "Annotation UI.Annotation Navigation!zc8hrs": {}
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": {
+      "first": "Annotation UI.Annotation Sidebar!3okj9ok",
+      "second": "Annotation UI.Annotation Controls!41305v",
+      "direction": "column",
+      "splitPercentage": 59.35727788279773
+    },
+    "second": {
+      "first": {
+        "first": {
+          "first": "Annotation UI.Annotation Trajectory Plot!1zkpg7p",
+          "second": {
+            "first": "Annotation UI.Annotation Lateral Plot!1dhw75a",
+            "second": "Annotation UI.Annotation Velocity Plot!17zzbzl",
+            "direction": "row"
+          },
+          "direction": "row",
+          "splitPercentage": 23.60620036950012
+        },
+        "second": "3D!27s9cac",
+        "direction": "column",
+        "splitPercentage": 50.84745762711865
+      },
+      "second": {
+        "first": {
+          "first": "Annotation UI.Annotation Metrics Table!3s9nnb8",
+          "second": "Annotation UI.Annotation Selection!10btfj6",
+          "direction": "row",
+          "splitPercentage": 46.56402553511078
+        },
+        "second": "Annotation UI.Annotation Navigation!zc8hrs",
+        "direction": "column",
+        "splitPercentage": 50.171821305841945
+      },
+      "direction": "column",
+      "splitPercentage": 69.7069943289225
+    },
+    "direction": "row",
+    "splitPercentage": 15.066378511886386
+  }
+}
