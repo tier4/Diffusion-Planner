@@ -7,7 +7,11 @@ import torch.nn as nn
 
 import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
-from diffusion_planner.loss import loss_func, make_turn_indicator_gt
+from diffusion_planner.loss import (
+    compute_road_border_penalty,
+    loss_func,
+    make_turn_indicator_gt,
+)
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
     euler_integration,
@@ -196,6 +200,26 @@ def compute_training_loss(
         loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
 
     loss["ego_planning_loss"] = dpm_loss[:, 0, : args.ego_prediction_horizon].mean()
+
+    # Road border collision loss (ego only, x_start mode)
+    if args.coeff_road_border_loss > 0 and model_type == "x_start":
+
+        # Denormalize ego prediction
+        ego_pred_world = model_output[:, 0] * norm.std[0].to(model_output.device) + norm.mean[0].to(
+            model_output.device
+        )  # [B, T, 4]
+
+        rb_loss = compute_road_border_penalty(
+            ego_pred_world,
+            inputs["ego_shape"],
+            inputs["line_strings"],
+            args.observation_normalizer,
+            margin=args.road_border_margin,
+            n_interp=args.road_border_n_interp,
+        )  # [B, T]
+        loss["road_border_loss"] = rb_loss.mean()
+    else:
+        loss["road_border_loss"] = torch.tensor(0.0, device=dpm_loss.device)
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 

@@ -258,6 +258,233 @@ def neighbor_clearance_penalty(
     return penalty
 
 
+def point_to_segment_distance(
+    p: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> torch.Tensor:
+    """Compute distance from points to line segments.
+
+    Args:
+        p: [..., 2] query points.
+        a: [..., 2] segment start points.
+        b: [..., 2] segment end points.
+
+    Returns:
+        dist: [...] non-negative distances.
+    """
+    ab = b - a
+    ap = p - a
+    t = (ap * ab).sum(-1) / (ab * ab).sum(-1).clamp_min(1e-8)
+    t = t.clamp(0.0, 1.0)
+    closest = a + t.unsqueeze(-1) * ab
+    return ((p - closest) ** 2).sum(-1).clamp_min(1e-8).sqrt()
+
+
+def sample_ego_edge_points(
+    ego_bbox_corners: torch.Tensor,
+    n_interp: int = 0,
+) -> torch.Tensor:
+    """Sample points along ego bounding box edges.
+
+    Args:
+        ego_bbox_corners: [B, T, 4, 2] ego rectangle corners.
+        n_interp: number of intermediate points per edge.
+            n_interp=0: 4 points (corners only).
+            n_interp=1: 8 points (corners + midpoints).
+
+    Returns:
+        points: [B, T, 4*(n_interp+1), 2] sampled points.
+    """
+    # Edges: corner0→1, 1→2, 2→3, 3→0
+    starts = ego_bbox_corners  # [B, T, 4, 2]
+    ends = torch.roll(ego_bbox_corners, -1, dims=2)  # [B, T, 4, 2]
+
+    n_pts = n_interp + 1
+    # t = [0, 1/(n_pts), ..., (n_pts-1)/n_pts], excluding 1.0 to avoid duplication
+    t = torch.linspace(0.0, 1.0, n_pts + 1, device=ego_bbox_corners.device)[:-1]
+    t = t.reshape(1, 1, 1, n_pts, 1)
+
+    starts = starts.unsqueeze(3)  # [B, T, 4, 1, 2]
+    ends = ends.unsqueeze(3)  # [B, T, 4, 1, 2]
+
+    points = starts + t * (ends - starts)  # [B, T, 4, n_pts, 2]
+    B, T = points.shape[:2]
+    return points.reshape(B, T, 4 * n_pts, 2)
+
+
+def road_border_penalty(
+    ego_edge_points: torch.Tensor,
+    line_strings_xy: torch.Tensor,
+    road_border_mask: torch.Tensor,
+    margin: float,
+) -> torch.Tensor:
+    """Compute penalty for ego bbox proximity to road border line strings.
+
+    For each ego edge sample point, computes the minimum distance to any
+    road border line segment and applies a hinge penalty.
+    Fully vectorized (no for loops).
+
+    Args:
+        ego_edge_points: [B, T, K, 2] sample points on ego bbox edges.
+        line_strings_xy: [B, N, P, 2] line string xy coordinates (denormalized).
+        road_border_mask: [B, N] True if the line string is a road border.
+        margin: distance threshold (meters).
+
+    Returns:
+        penalty: [B, T] non-negative penalty per timestep.
+    """
+    B, T, K, _ = ego_edge_points.shape
+    device = ego_edge_points.device
+
+    # Pre-filter: keep only line strings that are road border in any batch
+    any_rb = road_border_mask.any(dim=0)  # [N]
+    if not any_rb.any():
+        return torch.zeros(B, T, device=device)
+
+    # Segment endpoints: [B, N, S, 2]
+    seg_a = line_strings_xy[:, :, :-1, :]
+    seg_b = line_strings_xy[:, :, 1:, :]
+    S = seg_a.shape[2]
+
+    # Segment validity: both endpoints non-zero and line string is road border
+    seg_valid = (
+        (seg_a.abs().sum(-1) > 1e-6)
+        & (seg_b.abs().sum(-1) > 1e-6)
+        & road_border_mask[:, :, None]
+    )  # [B, N, S]
+
+    # Pre-filter valid line strings to reduce memory
+    valid_ls_indices = any_rb.nonzero(as_tuple=True)[0]  # [M]
+    seg_a = seg_a[:, valid_ls_indices]  # [B, M, S, 2]
+    seg_b = seg_b[:, valid_ls_indices]  # [B, M, S, 2]
+    seg_valid = seg_valid[:, valid_ls_indices]  # [B, M, S]
+    M = valid_ls_indices.shape[0]
+
+    # Flatten segments: [B, M*S, 2]
+    seg_a_flat = seg_a.reshape(B, M * S, 2)
+    seg_b_flat = seg_b.reshape(B, M * S, 2)
+    seg_valid_flat = seg_valid.reshape(B, M * S)
+
+    # Compute distances: ego_edge_points [B, T, K, 2] vs segments [B, M*S, 2]
+    # Broadcast: p [B, T*K, 1, 2], a [B, 1, M*S, 2], b [B, 1, M*S, 2]
+    p = ego_edge_points.reshape(B, T * K, 1, 2)
+    a = seg_a_flat[:, None, :, :]  # [B, 1, M*S, 2]
+    b = seg_b_flat[:, None, :, :]  # [B, 1, M*S, 2]
+
+    dist = point_to_segment_distance(p, a, b)  # [B, T*K, M*S]
+
+    # Mask invalid segments
+    dist = torch.where(
+        seg_valid_flat[:, None, :],
+        dist,
+        torch.full_like(dist, float("inf")),
+    )
+
+    # Min over all segments and all edge points per timestep
+    min_dist_per_point = dist.min(dim=-1).values  # [B, T*K]
+    min_dist_per_point = min_dist_per_point.reshape(B, T, K)
+    min_dist = min_dist_per_point.min(dim=-1).values  # [B, T]
+
+    penalty = torch.where(
+        torch.isfinite(min_dist),
+        F.relu(margin - min_dist),
+        torch.zeros_like(min_dist),
+    )
+
+    return penalty
+
+
+def compute_ego_bbox_corners(
+    ego_traj: torch.Tensor,
+    ego_shape: torch.Tensor,
+) -> torch.Tensor:
+    """Compute ego bounding box corners from trajectory and vehicle shape.
+
+    Args:
+        ego_traj: [B, T, 4] ego trajectory (x, y, cos_heading, sin_heading).
+        ego_shape: [B, 3] (wheelbase, length, width).
+
+    Returns:
+        corners: [B, T, 4, 2] four corners per timestep.
+    """
+    B, T, _ = ego_traj.shape
+    device = ego_traj.device
+    dtype = ego_traj.dtype
+
+    heading = ego_traj[..., 2:]
+    heading_unit = heading / torch.linalg.norm(heading, dim=-1, keepdim=True).clamp_min(1e-6)
+    ego_xy = ego_traj[..., :2]
+
+    cog_to_rear = 0.5 * ego_shape[:, 0:1].unsqueeze(-1)  # [B, 1, 1]
+    ego_center_xy = ego_xy + heading_unit * cog_to_rear
+
+    half_length = (ego_shape[:, 1] / 2.0).unsqueeze(-1).expand(-1, T)
+    half_width = (ego_shape[:, 2] / 2.0).unsqueeze(-1).expand(-1, T)
+    half_sizes = torch.stack([half_length, half_width], dim=-1)  # [B, T, 2]
+
+    corner_signs = torch.tensor(
+        [[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0]],
+        device=device,
+        dtype=dtype,
+    )
+    local_corners = corner_signs[None, None, :, :] * half_sizes[:, :, None, :]
+    rot = torch.stack(
+        [
+            heading_unit[..., 0],
+            -heading_unit[..., 1],
+            heading_unit[..., 1],
+            heading_unit[..., 0],
+        ],
+        dim=-1,
+    ).reshape(B, T, 2, 2)
+    rotated_corners = torch.einsum("btij,btkj->btki", rot, local_corners)
+    return ego_center_xy[:, :, None, :] + rotated_corners
+
+
+def compute_road_border_penalty(
+    ego_traj: torch.Tensor,
+    ego_shape: torch.Tensor,
+    line_strings_norm: torch.Tensor,
+    observation_normalizer,
+    margin: float,
+    n_interp: int,
+) -> torch.Tensor:
+    """Compute road border penalty for ego trajectory.
+
+    Handles line string denormalization, ego bbox computation, and penalty
+    calculation in one place to avoid code duplication.
+
+    Args:
+        ego_traj: [B, T, 4] ego trajectory (x, y, cos, sin) in world frame.
+        ego_shape: [B, 3] (wheelbase, length, width) in meters.
+        line_strings_norm: [B, N, P, D] normalized line strings from inputs.
+        observation_normalizer: normalizer with _normalization_dict.
+        margin: distance threshold (meters).
+        n_interp: number of interpolation points per ego edge.
+
+    Returns:
+        penalty: [B, T] non-negative penalty per timestep.
+    """
+    ego_bbox_corners = compute_ego_bbox_corners(ego_traj, ego_shape)
+    ego_edge_points = sample_ego_edge_points(ego_bbox_corners, n_interp=n_interp)
+
+    ls_mean = observation_normalizer._normalization_dict["line_strings"]["mean"].to(
+        line_strings_norm.device
+    )
+    ls_std = observation_normalizer._normalization_dict["line_strings"]["std"].to(
+        line_strings_norm.device
+    )
+    ls_zero_mask = torch.sum(torch.ne(line_strings_norm, 0), dim=-1) == 0  # [B, N, P]
+    ls_denorm = line_strings_norm * ls_std + ls_mean
+    ls_denorm[ls_zero_mask] = 0.0
+
+    ls_xy = ls_denorm[..., :2]  # [B, N, P, 2]
+    rb_mask = (ls_denorm[..., 3] > 0.5).any(dim=-1)  # [B, N]
+
+    return road_border_penalty(ego_edge_points, ls_xy, rb_mask, margin=margin)
+
+
 def compute_safety_penalty(
     trajectory_pred: torch.Tensor,
     inputs: dict[str, torch.Tensor],

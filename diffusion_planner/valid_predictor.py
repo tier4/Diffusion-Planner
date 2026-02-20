@@ -5,7 +5,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.loss import compute_safety_penalty, loss_func, make_turn_indicator_gt
+from diffusion_planner.loss import (
+    compute_road_border_penalty,
+    compute_safety_penalty,
+    loss_func,
+    make_turn_indicator_gt,
+)
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
@@ -135,6 +140,17 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         total_result_dict["ego_safety_margin_loss"].append(safety_penalty)
         total_result_dict["ego_lane_boundary_margin_loss"].append(lane_penalty)
         total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty)
+
+        # Road border collision metric
+        rb_penalty = compute_road_border_penalty(
+            prediction[:, 0],  # [B, T, 4] (already denormalized)
+            inputs["ego_shape"],
+            inputs["line_strings"],
+            args.observation_normalizer,
+            margin=args.road_border_margin,
+            n_interp=args.road_border_n_interp,
+        )
+        total_result_dict["ego_road_border_loss"].append(rb_penalty)
 
     avg_loss_ego = total_loss_ego / total_samples_ego
     avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)
@@ -352,6 +368,11 @@ if __name__ == "__main__":
         print(
             "ego_neighbor_margin_loss_mean="
             f"{valid_dict['ego_neighbor_margin_loss'].mean().item():.4f}"
+        )
+    if "ego_road_border_loss" in valid_dict:
+        print(
+            "ego_road_border_loss_mean="
+            f"{valid_dict['ego_road_border_loss'].mean().item():.4f}"
         )
 
     valid_dict_to_save = {

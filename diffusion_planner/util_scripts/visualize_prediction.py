@@ -148,7 +148,7 @@ if __name__ == "__main__":
         loss_nei = np.sqrt(loss_nei)
         loss_ego_mean = np.mean(loss_ego)
 
-        fig, ax = plt.subplots(1, 2, figsize=(8, 5), gridspec_kw={"width_ratios": [2, 1]})
+        fig, ax = plt.subplots(1, 2, figsize=(8, 5.5), gridspec_kw={"width_ratios": [2, 1]})
         visualize_inputs(valid_data_dict, save_path=None, ax=ax[0])
 
         # plot prediction
@@ -171,7 +171,10 @@ if __name__ == "__main__":
                     f"\nloss{timestep // 10}sec={diff_m:.2f}[m]\n"
                     f"lat={lat_error_ego[index]:.2f}[m], lon={lon_error_ego[index]:.2f}[m], angle={angle_error_ego[index]:.2f}[rad]"
                 )
-        # title += f"\nego_lane_boundary_margin_loss={valid_loss['ego_lane_boundary_margin_loss']:.2f}, ego_neighbor_margin_loss={valid_loss['ego_neighbor_margin_loss']:.2f}"
+        lane_val = valid_loss["ego_lane_boundary_margin_loss"]
+        nbr_val = valid_loss["ego_neighbor_margin_loss"]
+        rb_val = valid_loss["ego_road_border_loss"]
+        title += f"\nlane={lane_val:.2f}, nbr={nbr_val:.2f}, rb={rb_val:.2f}"
 
         # Neighbors
         neighbors = valid_data_dict["neighbor_agents_past"][0]
