@@ -45,6 +45,9 @@ class AnnotationParams:
     zoom_level: int = 5
     time_step: int = 40
     gt_similarity_mode: bool = True
+    enable_initial_pruning: bool = True
+    initial_pos_threshold: float = 0.055
+    initial_yaw_threshold_deg: float = 0.55
 
 
 @dataclass
@@ -183,6 +186,9 @@ class AnnotationWsServer:
                     "zoom_level": self.params.zoom_level,
                     "time_step": self.params.time_step,
                     "gt_similarity_mode": self.params.gt_similarity_mode,
+                    "enable_initial_pruning": self.params.enable_initial_pruning,
+                    "initial_pos_threshold": self.params.initial_pos_threshold,
+                    "initial_yaw_threshold_deg": self.params.initial_yaw_threshold_deg,
                 },
                 "status": {
                     "current_index": self.annotator.current_index,
@@ -193,6 +199,9 @@ class AnnotationWsServer:
                     "current_filter": self.annotator.current_filter,
                     "auto_skip_labeled": self.annotator.auto_skip_labeled,
                     "current_jump_size": self.annotator.current_jump_size,
+                    "is_pruned": self.annotator.is_pruned,
+                    "initial_displacement": self.annotator.initial_displacement,
+                    "initial_yaw_diff": self.annotator.initial_yaw_diff,
                 },
                 "server": {
                     "protocol": "annotation.websocket.v1",
@@ -286,6 +295,9 @@ class AnnotationWsServer:
             self.params.max_retries,
             self.params.zoom_level,
             self.params.gt_similarity_mode,
+            self.params.enable_initial_pruning,
+            self.params.initial_pos_threshold,
+            self.params.initial_yaw_threshold_deg,
         )
         return self._refresh_from_tuple(result)
 
@@ -355,6 +367,9 @@ class AnnotationWsServer:
                     self.params.max_retries,
                     self.params.zoom_level,
                     self.params.gt_similarity_mode,
+                    self.params.enable_initial_pruning,
+                    self.params.initial_pos_threshold,
+                    self.params.initial_yaw_threshold_deg,
                 )
             )
 
@@ -367,6 +382,9 @@ class AnnotationWsServer:
                     self.params.max_retries,
                     self.params.zoom_level,
                     self.params.gt_similarity_mode,
+                    self.params.enable_initial_pruning,
+                    self.params.initial_pos_threshold,
+                    self.params.initial_yaw_threshold_deg,
                 )
             )
 
@@ -385,6 +403,9 @@ class AnnotationWsServer:
                     self.params.max_retries,
                     self.params.zoom_level,
                     self.params.gt_similarity_mode,
+                    self.params.enable_initial_pruning,
+                    self.params.initial_pos_threshold,
+                    self.params.initial_yaw_threshold_deg,
                 )
             )
 
