@@ -1,14 +1,53 @@
 # GT-as-Winner DPO Strategy
 
+## Status
+
+**Implemented** — `select_gt_as_winner()` method and "🎯 GT is Best" button are live in
+`annotation_gui.py`. GT is smoothed, validated, and recorded as `traj_w` against the
+deterministic output as `traj_l`. Button is automatically disabled when GT is unavailable.
+WebSocket server exposes `select_gt_as_winner` action and `gt_available` state flag.
+
+---
+
+## Academic context
+
+This pattern is well-established in the RLHF/DPO literature under several names:
+
+**SPIN — Self-Play Fine-Tuning** (Chen et al., 2024, "Self-Play Fine-Tuning Converts Weak
+Language Models to Strong Language Models"): formalises pairing human demonstrations (winner)
+against the model's own current outputs (loser). Exactly what we do: GT trajectory (winner)
+vs deterministic model output (loser).
+
+**Offline DPO / SFT-seeded DPO**: The original DPO paper (Rafailov et al., 2023, "Direct
+Preference Optimization: Your Language Model is Secretly a Reward Model") discusses using
+human demonstration data directly as the preferred side of preference pairs. Our use of
+recorded driving as the winner side is a direct instance of this.
+
+**KTO — Kahneman-Tversky Optimisation** (Ethayarajh et al., 2024): A variant that works
+with unpaired "good examples" rather than ranked pairs — equivalent to GT-as-winner without
+needing a loser trajectory at all. Could be a simpler alternative if GT quality is high.
+
+**Key theoretical justification**: the KL regularisation term in the DPO objective (via the
+reference model) prevents the policy from collapsing into pure imitation of GT, which would
+happen with standard SFT. This gives GT-grounded training without catastrophic forgetting
+of the model's generalisation capabilities.
+
+**In autonomous driving**: GT-as-winner is implicit in several RLHF-for-driving works
+(e.g., Waymo, Motional internal reports) where human-driven trajectories serve as positives
+against policy rollouts. The combination of GT pairs (for clear-cut cases) and human
+annotation pairs (for ambiguous cases) is the standard mixed strategy in practice.
+
+---
+
 ## Concept
 
 Use the ground truth trajectory (`ego_agent_future` from the NPZ file) as `traj_w`, paired
 against one of the model's generated trajectories as `traj_l`. This gives a strong,
 unambiguous preference signal without requiring the annotator to compare two model outputs.
 
-The preferred UI approach is a **manual button** in the annotation interface: a "GT is Best"
-button alongside the existing orange/green selection buttons. The annotator presses it when
-they can see the model's outputs are clearly worse than the recorded behaviour.
+The annotator presses the "🎯 GT is Best" button when the model's outputs are clearly worse
+than the recorded behaviour. The button is disabled automatically when GT is unavailable for
+the current sample.
 
 ---
 
