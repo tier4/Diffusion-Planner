@@ -7,6 +7,7 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 import torch
+from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from matplotlib.figure import Figure
 
@@ -50,6 +51,9 @@ class PreferenceAnnotator:
         self.initial_displacement: float = 0.0
         self.initial_yaw_diff: float = 0.0
         self.is_pruned: bool = False
+
+        # GT availability state
+        self.gt_available: bool = False
 
         # Navigation and tracking state
         self.current_jump_size = 1  # Tracks the last navigation button click
@@ -128,6 +132,7 @@ class PreferenceAnnotator:
         self.initial_displacement = initial_disp
         self.initial_yaw_diff = initial_yaw_diff
         self.is_pruned = is_pruned
+        self.gt_available = self._check_gt_available()
 
         # Convert zoom_level to view_range: level 1 = 100m, level 10 = 10m
         view_range = 100 - (int(zoom_level) - 1) * 90 / 9
@@ -328,6 +333,97 @@ class PreferenceAnnotator:
             self.current_index = (self.current_index + self.current_jump_size) % len(self.npz_paths)
         
         return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, n_fixed_points, time_step)
+
+    def select_gt_as_winner(
+        self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
+        initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        n_fixed_points: int = 0,
+        time_step: int = 40,
+    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+        """Record GT as winner (against the deterministic trajectory) and advance to next sample.
+
+        The GT trajectory is smoothed using the same unicycle kinematic smoother applied
+        during training, ensuring distribution consistency with the base model's training data.
+
+        Returns:
+            Tuple of (trajectory_plot, velocity_plot, lateral_plot, metric_text, progress_text, metrics_text, sidebar_status, history_display)
+        """
+        if self.current_data is None:
+            return None, None, None, "No data loaded", "Error", "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        if not self.gt_available:
+            return None, None, None, "GT not available for this sample", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        gt_smoothed = self._get_smoothed_gt()
+        if gt_smoothed is None:
+            return None, None, None, "GT smoothing failed", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        self.mark_as_labeled(self.current_index)
+        npz_path = self.npz_paths[self.current_index]
+
+        self.preferences.append({
+            "npz_path": npz_path,
+            "trajectory_w": gt_smoothed.tolist(),
+            "trajectory_l": self.trajectory_1,   # deterministic (green) is the loser
+        })
+
+        print(f"Recorded GT as winner for {npz_path}")
+
+        if len(self.preferences) >= self.target_count:
+            self.annotation_complete = True
+            complete_msg = (
+                f"✅ Annotation complete!\n\n"
+                f"Collected {len(self.preferences)} preferences.\n\n"
+                f"The server will close automatically in 3 seconds.\n"
+                f"Training will start automatically."
+            )
+            print(f"\n{'='*60}")
+            print("ANNOTATION COMPLETE!")
+            print(f"Collected {len(self.preferences)} preferences")
+            print(f"{'='*60}\n")
+            self._self_shutdown()
+            return None, None, None, complete_msg, f"Complete: {len(self.preferences)}/{self.target_count}", "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        if self.auto_skip_labeled:
+            self.current_index = self.get_next_unlabeled()
+        else:
+            self.current_index = (self.current_index + self.current_jump_size) % len(self.npz_paths)
+
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, n_fixed_points, time_step)
+
+    def _check_gt_available(self) -> bool:
+        """Return True if a valid GT trajectory exists for the current sample."""
+        if self.current_data is None or "ego_agent_future" not in self.current_data:
+            return False
+        gt = self.current_data["ego_agent_future"][0].cpu().numpy()
+        valid = ~((gt[:, 0] == 0) & (gt[:, 1] == 0))
+        return bool(valid.mean() >= 0.8)
+
+    def _get_smoothed_gt(self) -> np.ndarray | None:
+        """Return the GT trajectory as [T, 4] (x, y, cos, sin), smoothed via unicycle model.
+
+        Applies the same Tikhonov-regularised smoothing used during base model training
+        so the GT distribution matches what the model was trained on.
+
+        Returns:
+            Smoothed GT as [T, 4] numpy array, or None if smoothing fails.
+        """
+        try:
+            gt_raw = self.current_data["ego_agent_future"][0].cpu().numpy()  # [T, 3]
+            cos_yaw = np.cos(gt_raw[:, 2:3])
+            sin_yaw = np.sin(gt_raw[:, 2:3])
+            gt_4d = np.concatenate([gt_raw[:, :2], cos_yaw, sin_yaw], axis=1)  # [T, 4]
+            gt_tensor = torch.tensor(gt_4d, dtype=torch.float32, device=self.device).unsqueeze(0)  # [1, T, 4]
+
+            ego_past = self.current_data["ego_agent_past"]      # [1, T_past, 4] already cos/sin
+            ego_current = self.current_data["ego_current_state"]  # [1, 10]
+
+            smoothed = smoothing_future_trajectory(ego_past, ego_current, gt_tensor)  # [1, T, 4]
+            return smoothed[0].cpu().numpy()
+        except Exception as e:
+            print(f"GT smoothing failed: {e}")
+            return None
 
     def jump(
         self, delta: int, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
@@ -1516,6 +1612,11 @@ def create_interface(
                             variant="primary",
                             size="lg",
                         )
+                        select_gt_btn = gr.Button(
+                            "🎯 GT is Best",
+                            variant="primary",
+                            size="lg",
+                        )
                         regenerate_btn = gr.Button(
                             "🔄 Regenerate Stochastic",
                             variant="secondary",
@@ -1542,23 +1643,38 @@ def create_interface(
                         nav_buttons[config["delta"]] = gr.Button(config["label"], size="sm")
 
         # Event handlers
-        # Helper: append button interactivity to any annotator result tuple
+        # Helper: append button interactivity states to any annotator result tuple.
+        # select_orange_btn is disabled when the stochastic trajectory is pruned.
+        # select_gt_btn is disabled when GT is not available for the current sample.
         def _with_btn(result):
-            return (*result, gr.update(interactive=not annotator.is_pruned))
+            return (
+                *result,
+                gr.update(interactive=not annotator.is_pruned),
+                gr.update(interactive=annotator.gt_available),
+            )
 
         # Common input lists (pruning controls + time_step appended to existing params)
         _std_inputs = [noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox]
         _pruning_inputs = [enable_initial_pruning_checkbox, initial_pos_threshold_slider, initial_yaw_threshold_slider, n_fixed_points_slider]
         _full_inputs = _std_inputs + _pruning_inputs + [time_slider]
 
-        # Common output list (select button appended so it can be disabled when pruned)
+        # Common output list (selection buttons appended so interactivity can be controlled)
         _std_outputs = [trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display]
-        _full_outputs = _std_outputs + [select_orange_btn]
+        _full_outputs = _std_outputs + [select_orange_btn, select_gt_btn]
 
         # Orange (stochastic) is selected as winner, green (deterministic) as loser
         select_orange_btn.click(
             fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts: _with_btn(
                 annotator.select_winner("trajectory_2", ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts)
+            ),
+            inputs=_full_inputs,
+            outputs=_full_outputs,
+        )
+
+        # GT is selected as winner, deterministic (green) as loser
+        select_gt_btn.click(
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts: _with_btn(
+                annotator.select_gt_as_winner(ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1659,7 +1775,7 @@ def create_interface(
             else:
                 print(f"Ignoring key: '{actual_key}'")
                 # Return gr.update() to not change anything
-                return [gr.update()] * 9
+                return [gr.update()] * 10
 
         keyboard_input.change(
             fn=handle_keyboard_event,

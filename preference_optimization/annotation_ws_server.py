@@ -204,6 +204,7 @@ class AnnotationWsServer:
                     "is_pruned": self.annotator.is_pruned,
                     "initial_displacement": self.annotator.initial_displacement,
                     "initial_yaw_diff": self.annotator.initial_yaw_diff,
+                    "gt_available": self.annotator.gt_available,
                 },
                 "server": {
                     "protocol": "annotation.websocket.v1",
@@ -401,6 +402,22 @@ class AnnotationWsServer:
             return self._refresh_from_tuple(
                 self.annotator.select_winner(
                     winner,
+                    self.params.noise_scale,
+                    self.params.fde_threshold,
+                    self.params.ade_threshold,
+                    self.params.max_retries,
+                    self.params.zoom_level,
+                    self.params.gt_similarity_mode,
+                    self.params.enable_initial_pruning,
+                    self.params.initial_pos_threshold,
+                    self.params.initial_yaw_threshold_deg,
+                    self.params.n_fixed_points,
+                )
+            )
+
+        if action == "select_gt_as_winner":
+            return self._refresh_from_tuple(
+                self.annotator.select_gt_as_winner(
                     self.params.noise_scale,
                     self.params.fde_threshold,
                     self.params.ade_threshold,
