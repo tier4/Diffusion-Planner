@@ -1,0 +1,30 @@
+{
+  "name": "annotation-ui",
+  "displayName": "Annotation UI",
+  "description": "Lichtblick panels for Diffusion-Planner preference annotation",
+  "publisher": "ukenryu",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/extension.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "lichtblick-extension build",
+    "lichtblick:prepublish": "lichtblick-extension build --mode production",
+    "local-install": "lichtblick-extension install",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "autoware-lichtblick-plugins": "0.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "create-lichtblick-extension": "1.0.0",
+    "typescript": "^5.4.5"
+  },
+  "peerDependencies": {
+    "@lichtblick/suite": "*"
+  }
+}
