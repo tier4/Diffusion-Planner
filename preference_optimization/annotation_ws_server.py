@@ -48,6 +48,7 @@ class AnnotationParams:
     enable_initial_pruning: bool = True
     initial_pos_threshold: float = 0.055
     initial_yaw_threshold_deg: float = 0.55
+    n_fixed_points: int = 0
 
 
 @dataclass
@@ -189,6 +190,7 @@ class AnnotationWsServer:
                     "enable_initial_pruning": self.params.enable_initial_pruning,
                     "initial_pos_threshold": self.params.initial_pos_threshold,
                     "initial_yaw_threshold_deg": self.params.initial_yaw_threshold_deg,
+                    "n_fixed_points": self.params.n_fixed_points,
                 },
                 "status": {
                     "current_index": self.annotator.current_index,
@@ -370,6 +372,7 @@ class AnnotationWsServer:
                     self.params.enable_initial_pruning,
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
+                    self.params.n_fixed_points,
                 )
             )
 
@@ -385,6 +388,7 @@ class AnnotationWsServer:
                     self.params.enable_initial_pruning,
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
+                    self.params.n_fixed_points,
                 )
             )
 
@@ -406,6 +410,7 @@ class AnnotationWsServer:
                     self.params.enable_initial_pruning,
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
+                    self.params.n_fixed_points,
                 )
             )
 

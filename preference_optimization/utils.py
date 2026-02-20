@@ -171,6 +171,7 @@ def generate_trajectory_pair(
     enable_initial_pruning: bool = True,
     initial_pos_threshold: float = 0.055,
     initial_yaw_threshold_deg: float = 0.55,
+    n_fixed_points: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, float, int, torch.Tensor, float, float, bool]:
     """Generate two diverse trajectories with threshold-based retry logic.
 
@@ -201,6 +202,11 @@ def generate_trajectory_pair(
         enable_initial_pruning: If True, skip candidates whose initial pose is misaligned
         initial_pos_threshold: Maximum initial position displacement to accept (meters)
         initial_yaw_threshold_deg: Maximum initial yaw difference to accept (degrees)
+        n_fixed_points: Number of leading timesteps for which noise is zeroed on the ego
+            agent, biasing those steps toward the deterministic trajectory. Applied to
+            indices [0, n_fixed_points) of the sampled_trajectories tensor. Note that
+            because the DiT processes the full trajectory jointly, this is a soft bias
+            rather than a hard constraint.
 
     Returns:
         Tuple of (trajectory_1, trajectory_2, final_metric, attempts_used, ego_shape,
@@ -245,9 +251,10 @@ def generate_trajectory_pair(
 
     for attempt in range(max_retries):
         # Generate stochastic trajectory (with noise)
-        data["sampled_trajectories"] = noise_scale * torch.randn(B, P, future_len + 1, 4).to(
-            device
-        )
+        noise = noise_scale * torch.randn(B, P, future_len + 1, 4).to(device)
+        if n_fixed_points > 0:
+            noise[:, 0, :n_fixed_points, :] = 0.0
+        data["sampled_trajectories"] = noise
         _, outputs = policy_model(data)
         traj_2 = outputs["prediction"][0, 0].cpu().numpy()
 

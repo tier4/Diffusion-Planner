@@ -69,6 +69,7 @@ class PreferenceAnnotator:
         self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
         gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
         initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        n_fixed_points: int = 0,
         time_step: int = 40,
     ) -> tuple[Figure, Figure, Figure, str, str, str, str, str]:
         """Load current sample and generate trajectory pair.
@@ -116,6 +117,7 @@ class PreferenceAnnotator:
             enable_initial_pruning=enable_initial_pruning,
             initial_pos_threshold=float(initial_pos_threshold),
             initial_yaw_threshold_deg=float(initial_yaw_threshold_deg),
+            n_fixed_points=int(n_fixed_points),
         )
 
         self.ego_shape = ego_shape.tolist() # [1, 3] wheel_base length, width
@@ -150,6 +152,7 @@ class PreferenceAnnotator:
         self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
         gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
         initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        n_fixed_points: int = 0,
         time_step: int = 40,
     ) -> tuple[Figure, Figure, Figure, str, str, str, str, str]:
         """Regenerate trajectory pair with current parameters.
@@ -191,6 +194,7 @@ class PreferenceAnnotator:
             enable_initial_pruning=enable_initial_pruning,
             initial_pos_threshold=float(initial_pos_threshold),
             initial_yaw_threshold_deg=float(initial_yaw_threshold_deg),
+            n_fixed_points=int(n_fixed_points),
         )
 
         self.ego_shape = ego_shape.tolist()
@@ -261,6 +265,7 @@ class PreferenceAnnotator:
         self, winner: str, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
         gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
         initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        n_fixed_points: int = 0,
         time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Record preference and move to next sample.
@@ -322,12 +327,13 @@ class PreferenceAnnotator:
         else:
             self.current_index = (self.current_index + self.current_jump_size) % len(self.npz_paths)
         
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, time_step)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, n_fixed_points, time_step)
 
     def jump(
         self, delta: int, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
         gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
         initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        n_fixed_points: int = 0,
         time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Jump to a different sample.
@@ -350,13 +356,14 @@ class PreferenceAnnotator:
         # Ensure delta is integer
         delta = int(delta)
         self.current_index = max(0, min(self.current_index + delta, len(self.npz_paths) - 1))
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, time_step)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, n_fixed_points, time_step)
 
     def handle_keyboard_navigation(
         self, direction: str, noise_scale: float, fde_threshold: float, ade_threshold: float,
         max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True,
         enable_initial_pruning: bool = True, initial_pos_threshold: float = 0.055,
-        initial_yaw_threshold_deg: float = 0.55, time_step: int = 40,
+        initial_yaw_threshold_deg: float = 0.55, n_fixed_points: int = 0,
+        time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Handle keyboard navigation (left/right arrow keys).
 
@@ -374,12 +381,13 @@ class PreferenceAnnotator:
         """
         # Determine delta based on direction and current jump size
         delta = -self.current_jump_size if direction == "left" else self.current_jump_size
-        return self.jump(delta, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, time_step)
+        return self.jump(delta, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, n_fixed_points, time_step)
 
     def jump_to_next_unlabeled(
         self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int,
         zoom_level: int = 5, gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
         initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        n_fixed_points: int = 0,
         time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Jump to the next unlabeled sample.
@@ -401,7 +409,7 @@ class PreferenceAnnotator:
             return None, None, None, "All samples labeled!", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
         
         self.current_index = next_idx
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, time_step)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, n_fixed_points, time_step)
 
     def update_time_display(
         self, time_step: int, zoom_level: int = 5
@@ -536,7 +544,8 @@ class PreferenceAnnotator:
         self, target_index: int, noise_scale: float, fde_threshold: float, ade_threshold: float,
         max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True,
         enable_initial_pruning: bool = True, initial_pos_threshold: float = 0.055,
-        initial_yaw_threshold_deg: float = 0.55, time_step: int = 40,
+        initial_yaw_threshold_deg: float = 0.55, n_fixed_points: int = 0,
+        time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Jump directly to a specific sample index.
 
@@ -560,13 +569,14 @@ class PreferenceAnnotator:
         target_index = max(0, min(target_index, len(self.npz_paths) - 1))
         
         self.current_index = target_index
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, time_step)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, n_fixed_points, time_step)
 
     def toggle_filter(
         self, filter_mode: str, noise_scale: float, fde_threshold: float, ade_threshold: float,
         max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True,
         enable_initial_pruning: bool = True, initial_pos_threshold: float = 0.055,
-        initial_yaw_threshold_deg: float = 0.55, time_step: int = 40,
+        initial_yaw_threshold_deg: float = 0.55, n_fixed_points: int = 0,
+        time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Toggle sample filter between All/Finished/Unfinished.
 
@@ -598,7 +608,7 @@ class PreferenceAnnotator:
         if not self.npz_paths:
             return None, None, None, "No samples match filter", "No samples", "", self.get_sidebar_state(), self.get_labeled_history_display()
 
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, time_step)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, n_fixed_points, time_step)
 
     def _draw_vehicle_footprint(
         self, ax, x: float, y: float, heading: float, color: str, alpha: float = 0.8
@@ -1446,6 +1456,14 @@ def create_interface(
                         label="Initial Yaw Threshold (°)",
                         info="Max absolute yaw difference between first poses"
                     )
+                    n_fixed_points_slider = gr.Slider(
+                        minimum=0,
+                        maximum=40,
+                        value=0,
+                        step=1,
+                        label="Fixed Initial Points",
+                        info="Noise zeroed for ego's first N timesteps, biasing them toward the deterministic trajectory (soft constraint)"
+                    )
 
                 # Visualizations - Trajectory with zoom slider in one column
                 gr.Markdown("## 🎨 Trajectory Visualization")
@@ -1530,7 +1548,7 @@ def create_interface(
 
         # Common input lists (pruning controls + time_step appended to existing params)
         _std_inputs = [noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox]
-        _pruning_inputs = [enable_initial_pruning_checkbox, initial_pos_threshold_slider, initial_yaw_threshold_slider]
+        _pruning_inputs = [enable_initial_pruning_checkbox, initial_pos_threshold_slider, initial_yaw_threshold_slider, n_fixed_points_slider]
         _full_inputs = _std_inputs + _pruning_inputs + [time_slider]
 
         # Common output list (select button appended so it can be disabled when pruned)
@@ -1539,16 +1557,16 @@ def create_interface(
 
         # Orange (stochastic) is selected as winner, green (deterministic) as loser
         select_orange_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts: _with_btn(
-                annotator.select_winner("trajectory_2", ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts)
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts: _with_btn(
+                annotator.select_winner("trajectory_2", ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
         )
 
         regenerate_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts: _with_btn(
-                annotator.regenerate(ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts)
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts: _with_btn(
+                annotator.regenerate(ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1570,9 +1588,9 @@ def create_interface(
 
         # Navigation handlers - fix lambda closure issue and update jump size
         def make_jump_fn(delta_val):
-            def jump_and_update(ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts):
+            def jump_and_update(ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts):
                 annotator.update_jump_size(delta_val)
-                return _with_btn(annotator.jump(delta_val, ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts))
+                return _with_btn(annotator.jump(delta_val, ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts))
             return jump_and_update
 
         # Wire up navigation button handlers dynamically
@@ -1586,8 +1604,8 @@ def create_interface(
         # Sidebar event handlers
         # Jump-to button - only trigger on button click, not on input change
         jump_to_btn.click(
-            fn=lambda idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts: _with_btn(
-                annotator.jump_to_index(idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts)
+            fn=lambda idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts: _with_btn(
+                annotator.jump_to_index(idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts)
             ),
             inputs=[jump_to_input] + _full_inputs,
             outputs=_full_outputs,
@@ -1595,8 +1613,8 @@ def create_interface(
 
         # Filter radio
         show_finished_radio.change(
-            fn=lambda filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts: _with_btn(
-                annotator.toggle_filter(filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts)
+            fn=lambda filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts: _with_btn(
+                annotator.toggle_filter(filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts)
             ),
             inputs=[show_finished_radio] + _full_inputs,
             outputs=_full_outputs,
@@ -1604,8 +1622,8 @@ def create_interface(
 
         # Next unlabeled button
         next_unlabeled_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts: _with_btn(
-                annotator.jump_to_next_unlabeled(ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts)
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts: _with_btn(
+                annotator.jump_to_next_unlabeled(ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1626,7 +1644,7 @@ def create_interface(
         )
 
         # Keyboard navigation handler - only trigger on valid arrow keys
-        def handle_keyboard_event(key, ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts):
+        def handle_keyboard_event(key, ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts):
             print(f"Python handler received key: '{key}'")
             # Parse the key (format is "ArrowLeft:123" or "ArrowRight:123")
             actual_key = key.split(':')[0] if ':' in key else key
@@ -1635,7 +1653,7 @@ def create_interface(
             if actual_key in ["ArrowLeft", "ArrowRight"]:
                 direction = "left" if actual_key == "ArrowLeft" else "right"
                 print(f"Processing {direction} navigation")
-                result = _with_btn(annotator.handle_keyboard_navigation(direction, ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts))
+                result = _with_btn(annotator.handle_keyboard_navigation(direction, ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts))
                 print(f"Navigation complete")
                 return result
             else:
@@ -1660,8 +1678,8 @@ def create_interface(
 
         # Load first sample on startup (separate from JS)
         demo.load(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts: _with_btn(
-                annotator.load_sample(ns, ft, at, mr, zl, gt, eip, ipt, iyt, ts)
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts: _with_btn(
+                annotator.load_sample(ns, ft, at, mr, zl, gt, eip, ipt, iyt, nfp, ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
