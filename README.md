@@ -28,8 +28,8 @@ python3 -c "import torch; print(torch.cuda.is_available())"
 # install ros-humble
 ./ros_scripts/download_ros-humble.sh
 
-# prepare autoware
-./ros_scripts/prepare_autoware.sh
+# prepare data_converter
+./data_converter/build_data_converter.sh
 ```
 
 ## 2. Create dataset
@@ -68,11 +68,7 @@ driving_dataset$ tree . -L 2
 
 ### 2.2. Convert to diffusion_planner's format (npz)
 
-```bash
-./ros_scripts/generate_all_data.sh
-```
-
-or use `parse_rosbag_for_directory.py` directly.
+use `parse_rosbag_for_directory.py` directly.
 
 ```bash
 python3 ./ros_scripts/parse_rosbag_for_directory.py <target_dir_list> --save_root <save_root> [--step <step>] [--limit <limit>]
