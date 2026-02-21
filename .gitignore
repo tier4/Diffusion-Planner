@@ -1,3 +1,11 @@
 *.pyc
 extension_ws/
 *.code-workspace
+
+.cursor
+*dpo_experiment
+sample*
+.vscode
+
+*/.agents/
+

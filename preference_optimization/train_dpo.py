@@ -1,173 +1,113 @@
-"""
-Direct Preference Optimization (DPO) Training for Diffusion Planner
+"""Direct Preference Optimization (DPO) Training for Diffusion Planner.
 
-This program trains the Diffusion Planner model using DPO based on human preference annotations.
+This script trains a trajectory planning model using human preferences via DPO.
+
+Usage:
+    cd /path/to/Diffusion-Planner
+    python3 -m preference_optimization.train_dpo [args]
+
+Or:
+    cd /path/to/Diffusion-Planner/preference_optimization
+    python3 train_dpo.py [args]
 """
 
 import argparse
-import copy
 import json
 import os
-import random
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib
-import numpy as np
-import pandas as pd
+# Ensure parent directory is in path for diffusion_planner imports
+parent_dir = Path(__file__).resolve().parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
 import torch
-import torch.nn.functional as F
-
-matplotlib.use("Agg")  # Use non-interactive backend
-import matplotlib.pyplot as plt
-from annotation_gui import collect_preferences_gui
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.config import Config
-from diffusion_planner.utils.visualize_input import visualize_inputs
 from torch import optim
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
-from utils import calculate_path_length, generate_trajectory_pair, load_npz_data
 
-DEVICE = torch.device("cuda")
+from preference_optimization.annotation_gui import collect_preferences
+from preference_optimization.annotation_ros_node import AnnotationRosServer
+from preference_optimization.model_utils import load_model
+from preference_optimization.preference_collection import generate_rule_based_preferences
+from preference_optimization.trainer import DPOTrainer
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--exp_name", type=str, default="test")
-    parser.add_argument("--model_path", type=Path, required=True)
-    parser.add_argument("--train_npz_list", type=Path, required=True)
-    parser.add_argument("--valid_npz_list", type=Path, required=True)
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Train Diffusion Planner with Direct Preference Optimization"
+    )
+
+    # Required arguments
+    parser.add_argument(
+        "--model_path",
+        type=Path,
+        required=True,
+        help="Path to initial model checkpoint (.pth file)",
+    )
+    parser.add_argument(
+        "--train_npz_list",
+        type=Path,
+        required=True,
+        help="Path to JSON file containing training NPZ paths",
+    )
+    parser.add_argument(
+        "--valid_npz_list",
+        type=Path,
+        required=True,
+        help="Path to JSON file containing validation NPZ paths",
+    )
+
+    # Training configuration
+    parser.add_argument(
+        "--exp_name",
+        type=str,
+        default="dpo_experiment",
+        help="Experiment name for organizing outputs",
+    )
     parser.add_argument(
         "--preference_mode",
         type=str,
-        choices=["rule", "gui"],
+        choices=["rule", "gui", "lichtblick"],
         default="rule",
-        help="Use rule-based scoring or GUI annotation to collect preferences.",
+        help="Preference collection mode: 'rule' for automatic, 'gui' for manual annotation",
     )
-    parser.add_argument("--beta", type=float, default=0.1)
-    parser.add_argument("--train_epochs", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--lichtblick_host", type=str, default="127.0.0.1", help="Lichtblick websocket host")
+    parser.add_argument("--lichtblick_port", type=int, default=8765, help="Lichtblick websocket port")
+    parser.add_argument(
+        "--train_epochs",
+        type=int,
+        default=3,
+        help="Number of training epochs",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Training batch size",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-5,
+        help="Learning rate for optimizer",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.1,
+        help="DPO regularization parameter",
+    )
+
     return parser.parse_args()
 
 
-def load_model(model_path: Path) -> tuple[Diffusion_Planner, Config]:
-    """Load Diffusion Planner model and its configuration."""
-    print(f"Loading model from {model_path}")
-    checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=False)
-
-    model_dir = model_path.parent
-    args_path = model_dir / "args.json"
-    model_args = Config(str(args_path), guidance_fn=None)
-
-    model = Diffusion_Planner(model_args)
-
-    if "model" in checkpoint:
-        state_dict = {k.replace("module.", ""): v for k, v in checkpoint["model"].items()}
-        model.load_state_dict(state_dict, strict=False)
-    elif "ema_state_dict" in checkpoint:
-        print("Loading EMA weights")
-        model.load_state_dict(checkpoint["ema_state_dict"], strict=False)
-    else:
-        model.load_state_dict(checkpoint, strict=False)
-
-    model.to(DEVICE)
-    return model, model_args
-
-
-def generate_rule_based_preferences(
-    policy_model: Diffusion_Planner, model_args, npz_list: Path
-) -> list[dict]:
-    """Generate preference annotations using the provided policy model."""
-    seed = random.randint(0, 2**32 - 1)
-    torch.manual_seed(seed)
-    np.random.seed(seed % (2**32))
-    print(f"Random seed: {seed}")
-
-    with open(npz_list, "r") as f:
-        npz_paths = json.load(f)
-
-    preferences: list[dict] = []
-
-    print(f"Total NPZ files to annotate: {len(npz_paths)}")
-
-    was_training = policy_model.training
-    policy_model.eval()
-
-    print("Starting rule-based annotation...")
-    for npz_path in tqdm(npz_paths):
-        data = load_npz_data(npz_path, DEVICE)
-        traj_1, traj_2 = generate_trajectory_pair(policy_model, model_args, data, device=DEVICE)
-        score_1 = calculate_path_length(traj_1)
-        score_2 = calculate_path_length(traj_2)
-
-        if score_1 > score_2:
-            traj_w, traj_l = traj_1, traj_2
-            score_w, score_l = score_1, score_2
-        else:
-            traj_w, traj_l = traj_2, traj_1
-            score_w, score_l = score_2, score_1
-
-        preference_data = {
-            "npz_path": npz_path,
-            "trajectory_w": traj_w.tolist(),
-            "trajectory_l": traj_l.tolist(),
-            "score_w": score_w,
-            "score_l": score_l,
-        }
-        preferences.append(preference_data)
-
-    print(f"Annotation complete! Generated {len(preferences)} preferences")
-
-    if was_training:
-        policy_model.train()
-
-    return preferences
-
-
-
-class DPODataset(Dataset):
-    def __init__(self, preferences: list[dict]):
-        self.preferences = preferences
-
-    def __len__(self):
-        return len(self.preferences)
-
-    def __getitem__(self, idx):
-        """Return tensors and trajectories."""
-        pref = self.preferences[idx]
-        return {
-            "data": load_npz_data(pref["npz_path"], DEVICE),
-            "trajectory_w": np.asarray(pref["trajectory_w"], dtype=np.float32),
-            "trajectory_l": np.asarray(pref["trajectory_l"], dtype=np.float32),
-        }
-
-
-class NPZDataset(Dataset):
-    """Dataset that loads NPZ inputs for visualization/evaluation."""
-
-    def __init__(self, npz_paths: list[str]):
-        self.npz_paths = npz_paths
-
-    def __len__(self):
-        return len(self.npz_paths)
-
-    def __getitem__(self, idx):
-        return load_npz_data(self.npz_paths[idx], DEVICE)
-
-
-def compute_trajectory_loss(
-    model: Diffusion_Planner,
-    data: dict[str, torch.Tensor],
-    trajectory: np.ndarray,
-    model_args,
-    noise: torch.Tensor,
-    t: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Compute MSE loss of a trajectory under the model using diffusion training.
+def setup_experiment(args: argparse.Namespace) -> tuple[Path, Path]:
+    """Setup experiment directory and copy initial model.
 
     Args:
         model: The diffusion model
@@ -490,112 +430,211 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = save_dir / f"{timestamp}_{args.exp_name}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    latest_ckpt = run_dir / "latest.pth"
 
-    initial_model_path = Path(args.model_path)
-    if not initial_model_path.exists():
-        raise FileNotFoundError(f"Model checkpoint not found: {initial_model_path}")
+    # Copy model and config to experiment directory
+    checkpoint_path = run_dir / "latest.pth"
+    shutil.copy2(args.model_path, checkpoint_path)
+    shutil.copy2(args_json_path, run_dir / "args.json")
 
-    initial_args_path = initial_model_path.parent / "args.json"
-    if not initial_args_path.exists():
-        raise FileNotFoundError(f"args.json not found next to model: {initial_args_path}")
-
-    shutil.copy2(initial_model_path, latest_ckpt)
-    shutil.copy2(initial_args_path, run_dir / "args.json")
-
-    print(f"Saving artifacts to {run_dir}")
-
-    policy_model, model_args = load_model(latest_ckpt)
-    policy_model.train()
-    optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
-
+    # Save training arguments
     args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     with open(run_dir / "dpo_args.json", "w") as f:
         json.dump(args_dict, f, indent=4)
 
-    with open(args.train_npz_list, "r") as f:
-        train_npz_paths = json.load(f)
-    with open(args.valid_npz_list, "r") as f:
-        valid_npz_paths = json.load(f)
-    valid_dataset = NPZDataset(valid_npz_paths)
-    valid_loader = DataLoader(
-        valid_dataset,
+    print(f"Experiment directory: {run_dir}")
+
+    return run_dir, checkpoint_path
+
+
+def collect_epoch_preferences(
+    args: argparse.Namespace,
+    policy_model,
+    model_args,
+    train_npz_paths: list[str],
+    ros_node: AnnotationRosServer | None = None,
+) -> list[dict]:
+    """Collect preferences for current epoch.
+
+    Args:
+        args: Parsed arguments
+        policy_model: Policy model for trajectory generation
+        model_args: Model configuration
+        train_npz_paths: List of training data paths
+
+    Returns:
+        List of preference annotations
+    """
+    if args.preference_mode == "gui":
+        print("Launching GUI for preference annotation...")
+        preferences = collect_preferences(
+            policy_model,
+            model_args,
+            args.train_npz_list,
+            target_count=len(train_npz_paths),
+        )
+    elif args.preference_mode == "lichtblick":
+        if ros_node is None:
+            raise RuntimeError("Lichtblick mode requires a running AnnotationRosServer.")
+        print("Launching Lichtblick websocket annotation...")
+        ros_node.reset_annotation_round(target_count=len(train_npz_paths))
+        ros_node.update_training_status(
+            phase="annotation",
+            message="Annotate trajectories. If both look poor, click Regenerate first, then select winner and click Launch Training.",
+            epoch=0,
+            total_epochs=args.train_epochs,
+        )
+        preferences = ros_node.wait_for_annotation_complete()
+    else:
+        print("Generating rule-based preferences...")
+        preferences = generate_rule_based_preferences(
+            policy_model,
+            model_args,
+            args.train_npz_list,
+            DEVICE,
+        )
+
+    return preferences
+
+
+def main():
+    """Main training loop."""
+    # Parse arguments
+    args = parse_args()
+
+    # Setup experiment
+    run_dir, checkpoint_path = setup_experiment(args)
+
+    # Load model
+    policy_model, model_args = load_model(checkpoint_path, DEVICE)
+
+    # Create optimizer
+    optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
+
+    # Create trainer
+    trainer = DPOTrainer(
+        policy_model=policy_model,
+        model_args=model_args,
+        optimizer=optimizer,
+        device=DEVICE,
+        run_dir=run_dir,
         batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=0,
-        collate_fn=lambda x: x,
+        beta=args.beta,
     )
 
-    train_log: list[dict] = []
+    ros_node: AnnotationRosServer | None = None
+    if args.preference_mode == "lichtblick":
+        ros_node = AnnotationRosServer(
+            model_path=checkpoint_path,
+            npz_list=args.train_npz_list,
+            target_count=len(train_npz_paths) if "train_npz_paths" in locals() else None,
+            device=str(DEVICE),
+        )
+        ros_node.start_background()
 
-    visualize_validation(policy_model, valid_loader, model_args, run_dir, 0)
+    # Load validation data
+    with open(args.valid_npz_list, "r") as f:
+        valid_npz_paths = json.load(f)
+    valid_loader = trainer.create_validation_loader(valid_npz_paths)
+
+    # Load training data paths
+    with open(args.train_npz_list, "r") as f:
+        train_npz_paths = json.load(f)
+
+    print(f"Training data: {len(train_npz_paths)} samples")
+    print(f"Validation data: {len(valid_npz_paths)} samples")
+
+    # Initial visualization
+    print("Generating initial validation visualizations...")
+    trainer.visualize_epoch(valid_loader, epoch=0)
+
+    # Training loop
+    print(f"\nStarting training for {args.train_epochs} epochs...")
+    print("=" * 60)
+
+    args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
 
     for epoch in range(1, args.train_epochs + 1):
-        if args.preference_mode == "gui":
-            preferences = collect_preferences_gui(
-                policy_model, model_args, args.train_npz_list, target_count=len(train_npz_paths)
-            )
-        else:
-            preferences = generate_rule_based_preferences(
-                policy_model,
-                model_args,
-                args.train_npz_list,
-            )
+        print(f"\nEpoch {epoch}/{args.train_epochs}")
+        print("-" * 60)
+
+        # Collect preferences
+        preferences = collect_epoch_preferences(
+            args, policy_model, model_args, train_npz_paths, ros_node=ros_node
+        )
 
         if not preferences:
-            print("No preferences collected this epoch. Skipping training step.")
+            print("No preferences collected. Skipping this epoch.")
             continue
 
-        print(f"Loaded {len(preferences)} preference annotations")
+        # Train on preferences
+        if ros_node is not None:
+            ros_node.update_training_status(
+                phase="training",
+                message=f"Training epoch {epoch}/{args.train_epochs}...",
+                epoch=epoch,
+                total_epochs=args.train_epochs,
+            )
 
-        random.shuffle(preferences)
-        train_dataset = DPODataset(preferences)
+        def _progress_cb(progress: dict[str, float]) -> None:
+            if ros_node is None:
+                return
+            ros_node.update_training_status(
+                phase="training",
+                message=f"Training epoch {epoch}/{args.train_epochs}",
+                epoch=epoch,
+                total_epochs=args.train_epochs,
+                batch=int(progress["batch"]),
+                total_batches=int(progress["total_batches"]),
+                metrics={
+                    "loss": float(progress["loss"]),
+                    "accuracy": float(progress["accuracy"]),
+                    "reward_margin": float(progress["reward_margin"]),
+                },
+            )
 
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=0,
-            collate_fn=lambda x: x,
+        metrics = trainer.train_epoch(preferences, epoch, progress_callback=_progress_cb)
+
+        # Visualize
+        trainer.visualize_epoch(valid_loader, epoch)
+
+        # Log and save
+        trainer.log_metrics(epoch, metrics)
+        trainer.save_checkpoint(epoch, args_dict)
+
+        if ros_node is not None:
+            ros_node.update_training_status(
+                phase="training",
+                message=f"Epoch {epoch} complete. Loss={metrics['loss']:.4f}, Acc={metrics['accuracy']:.4f}",
+                epoch=epoch,
+                total_epochs=args.train_epochs,
+                metrics=metrics,
+            )
+            if epoch < args.train_epochs:
+                ros_node.update_training_status(
+                    phase="annotation",
+                    message=(
+                        f"Epoch {epoch} training finished. Next annotation round is ready. "
+                        "Please click Regenerate when needed, then select winner and Launch Training."
+                    ),
+                    epoch=epoch,
+                    total_epochs=args.train_epochs,
+                    metrics=metrics,
+                )
+
+        print("-" * 60)
+
+    print("\n" + "=" * 60)
+    print("Training complete!")
+    print(f"Results saved to: {run_dir}")
+    print("=" * 60)
+
+    if ros_node is not None:
+        ros_node.update_training_status(
+            phase="complete",
+            message=f"Training complete. Results: {run_dir}",
+            epoch=args.train_epochs,
+            total_epochs=args.train_epochs,
         )
-
-        reference_model = copy.deepcopy(policy_model)
-        reference_model.eval()
-        for param in reference_model.parameters():
-            param.requires_grad = False
-
-        policy_model.train()
-        train_metrics = train_epoch(
-            policy_model, reference_model, train_loader, optimizer, args, model_args
-        )
-
-        visualize_validation(policy_model, valid_loader, model_args, run_dir, epoch)
-
-        print(
-            f"Epoch {epoch}/{args.train_epochs}\n"
-            f"  Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}"
-        )
-
-        checkpoint_data = {
-            "epoch": epoch,
-            "model": policy_model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "args": args_dict,
-        }
-
-        torch.save(checkpoint_data, latest_ckpt)
-
-        if epoch % 10 == 0:
-            torch.save(checkpoint_data, os.path.join(run_dir, f"epoch_{epoch:03d}.pth"))
-
-        train_log.append(
-            {
-                "epoch": epoch,
-                **{f"train_{k}": v for k, v in train_metrics.items()},
-            }
-        )
-        df = pd.DataFrame(train_log)
-        df.to_csv(os.path.join(run_dir, "dpo_train_log.tsv"), sep="\t", index=False)
 
 
 if __name__ == "__main__":
