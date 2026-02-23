@@ -1608,7 +1608,7 @@ def create_interface(
                         )
                         select_gt_btn = gr.Button(
                             "🎯 GT is Best",
-                            variant="primary",
+                            variant="stop",
                             size="lg",
                         )
                         regenerate_btn = gr.Button(
