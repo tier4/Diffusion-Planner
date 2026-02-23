@@ -51,49 +51,33 @@ the current sample.
 
 ---
 
-## GT smoothing during normal training
+## GT smoothing — investigation result
 
-The raw `ego_agent_future` stored in NPZ files is `[T, 3]` (x, y, heading in radians),
-extracted without any smoothing from the rosbag in `ros_scripts/parse_rosbag.py`.
+**No smoothing is applied during rosbag→NPZ conversion.** This was verified in both
+conversion paths:
 
-During training, smoothing is applied **only when data augmentation is active** via
-`smoothing_future_trajectory()` in
-`diffusion_planner/diffusion_planner/utils/unicycle_accel_curvature.py`.
+- **Python path** (`ros_scripts/parse_rosbag.py`): directly extracts `(x, y, quaternion)`
+  from `/localization/kinematic_state` Odometry messages, converts quaternion→yaw, and
+  stores `[T, 3]` (x, y, heading). No filtering.
+- **C++ path** (`autoware_diffusion_planner/tool/data_converter.cpp` +
+  `src/preprocessing/preprocessing_utils.cpp`): identical logic — pose extraction, frame
+  transform, rotation matrix→cos/sin. No smoothing whatsoever.
 
-### What the smoothing does
+Both paths consume `/localization/kinematic_state` which is published by Autoware's
+**EKF localization** (multi-sensor fusion of GNSS, IMU, LiDAR scan matching). The EKF
+provides filtered poses, but this filtering is internal to Autoware and opaque to the
+converter — we take the published pose as-is.
 
-It converts the raw trajectory into unicycle action space (acceleration + curvature),
-applies **Tikhonov regularisation** (no scipy — pure torch, solved via Cholesky), then
-reconstructs the trajectory from the smoothed actions using a kinematic model:
+### Implications for DPO
 
-| Quantity | Smoothing order | Lambda default |
-|---|---|---|
-| Heading θ | 3rd order | `theta_lambda=1e-1` |
-| Velocity v | 3rd order | `v_lambda=1e-6` |
-| Acceleration a | 2nd order | `a_lambda=1e-4` |
-| Curvature κ | 2nd order | `kappa_lambda=1e-4` |
+The model was trained on this raw EKF output as GT (when augmentation is off) or on
+unicycle-smoothed versions (when augmentation is on, controlled by `augment_prob`).
+Since the model predominantly sees the raw EKF trajectory as GT, **applying
+`smoothing_future_trajectory()` to GT in DPO would introduce a distribution mismatch**
+— the DPO winner would look like augmented training data rather than the standard GT.
 
-Entry point:
-```python
-# data_augmentation.py:230-232
-from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
-
-smoothed_ego_future4d = smoothing_future_trajectory(
-    ego_past4d,                   # [B, T_past, 4]
-    inputs["ego_current_state"],  # [B, 10]
-    ego_future4d,                 # [B, T_future, 4]  (already in cos/sin format here)
-)
-```
-
-`UnicycleAccelCurvatureActionSpace` is instantiated with default lambdas inside
-`smoothing_future_trajectory` — no external config needed.
-
-### When to apply it for DPO
-
-The same smoothing **should be applied** to the GT trajectory before using it as `traj_w` in
-DPO, for consistency with the distribution the model was trained on. Without it, the GT
-carries localization noise (GPS/LIDAR drift) that was smoothed away during base training,
-which would introduce a distribution mismatch.
+**Conclusion: do not apply unicycle smoothing to GT in `_get_smoothed_gt()`.**
+The method simply converts `[T, 3]` (x, y, heading) → `[T, 4]` (x, y, cos, sin).
 
 The smoothing expects the trajectory already in `[B, T, 4]` (cos/sin) format, so the
 conversion from `[T, 3]` (heading) must happen first (see Format conversion below).
@@ -183,37 +167,18 @@ Pairing GT against the **deterministic** output (green) is preferred over the st
 
 ---
 
-## Smoothing call in DPO context — full sketch
+## GT conversion in DPO — actual implementation
 
 ```python
-from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
-from preference_optimization.utils import load_npz_data
-
-def get_smoothed_gt(current_data: dict, device: torch.device) -> np.ndarray | None:
-    """Return smoothed GT as [T, 4] numpy array, or None if GT is invalid."""
-    if "ego_agent_future" not in current_data:
-        return None
-
-    gt_raw = current_data["ego_agent_future"][0].cpu().numpy()  # [T, 3]
-
-    # Validity check
-    valid = ~((gt_raw[:, 0] == 0) & (gt_raw[:, 1] == 0))
-    if valid.mean() < 0.8:
-        return None
-
-    # Convert to 4D (cos/sin) and add batch dim
-    gt_4d = gt_to_model_format(gt_raw)                          # [T, 4]
-    gt_tensor = torch.tensor(gt_4d, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T, 4]
-
-    # Need ego_agent_past in 4D for smoothing (already converted by load_npz_data)
-    ego_past = current_data["ego_agent_past"]                   # [1, T_past, 4]
-    ego_current = current_data["ego_current_state"]             # [1, 10]
-
-    # Apply same smoothing used during training
-    smoothed = smoothing_future_trajectory(ego_past, ego_current, gt_tensor)  # [1, T, 4]
-
-    return smoothed[0].cpu().numpy()   # [T, 4]
+# _get_smoothed_gt() in annotation_gui.py — name kept for historical reasons
+def _get_smoothed_gt(self) -> np.ndarray | None:
+    gt_raw = self.current_data["ego_agent_future"][0].cpu().numpy()  # [T, 3]
+    cos_yaw = np.cos(gt_raw[:, 2:3])
+    sin_yaw = np.sin(gt_raw[:, 2:3])
+    return np.concatenate([gt_raw[:, :2], cos_yaw, sin_yaw], axis=1).astype(np.float32)
 ```
+
+No smoothing — just the heading→cos/sin conversion to match the model's `[T, 4]` format.
 
 ---
 
@@ -223,7 +188,3 @@ def get_smoothed_gt(current_data: dict, device: torch.device) -> np.ndarray | No
   (e.g., run before launching the GUI, auto-label all samples where ADE > threshold)?
 - Should the loser be the deterministic only, or let the user choose
   (green = loser, orange = loser, or worse-of-two = loser)?
-- Does smoothing need the unnormalised `ego_agent_past`? Check whether
-  `load_npz_data` already converts it with `heading_to_cos_sin` (it does, line 31)
-  — so `ego_agent_past` in `current_data` is already in 4D cos/sin format, which is
-  what `smoothing_future_trajectory` expects.

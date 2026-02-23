@@ -7,7 +7,6 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 import torch
-from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from matplotlib.figure import Figure
 
@@ -401,28 +400,23 @@ class PreferenceAnnotator:
         return bool(valid.mean() >= 0.8)
 
     def _get_smoothed_gt(self) -> np.ndarray | None:
-        """Return the GT trajectory as [T, 4] (x, y, cos, sin), smoothed via unicycle model.
+        """Return the GT trajectory as [T, 4] (x, y, cos, sin).
 
-        Applies the same Tikhonov-regularised smoothing used during base model training
-        so the GT distribution matches what the model was trained on.
+        The NPZ ego_agent_future is stored as [T, 3] (x, y, heading in radians) and comes
+        directly from Autoware's EKF localization with no additional smoothing applied during
+        rosbag-to-NPZ conversion (verified in both the Python and C++ converter paths). The
+        model trains on this raw EKF output as GT, so no further smoothing is applied here.
 
         Returns:
-            Smoothed GT as [T, 4] numpy array, or None if smoothing fails.
+            GT trajectory as [T, 4] numpy array, or None on error.
         """
         try:
             gt_raw = self.current_data["ego_agent_future"][0].cpu().numpy()  # [T, 3]
             cos_yaw = np.cos(gt_raw[:, 2:3])
             sin_yaw = np.sin(gt_raw[:, 2:3])
-            gt_4d = np.concatenate([gt_raw[:, :2], cos_yaw, sin_yaw], axis=1)  # [T, 4]
-            gt_tensor = torch.tensor(gt_4d, dtype=torch.float32, device=self.device).unsqueeze(0)  # [1, T, 4]
-
-            ego_past = self.current_data["ego_agent_past"]      # [1, T_past, 4] already cos/sin
-            ego_current = self.current_data["ego_current_state"]  # [1, 10]
-
-            smoothed = smoothing_future_trajectory(ego_past, ego_current, gt_tensor)  # [1, T, 4]
-            return smoothed[0].cpu().numpy()
+            return np.concatenate([gt_raw[:, :2], cos_yaw, sin_yaw], axis=1).astype(np.float32)
         except Exception as e:
-            print(f"GT smoothing failed: {e}")
+            print(f"GT conversion failed: {e}")
             return None
 
     def jump(
