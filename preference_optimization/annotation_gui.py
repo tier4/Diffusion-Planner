@@ -354,16 +354,16 @@ class PreferenceAnnotator:
         if not self.gt_available:
             return None, None, None, "GT not available for this sample", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
 
-        gt_smoothed = self._get_smoothed_gt()
-        if gt_smoothed is None:
-            return None, None, None, "GT smoothing failed", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
+        gt_trajectory = self._get_gt_trajectory()
+        if gt_trajectory is None:
+            return None, None, None, "GT conversion failed", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
 
         self.mark_as_labeled(self.current_index)
         npz_path = self.npz_paths[self.current_index]
 
         self.preferences.append({
             "npz_path": npz_path,
-            "trajectory_w": gt_smoothed.tolist(),
+            "trajectory_w": gt_trajectory.tolist(),
             "trajectory_l": self.trajectory_1,   # deterministic (green) is the loser
         })
 
@@ -399,7 +399,7 @@ class PreferenceAnnotator:
         valid = ~((gt[:, 0] == 0) & (gt[:, 1] == 0))
         return bool(valid.mean() >= 0.8)
 
-    def _get_smoothed_gt(self) -> np.ndarray | None:
+    def _get_gt_trajectory(self) -> np.ndarray | None:
         """Return the GT trajectory as [T, 4] (x, y, cos, sin).
 
         The NPZ ego_agent_future is stored as [T, 3] (x, y, heading in radians) and comes

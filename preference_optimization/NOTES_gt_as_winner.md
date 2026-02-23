@@ -170,8 +170,8 @@ Pairing GT against the **deterministic** output (green) is preferred over the st
 ## GT conversion in DPO — actual implementation
 
 ```python
-# _get_smoothed_gt() in annotation_gui.py — name kept for historical reasons
-def _get_smoothed_gt(self) -> np.ndarray | None:
+# _get_gt_trajectory() in annotation_gui.py
+def _get_gt_trajectory(self) -> np.ndarray | None:
     gt_raw = self.current_data["ego_agent_future"][0].cpu().numpy()  # [T, 3]
     cos_yaw = np.cos(gt_raw[:, 2:3])
     sin_yaw = np.sin(gt_raw[:, 2:3])
