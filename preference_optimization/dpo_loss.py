@@ -46,19 +46,21 @@ def compute_trajectory_loss(
     gt_future = torch.zeros(B, P, future_len, 4, device=device)
     gt_future[:, 0, :, :] = gt_trajectory_norm  # Only ego has ground truth
 
-    # Get current states and normalize using state_normalizer, matching the normal
-    # training path in decoder.py where inputs are already normalized before
-    # compute_training_loss is called. Without this, the anchor point at index 0
-    # of all_gt sits in raw coordinate space while all future timesteps are
-    # normalized, causing a 10m forward offset in the model's internal space
-    # (ego x-mean=10, std=20 → unnormalized [0,0,...] ≠ normalized [-0.5,0,...]).
+    # Get current states and normalize using the same ego_mean/ego_std already
+    # computed above. This matches the normal training path in decoder.py where
+    # inputs are already normalized before compute_training_loss is called.
+    # Without this, the anchor point at index 0 of all_gt sits in raw coordinate
+    # space while all future timesteps are normalized, causing a 10m forward
+    # offset (ego x-mean=10, std=20 → raw [0,0,...] ≠ normalized [-0.5,0,...]).
+    # Ego and neighbor share the same normalization stats (confirmed in normalization.json).
     ego_current = data["ego_current_state"][:, :4]
     if P > 1:
         neighbors_current = data["neighbor_agents_past"][:, : P - 1, -1, :4]
+        neighbors_current_norm = (neighbors_current - ego_mean) / ego_std  # [B, P-1, 4]
     else:
-        neighbors_current = torch.zeros(B, 0, 4, device=device)
-    current_states_raw = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
-    current_states = (current_states_raw - model_args.state_normalizer.mean.to(device)) / model_args.state_normalizer.std.to(device)
+        neighbors_current_norm = torch.zeros(B, 0, 4, device=device)
+    ego_current_norm = (ego_current - ego_mean) / ego_std  # [B, 4]
+    current_states = torch.cat([ego_current_norm[:, None], neighbors_current_norm], dim=1)  # [B, P, 4]
 
     # Concatenate current state with future
     all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, 1+T, 4]
