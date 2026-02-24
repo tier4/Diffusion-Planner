@@ -4,15 +4,14 @@ import torch.nn.functional as F
 
 def route_following_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     """
-    x: [B * Pn+1, T + 1, 4]
-    t: [B, 1],
+    x: [B, P, T + 1, 4]
+    t: [B],
     inputs: Dict[str, torch.Tensor]
     """
     B, P, T, _ = x.shape
-    route_lanes = inputs["route_lanes"]
-    # print(route_lanes.shape)  # torch.Size([B=1024, SegNum=25, PointNum=20, FeatureDim=12])
-    route_lanes = route_lanes.reshape(B, 25 * 20, 12)  # [B, SegNum * PointNum, FeatureDim]
-    route_lanes = route_lanes[:, :, :2]  # [B, SegNum * PointNum, 2]
+    route_lanes = inputs["route_lanes"]  # [B, SegNum=25, PointNum=20, SEGMENT_POINT_DIM=33]
+    route_lanes = route_lanes.reshape(B, 25 * 20, route_lanes.shape[-1])  # [B, 500, 33]
+    route_lanes = route_lanes[:, :, :2]  # [B, 500, 2] - centerline XY only
 
     x: torch.Tensor = x.reshape(B, P, -1, 4)
     mask_diffusion_time = (t < 0.1) * (t > 0.005)

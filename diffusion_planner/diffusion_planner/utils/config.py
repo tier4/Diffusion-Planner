@@ -23,3 +23,7 @@ class Config:
         )
 
         self.guidance_fn = guidance_fn
+
+        # Default guidance scale; overridable without reloading the model.
+        if not hasattr(self, "guidance_scale"):
+            self.guidance_scale = 0.5

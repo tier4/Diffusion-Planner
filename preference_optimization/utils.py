@@ -172,6 +172,7 @@ def generate_trajectory_pair(
     initial_pos_threshold: float = 0.055,
     initial_yaw_threshold_deg: float = 0.55,
     n_fixed_points: int = 0,
+    guidance_scale: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, int, torch.Tensor, float, float, bool]:
     """Generate two diverse trajectories with threshold-based retry logic.
 
@@ -207,6 +208,9 @@ def generate_trajectory_pair(
             indices [0, n_fixed_points) of the sampled_trajectories tensor. Note that
             because the DiT processes the full trajectory jointly, this is a soft bias
             rather than a hard constraint.
+        guidance_scale: If not None, temporarily overrides the decoder's guidance scale
+            for all trajectory generations in this call. Has no effect when the model
+            was loaded without a guidance function.
 
     Returns:
         Tuple of (trajectory_1, trajectory_2, final_metric, attempts_used, ego_shape,
@@ -225,6 +229,11 @@ def generate_trajectory_pair(
     data = model_args.observation_normalizer(data)
 
     ego_shape = data["ego_shape"]
+
+    # Temporarily override guidance scale on the decoder if requested.
+    _original_guidance_scale = policy_model.decoder._guidance_scale
+    if guidance_scale is not None:
+        policy_model.decoder._guidance_scale = guidance_scale
 
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
@@ -275,6 +284,7 @@ def generate_trajectory_pair(
                 best_metric, best_traj_2, best_disp, best_yaw_diff = ade, traj_2, disp, yaw_diff
 
             if ade <= ade_threshold:
+                policy_model.decoder._guidance_scale = _original_guidance_scale
                 return traj_1, traj_2, ade, attempt + 1, ego_shape, disp, yaw_diff, is_pruned_candidate
         else:
             fde = calculate_fde(traj_1, traj_2)
@@ -283,9 +293,12 @@ def generate_trajectory_pair(
                 best_metric, best_traj_2, best_disp, best_yaw_diff = fde, traj_2, disp, yaw_diff
 
             if fde >= fde_threshold:
+                policy_model.decoder._guidance_scale = _original_guidance_scale
                 return traj_1, traj_2, fde, attempt + 1, ego_shape, disp, yaw_diff, is_pruned_candidate
 
-    # Max retries reached
+    # Max retries reached — restore guidance scale before returning.
+    policy_model.decoder._guidance_scale = _original_guidance_scale
+
     if best_traj_2 is not None:
         # At least one candidate passed the initial pose check (if pruning was enabled)
         # or best by FDE/ADE metric (if pruning was disabled)

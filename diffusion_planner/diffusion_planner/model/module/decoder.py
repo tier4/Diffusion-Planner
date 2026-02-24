@@ -189,6 +189,7 @@ class Decoder(nn.Module):
         self._guidance_fn = (
             config.guidance_fn if config.__dict__.get("guidance_fn") is not None else None
         )
+        self._guidance_scale: float = getattr(config, "guidance_scale", 0.5)
         self._model_type = config.diffusion_model_type
 
         # Initialize transformer layers:
@@ -369,7 +370,7 @@ class Decoder(nn.Module):
                 "observation_normalizer": self._observation_normalizer,
                 "state_normalizer": self._state_normalizer,
             },
-            "guidance_scale": 0.5,
+            "guidance_scale": self._guidance_scale,
             "guidance_type": "classifier" if self._guidance_fn is not None else "uncond",
         }
 

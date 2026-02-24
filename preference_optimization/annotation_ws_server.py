@@ -49,6 +49,7 @@ class AnnotationParams:
     initial_pos_threshold: float = 0.055
     initial_yaw_threshold_deg: float = 0.55
     n_fixed_points: int = 0
+    guidance_scale: float = 0.5
 
 
 @dataclass
@@ -191,6 +192,7 @@ class AnnotationWsServer:
                     "initial_pos_threshold": self.params.initial_pos_threshold,
                     "initial_yaw_threshold_deg": self.params.initial_yaw_threshold_deg,
                     "n_fixed_points": self.params.n_fixed_points,
+                    "guidance_scale": self.params.guidance_scale,
                 },
                 "status": {
                     "current_index": self.annotator.current_index,
@@ -374,6 +376,7 @@ class AnnotationWsServer:
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
                     self.params.n_fixed_points,
+                    self.params.guidance_scale,
                 )
             )
 
@@ -390,6 +393,7 @@ class AnnotationWsServer:
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
                     self.params.n_fixed_points,
+                    self.params.guidance_scale,
                 )
             )
 
@@ -412,6 +416,7 @@ class AnnotationWsServer:
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
                     self.params.n_fixed_points,
+                    self.params.guidance_scale,
                 )
             )
 
@@ -428,6 +433,7 @@ class AnnotationWsServer:
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
                     self.params.n_fixed_points,
+                    self.params.guidance_scale,
                 )
             )
 
