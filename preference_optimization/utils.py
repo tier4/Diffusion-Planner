@@ -258,11 +258,20 @@ def generate_trajectory_pair(
     last_disp = 0.0
     last_yaw_diff = 0.0
 
+    # When guidance is active, use zeros as the starting point so the guidance
+    # signal is the sole source of diversity rather than mixing it with noise.
+    guidance_active = policy_model.decoder._guidance_fn is not None
+
     for attempt in range(max_retries):
-        # Generate stochastic trajectory (with noise)
-        noise = noise_scale * torch.randn(B, P, future_len + 1, 4).to(device)
-        if n_fixed_points > 0:
-            noise[:, 0, :n_fixed_points, :] = 0.0
+        # Generate stochastic trajectory.
+        # With guidance: start from zeros so guidance drives the variation.
+        # Without guidance: start from scaled random noise for stochastic diversity.
+        if guidance_active:
+            noise = torch.zeros(B, P, future_len + 1, 4).to(device)
+        else:
+            noise = noise_scale * torch.randn(B, P, future_len + 1, 4).to(device)
+            if n_fixed_points > 0:
+                noise[:, 0, :n_fixed_points, :] = 0.0
         data["sampled_trajectories"] = noise
         _, outputs = policy_model(data)
         traj_2 = outputs["prediction"][0, 0].cpu().numpy()
