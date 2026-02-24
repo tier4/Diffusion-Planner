@@ -14,6 +14,7 @@ def load_model(
     use_collision: bool = False,
     use_route_following: bool = False,
     use_lane_keeping: bool = False,
+    use_centerline_following: bool = False,
     guidance_scale: float = 0.5,
 ) -> tuple[Diffusion_Planner, Config]:
     """Load Diffusion Planner model and its configuration.
@@ -47,12 +48,13 @@ def load_model(
     if not args_path.exists():
         raise FileNotFoundError(f"args.json not found in model directory: {args_path}")
 
-    use_any_guidance = use_collision or use_route_following or use_lane_keeping
+    use_any_guidance = use_collision or use_route_following or use_lane_keeping or use_centerline_following
     guidance_fn = (
         GuidanceWrapper(
             use_collision=use_collision,
             use_route_following=use_route_following,
             use_lane_keeping=use_lane_keeping,
+            use_centerline_following=use_centerline_following,
         )
         if use_any_guidance
         else None

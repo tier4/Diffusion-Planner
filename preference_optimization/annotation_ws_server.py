@@ -53,6 +53,7 @@ class AnnotationParams:
     use_collision: bool = True
     use_route_following: bool = False
     use_lane_keeping: bool = False
+    use_centerline_following: bool = False
     guidance_scale: float = 0.5
 
 
@@ -200,6 +201,7 @@ class AnnotationWsServer:
                     "use_collision": self.params.use_collision,
                     "use_route_following": self.params.use_route_following,
                     "use_lane_keeping": self.params.use_lane_keeping,
+                    "use_centerline_following": self.params.use_centerline_following,
                     "guidance_scale": self.params.guidance_scale,
                 },
                 "status": {
@@ -388,6 +390,7 @@ class AnnotationWsServer:
                     self.params.use_collision,
                     self.params.use_route_following,
                     self.params.use_lane_keeping,
+                    self.params.use_centerline_following,
                     self.params.guidance_scale,
                 )
             )
@@ -409,6 +412,7 @@ class AnnotationWsServer:
                     self.params.use_collision,
                     self.params.use_route_following,
                     self.params.use_lane_keeping,
+                    self.params.use_centerline_following,
                     self.params.guidance_scale,
                 )
             )
@@ -436,6 +440,7 @@ class AnnotationWsServer:
                     self.params.use_collision,
                     self.params.use_route_following,
                     self.params.use_lane_keeping,
+                    self.params.use_centerline_following,
                     self.params.guidance_scale,
                 )
             )
@@ -457,6 +462,7 @@ class AnnotationWsServer:
                     self.params.use_collision,
                     self.params.use_route_following,
                     self.params.use_lane_keeping,
+                    self.params.use_centerline_following,
                     self.params.guidance_scale,
                 )
             )

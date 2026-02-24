@@ -1,8 +1,9 @@
 import torch
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+from diffusion_planner.model.guidance.centerline_following import centerline_following_fn
 from diffusion_planner.model.guidance.collision import collision_guidance_fn
-from diffusion_planner.model.guidance.route_following import route_following_fn
 from diffusion_planner.model.guidance.lane_keeping import lane_keeping_fn
+from diffusion_planner.model.guidance.route_following import route_following_fn
 
 N = 1
 sde = VPSDE_linear()
@@ -14,6 +15,7 @@ class GuidanceWrapper:
         use_collision: bool = True,
         use_route_following: bool = False,
         use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
     ):
         """Accumulates energy from one or more guidance functions.
 
@@ -29,6 +31,8 @@ class GuidanceWrapper:
             self._guidance_fns.append(route_following_fn)
         if use_lane_keeping:
             self._guidance_fns.append(lane_keeping_fn)
+        if use_centerline_following:
+            self._guidance_fns.append(centerline_following_fn)
 
         if not self._guidance_fns:
             raise ValueError(

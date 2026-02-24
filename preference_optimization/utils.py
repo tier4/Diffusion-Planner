@@ -176,6 +176,7 @@ def generate_trajectory_pair(
     use_collision: bool = True,
     use_route_following: bool = False,
     use_lane_keeping: bool = False,
+    use_centerline_following: bool = False,
     guidance_scale: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, int, torch.Tensor, float, float, bool]:
     """Generate two diverse trajectories with threshold-based retry logic.
@@ -255,12 +256,13 @@ def generate_trajectory_pair(
     traj_1 = outputs["prediction"][0, 0].cpu().numpy()
 
     # Now configure guidance for the stochastic trajectory generation.
-    if enable_guidance and (use_collision or use_route_following or use_lane_keeping):
+    if enable_guidance and (use_collision or use_route_following or use_lane_keeping or use_centerline_following):
         from diffusion_planner.model.guidance.guidance_wrapper import GuidanceWrapper
         policy_model.decoder._guidance_fn = GuidanceWrapper(
             use_collision=use_collision,
             use_route_following=use_route_following,
             use_lane_keeping=use_lane_keeping,
+            use_centerline_following=use_centerline_following,
         )
     else:
         policy_model.decoder._guidance_fn = None
