@@ -172,6 +172,10 @@ def generate_trajectory_pair(
     initial_pos_threshold: float = 0.055,
     initial_yaw_threshold_deg: float = 0.55,
     n_fixed_points: int = 0,
+    enable_guidance: bool = False,
+    use_collision: bool = True,
+    use_route_following: bool = False,
+    use_lane_keeping: bool = False,
     guidance_scale: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, int, torch.Tensor, float, float, bool]:
     """Generate two diverse trajectories with threshold-based retry logic.
@@ -230,8 +234,22 @@ def generate_trajectory_pair(
 
     ego_shape = data["ego_shape"]
 
-    # Temporarily override guidance scale on the decoder if requested.
+    # Temporarily configure guidance on the decoder.
+    # The guidance function and scale are restored after generation regardless
+    # of which return path is taken.
+    _original_guidance_fn = policy_model.decoder._guidance_fn
     _original_guidance_scale = policy_model.decoder._guidance_scale
+
+    if enable_guidance and (use_collision or use_route_following or use_lane_keeping):
+        from diffusion_planner.model.guidance.guidance_wrapper import GuidanceWrapper
+        policy_model.decoder._guidance_fn = GuidanceWrapper(
+            use_collision=use_collision,
+            use_route_following=use_route_following,
+            use_lane_keeping=use_lane_keeping,
+        )
+    else:
+        policy_model.decoder._guidance_fn = None
+
     if guidance_scale is not None:
         policy_model.decoder._guidance_scale = guidance_scale
 
@@ -293,6 +311,7 @@ def generate_trajectory_pair(
                 best_metric, best_traj_2, best_disp, best_yaw_diff = ade, traj_2, disp, yaw_diff
 
             if ade <= ade_threshold:
+                policy_model.decoder._guidance_fn = _original_guidance_fn
                 policy_model.decoder._guidance_scale = _original_guidance_scale
                 return traj_1, traj_2, ade, attempt + 1, ego_shape, disp, yaw_diff, is_pruned_candidate
         else:
@@ -305,7 +324,8 @@ def generate_trajectory_pair(
                 policy_model.decoder._guidance_scale = _original_guidance_scale
                 return traj_1, traj_2, fde, attempt + 1, ego_shape, disp, yaw_diff, is_pruned_candidate
 
-    # Max retries reached — restore guidance scale before returning.
+    # Max retries reached — restore guidance configuration before returning.
+    policy_model.decoder._guidance_fn = _original_guidance_fn
     policy_model.decoder._guidance_scale = _original_guidance_scale
 
     if best_traj_2 is not None:

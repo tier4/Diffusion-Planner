@@ -49,6 +49,10 @@ class AnnotationParams:
     initial_pos_threshold: float = 0.055
     initial_yaw_threshold_deg: float = 0.55
     n_fixed_points: int = 0
+    enable_guidance: bool = False
+    use_collision: bool = True
+    use_route_following: bool = False
+    use_lane_keeping: bool = False
     guidance_scale: float = 0.5
 
 
@@ -192,6 +196,10 @@ class AnnotationWsServer:
                     "initial_pos_threshold": self.params.initial_pos_threshold,
                     "initial_yaw_threshold_deg": self.params.initial_yaw_threshold_deg,
                     "n_fixed_points": self.params.n_fixed_points,
+                    "enable_guidance": self.params.enable_guidance,
+                    "use_collision": self.params.use_collision,
+                    "use_route_following": self.params.use_route_following,
+                    "use_lane_keeping": self.params.use_lane_keeping,
                     "guidance_scale": self.params.guidance_scale,
                 },
                 "status": {
@@ -376,6 +384,10 @@ class AnnotationWsServer:
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
                     self.params.n_fixed_points,
+                    self.params.enable_guidance,
+                    self.params.use_collision,
+                    self.params.use_route_following,
+                    self.params.use_lane_keeping,
                     self.params.guidance_scale,
                 )
             )
@@ -393,6 +405,10 @@ class AnnotationWsServer:
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
                     self.params.n_fixed_points,
+                    self.params.enable_guidance,
+                    self.params.use_collision,
+                    self.params.use_route_following,
+                    self.params.use_lane_keeping,
                     self.params.guidance_scale,
                 )
             )
@@ -416,6 +432,10 @@ class AnnotationWsServer:
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
                     self.params.n_fixed_points,
+                    self.params.enable_guidance,
+                    self.params.use_collision,
+                    self.params.use_route_following,
+                    self.params.use_lane_keeping,
                     self.params.guidance_scale,
                 )
             )
@@ -433,6 +453,10 @@ class AnnotationWsServer:
                     self.params.initial_pos_threshold,
                     self.params.initial_yaw_threshold_deg,
                     self.params.n_fixed_points,
+                    self.params.enable_guidance,
+                    self.params.use_collision,
+                    self.params.use_route_following,
+                    self.params.use_lane_keeping,
                     self.params.guidance_scale,
                 )
             )
