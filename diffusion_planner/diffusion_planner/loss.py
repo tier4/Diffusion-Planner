@@ -4,10 +4,9 @@ import torch
 import torch.nn.functional as F
 
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_KEEP
-from diffusion_planner.model.guidance.collision import (
-    batch_signed_distance_rect,
-    center_rect_to_points,
-)
+from diffusion_planner.model.guidance.collision import center_rect_to_points
+
+_NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
 
 
 def make_turn_indicator_gt(
@@ -204,56 +203,102 @@ def neighbor_clearance_penalty(
     neighbors_future_valid: torch.Tensor,
     denorm_inputs: dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    """Compute neighbor clearance penalty using oriented rectangles."""
+    """Compute neighbor clearance penalty using point-to-segment distance.
 
-    B, T, _, _ = ego_bbox_corners.shape
+    Uses the same primitives as ``road_border_penalty``
+    (``sample_ego_edge_points`` and ``point_to_segment_distance``).
+
+    Args:
+        ego_bbox_corners: [B, T, 4, 2] ego rectangle corners per timestep.
+        neighbors_future: [B, P, T, 4] neighbor trajectories (x, y, cos, sin).
+        neighbors_future_valid: [B, P, T] validity mask for neighbor timesteps.
+        denorm_inputs: denormalized input dict containing neighbor_agents_past.
+
+    Returns:
+        penalty: [B, T] penalty per timestep (zero at non-evaluated steps).
+    """
+    B, T_full, _, _ = ego_bbox_corners.shape
     P = neighbors_future.shape[1]
+    device = ego_bbox_corners.device
+    dtype = ego_bbox_corners.dtype
 
+    # Determine evaluation timesteps
+    eval_steps = _NEIGHBOR_EVAL_STEPS
+    steps = torch.tensor([s for s in eval_steps if s < T_full], device=device, dtype=torch.long)
+    S = steps.shape[0]
+    if S == 0:
+        return torch.zeros(B, T_full, device=device, dtype=dtype)
+
+    # Ego edge points at eval timesteps
+    ego_edge_pts = sample_ego_edge_points(ego_bbox_corners[:, steps], n_interp=0)  # [B, S, K, 2]
+    K = ego_edge_pts.shape[2]
+
+    # Neighbor sizes from last past timestep
     neighbor_sizes = denorm_inputs["neighbor_agents_past"][:, :P, -1, :]
-    neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3)
-    neighbor_length = torch.clamp(neighbor_sizes[..., 7], min=1e-3)
+    neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3)  # [B, P]
+    neighbor_length = torch.clamp(neighbor_sizes[..., 7], min=1e-3)  # [B, P]
 
-    neighbor_pos = neighbors_future[..., :2]
-    neighbor_cos = neighbors_future[..., 2]
-    neighbor_sin = neighbors_future[..., 3]
+    # Neighbor trajectory at eval timesteps
+    neighbor_pos = neighbors_future[:, :, steps, :2]  # [B, P, S, 2]
+    neighbor_cos = neighbors_future[:, :, steps, 2]  # [B, P, S]
+    neighbor_sin = neighbors_future[:, :, steps, 3]  # [B, P, S]
     orientation_norm = torch.sqrt(neighbor_cos**2 + neighbor_sin**2).clamp_min(1e-6)
     neighbor_cos = neighbor_cos / orientation_norm
     neighbor_sin = neighbor_sin / orientation_norm
 
-    neighbor_length = neighbor_length[..., None].expand(-1, -1, T)
-    neighbor_width = neighbor_width[..., None].expand(-1, -1, T)
-
+    # Build neighbor rect: [B, P, S, 6]
     neighbor_rect = torch.stack(
         [
             neighbor_pos[..., 0],
             neighbor_pos[..., 1],
             neighbor_cos,
             neighbor_sin,
-            neighbor_length,
-            neighbor_width,
+            neighbor_length.unsqueeze(-1).expand(-1, -1, S),
+            neighbor_width.unsqueeze(-1).expand(-1, -1, S),
         ],
         dim=-1,
-    )  # [B, P, T, 6]
+    )  # [B, P, S, 6]
 
-    ego_flat = ego_bbox_corners.reshape(B * T, 4, 2)
-    neighbor_flat = neighbor_rect.reshape(B * T, P, 6)
-    valid_mask = neighbors_future_valid.reshape(B * T, P)
+    # Neighbor corners -> edge segments
+    neighbor_corners = center_rect_to_points(neighbor_rect.reshape(-1, 6))
+    neighbor_corners = neighbor_corners.reshape(B, P, S, 4, 2)
+    seg_a = neighbor_corners  # [B, P, S, 4, 2]
+    seg_b = torch.roll(neighbor_corners, -1, dims=3)  # [B, P, S, 4, 2]
 
-    ego_pts = ego_flat.unsqueeze(1).expand(-1, P, 4, 2).reshape(-1, 4, 2)
-    neighbor_pts = center_rect_to_points(neighbor_flat.reshape(-1, 6))
-    distances = batch_signed_distance_rect(ego_pts, neighbor_pts)
-    distances = distances.reshape(B * T, P)
+    # Valid mask expanded to edges
+    valid = neighbors_future_valid[:, :, steps]  # [B, P, S]
+    valid_edges = valid.unsqueeze(-1).expand(-1, -1, -1, 4)  # [B, P, S, 4]
 
-    inf_tensor = torch.full_like(distances, float("inf"))
-    distances = torch.where(valid_mask, distances, inf_tensor)
+    # Reshape: align timestep dim with ego (dim 1)
+    seg_a = seg_a.permute(0, 2, 1, 3, 4).reshape(B, S, P * 4, 2)
+    seg_b = seg_b.permute(0, 2, 1, 3, 4).reshape(B, S, P * 4, 2)
+    valid_flat = valid_edges.permute(0, 2, 1, 3).reshape(B, S, P * 4)
 
-    min_distance, _ = distances.min(dim=1)
-    min_distance = min_distance.reshape(B, T)
+    # Point-to-segment distance
+    p = ego_edge_pts.reshape(B * S, K, 1, 2)
+    a = seg_a.reshape(B * S, 1, P * 4, 2)
+    b = seg_b.reshape(B * S, 1, P * 4, 2)
+    dist = point_to_segment_distance(p, a, b)  # [B*S, K, P*4]
 
-    neighbor_margin = 0.5
-    penalty = torch.zeros_like(min_distance)
-    finite_mask = torch.isfinite(min_distance)
-    penalty[finite_mask] = F.relu(neighbor_margin - min_distance[finite_mask])
+    # Mask invalid neighbor segments
+    valid_bs = valid_flat.reshape(B * S, P * 4)
+    dist = torch.where(valid_bs[:, None, :], dist, torch.full_like(dist, float("inf")))
+
+    # Min distance over ego edge points and neighbor segments
+    min_dist = dist.min(dim=-1).values.min(dim=-1).values  # [B*S]
+    min_dist = min_dist.reshape(B, S)
+
+    # Hinge penalty
+    margin = 0.5
+    penalty_s = torch.where(
+        torch.isfinite(min_dist),
+        F.relu(margin - min_dist),
+        torch.zeros_like(min_dist),
+    )
+
+    # Scatter to full T
+    penalty = torch.zeros(B, T_full, device=device, dtype=dtype)
+    penalty[:, steps] = penalty_s
 
     return penalty
 
@@ -349,9 +394,7 @@ def road_border_penalty(
 
     # Segment validity: both endpoints non-zero and line string is road border
     seg_valid = (
-        (seg_a.abs().sum(-1) > 1e-6)
-        & (seg_b.abs().sum(-1) > 1e-6)
-        & road_border_mask[:, :, None]
+        (seg_a.abs().sum(-1) > 1e-6) & (seg_b.abs().sum(-1) > 1e-6) & road_border_mask[:, :, None]
     )  # [B, N, S]
 
     # Pre-filter valid line strings to reduce memory
@@ -499,45 +542,15 @@ def compute_safety_penalty(
 
     traj_world = state_normalizer.inverse(trajectory_pred)
     ego_traj = traj_world[:, 0]  # [B, T, 4]
-    B, T, _ = ego_traj.shape
-    device = ego_traj.device
-    dtype = ego_traj.dtype
-
-    heading = ego_traj[..., 2:]
-    heading_unit = heading / torch.linalg.norm(heading, dim=-1, keepdim=True).clamp_min(1e-6)
-    ego_xy = ego_traj[..., :2]
 
     ego_shape = denorm_inputs["ego_shape"]
-    wheel_base = ego_shape[:, 0]
-    ego_length = ego_shape[:, 1]
-    ego_width = ego_shape[:, 2]
+    ego_bbox_corners = compute_ego_bbox_corners(ego_traj, ego_shape)
 
-    cog_to_rear = 0.5 * wheel_base[:, None, None]
+    lane_penalty = lane_boundary_penalty(ego_bbox_corners, denorm_inputs.get("route_lanes"))
+    if lane_penalty is None:
+        B, T = ego_traj.shape[:2]
+        lane_penalty = torch.zeros(B, T, device=ego_traj.device, dtype=ego_traj.dtype)
 
-    ego_center_xy = ego_xy + heading_unit * cog_to_rear
-
-    half_length = (ego_length / 2.0).unsqueeze(-1).expand(-1, T)
-    half_width = (ego_width / 2.0).unsqueeze(-1).expand(-1, T)
-    half_sizes = torch.stack([half_length, half_width], dim=-1)  # [B, T, 2]
-    corner_signs = torch.tensor(
-        [[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0]],
-        device=device,
-        dtype=dtype,
-    )
-    local_corners = corner_signs[None, None, :, :] * half_sizes[:, :, None, :]
-    rot = torch.stack(
-        [
-            heading_unit[..., 0],
-            -heading_unit[..., 1],
-            heading_unit[..., 1],
-            heading_unit[..., 0],
-        ],
-        dim=-1,
-    ).reshape(B, T, 2, 2)
-    rotated_corners = torch.einsum("btij,btkj->btki", rot, local_corners)
-    ego_bbox_corners = ego_center_xy[:, :, None, :] + rotated_corners
-
-    lane_penalty = lane_boundary_penalty(ego_bbox_corners, denorm_inputs["route_lanes"])
     neighbor_penalty = neighbor_clearance_penalty(
         ego_bbox_corners,
         neighbors_future,
