@@ -240,6 +240,21 @@ def generate_trajectory_pair(
     _original_guidance_fn = policy_model.decoder._guidance_fn
     _original_guidance_scale = policy_model.decoder._guidance_scale
 
+    if guidance_scale is not None:
+        policy_model.decoder._guidance_scale = guidance_scale
+
+    B = data["ego_current_state"].shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+
+    # Generate deterministic trajectory WITHOUT guidance — always the unconstrained
+    # baseline regardless of guidance settings. Guidance only shapes traj_2.
+    policy_model.decoder._guidance_fn = None
+    data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4).to(device)
+    _, outputs = policy_model(data)
+    traj_1 = outputs["prediction"][0, 0].cpu().numpy()
+
+    # Now configure guidance for the stochastic trajectory generation.
     if enable_guidance and (use_collision or use_route_following or use_lane_keeping):
         from diffusion_planner.model.guidance.guidance_wrapper import GuidanceWrapper
         policy_model.decoder._guidance_fn = GuidanceWrapper(
@@ -249,18 +264,6 @@ def generate_trajectory_pair(
         )
     else:
         policy_model.decoder._guidance_fn = None
-
-    if guidance_scale is not None:
-        policy_model.decoder._guidance_scale = guidance_scale
-
-    B = data["ego_current_state"].shape[0]
-    P = 1 + model_args.predicted_neighbor_num
-    future_len = model_args.future_len
-
-    # Generate deterministic trajectory once (temperature=0)
-    data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4).to(device)
-    _, outputs = policy_model(data)
-    traj_1 = outputs["prediction"][0, 0].cpu().numpy()
 
     # Initialize best tracking based on FDE/ADE mode
     if gt_similarity_mode and gt_trajectory is not None:
