@@ -43,4 +43,4 @@ if __name__ == "__main__":
         for sub_sub_dir in sub_sub_dirs:
             npz_path_list = sorted(sub_sub_dir.rglob("*.npz"))
             print(f"  {sub_sub_dir.name} {len(npz_path_list)} 件")
-            f.write(f"{subdir} {sub_sub_dir.name} {len(npz_path_list)}\n")
+            f.write(f"{subdir.name} {sub_sub_dir.name} {len(npz_path_list)}\n")
