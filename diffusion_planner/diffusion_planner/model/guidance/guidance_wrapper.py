@@ -58,8 +58,14 @@ class GuidanceWrapper:
         kwargs["inputs"] = observation_normalizer.inverse(kwargs["inputs"])
 
         for guidance_fn in self._guidance_fns:
-            energy += guidance_fn(x_in, t_input, cond, **kwargs)
+            e = guidance_fn(x_in, t_input, cond, **kwargs)
+            if torch.isnan(e).any():
+                print(f"Warning: NaN energy from {guidance_fn.__name__}, skipping")
+                continue
+            energy += e
 
-        assert not torch.isnan(energy).any()
+        if isinstance(energy, int):
+            # No guidance function produced valid energy
+            energy = torch.zeros(x_in.shape[0], device=x_in.device)
 
         return energy

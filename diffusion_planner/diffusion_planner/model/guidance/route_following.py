@@ -27,9 +27,31 @@ def route_following_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     expanded_preds = pred_points.unsqueeze(2)
     # 全ての距離を一度に計算 [B, T, SegNum*PointNum]
     distances = torch.norm(expanded_preds - expanded_routes, dim=-1)
-    # 各バッチ、各タイムステップでの最小距離を取得 [B, T]
+    # Per-timestep minimum distance to any route point [B, T]
     min_distances = torch.min(distances, dim=2)[0]
-    # 時間軸に沿って合計し、符号を反転 [B]
-    reward = -torch.sum(min_distances, dim=1)
+    raw_reward = -torch.sum(min_distances, dim=1)  # [B]
 
-    return reward
+    # Compute and smooth the gradient (same pattern as collision guidance)
+    # to bound the per-timestep correction and avoid abrupt steering.
+    raw_grad = torch.autograd.grad(
+        raw_reward.sum(), x, retain_graph=True, allow_unused=True
+    )[0]
+
+    if raw_grad is None:
+        return torch.zeros(B, device=x.device)
+
+    x_grad = raw_grad[:, 0, :T, :2]   # [B, T, 2]  ego XY only
+
+    half = 10
+    kernel_1d = (-(torch.linspace(-2.0, 2.0, 2 * half + 1, device=x.device) ** 2) / 4.0).exp()
+    kernel_1d = kernel_1d / kernel_1d.sum()
+
+    x_grad_smooth = F.conv1d(
+        F.pad(x_grad.permute(0, 2, 1), (half, half), mode="replicate"),
+        kernel_1d.unsqueeze(0).unsqueeze(0).expand(2, 1, -1),
+        groups=2,
+    ).permute(0, 2, 1)   # [B, T, 2]
+
+    reward = torch.sum(x_grad_smooth.detach() * x[:, 0, :T, :2], dim=(1, 2))  # [B]
+
+    return 100.0 * reward

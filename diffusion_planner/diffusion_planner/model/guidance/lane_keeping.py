@@ -22,16 +22,20 @@ _LBX, _LBY = 4, 5
 _RBX, _RBY = 6, 7
 
 # Only penalise violations that are above this threshold (metres).
-# Setting to 0 means any protrusion is penalised; a small positive value
-# provides a soft margin before the penalty kicks in.
 _MARGIN = 0.0
 
 # Ignore the nearest lane if it is farther than this distance from the
 # ego position (handles sparse/empty lane data gracefully).
 _MAX_LANE_DIST = 30.0
 
-# Energy scale factor (tuned to be comparable with collision guidance ~300).
+# Energy scale factor applied after gradient smoothing, matched to
+# collision guidance which uses 300.0 on a smoothed bounded gradient.
 _SCALE = 100.0
+
+# Gaussian smoothing kernel half-width for the gradient (same approach
+# as collision guidance to avoid abrupt per-timestep corrections).
+_SMOOTH_SIGMA = 2.0
+_SMOOTH_HALF = 10  # kernel spans [-10, 10] timesteps
 
 
 def lane_keeping_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
@@ -131,6 +135,36 @@ def lane_keeping_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     viol_left  = viol_left.masked_fill(no_lane, 0.0)
     viol_right = viol_right.masked_fill(no_lane, 0.0)
 
-    reward = -(viol_left + viol_right).sum(dim=-1)  # [B]
+    raw_reward = -(viol_left + viol_right).sum(dim=-1)  # [B]
+
+    # Compute raw gradient of violation energy w.r.t. ego XY positions,
+    # then apply Gaussian smoothing along the time axis to avoid abrupt
+    # per-timestep corrections — same pattern as collision guidance.
+    raw_grad = torch.autograd.grad(
+        raw_reward.sum(), x, retain_graph=True, allow_unused=True
+    )[0]
+
+    if raw_grad is None:
+        return torch.zeros(B, device=x.device)
+
+    x_grad = raw_grad[:, 0, 1:, :2]   # [B, T, 2]  ego XY only
+
+    # Gaussian kernel (same shape as collision guidance).
+    half = _SMOOTH_HALF
+    kernel_1d = (-(torch.linspace(-_SMOOTH_SIGMA, _SMOOTH_SIGMA, 2 * half + 1,
+                                  device=x.device) ** 2) / (_SMOOTH_SIGMA ** 2)).exp()
+    kernel_1d = kernel_1d / kernel_1d.sum()
+
+    # Apply smoothing independently to the x and y gradient components.
+    x_grad_smooth = F.conv1d(
+        F.pad(x_grad.permute(0, 2, 1), (half, half), mode="replicate"),  # [B, 2, T+2*half]
+        kernel_1d.unsqueeze(0).unsqueeze(0).expand(2, 1, -1),             # [2, 1, kernel]
+        groups=2,
+    )  # [B, 2, T]
+    x_grad_smooth = x_grad_smooth.permute(0, 2, 1)  # [B, T, 2]
+
+    # Re-wrap as a dot product so that the returned energy's gradient
+    # equals the smoothed gradient (matching collision guidance's trick).
+    reward = torch.sum(x_grad_smooth.detach() * x[:, 0, 1:, :2], dim=(1, 2))  # [B]
 
     return _SCALE * reward
