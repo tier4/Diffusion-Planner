@@ -1,18 +1,16 @@
 import torch
-import torch.nn.functional as F
 
 
 def route_following_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     """
-    x: [B * Pn+1, T + 1, 4]
-    t: [B, 1],
+    x: [B, P, T + 1, 4]
+    t: [B],
     inputs: Dict[str, torch.Tensor]
     """
     B, P, T, _ = x.shape
-    route_lanes = inputs["route_lanes"]
-    # print(route_lanes.shape)  # torch.Size([B=1024, SegNum=25, PointNum=20, FeatureDim=12])
-    route_lanes = route_lanes.reshape(B, 25 * 20, 12)  # [B, SegNum * PointNum, FeatureDim]
-    route_lanes = route_lanes[:, :, :2]  # [B, SegNum * PointNum, 2]
+    route_lanes = inputs["route_lanes"]  # [B, SegNum=25, PointNum=20, SEGMENT_POINT_DIM=33]
+    route_lanes = route_lanes.reshape(B, 25 * 20, route_lanes.shape[-1])  # [B, 500, 33]
+    route_lanes = route_lanes[:, :, :2]  # [B, 500, 2] - centerline XY only
 
     x: torch.Tensor = x.reshape(B, P, -1, 4)
     mask_diffusion_time = (t < 0.1) * (t > 0.005)
@@ -28,9 +26,11 @@ def route_following_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     expanded_preds = pred_points.unsqueeze(2)
     # 全ての距離を一度に計算 [B, T, SegNum*PointNum]
     distances = torch.norm(expanded_preds - expanded_routes, dim=-1)
-    # 各バッチ、各タイムステップでの最小距離を取得 [B, T]
+    # Per-timestep minimum distance to any route point [B, T]
     min_distances = torch.min(distances, dim=2)[0]
-    # 時間軸に沿って合計し、符号を反転 [B]
-    reward = -torch.sum(min_distances, dim=1)
+    # Negative sum: reward is higher when trajectory is close to the route.
+    # Scale matches lane_keeping (0.05) so both guidance functions have
+    # comparable influence; adjust with the guidance_scale UI slider.
+    reward = -torch.sum(min_distances, dim=1)  # [B]
 
-    return reward
+    return 0.05 * reward

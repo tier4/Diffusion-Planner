@@ -60,7 +60,7 @@ def generate_rule_based_preferences(
         data = load_npz_data(npz_path, device)
 
         # Generate trajectory pair
-        traj_1, traj_2, fde, attempts = generate_trajectory_pair(
+        traj_1, traj_2, fde, attempts, *_ = generate_trajectory_pair(
             policy_model, model_args, data, device=device
         )
 
