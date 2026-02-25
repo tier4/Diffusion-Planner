@@ -41,7 +41,7 @@ def centerline_following_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor
         cond: unused.
         inputs: observation dict (already inverse-normalised by the wrapper).
             Required keys:
-                ``route_lanes`` – [B, N_seg=25, N_pts=20, SEGMENT_POINT_DIM]
+                ``lanes`` – [B, N_seg, N_pts, SEGMENT_POINT_DIM]
 
     Returns:
         [B] energy tensor (higher = closer to centerline).
@@ -55,9 +55,7 @@ def centerline_following_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor
 
     ego_pos = x[:, 0, 1:, :2]  # [B, T, 2]
 
-    # Use route_lanes (planned route only) so the reference is always the
-    # intended lane, not the geometrically nearest lane in the full map.
-    lanes = inputs["route_lanes"]  # [B, 25, 20, 33]
+    lanes = inputs["lanes"]  # [B, 140, 20, 33]
     N = lanes.shape[1] * lanes.shape[2]
 
     lane_centers = lanes[..., _X:_Y + 1].reshape(B, N, 2)  # [B, N, 2]
