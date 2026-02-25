@@ -33,4 +33,6 @@ if __name__ == "__main__":
     total_min = total_sec // 60
     total_sec -= total_min * 60
 
-    print(f"Total duration: {total_hou:02d} h {total_min:02d} min {total_sec:02d} sec")
+    print(
+        f"Total duration: {total_hou:02d} h {total_min:02d} min {total_sec:02d} sec ({total_duration_sec / 3600:.1f} h)"
+    )

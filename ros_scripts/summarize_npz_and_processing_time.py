@@ -18,7 +18,7 @@ if __name__ == "__main__":
 
     for subdir in subdirs:
         print(subdir.name)
-        path_list_files = sorted(subdir.rglob("path_list_*.json"))
+        path_list_files = sorted(subdir.rglob("path_list*.json"))
 
         npz_count = 0
         for json_file in path_list_files:
@@ -26,7 +26,7 @@ if __name__ == "__main__":
                 data = json.load(f)
             n = len(data)
             hour = n / 10 / 60 / 60
-            print(f"  {json_file.name}: {n:,} 件 ({hour:.2f} 時間分)")
+            print(f"  {json_file.name}: {n:,} 件 ({hour:.1f} 時間分)")
 
         processing_time_file = subdir / "processing_time.txt"
         if processing_time_file.exists():
