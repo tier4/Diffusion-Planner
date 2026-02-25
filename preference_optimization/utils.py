@@ -270,8 +270,10 @@ def generate_trajectory_pair(
     best_disp = 0.0
     best_yaw_diff = 0.0
 
-    # Last generated trajectory - used as fallback when all candidates are pruned
-    last_traj_2 = None
+    # Last generated trajectory - used as fallback when all candidates are pruned.
+    # Initialised to traj_1 so the return is always a valid array even if the
+    # very first candidate triggers an exception before last_traj_2 is assigned.
+    last_traj_2 = traj_1
     last_disp = 0.0
     last_yaw_diff = 0.0
 
@@ -327,6 +329,7 @@ def generate_trajectory_pair(
                 best_metric, best_traj_2, best_disp, best_yaw_diff = fde, traj_2, disp, yaw_diff
 
             if fde >= fde_threshold:
+                policy_model.decoder._guidance_fn = _original_guidance_fn
                 policy_model.decoder._guidance_scale = _original_guidance_scale
                 return traj_1, traj_2, fde, attempt + 1, ego_shape, disp, yaw_diff, is_pruned_candidate
 

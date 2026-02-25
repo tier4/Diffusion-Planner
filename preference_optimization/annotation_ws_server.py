@@ -311,6 +311,13 @@ class AnnotationWsServer:
             self.params.enable_initial_pruning,
             self.params.initial_pos_threshold,
             self.params.initial_yaw_threshold_deg,
+            self.params.enable_guidance,
+            self.params.use_collision,
+            self.params.use_route_following,
+            self.params.use_lane_keeping,
+            self.params.use_centerline_following,
+            self.params.guidance_scale,
+            self.params.time_step,
         )
         return self._refresh_from_tuple(result)
 

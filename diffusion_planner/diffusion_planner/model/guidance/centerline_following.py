@@ -1,13 +1,8 @@
 """Centerline following guidance for the diffusion planner.
 
-Pulls the ego trajectory toward the nearest route-lane centerline by
-penalising lateral deviation continuously (quadratic cost), unlike
-lane_keeping which only fires when the vehicle protrudes beyond the boundary.
-
-Uses ``route_lanes`` (25 segments along the planned route) instead of the
-full ``lanes`` set so the reference is always the intended lane rather than
-the geometrically nearest lane which may belong to an adjacent or oncoming
-lane.
+Pulls the ego trajectory toward the nearest lane centerline by penalising
+lateral deviation continuously (quadratic cost), unlike lane_keeping which
+only fires when the vehicle protrudes beyond the boundary.
 
 The gradient grows linearly with lateral offset, so the correction is
 stronger the further the vehicle is from the center.

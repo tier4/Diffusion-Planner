@@ -375,8 +375,10 @@ class PreferenceAnnotator:
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Record GT as winner (against the deterministic trajectory) and advance to next sample.
 
-        The GT trajectory is smoothed using the same unicycle kinematic smoother applied
-        during training, ensuring distribution consistency with the base model's training data.
+        The GT trajectory is converted from [T, 3] (x, y, heading) to model format [T, 4]
+        (x, y, cos, sin) with no additional smoothing. The rosbag-to-NPZ pipeline stores
+        ego_agent_future as raw Autoware EKF output, which is the same distribution the
+        base model trains on as ground truth.
 
         Returns:
             Tuple of (trajectory_plot, velocity_plot, lateral_plot, metric_text, progress_text, metrics_text, sidebar_status, history_display)
@@ -1589,7 +1591,7 @@ def create_interface(
                     enable_initial_pruning_checkbox = gr.Checkbox(
                         value=True,
                         label="Enable Initial Pose Pruning (visual indicator only when disabled)",
-                        info="Disabled: highlights would-be-pruned trajectories in red. Enabled: retries until initial pose thresholds are met."
+                        info="Disabled: highlights would-be-pruned trajectories in grey. Enabled: retries until initial pose thresholds are met."
                     )
                 with gr.Row():
                     initial_pos_threshold_slider = gr.Slider(

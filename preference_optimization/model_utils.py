@@ -25,6 +25,7 @@ def load_model(
         use_collision: Enable collision-avoidance guidance during inference.
         use_route_following: Enable route-following guidance during inference.
         use_lane_keeping: Enable lane-keeping guidance during inference.
+        use_centerline_following: Enable centerline-following guidance during inference.
         guidance_scale: Classifier guidance scale (higher = stronger guidance).
 
     Returns:

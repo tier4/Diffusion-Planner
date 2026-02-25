@@ -23,6 +23,7 @@ class GuidanceWrapper:
             use_collision: Enable collision-avoidance guidance.
             use_route_following: Enable route-following guidance.
             use_lane_keeping: Enable lane-keeping guidance.
+            use_centerline_following: Enable centerline-following guidance.
         """
         self._guidance_fns = []
         if use_collision:
@@ -37,7 +38,7 @@ class GuidanceWrapper:
         if not self._guidance_fns:
             raise ValueError(
                 "GuidanceWrapper requires at least one guidance function. "
-                "Set use_collision, use_route_following, or use_lane_keeping to True."
+                "Set use_collision, use_route_following, use_lane_keeping, or use_centerline_following to True."
             )
 
     def __call__(self, x_in, t_input, cond, *args, **kwargs):
