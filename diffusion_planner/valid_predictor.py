@@ -6,8 +6,9 @@ from pathlib import Path
 import numpy as np
 import torch
 from diffusion_planner.loss import (
+    compute_ego_edge_points,
+    compute_neighbor_collision_penalty,
     compute_road_border_penalty,
-    compute_safety_penalty,
     loss_func,
     make_turn_indicator_gt,
 )
@@ -129,26 +130,24 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             # val : (B, Pn + 1, T)
             total_result_dict[f"ego_{key}"].append(val[:, 0, :])  # (B, T)
 
-        safety_penalty, _, (lane_penalty, neighbor_penalty) = compute_safety_penalty(
-            args.state_normalizer(prediction),
-            inputs,
+        # Compute ego edge points for penalty metrics
+        ego_edge_points = compute_ego_edge_points(prediction[:, 0], inputs["ego_shape"], n_interp=args.road_border_n_interp)
+
+        denorm_inputs = args.observation_normalizer.inverse(inputs)
+        neighbor_penalty = compute_neighbor_collision_penalty(
+            ego_edge_points,
             neighbors_future,
             neighbors_future_valid,
-            args,
-            return_components=True,
+            denorm_inputs["neighbor_agents_past"],
+            margin=args.neighbor_collision_margin,
         )
-        total_result_dict["ego_safety_margin_loss"].append(safety_penalty)
-        total_result_dict["ego_lane_boundary_margin_loss"].append(lane_penalty)
         total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty)
 
         # Road border collision metric
         rb_penalty = compute_road_border_penalty(
-            prediction[:, 0],  # [B, T, 4] (already denormalized)
-            inputs["ego_shape"],
-            inputs["line_strings"],
-            args.observation_normalizer,
+            ego_edge_points,
+            denorm_inputs["line_strings"],
             margin=args.road_border_margin,
-            n_interp=args.road_border_n_interp,
         )
         total_result_dict["ego_road_border_loss"].append(rb_penalty)
 
@@ -355,15 +354,6 @@ if __name__ == "__main__":
         print(f"{turn_indicator_change_accuracy=:.4f} ({turn_indicator_change_total=:d})")
     else:
         print("turn_indicator_change_accuracy=0.0000 (num_samples=0)")
-    if "ego_safety_margin_loss" in valid_dict:
-        print(
-            f"ego_safety_margin_loss_mean={valid_dict['ego_safety_margin_loss'].mean().item():.4f}"
-        )
-    if "ego_lane_boundary_margin_loss" in valid_dict:
-        print(
-            "ego_lane_boundary_margin_loss_mean="
-            f"{valid_dict['ego_lane_boundary_margin_loss'].mean().item():.4f}"
-        )
     if "ego_neighbor_margin_loss" in valid_dict:
         print(
             "ego_neighbor_margin_loss_mean="

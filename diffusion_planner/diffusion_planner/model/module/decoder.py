@@ -8,6 +8,8 @@ import torch.nn as nn
 import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
 from diffusion_planner.loss import (
+    compute_ego_edge_points,
+    compute_neighbor_collision_penalty,
     compute_road_border_penalty,
     loss_func,
     make_turn_indicator_gt,
@@ -197,25 +199,40 @@ def compute_training_loss(
 
     loss["ego_planning_loss"] = dpm_loss[:, 0, : args.ego_prediction_horizon].mean()
 
-    # Road border collision loss (ego only, x_start mode)
-    if args.coeff_road_border_loss > 0 and model_type == "x_start":
-
-        # Denormalize ego prediction
+    # Compute ego edge points for penalty losses
+    need_ego_edge = model_type == "x_start" and (
+        args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
+    )
+    if need_ego_edge:
         ego_pred_world = model_output[:, 0] * norm.std[0].to(model_output.device) + norm.mean[0].to(
             model_output.device
         )  # [B, T, 4]
+        ego_edge_points = compute_ego_edge_points(ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp)
+        denorm_inputs = args.observation_normalizer.inverse(inputs)
 
+    # Road border collision loss (ego only, x_start mode)
+    if args.coeff_road_border_loss > 0 and model_type == "x_start":
         rb_loss = compute_road_border_penalty(
-            ego_pred_world,
-            inputs["ego_shape"],
-            inputs["line_strings"],
-            args.observation_normalizer,
+            ego_edge_points,
+            denorm_inputs["line_strings"],
             margin=args.road_border_margin,
-            n_interp=args.road_border_n_interp,
         )  # [B, T]
         loss["road_border_loss"] = rb_loss.mean()
     else:
         loss["road_border_loss"] = torch.tensor(0.0, device=dpm_loss.device)
+
+    # Neighbor collision loss (ego only, x_start mode)
+    if args.coeff_neighbor_collision_loss > 0 and model_type == "x_start":
+        nc_loss = compute_neighbor_collision_penalty(
+            ego_edge_points,
+            neighbors_future,
+            neighbors_future_valid,
+            denorm_inputs["neighbor_agents_past"],
+            margin=args.neighbor_collision_margin,
+        )  # [B, T]
+        loss["neighbor_collision_loss"] = nc_loss.mean()
+    else:
+        loss["neighbor_collision_loss"] = torch.tensor(0.0, device=dpm_loss.device)
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 

@@ -22,11 +22,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.loss import (
-    compute_ego_bbox_corners,
-    neighbor_clearance_penalty,
+    compute_ego_edge_points,
+    compute_neighbor_collision_penalty,
+    compute_road_border_penalty,
     point_to_segment_distance,
-    road_border_penalty,
-    sample_ego_edge_points,
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.visualize_input import visualize_inputs
@@ -120,10 +119,10 @@ def process_sample(idx, valid_data_path, prediction_path, save_dir, road_border_
     T = ego_traj.shape[0]
     timesteps = np.arange(T) * 0.1  # seconds (10 Hz)
 
-    # Compute ego bounding box corners [1, T, 4, 2]
-    ego_bbox_corners = compute_ego_bbox_corners(ego_traj[None], ego_shape[None])
+    # Compute ego edge points [1, T, K, 2]
+    ego_edge_points = compute_ego_edge_points(ego_traj[None], ego_shape[None], n_interp=road_border_n_interp)
 
-    # 1. Neighbor clearance penalty
+    # 1. Neighbor collision penalty
     neighbors_future = inputs["neighbor_agents_future"]
     neighbor_future_mask = (
         torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
@@ -132,29 +131,20 @@ def process_sample(idx, valid_data_path, prediction_path, save_dir, road_border_
     neighbors_future[neighbor_future_mask] = 0.0
     neighbors_future_valid = ~neighbor_future_mask
 
-    neighbor_pen = neighbor_clearance_penalty(
-        ego_bbox_corners, neighbors_future, neighbors_future_valid, inputs
+    neighbor_pen = compute_neighbor_collision_penalty(
+        ego_edge_points, neighbors_future, neighbors_future_valid,
+        inputs["neighbor_agents_past"],
+        margin=2.0,
     )
 
     # 2. Road border penalty and distance
-    ls = inputs["line_strings"][0]  # [N, P, D]
-    D = ls.shape[-1]
-    has_road_border = D >= 4
-    if has_road_border:
-        ls_xy = ls[..., :2]  # [N, P, 2]
-        rb_mask = (ls[..., 3] > 0.5).any(dim=-1)  # [N]
-
-        ego_edge_points = sample_ego_edge_points(ego_bbox_corners, n_interp=road_border_n_interp)
-        rb_pen = road_border_penalty(
-            ego_edge_points,
-            ls_xy.unsqueeze(0),
-            rb_mask.unsqueeze(0),
-            margin=road_border_margin,
-        )
-        min_dist = compute_min_edge_to_road_border_distance(ego_edge_points, ls_xy, rb_mask)
-    else:
-        rb_pen = torch.zeros(1, T)
-        min_dist = torch.full((T,), float("inf"))
+    ls = inputs["line_strings"]  # [1, N, P, D]
+    rb_pen = compute_road_border_penalty(
+        ego_edge_points, ls, margin=road_border_margin,
+    )  # [1, T]
+    ls_xy = ls[0, ..., :2]  # [N, P, 2]
+    rb_mask = (ls[0, ..., 3] > 0.5).any(dim=-1)  # [N]
+    min_dist = compute_min_edge_to_road_border_distance(ego_edge_points, ls_xy, rb_mask)
 
     # Convert to numpy
     neighbor_pen_np = neighbor_pen[0].detach().numpy()
@@ -193,13 +183,10 @@ def process_sample(idx, valid_data_path, prediction_path, save_dir, road_border_
     )
     plt.colorbar(scatter, ax=ax_map, label="road_border penalty [m]", shrink=0.6)
 
-    # Draw ego bbox at a few timesteps
+    # Draw ego edge points at a few timesteps
     for t_idx in [0, T // 4, T // 2, 3 * T // 4, T - 1]:
-        corners = ego_bbox_corners[0, t_idx].numpy()
-        polygon = plt.Polygon(
-            corners, fill=False, edgecolor="gray", linewidth=0.5, alpha=0.5
-        )
-        ax_map.add_patch(polygon)
+        pts = ego_edge_points[0, t_idx].numpy()  # [K, 2]
+        ax_map.scatter(pts[:, 0], pts[:, 1], c="gray", s=5, alpha=0.5, zorder=5)
 
     ax_map.set_title(f"Sample {idx}: {valid_data_path.stem}")
 

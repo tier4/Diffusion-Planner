@@ -57,7 +57,6 @@ if __name__ == "__main__":
     trajectory_dict_y = defaultdict(list)
     loss_ego_3sec = defaultdict(list)
     loss_ego_position_lat = defaultdict(list)
-    loss_ego_lane_boundary_margin_loss = defaultdict(list)
     loss_ego_neighbor_margin_loss = defaultdict(list)
     loss_list = []
     for info_path, loss_path in zip(info_path_list, loss_path_list):
@@ -72,9 +71,6 @@ if __name__ == "__main__":
         loss_ego_3sec[time_str].append(loss_data["loss_ego_3sec"])
         loss_list.append(loss_data["loss_ego_3sec"])
         loss_ego_position_lat[time_str].append(loss_data["ego_position_lat_loss"])
-        loss_ego_lane_boundary_margin_loss[time_str].append(
-            loss_data["ego_lane_boundary_margin_loss"]
-        )
         loss_ego_neighbor_margin_loss[time_str].append(loss_data["ego_neighbor_margin_loss"])
 
     assert len(prediction_path_list) == len(valid_data_path_list)
@@ -171,10 +167,9 @@ if __name__ == "__main__":
                     f"\nloss{timestep // 10}sec={diff_m:.2f}[m]\n"
                     f"lat={lat_error_ego[index]:.2f}[m], lon={lon_error_ego[index]:.2f}[m], angle={angle_error_ego[index]:.2f}[rad]"
                 )
-        lane_val = valid_loss["ego_lane_boundary_margin_loss"]
         nbr_val = valid_loss["ego_neighbor_margin_loss"]
         rb_val = valid_loss["ego_road_border_loss"]
-        title += f"\nlane={lane_val:.2f}, nbr={nbr_val:.2f}, rb={rb_val:.2f}"
+        title += f"\nnbr={nbr_val:.2f}, rb={rb_val:.2f}"
 
         # Neighbors
         neighbors = valid_data_dict["neighbor_agents_past"][0]
