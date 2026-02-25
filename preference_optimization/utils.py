@@ -283,18 +283,27 @@ def generate_trajectory_pair(
 
     # When guidance is active, use zeros as the starting point so the guidance
     # signal is the sole source of diversity rather than mixing it with noise.
+    # Because the input is deterministic (zeros), the output is also deterministic,
+    # so retrying would produce the same trajectory every time. Generate once and
+    # skip the retry loop entirely.
     guidance_active = policy_model.decoder._guidance_fn is not None
 
+    if guidance_active:
+        data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4).to(device)
+        _, outputs = policy_model(data)
+        traj_2 = outputs["prediction"][0, 0].cpu().numpy()
+        is_pruned_candidate, disp, yaw_diff = should_prune_by_initial_pose(
+            traj_1, traj_2, initial_pos_threshold, initial_yaw_threshold_deg
+        )
+        policy_model.decoder._guidance_fn = _original_guidance_fn
+        policy_model.decoder._guidance_scale = _original_guidance_scale
+        return traj_1, traj_2, 0.0, 1, ego_shape, disp, yaw_diff, is_pruned_candidate
+
     for attempt in range(max_retries):
-        # Generate stochastic trajectory.
-        # With guidance: start from zeros so guidance drives the variation.
-        # Without guidance: start from scaled random noise for stochastic diversity.
-        if guidance_active:
-            noise = torch.zeros(B, P, future_len + 1, 4).to(device)
-        else:
-            noise = noise_scale * torch.randn(B, P, future_len + 1, 4).to(device)
-            if n_fixed_points > 0:
-                noise[:, 0, :n_fixed_points, :] = 0.0
+        # Generate stochastic trajectory with scaled random noise.
+        noise = noise_scale * torch.randn(B, P, future_len + 1, 4).to(device)
+        if n_fixed_points > 0:
+            noise[:, 0, :n_fixed_points, :] = 0.0
         data["sampled_trajectories"] = noise
         _, outputs = policy_model(data)
         traj_2 = outputs["prediction"][0, 0].cpu().numpy()
