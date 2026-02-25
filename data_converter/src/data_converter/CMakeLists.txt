@@ -14,6 +14,10 @@ ament_auto_add_executable(autoware_diffusion_planner_data_converter
   src/data_converter.cpp
 )
 
+ament_auto_add_executable(diffusion_planner_inference_tool
+  src/inference_tool.cpp
+)
+
 ament_auto_package(
   INSTALL_TO_SHARE
 )
