@@ -15,7 +15,7 @@
       "compilerPath": "/usr/bin/gcc",
       "cStandard": "c17",
       "cppStandard": "c++17",
-      "compileCommands": "${workspaceFolder}/data_converter/build/compile_commands.json"
+      "compileCommands": "${workspaceFolder}/cpp_tools/build/compile_commands.json"
     }
   ],
   "version": 4

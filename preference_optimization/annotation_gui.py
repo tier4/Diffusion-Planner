@@ -10,7 +10,12 @@ import torch
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from matplotlib.figure import Figure
 
-from preference_optimization.utils import calculate_ade, generate_trajectory_pair, load_npz_data
+from preference_optimization.utils import (
+    calculate_ade,
+    generate_trajectory_pair,
+    load_npz_data,
+    should_prune_by_initial_pose,
+)
 
 
 class PreferenceAnnotator:
@@ -41,6 +46,15 @@ class PreferenceAnnotator:
         self.current_attempts = 0
         self.annotation_complete = False
 
+        # Initial pose pruning state
+        self.initial_displacement: float = 0.0
+        self.initial_yaw_diff: float = 0.0
+        self.is_pruned: bool = False
+        self.enable_initial_pruning: bool = True
+
+        # GT availability state
+        self.gt_available: bool = False
+
         # Navigation and tracking state
         self.current_jump_size = 1  # Tracks the last navigation button click
         self.labeled_indices: set[int] = set()  # Tracks which samples have been labeled
@@ -57,7 +71,15 @@ class PreferenceAnnotator:
 
     def load_sample(
         self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
-        gt_similarity_mode: bool = True
+        gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
+        initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False,
+        use_collision: bool = True,
+        use_route_following: bool = False,
+        use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5,
+        time_step: int = 40,
     ) -> tuple[Figure, Figure, Figure, str, str, str, str, str]:
         """Load current sample and generate trajectory pair.
 
@@ -90,7 +112,7 @@ class PreferenceAnnotator:
         self.gt_similarity_mode = gt_similarity_mode
 
         # Generate trajectory pair
-        traj_1, traj_2, metric, attempts, ego_shape = generate_trajectory_pair(
+        traj_1, traj_2, metric, attempts, ego_shape, initial_disp, initial_yaw_diff, is_pruned = generate_trajectory_pair(
             self.policy_model,
             self.model_args,
             self.current_data,
@@ -101,6 +123,15 @@ class PreferenceAnnotator:
             device=self.device,
             gt_similarity_mode=gt_similarity_mode,
             gt_trajectory=gt_trajectory,
+            enable_initial_pruning=enable_initial_pruning,
+            initial_pos_threshold=float(initial_pos_threshold),
+            initial_yaw_threshold_deg=float(initial_yaw_threshold_deg),
+            enable_guidance=bool(enable_guidance),
+            use_collision=bool(use_collision),
+            use_route_following=bool(use_route_following),
+            use_lane_keeping=bool(use_lane_keeping),
+            use_centerline_following=bool(use_centerline_following),
+            guidance_scale=float(guidance_scale),
         )
 
         self.ego_shape = ego_shape.tolist() # [1, 3] wheel_base length, width
@@ -108,20 +139,26 @@ class PreferenceAnnotator:
         self.trajectory_2 = traj_2.tolist()
         self.current_metric = metric
         self.current_attempts = attempts
+        self.initial_displacement = initial_disp
+        self.initial_yaw_diff = initial_yaw_diff
+        self.is_pruned = is_pruned
+        self.enable_initial_pruning = enable_initial_pruning
+        self.gt_available = self._check_gt_available()
 
-        # Create visualizations with default time_step=40 (middle of trajectory)
-        default_time = 40
         # Convert zoom_level to view_range: level 1 = 100m, level 10 = 10m
         view_range = 100 - (int(zoom_level) - 1) * 90 / 9
-        traj_plot = self._create_trajectory_plot(time_step=default_time, view_range=view_range)
-        vel_plot = self._create_velocity_plot(time_step=default_time)
-        lat_plot = self._create_lateral_curvature_plot(time_step=default_time)
+        traj_plot = self._create_trajectory_plot(time_step=int(time_step), view_range=view_range)
+        vel_plot = self._create_velocity_plot(time_step=int(time_step))
+        lat_plot = self._create_lateral_curvature_plot(time_step=int(time_step))
 
         # Create status text based on mode
         if gt_similarity_mode:
             metric_text = f"ADE (vs GT): {metric:.2f}m (Attempts: {attempts})"
         else:
             metric_text = f"FDE (vs Det.): {metric:.2f}m (Attempts: {attempts})"
+        metric_text += f" | pos: {initial_disp:.3f}m, yaw: {initial_yaw_diff:.2f}°"
+        if is_pruned:
+            metric_text += " ⚠️ PRUNED"
         progress_text = self._format_progress()
         metrics_text = self._format_metrics_comparison()
 
@@ -129,7 +166,15 @@ class PreferenceAnnotator:
 
     def regenerate(
         self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
-        gt_similarity_mode: bool = True
+        gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
+        initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False,
+        use_collision: bool = True,
+        use_route_following: bool = False,
+        use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5,
+        time_step: int = 40,
     ) -> tuple[Figure, Figure, Figure, str, str, str, str, str]:
         """Regenerate trajectory pair with current parameters.
 
@@ -156,7 +201,7 @@ class PreferenceAnnotator:
         self.gt_similarity_mode = gt_similarity_mode
 
         # Generate new pair
-        traj_1, traj_2, metric, attempts, ego_shape = generate_trajectory_pair(
+        traj_1, traj_2, metric, attempts, ego_shape, initial_disp, initial_yaw_diff, is_pruned = generate_trajectory_pair(
             self.policy_model,
             self.model_args,
             self.current_data,
@@ -167,6 +212,15 @@ class PreferenceAnnotator:
             device=self.device,
             gt_similarity_mode=gt_similarity_mode,
             gt_trajectory=gt_trajectory,
+            enable_initial_pruning=enable_initial_pruning,
+            initial_pos_threshold=float(initial_pos_threshold),
+            initial_yaw_threshold_deg=float(initial_yaw_threshold_deg),
+            enable_guidance=bool(enable_guidance),
+            use_collision=bool(use_collision),
+            use_route_following=bool(use_route_following),
+            use_lane_keeping=bool(use_lane_keeping),
+            use_centerline_following=bool(use_centerline_following),
+            guidance_scale=float(guidance_scale),
         )
 
         self.ego_shape = ego_shape.tolist()
@@ -174,20 +228,25 @@ class PreferenceAnnotator:
         self.trajectory_2 = traj_2.tolist()
         self.current_metric = metric
         self.current_attempts = attempts
+        self.initial_displacement = initial_disp
+        self.initial_yaw_diff = initial_yaw_diff
+        self.is_pruned = is_pruned
+        self.enable_initial_pruning = enable_initial_pruning
 
-        # Create visualizations with default time_step=40 (middle of trajectory)
-        default_time = 40
         # Convert zoom_level to view_range: level 1 = 100m, level 10 = 10m
         view_range = 100 - (int(zoom_level) - 1) * 90 / 9
-        traj_plot = self._create_trajectory_plot(time_step=default_time, view_range=view_range)
-        vel_plot = self._create_velocity_plot(time_step=default_time)
-        lat_plot = self._create_lateral_curvature_plot(time_step=default_time)
+        traj_plot = self._create_trajectory_plot(time_step=int(time_step), view_range=view_range)
+        vel_plot = self._create_velocity_plot(time_step=int(time_step))
+        lat_plot = self._create_lateral_curvature_plot(time_step=int(time_step))
 
         # Create status text based on mode
         if gt_similarity_mode:
             metric_text = f"ADE (vs GT): {metric:.2f}m (Attempts: {attempts})"
         else:
             metric_text = f"FDE (vs Det.): {metric:.2f}m (Attempts: {attempts})"
+        metric_text += f" | pos: {initial_disp:.3f}m, yaw: {initial_yaw_diff:.2f}°"
+        if is_pruned:
+            metric_text += " ⚠️ PRUNED"
         progress_text = self._format_progress()
         metrics_text = self._format_metrics_comparison()
 
@@ -231,7 +290,15 @@ class PreferenceAnnotator:
 
     def select_winner(
         self, winner: str, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
-        gt_similarity_mode: bool = True
+        gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
+        initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False,
+        use_collision: bool = True,
+        use_route_following: bool = False,
+        use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5,
+        time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Record preference and move to next sample.
 
@@ -292,11 +359,112 @@ class PreferenceAnnotator:
         else:
             self.current_index = (self.current_index + self.current_jump_size) % len(self.npz_paths)
         
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, enable_guidance, use_collision, use_route_following, use_lane_keeping, use_centerline_following, guidance_scale, time_step)
+
+    def select_gt_as_winner(
+        self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
+        gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
+        initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False,
+        use_collision: bool = True,
+        use_route_following: bool = False,
+        use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5,
+        time_step: int = 40,
+    ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
+        """Record GT as winner (against the deterministic trajectory) and advance to next sample.
+
+        The GT trajectory is converted from [T, 3] (x, y, heading) to model format [T, 4]
+        (x, y, cos, sin) with no additional smoothing. The rosbag-to-NPZ pipeline stores
+        ego_agent_future as raw Autoware EKF output, which is the same distribution the
+        base model trains on as ground truth.
+
+        Returns:
+            Tuple of (trajectory_plot, velocity_plot, lateral_plot, metric_text, progress_text, metrics_text, sidebar_status, history_display)
+        """
+        if self.current_data is None:
+            return None, None, None, "No data loaded", "Error", "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        if not self.gt_available:
+            return None, None, None, "GT not available for this sample", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        gt_trajectory = self._get_gt_trajectory()
+        if gt_trajectory is None:
+            return None, None, None, "GT conversion failed", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        self.mark_as_labeled(self.current_index)
+        npz_path = self.npz_paths[self.current_index]
+
+        self.preferences.append({
+            "npz_path": npz_path,
+            "trajectory_w": gt_trajectory.tolist(),
+            "trajectory_l": self.trajectory_1,   # deterministic (green) is the loser
+        })
+
+        print(f"Recorded GT as winner for {npz_path}")
+
+        if len(self.preferences) >= self.target_count:
+            self.annotation_complete = True
+            complete_msg = (
+                f"✅ Annotation complete!\n\n"
+                f"Collected {len(self.preferences)} preferences.\n\n"
+                f"The server will close automatically in 3 seconds.\n"
+                f"Training will start automatically."
+            )
+            print(f"\n{'='*60}")
+            print("ANNOTATION COMPLETE!")
+            print(f"Collected {len(self.preferences)} preferences")
+            print(f"{'='*60}\n")
+            self._self_shutdown()
+            return None, None, None, complete_msg, f"Complete: {len(self.preferences)}/{self.target_count}", "", self.get_sidebar_state(), self.get_labeled_history_display()
+
+        if self.auto_skip_labeled:
+            self.current_index = self.get_next_unlabeled()
+        else:
+            self.current_index = (self.current_index + self.current_jump_size) % len(self.npz_paths)
+
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, enable_guidance, use_collision, use_route_following, use_lane_keeping, use_centerline_following, guidance_scale, time_step)
+
+    def _check_gt_available(self) -> bool:
+        """Return True if a valid GT trajectory exists for the current sample."""
+        if self.current_data is None or "ego_agent_future" not in self.current_data:
+            return False
+        gt = self.current_data["ego_agent_future"][0].cpu().numpy()
+        valid = ~((gt[:, 0] == 0) & (gt[:, 1] == 0))
+        return bool(valid.mean() >= 0.8)
+
+    def _get_gt_trajectory(self) -> np.ndarray | None:
+        """Return the GT trajectory as [T, 4] (x, y, cos, sin).
+
+        The NPZ ego_agent_future is stored as [T, 3] (x, y, heading in radians) and comes
+        directly from Autoware's EKF localization with no additional smoothing applied during
+        rosbag-to-NPZ conversion (verified in both the Python and C++ converter paths). The
+        model trains on this raw EKF output as GT, so no further smoothing is applied here.
+
+        Returns:
+            GT trajectory as [T, 4] numpy array, or None on error.
+        """
+        try:
+            gt_raw = self.current_data["ego_agent_future"][0].cpu().numpy()  # [T, 3]
+            cos_yaw = np.cos(gt_raw[:, 2:3])
+            sin_yaw = np.sin(gt_raw[:, 2:3])
+            return np.concatenate([gt_raw[:, :2], cos_yaw, sin_yaw], axis=1).astype(np.float32)
+        except Exception as e:
+            print(f"GT conversion failed: {e}")
+            return None
 
     def jump(
         self, delta: int, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, zoom_level: int = 5,
-        gt_similarity_mode: bool = True
+        gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
+        initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False,
+        use_collision: bool = True,
+        use_route_following: bool = False,
+        use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5,
+        time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Jump to a different sample.
 
@@ -318,11 +486,17 @@ class PreferenceAnnotator:
         # Ensure delta is integer
         delta = int(delta)
         self.current_index = max(0, min(self.current_index + delta, len(self.npz_paths) - 1))
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, enable_guidance, use_collision, use_route_following, use_lane_keeping, use_centerline_following, guidance_scale, time_step)
 
     def handle_keyboard_navigation(
-        self, direction: str, noise_scale: float, fde_threshold: float, ade_threshold: float, 
-        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True
+        self, direction: str, noise_scale: float, fde_threshold: float, ade_threshold: float,
+        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True,
+        enable_initial_pruning: bool = True, initial_pos_threshold: float = 0.055,
+        initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False, use_collision: bool = True,
+        use_route_following: bool = False, use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5, time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Handle keyboard navigation (left/right arrow keys).
 
@@ -340,11 +514,19 @@ class PreferenceAnnotator:
         """
         # Determine delta based on direction and current jump size
         delta = -self.current_jump_size if direction == "left" else self.current_jump_size
-        return self.jump(delta, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+        return self.jump(delta, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, enable_guidance, use_collision, use_route_following, use_lane_keeping, use_centerline_following, guidance_scale, time_step)
 
     def jump_to_next_unlabeled(
-        self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int, 
-        zoom_level: int = 5, gt_similarity_mode: bool = True
+        self, noise_scale: float, fde_threshold: float, ade_threshold: float, max_retries: int,
+        zoom_level: int = 5, gt_similarity_mode: bool = True, enable_initial_pruning: bool = True,
+        initial_pos_threshold: float = 0.055, initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False,
+        use_collision: bool = True,
+        use_route_following: bool = False,
+        use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5,
+        time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Jump to the next unlabeled sample.
 
@@ -365,7 +547,7 @@ class PreferenceAnnotator:
             return None, None, None, "All samples labeled!", self._format_progress(), "", self.get_sidebar_state(), self.get_labeled_history_display()
         
         self.current_index = next_idx
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, enable_guidance, use_collision, use_route_following, use_lane_keeping, use_centerline_following, guidance_scale, time_step)
 
     def update_time_display(
         self, time_step: int, zoom_level: int = 5
@@ -497,8 +679,14 @@ class PreferenceAnnotator:
         return "\n".join(lines)
 
     def jump_to_index(
-        self, target_index: int, noise_scale: float, fde_threshold: float, ade_threshold: float, 
-        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True
+        self, target_index: int, noise_scale: float, fde_threshold: float, ade_threshold: float,
+        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True,
+        enable_initial_pruning: bool = True, initial_pos_threshold: float = 0.055,
+        initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False, use_collision: bool = True,
+        use_route_following: bool = False, use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5, time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Jump directly to a specific sample index.
 
@@ -522,11 +710,17 @@ class PreferenceAnnotator:
         target_index = max(0, min(target_index, len(self.npz_paths) - 1))
         
         self.current_index = target_index
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, enable_guidance, use_collision, use_route_following, use_lane_keeping, use_centerline_following, guidance_scale, time_step)
 
     def toggle_filter(
         self, filter_mode: str, noise_scale: float, fde_threshold: float, ade_threshold: float,
-        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True
+        max_retries: int, zoom_level: int = 5, gt_similarity_mode: bool = True,
+        enable_initial_pruning: bool = True, initial_pos_threshold: float = 0.055,
+        initial_yaw_threshold_deg: float = 0.55,
+        enable_guidance: bool = False, use_collision: bool = True,
+        use_route_following: bool = False, use_lane_keeping: bool = False,
+        use_centerline_following: bool = False,
+        guidance_scale: float = 0.5, time_step: int = 40,
     ) -> tuple[Figure | None, Figure | None, Figure | None, str, str, str, str, str]:
         """Toggle sample filter between All/Finished/Unfinished.
 
@@ -557,8 +751,8 @@ class PreferenceAnnotator:
         
         if not self.npz_paths:
             return None, None, None, "No samples match filter", "No samples", "", self.get_sidebar_state(), self.get_labeled_history_display()
-        
-        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode)
+
+        return self.load_sample(noise_scale, fde_threshold, ade_threshold, max_retries, zoom_level, gt_similarity_mode, enable_initial_pruning, initial_pos_threshold, initial_yaw_threshold_deg, enable_guidance, use_collision, use_route_following, use_lane_keeping, use_centerline_following, guidance_scale, time_step)
 
     def _draw_vehicle_footprint(
         self, ax, x: float, y: float, heading: float, color: str, alpha: float = 0.8
@@ -654,6 +848,20 @@ class PreferenceAnnotator:
         data_cpu = {k: v.cpu() for k, v in self.current_data.items()}
         visualize_inputs(data_cpu, save_path=None, ax=ax, view_ranges=[120])
 
+        # Stochastic trajectory color:
+        #   orange  — normal
+        #   grey    — would be pruned but pruning is OFF (visual indicator only)
+        #   red     — actively pruned (pruning is ON, trajectory was flagged)
+        if self.is_pruned and self.enable_initial_pruning:
+            stochastic_color = "red"
+            stochastic_label = "Trajectory 2 (Stochastic) ⚠️ PRUNED"
+        elif self.is_pruned and not self.enable_initial_pruning:
+            stochastic_color = "gray"
+            stochastic_label = "Trajectory 2 (Stochastic) ⚠️ would be pruned"
+        else:
+            stochastic_color = "orange"
+            stochastic_label = "Trajectory 2 (Stochastic)"
+
         # Plot full trajectories
         ax.plot(
             traj_1_np[:, 0],
@@ -666,39 +874,45 @@ class PreferenceAnnotator:
         ax.plot(
             traj_2_np[:, 0],
             traj_2_np[:, 1],
-            color="orange",
+            color=stochastic_color,
             linewidth=3,
             alpha=0.7,
-            label="Trajectory 2 (Stochastic)",
+            label=stochastic_label,
         )
 
         # Draw vehicle footprints at selected time step
         if time_step is not None and 0 <= time_step < len(traj_1_np):
             # Trajectory format is [x, y, cos(heading), sin(heading)]
             # Need to use arctan2(sin, cos) to get the heading angle
-            
+
             # Trajectory 1 footprint (green)
             x1, y1 = traj_1_np[time_step, 0], traj_1_np[time_step, 1]
             cos1, sin1 = traj_1_np[time_step, 2], traj_1_np[time_step, 3]
             heading1 = np.arctan2(sin1, cos1)
             self._draw_vehicle_footprint(ax, x1, y1, heading1, color="green", alpha=0.6)
 
-            # Trajectory 2 footprint (orange)
+            # Trajectory 2 footprint
             x2, y2 = traj_2_np[time_step, 0], traj_2_np[time_step, 1]
             cos2, sin2 = traj_2_np[time_step, 2], traj_2_np[time_step, 3]
             heading2 = np.arctan2(sin2, cos2)
-            self._draw_vehicle_footprint(ax, x2, y2, heading2, color="orange", alpha=0.6)
+            self._draw_vehicle_footprint(ax, x2, y2, heading2, color=stochastic_color, alpha=0.6)
 
             # Mark the positions with dots
             ax.scatter([x1], [y1], c="green", s=50, zorder=10, edgecolors="black")
-            ax.scatter([x2], [y2], c="orange", s=50, zorder=10, edgecolors="black")
+            ax.scatter([x2], [y2], c=stochastic_color, s=50, zorder=10, edgecolors="black")
 
             # Update title with time info
             time_sec = time_step * 0.1
             total_time = (len(traj_1_np) - 1) * 0.1
-            ax.set_title(f"Trajectory Comparison - Time: {time_sec:.1f}s / {total_time:.1f}s")
+            title = f"Trajectory Comparison - Time: {time_sec:.1f}s / {total_time:.1f}s"
+            if self.is_pruned:
+                title += f"  ⚠️ PRUNED (pos:{self.initial_displacement:.3f}m, yaw:{self.initial_yaw_diff:.2f}°)"
+            ax.set_title(title)
         else:
-            ax.set_title("Trajectory Comparison")
+            title = "Trajectory Comparison"
+            if self.is_pruned:
+                title += f"  ⚠️ PRUNED (pos:{self.initial_displacement:.3f}m, yaw:{self.initial_yaw_diff:.2f}°)"
+            ax.set_title(title)
 
         ax.legend(loc="upper left")
 
@@ -1371,6 +1585,70 @@ def create_interface(
                         info="When enabled: retry until ADE(stochastic, GT) <= ADE threshold. When disabled: retry until FDE(det., stochastic) >= FDE threshold."
                     )
 
+                # Initial pose pruning controls
+                gr.Markdown("## ✂️ Initial Pose Pruning")
+                with gr.Row():
+                    enable_initial_pruning_checkbox = gr.Checkbox(
+                        value=True,
+                        label="Enable Initial Pose Pruning (visual indicator only when disabled)",
+                        info="Disabled: highlights would-be-pruned trajectories in grey. Enabled: retries until initial pose thresholds are met."
+                    )
+                with gr.Row():
+                    initial_pos_threshold_slider = gr.Slider(
+                        minimum=0.01,
+                        maximum=0.1,
+                        value=0.055,
+                        step=0.005,
+                        label="Initial Position Threshold (m)",
+                        info="Max displacement between first poses of det. and stoch. trajectories"
+                    )
+                    initial_yaw_threshold_slider = gr.Slider(
+                        minimum=0.1,
+                        maximum=1.0,
+                        value=0.55,
+                        step=0.05,
+                        label="Initial Yaw Threshold (°)",
+                        info="Max absolute yaw difference between first poses"
+                    )
+                # Guidance controls
+                gr.Markdown("## 🧭 Guidance")
+                with gr.Row():
+                    enable_guidance_checkbox = gr.Checkbox(
+                        value=False,
+                        label="Enable Guidance",
+                        info="When enabled, uses zeros as starting noise and guidance shapes the stochastic trajectory"
+                    )
+                with gr.Row():
+                    use_collision_checkbox = gr.Checkbox(
+                        value=True,
+                        label="Collision Avoidance",
+                        info="Penalise trajectories that collide with neighbouring agents"
+                    )
+                    use_route_following_checkbox = gr.Checkbox(
+                        value=False,
+                        label="Route Following",
+                        info="Penalise trajectories that stray from the planned route"
+                    )
+                    use_lane_keeping_checkbox = gr.Checkbox(
+                        value=False,
+                        label="Lane Keeping",
+                        info="Penalise trajectories where the vehicle protrudes beyond lane boundaries"
+                    )
+                    use_centerline_following_checkbox = gr.Checkbox(
+                        value=False,
+                        label="Centerline Following",
+                        info="Continuously attract the trajectory toward the nearest lane centerline (quadratic cost)"
+                    )
+                with gr.Row():
+                    guidance_scale_slider = gr.Slider(
+                        minimum=0.0,
+                        maximum=5.0,
+                        value=0.5,
+                        step=0.1,
+                        label="Guidance Scale",
+                        info="Strength of classifier guidance during DPM-Solver sampling"
+                    )
+
                 # Visualizations - Trajectory with zoom slider in one column
                 gr.Markdown("## 🎨 Trajectory Visualization")
                 with gr.Row():
@@ -1422,6 +1700,11 @@ def create_interface(
                             variant="primary",
                             size="lg",
                         )
+                        select_gt_btn = gr.Button(
+                            "🎯 GT is Best",
+                            variant="stop",
+                            size="lg",
+                        )
                         regenerate_btn = gr.Button(
                             "🔄 Regenerate Stochastic",
                             variant="secondary",
@@ -1448,17 +1731,53 @@ def create_interface(
                         nav_buttons[config["delta"]] = gr.Button(config["label"], size="sm")
 
         # Event handlers
+        # Helper: append button interactivity states to any annotator result tuple.
+        # select_orange_btn is disabled when the stochastic trajectory is pruned.
+        # select_gt_btn is disabled when GT is not available for the current sample.
+        def _with_btn(result):
+            # Disable orange button only when pruning is actively ON and trajectory failed.
+            # When pruning is OFF it's a visual indicator only — user can still annotate.
+            orange_blocked = annotator.is_pruned and annotator.enable_initial_pruning
+            return (
+                *result,
+                gr.update(interactive=not orange_blocked),
+                gr.update(interactive=annotator.gt_available),
+            )
+
+        # Common input lists (pruning controls + time_step appended to existing params)
+        _std_inputs = [noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox]
+        _pruning_inputs = [enable_initial_pruning_checkbox, initial_pos_threshold_slider, initial_yaw_threshold_slider]
+        _guidance_inputs = [enable_guidance_checkbox, use_collision_checkbox, use_route_following_checkbox, use_lane_keeping_checkbox, use_centerline_following_checkbox, guidance_scale_slider]
+        _full_inputs = _std_inputs + _pruning_inputs + _guidance_inputs + [time_slider]
+
+        # Common output list (selection buttons appended so interactivity can be controlled)
+        _std_outputs = [trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display]
+        _full_outputs = _std_outputs + [select_orange_btn, select_gt_btn]
+
         # Orange (stochastic) is selected as winner, green (deterministic) as loser
         select_orange_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt: annotator.select_winner("trajectory_2", ns, ft, at, mr, zl, gt),
-            inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts: _with_btn(
+                annotator.select_winner("trajectory_2", ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts)
+            ),
+            inputs=_full_inputs,
+            outputs=_full_outputs,
+        )
+
+        # GT is selected as winner, deterministic (green) as loser
+        select_gt_btn.click(
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts: _with_btn(
+                annotator.select_gt_as_winner(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts)
+            ),
+            inputs=_full_inputs,
+            outputs=_full_outputs,
         )
 
         regenerate_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt: annotator.regenerate(ns, ft, at, mr, zl, gt),
-            inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts: _with_btn(
+                annotator.regenerate(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts)
+            ),
+            inputs=_full_inputs,
+            outputs=_full_outputs,
         )
 
         # Time slider handler - only redraws, does NOT regenerate trajectories
@@ -1477,39 +1796,45 @@ def create_interface(
 
         # Navigation handlers - fix lambda closure issue and update jump size
         def make_jump_fn(delta_val):
-            def jump_and_update(ns, ft, at, mr, zl, gt):
+            def jump_and_update(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts):
                 annotator.update_jump_size(delta_val)
-                return annotator.jump(delta_val, ns, ft, at, mr, zl, gt)
+                return _with_btn(annotator.jump(delta_val, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts))
             return jump_and_update
 
         # Wire up navigation button handlers dynamically
         for delta, button in nav_buttons.items():
             button.click(
                 fn=make_jump_fn(delta),
-                inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-                outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+                inputs=_full_inputs,
+                outputs=_full_outputs,
             )
 
         # Sidebar event handlers
         # Jump-to button - only trigger on button click, not on input change
         jump_to_btn.click(
-            fn=lambda idx, ns, ft, at, mr, zl, gt: annotator.jump_to_index(idx, ns, ft, at, mr, zl, gt),
-            inputs=[jump_to_input, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+            fn=lambda idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts: _with_btn(
+                annotator.jump_to_index(idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts)
+            ),
+            inputs=[jump_to_input] + _full_inputs,
+            outputs=_full_outputs,
         )
 
         # Filter radio
         show_finished_radio.change(
-            fn=lambda filter_mode, ns, ft, at, mr, zl, gt: annotator.toggle_filter(filter_mode, ns, ft, at, mr, zl, gt),
-            inputs=[show_finished_radio, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+            fn=lambda filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts: _with_btn(
+                annotator.toggle_filter(filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts)
+            ),
+            inputs=[show_finished_radio] + _full_inputs,
+            outputs=_full_outputs,
         )
 
         # Next unlabeled button
         next_unlabeled_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt: annotator.jump_to_next_unlabeled(ns, ft, at, mr, zl, gt),
-            inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts: _with_btn(
+                annotator.jump_to_next_unlabeled(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts)
+            ),
+            inputs=_full_inputs,
+            outputs=_full_outputs,
         )
 
         # Auto-skip checkbox
@@ -1527,27 +1852,27 @@ def create_interface(
         )
 
         # Keyboard navigation handler - only trigger on valid arrow keys
-        def handle_keyboard_event(key, ns, ft, at, mr, zl, gt):
+        def handle_keyboard_event(key, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts):
             print(f"Python handler received key: '{key}'")
             # Parse the key (format is "ArrowLeft:123" or "ArrowRight:123")
             actual_key = key.split(':')[0] if ':' in key else key
             print(f"Parsed key: '{actual_key}'")
-            
+
             if actual_key in ["ArrowLeft", "ArrowRight"]:
                 direction = "left" if actual_key == "ArrowLeft" else "right"
                 print(f"Processing {direction} navigation")
-                result = annotator.handle_keyboard_navigation(direction, ns, ft, at, mr, zl, gt)
+                result = _with_btn(annotator.handle_keyboard_navigation(direction, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts))
                 print(f"Navigation complete")
                 return result
             else:
                 print(f"Ignoring key: '{actual_key}'")
                 # Return gr.update() to not change anything
-                return [gr.update()] * 8
-        
+                return [gr.update()] * 10
+
         keyboard_input.change(
             fn=handle_keyboard_event,
-            inputs=[keyboard_input, noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+            inputs=[keyboard_input] + _full_inputs,
+            outputs=_full_outputs,
         )
 
         # Setup keyboard capture on load (load from external JS file)
@@ -1558,12 +1883,14 @@ def create_interface(
             outputs=None,
             js=f"function() {{ {js_content} }}"
         )
-        
+
         # Load first sample on startup (separate from JS)
         demo.load(
-            fn=lambda ns, ft, at, mr, zl, gt: annotator.load_sample(ns, ft, at, mr, zl, gt),
-            inputs=[noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox],
-            outputs=[trajectory_plot, velocity_plot, lateral_plot, fde_text, progress_text, metrics_display, sidebar_status, history_display],
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts: _with_btn(
+                annotator.load_sample(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, urf, ulk, ucf, gs, ts)
+            ),
+            inputs=_full_inputs,
+            outputs=_full_outputs,
         )
 
     return demo, annotator

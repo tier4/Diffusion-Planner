@@ -16,7 +16,9 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <autoware/diffusion_planner/diffusion_planner_core.hpp>
+#include <autoware/diffusion_planner/dimensions.hpp>
 #include <autoware/diffusion_planner/preprocessing/preprocessing_utils.hpp>
+#include <autoware/diffusion_planner/utils/marker_utils.hpp>
 #include <autoware/diffusion_planner/utils/utils.hpp>
 #include <autoware/vehicle_info_utils/vehicle_info.hpp>
 #include <autoware_lanelet2_extension/projection/mgrs_projector.hpp>
@@ -37,6 +39,7 @@
 #include <memory>
 #include <optional>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -139,6 +142,8 @@ constexpr const char * TOPIC_OUT_TRAJECTORY = "/diffusion_planner/output/traject
 constexpr const char * TOPIC_OUT_TRAJECTORIES = "/diffusion_planner/output/trajectories";
 constexpr const char * TOPIC_OUT_PREDICTED_OBJECTS = "/diffusion_planner/output/predicted_objects";
 constexpr const char * TOPIC_OUT_TURN_INDICATORS = "/diffusion_planner/output/turn_indicators";
+constexpr const char * TOPIC_OUT_DEBUG_ROUTE_MARKER = "/diffusion_planner/debug/route_marker";
+constexpr const char * TOPIC_OUT_DEBUG_LANE_MARKER = "/diffusion_planner/debug/lane_marker";
 
 constexpr int64_t SYNC_WINDOW_NS = 200'000'000;  // 200ms
 
@@ -149,8 +154,7 @@ int64_t to_nanoseconds(const builtin_interfaces::msg::Time & stamp)
 
 // --- Message synchronization (same approach as data_converter) ---
 template <typename T, typename StampExtractor>
-std::optional<T> find_nearest(
-  std::deque<T> & msgs, int64_t target_ns, StampExtractor get_stamp)
+std::optional<T> find_nearest(std::deque<T> & msgs, int64_t target_ns, StampExtractor get_stamp)
 {
   int64_t best_idx = -1;
   int64_t best_diff = SYNC_WINDOW_NS + 1;
@@ -202,7 +206,9 @@ int main(int argc, char ** argv)
   if (argc < 4) {
     std::cerr
       << "Usage: diffusion_planner_inference_tool <rosbag_path> <vector_map_path> <output_path>\n"
-      << "  [--vehicle_model_path=<path>] [--step=1] [--limit=-1]\n";
+      << "  [--vehicle_model_path=<path>] [--planner_config_path=<path>]\n"
+      << "  [--step=1] [--limit=-1]\n"
+      << "  [--<yaml_param_name>=<value>]  (override any parameter from the planner config YAML)\n";
     return 1;
   }
 
@@ -213,28 +219,97 @@ int main(int argc, char ** argv)
   std::string vehicle_model_path =
     ament_index_cpp::get_package_share_directory("autoware_vehicle_info_utils") +
     "/config/vehicle_info.param.yaml";
+  std::string planner_config_path =
+    ament_index_cpp::get_package_share_directory("autoware_diffusion_planner") +
+    "/config/diffusion_planner.param.yaml";
   int64_t step = 1;
   int64_t limit = -1;
+
+  // CLI overrides for planner parameters
+  std::unordered_map<std::string, std::string> cli_overrides;
 
   for (int i = 4; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg.find("--vehicle_model_path=") == 0) {
       vehicle_model_path = arg.substr(21);
+    } else if (arg.find("--planner_config_path=") == 0) {
+      planner_config_path = arg.substr(22);
     } else if (arg.find("--step=") == 0) {
       step = std::stoll(arg.substr(7));
     } else if (arg.find("--limit=") == 0) {
       limit = std::stoll(arg.substr(8));
+    } else if (arg.substr(0, 2) == "--") {
+      const auto eq_pos = arg.find('=');
+      if (eq_pos != std::string::npos) {
+        cli_overrides[arg.substr(2, eq_pos - 2)] = arg.substr(eq_pos + 1);
+      }
     }
   }
 
   // --- 1. Load parameters ---
   std::cout << "Loading parameters..." << std::endl;
-  const std::string planner_yaml_path =
-    ament_index_cpp::get_package_share_directory("autoware_diffusion_planner") +
-    "/config/diffusion_planner.param.yaml";
-  auto param_map = load_param_map(planner_yaml_path);
+  std::cout << "  planner_config: " << planner_config_path << std::endl;
+  std::cout << "  vehicle_model:  " << vehicle_model_path << std::endl;
+  auto param_map = load_param_map(planner_config_path);
   for (const auto & [k, v] : load_param_map(vehicle_model_path)) {
     param_map[k] = v;
+  }
+
+  // Apply CLI overrides to param_map (type is inferred from existing YAML parameter)
+  for (const auto & [key, value] : cli_overrides) {
+    const auto it = param_map.find(key);
+    if (it != param_map.end()) {
+      switch (it->second.get_type()) {
+        case rclcpp::ParameterType::PARAMETER_BOOL:
+          param_map[key] = rclcpp::Parameter(key, value == "true" || value == "1");
+          break;
+        case rclcpp::ParameterType::PARAMETER_INTEGER:
+          param_map[key] = rclcpp::Parameter(key, static_cast<int64_t>(std::stoll(value)));
+          break;
+        case rclcpp::ParameterType::PARAMETER_DOUBLE:
+          param_map[key] = rclcpp::Parameter(key, std::stod(value));
+          break;
+        case rclcpp::ParameterType::PARAMETER_STRING:
+          param_map[key] = rclcpp::Parameter(key, value);
+          break;
+        case rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY: {
+          std::vector<double> vals;
+          std::istringstream ss(value);
+          std::string token;
+          while (std::getline(ss, token, ',')) {
+            vals.push_back(std::stod(token));
+          }
+          param_map[key] = rclcpp::Parameter(key, vals);
+          break;
+        }
+        case rclcpp::ParameterType::PARAMETER_INTEGER_ARRAY: {
+          std::vector<int64_t> vals;
+          std::istringstream ss(value);
+          std::string token;
+          while (std::getline(ss, token, ',')) {
+            vals.push_back(std::stoll(token));
+          }
+          param_map[key] = rclcpp::Parameter(key, vals);
+          break;
+        }
+        case rclcpp::ParameterType::PARAMETER_STRING_ARRAY: {
+          std::vector<std::string> vals;
+          std::istringstream ss(value);
+          std::string token;
+          while (std::getline(ss, token, ',')) {
+            vals.push_back(token);
+          }
+          param_map[key] = rclcpp::Parameter(key, vals);
+          break;
+        }
+        default:
+          std::cerr << "  Warning: unsupported type for CLI override: " << key << std::endl;
+          break;
+      }
+      std::cout << "  CLI override: " << key << " = " << value << std::endl;
+    } else {
+      std::cerr << "  Warning: unknown parameter: " << key << std::endl;
+    }
   }
 
   const auto params = read_planner_params(param_map);
@@ -252,7 +327,38 @@ int main(int argc, char ** argv)
 
   std::cout << "  model_path: " << params.model_path << std::endl;
   std::cout << "  args_path: " << params.args_path << std::endl;
+  std::cout << "  plugins_path: " << params.plugins_path << std::endl;
+  std::cout << "  planning_frequency_hz: " << params.planning_frequency_hz << std::endl;
+  std::cout << "  ignore_neighbors: " << std::boolalpha << params.ignore_neighbors << std::endl;
+  std::cout << "  ignore_unknown_neighbors: " << params.ignore_unknown_neighbors << std::endl;
+  std::cout << "  predict_neighbor_trajectory: " << params.predict_neighbor_trajectory << std::endl;
+  std::cout << "  traffic_light_group_msg_timeout_seconds: "
+            << params.traffic_light_group_msg_timeout_seconds << std::endl;
   std::cout << "  batch_size: " << params.batch_size << std::endl;
+  std::cout << "  temperature: [";
+  for (size_t i = 0; i < params.temperature_list.size(); ++i) {
+    if (i > 0) std::cout << ", ";
+    std::cout << params.temperature_list[i];
+  }
+  std::cout << "]" << std::endl;
+  std::cout << "  velocity_smoothing_window: " << params.velocity_smoothing_window << std::endl;
+  std::cout << "  stopping_threshold: " << params.stopping_threshold << std::endl;
+  std::cout << "  turn_indicator_keep_offset: " << params.turn_indicator_keep_offset << std::endl;
+  std::cout << "  turn_indicator_hold_duration: " << params.turn_indicator_hold_duration
+            << std::endl;
+  std::cout << "  shift_x: " << params.shift_x << std::endl;
+  std::cout << "  vehicle_info:" << std::endl;
+  std::cout << "    wheel_radius: " << vehicle_info.wheel_radius_m << std::endl;
+  std::cout << "    wheel_base: " << vehicle_info.wheel_base_m << std::endl;
+  std::cout << "    wheel_tread: " << vehicle_info.wheel_tread_m << std::endl;
+  std::cout << "    front_overhang: " << vehicle_info.front_overhang_m << std::endl;
+  std::cout << "    rear_overhang: " << vehicle_info.rear_overhang_m << std::endl;
+  std::cout << "    left_overhang: " << vehicle_info.left_overhang_m << std::endl;
+  std::cout << "    right_overhang: " << vehicle_info.right_overhang_m << std::endl;
+  std::cout << "    vehicle_height: " << vehicle_info.vehicle_height_m << std::endl;
+  std::cout << "    vehicle_length: " << vehicle_info.vehicle_length_m << std::endl;
+  std::cout << "    vehicle_width: " << vehicle_info.vehicle_width_m << std::endl;
+  std::cout << "    max_steer_angle: " << vehicle_info.max_steer_angle_rad << std::endl;
 
   // --- 2. Load lanelet map ---
   std::cout << "Loading lanelet map: " << vector_map_path << std::endl;
@@ -273,7 +379,8 @@ int main(int argc, char ** argv)
   core.set_map(lanelet_map_ptr);
   std::cout << "Model loaded successfully." << std::endl;
 
-  const auto generator_uuid = autoware_utils_uuid::generate_uuid();
+  unique_identifier_msgs::msg::UUID generator_uuid{};
+  generator_uuid.uuid.fill(0);
 
   // --- 4. Read input rosbag ---
   std::cout << "Reading rosbag: " << rosbag_path << std::endl;
@@ -342,6 +449,8 @@ int main(int argc, char ** argv)
     TOPIC_OUT_PREDICTED_OBJECTS, "autoware_perception_msgs/msg/PredictedObjects");
   writer_parser.create_topic(
     TOPIC_OUT_TURN_INDICATORS, "autoware_vehicle_msgs/msg/TurnIndicatorsCommand");
+  writer_parser.create_topic(TOPIC_OUT_DEBUG_ROUTE_MARKER, "visualization_msgs/msg/MarkerArray");
+  writer_parser.create_topic(TOPIC_OUT_DEBUG_LANE_MARKER, "visualization_msgs/msg/MarkerArray");
 
   // Pass-through all raw input messages
   for (const auto & msg : raw_messages) {
@@ -367,27 +476,41 @@ int main(int argc, char ** argv)
   int64_t skipped_frames = 0;
   int64_t failed_frames = 0;
 
-  for (size_t odom_idx = 0; odom_idx < odometry_msgs.size();
-       odom_idx += static_cast<size_t>(step)) {
+  const int64_t first_odom_ns = to_nanoseconds(odometry_msgs.front().header.stamp);
+  const int64_t last_odom_ns = to_nanoseconds(odometry_msgs.back().header.stamp);
+  const int64_t timer_interval_ns =
+    static_cast<int64_t>(1.0e9 / params.planning_frequency_hz) * step;
+  size_t odom_search_idx = 0;
+
+  const int64_t expected_frames = (last_odom_ns - first_odom_ns) / timer_interval_ns + 1;
+  std::cout << "  timer_interval: " << timer_interval_ns / 1'000'000 << "ms"
+            << ", expected_frames: " << expected_frames << std::endl;
+
+  for (int64_t timer_ns = first_odom_ns; timer_ns <= last_odom_ns; timer_ns += timer_interval_ns) {
     ++total_frames;
 
-    const auto & odom = odometry_msgs[odom_idx];
-    const int64_t target_ns = to_nanoseconds(odom.header.stamp);
+    // Find most recent odometry at or before timer tick
+    for (size_t i = odom_search_idx + 1; i < odometry_msgs.size(); ++i) {
+      if (to_nanoseconds(odometry_msgs[i].header.stamp) > timer_ns) break;
+      odom_search_idx = i;
+    }
+
+    const auto & odom = odometry_msgs[odom_search_idx];
 
     // Update sticky route
     while (!route_msgs.empty()) {
       const int64_t route_ns = to_nanoseconds(route_msgs.front().header.stamp);
-      if (route_ns > target_ns) break;
+      if (route_ns > timer_ns) break;
       current_route = std::make_shared<LaneletRoute>(route_msgs.front());
       route_msgs.pop_front();
     }
 
-    // Synchronize
-    const auto accel = find_nearest(acceleration_msgs, target_ns, accel_stamp);
-    const auto objects = find_nearest(tracked_objects_msgs, target_ns, objects_stamp);
-    const auto turn_ind = find_nearest(turn_indicator_msgs, target_ns, turn_stamp);
+    // Synchronize (use timer_ns as reference for all messages)
+    const auto accel = find_nearest(acceleration_msgs, timer_ns, accel_stamp);
+    const auto objects = find_nearest(tracked_objects_msgs, timer_ns, objects_stamp);
+    const auto turn_ind = find_nearest(turn_indicator_msgs, timer_ns, turn_stamp);
     const auto traffic_signals =
-      collect_within_window(traffic_signal_msgs, target_ns, traffic_stamp);
+      collect_within_window(traffic_signal_msgs, timer_ns, traffic_stamp);
 
     if (!accel || !objects || !turn_ind || !current_route) {
       ++skipped_frames;
@@ -413,6 +536,24 @@ int main(int argc, char ** argv)
     }
 
     auto input_data_map = core.create_input_data(*frame_context);
+    const rclcpp::Time frame_time(frame_context->frame_time);
+
+    // Write debug markers before normalization
+    {
+      const auto lifetime = rclcpp::Duration::from_seconds(0.2);
+      const auto route_markers = utils::create_lane_marker(
+        frame_context->ego_to_map_transform, input_data_map.at("route_lanes"),
+        std::vector<int64_t>(ROUTE_LANES_SHAPE.begin(), ROUTE_LANES_SHAPE.end()), frame_time,
+        lifetime, {0.8f, 0.8f, 0.8f, 0.8f}, "map", true);
+      writer_parser.write_topic(route_markers, frame_time, TOPIC_OUT_DEBUG_ROUTE_MARKER);
+
+      const auto lane_markers = utils::create_lane_marker(
+        frame_context->ego_to_map_transform, input_data_map.at("lanes"),
+        std::vector<int64_t>(LANES_SHAPE.begin(), LANES_SHAPE.end()), frame_time, lifetime,
+        {0.1f, 0.1f, 0.7f, 0.8f}, "map", true);
+      writer_parser.write_topic(lane_markers, frame_time, TOPIC_OUT_DEBUG_LANE_MARKER);
+    }
+
     preprocess::normalize_input_data(input_data_map, core.get_normalization_map());
 
     if (!utils::check_input_map(input_data_map)) {
@@ -429,7 +570,6 @@ int main(int argc, char ** argv)
     }
 
     const auto & [predictions, turn_indicator_logit] = inference_result.outputs.value();
-    const rclcpp::Time frame_time(frame_context->frame_time);
 
     PlannerOutput planner_output;
     try {
@@ -454,7 +594,8 @@ int main(int argc, char ** argv)
     ++processed_frames;
 
     if (processed_frames % 100 == 0) {
-      std::cout << "  Processed " << processed_frames << " frames..." << std::endl;
+      std::cout << "  Processed " << processed_frames << " / " << expected_frames << " frames..."
+                << std::endl;
     }
   }
 

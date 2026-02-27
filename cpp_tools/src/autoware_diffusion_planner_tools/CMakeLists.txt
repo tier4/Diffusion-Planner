@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(autoware_diffusion_planner_data_converter)
+project(autoware_diffusion_planner_tools)
 
 find_package(autoware_cmake REQUIRED)
 autoware_package()
@@ -10,11 +10,11 @@ add_compile_options(-Wno-deprecated-declarations)
 # Suppress narrowing conversion warnings from TensorRT headers
 add_compile_options(-Wno-narrowing)
 
-ament_auto_add_executable(autoware_diffusion_planner_data_converter
+ament_auto_add_executable(data_converter
   src/data_converter.cpp
 )
 
-ament_auto_add_executable(diffusion_planner_inference_tool
+ament_auto_add_executable(inference_tool
   src/inference_tool.cpp
 )
 

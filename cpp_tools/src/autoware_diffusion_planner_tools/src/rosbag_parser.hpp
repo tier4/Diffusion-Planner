@@ -115,11 +115,11 @@ public:
 
   std::vector<rosbag2_storage::TopicMetadata> get_all_topic_data() { return all_topic_data_; }
 
-  void create_writer(const std::string & file_name)
+  void create_writer(const std::string & file_name, const std::string & storage_id = "mcap")
   {
     rosbag2_storage::StorageOptions storage_options{};
     storage_options.uri = file_name;
-    storage_options.storage_id = determine_storage_id(file_name);
+    storage_options.storage_id = storage_id;
 
     try {
       writer_.open(storage_options, converter_options_);
@@ -139,6 +139,13 @@ public:
     meta_data.name = topic_name;
     meta_data.type = type;
     meta_data.serialization_format = "cdr";
+    meta_data.offered_qos_profiles =
+      "- history: 1\n  depth: 1\n  reliability: 1\n  durability: 2\n"
+      "  deadline:\n    sec: 9223372036\n    nsec: 854775807\n"
+      "  lifespan:\n    sec: 9223372036\n    nsec: 854775807\n"
+      "  liveliness: 1\n  liveliness_lease_duration:\n"
+      "    sec: 9223372036\n    nsec: 854775807\n"
+      "  avoid_ros_namespace_conventions: false";
     writer_.create_topic(meta_data);
   }
 

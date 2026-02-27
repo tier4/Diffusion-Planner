@@ -80,10 +80,12 @@ def collision_guidance_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     mask_diffusion_time = mask_diffusion_time.view(B, 1, 1, 1)
     x = torch.where(mask_diffusion_time, x, x.detach())
 
+    cos_sin = x[:, :, :, 2:].detach()
+    cos_sin_norm = torch.norm(cos_sin, dim=-1, keepdim=True).clamp(min=1e-6)
     x = torch.cat(
         [
             x[:, :, :, :2],
-            x[:, :, :, 2:].detach() / torch.norm(x[:, :, :, 2:].detach(), dim=-1, keepdim=True),
+            cos_sin / cos_sin_norm,
         ],
         dim=-1,
     )  # [B, P + 1, T, 4]
