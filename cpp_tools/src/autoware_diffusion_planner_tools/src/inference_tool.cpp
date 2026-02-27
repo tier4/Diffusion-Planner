@@ -379,7 +379,8 @@ int main(int argc, char ** argv)
   core.set_map(lanelet_map_ptr);
   std::cout << "Model loaded successfully." << std::endl;
 
-  const auto generator_uuid = autoware_utils_uuid::generate_uuid();
+  unique_identifier_msgs::msg::UUID generator_uuid{};
+  generator_uuid.uuid.fill(0);
 
   // --- 4. Read input rosbag ---
   std::cout << "Reading rosbag: " << rosbag_path << std::endl;
