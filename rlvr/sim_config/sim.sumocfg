@@ -1,0 +1,20 @@
+<configuration>
+  <input>
+    <net-file value="/sim_config/maps/shinagawa_odaiba.net.xml"/>
+    <route-files value="/sim_config/background_traffic.rou.xml"/>
+  </input>
+  <time>
+    <begin value="0"/>
+    <end value="99999"/>
+    <step-length value="0.1"/>
+  </time>
+  <random_number>
+    <random value="false"/>
+  </random_number>
+  <processing>
+    <default.action-step-length value="0.1"/>
+    <lateral-resolution value="0.25"/>
+    <collision.mingap-factor value="0"/>
+    <collision.action value="warn"/>
+  </processing>
+</configuration>

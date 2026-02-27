@@ -1,0 +1,8 @@
+<routes>
+  <!-- Vehicle type definitions only. NDE generates routes dynamically;
+       this file satisfies SUMO's requirement that at least one route file be present. -->
+  <vType id="car" length="4.5" width="1.8" maxSpeed="30"
+         accel="2.6" decel="4.5" sigma="0.5"/>
+  <vType id="veh_AV" length="4.5" width="1.8" maxSpeed="30"
+         accel="2.6" decel="4.5" sigma="0.0" color="1,0,0"/>
+</routes>

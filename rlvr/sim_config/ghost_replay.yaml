@@ -1,0 +1,59 @@
+# TeraSim simulation configuration for RLVR Phase 1 ghost replay.
+#
+# The ego (AV) is driven step-by-step via /simulation_tick and /agent_command
+# (auto_run=false). NDE background traffic moves naturally under IDM+MOBIL.
+#
+# Key design choices:
+#   - warmup_time_lb/ub = 0: no NDE warmup; AV is added immediately at t=0
+#   - av_debug_control: false → AV goes directly into external control mode
+#     (SUMO SpeedMode=0, LaneChangeMode=0); all movement from moveToXY
+#   - collision.action = warn (in sumocfg): SUMO logs collisions but does not
+#     remove vehicles; TeraSimBridge infers collision from AV disappearing or
+#     via /simulation_result endpoint
+
+seed: 42
+
+input:
+  sumo_net_file: "/sim_config/maps/shinagawa_odaiba.net.xml"
+  sumo_config_file: "/sim_config/sim.sumocfg"
+
+environment:
+  module: "terasim_nde_nade.envs"
+  class: "NADEWithAV"
+  parameters:
+    log_flag: false
+    warmup_time_lb: 0
+    warmup_time_ub: 1
+    run_time: 99999
+    MOBIL_lc_flag: true
+    stochastic_acc_flag: false
+    drive_rule: "lefthand"
+    av_debug_control: false
+    AV_cfg:
+      type: "veh_AV"
+      cache_radius: 150
+      control_radius: 50
+      route:
+        - "ll_190615"
+      warmup_control:
+        enabled: false
+
+simulator:
+  parameters:
+    num_tries: 10
+    gui_flag: false
+    realtime_flag: false
+    sumo_seed: 42
+    traffic_scale: 1.0
+    sumo_output_file_types:
+      - "collision"
+
+output:
+  dir: "/tmp/terasim_output"
+  name: "ghost_replay"
+  nth: "0"
+  aggregated_dir: "aggregated"
+
+logging:
+  levels:
+    - "INFO"
