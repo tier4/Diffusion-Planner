@@ -126,7 +126,6 @@ DiffusionPlannerParams read_planner_params(const ParamMap & params)
     static_cast<float>(get_param<double>(params, "turn_indicator_keep_offset", -1.25));
   p.turn_indicator_hold_duration = get_param<double>(params, "turn_indicator_hold_duration", 0.0);
   p.shift_x = get_param<bool>(params, "shift_x", false);
-  p.delay_step = get_param<int64_t>(params, "delay_step", 0);
   return p;
 }
 
@@ -348,7 +347,6 @@ int main(int argc, char ** argv)
   std::cout << "  turn_indicator_hold_duration: " << params.turn_indicator_hold_duration
             << std::endl;
   std::cout << "  shift_x: " << params.shift_x << std::endl;
-  std::cout << "  delay_step: " << params.delay_step << std::endl;
   std::cout << "  vehicle_info:" << std::endl;
   std::cout << "    wheel_radius: " << vehicle_info.wheel_radius_m << std::endl;
   std::cout << "    wheel_base: " << vehicle_info.wheel_base_m << std::endl;
