@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Map Evaluation Dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; }
+    .dashboard { display: flex; flex-direction: column; height: 100vh; }
+    .toolbar {
+      display: flex; align-items: center; gap: 1rem; padding: 0.5rem 1rem;
+      background: #1a1a2e; color: #eee; border-bottom: 1px solid #333;
+    }
+    .tabs { display: flex; gap: 0.25rem; }
+    .tab {
+      padding: 0.5rem 1rem; cursor: pointer; border-radius: 4px;
+      background: #2d2d44; border: none; color: #ccc;
+    }
+    .tab:hover { background: #3d3d5c; color: #fff; }
+    .tab.active { background: #4361ee; color: #fff; }
+    .layers { display: flex; gap: 1rem; align-items: center; margin-left: 1rem; }
+    .layer-cb { display: flex; align-items: center; gap: 0.25rem; }
+    .main { flex: 1; display: flex; overflow: hidden; }
+    #map { flex: 1; min-height: 0; }
+    .sidebar {
+      width: 200px; padding: 0.75rem; background: #16162a; color: #ddd;
+      border-left: 1px solid #333; overflow-y: auto;
+    }
+    .legend-title { font-weight: 600; margin-bottom: 0.5rem; font-size: 0.9rem; }
+    .legend-wrap { display: flex; align-items: center; gap: 0.5rem; }
+    .legend-scale {
+      height: 120px; width: 24px; background: linear-gradient(to top,
+        #440154 0%, #3b528b 25%, #21918c 50%, #5ec962 75%, #fde725 100%);
+      border: 1px solid #444; border-radius: 4px; flex-shrink: 0;
+    }
+    .legend-labels {
+      font-size: 0.75rem; color: #999;
+      height: 120px; display: flex; flex-direction: column; justify-content: space-between;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+    <div class="toolbar">
+      <div class="tabs">
+        <button class="tab active" data-tab="overlay">Overlay</button>
+        <button class="tab" data-tab="lane-heatmap">Lane heatmap</button>
+        <button class="tab" data-tab="line-heatmap">Line heatmap</button>
+        <button class="tab" data-tab="polygon-heatmap">Polygon heatmap</button>
+      </div>
+      <div class="layers" id="layer-controls">
+        <label class="layer-cb"><input type="checkbox" checked data-layer="lanes"> Lanes</label>
+        <label class="layer-cb"><input type="checkbox" checked data-layer="lines"> Line strings</label>
+        <label class="layer-cb"><input type="checkbox" checked data-layer="polygons"> Polygons</label>
+      </div>
+    </div>
+    <div class="main">
+      <div id="map"></div>
+      <div class="sidebar">
+        <div class="legend-title" id="legend-title">Hausdorff error (m)</div>
+        <p class="legend-hint" id="legend-hint" style="font-size: 0.75rem; color: #888; margin: 0 0 0.5rem 0; display: none;">Reference map (lanes) shown as background for context.</p>
+        <div class="legend-wrap">
+          <div class="legend-scale" id="legend-scale"></div>
+          <div class="legend-labels">
+            <div id="legend-max">{{ "%.2f"|format(vmax_lane) }}</div>
+            <div id="legend-min">0</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const LANES_REF = {{ lanes_ref | tojson }};
+    const LANES_INT = {{ lanes_int | tojson }};
+    const LINES_REF = {{ lines_ref | tojson }};
+    const LINES_INT = {{ lines_int | tojson }};
+    const POLYS_REF = {{ polys_ref | tojson }};
+    const POLYS_INT = {{ polys_int | tojson }};
+    const VMAX_LANE = {{ vmax_lane }};
+    const VMAX_LINE = {{ vmax_line }};
+    const VMAX_POLY = {{ vmax_poly }};
+    const METRICS = {{ metrics_json | tojson }};
+
+    function toLeafletCoords(pts) {
+      return pts.map(p => [p[1], p[0]]);
+    }
+    function rgbFromScalar(t) {
+      t = Math.max(0, Math.min(1, t));
+      const stops = [[0,'#440154'],[0.25,'#3b528b'],[0.5,'#21918c'],[0.75,'#5ec962'],[1,'#fde725']];
+      let i = 0;
+      for (; i < stops.length - 1 && t > stops[i+1][0]; i++) {}
+      const a = stops[i], bStop = stops[Math.min(i+1, stops.length-1)];
+      const local = (t - a[0]) / (bStop[0] - a[0] || 1);
+      const hex = (x) => parseInt(x.slice(1), 16);
+      const ah = hex(a[1]), ar = (ah>>16)&255, ag = (ah>>8)&255, ab = ah&255;
+      const bh = hex(bStop[1]), br = (bh>>16)&255, bg = (bh>>8)&255, bb = bh&255;
+      const r = Math.round(ar + (br - ar) * local), g = Math.round(ag + (bg - ag) * local), bv = Math.round(ab + (bb - ab) * local);
+      return `rgb(${r},${g},${bv})`;
+    }
+    function hausdorffToColor(v, vmax) {
+      const t = vmax > 0 ? v / vmax : 0;
+      return rgbFromScalar(t);
+    }
+    function initMap() {
+      const map = L.map('map', { crs: L.CRS.Simple });
+      const allBounds = [];
+      function addToBounds(pts) {
+        pts.forEach(p => { allBounds.push([p[1], p[0]]); });
+      }
+      [...LANES_REF, ...LANES_INT, ...LINES_REF, ...LINES_INT].forEach(ent => {
+        if (ent.coordinates && ent.coordinates.length) addToBounds(ent.coordinates);
+      });
+      [...POLYS_REF, ...POLYS_INT].forEach(ent => {
+        if (ent.coordinates && ent.coordinates[0]) addToBounds(ent.coordinates[0]);
+      });
+      const bounds = allBounds.length ? L.latLngBounds(allBounds) : L.latLngBounds([[0,0],[100,100]]);
+      map.fitBounds(bounds.pad(0.1));
+      return { map, bounds };
+    }
+    const { map } = initMap();
+
+    const layerGroups = {
+      overlay: {},
+      'lane-heatmap': {},
+      'line-heatmap': {},
+      'polygon-heatmap': {},
+      referenceBasemap: {}
+    };
+
+    function addReferenceBasemap() {
+      const lg = L.layerGroup();
+      LANES_REF.forEach(ent => {
+        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 1.5, opacity: 0.4 });
+        line.addTo(lg);
+      });
+      LINES_REF.forEach(ent => {
+        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 1.2, opacity: 0.3 });
+        line.addTo(lg);
+      });
+      POLYS_REF.forEach(ent => {
+        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: '#2d5016', weight: 1, fillOpacity: 0.15 });
+        poly.addTo(lg);
+      });
+      layerGroups.referenceBasemap = lg;
+    }
+
+    function addOverlayLayers() {
+      const lg = L.layerGroup();
+      LANES_REF.forEach(ent => {
+        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 2, opacity: 0.8 });
+        line.addTo(lg);
+      });
+      LANES_INT.forEach(ent => {
+        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: 'blue', weight: 1.5, opacity: 0.7 });
+        line.addTo(lg);
+      });
+      LINES_REF.forEach(ent => {
+        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 2, opacity: 0.8 });
+        line.addTo(lg);
+      });
+      LINES_INT.forEach(ent => {
+        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: 'red', weight: 1.5, opacity: 0.8 });
+        line.addTo(lg);
+      });
+      POLYS_REF.forEach(ent => {
+        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: '#2d5016', weight: 2, fillOpacity: 0.2 });
+        poly.addTo(lg);
+      });
+      POLYS_INT.forEach(ent => {
+        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: 'green', weight: 1, fillOpacity: 0.4 });
+        poly.addTo(lg);
+      });
+      layerGroups.overlay = lg;
+    }
+
+    function addHeatmapLayers() {
+      const laneLg = L.layerGroup();
+      LANES_INT.forEach(ent => {
+        const c = hausdorffToColor(ent.hausdorff || 0, VMAX_LANE);
+        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: c, weight: 2, opacity: 0.9 });
+        line.bindPopup(`Lane ${ent.id}: ${(ent.hausdorff || 0).toFixed(4)} m`);
+        line.addTo(laneLg);
+      });
+      layerGroups['lane-heatmap'] = laneLg;
+
+      const lineLg = L.layerGroup();
+      LINES_INT.forEach(ent => {
+        const c = hausdorffToColor(ent.hausdorff || 0, VMAX_LINE);
+        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: c, weight: 2, opacity: 0.9 });
+        line.bindPopup(`Line ${ent.index}: ${(ent.hausdorff || 0).toFixed(4)} m`);
+        line.addTo(lineLg);
+      });
+      layerGroups['line-heatmap'] = lineLg;
+
+      const polyLg = L.layerGroup();
+      POLYS_INT.forEach(ent => {
+        const c = hausdorffToColor(ent.hausdorff || 0, VMAX_POLY);
+        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: c, weight: 1, fillColor: c, fillOpacity: 0.5 });
+        poly.bindPopup(`Polygon ${ent.index}: ${(ent.hausdorff || 0).toFixed(4)} m`);
+        poly.addTo(polyLg);
+      });
+      layerGroups['polygon-heatmap'] = polyLg;
+    }
+
+    addReferenceBasemap();
+    addOverlayLayers();
+    addHeatmapLayers();
+
+    let currentLayer = null;
+    let referenceBasemapVisible = false;
+    const vmaxByTab = { overlay: VMAX_LANE, 'lane-heatmap': VMAX_LANE, 'line-heatmap': VMAX_LINE, 'polygon-heatmap': VMAX_POLY };
+    function updateLegendForTab(tab) {
+      const vmax = vmaxByTab[tab] || VMAX_LANE;
+      const maxEl = document.getElementById('legend-max');
+      const minEl = document.getElementById('legend-min');
+      const titleEl = document.getElementById('legend-title');
+      if (maxEl) maxEl.textContent = vmax.toFixed(2);
+      if (minEl) minEl.textContent = '0';
+      if (titleEl) titleEl.textContent = tab === 'overlay' ? 'Hausdorff error (m)' : 'Hausdorff error (m) - ' + (tab === 'lane-heatmap' ? 'Lanes' : tab === 'line-heatmap' ? 'Lines' : 'Polygons');
+      const hintEl = document.getElementById('legend-hint');
+      if (hintEl) hintEl.style.display = ['lane-heatmap', 'line-heatmap', 'polygon-heatmap'].includes(tab) ? 'block' : 'none';
+    }
+
+    function showTab(tab) {
+      if (currentLayer && map.hasLayer(currentLayer)) {
+        map.removeLayer(currentLayer);
+      }
+      if (referenceBasemapVisible && map.hasLayer(layerGroups.referenceBasemap)) {
+        map.removeLayer(layerGroups.referenceBasemap);
+        referenceBasemapVisible = false;
+      }
+      const isHeatmap = ['lane-heatmap', 'line-heatmap', 'polygon-heatmap'].includes(tab);
+      if (isHeatmap) {
+        layerGroups.referenceBasemap.addTo(map);
+        referenceBasemapVisible = true;
+      }
+      const lg = layerGroups[tab];
+      if (lg && typeof lg.addTo === 'function') {
+        lg.addTo(map);
+        currentLayer = lg;
+      }
+      document.querySelectorAll('.tab').forEach(el => {
+        el.classList.toggle('active', el.dataset.tab === tab);
+      });
+      updateLegendForTab(tab);
+    }
+    showTab('overlay');
+
+    document.querySelectorAll('.tab').forEach(btn => {
+      btn.addEventListener('click', () => showTab(btn.dataset.tab));
+    });
+
+    function rebuildOverlayFromCheckboxes() {
+      const lanesCb = document.querySelector('input[data-layer="lanes"]');
+      const linesCb = document.querySelector('input[data-layer="lines"]');
+      const polysCb = document.querySelector('input[data-layer="polygons"]');
+      const showLanes = !lanesCb || lanesCb.checked;
+      const showLines = !linesCb || linesCb.checked;
+      const showPolys = !polysCb || polysCb.checked;
+      if (currentLayer === layerGroups.overlay && map.hasLayer(layerGroups.overlay)) {
+        layerGroups.overlay.clearLayers();
+        if (showLanes) { LANES_REF.forEach(ent => { L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 2, opacity: 0.8 }).addTo(layerGroups.overlay); }); LANES_INT.forEach(ent => { L.polyline(toLeafletCoords(ent.coordinates), { color: 'blue', weight: 1.5, opacity: 0.7 }).addTo(layerGroups.overlay); }); }
+        if (showLines) { LINES_REF.forEach(ent => { L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 2, opacity: 0.8 }).addTo(layerGroups.overlay); }); LINES_INT.forEach(ent => { L.polyline(toLeafletCoords(ent.coordinates), { color: 'red', weight: 1.5, opacity: 0.8 }).addTo(layerGroups.overlay); }); }
+        if (showPolys) { POLYS_REF.forEach(ent => { L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: '#2d5016', weight: 2, fillOpacity: 0.2 }).addTo(layerGroups.overlay); }); POLYS_INT.forEach(ent => { L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: 'green', weight: 1, fillOpacity: 0.4 }).addTo(layerGroups.overlay); }); }
+      }
+    }
+    document.querySelectorAll('.layer-cb input').forEach(cb => {
+      cb.addEventListener('change', rebuildOverlayFromCheckboxes);
+    });
+  </script>
+</body>
+</html>
