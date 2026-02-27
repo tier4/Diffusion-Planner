@@ -31,28 +31,17 @@ For a polyline pair A and B:
 
 ### Lane segments
 
-- count consistency and unmatched IDs
 - centerline and boundary symmetric Chamfer-like and Hausdorff-like metrics
-- length relative error
 - heading difference (deg)
-- speed limit absolute error
-- attribute agreement rate (`left_line_type`, `right_line_type`, `turn_direction`, `traffic_light_id`)
 - pass rate for `centerline_symmetric_hausdorff_like < 0.2 m` (key metric)
-- explicit lane ID mismatch report
 
 ### Polygons (`intersection_area`)
 
-- count consistency
 - symmetric Hausdorff-like distance
 - symmetric Chamfer-like distance
-- absolute and relative area error
-- centroid offset
 
 ### Line strings (`stop_line`)
 
-- count consistency
-- endpoint error (orientation-agnostic)
-- length error
 - symmetric Hausdorff-like distance (main error)
 - symmetric Chamfer-like distance
 - orientation error (deg)
@@ -75,10 +64,7 @@ For a polyline pair A and B:
 ```bash
 python3 src/autoware_diffusion_planner_tools/scripts/map_eval/compare_map.py export-eval \
   --map_path /path/to/lanelet2_map.osm \
-  --out_dir /tmp/map_eval \
-  --output_prefix run1 \
-  --max_match_distance 5.0 \
-  --top_k_debug 20
+  --out_dir /output/map_eval \
 ```
 
 ### Evaluate existing JSON files
@@ -88,8 +74,6 @@ python3 src/autoware_diffusion_planner_tools/scripts/map_eval/compare_map.py eva
   --internal_map /tmp/internal_map.json \
   --reference_map /tmp/reference.json \
   --out_dir /tmp/map_eval \
-  --max_match_distance 5.0 \
-  --top_k_debug 20
 ```
 
 ### Run exporter directly (ROS parameter style)
