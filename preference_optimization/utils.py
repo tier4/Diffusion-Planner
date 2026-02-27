@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from diffusion_planner.train_epoch import heading_to_cos_sin
 
 
@@ -171,6 +172,9 @@ def generate_trajectory_pair(
     enable_initial_pruning: bool = True,
     initial_pos_threshold: float = 0.055,
     initial_yaw_threshold_deg: float = 0.55,
+    # New unified guidance parameter:
+    guidance: GuidanceSetConfig | None = None,
+    # Deprecated: kept for backward compatibility, ignored when guidance is not None.
     enable_guidance: bool = False,
     use_collision: bool = True,
     use_route_following: bool = False,
@@ -207,9 +211,10 @@ def generate_trajectory_pair(
         enable_initial_pruning: If True, skip candidates whose initial pose is misaligned
         initial_pos_threshold: Maximum initial position displacement to accept (meters)
         initial_yaw_threshold_deg: Maximum initial yaw difference to accept (degrees)
-        guidance_scale: If not None, temporarily overrides the decoder's guidance scale
-            for all trajectory generations in this call. Has no effect when the model
-            was loaded without a guidance function.
+        guidance: GuidanceSetConfig describing which guidance functions to apply and
+            their scales. When provided, the deprecated boolean flags below are ignored.
+        guidance_scale: Deprecated. Use guidance=GuidanceSetConfig(global_scale=...).
+            If not None, temporarily overrides the decoder's guidance scale.
 
     Returns:
         Tuple of (trajectory_1, trajectory_2, final_metric, attempts_used, ego_shape,
@@ -238,6 +243,26 @@ def generate_trajectory_pair(
     if guidance_scale is not None:
         policy_model.decoder._guidance_scale = guidance_scale
 
+    # Build GuidanceSetConfig from legacy boolean params if new-style config not provided.
+    if guidance is None and enable_guidance and (
+        use_collision or use_route_following or use_lane_keeping or use_centerline_following
+    ):
+        import warnings
+        warnings.warn(
+            "Boolean guidance flags are deprecated. Use guidance=GuidanceSetConfig(...).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        guidance = GuidanceSetConfig(
+            global_scale=guidance_scale if guidance_scale is not None else 0.5,
+            functions=[
+                GuidanceConfig("collision",            enabled=use_collision),
+                GuidanceConfig("route_following",      enabled=use_route_following),
+                GuidanceConfig("lane_keeping",         enabled=use_lane_keeping),
+                GuidanceConfig("centerline_following", enabled=use_centerline_following),
+            ],
+        )
+
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
@@ -249,15 +274,11 @@ def generate_trajectory_pair(
     _, outputs = policy_model(data)
     traj_1 = outputs["prediction"][0, 0].cpu().numpy()
 
-    # Now configure guidance for the stochastic trajectory generation.
-    if enable_guidance and (use_collision or use_route_following or use_lane_keeping or use_centerline_following):
-        from diffusion_planner.model.guidance.guidance_wrapper import GuidanceWrapper
-        policy_model.decoder._guidance_fn = GuidanceWrapper(
-            use_collision=use_collision,
-            use_route_following=use_route_following,
-            use_lane_keeping=use_lane_keeping,
-            use_centerline_following=use_centerline_following,
-        )
+    # Configure guidance for the stochastic trajectory generation.
+    if guidance is not None and guidance.active_functions():
+        from diffusion_planner.model.guidance.composer import GuidanceComposer
+        policy_model.decoder._guidance_fn = GuidanceComposer(guidance)
+        policy_model.decoder._guidance_scale = guidance.global_scale
     else:
         policy_model.decoder._guidance_fn = None
 
