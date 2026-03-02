@@ -51,22 +51,21 @@ def _load_npz_list(json_path: str) -> list[str]:
 
 
 def _sample_info(npz_path: str) -> str:
-    """Return a short human-readable summary of the NPZ sample."""
+    """Return a plain-text summary of the NPZ sample for the info textbox."""
     try:
         extract_spawn_states, _ = _get_bridge_and_utils()
         json_path = npz_path.replace(".npz", ".json")
         spawn = extract_spawn_states(npz_path, json_path)
         ego = spawn["ego"]
         return (
-            f"**Path:** `{Path(npz_path).name}`\n\n"
-            f"**Ego t=0:** x={ego['x']:.1f}  y={ego['y']:.1f}  "
+            f"x={ego['x']:.2f}  y={ego['y']:.2f}\n"
             f"yaw={math.degrees(ego['yaw_rad']):.1f}°  "
-            f"speed={ego['vx']:.2f} m/s\n\n"
-            f"**Active NPCs:** {len(spawn['npcs'])}\n\n"
-            f"**GT future steps:** {spawn['ego_future_map'].shape[0]}"
+            f"speed={ego['vx']:.2f} m/s\n"
+            f"Active NPCs: {len(spawn['npcs'])}\n"
+            f"GT steps: {spawn['ego_future_map'].shape[0]}"
         )
     except Exception as e:
-        return f"*Could not load sample info: {e}*"
+        return f"Could not load: {e}"
 
 
 def _run_simulation(
@@ -222,7 +221,8 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
         state["index"] = i
         path = npz_paths[i]
         info = _sample_info(path)
-        return i + 1, info, path     # (displayed_index, info_md, hidden_path)
+        # returns: displayed_index, current_path, info_text, hidden_path
+        return i + 1, path, info, path
 
     def _nav(delta: int, current_displayed: int):
         new = _clamp(int(current_displayed) - 1 + delta)
@@ -257,9 +257,19 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
                     btn_prev = gr.Button("◄ Prev", size="sm")
                     btn_next = gr.Button("Next ►", size="sm")
 
-                sample_info_md = gr.Markdown(
-                    value=_sample_info(npz_paths[0]),
+                # Visible textbox so the user can clearly see the current path
+                current_path_box = gr.Textbox(
+                    label="Current NPZ path",
+                    value=npz_paths[0],
+                    interactive=False,
+                    lines=2,
+                )
+
+                sample_info_md = gr.Textbox(
                     label="Sample info",
+                    value=_sample_info(npz_paths[0]),
+                    interactive=False,
+                    lines=6,
                 )
 
             # ── RIGHT: simulation options ────────────────────────────────
@@ -276,8 +286,14 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
                     use_viz = gr.Checkbox(
                         label="Dash web viewer  (--viz)",
                         value=False,
-                        info="Opens Plotly/Dash at http://localhost:8050",
+                        info="When checked, open http://localhost:8050 in a "
+                             "separate browser tab after clicking Launch.",
                     )
+
+                gr.Markdown(
+                    "💡 **Dash simulation view → [http://localhost:8050](http://localhost:8050)**  "
+                    "(only active while a simulation is running with --viz checked)"
+                )
 
                 with gr.Row():
                     use_fcd = gr.Checkbox(
@@ -317,7 +333,8 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
         )
 
         # ── Event wiring ─────────────────────────────────────────────────
-        _outputs = [index_input, sample_info_md, npz_path_state]
+        # Order matches _load_index return: (index, path_box, info, hidden_path)
+        _outputs = [index_input, current_path_box, sample_info_md, npz_path_state]
 
         index_input.submit(fn=_load_index, inputs=[index_input], outputs=_outputs)
         btn_prev.click(fn=lambda i: _nav(-1, i), inputs=[index_input], outputs=_outputs)
