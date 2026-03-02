@@ -9,11 +9,24 @@ asserts that:
   2. The AV's final simulated position is within 2 m of the GT final position
      (verifies MGRS coordinate alignment between the data pipeline and SUMO).
 
-Usage:
-    source .venv/bin/activate
-    python3 rlvr/scripts/validate_ghost_replay.py \\
-        --npz_path <path>.npz \\
-        --json_path <path>.json
+Usage examples:
+
+  # Headless (fastest, no GUI):
+  python3 rlvr/scripts/validate_ghost_replay.py --npz_path <path>.npz
+
+  # Live sumo-gui window on host desktop (requires X11):
+  xhost +local:docker
+  python3 rlvr/scripts/validate_ghost_replay.py --npz_path <path>.npz \\
+      --gui --step_delay 0.1
+
+  # Record FCD for offline replay:
+  python3 rlvr/scripts/validate_ghost_replay.py --npz_path <path>.npz \\
+      --fcd /tmp/terasim_fcd
+
+  # GUI + FCD + Dash all at once:
+  xhost +local:docker
+  python3 rlvr/scripts/validate_ghost_replay.py --npz_path <path>.npz \\
+      --gui --fcd /tmp/terasim_fcd --viz --step_delay 0.1
 """
 
 import argparse
@@ -32,7 +45,8 @@ _SIM_CONFIG_DIR = _REPO_ROOT / "rlvr" / "sim_config"
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ghost replay validator for RLVR Phase 1."
+        description="Ghost replay validator for RLVR Phase 1.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--npz_path", required=True, help="Path to .npz data file")
     parser.add_argument(
@@ -41,16 +55,32 @@ def main() -> None:
         help="Path to companion .json sidecar (defaults to <npz_path>.json)",
     )
     parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Open sumo-gui on the host desktop via X11 forwarding. "
+             "Run `xhost +local:docker` on the host before using this flag.",
+    )
+    parser.add_argument(
+        "--fcd",
+        metavar="DIR",
+        default=None,
+        help="Write SUMO FCD trajectory output to this host directory. "
+             "After the run, replay offline with: "
+             "python3 rlvr/scripts/replay_fcd.py --fcd_dir DIR",
+    )
+    parser.add_argument(
         "--viz",
         action="store_true",
-        help="Enable TeraSim Dash visualizer on http://localhost:8050",
+        help="Enable TeraSim Dash web visualizer on http://localhost:8050",
     )
     parser.add_argument(
         "--step_delay",
         type=float,
         default=0.0,
-        help="Sleep this many seconds between each simulation step (default: 0 = as fast as possible). "
-             "Use 0.1 to replay at real-time speed, or higher to slow down for visualization.",
+        help="Seconds to sleep between steps. "
+             "0 = as fast as possible (default). "
+             "0.1 = real-time speed. "
+             "Use with --gui or --viz so you can watch the replay.",
     )
     args = parser.parse_args()
 
@@ -73,16 +103,29 @@ def main() -> None:
     print(f"  Active NPCs: {len(spawn['npcs'])}")
     print(f"  GT future steps: {spawn['ego_future_map'].shape[0]}")
 
+    if args.gui:
+        print("GUI mode: sumo-gui will open on your desktop.")
+        print("  (If you see no window, run:  xhost +local:docker)")
+    if args.fcd:
+        print(f"FCD output dir: {args.fcd}")
+    if args.viz:
+        print("Dash visualizer: http://localhost:8050")
+
     # -----------------------------------------------------------------------
     # Run ghost replay
     # -----------------------------------------------------------------------
-    if args.viz:
-        print("Visualization enabled → http://localhost:8050")
-
-    with TeraSimBridge(sim_config_host_dir=str(_SIM_CONFIG_DIR)) as sim:
+    with TeraSimBridge(
+        sim_config_host_dir=str(_SIM_CONFIG_DIR),
+        gui=args.gui,
+        fcd_host_dir=args.fcd,
+    ) as sim:
         print("Starting simulation episode…")
         sim.start_episode(spawn, enable_viz=args.viz)
         print("  Episode started.")
+
+        if args.gui:
+            print("  sumo-gui window should now be open on your desktop.")
+            print("  Tip: double-click the AV (red) in sumo-gui to track it.")
         if args.viz:
             print("  >>> Open http://localhost:8050 in your browser now <<<")
             print("  Waiting 3 s for the Dash app to initialise…")
@@ -130,6 +173,16 @@ def main() -> None:
             f"  AV at ({av_x:.2f}, {av_y:.2f}), GT at ({gt_x:.2f}, {gt_y:.2f})\n"
             f"  This indicates a coordinate alignment problem."
         )
+
+        # Report FCD file location
+        fcd_path = sim.fcd_output_path
+        if fcd_path:
+            fcd = Path(fcd_path)
+            if fcd.exists():
+                print(f"\nFCD file written: {fcd_path}  ({fcd.stat().st_size // 1024} KB)")
+                print(f"  Replay with:  python3 rlvr/scripts/replay_fcd.py --fcd_file {fcd_path}")
+            else:
+                print(f"\nFCD file expected at: {fcd_path} (may still be flushed to disk)")
 
     print("\nGhost replay validation PASSED")
 

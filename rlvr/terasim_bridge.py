@@ -17,8 +17,23 @@ Step protocol (non-auto_run mode):
   4. poll simulation_time > prev: confirms the step completed and state
      was written to Redis
   5. GET /simulation/{id}/state: read NPC positions and AV presence
+
+GUI mode (gui=True):
+  - Uses ghost_replay_gui.yaml (gui_flag: true) so TeraSim launches sumo-gui.
+  - The container is started with X11 forwarding flags so the sumo-gui window
+    appears on the host desktop.
+  - Prerequisite (once per session on the host):  xhost +local:docker
+
+FCD recording (fcd_host_dir):
+  - When a host directory is supplied the container's SUMO output directory
+    (/tmp/terasim_output) is bind-mounted there.
+  - After the episode the FCD file is at:
+      <fcd_host_dir>/ghost_replay/raw_data/0/<sim_id>/fcd_all.xml
+  - fcd_all is enabled in both ghost_replay.yaml and ghost_replay_gui.yaml,
+    so the file is always produced when this mount is active.
 """
 
+import os
 import subprocess
 import time
 
@@ -31,7 +46,8 @@ class TeraSimBridge:
     def __init__(
         self,
         sim_config_host_dir: str,
-        config_yaml_container_path: str = "/sim_config/ghost_replay.yaml",
+        gui: bool = False,
+        fcd_host_dir: str | None = None,
         service_url: str = "http://localhost:8000",
         docker_image: str = "terasim:latest",
         container_name: str = "terasim_rlvr",
@@ -39,16 +55,28 @@ class TeraSimBridge:
     ):
         """
         Args:
-            sim_config_host_dir:         Absolute path to rlvr/sim_config/ on the host.
-                                         Volume-mounted at /sim_config inside the container.
-            config_yaml_container_path:  Path to the YAML config inside the container.
-            service_url:                 Base URL of the TeraSim FastAPI service.
-            docker_image:                Docker image tag to run.
-            container_name:              Docker container name (for inspect/start/stop).
-            step_timeout:                Seconds to wait for each simulation step to complete.
+            sim_config_host_dir: Absolute path to rlvr/sim_config/ on the host.
+                                 Volume-mounted at /sim_config inside the container.
+            gui:                 Launch sumo-gui for live visualization via X11.
+                                 Requires `xhost +local:docker` on the host first.
+                                 Uses ghost_replay_gui.yaml (gui_flag: true).
+            fcd_host_dir:        If set, bind-mount this host directory to
+                                 /tmp/terasim_output inside the container so that
+                                 SUMO FCD output is written to the host filesystem.
+                                 After the episode, the FCD file is at:
+                                   <fcd_host_dir>/ghost_replay/raw_data/0/<sim_id>/fcd_all.xml
+            service_url:         Base URL of the TeraSim FastAPI service.
+            docker_image:        Docker image tag to run.
+            container_name:      Docker container name.
+            step_timeout:        Seconds to wait per simulation step.
         """
         self.sim_config_host_dir = sim_config_host_dir
-        self.config_yaml_container_path = config_yaml_container_path
+        self.gui = gui
+        self.fcd_host_dir = fcd_host_dir
+        self.config_yaml_container_path = (
+            "/sim_config/ghost_replay_gui.yaml" if gui
+            else "/sim_config/ghost_replay.yaml"
+        )
         self.service_url = service_url
         self.docker_image = docker_image
         self.container_name = container_name
@@ -78,20 +106,35 @@ class TeraSimBridge:
             capture_output=True,
         )
 
-        subprocess.run(
-            [
-                "docker", "run", "-d",
-                "--name", self.container_name,
-                "-p", "8000:8000",
-                "-p", "6379:6379",
-                "-p", "8050:8050",
-                "-v", f"{self.sim_config_host_dir}:/sim_config:ro",
-                self.docker_image,
-                "sh", "-c",
-                "redis-server --daemonize yes && python3 -m terasim_service",
-            ],
-            check=True,
-        )
+        cmd = [
+            "docker", "run", "-d",
+            "--name", self.container_name,
+            "-p", "8000:8000",
+            "-p", "6379:6379",
+            "-p", "8050:8050",
+            "-v", f"{self.sim_config_host_dir}:/sim_config:ro",
+        ]
+
+        # X11 forwarding for sumo-gui
+        if self.gui:
+            display = os.environ.get("DISPLAY", ":0")
+            cmd += [
+                "-e", f"DISPLAY={display}",
+                "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
+            ]
+
+        # Bind-mount host output directory so FCD/collision files reach the host
+        if self.fcd_host_dir:
+            os.makedirs(self.fcd_host_dir, exist_ok=True)
+            cmd += ["-v", f"{self.fcd_host_dir}:/tmp/terasim_output"]
+
+        cmd += [
+            self.docker_image,
+            "sh", "-c",
+            "redis-server --daemonize yes && python3 -m terasim_service",
+        ]
+
+        subprocess.run(cmd, check=True)
         self._wait_for_service()
 
     def _wait_for_service(self, timeout: float = 60.0) -> None:
@@ -107,6 +150,19 @@ class TeraSimBridge:
             time.sleep(1.0)
         raise RuntimeError(
             f"TeraSim service at {self.service_url} did not become ready within {timeout}s"
+        )
+
+    @property
+    def fcd_output_path(self) -> str | None:
+        """
+        Absolute path to the fcd_all.xml produced by the last episode, or None
+        if fcd_host_dir was not set or no episode has run yet.
+        """
+        if self.fcd_host_dir is None or self._sim_id is None:
+            return None
+        return os.path.join(
+            self.fcd_host_dir,
+            "ghost_replay", "raw_data", "0", self._sim_id, "fcd_all.xml",
         )
 
     def stop_container(self) -> None:
