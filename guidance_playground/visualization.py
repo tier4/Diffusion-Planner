@@ -12,7 +12,7 @@ import matplotlib.cm as cm
 import matplotlib.patches as patches
 import numpy as np
 from matplotlib.figure import Figure
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 # ---------------------------------------------------------------------------
@@ -361,18 +361,24 @@ def _fig_to_pil(fig: Figure) -> Image.Image:
     return img
 
 
-def render_prototype_thumbnail(all_protos: np.ndarray, index: int, count: int) -> Image.Image:
+def render_prototype_thumbnail(
+    all_protos: np.ndarray, index: int, count: int, selected: bool = False
+) -> Image.Image:
     """Render one prototype thumbnail with all others shown in grey for context.
 
     Args:
         all_protos: (K, 80, 2) all prototype trajectories in ego-centric metres.
         index: Index of the prototype to highlight in blue.
         count: Number of training samples assigned to this cluster.
+        selected: When True, draws a prominent orange border to indicate the
+            active anchor selection.
 
     Returns:
         PIL Image for use in gr.Gallery.
     """
     fig = Figure(figsize=(2, 2))
+    if selected:
+        fig.patch.set_facecolor("#FF8C00")
     ax = fig.add_subplot(111)
     for i, proto in enumerate(all_protos):
         if i != index:
@@ -380,18 +386,32 @@ def render_prototype_thumbnail(all_protos: np.ndarray, index: int, count: int) -
     ax.plot(all_protos[index, :, 0], all_protos[index, :, 1],
             color="royalblue", linewidth=2.2, zorder=5)
     ax.scatter([0], [0], c="red", s=20, zorder=6)
-    ax.set_title(f"#{index}  n={count}", fontsize=8)
+    if selected:
+        ax.set_title(f"#{index}  n={count}", fontsize=8, color="#FF8C00", fontweight="bold")
+    else:
+        ax.set_title(f"#{index}  n={count}", fontsize=8)
     ax.set_aspect("equal")
     ax.axis("off")
     fig.tight_layout(pad=0.2)
-    return _fig_to_pil(fig)
+    img = _fig_to_pil(fig)
+    if selected:
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        border = 5
+        for b in range(border):
+            draw.rectangle([b, b, w - 1 - b, h - 1 - b], outline=(255, 140, 0))
+    return img
 
 
-def render_prototype_gallery(prototypes_path: str) -> list[tuple[Image.Image, str]] | None:
+def render_prototype_gallery(
+    prototypes_path: str, selected_index: int = -1
+) -> list[tuple[Image.Image, str]] | None:
     """Load a prototypes .npy file and return a gallery-ready list.
 
     Args:
         prototypes_path: Path to prototypes .npy file of shape (K, 80, 2).
+        selected_index: Index of the currently selected anchor prototype.
+            Pass -1 (default) for no selection highlight.
 
     Returns:
         List of (PIL Image, label) tuples for gr.Gallery, or None if path invalid.
@@ -404,7 +424,8 @@ def render_prototype_gallery(prototypes_path: str) -> list[tuple[Image.Image, st
     counts_path = prototypes_path.replace(".npy", "_counts.npy")
     counts = np.load(counts_path) if os.path.exists(counts_path) else np.ones(K, dtype=int)
     return [
-        (render_prototype_thumbnail(protos, i, int(counts[i])), f"#{i} (n={int(counts[i])})")
+        (render_prototype_thumbnail(protos, i, int(counts[i]), selected=(i == selected_index)),
+         f"#{i} (n={int(counts[i])})")
         for i in range(K)
     ]
 
