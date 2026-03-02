@@ -7,9 +7,9 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 import torch
-from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+from diffusion_planner.model.guidance.config import GuidanceSetConfig
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from guidance_playground.visualization import render_prototype_gallery
+from guidance_playground.guidance_ui import build_guidance_panel, make_guidance_set_config
 from matplotlib.figure import Figure
 
 from preference_optimization.utils import (
@@ -1568,113 +1568,7 @@ def create_interface(
                     )
                 # Guidance controls
                 gr.Markdown("## 🧭 Guidance")
-                with gr.Row():
-                    enable_guidance_checkbox = gr.Checkbox(
-                        value=False,
-                        label="Enable Guidance",
-                        info="When enabled, uses zeros as starting noise and guidance shapes the stochastic trajectory"
-                    )
-                with gr.Row():
-                    guidance_scale_slider = gr.Slider(
-                        minimum=0.0,
-                        maximum=5.0,
-                        value=0.5,
-                        step=0.1,
-                        label="Global Guidance Scale",
-                        info="Multiplies the total gradient correction from all active guidance functions"
-                    )
-                with gr.Row():
-                    with gr.Column():
-                        use_collision_checkbox = gr.Checkbox(
-                            value=True,
-                            label="Collision Avoidance",
-                            info="Penalise trajectories that collide with neighbouring agents"
-                        )
-                        collision_scale_slider = gr.Slider(
-                            minimum=0.1,
-                            maximum=5.0,
-                            value=1.0,
-                            step=0.1,
-                            label="Collision Scale",
-                        )
-                    with gr.Column():
-                        use_route_following_checkbox = gr.Checkbox(
-                            value=False,
-                            label="Route Following",
-                            info="Penalise trajectories that stray from the planned route"
-                        )
-                        route_following_scale_slider = gr.Slider(
-                            minimum=0.1,
-                            maximum=5.0,
-                            value=1.0,
-                            step=0.1,
-                            label="Route Following Scale",
-                        )
-                    with gr.Column():
-                        use_lane_keeping_checkbox = gr.Checkbox(
-                            value=False,
-                            label="Lane Keeping",
-                            info="Penalise trajectories where the vehicle protrudes beyond lane boundaries"
-                        )
-                        lane_keeping_scale_slider = gr.Slider(
-                            minimum=0.1,
-                            maximum=5.0,
-                            value=1.0,
-                            step=0.1,
-                            label="Lane Keeping Scale",
-                        )
-                    with gr.Column():
-                        use_centerline_following_checkbox = gr.Checkbox(
-                            value=False,
-                            label="Centerline Following",
-                            info="Continuously attract the trajectory toward the nearest lane centerline (quadratic cost)"
-                        )
-                        centerline_following_scale_slider = gr.Slider(
-                            minimum=0.1,
-                            maximum=5.0,
-                            value=1.0,
-                            step=0.1,
-                            label="Centerline Scale",
-                        )
-                    with gr.Column():
-                        use_anchor_following_checkbox = gr.Checkbox(
-                            value=False,
-                            label="Anchor Following",
-                            info="Guide trajectory toward a prototype motion mode"
-                        )
-                        anchor_following_scale_slider = gr.Slider(
-                            minimum=0.1,
-                            maximum=5.0,
-                            value=1.0,
-                            step=0.1,
-                            label="Anchor Scale",
-                        )
-                        anchor_index_slider = gr.Slider(
-                            minimum=0,
-                            maximum=63,
-                            value=0,
-                            step=1,
-                            label="Anchor Index (click gallery below to set)",
-                            interactive=False,
-                        )
-                        anchor_prototypes_path = gr.Textbox(
-                            value="guidance_playground/prototypes_k16.npy",
-                            label="Prototypes Path",
-                            info="Path to prototypes .npy file (K, 80, 2)"
-                        )
-
-                with gr.Accordion("Prototype Gallery — click to select anchor", open=False):
-                    _default_gallery = render_prototype_gallery("guidance_playground/prototypes_k16.npy")
-                    anchor_gallery = gr.Gallery(
-                        value=_default_gallery or [],
-                        columns=8,
-                        rows=2,
-                        height=260,
-                        allow_preview=False,
-                        selected_index=0,
-                        label="Motion Mode Prototypes",
-                    )
-                    reload_gallery_btn = gr.Button("↺ Reload Gallery from Path", size="sm")
+                panel = build_guidance_panel()
 
                 # Visualizations - Trajectory with zoom slider in one column
                 gr.Markdown("## 🎨 Trajectory Visualization")
@@ -1771,37 +1665,10 @@ def create_interface(
                 gr.update(interactive=annotator.gt_available),
             )
 
-        def _make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs) -> GuidanceSetConfig | None:
-            """Build GuidanceSetConfig from individual checkbox/slider values."""
-            if not eg:
-                return None
-            import os
-            fns = [
-                GuidanceConfig("collision",            enabled=bool(uc),  scale=float(ucs)),
-                GuidanceConfig("route_following",      enabled=bool(urf), scale=float(urfs)),
-                GuidanceConfig("lane_keeping",         enabled=bool(ulk), scale=float(ulks)),
-                GuidanceConfig("centerline_following", enabled=bool(ucf), scale=float(ucfs)),
-            ]
-            if ua and ap and os.path.exists(str(ap)):
-                fns.append(GuidanceConfig(
-                    "anchor_following", enabled=True, scale=float(uas),
-                    params={"prototypes_path": str(ap), "anchor_index": int(ai)},
-                ))
-            return GuidanceSetConfig(global_scale=float(gs), functions=fns)
-
         # Common input lists (pruning controls + time_step appended to existing params)
         _std_inputs = [noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox]
         _pruning_inputs = [enable_initial_pruning_checkbox, initial_pos_threshold_slider, initial_yaw_threshold_slider]
-        _guidance_inputs = [
-            enable_guidance_checkbox,
-            use_collision_checkbox, collision_scale_slider,
-            use_route_following_checkbox, route_following_scale_slider,
-            use_lane_keeping_checkbox, lane_keeping_scale_slider,
-            use_centerline_following_checkbox, centerline_following_scale_slider,
-            use_anchor_following_checkbox, anchor_following_scale_slider,
-            anchor_index_slider, anchor_prototypes_path,
-            guidance_scale_slider,
-        ]
+        _guidance_inputs = panel.inputs
         _full_inputs = _std_inputs + _pruning_inputs + _guidance_inputs + [time_slider]
 
         # Common output list (selection buttons appended so interactivity can be controlled)
@@ -1812,7 +1679,7 @@ def create_interface(
         select_orange_btn.click(
             fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.select_winner("trajectory_2", ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
+                                        guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1822,7 +1689,7 @@ def create_interface(
         select_gt_btn.click(
             fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.select_gt_as_winner(ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                              guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
+                                              guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1831,7 +1698,7 @@ def create_interface(
         regenerate_btn.click(
             fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.regenerate(ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                     guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
+                                     guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1856,7 +1723,7 @@ def create_interface(
             def jump_and_update(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts):
                 annotator.update_jump_size(delta_val)
                 return _with_btn(annotator.jump(delta_val, ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                                guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts))
+                                                guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts))
             return jump_and_update
 
         # Wire up navigation button handlers dynamically
@@ -1872,7 +1739,7 @@ def create_interface(
         jump_to_btn.click(
             fn=lambda idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.jump_to_index(idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
+                                        guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=[jump_to_input] + _full_inputs,
             outputs=_full_outputs,
@@ -1882,7 +1749,7 @@ def create_interface(
         show_finished_radio.change(
             fn=lambda filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.toggle_filter(filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
+                                        guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=[show_finished_radio] + _full_inputs,
             outputs=_full_outputs,
@@ -1892,7 +1759,7 @@ def create_interface(
         next_unlabeled_btn.click(
             fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.jump_to_next_unlabeled(ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                                  guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
+                                                  guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1903,19 +1770,6 @@ def create_interface(
             fn=lambda checked: setattr(annotator, 'auto_skip_labeled', checked),
             inputs=[auto_skip_checkbox],
             outputs=[],
-        )
-
-        # Anchor gallery: click sets the index slider (read-only display)
-        anchor_gallery.select(
-            fn=lambda evt: gr.update(value=evt.index, maximum=max(63, evt.index)),
-            outputs=[anchor_index_slider],
-        )
-
-        # Reload gallery when path textbox changes and user clicks Reload
-        reload_gallery_btn.click(
-            fn=lambda path: gr.update(value=render_prototype_gallery(path) or []),
-            inputs=[anchor_prototypes_path],
-            outputs=[anchor_gallery],
         )
 
         # Launch Training button
@@ -1937,7 +1791,7 @@ def create_interface(
                 print(f"Processing {direction} navigation")
                 result = _with_btn(annotator.handle_keyboard_navigation(
                     direction, ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                    guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts))
+                    guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts))
                 print(f"Navigation complete")
                 return result
             else:
@@ -1964,7 +1818,7 @@ def create_interface(
         demo.load(
             fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.load_sample(ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                      guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
+                                      guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,

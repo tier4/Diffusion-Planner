@@ -28,7 +28,7 @@ from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
 
 from guidance_playground.generate_samples import generate_samples
-from guidance_playground.visualization import render_prototype_gallery
+from guidance_playground.guidance_ui import build_guidance_panel, make_guidance_set_config
 
 
 _CMAP = cm.get_cmap("tab10")
@@ -49,7 +49,6 @@ class PlaygroundAnnotator(PreferenceAnnotator):
         self.prototypes = prototypes                 # (K, 80, 2) or None
         self.prototypes_path = prototypes_path       # str path for GuidanceConfig.params
         self.prototype_counts = prototype_counts     # (K,) or None
-        self.selected_anchor: int = 0
 
     # ------------------------------------------------------------------
     # Override: generate N samples instead of a deterministic/stochastic pair
@@ -184,29 +183,9 @@ def build_playground_interface(annotator: PlaygroundAnnotator):
                 time_slider   = gr.Slider(0, 79, value=40, step=1, label="Time Step")
 
                 gr.Markdown("### Guidance")
-                guidance_scale_slider = gr.Slider(0.0, 5.0, value=0.5, step=0.1,
-                                                   label="Global Guidance Scale")
-                with gr.Row():
-                    with gr.Column():
-                        use_collision_cb = gr.Checkbox(value=True,  label="Collision")
-                        collision_scale  = gr.Slider(0.1, 5.0, value=1.0, step=0.1, label="Scale")
-                    with gr.Column():
-                        use_route_cb  = gr.Checkbox(value=False, label="Route Following")
-                        route_scale   = gr.Slider(0.1, 5.0, value=1.0, step=0.1, label="Scale")
-                    with gr.Column():
-                        use_lane_cb   = gr.Checkbox(value=False, label="Lane Keeping")
-                        lane_scale    = gr.Slider(0.1, 5.0, value=1.0, step=0.1, label="Scale")
-                    with gr.Column():
-                        use_cl_cb     = gr.Checkbox(value=False, label="Centerline")
-                        cl_scale      = gr.Slider(0.1, 5.0, value=1.0, step=0.1, label="Scale")
-
-                with gr.Row():
-                    with gr.Column():
-                        use_anchor_cb  = gr.Checkbox(value=False, label="Anchor Following",
-                                                      interactive=(annotator.prototypes is not None))
-                        anchor_scale   = gr.Slider(0.1, 5.0, value=1.0, step=0.1, label="Scale")
-
-                enable_guidance_cb = gr.Checkbox(value=False, label="Enable Guidance")
+                panel = build_guidance_panel(
+                    annotator.prototypes_path or "guidance_playground/prototypes_k16.npy"
+                )
 
             with gr.Column(scale=2):
                 traj_plot = gr.Plot(label="Trajectories")
@@ -216,54 +195,18 @@ def build_playground_interface(annotator: PlaygroundAnnotator):
                         lat_plot = gr.Plot(label="Lateral Curvature")
                 sample_info = gr.Markdown("Sample — / —")
 
-                # Prototype gallery — rendered once at startup, collapsible
-                if annotator.prototypes is not None:
-                    thumbnails = render_prototype_gallery(annotator.prototypes_path)
-                    with gr.Accordion("Prototype Gallery — click to select anchor", open=True):
-                        proto_gallery = gr.Gallery(
-                            value=thumbnails,
-                            columns=8, rows=2, height=260,
-                            allow_preview=False,
-                            selected_index=0,
-                            label="Motion Mode Prototypes",
-                        )
-
         # ---- helpers ----
-        from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
-
-        def _make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, gs):
-            if not eg:
-                return None
-            fns = [
-                GuidanceConfig("collision",            enabled=bool(uc),  scale=float(ucs)),
-                GuidanceConfig("route_following",      enabled=bool(urf), scale=float(urfs)),
-                GuidanceConfig("lane_keeping",         enabled=bool(ulk), scale=float(ulks)),
-                GuidanceConfig("centerline_following", enabled=bool(ucf), scale=float(ucfs)),
-            ]
-            if ua and annotator.prototypes_path is not None:
-                fns.append(GuidanceConfig(
-                    "anchor_following", enabled=True, scale=float(uas),
-                    params={"prototypes_path": annotator.prototypes_path,
-                            "anchor_index": annotator.selected_anchor},
-                ))
-            return GuidanceSetConfig(global_scale=float(gs), functions=fns)
-
-        _gen_inputs = [
-            noise_scale, n_samples_sl, zoom_slider, time_slider,
-            enable_guidance_cb,
-            use_collision_cb, collision_scale,
-            use_route_cb,     route_scale,
-            use_lane_cb,      lane_scale,
-            use_cl_cb,        cl_scale,
-            use_anchor_cb,    anchor_scale,
-            guidance_scale_slider,
-        ]
+        # panel.inputs order: [enable_cb, collision_cb, collision_scale, route_cb, route_scale,
+        #                       lane_cb, lane_scale, centerline_cb, centerline_scale,
+        #                       anchor_cb, anchor_scale, anchor_index, anchor_path, global_scale]
+        _gen_inputs = [noise_scale, n_samples_sl, zoom_slider, time_slider] + panel.inputs
         _outputs = [traj_plot, vel_plot, lat_plot, sample_info]
 
-        def _run(ns, n, zl, ts, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, gs):
+        def _run(ns, n, zl, ts, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs):
             result = annotator.load_sample(
                 noise_scale=ns, fde_threshold=2.0, ade_threshold=1.0, max_retries=1,
-                zoom_level=zl, guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, gs),
+                zoom_level=zl,
+                guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs),
                 time_step=int(ts), n_samples=int(n),
             )
             return result[0], result[1], result[2], result[3]
@@ -292,22 +235,28 @@ def build_playground_interface(annotator: PlaygroundAnnotator):
         jump_input.submit(_jump,     inputs=[jump_input] + _gen_inputs, outputs=_outputs)
 
         for slider in [noise_scale, n_samples_sl, zoom_slider,
-                       guidance_scale_slider,
-                       collision_scale, route_scale, lane_scale, cl_scale, anchor_scale]:
+                       panel.global_scale,
+                       panel.collision_scale, panel.route_scale,
+                       panel.lane_scale, panel.centerline_scale, panel.anchor_scale]:
             slider.release(_run, inputs=_gen_inputs, outputs=_outputs)
 
         time_slider.release(_run, inputs=_gen_inputs, outputs=_outputs)
 
-        for cb in [enable_guidance_cb, use_collision_cb, use_route_cb, use_lane_cb, use_cl_cb,
-                   use_anchor_cb]:
+        for cb in [panel.enable_cb, panel.collision_cb, panel.route_cb, panel.lane_cb,
+                   panel.centerline_cb, panel.anchor_cb]:
             cb.change(_run, inputs=_gen_inputs, outputs=_outputs)
 
-        # Gallery click: update selected anchor index then regenerate
-        if annotator.prototypes is not None:
-            def _select_anchor(evt: gr.SelectData, *gen_args):
-                annotator.selected_anchor = evt.index
-                return _run(*gen_args)
-            proto_gallery.select(_select_anchor, inputs=_gen_inputs, outputs=_outputs)
+        # Gallery click: inject evt.index directly to bypass potentially stale component value,
+        # then regenerate immediately with the new anchor.
+        # anchor_index is at position 15 in _gen_inputs (4 app-level + 11 in panel.inputs).
+        _ANCHOR_IDX_POS = 4 + 11  # = 15
+
+        def _select_anchor(evt: gr.SelectData, *gen_args):
+            gen_list = list(gen_args)
+            gen_list[_ANCHOR_IDX_POS] = evt.index
+            return _run(*gen_list)
+
+        panel.gallery.select(_select_anchor, inputs=_gen_inputs, outputs=_outputs)
 
         demo.load(_run, inputs=_gen_inputs, outputs=_outputs)
 
