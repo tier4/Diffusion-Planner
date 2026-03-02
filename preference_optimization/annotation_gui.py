@@ -1732,6 +1732,21 @@ def create_interface(
 
         panel.anchor_path.change(_regen_if_guidance_active, inputs=_full_inputs, outputs=_full_outputs)
 
+        # Gallery click: inject evt.index directly (programmatic gr.update on anchor_index
+        # does not fire .release), then regen if guidance is active.
+        # anchor_index sits at _full_inputs[len(_std_inputs) + len(_pruning_inputs) + 11].
+        _ANCHOR_IDX_POS = len(_std_inputs) + len(_pruning_inputs) + 11  # = 20
+        _EG_POS = len(_std_inputs) + len(_pruning_inputs)               # = 9
+
+        def _on_anchor_gallery_select(evt: gr.SelectData, *full_args):
+            if not full_args[_EG_POS]:
+                return [gr.update()] * len(_full_outputs)
+            full_list = list(full_args)
+            full_list[_ANCHOR_IDX_POS] = evt.index
+            return _regen_full(*full_list)
+
+        panel.gallery.select(_on_anchor_gallery_select, inputs=_full_inputs, outputs=_full_outputs)
+
         # Time slider handler - only redraws, does NOT regenerate trajectories
         time_slider.change(
             fn=lambda t, z: annotator.update_time_display(int(t), int(z)),
