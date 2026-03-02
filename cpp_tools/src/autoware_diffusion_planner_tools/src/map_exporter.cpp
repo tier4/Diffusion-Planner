@@ -76,12 +76,12 @@ json to_json_lanelet_map(const LaneletMap & map)
 
   root["polygons"] = json::array();
   for (const auto & poly : map.polygons) {
-    root["polygons"].push_back(json{{"points", to_json_polyline(poly)}});
+    root["polygons"].push_back(json{{"points", to_json_polyline(poly.points)}});
   }
 
   root["line_strings"] = json::array();
   for (const auto & line : map.line_strings) {
-    root["line_strings"].push_back(json{{"points", to_json_polyline(line)}});
+    root["line_strings"].push_back(json{{"points", to_json_polyline(line.points)}});
   }
   return root;
 }
