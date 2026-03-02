@@ -1,15 +1,15 @@
-# TeraSim simulation configuration for RLVR Phase 1 ghost replay.
+# TeraSim ghost replay config with sumo-gui enabled.
 #
-# The ego (AV) is driven step-by-step via /simulation_tick and /agent_command
-# (auto_run=false). NDE background traffic moves naturally under IDM+MOBIL.
+# Requires X11 forwarding in the Docker container:
+#   xhost +local:docker   (run once on the host)
+#   docker run -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix ...
 #
-# Key design choices:
-#   - warmup_time_lb/ub = 0: no NDE warmup; AV is added immediately at t=0
-#   - av_debug_control: false → AV goes directly into external control mode
-#     (SUMO SpeedMode=0, LaneChangeMode=0); all movement from moveToXY
-#   - collision.action = warn (in sumocfg): SUMO logs collisions but does not
-#     remove vehicles; TeraSimBridge infers collision from AV disappearing or
-#     via /simulation_result endpoint
+# gui_flag: true  → simulator uses the sumo-gui binary; a native window
+# opens on the host desktop.  Simulation advances only when the bridge fires
+# a tick, so the visual update rate matches --step_delay in the validate script.
+#
+# fcd_all is always enabled so the FCD file is available for offline replay
+# regardless of whether --gui was used.
 
 seed: 42
 
@@ -41,7 +41,7 @@ environment:
 simulator:
   parameters:
     num_tries: 10
-    gui_flag: false
+    gui_flag: true
     realtime_flag: false
     sumo_seed: 42
     traffic_scale: 1.0
