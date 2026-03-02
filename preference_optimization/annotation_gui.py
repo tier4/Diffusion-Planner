@@ -1704,6 +1704,34 @@ def create_interface(
             outputs=_full_outputs,
         )
 
+        # Auto-regenerate the stochastic trajectory when guidance controls change.
+        # Toggling the master switch always regens (to apply or remove guidance immediately).
+        # All other guidance controls only regen when guidance is already enabled.
+        def _regen_full(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts):
+            return _with_btn(annotator.regenerate(
+                ns, ft, at, mr, zl, gt, eip, ipt, iyt,
+                guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs),
+                time_step=ts,
+            ))
+
+        def _regen_if_guidance_active(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts):
+            if not eg:
+                return [gr.update()] * len(_full_outputs)
+            return _regen_full(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts)
+
+        panel.enable_cb.change(_regen_full, inputs=_full_inputs, outputs=_full_outputs)
+
+        for _cb in [panel.collision_cb, panel.route_cb, panel.lane_cb,
+                    panel.centerline_cb, panel.anchor_cb]:
+            _cb.change(_regen_if_guidance_active, inputs=_full_inputs, outputs=_full_outputs)
+
+        for _sl in [panel.global_scale, panel.collision_scale, panel.route_scale,
+                    panel.lane_scale, panel.centerline_scale, panel.anchor_scale,
+                    panel.anchor_index]:
+            _sl.release(_regen_if_guidance_active, inputs=_full_inputs, outputs=_full_outputs)
+
+        panel.anchor_path.change(_regen_if_guidance_active, inputs=_full_inputs, outputs=_full_outputs)
+
         # Time slider handler - only redraws, does NOT regenerate trajectories
         time_slider.change(
             fn=lambda t, z: annotator.update_time_display(int(t), int(z)),
