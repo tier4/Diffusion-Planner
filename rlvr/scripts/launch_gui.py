@@ -276,23 +276,29 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
             with gr.Column(scale=2):
                 gr.Markdown("### Simulation Options")
 
+                gr.Markdown(
+                    "**Visualization options** — these are independent, you can enable both:"
+                )
                 with gr.Row():
                     use_gui = gr.Checkbox(
-                        label="sumo-gui  (--gui)",
+                        label="🖥️  sumo-gui — native desktop window (X11)",
                         value=False,
-                        info="Opens sumo-gui on your desktop via X11. "
-                             "Run `xhost +local:docker` first.",
+                        info="Opens sumo-gui as a window on your host desktop. "
+                             "Requires running `xhost +local:docker` once first. "
+                             "Does NOT use a browser port.",
                     )
                     use_viz = gr.Checkbox(
-                        label="Dash web viewer  (--viz)",
+                        label="🌐  Dash viewer — browser at :8050",
                         value=False,
-                        info="When checked, open http://localhost:8050 in a "
-                             "separate browser tab after clicking Launch.",
+                        info="Starts the Plotly/Dash map. "
+                             "Open http://localhost:8050 in a NEW browser tab "
+                             "after clicking Launch.",
                     )
 
                 gr.Markdown(
-                    "💡 **Dash simulation view → [http://localhost:8050](http://localhost:8050)**  "
-                    "(only active while a simulation is running with --viz checked)"
+                    "💡 **Dash map opens here →** "
+                    "[http://localhost:8050](http://localhost:8050)  "
+                    "*(second tab, only when Dash viewer is checked)*"
                 )
 
                 with gr.Row():
