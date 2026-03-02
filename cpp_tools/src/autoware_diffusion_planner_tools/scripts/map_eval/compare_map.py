@@ -5,6 +5,7 @@ import csv
 import json
 from pathlib import Path
 import subprocess
+import webbrowser
 from typing import Dict
 from typing import List
 from typing import Tuple
@@ -170,16 +171,23 @@ def match_geometry_only(
     matches = []
     first_points_int = np.array([item["points"][0][:2] for item in int_items])
     first_points_ref = np.array([ref["points"][0][:2] for ref in ref_items])
+    last_points_int = np.array([item["points"][-1][:2] for item in int_items])
+    last_points_ref = np.array([ref["points"][-1][:2] for ref in ref_items])
     start_distances_matrix = np.linalg.norm(
         first_points_int[:, None] - first_points_ref[None, :], axis=2
     )
-    start_distances_mask_matrix = start_distances_matrix < 1.0
-
+    start_distances_mask_matrix = start_distances_matrix < 0.3
+    end_distances_matrix = np.linalg.norm(
+        last_points_int[:, None] - last_points_ref[None, :], axis=2
+    )
+    end_distances_mask_matrix = end_distances_matrix < 0.3
+    valid_mask_matrix = np.logical_and(
+        start_distances_mask_matrix, end_distances_mask_matrix)
     for i, item in enumerate(int_items):
         p_i = points3_to_np(item["points"])
         best_j = -1
         best_score = float("inf")
-        ref_indices = np.where(start_distances_mask_matrix[i])[0]
+        ref_indices = np.where(valid_mask_matrix[i])[0]
         for j in ref_indices:
             p_ref = points3_to_np(ref_items[j]["points"])
             score = symmetric_distance_stats(p_i, p_ref)["symmetric_chamfer_like"]
@@ -563,6 +571,11 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--top_k_debug", type=int, default=20)
     parser.add_argument("--skip_html", action="store_true")
     parser.add_argument("--output_prefix", type=str, default="")
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Open the interactive HTML overlay in the default browser after completion.",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -623,6 +636,7 @@ def evaluate_core(
     top_k_debug: int,
     skip_html: bool,
     output_prefix: str,
+    open_web: bool = False,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     print("[2/3] Computing metrics...")
@@ -759,6 +773,8 @@ def evaluate_core(
     make_static_plots(internal, reference, lane_rows, line_rows, poly_rows, overlay_png_path)
     if not skip_html:
         render_html_dashboard(internal, reference, lane_rows, line_rows, poly_rows, html_path)
+        if open_web:
+            webbrowser.open(f"file://{html_path.resolve()}")
 
     print("Done.")
     print(f"- metrics: {metrics_json_path}")
@@ -778,6 +794,7 @@ def main() -> None:
             top_k_debug=args.top_k_debug,
             skip_html=args.skip_html,
             output_prefix=args.output_prefix,
+            open_web=args.web,
         )
         return
 
@@ -803,6 +820,7 @@ def main() -> None:
         top_k_debug=args.top_k_debug,
         skip_html=args.skip_html,
         output_prefix=args.output_prefix,
+        open_web=args.web,
     )
 
 
