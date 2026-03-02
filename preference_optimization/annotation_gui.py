@@ -1635,6 +1635,32 @@ def create_interface(
                             step=0.1,
                             label="Centerline Scale",
                         )
+                    with gr.Column():
+                        use_anchor_following_checkbox = gr.Checkbox(
+                            value=False,
+                            label="Anchor Following",
+                            info="Guide trajectory toward a prototype motion mode from the prototype gallery"
+                        )
+                        anchor_following_scale_slider = gr.Slider(
+                            minimum=0.1,
+                            maximum=5.0,
+                            value=1.0,
+                            step=0.1,
+                            label="Anchor Scale",
+                        )
+                        anchor_index_slider = gr.Slider(
+                            minimum=0,
+                            maximum=63,
+                            value=0,
+                            step=1,
+                            label="Anchor Index",
+                            info="Prototype index (see guidance_playground for visual selection)"
+                        )
+                        anchor_prototypes_path = gr.Textbox(
+                            value="guidance_playground/prototypes_k16.npy",
+                            label="Prototypes Path",
+                            info="Path to prototypes .npy file (K, 80, 2)"
+                        )
 
                 # Visualizations - Trajectory with zoom slider in one column
                 gr.Markdown("## 🎨 Trajectory Visualization")
@@ -1731,19 +1757,23 @@ def create_interface(
                 gr.update(interactive=annotator.gt_available),
             )
 
-        def _make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs) -> GuidanceSetConfig | None:
+        def _make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs) -> GuidanceSetConfig | None:
             """Build GuidanceSetConfig from individual checkbox/slider values."""
             if not eg:
                 return None
-            return GuidanceSetConfig(
-                global_scale=float(gs),
-                functions=[
-                    GuidanceConfig("collision",            enabled=bool(uc),  scale=float(ucs)),
-                    GuidanceConfig("route_following",      enabled=bool(urf), scale=float(urfs)),
-                    GuidanceConfig("lane_keeping",         enabled=bool(ulk), scale=float(ulks)),
-                    GuidanceConfig("centerline_following", enabled=bool(ucf), scale=float(ucfs)),
-                ],
-            )
+            import os
+            fns = [
+                GuidanceConfig("collision",            enabled=bool(uc),  scale=float(ucs)),
+                GuidanceConfig("route_following",      enabled=bool(urf), scale=float(urfs)),
+                GuidanceConfig("lane_keeping",         enabled=bool(ulk), scale=float(ulks)),
+                GuidanceConfig("centerline_following", enabled=bool(ucf), scale=float(ucfs)),
+            ]
+            if ua and ap and os.path.exists(str(ap)):
+                fns.append(GuidanceConfig(
+                    "anchor_following", enabled=True, scale=float(uas),
+                    params={"prototypes_path": str(ap), "anchor_index": int(ai)},
+                ))
+            return GuidanceSetConfig(global_scale=float(gs), functions=fns)
 
         # Common input lists (pruning controls + time_step appended to existing params)
         _std_inputs = [noise_scale, fde_threshold, ade_threshold, max_retries, zoom_slider, gt_similarity_checkbox]
@@ -1754,6 +1784,8 @@ def create_interface(
             use_route_following_checkbox, route_following_scale_slider,
             use_lane_keeping_checkbox, lane_keeping_scale_slider,
             use_centerline_following_checkbox, centerline_following_scale_slider,
+            use_anchor_following_checkbox, anchor_following_scale_slider,
+            anchor_index_slider, anchor_prototypes_path,
             guidance_scale_slider,
         ]
         _full_inputs = _std_inputs + _pruning_inputs + _guidance_inputs + [time_slider]
@@ -1764,9 +1796,9 @@ def create_interface(
 
         # Orange (stochastic) is selected as winner, green (deterministic) as loser
         select_orange_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts: _with_btn(
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.select_winner("trajectory_2", ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts)
+                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1774,18 +1806,18 @@ def create_interface(
 
         # GT is selected as winner, deterministic (green) as loser
         select_gt_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts: _with_btn(
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.select_gt_as_winner(ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                              guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts)
+                                              guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
         )
 
         regenerate_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts: _with_btn(
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.regenerate(ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                     guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts)
+                                     guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1807,10 +1839,10 @@ def create_interface(
 
         # Navigation handlers - fix lambda closure issue and update jump size
         def make_jump_fn(delta_val):
-            def jump_and_update(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts):
+            def jump_and_update(ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts):
                 annotator.update_jump_size(delta_val)
                 return _with_btn(annotator.jump(delta_val, ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                                guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts))
+                                                guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts))
             return jump_and_update
 
         # Wire up navigation button handlers dynamically
@@ -1824,9 +1856,9 @@ def create_interface(
         # Sidebar event handlers
         # Jump-to button - only trigger on button click, not on input change
         jump_to_btn.click(
-            fn=lambda idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts: _with_btn(
+            fn=lambda idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.jump_to_index(idx, ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts)
+                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=[jump_to_input] + _full_inputs,
             outputs=_full_outputs,
@@ -1834,9 +1866,9 @@ def create_interface(
 
         # Filter radio
         show_finished_radio.change(
-            fn=lambda filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts: _with_btn(
+            fn=lambda filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.toggle_filter(filter_mode, ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts)
+                                        guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=[show_finished_radio] + _full_inputs,
             outputs=_full_outputs,
@@ -1844,9 +1876,9 @@ def create_interface(
 
         # Next unlabeled button
         next_unlabeled_btn.click(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts: _with_btn(
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.jump_to_next_unlabeled(ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                                  guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts)
+                                                  guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
@@ -1867,7 +1899,7 @@ def create_interface(
         )
 
         # Keyboard navigation handler - only trigger on valid arrow keys
-        def handle_keyboard_event(key, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts):
+        def handle_keyboard_event(key, ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts):
             print(f"Python handler received key: '{key}'")
             # Parse the key (format is "ArrowLeft:123" or "ArrowRight:123")
             actual_key = key.split(':')[0] if ':' in key else key
@@ -1878,7 +1910,7 @@ def create_interface(
                 print(f"Processing {direction} navigation")
                 result = _with_btn(annotator.handle_keyboard_navigation(
                     direction, ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                    guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts))
+                    guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts))
                 print(f"Navigation complete")
                 return result
             else:
@@ -1903,9 +1935,9 @@ def create_interface(
 
         # Load first sample on startup (separate from JS)
         demo.load(
-            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs, ts: _with_btn(
+            fn=lambda ns, ft, at, mr, zl, gt, eip, ipt, iyt, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs, ts: _with_btn(
                 annotator.load_sample(ns, ft, at, mr, zl, gt, eip, ipt, iyt,
-                                      guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, gs), time_step=ts)
+                                      guidance=_make_guidance(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs), time_step=ts)
             ),
             inputs=_full_inputs,
             outputs=_full_outputs,
