@@ -205,15 +205,15 @@ def _build_net_xml(ll_map, routing_graph) -> ET.Element:
             if to_edge:
                 connections.append((from_edge, to_edge))
 
-    # --- determine junction types ---
-    # junctions that are destinations of connections get "priority";
-    # terminal junctions get "dead_end"
-    dest_junctions = {edges[to_e]["from_jn"] for _, to_e in connections}
+    # --- junction types ---
+    # "unregulated" means no right-of-way enforcement and no internal
+    # crossing lanes (intLanes=""), which avoids the
+    # "invalid logic position" SUMO error that arises when priority
+    # junctions have empty intLanes.  This lets us skip the netconvert
+    # post-processing step, which collapses curved lane shapes to two
+    # endpoints and destroys road geometry accuracy.
     for jn_id, info in junctions.items():
-        if len(info["inc_lanes"]) > 1 or jn_id in dest_junctions:
-            info["type"] = "priority"
-        else:
-            info["type"] = "dead_end"
+        info["type"] = "unregulated"
 
     # --- compute network bounding box ---
     all_x = [v["x"] for v in junctions.values()]
