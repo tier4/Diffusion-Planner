@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from diffusion_planner.utils.visualize_input import visualize_inputs
+from guidance_playground.visualization import render_prototype_gallery
 from matplotlib.figure import Figure
 
 from preference_optimization.utils import (
@@ -1639,7 +1640,7 @@ def create_interface(
                         use_anchor_following_checkbox = gr.Checkbox(
                             value=False,
                             label="Anchor Following",
-                            info="Guide trajectory toward a prototype motion mode from the prototype gallery"
+                            info="Guide trajectory toward a prototype motion mode"
                         )
                         anchor_following_scale_slider = gr.Slider(
                             minimum=0.1,
@@ -1653,14 +1654,27 @@ def create_interface(
                             maximum=63,
                             value=0,
                             step=1,
-                            label="Anchor Index",
-                            info="Prototype index (see guidance_playground for visual selection)"
+                            label="Anchor Index (click gallery below to set)",
+                            interactive=False,
                         )
                         anchor_prototypes_path = gr.Textbox(
                             value="guidance_playground/prototypes_k16.npy",
                             label="Prototypes Path",
                             info="Path to prototypes .npy file (K, 80, 2)"
                         )
+
+                with gr.Accordion("Prototype Gallery — click to select anchor", open=False):
+                    _default_gallery = render_prototype_gallery("guidance_playground/prototypes_k16.npy")
+                    anchor_gallery = gr.Gallery(
+                        value=_default_gallery or [],
+                        columns=8,
+                        rows=2,
+                        height=260,
+                        allow_preview=False,
+                        selected_index=0,
+                        label="Motion Mode Prototypes",
+                    )
+                    reload_gallery_btn = gr.Button("↺ Reload Gallery from Path", size="sm")
 
                 # Visualizations - Trajectory with zoom slider in one column
                 gr.Markdown("## 🎨 Trajectory Visualization")
@@ -1889,6 +1903,19 @@ def create_interface(
             fn=lambda checked: setattr(annotator, 'auto_skip_labeled', checked),
             inputs=[auto_skip_checkbox],
             outputs=[],
+        )
+
+        # Anchor gallery: click sets the index slider (read-only display)
+        anchor_gallery.select(
+            fn=lambda evt: gr.update(value=evt.index, maximum=max(63, evt.index)),
+            outputs=[anchor_index_slider],
+        )
+
+        # Reload gallery when path textbox changes and user clicks Reload
+        reload_gallery_btn.click(
+            fn=lambda path: gr.update(value=render_prototype_gallery(path) or []),
+            inputs=[anchor_prototypes_path],
+            outputs=[anchor_gallery],
         )
 
         # Launch Training button

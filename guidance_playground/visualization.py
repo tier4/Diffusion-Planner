@@ -6,10 +6,13 @@ adapted from the plotting methods in preference_optimization/annotation_gui.py.
 
 from __future__ import annotations
 
+import io
+
 import matplotlib.cm as cm
 import matplotlib.patches as patches
 import numpy as np
 from matplotlib.figure import Figure
+from PIL import Image
 
 
 # ---------------------------------------------------------------------------
@@ -348,28 +351,62 @@ def plot_lateral_curvature(
     return fig
 
 
-def render_prototype_thumbnail(prototype_xy: np.ndarray, index: int, count: int) -> Figure:
-    """Render a small thumbnail plot of one prototype trajectory.
+def _fig_to_pil(fig: Figure) -> Image.Image:
+    """Convert a matplotlib Figure to a PIL Image."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=72, bbox_inches="tight")
+    buf.seek(0)
+    img = Image.open(buf).copy()
+    buf.close()
+    return img
+
+
+def render_prototype_thumbnail(all_protos: np.ndarray, index: int, count: int) -> Image.Image:
+    """Render one prototype thumbnail with all others shown in grey for context.
 
     Args:
-        prototype_xy: (80, 2) trajectory in ego-centric metres.
-        index: Prototype index (for title).
+        all_protos: (K, 80, 2) all prototype trajectories in ego-centric metres.
+        index: Index of the prototype to highlight in blue.
         count: Number of training samples assigned to this cluster.
 
     Returns:
-        Small matplotlib Figure suitable for use in gr.Gallery.
+        PIL Image for use in gr.Gallery.
     """
-    fig = Figure(figsize=(2.2, 2.2))
+    fig = Figure(figsize=(2, 2))
     ax = fig.add_subplot(111)
-
-    ax.plot(prototype_xy[:, 0], prototype_xy[:, 1], "b-", linewidth=1.8)
-    ax.scatter([0], [0], c="red", s=40, zorder=5)  # origin = ego at t=0
-
-    ax.set_title(f"Mode {index}\n(n={count:,})", fontsize=8)
+    for i, proto in enumerate(all_protos):
+        if i != index:
+            ax.plot(proto[:, 0], proto[:, 1], color="#cccccc", linewidth=0.8, alpha=0.6)
+    ax.plot(all_protos[index, :, 0], all_protos[index, :, 1],
+            color="royalblue", linewidth=2.2, zorder=5)
+    ax.scatter([0], [0], c="red", s=20, zorder=6)
+    ax.set_title(f"#{index}  n={count}", fontsize=8)
     ax.set_aspect("equal")
     ax.axis("off")
     fig.tight_layout(pad=0.2)
-    return fig
+    return _fig_to_pil(fig)
+
+
+def render_prototype_gallery(prototypes_path: str) -> list[tuple[Image.Image, str]] | None:
+    """Load a prototypes .npy file and return a gallery-ready list.
+
+    Args:
+        prototypes_path: Path to prototypes .npy file of shape (K, 80, 2).
+
+    Returns:
+        List of (PIL Image, label) tuples for gr.Gallery, or None if path invalid.
+    """
+    import os
+    if not prototypes_path or not os.path.exists(prototypes_path):
+        return None
+    protos = np.load(prototypes_path)           # (K, 80, 2)
+    K = protos.shape[0]
+    counts_path = prototypes_path.replace(".npy", "_counts.npy")
+    counts = np.load(counts_path) if os.path.exists(counts_path) else np.ones(K, dtype=int)
+    return [
+        (render_prototype_thumbnail(protos, i, int(counts[i])), f"#{i} (n={int(counts[i])})")
+        for i in range(K)
+    ]
 
 
 def compute_stats(
