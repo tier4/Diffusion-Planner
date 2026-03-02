@@ -377,8 +377,6 @@ def render_prototype_thumbnail(
         PIL Image for use in gr.Gallery.
     """
     fig = Figure(figsize=(2, 2))
-    if selected:
-        fig.patch.set_facecolor("#FF8C00")
     ax = fig.add_subplot(111)
     for i, proto in enumerate(all_protos):
         if i != index:
@@ -386,10 +384,7 @@ def render_prototype_thumbnail(
     ax.plot(all_protos[index, :, 0], all_protos[index, :, 1],
             color="royalblue", linewidth=2.2, zorder=5)
     ax.scatter([0], [0], c="red", s=20, zorder=6)
-    if selected:
-        ax.set_title(f"#{index}  n={count}", fontsize=8, color="#FF8C00", fontweight="bold")
-    else:
-        ax.set_title(f"#{index}  n={count}", fontsize=8)
+    ax.set_title(f"#{index}  n={count}", fontsize=8, fontweight="bold" if selected else "normal")
     ax.set_aspect("equal")
     ax.axis("off")
     fig.tight_layout(pad=0.2)
