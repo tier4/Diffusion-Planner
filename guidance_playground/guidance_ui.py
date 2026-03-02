@@ -221,13 +221,21 @@ def build_guidance_panel(
     # Wire gallery events once here so callers never have to repeat this boilerplate.
     # Gradio 6.x requires gr.SelectData type annotation for SelectData to be injected;
     # bare lambdas receive None without it.
-    def _on_gallery_select(evt: gr.SelectData) -> dict:
-        return gr.update(value=evt.index, maximum=max(63, evt.index))
+    def _on_gallery_select(evt: gr.SelectData, path: str) -> tuple:
+        updated = render_prototype_gallery(path, selected_index=evt.index) or []
+        return (
+            gr.update(value=evt.index, maximum=max(63, evt.index)),
+            gr.update(value=updated),
+        )
 
     def _on_reload(path: str) -> dict:
         return gr.update(value=render_prototype_gallery(path) or [])
 
-    panel.gallery.select(fn=_on_gallery_select, outputs=[panel.anchor_index])
+    panel.gallery.select(
+        fn=_on_gallery_select,
+        inputs=[panel.anchor_path],
+        outputs=[panel.anchor_index, panel.gallery],
+    )
     panel.reload_btn.click(fn=_on_reload, inputs=[panel.anchor_path], outputs=[panel.gallery])
 
     return panel
