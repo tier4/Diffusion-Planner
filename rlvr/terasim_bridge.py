@@ -131,7 +131,9 @@ class TeraSimBridge:
         cmd += [
             self.docker_image,
             "sh", "-c",
-            "redis-server --daemonize yes && python3 -m terasim_service",
+            # --protected-mode no: allow host connections for GT trajectory push
+            "redis-server --daemonize yes --protected-mode no "
+            "&& python3 -m terasim_service",
         ]
 
         subprocess.run(cmd, check=True)
@@ -217,6 +219,28 @@ class TeraSimBridge:
 
         # Wait for NDE warmup (0 s) and AV spawn to complete
         self._poll_status("wait_for_tick", timeout=60.0)
+
+        # Store GT trajectory in Redis so the Dash visualizer can draw it.
+        # Key expires with the same 3600 s TTL used by the TeraSim service.
+        if enable_viz and "ego_future_map" in spawn_states:
+            import json as _json
+            traj = spawn_states["ego_future_map"][:, :2].tolist()  # [[x,y], ...]
+            try:
+                import redis as _redis
+                # health_check_interval=0: skip RESP3 HELLO handshake
+                # (redis-py 7.x vs Redis server 6.x incompatibility)
+                _r = _redis.Redis(
+                    host="localhost", port=6379,
+                    decode_responses=True,
+                    health_check_interval=0,
+                )
+                _r.setex(
+                    f"simulation:{self._sim_id}:gt_trajectory",
+                    3600,
+                    _json.dumps(traj),
+                )
+            except Exception:
+                pass  # non-fatal; viz still works without trajectory overlay
 
         # Teleport AV to ground-truth t=0 position
         ego = spawn_states["ego"]
