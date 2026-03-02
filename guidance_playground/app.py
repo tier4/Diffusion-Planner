@@ -12,7 +12,6 @@ python guidance_playground/app.py \\
 """
 
 import argparse
-import io
 import json
 import random
 from pathlib import Path
@@ -22,7 +21,6 @@ import matplotlib.cm as cm
 import numpy as np
 import torch
 from matplotlib.figure import Figure
-from PIL import Image
 
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from preference_optimization.annotation_gui import PreferenceAnnotator
@@ -30,34 +28,12 @@ from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
 
 from guidance_playground.generate_samples import generate_samples
+from guidance_playground.visualization import render_prototype_gallery
 
 
 _CMAP = cm.get_cmap("tab10")
 
 
-def _fig_to_pil(fig: Figure) -> Image.Image:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=72, bbox_inches="tight")
-    buf.seek(0)
-    img = Image.open(buf).copy()
-    buf.close()
-    return img
-
-
-def _render_prototype_thumbnail(all_protos: np.ndarray, index: int, count: int) -> Image.Image:
-    """All prototypes in grey + highlighted one in blue, shared axis for context."""
-    fig = Figure(figsize=(2, 2))
-    ax = fig.add_subplot(111)
-    for i, proto in enumerate(all_protos):
-        if i != index:
-            ax.plot(proto[:, 0], proto[:, 1], color="#cccccc", linewidth=0.8, alpha=0.6)
-    ax.plot(all_protos[index, :, 0], all_protos[index, :, 1], color="royalblue", linewidth=2.2, zorder=5)
-    ax.scatter([0], [0], c="red", s=20, zorder=6)
-    ax.set_title(f"#{index}  n={count}", fontsize=8)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    fig.tight_layout(pad=0.2)
-    return _fig_to_pil(fig)
 
 
 class PlaygroundAnnotator(PreferenceAnnotator):
@@ -240,23 +216,17 @@ def build_playground_interface(annotator: PlaygroundAnnotator):
                         lat_plot = gr.Plot(label="Lateral Curvature")
                 sample_info = gr.Markdown("Sample — / —")
 
-                # Prototype gallery — rendered once at startup
+                # Prototype gallery — rendered once at startup, collapsible
                 if annotator.prototypes is not None:
-                    K = annotator.prototypes.shape[0]
-                    counts = annotator.prototype_counts if annotator.prototype_counts is not None else np.ones(K, int)
-                    thumbnails = [
-                        (_render_prototype_thumbnail(annotator.prototypes, i, int(counts[i])),
-                         f"#{i} (n={int(counts[i])})")
-                        for i in range(K)
-                    ]
-                    gr.Markdown("### Prototype Gallery — click to select anchor")
-                    proto_gallery = gr.Gallery(
-                        value=thumbnails,
-                        columns=8, rows=2, height=260,
-                        allow_preview=False,
-                        selected_index=0,
-                        label="Motion Mode Prototypes",
-                    )
+                    thumbnails = render_prototype_gallery(annotator.prototypes_path)
+                    with gr.Accordion("Prototype Gallery — click to select anchor", open=True):
+                        proto_gallery = gr.Gallery(
+                            value=thumbnails,
+                            columns=8, rows=2, height=260,
+                            allow_preview=False,
+                            selected_index=0,
+                            label="Motion Mode Prototypes",
+                        )
 
         # ---- helpers ----
         from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
