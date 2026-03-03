@@ -73,7 +73,7 @@ def _sample_info(npz_path: str) -> str:
         return f"Could not load: {e}"
 
 
-def _load_scene_figure(npz_path: str, view_range: int = 60) -> Figure:
+def _load_scene_figure(npz_path: str, view_range: int = 80) -> Figure:
     """Load NPZ file and render the driving scene as a matplotlib Figure.
 
     Renders lanes, route, neighbor agents, and ego vehicle in the ego-centric
@@ -154,19 +154,67 @@ def _extract_scene_geometry(scene_data: dict) -> dict:
     return {"lane_segs": lane_segs, "route_segs": route_segs}
 
 
-def _map_to_ego(xy_map: np.ndarray, map2bl: np.ndarray) -> np.ndarray:
+def _filter_npcs_on_lane(npcs: list[dict], scene_data: dict,
+                          map2bl: np.ndarray, ego_z_map: float,
+                          max_dist: float = 30.0) -> list[dict]:
+    """Return only NPCs whose map-frame position is within max_dist meters
+    of any lane centerline point in the NPZ scene (ego-centric frame).
+
+    Vehicles further than max_dist from every lane are outside the road
+    network and would be snapped to a wrong lane or crash SUMO.
+    """
+    import torch
+
+    def _to_np(v):
+        return v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v
+
+    if "lanes" not in scene_data:
+        return npcs
+
+    lanes = _to_np(scene_data["lanes"])
+    if lanes.ndim == 4:
+        lanes = lanes[0]  # (140, 20, 33)
+
+    lane_pts = []
+    for i in range(lanes.shape[0]):
+        cx, cy = lanes[i, :, 0], lanes[i, :, 1]
+        if np.any(cx != 0) or np.any(cy != 0):
+            lane_pts.append(np.column_stack([cx, cy]))
+
+    if not lane_pts:
+        return npcs
+
+    all_lane_pts = np.concatenate(lane_pts, axis=0)  # (N, 2)
+
+    kept = []
+    for npc in npcs:
+        npc_bl = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map)[0]
+        min_dist = float(np.min(np.linalg.norm(all_lane_pts - npc_bl, axis=1)))
+        if min_dist <= max_dist:
+            kept.append(npc)
+    return kept
+
+
+def _map_to_ego(xy_map: np.ndarray, map2bl: np.ndarray, z_map: float = 0.0) -> np.ndarray:
     """Transform (N, 2) MGRS map-frame positions to ego-centric frame.
+
+    z_map should be set to the ego vehicle's z coordinate in the map frame
+    (bl2map[2, 3]).  ego_centric_to_map() transforms ego-frame z=0 points to
+    z≈z_ego in the map, so the inverse must receive z=z_ego to recover the
+    original ego-centric XY without a ~z_ego * sin(pitch) offset error.
 
     Args:
         xy_map:  (N, 2) positions in MGRS map frame
         map2bl:  (4, 4) inverse of bl2map — map frame → base_link transform
+        z_map:   z coordinate to assume for all points in the map frame
+                 (default 0.0, correct only when ego has zero pitch/roll/height)
 
     Returns:
         (N, 2) positions in ego-centric frame
     """
     n = len(xy_map)
-    pts_h = np.column_stack([xy_map, np.zeros(n), np.ones(n)])  # (N, 4)
-    pts_bl = (map2bl @ pts_h.T).T                                # (N, 4)
+    pts_h = np.column_stack([xy_map, np.full(n, z_map), np.ones(n)])  # (N, 4)
+    pts_bl = (map2bl @ pts_h.T).T                                       # (N, 4)
     return pts_bl[:, :2]
 
 
@@ -224,10 +272,12 @@ def _make_sim_figure(
     ego_history_map: list[tuple[float, float, float]],
     npc_current: list[dict],
     vru_current: list[dict],
+    ped_map_positions: list[tuple[float, float]],
     step: int,
     total_steps: int,
     map2bl: np.ndarray,
     map_yaw0: float,
+    ego_z_map: float = 0.0,
 ) -> Figure:
     """Render current simulation state in ego-centric frame with lane overlay.
 
@@ -242,10 +292,15 @@ def _make_sim_figure(
         ego_history_map:  List of (x, y, yaw_rad) in MGRS map frame — one per completed step.
         npc_current:      Vehicle state dicts from sim.step() result (map frame, not AV).
         vru_current:      VRU state dicts from sim.step() result (map frame).
+        ped_map_positions: List of (x, y) map-frame positions from the NPZ for pedestrians.
+                           Drawn as static orange dots every frame (not from SUMO state).
         step:             Current step index (0-based, used for title).
         total_steps:      Total number of GT steps.
         map2bl:           (4, 4) map→ego-centric transform (inverse of bl2map).
         map_yaw0:         Ego heading in map frame at t=0 (radians).
+        ego_z_map:        Ego vehicle z coordinate in map frame (bl2map[2, 3]).
+                          Passed to _map_to_ego to cancel the z-offset error
+                          that arises from ego pitch/roll and non-zero height.
     """
     fig = Figure(figsize=(8, 8))
     ax = fig.add_subplot(111)
@@ -272,7 +327,7 @@ def _make_sim_figure(
     # --- Live ego path history (transform map→ego-centric) ---
     if ego_history_map:
         xy_map = np.array([[p[0], p[1]] for p in ego_history_map])
-        xy_bl = _map_to_ego(xy_map, map2bl)
+        xy_bl = _map_to_ego(xy_map, map2bl, z_map=ego_z_map)
         if len(xy_bl) > 1:
             ax.plot(xy_bl[:, 0], xy_bl[:, 1], color="red",
                     linewidth=2.5, alpha=0.85, zorder=6)
@@ -286,33 +341,40 @@ def _make_sim_figure(
 
     # --- NPC vehicles (transform map→ego-centric, draw bounding boxes) ---
     for npc in npc_current:
-        nxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl)[0]
+        nxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map)[0]
         npc_yaw_bl = math.radians(90.0 - npc.get("sumo_angle", 0.0)) - map_yaw0
         _draw_agent_box(ax, float(nxy[0]), float(nxy[1]), npc_yaw_bl,
                         npc.get("length", 4.5), npc.get("width", 2.0),
                         facecolor="royalblue", edgecolor="navy", alpha=0.75, zorder=8)
 
-    # --- VRU agents: pedestrians / cyclists ---
+    # --- VRU agents from SUMO state (cyclists etc.) ---
     for vru in vru_current:
-        nxy = _map_to_ego(np.array([[vru["x"], vru["y"]]]), map2bl)[0]
+        nxy = _map_to_ego(np.array([[vru["x"], vru["y"]]]), map2bl, z_map=ego_z_map)[0]
         vru_yaw_bl = math.radians(90.0 - vru.get("sumo_angle", 0.0)) - map_yaw0
-        # Pedestrians are very small — use a circle marker; cyclists slightly larger box
         length = vru.get("length", 0.5)
         width  = vru.get("width",  0.5)
         if length < 1.0:
-            # Pedestrian — circle
             ax.scatter([float(nxy[0])], [float(nxy[1])],
                        c="darkorange", s=60, alpha=0.9,
                        edgecolors="saddlebrown", linewidths=1.0, zorder=9, marker="o")
         else:
-            # Cyclist / small vehicle
             _draw_agent_box(ax, float(nxy[0]), float(nxy[1]), vru_yaw_bl,
                             length, width,
                             facecolor="darkorange", edgecolor="saddlebrown",
                             alpha=0.75, zorder=9)
 
-    # --- View window: follow current ego, 40 m half-range ---
-    half = 40.0
+    # --- Pedestrians: drawn from NPZ spawn positions (not from SUMO) ---
+    if ped_map_positions:
+        ped_xy = np.array(ped_map_positions)
+        ped_bl = _map_to_ego(ped_xy, map2bl, z_map=ego_z_map)
+        ax.scatter(ped_bl[:, 0], ped_bl[:, 1],
+                   c="darkorange", s=60, alpha=0.9,
+                   edgecolors="saddlebrown", linewidths=1.0, zorder=9, marker="o")
+
+    # --- View window: follow current ego, 80 m half-range ---
+    # 80 m matches the scene preview and covers the typical NPC range in
+    # the dataset (most NPCs are within 80 m of the ego at t=0).
+    half = 80.0
     ax.set_xlim(ex - half, ex + half)
     ax.set_ylim(ey - half, ey + half)
     ax.set_aspect("equal")
@@ -322,7 +384,7 @@ def _make_sim_figure(
     total_s = total_steps * 0.1
     ax.set_title(
         f"Step {step}/{total_steps}  ({t_s:.1f}s / {total_s:.1f}s)  "
-        f"Veh: {len(npc_current)}  VRU: {len(vru_current)}"
+        f"Veh: {len(npc_current)}  Ped: {len(ped_map_positions)}"
     )
     ax.legend(loc="upper left", fontsize=8)
     ax.set_xlabel("X [m] (ego-centric)")
@@ -377,6 +439,14 @@ def _run_simulation(
     )
     yield None, emit(f"  Active NPCs: {len(spawn['npcs'])}")
 
+    # Pedestrian positions in map frame — drawn as static overlay, not in SUMO.
+    ped_map_positions = [
+        (float(n["x"]), float(n["y"]))
+        for n in spawn["npcs"]
+        if n.get("class", 0) == 1
+    ]
+    yield None, emit(f"  Pedestrians (NPZ overlay): {len(ped_map_positions)}")
+
     # --- Pre-compute static scene geometry (done once, reused every frame) ---
     yield None, emit("Loading scene geometry…")
     try:
@@ -385,9 +455,27 @@ def _run_simulation(
         bl2map = load_bl2map(json_path)
         map2bl = np.linalg.inv(bl2map)
         map_yaw0 = float(np.arctan2(bl2map[1, 0], bl2map[0, 0]))
+        # z coordinate of the ego in the map frame.  ego_centric_to_map() sends
+        # z=0 (base_link plane) to z≈z_ego in map; _map_to_ego must receive the
+        # same z to invert cleanly and avoid a ~z_ego * sin(pitch) XY offset.
+        ego_z_map = float(bl2map[2, 3])
         # GT trajectory in ego-centric frame (raw yaw, same as NPZ ego_agent_future)
         raw = np.load(npz_path, allow_pickle=True)
         gt_ego_bl = raw["ego_agent_future"].astype(np.float32)  # (80, 3) [x, y, yaw_rad]
+
+        # Filter NPCs to those within 30 m of a lane — off-road vehicles get
+        # snapped to wrong lanes by keepRoute=0 and can crash SUMO.
+        all_npcs = spawn["npcs"]
+        vehicles_on_lane = _filter_npcs_on_lane(
+            [n for n in all_npcs if n.get("class", 0) != 1],
+            scene_data, map2bl, ego_z_map, max_dist=30.0,
+        )
+        spawn = dict(spawn)
+        spawn["npcs"] = vehicles_on_lane
+        yield None, emit(
+            f"  NPCs after lane filter: {len(vehicles_on_lane)} / "
+            f"{sum(1 for n in all_npcs if n.get('class',0) != 1)} vehicles kept"
+        )
     except Exception as e:
         yield None, emit(f"ERROR loading scene geometry: {e}")
         return
@@ -406,7 +494,8 @@ def _run_simulation(
     # Show GT trajectory before simulation starts
     n_steps = len(spawn["ego_future_map"])
     init_fig = _make_sim_figure(
-        scene_geom, gt_ego_bl, [], [], [], 0, n_steps, map2bl, map_yaw0,
+        scene_geom, gt_ego_bl, [], [], [], ped_map_positions,
+        0, n_steps, map2bl, map_yaw0, ego_z_map,
     )
     yield init_fig, emit("  Waiting for episode to start…")
 
@@ -437,7 +526,7 @@ def _run_simulation(
                     )
                     for i, npc in enumerate(npc_states[:5]):
                         nxy = _map_to_ego(
-                            np.array([[npc["x"], npc["y"]]]), map2bl
+                            np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map
                         )[0]
                         yield None, emit(
                             f"    NPC[{i}] map=({npc['x']:.1f},{npc['y']:.1f})"
@@ -446,7 +535,7 @@ def _run_simulation(
                         )
                     for i, vru in enumerate(vru_states[:3]):
                         vxy = _map_to_ego(
-                            np.array([[vru["x"], vru["y"]]]), map2bl
+                            np.array([[vru["x"], vru["y"]]]), map2bl, z_map=ego_z_map
                         )[0]
                         yield None, emit(
                             f"    VRU[{i}] map=({vru['x']:.1f},{vru['y']:.1f})"
@@ -454,10 +543,10 @@ def _run_simulation(
                             f"  type={vru.get('type','?')}"
                         )
                     # Show ego position in ego-centric (should be near origin at step 0)
-                    ego_xy_bl = _map_to_ego(np.array([[x, y]]), map2bl)[0]
+                    ego_xy_bl = _map_to_ego(np.array([[x, y]]), map2bl, z_map=ego_z_map)[0]
                     yield None, emit(
                         f"  [DBG step0] ego in ego-centric: ({ego_xy_bl[0]:.2f},{ego_xy_bl[1]:.2f})"
-                        f"  view=±40m"
+                        f"  view=±80m"
                     )
 
                 if step_delay > 0:
@@ -466,8 +555,9 @@ def _run_simulation(
                 sim_fig = _make_sim_figure(
                     scene_geom, gt_ego_bl, ego_history,
                     result["npc_states"], result.get("vru_states", []),
+                    ped_map_positions,
                     step_idx + 1, n_steps,
-                    map2bl, map_yaw0,
+                    map2bl, map_yaw0, ego_z_map,
                 )
 
                 if not result["av_in_sim"]:

@@ -29,6 +29,7 @@ environment:
     stochastic_acc_flag: false
     drive_rule: "lefthand"
     av_debug_control: false
+    adversity_cfg: {}
     AV_cfg:
       type: "veh_AV"
       cache_radius: 150
