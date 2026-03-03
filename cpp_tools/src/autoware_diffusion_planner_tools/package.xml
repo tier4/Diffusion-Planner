@@ -19,6 +19,7 @@
   <depend>autoware_diffusion_planner</depend>
   <depend>autoware_vehicle_info_utils</depend>
   <depend>rosbag2_cpp</depend>
+  <depend>yaml-cpp</depend>
 
   <exec_depend>rosbag2_storage_mcap</exec_depend>
 
