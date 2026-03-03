@@ -575,9 +575,28 @@ def _run_simulation(
             sim.start_episode(spawn, enable_viz=False)
             yield init_fig, emit("  Episode started.")
 
+            # Seed last-seen table with NPZ t=0 spawn positions so vehicles
+            # that SUMO removes (route exhausted, collision) keep rendering at
+            # their last known position instead of vanishing from the view.
+            npc_last_seen: dict[str, dict] = {
+                n["id"]: {
+                    "id":         n["id"],
+                    "x":          n["x"],
+                    "y":          n["y"],
+                    "sumo_angle": n["sumo_angle"],
+                    "speed":      n["vx"],
+                }
+                for n in vehicles_on_lane
+            }
+
             for step_idx in range(n_steps):
                 x, y, yaw_rad = spawn["ego_future_map"][step_idx]
                 result = sim.step((float(x), float(y)), float(yaw_rad))
+
+                # Update last-seen table; vehicles absent from this step's
+                # state (removed by SUMO) will retain their previous entry.
+                for npc in result["npc_states"]:
+                    npc_last_seen[npc["id"]] = npc
 
                 ego_history.append((float(x), float(y), float(yaw_rad)))
 
@@ -619,7 +638,7 @@ def _run_simulation(
 
                 sim_fig = _make_sim_figure(
                     scene_geom, gt_ego_bl, ego_history,
-                    result["npc_states"], result.get("vru_states", []),
+                    list(npc_last_seen.values()), result.get("vru_states", []),
                     ped_map_positions,
                     step_idx + 1, n_steps,
                     map2bl, map_yaw0, ego_z_map,
