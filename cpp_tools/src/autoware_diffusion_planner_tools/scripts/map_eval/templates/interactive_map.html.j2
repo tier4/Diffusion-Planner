@@ -83,6 +83,9 @@
     const VMAX_LANE = {{ vmax_lane }};
     const VMAX_LINE = {{ vmax_line }};
     const VMAX_POLY = {{ vmax_poly }};
+    const THRESHOLD_LANE = {{ threshold_lane }};
+    const THRESHOLD_LINE = {{ threshold_line }};
+    const THRESHOLD_POLY = {{ threshold_poly }};
     const METRICS = {{ metrics_json | tojson }};
 
     function toLeafletCoords(pts) {
@@ -101,8 +104,8 @@
       const r = Math.round(ar + (br - ar) * local), g = Math.round(ag + (bg - ag) * local), bv = Math.round(ab + (bb - ab) * local);
       return `rgb(${r},${g},${bv})`;
     }
-    function hausdorffToColor(v, vmax) {
-      const t = vmax > 0 ? v / vmax : 0;
+    function hausdorffToColor(v, threshold) {
+      const t = threshold > 0 ? Math.min(v / threshold, 1.0) : 0;
       return rgbFromScalar(t);
     }
     function initMap() {
@@ -180,7 +183,7 @@
     function addHeatmapLayers() {
       const laneLg = L.layerGroup();
       LANES_INT.forEach(ent => {
-        const c = hausdorffToColor(ent.hausdorff || 0, VMAX_LANE);
+        const c = hausdorffToColor(ent.hausdorff || 0, THRESHOLD_LANE);
         const line = L.polyline(toLeafletCoords(ent.coordinates), { color: c, weight: 2, opacity: 0.9 });
         line.bindPopup(`Lane ${ent.id}: ${(ent.hausdorff || 0).toFixed(4)} m`);
         line.addTo(laneLg);
@@ -189,7 +192,7 @@
 
       const lineLg = L.layerGroup();
       LINES_INT.forEach(ent => {
-        const c = hausdorffToColor(ent.hausdorff || 0, VMAX_LINE);
+        const c = hausdorffToColor(ent.hausdorff || 0, THRESHOLD_LINE);
         const line = L.polyline(toLeafletCoords(ent.coordinates), { color: c, weight: 2, opacity: 0.9 });
         line.bindPopup(`Line ${ent.index}: ${(ent.hausdorff || 0).toFixed(4)} m`);
         line.addTo(lineLg);
@@ -198,7 +201,7 @@
 
       const polyLg = L.layerGroup();
       POLYS_INT.forEach(ent => {
-        const c = hausdorffToColor(ent.hausdorff || 0, VMAX_POLY);
+        const c = hausdorffToColor(ent.hausdorff || 0, THRESHOLD_POLY);
         const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: c, weight: 1, fillColor: c, fillOpacity: 0.5 });
         poly.bindPopup(`Polygon ${ent.index}: ${(ent.hausdorff || 0).toFixed(4)} m`);
         poly.addTo(polyLg);
@@ -212,7 +215,7 @@
 
     let currentLayer = null;
     let referenceBasemapVisible = false;
-    const vmaxByTab = { overlay: VMAX_LANE, 'lane-heatmap': VMAX_LANE, 'line-heatmap': VMAX_LINE, 'polygon-heatmap': VMAX_POLY };
+    const vmaxByTab = { overlay: THRESHOLD_LANE, 'lane-heatmap': THRESHOLD_LANE, 'line-heatmap': THRESHOLD_LINE, 'polygon-heatmap': THRESHOLD_POLY };
     function updateLegendForTab(tab) {
       const vmax = vmaxByTab[tab] || VMAX_LANE;
       const maxEl = document.getElementById('legend-max');
