@@ -415,6 +415,9 @@ def render_html_dashboard(
     line_rows: List[Dict],
     poly_rows: List[Dict],
     out_path: Path,
+    lane_threshold: float = 0.2,
+    line_threshold: float = 0.2,
+    poly_threshold: float = 1.0,
 ) -> None:
     if Environment is None:
         return
@@ -504,9 +507,12 @@ def render_html_dashboard(
         lines_int=lines_int,
         polys_ref=polys_ref,
         polys_int=polys_int,
-        vmax_lane=vmax_lane,
-        vmax_line=vmax_line,
-        vmax_poly=vmax_poly,
+        vmax_lane=lane_threshold,
+        vmax_line=line_threshold,
+        vmax_poly=poly_threshold,
+        threshold_lane=lane_threshold,
+        threshold_line=line_threshold,
+        threshold_poly=poly_threshold,
         metrics_json=metrics_json,
     )
     out_path.write_text(html, encoding="utf-8")
@@ -576,6 +582,24 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Open the interactive HTML overlay in the default browser after completion.",
     )
+    parser.add_argument(
+        "--lane_threshold",
+        type=float,
+        default=0.2,
+        help="Threshold (m) for lanelet error color mapping. Errors >= threshold show max color.",
+    )
+    parser.add_argument(
+        "--line_threshold",
+        type=float,
+        default=0.2,
+        help="Threshold (m) for linestring error color mapping. Errors >= threshold show max color.",
+    )
+    parser.add_argument(
+        "--poly_threshold",
+        type=float,
+        default=1.0,
+        help="Threshold (m) for polygon error color mapping. Errors >= threshold show max color.",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -637,6 +661,9 @@ def evaluate_core(
     skip_html: bool,
     output_prefix: str,
     open_web: bool = False,
+    lane_threshold: float = 0.2,
+    line_threshold: float = 0.2,
+    poly_threshold: float = 1.0,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     print("[2/3] Computing metrics...")
@@ -772,7 +799,17 @@ def evaluate_core(
     )
     make_static_plots(internal, reference, lane_rows, line_rows, poly_rows, overlay_png_path)
     if not skip_html:
-        render_html_dashboard(internal, reference, lane_rows, line_rows, poly_rows, html_path)
+        render_html_dashboard(
+            internal,
+            reference,
+            lane_rows,
+            line_rows,
+            poly_rows,
+            html_path,
+            lane_threshold=lane_threshold,
+            line_threshold=line_threshold,
+            poly_threshold=poly_threshold,
+        )
         if open_web:
             webbrowser.open(f"file://{html_path.resolve()}")
 
@@ -795,6 +832,9 @@ def main() -> None:
             skip_html=args.skip_html,
             output_prefix=args.output_prefix,
             open_web=args.web,
+            lane_threshold=args.lane_threshold,
+            line_threshold=args.line_threshold,
+            poly_threshold=args.poly_threshold,
         )
         return
 
@@ -821,6 +861,9 @@ def main() -> None:
         skip_html=args.skip_html,
         output_prefix=args.output_prefix,
         open_web=args.web,
+        lane_threshold=args.lane_threshold,
+        line_threshold=args.line_threshold,
+        poly_threshold=args.poly_threshold,
     )
 
 
