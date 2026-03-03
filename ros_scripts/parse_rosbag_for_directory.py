@@ -6,11 +6,17 @@ from pathlib import Path
 
 from parse_rosbag_by_cpp import main as parse_rosbag_main_cpp
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CPP_BINARY = (
+    PROJECT_ROOT / "cpp_tools" / "build" / "autoware_diffusion_planner_tools" / "data_converter"
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("target_dir_list", type=Path, nargs="+")
     parser.add_argument("--save_root", type=Path, required=True)
+    parser.add_argument("--cpp_binary_path", type=Path, default=DEFAULT_CPP_BINARY)
     parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
@@ -27,6 +33,7 @@ def parse_args():
 
 def process_single_bag(args_tuple):
     (
+        cpp_binary_path,
         bag_path,
         save_root,
         step,
@@ -62,7 +69,7 @@ def process_single_bag(args_tuple):
 
     try:
         parse_rosbag_main_cpp(
-            Path("~/autoware/build/autoware_diffusion_planner/data_converter").expanduser(),
+            cpp_binary_path,
             rosbag_path=bag_path,
             vector_map_path=vector_map_path,
             save_dir=save_dir,
@@ -88,6 +95,7 @@ if __name__ == "__main__":
     args = parse_args()
     target_dir_list = args.target_dir_list
     save_root = args.save_root
+    cpp_binary_path = args.cpp_binary_path
     step = args.step
     limit = args.limit
     min_frames = args.min_frames
@@ -128,6 +136,7 @@ if __name__ == "__main__":
     for bag_path in bag_dir_list:
         process_args.append(
             (
+                cpp_binary_path,
                 bag_path,
                 save_root,
                 step,
