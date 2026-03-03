@@ -154,14 +154,31 @@ def _extract_scene_geometry(scene_data: dict) -> dict:
     return {"lane_segs": lane_segs, "route_segs": route_segs}
 
 
-def _filter_npcs_on_lane(npcs: list[dict], scene_data: dict,
-                          map2bl: np.ndarray, ego_z_map: float,
-                          max_dist: float = 30.0) -> list[dict]:
-    """Return only NPCs whose map-frame position is within max_dist meters
-    of any lane centerline point in the NPZ scene (ego-centric frame).
+def _filter_npcs_on_lane(
+    npcs: list[dict],
+    scene_data: dict,
+    map2bl: np.ndarray,
+    ego_z_map: float,
+    max_dist: float = 30.0,
+) -> tuple[list[dict], list[dict]]:
+    """Split NPCs into on-road and off-road by proximity to lane centerlines.
 
-    Vehicles further than max_dist from every lane are outside the road
-    network and would be snapped to a wrong lane or crash SUMO.
+    Vehicles within max_dist meters of any lane centerline point are on-road
+    and safe to spawn in SUMO (keepRoute=0 snaps them to the correct lane).
+    Vehicles further away are outside the road network; spawning them causes
+    wrong-lane snapping artifacts or SUMO crashes.  Off-road vehicles are
+    returned as a separate list for rendering as static visual overlays at
+    their exact NPZ positions.
+
+    Args:
+        npcs:       List of NPC dicts from extract_spawn_states() (vehicles only).
+        scene_data: Dict of tensors/arrays from load_npz_data().
+        map2bl:     (4, 4) map→ego-centric transform.
+        ego_z_map:  Ego z coordinate in map frame (bl2map[2, 3]).
+        max_dist:   Lane proximity threshold in meters.
+
+    Returns:
+        (on_lane, off_lane) — two disjoint lists covering all input NPCs.
     """
     import torch
 
@@ -169,7 +186,7 @@ def _filter_npcs_on_lane(npcs: list[dict], scene_data: dict,
         return v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v
 
     if "lanes" not in scene_data:
-        return npcs
+        return npcs, []
 
     lanes = _to_np(scene_data["lanes"])
     if lanes.ndim == 4:
@@ -182,17 +199,19 @@ def _filter_npcs_on_lane(npcs: list[dict], scene_data: dict,
             lane_pts.append(np.column_stack([cx, cy]))
 
     if not lane_pts:
-        return npcs
+        return npcs, []
 
     all_lane_pts = np.concatenate(lane_pts, axis=0)  # (N, 2)
 
-    kept = []
+    on_lane, off_lane = [], []
     for npc in npcs:
         npc_bl = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map)[0]
         min_dist = float(np.min(np.linalg.norm(all_lane_pts - npc_bl, axis=1)))
         if min_dist <= max_dist:
-            kept.append(npc)
-    return kept
+            on_lane.append(npc)
+        else:
+            off_lane.append(npc)
+    return on_lane, off_lane
 
 
 def _map_to_ego(xy_map: np.ndarray, map2bl: np.ndarray, z_map: float = 0.0) -> np.ndarray:
@@ -278,29 +297,41 @@ def _make_sim_figure(
     map2bl: np.ndarray,
     map_yaw0: float,
     ego_z_map: float = 0.0,
+    ego_length: float = 4.5,
+    ego_width: float = 2.0,
+    static_vehicle_overlay: list[dict] | None = None,
+    npc_dim_lookup: dict | None = None,
 ) -> Figure:
     """Render current simulation state in ego-centric frame with lane overlay.
 
     Draws the lane/route geometry from the NPZ (static background), the
     ground-truth ego trajectory, the live ego path history, current NPC
-    vehicle bounding boxes (blue, from TeraSim), and VRU markers (orange)
+    vehicle bounding boxes (blue, from TeraSim), static off-road vehicle
+    overlays (grey, from NPZ), and VRU/pedestrian markers (orange)
     — all in the ego-centric frame (base_link at t=0).
 
     Args:
-        scene_geom:       Pre-extracted lane/route segments (from _extract_scene_geometry).
-        gt_ego_bl:        (80, 3) GT ego trajectory [x, y, yaw_rad] in ego-centric frame.
-        ego_history_map:  List of (x, y, yaw_rad) in MGRS map frame — one per completed step.
-        npc_current:      Vehicle state dicts from sim.step() result (map frame, not AV).
-        vru_current:      VRU state dicts from sim.step() result (map frame).
-        ped_map_positions: List of (x, y) map-frame positions from the NPZ for pedestrians.
-                           Drawn as static orange dots every frame (not from SUMO state).
-        step:             Current step index (0-based, used for title).
-        total_steps:      Total number of GT steps.
-        map2bl:           (4, 4) map→ego-centric transform (inverse of bl2map).
-        map_yaw0:         Ego heading in map frame at t=0 (radians).
-        ego_z_map:        Ego vehicle z coordinate in map frame (bl2map[2, 3]).
-                          Passed to _map_to_ego to cancel the z-offset error
-                          that arises from ego pitch/roll and non-zero height.
+        scene_geom:            Pre-extracted lane/route segments (from _extract_scene_geometry).
+        gt_ego_bl:             (80, 3) GT ego trajectory [x, y, yaw_rad] in ego-centric frame.
+        ego_history_map:       List of (x, y, yaw_rad) in MGRS map frame — one per step.
+        npc_current:           Vehicle state dicts from sim.step() result (map frame, not AV).
+        vru_current:           VRU state dicts from sim.step() result (map frame).
+        ped_map_positions:     List of (x, y) map-frame positions from the NPZ for pedestrians.
+                               Drawn as static orange dots every frame (not from SUMO state).
+        step:                  Current step index (0-based, used for title).
+        total_steps:           Total number of GT steps.
+        map2bl:                (4, 4) map→ego-centric transform (inverse of bl2map).
+        map_yaw0:              Ego heading in map frame at t=0 (radians).
+        ego_z_map:             Ego vehicle z coordinate in map frame (bl2map[2, 3]).
+                               Passed to _map_to_ego to cancel the z-offset error
+                               that arises from ego pitch/roll and non-zero height.
+        ego_length:            Ego vehicle length from NPZ ego_shape (meters).
+        ego_width:             Ego vehicle width from NPZ ego_shape (meters).
+        static_vehicle_overlay: Off-road NPC dicts (class != ped, dist > max_dist from lanes).
+                               Drawn as grey boxes at their exact NPZ positions — not in SUMO.
+        npc_dim_lookup:        {npc_id: (length, width)} from NPZ spawn states.
+                               Used to draw SUMO-spawned vehicles with correct dimensions
+                               instead of the SUMO vType defaults (car=4.5×1.8 m).
     """
     fig = Figure(figsize=(8, 8))
     ax = fig.add_subplot(111)
@@ -334,17 +365,30 @@ def _make_sim_figure(
         ex, ey = float(xy_bl[-1, 0]), float(xy_bl[-1, 1])
         eyaw_map = ego_history_map[-1][2]
         eyaw_bl = eyaw_map - map_yaw0
-        _draw_agent_box(ax, ex, ey, eyaw_bl, 4.5, 2.0,
+        _draw_agent_box(ax, ex, ey, eyaw_bl, ego_length, ego_width,
                         facecolor="red", edgecolor="darkred", alpha=0.85, zorder=10)
     else:
         ex, ey = 0.0, 0.0
 
-    # --- NPC vehicles (transform map→ego-centric, draw bounding boxes) ---
-    for npc in npc_current:
+    # --- Off-road static vehicle overlay (from NPZ, not in SUMO) ---
+    # Drawn as grey boxes at their exact NPZ positions using actual NPZ dimensions.
+    for npc in (static_vehicle_overlay or []):
         nxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map)[0]
         npc_yaw_bl = math.radians(90.0 - npc.get("sumo_angle", 0.0)) - map_yaw0
         _draw_agent_box(ax, float(nxy[0]), float(nxy[1]), npc_yaw_bl,
                         npc.get("length", 4.5), npc.get("width", 2.0),
+                        facecolor="slategray", edgecolor="dimgray", alpha=0.6, zorder=7)
+
+    # --- NPC vehicles from SUMO state (transform map→ego-centric, draw bounding boxes) ---
+    # Dimensions come from the NPZ lookup (correct per-agent shape), not from the
+    # SUMO state which only reports the vType defaults (car=4.5 m × 1.8 m).
+    _dim_lut = npc_dim_lookup or {}
+    for npc in npc_current:
+        nxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map)[0]
+        npc_yaw_bl = math.radians(90.0 - npc.get("sumo_angle", 0.0)) - map_yaw0
+        length, width = _dim_lut.get(npc["id"], (npc.get("length", 4.5), npc.get("width", 2.0)))
+        _draw_agent_box(ax, float(nxy[0]), float(nxy[1]), npc_yaw_bl,
+                        length, width,
                         facecolor="royalblue", edgecolor="navy", alpha=0.75, zorder=8)
 
     # --- VRU agents from SUMO state (cyclists etc.) ---
@@ -382,9 +426,10 @@ def _make_sim_figure(
 
     t_s = step * 0.1
     total_s = total_steps * 0.1
+    n_static = len(static_vehicle_overlay) if static_vehicle_overlay else 0
     ax.set_title(
         f"Step {step}/{total_steps}  ({t_s:.1f}s / {total_s:.1f}s)  "
-        f"Veh: {len(npc_current)}  Ped: {len(ped_map_positions)}"
+        f"Veh: {len(npc_current)}  Off-road: {n_static}  Ped: {len(ped_map_positions)}"
     )
     ax.legend(loc="upper left", fontsize=8)
     ax.set_xlabel("X [m] (ego-centric)")
@@ -459,22 +504,33 @@ def _run_simulation(
         # z=0 (base_link plane) to z≈z_ego in map; _map_to_ego must receive the
         # same z to invert cleanly and avoid a ~z_ego * sin(pitch) XY offset.
         ego_z_map = float(bl2map[2, 3])
-        # GT trajectory in ego-centric frame (raw yaw, same as NPZ ego_agent_future)
+        # Load the raw NPZ once for GT trajectory and ego shape
         raw = np.load(npz_path, allow_pickle=True)
         gt_ego_bl = raw["ego_agent_future"].astype(np.float32)  # (80, 3) [x, y, yaw_rad]
+        # ego_shape: [wheel_base, length, width] — indices 1 and 2
+        ego_shape = raw["ego_shape"] if "ego_shape" in raw else None
+        ego_length = float(ego_shape[1]) if ego_shape is not None and len(ego_shape) > 2 else 4.5
+        ego_width  = float(ego_shape[2]) if ego_shape is not None and len(ego_shape) > 2 else 2.0
 
-        # Filter NPCs to those within 30 m of a lane — off-road vehicles get
-        # snapped to wrong lanes by keepRoute=0 and can crash SUMO.
+        # Split vehicles: on-road ones are spawned in SUMO; off-road ones are
+        # rendered as static grey overlays at their exact NPZ positions.
+        # keepRoute=0 snaps on-road vehicles to the nearest lane (correct
+        # behaviour); off-road vehicles would be snapped to the wrong lane,
+        # which produces wrong positions and can crash SUMO.
         all_npcs = spawn["npcs"]
-        vehicles_on_lane = _filter_npcs_on_lane(
-            [n for n in all_npcs if n.get("class", 0) != 1],
-            scene_data, map2bl, ego_z_map, max_dist=30.0,
+        all_vehicles = [n for n in all_npcs if n.get("class", 0) != 1]
+        vehicles_on_lane, vehicles_off_lane = _filter_npcs_on_lane(
+            all_vehicles, scene_data, map2bl, ego_z_map, max_dist=30.0,
         )
+        # Dimension lookup: NPZ length/width for every vehicle (used in visualization
+        # because the SUMO state only reports the vType default dimensions).
+        npc_dim_lookup = {n["id"]: (n["length"], n["width"]) for n in all_vehicles}
+
         spawn = dict(spawn)
         spawn["npcs"] = vehicles_on_lane
         yield None, emit(
-            f"  NPCs after lane filter: {len(vehicles_on_lane)} / "
-            f"{sum(1 for n in all_npcs if n.get('class',0) != 1)} vehicles kept"
+            f"  Vehicles on-road: {len(vehicles_on_lane)} / {len(all_vehicles)}  "
+            f"off-road (static overlay): {len(vehicles_off_lane)}"
         )
     except Exception as e:
         yield None, emit(f"ERROR loading scene geometry: {e}")
@@ -496,6 +552,8 @@ def _run_simulation(
     init_fig = _make_sim_figure(
         scene_geom, gt_ego_bl, [], [], [], ped_map_positions,
         0, n_steps, map2bl, map_yaw0, ego_z_map,
+        ego_length=ego_length, ego_width=ego_width,
+        static_vehicle_overlay=vehicles_off_lane, npc_dim_lookup=npc_dim_lookup,
     )
     yield init_fig, emit("  Waiting for episode to start…")
 
@@ -558,6 +616,9 @@ def _run_simulation(
                     ped_map_positions,
                     step_idx + 1, n_steps,
                     map2bl, map_yaw0, ego_z_map,
+                    ego_length=ego_length, ego_width=ego_width,
+                    static_vehicle_overlay=vehicles_off_lane,
+                    npc_dim_lookup=npc_dim_lookup,
                 )
 
                 if not result["av_in_sim"]:
