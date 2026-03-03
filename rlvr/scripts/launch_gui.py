@@ -228,15 +228,13 @@ def _make_sim_figure(
     total_steps: int,
     map2bl: np.ndarray,
     map_yaw0: float,
-    recorded_npcs: list[dict] | None = None,
 ) -> Figure:
     """Render current simulation state in ego-centric frame with lane overlay.
 
     Draws the lane/route geometry from the NPZ (static background), the
     ground-truth ego trajectory, the live ego path history, current NPC
-    vehicle bounding boxes (blue, from TeraSim), VRU markers (orange), and
-    the recorded NPZ neighbor agents at t=0 as a static gold overlay —
-    all in the ego-centric frame (base_link at t=0).
+    vehicle bounding boxes (blue, from TeraSim), and VRU markers (orange)
+    — all in the ego-centric frame (base_link at t=0).
 
     Args:
         scene_geom:       Pre-extracted lane/route segments (from _extract_scene_geometry).
@@ -248,8 +246,6 @@ def _make_sim_figure(
         total_steps:      Total number of GT steps.
         map2bl:           (4, 4) map→ego-centric transform (inverse of bl2map).
         map_yaw0:         Ego heading in map frame at t=0 (radians).
-        recorded_npcs:    Optional list of NPZ neighbor agent dicts (map frame, t=0 snapshot).
-                          Drawn as faded gold boxes — shows what was recorded in the rosbag.
     """
     fig = Figure(figsize=(8, 8))
     ax = fig.add_subplot(111)
@@ -314,43 +310,6 @@ def _make_sim_figure(
                             length, width,
                             facecolor="darkorange", edgecolor="saddlebrown",
                             alpha=0.75, zorder=9)
-
-    # --- Recorded NPZ neighbor agents (static t=0 snapshot from rosbag) ---
-    # Drawn in faded gold so the user can see what was in the recording even
-    # when TeraSim's NDE hasn't yet spawned live traffic near the ego.
-    if recorded_npcs:
-        _recorded_label_added = False
-        for npc in recorded_npcs:
-            npc_class = npc.get("class", 0)  # 0=vehicle, 1=pedestrian, 2=bicycle
-            # recorded npcs have yaw_rad in map frame
-            npc_yaw_bl = npc["yaw_rad"] - map_yaw0
-            # Transform map-frame position to ego-centric
-            rxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl)[0]
-            label = "Recorded NPCs" if not _recorded_label_added else None
-            _recorded_label_added = True
-            if npc_class == 1:
-                # Pedestrian — small gold circle
-                ax.scatter(
-                    [float(rxy[0])], [float(rxy[1])],
-                    c="gold", s=40, alpha=0.55,
-                    edgecolors="darkgoldenrod", linewidths=0.8,
-                    zorder=5, marker="o", label=label,
-                )
-            else:
-                # Vehicle or bicycle — gold bounding box
-                length = npc.get("length", 4.5 if npc_class == 0 else 1.8)
-                width  = npc.get("width",  1.8 if npc_class == 0 else 0.7)
-                _draw_agent_box(
-                    ax, float(rxy[0]), float(rxy[1]), npc_yaw_bl,
-                    length, width,
-                    facecolor="gold", edgecolor="darkgoldenrod",
-                    alpha=0.45, zorder=5,
-                )
-                if label:
-                    # Add invisible scatter just for the legend entry
-                    ax.scatter([], [], c="gold", s=40, marker="s",
-                               edgecolors="darkgoldenrod", linewidths=0.8,
-                               alpha=0.45, label=label)
 
     # --- View window: follow current ego, 40 m half-range ---
     half = 40.0
@@ -444,14 +403,10 @@ def _run_simulation(
     yield None, emit("")
     yield None, emit("Starting TeraSim simulation…")
 
-    # Recorded NPZ neighbors (map frame, t=0 snapshot) — static overlay every frame
-    recorded_npcs = spawn.get("npcs", [])
-
     # Show GT trajectory before simulation starts
     n_steps = len(spawn["ego_future_map"])
     init_fig = _make_sim_figure(
         scene_geom, gt_ego_bl, [], [], [], 0, n_steps, map2bl, map_yaw0,
-        recorded_npcs=recorded_npcs,
     )
     yield init_fig, emit("  Waiting for episode to start…")
 
@@ -513,7 +468,6 @@ def _run_simulation(
                     result["npc_states"], result.get("vru_states", []),
                     step_idx + 1, n_steps,
                     map2bl, map_yaw0,
-                    recorded_npcs=recorded_npcs,
                 )
 
                 if not result["av_in_sim"]:

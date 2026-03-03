@@ -242,11 +242,54 @@ class TeraSimBridge:
             except Exception:
                 pass  # non-fatal; viz still works without trajectory overlay
 
+        # Spawn NPZ neighbor agents as SUMO background vehicles so the NDE/IDM
+        # model drives them from their recorded t=0 positions and speeds.
+        # Pedestrians (class=1) are skipped — TeraSim VRU pedestrian spawning
+        # is handled separately via traci.person.
+        npcs = spawn_states.get("npcs", [])
+        vehicle_npcs = [n for n in npcs if n.get("class", 0) != 1]
+        if vehicle_npcs:
+            self.spawn_npcs(vehicle_npcs)
+
         # Teleport AV to ground-truth t=0 position
         ego = spawn_states["ego"]
         self._send_agent_command(
             "AV", ego["x"], ego["y"], ego["sumo_angle"], ego["vx"]
         )
+
+    def spawn_npcs(self, npcs: list[dict]) -> None:
+        """Enqueue spawn_vehicle commands for a list of NPZ neighbor agents.
+
+        Each NPC is inserted into SUMO at its recorded t=0 position and speed.
+        The NDE/IDM model then controls them autonomously from the first tick
+        onwards — stationary agents (vx≈0) stay still until traffic conditions
+        cause them to move; moving agents drive under IDM/MOBIL.
+
+        Must be called after start_episode() (simulation in wait_for_tick state).
+        Pedestrians (class=1) should be filtered out before calling; this method
+        only handles vehicle-type agents.
+
+        Args:
+            npcs: List of NPC dicts as returned by npz_utils.extract_spawn_states().
+                  Each must have: x, y, sumo_angle, vx, and optionally class.
+        """
+        for npc in npcs:
+            payload = {
+                "agent_id":    npc["id"],
+                "agent_type":  "vehicle",
+                "command_type": "spawn_vehicle",
+                "data": {
+                    "position":   [float(npc["x"]), float(npc["y"])],
+                    "sumo_angle": float(npc["sumo_angle"]),
+                    "speed":      float(npc["vx"]),
+                    "type_id":    "car",
+                },
+            }
+            requests.post(
+                f"{self.service_url}/simulation/{self._sim_id}/agent_command",
+                json=payload,
+                timeout=5.0,
+            ).raise_for_status()
 
     def step(
         self, ego_xy: tuple, ego_yaw_rad: float, ego_speed: float = 0.0
