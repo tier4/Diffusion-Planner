@@ -442,19 +442,37 @@ class TeraSimBridge:
         av_in_sim = "AV" in vehicles
         npc_states = [
             {
-                "id":          k,
-                "x":           v["x"],
-                "y":           v["y"],
-                "sumo_angle":  v["sumo_angle"],
-                "speed":       v["speed"],
+                "id":         k,
+                "x":          v["x"],
+                "y":          v["y"],
+                "sumo_angle": v["sumo_angle"],
+                "speed":      v["speed"],
+                "length":     v.get("length", 4.5),
+                "width":      v.get("width", 2.0),
             }
             for k, v in vehicles.items()
             if k != "AV"
+        ]
+        # VRUs: pedestrians and cyclists managed by TeraSim's NDE model
+        vrus = new_state["agent_details"].get("vru", {})
+        vru_states = [
+            {
+                "id":         k,
+                "x":          v["x"],
+                "y":          v["y"],
+                "sumo_angle": v["sumo_angle"],
+                "speed":      v["speed"],
+                "length":     v.get("length", 0.5),
+                "width":      v.get("width", 0.5),
+                "type":       v.get("type", ""),
+            }
+            for k, v in vrus.items()
         ]
         return {
             "collision":  not av_in_sim,
             "av_in_sim":  av_in_sim,
             "npc_states": npc_states,
+            "vru_states": vru_states,
             "sim_time":   new_state["simulation_time"],
         }
 
