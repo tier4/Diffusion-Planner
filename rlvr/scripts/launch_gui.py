@@ -300,6 +300,7 @@ def _make_sim_figure(
     ego_length: float = 4.5,
     ego_width: float = 2.0,
     static_vehicle_overlay: list[dict] | None = None,
+    npc_dim_lookup: dict | None = None,
 ) -> Figure:
     """Render current simulation state in ego-centric frame with lane overlay.
 
@@ -326,11 +327,11 @@ def _make_sim_figure(
                                that arises from ego pitch/roll and non-zero height.
         ego_length:            Ego vehicle length from NPZ ego_shape (meters).
         ego_width:             Ego vehicle width from NPZ ego_shape (meters).
-        static_vehicle_overlay: All NPC vehicle dicts with NPZ positions and a
-                               ``_on_road`` bool flag (True = also spawned in SUMO).
-                               On-road vehicles drawn in blue, off-road in grey.
-                               All positions are from the NPZ — SUMO state positions
-                               are not used for display (keepRoute=0 snaps to lane).
+        static_vehicle_overlay: Off-road NPC dicts (not spawned in SUMO).
+                               Drawn as grey boxes at exact NPZ t=0 positions.
+        npc_dim_lookup:        {npc_id: (length, width)} from NPZ spawn states.
+                               Used to draw on-road SUMO vehicles with correct
+                               dimensions instead of the car vType defaults.
     """
     fig = Figure(figsize=(8, 8))
     ax = fig.add_subplot(111)
@@ -369,21 +370,28 @@ def _make_sim_figure(
     else:
         ex, ey = 0.0, 0.0
 
-    # --- All NPC vehicles drawn from original NPZ t=0 positions ---
-    # SUMO's keepRoute=0 snaps spawned vehicles to lane centers, producing
-    # wrong display positions.  For ghost replay the scene is static (recorded
-    # data), so all vehicles are always shown at their NPZ spawn positions.
-    # On-road vehicles (blue) are also simulated in SUMO for collision detection;
-    # off-road vehicles (grey) exist only as visual overlays.
+    # --- Off-road vehicles: static grey overlays at exact NPZ t=0 positions ---
+    # These are not in SUMO and never move.  Drawn before on-road so blue
+    # boxes are rendered on top when both lists overlap visually.
     for npc in (static_vehicle_overlay or []):
         nxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map)[0]
         npc_yaw_bl = math.radians(90.0 - npc.get("sumo_angle", 0.0)) - map_yaw0
-        on_road = npc.get("_on_road", False)
         _draw_agent_box(ax, float(nxy[0]), float(nxy[1]), npc_yaw_bl,
                         npc.get("length", 4.5), npc.get("width", 2.0),
-                        facecolor="royalblue" if on_road else "slategray",
-                        edgecolor="navy" if on_road else "dimgray",
-                        alpha=0.75 if on_road else 0.6, zorder=8)
+                        facecolor="slategray", edgecolor="dimgray",
+                        alpha=0.6, zorder=7)
+
+    # --- On-road vehicles from SUMO state (NDE-driven, move over time) ---
+    # Dimensions from NPZ lookup: SUMO only reports the car vType defaults.
+    _dim_lut = npc_dim_lookup or {}
+    for npc in npc_current:
+        nxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map)[0]
+        npc_yaw_bl = math.radians(90.0 - npc.get("sumo_angle", 0.0)) - map_yaw0
+        length, width = _dim_lut.get(npc["id"], (npc.get("length", 4.5), npc.get("width", 2.0)))
+        _draw_agent_box(ax, float(nxy[0]), float(nxy[1]), npc_yaw_bl,
+                        length, width,
+                        facecolor="royalblue", edgecolor="navy",
+                        alpha=0.75, zorder=8)
 
     # --- VRU agents from SUMO state (cyclists etc.) ---
     for vru in vru_current:
@@ -420,12 +428,10 @@ def _make_sim_figure(
 
     t_s = step * 0.1
     total_s = total_steps * 0.1
-    overlay = static_vehicle_overlay or []
-    n_on  = sum(1 for v in overlay if v.get("_on_road"))
-    n_off = sum(1 for v in overlay if not v.get("_on_road"))
+    n_off = len(static_vehicle_overlay) if static_vehicle_overlay else 0
     ax.set_title(
         f"Step {step}/{total_steps}  ({t_s:.1f}s / {total_s:.1f}s)  "
-        f"Veh (on-road): {n_on}  Off-road: {n_off}  Ped: {len(ped_map_positions)}"
+        f"Veh: {len(npc_current)}  Off-road: {n_off}  Ped: {len(ped_map_positions)}"
     )
     ax.legend(loc="upper left", fontsize=8)
     ax.set_xlabel("X [m] (ego-centric)")
@@ -515,23 +521,22 @@ def _run_simulation(
         # which produces wrong positions and can crash SUMO.
         all_npcs = spawn["npcs"]
         all_vehicles = [n for n in all_npcs if n.get("class", 0) != 1]
+        # 5 m threshold: only spawn vehicles that are actually on a road lane.
+        # Vehicles in parking lots / on sidewalks are typically >5 m from any
+        # lane centerline and would be snapped to a wrong road position by
+        # SUMO's keepRoute=0.  They are shown as static grey overlays instead.
         vehicles_on_lane, vehicles_off_lane = _filter_npcs_on_lane(
-            all_vehicles, scene_data, map2bl, ego_z_map, max_dist=30.0,
+            all_vehicles, scene_data, map2bl, ego_z_map, max_dist=5.0,
         )
-        # Tag each vehicle so _make_sim_figure can colour on-road vs off-road.
-        # All vehicles are visualised at their original NPZ t=0 positions —
-        # SUMO's keepRoute=0 snaps spawned vehicles to lane centres so the
-        # SUMO state positions are not used for display.
-        on_ids = {n["id"] for n in vehicles_on_lane}
-        all_vehicles_overlay = [
-            dict(n, _on_road=(n["id"] in on_ids)) for n in all_vehicles
-        ]
+        # NPZ dimension lookup for on-road vehicles: SUMO state only reports
+        # the car vType defaults (4.5 m × 1.8 m), not the actual agent shape.
+        npc_dim_lookup = {n["id"]: (n["length"], n["width"]) for n in all_vehicles}
 
         spawn = dict(spawn)
         spawn["npcs"] = vehicles_on_lane
         yield None, emit(
             f"  Vehicles on-road (SUMO): {len(vehicles_on_lane)} / {len(all_vehicles)}  "
-            f"off-road (overlay only): {len(vehicles_off_lane)}"
+            f"off-road (static overlay): {len(vehicles_off_lane)}"
         )
     except Exception as e:
         yield None, emit(f"ERROR loading scene geometry: {e}")
@@ -554,7 +559,8 @@ def _run_simulation(
         scene_geom, gt_ego_bl, [], [], [], ped_map_positions,
         0, n_steps, map2bl, map_yaw0, ego_z_map,
         ego_length=ego_length, ego_width=ego_width,
-        static_vehicle_overlay=all_vehicles_overlay,
+        static_vehicle_overlay=vehicles_off_lane,
+        npc_dim_lookup=npc_dim_lookup,
     )
     yield init_fig, emit("  Waiting for episode to start…")
 
@@ -618,7 +624,8 @@ def _run_simulation(
                     step_idx + 1, n_steps,
                     map2bl, map_yaw0, ego_z_map,
                     ego_length=ego_length, ego_width=ego_width,
-                    static_vehicle_overlay=all_vehicles_overlay,
+                    static_vehicle_overlay=vehicles_off_lane,
+                    npc_dim_lookup=npc_dim_lookup,
                 )
 
                 if not result["av_in_sim"]:
