@@ -1,10 +1,106 @@
 import torch
 import torch.nn.functional as F
 
-from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_KEEP
+from diffusion_planner.dimensions import INPUT_T, OUTPUT_T, TURN_INDICATOR_OUTPUT_KEEP
 from diffusion_planner.model.guidance.collision import center_rect_to_points
 
 _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
+
+
+# ---------------------------------------------------------------------------
+# Velocity (delta) representation utilities  (HDP paper, Section IV-B)
+# ---------------------------------------------------------------------------
+
+def waypoints_to_velocity(waypoints: torch.Tensor) -> torch.Tensor:
+    """Convert absolute waypoints to per-frame displacement (velocity).
+
+    Only the position channels (first 2) are converted to finite differences;
+    heading channels (cos, sin) are taken from the destination frame.
+
+    Args:
+        waypoints: [..., T+1, D] where D >= 2.  The first two channels are (x, y).
+
+    Returns:
+        velocity: [..., T, D].  velocity[..., i, :2] = waypoints[..., i+1, :2] - waypoints[..., i, :2].
+    """
+    assert waypoints.shape[-2] == OUTPUT_T + 1, "Expected waypoints shape [..., T+1, D]"
+    vel_pos = torch.diff(waypoints[..., :2], dim=-2)  # [..., T, 2]
+    if waypoints.shape[-1] > 2:
+        return torch.cat([vel_pos, waypoints[..., 1:, 2:]], dim=-1)
+    return vel_pos
+
+
+def velocity_to_waypoints(velocity: torch.Tensor) -> torch.Tensor:
+    """Integrate per-frame displacement back to absolute waypoints (cumulative sum).
+
+    Args:
+        velocity: [..., T, D].  First two channels are (dx, dy).
+
+    Returns:
+        waypoints: [..., T, D].
+    """
+    pos = torch.cumsum(velocity[..., :2], dim=-2)
+    if velocity.shape[-1] > 2:
+        return torch.cat([pos, velocity[..., 2:]], dim=-1)
+    return pos
+
+
+def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
+    """Compute waypoints from velocity with gradient detach window.
+
+    This implements Algorithm 1 from the HDP paper appendix.
+    Gradients only flow through a sliding window of size *W* so that the
+    position loss does not cause gradient accumulation over the full horizon.
+
+    Args:
+        v: [..., T, 2] predicted displacement (position channels only).
+        W: gradient detach window size.
+
+    Returns:
+        waypoints: [..., T, 2] integrated positions.
+    """
+    # Fully-detached cumsum shifted by W
+    wpt_sg = torch.cumsum(v.detach(), dim=-2)               # [..., T, 2]
+    shift_sg = torch.roll(wpt_sg, shifts=W, dims=-2)
+    shift_sg[..., :W, :] = 0.0
+
+    # Live cumsum (gradients flow)
+    wpt = torch.cumsum(v, dim=-2)                            # [..., T, 2]
+    shift = torch.roll(wpt, shifts=W, dims=-2)
+    shift[..., :W, :] = 0.0
+
+    return wpt + shift_sg - shift
+
+
+def hybrid_loss(
+    pred_v: torch.Tensor,
+    gt_v: torch.Tensor,
+    omega: float,
+    W: int,
+) -> torch.Tensor:
+    """Compute hybrid velocity + waypoint loss per the HDP paper (Eq. 5).
+
+    Args:
+        pred_v: [..., T, D] predicted per-frame displacement (D >= 2).
+        gt_v:   [..., T, D] ground-truth per-frame displacement.
+        omega:  balancing weight for the waypoint loss term.
+        W:      gradient detach window size for waypoint loss.
+
+    Returns:
+        loss: [..., T] per-timestep loss (velocity L2 + omega * waypoint L2).
+    """
+    # Velocity loss on all D channels
+    l_v = torch.sum((pred_v - gt_v) ** 2, dim=-1)  # [..., T]
+
+    if omega <= 0.0:
+        return l_v
+
+    # Waypoint loss only on position channels
+    pred_pos = _detached_integral(pred_v[..., :2], W)       # [..., T, 2]
+    gt_pos = torch.cumsum(gt_v[..., :2], dim=-2)            # [..., T, 2]
+    l_wpt = torch.sum((pred_pos - gt_pos) ** 2, dim=-1)     # [..., T]
+
+    return l_v + omega * l_wpt
 
 
 def make_turn_indicator_gt(

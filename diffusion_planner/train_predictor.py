@@ -108,6 +108,27 @@ def get_args():
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
+    # Velocity representation & hybrid loss (HDP paper, Section IV-B)
+    parser.add_argument(
+        "--use_velocity_representation",
+        type=boolean,
+        default=False,
+        help="Output trajectory as per-frame displacement instead of absolute waypoints",
+    )
+    parser.add_argument(
+        "--hybrid_loss_omega",
+        type=float,
+        default=0.1,
+        help="Weight for waypoint loss term in hybrid loss (omega in the paper)",
+    )
+    parser.add_argument(
+        "--hybrid_loss_window",
+        type=int,
+        default=10,
+        help="Gradient detach window size W for the waypoint loss term",
+    )
+
+    parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
     parser.add_argument("--use_ema", default=True, type=boolean)

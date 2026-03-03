@@ -11,8 +11,11 @@ from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
+    hybrid_loss,
     loss_func,
     make_turn_indicator_gt,
+    velocity_to_waypoints,
+    waypoints_to_velocity,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
@@ -59,6 +62,9 @@ def compute_training_loss(
 ):
     norm = args.state_normalizer
     model_type = args.diffusion_model_type
+    use_velocity = args.use_velocity_representation
+    hybrid_omega = args.hybrid_loss_omega
+    hybrid_window = args.hybrid_loss_window
 
     ego_future, neighbors_future, neighbor_future_mask = futures
     neighbors_future_valid = ~neighbor_future_mask  # [B, Pn, V]
@@ -93,7 +99,14 @@ def compute_training_loss(
     curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=gt_future.device))
     t = torch.where(prefix_mask, curr_mask_time, t)
 
-    all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
+    # Convert to velocity representation if enabled
+    if use_velocity:
+        full_traj = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, T+1, 4]
+        gt_velocity = waypoints_to_velocity(full_traj)  # [B, P, T, 4]
+        gt_velocity[:, 1:][neighbor_future_mask] = 0.0
+        all_gt = torch.cat([current_states[:, :, None, :], norm(gt_velocity)], dim=2)
+    else:
+        all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
 
     if model_type == "x_start":
@@ -114,58 +127,46 @@ def compute_training_loss(
         _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
 
-        # dpm_loss = torch.sum((model_output - all_gt[:, :, 1:, :]) ** 2, dim=-1)
-        loss_dict = loss_func(model_output, all_gt[:, :, 1:, :])
-        heading_l2_loss = loss_dict["heading_l2_loss"]  # [B, P, T]
-        position_lat_loss = loss_dict["position_lat_loss"]  # [B, P, T]
-        position_lon_loss = loss_dict["position_lon_loss"]  # [B, P, T]
+        gt_target = all_gt[:, :, 1:, :]  # [B, P, T, 4]
 
-        # velocity weight
-        velocity_weight = longitudinal_velocity * args.coeff_velocity
-        velocity_weight = torch.abs(velocity_weight)
-        velocity_weight = torch.clamp_min(velocity_weight, 1.0)
-        velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
-        position_lon_loss = position_lon_loss / velocity_weight
+        if use_velocity:
+            # Hybrid loss: velocity L2 + omega * waypoint L2 (with detach window)
+            dpm_loss = hybrid_loss(
+                model_output,
+                gt_target,
+                omega=hybrid_omega,
+                W=hybrid_window,
+            )  # [B, P, T]
+        else:
+            loss_dict = loss_func(model_output, gt_target)
+            heading_l2_loss = loss_dict["heading_l2_loss"]  # [B, P, T]
+            position_lat_loss = loss_dict["position_lat_loss"]  # [B, P, T]
+            position_lon_loss = loss_dict["position_lon_loss"]  # [B, P, T]
 
-        # timestep weight
-        timestep_weight = args.coeff_timestep
-        assert T % len(timestep_weight) == 0, (
-            f"Timestep {T} is not divisible by the number of timestep weights {len(timestep_weight)}"
-        )
-        unit = T // len(timestep_weight)
-        for i in range(len(timestep_weight)):
-            position_lat_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
-            position_lon_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
-            heading_l2_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+            # velocity weight
+            velocity_weight = longitudinal_velocity * args.coeff_velocity
+            velocity_weight = torch.abs(velocity_weight)
+            velocity_weight = torch.clamp_min(velocity_weight, 1.0)
+            velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
+            position_lon_loss = position_lon_loss / velocity_weight
 
-        # mask neighbors' heading loss
-        # heading_l2_loss[:, 1:] *= 0.0
+            # timestep weight
+            timestep_weight = args.coeff_timestep
+            assert T % len(timestep_weight) == 0, (
+                f"Timestep {T} is not divisible by the number of timestep weights {len(timestep_weight)}"
+            )
+            unit = T // len(timestep_weight)
+            for i in range(len(timestep_weight)):
+                position_lat_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+                position_lon_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
+                heading_l2_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
 
-        dpm_loss = (
-            args.coeff_position_lat_loss * position_lat_loss
-            + args.coeff_position_lon_loss * position_lon_loss
-            + args.coeff_heading_l2_loss * heading_l2_loss
-        )  # [B, P, T]
+            dpm_loss = (
+                args.coeff_position_lat_loss * position_lat_loss
+                + args.coeff_position_lon_loss * position_lon_loss
+                + args.coeff_heading_l2_loss * heading_l2_loss
+            )  # [B, P, T]
 
-        # Dreamer V4 weighting
-        # w = 0.9 * (1.0 - t[:, :, 1:, 0]) + 0.1  # [B, P, T]
-        # dpm_loss = dpm_loss * w
-
-        # Theoretically, we should not compute loss on the prefix part
-        # but empirically, it is better to include them.
-        # dpm_loss[prefix_mask[:, :, 1:, 0]] = 0.0
-
-        # safety_penalty, safety_logs, _ = compute_safety_penalty(
-        #     model_output,
-        #     inputs,
-        #     neighbors_future,
-        #     neighbors_future_valid,
-        #     args,
-        #     return_components=True,
-        # )
-        # if safety_penalty is not None:
-        #     dpm_loss[:, 0, :] = dpm_loss[:, 0, :] + safety_penalty
-        #     safety_loss_terms.update(safety_logs)
     elif model_type == "flow_matching":
         # t=0 is noise, t=1 is data
         t = t.reshape(-1, *([1] * (len(all_gt.shape) - 1)))  # [B, 1, 1, 1]
@@ -204,10 +205,16 @@ def compute_training_loss(
         args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
     )
     if need_ego_edge:
-        ego_pred_world = model_output[:, 0] * norm.std[0].to(model_output.device) + norm.mean[0].to(
+        ego_pred_norm = model_output[:, 0]  # [B, T, 4]
+        if use_velocity:
+            # Convert velocity -> waypoints before denormalization
+            ego_pred_norm = velocity_to_waypoints(ego_pred_norm)
+        ego_pred_world = ego_pred_norm * norm.std[0].to(model_output.device) + norm.mean[0].to(
             model_output.device
         )  # [B, T, 4]
-        ego_edge_points = compute_ego_edge_points(ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp)
+        ego_edge_points = compute_ego_edge_points(
+            ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp
+        )
         denorm_inputs = args.observation_normalizer.inverse(inputs)
 
     # Road border collision loss (ego only, x_start mode)
@@ -281,8 +288,9 @@ class Decoder(nn.Module):
         self._guidance_fn = (
             config.guidance_fn if config.__dict__.get("guidance_fn") is not None else None
         )
-        self._guidance_scale: float = getattr(config, "guidance_scale", 0.5)
+        self._guidance_scale = config.guidance_scale
         self._model_type = config.diffusion_model_type
+        self._use_velocity = config.use_velocity_representation
 
         # Initialize transformer layers:
         def _basic_init(m):
@@ -405,6 +413,8 @@ class Decoder(nn.Module):
         ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
         x = self._state_normalizer.inverse(x)[:, :, 1:]
+        if self._use_velocity:
+            x = velocity_to_waypoints(x)
         return {"prediction": x, "turn_indicator_logit": turn_indicator_logit}
 
     def _inference_x_start(
@@ -479,11 +489,12 @@ class Decoder(nn.Module):
 
         x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
 
-        x0 = x0.reshape(B, P, (1 + self._future_len) * 4)
-        x = x0.reshape(B, P, (1 + self._future_len), 4)
-        ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
+        x0 = x0.reshape(B, P, (1 + self._future_len), 4)
+        ego_trajectory = x0[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
-        x0 = self._state_normalizer.inverse(x0.reshape(B, P, -1, 4))[:, :, 1:]
+        x0 = self._state_normalizer.inverse(x0)[:, :, 1:]
+        if self._use_velocity:
+            x0 = velocity_to_waypoints(x0)
 
         return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
 
