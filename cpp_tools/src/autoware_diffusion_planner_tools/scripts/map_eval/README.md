@@ -48,7 +48,7 @@ For a polyline pair A and B:
 
 ## Outputs
 
-`compare_maps.py` writes:
+`compare_map.py` writes:
 
 - `metrics_summary.json`
 - `metrics_summary.csv`

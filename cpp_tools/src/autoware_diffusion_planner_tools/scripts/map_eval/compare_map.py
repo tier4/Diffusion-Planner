@@ -189,6 +189,8 @@ def match_geometry_only(
         best_score = float("inf")
         ref_indices = np.where(valid_mask_matrix[i])[0]
         for j in ref_indices:
+            if j in used_ref:
+                continue
             p_ref = points3_to_np(ref_items[j]["points"])
             score = symmetric_distance_stats(p_i, p_ref)["symmetric_chamfer_like"]
             if score < best_score:
