@@ -2,6 +2,7 @@
 set -eux
 
 cd $(dirname $0)/..
+ROOT_DIR=$(pwd)
 converter_type=${1}  # python or cpp
 
 result_dir=/mnt/nvme0/sakoda/test/$(date +%Y%m%d_%H%M%S)_test_${converter_type}
@@ -28,7 +29,7 @@ if [ "$converter_type" = "python" ]; then
         2>&1 | tee $result_dir/result_$(date +%Y%m%d_%H%M%S).txt
 elif [ "$converter_type" = "cpp" ]; then
     python3 ./ros_scripts/parse_rosbag_by_cpp.py \
-        $HOME/autoware/build/autoware_diffusion_planner/data_converter \
+        ${ROOT_DIR}/cpp_tools/build/autoware_diffusion_planner_tools/data_converter \
         ${bag} \
         ${map} \
         ${npz_dir} \
