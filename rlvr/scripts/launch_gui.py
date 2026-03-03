@@ -2,14 +2,15 @@
 """
 TeraSim Ghost Replay Launcher GUI.
 
-Simple Gradio interface for browsing a JSON list of NPZ samples and
-launching ghost replay simulations in TeraSim.  Designed to be extended
-later with GRPO / model-inference panels.
+Gradio interface for browsing NPZ samples and running ghost replay simulations
+with live in-browser visualization.  Scene preview uses the diffusion_planner
+visualize_inputs utility (ego-centric frame).  Simulation visualization renders
+the live state in MGRS map frame, updating step-by-step in the same window.
 
 Usage:
     source .venv/bin/activate
     python3 rlvr/scripts/launch_gui.py \\
-        --npz_list /media/danielsanchez/.../dpo-npz.json
+        --npz_list /media/danielsanchez/.../path_list.json
 
 Opens at http://localhost:7861
 """
@@ -21,6 +22,9 @@ import time
 from pathlib import Path
 
 import gradio as gr
+import numpy as np
+from matplotlib.collections import LineCollection
+from matplotlib.figure import Figure
 
 # ---------------------------------------------------------------------------
 # Repo paths
@@ -29,8 +33,9 @@ _REPO_ROOT = Path(__file__).parents[2]
 _SIM_CONFIG_DIR = _REPO_ROOT / "rlvr" / "sim_config"
 _DEFAULT_FCD_DIR = str(Path.home() / "terasim_fcd")
 
+
 # ---------------------------------------------------------------------------
-# Lazy imports for the rlvr package (avoids slow TeraSim startup at module load)
+# Lazy imports (avoids slow startup at module load)
 # ---------------------------------------------------------------------------
 def _get_bridge_and_utils():
     from rlvr.npz_utils import extract_spawn_states
@@ -68,138 +73,502 @@ def _sample_info(npz_path: str) -> str:
         return f"Could not load: {e}"
 
 
+def _load_scene_figure(npz_path: str, view_range: int = 60) -> Figure:
+    """Load NPZ file and render the driving scene as a matplotlib Figure.
+
+    Renders lanes, route, neighbor agents, and ego vehicle in the ego-centric
+    coordinate frame (base_link at t=0) using diffusion_planner.utils.visualize_input.
+    Uses load_npz_data to ensure heading conversions (goal_pose, ego_agent_past)
+    are applied before visualization.
+    """
+    import torch
+    from diffusion_planner.utils.visualize_input import visualize_inputs
+    from preference_optimization.utils import load_npz_data
+
+    fig = Figure(figsize=(8, 8))
+    ax = fig.add_subplot(111)
+
+    try:
+        data = load_npz_data(npz_path, torch.device("cpu"))
+
+        # visualize_inputs handles tensor→numpy conversion internally
+        visualize_inputs(data, ax=ax, view_ranges=[view_range])
+        ax.set_title(Path(npz_path).name, fontsize=9)
+
+    except Exception as e:
+        ax.text(
+            0.5, 0.5, f"Scene preview error:\n{e}",
+            ha="center", va="center", transform=ax.transAxes,
+            fontsize=9,
+        )
+        ax.set_axis_off()
+
+    return fig
+
+
+def _extract_scene_geometry(scene_data: dict) -> dict:
+    """Pre-extract lane and route boundary segments from NPZ scene data.
+
+    Extracts left/right lane boundaries and route centerlines as lists of (N, 2)
+    numpy arrays in the ego-centric frame.  Called once before the simulation
+    loop so the geometry can be cheaply redrawn each step.
+
+    Args:
+        scene_data: Dict of tensors/arrays as returned by load_npz_data.
+
+    Returns:
+        Dict with keys:
+          "lane_segs"  — list of (20, 2) arrays, lane left/right boundaries
+          "route_segs" — list of (20, 2) arrays, route centerlines
+    """
+    import torch
+
+    def _to_np(v):
+        return v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else v
+
+    lane_segs = []
+    if "lanes" in scene_data:
+        lanes = _to_np(scene_data["lanes"])[0]  # (140, 20, 33)
+        for i in range(lanes.shape[0]):
+            cx, cy = lanes[i, :, 0], lanes[i, :, 1]
+            if np.all(cx == 0) and np.all(cy == 0):
+                continue
+            # Left boundary: centerline + lateral offset (cols 4, 5)
+            lx = cx + lanes[i, :, 4]
+            ly = cy + lanes[i, :, 5]
+            lane_segs.append(np.column_stack([lx, ly]))
+            # Right boundary: centerline + lateral offset (cols 6, 7)
+            rx = cx + lanes[i, :, 6]
+            ry = cy + lanes[i, :, 7]
+            lane_segs.append(np.column_stack([rx, ry]))
+
+    route_segs = []
+    if "route_lanes" in scene_data:
+        route = _to_np(scene_data["route_lanes"])[0]  # (25, 20, 33)
+        for i in range(route.shape[0]):
+            cx, cy = route[i, :, 0], route[i, :, 1]
+            if np.all(cx == 0) and np.all(cy == 0):
+                continue
+            route_segs.append(np.column_stack([cx, cy]))
+
+    return {"lane_segs": lane_segs, "route_segs": route_segs}
+
+
+def _map_to_ego(xy_map: np.ndarray, map2bl: np.ndarray) -> np.ndarray:
+    """Transform (N, 2) MGRS map-frame positions to ego-centric frame.
+
+    Args:
+        xy_map:  (N, 2) positions in MGRS map frame
+        map2bl:  (4, 4) inverse of bl2map — map frame → base_link transform
+
+    Returns:
+        (N, 2) positions in ego-centric frame
+    """
+    n = len(xy_map)
+    pts_h = np.column_stack([xy_map, np.zeros(n), np.ones(n)])  # (N, 4)
+    pts_bl = (map2bl @ pts_h.T).T                                # (N, 4)
+    return pts_bl[:, :2]
+
+
+def _draw_agent_box(
+    ax,
+    cx: float, cy: float,
+    heading_bl: float,
+    length: float, width: float,
+    facecolor: str, edgecolor: str,
+    alpha: float = 0.75,
+    zorder: int = 8,
+) -> None:
+    """Draw a rotated bounding-box rectangle for a single agent.
+
+    Args:
+        ax:          Matplotlib axis.
+        cx, cy:      Agent centre in ego-centric frame.
+        heading_bl:  Heading in ego-centric frame (radians, CCW from +X).
+        length:      Agent length along heading axis (meters).
+        width:       Agent width perpendicular to heading (meters).
+        facecolor:   Fill colour.
+        edgecolor:   Border colour.
+        alpha:       Transparency.
+        zorder:      Drawing order.
+    """
+    from matplotlib.patches import Polygon as MplPolygon
+
+    cos_h = math.cos(heading_bl)
+    sin_h = math.sin(heading_bl)
+    hl, hw = length / 2.0, width / 2.0
+
+    # Four corners in body frame, rotated to world frame
+    corners = [
+        (cx + hl * cos_h - hw * sin_h, cy + hl * sin_h + hw * cos_h),
+        (cx + hl * cos_h + hw * sin_h, cy + hl * sin_h - hw * cos_h),
+        (cx - hl * cos_h + hw * sin_h, cy - hl * sin_h - hw * cos_h),
+        (cx - hl * cos_h - hw * sin_h, cy - hl * sin_h + hw * cos_h),
+    ]
+    ax.add_patch(MplPolygon(
+        corners, closed=True,
+        facecolor=facecolor, edgecolor=edgecolor,
+        alpha=alpha, linewidth=0.8, zorder=zorder,
+    ))
+    # Front indicator line
+    ax.plot(
+        [cx, cx + (hl * 0.6) * cos_h],
+        [cy, cy + (hl * 0.6) * sin_h],
+        color=edgecolor, linewidth=1.2, alpha=alpha, zorder=zorder + 1,
+    )
+
+
+def _make_sim_figure(
+    scene_geom: dict,
+    gt_ego_bl: np.ndarray,
+    ego_history_map: list[tuple[float, float, float]],
+    npc_current: list[dict],
+    vru_current: list[dict],
+    step: int,
+    total_steps: int,
+    map2bl: np.ndarray,
+    map_yaw0: float,
+    recorded_npcs: list[dict] | None = None,
+) -> Figure:
+    """Render current simulation state in ego-centric frame with lane overlay.
+
+    Draws the lane/route geometry from the NPZ (static background), the
+    ground-truth ego trajectory, the live ego path history, current NPC
+    vehicle bounding boxes (blue, from TeraSim), VRU markers (orange), and
+    the recorded NPZ neighbor agents at t=0 as a static gold overlay —
+    all in the ego-centric frame (base_link at t=0).
+
+    Args:
+        scene_geom:       Pre-extracted lane/route segments (from _extract_scene_geometry).
+        gt_ego_bl:        (80, 3) GT ego trajectory [x, y, yaw_rad] in ego-centric frame.
+        ego_history_map:  List of (x, y, yaw_rad) in MGRS map frame — one per completed step.
+        npc_current:      Vehicle state dicts from sim.step() result (map frame, not AV).
+        vru_current:      VRU state dicts from sim.step() result (map frame).
+        step:             Current step index (0-based, used for title).
+        total_steps:      Total number of GT steps.
+        map2bl:           (4, 4) map→ego-centric transform (inverse of bl2map).
+        map_yaw0:         Ego heading in map frame at t=0 (radians).
+        recorded_npcs:    Optional list of NPZ neighbor agent dicts (map frame, t=0 snapshot).
+                          Drawn as faded gold boxes — shows what was recorded in the rosbag.
+    """
+    fig = Figure(figsize=(8, 8))
+    ax = fig.add_subplot(111)
+
+    # --- Static background: lane boundaries ---
+    if scene_geom["lane_segs"]:
+        lc = LineCollection(
+            scene_geom["lane_segs"], colors="gray", alpha=0.3, linewidths=0.8, zorder=1
+        )
+        ax.add_collection(lc)
+
+    # --- Static background: route centerlines ---
+    for seg in scene_geom["route_segs"]:
+        ax.plot(seg[:, 0], seg[:, 1], color="olive", alpha=0.5,
+                linewidth=2.0, linestyle="--", zorder=2)
+
+    # --- GT trajectory (ego-centric, from NPZ) ---
+    ax.plot(
+        gt_ego_bl[:, 0], gt_ego_bl[:, 1],
+        color="green", linestyle="--", alpha=0.45, linewidth=1.5,
+        label="GT", zorder=3,
+    )
+
+    # --- Live ego path history (transform map→ego-centric) ---
+    if ego_history_map:
+        xy_map = np.array([[p[0], p[1]] for p in ego_history_map])
+        xy_bl = _map_to_ego(xy_map, map2bl)
+        if len(xy_bl) > 1:
+            ax.plot(xy_bl[:, 0], xy_bl[:, 1], color="red",
+                    linewidth=2.5, alpha=0.85, zorder=6)
+        ex, ey = float(xy_bl[-1, 0]), float(xy_bl[-1, 1])
+        eyaw_map = ego_history_map[-1][2]
+        eyaw_bl = eyaw_map - map_yaw0
+        _draw_agent_box(ax, ex, ey, eyaw_bl, 4.5, 2.0,
+                        facecolor="red", edgecolor="darkred", alpha=0.85, zorder=10)
+    else:
+        ex, ey = 0.0, 0.0
+
+    # --- NPC vehicles (transform map→ego-centric, draw bounding boxes) ---
+    for npc in npc_current:
+        nxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl)[0]
+        npc_yaw_bl = math.radians(90.0 - npc.get("sumo_angle", 0.0)) - map_yaw0
+        _draw_agent_box(ax, float(nxy[0]), float(nxy[1]), npc_yaw_bl,
+                        npc.get("length", 4.5), npc.get("width", 2.0),
+                        facecolor="royalblue", edgecolor="navy", alpha=0.75, zorder=8)
+
+    # --- VRU agents: pedestrians / cyclists ---
+    for vru in vru_current:
+        nxy = _map_to_ego(np.array([[vru["x"], vru["y"]]]), map2bl)[0]
+        vru_yaw_bl = math.radians(90.0 - vru.get("sumo_angle", 0.0)) - map_yaw0
+        # Pedestrians are very small — use a circle marker; cyclists slightly larger box
+        length = vru.get("length", 0.5)
+        width  = vru.get("width",  0.5)
+        if length < 1.0:
+            # Pedestrian — circle
+            ax.scatter([float(nxy[0])], [float(nxy[1])],
+                       c="darkorange", s=60, alpha=0.9,
+                       edgecolors="saddlebrown", linewidths=1.0, zorder=9, marker="o")
+        else:
+            # Cyclist / small vehicle
+            _draw_agent_box(ax, float(nxy[0]), float(nxy[1]), vru_yaw_bl,
+                            length, width,
+                            facecolor="darkorange", edgecolor="saddlebrown",
+                            alpha=0.75, zorder=9)
+
+    # --- Recorded NPZ neighbor agents (static t=0 snapshot from rosbag) ---
+    # Drawn in faded gold so the user can see what was in the recording even
+    # when TeraSim's NDE hasn't yet spawned live traffic near the ego.
+    if recorded_npcs:
+        _recorded_label_added = False
+        for npc in recorded_npcs:
+            npc_class = npc.get("class", 0)  # 0=vehicle, 1=pedestrian, 2=bicycle
+            # recorded npcs have yaw_rad in map frame
+            npc_yaw_bl = npc["yaw_rad"] - map_yaw0
+            # Transform map-frame position to ego-centric
+            rxy = _map_to_ego(np.array([[npc["x"], npc["y"]]]), map2bl)[0]
+            label = "Recorded NPCs" if not _recorded_label_added else None
+            _recorded_label_added = True
+            if npc_class == 1:
+                # Pedestrian — small gold circle
+                ax.scatter(
+                    [float(rxy[0])], [float(rxy[1])],
+                    c="gold", s=40, alpha=0.55,
+                    edgecolors="darkgoldenrod", linewidths=0.8,
+                    zorder=5, marker="o", label=label,
+                )
+            else:
+                # Vehicle or bicycle — gold bounding box
+                length = npc.get("length", 4.5 if npc_class == 0 else 1.8)
+                width  = npc.get("width",  1.8 if npc_class == 0 else 0.7)
+                _draw_agent_box(
+                    ax, float(rxy[0]), float(rxy[1]), npc_yaw_bl,
+                    length, width,
+                    facecolor="gold", edgecolor="darkgoldenrod",
+                    alpha=0.45, zorder=5,
+                )
+                if label:
+                    # Add invisible scatter just for the legend entry
+                    ax.scatter([], [], c="gold", s=40, marker="s",
+                               edgecolors="darkgoldenrod", linewidths=0.8,
+                               alpha=0.45, label=label)
+
+    # --- View window: follow current ego, 40 m half-range ---
+    half = 40.0
+    ax.set_xlim(ex - half, ex + half)
+    ax.set_ylim(ey - half, ey + half)
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.25)
+
+    t_s = step * 0.1
+    total_s = total_steps * 0.1
+    ax.set_title(
+        f"Step {step}/{total_steps}  ({t_s:.1f}s / {total_s:.1f}s)  "
+        f"Veh: {len(npc_current)}  VRU: {len(vru_current)}"
+    )
+    ax.legend(loc="upper left", fontsize=8)
+    ax.set_xlabel("X [m] (ego-centric)")
+    ax.set_ylabel("Y [m] (ego-centric)")
+
+    return fig
+
+
 def _run_simulation(
     npz_path: str,
-    use_gui: bool,
-    use_viz: bool,
     use_fcd: bool,
     fcd_dir: str,
     step_delay: float,
 ):
+    """Generator: yields (sim_figure, log_text) while running the ghost replay.
+
+    Called by Gradio on button click.  Streams step-by-step updates to the
+    simulation plot and the log textbox.
     """
-    Generator: yields log lines while running the ghost replay.
-    Called by Gradio on button click; output streams to the log textbox.
-    """
+    import torch
+    from preference_optimization.utils import load_npz_data
+    from rlvr.npz_utils import load_bl2map
+
     extract_spawn_states, TeraSimBridge = _get_bridge_and_utils()
 
     json_path = npz_path.replace(".npz", ".json")
-
     log = ""
+    ego_history: list[tuple[float, float, float]] = []
 
-    def emit(line: str):
+    def emit(line: str) -> str:
         nonlocal log
         log += line + "\n"
         return log
 
-    yield emit(f"NPZ:  {npz_path}")
-    yield emit(f"JSON: {json_path}")
-    yield emit("")
+    yield None, emit(f"NPZ:  {npz_path}")
+    yield None, emit(f"JSON: {json_path}")
+    yield None, emit("")
 
     # --- Extract spawn states ---
-    yield emit("Extracting spawn states…")
+    yield None, emit("Extracting spawn states…")
     try:
         spawn = extract_spawn_states(npz_path, json_path)
     except Exception as e:
-        yield emit(f"ERROR: {e}")
+        yield None, emit(f"ERROR: {e}")
         return
 
     ego = spawn["ego"]
-    yield emit(
+    yield None, emit(
         f"  Ego t=0:  x={ego['x']:.2f}  y={ego['y']:.2f}  "
         f"yaw={math.degrees(ego['yaw_rad']):.1f}°  "
         f"speed={ego['vx']:.2f} m/s"
     )
-    yield emit(f"  Active NPCs: {len(spawn['npcs'])}")
+    yield None, emit(f"  Active NPCs: {len(spawn['npcs'])}")
 
-    if use_gui:
-        yield emit("GUI mode: sumo-gui will open on your desktop.")
-        yield emit("  (If no window appears, run:  xhost +local:docker)")
-    if use_viz:
-        yield emit("Dash visualizer: http://localhost:8050")
+    # --- Pre-compute static scene geometry (done once, reused every frame) ---
+    yield None, emit("Loading scene geometry…")
+    try:
+        scene_data = load_npz_data(npz_path, torch.device("cpu"))
+        scene_geom = _extract_scene_geometry(scene_data)
+        bl2map = load_bl2map(json_path)
+        map2bl = np.linalg.inv(bl2map)
+        map_yaw0 = float(np.arctan2(bl2map[1, 0], bl2map[0, 0]))
+        # GT trajectory in ego-centric frame (raw yaw, same as NPZ ego_agent_future)
+        raw = np.load(npz_path, allow_pickle=True)
+        gt_ego_bl = raw["ego_agent_future"].astype(np.float32)  # (80, 3) [x, y, yaw_rad]
+    except Exception as e:
+        yield None, emit(f"ERROR loading scene geometry: {e}")
+        return
+
     if use_fcd:
         if fcd_dir.startswith("/tmp"):
-            yield emit(
+            yield None, emit(
                 "WARNING: fcd_dir starts with /tmp — Docker bind-mount may not "
                 "work on this host. Use a path under /home/ instead."
             )
-        yield emit(f"FCD output dir: {fcd_dir}")
+        yield None, emit(f"FCD output dir: {fcd_dir}")
 
-    yield emit("")
-    yield emit("Starting TeraSim simulation…")
+    yield None, emit("")
+    yield None, emit("Starting TeraSim simulation…")
 
-    # --- Run ---
+    # Recorded NPZ neighbors (map frame, t=0 snapshot) — static overlay every frame
+    recorded_npcs = spawn.get("npcs", [])
+
+    # Show GT trajectory before simulation starts
+    n_steps = len(spawn["ego_future_map"])
+    init_fig = _make_sim_figure(
+        scene_geom, gt_ego_bl, [], [], [], 0, n_steps, map2bl, map_yaw0,
+        recorded_npcs=recorded_npcs,
+    )
+    yield init_fig, emit("  Waiting for episode to start…")
+
     fcd_host_dir = fcd_dir if use_fcd else None
+    sim_fig = init_fig
     try:
         with TeraSimBridge(
             sim_config_host_dir=str(_SIM_CONFIG_DIR),
-            gui=use_gui,
+            gui=False,
             fcd_host_dir=fcd_host_dir,
         ) as sim:
-            sim.start_episode(spawn, enable_viz=use_viz)
-            yield emit("  Episode started.")
+            sim.start_episode(spawn, enable_viz=False)
+            yield init_fig, emit("  Episode started.")
 
-            if use_viz:
-                yield emit("  >>> Open http://localhost:8050 in your browser <<<")
-                time.sleep(3)
-
-            n_steps = len(spawn["ego_future_map"])
             for step_idx in range(n_steps):
                 x, y, yaw_rad = spawn["ego_future_map"][step_idx]
                 result = sim.step((float(x), float(y)), float(yaw_rad))
 
+                ego_history.append((float(x), float(y), float(yaw_rad)))
+
+                # Debug: at step 0 log raw NPC/VRU positions and their
+                # ego-centric transforms so we can see if agents are in-frame.
+                if step_idx == 0:
+                    npc_states = result["npc_states"]
+                    vru_states = result.get("vru_states", [])
+                    yield None, emit(
+                        f"  [DBG step0] Veh={len(npc_states)}  VRU={len(vru_states)}"
+                    )
+                    for i, npc in enumerate(npc_states[:5]):
+                        nxy = _map_to_ego(
+                            np.array([[npc["x"], npc["y"]]]), map2bl
+                        )[0]
+                        yield None, emit(
+                            f"    NPC[{i}] map=({npc['x']:.1f},{npc['y']:.1f})"
+                            f"  ego=({nxy[0]:.1f},{nxy[1]:.1f})"
+                            f"  sumo_angle={npc.get('sumo_angle',0):.1f}°"
+                        )
+                    for i, vru in enumerate(vru_states[:3]):
+                        vxy = _map_to_ego(
+                            np.array([[vru["x"], vru["y"]]]), map2bl
+                        )[0]
+                        yield None, emit(
+                            f"    VRU[{i}] map=({vru['x']:.1f},{vru['y']:.1f})"
+                            f"  ego=({vxy[0]:.1f},{vxy[1]:.1f})"
+                            f"  type={vru.get('type','?')}"
+                        )
+                    # Show ego position in ego-centric (should be near origin at step 0)
+                    ego_xy_bl = _map_to_ego(np.array([[x, y]]), map2bl)[0]
+                    yield None, emit(
+                        f"  [DBG step0] ego in ego-centric: ({ego_xy_bl[0]:.2f},{ego_xy_bl[1]:.2f})"
+                        f"  view=±40m"
+                    )
+
                 if step_delay > 0:
                     time.sleep(step_delay)
 
+                sim_fig = _make_sim_figure(
+                    scene_geom, gt_ego_bl, ego_history,
+                    result["npc_states"], result.get("vru_states", []),
+                    step_idx + 1, n_steps,
+                    map2bl, map_yaw0,
+                    recorded_npcs=recorded_npcs,
+                )
+
                 if not result["av_in_sim"]:
-                    yield emit(
+                    yield sim_fig, emit(
                         f"\nFAILED: AV removed from simulation at step {step_idx} "
                         f"(t={result['sim_time']:.1f}s) — collision or out-of-bounds."
                     )
                     return
 
                 if (step_idx + 1) % 10 == 0:
-                    yield emit(
+                    yield sim_fig, emit(
                         f"  step {step_idx + 1:3d}/{n_steps}  "
                         f"t={result['sim_time']:.1f}s  "
-                        f"NPCs={len(result['npc_states'])}"
+                        f"Veh={len(result['npc_states'])}  "
+                        f"VRU={len(result.get('vru_states', []))}"
                     )
+                else:
+                    yield sim_fig, log
 
-            # Final position check
+            # --- Final position check ---
             final_state = sim._last_state
             av_state = final_state["agent_details"]["vehicle"]["AV"]
             av_x, av_y = av_state["x"], av_state["y"]
-            gt_x, gt_y = float(spawn["ego_future_map"][-1, 0]), float(
-                spawn["ego_future_map"][-1, 1]
+            gt_x, gt_y = (
+                float(spawn["ego_future_map"][-1, 0]),
+                float(spawn["ego_future_map"][-1, 1]),
             )
             dist = math.sqrt((av_x - gt_x) ** 2 + (av_y - gt_y) ** 2)
-            yield emit(
+            yield sim_fig, emit(
                 f"\nFinal position:  sim=({av_x:.2f}, {av_y:.2f})  "
                 f"GT=({gt_x:.2f}, {gt_y:.2f})  error={dist:.3f}m"
             )
 
             if dist >= 2.0:
-                yield emit(
+                yield sim_fig, emit(
                     f"\nFAILED: position error {dist:.3f}m > 2.0m threshold."
                 )
                 return
 
-            # FCD path
             fcd_path = sim.fcd_output_path
             if fcd_path:
                 fcd = Path(fcd_path)
                 if fcd.exists():
-                    yield emit(
+                    yield sim_fig, emit(
                         f"\nFCD written: {fcd_path}  ({fcd.stat().st_size // 1024} KB)"
                     )
-                    yield emit(
+                    yield sim_fig, emit(
                         f"Replay:  python3 rlvr/scripts/replay_fcd.py "
                         f"--fcd_file {fcd_path}"
                     )
 
-            yield emit("\n✓  Ghost replay validation PASSED")
+            yield sim_fig, emit("\n✓  Ghost replay validation PASSED")
 
     except Exception as e:
-        yield emit(f"\nERROR: {e}")
+        yield None, emit(f"\nERROR: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -209,20 +578,20 @@ def _run_simulation(
 def build_interface(npz_paths: list[str]) -> gr.Blocks:
     total = len(npz_paths)
 
-    # Shared mutable state
     state = {"index": 0}
 
     def _clamp(i: int) -> int:
         return max(0, min(total - 1, i))
 
     def _load_index(i: int):
-        """Update displayed info when index changes."""
-        i = _clamp(int(i) - 1)      # UI is 1-based
+        """Update all display components when the sample index changes."""
+        i = _clamp(int(i) - 1)  # UI is 1-based
         state["index"] = i
         path = npz_paths[i]
         info = _sample_info(path)
-        # returns: displayed_index, current_path, info_text, hidden_path
-        return i + 1, path, info, path
+        fig = _load_scene_figure(path)
+        # Returns: displayed_index, path_box, info_text, hidden_path, scene_figure
+        return i + 1, path, info, path, fig
 
     def _nav(delta: int, current_displayed: int):
         new = _clamp(int(current_displayed) - 1 + delta)
@@ -232,14 +601,15 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
         gr.Markdown("# TeraSim Ghost Replay Launcher")
         gr.Markdown(
             f"Loaded **{total}** samples.  "
-            "Browse by index, configure options, then launch the simulation."
+            "Browse samples to preview the scene, then launch the simulation."
         )
 
-        # Hidden component to pass the resolved NPZ path to the simulation
+        # Hidden state: resolved NPZ path passed to simulation
         npz_path_state = gr.Textbox(visible=False)
 
+        # ── Top row: browser + scene preview ────────────────────────────────
         with gr.Row():
-            # ── LEFT: sample browser ────────────────────────────────────
+            # Left column: navigation controls
             with gr.Column(scale=1):
                 gr.Markdown("### NPZ Browser")
 
@@ -257,102 +627,83 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
                     btn_prev = gr.Button("◄ Prev", size="sm")
                     btn_next = gr.Button("Next ►", size="sm")
 
-                # Visible textbox so the user can clearly see the current path
                 current_path_box = gr.Textbox(
                     label="Current NPZ path",
                     value=npz_paths[0],
                     interactive=False,
                     lines=2,
                 )
-
                 sample_info_md = gr.Textbox(
                     label="Sample info",
-                    value=_sample_info(npz_paths[0]),
+                    value="Loading…",
                     interactive=False,
-                    lines=6,
+                    lines=5,
                 )
 
-            # ── RIGHT: simulation options ────────────────────────────────
+            # Right column: scene preview
             with gr.Column(scale=2):
-                gr.Markdown("### Simulation Options")
+                gr.Markdown("### Scene Preview (ego-centric frame)")
+                scene_plot = gr.Plot(label="Scene at t=0")
 
-                gr.Markdown(
-                    "**Visualization options** — these are independent, you can enable both:"
+        # ── Simulation options ───────────────────────────────────────────────
+        with gr.Row():
+            step_delay = gr.Slider(
+                label="Step delay (s) — 0 = as fast as possible, 0.1 = real-time",
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                value=0.1,
+            )
+            with gr.Column():
+                use_fcd = gr.Checkbox(
+                    label="Record FCD output",
+                    value=False,
+                    info="Write SUMO FCD trajectory XML to disk for offline replay.",
                 )
-                with gr.Row():
-                    use_gui = gr.Checkbox(
-                        label="🖥️  sumo-gui — native desktop window (X11)",
-                        value=False,
-                        info="Opens sumo-gui as a window on your host desktop. "
-                             "Requires running `xhost +local:docker` once first. "
-                             "Does NOT use a browser port.",
-                    )
-                    use_viz = gr.Checkbox(
-                        label="🌐  Dash viewer — browser at :8050",
-                        value=False,
-                        info="Starts the Plotly/Dash map. "
-                             "Open http://localhost:8050 in a NEW browser tab "
-                             "after clicking Launch.",
-                    )
-
-                gr.Markdown(
-                    "💡 **Dash map opens here →** "
-                    "[http://localhost:8050](http://localhost:8050)  "
-                    "*(second tab, only when Dash viewer is checked)*"
+                fcd_dir = gr.Textbox(
+                    label="FCD output directory",
+                    value=_DEFAULT_FCD_DIR,
+                    placeholder="/home/user/terasim_fcd",
+                    interactive=True,
                 )
 
-                with gr.Row():
-                    use_fcd = gr.Checkbox(
-                        label="Record FCD output",
-                        value=False,
-                        info="Write SUMO FCD trajectory file to disk.",
-                    )
-                    fcd_dir = gr.Textbox(
-                        label="FCD output directory",
-                        value=_DEFAULT_FCD_DIR,
-                        placeholder="/home/user/terasim_fcd",
-                        interactive=True,
-                    )
-
-                step_delay = gr.Slider(
-                    label="Step delay (s)  — 0 = as fast as possible, 0.1 = real-time",
-                    minimum=0.0,
-                    maximum=1.0,
-                    step=0.05,
-                    value=0.1,
-                )
-
-        # ── Launch button ────────────────────────────────────────────────
         launch_btn = gr.Button(
-            "🚀  Launch TeraSim Simulation",
+            "🚀  Launch Simulation with Visualization",
             variant="primary",
             size="lg",
         )
 
-        # ── Output log ───────────────────────────────────────────────────
-        gr.Markdown("### Output")
-        output_log = gr.Textbox(
-            label="Simulation log",
-            lines=20,
-            max_lines=40,
-            interactive=False,
-        )
+        # ── Simulation output: live plot + log ──────────────────────────────
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("### Live Simulation (MGRS map frame)")
+                sim_plot = gr.Plot(label="Simulation state")
+            with gr.Column(scale=1):
+                gr.Markdown("### Output Log")
+                output_log = gr.Textbox(
+                    label="Simulation log",
+                    lines=20,
+                    max_lines=40,
+                    interactive=False,
+                )
 
-        # ── Event wiring ─────────────────────────────────────────────────
-        # Order matches _load_index return: (index, path_box, info, hidden_path)
-        _outputs = [index_input, current_path_box, sample_info_md, npz_path_state]
+        # ── Event wiring ─────────────────────────────────────────────────────
+        _browse_outputs = [
+            index_input, current_path_box, sample_info_md,
+            npz_path_state, scene_plot,
+        ]
 
-        index_input.submit(fn=_load_index, inputs=[index_input], outputs=_outputs)
-        btn_prev.click(fn=lambda i: _nav(-1, i), inputs=[index_input], outputs=_outputs)
-        btn_next.click(fn=lambda i: _nav(+1, i), inputs=[index_input], outputs=_outputs)
+        index_input.submit(fn=_load_index, inputs=[index_input], outputs=_browse_outputs)
+        btn_prev.click(fn=lambda i: _nav(-1, i), inputs=[index_input], outputs=_browse_outputs)
+        btn_next.click(fn=lambda i: _nav(+1, i), inputs=[index_input], outputs=_browse_outputs)
 
-        # Initialise state on load
-        demo.load(fn=lambda: _load_index(1), outputs=_outputs)
+        # Load first sample on page open
+        demo.load(fn=lambda: _load_index(1), outputs=_browse_outputs)
 
         launch_btn.click(
             fn=_run_simulation,
-            inputs=[npz_path_state, use_gui, use_viz, use_fcd, fcd_dir, step_delay],
-            outputs=[output_log],
+            inputs=[npz_path_state, use_fcd, fcd_dir, step_delay],
+            outputs=[sim_plot, output_log],
         )
 
     return demo
@@ -394,6 +745,7 @@ def main():
         server_port=args.port,
         share=args.share,
         show_error=True,
+        inbrowser=True,
         theme=gr.themes.Soft(),
     )
 
