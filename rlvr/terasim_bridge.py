@@ -86,6 +86,11 @@ class TeraSimBridge:
         self._last_state: dict | None = None
         self._sim_time: float = -1.0  # tracks last known simulation_time
 
+        # List of static NPC dicts (x, y, sumo_angle, id) that are re-teleported
+        # to their NPZ positions each step via keepRoute=2 (exact position, no
+        # lane-snapping).  Includes all pedestrians and parked vehicles.
+        self._static_npcs: list[dict] = []
+
     # ------------------------------------------------------------------
     # Container lifecycle
     # ------------------------------------------------------------------
@@ -242,14 +247,34 @@ class TeraSimBridge:
             except Exception:
                 pass  # non-fatal; viz still works without trajectory overlay
 
-        # Spawn NPZ neighbor agents as SUMO background vehicles so the NDE/IDM
-        # model drives them from their recorded t=0 positions and speeds.
-        # Pedestrians (class=1) are skipped — TeraSim VRU pedestrian spawning
-        # is handled separately via traci.person.
+        # Classify NPCs: vehicles are split by speed (NDE drives moving ones),
+        # pedestrians are always kept static at their exact NPZ positions
+        # regardless of recorded speed — snapping them to the nearest road
+        # lane produces wrong positions since pedestrians are typically
+        # off-road (sidewalks, crossings, car parks).
+        _STATIC_SPEED_THR = 0.5  # m/s
         npcs = spawn_states.get("npcs", [])
-        vehicle_npcs = [n for n in npcs if n.get("class", 0) != 1]
-        if vehicle_npcs:
-            self.spawn_npcs(vehicle_npcs)
+
+        moving_vehicles = [
+            n for n in npcs
+            if n.get("class", 0) != 1 and n.get("vx", 0.0) >= _STATIC_SPEED_THR
+        ]
+        static_vehicles = [
+            n for n in npcs
+            if n.get("class", 0) != 1 and n.get("vx", 0.0) < _STATIC_SPEED_THR
+        ]
+        # Pedestrians are NOT spawned in SUMO.  Spawning them as vehicle-type
+        # agents causes SUMO to crash: multiple pedestrians in a crosswalk area
+        # get snapped to the same lane by keepRoute=0, creating immediate
+        # collisions that kill the simulation.  Pedestrians are rendered from
+        # the NPZ data directly in the GUI visualization instead.
+
+        if moving_vehicles:
+            self.spawn_npcs(moving_vehicles)
+        if static_vehicles:
+            self.spawn_npcs(static_vehicles)
+
+        self._static_npcs = []  # re-teleportation disabled; vehicles stay where SUMO puts them
 
         # Teleport AV to ground-truth t=0 position
         ego = spawn_states["ego"]
@@ -291,6 +316,67 @@ class TeraSimBridge:
                 timeout=5.0,
             ).raise_for_status()
 
+    def spawn_pedestrians(self, peds: list[dict]) -> None:
+        """Enqueue spawn commands for NPZ pedestrian agents.
+
+        Pedestrians are inserted as small, slow SUMO vehicle agents using the
+        "pedestrian" vType defined in background_traffic.rou.xml.  Their IDs
+        are prefixed with "VRU_" so TeraSim's state writer classifies them as
+        VRU agents, making them visible in the vru_states field of step().
+
+        Args:
+            peds: List of NPC dicts (class=1) from extract_spawn_states().
+                  Each must have: x, y, sumo_angle, vx.
+        """
+        for ped in peds:
+            ped_id = "VRU_" + ped["id"]  # e.g. "VRU_npc_0"
+            payload = {
+                "agent_id":    ped_id,
+                "agent_type":  "vehicle",
+                "command_type": "spawn_vehicle",
+                "data": {
+                    "position":   [float(ped["x"]), float(ped["y"])],
+                    "sumo_angle": float(ped["sumo_angle"]),
+                    "speed":      float(ped["vx"]),
+                    "type_id":    "pedestrian",
+                },
+            }
+            requests.post(
+                f"{self.service_url}/simulation/{self._sim_id}/agent_command",
+                json=payload,
+                timeout=5.0,
+            ).raise_for_status()
+
+    def _send_static_agent_commands(self) -> None:
+        """Re-teleport every static NPC to its NPZ position with speed=0.
+
+        Commands use agent_type="vru" so the cosim handler dispatches to the
+        VRU set_state branch, which calls moveToXY with keepRoute=2 (exact XY,
+        no lane-snapping).  This is called at the start of every step() so that
+        the simulation state read — which happens after these commands are
+        processed but before the next simulationStep — always reports the
+        original scene positions for parked vehicles and pedestrians.
+        """
+        for npc in self._static_npcs:
+            payload = {
+                "agent_id":    npc["id"],
+                "agent_type":  "vru",
+                "command_type": "set_state",
+                "data": {
+                    "position":   [float(npc["x"]), float(npc["y"])],
+                    "sumo_angle": float(npc["sumo_angle"]),
+                    "speed":      0.0,
+                },
+            }
+            try:
+                requests.post(
+                    f"{self.service_url}/simulation/{self._sim_id}/agent_command",
+                    json=payload,
+                    timeout=5.0,
+                ).raise_for_status()
+            except Exception:
+                pass  # non-fatal: if the agent was removed, skip silently
+
     def step(
         self, ego_xy: tuple, ego_yaw_rad: float, ego_speed: float = 0.0
     ) -> dict:
@@ -315,19 +401,19 @@ class TeraSimBridge:
         """
         sumo_angle = ros_yaw_to_sumo_angle(ego_yaw_rad)
 
-        # 1. Queue the AV teleport command
+        # Queue the AV teleport command
         self._send_agent_command("AV", ego_xy[0], ego_xy[1], sumo_angle, ego_speed)
 
-        # 2. Allow time for the cosim Redis loop to process the command (5 ms poll)
+        # 3. Allow time for the cosim Redis loop to process all commands (5 ms poll)
         time.sleep(0.025)
 
-        # 3. Fire the simulation tick
+        # 4. Fire the simulation tick
         requests.post(
             f"{self.service_url}/simulation_tick/{self._sim_id}",
             timeout=5.0,
         ).raise_for_status()
 
-        # 4. Poll until simulation_time advances (confirms step completed and
+        # 5. Poll until simulation_time advances (confirms step completed and
         #    state was written to Redis)
         prev_time = self._sim_time
         deadline = time.time() + self.step_timeout
@@ -402,6 +488,7 @@ class TeraSimBridge:
             except Exception:
                 pass
             self._sim_id = None
+        self._static_npcs = []
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -5,4 +5,10 @@
          accel="2.6" decel="4.5" sigma="0.5"/>
   <vType id="veh_AV" length="4.5" width="1.8" maxSpeed="30"
          accel="2.6" decel="4.5" sigma="0.0" color="1,0,0"/>
+  <!-- Pedestrian: modelled as a very small, slow vehicle so that SUMO's
+       vehicle routing infrastructure (keepRoute=0 lane-snapping, NDE IDM)
+       can handle them without requiring a dedicated pedestrian network.
+       IDs must be prefixed with VRU_ so TeraSim classifies them as VRUs. -->
+  <vType id="pedestrian" length="0.5" width="0.5" maxSpeed="2.0"
+         accel="1.0" decel="2.0" sigma="0.3" color="1,0.5,0"/>
 </routes>
