@@ -97,8 +97,8 @@ struct TrainingDataBinary
   float route_lanes[NUM_SEGMENTS_IN_ROUTE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM];
   float route_lanes_speed_limit[NUM_SEGMENTS_IN_ROUTE];
   int32_t route_lanes_has_speed_limit[NUM_SEGMENTS_IN_ROUTE];
-  float polygons[NUM_POLYGONS * POINTS_PER_POLYGON * 2];
-  float line_strings[NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * 2];
+  float polygons[NUM_POLYGONS * POINTS_PER_POLYGON * (2 + POLYGON_TYPE_NUM)];
+  float line_strings[NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * (2 + LINE_STRING_TYPE_NUM)];
   float goal_pose[NEIGHBOR_FUTURE_DIM];
   int32_t turn_indicators[INPUT_T_WITH_CURRENT];
   float ego_shape[EGO_SHAPE_SHAPE[1]];
