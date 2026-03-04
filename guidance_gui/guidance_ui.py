@@ -199,14 +199,14 @@ def build_guidance_panel(
             )
 
     with gr.Accordion("Prototype Gallery — click to select anchor", open=False):
-        _default_gallery = render_prototype_gallery(default_prototypes_path)
+        _default_gallery = render_prototype_gallery(default_prototypes_path) or []
         gallery = gr.Gallery(
-            value=_default_gallery or [],
+            value=_default_gallery,
             columns=8,
             rows=2,
             height=260,
             allow_preview=False,
-            selected_index=0,
+            selected_index=0 if _default_gallery else None,
             label="Motion Mode Prototypes",
         )
         reload_btn = gr.Button("↺ Reload Gallery from Path", size="sm")
