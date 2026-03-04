@@ -69,6 +69,15 @@ class AnnotationRosNode(Node):
             "zoom_level": 5,
             "time_step": 40,
             "gt_similarity_mode": True,
+            "enable_initial_pruning": True,
+            "initial_pos_threshold": 0.055,
+            "initial_yaw_threshold_deg": 0.55,
+            "enable_guidance": False,
+            "use_collision": True,
+            "use_route_following": False,
+            "use_lane_keeping": False,
+            "use_centerline_following": False,
+            "guidance_scale": 0.5,
         }
         self.training_status = {
             "phase": "annotation",
@@ -659,6 +668,10 @@ class AnnotationRosNode(Node):
                 "current_filter": self.annotator.current_filter,
                 "auto_skip_labeled": self.annotator.auto_skip_labeled,
                 "current_jump_size": self.annotator.current_jump_size,
+                "is_pruned": getattr(self.annotator, "is_pruned", False),
+                "initial_displacement": getattr(self.annotator, "initial_displacement", 0.0),
+                "initial_yaw_diff": getattr(self.annotator, "initial_yaw_diff", 0.0),
+                "gt_available": getattr(self.annotator, "gt_available", False),
             },
             "training": self.training_status,
         }
@@ -674,13 +687,24 @@ class AnnotationRosNode(Node):
         self._publish_dynamic_streams_tick()
 
     def _load_sample(self) -> None:
+        kw = self._get_annotator_kwargs()
         result = self.annotator.load_sample(
-            self.params["noise_scale"],
-            self.params["fde_threshold"],
-            self.params["ade_threshold"],
-            self.params["max_retries"],
-            self.params["zoom_level"],
-            self.params["gt_similarity_mode"],
+            kw["noise_scale"],
+            kw["fde_threshold"],
+            kw["ade_threshold"],
+            kw["max_retries"],
+            kw["zoom_level"],
+            kw["gt_similarity_mode"],
+            enable_initial_pruning=kw["enable_initial_pruning"],
+            initial_pos_threshold=kw["initial_pos_threshold"],
+            initial_yaw_threshold_deg=kw["initial_yaw_threshold_deg"],
+            enable_guidance=kw["enable_guidance"],
+            use_collision=kw["use_collision"],
+            use_route_following=kw["use_route_following"],
+            use_lane_keeping=kw["use_lane_keeping"],
+            use_centerline_following=kw["use_centerline_following"],
+            guidance_scale=kw["guidance_scale"],
+            time_step=kw["time_step"],
         )
         self._pending_marker_clear = True
         self._static_markers_dirty = True
@@ -719,6 +743,27 @@ class AnnotationRosNode(Node):
         )
         self._publish_all(payload)
 
+    def _get_annotator_kwargs(self) -> dict[str, Any]:
+        """Return full param dict for annotator method calls."""
+        return {
+            "noise_scale": self.params["noise_scale"],
+            "fde_threshold": self.params["fde_threshold"],
+            "ade_threshold": self.params["ade_threshold"],
+            "max_retries": self.params["max_retries"],
+            "zoom_level": self.params["zoom_level"],
+            "gt_similarity_mode": self.params["gt_similarity_mode"],
+            "enable_initial_pruning": self.params["enable_initial_pruning"],
+            "initial_pos_threshold": self.params["initial_pos_threshold"],
+            "initial_yaw_threshold_deg": self.params["initial_yaw_threshold_deg"],
+            "enable_guidance": self.params["enable_guidance"],
+            "use_collision": self.params["use_collision"],
+            "use_route_following": self.params["use_route_following"],
+            "use_lane_keeping": self.params["use_lane_keeping"],
+            "use_centerline_following": self.params["use_centerline_following"],
+            "guidance_scale": self.params["guidance_scale"],
+            "time_step": self.params["time_step"],
+        }
+
     def _publish_time_step_update(self) -> None:
         # Lightweight update path: keep existing plots and trajectories, only update time-step state + TF/footprint.
         payload = self._state_payload(
@@ -747,14 +792,25 @@ class AnnotationRosNode(Node):
             elif action == "load_sample":
                 self._load_sample()
             elif action == "regenerate":
+                kw = self._get_annotator_kwargs()
                 self._refresh(
                     self.annotator.regenerate(
-                        self.params["noise_scale"],
-                        self.params["fde_threshold"],
-                        self.params["ade_threshold"],
-                        self.params["max_retries"],
-                        self.params["zoom_level"],
-                        self.params["gt_similarity_mode"],
+                        kw["noise_scale"],
+                        kw["fde_threshold"],
+                        kw["ade_threshold"],
+                        kw["max_retries"],
+                        kw["zoom_level"],
+                        kw["gt_similarity_mode"],
+                        enable_initial_pruning=kw["enable_initial_pruning"],
+                        initial_pos_threshold=kw["initial_pos_threshold"],
+                        initial_yaw_threshold_deg=kw["initial_yaw_threshold_deg"],
+                        enable_guidance=kw["enable_guidance"],
+                        use_collision=kw["use_collision"],
+                        use_route_following=kw["use_route_following"],
+                        use_lane_keeping=kw["use_lane_keeping"],
+                        use_centerline_following=kw["use_centerline_following"],
+                        guidance_scale=kw["guidance_scale"],
+                        time_step=kw["time_step"],
                     )
                 )
             elif action == "select_winner":
@@ -763,64 +819,141 @@ class AnnotationRosNode(Node):
                     winner = "trajectory_2"
                 elif winner == "green":
                     winner = "trajectory_1"
+                kw = self._get_annotator_kwargs()
                 self._refresh(
                     self.annotator.select_winner(
                         winner,
-                        self.params["noise_scale"],
-                        self.params["fde_threshold"],
-                        self.params["ade_threshold"],
-                        self.params["max_retries"],
-                        self.params["zoom_level"],
-                        self.params["gt_similarity_mode"],
+                        kw["noise_scale"],
+                        kw["fde_threshold"],
+                        kw["ade_threshold"],
+                        kw["max_retries"],
+                        kw["zoom_level"],
+                        kw["gt_similarity_mode"],
+                        enable_initial_pruning=kw["enable_initial_pruning"],
+                        initial_pos_threshold=kw["initial_pos_threshold"],
+                        initial_yaw_threshold_deg=kw["initial_yaw_threshold_deg"],
+                        enable_guidance=kw["enable_guidance"],
+                        use_collision=kw["use_collision"],
+                        use_route_following=kw["use_route_following"],
+                        use_lane_keeping=kw["use_lane_keeping"],
+                        use_centerline_following=kw["use_centerline_following"],
+                        guidance_scale=kw["guidance_scale"],
+                        time_step=kw["time_step"],
+                    )
+                )
+            elif action == "select_gt_as_winner":
+                kw = self._get_annotator_kwargs()
+                self._refresh(
+                    self.annotator.select_gt_as_winner(
+                        kw["noise_scale"],
+                        kw["fde_threshold"],
+                        kw["ade_threshold"],
+                        kw["max_retries"],
+                        kw["zoom_level"],
+                        kw["gt_similarity_mode"],
+                        enable_initial_pruning=kw["enable_initial_pruning"],
+                        initial_pos_threshold=kw["initial_pos_threshold"],
+                        initial_yaw_threshold_deg=kw["initial_yaw_threshold_deg"],
+                        enable_guidance=kw["enable_guidance"],
+                        use_collision=kw["use_collision"],
+                        use_route_following=kw["use_route_following"],
+                        use_lane_keeping=kw["use_lane_keeping"],
+                        use_centerline_following=kw["use_centerline_following"],
+                        guidance_scale=kw["guidance_scale"],
+                        time_step=kw["time_step"],
                     )
                 )
             elif action == "jump":
                 delta = int(payload.get("delta", 0))
                 self.annotator.update_jump_size(delta)
+                kw = self._get_annotator_kwargs()
                 self._refresh(
                     self.annotator.jump(
                         delta,
-                        self.params["noise_scale"],
-                        self.params["fde_threshold"],
-                        self.params["ade_threshold"],
-                        self.params["max_retries"],
-                        self.params["zoom_level"],
-                        self.params["gt_similarity_mode"],
+                        kw["noise_scale"],
+                        kw["fde_threshold"],
+                        kw["ade_threshold"],
+                        kw["max_retries"],
+                        kw["zoom_level"],
+                        kw["gt_similarity_mode"],
+                        enable_initial_pruning=kw["enable_initial_pruning"],
+                        initial_pos_threshold=kw["initial_pos_threshold"],
+                        initial_yaw_threshold_deg=kw["initial_yaw_threshold_deg"],
+                        enable_guidance=kw["enable_guidance"],
+                        use_collision=kw["use_collision"],
+                        use_route_following=kw["use_route_following"],
+                        use_lane_keeping=kw["use_lane_keeping"],
+                        use_centerline_following=kw["use_centerline_following"],
+                        guidance_scale=kw["guidance_scale"],
+                        time_step=kw["time_step"],
                     )
                 )
             elif action == "jump_to_index":
+                kw = self._get_annotator_kwargs()
                 self._refresh(
                     self.annotator.jump_to_index(
                         int(payload.get("target_index", 1)),
-                        self.params["noise_scale"],
-                        self.params["fde_threshold"],
-                        self.params["ade_threshold"],
-                        self.params["max_retries"],
-                        self.params["zoom_level"],
-                        self.params["gt_similarity_mode"],
+                        kw["noise_scale"],
+                        kw["fde_threshold"],
+                        kw["ade_threshold"],
+                        kw["max_retries"],
+                        kw["zoom_level"],
+                        kw["gt_similarity_mode"],
+                        enable_initial_pruning=kw["enable_initial_pruning"],
+                        initial_pos_threshold=kw["initial_pos_threshold"],
+                        initial_yaw_threshold_deg=kw["initial_yaw_threshold_deg"],
+                        enable_guidance=kw["enable_guidance"],
+                        use_collision=kw["use_collision"],
+                        use_route_following=kw["use_route_following"],
+                        use_lane_keeping=kw["use_lane_keeping"],
+                        use_centerline_following=kw["use_centerline_following"],
+                        guidance_scale=kw["guidance_scale"],
+                        time_step=kw["time_step"],
                     )
                 )
             elif action == "jump_to_next_unlabeled":
+                kw = self._get_annotator_kwargs()
                 self._refresh(
                     self.annotator.jump_to_next_unlabeled(
-                        self.params["noise_scale"],
-                        self.params["fde_threshold"],
-                        self.params["ade_threshold"],
-                        self.params["max_retries"],
-                        self.params["zoom_level"],
-                        self.params["gt_similarity_mode"],
+                        kw["noise_scale"],
+                        kw["fde_threshold"],
+                        kw["ade_threshold"],
+                        kw["max_retries"],
+                        kw["zoom_level"],
+                        kw["gt_similarity_mode"],
+                        enable_initial_pruning=kw["enable_initial_pruning"],
+                        initial_pos_threshold=kw["initial_pos_threshold"],
+                        initial_yaw_threshold_deg=kw["initial_yaw_threshold_deg"],
+                        enable_guidance=kw["enable_guidance"],
+                        use_collision=kw["use_collision"],
+                        use_route_following=kw["use_route_following"],
+                        use_lane_keeping=kw["use_lane_keeping"],
+                        use_centerline_following=kw["use_centerline_following"],
+                        guidance_scale=kw["guidance_scale"],
+                        time_step=kw["time_step"],
                     )
                 )
             elif action == "toggle_filter":
+                kw = self._get_annotator_kwargs()
                 self._refresh(
                     self.annotator.toggle_filter(
                         payload.get("filter_mode", "All"),
-                        self.params["noise_scale"],
-                        self.params["fde_threshold"],
-                        self.params["ade_threshold"],
-                        self.params["max_retries"],
-                        self.params["zoom_level"],
-                        self.params["gt_similarity_mode"],
+                        kw["noise_scale"],
+                        kw["fde_threshold"],
+                        kw["ade_threshold"],
+                        kw["max_retries"],
+                        kw["zoom_level"],
+                        kw["gt_similarity_mode"],
+                        enable_initial_pruning=kw["enable_initial_pruning"],
+                        initial_pos_threshold=kw["initial_pos_threshold"],
+                        initial_yaw_threshold_deg=kw["initial_yaw_threshold_deg"],
+                        enable_guidance=kw["enable_guidance"],
+                        use_collision=kw["use_collision"],
+                        use_route_following=kw["use_route_following"],
+                        use_lane_keeping=kw["use_lane_keeping"],
+                        use_centerline_following=kw["use_centerline_following"],
+                        guidance_scale=kw["guidance_scale"],
+                        time_step=kw["time_step"],
                     )
                 )
             elif action == "set_auto_skip":

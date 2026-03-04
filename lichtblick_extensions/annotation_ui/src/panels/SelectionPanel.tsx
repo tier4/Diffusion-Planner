@@ -5,14 +5,16 @@ import { useWsState } from "../shared/useWsState";
 import { ui } from "../shared/ui";
 
 export function SelectionPanel({ context }: { context: PanelExtensionContext }) {
-  const { status } = useWsState(context);
+  const { params, status } = useWsState(context);
+  const greenOrangeDisabled = status.is_pruned && params.enable_initial_pruning;
 
   return (
     <div style={ui.page}>
       <h3 style={ui.title}>✅ Annotation Selection</h3>
       <div style={ui.section}>
         <button
-          onClick={() => sendMessage({ type: "select_winner", payload: { winner: "trajectory_2" } })}
+          onClick={() => sendMessage({ type: "select_winner", payload: { winner: "trajectory_1" } })}
+          disabled={greenOrangeDisabled}
           style={{
             width: "100%",
             marginBottom: "10px",
@@ -20,13 +22,49 @@ export function SelectionPanel({ context }: { context: PanelExtensionContext }) 
             padding: "12px",
             border: "none",
             color: "white",
-            background: "linear-gradient(90deg, #f97316, #fb923c)",
+            background: greenOrangeDisabled ? "#9ca3af" : "linear-gradient(90deg, #22c55e, #4ade80)",
             fontSize: "16px",
             fontWeight: 700,
-            cursor: "pointer",
+            cursor: greenOrangeDisabled ? "not-allowed" : "pointer",
+          }}
+        >
+          🟩 Green (Deterministic) is Better
+        </button>
+        <button
+          onClick={() => sendMessage({ type: "select_winner", payload: { winner: "trajectory_2" } })}
+          disabled={greenOrangeDisabled}
+          style={{
+            width: "100%",
+            marginBottom: "10px",
+            borderRadius: "10px",
+            padding: "12px",
+            border: "none",
+            color: "white",
+            background: greenOrangeDisabled ? "#9ca3af" : "linear-gradient(90deg, #f97316, #fb923c)",
+            fontSize: "16px",
+            fontWeight: 700,
+            cursor: greenOrangeDisabled ? "not-allowed" : "pointer",
           }}
         >
           🟧 Orange (Stochastic) is Better
+        </button>
+        <button
+          onClick={() => sendMessage({ type: "select_gt_as_winner" })}
+          disabled={!status.gt_available}
+          style={{
+            width: "100%",
+            marginBottom: "10px",
+            borderRadius: "10px",
+            padding: "12px",
+            border: "none",
+            color: "white",
+            background: !status.gt_available ? "#9ca3af" : "linear-gradient(90deg, #dc2626, #ef4444)",
+            fontSize: "16px",
+            fontWeight: 700,
+            cursor: !status.gt_available ? "not-allowed" : "pointer",
+          }}
+        >
+          GT is Best
         </button>
         <button
           onClick={() => sendMessage({ type: "regenerate" })}

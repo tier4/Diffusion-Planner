@@ -24,6 +24,15 @@ export interface AnnotationParams {
   zoom_level: number;
   time_step: number;
   gt_similarity_mode: boolean;
+  enable_initial_pruning: boolean;
+  initial_pos_threshold: number;
+  initial_yaw_threshold_deg: number;
+  enable_guidance: boolean;
+  use_collision: boolean;
+  use_route_following: boolean;
+  use_lane_keeping: boolean;
+  use_centerline_following: boolean;
+  guidance_scale: number;
 }
 
 export interface AnnotationStatus {
@@ -35,6 +44,10 @@ export interface AnnotationStatus {
   current_filter: string;
   auto_skip_labeled: boolean;
   current_jump_size: number;
+  is_pruned: boolean;
+  initial_displacement: number;
+  initial_yaw_diff: number;
+  gt_available: boolean;
 }
 
 export interface AnnotationState {

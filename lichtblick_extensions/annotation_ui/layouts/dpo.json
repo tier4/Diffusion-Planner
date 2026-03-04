@@ -8,9 +8,9 @@
     "3D!27s9cac": {
       "cameraState": {
         "perspective": false,
-        "distance": 58.72652247395408,
+        "distance": 65.07093902931186,
         "phi": 5.194862493130896,
-        "thetaOffset": -3.506696792965936,
+        "thetaOffset": -3.5066967929659403,
         "targetOffset": [
           19.80350826412806,
           -18.086361661609335,
@@ -49,6 +49,149 @@
         }
       },
       "topics": {
+        "/awapi/prediction/get/objects": {
+          "viewPathObjectId": "Off",
+          "showExistenceProb": "Off"
+        },
+        "/control/trajectory_follower/controller_node_exe/debug/predicted_trajectory_in_frenet_coordinate": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/control/trajectory_follower/controller_node_exe/debug/resampled_reference_trajectory": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/control/trajectory_follower/lateral/predicted_trajectory": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/localization/kinematic_state": {
+          "viewTrajectoryPoints": "Off",
+          "trajectoryFadeTime": 4
+        },
+        "/perception_reproducer/rosbag_ego_odom": {
+          "viewTrajectoryPoints": "Off",
+          "trajectoryFadeTime": 4
+        },
+        "/perception/object_recognition/detection/objects": {
+          "viewPathObjectId": "Off",
+          "showExistenceProb": "Off"
+        },
+        "/perception/object_recognition/objects": {
+          "viewPathObjectId": "Off",
+          "showExistenceProb": "Off"
+        },
+        "/perception/object_recognition/tracking/objects": {
+          "viewPathObjectId": "Off",
+          "showExistenceProb": "Off"
+        },
+        "/planning/generator/trajectory_optimizer/debug/trajectory": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/planning/planning_factors/stop_point_fixer": {
+          "viewSafetyFactors": "On"
+        },
+        "/planning/scenario_planning/trajectory": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/planning/trajectory": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/planning/trajectory_generator/neural_network_based_planner/diffusion_planner_node/output/predicted_objects": {
+          "viewPathObjectId": "Off",
+          "showExistenceProb": "Off"
+        },
+        "/planning/trajectory_generator/neural_network_based_planner/diffusion_planner_node/output/trajectory": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/planning/trajectory_generator/neural_network_based_planner/trajectory_optimizer_node/debug/eb_fixed_traj": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/planning/trajectory_generator/neural_network_based_planner/trajectory_optimizer_node/debug/eb_traj": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/planning/trajectory_generator/neural_network_based_planner/trajectory_optimizer_node/debug/mpt_fixed_traj": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/planning/trajectory_generator/neural_network_based_planner/trajectory_optimizer_node/debug/mpt_ref_traj": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/planning/trajectory_generator/neural_network_based_planner/trajectory_optimizer_node/debug/mpt_traj": {
+          "viewPath": "On",
+          "viewVelocity": "Off",
+          "viewVelocityText": "Off",
+          "viewFootprint": "Off",
+          "viewPoint": "Off",
+          "viewDrivableArea": "Off",
+          "viewTimeText": "Off"
+        },
+        "/simulation/dummy_perception_publisher/output/debug/ground_truth_objects": {
+          "viewPathObjectId": "Off",
+          "showExistenceProb": "Off"
+        },
         "/annotation/data/tracked_objects": {
           "viewPathObjectId": "Off",
           "showExistenceProb": "Off",
@@ -152,7 +295,7 @@
       "first": "Annotation UI.Annotation Sidebar!3okj9ok",
       "second": "Annotation UI.Annotation Controls!41305v",
       "direction": "column",
-      "splitPercentage": 59.35727788279773
+      "splitPercentage": 44.801512287334596
     },
     "second": {
       "first": {
