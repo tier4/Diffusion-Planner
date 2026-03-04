@@ -214,7 +214,9 @@ def generate_trajectory_pair(
         guidance: GuidanceSetConfig describing which guidance functions to apply and
             their scales. When provided, the deprecated boolean flags below are ignored.
         guidance_scale: Deprecated. Use guidance=GuidanceSetConfig(global_scale=...).
-            If not None, temporarily overrides the decoder's guidance scale.
+            Ignored (with a DeprecationWarning) when guidance= is provided.
+            When guidance= is None and no legacy flags are set, temporarily overrides
+            the decoder's guidance scale.
 
     Returns:
         Tuple of (trajectory_1, trajectory_2, final_metric, attempts_used, ego_shape,
@@ -240,14 +242,12 @@ def generate_trajectory_pair(
     _original_guidance_fn = policy_model.decoder._guidance_fn
     _original_guidance_scale = policy_model.decoder._guidance_scale
 
-    if guidance_scale is not None:
-        policy_model.decoder._guidance_scale = guidance_scale
+    import warnings
 
     # Build GuidanceSetConfig from legacy boolean params if new-style config not provided.
     if guidance is None and enable_guidance and (
         use_collision or use_route_following or use_lane_keeping or use_centerline_following
     ):
-        import warnings
         warnings.warn(
             "Boolean guidance flags are deprecated. Use guidance=GuidanceSetConfig(...).",
             DeprecationWarning,
@@ -276,11 +276,20 @@ def generate_trajectory_pair(
 
     # Configure guidance for the stochastic trajectory generation.
     if guidance is not None and guidance.active_functions():
+        if guidance_scale is not None:
+            warnings.warn(
+                "guidance_scale is ignored when guidance= is provided; "
+                "set the scale via GuidanceSetConfig(global_scale=...).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         from diffusion_planner.model.guidance.composer import GuidanceComposer
         policy_model.decoder._guidance_fn = GuidanceComposer(guidance)
         policy_model.decoder._guidance_scale = guidance.global_scale
     else:
         policy_model.decoder._guidance_fn = None
+        if guidance_scale is not None:
+            policy_model.decoder._guidance_scale = guidance_scale
 
     # Initialize best tracking based on FDE/ADE mode
     if gt_similarity_mode and gt_trajectory is not None:
