@@ -7,7 +7,7 @@ This directory contains Python tooling to evaluate map preprocessing fidelity.
 - Python 3 with: `numpy`, `matplotlib`
 - `jinja2` (for HTML dashboard rendering): `pip install jinja2`
 
-- `compare_maps.py`: compares exported internal map JSON with reference map JSON
+- `compare_map.py`: compares exported internal map JSON with reference map JSON
 
 ## Inputs
 
@@ -64,7 +64,7 @@ For a polyline pair A and B:
 ```bash
 python3 src/autoware_diffusion_planner_tools/scripts/map_eval/compare_map.py export-eval \
   --map_path /path/to/lanelet2_map.osm \
-  --out_dir /output/map_eval \
+  --out_dir /output/map_eval --web \
 ```
 
 ### Evaluate existing JSON files
