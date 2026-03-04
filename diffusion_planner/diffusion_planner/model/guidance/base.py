@@ -28,6 +28,16 @@ class BaseGuidance(ABC):
     name: str
     _energy_scale: float = 1.0
 
+    # Diffusion timestep window in which guidance gradients are allowed to flow.
+    # Outside this range x is detached to avoid instability at high noise levels
+    # (t >> 0.1, trajectory is still dominated by noise) and at near-zero noise
+    # (t < 0.005, last DPM step, gradient directions become unreliable).
+    # With 10 logSNR-spaced DPM steps these bounds activate guidance at ~3 steps.
+    # Values originate from the upstream Diffusion-Planner guidance implementation.
+    # Subclasses may override if a different window is needed.
+    _t_min: float = 0.005
+    _t_max: float = 0.1
+
     def __init__(self, config: "GuidanceConfig"):  # noqa: F821
         self.config = config
 
@@ -70,7 +80,7 @@ class BaseGuidance(ABC):
         Returns:
             [B] energy tensor.
         """
-        mask = (t < 0.1) * (t > 0.005)
+        mask = (t < self._t_max) * (t > self._t_min)
         mask = mask.view(x.shape[0], 1, 1, 1)
         x_gated = torch.where(mask, x, x.detach())
         raw = self._compute(x_gated, inputs)
