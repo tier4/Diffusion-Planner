@@ -206,7 +206,8 @@ def compute_training_loss(
         ego_pred = model_output[:, 0]  # [B, T, 4]
         if use_velocity:
             ego_current_raw = current_states[:, 0]  # [B, 4]
-            ego_pred_world = velocity_to_waypoints(ego_pred) + ego_current_raw[:, None, :]
+            ego_pred_world = velocity_to_waypoints(ego_pred)
+            ego_pred_world[..., :2] = ego_pred_world[..., :2] + ego_current_raw[:, None, :2]
         else:
             ego_pred_world = ego_pred * norm.std[0].to(model_output.device) + norm.mean[0].to(
                 model_output.device
@@ -412,7 +413,8 @@ class Decoder(nn.Module):
         ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
         if self._use_velocity:
-            future = velocity_to_waypoints(x[:, :, 1:, :]) + current_states[:, :, None, :]
+            future = velocity_to_waypoints(x[:, :, 1:, :])
+            future[..., :2] = future[..., :2] + current_states[:, :, None, :2]
             x = future  # [B, P, T, 4]
         else:
             x = self._state_normalizer.inverse(x)[:, :, 1:]
@@ -494,7 +496,8 @@ class Decoder(nn.Module):
         ego_trajectory = x0[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
         if self._use_velocity:
-            future = velocity_to_waypoints(x0[:, :, 1:, :]) + current_states[:, :, None, :]
+            future = velocity_to_waypoints(x0[:, :, 1:, :])
+            future[..., :2] = future[..., :2] + current_states[:, :, None, :2]
             x0 = future  # [B, P, T, 4]
         else:
             x0 = self._state_normalizer.inverse(x0)[:, :, 1:]
