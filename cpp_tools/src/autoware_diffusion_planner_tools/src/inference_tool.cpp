@@ -102,7 +102,9 @@ template <typename T>
 T get_param(const ParamMap & params, const std::string & name, const T & default_val)
 {
   const auto it = params.find(name);
-  if (it == params.end()) return default_val;
+  if (it == params.end()) {
+    return default_val;
+  }
   return it->second.get_value<T>();
 }
 
@@ -164,14 +166,18 @@ std::optional<T> find_nearest(std::deque<T> & msgs, int64_t target_ns, StampExtr
   for (int64_t i = 0; i < static_cast<int64_t>(msgs.size()); ++i) {
     const int64_t msg_ns = to_nanoseconds(get_stamp(msgs[i]));
     const int64_t diff = target_ns - msg_ns;
-    if (diff < 0) break;  // future message
+    if (diff < 0) {
+      break;  // future message
+    }
     if (diff <= SYNC_WINDOW_NS && diff < best_diff) {
       best_diff = diff;
       best_idx = i;
     }
   }
 
-  if (best_idx < 0) return std::nullopt;
+  if (best_idx < 0) {
+    return std::nullopt;
+  }
 
   T result = msgs[best_idx];
   msgs.erase(msgs.begin(), msgs.begin() + best_idx);
@@ -188,7 +194,9 @@ std::vector<std::shared_ptr<const T>> collect_within_window(
   for (int64_t i = 0; i < static_cast<int64_t>(msgs.size()); ++i) {
     const int64_t msg_ns = to_nanoseconds(get_stamp(msgs[i]));
     const int64_t diff = target_ns - msg_ns;
-    if (diff < 0) break;
+    if (diff < 0) {
+      break;
+    }
     if (diff <= SYNC_WINDOW_NS) {
       result.push_back(std::make_shared<const T>(msgs[i]));
     }
@@ -226,7 +234,9 @@ Odometry interpolate_odometry(
   // Find bracketing odom messages, continuing from previous position
   for (; search_hint + 1 < odom_msgs.size(); ++search_hint) {
     const double t_next = stamp_sec(odom_msgs[search_hint + 1]);
-    if (target_sec <= t_next) break;
+    if (target_sec <= t_next) {
+      break;
+    }
   }
 
   const auto & odom0 = odom_msgs[search_hint];
@@ -398,7 +408,9 @@ int main(int argc, char ** argv)
   std::cout << "  batch_size: " << params.batch_size << std::endl;
   std::cout << "  temperature: [";
   for (size_t i = 0; i < params.temperature_list.size(); ++i) {
-    if (i > 0) std::cout << ", ";
+    if (i > 0) {
+      std::cout << ", ";
+    }
     std::cout << params.temperature_list[i];
   }
   std::cout << "]" << std::endl;
@@ -553,7 +565,9 @@ int main(int argc, char ** argv)
 
     // Find most recent odometry at or before timer tick
     for (size_t i = odom_search_idx + 1; i < odometry_msgs.size(); ++i) {
-      if (to_nanoseconds(odometry_msgs[i].header.stamp) > timer_ns) break;
+      if (to_nanoseconds(odometry_msgs[i].header.stamp) > timer_ns) {
+        break;
+      }
       odom_search_idx = i;
     }
 
@@ -562,7 +576,9 @@ int main(int argc, char ** argv)
     // Update sticky route
     while (!route_msgs.empty()) {
       const int64_t route_ns = to_nanoseconds(route_msgs.front().header.stamp);
-      if (route_ns > timer_ns) break;
+      if (route_ns > timer_ns) {
+        break;
+      }
       current_route = std::make_shared<LaneletRoute>(route_msgs.front());
       route_msgs.pop_front();
     }
@@ -657,16 +673,17 @@ int main(int argc, char ** argv)
     {
       const int64_t GT_DT_NS =
         static_cast<int64_t>(constants::PREDICTION_TIME_STEP_S * 1e9);  // 0.1s
-      const int GT_NUM_POINTS = static_cast<int>(OUTPUT_T);             // 0.1s to 8.0s
 
       autoware_planning_msgs::msg::Trajectory gt_trajectory;
       gt_trajectory.header = odom.header;
 
       size_t gt_search_hint = odom_search_idx;
-      for (int k = 0; k < GT_NUM_POINTS; ++k) {
-        const int64_t offset_ns = static_cast<int64_t>(k + 1) * GT_DT_NS;
+      for (int64_t k = 0; k < OUTPUT_T; ++k) {
+        const int64_t offset_ns = (k + 1) * GT_DT_NS;
         const int64_t target_ns = timer_ns + offset_ns;
-        if (target_ns > last_odom_ns) break;
+        if (target_ns > last_odom_ns) {
+          break;
+        }
 
         const auto interp_odom = interpolate_odometry(odometry_msgs, target_ns, gt_search_hint);
 
