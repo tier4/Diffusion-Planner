@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from diffusion_planner.model.guidance.config import GuidanceSetConfig
 from diffusion_planner.utils.visualize_input import visualize_inputs
-from guidance_playground.guidance_ui import build_guidance_panel, make_guidance_set_config
+from guidance_gui.guidance_ui import build_guidance_panel, make_guidance_set_config
 from matplotlib.figure import Figure
 
 from preference_optimization.utils import (

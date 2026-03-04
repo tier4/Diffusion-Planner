@@ -9,10 +9,10 @@ Output files (saved to --output path):
 
 Usage
 -----
-python guidance_playground/scripts/generate_prototypes.py \\
+python guidance_gui/scripts/generate_prototypes.py \\
   --npz_list  /path/to/train.json \\
   --k         16 \\
-  --output    guidance_playground/prototypes_k16.npy \\
+  --output    guidance_gui/prototypes_k16.npy \\
   --max_samples 50000
 """
 

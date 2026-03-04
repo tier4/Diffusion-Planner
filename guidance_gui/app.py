@@ -6,7 +6,7 @@ a deterministic/stochastic pair for annotation.
 Launch
 ------
 source .venv/bin/activate
-python guidance_playground/app.py \\
+python guidance_gui/app.py \\
   --model_path /path/to/model.pth \\
   --npz_list   /path/to/train_or_valid.json
 """
@@ -27,8 +27,8 @@ from preference_optimization.annotation_gui import PreferenceAnnotator
 from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
 
-from guidance_playground.generate_samples import generate_samples
-from guidance_playground.guidance_ui import build_guidance_panel, make_guidance_set_config
+from guidance_gui.generate_samples import generate_samples
+from guidance_gui.guidance_ui import _DEFAULT_PROTOTYPES_PATH, build_guidance_panel, make_guidance_set_config
 
 
 _CMAP = cm.get_cmap("tab10")
@@ -184,7 +184,7 @@ def build_playground_interface(annotator: PlaygroundAnnotator):
 
                 gr.Markdown("### Guidance")
                 panel = build_guidance_panel(
-                    annotator.prototypes_path or "guidance_playground/prototypes_k16.npy"
+                    annotator.prototypes_path or _DEFAULT_PROTOTYPES_PATH
                 )
 
             with gr.Column(scale=2):

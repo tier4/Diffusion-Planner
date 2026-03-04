@@ -32,7 +32,9 @@ from dataclasses import dataclass
 import gradio as gr
 
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
-from guidance_playground.visualization import render_prototype_gallery
+from guidance_gui.visualization import render_prototype_gallery
+
+_DEFAULT_PROTOTYPES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prototypes_k16.npy")
 
 
 @dataclass
@@ -89,7 +91,7 @@ class GuidancePanelComponents:
 
 
 def build_guidance_panel(
-    default_prototypes_path: str = "guidance_playground/prototypes_k16.npy",
+    default_prototypes_path: str = _DEFAULT_PROTOTYPES_PATH,
 ) -> GuidancePanelComponents:
     """Create all guidance-related Gradio components inside the caller's ``gr.Blocks``.
 

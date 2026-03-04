@@ -347,3 +347,23 @@ Implement the framework first (Steps 1-3), then the playground on top of it (Ste
 | `noise_scale=2.0`, anchor guidance (scale=2.0, prototype=sharp_right), N=4 | Mean ADE to selected anchor < mean ADE to all other anchors |
 | `noise_scale=2.0`, anchor + lane_keeping, N=4 | Trajectories biased toward anchor shape but stay within lane boundaries |
 | Prototype gallery | 16 thumbnails rendered, clicking highlights selection, anchor shown in main plot |
+
+---
+
+## 10. Design Rationale: Why the DPO GUI Uses noise_scale = 0 for the Guided Trajectory
+
+The DPO annotation GUI intentionally fixes noise to near-zero for the trajectory that receives
+guidance. High noise scales introduce instability in the first predicted waypoints — the model's
+output at step t=0 becomes erratic when the initial noise tensor is large. When trajectories
+generated under high noise are then used as "preferred" examples in DPO training, the model
+learns to replicate that erratic behavior, causing successive training iterations to produce
+increasingly noisy predictions.
+
+To avoid conflating guidance signal with noise-induced artifacts, the DPO GUI's guided
+trajectory is generated deterministically (noise_scale ≈ 0). Guidance alone then shifts the
+trajectory — cleanly attributable to the guidance function and not to sampling noise. The
+unguided baseline (`traj_1`) remains stochastic to retain diversity in the preference pair.
+
+The Guidance GUI lifts this restriction intentionally: it is an exploration tool, not a
+training data generator. Both noise_scale and guidance can be varied simultaneously to study
+their interaction.
