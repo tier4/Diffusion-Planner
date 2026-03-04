@@ -26,15 +26,25 @@ All apps that import this module update automatically with no further changes.
 
 from __future__ import annotations
 
+import functools
 import os
 from dataclasses import dataclass
 
 import gradio as gr
+import numpy as np
 
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from guidance_gui.visualization import render_prototype_gallery
 
 _DEFAULT_PROTOTYPES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prototypes_k16.npy")
+
+
+@functools.lru_cache(maxsize=4)
+def _get_prototype_k(path: str) -> int:
+    """Return K (number of prototypes) from a .npy file, cached by path."""
+    if not path or not os.path.exists(path):
+        return 64
+    return int(np.load(path).shape[0])
 
 
 @dataclass
@@ -177,7 +187,7 @@ def build_guidance_panel(
             )
             anchor_index = gr.Slider(
                 minimum=0,
-                maximum=63,
+                maximum=max(0, _get_prototype_k(default_prototypes_path) - 1),
                 value=0,
                 step=1,
                 label="Anchor Index",
@@ -225,20 +235,31 @@ def build_guidance_panel(
     # bare lambdas receive None without it.
     def _on_gallery_select(evt: gr.SelectData, path: str) -> tuple:
         updated = render_prototype_gallery(path, selected_index=evt.index) or []
+        k = len(updated) if updated else _get_prototype_k(path)
+        clamped = min(evt.index, max(0, k - 1))
         return (
-            gr.update(value=evt.index, maximum=max(63, evt.index)),
+            gr.update(value=clamped, maximum=max(0, k - 1)),
             gr.update(value=updated),
         )
 
-    def _on_reload(path: str) -> dict:
-        return gr.update(value=render_prototype_gallery(path) or [])
+    def _on_reload(path: str) -> tuple:
+        updated = render_prototype_gallery(path) or []
+        k = len(updated) if updated else _get_prototype_k(path)
+        return (
+            gr.update(value=updated),
+            gr.update(maximum=max(0, k - 1), value=0),
+        )
 
     panel.gallery.select(
         fn=_on_gallery_select,
         inputs=[panel.anchor_path],
         outputs=[panel.anchor_index, panel.gallery],
     )
-    panel.reload_btn.click(fn=_on_reload, inputs=[panel.anchor_path], outputs=[panel.gallery])
+    panel.reload_btn.click(
+        fn=_on_reload,
+        inputs=[panel.anchor_path],
+        outputs=[panel.gallery, panel.anchor_index],
+    )
 
     return panel
 
@@ -288,8 +309,9 @@ def make_guidance_set_config(
         GuidanceConfig("centerline_following", enabled=bool(ucf), scale=float(ucfs)),
     ]
     if ua and ap and os.path.exists(str(ap)):
+        k = _get_prototype_k(str(ap))
         fns.append(GuidanceConfig(
             "anchor_following", enabled=True, scale=float(uas),
-            params={"prototypes_path": str(ap), "anchor_index": int(ai)},
+            params={"prototypes_path": str(ap), "anchor_index": max(0, min(int(ai), k - 1))},
         ))
     return GuidanceSetConfig(global_scale=float(gs), functions=fns)
