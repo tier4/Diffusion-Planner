@@ -302,11 +302,7 @@ New files in existing packages (see GUIDANCE_FRAMEWORK_DESIGN.md for full spec):
   preference_optimization/annotation_gui.py  [MODIFIED - build GuidanceSetConfig from UI controls]
 ```
 
-New pip dependency (add to `diffusion_planner/requirements.txt`):
-```
-scikit-learn   # for KMeans in generate_prototypes.py
-```
-`gradio>=4.0.0` is already present.
+No new pip dependencies: `scipy` (used by `generate_prototypes.py` via `scipy.cluster.vq`) and `gradio>=4.0.0` are already listed in `diffusion_planner/requirements.txt`.
 
 ---
 
