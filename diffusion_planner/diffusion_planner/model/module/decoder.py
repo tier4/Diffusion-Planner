@@ -99,12 +99,10 @@ def compute_training_loss(
     curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=gt_future.device))
     t = torch.where(prefix_mask, curr_mask_time, t)
 
-    # Convert to velocity representation if enabled
     if use_velocity:
         full_traj = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, T+1, 4]
         gt_velocity = waypoints_to_velocity(full_traj)  # [B, P, T, 4]
-        gt_velocity[:, 1:][neighbor_future_mask] = 0.0
-        all_gt = torch.cat([current_states[:, :, None, :], norm(gt_velocity)], dim=2)
+        all_gt = torch.cat([current_states[:, :, None, :], gt_velocity], dim=2)
     else:
         all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
@@ -205,13 +203,14 @@ def compute_training_loss(
         args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
     )
     if need_ego_edge:
-        ego_pred_norm = model_output[:, 0]  # [B, T, 4]
+        ego_pred = model_output[:, 0]  # [B, T, 4]
         if use_velocity:
-            # Convert velocity -> waypoints before denormalization
-            ego_pred_norm = velocity_to_waypoints(ego_pred_norm)
-        ego_pred_world = ego_pred_norm * norm.std[0].to(model_output.device) + norm.mean[0].to(
-            model_output.device
-        )  # [B, T, 4]
+            ego_current_raw = current_states[:, 0]  # [B, 4]
+            ego_pred_world = velocity_to_waypoints(ego_pred) + ego_current_raw[:, None, :]
+        else:
+            ego_pred_world = ego_pred * norm.std[0].to(model_output.device) + norm.mean[0].to(
+                model_output.device
+            )  # [B, T, 4]
         ego_edge_points = compute_ego_edge_points(
             ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp
         )
@@ -382,7 +381,7 @@ class Decoder(nn.Module):
         }
 
     def _inference_flow_matching(
-        self, encoding, inputs, neighbor_current_mask, encoding_pooled, sampled_trajectories
+        self, encoding, inputs, current_states, neighbor_current_mask, encoding_pooled, sampled_trajectories
     ):
         """Inference using Flow Matching approach.
 
@@ -412,9 +411,11 @@ class Decoder(nn.Module):
         x = x.reshape(B, P, (1 + self._future_len), 4)
         ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
-        x = self._state_normalizer.inverse(x)[:, :, 1:]
         if self._use_velocity:
-            x = velocity_to_waypoints(x)
+            future = velocity_to_waypoints(x[:, :, 1:, :]) + current_states[:, :, None, :]
+            x = future  # [B, P, T, 4]
+        else:
+            x = self._state_normalizer.inverse(x)[:, :, 1:]
         return {"prediction": x, "turn_indicator_logit": turn_indicator_logit}
 
     def _inference_x_start(
@@ -492,9 +493,11 @@ class Decoder(nn.Module):
         x0 = x0.reshape(B, P, (1 + self._future_len), 4)
         ego_trajectory = x0[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
-        x0 = self._state_normalizer.inverse(x0)[:, :, 1:]
         if self._use_velocity:
-            x0 = velocity_to_waypoints(x0)
+            future = velocity_to_waypoints(x0[:, :, 1:, :]) + current_states[:, :, None, :]
+            x0 = future  # [B, P, T, 4]
+        else:
+            x0 = self._state_normalizer.inverse(x0)[:, :, 1:]
 
         return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
 
@@ -522,7 +525,7 @@ class Decoder(nn.Module):
 
         if self._model_type == "flow_matching":
             return self._inference_flow_matching(
-                encoding, inputs, neighbor_current_mask, encoding_pooled, sampled_trajectories
+                encoding, inputs, current_states, neighbor_current_mask, encoding_pooled, sampled_trajectories
             )
         elif self._model_type == "x_start":
             return self._inference_x_start(
