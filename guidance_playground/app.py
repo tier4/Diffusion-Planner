@@ -304,7 +304,7 @@ def main():
                                     prototype_counts=prototype_counts)
 
     demo = build_playground_interface(annotator)
-    demo.launch(server_port=args.port, share=args.share)
+    demo.launch(server_port=args.port, share=args.share, inbrowser=True)
 
 
 if __name__ == "__main__":
