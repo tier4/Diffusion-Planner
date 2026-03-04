@@ -85,6 +85,98 @@ export function ControlsPanel({ context }: { context: PanelExtensionContext }) {
         </label>
       </div>
 
+      <div style={{ ...ui.section, borderLeft: "4px solid #10b981" }}>
+        <h4 style={ui.subtitle}>✂️ Initial Pose Pruning</h4>
+        <label style={{ display: "block", marginBottom: "8px", fontSize: "15px" }}>
+          <input
+            type="checkbox"
+            checked={localParams.enable_initial_pruning}
+            onChange={(event) => updateParam("enable_initial_pruning", event.target.checked)}
+          />
+          <span style={{ marginLeft: "6px" }}>Enable pruning</span>
+        </label>
+        <label style={{ display: "block", marginBottom: "12px", fontSize: "16px", fontWeight: 600 }}>
+          Position threshold (m): {localParams.initial_pos_threshold.toFixed(3)}
+          <input
+            type="range"
+            min={0.01}
+            max={0.1}
+            step={0.005}
+            value={localParams.initial_pos_threshold}
+            onChange={(event) => updateParam("initial_pos_threshold", Number(event.target.value))}
+            style={ui.slider}
+          />
+        </label>
+        <label style={{ display: "block", marginBottom: "8px", fontSize: "16px", fontWeight: 600 }}>
+          Yaw threshold (°): {localParams.initial_yaw_threshold_deg.toFixed(2)}
+          <input
+            type="range"
+            min={0.1}
+            max={1.0}
+            step={0.05}
+            value={localParams.initial_yaw_threshold_deg}
+            onChange={(event) => updateParam("initial_yaw_threshold_deg", Number(event.target.value))}
+            style={ui.slider}
+          />
+        </label>
+      </div>
+
+      <div style={{ ...ui.section, borderLeft: "4px solid #f59e0b" }}>
+        <h4 style={ui.subtitle}>🧭 Classifier Guidance</h4>
+        <label style={{ display: "block", marginBottom: "8px", fontSize: "15px" }}>
+          <input
+            type="checkbox"
+            checked={localParams.enable_guidance}
+            onChange={(event) => updateParam("enable_guidance", event.target.checked)}
+          />
+          <span style={{ marginLeft: "6px" }}>Enable guidance</span>
+        </label>
+        <label style={{ display: "block", marginBottom: "6px", fontSize: "14px" }}>
+          <input
+            type="checkbox"
+            checked={localParams.use_collision}
+            onChange={(event) => updateParam("use_collision", event.target.checked)}
+          />
+          <span style={{ marginLeft: "6px" }}>Collision</span>
+        </label>
+        <label style={{ display: "block", marginBottom: "6px", fontSize: "14px" }}>
+          <input
+            type="checkbox"
+            checked={localParams.use_route_following}
+            onChange={(event) => updateParam("use_route_following", event.target.checked)}
+          />
+          <span style={{ marginLeft: "6px" }}>Route following</span>
+        </label>
+        <label style={{ display: "block", marginBottom: "6px", fontSize: "14px" }}>
+          <input
+            type="checkbox"
+            checked={localParams.use_lane_keeping}
+            onChange={(event) => updateParam("use_lane_keeping", event.target.checked)}
+          />
+          <span style={{ marginLeft: "6px" }}>Lane keeping</span>
+        </label>
+        <label style={{ display: "block", marginBottom: "12px", fontSize: "14px" }}>
+          <input
+            type="checkbox"
+            checked={localParams.use_centerline_following}
+            onChange={(event) => updateParam("use_centerline_following", event.target.checked)}
+          />
+          <span style={{ marginLeft: "6px" }}>Centerline following</span>
+        </label>
+        <label style={{ display: "block", marginBottom: "8px", fontSize: "16px", fontWeight: 600 }}>
+          Guidance scale: {localParams.guidance_scale.toFixed(1)}
+          <input
+            type="range"
+            min={0}
+            max={5}
+            step={0.1}
+            value={localParams.guidance_scale}
+            onChange={(event) => updateParam("guidance_scale", Number(event.target.value))}
+            style={ui.slider}
+          />
+        </label>
+      </div>
+
       <div style={{ ...ui.section, borderLeft: "4px solid #0ea5e9" }}>
         <h4 style={ui.subtitle}>🖼️ Visualization</h4>
         <label style={{ display: "block", marginBottom: "12px", fontSize: "16px", fontWeight: 600 }}>

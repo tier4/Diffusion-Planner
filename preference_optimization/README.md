@@ -34,6 +34,34 @@ python train_dpo.py \
   --train_epochs 10
 ```
 
+## Lichtblick Launch
+
+1. Install the lichtblick extension with `cd lichtblick_extensions/annotation_ui/; npm run install-local`
+2. Open three terminals, run `source ~/pilot-auto/install/setup.bash` to collect pilot-auto (or projects) message paths.
+3. On each terminals
+
+
+```bash
+## Terminal 1: Launch Lichtblick
+lichtblick  ## Select layout from `lichtblick_extensions/annotation_ui/layouts/dpo.json`
+
+
+## Terminal 2: Launch foxglove_bridge
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml
+
+## Terminal 3: Launch DPO train
+# Train with GUI annotation
+python train_dpo.py \
+  --model_path <path/to/model.pth> \
+  --train_npz_list <path/to/train.json> \
+  --valid_npz_list <path/to/valid.json> \
+  --preference_mode lichtblick \
+  --train_epochs 10 \
+  --exp_name my_experiment
+
+```
+
+
 ## Architecture
 
 ### Module Structure
@@ -199,94 +227,6 @@ Adjustable in GUI or programmatically:
 | fde_threshold | 2.0 | 0.5-10.0 | Minimum endpoint distance (m) |
 | max_retries | 50 | 10-200 | Generation attempts |
 
-## Testing
-
-Run unit tests:
-
-```bash
-python3 test_fde_standalone.py
-```
-
-Expected output:
-```
-============================================================
-ALL TESTS PASSED! ✓
-============================================================
-```
-
-## Output Structure
-
-```
-experiments/
-└── 20260126-120000_my_experiment/
-    ├── args.json                    # Model configuration
-    ├── dpo_args.json                # Training arguments
-    ├── latest.pth                   # Latest checkpoint
-    ├── epoch_010.pth                # Periodic checkpoints
-    ├── dpo_train_log.tsv            # Training metrics
-    └── validation_vis/              # Validation visualizations
-        ├── sample_000_epoch_0000.png
-        ├── sample_001_epoch_0000.png
-        └── ...
-```
-
-## Dependencies
-
-```
-torch
-numpy
-matplotlib
-gradio>=4.0.0
-pandas
-tqdm
-diffusion_planner  # Parent package
-```
-
-## Contributing
-
-When adding features:
-
-1. **Follow the module structure** - Keep related code together
-2. **Add type hints** - All public functions should be typed
-3. **Write docstrings** - Document parameters and return values
-4. **Update tests** - Add tests for new functionality
-5. **Keep modules small** - Aim for <300 lines per module
-
-## Performance
-
-### Training Speed
-- ~5-10 seconds per epoch (1000 samples, batch_size=32)
-- ~1-3 seconds per trajectory pair generation (GPU-dependent)
-
-### Memory Usage
-- ~2-4GB GPU memory (model-dependent)
-- ~1GB RAM for data loading
-
-## Troubleshooting
-
-### Import errors
-```bash
-# Make sure you're in the correct directory
-cd /path/to/Diffusion-Planner/preference_optimization
-python train_dpo.py ...
-```
-
-### CUDA out of memory
-```bash
-# Reduce batch size
-python train_dpo.py --batch_size 16 ...
-```
-
-### Gradio not found
-```bash
-pip install gradio>=4.0.0
-```
-
-## Documentation
-
-- `../QUICK_START_GUIDE.md` - User guide
-- `../IMPLEMENTATION_SUMMARY.md` - Technical details
-- `../REFACTORING_SUMMARY.md` - Architecture changes
 
 ## License
 
