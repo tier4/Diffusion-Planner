@@ -6,11 +6,19 @@ a desired shape in the ego-centric frame (straight, turn-left, etc.)
 and the guidance energy attracts the predicted trajectory toward it.
 """
 
+import functools
+
 import numpy as np
 import torch
 
 from .base import BaseGuidance
 from .registry import register
+
+
+@functools.lru_cache(maxsize=4)
+def _load_prototypes(path: str) -> np.ndarray:
+    """Load a prototypes .npy file, cached by path to avoid repeated disk I/O."""
+    return np.load(path)
 
 
 @register
@@ -34,7 +42,7 @@ class AnchorFollowingGuidance(BaseGuidance):
 
     def __init__(self, config: "GuidanceConfig"):  # noqa: F821
         super().__init__(config)
-        protos = np.load(config.params["prototypes_path"])  # (K, 80, 2)
+        protos = _load_prototypes(config.params["prototypes_path"])  # (K, 80, 2)
         idx = config.params["anchor_index"]
         self._anchor = torch.tensor(protos[idx], dtype=torch.float32)  # (80, 2)
 
