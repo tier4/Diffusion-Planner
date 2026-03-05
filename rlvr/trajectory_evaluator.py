@@ -226,9 +226,10 @@ def compute_score(m: TrajectoryMetrics, total_steps: int = 80) -> float:
     good its clearance/TTC look (which are artificially inflated when the
     ego has left the road and moved away from all NPCs).
 
-      on_road_factor = max(0, 1 − 2 × off_road_fraction)
-        → 25% off-road: factor = 0.5   (score halved)
-        → 50% off-road: factor = 0     (same outcome as collision)
+      on_road_factor = max(0, 1 − 10 × off_road_fraction)
+        →  1% off-road: factor = 0.90  (-10% score)
+        →  5% off-road: factor = 0.50  (score halved)
+        → 10% off-road: factor = 0     (same outcome as collision)
 
     Base weights (applied before the factor):
       progress 0.40, clearance 0.25, TTC 0.15, near-miss-free 0.10, jerk 0.10.
@@ -250,7 +251,7 @@ def compute_score(m: TrajectoryMetrics, total_steps: int = 80) -> float:
         0.10 * jerk_score
     )
 
-    on_road_factor = max(0.0, 1.0 - 2.0 * m.off_road_fraction)
+    on_road_factor = max(0.0, 1.0 - 10.0 * m.off_road_fraction)
     return base * on_road_factor
 
 
