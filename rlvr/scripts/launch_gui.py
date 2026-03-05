@@ -18,6 +18,8 @@ Opens at http://localhost:7861
 import argparse
 import json
 import math
+import os
+import random
 import time
 from pathlib import Path
 
@@ -41,6 +43,19 @@ def _get_bridge_and_utils():
     from rlvr.npz_utils import extract_spawn_states
     from rlvr.terasim_bridge import TeraSimBridge
     return extract_spawn_states, TeraSimBridge
+
+
+# ---------------------------------------------------------------------------
+# Top-level mutable state (shared across Gradio callbacks)
+# ---------------------------------------------------------------------------
+model_state = {
+    "model":             None,   # loaded nn.Module
+    "model_args":        None,   # Config object from load_model()
+    "device":            None,   # torch.device
+    "trajectories_ego":  None,   # np.ndarray (N, 80, 4) [x,y,cos,sin] ego frame
+    "trajectories_map":  None,   # np.ndarray (N, 80, 3) [x_map,y_map,yaw_map]
+    "traj_labels":       None,   # list[str]
+}
 
 
 # ---------------------------------------------------------------------------
@@ -73,14 +88,28 @@ def _sample_info(npz_path: str) -> str:
         return f"Could not load: {e}"
 
 
-def _load_scene_figure(npz_path: str, view_range: int = 80) -> Figure:
+def _load_scene_figure(
+    npz_path: str,
+    trajectories_ego: np.ndarray | None = None,
+    view_range: int = 80,
+) -> Figure:
     """Load NPZ file and render the driving scene as a matplotlib Figure.
 
     Renders lanes, route, neighbor agents, and ego vehicle in the ego-centric
     coordinate frame (base_link at t=0) using diffusion_planner.utils.visualize_input.
     Uses load_npz_data to ensure heading conversions (goal_pose, ego_agent_past)
     are applied before visualization.
+
+    If trajectories_ego is provided, overlays N colored trajectory lines on the
+    scene preview so the user can review candidates before launching simulation.
+
+    Args:
+        npz_path:         Path to the .npz sample file.
+        trajectories_ego: Optional (N, 80, 4) array [x, y, cos, sin] of model
+                          trajectories in ego-centric frame.
+        view_range:       Axis half-range in meters.
     """
+    import matplotlib.pyplot as plt
     import torch
     from diffusion_planner.utils.visualize_input import visualize_inputs
     from preference_optimization.utils import load_npz_data
@@ -102,6 +131,20 @@ def _load_scene_figure(npz_path: str, view_range: int = 80) -> Figure:
             fontsize=9,
         )
         ax.set_axis_off()
+        return fig
+
+    if trajectories_ego is not None and len(trajectories_ego) > 0:
+        cmap = plt.cm.get_cmap("tab10")
+        labels = model_state.get("traj_labels") or [
+            f"traj_{i}" for i in range(len(trajectories_ego))
+        ]
+        for i, traj in enumerate(trajectories_ego):
+            ax.plot(
+                traj[:, 0], traj[:, 1],
+                color=cmap(i % 10), linewidth=1.8, alpha=0.75,
+                label=labels[i],
+            )
+        ax.legend(fontsize=7, loc="upper right")
 
     return fig
 
@@ -235,6 +278,115 @@ def _map_to_ego(xy_map: np.ndarray, map2bl: np.ndarray, z_map: float = 0.0) -> n
     pts_h = np.column_stack([xy_map, np.full(n, z_map), np.ones(n)])  # (N, 4)
     pts_bl = (map2bl @ pts_h.T).T                                       # (N, 4)
     return pts_bl[:, :2]
+
+
+def _convert_trajectories_to_map(
+    trajectories_ego: np.ndarray,  # (N, 80, 4) [x, y, cos, sin]
+    bl2map: np.ndarray,            # (4, 4)
+) -> np.ndarray:                   # (N, 80, 3) [x_map, y_map, yaw_rad_map]
+    """Convert N ego-centric trajectories to MGRS map frame."""
+    from rlvr.npz_utils import ego_centric_to_map, heading_bl_to_map
+    N, T, _ = trajectories_ego.shape
+    out = np.zeros((N, T, 3), dtype=np.float64)
+    for i, traj in enumerate(trajectories_ego):
+        xy_map = ego_centric_to_map(traj[:, :2], bl2map)   # (T, 2)
+        out[i, :, :2] = xy_map
+        for t in range(T):
+            out[i, t, 2] = heading_bl_to_map(
+                float(traj[t, 2]), float(traj[t, 3]), bl2map
+            )
+    return out
+
+
+def _load_model(model_path: str) -> str:
+    """Load a Diffusion Planner checkpoint into module-level model_state."""
+    import torch
+    from preference_optimization.model_utils import load_model
+
+    if not model_path or not os.path.isfile(model_path):
+        return "Model file not found"
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        from pathlib import Path
+        model, model_args = load_model(Path(model_path), device)
+        model.eval()
+        model_state["model"]      = model
+        model_state["model_args"] = model_args
+        model_state["device"]     = device
+        return f"Loaded on {device}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _generate_trajectories(
+    npz_path, n_samples, include_det, noise_min, noise_max,
+    eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs,
+):
+    """Generate N model trajectories for the current scene and update model_state."""
+    import torch
+    from diffusion_planner.model.guidance.composer import GuidanceComposer
+    from guidance_playground.generate_samples import generate_samples
+    from guidance_playground.guidance_ui import make_guidance_set_config
+    from preference_optimization.utils import load_npz_data
+    from rlvr.npz_utils import load_bl2map
+
+    if model_state["model"] is None:
+        return gr.update(), "No model loaded — click 'Load Model' first."
+
+    device     = model_state["device"]
+    model      = model_state["model"]
+    model_args = model_state["model_args"]
+
+    # Load and normalize observation (same pattern as preference_optimization/utils.py)
+    data = load_npz_data(npz_path, device)
+    data = model_args.observation_normalizer(data)
+
+    # Build guidance composer
+    guidance_cfg = make_guidance_set_config(
+        eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs
+    )
+    composer = GuidanceComposer(guidance_cfg) if guidance_cfg else None
+
+    trajectories, labels = [], []
+
+    if include_det:
+        traj = generate_samples(
+            model, model_args, data,
+            noise_scale=0.0, n_samples=1,
+            composer=None, device=device,
+        )
+        trajectories.append(traj[0])
+        labels.append("deterministic")
+
+    remaining = int(n_samples) - (1 if include_det else 0)
+    for i in range(max(remaining, 0)):
+        noise = (
+            random.uniform(float(noise_min), float(noise_max))
+            if float(noise_max) > 0 else 0.0
+        )
+        traj = generate_samples(
+            model, model_args, data,
+            noise_scale=noise, n_samples=1,
+            composer=composer, device=device,
+        )
+        trajectories.append(traj[0])
+        guidance_tag = "+guidance" if composer else ""
+        labels.append(f"sample_{i+1} s={noise:.2f}{guidance_tag}")
+
+    if not trajectories:
+        return gr.update(), "No trajectories generated (n_samples=0)."
+
+    model_state["trajectories_ego"] = np.stack(trajectories)   # (N, 80, 4)
+    model_state["traj_labels"]      = labels
+
+    json_path = npz_path.replace(".npz", ".json")
+    bl2map = load_bl2map(json_path)
+    model_state["trajectories_map"] = _convert_trajectories_to_map(
+        model_state["trajectories_ego"], bl2map
+    )
+
+    fig = _load_scene_figure(npz_path, trajectories_ego=model_state["trajectories_ego"])
+    return fig, f"Generated {len(labels)}: {', '.join(labels)}"
 
 
 def _draw_agent_box(
@@ -440,273 +592,234 @@ def _make_sim_figure(
     return fig
 
 
-def _run_simulation(
+
+def _run_multi_traj(
     npz_path: str,
-    use_fcd: bool,
-    fcd_dir: str,
     step_delay: float,
 ):
-    """Generator: yields (sim_figure, log_text) while running the ghost replay.
+    """Generator: yields (sim_figure, log_text, results_table) for multi-trajectory mode.
 
-    Called by Gradio on button click.  Streams step-by-step updates to the
-    simulation plot and the log textbox.
+    Runs each model trajectory through an independent TeraSim episode (NPCs react
+    adversarially to each), collects per-step safety states, computes metrics, and
+    yields a ranked results table at the end.
     """
     import torch
     from preference_optimization.utils import load_npz_data
     from rlvr.npz_utils import load_bl2map
+    from rlvr.trajectory_evaluator import (
+        StepState,
+        compute_score,
+        finalize_metrics,
+        metrics_to_dataframe,
+        rank_trajectories,
+    )
 
     extract_spawn_states, TeraSimBridge = _get_bridge_and_utils()
 
     json_path = npz_path.replace(".npz", ".json")
     log = ""
-    ego_history: list[tuple[float, float, float]] = []
 
     def emit(line: str) -> str:
         nonlocal log
         log += line + "\n"
         return log
 
-    yield None, emit(f"NPZ:  {npz_path}")
-    yield None, emit(f"JSON: {json_path}")
-    yield None, emit("")
+    yield None, emit("=== Multi-Trajectory Evaluation ==="), None
+    yield None, emit(f"NPZ:  {npz_path}"), None
 
-    # --- Extract spawn states ---
-    yield None, emit("Extracting spawn states…")
-    try:
-        spawn = extract_spawn_states(npz_path, json_path)
-    except Exception as e:
-        yield None, emit(f"ERROR: {e}")
-        return
-
-    ego = spawn["ego"]
-    yield None, emit(
-        f"  Ego t=0:  x={ego['x']:.2f}  y={ego['y']:.2f}  "
-        f"yaw={math.degrees(ego['yaw_rad']):.1f}°  "
-        f"speed={ego['vx']:.2f} m/s"
-    )
-    yield None, emit(f"  Active NPCs: {len(spawn['npcs'])}")
-
-    # Pedestrian positions in map frame — drawn as static overlay, not in SUMO.
-    ped_map_positions = [
-        (float(n["x"]), float(n["y"]))
-        for n in spawn["npcs"]
-        if n.get("class", 0) == 1
-    ]
-    yield None, emit(f"  Pedestrians (NPZ overlay): {len(ped_map_positions)}")
-
-    # --- Pre-compute static scene geometry (done once, reused every frame) ---
-    yield None, emit("Loading scene geometry…")
+    # --- Load scene geometry once ---
+    yield None, emit("Loading scene geometry…"), None
     try:
         scene_data = load_npz_data(npz_path, torch.device("cpu"))
         scene_geom = _extract_scene_geometry(scene_data)
-        bl2map = load_bl2map(json_path)
-        map2bl = np.linalg.inv(bl2map)
-        map_yaw0 = float(np.arctan2(bl2map[1, 0], bl2map[0, 0]))
-        # z coordinate of the ego in the map frame.  ego_centric_to_map() sends
-        # z=0 (base_link plane) to z≈z_ego in map; _map_to_ego must receive the
-        # same z to invert cleanly and avoid a ~z_ego * sin(pitch) XY offset.
-        ego_z_map = float(bl2map[2, 3])
-        # Load the raw NPZ once for GT trajectory and ego shape
-        raw = np.load(npz_path, allow_pickle=True)
-        gt_ego_bl = raw["ego_agent_future"].astype(np.float32)  # (80, 3) [x, y, yaw_rad]
-        # ego_shape: [wheel_base, length, width] — indices 1 and 2
-        ego_shape = raw["ego_shape"] if "ego_shape" in raw else None
+        bl2map     = load_bl2map(json_path)
+        map2bl     = np.linalg.inv(bl2map)
+        map_yaw0   = float(np.arctan2(bl2map[1, 0], bl2map[0, 0]))
+        ego_z_map  = float(bl2map[2, 3])
+
+        raw        = np.load(npz_path, allow_pickle=True)
+        gt_ego_bl  = raw["ego_agent_future"].astype(np.float32)  # (80, 3) ego-centric
+        ego_shape  = raw["ego_shape"] if "ego_shape" in raw else None
         ego_length = float(ego_shape[1]) if ego_shape is not None and len(ego_shape) > 2 else 4.5
         ego_width  = float(ego_shape[2]) if ego_shape is not None and len(ego_shape) > 2 else 2.0
 
-        # Split vehicles: on-road ones are spawned in SUMO; off-road ones are
-        # rendered as static grey overlays at their exact NPZ positions.
-        # keepRoute=0 snaps on-road vehicles to the nearest lane (correct
-        # behaviour); off-road vehicles would be snapped to the wrong lane,
-        # which produces wrong positions and can crash SUMO.
-        all_npcs = spawn["npcs"]
-        all_vehicles = [n for n in all_npcs if n.get("class", 0) != 1]
-        # 5 m threshold: only spawn vehicles that are actually on a road lane.
-        # Vehicles in parking lots / on sidewalks are typically >5 m from any
-        # lane centerline and would be snapped to a wrong road position by
-        # SUMO's keepRoute=0.  They are shown as static grey overlays instead.
+        spawn = extract_spawn_states(npz_path, json_path)
+        gt_traj_map = spawn["ego_future_map"]  # (80, 3) [x_map, y_map, yaw_rad_map]
+
+        # Pedestrian overlay positions (not spawned in SUMO, drawn statically)
+        ped_map_positions = [
+            (float(n["x"]), float(n["y"]))
+            for n in spawn["npcs"]
+            if n.get("class", 0) == 1
+        ]
+
+        # On-road filtering: only spawn vehicles that SUMO can snap to a lane
+        all_vehicles = [n for n in spawn["npcs"] if n.get("class", 0) != 1]
         vehicles_on_lane, vehicles_off_lane = _filter_npcs_on_lane(
             all_vehicles, scene_data, map2bl, ego_z_map, max_dist=5.0,
         )
-        # NPZ dimension lookup for on-road vehicles: SUMO state only reports
-        # the car vType defaults (4.5 m × 1.8 m), not the actual agent shape.
         npc_dim_lookup = {n["id"]: (n["length"], n["width"]) for n in all_vehicles}
 
         spawn = dict(spawn)
         spawn["npcs"] = vehicles_on_lane
+
         yield None, emit(
-            f"  Vehicles on-road (SUMO): {len(vehicles_on_lane)} / {len(all_vehicles)}  "
-            f"off-road (static overlay): {len(vehicles_off_lane)}"
-        )
+            f"  Vehicles on-road: {len(vehicles_on_lane)}/{len(all_vehicles)}  "
+            f"off-road overlay: {len(vehicles_off_lane)}  "
+            f"peds: {len(ped_map_positions)}"
+        ), None
     except Exception as e:
-        yield None, emit(f"ERROR loading scene geometry: {e}")
+        yield None, emit(f"ERROR loading scene: {e}"), None
         return
 
-    if use_fcd:
-        if fcd_dir.startswith("/tmp"):
-            yield None, emit(
-                "WARNING: fcd_dir starts with /tmp — Docker bind-mount may not "
-                "work on this host. Use a path under /home/ instead."
-            )
-        yield None, emit(f"FCD output dir: {fcd_dir}")
+    trajectories = model_state["trajectories_map"]    # (N, 80, 3)
+    labels       = model_state["traj_labels"]          # list[str]
+    N            = len(trajectories)
+    yield None, emit(f"Trajectories to evaluate: {N}"), None
 
-    yield None, emit("")
-    yield None, emit("Starting TeraSim simulation…")
+    all_metrics = []
 
-    # Show GT trajectory before simulation starts
-    n_steps = len(spawn["ego_future_map"])
-    init_fig = _make_sim_figure(
-        scene_geom, gt_ego_bl, [], [], [], ped_map_positions,
-        0, n_steps, map2bl, map_yaw0, ego_z_map,
-        ego_length=ego_length, ego_width=ego_width,
-        static_vehicle_overlay=vehicles_off_lane,
-        npc_dim_lookup=npc_dim_lookup,
-    )
-    yield init_fig, emit("  Waiting for episode to start…")
-
-    fcd_host_dir = fcd_dir if use_fcd else None
-    sim_fig = init_fig
     try:
-        with TeraSimBridge(
-            sim_config_host_dir=str(_SIM_CONFIG_DIR),
-            gui=False,
-            fcd_host_dir=fcd_host_dir,
-        ) as sim:
-            sim.start_episode(spawn, enable_viz=False)
-            yield init_fig, emit("  Episode started.")
+        with TeraSimBridge(sim_config_host_dir=str(_SIM_CONFIG_DIR)) as sim:
+            for traj_idx, (traj_map, label) in enumerate(zip(trajectories, labels)):
+                yield None, emit(f"\n[{traj_idx+1}/{N}] Starting: {label}"), None
 
-            # Seed last-seen table with NPZ t=0 spawn positions so vehicles
-            # that SUMO removes (route exhausted, collision) keep rendering at
-            # their last known position instead of vanishing from the view.
-            npc_last_seen: dict[str, dict] = {
-                n["id"]: {
-                    "id":         n["id"],
-                    "x":          n["x"],
-                    "y":          n["y"],
-                    "sumo_angle": n["sumo_angle"],
-                    "speed":      n["vx"],
-                }
-                for n in vehicles_on_lane
-            }
+                sim.start_episode(spawn, enable_viz=False)
+                yield None, emit(f"  Episode started."), None
 
-            for step_idx in range(n_steps):
-                x, y, yaw_rad = spawn["ego_future_map"][step_idx]
-                result = sim.step((float(x), float(y)), float(yaw_rad))
+                step_states: list[StepState] = []
+                ego_history_map: list[tuple] = []
 
-                # Update last-seen table; vehicles absent from this step's
-                # state (removed by SUMO) will retain their previous entry.
-                for npc in result["npc_states"]:
-                    npc_last_seen[npc["id"]] = npc
+                for step_i, (x, y, yaw_rad) in enumerate(traj_map):
+                    result     = sim.step((float(x), float(y)), float(yaw_rad))
+                    full_state = sim._last_state
+                    av_in_sim  = result["av_in_sim"]
 
-                ego_history.append((float(x), float(y), float(yaw_rad)))
+                    all_vehicles_state = full_state["agent_details"].get("vehicle", {})
+                    all_vrus_state     = full_state["agent_details"].get("vru", {})
 
-                # Debug: at step 0 log raw NPC/VRU positions and their
-                # ego-centric transforms so we can see if agents are in-frame.
-                if step_idx == 0:
-                    npc_states = result["npc_states"]
-                    vru_states = result.get("vru_states", [])
-                    yield None, emit(
-                        f"  [DBG step0] Veh={len(npc_states)}  VRU={len(vru_states)}"
-                    )
-                    for i, npc in enumerate(npc_states[:5]):
-                        nxy = _map_to_ego(
-                            np.array([[npc["x"], npc["y"]]]), map2bl, z_map=ego_z_map
-                        )[0]
-                        yield None, emit(
-                            f"    NPC[{i}] map=({npc['x']:.1f},{npc['y']:.1f})"
-                            f"  ego=({nxy[0]:.1f},{nxy[1]:.1f})"
-                            f"  sumo_angle={npc.get('sumo_angle',0):.1f}°"
-                        )
-                    for i, vru in enumerate(vru_states[:3]):
-                        vxy = _map_to_ego(
-                            np.array([[vru["x"], vru["y"]]]), map2bl, z_map=ego_z_map
-                        )[0]
-                        yield None, emit(
-                            f"    VRU[{i}] map=({vru['x']:.1f},{vru['y']:.1f})"
-                            f"  ego=({vxy[0]:.1f},{vxy[1]:.1f})"
-                            f"  type={vru.get('type','?')}"
-                        )
-                    # Show ego position in ego-centric (should be near origin at step 0)
-                    ego_xy_bl = _map_to_ego(np.array([[x, y]]), map2bl, z_map=ego_z_map)[0]
-                    yield None, emit(
-                        f"  [DBG step0] ego in ego-centric: ({ego_xy_bl[0]:.2f},{ego_xy_bl[1]:.2f})"
-                        f"  view=±80m"
-                    )
+                    # Dicts keyed by agent_id for metrics
+                    vehicle_states_dict = {
+                        k: v for k, v in all_vehicles_state.items() if k != "AV"
+                    }
+                    vru_states_dict = dict(all_vrus_state)
 
-                if step_delay > 0:
-                    time.sleep(step_delay)
+                    # Snap distance: commanded position vs where SUMO actually placed the AV.
+                    # SUMO snaps to nearest road with keepRoute=0; large gap = off-road.
+                    if av_in_sim and "AV" in all_vehicles_state:
+                        av_sumo = all_vehicles_state["AV"]
+                        sumo_xy = (float(av_sumo["x"]), float(av_sumo["y"]))
+                        snap_dist = float(np.linalg.norm(
+                            np.array([x, y]) - np.array(sumo_xy)
+                        ))
+                    else:
+                        sumo_xy   = (float(x), float(y))
+                        snap_dist = 0.0
 
-                sim_fig = _make_sim_figure(
-                    scene_geom, gt_ego_bl, ego_history,
-                    list(npc_last_seen.values()), result.get("vru_states", []),
-                    ped_map_positions,
-                    step_idx + 1, n_steps,
-                    map2bl, map_yaw0, ego_z_map,
-                    ego_length=ego_length, ego_width=ego_width,
-                    static_vehicle_overlay=vehicles_off_lane,
-                    npc_dim_lookup=npc_dim_lookup,
-                )
+                    # Compute ego speed from position diff
+                    if step_states:
+                        prev_xy = step_states[-1].ego_xy_map
+                        ego_speed = float(np.linalg.norm([
+                            (x - prev_xy[0]) / 0.1,
+                            (y - prev_xy[1]) / 0.1,
+                        ]))
+                    else:
+                        ego_speed = 0.0
 
-                if not result["av_in_sim"]:
-                    yield sim_fig, emit(
-                        f"\nFAILED: AV removed from simulation at step {step_idx} "
-                        f"(t={result['sim_time']:.1f}s) — collision or out-of-bounds."
-                    )
-                    return
+                    step_states.append(StepState(
+                        step=step_i,
+                        ego_xy_map=(float(x), float(y)),
+                        ego_xy_sumo=sumo_xy,
+                        snap_distance=snap_dist,
+                        ego_speed=ego_speed,
+                        vehicle_states=vehicle_states_dict,
+                        vru_states=vru_states_dict,
+                        av_in_sim=av_in_sim,
+                    ))
 
-                if (step_idx + 1) % 10 == 0:
-                    yield sim_fig, emit(
-                        f"  step {step_idx + 1:3d}/{n_steps}  "
-                        f"t={result['sim_time']:.1f}s  "
-                        f"Veh={len(result['npc_states'])}  "
-                        f"VRU={len(result.get('vru_states', []))}"
-                    )
-                else:
-                    yield sim_fig, log
+                    ego_history_map.append((float(x), float(y), float(yaw_rad)))
 
-            # --- Final position check ---
-            final_state = sim._last_state
-            av_state = final_state["agent_details"]["vehicle"]["AV"]
-            av_x, av_y = av_state["x"], av_state["y"]
-            gt_x, gt_y = (
-                float(spawn["ego_future_map"][-1, 0]),
-                float(spawn["ego_future_map"][-1, 1]),
-            )
-            dist = math.sqrt((av_x - gt_x) ** 2 + (av_y - gt_y) ** 2)
-            yield sim_fig, emit(
-                f"\nFinal position:  sim=({av_x:.2f}, {av_y:.2f})  "
-                f"GT=({gt_x:.2f}, {gt_y:.2f})  error={dist:.3f}m"
-            )
+                    # Build lists with "id" key for rendering
+                    npc_list = [{"id": k, **v} for k, v in vehicle_states_dict.items()]
+                    vru_list = [{"id": k, **v} for k, v in vru_states_dict.items()]
 
-            if dist >= 2.0:
-                yield sim_fig, emit(
-                    f"\nFAILED: position error {dist:.3f}m > 2.0m threshold."
-                )
-                return
-
-            fcd_path = sim.fcd_output_path
-            if fcd_path:
-                fcd = Path(fcd_path)
-                if fcd.exists():
-                    yield sim_fig, emit(
-                        f"\nFCD written: {fcd_path}  ({fcd.stat().st_size // 1024} KB)"
-                    )
-                    yield sim_fig, emit(
-                        f"Replay:  python3 rlvr/scripts/replay_fcd.py "
-                        f"--fcd_file {fcd_path}"
+                    sim_fig = _make_sim_figure(
+                        scene_geom, gt_ego_bl, ego_history_map,
+                        npc_list, vru_list, ped_map_positions,
+                        step_i + 1, 80,
+                        map2bl, map_yaw0, ego_z_map,
+                        ego_length=ego_length, ego_width=ego_width,
+                        static_vehicle_overlay=vehicles_off_lane,
+                        npc_dim_lookup=npc_dim_lookup,
                     )
 
-            yield sim_fig, emit("\n✓  Ghost replay validation PASSED")
+                    if float(step_delay) > 0:
+                        time.sleep(float(step_delay))
+
+                    if not av_in_sim:
+                        yield sim_fig, emit(
+                            f"  [{traj_idx+1}/{N}] COLLISION at step {step_i+1}"
+                        ), None
+                        break
+
+                    if (step_i + 1) % 10 == 0:
+                        yield sim_fig, emit(
+                            f"  step {step_i+1:3d}/80  "
+                            f"Veh={len(npc_list)}  VRU={len(vru_list)}"
+                        ), None
+                    else:
+                        yield sim_fig, log, None
+
+                sim.close()
+
+                m = finalize_metrics(step_states, traj_map, gt_traj_map)
+                m.label = label
+                m.score = compute_score(m)
+                all_metrics.append(m)
+                yield None, emit(
+                    f"  Done: score={m.score:.3f}  collision={m.collision}  "
+                    f"clearance={m.min_clearance_m:.1f}m  FDE={m.fde_from_gt_m:.1f}m"
+                ), None
 
     except Exception as e:
-        yield None, emit(f"\nERROR: {e}")
+        yield None, emit(f"\nERROR: {e}"), None
+        return
+
+    ranked  = rank_trajectories(all_metrics)
+    df_data = metrics_to_dataframe(ranked)
+    yield None, emit(
+        f"\nAll {N} trajectories evaluated.\nBest: {ranked[0].label}  "
+        f"score={ranked[0].score:.3f}"
+    ), df_data
+
+
+def _run_simulation(
+    npz_path: str,
+    use_fcd: bool,
+    fcd_dir: str,
+    step_delay: float,
+):
+    """Dispatcher: runs model trajectories through TeraSim.
+
+    Requires model trajectories to have been generated first via 'Generate
+    Trajectories'.  Yields (sim_figure, log_text, results_table) tuples.
+    """
+    if model_state["trajectories_map"] is None:
+        yield None, (
+            "No model trajectories available.\n"
+            "Load a model and click 'Generate Trajectories' before launching simulation."
+        ), None
+        return
+    yield from _run_multi_traj(npz_path, step_delay)
 
 
 # ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
 
-def build_interface(npz_paths: list[str]) -> gr.Blocks:
+def build_interface(npz_paths: list[str], model_path_default: str = "") -> gr.Blocks:
+    from guidance_playground.guidance_ui import build_guidance_panel
+
     total = len(npz_paths)
 
     state = {"index": 0}
@@ -776,9 +889,28 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
                 gr.Markdown("### Scene Preview (ego-centric frame)")
                 scene_plot = gr.Plot(label="Scene at t=0")
 
+        # ── Model & Trajectory Generation ───────────────────────────────────
+        with gr.Accordion("Model & Trajectory Generation", open=True):
+            with gr.Row():
+                model_path_tb   = gr.Textbox(label="Model path (.pth)", scale=3, value=model_path_default)
+                load_model_btn  = gr.Button("Load Model", scale=1)
+                model_status_lb = gr.Label(value="No model loaded", label="Status")
+
+            with gr.Row():
+                n_samples_sl   = gr.Slider(1, 8, value=4, step=1,  label="N Trajectories")
+                include_det_cb = gr.Checkbox(value=True,            label="Include deterministic")
+                noise_min_sl   = gr.Slider(0.0, 5.0, value=0.5, step=0.1, label="Noise scale min")
+                noise_max_sl   = gr.Slider(0.0, 5.0, value=3.0, step=0.1, label="Noise scale max")
+
+            panel = build_guidance_panel()
+
+            with gr.Row():
+                generate_btn  = gr.Button("Generate Trajectories", variant="primary")
+                gen_status_lb = gr.Label(value="", label="Generation status")
+
         # ── Simulation options ───────────────────────────────────────────────
         with gr.Row():
-            step_delay = gr.Slider(
+            step_delay_sl = gr.Slider(
                 label="Step delay (s) — 0 = as fast as possible, 0.1 = real-time",
                 minimum=0.0,
                 maximum=1.0,
@@ -799,7 +931,7 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
                 )
 
         launch_btn = gr.Button(
-            "🚀  Launch Simulation with Visualization",
+            "Launch Simulation",
             variant="primary",
             size="lg",
         )
@@ -807,7 +939,7 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
         # ── Simulation output: live plot + log ──────────────────────────────
         with gr.Row():
             with gr.Column(scale=2):
-                gr.Markdown("### Live Simulation (MGRS map frame)")
+                gr.Markdown("### Live Simulation (ego-centric frame)")
                 sim_plot = gr.Plot(label="Simulation state")
             with gr.Column(scale=1):
                 gr.Markdown("### Output Log")
@@ -817,6 +949,16 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
                     max_lines=40,
                     interactive=False,
                 )
+
+        # ── Results table ────────────────────────────────────────────────────
+        results_table = gr.Dataframe(
+            headers=[
+                "Rank", "Label", "Score", "Collision", "Completion%",
+                "MinClear(m)", "MinTTC(s)", "NearMiss", "OffRoad%", "MaxSnap(m)", "Jerk", "FDE(m)",
+            ],
+            label="Trajectory Ranking",
+            visible=True,
+        )
 
         # ── Event wiring ─────────────────────────────────────────────────────
         _browse_outputs = [
@@ -831,10 +973,28 @@ def build_interface(npz_paths: list[str]) -> gr.Blocks:
         # Load first sample on page open
         demo.load(fn=lambda: _load_index(1), outputs=_browse_outputs)
 
+        # Load model
+        load_model_btn.click(
+            fn=_load_model,
+            inputs=[model_path_tb],
+            outputs=[model_status_lb],
+        )
+
+        # Generate trajectories → update scene preview with overlay
+        generate_btn.click(
+            fn=_generate_trajectories,
+            inputs=[
+                npz_path_state,
+                n_samples_sl, include_det_cb, noise_min_sl, noise_max_sl,
+                *panel.inputs,   # 14 guidance values
+            ],
+            outputs=[scene_plot, gen_status_lb],
+        )
+
         launch_btn.click(
             fn=_run_simulation,
-            inputs=[npz_path_state, use_fcd, fcd_dir, step_delay],
-            outputs=[sim_plot, output_log],
+            inputs=[npz_path_state, use_fcd, fcd_dir, step_delay_sl],
+            outputs=[sim_plot, output_log, results_table],
         )
 
     return demo
@@ -854,6 +1014,11 @@ def main():
         help="JSON file containing a list of .npz paths.",
     )
     parser.add_argument(
+        "--model_path",
+        default="",
+        help="Optional path to a Diffusion Planner .pth checkpoint to pre-load.",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=7861,
@@ -870,7 +1035,19 @@ def main():
     npz_paths = _load_npz_list(args.npz_list)
     print(f"  {len(npz_paths)} samples loaded.")
 
-    demo = build_interface(npz_paths)
+    # Ensure TeraSim Docker container is running before the GUI opens.
+    print("Checking TeraSim Docker container…")
+    from rlvr.terasim_bridge import TeraSimBridge
+    TeraSimBridge(sim_config_host_dir=str(_SIM_CONFIG_DIR))._ensure_container_running()
+    print("  TeraSim container ready.")
+
+    # Pre-load model if provided on the command line.
+    if args.model_path:
+        print(f"Loading model from {args.model_path}…")
+        status = _load_model(args.model_path)
+        print(f"  {status}")
+
+    demo = build_interface(npz_paths, model_path_default=args.model_path)
     demo.launch(
         server_name="0.0.0.0",
         server_port=args.port,
