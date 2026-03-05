@@ -22,6 +22,7 @@
 #include <autoware/diffusion_planner/utils/utils.hpp>
 #include <autoware/vehicle_info_utils/vehicle_info.hpp>
 #include <autoware_lanelet2_extension/projection/mgrs_projector.hpp>
+#include <autoware_utils_geometry/geometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 #include <autoware_perception_msgs/msg/tracked_objects.hpp>
@@ -101,7 +102,9 @@ template <typename T>
 T get_param(const ParamMap & params, const std::string & name, const T & default_val)
 {
   const auto it = params.find(name);
-  if (it == params.end()) return default_val;
+  if (it == params.end()) {
+    return default_val;
+  }
   return it->second.get_value<T>();
 }
 
@@ -142,6 +145,7 @@ constexpr const char * TOPIC_OUT_TRAJECTORY = "/diffusion_planner/output/traject
 constexpr const char * TOPIC_OUT_TRAJECTORIES = "/diffusion_planner/output/trajectories";
 constexpr const char * TOPIC_OUT_PREDICTED_OBJECTS = "/diffusion_planner/output/predicted_objects";
 constexpr const char * TOPIC_OUT_TURN_INDICATORS = "/diffusion_planner/output/turn_indicators";
+constexpr const char * TOPIC_OUT_GT_TRAJECTORY = "/diffusion_planner/output/gt_trajectory";
 constexpr const char * TOPIC_OUT_DEBUG_ROUTE_MARKER = "/diffusion_planner/debug/route_marker";
 constexpr const char * TOPIC_OUT_DEBUG_LANE_MARKER = "/diffusion_planner/debug/lane_marker";
 
@@ -162,14 +166,18 @@ std::optional<T> find_nearest(std::deque<T> & msgs, int64_t target_ns, StampExtr
   for (int64_t i = 0; i < static_cast<int64_t>(msgs.size()); ++i) {
     const int64_t msg_ns = to_nanoseconds(get_stamp(msgs[i]));
     const int64_t diff = target_ns - msg_ns;
-    if (diff < 0) break;  // future message
+    if (diff < 0) {
+      break;  // future message
+    }
     if (diff <= SYNC_WINDOW_NS && diff < best_diff) {
       best_diff = diff;
       best_idx = i;
     }
   }
 
-  if (best_idx < 0) return std::nullopt;
+  if (best_idx < 0) {
+    return std::nullopt;
+  }
 
   T result = msgs[best_idx];
   msgs.erase(msgs.begin(), msgs.begin() + best_idx);
@@ -186,7 +194,9 @@ std::vector<std::shared_ptr<const T>> collect_within_window(
   for (int64_t i = 0; i < static_cast<int64_t>(msgs.size()); ++i) {
     const int64_t msg_ns = to_nanoseconds(get_stamp(msgs[i]));
     const int64_t diff = target_ns - msg_ns;
-    if (diff < 0) break;
+    if (diff < 0) {
+      break;
+    }
     if (diff <= SYNC_WINDOW_NS) {
       result.push_back(std::make_shared<const T>(msgs[i]));
     }
@@ -196,6 +206,67 @@ std::vector<std::shared_ptr<const T>> collect_within_window(
   if (last_consumed >= 0) {
     msgs.erase(msgs.begin(), msgs.begin() + last_consumed);
   }
+  return result;
+}
+
+// --- Odometry interpolation at a target time ---
+// Uses linear interpolation for position/velocity and slerp for orientation.
+// search_hint is updated to speed up subsequent calls with increasing target times.
+Odometry interpolate_odometry(
+  const std::deque<Odometry> & odom_msgs, int64_t target_ns, size_t & search_hint)
+{
+  auto stamp_sec = [](const Odometry & m) -> double {
+    return static_cast<double>(m.header.stamp.sec) +
+           static_cast<double>(m.header.stamp.nanosec) * 1e-9;
+  };
+
+  const double target_sec = static_cast<double>(target_ns) / 1e9;
+  const double first_sec = stamp_sec(odom_msgs.front());
+  const double last_sec = stamp_sec(odom_msgs.back());
+
+  if (target_sec <= first_sec) {
+    return odom_msgs.front();
+  }
+  if (target_sec >= last_sec) {
+    return odom_msgs.back();
+  }
+
+  // Find bracketing odom messages, continuing from previous position
+  for (; search_hint + 1 < odom_msgs.size(); ++search_hint) {
+    const double t_next = stamp_sec(odom_msgs[search_hint + 1]);
+    if (target_sec <= t_next) {
+      break;
+    }
+  }
+
+  const auto & odom0 = odom_msgs[search_hint];
+  const auto & odom1 = odom_msgs[search_hint + 1];
+  const double t0 = stamp_sec(odom0);
+  const double t1 = stamp_sec(odom1);
+  const double ratio = (t1 > t0) ? (target_sec - t0) / (t1 - t0) : 0.0;
+  const double r = std::clamp(ratio, 0.0, 1.0);
+
+  Odometry result;
+  result.header = odom0.header;
+
+  // Interpolate pose (position linear + orientation slerp)
+  result.pose.pose =
+    autoware_utils_geometry::calc_interpolated_pose(odom0.pose.pose, odom1.pose.pose, r, false);
+
+  // Interpolate twist linearly
+  result.twist.twist.linear.x =
+    odom0.twist.twist.linear.x * (1.0 - r) + odom1.twist.twist.linear.x * r;
+  result.twist.twist.linear.y =
+    odom0.twist.twist.linear.y * (1.0 - r) + odom1.twist.twist.linear.y * r;
+  result.twist.twist.linear.z =
+    odom0.twist.twist.linear.z * (1.0 - r) + odom1.twist.twist.linear.z * r;
+  result.twist.twist.angular.x =
+    odom0.twist.twist.angular.x * (1.0 - r) + odom1.twist.twist.angular.x * r;
+  result.twist.twist.angular.y =
+    odom0.twist.twist.angular.y * (1.0 - r) + odom1.twist.twist.angular.y * r;
+  result.twist.twist.angular.z =
+    odom0.twist.twist.angular.z * (1.0 - r) + odom1.twist.twist.angular.z * r;
+
   return result;
 }
 
@@ -337,7 +408,9 @@ int main(int argc, char ** argv)
   std::cout << "  batch_size: " << params.batch_size << std::endl;
   std::cout << "  temperature: [";
   for (size_t i = 0; i < params.temperature_list.size(); ++i) {
-    if (i > 0) std::cout << ", ";
+    if (i > 0) {
+      std::cout << ", ";
+    }
     std::cout << params.temperature_list[i];
   }
   std::cout << "]" << std::endl;
@@ -449,6 +522,7 @@ int main(int argc, char ** argv)
     TOPIC_OUT_PREDICTED_OBJECTS, "autoware_perception_msgs/msg/PredictedObjects");
   writer_parser.create_topic(
     TOPIC_OUT_TURN_INDICATORS, "autoware_vehicle_msgs/msg/TurnIndicatorsCommand");
+  writer_parser.create_topic(TOPIC_OUT_GT_TRAJECTORY, "autoware_planning_msgs/msg/Trajectory");
   writer_parser.create_topic(TOPIC_OUT_DEBUG_ROUTE_MARKER, "visualization_msgs/msg/MarkerArray");
   writer_parser.create_topic(TOPIC_OUT_DEBUG_LANE_MARKER, "visualization_msgs/msg/MarkerArray");
 
@@ -491,7 +565,9 @@ int main(int argc, char ** argv)
 
     // Find most recent odometry at or before timer tick
     for (size_t i = odom_search_idx + 1; i < odometry_msgs.size(); ++i) {
-      if (to_nanoseconds(odometry_msgs[i].header.stamp) > timer_ns) break;
+      if (to_nanoseconds(odometry_msgs[i].header.stamp) > timer_ns) {
+        break;
+      }
       odom_search_idx = i;
     }
 
@@ -500,7 +576,9 @@ int main(int argc, char ** argv)
     // Update sticky route
     while (!route_msgs.empty()) {
       const int64_t route_ns = to_nanoseconds(route_msgs.front().header.stamp);
-      if (route_ns > timer_ns) break;
+      if (route_ns > timer_ns) {
+        break;
+      }
       current_route = std::make_shared<LaneletRoute>(route_msgs.front());
       route_msgs.pop_front();
     }
@@ -590,6 +668,38 @@ int main(int argc, char ** argv)
       planner_output.predicted_objects, frame_time, TOPIC_OUT_PREDICTED_OBJECTS);
     writer_parser.write_topic(
       planner_output.turn_indicator_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
+
+    // Build ground truth trajectory from future odometry with interpolation
+    {
+      const int64_t GT_DT_NS =
+        static_cast<int64_t>(constants::PREDICTION_TIME_STEP_S * 1e9);  // 0.1s
+
+      autoware_planning_msgs::msg::Trajectory gt_trajectory;
+      gt_trajectory.header = odom.header;
+
+      size_t gt_search_hint = odom_search_idx;
+      for (int64_t k = 0; k < OUTPUT_T; ++k) {
+        const int64_t offset_ns = (k + 1) * GT_DT_NS;
+        const int64_t target_ns = timer_ns + offset_ns;
+        if (target_ns > last_odom_ns) {
+          break;
+        }
+
+        const auto interp_odom = interpolate_odometry(odometry_msgs, target_ns, gt_search_hint);
+
+        autoware_planning_msgs::msg::TrajectoryPoint tp;
+        tp.time_from_start.sec = static_cast<int32_t>(offset_ns / 1'000'000'000LL);
+        tp.time_from_start.nanosec = static_cast<uint32_t>(offset_ns % 1'000'000'000LL);
+        tp.pose = interp_odom.pose.pose;
+        tp.longitudinal_velocity_mps = static_cast<float>(interp_odom.twist.twist.linear.x);
+        tp.lateral_velocity_mps = static_cast<float>(interp_odom.twist.twist.linear.y);
+        tp.heading_rate_rps = static_cast<float>(interp_odom.twist.twist.angular.z);
+
+        gt_trajectory.points.push_back(tp);
+      }
+
+      writer_parser.write_topic(gt_trajectory, frame_time, TOPIC_OUT_GT_TRAJECTORY);
+    }
 
     ++processed_frames;
 
