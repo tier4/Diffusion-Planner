@@ -39,7 +39,7 @@ ros2 run autoware_diffusion_planner_tools benchmark_tool
 # Custom runs/warmup
 ros2 run autoware_diffusion_planner_tools benchmark_tool --warmup 50 --runs 300
 
-# Use a custom config (e.g. to test cuda_graph_enable: true)
+# Use a custom config
 ros2 run autoware_diffusion_planner_tools benchmark_tool --config /path/to/diffusion_planner.param.yaml
 ```
 
@@ -71,7 +71,7 @@ source install/setup.bash
 ros2 run autoware_diffusion_planner_tools benchmark_tool --runs 300
 ```
 
-The tool reads `onnx_model_path`, `plugins_path`, `batch_size`, and `cuda_graph_enable`
+The tool reads `onnx_model_path`, `plugins_path`, and `batch_size`
 from the installed `diffusion_planner.param.yaml`, so each branch automatically uses its own config.
 
 ### Options

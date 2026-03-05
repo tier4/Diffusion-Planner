@@ -94,35 +94,6 @@ T get_param(const ParamMap & params, const std::string & name, const T & default
   return it->second.get_value<T>();
 }
 
-// --- SFINAE: detect if TensorrtInference accepts cuda_graph_enable (4-arg constructor) ---
-template <typename T = TensorrtInference, typename = void>
-struct has_cuda_graph_ctor : std::false_type
-{
-};
-
-template <typename T>
-struct has_cuda_graph_ctor<
-  T, std::void_t<decltype(T(
-       std::declval<std::string>(), std::declval<std::string>(), int{}, bool{}))>> : std::true_type
-{
-};
-
-template <typename T = TensorrtInference>
-std::enable_if_t<has_cuda_graph_ctor<T>::value, std::unique_ptr<T>> create_inference(
-  const std::string & model_path, const std::string & plugins_path, int batch_size,
-  bool cuda_graph_enable)
-{
-  return std::make_unique<T>(model_path, plugins_path, batch_size, cuda_graph_enable);
-}
-
-template <typename T = TensorrtInference>
-std::enable_if_t<!has_cuda_graph_ctor<T>::value, std::unique_ptr<T>> create_inference(
-  const std::string & model_path, const std::string & plugins_path, int batch_size,
-  bool /*cuda_graph_enable*/)
-{
-  return std::make_unique<T>(model_path, plugins_path, batch_size);
-}
-
 // --- Generate random InputDataMap matching model dimensions ---
 preprocess::InputDataMap generate_random_inputs(std::mt19937 & gen)
 {
@@ -226,13 +197,9 @@ int main(int argc, char ** argv)
   const std::string plugins_path =
     resolve_substitutions(get_param<std::string>(param_map, "plugins_path", ""));
   const int batch_size = static_cast<int>(get_param<int64_t>(param_map, "batch_size", 1));
-  const bool cuda_graph_enable = get_param<bool>(param_map, "cuda_graph_enable", false);
 
   std::cout << "  Model:  " << model_path << "\n";
   std::cout << "  Batch:  " << batch_size << "\n";
-  if constexpr (has_cuda_graph_ctor<>::value) {
-    std::cout << "  CUDA Graph: " << std::boolalpha << cuda_graph_enable << "\n";
-  }
   std::cout << "  Warmup: " << warmup << "\n";
   std::cout << "  Runs:   " << runs << "\n";
   std::cout << "------------------------------------------------------\n";
@@ -241,7 +208,7 @@ int main(int argc, char ** argv)
   // All host-side optimizations come from the linked library automatically.
   std::cout << "  Loading engine..." << std::flush;
   auto t_load_start = std::chrono::high_resolution_clock::now();
-  auto inference_ptr = create_inference(model_path, plugins_path, batch_size, cuda_graph_enable);
+  auto inference_ptr = std::make_unique<TensorrtInference>(model_path, plugins_path, batch_size);
   auto & inference = *inference_ptr;
   auto t_load_end = std::chrono::high_resolution_clock::now();
   const double load_s = std::chrono::duration<double>(t_load_end - t_load_start).count();
