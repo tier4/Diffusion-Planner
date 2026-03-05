@@ -226,17 +226,18 @@ def compute_score(m: TrajectoryMetrics, total_steps: int = 80) -> float:
     good its clearance/TTC look (which are artificially inflated when the
     ego has left the road and moved away from all NPCs).
 
-      on_road_factor = max(0, 1 − 10 × off_road_fraction)
-        →  1% off-road: factor = 0.90  (-10% score)
-        →  5% off-road: factor = 0.50  (score halved)
-        → 10% off-road: factor = 0     (same outcome as collision)
+      on_road_factor = exp(−20 × off_road_fraction)
+        →  1% off-road: factor = 0.819  (-18% score)
+        →  5% off-road: factor = 0.368  (score × 0.37)
+        → 10% off-road: factor = 0.135  (score × 0.14)
+
+      Exponential decay avoids hard cliffs that create dead zones in the
+      reward signal; every additional percent off-road continuously penalises
+      the score, which is required for stable GRPO training.
 
     Base weights (applied before the factor):
       progress 0.40, clearance 0.25, TTC 0.15, near-miss-free 0.10, jerk 0.10.
     """
-    if m.collision:
-        return 0.0
-
     clearance_score  = min(m.min_clearance_m / 5.0, 1.0)
     ttc_score        = min(m.min_ttc_s / 5.0, 1.0) if m.min_ttc_s < float("inf") else 1.0
     safe_steps_score = max(0.0, 1.0 - m.near_miss_count / total_steps)
@@ -251,8 +252,16 @@ def compute_score(m: TrajectoryMetrics, total_steps: int = 80) -> float:
         0.10 * jerk_score
     )
 
-    on_road_factor = max(0.0, 1.0 - 10.0 * m.off_road_fraction)
-    return base * on_road_factor
+    on_road_factor = math.exp(-20.0 * m.off_road_fraction)
+
+    # Collision: heavy multiplicative penalty rather than hard 0, so that a
+    # trajectory that collides late (high progress, good clearance up to that
+    # point) scores better than one that collides immediately.  The 0.1 factor
+    # ensures any no-collision trajectory with reasonable progress outscores
+    # a collision trajectory.
+    collision_factor = 0.1 if m.collision else 1.0
+
+    return base * on_road_factor * collision_factor
 
 
 def rank_trajectories(metrics: list[TrajectoryMetrics]) -> list[TrajectoryMetrics]:
