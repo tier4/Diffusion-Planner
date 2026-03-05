@@ -18,6 +18,10 @@ ament_auto_add_executable(inference_tool
   src/inference_tool.cpp
 )
 
+ament_auto_add_executable(benchmark_tool
+  src/benchmark_tool.cpp
+)
+
 ament_auto_package(
   INSTALL_TO_SHARE
 )
