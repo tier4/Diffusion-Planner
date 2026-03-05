@@ -221,8 +221,17 @@ def compute_score(m: TrajectoryMetrics, total_steps: int = 80) -> float:
     Composite score in [0, 1]. Higher = better.
     Collision → 0 (hard fail).
 
-    Weights: progress 0.25, clearance 0.25, on-road 0.15, TTC 0.15,
-             near-miss-free 0.10, jerk 0.10.
+    Off-road is a multiplicative penalty on the whole score so that a
+    trajectory which is off-road half the time scores ~0 regardless of how
+    good its clearance/TTC look (which are artificially inflated when the
+    ego has left the road and moved away from all NPCs).
+
+      on_road_factor = max(0, 1 − 2 × off_road_fraction)
+        → 25% off-road: factor = 0.5   (score halved)
+        → 50% off-road: factor = 0     (same outcome as collision)
+
+    Base weights (applied before the factor):
+      progress 0.40, clearance 0.25, TTC 0.15, near-miss-free 0.10, jerk 0.10.
     """
     if m.collision:
         return 0.0
@@ -230,18 +239,19 @@ def compute_score(m: TrajectoryMetrics, total_steps: int = 80) -> float:
     clearance_score  = min(m.min_clearance_m / 5.0, 1.0)
     ttc_score        = min(m.min_ttc_s / 5.0, 1.0) if m.min_ttc_s < float("inf") else 1.0
     safe_steps_score = max(0.0, 1.0 - m.near_miss_count / total_steps)
-    on_road_score    = 1.0 - m.off_road_fraction
     jerk_score       = max(0.0, 1.0 - m.mean_jerk / 5.0)
     progress_score   = m.progress_frac
 
-    return (
-        0.25 * progress_score   +
+    base = (
+        0.40 * progress_score   +
         0.25 * clearance_score  +
-        0.15 * on_road_score    +
         0.15 * ttc_score        +
         0.10 * safe_steps_score +
         0.10 * jerk_score
     )
+
+    on_road_factor = max(0.0, 1.0 - 2.0 * m.off_road_fraction)
+    return base * on_road_factor
 
 
 def rank_trajectories(metrics: list[TrajectoryMetrics]) -> list[TrajectoryMetrics]:
