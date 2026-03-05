@@ -35,6 +35,10 @@ _REPO_ROOT = Path(__file__).parents[2]
 _SIM_CONFIG_DIR = _REPO_ROOT / "rlvr" / "sim_config"
 _DEFAULT_FCD_DIR = str(Path.home() / "terasim_fcd")
 
+_CSS = """
+.compact-status textarea { font-size: 0.85rem !important; }
+"""
+
 
 # ---------------------------------------------------------------------------
 # Lazy imports (avoids slow startup at module load)
@@ -841,123 +845,109 @@ def build_interface(npz_paths: list[str], model_path_default: str = "") -> gr.Bl
         new = _clamp(int(current_displayed) - 1 + delta)
         return _load_index(new + 1)
 
-    with gr.Blocks(title="TeraSim Ghost Replay") as demo:
-        gr.Markdown("# TeraSim Ghost Replay Launcher")
-        gr.Markdown(
-            f"Loaded **{total}** samples.  "
-            "Browse samples to preview the scene, then launch the simulation."
-        )
+    with gr.Blocks(title="TeraSim Multi-Traj Evaluator", css=_CSS) as demo:
+        gr.Markdown("## TeraSim — Multi-Trajectory Evaluator")
 
         # Hidden state: resolved NPZ path passed to simulation
         npz_path_state = gr.Textbox(visible=False)
 
         # ── Top row: browser + scene preview ────────────────────────────────
         with gr.Row():
-            # Left column: navigation controls
-            with gr.Column(scale=1):
-                gr.Markdown("### NPZ Browser")
-
-                with gr.Row():
-                    index_input = gr.Number(
-                        label="Sample index",
-                        value=1,
-                        minimum=1,
-                        maximum=total,
-                        precision=0,
-                    )
-                    gr.Markdown(f"/ {total}")
-
-                with gr.Row():
-                    btn_prev = gr.Button("◄ Prev", size="sm")
-                    btn_next = gr.Button("Next ►", size="sm")
-
+            with gr.Column(scale=1, min_width=220):
+                gr.Markdown("**NPZ Browser** — " + f"{total} samples")
+                with gr.Row(equal_height=True):
+                    btn_prev    = gr.Button("◄", size="sm", min_width=40)
+                    index_input = gr.Number(value=1, minimum=1, maximum=total,
+                                            precision=0, label="", show_label=False,
+                                            min_width=70)
+                    btn_next    = gr.Button("►", size="sm", min_width=40)
                 current_path_box = gr.Textbox(
-                    label="Current NPZ path",
-                    value=npz_paths[0],
-                    interactive=False,
-                    lines=2,
+                    label="Path", value=npz_paths[0],
+                    interactive=False, lines=2, max_lines=3,
                 )
                 sample_info_md = gr.Textbox(
-                    label="Sample info",
-                    value="Loading…",
-                    interactive=False,
-                    lines=5,
+                    label="Info", value="Loading…",
+                    interactive=False, lines=4, max_lines=6,
                 )
 
-            # Right column: scene preview
-            with gr.Column(scale=2):
-                gr.Markdown("### Scene Preview (ego-centric frame)")
-                scene_plot = gr.Plot(label="Scene at t=0")
+            with gr.Column(scale=3):
+                scene_plot = gr.Plot(label="Scene preview (ego-centric, t=0)",
+                                     show_label=True)
 
         # ── Model & Trajectory Generation ───────────────────────────────────
         with gr.Accordion("Model & Trajectory Generation", open=True):
-            with gr.Row():
-                model_path_tb   = gr.Textbox(label="Model path (.pth)", scale=3, value=model_path_default)
-                load_model_btn  = gr.Button("Load Model", scale=1)
-                model_status_lb = gr.Label(value="No model loaded", label="Status")
+            # Row 1: model path + load
+            with gr.Row(equal_height=True):
+                model_path_tb  = gr.Textbox(
+                    label="Model checkpoint (.pth)", value=model_path_default,
+                    scale=4, lines=1,
+                )
+                load_model_btn = gr.Button("Load", variant="secondary",
+                                           scale=1, min_width=80)
+                model_status_lb = gr.Textbox(
+                    value="no model loaded", label="Status",
+                    interactive=False, scale=2, lines=1, max_lines=2,
+                )
 
-            with gr.Row():
-                n_samples_sl   = gr.Slider(1, 8, value=4, step=1,  label="N Trajectories")
-                include_det_cb = gr.Checkbox(value=True,            label="Include deterministic")
-                noise_min_sl   = gr.Slider(0.0, 5.0, value=0.5, step=0.1, label="Noise scale min")
-                noise_max_sl   = gr.Slider(0.0, 5.0, value=3.0, step=0.1, label="Noise scale max")
+            # Row 2: sampling knobs
+            with gr.Row(equal_height=True):
+                n_samples_sl   = gr.Slider(1, 8, value=4, step=1,
+                                           label="N trajectories", scale=2)
+                include_det_cb = gr.Checkbox(value=True,
+                                             label="Include deterministic", scale=1)
+                noise_min_sl   = gr.Slider(0.0, 5.0, value=0.5, step=0.1,
+                                           label="Noise min", scale=2)
+                noise_max_sl   = gr.Slider(0.0, 5.0, value=3.0, step=0.1,
+                                           label="Noise max", scale=2)
 
-            panel = build_guidance_panel()
+            # Guidance — collapsed by default to avoid scroll marathon
+            with gr.Accordion("Guidance options", open=False):
+                panel = build_guidance_panel()
 
-            with gr.Row():
-                generate_btn  = gr.Button("Generate Trajectories", variant="primary")
-                gen_status_lb = gr.Label(value="", label="Generation status")
+            # Row 3: generate
+            with gr.Row(equal_height=True):
+                generate_btn  = gr.Button("Generate Trajectories",
+                                          variant="primary", scale=2)
+                gen_status_lb = gr.Textbox(
+                    value="", label="Generation status",
+                    interactive=False, scale=3, lines=1, max_lines=3,
+                )
 
-        # ── Simulation options ───────────────────────────────────────────────
-        with gr.Row():
+        # ── Simulation controls (compact single row) ─────────────────────────
+        with gr.Row(equal_height=True):
             step_delay_sl = gr.Slider(
-                label="Step delay (s) — 0 = as fast as possible, 0.1 = real-time",
-                minimum=0.0,
-                maximum=1.0,
-                step=0.05,
-                value=0.1,
+                label="Step delay (s) — 0 = max speed, 0.1 = real-time",
+                minimum=0.0, maximum=1.0, step=0.05, value=0.1, scale=3,
             )
-            with gr.Column():
-                use_fcd = gr.Checkbox(
-                    label="Record FCD output",
-                    value=False,
-                    info="Write SUMO FCD trajectory XML to disk for offline replay.",
-                )
-                fcd_dir = gr.Textbox(
-                    label="FCD output directory",
-                    value=_DEFAULT_FCD_DIR,
-                    placeholder="/home/user/terasim_fcd",
-                    interactive=True,
-                )
-
-        launch_btn = gr.Button(
-            "Launch Simulation",
-            variant="primary",
-            size="lg",
-        )
+            use_fcd = gr.Checkbox(
+                label="Record FCD", value=False, scale=1,
+                info="Save SUMO FCD trajectory XML for offline replay.",
+            )
+            fcd_dir = gr.Textbox(
+                label="FCD directory", value=_DEFAULT_FCD_DIR,
+                interactive=True, scale=2, lines=1,
+            )
+            launch_btn = gr.Button("▶ Launch Simulation",
+                                   variant="primary", scale=1, min_width=160)
 
         # ── Simulation output: live plot + log ──────────────────────────────
         with gr.Row():
             with gr.Column(scale=2):
-                gr.Markdown("### Live Simulation (ego-centric frame)")
-                sim_plot = gr.Plot(label="Simulation state")
+                sim_plot = gr.Plot(label="Live simulation (ego-centric frame)")
             with gr.Column(scale=1):
-                gr.Markdown("### Output Log")
                 output_log = gr.Textbox(
-                    label="Simulation log",
-                    lines=20,
-                    max_lines=40,
-                    interactive=False,
+                    label="Log", lines=20, max_lines=50, interactive=False,
                 )
 
         # ── Results table ────────────────────────────────────────────────────
         results_table = gr.Dataframe(
             headers=[
                 "Rank", "Label", "Score", "Collision", "Completion%",
-                "MinClear(m)", "MinTTC(s)", "NearMiss", "OffRoad%", "MaxSnap(m)", "Jerk", "FDE(m)",
+                "MinClear(m)", "MinTTC(s)", "NearMiss", "OffRoad%",
+                "MaxSnap(m)", "Jerk", "FDE(m)",
             ],
             label="Trajectory Ranking",
-            visible=True,
+            wrap=True,
         )
 
         # ── Event wiring ─────────────────────────────────────────────────────
@@ -970,8 +960,18 @@ def build_interface(npz_paths: list[str], model_path_default: str = "") -> gr.Bl
         btn_prev.click(fn=lambda i: _nav(-1, i), inputs=[index_input], outputs=_browse_outputs)
         btn_next.click(fn=lambda i: _nav(+1, i), inputs=[index_input], outputs=_browse_outputs)
 
-        # Load first sample on page open
-        demo.load(fn=lambda: _load_index(1), outputs=_browse_outputs)
+        def _on_page_load():
+            *browse, fig = _load_index(1)
+            # Report pre-loaded model status so the UI reflects startup load
+            dev = model_state["device"]
+            status = f"loaded on {dev}" if dev is not None else "no model loaded"
+            return (*browse, fig, status)
+
+        # Load first sample and sync model status on page open
+        demo.load(
+            fn=_on_page_load,
+            outputs=[*_browse_outputs, model_status_lb],
+        )
 
         # Load model
         load_model_btn.click(
