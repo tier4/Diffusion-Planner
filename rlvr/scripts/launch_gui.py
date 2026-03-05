@@ -688,97 +688,109 @@ def _run_multi_traj(
             for traj_idx, (traj_map, label) in enumerate(zip(trajectories, labels)):
                 yield None, emit(f"\n[{traj_idx+1}/{N}] Starting: {label}"), None
 
-                sim.start_episode(spawn, enable_viz=False)
-                yield None, emit(f"  Episode started."), None
+                try:
+                    sim.start_episode(spawn, enable_viz=False)
+                    yield None, emit(f"  Episode started."), None
 
-                step_states: list[StepState] = []
-                ego_history_map: list[tuple] = []
+                    step_states: list[StepState] = []
+                    ego_history_map: list[tuple] = []
 
-                for step_i, (x, y, yaw_rad) in enumerate(traj_map):
-                    result     = sim.step((float(x), float(y)), float(yaw_rad))
-                    full_state = sim._last_state
-                    av_in_sim  = result["av_in_sim"]
+                    for step_i, (x, y, yaw_rad) in enumerate(traj_map):
+                        result     = sim.step((float(x), float(y)), float(yaw_rad))
+                        full_state = sim._last_state
+                        av_in_sim  = result["av_in_sim"]
 
-                    all_vehicles_state = full_state["agent_details"].get("vehicle", {})
-                    all_vrus_state     = full_state["agent_details"].get("vru", {})
+                        all_vehicles_state = full_state["agent_details"].get("vehicle", {})
+                        all_vrus_state     = full_state["agent_details"].get("vru", {})
 
-                    # Dicts keyed by agent_id for metrics
-                    vehicle_states_dict = {
-                        k: v for k, v in all_vehicles_state.items() if k != "AV"
-                    }
-                    vru_states_dict = dict(all_vrus_state)
+                        vehicle_states_dict = {
+                            k: v for k, v in all_vehicles_state.items() if k != "AV"
+                        }
+                        vru_states_dict = dict(all_vrus_state)
 
-                    # Ego speed from commanded position diff
-                    if step_states:
-                        prev_xy = step_states[-1].ego_xy_map
-                        ego_speed = float(np.linalg.norm([
-                            (x - prev_xy[0]) / 0.1,
-                            (y - prev_xy[1]) / 0.1,
-                        ]))
-                    else:
-                        ego_speed = 0.0
+                        if step_states:
+                            prev_xy = step_states[-1].ego_xy_map
+                            ego_speed = float(np.linalg.norm([
+                                (x - prev_xy[0]) / 0.1,
+                                (y - prev_xy[1]) / 0.1,
+                            ]))
+                        else:
+                            ego_speed = 0.0
 
-                    # AV lane occupancy from SUMO via TeraSim state
-                    av_state = all_vehicles_state.get("AV", {})
-                    step_states.append(StepState(
-                        step=step_i,
-                        ego_xy_map=(float(x), float(y)),
-                        ego_speed=ego_speed,
-                        av_lane_id=av_state.get("lane_id", ""),
-                        av_lateral_lane_pos=float(av_state.get("lateral_lane_pos", 0.0)),
-                        av_lane_width=float(av_state.get("lane_width", 0.0)),
-                        av_width=ego_width,
-                        vehicle_states=vehicle_states_dict,
-                        vru_states=vru_states_dict,
-                        av_in_sim=av_in_sim,
-                    ))
+                        av_state = all_vehicles_state.get("AV", {})
+                        step_states.append(StepState(
+                            step=step_i,
+                            ego_xy_map=(float(x), float(y)),
+                            ego_speed=ego_speed,
+                            av_lane_id=av_state.get("lane_id", ""),
+                            av_lateral_lane_pos=float(av_state.get("lateral_lane_pos", 0.0)),
+                            av_lane_width=float(av_state.get("lane_width", 0.0)),
+                            av_width=ego_width,
+                            vehicle_states=vehicle_states_dict,
+                            vru_states=vru_states_dict,
+                            av_in_sim=av_in_sim,
+                        ))
 
-                    ego_history_map.append((float(x), float(y), float(yaw_rad)))
+                        ego_history_map.append((float(x), float(y), float(yaw_rad)))
 
-                    # Build lists with "id" key for rendering
-                    npc_list = [{"id": k, **v} for k, v in vehicle_states_dict.items()]
-                    vru_list = [{"id": k, **v} for k, v in vru_states_dict.items()]
+                        npc_list = [{"id": k, **v} for k, v in vehicle_states_dict.items()]
+                        vru_list = [{"id": k, **v} for k, v in vru_states_dict.items()]
 
-                    sim_fig = _make_sim_figure(
-                        scene_geom, gt_ego_bl, ego_history_map,
-                        npc_list, vru_list, ped_map_positions,
-                        step_i + 1, 80,
-                        map2bl, map_yaw0, ego_z_map,
-                        ego_length=ego_length, ego_width=ego_width,
-                        static_vehicle_overlay=vehicles_off_lane,
-                        npc_dim_lookup=npc_dim_lookup,
-                    )
+                        sim_fig = _make_sim_figure(
+                            scene_geom, gt_ego_bl, ego_history_map,
+                            npc_list, vru_list, ped_map_positions,
+                            step_i + 1, 80,
+                            map2bl, map_yaw0, ego_z_map,
+                            ego_length=ego_length, ego_width=ego_width,
+                            static_vehicle_overlay=vehicles_off_lane,
+                            npc_dim_lookup=npc_dim_lookup,
+                        )
 
-                    if float(step_delay) > 0:
-                        time.sleep(float(step_delay))
+                        if float(step_delay) > 0:
+                            time.sleep(float(step_delay))
 
-                    if not av_in_sim:
-                        yield sim_fig, emit(
-                            f"  [{traj_idx+1}/{N}] COLLISION at step {step_i+1}"
-                        ), None
-                        break
+                        if not av_in_sim:
+                            yield sim_fig, emit(
+                                f"  [{traj_idx+1}/{N}] COLLISION at step {step_i+1}"
+                            ), None
+                            break
 
-                    if (step_i + 1) % 10 == 0:
-                        yield sim_fig, emit(
-                            f"  step {step_i+1:3d}/80  "
-                            f"Veh={len(npc_list)}  VRU={len(vru_list)}"
-                        ), None
-                    else:
-                        yield sim_fig, log, None
+                        if (step_i + 1) % 10 == 0:
+                            yield sim_fig, emit(
+                                f"  step {step_i+1:3d}/80  "
+                                f"Veh={len(npc_list)}  VRU={len(vru_list)}"
+                            ), None
+                        else:
+                            yield sim_fig, log, None
 
-                sim.close()
+                    sim.close()
 
-                m = finalize_metrics(step_states, traj_map, gt_traj_map)
-                m.label = label
-                m.score = compute_score(m)
-                all_metrics.append(m)
-                yield None, emit(
-                    f"  Done: score={m.score:.3f}  collision={m.collision}  "
-                    f"clearance={m.min_clearance_m:.1f}m  FDE={m.fde_from_gt_m:.1f}m"
-                ), None
+                    m = finalize_metrics(step_states, traj_map, gt_traj_map)
+                    m.label = label
+                    m.score = compute_score(m)
+                    all_metrics.append(m)
+                    yield None, emit(
+                        f"  Done: score={m.score:.3f}  collision={m.collision}  "
+                        f"clearance={m.min_clearance_m:.1f}m  FDE={m.fde_from_gt_m:.1f}m"
+                    ), None
+
+                except Exception as ep_err:
+                    # Episode failed (e.g. TeraSim timeout after collision).
+                    # Log the error, restart the container for a clean state,
+                    # then continue with the remaining trajectories.
+                    yield None, emit(
+                        f"  [{traj_idx+1}/{N}] EPISODE FAILED: {ep_err}\n"
+                        f"  Restarting TeraSim container…"
+                    ), None
+                    try:
+                        sim.close()
+                    except Exception:
+                        pass
+                    sim._ensure_container_running(force_restart=True)
+                    yield None, emit("  Container restarted. Continuing…"), None
 
     except Exception as e:
-        yield None, emit(f"\nERROR: {e}"), None
+        yield None, emit(f"\nFATAL ERROR: {e}"), None
         return
 
     ranked  = rank_trajectories(all_metrics)

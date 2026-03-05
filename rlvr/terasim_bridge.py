@@ -95,15 +95,21 @@ class TeraSimBridge:
     # Container lifecycle
     # ------------------------------------------------------------------
 
-    def _ensure_container_running(self) -> None:
-        """Start the Docker container if it is not already running."""
-        result = subprocess.run(
-            ["docker", "inspect", "--format={{.State.Running}}", self.container_name],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip() == "true":
-            return  # already running
+    def _ensure_container_running(self, force_restart: bool = False) -> None:
+        """Start the Docker container if it is not already running.
+
+        Args:
+            force_restart: If True, remove and restart even if already running.
+                           Use this after an episode crash to guarantee a clean state.
+        """
+        if not force_restart:
+            result = subprocess.run(
+                ["docker", "inspect", "--format={{.State.Running}}", self.container_name],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "true":
+                return  # already running
 
         # Remove any stopped container with the same name
         subprocess.run(
