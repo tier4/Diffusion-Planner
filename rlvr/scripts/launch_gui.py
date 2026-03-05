@@ -708,19 +708,7 @@ def _run_multi_traj(
                     }
                     vru_states_dict = dict(all_vrus_state)
 
-                    # Snap distance: commanded position vs where SUMO actually placed the AV.
-                    # SUMO snaps to nearest road with keepRoute=0; large gap = off-road.
-                    if av_in_sim and "AV" in all_vehicles_state:
-                        av_sumo = all_vehicles_state["AV"]
-                        sumo_xy = (float(av_sumo["x"]), float(av_sumo["y"]))
-                        snap_dist = float(np.linalg.norm(
-                            np.array([x, y]) - np.array(sumo_xy)
-                        ))
-                    else:
-                        sumo_xy   = (float(x), float(y))
-                        snap_dist = 0.0
-
-                    # Compute ego speed from position diff
+                    # Ego speed from commanded position diff
                     if step_states:
                         prev_xy = step_states[-1].ego_xy_map
                         ego_speed = float(np.linalg.norm([
@@ -730,12 +718,16 @@ def _run_multi_traj(
                     else:
                         ego_speed = 0.0
 
+                    # AV lane occupancy from SUMO via TeraSim state
+                    av_state = all_vehicles_state.get("AV", {})
                     step_states.append(StepState(
                         step=step_i,
                         ego_xy_map=(float(x), float(y)),
-                        ego_xy_sumo=sumo_xy,
-                        snap_distance=snap_dist,
                         ego_speed=ego_speed,
+                        av_lane_id=av_state.get("lane_id", ""),
+                        av_lateral_lane_pos=float(av_state.get("lateral_lane_pos", 0.0)),
+                        av_lane_width=float(av_state.get("lane_width", 0.0)),
+                        av_width=ego_width,
                         vehicle_states=vehicle_states_dict,
                         vru_states=vru_states_dict,
                         av_in_sim=av_in_sim,
@@ -942,9 +934,8 @@ def build_interface(npz_paths: list[str], model_path_default: str = "") -> gr.Bl
         # ── Results table ────────────────────────────────────────────────────
         results_table = gr.Dataframe(
             headers=[
-                "Rank", "Label", "Score", "Collision", "Completion%",
-                "MinClear(m)", "MinTTC(s)", "NearMiss", "OffRoad%",
-                "MaxSnap(m)", "Jerk", "FDE(m)",
+                "Rank", "Label", "Score", "Collision", "Progress%", "Dist(m)",
+                "MinClear(m)", "MinTTC(s)", "NearMiss", "OffRoad%", "Jerk", "FDE(m)",
             ],
             label="Trajectory Ranking",
             wrap=True,
