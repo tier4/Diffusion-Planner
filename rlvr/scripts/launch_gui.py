@@ -694,6 +694,7 @@ def _run_multi_traj(
 
                     step_states: list[StepState] = []
                     ego_history_map: list[tuple] = []
+                    episode_had_collision = False
 
                     for step_i, (x, y, yaw_rad) in enumerate(traj_map):
                         result     = sim.step((float(x), float(y)), float(yaw_rad))
@@ -750,6 +751,7 @@ def _run_multi_traj(
                             time.sleep(float(step_delay))
 
                         if not av_in_sim:
+                            episode_had_collision = True
                             yield sim_fig, emit(
                                 f"  [{traj_idx+1}/{N}] COLLISION at step {step_i+1}"
                             ), None
@@ -763,8 +765,8 @@ def _run_multi_traj(
                         else:
                             yield sim_fig, log, None
 
-                    sim.close()
-
+                    # Compute metrics before closing — step_states are valid
+                    # even when the episode ended in a collision.
                     m = finalize_metrics(step_states, traj_map, gt_traj_map)
                     m.label = label
                     m.score = compute_score(m)
@@ -774,14 +776,36 @@ def _run_multi_traj(
                         f"clearance={m.min_clearance_m:.1f}m  FDE={m.fde_from_gt_m:.1f}m"
                     ), None
 
+                    try:
+                        sim.close()
+                    except Exception:
+                        pass
+
                 except Exception as ep_err:
-                    # Episode failed (e.g. TeraSim timeout after collision).
-                    # Log the error, restart the container for a clean state,
-                    # then continue with the remaining trajectories.
-                    yield None, emit(
-                        f"  [{traj_idx+1}/{N}] EPISODE FAILED: {ep_err}\n"
-                        f"  Restarting TeraSim container…"
-                    ), None
+                    # Episode failed mid-run (e.g. step timeout after collision).
+                    # If steps were collected, inject a terminal collision state so
+                    # finalize_metrics correctly attributes collision=True, then
+                    # score the trajectory normally.
+                    if step_states:
+                        last = step_states[-1]
+                        step_states.append(StepState(
+                            step=last.step + 1,
+                            ego_xy_map=last.ego_xy_map,
+                            ego_speed=0.0,
+                            av_in_sim=False,
+                        ))
+                        m = finalize_metrics(step_states, traj_map, gt_traj_map)
+                        m.label = label
+                        m.score = compute_score(m)
+                        all_metrics.append(m)
+                        yield None, emit(
+                            f"  [{traj_idx+1}/{N}] COLLISION (step timeout) — "
+                            f"score={m.score:.3f}  ({ep_err})"
+                        ), None
+                    else:
+                        yield None, emit(
+                            f"  [{traj_idx+1}/{N}] EPISODE FAILED (no data): {ep_err}"
+                        ), None
                     try:
                         sim.close()
                     except Exception:
