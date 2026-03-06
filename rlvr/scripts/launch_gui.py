@@ -329,8 +329,8 @@ def _generate_trajectories(
     """Generate N model trajectories for the current scene and update model_state."""
     import torch
     from diffusion_planner.model.guidance.composer import GuidanceComposer
-    from guidance_playground.generate_samples import generate_samples
-    from guidance_playground.guidance_ui import make_guidance_set_config
+    from guidance_gui.generate_samples import generate_samples
+    from guidance_gui.guidance_ui import make_guidance_set_config
     from preference_optimization.utils import load_npz_data
     from rlvr.npz_utils import load_bl2map
 
@@ -850,7 +850,7 @@ def _run_simulation(
 # ---------------------------------------------------------------------------
 
 def build_interface(npz_paths: list[str], model_path_default: str = "") -> gr.Blocks:
-    from guidance_playground.guidance_ui import build_guidance_panel
+    from guidance_gui.guidance_ui import build_guidance_panel
 
     total = len(npz_paths)
 
