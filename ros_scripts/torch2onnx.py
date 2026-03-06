@@ -1,10 +1,13 @@
 import argparse
 import json
 import random
+import subprocess
+import sys
+import tempfile
+import warnings
 from pathlib import Path
 
 import numpy as np
-import onnxruntime as ort
 import torch
 import torch.nn as nn
 from diffusion_planner.dimensions import *
@@ -12,6 +15,9 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
 torch.backends.mha.set_fastpath_enabled(False)
 
 
@@ -19,6 +25,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("root_dir", type=Path)
     parser.add_argument("--eval_npz", type=Path, default=None)
+    parser.add_argument(
+        "--output-name",
+        type=str,
+        default="diffusion_planner",
+        help="Base name for output ONNX files (default: diffusion_planner)",
+    )
+    parser.add_argument(
+        "--use-simplify",
+        action="store_true",
+        help="Run onnxsim to produce a simplified ONNX model",
+    )
     args = parser.parse_args()
     return args
 
@@ -138,7 +155,8 @@ def build_inputs_from_npz(npz_path: Path) -> dict:
 
 
 def convert_model(
-    config_json_path: str, ckpt_path: str, onnx_path: str, eval_npz_path: Path | None
+    config_json_path: str, ckpt_path: str, onnx_path: str, eval_npz_path: Path | None,
+    use_simplify: bool = False,
 ):
     """Convert a single PyTorch model to ONNX format."""
     print(f"\n{'=' * 80}")
@@ -224,27 +242,82 @@ def convert_model(
     dynamic_axes["prediction"] = {0: "batch"}
     dynamic_axes["turn_indicator_logit"] = {0: "batch"}
 
-    onnx_model = torch.onnx.export(
-        wrapper,
-        torch_input_tuple,
-        onnx_path,
-        input_names=input_names,
-        output_names=["prediction", "turn_indicator_logit"],
-        dynamic_axes=dynamic_axes,
-        opset_version=20,
-        dynamo=False,
-    )
+    # Suppress known-harmless TracerWarnings:
+    #   - assert D == 4 / assert P == ... : fixed dimensions, always constant
+    #   - if valid_indices.sum() > 0 : empty-tensor path produces correct zeros
+    #   - DPM solver schedule params : truly constant across all runs
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
+        onnx_model = torch.onnx.export(
+            wrapper,
+            torch_input_tuple,
+            onnx_path,
+            input_names=input_names,
+            output_names=["prediction", "turn_indicator_logit"],
+            dynamic_axes=dynamic_axes,
+            opset_version=20,
+            dynamo=False,
+        )
 
-    sess_options = ort.SessionOptions()
-    # sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-    ort_session = ort.InferenceSession(
-        onnx_path, sess_options, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
-    )
+    # Simplify ONNX model with onnxsim
+    if use_simplify:
+        simplified_path = onnx_path.replace(".onnx", "_simplified.onnx")
+        try:
+            import onnx
+            from onnxsim import simplify
+
+            print("\nSimplifying ONNX model with onnxsim...")
+            model_proto = onnx.load(onnx_path)
+            model_simp, check = simplify(model_proto)
+            if check:
+                onnx.save(model_simp, simplified_path)
+                print(f"Simplified ONNX saved: {simplified_path}")
+            else:
+                print("WARNING: onnxsim validation failed, skipping simplification")
+        except ImportError:
+            print("WARNING: onnxsim not installed, skipping (pip install onnxsim)")
+        except Exception as e:
+            print(f"WARNING: onnxsim failed ({e}), skipping")
+
+    # ORT validation: run in subprocess to avoid PyTorch/ORT CUDA context conflict on Blackwell.
+    # When PyTorch initializes CUDA first, ORT's CUBLAS handle creation fails on sm_120 GPUs.
+    # A subprocess gets a fresh CUDA context where ORT can use CUDAExecutionProvider normally.
+    def run_ort_in_subprocess(model_path: str, np_inputs: dict) -> list:
+        """Run ORT inference in a subprocess and return outputs as numpy arrays."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = f"{tmpdir}/inputs.npz"
+            output_path = f"{tmpdir}/outputs.npz"
+            np.savez(input_path, **np_inputs)
+
+            script = f"""
+import numpy as np
+import onnxruntime as ort
+data = np.load("{input_path}", allow_pickle=True)
+inputs = {{k: data[k] for k in data.files}}
+sess_options = ort.SessionOptions()
+sess_options.log_severity_level = 3
+sess = ort.InferenceSession(
+    "{model_path}", sess_options,
+    providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+print("ORT providers:", sess.get_providers())
+outputs = sess.run(None, inputs)
+np.savez("{output_path}", **{{f"out_{{i}}": o for i, o in enumerate(outputs)}})
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"ORT subprocess failed:\n{result.stderr[-1000:]}")
+            print(result.stdout.strip())
+            data = np.load(output_path, allow_pickle=True)
+            return [data[f"out_{i}"] for i in range(len(data.files))]
 
     with torch.no_grad():
         output = wrapper(*torch_input_tuple)
         torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
-    onnx_output = ort_session.run(None, onnx_inputs)
+    print("\nORT validation (subprocess with CUDA)...")
+    onnx_output = run_ort_in_subprocess(onnx_path, onnx_inputs)
     print("Compare outputs using the creation input")
     compare_outputs(torch_output, onnx_output)
 
@@ -258,7 +331,7 @@ def convert_model(
         with torch.no_grad():
             output = wrapper(*torch_input_tuple)
             torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
-        onnx_output = ort_session.run(None, onnx_inputs)
+        onnx_output = run_ort_in_subprocess(onnx_path, onnx_inputs)
         compare_outputs(torch_output, onnx_output)
 
     if eval_npz_path and eval_npz_path.exists():
@@ -269,7 +342,7 @@ def convert_model(
         with torch.no_grad():
             output = wrapper(*torch_eval_tuple)
             torch_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
-        onnx_output = ort_session.run(None, onnx_eval_inputs)
+        onnx_output = run_ort_in_subprocess(onnx_path, onnx_eval_inputs)
         compare_outputs(torch_output, onnx_output)
     elif eval_npz_path:
         print(f"\n⚠ Eval NPZ not found, skipped: {eval_npz_path}")
@@ -299,7 +372,7 @@ if __name__ == "__main__":
     for pth_file in pth_files:
         pth_dir = pth_file.parent
         config_file = pth_dir / "args.json"
-        onnx_file = pth_dir / "model.onnx"
+        onnx_file = pth_dir / f"{args.output_name}.onnx"
 
         print(f"\n{'#' * 80}")
         print(f"Processing: {pth_file.relative_to(root_dir)}")
@@ -316,6 +389,7 @@ if __name__ == "__main__":
             ckpt_path=str(pth_file),
             onnx_path=str(onnx_file),
             eval_npz_path=args.eval_npz,
+            use_simplify=args.use_simplify,
         )
 
     # Print summary
