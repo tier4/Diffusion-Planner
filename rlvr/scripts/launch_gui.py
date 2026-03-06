@@ -688,13 +688,13 @@ def _run_multi_traj(
             for traj_idx, (traj_map, label) in enumerate(zip(trajectories, labels)):
                 yield None, emit(f"\n[{traj_idx+1}/{N}] Starting: {label}"), None
 
+                step_states: list[StepState] = []
+                ego_history_map: list[tuple] = []
+                episode_had_collision = False
+
                 try:
                     sim.start_episode(spawn, enable_viz=False)
                     yield None, emit(f"  Episode started."), None
-
-                    step_states: list[StepState] = []
-                    ego_history_map: list[tuple] = []
-                    episode_had_collision = False
 
                     for step_i, (x, y, yaw_rad) in enumerate(traj_map):
                         result     = sim.step((float(x), float(y)), float(yaw_rad))
