@@ -51,7 +51,7 @@ class TeraSimBridge:
         service_url: str = "http://localhost:8000",
         docker_image: str = "terasim:latest",
         container_name: str = "terasim_rlvr",
-        step_timeout: float = 30.0,
+        step_timeout: float = 8.0,
     ):
         """
         Args:
@@ -229,7 +229,7 @@ class TeraSimBridge:
         self._sim_time = -1.0
 
         # Wait for NDE warmup (0 s) and AV spawn to complete
-        self._poll_status("wait_for_tick", timeout=60.0)
+        self._poll_status("wait_for_tick", timeout=20.0)
 
         # Store GT trajectory in Redis so the Dash visualizer can draw it.
         # Key expires with the same 3600 s TTL used by the TeraSim service.
@@ -436,6 +436,52 @@ class TeraSimBridge:
                     self._sim_time = state_data["simulation_time"]
                     break
             time.sleep(0.01)
+
+            # Check if TeraSim terminated the simulation (e.g. NADE-detected collision).
+            # function_after_env_stop sets status="finished" within ~50ms; detecting it
+            # here avoids the full step_timeout hang.
+            try:
+                sr = requests.get(
+                    f"{self.service_url}/simulation_status/{self._sim_id}",
+                    timeout=2.0,
+                )
+                if sr.status_code == 200 and sr.json().get("status") == "finished":
+                    last = self._last_state or {}
+                    vehicles = last.get("agent_details", {}).get("vehicle", {})
+                    vrus = last.get("agent_details", {}).get("vru", {})
+                    return {
+                        "collision":  True,
+                        "av_in_sim":  False,
+                        "npc_states": [
+                            {
+                                "id":         k,
+                                "x":          v["x"],
+                                "y":          v["y"],
+                                "sumo_angle": v["sumo_angle"],
+                                "speed":      v["speed"],
+                                "length":     v.get("length", 4.5),
+                                "width":      v.get("width", 2.0),
+                            }
+                            for k, v in vehicles.items()
+                            if k != "AV"
+                        ],
+                        "vru_states": [
+                            {
+                                "id":         k,
+                                "x":          v["x"],
+                                "y":          v["y"],
+                                "sumo_angle": v["sumo_angle"],
+                                "speed":      v["speed"],
+                                "length":     v.get("length", 0.5),
+                                "width":      v.get("width", 0.5),
+                                "type":       v.get("type", ""),
+                            }
+                            for k, v in vrus.items()
+                        ],
+                        "sim_time":   prev_time,
+                    }
+            except requests.exceptions.RequestException:
+                pass
 
         if new_state is None:
             raise TimeoutError(
