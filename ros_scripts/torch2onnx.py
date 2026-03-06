@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
         default="diffusion_planner",
         help="Base name for output ONNX files (default: diffusion_planner)",
     )
+    parser.add_argument(
+        "--use-simplify",
+        action="store_true",
+        help="Run onnxsim to produce a simplified ONNX model",
+    )
     args = parser.parse_args()
     return args
 
@@ -150,7 +155,8 @@ def build_inputs_from_npz(npz_path: Path) -> dict:
 
 
 def convert_model(
-    config_json_path: str, ckpt_path: str, onnx_path: str, eval_npz_path: Path | None
+    config_json_path: str, ckpt_path: str, onnx_path: str, eval_npz_path: Path | None,
+    use_simplify: bool = False,
 ):
     """Convert a single PyTorch model to ONNX format."""
     print(f"\n{'=' * 80}")
@@ -253,24 +259,25 @@ def convert_model(
             dynamo=False,
         )
 
-    # Simplify ONNX model with onnxsim (before ORT validation so it's always produced)
-    simplified_path = onnx_path.replace(".onnx", "_simplified.onnx")
-    try:
-        import onnx
-        from onnxsim import simplify
+    # Simplify ONNX model with onnxsim
+    if use_simplify:
+        simplified_path = onnx_path.replace(".onnx", "_simplified.onnx")
+        try:
+            import onnx
+            from onnxsim import simplify
 
-        print("\nSimplifying ONNX model with onnxsim...")
-        model_proto = onnx.load(onnx_path)
-        model_simp, check = simplify(model_proto)
-        if check:
-            onnx.save(model_simp, simplified_path)
-            print(f"Simplified ONNX saved: {simplified_path}")
-        else:
-            print("WARNING: onnxsim validation failed, skipping simplification")
-    except ImportError:
-        print("WARNING: onnxsim not installed, skipping (pip install onnxsim)")
-    except Exception as e:
-        print(f"WARNING: onnxsim failed ({e}), skipping")
+            print("\nSimplifying ONNX model with onnxsim...")
+            model_proto = onnx.load(onnx_path)
+            model_simp, check = simplify(model_proto)
+            if check:
+                onnx.save(model_simp, simplified_path)
+                print(f"Simplified ONNX saved: {simplified_path}")
+            else:
+                print("WARNING: onnxsim validation failed, skipping simplification")
+        except ImportError:
+            print("WARNING: onnxsim not installed, skipping (pip install onnxsim)")
+        except Exception as e:
+            print(f"WARNING: onnxsim failed ({e}), skipping")
 
     # ORT validation: run in subprocess to avoid PyTorch/ORT CUDA context conflict on Blackwell.
     # When PyTorch initializes CUDA first, ORT's CUBLAS handle creation fails on sm_120 GPUs.
@@ -382,6 +389,7 @@ if __name__ == "__main__":
             ckpt_path=str(pth_file),
             onnx_path=str(onnx_file),
             eval_npz_path=args.eval_npz,
+            use_simplify=args.use_simplify,
         )
 
     # Print summary

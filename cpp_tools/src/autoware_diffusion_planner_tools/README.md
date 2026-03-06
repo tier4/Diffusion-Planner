@@ -2,7 +2,7 @@
 
 Offline tools for benchmarking and testing the diffusion planner outside of Autoware runtime.
 These tools link against the **actual autoware_universe inference code**, so results always reflect
-the real host-side behavior (bind-once, CUDA graph, pinned memory, etc.) of whatever branch you build against.
+the real host-side behavior (bind-once, pinned memory, etc.) of whatever branch you build against.
 
 ## Prerequisites
 
@@ -42,37 +42,6 @@ ros2 run autoware_diffusion_planner_tools benchmark_tool --warmup 50 --runs 300
 # Use a custom config
 ros2 run autoware_diffusion_planner_tools benchmark_tool --config /path/to/diffusion_planner.param.yaml
 ```
-
-### Comparing branches
-
-To benchmark a PR's impact, rebuild against each branch and compare:
-
-```bash
-# --- Old branch ---
-cd ~/autoware/src/universe/autoware_universe
-git checkout main
-
-# Rebuild universe + tools
-cd ~/autoware && colcon build --symlink-install --packages-up-to autoware_diffusion_planner
-cd ~/work/Diffusion-Planner/cpp_tools && ./build.sh
-source install/setup.bash
-
-ros2 run autoware_diffusion_planner_tools benchmark_tool --runs 300
-
-# --- New branch ---
-cd ~/autoware/src/universe/autoware_universe
-git checkout feat/your-branch
-
-# Rebuild universe + tools
-cd ~/autoware && colcon build --symlink-install --packages-up-to autoware_diffusion_planner
-cd ~/work/Diffusion-Planner/cpp_tools && ./build.sh
-source install/setup.bash
-
-ros2 run autoware_diffusion_planner_tools benchmark_tool --runs 300
-```
-
-The tool reads `onnx_model_path`, `plugins_path`, and `batch_size`
-from the installed `diffusion_planner.param.yaml`, so each branch automatically uses its own config.
 
 ### Options
 
