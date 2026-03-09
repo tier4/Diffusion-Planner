@@ -139,6 +139,14 @@ public:
     meta_data.name = topic_name;
     meta_data.type = type;
     meta_data.serialization_format = "cdr";
+    // offered_qos_profiles changed from std::string (Humble/Iron) to
+    // std::vector<rclcpp::QoS> (Jazzy+) in rosbag2_storage >= 0.26
+#if defined(ROSBAG2_QOS_PROFILES_AS_VECTOR)
+    rclcpp::QoS qos(rclcpp::KeepLast(1));
+    qos.reliability(rclcpp::ReliabilityPolicy::Reliable);
+    qos.durability(rclcpp::DurabilityPolicy::Volatile);
+    meta_data.offered_qos_profiles = {qos};
+#else
     meta_data.offered_qos_profiles =
       "- history: 1\n  depth: 1\n  reliability: 1\n  durability: 2\n"
       "  deadline:\n    sec: 9223372036\n    nsec: 854775807\n"
@@ -146,6 +154,7 @@ public:
       "  liveliness: 1\n  liveliness_lease_duration:\n"
       "    sec: 9223372036\n    nsec: 854775807\n"
       "  avoid_ros_namespace_conventions: false";
+#endif
     writer_.create_topic(meta_data);
   }
 
