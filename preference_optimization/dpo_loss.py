@@ -1,5 +1,7 @@
 """DPO loss computation for trajectory preference optimization."""
 
+import contextlib
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -162,42 +164,49 @@ def compute_dpo_loss(
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
+    # Number of (t, noise) samples to average per preference pair.
+    # Averaging over K samples reduces variance in the loss_diff estimate by sqrt(K).
+    # A single sample is dominated by noise when MSE values are small (well-trained model).
+    K = 8
+    eps = 1e-3
+
+    ref_model = reference_model if reference_model is not None else policy_model
+    inner_ref = ref_model.module if hasattr(ref_model, "module") else ref_model
+    use_lora_disable = hasattr(inner_ref, "disable_adapter")
+
     for sample in batch:
         data_raw = sample["data"]
         traj_w = sample["trajectory_w"]
         traj_l = sample["trajectory_l"]
 
-        # Generate separate noise for winner and loser
-        noise_w = torch.randn(B, P, future_len, 4, device=device)
-        noise_l = torch.randn(B, P, future_len, 4, device=device)
+        l_w_sum = torch.tensor(0.0, device=device)
+        l_l_sum = torch.tensor(0.0, device=device)
+        l_ref_w_sum = torch.tensor(0.0, device=device, requires_grad=False)
+        l_ref_l_sum = torch.tensor(0.0, device=device, requires_grad=False)
 
-        # Sample diffusion time
-        eps = 1e-3
-        t = torch.rand(B, device=device) * (1 - eps) + eps
+        for _ in range(K):
+            # Use the same noise and t for winner and loser so that l_w - l_l
+            # is a clean comparison under identical noisy conditions. Averaging
+            # over K draws reduces variance in the loss_diff estimate.
+            noise = torch.randn(B, P, future_len, 4, device=device)
+            t = torch.rand(B, device=device) * (1 - eps) + eps
 
-        # Clone data to avoid inplace modifications
-        data_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
-        data_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+            data_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+            data_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+            l_w_sum = l_w_sum + compute_trajectory_loss(policy_model, data_w, traj_w, model_args, noise, t, device)
+            l_l_sum = l_l_sum + compute_trajectory_loss(policy_model, data_l, traj_l, model_args, noise, t, device)
 
-        # Compute losses under policy model
-        l_w = compute_trajectory_loss(policy_model, data_w, traj_w, model_args, noise_w, t, device)
-        l_l = compute_trajectory_loss(policy_model, data_l, traj_l, model_args, noise_l, t, device)
+            disable_ctx = inner_ref.disable_adapter() if use_lora_disable else contextlib.nullcontext()
+            with disable_ctx, torch.no_grad():
+                data_ref_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+                data_ref_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
+                l_ref_w_sum = l_ref_w_sum + compute_trajectory_loss(ref_model, data_ref_w, traj_w, model_args, noise.clone(), t, device)
+                l_ref_l_sum = l_ref_l_sum + compute_trajectory_loss(ref_model, data_ref_l, traj_l, model_args, noise.clone(), t, device)
 
-        # Compute losses under reference model
-        with torch.no_grad():
-            data_ref_w = {
-                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()
-            }
-            data_ref_l = {
-                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()
-            }
-
-            l_ref_w = compute_trajectory_loss(
-                reference_model, data_ref_w, traj_w, model_args, noise_w.clone(), t, device
-            )
-            l_ref_l = compute_trajectory_loss(
-                reference_model, data_ref_l, traj_l, model_args, noise_l.clone(), t, device
-            )
+        l_w = l_w_sum / K
+        l_l = l_l_sum / K
+        l_ref_w = l_ref_w_sum / K
+        l_ref_l = l_ref_l_sum / K
 
         # Compute DPO loss
         # Since MSE loss is lower-is-better, we want l_w < l_l relative to reference
