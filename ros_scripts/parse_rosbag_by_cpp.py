@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
     parser.add_argument("--convert_red", type=int, default=0)
+    parser.add_argument("--interpolation", type=int, default=0)
     parser.add_argument("--ego_wheel_base", type=float, default=2.75)
     parser.add_argument("--ego_length", type=float, default=4.34)
     parser.add_argument("--ego_width", type=float, default=1.70)
@@ -38,6 +39,7 @@ def main(
     search_nearest_route: bool,
     convert_yellow: int,
     convert_red: int,
+    interpolation: int,
     ego_wheel_base: float,
     ego_length: float,
     ego_width: float,
@@ -56,6 +58,7 @@ def main(
         f"--search_nearest_route={search_nearest_route}",
         f"--convert_yellow={convert_yellow}",
         f"--convert_red={convert_red}",
+        f"--interpolation={interpolation}",
         f"--ego_wheel_base={ego_wheel_base}",
         f"--ego_length={ego_length}",
         f"--ego_width={ego_width}",
