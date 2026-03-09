@@ -118,7 +118,6 @@ DiffusionPlannerParams read_planner_params(const ParamMap & params)
   p.planning_frequency_hz = get_param<double>(params, "planning_frequency_hz", 10.0);
   p.ignore_neighbors = get_param<bool>(params, "ignore_neighbors", false);
   p.ignore_unknown_neighbors = get_param<bool>(params, "ignore_unknown_neighbors", false);
-  p.predict_neighbor_trajectory = get_param<bool>(params, "predict_neighbor_trajectory", false);
   p.traffic_light_group_msg_timeout_seconds =
     get_param<double>(params, "traffic_light_group_msg_timeout_seconds", 0.2);
   p.batch_size = static_cast<int>(get_param<int64_t>(params, "batch_size", 1));
@@ -402,7 +401,6 @@ int main(int argc, char ** argv)
   std::cout << "  planning_frequency_hz: " << params.planning_frequency_hz << std::endl;
   std::cout << "  ignore_neighbors: " << std::boolalpha << params.ignore_neighbors << std::endl;
   std::cout << "  ignore_unknown_neighbors: " << params.ignore_unknown_neighbors << std::endl;
-  std::cout << "  predict_neighbor_trajectory: " << params.predict_neighbor_trajectory << std::endl;
   std::cout << "  traffic_light_group_msg_timeout_seconds: "
             << params.traffic_light_group_msg_timeout_seconds << std::endl;
   std::cout << "  batch_size: " << params.batch_size << std::endl;
