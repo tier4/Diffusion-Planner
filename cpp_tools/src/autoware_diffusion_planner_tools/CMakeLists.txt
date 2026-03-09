@@ -25,6 +25,10 @@ ament_auto_add_executable(map_exporter
 )
 target_link_libraries(map_exporter yaml-cpp)
 
+ament_auto_add_executable(benchmark_tool
+  src/benchmark_tool.cpp
+)
+
 ament_auto_package(
   INSTALL_TO_SHARE
 )
