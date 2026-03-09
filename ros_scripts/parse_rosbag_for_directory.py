@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
     parser.add_argument("--convert_red", type=int, default=0)
+    parser.add_argument("--interpolation", type=int, default=0)
     parser.add_argument("--ego_wheel_base", type=float, default=2.75)
     parser.add_argument("--ego_length", type=float, default=4.34)
     parser.add_argument("--ego_width", type=float, default=1.70)
@@ -43,6 +44,7 @@ def process_single_bag(args_tuple):
         search_nearest_route,
         convert_yellow,
         convert_red,
+        interpolation,
         ego_wheel_base,
         ego_length,
         ego_width,
@@ -80,6 +82,7 @@ def process_single_bag(args_tuple):
             search_nearest_route=search_nearest_route,
             convert_yellow=convert_yellow,
             convert_red=convert_red,
+            interpolation=interpolation,
             ego_wheel_base=ego_wheel_base,
             ego_length=ego_length,
             ego_width=ego_width,
@@ -103,6 +106,7 @@ if __name__ == "__main__":
     search_nearest_route = args.search_nearest_route
     convert_yellow = args.convert_yellow
     convert_red = args.convert_red
+    interpolation = args.interpolation
     ego_wheel_base = args.ego_wheel_base
     ego_length = args.ego_length
     ego_width = args.ego_width
@@ -146,6 +150,7 @@ if __name__ == "__main__":
                 search_nearest_route,
                 convert_yellow,
                 convert_red,
+                interpolation,
                 ego_wheel_base,
                 ego_length,
                 ego_width,
