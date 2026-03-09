@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import random
 import subprocess
 import sys
@@ -19,6 +20,32 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 torch.backends.mha.set_fastpath_enabled(False)
+
+
+def _migrate_fused_attention(state_dict: dict) -> dict:
+    """Convert DiT decoder nn.MultiheadAttention weights to UnfusedMultiheadAttention format.
+
+    Splits in_proj_weight (shape [3D, D]) into q/k/v_proj.weight (shape [D, D] each)
+    for decoder DiT block keys only. The encoder still uses nn.MultiheadAttention (fused),
+    so encoder keys are left unchanged. No-op if already in the unfused format.
+    """
+    new_sd = {}
+    for key, val in state_dict.items():
+        if "decoder" in key and key.endswith(".in_proj_weight"):
+            prefix = key[: -len(".in_proj_weight")]
+            D = val.shape[0] // 3
+            new_sd[prefix + ".q_proj.weight"] = val[:D].clone()
+            new_sd[prefix + ".k_proj.weight"] = val[D: 2 * D].clone()
+            new_sd[prefix + ".v_proj.weight"] = val[2 * D:].clone()
+        elif "decoder" in key and key.endswith(".in_proj_bias"):
+            prefix = key[: -len(".in_proj_bias")]
+            D = val.shape[0] // 3
+            new_sd[prefix + ".q_proj.bias"] = val[:D].clone()
+            new_sd[prefix + ".k_proj.bias"] = val[D: 2 * D].clone()
+            new_sd[prefix + ".v_proj.bias"] = val[2 * D:].clone()
+        else:
+            new_sd[key] = val
+    return new_sd
 
 
 def parse_args() -> argparse.Namespace:
@@ -221,7 +248,46 @@ def convert_model(
     ckpt = torch.load(ckpt_path)
     state_dict = ckpt["model"]
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    # Transparently handle checkpoints saved before the UnfusedMultiheadAttention
+    # refactor (in_proj_weight → q/k/v_proj.weight split).
+    new_state_dict = _migrate_fused_attention(new_state_dict)
     model.load_state_dict(new_state_dict)
+
+    # If a LoRA adapter directory exists, merge the adapter weights into the base
+    # model before export (W_merged = W_base + alpha/r * B @ A).
+    # Two layouts are supported:
+    #   (a) adapter_config.json sits next to the .pth (single-dir layout)
+    #   (b) DPO trainer layout: base .pth is in run_dir/ and LoRA adapter is in
+    #       run_dir/lora_latest/ (symlink) or run_dir/lora_epoch_NNN/
+    ckpt_dir = Path(ckpt_path).parent
+    lora_dir = None
+    if os.path.isfile(ckpt_dir / "adapter_config.json"):
+        lora_dir = str(ckpt_dir)
+    else:
+        # Look for lora_latest symlink or highest-numbered lora_epoch_* directory
+        lora_latest = ckpt_dir / "lora_latest"
+        if lora_latest.exists() and (lora_latest / "adapter_config.json").exists():
+            lora_dir = str(lora_latest.resolve())
+        else:
+            epoch_dirs = sorted(ckpt_dir.glob("lora_epoch_*"))
+            for d in reversed(epoch_dirs):
+                if (d / "adapter_config.json").exists():
+                    lora_dir = str(d)
+                    break
+
+    if lora_dir is not None:
+        import sys
+        _repo_root = str(Path(__file__).resolve().parent.parent)
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
+        from peft import PeftModel
+        from preference_optimization.lora_utils import merge_lora_and_unload
+        model = PeftModel.from_pretrained(model, lora_dir)
+        model = merge_lora_and_unload(model)
+        model.eval()
+        print(f"LoRA weights merged from {lora_dir} for ONNX export.")
+    else:
+        print("No LoRA adapter found; exporting base model weights only.")
 
     # Wrap model for onnx compatibility
     wrapper = ONNXWrapper(model).eval()
