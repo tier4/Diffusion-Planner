@@ -167,12 +167,16 @@ def _build_gt_representation(
         neighbor_history_local = torch.cat([nh_x, nh_y, nh_cos, nh_sin], dim=-1)
         # Inverse-rotate and translate future to neighbor-local frame
         nf = gt_future[:, 1:]  # [B, Pn, T, 4]
+        # Preserve invalid (all-zero) mask BEFORE transformation
+        nf_invalid = torch.sum(torch.ne(nf, 0), dim=-1, keepdim=True) == 0  # [B, Pn, T, 1]
         nf_xy = nf[..., :2] - n_pos
         nf_x = nf_xy[..., 0:1] * n_cos + nf_xy[..., 1:2] * n_sin
         nf_y = -nf_xy[..., 0:1] * n_sin + nf_xy[..., 1:2] * n_cos
         nf_cos = nf[..., 2:3] * n_cos + nf[..., 3:4] * n_sin
         nf_sin = -nf[..., 2:3] * n_sin + nf[..., 3:4] * n_cos
         neighbor_future_local = torch.cat([nf_x, nf_y, nf_cos, nf_sin], dim=-1)
+        # Restore zeros for originally-invalid timesteps
+        neighbor_future_local[nf_invalid.expand_as(neighbor_future_local)] = 0.0
         neighbor_ctrl = waypoints_to_control(
             neighbor_history_local, neighbor_future_local
         )  # [B, Pn, T, 2]
