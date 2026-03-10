@@ -33,7 +33,11 @@ from diffusion_planner.model.flow_matching_utils.ode_solver import (
     rk4_integration,
 )
 from diffusion_planner.model.module.dit import DiT
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 
 
 def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> torch.Tensor:
@@ -112,6 +116,8 @@ def _build_gt_representation(
     output_mode: str,
     use_velocity: bool,
     norm: StateNormalizer,
+    control_norm: ControlNormalizer,
+    obs_norm: ObservationNormalizer,
     Pn: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build GT and current state in the target representation.
@@ -135,15 +141,18 @@ def _build_gt_representation(
 
     # --- Control part [B, P, T, 2] ---
     if has_ctrl:
+        # Denormalize inputs for control conversion (gt_future is raw, so history must be raw too)
+        raw_inputs = obs_norm.inverse(inputs)
+
         # Ego control
-        ego_history = inputs["ego_agent_past"]  # [B, T_hist, 4]
-        ego_v0 = inputs["ego_current_state"][:, 4:5]  # [B, 1]
+        ego_history = raw_inputs["ego_agent_past"]  # [B, T_hist, 4] raw
+        ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
         ego_ctrl = waypoints_to_control(
             ego_history, gt_future[:, 0], t0_states={"v": ego_v0.squeeze(-1)}
         )  # [B, T, 2]
 
         # Neighbor control
-        neighbor_history = inputs["neighbor_agents_past"][:, :Pn, :, :4]  # [B, Pn, T_hist, 4]
+        neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]  # [B, Pn, T_hist, 4]
         neighbor_ctrl = waypoints_to_control(
             neighbor_history, gt_future[:, 1:]
         )  # [B, Pn, T, 2]
@@ -152,13 +161,13 @@ def _build_gt_representation(
 
         ctrl_gt = torch.cat([ego_ctrl[:, None], neighbor_ctrl], dim=1)  # [B, P, T, 2]
 
-        # Control current state: [v0, kappa0=0]
+        # Control current state: [v0, kappa0=0] (raw velocity)
         ego_ctrl_current = torch.cat(
             [ego_v0, torch.zeros_like(ego_v0)], dim=-1
         )  # [B, 2]
-        # Estimate neighbor v0 from last two history positions
-        n_last = inputs["neighbor_agents_past"][:, :Pn, -1, :2]  # [B, Pn, 2]
-        n_prev = inputs["neighbor_agents_past"][:, :Pn, -2, :2]  # [B, Pn, 2]
+        # Estimate neighbor v0 from raw last two history positions
+        n_last = raw_inputs["neighbor_agents_past"][:, :Pn, -1, :2]  # [B, Pn, 2]
+        n_prev = raw_inputs["neighbor_agents_past"][:, :Pn, -2, :2]  # [B, Pn, 2]
         neighbor_v0 = torch.norm(n_last - n_prev, dim=-1, keepdim=True) / 0.1  # [B, Pn, 1]
         neighbor_v0 = torch.nan_to_num(neighbor_v0, nan=0.0)
         neighbor_ctrl_current = torch.cat(
@@ -167,6 +176,10 @@ def _build_gt_representation(
         ctrl_current = torch.cat(
             [ego_ctrl_current[:, None], neighbor_ctrl_current], dim=1
         )  # [B, P, 2]
+
+        # Normalize control signals
+        ctrl_gt = control_norm(ctrl_gt)
+        ctrl_current = control_norm(ctrl_current)
 
     # --- Assemble ---
     if output_mode == OUTPUT_MODE_TRAJECTORY:
@@ -199,6 +212,8 @@ def compute_training_loss(
     args: Namespace,
 ):
     norm = args.state_normalizer
+    control_norm = args.control_normalizer
+    obs_norm = args.observation_normalizer
     model_type = args.diffusion_model_type
     use_velocity = args.use_velocity_representation
     hybrid_omega = args.hybrid_loss_omega
@@ -228,7 +243,7 @@ def compute_training_loss(
 
     # Build GT in the target representation
     all_gt, all_gt_pose = _build_gt_representation(
-        gt_future, current_states, inputs, output_mode, use_velocity, norm, Pn
+        gt_future, current_states, inputs, output_mode, use_velocity, norm, control_norm, obs_norm, Pn
     )
     all_gt[:, 1:][neighbor_mask] = 0.0
     all_gt_pose[:, 1:][neighbor_mask] = 0.0
@@ -438,6 +453,7 @@ class Decoder(nn.Module):
 
         self._state_normalizer: StateNormalizer = config.state_normalizer
         self._observation_normalizer: ObservationNormalizer = config.observation_normalizer
+        self._control_normalizer: ControlNormalizer = config.control_normalizer
 
         # self._guidance_fn = config.guidance_fn
         self._guidance_fn = (
@@ -503,14 +519,16 @@ class Decoder(nn.Module):
             return current_states  # [B, P, 4]
 
         Pn = self._predicted_neighbor_num
+        # Denormalize inputs to get raw velocity/positions for control conversion
+        raw_inputs = self._observation_normalizer.inverse(inputs)
         # Build control current state [B, P, 2]: [v0, kappa0=0]
-        ego_v0 = inputs["ego_current_state"][:, 4:5]  # [B, 1]
+        ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
         ego_ctrl_current = torch.cat(
             [ego_v0, torch.zeros_like(ego_v0)], dim=-1
         )  # [B, 2]
 
-        n_last = inputs["neighbor_agents_past"][:, :Pn, -1, :2]
-        n_prev = inputs["neighbor_agents_past"][:, :Pn, -2, :2]
+        n_last = raw_inputs["neighbor_agents_past"][:, :Pn, -1, :2]
+        n_prev = raw_inputs["neighbor_agents_past"][:, :Pn, -2, :2]
         neighbor_v0 = torch.norm(n_last - n_prev, dim=-1, keepdim=True) / 0.1
         neighbor_v0 = torch.nan_to_num(neighbor_v0, nan=0.0)
         neighbor_ctrl_current = torch.cat(
@@ -519,6 +537,7 @@ class Decoder(nn.Module):
         ctrl_current = torch.cat(
             [ego_ctrl_current[:, None], neighbor_ctrl_current], dim=1
         )  # [B, P, 2]
+        ctrl_current = self._control_normalizer(ctrl_current)
 
         if self._output_mode == OUTPUT_MODE_CONTROL:
             return ctrl_current
@@ -595,18 +614,21 @@ class Decoder(nn.Module):
         Pn = self._predicted_neighbor_num
 
         if self._output_mode == OUTPUT_MODE_CONTROL:
-            # x is [B, P, T+1, 2] — control (accel, curvature)
-            ctrl = x[:, :, 1:, :]  # [B, P, T, 2]
+            # x is [B, P, T+1, 2] — normalized control (accel, curvature)
+            ctrl = self._control_normalizer.inverse(x[:, :, 1:, :])  # [B, P, T, 2]
+
+            # Denormalize inputs to get raw history/velocity for control→trajectory conversion
+            raw_inputs = self._observation_normalizer.inverse(inputs)
 
             # Ego: convert control → trajectory
-            ego_v0 = inputs["ego_current_state"][:, 4:5]  # [B, 1]
+            ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
             ego_traj = control_to_waypoints(
-                ctrl[:, 0], inputs["ego_agent_past"],
+                ctrl[:, 0], raw_inputs["ego_agent_past"],
                 t0_states={"v": ego_v0.squeeze(-1)},
             )  # [B, T, 4]
 
             # Neighbors: convert control → trajectory
-            neighbor_history = inputs["neighbor_agents_past"][:, :Pn, :, :4]
+            neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]
             neighbor_traj = control_to_waypoints(
                 ctrl[:, 1:], neighbor_history,
             )  # [B, Pn, T, 4]
@@ -721,10 +743,11 @@ class Decoder(nn.Module):
                 "cross_c": encoding,
                 "neighbor_current_mask": neighbor_current_mask,
             },
+            D=D,
             **model_wrapper_params,
         )
 
-        dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint)
+        dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint, D=D)
 
         x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
 

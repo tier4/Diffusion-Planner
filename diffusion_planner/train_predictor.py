@@ -13,7 +13,11 @@ from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from timm.utils import ModelEma
 from torch import optim
@@ -176,6 +180,10 @@ def get_args():
 
     args.state_normalizer = StateNormalizer.from_json(args)
     args.observation_normalizer = ObservationNormalizer.from_json(args)
+    args.control_normalizer = ControlNormalizer(
+        mean=[-0.030108, -0.001032],
+        std=[2.177840, 0.033305],
+    )
 
     return args
 
@@ -214,7 +222,7 @@ def model_training(args):
         # Save args
         args_dict = vars(args)
         args_dict = {
-            k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
+            k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer, ControlNormalizer)) else v.to_dict()
             for k, v in args_dict.items()
         }
         args_dict["major_version"] = 3
