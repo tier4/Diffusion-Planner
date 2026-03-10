@@ -184,6 +184,10 @@ def get_args():
         mean=[-0.030108, -0.001032],
         std=[2.177840, 0.033305],
     )
+    args.neighbor_control_normalizer = ControlNormalizer(
+        mean=[-3.346858, 0.000680],
+        std=[46.111027, 0.295797],
+    )
 
     return args
 

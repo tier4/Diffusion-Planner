@@ -117,6 +117,7 @@ def _build_gt_representation(
     use_velocity: bool,
     norm: StateNormalizer,
     control_norm: ControlNormalizer,
+    neighbor_control_norm: ControlNormalizer,
     obs_norm: ObservationNormalizer,
     Pn: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -201,9 +202,11 @@ def _build_gt_representation(
             [ego_ctrl_current[:, None], neighbor_ctrl_current], dim=1
         )  # [B, P, 2]
 
-        # Normalize control signals
-        ctrl_gt = control_norm(ctrl_gt)
-        ctrl_current = control_norm(ctrl_current)
+        # Normalize control signals (ego and neighbor separately)
+        ctrl_gt[:, 0:1] = control_norm(ctrl_gt[:, 0:1])
+        ctrl_gt[:, 1:] = neighbor_control_norm(ctrl_gt[:, 1:])
+        ctrl_current[:, 0:1] = control_norm(ctrl_current[:, 0:1])
+        ctrl_current[:, 1:] = neighbor_control_norm(ctrl_current[:, 1:])
 
     # --- Assemble ---
     if output_mode == OUTPUT_MODE_TRAJECTORY:
@@ -237,6 +240,7 @@ def compute_training_loss(
 ):
     norm = args.state_normalizer
     control_norm = args.control_normalizer
+    neighbor_control_norm = args.neighbor_control_normalizer
     obs_norm = args.observation_normalizer
     model_type = args.diffusion_model_type
     use_velocity = args.use_velocity_representation
@@ -267,7 +271,7 @@ def compute_training_loss(
 
     # Build GT in the target representation
     all_gt, all_gt_pose = _build_gt_representation(
-        gt_future, current_states, inputs, output_mode, use_velocity, norm, control_norm, obs_norm, Pn
+        gt_future, current_states, inputs, output_mode, use_velocity, norm, control_norm, neighbor_control_norm, obs_norm, Pn
     )
     all_gt[:, 1:][neighbor_mask] = 0.0
     all_gt_pose[:, 1:][neighbor_mask] = 0.0
@@ -478,6 +482,7 @@ class Decoder(nn.Module):
         self._state_normalizer: StateNormalizer = config.state_normalizer
         self._observation_normalizer: ObservationNormalizer = config.observation_normalizer
         self._control_normalizer: ControlNormalizer = config.control_normalizer
+        self._neighbor_control_normalizer: ControlNormalizer = config.neighbor_control_normalizer
 
         # self._guidance_fn = config.guidance_fn
         self._guidance_fn = (
@@ -639,7 +644,11 @@ class Decoder(nn.Module):
 
         if self._output_mode == OUTPUT_MODE_CONTROL:
             # x is [B, P, T+1, 2] — normalized control (accel, curvature)
-            ctrl = self._control_normalizer.inverse(x[:, :, 1:, :])  # [B, P, T, 2]
+            # Denormalize ego and neighbor with separate normalizers
+            ctrl_raw = x[:, :, 1:, :]  # [B, P, T, 2]
+            ctrl = torch.empty_like(ctrl_raw)
+            ctrl[:, 0:1] = self._control_normalizer.inverse(ctrl_raw[:, 0:1])
+            ctrl[:, 1:] = self._neighbor_control_normalizer.inverse(ctrl_raw[:, 1:])
 
             # Denormalize inputs to get raw history/velocity for control→trajectory conversion
             raw_inputs = self._observation_normalizer.inverse(inputs)
