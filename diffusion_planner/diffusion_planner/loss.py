@@ -3,6 +3,11 @@ import torch.nn.functional as F
 
 from diffusion_planner.dimensions import INPUT_T, OUTPUT_T, TURN_INDICATOR_OUTPUT_KEEP
 from diffusion_planner.model.guidance.collision import center_rect_to_points
+from diffusion_planner.utils.unicycle_accel_curvature import (
+    UnicycleAccelCurvatureActionSpace,
+    action_to_traj4d,
+    traj4d_to_action,
+)
 
 _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
 
@@ -101,6 +106,54 @@ def hybrid_loss(
     l_wpt = torch.sum((pred_pos - gt_pos) ** 2, dim=-1)     # [..., T]
 
     return l_v + omega * l_wpt
+
+
+# ---------------------------------------------------------------------------
+# Control (accel, curvature) representation utilities
+# ---------------------------------------------------------------------------
+
+_ACTION_SPACE = UnicycleAccelCurvatureActionSpace(n_waypoints=OUTPUT_T)
+
+
+def waypoints_to_control(
+    traj_history_4d: torch.Tensor,
+    traj_future_4d: torch.Tensor,
+    t0_states: dict[str, torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Convert absolute waypoints to control (accel, curvature).
+
+    This is a GT-side conversion (no gradient; traj4d_to_action uses @no_grad).
+
+    Args:
+        traj_history_4d: [..., T_hist, 4] past trajectory (x,y,cos,sin).
+        traj_future_4d: [..., T, 4] future trajectory (x,y,cos,sin).
+        t0_states: optional initial state estimate ({"v": ...}).
+            If None, estimated from history.
+
+    Returns:
+        control: [..., T, 2] (accel, curvature) per timestep.
+    """
+    return traj4d_to_action(_ACTION_SPACE, traj_history_4d, traj_future_4d, t0_states=t0_states)
+
+
+def control_to_waypoints(
+    control: torch.Tensor,
+    traj_history_4d: torch.Tensor,
+    t0_states: dict[str, torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Convert control (accel, curvature) back to absolute waypoints.
+
+    This IS differentiable (action_to_traj4d does not use @no_grad).
+
+    Args:
+        control: [..., T, 2] (accel, curvature).
+        traj_history_4d: [..., T_hist, 4] past trajectory.
+        t0_states: optional initial state estimate ({"v": ...}).
+
+    Returns:
+        waypoints: [..., T, 4] (x, y, cos, sin).
+    """
+    return action_to_traj4d(_ACTION_SPACE, traj_history_4d, control, t0_states=t0_states)
 
 
 def make_turn_indicator_gt(

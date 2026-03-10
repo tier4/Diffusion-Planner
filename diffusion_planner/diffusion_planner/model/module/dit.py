@@ -93,11 +93,13 @@ class DiT(nn.Module):
         heads=6,
         dropout=0.1,
         mlp_ratio=4.0,
+        T=81,
+        D=4,
     ):
         super().__init__()
 
-        T = 81
-        D = 4
+        self._T = T
+        self._D = D
         self.agent_embedding = nn.Embedding(2, hidden_dim)
         self.preproj = Mlp(
             in_features=T * D,
@@ -153,5 +155,5 @@ class DiT(nn.Module):
             x = block(x, cross_c, t, attn_mask)
 
         x = self.final_layer(x, t) # (B, P, output_dim)
-        x = x.reshape(B, P, T, D)
+        x = x.reshape(B, P, self._T, self._D)
         return x

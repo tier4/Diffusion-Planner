@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from diffusion_planner.dimensions import OUTPUT_MODE_TRAJECTORY, output_dim_for_mode
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
@@ -53,7 +54,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
         turn_indicator_seq = inputs["turn_indicators"]
 
-        inputs["sampled_trajectories"] = torch.zeros(B, 33, 81, 4, dtype=torch.float32)
+        output_mode = args.output_mode
+        D = output_dim_for_mode(output_mode)
+        inputs["sampled_trajectories"] = torch.zeros(B, 33, 81, D, dtype=torch.float32)
         inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
 
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])

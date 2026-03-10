@@ -41,6 +41,32 @@ SEGMENT_POINT_DIM = LINE_TYPE_RIGHT_START + LINE_TYPE_NUM
 INPUT_T = 30
 OUTPUT_T = 80  # Output timestamp number
 POSE_DIM = 4  # x, y, cos(yaw), sin(yaw)
+CONTROL_DIM = 2  # accel, curvature
+
+# Output mode determines the per-timestep dimension D used by the decoder.
+#   "trajectory"             -> D = POSE_DIM (4)
+#   "control"                -> D = CONTROL_DIM (2)
+#   "trajectory_and_control" -> D = POSE_DIM + CONTROL_DIM (6)
+OUTPUT_MODE_TRAJECTORY = "trajectory"
+OUTPUT_MODE_CONTROL = "control"
+OUTPUT_MODE_TRAJECTORY_AND_CONTROL = "trajectory_and_control"
+OUTPUT_MODES = (OUTPUT_MODE_TRAJECTORY, OUTPUT_MODE_CONTROL, OUTPUT_MODE_TRAJECTORY_AND_CONTROL)
+
+
+def output_dim_for_mode(mode: str, use_velocity: bool = False) -> int:
+    """Return the per-timestep feature dimension D for the given output mode.
+
+    Both trajectory and velocity representations use POSE_DIM channels.
+    """
+    if mode == OUTPUT_MODE_TRAJECTORY:
+        return POSE_DIM
+    elif mode == OUTPUT_MODE_CONTROL:
+        return CONTROL_DIM
+    elif mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+        return POSE_DIM + CONTROL_DIM
+    else:
+        raise ValueError(f"Unknown output mode: {mode}")
+
 
 OUTPUT_SHAPE = (1, MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM)
 

@@ -182,9 +182,10 @@ def convert_model(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+    _D = output_dim_for_mode(config_obj.output_mode)
     inputs = {}
     inputs["sampled_trajectories"] = torch.ones(
-        1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+        1, MAX_NUM_AGENTS, OUTPUT_T + 1, _D, dtype=torch.float32
     )
     inputs["ego_agent_past"] = torch.randn(1, INPUT_T + 1, POSE_DIM, dtype=torch.float32)
     inputs["ego_current_state"] = torch.randn(1, 10, dtype=torch.float32)

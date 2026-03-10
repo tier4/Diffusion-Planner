@@ -128,6 +128,22 @@ def get_args():
         help="Gradient detach window size W for the waypoint loss term",
     )
 
+    # Output mode: "trajectory", "control", or "trajectory_and_control"
+    parser.add_argument(
+        "--output_mode",
+        type=str,
+        choices=["trajectory", "control", "trajectory_and_control"],
+        default="trajectory",
+        help="Decoder output representation: trajectory (x,y,cos,sin), "
+        "control (accel,curvature), or both",
+    )
+    parser.add_argument(
+        "--coeff_control_loss",
+        type=float,
+        default=1.0,
+        help="Weight for control loss when output_mode includes control",
+    )
+
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
