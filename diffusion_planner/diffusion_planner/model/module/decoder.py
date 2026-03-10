@@ -151,10 +151,30 @@ def _build_gt_representation(
             ego_history, gt_future[:, 0], t0_states={"v": ego_v0.squeeze(-1)}
         )  # [B, T, 2]
 
-        # Neighbor control
+        # Neighbor control — transform to each neighbor's local frame first.
+        # traj_to_action assumes current position = (0,0) and heading = 0.
+        # Neighbor trajectories in ego-centric frame violate both assumptions.
         neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]  # [B, Pn, T_hist, 4]
+        n_pos = neighbor_history[:, :, -1:, :2]  # [B, Pn, 1, 2]
+        n_cos = neighbor_history[:, :, -1:, 2:3]  # [B, Pn, 1, 1]
+        n_sin = neighbor_history[:, :, -1:, 3:4]  # [B, Pn, 1, 1]
+        # Inverse-rotate and translate history to neighbor-local frame
+        nh_xy = neighbor_history[..., :2] - n_pos  # translate
+        nh_x = nh_xy[..., 0:1] * n_cos + nh_xy[..., 1:2] * n_sin  # inverse rotation
+        nh_y = -nh_xy[..., 0:1] * n_sin + nh_xy[..., 1:2] * n_cos
+        nh_cos = neighbor_history[..., 2:3] * n_cos + neighbor_history[..., 3:4] * n_sin
+        nh_sin = -neighbor_history[..., 2:3] * n_sin + neighbor_history[..., 3:4] * n_cos
+        neighbor_history_local = torch.cat([nh_x, nh_y, nh_cos, nh_sin], dim=-1)
+        # Inverse-rotate and translate future to neighbor-local frame
+        nf = gt_future[:, 1:]  # [B, Pn, T, 4]
+        nf_xy = nf[..., :2] - n_pos
+        nf_x = nf_xy[..., 0:1] * n_cos + nf_xy[..., 1:2] * n_sin
+        nf_y = -nf_xy[..., 0:1] * n_sin + nf_xy[..., 1:2] * n_cos
+        nf_cos = nf[..., 2:3] * n_cos + nf[..., 3:4] * n_sin
+        nf_sin = -nf[..., 2:3] * n_sin + nf[..., 3:4] * n_cos
+        neighbor_future_local = torch.cat([nf_x, nf_y, nf_cos, nf_sin], dim=-1)
         neighbor_ctrl = waypoints_to_control(
-            neighbor_history, gt_future[:, 1:]
+            neighbor_history_local, neighbor_future_local
         )  # [B, Pn, T, 2]
         # Replace NaN from invalid neighbors with 0
         neighbor_ctrl = torch.nan_to_num(neighbor_ctrl, nan=0.0)
@@ -627,11 +647,32 @@ class Decoder(nn.Module):
                 t0_states={"v": ego_v0.squeeze(-1)},
             )  # [B, T, 4]
 
-            # Neighbors: convert control → trajectory
+            # Neighbors: convert control → trajectory (in neighbor-local frame)
             neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]
-            neighbor_traj = control_to_waypoints(
+            neighbor_traj_local = control_to_waypoints(
                 ctrl[:, 1:], neighbor_history,
-            )  # [B, Pn, T, 4]
+            )  # [B, Pn, T, 4] in neighbor-local frame (origin=0, heading=0)
+
+            # Transform neighbor trajectories from local frame to ego-centric frame
+            n_pos = neighbor_history[:, :, -1, :2]  # [B, Pn, 2] neighbor current (x, y)
+            n_cos = neighbor_history[:, :, -1, 2:3]  # [B, Pn, 1]
+            n_sin = neighbor_history[:, :, -1, 3:4]  # [B, Pn, 1]
+            # Rotate local (x, y) by neighbor heading and translate
+            local_x = neighbor_traj_local[..., 0:1]  # [B, Pn, T, 1]
+            local_y = neighbor_traj_local[..., 1:2]
+            rot_x = local_x * n_cos[:, :, None, :] - local_y * n_sin[:, :, None, :]
+            rot_y = local_x * n_sin[:, :, None, :] + local_y * n_cos[:, :, None, :]
+            # Rotate local heading (cos, sin) by neighbor heading
+            local_cos = neighbor_traj_local[..., 2:3]
+            local_sin = neighbor_traj_local[..., 3:4]
+            rot_cos = local_cos * n_cos[:, :, None, :] - local_sin * n_sin[:, :, None, :]
+            rot_sin = local_cos * n_sin[:, :, None, :] + local_sin * n_cos[:, :, None, :]
+            neighbor_traj = torch.cat([
+                rot_x + n_pos[:, :, None, 0:1],
+                rot_y + n_pos[:, :, None, 1:2],
+                rot_cos,
+                rot_sin,
+            ], dim=-1)  # [B, Pn, T, 4]
 
             return torch.cat([ego_traj[:, None], neighbor_traj], dim=1)
 
