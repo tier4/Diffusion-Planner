@@ -137,7 +137,7 @@ def get_args():
         "--output_mode",
         type=str,
         choices=["trajectory", "control", "trajectory_and_control"],
-        default="trajectory",
+        default="trajectory_and_control",
         help="Decoder output representation: trajectory (x,y,cos,sin), "
         "control (accel,curvature), or both",
     )
