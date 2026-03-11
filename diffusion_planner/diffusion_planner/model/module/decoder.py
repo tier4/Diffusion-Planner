@@ -109,7 +109,7 @@ def _compute_trajectory_loss(
     )
 
 
-def _build_gt_representation(
+def build_gt_representation(
     gt_future: torch.Tensor,
     current_states: torch.Tensor,
     inputs: dict[str, torch.Tensor],
@@ -270,7 +270,7 @@ def compute_training_loss(
     current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
     # Build GT in the target representation
-    all_gt, all_gt_pose = _build_gt_representation(
+    all_gt, all_gt_pose = build_gt_representation(
         gt_future, current_states, inputs, output_mode, use_velocity, norm, control_norm, neighbor_control_norm, obs_norm, Pn
     )
     all_gt[:, 1:][neighbor_mask] = 0.0
@@ -633,7 +633,7 @@ class Decoder(nn.Module):
             "turn_indicator_logit": turn_indicator_logit,
         }
 
-    def _denoised_to_trajectory(self, x, inputs, current_states):
+    def denoised_to_trajectory(self, x, inputs, current_states):
         """Convert denoised output [B, P, T+1, D] to trajectory [B, P, T, 4].
 
         Handles all output modes (trajectory, control, trajectory_and_control)
@@ -736,7 +736,7 @@ class Decoder(nn.Module):
         x = x.reshape(B, P, (1 + self._future_len), D)
 
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x, encoding_pooled)
-        prediction = self._denoised_to_trajectory(x, inputs, current_states)
+        prediction = self.denoised_to_trajectory(x, inputs, current_states)
 
         return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit}
 
@@ -808,7 +808,7 @@ class Decoder(nn.Module):
         x0 = x0.reshape(B, P, (1 + self._future_len), D)
 
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x0, encoding_pooled)
-        prediction = self._denoised_to_trajectory(x0, inputs, current_states)
+        prediction = self.denoised_to_trajectory(x0, inputs, current_states)
 
         return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit}
 
