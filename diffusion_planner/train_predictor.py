@@ -200,6 +200,25 @@ def mean_ego_loss(loss_dict):
     return result
 
 
+def print_validation(valid_dict):
+    """Print validation metrics."""
+    mean_dict = mean_ego_loss(valid_dict)
+    print(f"valid_loss_ego={valid_dict['avg_loss_ego']:.3f}")
+    print(f"valid_loss_neighbor={valid_dict['avg_loss_neighbor']:.3f}")
+    print("--- trajectory ---")
+    print(f"  ego_simple_l2={mean_dict['valid_loss/ego_simple_l2_loss']:.3f}")
+    print(f"  ego_lat={mean_dict['valid_loss/ego_position_lat_loss']:.3f}")
+    print(f"  ego_lon={mean_dict['valid_loss/ego_position_lon_loss']:.3f}")
+    if "valid_loss/ego_control_simple_l2_loss" in mean_dict:
+        print("--- control ---")
+        print(f"  ego_ctrl_l2={mean_dict['valid_loss/ego_control_simple_l2_loss']:.3f}")
+        print(f"  ego_ctrl_lat={mean_dict['valid_loss/ego_control_position_lat_loss']:.3f}")
+        print(f"  ego_ctrl_lon={mean_dict['valid_loss/ego_control_position_lon_loss']:.3f}")
+    print(f"turn_indicator_accuracy={valid_dict['turn_indicator_accuracy']:.3f}")
+    print(f"turn_indicator_change_accuracy={valid_dict['turn_indicator_change_accuracy']:.3f}")
+    return mean_dict
+
+
 def model_training(args):
     # init ddp
     global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
@@ -357,27 +376,7 @@ def model_training(args):
 
     if global_rank == 0:
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
-        valid_loss_ego = valid_dict["avg_loss_ego"]
-        valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
-        mean_ego_loss_dict = mean_ego_loss(valid_dict)
-        valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
-            "valid_loss/ego_position_lat_loss", 0.0
-        )
-        valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
-            "valid_loss/ego_position_lon_loss", 0.0
-        )
-        turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
-        turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
-        turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
-        print(
-            f"{valid_loss_ego=:.3f}\n"
-            f"{valid_loss_neighbor=:.3f}\n"
-            f"{valid_loss_ego_position_lat_loss=:.3f}\n"
-            f"{valid_loss_ego_position_lon_loss=:.3f}\n"
-            f"{turn_indicator_accuracy=:.3f}\n"
-            f"{turn_indicator_change_accuracy=:.3f}\n"
-            f"{turn_indicator_change_total=:.3f}"
-        )
+        print_validation(valid_dict)
 
     # begin training
     for epoch in range(init_epoch, train_epochs):
@@ -405,28 +404,13 @@ def model_training(args):
 
         if global_rank == 0:
             valid_dict = validate_model(diffusion_planner, valid_loader, args)
+            print(f"Epoch {epoch + 1}/{train_epochs}")
+            mean_ego_loss_dict = print_validation(valid_dict)
             valid_loss_ego = valid_dict["avg_loss_ego"]
             valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
-            mean_ego_loss_dict = mean_ego_loss(valid_dict)
-            valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
-                "valid_loss/ego_position_lat_loss", 0.0
-            )
-            valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
-                "valid_loss/ego_position_lon_loss", 0.0
-            )
-            turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
-            turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
-            turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
-            print(
-                f"Epoch {epoch + 1}/{train_epochs}\n"
-                f"{valid_loss_ego=:.3f}\n"
-                f"{valid_loss_neighbor=:.3f}\n"
-                f"{valid_loss_ego_position_lat_loss=:.3f}\n"
-                f"{valid_loss_ego_position_lon_loss=:.3f}\n"
-                f"{turn_indicator_accuracy=:.3f}\n"
-                f"{turn_indicator_change_accuracy=:.3f}\n"
-                f"{turn_indicator_change_total=:.3f}"
-            )
+            valid_loss_ego_position_lat_loss = mean_ego_loss_dict[
+                "valid_loss/ego_position_lat_loss"
+            ]
 
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
             wandb.log(
@@ -435,8 +419,8 @@ def model_training(args):
                     **{f"lr/{k}": v for k, v in lr_dict.items()},
                     "valid_loss/ego": valid_loss_ego,
                     "valid_loss/neighbors": valid_loss_neighbor,
-                    "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
-                    "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                    "valid_loss/turn_indicator_accuracy": valid_dict["turn_indicator_accuracy"],
+                    "valid_loss/turn_indicator_change_accuracy": valid_dict["turn_indicator_change_accuracy"],
                     **mean_ego_loss_dict,
                 },
                 step=epoch + 1,
@@ -447,8 +431,7 @@ def model_training(args):
                 "train_loss": train_total_loss,
                 "valid_loss_ego": valid_loss_ego,
                 "valid_loss_neighbor": valid_loss_neighbor,
-                "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
-                "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                **{k: v for k, v in mean_ego_loss_dict.items()},
             }
             data_list.append(curr_data)
             df = pd.DataFrame(data_list)

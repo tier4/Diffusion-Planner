@@ -117,7 +117,6 @@ def build_gt_representation(
     use_velocity: bool,
     norm: StateNormalizer,
     control_norm: ControlNormalizer,
-    neighbor_control_norm: ControlNormalizer,
     obs_norm: ObservationNormalizer,
     Pn: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -141,9 +140,12 @@ def build_gt_representation(
         traj_current = current_states  # [B, P, 4]
 
     # --- Control part [B, P, T, 2] ---
+    # Control is only meaningful for ego. Neighbor control in ego-centric frame
+    # is ill-defined (unicycle model requires origin position and zero heading).
+    # Neighbor control channels are filled with zeros.
     if has_ctrl:
-        # Denormalize inputs for control conversion (gt_future is raw, so history must be raw too)
         raw_inputs = obs_norm.inverse(inputs)
+        B, P, T = gt_future.shape[:3]
 
         # Ego control
         ego_history = raw_inputs["ego_agent_past"]  # [B, T_hist, 4] raw
@@ -151,62 +153,18 @@ def build_gt_representation(
         ego_ctrl = waypoints_to_control(
             ego_history, gt_future[:, 0], t0_states={"v": ego_v0.squeeze(-1)}
         )  # [B, T, 2]
+        ego_ctrl_norm = control_norm(ego_ctrl)  # [B, T, 2]
 
-        # Neighbor control — transform to each neighbor's local frame first.
-        # traj_to_action assumes current position = (0,0) and heading = 0.
-        # Neighbor trajectories in ego-centric frame violate both assumptions.
-        neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]  # [B, Pn, T_hist, 4]
-        n_pos = neighbor_history[:, :, -1:, :2]  # [B, Pn, 1, 2]
-        n_cos = neighbor_history[:, :, -1:, 2:3]  # [B, Pn, 1, 1]
-        n_sin = neighbor_history[:, :, -1:, 3:4]  # [B, Pn, 1, 1]
-        # Inverse-rotate and translate history to neighbor-local frame
-        nh_xy = neighbor_history[..., :2] - n_pos  # translate
-        nh_x = nh_xy[..., 0:1] * n_cos + nh_xy[..., 1:2] * n_sin  # inverse rotation
-        nh_y = -nh_xy[..., 0:1] * n_sin + nh_xy[..., 1:2] * n_cos
-        nh_cos = neighbor_history[..., 2:3] * n_cos + neighbor_history[..., 3:4] * n_sin
-        nh_sin = -neighbor_history[..., 2:3] * n_sin + neighbor_history[..., 3:4] * n_cos
-        neighbor_history_local = torch.cat([nh_x, nh_y, nh_cos, nh_sin], dim=-1)
-        # Inverse-rotate and translate future to neighbor-local frame
-        nf = gt_future[:, 1:]  # [B, Pn, T, 4]
-        # Preserve invalid (all-zero) mask BEFORE transformation
-        nf_invalid = torch.sum(torch.ne(nf, 0), dim=-1, keepdim=True) == 0  # [B, Pn, T, 1]
-        nf_xy = nf[..., :2] - n_pos
-        nf_x = nf_xy[..., 0:1] * n_cos + nf_xy[..., 1:2] * n_sin
-        nf_y = -nf_xy[..., 0:1] * n_sin + nf_xy[..., 1:2] * n_cos
-        nf_cos = nf[..., 2:3] * n_cos + nf[..., 3:4] * n_sin
-        nf_sin = -nf[..., 2:3] * n_sin + nf[..., 3:4] * n_cos
-        neighbor_future_local = torch.cat([nf_x, nf_y, nf_cos, nf_sin], dim=-1)
-        # Restore zeros for originally-invalid timesteps
-        neighbor_future_local[nf_invalid.expand_as(neighbor_future_local)] = 0.0
-        neighbor_ctrl = waypoints_to_control(
-            neighbor_history_local, neighbor_future_local
-        )  # [B, Pn, T, 2]
-        # Replace NaN from invalid neighbors with 0
-        neighbor_ctrl = torch.nan_to_num(neighbor_ctrl, nan=0.0)
+        # Assemble: ego control + zeros for neighbors
+        ctrl_gt = torch.zeros(B, P, T, 2, device=gt_future.device)
+        ctrl_gt[:, 0] = ego_ctrl_norm
 
-        ctrl_gt = torch.cat([ego_ctrl[:, None], neighbor_ctrl], dim=1)  # [B, P, T, 2]
-
-        # Control current state: [v0, kappa0=0] (raw velocity)
-        ego_ctrl_current = torch.cat(
-            [ego_v0, torch.zeros_like(ego_v0)], dim=-1
+        # Current state: [normalized_v0, 0] for ego, zeros for neighbors
+        ego_ctrl_current = control_norm(
+            torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1)
         )  # [B, 2]
-        # Estimate neighbor v0 from raw last two history positions
-        n_last = raw_inputs["neighbor_agents_past"][:, :Pn, -1, :2]  # [B, Pn, 2]
-        n_prev = raw_inputs["neighbor_agents_past"][:, :Pn, -2, :2]  # [B, Pn, 2]
-        neighbor_v0 = torch.norm(n_last - n_prev, dim=-1, keepdim=True) / 0.1  # [B, Pn, 1]
-        neighbor_v0 = torch.nan_to_num(neighbor_v0, nan=0.0)
-        neighbor_ctrl_current = torch.cat(
-            [neighbor_v0, torch.zeros_like(neighbor_v0)], dim=-1
-        )  # [B, Pn, 2]
-        ctrl_current = torch.cat(
-            [ego_ctrl_current[:, None], neighbor_ctrl_current], dim=1
-        )  # [B, P, 2]
-
-        # Normalize control signals (ego and neighbor separately)
-        ctrl_gt[:, 0:1] = control_norm(ctrl_gt[:, 0:1])
-        ctrl_gt[:, 1:] = neighbor_control_norm(ctrl_gt[:, 1:])
-        ctrl_current[:, 0:1] = control_norm(ctrl_current[:, 0:1])
-        ctrl_current[:, 1:] = neighbor_control_norm(ctrl_current[:, 1:])
+        ctrl_current = torch.zeros(B, P, 2, device=gt_future.device)
+        ctrl_current[:, 0] = ego_ctrl_current
 
     # --- Assemble ---
     if output_mode == OUTPUT_MODE_TRAJECTORY:
@@ -240,7 +198,6 @@ def compute_training_loss(
 ):
     norm = args.state_normalizer
     control_norm = args.control_normalizer
-    neighbor_control_norm = args.neighbor_control_normalizer
     obs_norm = args.observation_normalizer
     model_type = args.diffusion_model_type
     use_velocity = args.use_velocity_representation
@@ -271,7 +228,7 @@ def compute_training_loss(
 
     # Build GT in the target representation
     all_gt, all_gt_pose = build_gt_representation(
-        gt_future, current_states, inputs, output_mode, use_velocity, norm, control_norm, neighbor_control_norm, obs_norm, Pn
+        gt_future, current_states, inputs, output_mode, use_velocity, norm, control_norm, obs_norm, Pn
     )
     all_gt[:, 1:][neighbor_mask] = 0.0
     all_gt_pose[:, 1:][neighbor_mask] = 0.0
@@ -330,9 +287,14 @@ def compute_training_loss(
                 traj_out, traj_gt, use_velocity, hybrid_omega, hybrid_window,
                 longitudinal_velocity, args, T,
             )
-            ctrl_loss = torch.sum((ctrl_out - ctrl_gt) ** 2, dim=-1)
+            # Control loss for ego only — neighbor control is not well-defined
+            # in ego-centric frame (position/heading offset violates unicycle assumptions).
+            ego_ctrl_loss = torch.sum(
+                (ctrl_out[:, 0] - ctrl_gt[:, 0]) ** 2, dim=-1
+            )  # [B, T]
             coeff_ctrl = args.coeff_control_loss
-            dpm_loss = traj_loss + coeff_ctrl * ctrl_loss
+            dpm_loss = traj_loss
+            dpm_loss[:, 0] = dpm_loss[:, 0] + coeff_ctrl * ego_ctrl_loss
 
     elif model_type == "flow_matching":
         # t=0 is noise, t=1 is data
@@ -547,27 +509,18 @@ class Decoder(nn.Module):
         if self._output_mode == OUTPUT_MODE_TRAJECTORY:
             return current_states  # [B, P, 4]
 
+        B = current_states.shape[0]
         Pn = self._predicted_neighbor_num
-        # Denormalize inputs to get raw velocity/positions for control conversion
-        raw_inputs = self._observation_normalizer.inverse(inputs)
-        # Build control current state [B, P, 2]: [v0, kappa0=0]
-        ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
-        ego_ctrl_current = torch.cat(
-            [ego_v0, torch.zeros_like(ego_v0)], dim=-1
-        )  # [B, 2]
+        P = 1 + Pn
 
-        n_last = raw_inputs["neighbor_agents_past"][:, :Pn, -1, :2]
-        n_prev = raw_inputs["neighbor_agents_past"][:, :Pn, -2, :2]
-        neighbor_v0 = torch.norm(n_last - n_prev, dim=-1, keepdim=True) / 0.1
-        neighbor_v0 = torch.nan_to_num(neighbor_v0, nan=0.0)
-        neighbor_ctrl_current = torch.cat(
-            [neighbor_v0, torch.zeros_like(neighbor_v0)], dim=-1
-        )  # [B, Pn, 2]
-        ctrl_current = torch.cat(
-            [ego_ctrl_current[:, None], neighbor_ctrl_current], dim=1
-        )  # [B, P, 2]
-        ctrl_current[:, 0:1] = self._control_normalizer(ctrl_current[:, 0:1])
-        ctrl_current[:, 1:] = self._neighbor_control_normalizer(ctrl_current[:, 1:])
+        # Control current state: ego = normalized [v0, 0], neighbors = zeros
+        raw_inputs = self._observation_normalizer.inverse(inputs)
+        ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1]
+        ego_ctrl_current = self._control_normalizer(
+            torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1)
+        )  # [B, 2]
+        ctrl_current = torch.zeros(B, P, 2, device=current_states.device)
+        ctrl_current[:, 0] = ego_ctrl_current
 
         if self._output_mode == OUTPUT_MODE_CONTROL:
             return ctrl_current
@@ -661,32 +614,13 @@ class Decoder(nn.Module):
                 t0_states={"v": ego_v0.squeeze(-1)},
             )  # [B, T, 4]
 
-            # Neighbors: convert control → trajectory (in neighbor-local frame)
+            # Neighbors: convert control → trajectory
+            # Control signals (accel, curvature) are frame-invariant, so integrating
+            # from ego-centric history directly produces ego-centric trajectories.
             neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]
-            neighbor_traj_local = control_to_waypoints(
+            neighbor_traj = control_to_waypoints(
                 ctrl[:, 1:], neighbor_history,
-            )  # [B, Pn, T, 4] in neighbor-local frame (origin=0, heading=0)
-
-            # Transform neighbor trajectories from local frame to ego-centric frame
-            n_pos = neighbor_history[:, :, -1, :2]  # [B, Pn, 2] neighbor current (x, y)
-            n_cos = neighbor_history[:, :, -1, 2:3]  # [B, Pn, 1]
-            n_sin = neighbor_history[:, :, -1, 3:4]  # [B, Pn, 1]
-            # Rotate local (x, y) by neighbor heading and translate
-            local_x = neighbor_traj_local[..., 0:1]  # [B, Pn, T, 1]
-            local_y = neighbor_traj_local[..., 1:2]
-            rot_x = local_x * n_cos[:, :, None, :] - local_y * n_sin[:, :, None, :]
-            rot_y = local_x * n_sin[:, :, None, :] + local_y * n_cos[:, :, None, :]
-            # Rotate local heading (cos, sin) by neighbor heading
-            local_cos = neighbor_traj_local[..., 2:3]
-            local_sin = neighbor_traj_local[..., 3:4]
-            rot_cos = local_cos * n_cos[:, :, None, :] - local_sin * n_sin[:, :, None, :]
-            rot_sin = local_cos * n_sin[:, :, None, :] + local_sin * n_cos[:, :, None, :]
-            neighbor_traj = torch.cat([
-                rot_x + n_pos[:, :, None, 0:1],
-                rot_y + n_pos[:, :, None, 1:2],
-                rot_cos,
-                rot_sin,
-            ], dim=-1)  # [B, Pn, T, 4]
+            )  # [B, Pn, T, 4] in ego-centric frame
 
             return torch.cat([ego_traj[:, None], neighbor_traj], dim=1)
 
@@ -739,7 +673,7 @@ class Decoder(nn.Module):
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x, encoding_pooled)
         prediction = self.denoised_to_trajectory(x, inputs, current_states)
 
-        return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit}
+        return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit, "denoised": x}
 
     def _inference_x_start(
         self,
@@ -811,7 +745,7 @@ class Decoder(nn.Module):
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x0, encoding_pooled)
         prediction = self.denoised_to_trajectory(x0, inputs, current_states)
 
-        return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit}
+        return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit, "denoised": x0}
 
     def _forward_inference(
         self, encoding, inputs, current_states, neighbor_current_mask, encoding_pooled

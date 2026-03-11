@@ -5,11 +5,17 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.dimensions import OUTPUT_MODE_TRAJECTORY, output_dim_for_mode
+from diffusion_planner.dimensions import (
+    OUTPUT_MODE_TRAJECTORY_AND_CONTROL,
+    POSE_DIM,
+    TURN_INDICATOR_OUTPUT_DIM,
+    output_dim_for_mode,
+)
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
+    control_to_waypoints,
     loss_func,
     make_turn_indicator_gt,
 )
@@ -26,8 +32,44 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 
+def _gt_control_roundtrip(
+    decoder,
+    gt_future: torch.Tensor,
+    current_states: torch.Tensor,
+    inputs: dict[str, torch.Tensor],
+    args,
+    Pn: int,
+) -> torch.Tensor:
+    """Build GT in control representation, then convert back to trajectory.
+
+    Uses the same code paths as training (build_gt_representation) and
+    inference (decoder.denoised_to_trajectory) to measure roundtrip error.
+
+    Args:
+        decoder: The decoder module (for denoised_to_trajectory)
+        gt_future: [B, P, T, 4] raw trajectory (ego + neighbors)
+        current_states: [B, P, 4] current states
+        inputs: normalized inputs dict
+        args: config
+        Pn: number of neighbor agents
+
+    Returns:
+        prediction: [B, P, T, 4] reconstructed trajectory
+    """
+    from diffusion_planner.model.module.decoder import build_gt_representation
+
+    all_gt, _ = build_gt_representation(
+        gt_future, current_states, inputs,
+        args.output_mode, args.use_velocity_representation,
+        args.state_normalizer, args.control_normalizer,
+        args.observation_normalizer, Pn,
+    )
+    # all_gt: [B, P, T+1, D] — GT in the model's target representation
+    return decoder.denoised_to_trajectory(all_gt, inputs, current_states)
+
+
 @torch.no_grad()
-def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, float]:
+def validate_model(model, val_loader, args, return_pred=False, use_gt_roundtrip=False) -> tuple[float, float]:
     """return: ave_loss_ego, ave_loss_neighbor"""
     device = args.device
     model.eval()
@@ -78,8 +120,6 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         )
         inputs = args.observation_normalizer(inputs)
 
-        _, outputs = model(inputs)
-
         neighbor_current_mask = (
             torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
         )  # (B, Pn)
@@ -98,8 +138,19 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         )  # (B, Pn + 1, T + 1, 4)
         all_gt[:, 1:][neighbor_mask] = 0.0
 
-        prediction = outputs["prediction"]
-        turn_indicator_logit = outputs["turn_indicator_logit"]
+        if use_gt_roundtrip:
+            # Get the decoder from the (possibly DDP-wrapped) model
+            base_model = model.module if hasattr(model, "module") else model
+            decoder = base_model.decoder
+            prediction = _gt_control_roundtrip(
+                decoder, gt_future, current_states, inputs, args, Pn,
+            )
+            # Dummy turn indicator
+            turn_indicator_logit = torch.zeros(B, TURN_INDICATOR_OUTPUT_DIM, device=device)
+        else:
+            _, outputs = model(inputs)
+            prediction = outputs["prediction"]
+            turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
         turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
         correct = (turn_indicator == turn_indicator_gt).long()
@@ -113,6 +164,24 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         if return_pred:
             predictions.append(prediction)
             turn_indicators.append(turn_indicator)
+
+        # Ego loss from control prediction (trajectory_and_control mode)
+        if not use_gt_roundtrip and args.output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+            denoised = outputs["denoised"]  # [B, P, T+1, 6]
+            ego_ctrl_norm = denoised[:, 0, 1:, POSE_DIM:]  # [B, T, 2]
+            ego_ctrl = args.control_normalizer.inverse(ego_ctrl_norm)
+            raw_inputs = args.observation_normalizer.inverse(inputs)
+            ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1]
+            ego_traj_from_ctrl = control_to_waypoints(
+                ego_ctrl, raw_inputs["ego_agent_past"],
+                t0_states={"v": ego_v0.squeeze(-1)},
+            )  # [B, T, 4]
+            # Compute detailed losses (lat, lon, l2, etc.) for control-derived trajectory
+            ctrl_pred = ego_traj_from_ctrl[:, None]  # [B, 1, T, 4]
+            ctrl_gt = ego_future[:, None]  # [B, 1, T, 4]
+            ctrl_loss_dict = loss_func(ctrl_pred, ctrl_gt)
+            for key, val in ctrl_loss_dict.items():
+                total_result_dict[f"ego_control_{key}"].append(val[:, 0, :])  # (B, T)
 
         neighbors_future_valid = ~neighbor_future_mask
         all_gt = all_gt[:, :, 1:, :]  # (B, Pn + 1, T, 4)
@@ -238,6 +307,11 @@ def get_args():
         "--save_predictions_dir", type=str, help="path to save prediction", default=None
     )
 
+    parser.add_argument(
+        "--use_gt_roundtrip", action="store_true",
+        help="Skip model inference; measure GT control roundtrip error instead",
+    )
+
     # distributed training parameters
     parser.add_argument("--ddp", default=True, type=boolean, help="use ddp or not")
     parser.add_argument("--port", default="22323", type=str, help="port")
@@ -340,7 +414,10 @@ if __name__ == "__main__":
     if args.ddp:
         torch.distributed.barrier()
 
-    valid_dict = validate_model(diffusion_planner, valid_loader, config_obj, return_pred=True)
+    valid_dict = validate_model(
+        diffusion_planner, valid_loader, config_obj,
+        return_pred=True, use_gt_roundtrip=args.use_gt_roundtrip,
+    )
     loss_ego = valid_dict["loss_ego"]
     avg_loss_ego = valid_dict["avg_loss_ego"]
     avg_loss_neighbor = valid_dict["avg_loss_neighbor"]
