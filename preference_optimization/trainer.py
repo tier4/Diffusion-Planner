@@ -3,6 +3,7 @@
 import copy
 import json
 import random
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -180,8 +181,10 @@ class DPOTrainer:
             save_lora_checkpoint(self.policy_model, lora_dir)
             # Also keep a pointer to "latest" lora directory
             latest_link = self.run_dir / "lora_latest"
-            if latest_link.exists() or latest_link.is_symlink():
+            if latest_link.is_symlink() or latest_link.is_file():
                 latest_link.unlink()
+            elif latest_link.is_dir():
+                shutil.rmtree(latest_link)
             latest_link.symlink_to(f"lora_epoch_{epoch:03d}")
         else:
             checkpoint_data = {

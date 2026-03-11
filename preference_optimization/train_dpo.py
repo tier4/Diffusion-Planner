@@ -108,8 +108,8 @@ def parse_args() -> argparse.Namespace:
         "--use_lora",
         action="store_true",
         default=False,
-        help="Apply LoRA adapters to DiT attention layers. Requires a checkpoint migrated "
-             "with preference_optimization/scripts/migrate_checkpoint.py.",
+        help="Apply LoRA adapters to DiT attention layers. Standard checkpoints load "
+             "automatically without any manual migration step.",
     )
     parser.add_argument(
         "--lora_rank",

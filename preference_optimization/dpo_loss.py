@@ -1,9 +1,11 @@
 """DPO loss computation for trajectory preference optimization."""
 
 import contextlib
+from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
@@ -123,7 +125,7 @@ def compute_trajectory_loss(
 
 def compute_dpo_loss(
     policy_model: Diffusion_Planner,
-    reference_model: Diffusion_Planner,
+    reference_model: Optional[nn.Module],
     batch: list[dict],
     beta: float,
     model_args,
@@ -144,7 +146,9 @@ def compute_dpo_loss(
 
     Args:
         policy_model: Policy model being trained
-        reference_model: Reference model (frozen)
+        reference_model: Frozen reference model. When None, reference logprobs are
+            computed by disabling LoRA adapters on the policy model (shared-model DPO).
+            When provided, a separate frozen model is used as the reference.
         batch: List of preference samples
         beta: DPO regularization parameter
         model_args: Model configuration arguments

@@ -4,8 +4,6 @@ import torch
 import torch.nn as nn
 from timm.models.layers import Mlp
 
-from diffusion_planner.model.module.attention import UnfusedMultiheadAttention
-
 
 def modulate(x, shift, scale, only_first=False):
     if only_first:
@@ -76,7 +74,7 @@ class DiTBlock(nn.Module):
     def __init__(self, dim=192, heads=6, dropout=0.1, mlp_ratio=4.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = UnfusedMultiheadAttention(dim, heads, dropout, batch_first=True)
+        self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm2 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -85,7 +83,7 @@ class DiTBlock(nn.Module):
         )
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim, bias=True))
         self.norm3 = nn.LayerNorm(dim)
-        self.cross_attn = UnfusedMultiheadAttention(dim, heads, dropout, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm4 = nn.LayerNorm(dim)
 
         self.mlp2 = Mlp(
