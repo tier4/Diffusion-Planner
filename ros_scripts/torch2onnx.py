@@ -252,8 +252,19 @@ def convert_model(
         _repo_root = str(Path(__file__).resolve().parent.parent)
         if _repo_root not in sys.path:
             sys.path.insert(0, _repo_root)
+        from peft import PeftModel
         from preference_optimization.lora_utils import load_lora_checkpoint, merge_lora_and_unload
-        model = load_lora_checkpoint(model, lora_dir, is_trainable=False)
+        # Detect adapter format: new adapters target q/k/v/out_proj Linear sub-layers;
+        # old adapters target the MHA module directly (before UnfusedMHA migration).
+        with open(os.path.join(lora_dir, "adapter_config.json")) as _f:
+            _adapter_cfg = json.load(_f)
+        _target = _adapter_cfg.get("target_modules", "")
+        _is_new_format = isinstance(_target, str) and "q_proj" in _target
+        if _is_new_format:
+            model = load_lora_checkpoint(model, lora_dir, is_trainable=False)
+        else:
+            # Old-style MHA LoRA: load directly without UnfusedMHA replacement.
+            model = PeftModel.from_pretrained(model, lora_dir, is_trainable=False)
         model = merge_lora_and_unload(model)
         model.eval()
         print(f"LoRA weights merged from {lora_dir} for ONNX export.")
