@@ -141,6 +141,13 @@ def summarize(values: List[float]) -> Dict:
 
 
 def angle_diff_deg(a: np.ndarray, b: np.ndarray) -> float:
+    """Calculate angle difference between two polylines in degrees.
+
+    Note: This function measures global start-to-end heading difference only.
+    It uses the vector from the first point to the last point of each polyline,
+    ignoring local path curvature. For example, an S-curve and a straight line
+    with the same start/end points will both yield 0° difference.
+    """
     if len(a) < 2 or len(b) < 2:
         return 0.0
     va = a[-1, :2] - a[0, :2]
@@ -225,14 +232,12 @@ def _compute_point_errors_for_indexed_entities(
         p_e = points3_to_np(reference_list[r_idx][points_key])
 
         if len(p_i) > 0 and len(p_e) > 0:
-            # Use symmetric distance for visual consistency with metrics
-            # Use Hausdorff-style: max(point-wise distance, max reverse distance)
-            # This handles cases where internal and reference have different point counts
+            # Use directed distance for point-level visualization
+            # This shows where internal points deviate from reference, avoiding
+            # scalar broadcast from max reverse distance inflating all errors
             d_ab = directed_polyline_distance_xy(p_i, p_e)
-            d_ba_max = float(np.max(directed_polyline_distance_xy(p_e, p_i)))
-            symmetric_errors = np.maximum(d_ab, d_ba_max)
 
-            errors[i_idx] = _points_to_error_dicts(p_i, symmetric_errors)
+            errors[i_idx] = _points_to_error_dicts(p_i, d_ab)
     return errors
 
 
@@ -267,14 +272,12 @@ def compute_point_errors(
         c_e = points3_to_np(ref_lane["centerline"])
 
         if len(c_i) > 0 and len(c_e) > 0:
-            # Use symmetric distance for visual consistency with metrics
-            # Use Hausdorff-style: max(point-wise distance, max reverse distance)
-            # This handles cases where internal and reference have different point counts
+            # Use directed distance for point-level visualization
+            # This shows where internal points deviate from reference, avoiding
+            # scalar broadcast from max reverse distance inflating all errors
             d_ab = directed_polyline_distance_xy(c_i, c_e)
-            d_ba_max = float(np.max(directed_polyline_distance_xy(c_e, c_i)))
-            symmetric_errors = np.maximum(d_ab, d_ba_max)
 
-            lane_point_errors[lane_id] = _points_to_error_dicts(c_i, symmetric_errors)
+            lane_point_errors[lane_id] = _points_to_error_dicts(c_i, d_ab)
 
     # Use helper function for lines only (polygons don't need point error visualization)
     line_point_errors = _compute_point_errors_for_indexed_entities(
