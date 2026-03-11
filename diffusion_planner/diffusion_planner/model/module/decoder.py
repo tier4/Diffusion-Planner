@@ -566,7 +566,8 @@ class Decoder(nn.Module):
         ctrl_current = torch.cat(
             [ego_ctrl_current[:, None], neighbor_ctrl_current], dim=1
         )  # [B, P, 2]
-        ctrl_current = self._control_normalizer(ctrl_current)
+        ctrl_current[:, 0:1] = self._control_normalizer(ctrl_current[:, 0:1])
+        ctrl_current[:, 1:] = self._neighbor_control_normalizer(ctrl_current[:, 1:])
 
         if self._output_mode == OUTPUT_MODE_CONTROL:
             return ctrl_current
