@@ -733,6 +733,7 @@ int main(int argc, char ** argv)
 
     // Process frames with stopping count tracking
     int64_t stopping_count = 0;
+    bool sequence_started = false;
     for (int64_t i = INPUT_T_WITH_CURRENT; i < n; i += step) {
       // Create token in same format as Python version: seq_id(8digits) + i(8digits)
       std::ostringstream token_stream;
@@ -881,6 +882,21 @@ int main(int argc, char ** argv)
         sum_mileage += std::sqrt(dx * dx + dy * dy);
       }
       const bool is_future_forward = sum_mileage > 1.0;
+
+      // Skip frames at the beginning of the sequence while the ego is still stopped. Once it
+      // exceeds the threshold, start generating data.
+      if (!sequence_started) {
+        if (!is_future_forward) {
+          if (i % 100 == 0) {
+            std::cout << "Skip frame " << i << " at sequence start (future mileage=" << sum_mileage
+                      << "m <= 1.0m)" << std::endl;
+          }
+          continue;
+        }
+        sequence_started = true;
+        std::cout << "Sequence started at frame " << i << " (future mileage=" << sum_mileage << "m)"
+                  << std::endl;
+      }
 
       if (is_stop && is_red_or_yellow && is_future_forward) {
         std::cout << "Skip this frame " << i
