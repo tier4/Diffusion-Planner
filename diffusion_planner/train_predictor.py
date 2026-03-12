@@ -68,6 +68,12 @@ def get_args():
     # DataLoader parameters
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, help="augmentation probability", default=0.5)
+    parser.add_argument(
+        "--augment_heading_offset_deg",
+        type=float,
+        help="maximum absolute heading perturbation in degrees for data augmentation",
+        default=15.0,
+    )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
@@ -190,7 +196,11 @@ def model_training(args):
 
     # set up data loaders
     aug = (
-        StatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        StatePerturbation(
+            augment_prob=args.augment_prob,
+            device=args.device,
+            max_heading_offset_deg=args.augment_heading_offset_deg,
+        )
         if args.use_data_augment
         else None
     )

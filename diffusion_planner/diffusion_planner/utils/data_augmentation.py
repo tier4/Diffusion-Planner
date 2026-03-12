@@ -116,6 +116,52 @@ def quintic_decay_torch(unit_s: torch.Tensor) -> torch.Tensor:
     return 1.0 - 10.0 * u**3 + 15.0 * u**4 - 6.0 * u**5
 
 
+def solve_lateral_profile_coeffs_torch(
+    s_merge: torch.Tensor,
+    lateral_offset: torch.Tensor,
+    heading_offset: torch.Tensor,
+) -> torch.Tensor:
+    if s_merge <= 0.0:
+        raise ValueError("s_merge must be positive.")
+
+    length = s_merge
+    a0 = lateral_offset
+    a1 = torch.tan(heading_offset)
+    a2 = torch.zeros((), dtype=length.dtype, device=length.device)
+
+    system = torch.stack(
+        [
+            torch.stack([length**3, length**4, length**5]),
+            torch.stack([3.0 * length**2, 4.0 * length**3, 5.0 * length**4]),
+            torch.stack([6.0 * length, 12.0 * length**2, 20.0 * length**3]),
+        ]
+    )
+    rhs = torch.stack(
+        [
+            -(a0 + a1 * length + a2 * length**2),
+            -(a1 + 2.0 * a2 * length),
+            -(2.0 * a2),
+        ]
+    )
+    a3_to_a5 = torch.linalg.solve(system, rhs)
+    return torch.stack([a0, a1, a2, a3_to_a5[0], a3_to_a5[1], a3_to_a5[2]])
+
+
+def lateral_offset_profile_torch(
+    s: torch.Tensor,
+    s_merge: torch.Tensor,
+    lateral_offset: torch.Tensor,
+    heading_offset: torch.Tensor,
+) -> torch.Tensor:
+    coeffs = solve_lateral_profile_coeffs_torch(
+        s_merge=s_merge,
+        lateral_offset=lateral_offset,
+        heading_offset=heading_offset,
+    )
+    powers = torch.stack([s**idx for idx in range(6)], dim=-1)
+    return powers @ coeffs
+
+
 def sample_centerline_torch(
     center_s: torch.Tensor,
     center_xy: torch.Tensor,
@@ -133,6 +179,7 @@ def build_offset_path_torch(
     center_s: torch.Tensor,
     s_merge: torch.Tensor,
     lateral_offset: torch.Tensor,
+    heading_offset: torch.Tensor,
     dense_ds: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     device = center_xy.device
@@ -141,7 +188,12 @@ def build_offset_path_torch(
     dense_s = torch.linspace(0.0, float(s_merge.item()), num_dense + 1, device=device, dtype=dtype)
     base_xy, base_heading = sample_centerline_torch(center_s, center_xy, center_heading, dense_s)
 
-    offset = lateral_offset * quintic_decay_torch(dense_s / torch.clamp(s_merge, min=1.0e-6))
+    offset = lateral_offset_profile_torch(
+        dense_s,
+        torch.clamp(s_merge, min=1.0e-6),
+        lateral_offset,
+        heading_offset,
+    )
     normals = torch.stack([-torch.sin(base_heading), torch.cos(base_heading)], dim=-1)
     path_xy = base_xy + offset.unsqueeze(-1) * normals
     path_sigma = cumulative_distance_torch(path_xy)
@@ -155,10 +207,11 @@ def merge_path_length_torch(
     center_s: torch.Tensor,
     s_merge: torch.Tensor,
     lateral_offset: torch.Tensor,
+    heading_offset: torch.Tensor,
     dense_ds: float,
 ) -> torch.Tensor:
     _, path_sigma, _ = build_offset_path_torch(
-        center_xy, center_heading, center_s, s_merge, lateral_offset, dense_ds
+        center_xy, center_heading, center_s, s_merge, lateral_offset, heading_offset, dense_ds
     )
     return path_sigma[-1]
 
@@ -169,6 +222,7 @@ def solve_merge_centerline_s_torch(
     center_s: torch.Tensor,
     distance_budget: torch.Tensor,
     lateral_offset: torch.Tensor,
+    heading_offset: torch.Tensor,
     dense_ds: float,
     tol_m: float = 1.0e-3,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -185,14 +239,14 @@ def solve_merge_centerline_s_torch(
 
     while lower > dense_ds * 1.0e-3:
         length_lower = merge_path_length_torch(
-            center_xy, center_heading, center_s, lower, lateral_offset, dense_ds
+            center_xy, center_heading, center_s, lower, lateral_offset, heading_offset, dense_ds
         )
         if length_lower < distance_budget:
             break
         lower = lower * 0.5
 
     upper_length = merge_path_length_torch(
-        center_xy, center_heading, center_s, upper, lateral_offset, dense_ds
+        center_xy, center_heading, center_s, upper, lateral_offset, heading_offset, dense_ds
     )
     if upper_length < distance_budget:
         raise RuntimeError("Unable to find a feasible merge point within the distance budget.")
@@ -200,7 +254,7 @@ def solve_merge_centerline_s_torch(
     for _ in range(50):
         mid = 0.5 * (lower + upper)
         mid_length = merge_path_length_torch(
-            center_xy, center_heading, center_s, mid, lateral_offset, dense_ds
+            center_xy, center_heading, center_s, mid, lateral_offset, heading_offset, dense_ds
         )
         if mid_length < distance_budget:
             lower = mid
@@ -211,7 +265,7 @@ def solve_merge_centerline_s_torch(
 
     s_merge = 0.5 * (lower + upper)
     path_xy, path_sigma, path_heading = build_offset_path_torch(
-        center_xy, center_heading, center_s, s_merge, lateral_offset, dense_ds
+        center_xy, center_heading, center_s, s_merge, lateral_offset, heading_offset, dense_ds
     )
     return s_merge, path_xy, path_sigma, path_heading
 
@@ -221,6 +275,7 @@ def augment_segment_torch(
     segment_heading: torch.Tensor,
     segment_time: torch.Tensor,
     lateral_offset: torch.Tensor,
+    heading_offset: torch.Tensor,
     connect_time_s: float,
     dense_ds: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -238,6 +293,7 @@ def augment_segment_torch(
         center_s=center_s,
         s_merge=distance_budget,
         lateral_offset=lateral_offset,
+        heading_offset=heading_offset,
         dense_ds=dense_ds,
     )
     candidate_length = path_sigma_candidate[-1]
@@ -254,6 +310,7 @@ def augment_segment_torch(
             center_s=center_s,
             distance_budget=distance_budget,
             lateral_offset=lateral_offset,
+            heading_offset=heading_offset,
             dense_ds=dense_ds,
         )
         speed_scale = torch.tensor(1.0, dtype=segment_xy.dtype, device=segment_xy.device)
@@ -292,6 +349,7 @@ class StatePerturbation:
         past_bridge_sec: float = 1.0,
         future_bridge_sec: float = 1.5,
         dense_sample_ds: float = DENSE_SAMPLE_DS,
+        max_heading_offset_deg: float = 15.0,
     ) -> None:
         """
         Initialize the augmentor.
@@ -299,11 +357,13 @@ class StatePerturbation:
         :param past_bridge_sec: duration used to connect the past trajectory to the perturbed state
         :param future_bridge_sec: duration used to reconnect the perturbed state to the GT future
         :param dense_sample_ds: dense sampling resolution used for path-length feasibility checks
+        :param max_heading_offset_deg: maximum absolute initial heading perturbation in degrees
         """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
-        lo = ([0.0, -0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],)
-        hi = ([0.0, +0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],)
+        heading_limit_rad = np.deg2rad(max_heading_offset_deg)
+        lo = ([0.0, -0.75, -heading_limit_rad, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],)
+        hi = ([0.0, +0.75, +heading_limit_rad, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],)
         self._low = torch.tensor(lo, dtype=torch.float32, device=self._device)
         self._high = torch.tensor(hi, dtype=torch.float32, device=self._device)
         self._wheel_base = wheel_base
@@ -345,6 +405,10 @@ class StatePerturbation:
         random_tensor = torch.rand(batch_size, device=self._device)
         return self._low[:, 1] + (self._high[:, 1] - self._low[:, 1]) * random_tensor
 
+    def _sample_heading_offsets(self, batch_size: int) -> torch.Tensor:
+        random_tensor = torch.rand(batch_size, device=self._device)
+        return self._low[:, 2] + (self._high[:, 2] - self._low[:, 2]) * random_tensor
+
     def _state_to_heading(self, current_state: torch.Tensor) -> torch.Tensor:
         return torch.atan2(current_state[..., 3], current_state[..., 2])
 
@@ -354,6 +418,7 @@ class StatePerturbation:
         ego_current_state: torch.Tensor,
         ego_future: torch.Tensor,
         lateral_offset: torch.Tensor,
+        heading_offset: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Rebuild ego past/current/future around a laterally perturbed current state while keeping
@@ -391,6 +456,7 @@ class StatePerturbation:
             future_segment_heading,
             future_time,
             lateral_offset,
+            heading_offset,
             min(self._future_bridge_sec, float(future_time[-1].item())),
             self.dense_sample_ds,
         )
@@ -399,6 +465,7 @@ class StatePerturbation:
             past_segment_heading,
             past_time,
             lateral_offset,
+            -heading_offset,
             min(self._past_bridge_sec, float(past_time[-1].item())),
             self.dense_sample_ds,
         )
@@ -473,8 +540,9 @@ class StatePerturbation:
 
         batch_size = ego_current_state.shape[0]
         lateral_offsets = self._sample_lateral_offsets(batch_size)
+        heading_offsets = self._sample_heading_offsets(batch_size)
         valid_speed = torch.abs(ego_current_state[:, 4]) >= 2.0
-        valid_offset = torch.abs(lateral_offsets) > 1.0e-3
+        valid_offset = (torch.abs(lateral_offsets) > 1.0e-3) | (torch.abs(heading_offsets) > 1.0e-3)
         aug_flag = (
             (torch.rand(batch_size, device=self._device) < self._augment_prob)
             & valid_speed
@@ -487,6 +555,7 @@ class StatePerturbation:
                 ego_current_state=ego_current_state[batch_index],
                 ego_future=ego_future[batch_index],
                 lateral_offset=lateral_offsets[batch_index],
+                heading_offset=heading_offsets[batch_index],
             )
             ego_current_state[batch_index] = aug_state
             ego_agent_past[batch_index] = aug_past
