@@ -72,7 +72,7 @@ def get_args():
         "--augment_heading_offset_deg",
         type=float,
         help="maximum absolute heading perturbation in degrees for data augmentation",
-        default=15.0,
+        default=10.0,
     )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=4, type=int)

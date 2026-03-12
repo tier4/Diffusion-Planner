@@ -349,7 +349,7 @@ class StatePerturbation:
         past_bridge_sec: float = 1.0,
         future_bridge_sec: float = 1.5,
         dense_sample_ds: float = DENSE_SAMPLE_DS,
-        max_heading_offset_deg: float = 15.0,
+        max_heading_offset_deg: float = 10.0,
     ) -> None:
         """
         Initialize the augmentor.
