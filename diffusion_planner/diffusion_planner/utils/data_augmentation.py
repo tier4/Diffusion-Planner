@@ -12,12 +12,12 @@ def vector_transform(vector, transform_mat, bias=None):
     bias: (B, ..., 2)
     """
     shape = vector.shape
-    bsz = vector.shape[0]
+    B = vector.shape[0]
     nexpand = vector.ndim - 2
     if bias is not None:
-        vector = vector - bias.reshape(bsz, *([1] * nexpand), -1)
-    vector = vector.reshape(bsz, -1, 2).permute(0, 2, 1)
-    return torch.bmm(transform_mat, vector).permute(0, 2, 1).reshape(*shape)
+        vector = vector - bias.reshape(B, *([1] * nexpand), -1)
+    vector = vector.reshape(B, -1, 2).permute(0, 2, 1)  # (B, 2, N1 * N2 ...)
+    return torch.bmm(transform_mat, vector).permute(0, 2, 1).reshape(*shape)  # (B, ..., 2)
 
 
 def heading_transform(heading, transform_mat):
@@ -25,10 +25,10 @@ def heading_transform(heading, transform_mat):
     heading: (B, ...)
     transform_mat: (B, 2, 2)
     """
-    bsz = heading.shape[0]
+    B = heading.shape[0]
     shape = heading.shape
-    heading = heading.reshape(bsz, -1)
-    transform_mat = transform_mat.reshape(bsz, 1, 2, 2)
+    heading = heading.reshape(B, -1)
+    transform_mat = transform_mat.reshape(B, 1, 2, 2)
     return torch.atan2(
         torch.cos(heading) * transform_mat[..., 1, 0]
         + torch.sin(heading) * transform_mat[..., 1, 1],
@@ -280,8 +280,8 @@ def augment_segment_torch(
 
 class StatePerturbation:
     """
-    Data augmentation that perturbs the current ego position laterally and generates a feasible
-    bidirectional bridge trajectory that reconnects to the original GT without requiring overspeed.
+    Data augmentation that perturbs the current ego position and generates a feasible trajectory that
+    reconnects to the original GT without requiring overspeed.
     """
 
     def __init__(
@@ -293,6 +293,13 @@ class StatePerturbation:
         future_bridge_sec: float = 1.5,
         dense_sample_ds: float = DENSE_SAMPLE_DS,
     ) -> None:
+        """
+        Initialize the augmentor.
+        :param augment_prob: probability between 0 and 1 of applying the data augmentation
+        :param past_bridge_sec: duration used to connect the past trajectory to the perturbed state
+        :param future_bridge_sec: duration used to reconnect the perturbed state to the GT future
+        :param dense_sample_ds: dense sampling resolution used for path-length feasibility checks
+        """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
         lo = ([0.0, -0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],)
@@ -318,10 +325,20 @@ class StatePerturbation:
         return (angle + np.pi) % (2 * np.pi) - np.pi
 
     def get_transform_matrix_batch(self, cur_state):
-        processed_input = torch.column_stack((cur_state[:, 2], cur_state[:, 3]))
-        reshaping_tensor = torch.tensor(
-            [[1, 0, 0, 1], [0, 1, -1, 0]], dtype=torch.float32, device=processed_input.device
+        processed_input = torch.column_stack(
+            (
+                cur_state[:, 2],  # cos
+                cur_state[:, 3],  # sin
+            )
         )
+
+        reshaping_tensor = torch.tensor(
+            [
+                [1, 0, 0, 1],
+                [0, 1, -1, 0],
+            ],
+            dtype=torch.float32,
+        ).to(processed_input.device)
         return (processed_input @ reshaping_tensor).reshape(-1, 2, 2)
 
     def _sample_lateral_offsets(self, batch_size: int) -> torch.Tensor:
@@ -338,6 +355,10 @@ class StatePerturbation:
         ego_future: torch.Tensor,
         lateral_offset: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Rebuild ego past/current/future around a laterally perturbed current state while keeping
+        the longitudinal progress speed-feasible against the available GT distance budget.
+        """
         dt = self.time_interval
         dtype = ego_past.dtype
         device = ego_past.device
@@ -454,7 +475,11 @@ class StatePerturbation:
         lateral_offsets = self._sample_lateral_offsets(batch_size)
         valid_speed = torch.abs(ego_current_state[:, 4]) >= 2.0
         valid_offset = torch.abs(lateral_offsets) > 1.0e-3
-        aug_flag = ((torch.rand(batch_size, device=self._device) < self._augment_prob) & valid_speed & valid_offset)
+        aug_flag = (
+            (torch.rand(batch_size, device=self._device) < self._augment_prob)
+            & valid_speed
+            & valid_offset
+        )
 
         for batch_index in torch.nonzero(aug_flag, as_tuple=False).flatten():
             aug_state, aug_past, aug_future = self._build_augmented_sample(
@@ -469,24 +494,34 @@ class StatePerturbation:
 
         return aug_flag, ego_current_state, ego_agent_past, aug_ego_future
 
-    def centric_transform(self, inputs, ego_future, neighbors_future):
+    def centric_transform(
+        self,
+        inputs: torch.Tensor,
+        ego_future: torch.Tensor,
+        neighbors_future: torch.Tensor,
+    ):
         cur_state = inputs["ego_current_state"].clone()
         center_xy = cur_state[:, :2]
         transform_matrix = self.get_transform_matrix_batch(cur_state)
 
+        # ego xy
         inputs["ego_current_state"][..., :2] = vector_transform(
             inputs["ego_current_state"][..., :2], transform_matrix, center_xy
         )
+        # ego cos sin
         inputs["ego_current_state"][..., 2:4] = vector_transform(
             inputs["ego_current_state"][..., 2:4], transform_matrix
         )
+        # ego vx, vy
         inputs["ego_current_state"][..., 4:6] = vector_transform(
             inputs["ego_current_state"][..., 4:6], transform_matrix
         )
+        # ego ax, ay
         inputs["ego_current_state"][..., 6:8] = vector_transform(
             inputs["ego_current_state"][..., 6:8], transform_matrix
         )
 
+        # ego past
         ego_past_mask = torch.sum(torch.ne(inputs["ego_agent_past"][..., :4], 0), dim=-1) == 0
         inputs["ego_agent_past"][..., :2] = vector_transform(
             inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
@@ -496,22 +531,27 @@ class StatePerturbation:
         )
         inputs["ego_agent_past"][ego_past_mask] = 0.0
 
+        # ego future xy
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
         inputs["ego_agent_future"] = ego_future
 
+        # neighbor past xy
         mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
         inputs["neighbor_agents_past"][..., :2] = vector_transform(
             inputs["neighbor_agents_past"][..., :2], transform_matrix, center_xy
         )
+        # neighbor past cos sin
         inputs["neighbor_agents_past"][..., 2:4] = vector_transform(
             inputs["neighbor_agents_past"][..., 2:4], transform_matrix
         )
+        # neighbor past vx, vy
         inputs["neighbor_agents_past"][..., 4:6] = vector_transform(
             inputs["neighbor_agents_past"][..., 4:6], transform_matrix
         )
         inputs["neighbor_agents_past"][mask] = 0.0
 
+        # neighbor future xy
         mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
@@ -519,13 +559,17 @@ class StatePerturbation:
         neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
         neighbors_future[mask] = 0.0
 
+        # lanes
         mask = torch.sum(torch.ne(inputs["lanes"][..., :8], 0), dim=-1) == 0
-        inputs["lanes"][..., :2] = vector_transform(inputs["lanes"][..., :2], transform_matrix, center_xy)
+        inputs["lanes"][..., :2] = vector_transform(
+            inputs["lanes"][..., :2], transform_matrix, center_xy
+        )
         inputs["lanes"][..., 2:4] = vector_transform(inputs["lanes"][..., 2:4], transform_matrix)
         inputs["lanes"][..., 4:6] = vector_transform(inputs["lanes"][..., 4:6], transform_matrix)
         inputs["lanes"][..., 6:8] = vector_transform(inputs["lanes"][..., 6:8], transform_matrix)
         inputs["lanes"][mask] = 0.0
 
+        # route_lanes
         mask = torch.sum(torch.ne(inputs["route_lanes"][..., :8], 0), dim=-1) == 0
         inputs["route_lanes"][..., :2] = vector_transform(
             inputs["route_lanes"][..., :2], transform_matrix, center_xy
@@ -541,20 +585,26 @@ class StatePerturbation:
         )
         inputs["route_lanes"][mask] = 0.0
 
+        # polygons
         mask = torch.sum(torch.ne(inputs["polygons"], 0), dim=-1) == 0
-        inputs["polygons"][..., :2] = vector_transform(inputs["polygons"][..., :2], transform_matrix, center_xy)
+        inputs["polygons"][..., :2] = vector_transform(
+            inputs["polygons"][..., :2], transform_matrix, center_xy
+        )
         inputs["polygons"][mask] = 0.0
 
+        # line_strings
         mask = torch.sum(torch.ne(inputs["line_strings"], 0), dim=-1) == 0
         inputs["line_strings"][..., :2] = vector_transform(
             inputs["line_strings"][..., :2], transform_matrix, center_xy
         )
         inputs["line_strings"][mask] = 0.0
 
+        # static objects xy
         mask = torch.sum(torch.ne(inputs["static_objects"][..., :10], 0), dim=-1) == 0
         inputs["static_objects"][..., :2] = vector_transform(
             inputs["static_objects"][..., :2], transform_matrix, center_xy
         )
+        # static objects cos sin
         inputs["static_objects"][..., 2:4] = vector_transform(
             inputs["static_objects"][..., 2:4], transform_matrix
         )
@@ -592,21 +642,27 @@ if __name__ == "__main__":
         if key == "goal_pose" or key == "ego_agent_past":
             data[key] = heading_to_cos_sin(data[key])
 
+    # Load future trajectories separately
     ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
     neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
 
     aug = StatePerturbation(augment_prob=1.0, device="cpu")
 
+    # Save original data visualization with augmentation range rectangle
     original_save_path = save_dir / "original.png"
     fig, ax = plt.subplots(figsize=(10, 10))
+
+    # Visualize inputs on the ax
     view_range = 20
     visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
 
-    lo = aug._low.cpu().numpy()[0]
-    hi = aug._high.cpu().numpy()[0]
+    # Get augmentation ranges from the aug object
+    lo = aug._low.cpu().numpy()[0]  # Extract from tuple
+    hi = aug._high.cpu().numpy()[0]  # Extract from tuple
     x_min, y_min = lo[0], lo[1]
     x_max, y_max = hi[0], hi[1]
 
+    # Draw the augmentation range rectangle
     rect = patches.Rectangle(
         (x_min, y_min),
         x_max - x_min,
@@ -630,6 +686,7 @@ if __name__ == "__main__":
             deepcopy(data), ego_future.clone(), neighbors_future.clone()
         )
 
+        # Save augmented data to npz file
         data_dict = {}
         for key, value in aug_data.items():
             if isinstance(value, torch.Tensor):
@@ -637,14 +694,19 @@ if __name__ == "__main__":
             else:
                 data_dict[key] = value
 
+        # Add future trajectories with consistent naming
         data_dict["ego_agent_future"] = aug_ego_future.squeeze(0).detach().cpu().numpy()
-        data_dict["neighbor_agents_future"] = aug_neighbors_future.squeeze(0).detach().cpu().numpy()
+        data_dict["neighbor_agents_future"] = (
+            aug_neighbors_future.squeeze(0).detach().cpu().numpy()
+        )
         aug_data["ego_agent_future"] = aug_ego_future
         aug_data["neighbor_agents_future"] = aug_neighbors_future
 
+        # Save to npz file
         output_path = save_dir / f"augmented_{i:08d}.npz"
         np.savez(output_path, **data_dict)
 
+        # Use deepcopy to avoid side effects from visualize_inputs
         visualize_inputs(
             deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[view_range]
         )
