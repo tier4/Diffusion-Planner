@@ -1,10 +1,8 @@
 import numpy as np
 import torch
 
-from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
-
-NUM_REFINE = 20
 TIME_INTERVAL = 0.1
+DENSE_SAMPLE_DS = 0.05
 
 
 def vector_transform(vector, transform_mat, bias=None):
@@ -14,12 +12,12 @@ def vector_transform(vector, transform_mat, bias=None):
     bias: (B, ..., 2)
     """
     shape = vector.shape
-    B = vector.shape[0]
+    bsz = vector.shape[0]
     nexpand = vector.ndim - 2
     if bias is not None:
-        vector = vector - bias.reshape(B, *([1] * nexpand), -1)
-    vector = vector.reshape(B, -1, 2).permute(0, 2, 1)  # (B, 2, N1 * N2 ...)
-    return torch.bmm(transform_mat, vector).permute(0, 2, 1).reshape(*shape)  # (B, ..., 2)
+        vector = vector - bias.reshape(bsz, *([1] * nexpand), -1)
+    vector = vector.reshape(bsz, -1, 2).permute(0, 2, 1)
+    return torch.bmm(transform_mat, vector).permute(0, 2, 1).reshape(*shape)
 
 
 def heading_transform(heading, transform_mat):
@@ -27,10 +25,10 @@ def heading_transform(heading, transform_mat):
     heading: (B, ...)
     transform_mat: (B, 2, 2)
     """
-    B = heading.shape[0]
+    bsz = heading.shape[0]
     shape = heading.shape
-    heading = heading.reshape(B, -1)
-    transform_mat = transform_mat.reshape(B, 1, 2, 2)
+    heading = heading.reshape(bsz, -1)
+    transform_mat = transform_mat.reshape(bsz, 1, 2, 2)
     return torch.atan2(
         torch.cos(heading) * transform_mat[..., 1, 0]
         + torch.sin(heading) * transform_mat[..., 1, 1],
@@ -39,10 +37,251 @@ def heading_transform(heading, transform_mat):
     ).reshape(*shape)
 
 
+def normalize_angle_torch(angle: torch.Tensor) -> torch.Tensor:
+    return torch.atan2(torch.sin(angle), torch.cos(angle))
+
+
+def cumulative_distance_torch(xy: torch.Tensor) -> torch.Tensor:
+    if xy.shape[0] == 0:
+        return torch.zeros(0, dtype=xy.dtype, device=xy.device)
+    deltas = torch.diff(xy, dim=0)
+    segment_lengths = torch.linalg.norm(deltas, dim=-1)
+    distance = torch.zeros(xy.shape[0], dtype=xy.dtype, device=xy.device)
+    distance[1:] = torch.cumsum(segment_lengths, dim=0)
+    return distance
+
+
+def interp1d_torch(x: torch.Tensor, y: torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
+    if x.numel() == 1:
+        return y[0].expand_as(xq) if y.ndim == 1 else y[0].expand(xq.shape[0], *y.shape[1:])
+
+    xq_clamped = torch.clamp(xq, min=x[0], max=x[-1])
+    idx = torch.searchsorted(x, xq_clamped, right=False)
+    idx = torch.clamp(idx, 1, x.shape[0] - 1)
+    x0 = x[idx - 1]
+    x1 = x[idx]
+    weight = (xq_clamped - x0) / torch.clamp(x1 - x0, min=1.0e-6)
+
+    if y.ndim == 1:
+        y0 = y[idx - 1]
+        y1 = y[idx]
+        return y0 + weight * (y1 - y0)
+
+    y0 = y[idx - 1]
+    y1 = y[idx]
+    return y0 + weight.unsqueeze(-1) * (y1 - y0)
+
+
+def interp_heading_torch(
+    x: torch.Tensor, heading: torch.Tensor, xq: torch.Tensor
+) -> torch.Tensor:
+    cos_interp = interp1d_torch(x, torch.cos(heading), xq)
+    sin_interp = interp1d_torch(x, torch.sin(heading), xq)
+    return torch.atan2(sin_interp, cos_interp)
+
+
+def heading_from_positions_torch(
+    xy: torch.Tensor, fallback_heading: torch.Tensor | None = None
+) -> torch.Tensor:
+    num_points = xy.shape[0]
+    if num_points == 0:
+        return torch.zeros(0, dtype=xy.dtype, device=xy.device)
+    if num_points == 1:
+        if fallback_heading is not None:
+            return fallback_heading[:1]
+        return torch.zeros(1, dtype=xy.dtype, device=xy.device)
+
+    heading = torch.zeros(num_points, dtype=xy.dtype, device=xy.device)
+    first_delta = xy[1] - xy[0]
+    last_delta = xy[-1] - xy[-2]
+    heading[0] = torch.atan2(first_delta[1], first_delta[0])
+    heading[-1] = torch.atan2(last_delta[1], last_delta[0])
+    if num_points > 2:
+        middle_delta = xy[2:] - xy[:-2]
+        heading[1:-1] = torch.atan2(middle_delta[:, 1], middle_delta[:, 0])
+
+    if fallback_heading is not None:
+        delta_norm = torch.zeros(num_points, dtype=xy.dtype, device=xy.device)
+        delta_norm[0] = torch.linalg.norm(first_delta)
+        delta_norm[-1] = torch.linalg.norm(last_delta)
+        if num_points > 2:
+            delta_norm[1:-1] = torch.linalg.norm(middle_delta, dim=-1)
+        heading = torch.where(delta_norm < 1.0e-6, fallback_heading, heading)
+
+    return normalize_angle_torch(heading)
+
+
+def quintic_decay_torch(unit_s: torch.Tensor) -> torch.Tensor:
+    u = torch.clamp(unit_s, 0.0, 1.0)
+    return 1.0 - 10.0 * u**3 + 15.0 * u**4 - 6.0 * u**5
+
+
+def sample_centerline_torch(
+    center_s: torch.Tensor,
+    center_xy: torch.Tensor,
+    center_heading: torch.Tensor,
+    query_s: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    base_xy = interp1d_torch(center_s, center_xy, query_s)
+    base_heading = interp_heading_torch(center_s, center_heading, query_s)
+    return base_xy, base_heading
+
+
+def build_offset_path_torch(
+    center_xy: torch.Tensor,
+    center_heading: torch.Tensor,
+    center_s: torch.Tensor,
+    s_merge: torch.Tensor,
+    lateral_offset: torch.Tensor,
+    dense_ds: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    device = center_xy.device
+    dtype = center_xy.dtype
+    num_dense = max(int(torch.ceil(s_merge / dense_ds).item()), 1)
+    dense_s = torch.linspace(0.0, float(s_merge.item()), num_dense + 1, device=device, dtype=dtype)
+    base_xy, base_heading = sample_centerline_torch(center_s, center_xy, center_heading, dense_s)
+
+    offset = lateral_offset * quintic_decay_torch(dense_s / torch.clamp(s_merge, min=1.0e-6))
+    normals = torch.stack([-torch.sin(base_heading), torch.cos(base_heading)], dim=-1)
+    path_xy = base_xy + offset.unsqueeze(-1) * normals
+    path_sigma = cumulative_distance_torch(path_xy)
+    path_heading = heading_from_positions_torch(path_xy, fallback_heading=base_heading)
+    return path_xy, path_sigma, path_heading
+
+
+def merge_path_length_torch(
+    center_xy: torch.Tensor,
+    center_heading: torch.Tensor,
+    center_s: torch.Tensor,
+    s_merge: torch.Tensor,
+    lateral_offset: torch.Tensor,
+    dense_ds: float,
+) -> torch.Tensor:
+    _, path_sigma, _ = build_offset_path_torch(
+        center_xy, center_heading, center_s, s_merge, lateral_offset, dense_ds
+    )
+    return path_sigma[-1]
+
+
+def solve_merge_centerline_s_torch(
+    center_xy: torch.Tensor,
+    center_heading: torch.Tensor,
+    center_s: torch.Tensor,
+    distance_budget: torch.Tensor,
+    lateral_offset: torch.Tensor,
+    dense_ds: float,
+    tol_m: float = 1.0e-3,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    device = center_xy.device
+    dtype = center_xy.dtype
+    upper = torch.minimum(distance_budget, center_s[-1])
+    lower = torch.minimum(
+        torch.maximum(
+            torch.tensor(dense_ds, device=device, dtype=dtype),
+            torch.abs(lateral_offset) * 0.25,
+        ),
+        upper * 0.5,
+    )
+
+    while lower > dense_ds * 1.0e-3:
+        length_lower = merge_path_length_torch(
+            center_xy, center_heading, center_s, lower, lateral_offset, dense_ds
+        )
+        if length_lower < distance_budget:
+            break
+        lower = lower * 0.5
+
+    upper_length = merge_path_length_torch(
+        center_xy, center_heading, center_s, upper, lateral_offset, dense_ds
+    )
+    if upper_length < distance_budget:
+        raise RuntimeError("Unable to find a feasible merge point within the distance budget.")
+
+    for _ in range(50):
+        mid = 0.5 * (lower + upper)
+        mid_length = merge_path_length_torch(
+            center_xy, center_heading, center_s, mid, lateral_offset, dense_ds
+        )
+        if mid_length < distance_budget:
+            lower = mid
+        else:
+            upper = mid
+        if upper - lower < tol_m:
+            break
+
+    s_merge = 0.5 * (lower + upper)
+    path_xy, path_sigma, path_heading = build_offset_path_torch(
+        center_xy, center_heading, center_s, s_merge, lateral_offset, dense_ds
+    )
+    return s_merge, path_xy, path_sigma, path_heading
+
+
+def augment_segment_torch(
+    segment_xy: torch.Tensor,
+    segment_heading: torch.Tensor,
+    segment_time: torch.Tensor,
+    lateral_offset: torch.Tensor,
+    connect_time_s: float,
+    dense_ds: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    center_s = cumulative_distance_torch(segment_xy)
+    # Use GT heading directly so past-bridge generation keeps the same lateral
+    # offset convention even when the past segment is traversed in reverse.
+    center_heading = normalize_angle_torch(segment_heading)
+    connect_time = torch.tensor(connect_time_s, dtype=segment_xy.dtype, device=segment_xy.device)
+    connect_time = torch.clamp(connect_time, min=segment_time[0], max=segment_time[-1])
+    distance_budget = interp1d_torch(segment_time, center_s, connect_time.unsqueeze(0))[0]
+
+    path_xy_candidate, path_sigma_candidate, _ = build_offset_path_torch(
+        center_xy=segment_xy,
+        center_heading=center_heading,
+        center_s=center_s,
+        s_merge=distance_budget,
+        lateral_offset=lateral_offset,
+        dense_ds=dense_ds,
+    )
+    candidate_length = path_sigma_candidate[-1]
+
+    if candidate_length <= distance_budget + 1.0e-3:
+        s_merge = distance_budget
+        merge_xy = path_xy_candidate
+        merge_sigma = path_sigma_candidate
+        speed_scale = candidate_length / torch.clamp(distance_budget, min=1.0e-6)
+    else:
+        s_merge, merge_xy, merge_sigma, _ = solve_merge_centerline_s_torch(
+            center_xy=segment_xy,
+            center_heading=center_heading,
+            center_s=center_s,
+            distance_budget=distance_budget,
+            lateral_offset=lateral_offset,
+            dense_ds=dense_ds,
+        )
+        speed_scale = torch.tensor(1.0, dtype=segment_xy.dtype, device=segment_xy.device)
+
+    connect_mask = segment_time <= connect_time + 1.0e-6
+    query_xy = torch.zeros_like(segment_xy)
+    progress = torch.zeros_like(segment_time)
+
+    connect_sigma = speed_scale * center_s[connect_mask]
+    query_xy[connect_mask] = interp1d_torch(merge_sigma, merge_xy, connect_sigma)
+    progress[connect_mask] = connect_sigma
+
+    continue_mask = ~connect_mask
+    if torch.any(continue_mask):
+        continue_s = s_merge + (center_s[continue_mask] - distance_budget)
+        query_xy[continue_mask], _ = sample_centerline_torch(
+            center_s, segment_xy, center_heading, continue_s
+        )
+        progress[continue_mask] = merge_sigma[-1] + (center_s[continue_mask] - distance_budget)
+
+    query_heading = heading_from_positions_torch(query_xy, fallback_heading=segment_heading)
+    return query_xy, query_heading, progress
+
+
 class StatePerturbation:
     """
-    Data augmentation that perturbs the current ego position and generates a feasible trajectory that
-    satisfies polynomial constraints.
+    Data augmentation that perturbs the current ego position laterally and generates a feasible
+    bidirectional bridge trajectory that reconnects to the original GT without requiring overspeed.
     """
 
     def __init__(
@@ -50,214 +289,229 @@ class StatePerturbation:
         augment_prob: float = 0.5,
         wheel_base: float = 2.75,
         device: torch.device | str = "cpu",
+        past_bridge_sec: float = 1.0,
+        future_bridge_sec: float = 1.5,
+        dense_sample_ds: float = DENSE_SAMPLE_DS,
     ) -> None:
-        """
-        Initialize the augmentor,
-        :param low: Parameter to set lower bound vector of the Uniform noise on [x, y, yaw, vx, vy, ax, ay, steering angle, yaw rate].
-        :param high: Parameter to set upper bound vector of the Uniform noise on [x, y, yaw, vx, vy, ax, ay, steering angle, yaw rate].
-        :param augment_prob: probability between 0 and 1 of applying the data augmentation
-        """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
-        lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
-        hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
-        self._low = torch.tensor(lo).to(self._device)
-        self._high = torch.tensor(hi).to(self._device)
+        lo = ([0.0, -0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],)
+        hi = ([0.0, +0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],)
+        self._low = torch.tensor(lo, dtype=torch.float32, device=self._device)
+        self._high = torch.tensor(hi, dtype=torch.float32, device=self._device)
         self._wheel_base = wheel_base
-
-        self.num_refine = NUM_REFINE
+        self._past_bridge_sec = past_bridge_sec
+        self._future_bridge_sec = future_bridge_sec
         self.time_interval = TIME_INTERVAL
-
-        REFINE_HORIZON = NUM_REFINE * TIME_INTERVAL
-
-        T = REFINE_HORIZON + TIME_INTERVAL
-        self.coeff_matrix = torch.linalg.inv(
-            torch.tensor(
-                [
-                    [1, 0, 0, 0, 0, 0],
-                    [0, 1, 0, 0, 0, 0],
-                    [0, 0, 2, 0, 0, 0],
-                    [1, T, T**2, T**3, T**4, T**5],
-                    [0, 1, 2 * T, 3 * T**2, 4 * T**3, 5 * T**4],
-                    [0, 0, 2, 6 * T, 12 * T**2, 20 * T**3],
-                ],
-                device=device,
-                dtype=torch.float32,
-            )
-        )
-        self.t_matrix = torch.pow(
-            torch.linspace(TIME_INTERVAL, REFINE_HORIZON, NUM_REFINE).unsqueeze(1),
-            torch.arange(6).unsqueeze(0),
-        ).to(device=device)  # shape (B, N+1)
+        self.dense_sample_ds = dense_sample_ds
 
     def __call__(self, inputs, ego_future, neighbors_future):
-        aug_flag, aug_ego_current_state = self.augment(inputs)
+        aug_flag, aug_current_state, aug_ego_past, aug_ego_future = self.augment(inputs, ego_future)
 
-        # Interpolate future trajectory
-        interpolated_ego_future = self.interpolation_future_trajectory(
-            aug_ego_current_state, ego_future
-        )
-
-        inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
-        ego_future[aug_flag] = interpolated_ego_future[aug_flag]
+        inputs["ego_current_state"][aug_flag] = aug_current_state[aug_flag]
+        inputs["ego_agent_past"][aug_flag] = aug_ego_past[aug_flag]
+        ego_future[aug_flag] = aug_ego_future[aug_flag]
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
-
-    def augment(self, inputs):
-        # Only aug current state
-        ego_current_state = inputs["ego_current_state"].clone()
-
-        B = ego_current_state.shape[0]
-        aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
-            abs(ego_current_state[:, 4]) < 2.0
-        )
-
-        random_tensor = torch.rand(B, len(self._low)).to(self._device)
-        scaled_random_tensor = self._low + (self._high - self._low) * random_tensor
-
-        new_state = torch.zeros((B, 9), dtype=torch.float32).to(self._device)
-        new_state[:, 3:] = ego_current_state[
-            :, 4:10
-        ]  # x, y, h is 0 because of ego-centric, update vx, vy, ax, ay, steering angle, yaw rate
-        new_state = new_state + scaled_random_tensor
-        new_state[:, 3] = torch.max(new_state[:, 3], torch.tensor(0.0, device=new_state.device))
-        new_state[:, -1] = torch.clip(new_state[:, -1], -0.85, 0.85)
-
-        ego_current_state[:, :2] = new_state[:, :2]
-        ego_current_state[:, 2] = torch.cos(new_state[:, 2])
-        ego_current_state[:, 3] = torch.sin(new_state[:, 2])
-        ego_current_state[:, 4:8] = new_state[:, 3:7]
-        ego_current_state[:, 8:10] = new_state[:, -2:]  # steering angle, yaw rate
-
-        # update steering angle and yaw rate
-        cur_velocity = ego_current_state[:, 4]
-        yaw_rate = ego_current_state[:, 9]
-
-        steering_angle = torch.zeros_like(cur_velocity)
-        new_yaw_rate = torch.zeros_like(yaw_rate)
-
-        mask = torch.abs(cur_velocity) < 0.2
-        not_mask = ~mask
-        steering_angle[not_mask] = torch.atan(
-            yaw_rate[not_mask] * self._wheel_base / torch.abs(cur_velocity[not_mask])
-        )
-        steering_angle[not_mask] = torch.clamp(
-            steering_angle[not_mask], -2 / 3 * np.pi, 2 / 3 * np.pi
-        )
-        new_yaw_rate[not_mask] = yaw_rate[not_mask]
-
-        ego_current_state[:, 8] = steering_angle
-        ego_current_state[:, 9] = new_yaw_rate
-
-        return aug_flag, ego_current_state
 
     def normalize_angle(self, angle: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
         return (angle + np.pi) % (2 * np.pi) - np.pi
 
     def get_transform_matrix_batch(self, cur_state):
-        processed_input = torch.column_stack(
-            (
-                cur_state[:, 2],  # cos
-                cur_state[:, 3],  # sin
-            )
-        )
-
+        processed_input = torch.column_stack((cur_state[:, 2], cur_state[:, 3]))
         reshaping_tensor = torch.tensor(
-            [
-                [1, 0, 0, 1],
-                [0, 1, -1, 0],
-            ],
-            dtype=torch.float32,
-        ).to(processed_input.device)
+            [[1, 0, 0, 1], [0, 1, -1, 0]], dtype=torch.float32, device=processed_input.device
+        )
         return (processed_input @ reshaping_tensor).reshape(-1, 2, 2)
 
-    def centric_transform(
+    def _sample_lateral_offsets(self, batch_size: int) -> torch.Tensor:
+        random_tensor = torch.rand(batch_size, device=self._device)
+        return self._low[:, 1] + (self._high[:, 1] - self._low[:, 1]) * random_tensor
+
+    def _state_to_heading(self, current_state: torch.Tensor) -> torch.Tensor:
+        return torch.atan2(current_state[..., 3], current_state[..., 2])
+
+    def _build_augmented_sample(
         self,
-        inputs: torch.Tensor,
+        ego_past: torch.Tensor,
+        ego_current_state: torch.Tensor,
         ego_future: torch.Tensor,
-        neighbors_future: torch.Tensor,
-    ):
+        lateral_offset: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        dt = self.time_interval
+        dtype = ego_past.dtype
+        device = ego_past.device
+
+        past_len = ego_past.shape[0]
+        future_len = ego_future.shape[0]
+
+        past_xy = ego_past[:, :2].clone()
+        past_heading = torch.atan2(ego_past[:, 3], ego_past[:, 2]).clone()
+        current_xy = ego_current_state[:2].clone()
+        current_heading = self._state_to_heading(ego_current_state).clone()
+        future_xy = ego_future[:, :2].clone()
+        future_heading = ego_future[:, 2].clone()
+
+        past_xy[-1] = current_xy
+        past_heading[-1] = current_heading
+
+        future_segment_xy = torch.cat([current_xy.unsqueeze(0), future_xy], dim=0)
+        future_segment_heading = torch.cat([current_heading.unsqueeze(0), future_heading], dim=0)
+        future_time = torch.arange(
+            0.0, (future_len + 1) * dt, dt, dtype=dtype, device=device
+        )
+
+        past_segment_xy = torch.flip(past_xy, dims=[0])
+        past_segment_heading = torch.flip(past_heading, dims=[0])
+        past_time = torch.arange(0.0, past_len * dt, dt, dtype=dtype, device=device)
+
+        aug_future_xy, _, _ = augment_segment_torch(
+            future_segment_xy,
+            future_segment_heading,
+            future_time,
+            lateral_offset,
+            min(self._future_bridge_sec, float(future_time[-1].item())),
+            self.dense_sample_ds,
+        )
+        aug_past_reverse_xy, _, _ = augment_segment_torch(
+            past_segment_xy,
+            past_segment_heading,
+            past_time,
+            lateral_offset,
+            min(self._past_bridge_sec, float(past_time[-1].item())),
+            self.dense_sample_ds,
+        )
+
+        aug_past_xy = torch.flip(aug_past_reverse_xy, dims=[0])
+        full_xy = torch.cat([aug_past_xy[:-1], aug_future_xy], dim=0)
+
+        original_full_heading = torch.cat(
+            [past_heading[:-1], current_heading.unsqueeze(0), future_heading], dim=0
+        )
+        full_heading = heading_from_positions_torch(full_xy, fallback_heading=original_full_heading)
+
+        current_index = past_len - 1
+        aug_past_heading = full_heading[:past_len]
+        aug_future_heading = full_heading[past_len:]
+
+        aug_past_4d = torch.stack(
+            [
+                aug_past_xy[:, 0],
+                aug_past_xy[:, 1],
+                torch.cos(aug_past_heading),
+                torch.sin(aug_past_heading),
+            ],
+            dim=-1,
+        )
+        aug_future_3d = torch.stack(
+            [full_xy[past_len:, 0], full_xy[past_len:, 1], aug_future_heading], dim=-1
+        )
+
+        if current_index == 0:
+            velocity = (full_xy[1] - full_xy[0]) / dt
+            acceleration = torch.zeros(2, dtype=dtype, device=device)
+            yaw_rate = normalize_angle_torch(full_heading[1] - full_heading[0]) / dt
+        elif current_index == full_xy.shape[0] - 1:
+            velocity = (full_xy[-1] - full_xy[-2]) / dt
+            acceleration = torch.zeros(2, dtype=dtype, device=device)
+            yaw_rate = normalize_angle_torch(full_heading[-1] - full_heading[-2]) / dt
+        else:
+            velocity = (full_xy[current_index + 1] - full_xy[current_index - 1]) / (2.0 * dt)
+            acceleration = (
+                full_xy[current_index + 1]
+                - 2.0 * full_xy[current_index]
+                + full_xy[current_index - 1]
+            ) / (dt**2)
+            yaw_rate = normalize_angle_torch(
+                full_heading[current_index + 1] - full_heading[current_index - 1]
+            ) / (2.0 * dt)
+
+        speed = torch.linalg.norm(velocity)
+        steering_angle = torch.tensor(0.0, dtype=dtype, device=device)
+        if speed >= 0.2:
+            steering_angle = torch.atan(yaw_rate * self._wheel_base / torch.abs(speed))
+            steering_angle = torch.clamp(steering_angle, -2.0 / 3.0 * np.pi, 2.0 / 3.0 * np.pi)
+        else:
+            yaw_rate = torch.tensor(0.0, dtype=dtype, device=device)
+
+        aug_current_state = ego_current_state.clone()
+        aug_current_state[:2] = full_xy[current_index]
+        aug_current_state[2] = torch.cos(full_heading[current_index])
+        aug_current_state[3] = torch.sin(full_heading[current_index])
+        aug_current_state[4:6] = velocity
+        aug_current_state[6:8] = acceleration
+        aug_current_state[8] = steering_angle
+        aug_current_state[9] = yaw_rate
+
+        return aug_current_state, aug_past_4d, aug_future_3d
+
+    def augment(self, inputs, ego_future):
+        ego_current_state = inputs["ego_current_state"].clone()
+        ego_agent_past = inputs["ego_agent_past"].clone()
+        aug_ego_future = ego_future.clone()
+
+        batch_size = ego_current_state.shape[0]
+        lateral_offsets = self._sample_lateral_offsets(batch_size)
+        valid_speed = torch.abs(ego_current_state[:, 4]) >= 2.0
+        valid_offset = torch.abs(lateral_offsets) > 1.0e-3
+        aug_flag = ((torch.rand(batch_size, device=self._device) < self._augment_prob) & valid_speed & valid_offset)
+
+        for batch_index in torch.nonzero(aug_flag, as_tuple=False).flatten():
+            aug_state, aug_past, aug_future = self._build_augmented_sample(
+                ego_past=ego_agent_past[batch_index],
+                ego_current_state=ego_current_state[batch_index],
+                ego_future=ego_future[batch_index],
+                lateral_offset=lateral_offsets[batch_index],
+            )
+            ego_current_state[batch_index] = aug_state
+            ego_agent_past[batch_index] = aug_past
+            aug_ego_future[batch_index] = aug_future
+
+        return aug_flag, ego_current_state, ego_agent_past, aug_ego_future
+
+    def centric_transform(self, inputs, ego_future, neighbors_future):
         cur_state = inputs["ego_current_state"].clone()
         center_xy = cur_state[:, :2]
         transform_matrix = self.get_transform_matrix_batch(cur_state)
 
-        # ego xy
         inputs["ego_current_state"][..., :2] = vector_transform(
             inputs["ego_current_state"][..., :2], transform_matrix, center_xy
         )
-        # ego cos sin
         inputs["ego_current_state"][..., 2:4] = vector_transform(
             inputs["ego_current_state"][..., 2:4], transform_matrix
         )
-        # ego vx, vy
         inputs["ego_current_state"][..., 4:6] = vector_transform(
             inputs["ego_current_state"][..., 4:6], transform_matrix
         )
-        # ego ax, ay
         inputs["ego_current_state"][..., 6:8] = vector_transform(
             inputs["ego_current_state"][..., 6:8], transform_matrix
         )
 
-        # ego future xy
+        ego_past_mask = torch.sum(torch.ne(inputs["ego_agent_past"][..., :4], 0), dim=-1) == 0
+        inputs["ego_agent_past"][..., :2] = vector_transform(
+            inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
+        )
+        inputs["ego_agent_past"][..., 2:4] = vector_transform(
+            inputs["ego_agent_past"][..., 2:4], transform_matrix
+        )
+        inputs["ego_agent_past"][ego_past_mask] = 0.0
+
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
-
-        # ego past
-        # inputs["ego_agent_past"][..., :2] = vector_transform(
-        #     inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
-        # )
-        # inputs["ego_agent_past"][..., 2:4] = vector_transform(
-        #     inputs["ego_agent_past"][..., 2:4], transform_matrix
-        # )
-
-        ego_past4d = torch.cat(
-            [
-                inputs["ego_agent_past"][..., :2],  # x, y
-                torch.cos(inputs["ego_agent_past"][..., 2:3]),  # cos
-                torch.sin(inputs["ego_agent_past"][..., 2:3]),  # sin
-            ],
-            dim=-1,
-        )
-        ego_future4d = torch.cat(
-            [
-                ego_future[..., :2],  # x, y
-                torch.cos(ego_future[..., 2:3]),  # cos
-                torch.sin(ego_future[..., 2:3]),  # sin
-            ],
-            dim=-1,
-        )
-
-        ego_future4d = smoothing_future_trajectory(
-            ego_past4d, inputs["ego_current_state"], ego_future4d
-        )
-
-        ego_future = torch.cat(
-            [
-                ego_future4d[..., :2],  # x, y
-                torch.atan2(ego_future4d[..., 3], ego_future4d[..., 2]).unsqueeze(
-                    -1
-                ),  # heading from cos, sin
-            ],
-            dim=-1,
-        )
         inputs["ego_agent_future"] = ego_future
 
-        # neighbor past xy
         mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
         inputs["neighbor_agents_past"][..., :2] = vector_transform(
             inputs["neighbor_agents_past"][..., :2], transform_matrix, center_xy
         )
-        # neighbor past cos sin
         inputs["neighbor_agents_past"][..., 2:4] = vector_transform(
             inputs["neighbor_agents_past"][..., 2:4], transform_matrix
         )
-        # neighbor past vx, vy
         inputs["neighbor_agents_past"][..., 4:6] = vector_transform(
             inputs["neighbor_agents_past"][..., 4:6], transform_matrix
         )
         inputs["neighbor_agents_past"][mask] = 0.0
 
-        # neighbor future xy
         mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
@@ -265,17 +519,13 @@ class StatePerturbation:
         neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
         neighbors_future[mask] = 0.0
 
-        # lanes
         mask = torch.sum(torch.ne(inputs["lanes"][..., :8], 0), dim=-1) == 0
-        inputs["lanes"][..., :2] = vector_transform(
-            inputs["lanes"][..., :2], transform_matrix, center_xy
-        )
+        inputs["lanes"][..., :2] = vector_transform(inputs["lanes"][..., :2], transform_matrix, center_xy)
         inputs["lanes"][..., 2:4] = vector_transform(inputs["lanes"][..., 2:4], transform_matrix)
         inputs["lanes"][..., 4:6] = vector_transform(inputs["lanes"][..., 4:6], transform_matrix)
         inputs["lanes"][..., 6:8] = vector_transform(inputs["lanes"][..., 6:8], transform_matrix)
         inputs["lanes"][mask] = 0.0
 
-        # route_lanes
         mask = torch.sum(torch.ne(inputs["route_lanes"][..., :8], 0), dim=-1) == 0
         inputs["route_lanes"][..., :2] = vector_transform(
             inputs["route_lanes"][..., :2], transform_matrix, center_xy
@@ -291,127 +541,26 @@ class StatePerturbation:
         )
         inputs["route_lanes"][mask] = 0.0
 
-        # polygons
         mask = torch.sum(torch.ne(inputs["polygons"], 0), dim=-1) == 0
-        inputs["polygons"][..., :2] = vector_transform(
-            inputs["polygons"][..., :2], transform_matrix, center_xy
-        )
+        inputs["polygons"][..., :2] = vector_transform(inputs["polygons"][..., :2], transform_matrix, center_xy)
         inputs["polygons"][mask] = 0.0
 
-        # line_strings
         mask = torch.sum(torch.ne(inputs["line_strings"], 0), dim=-1) == 0
         inputs["line_strings"][..., :2] = vector_transform(
             inputs["line_strings"][..., :2], transform_matrix, center_xy
         )
         inputs["line_strings"][mask] = 0.0
 
-        # static objects xy
         mask = torch.sum(torch.ne(inputs["static_objects"][..., :10], 0), dim=-1) == 0
         inputs["static_objects"][..., :2] = vector_transform(
             inputs["static_objects"][..., :2], transform_matrix, center_xy
         )
-        # static objects cos sin
         inputs["static_objects"][..., 2:4] = vector_transform(
             inputs["static_objects"][..., 2:4], transform_matrix
         )
         inputs["static_objects"][mask] = 0.0
 
         return inputs, ego_future, neighbors_future
-
-    def interpolation_future_trajectory(self, aug_current_state, ego_future, keep_remaining=True):
-        """
-        refine future trajectory with quintic Hermite interpolation
-
-        Args:
-            aug_current_state: (B, 16) current state of the ego vehicle after augmentation
-            ego_future:        (B, T, 3) future trajectory of the ego vehicle
-            keep_remaining:    If True, keep the remaining trajectory after P frames (default: True)
-
-        Returns:
-            ego_future: refined future trajectory of the ego vehicle
-        """
-
-        P = self.num_refine
-        dt = self.time_interval
-        B = aug_current_state.shape[0]
-        M_t = self.t_matrix.unsqueeze(0).expand(B, -1, -1)
-        A = self.coeff_matrix.unsqueeze(0).expand(B, -1, -1)
-
-        # state: [x, y, heading, velocity, acceleration, yaw_rate]
-
-        x0, y0, theta0, v0, a0, omega0 = (
-            aug_current_state[:, 0],
-            aug_current_state[:, 1],
-            torch.atan2(
-                (ego_future[:, int(P / 2), 1] - aug_current_state[:, 1]),
-                (ego_future[:, int(P / 2), 0] - aug_current_state[:, 0]),
-            ),
-            torch.norm(aug_current_state[:, 4:6], dim=-1),
-            torch.norm(aug_current_state[:, 6:8], dim=-1),
-            aug_current_state[:, 9],
-        )
-
-        xT, yT, thetaT, vT, aT, omegaT = (
-            ego_future[:, P, 0],
-            ego_future[:, P, 1],
-            ego_future[:, P, 2],
-            torch.norm(ego_future[:, P, :2] - ego_future[:, P - 1, :2], dim=-1) / dt,
-            torch.norm(
-                ego_future[:, P, :2] - 2 * ego_future[:, P - 1, :2] + ego_future[:, P - 2, :2],
-                dim=-1,
-            )
-            / dt**2,
-            self.normalize_angle(ego_future[:, P, 2] - ego_future[:, P - 1, 2]) / dt,
-        )
-
-        # Boundary conditions
-        sx = torch.stack(
-            [
-                x0,
-                v0 * torch.cos(theta0),
-                a0 * torch.cos(theta0) - v0 * torch.sin(theta0) * omega0,
-                xT,
-                vT * torch.cos(thetaT),
-                aT * torch.cos(thetaT) - vT * torch.sin(thetaT) * omegaT,
-            ],
-            dim=-1,
-        )
-
-        sy = torch.stack(
-            [
-                y0,
-                v0 * torch.sin(theta0),
-                a0 * torch.sin(theta0) + v0 * torch.cos(theta0) * omega0,
-                yT,
-                vT * torch.sin(thetaT),
-                aT * torch.sin(thetaT) + vT * torch.cos(thetaT) * omegaT,
-            ],
-            dim=-1,
-        )
-
-        ax = A @ sx[:, :, None]  # B, 6, 1
-        ay = A @ sy[:, :, None]  # B, 6, 1
-
-        traj_x = M_t @ ax
-        traj_y = M_t @ ay
-        traj_heading = torch.cat(
-            [
-                torch.atan2(
-                    traj_y[:, :1, 0] - y0.unsqueeze(-1), traj_x[:, :1, 0] - x0.unsqueeze(-1)
-                ),
-                torch.atan2(
-                    traj_y[:, 1:, 0] - traj_y[:, :-1, 0], traj_x[:, 1:, 0] - traj_x[:, :-1, 0]
-                ),
-            ],
-            dim=1,
-        )
-
-        interpolated = torch.cat([traj_x, traj_y, traj_heading[..., None]], axis=-1)
-
-        if keep_remaining and ego_future.shape[1] > P:
-            return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
-        else:
-            return interpolated
 
 
 if __name__ == "__main__":
@@ -443,27 +592,21 @@ if __name__ == "__main__":
         if key == "goal_pose" or key == "ego_agent_past":
             data[key] = heading_to_cos_sin(data[key])
 
-    # Load future trajectories separately
     ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
     neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
 
     aug = StatePerturbation(augment_prob=1.0, device="cpu")
 
-    # Save original data visualization with augmentation range rectangle
     original_save_path = save_dir / "original.png"
     fig, ax = plt.subplots(figsize=(10, 10))
-
-    # Visualize inputs on the ax
     view_range = 20
     visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
 
-    # Get augmentation ranges from the aug object
-    lo = aug._low.cpu().numpy()[0]  # Extract from tuple
-    hi = aug._high.cpu().numpy()[0]  # Extract from tuple
+    lo = aug._low.cpu().numpy()[0]
+    hi = aug._high.cpu().numpy()[0]
     x_min, y_min = lo[0], lo[1]
     x_max, y_max = hi[0], hi[1]
 
-    # Draw the augmentation range rectangle
     rect = patches.Rectangle(
         (x_min, y_min),
         x_max - x_min,
@@ -487,7 +630,6 @@ if __name__ == "__main__":
             deepcopy(data), ego_future.clone(), neighbors_future.clone()
         )
 
-        # Save augmented data to npz file
         data_dict = {}
         for key, value in aug_data.items():
             if isinstance(value, torch.Tensor):
@@ -495,17 +637,14 @@ if __name__ == "__main__":
             else:
                 data_dict[key] = value
 
-        # Add future trajectories with consistent naming
         data_dict["ego_agent_future"] = aug_ego_future.squeeze(0).detach().cpu().numpy()
         data_dict["neighbor_agents_future"] = aug_neighbors_future.squeeze(0).detach().cpu().numpy()
         aug_data["ego_agent_future"] = aug_ego_future
         aug_data["neighbor_agents_future"] = aug_neighbors_future
 
-        # Save to npz file
         output_path = save_dir / f"augmented_{i:08d}.npz"
         np.savez(output_path, **data_dict)
 
-        # Use deepcopy to avoid side effects from visualize_inputs
         visualize_inputs(
             deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[view_range]
         )
