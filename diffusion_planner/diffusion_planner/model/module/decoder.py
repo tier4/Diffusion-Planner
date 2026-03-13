@@ -253,6 +253,10 @@ def compute_training_loss(
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, D]
 
+        # Fix neighbor control channels to GT (zero) — control is only meaningful for ego
+        if output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+            xT[:, 1:, :, POSE_DIM:] = all_gt[:, 1:, :, POSE_DIM:]
+
         merged_inputs = {
             **inputs,
             "gt_trajectories": all_gt,
@@ -303,6 +307,11 @@ def compute_training_loss(
         t = t.reshape(-1)  # [B,]
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+
+        # Fix neighbor control channels to GT (zero) — control is only meaningful for ego
+        if output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+            xT[:, 1:, :, POSE_DIM:] = all_gt[:, 1:, :, POSE_DIM:]
+
         merged_inputs = {
             **inputs,
             "gt_trajectories": all_gt,
@@ -704,6 +713,9 @@ class Decoder(nn.Module):
         def prefix_constraint(xt, t, step):
             xt = xt.reshape(B, P, -1, D)
             xt[:, :, 0, :] = current_states_D
+            # Fix neighbor control channels to zero — control is only meaningful for ego
+            if D > POSE_DIM:
+                xt[:, 1:, :, POSE_DIM:] = 0.0
             return xt.reshape(B, P, -1)
 
         model_wrapper_params = {
