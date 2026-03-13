@@ -66,6 +66,14 @@ class ONNXWrapper(nn.Module):
         turn_indicators,
         delay,
     ):
+        # ONNX input is always 4D (POSE_DIM). Pad to D if trajectory_and_control.
+        D = self.model.decoder._D
+        if D > POSE_DIM:
+            pad = torch.zeros(
+                *sampled_trajectories.shape[:-1], D - POSE_DIM,
+                device=sampled_trajectories.device, dtype=sampled_trajectories.dtype,
+            )
+            sampled_trajectories = torch.cat([sampled_trajectories, pad], dim=-1)
         inputs = {
             "sampled_trajectories": sampled_trajectories,
             "ego_agent_past": ego_agent_past,
@@ -182,10 +190,9 @@ def convert_model(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    _D = output_dim_for_mode(config_obj.output_mode)
     inputs = {}
     inputs["sampled_trajectories"] = torch.ones(
-        1, MAX_NUM_AGENTS, OUTPUT_T + 1, _D, dtype=torch.float32
+        1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
     )
     inputs["ego_agent_past"] = torch.randn(1, INPUT_T + 1, POSE_DIM, dtype=torch.float32)
     inputs["ego_current_state"] = torch.randn(1, 10, dtype=torch.float32)
