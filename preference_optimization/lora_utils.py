@@ -83,7 +83,7 @@ class UnfusedMHA(nn.Module):
             num_heads=mha.num_heads,
             dropout=mha.dropout,
             batch_first=mha.batch_first,
-        ).to(mha.in_proj_weight.device)
+        ).to(device=mha.in_proj_weight.device, dtype=mha.in_proj_weight.dtype)
         with torch.no_grad():
             module.q_proj.weight.copy_(mha.in_proj_weight[:D])
             module.k_proj.weight.copy_(mha.in_proj_weight[D : 2 * D])
@@ -173,8 +173,10 @@ def _replace_dit_mha_with_unfused(model: nn.Module) -> None:
     """
     inner = model.module if hasattr(model, "module") else model
     for block in inner.decoder.dit.blocks:
-        block.attn = UnfusedMHA.from_mha(block.attn)
-        block.cross_attn = UnfusedMHA.from_mha(block.cross_attn)
+        if isinstance(block.attn, nn.MultiheadAttention):
+            block.attn = UnfusedMHA.from_mha(block.attn)
+        if isinstance(block.cross_attn, nn.MultiheadAttention):
+            block.cross_attn = UnfusedMHA.from_mha(block.cross_attn)
 
 
 def apply_lora(

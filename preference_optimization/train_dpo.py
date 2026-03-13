@@ -294,6 +294,16 @@ def main():
     trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
     optimizer = optim.AdamW(trainable_params, lr=args.learning_rate)
 
+    # When resuming a LoRA run, restore AdamW moments from the saved optimizer state
+    # so training continues with the same first/second moment estimates rather than
+    # resetting to zero (which would transiently change the effective learning rate).
+    if args.use_lora and seed_lora_dir is not None:
+        opt_path = seed_lora_dir / "optimizer.pth"
+        if opt_path.exists():
+            saved = torch.load(opt_path, map_location=DEVICE)
+            optimizer.load_state_dict(saved["optimizer"])
+            print(f"Resumed optimizer state from {opt_path} (epoch {saved['epoch']})")
+
     # Create trainer
     trainer = DPOTrainer(
         policy_model=policy_model,

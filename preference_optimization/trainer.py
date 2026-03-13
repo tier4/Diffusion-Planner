@@ -179,6 +179,11 @@ class DPOTrainer:
             from preference_optimization.lora_utils import save_lora_checkpoint
             lora_dir = str(self.run_dir / f"lora_epoch_{epoch:03d}")
             save_lora_checkpoint(self.policy_model, lora_dir)
+            # Save optimizer state so resumed runs continue with warm AdamW moments.
+            torch.save(
+                {"epoch": epoch, "optimizer": self.optimizer.state_dict()},
+                Path(lora_dir) / "optimizer.pth",
+            )
             # Also keep a pointer to "latest" lora directory
             latest_link = self.run_dir / "lora_latest"
             if latest_link.is_symlink() or latest_link.is_file():
