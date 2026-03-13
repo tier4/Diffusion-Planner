@@ -437,8 +437,8 @@ if __name__ == "__main__":
         print(f"Error: '{root_dir}' is not a directory")
         exit(1)
 
-    # Find all .pth files recursively
-    pth_files = list(root_dir.rglob("*.pth"))
+    # Find all model checkpoint .pth files recursively, excluding optimizer state files.
+    pth_files = [f for f in root_dir.rglob("*.pth") if f.name != "optimizer.pth"]
 
     print(f"Found {len(pth_files)} .pth file(s) in '{root_dir}'")
 
