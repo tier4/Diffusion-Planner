@@ -74,6 +74,36 @@ def get_args():
         help="maximum absolute heading perturbation in degrees for data augmentation",
         default=10.0,
     )
+    parser.add_argument(
+        "--augment_past_bridge_sec",
+        type=float,
+        default=1.0,
+        help="seed past bridge time M [s] for data augmentation",
+    )
+    parser.add_argument(
+        "--augment_future_bridge_sec",
+        type=float,
+        default=1.5,
+        help="seed future bridge time N [s] for data augmentation",
+    )
+    parser.add_argument(
+        "--augment_max_lateral_accel",
+        type=float,
+        default=3.0,
+        help="maximum allowed lateral acceleration [m/s^2] during adaptive bridge search",
+    )
+    parser.add_argument(
+        "--augment_max_bridge_speed_gap",
+        type=float,
+        default=0.5,
+        help="maximum allowed bridge speed gap |v_aug - v_gt| [m/s]",
+    )
+    parser.add_argument(
+        "--augment_max_bridge_jerk",
+        type=float,
+        default=5.0,
+        help="maximum allowed bridge longitudinal jerk [m/s^3]",
+    )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
@@ -199,7 +229,12 @@ def model_training(args):
         StatePerturbation(
             augment_prob=args.augment_prob,
             device=args.device,
+            past_bridge_sec=args.augment_past_bridge_sec,
+            future_bridge_sec=args.augment_future_bridge_sec,
             max_heading_offset_deg=args.augment_heading_offset_deg,
+            max_lateral_accel_mps2=args.augment_max_lateral_accel,
+            max_bridge_speed_gap_mps=args.augment_max_bridge_speed_gap,
+            max_bridge_jerk_mps3=args.augment_max_bridge_jerk,
         )
         if args.use_data_augment
         else None
