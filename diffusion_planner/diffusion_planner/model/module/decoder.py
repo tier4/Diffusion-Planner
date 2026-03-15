@@ -524,8 +524,15 @@ class Decoder(nn.Module):
         P = 1 + Pn
 
         # Control current state: ego = normalized [v0, 0], neighbors = zeros
-        raw_inputs = self._observation_normalizer.inverse(inputs)
-        ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1]
+        # Denormalize only ego_current_state directly to avoid
+        # observation_normalizer.inverse's boolean masking (ONNX-incompatible).
+        device = current_states.device
+        ego_state_norm = self._observation_normalizer._normalization_dict["ego_current_state"]
+        ego_current_state_raw = (
+            inputs["ego_current_state"] * ego_state_norm["std"].to(device)
+            + ego_state_norm["mean"].to(device)
+        )
+        ego_v0 = ego_current_state_raw[:, 4:5]  # [B, 1]
         ego_ctrl_current = self._control_normalizer(
             torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1)
         )  # [B, 2]
@@ -737,7 +744,7 @@ class Decoder(nn.Module):
 
         # Build current state in D-space for prefix constraint
         current_states_D = self._build_current_states_D(inputs, current_states)  # [B, P, D]
-        action_prefix[:, :, 0, :] = current_states_D
+        action_prefix = torch.cat([current_states_D.unsqueeze(2), action_prefix[:, :, 1:, :]], dim=2)
 
         B, P, T_plus_1, _ = action_prefix.shape
 
@@ -746,10 +753,15 @@ class Decoder(nn.Module):
 
         def prefix_constraint(xt, t, step):
             xt = xt.reshape(B, P, -1, D)
-            xt[:, :, 0, :] = current_states_D
+            # Replace first timestep with current state (functional, no in-place)
+            xt = torch.cat([current_states_D.unsqueeze(2), xt[:, :, 1:, :]], dim=2)
             # Fix neighbor control channels to zero — control is only meaningful for ego
             if D > POSE_DIM:
-                xt[:, 1:, :, POSE_DIM:] = 0.0
+                ego = xt[:, 0:1, :, :]  # [B, 1, T+1, D] — keep ego as-is
+                neighbor_pose = xt[:, 1:, :, :POSE_DIM]  # [B, Pn, T+1, 4]
+                neighbor_ctrl = torch.zeros_like(xt[:, 1:, :, POSE_DIM:])  # [B, Pn, T+1, 2]
+                neighbors = torch.cat([neighbor_pose, neighbor_ctrl], dim=-1)
+                xt = torch.cat([ego, neighbors], dim=1)
             return xt.reshape(B, P, -1)
 
         model_wrapper_params = {
