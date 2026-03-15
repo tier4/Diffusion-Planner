@@ -526,10 +526,53 @@ def generate_time_candidates(
     return [tick * step_s for tick in range(start_tick, end_tick + 1)]
 
 
+def segment_kinematics_torch(
+    segment_result: SegmentAugmentationResultTorch,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    gt_speed = speed_from_progress_torch(
+        segment_result.distance_profile, segment_result.segment_time
+    )
+    augmented_speed = segment_result.exact_speed
+    gt_acceleration = acceleration_from_speed_torch(gt_speed, segment_result.segment_time)
+    augmented_acceleration = acceleration_from_speed_torch(
+        augmented_speed, segment_result.segment_time
+    )
+    gt_jerk = jerk_from_acceleration_torch(gt_acceleration, segment_result.segment_time)
+    augmented_jerk = jerk_from_acceleration_torch(
+        augmented_acceleration, segment_result.segment_time
+    )
+    return gt_speed, augmented_speed, gt_jerk, augmented_jerk
+
+
+def bridge_constraint_series_torch(
+    sample_result: AugmentedSampleTorchResult,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    past_gt_speed, past_aug_speed, past_gt_jerk, past_aug_jerk = segment_kinematics_torch(
+        sample_result.past_segment
+    )
+    future_gt_speed, future_aug_speed, future_gt_jerk, future_aug_jerk = segment_kinematics_torch(
+        sample_result.future_segment
+    )
+    bridge_speed_gap = torch.cat(
+        [
+            torch.abs(past_aug_speed - past_gt_speed).flip(0)[:-1],
+            torch.abs(future_aug_speed - future_gt_speed),
+        ],
+        dim=0,
+    )
+    augmented_jerk = torch.cat(
+        [past_aug_jerk.flip(0)[:-1], future_aug_jerk],
+        dim=0,
+    )
+    gt_arc_speed = torch.cat([past_gt_speed.flip(0)[:-1], future_gt_speed], dim=0)
+    augmented_arc_speed = torch.cat([past_aug_speed.flip(0)[:-1], future_aug_speed], dim=0)
+    return gt_arc_speed, augmented_arc_speed, bridge_speed_gap, augmented_jerk
+
+
 class StatePerturbation:
     """
     Data augmentation that perturbs the current ego position and generates a feasible trajectory that
-    reconnects to the original GT without requiring overspeed.
+    reconnects to the original GT while respecting longitudinal progress and bridge feasibility limits.
     """
 
     def __init__(
@@ -627,7 +670,7 @@ class StatePerturbation:
     ) -> AugmentedSampleTorchResult:
         """
         Rebuild ego past/current/future around a laterally perturbed current state while keeping
-        the longitudinal progress speed-feasible against the available GT distance budget.
+        the longitudinal progress aligned with the GT progress-time relation after merge.
         """
         dt = self.time_interval
         dtype = ego_past.dtype
@@ -767,19 +810,9 @@ class StatePerturbation:
         full_time = sample_result.full_time
         original_sigma = cumulative_distance_torch(sample_result.original_full_xy)
         augmented_sigma = cumulative_distance_torch(sample_result.augmented_full_xy)
-
-        past_gt_speed = speed_from_progress_torch(
-            sample_result.past_segment.distance_profile,
-            sample_result.past_segment.segment_time,
-        ).flip(0)
-        past_aug_speed = sample_result.past_segment.exact_speed.flip(0)
-        future_gt_speed = speed_from_progress_torch(
-            sample_result.future_segment.distance_profile,
-            sample_result.future_segment.segment_time,
+        gt_arc_speed, augmented_arc_speed, bridge_speed_gap, augmented_jerk = (
+            bridge_constraint_series_torch(sample_result)
         )
-        future_aug_speed = sample_result.future_segment.exact_speed
-        gt_arc_speed = torch.cat([past_gt_speed[:-1], future_gt_speed], dim=0)
-        augmented_arc_speed = torch.cat([past_aug_speed[:-1], future_aug_speed], dim=0)
 
         gt_curvature = curvature_from_xy_torch(sample_result.original_full_xy, original_sigma)
         augmented_curvature = curvature_from_xy_torch(
@@ -790,60 +823,10 @@ class StatePerturbation:
         )
         max_abs_augmented_lateral_accel = float(torch.max(torch.abs(augmented_lateral_accel)).item())
 
-        past_gt_accel = acceleration_from_speed_torch(
-            speed_from_progress_torch(
-                sample_result.past_segment.distance_profile,
-                sample_result.past_segment.segment_time,
-            ),
-            sample_result.past_segment.segment_time,
-        )
-        past_aug_accel = acceleration_from_speed_torch(
-            sample_result.past_segment.exact_speed,
-            sample_result.past_segment.segment_time,
-        )
-        future_gt_accel = acceleration_from_speed_torch(
-            speed_from_progress_torch(
-                sample_result.future_segment.distance_profile,
-                sample_result.future_segment.segment_time,
-            ),
-            sample_result.future_segment.segment_time,
-        )
-        future_aug_accel = acceleration_from_speed_torch(
-            sample_result.future_segment.exact_speed,
-            sample_result.future_segment.segment_time,
-        )
-        past_gt_jerk = jerk_from_acceleration_torch(
-            past_gt_accel,
-            sample_result.past_segment.segment_time,
-        )
-        past_aug_jerk = jerk_from_acceleration_torch(
-            past_aug_accel,
-            sample_result.past_segment.segment_time,
-        )
-        future_gt_jerk = jerk_from_acceleration_torch(
-            future_gt_accel,
-            sample_result.future_segment.segment_time,
-        )
-        future_aug_jerk = jerk_from_acceleration_torch(
-            future_aug_accel,
-            sample_result.future_segment.segment_time,
-        )
-
         bridge_time = full_time
         bridge_mask = (
             (bridge_time >= -sample_result.past_connect_time_s - 1.0e-9)
             & (bridge_time <= sample_result.future_recover_time_s + 1.0e-9)
-        )
-        bridge_speed_gap = torch.cat(
-            [
-                torch.abs(past_aug_speed - past_gt_speed).flip(0)[:-1],
-                torch.abs(future_aug_speed - future_gt_speed),
-            ],
-            dim=0,
-        )
-        augmented_jerk = torch.cat(
-            [past_aug_jerk.flip(0)[:-1], future_aug_jerk],
-            dim=0,
         )
 
         if torch.any(bridge_mask):
@@ -880,12 +863,21 @@ class StatePerturbation:
         initial_past_connect_time_s: float,
         initial_future_recover_time_s: float,
     ) -> AugmentedSampleTorchResult:
-        initial_result = self._build_augmented_sample(
-            ego_past=ego_past,
-            ego_current_state=ego_current_state,
-            ego_future=ego_future,
-            lateral_offset=lateral_offset,
-            heading_offset=heading_offset,
+        def build_candidate(
+            past_connect_time_s: float,
+            future_recover_time_s: float,
+        ) -> AugmentedSampleTorchResult:
+            return self._build_augmented_sample(
+                ego_past=ego_past,
+                ego_current_state=ego_current_state,
+                ego_future=ego_future,
+                lateral_offset=lateral_offset,
+                heading_offset=heading_offset,
+                past_connect_time_s=past_connect_time_s,
+                future_recover_time_s=future_recover_time_s,
+            )
+
+        initial_result = build_candidate(
             past_connect_time_s=initial_past_connect_time_s,
             future_recover_time_s=initial_future_recover_time_s,
         )
@@ -902,12 +894,7 @@ class StatePerturbation:
             step_s=self.time_interval,
         )
         for candidate_n in future_candidates:
-            candidate_result = self._build_augmented_sample(
-                ego_past=ego_past,
-                ego_current_state=ego_current_state,
-                ego_future=ego_future,
-                lateral_offset=lateral_offset,
-                heading_offset=heading_offset,
+            candidate_result = build_candidate(
                 past_connect_time_s=initial_past_connect_time_s,
                 future_recover_time_s=candidate_n,
             )
@@ -926,12 +913,7 @@ class StatePerturbation:
         )
         for candidate_m in past_candidates:
             for candidate_n in future_with_past_candidates:
-                candidate_result = self._build_augmented_sample(
-                    ego_past=ego_past,
-                    ego_current_state=ego_current_state,
-                    ego_future=ego_future,
-                    lateral_offset=lateral_offset,
-                    heading_offset=heading_offset,
+                candidate_result = build_candidate(
                     past_connect_time_s=candidate_m,
                     future_recover_time_s=candidate_n,
                 )
