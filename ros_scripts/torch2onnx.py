@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run onnxsim to produce a simplified ONNX model",
     )
+    parser.add_argument(
+        "--ego-from-control",
+        action="store_true",
+        help="For trajectory_and_control mode: ego prediction uses control→trajectory conversion via unicycle model",
+    )
     args = parser.parse_args()
     return args
 
@@ -173,6 +178,7 @@ def convert_model(
     eval_npz_path: Path | None,
     use_ema: bool = False,
     use_simplify: bool = False,
+    ego_from_control: bool = False,
 ):
     """Convert a single PyTorch model to ONNX format."""
     print(f"\n{'=' * 80}")
@@ -249,6 +255,16 @@ def convert_model(
         print("Loading regular model weights")
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
+
+    if ego_from_control:
+        from diffusion_planner.dimensions import OUTPUT_MODE_TRAJECTORY_AND_CONTROL
+        if model.decoder._output_mode != OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+            raise ValueError(
+                f"--ego-from-control requires output_mode='trajectory_and_control', "
+                f"but got '{model.decoder._output_mode}'"
+            )
+        model.decoder._ego_prediction_from_control = True
+        print("Ego prediction will use control→trajectory conversion")
 
     # Wrap model for onnx compatibility
     wrapper = ONNXWrapper(model).eval()
@@ -420,6 +436,7 @@ if __name__ == "__main__":
             eval_npz_path=args.eval_npz,
             use_ema=args.use_ema,
             use_simplify=args.use_simplify,
+            ego_from_control=args.ego_from_control,
         )
 
     # Print summary

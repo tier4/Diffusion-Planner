@@ -462,6 +462,7 @@ class Decoder(nn.Module):
         self._guidance_scale = config.guidance_scale
         self._model_type = config.diffusion_model_type
         self._use_velocity = config.use_velocity_representation
+        self._ego_prediction_from_control = False
 
         # Initialize transformer layers:
         def _basic_init(m):
@@ -634,6 +635,39 @@ class Decoder(nn.Module):
             return torch.cat([ego_traj[:, None], neighbor_traj], dim=1)
 
         elif self._output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+            if self._ego_prediction_from_control:
+                # Ego: use control channels → trajectory via unicycle model
+                ego_ctrl_raw = x[:, 0:1, 1:, POSE_DIM:]  # [B, 1, T, 2]
+                ego_ctrl = self._control_normalizer.inverse(ego_ctrl_raw)  # [B, 1, T, 2]
+
+                # Denormalize only the needed fields directly to avoid
+                # observation_normalizer.inverse's boolean masking (ONNX-incompatible).
+                obs_norms = self._observation_normalizer._normalization_dict
+                device = x.device
+                ego_past_norm = obs_norms["ego_agent_past"]
+                ego_agent_past_raw = (
+                    inputs["ego_agent_past"] * ego_past_norm["std"].to(device)
+                    + ego_past_norm["mean"].to(device)
+                )
+                ego_state_norm = obs_norms["ego_current_state"]
+                ego_current_state_raw = (
+                    inputs["ego_current_state"] * ego_state_norm["std"].to(device)
+                    + ego_state_norm["mean"].to(device)
+                )
+                ego_v0 = ego_current_state_raw[:, 4:5]  # [B, 1]
+                ego_traj = control_to_waypoints(
+                    ego_ctrl[:, 0], ego_agent_past_raw,
+                    t0_states={"v": ego_v0.squeeze(-1)},
+                )  # [B, T, 4]
+
+                # Neighbors: use trajectory channels as usual
+                # state_normalizer has shape [P, 1, 4] (ego + neighbors),
+                # so we need to apply inverse on the full P dim then slice.
+                x_traj_full = x[:, :, :, :POSE_DIM]  # [B, P, T+1, 4]
+                neighbor_future = self._state_normalizer.inverse(x_traj_full)[:, 1:, 1:]
+
+                return torch.cat([ego_traj[:, None], neighbor_future], dim=1)
+
             # x is [B, P, T+1, 6] — use trajectory part [B, P, T+1, 4]
             x_traj = x[..., :POSE_DIM]  # [B, P, T+1, 4]
         else:
