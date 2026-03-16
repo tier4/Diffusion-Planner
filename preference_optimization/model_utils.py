@@ -8,6 +8,7 @@ from diffusion_planner.model.guidance.guidance_wrapper import GuidanceWrapper
 from diffusion_planner.utils.config import Config
 
 
+
 def load_model(
     model_path: Path,
     device: torch.device,
@@ -66,7 +67,7 @@ def load_model(
     # Create model
     model = Diffusion_Planner(model_args)
 
-    # Load weights (handle different checkpoint formats)
+    # Load weights (handle different checkpoint formats).
     if "model" in checkpoint:
         # Distributed training checkpoint
         state_dict = {k.replace("module.", ""): v for k, v in checkpoint["model"].items()}

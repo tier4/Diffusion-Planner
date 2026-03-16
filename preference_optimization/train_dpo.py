@@ -103,17 +103,64 @@ def parse_args() -> argparse.Namespace:
         help="DPO regularization parameter",
     )
 
+    # LoRA arguments
+    parser.add_argument(
+        "--use_lora",
+        action="store_true",
+        default=False,
+        help="Apply LoRA adapters to DiT attention layers. Standard checkpoints load "
+             "automatically without any manual migration step.",
+    )
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=16,
+        help="LoRA rank r. Lower rank reduces capacity but mitigates catastrophic forgetting.",
+    )
+    parser.add_argument(
+        "--lora_alpha",
+        type=int,
+        default=16,
+        help="LoRA alpha scaling. Effective weight delta scale = alpha / r.",
+    )
+    parser.add_argument(
+        "--lora_dropout",
+        type=float,
+        default=0.05,
+        help="Dropout probability on LoRA activations.",
+    )
+
     return parser.parse_args()
 
 
-def setup_experiment(args: argparse.Namespace) -> tuple[Path, Path]:
+def _find_lora_dir(search_dir: Path) -> Path | None:
+    """Return the most recent LoRA adapter directory inside search_dir, or None.
+
+    Checks in order: lora_latest symlink, then highest-numbered lora_epoch_NNN/.
+    """
+    lora_latest = search_dir / "lora_latest"
+    if lora_latest.exists() and (lora_latest / "adapter_config.json").exists():
+        return lora_latest.resolve()
+    for d in reversed(sorted(search_dir.glob("lora_epoch_*"))):
+        if (d / "adapter_config.json").exists():
+            return d
+    return None
+
+
+def setup_experiment(args: argparse.Namespace) -> tuple[Path, Path, Path | None]:
     """Setup experiment directory and copy initial model.
+
+    If the model directory already contains LoRA adapter weights (from a previous
+    DPO run) and --use_lora is set, the adapter is copied into the new run dir so
+    that training resumes from the previously trained adapter rather than starting
+    from a fresh (zero-delta) initialisation.
 
     Args:
         args: Parsed command line arguments
 
     Returns:
-        Tuple of (run_dir, checkpoint_path)
+        Tuple of (run_dir, checkpoint_path, seed_lora_dir)
+        seed_lora_dir is the copied adapter directory, or None if not applicable.
 
     Raises:
         FileNotFoundError: If model or args.json not found
@@ -137,6 +184,17 @@ def setup_experiment(args: argparse.Namespace) -> tuple[Path, Path]:
     shutil.copy2(args.model_path, checkpoint_path)
     shutil.copy2(args_json_path, run_dir / "args.json")
 
+    # If a LoRA adapter exists next to model_path and --use_lora is requested,
+    # copy it into the new run dir so we can resume from the trained adapter.
+    seed_lora_dir: Path | None = None
+    if getattr(args, "use_lora", False):
+        src_lora = _find_lora_dir(args.model_path.parent)
+        if src_lora is not None:
+            seed_lora_dir = run_dir / "lora_seed"
+            shutil.copytree(src_lora, seed_lora_dir)
+            print(f"Found previous LoRA adapter: {src_lora}")
+            print(f"  → copied to {seed_lora_dir} (will resume from these weights)")
+
     # Save training arguments
     args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     with open(run_dir / "dpo_args.json", "w") as f:
@@ -144,7 +202,7 @@ def setup_experiment(args: argparse.Namespace) -> tuple[Path, Path]:
 
     print(f"Experiment directory: {run_dir}")
 
-    return run_dir, checkpoint_path
+    return run_dir, checkpoint_path, seed_lora_dir
 
 
 def collect_epoch_preferences(
@@ -153,6 +211,7 @@ def collect_epoch_preferences(
     model_args,
     train_npz_paths: list[str],
     ros_node: AnnotationRosServer | None = None,
+    drift_info: str = "",
 ) -> list[dict]:
     """Collect preferences for current epoch.
 
@@ -161,6 +220,7 @@ def collect_epoch_preferences(
         policy_model: Policy model for trajectory generation
         model_args: Model configuration
         train_npz_paths: List of training data paths
+        drift_info: Optional drift summary string to display in the annotation GUI.
 
     Returns:
         List of preference annotations
@@ -172,6 +232,7 @@ def collect_epoch_preferences(
             model_args,
             args.train_npz_list,
             target_count=len(train_npz_paths),
+            drift_info=drift_info,
         )
     elif args.preference_mode == "lichtblick":
         if ros_node is None:
@@ -203,13 +264,45 @@ def main():
     args = parse_args()
 
     # Setup experiment
-    run_dir, checkpoint_path = setup_experiment(args)
+    run_dir, checkpoint_path, seed_lora_dir = setup_experiment(args)
 
     # Load model
     policy_model, model_args = load_model(checkpoint_path, DEVICE)
 
-    # Create optimizer
-    optimizer = optim.AdamW(policy_model.parameters(), lr=args.learning_rate)
+    # Apply LoRA before creating the optimizer so the optimizer captures only the
+    # trainable LoRA parameters (A and B matrices), not the frozen base weights.
+    if args.use_lora:
+        if seed_lora_dir is not None:
+            # Resume from a previously trained LoRA adapter.  PeftModel.from_pretrained
+            # reads rank/alpha/dropout from the saved adapter_config.json so the CLI
+            # flags --lora_rank/--lora_alpha/--lora_dropout are intentionally ignored
+            # in this path to avoid silently changing the adapter architecture.
+            from preference_optimization.lora_utils import load_lora_checkpoint
+            policy_model = load_lora_checkpoint(policy_model, str(seed_lora_dir), is_trainable=True)
+            policy_model.print_trainable_parameters()
+            print(f"Resumed LoRA adapter from {seed_lora_dir}")
+        else:
+            from preference_optimization.lora_utils import apply_lora
+            policy_model = apply_lora(
+                policy_model,
+                r=args.lora_rank,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+            )
+
+    # Create optimizer over trainable parameters only
+    trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
+    optimizer = optim.AdamW(trainable_params, lr=args.learning_rate)
+
+    # When resuming a LoRA run, restore AdamW moments from the saved optimizer state
+    # so training continues with the same first/second moment estimates rather than
+    # resetting to zero (which would transiently change the effective learning rate).
+    if args.use_lora and seed_lora_dir is not None:
+        opt_path = seed_lora_dir / "optimizer.pth"
+        if opt_path.exists():
+            saved = torch.load(opt_path, map_location=DEVICE)
+            optimizer.load_state_dict(saved["optimizer"])
+            print(f"Resumed optimizer state from {opt_path} (epoch {saved['epoch']})")
 
     # Create trainer
     trainer = DPOTrainer(
@@ -220,6 +313,7 @@ def main():
         run_dir=run_dir,
         batch_size=args.batch_size,
         beta=args.beta,
+        use_lora=args.use_lora,
     )
 
     ros_node: AnnotationRosServer | None = None
@@ -254,18 +348,33 @@ def main():
 
     args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
 
+    # Drift summary from trainer; populated after epoch 1 baselines are saved.
+    drift_info: str = ""
+
     for epoch in range(1, args.train_epochs + 1):
         print(f"\nEpoch {epoch}/{args.train_epochs}")
         print("-" * 60)
 
+        if drift_info:
+            print(f"  {drift_info}")
+
         # Collect preferences
         preferences = collect_epoch_preferences(
-            args, policy_model, model_args, train_npz_paths, ros_node=ros_node
+            args, policy_model, model_args, train_npz_paths, ros_node=ros_node,
+            drift_info=drift_info,
         )
 
         if not preferences:
             print("No preferences collected. Skipping this epoch.")
             continue
+
+        # Snapshot the pre-training deterministic outputs for the annotated samples.
+        # Must be done BEFORE train_epoch so the baseline captures the current model
+        # state; compute_trajectory_drift (called after training) then measures the
+        # actual weight change produced by this epoch.
+        if epoch == 1:
+            print("Saving pre-training deterministic baselines...")
+            trainer.save_epoch1_baselines(preferences)
 
         # Train on preferences
         if ros_node is not None:
@@ -294,6 +403,10 @@ def main():
             )
 
         metrics = trainer.train_epoch(preferences, epoch, progress_callback=_progress_cb)
+
+        # Compute drift: compare current (post-training) model to the pre-training
+        # baselines saved above.  Displayed in the next annotation round.
+        drift_info = trainer.compute_trajectory_drift()
 
         # Visualize
         trainer.visualize_epoch(valid_loader, epoch)
