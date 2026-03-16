@@ -225,52 +225,6 @@ def convert_model(
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
 
-    # If a LoRA adapter directory exists, merge the adapter weights into the base
-    # model before export (W_merged = W_base + alpha/r * B @ A).
-    # Two layouts are supported:
-    #   (a) adapter_config.json sits next to the .pth (single-dir layout)
-    #   (b) DPO trainer layout: base .pth is in run_dir/ and LoRA adapter is in
-    #       run_dir/lora_latest/ (symlink) or run_dir/lora_epoch_NNN/
-    ckpt_dir = Path(ckpt_path).parent
-    lora_dir = None
-    if os.path.isfile(ckpt_dir / "adapter_config.json"):
-        lora_dir = str(ckpt_dir)
-    else:
-        # Look for lora_latest symlink or highest-numbered lora_epoch_* directory
-        lora_latest = ckpt_dir / "lora_latest"
-        if lora_latest.exists() and (lora_latest / "adapter_config.json").exists():
-            lora_dir = str(lora_latest.resolve())
-        else:
-            epoch_dirs = sorted(ckpt_dir.glob("lora_epoch_*"))
-            for d in reversed(epoch_dirs):
-                if (d / "adapter_config.json").exists():
-                    lora_dir = str(d)
-                    break
-
-    if lora_dir is not None:
-        import sys
-        _repo_root = str(Path(__file__).resolve().parent.parent)
-        if _repo_root not in sys.path:
-            sys.path.insert(0, _repo_root)
-        from peft import PeftModel
-        from preference_optimization.lora_utils import load_lora_checkpoint, merge_lora_and_unload
-        # Detect adapter format: new adapters target q/k/v/out_proj Linear sub-layers;
-        # old adapters target the MHA module directly (before UnfusedMHA migration).
-        with open(os.path.join(lora_dir, "adapter_config.json")) as _f:
-            _adapter_cfg = json.load(_f)
-        _target = _adapter_cfg.get("target_modules", "")
-        _is_new_format = isinstance(_target, str) and "q_proj" in _target
-        if _is_new_format:
-            model = load_lora_checkpoint(model, lora_dir, is_trainable=False)
-        else:
-            # Old-style MHA LoRA: load directly without UnfusedMHA replacement.
-            model = PeftModel.from_pretrained(model, lora_dir, is_trainable=False)
-        model = merge_lora_and_unload(model)
-        model.eval()
-        print(f"LoRA weights merged from {lora_dir} for ONNX export.")
-    else:
-        print("No LoRA adapter found; exporting base model weights only.")
-
     # Wrap model for onnx compatibility
     wrapper = ONNXWrapper(model).eval()
 
