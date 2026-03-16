@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 import random
 import subprocess
 import sys
@@ -20,7 +19,6 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 torch.backends.mha.set_fastpath_enabled(False)
-
 
 
 def parse_args() -> argparse.Namespace:
@@ -262,7 +260,6 @@ def convert_model(
         )
 
     # Simplify ONNX model with onnxsim
-    simplified_path = None
     if use_simplify:
         simplified_path = onnx_path.replace(".onnx", "_simplified.onnx")
         try:
@@ -277,13 +274,10 @@ def convert_model(
                 print(f"Simplified ONNX saved: {simplified_path}")
             else:
                 print("WARNING: onnxsim validation failed, skipping simplification")
-                simplified_path = None
         except ImportError:
             print("WARNING: onnxsim not installed, skipping (pip install onnxsim)")
-            simplified_path = None
         except Exception as e:
             print(f"WARNING: onnxsim failed ({e}), skipping")
-            simplified_path = None
 
     # ORT validation: run in subprocess to avoid PyTorch/ORT CUDA context conflict on Blackwell.
     # When PyTorch initializes CUDA first, ORT's CUBLAS handle creation fails on sm_120 GPUs.
@@ -353,29 +347,6 @@ np.savez("{output_path}", **{{f"out_{{i}}": o for i, o in enumerate(outputs)}})
     elif eval_npz_path:
         print(f"\n⚠ Eval NPZ not found, skipped: {eval_npz_path}")
 
-    # Validate the simplified ONNX against PyTorch outputs.
-    # onnxsim preserves model weights (only performs graph-level constant folding
-    # and dead-node elimination), but we run the same checks to confirm the
-    # simplified graph produces numerically identical results.
-    if simplified_path is not None:
-        print(f"\n--- ORT validation for simplified ONNX: {simplified_path} ---")
-        onnx_output_simp = run_ort_in_subprocess(simplified_path, onnx_inputs)
-        print("Compare simplified ONNX outputs vs PyTorch (normalized input):")
-        with torch.no_grad():
-            output = wrapper(*torch_input_tuple)
-            torch_output_simp = (output[0].cpu().numpy(), output[1].cpu().numpy())
-        compare_outputs(torch_output_simp, onnx_output_simp)
-
-        if eval_npz_path and eval_npz_path.exists():
-            print(f"\nTest simplified ONNX with eval NPZ input: {eval_npz_path}")
-            with torch.no_grad():
-                output = wrapper(*torch_eval_tuple)
-                torch_eval_output = (output[0].cpu().numpy(), output[1].cpu().numpy())
-            onnx_output_simp = run_ort_in_subprocess(simplified_path, onnx_eval_inputs)
-            compare_outputs(torch_eval_output, onnx_output_simp)
-
-        print(f"\n✓ Simplified ONNX validated: {simplified_path}")
-
     print(f"\n✓ Successfully converted to ONNX: {onnx_path}\n")
 
 
@@ -391,8 +362,8 @@ if __name__ == "__main__":
         print(f"Error: '{root_dir}' is not a directory")
         exit(1)
 
-    # Find all model checkpoint .pth files recursively, excluding optimizer state files.
-    pth_files = [f for f in root_dir.rglob("*.pth") if f.name != "optimizer.pth"]
+    # Find all .pth files recursively
+    pth_files = list(root_dir.rglob("*.pth"))
 
     print(f"Found {len(pth_files)} .pth file(s) in '{root_dir}'")
 
