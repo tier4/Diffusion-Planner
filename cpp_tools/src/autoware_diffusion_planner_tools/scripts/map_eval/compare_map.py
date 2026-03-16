@@ -50,7 +50,9 @@ def build_error_maps(
 ) -> ErrorMaps:
     """Build error maps from comparison rows for efficient lookup."""
     return ErrorMaps(
-        lane={int(r["entity_id"]): float(r["center_sym_hausdorff_like"]) for r in lane_rows},
+        lane={int(r["entity_id"]): max(float(r["center_sym_hausdorff_like"]), 
+                                       float(r["left_sym_hausdorff_like"]),
+                                       float(r["right_sym_hausdorff_like"])) for r in lane_rows},
         line={
             pair[0]: float(r["sym_hausdorff_like"])
             for r in line_rows
@@ -94,6 +96,14 @@ def points3_to_np(points: List[List[float]]) -> np.ndarray:
     if not points:
         return np.zeros((0, 3), dtype=np.float64)
     return np.asarray(points, dtype=np.float64)
+
+def points3_id_to_np(points: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
+    if not points:
+        return np.zeros((0, 4), dtype=np.int64), np.zeros((0, 3), dtype=np.float64)
+    ids = np.asarray([int(p["id"]) for p in points], dtype=np.int64)
+    pts = np.asarray([p['points'] for p in points], dtype=np.float64)
+    return ids, pts
+
 
 
 def polyline_segments_xy(poly: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -177,7 +187,12 @@ def symmetric_distance_stats(a: np.ndarray, b: np.ndarray) -> Dict:
     }
 
 
-def _points_to_error_dicts(pts: np.ndarray, errors: np.ndarray) -> List[Dict]:
+def _points_to_error_dicts(
+    pts: np.ndarray,
+    errors: np.ndarray,
+    point_ids: Optional[np.ndarray] = None,
+    boundary_type: Optional[str] = None,
+) -> List[Dict]:
     """Convert points and errors to list of dicts for JSON serialization.
 
     Args:
@@ -185,7 +200,7 @@ def _points_to_error_dicts(pts: np.ndarray, errors: np.ndarray) -> List[Dict]:
         errors: N-element array of error values
 
     Returns:
-        List of dicts with lat, lng, error keys
+        List of dicts with lat, lng, error and optional point_id/boundary_type keys
     """
     if len(pts) == 0 or len(errors) == 0:
         return []
@@ -193,8 +208,21 @@ def _points_to_error_dicts(pts: np.ndarray, errors: np.ndarray) -> List[Dict]:
         return []
     pts_array = np.column_stack([pts[:, 1], pts[:, 0], errors])
     valid_mask = np.isfinite(pts_array[:, 2])
-    pts_list = pts_array[valid_mask].tolist()
-    return [{"lat": float(p[0]), "lng": float(p[1]), "error": float(p[2])} for p in pts_list]
+    valid_points = pts_array[valid_mask]
+    point_ids_valid = point_ids[valid_mask] if point_ids is not None and len(point_ids) == len(pts) else None
+    out = []
+    for idx, p in enumerate(valid_points):
+        item = {
+            "lat": float(p[0]),
+            "lng": float(p[1]),
+            "error": float(p[2]),
+        }
+        if point_ids_valid is not None:
+            item["point_id"] = int(point_ids_valid[idx])
+        if boundary_type is not None:
+            item["boundary_type"] = boundary_type
+        out.append(item)
+    return out
 
 
 def _compute_point_errors_for_indexed_entities(
@@ -252,7 +280,13 @@ def compute_point_errors(
     Uses existing match_index from lane_rows, line_rows to find matches.
 
     Returns:
-        lane_point_errors: {lane_id: [{"lat": y, "lng": x, "error": float}, ...]}
+        lane_point_errors: {
+            lane_id: {
+                "centerline": [...],
+                "left_boundary": [...],
+                "right_boundary": [...],
+            }
+        }
         line_point_errors: {index: [{"lat": y, "lng": x, "error": float}, ...]}
     """
     # Build dictionary lookups for O(1) access
@@ -268,16 +302,25 @@ def compute_point_errors(
         if int_lane is None or ref_lane is None:
             continue
 
-        c_i = points3_to_np(int_lane["centerline"])
-        c_e = points3_to_np(ref_lane["centerline"])
-
-        if len(c_i) > 0 and len(c_e) > 0:
-            # Use directed distance for point-level visualization
-            # This shows where internal points deviate from reference, avoiding
-            # scalar broadcast from max reverse distance inflating all errors
-            d_ab = directed_polyline_distance_xy(c_i, c_e)
-
-            lane_point_errors[lane_id] = _points_to_error_dicts(c_i, d_ab)
+        lane_point_errors[lane_id] = {
+            "centerline": [],
+            "left_boundary": [],
+            "right_boundary": [],
+        }
+        for boundary_key in ("centerline", "left_boundary", "right_boundary"):
+            ref_ids, ref_pts = points3_id_to_np(ref_lane[boundary_key])
+            int_pts = points3_to_np(int_lane[boundary_key])
+            if len(ref_pts) == 0 or len(int_pts) == 0:
+                continue
+            # Compute reference -> internal errors. This is the direction with
+            # meaningful residuals in current preprocessing pipeline.
+            d_ref_to_int = directed_polyline_distance_xy(ref_pts, int_pts)
+            lane_point_errors[lane_id][boundary_key] = _points_to_error_dicts(
+                ref_pts,
+                d_ref_to_int,
+                point_ids=ref_ids,
+                boundary_type=boundary_key,
+            )
 
     # Use helper function for lines only (polygons don't need point error visualization)
     line_point_errors = _compute_point_errors_for_indexed_entities(
@@ -295,10 +338,9 @@ def compare_lane_segments(internal: Dict, reference: Dict) -> Tuple[Dict, List[D
     ref_by_id = {int(x["id"]): x for x in reference["lane_segments"]}
     matched_ids = sorted(set(int_by_id.keys()) & set(ref_by_id.keys()))
 
-    center_sym = []
-    left_sym = []
-    right_sym = []
     center_haus = []
+    left_haus = []
+    right_haus = []
     entity_rows = []
 
     for lane_id in matched_ids:
@@ -306,45 +348,45 @@ def compare_lane_segments(internal: Dict, reference: Dict) -> Tuple[Dict, List[D
         ref_lane = ref_by_id[lane_id]
 
         c_i = points3_to_np(i_lane["centerline"])
-        c_e = points3_to_np(ref_lane["centerline"])
+        c_e_ids, c_e = points3_id_to_np(ref_lane["centerline"])
         l_i = points3_to_np(i_lane["left_boundary"])
-        l_e = points3_to_np(ref_lane["left_boundary"])
+        l_e_ids, l_e = points3_id_to_np(ref_lane["left_boundary"])
         r_i = points3_to_np(i_lane["right_boundary"])
-        r_e = points3_to_np(ref_lane["right_boundary"])
+        r_e_ids, r_e = points3_id_to_np(ref_lane["right_boundary"])
 
         c_stats = symmetric_distance_stats(c_i, c_e)
         l_stats = symmetric_distance_stats(l_i, l_e)
         r_stats = symmetric_distance_stats(r_i, r_e)
 
-        center_sym.append(c_stats["symmetric_chamfer_like"])
-        left_sym.append(l_stats["symmetric_chamfer_like"])
-        right_sym.append(r_stats["symmetric_chamfer_like"])
         center_haus.append(c_stats["symmetric_hausdorff_like"])
+        left_haus.append(l_stats["symmetric_hausdorff_like"])
+        right_haus.append(r_stats["symmetric_hausdorff_like"])
 
         entity_rows.append(
             {
                 "entity_type": "lane_segment",
                 "entity_id": lane_id,
                 "match_index": -1,
-                "center_sym_chamfer_like": c_stats["symmetric_chamfer_like"],
                 "center_sym_hausdorff_like": c_stats["symmetric_hausdorff_like"],
-                "left_sym_chamfer_like": l_stats["symmetric_chamfer_like"],
-                "right_sym_chamfer_like": r_stats["symmetric_chamfer_like"],
+                "left_sym_hausdorff_like": l_stats["symmetric_hausdorff_like"],
+                "right_sym_hausdorff_like": r_stats["symmetric_hausdorff_like"],
             }
         )
 
     worst = sorted(entity_rows, key=lambda x: x["center_sym_hausdorff_like"], reverse=True)[:20]
-    haus_summary = summarize(center_haus)
+    haus_summary = summarize(center_haus + left_haus + right_haus)
     metrics = {
         "key_metric_symmetric_hausdorff_like_m": haus_summary,
-        "centerline_symmetric_chamfer_like_m": summarize(center_sym),
-        "centerline_symmetric_hausdorff_like_m": haus_summary,
-        "left_boundary_symmetric_chamfer_like_m": summarize(left_sym),
-        "right_boundary_symmetric_chamfer_like_m": summarize(right_sym),
+        "centerline_symmetric_hausdorff_like_m": summarize(center_haus),
+        "left_boundary_symmetric_hausdorff_like_m": summarize(left_haus),
+        "right_boundary_symmetric_hausdorff_like_m": summarize(right_haus),
         "pass_rate": {
             "centerline_symmetric_hausdorff_lt_0p2m": (
-                float(np.mean(np.asarray(center_haus) < 0.2)) if center_haus else 0.0
-            )
+                float(np.mean(np.asarray(center_haus) < 0.2)) if center_haus else 0.0),
+            "left_boundary_symmetric_hausdorff_lt_0p2m": (
+                float(np.mean(np.asarray(left_haus) < 0.2)) if left_haus else 0.0),
+            "right_boundary_symmetric_hausdorff_lt_0p2m": (
+                float(np.mean(np.asarray(right_haus) < 0.2)) if right_haus else 0.0),
         },
         "worst_k_centerline": worst,
     }
@@ -520,9 +562,15 @@ def make_static_plots(
 
     # Panel 1: Fused overlay (reference first, then internal)
     for lane in reference["lane_segments"]:
-        c = points3_to_np(lane["centerline"])
+        c_id, c = points3_id_to_np(lane["centerline"])
+        l_id, l = points3_id_to_np(lane["left_boundary"])
+        r_id, r = points3_id_to_np(lane["right_boundary"])
         if len(c):
             ax1.plot(c[:, 0], c[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
+        if len(l):
+            ax1.plot(l[:, 0], l[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
+        if len(r):
+            ax1.plot(r[:, 0], r[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
     for line_string in reference["line_strings"]:
         s = points3_to_np(line_string["points"])
         if len(s):
@@ -534,8 +582,14 @@ def make_static_plots(
 
     for lane in internal["lane_segments"]:
         c = points3_to_np(lane["centerline"])
+        r = points3_to_np(lane["right_boundary"])
+        l = points3_to_np(lane["left_boundary"])
         if len(c):
             ax1.plot(c[:, 0], c[:, 1], color="blue", alpha=0.55, linewidth=0.9)
+        if len(r):
+            ax1.plot(r[:, 0], r[:, 1], color="blue", alpha=0.55, linewidth=0.9)
+        if len(l):
+            ax1.plot(l[:, 0], l[:, 1], color="blue", alpha=0.55, linewidth=0.9)
     for i, line_string in enumerate(internal["line_strings"]):
         s = points3_to_np(line_string["points"])
         if len(s):
@@ -554,9 +608,17 @@ def make_static_plots(
     for lane in internal["lane_segments"]:
         lane_id = int(lane["id"])
         c = points3_to_np(lane["centerline"])
+        l = points3_to_np(lane["left_boundary"])
+        r = points3_to_np(lane["right_boundary"])
         if len(c):
             err = lane_error_map.get(lane_id, 0.0)
             ax2.plot(c[:, 0], c[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
+        if len(l):
+            err = lane_error_map.get(lane_id, 0.0)
+            ax2.plot(l[:, 0], l[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
+        if len(r):
+            err = lane_error_map.get(lane_id, 0.0)
+            ax2.plot(r[:, 0], r[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
     ax2.set_title("Lane Error Heatmap (Hausdorff)")
     ax2.set_aspect("equal")
     sm2 = matplotlib.cm.ScalarMappable(cmap=cmap, norm=norm_lane)
@@ -638,9 +700,17 @@ def render_html_dashboard(
 
     lanes_ref = []
     for lane in reference["lane_segments"]:
-        c = points3_to_np(lane["centerline"])
-        if len(c):
-            lanes_ref.append({"coordinates": _pts_to_coords(c)})
+        _, c = points3_id_to_np(lane["centerline"])
+        _, l = points3_id_to_np(lane["left_boundary"])
+        _, r = points3_id_to_np(lane["right_boundary"])
+        lane_id = int(lane["id"])
+        lane_geometries = {
+            "centerline": _pts_to_coords(c),
+            "left_boundary": _pts_to_coords(l),
+            "right_boundary": _pts_to_coords(r),
+        }
+        if lane_geometries["centerline"] or lane_geometries["left_boundary"] or lane_geometries["right_boundary"]:
+            lanes_ref.append({"id": lane_id, "geometries": lane_geometries})
     lines_ref = []
     for line_string in reference["line_strings"]:
         s = points3_to_np(line_string["points"])
@@ -685,17 +755,34 @@ def render_html_dashboard(
     lanes_int = []
     for lane in internal["lane_segments"]:
         c_i = points3_to_np(lane["centerline"])
-        if len(c_i):
-            lane_id = int(lane["id"])
-            ref_lane = ref_lanes_by_id.get(lane_id)
-            ref_coords = []
-            if ref_lane:
-                c_ref = points3_to_np(ref_lane["centerline"])
-                ref_coords = _pts_to_coords(c_ref)
+        l_i = points3_to_np(lane["left_boundary"])
+        r_i = points3_to_np(lane["right_boundary"])
+        lane_id = int(lane["id"])
+        ref_lane = ref_lanes_by_id.get(lane_id)
+        ref_geometries = {
+            "centerline": [],
+            "left_boundary": [],
+            "right_boundary": [],
+        }
+        if ref_lane:
+            _, c_ref = points3_id_to_np(ref_lane["centerline"])
+            _, l_ref = points3_id_to_np(ref_lane["left_boundary"])
+            _, r_ref = points3_id_to_np(ref_lane["right_boundary"])
+            ref_geometries = {
+                "centerline": _pts_to_coords(c_ref),
+                "left_boundary": _pts_to_coords(l_ref),
+                "right_boundary": _pts_to_coords(r_ref),
+            }
+        int_geometries = {
+            "centerline": _pts_to_coords(c_i),
+            "left_boundary": _pts_to_coords(l_i),
+            "right_boundary": _pts_to_coords(r_i),
+        }
+        if int_geometries["centerline"] or int_geometries["left_boundary"] or int_geometries["right_boundary"]:
             lanes_int.append(
                 {
-                    "coordinates": _pts_to_coords(c_i),
-                    "ref_coordinates": ref_coords,
+                    "geometries": int_geometries,
+                    "ref_geometries": ref_geometries,
                     "id": lane_id,
                     "hausdorff": lane_error_map.get(lane_id, 0.0),
                 }
