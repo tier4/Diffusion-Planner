@@ -13,12 +13,31 @@ class SegmentAugmentationResultTorch:
     query_heading: torch.Tensor
     progress: torch.Tensor
     exact_speed: torch.Tensor
+    exact_acceleration: torch.Tensor
+    exact_jerk: torch.Tensor
     distance_profile: torch.Tensor
     segment_time: torch.Tensor
+    connect_time_s: float
     merge_centerline_s: float
     merge_path_length_m: float
     connect_distance_budget_m: float
     connect_speed_scale: float
+
+
+@dataclass
+class PreparedDirectedSegmentTorch:
+    segment_xy: torch.Tensor
+    segment_heading: torch.Tensor
+    segment_time: torch.Tensor
+    center_s: torch.Tensor
+    center_heading: torch.Tensor
+    center_curvature: torch.Tensor
+    progress_samples: torch.Tensor
+    progress_time_lookup: torch.Tensor
+    total_distance_m: torch.Tensor
+    dense_ds: float
+    gt_exact_speed_profile: torch.Tensor
+    gt_longitudinal_jerk_profile: torch.Tensor
 
 
 @dataclass
@@ -49,6 +68,21 @@ class AugmentedSampleTorchResult:
     future_segment: SegmentAugmentationResultTorch
     past_connect_time_s: float
     future_recover_time_s: float
+
+
+@dataclass
+class BidirectionalAugmentationContextTorch:
+    original_full_xy: torch.Tensor
+    original_full_heading: torch.Tensor
+    full_time: torch.Tensor
+    current_index: int
+    past_len: int
+    future_len: int
+    future_segment: PreparedDirectedSegmentTorch
+    past_segment: PreparedDirectedSegmentTorch
+    gt_window_arc_speed: torch.Tensor
+    gt_window_lateral_accel: torch.Tensor
+    gt_window_longitudinal_jerk: torch.Tensor
 
 
 def vector_transform(vector, transform_mat, bias=None):
@@ -98,11 +132,16 @@ def cumulative_distance_torch(xy: torch.Tensor) -> torch.Tensor:
 
 
 def strictly_increasing_param_torch(param: torch.Tensor) -> torch.Tensor:
-    fixed = param.clone()
-    for idx in range(1, fixed.shape[0]):
-        if fixed[idx] <= fixed[idx - 1]:
-            fixed[idx] = fixed[idx - 1] + 1.0e-6
-    return fixed
+    if param.numel() < 2:
+        return param
+    if bool(torch.all(param[1:] > param[:-1])):
+        return param
+
+    eps = param.new_tensor(1.0e-6)
+    offset = eps * torch.arange(param.shape[0], device=param.device, dtype=param.dtype)
+    base = param - offset
+    fixed_base = torch.cummax(base, dim=0)[0]
+    return fixed_base + offset
 
 
 def interp1d_torch(x: torch.Tensor, y: torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
@@ -143,6 +182,46 @@ def build_progress_time_lookup_torch(
     return progress[keep], time[keep]
 
 
+def build_longitudinal_gt_profiles_torch(
+    distance_profile: torch.Tensor,
+    time: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    gt_exact_speed_profile = speed_from_progress_torch(distance_profile, time)
+    gt_acceleration_profile = acceleration_from_speed_torch(gt_exact_speed_profile, time)
+    gt_longitudinal_jerk_profile = jerk_from_acceleration_torch(gt_acceleration_profile, time)
+    return gt_exact_speed_profile, gt_longitudinal_jerk_profile
+
+
+def make_prepared_directed_segment_torch(
+    segment_xy: torch.Tensor,
+    segment_heading: torch.Tensor,
+    segment_time: torch.Tensor,
+    dense_ds: float,
+) -> PreparedDirectedSegmentTorch:
+    center_s = cumulative_distance_torch(segment_xy)
+    center_heading = normalize_angle_torch(segment_heading)
+    center_curvature = curvature_from_xy_torch(segment_xy, center_s)
+    progress_samples, progress_time_lookup = build_progress_time_lookup_torch(center_s, segment_time)
+    gt_exact_speed_profile, gt_longitudinal_jerk_profile = build_longitudinal_gt_profiles_torch(
+        center_s,
+        segment_time,
+    )
+    return PreparedDirectedSegmentTorch(
+        segment_xy=segment_xy,
+        segment_heading=segment_heading,
+        segment_time=segment_time,
+        center_s=center_s,
+        center_heading=center_heading,
+        center_curvature=center_curvature,
+        progress_samples=progress_samples,
+        progress_time_lookup=progress_time_lookup,
+        total_distance_m=center_s[-1],
+        dense_ds=dense_ds,
+        gt_exact_speed_profile=gt_exact_speed_profile,
+        gt_longitudinal_jerk_profile=gt_longitudinal_jerk_profile,
+    )
+
+
 def heading_from_positions_torch(
     xy: torch.Tensor, fallback_heading: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -177,7 +256,8 @@ def heading_from_positions_torch(
 def speed_from_progress_torch(progress: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
     if time.shape[0] < 3:
         return torch.zeros_like(time)
-    time = strictly_increasing_param_torch(time)
+    if not bool(torch.all(time[1:] > time[:-1])):
+        time = strictly_increasing_param_torch(time)
     speed = torch.zeros_like(progress)
     speed[0] = (progress[1] - progress[0]) / (time[1] - time[0])
     speed[-1] = (progress[-1] - progress[-2]) / (time[-1] - time[-2])
@@ -196,7 +276,8 @@ def jerk_from_acceleration_torch(acceleration: torch.Tensor, time: torch.Tensor)
 def curvature_from_xy_torch(xy: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
     if xy.shape[0] < 3:
         return torch.zeros(xy.shape[0], dtype=xy.dtype, device=xy.device)
-    param = strictly_increasing_param_torch(param)
+    if not bool(torch.all(param[1:] > param[:-1])):
+        param = strictly_increasing_param_torch(param)
     dx = torch.gradient(xy[:, 0], spacing=(param,), edge_order=2)[0]
     dy = torch.gradient(xy[:, 1], spacing=(param,), edge_order=2)[0]
     ddx = torch.gradient(dx, spacing=(param,), edge_order=2)[0]
@@ -205,12 +286,8 @@ def curvature_from_xy_torch(xy: torch.Tensor, param: torch.Tensor) -> torch.Tens
     return (dx * ddy - dy * ddx) / denom
 
 
-def quintic_decay_torch(unit_s: torch.Tensor) -> torch.Tensor:
-    u = torch.clamp(unit_s, 0.0, 1.0)
-    return 1.0 - 10.0 * u**3 + 15.0 * u**4 - 6.0 * u**5
-
-
-def solve_lateral_profile_coeffs_torch(
+def lateral_offset_profile_torch(
+    s: torch.Tensor,
     s_merge: torch.Tensor,
     lateral_offset: torch.Tensor,
     heading_offset: torch.Tensor,
@@ -218,42 +295,25 @@ def solve_lateral_profile_coeffs_torch(
     if s_merge <= 0.0:
         raise ValueError("s_merge must be positive.")
 
-    length = s_merge
-    a0 = lateral_offset
-    a1 = torch.tan(heading_offset)
-    a2 = torch.zeros((), dtype=length.dtype, device=length.device)
-
-    system = torch.stack(
-        [
-            torch.stack([length**3, length**4, length**5]),
-            torch.stack([3.0 * length**2, 4.0 * length**3, 5.0 * length**4]),
-            torch.stack([6.0 * length, 12.0 * length**2, 20.0 * length**3]),
-        ]
-    )
-    rhs = torch.stack(
-        [
-            -(a0 + a1 * length + a2 * length**2),
-            -(a1 + 2.0 * a2 * length),
-            -(2.0 * a2),
-        ]
-    )
-    a3_to_a5 = torch.linalg.solve(system, rhs)
-    return torch.stack([a0, a1, a2, a3_to_a5[0], a3_to_a5[1], a3_to_a5[2]])
+    unit_s = torch.clamp(s / s_merge, 0.0, 1.0)
+    offset_basis = 1.0 - 10.0 * unit_s**3 + 15.0 * unit_s**4 - 6.0 * unit_s**5
+    heading_basis = unit_s - 6.0 * unit_s**3 + 8.0 * unit_s**4 - 3.0 * unit_s**5
+    return lateral_offset * offset_basis + torch.tan(heading_offset) * s_merge * heading_basis
 
 
-def lateral_offset_profile_torch(
+def lateral_offset_profile_derivative_torch(
     s: torch.Tensor,
     s_merge: torch.Tensor,
     lateral_offset: torch.Tensor,
     heading_offset: torch.Tensor,
 ) -> torch.Tensor:
-    coeffs = solve_lateral_profile_coeffs_torch(
-        s_merge=s_merge,
-        lateral_offset=lateral_offset,
-        heading_offset=heading_offset,
-    )
-    powers = torch.stack([s**idx for idx in range(6)], dim=-1)
-    return powers @ coeffs
+    if s_merge <= 0.0:
+        raise ValueError("s_merge must be positive.")
+
+    unit_s = torch.clamp(s / s_merge, 0.0, 1.0)
+    offset_basis_prime = (-30.0 * unit_s**2 + 60.0 * unit_s**3 - 30.0 * unit_s**4) / s_merge
+    heading_basis_prime = 1.0 - 18.0 * unit_s**2 + 32.0 * unit_s**3 - 15.0 * unit_s**4
+    return lateral_offset * offset_basis_prime + torch.tan(heading_offset) * heading_basis_prime
 
 
 def sample_centerline_torch(
@@ -298,21 +358,47 @@ def build_offset_path_torch(
 def merge_path_length_torch(
     center_xy: torch.Tensor,
     center_heading: torch.Tensor,
+    center_curvature: torch.Tensor,
     center_s: torch.Tensor,
     s_merge: torch.Tensor,
     lateral_offset: torch.Tensor,
     heading_offset: torch.Tensor,
     dense_ds: float,
 ) -> torch.Tensor:
-    _, path_sigma, _ = build_offset_path_torch(
-        center_xy, center_heading, center_s, s_merge, lateral_offset, heading_offset, dense_ds
+    if s_merge <= 0.0:
+        raise ValueError("s_merge must be positive.")
+
+    device = center_s.device
+    dtype = center_s.dtype
+    dense_s = torch.arange(0.0, float(s_merge.item()), dense_ds, device=device, dtype=dtype)
+    if dense_s.numel() == 0 or not torch.isclose(dense_s[-1], s_merge):
+        dense_s = torch.cat([dense_s, s_merge.unsqueeze(0)])
+
+    curvature = interp1d_torch(center_s, center_curvature, dense_s)
+
+    offset = lateral_offset_profile_torch(
+        dense_s,
+        torch.clamp(s_merge, min=1.0e-6),
+        lateral_offset,
+        heading_offset,
     )
-    return path_sigma[-1]
+    offset_prime = lateral_offset_profile_derivative_torch(
+        dense_s,
+        torch.clamp(s_merge, min=1.0e-6),
+        lateral_offset,
+        heading_offset,
+    )
+    integrand = torch.sqrt(
+        torch.clamp((1.0 - curvature * offset) ** 2 + offset_prime * offset_prime, min=1.0e-12)
+    )
+    ds = torch.diff(dense_s)
+    return torch.sum(0.5 * (integrand[:-1] + integrand[1:]) * ds)
 
 
 def solve_merge_centerline_s_torch(
     center_xy: torch.Tensor,
     center_heading: torch.Tensor,
+    center_curvature: torch.Tensor,
     center_s: torch.Tensor,
     distance_budget: torch.Tensor,
     lateral_offset: torch.Tensor,
@@ -333,14 +419,28 @@ def solve_merge_centerline_s_torch(
 
     while lower > dense_ds * 1.0e-3:
         length_lower = merge_path_length_torch(
-            center_xy, center_heading, center_s, lower, lateral_offset, heading_offset, dense_ds
+            center_xy,
+            center_heading,
+            center_curvature,
+            center_s,
+            lower,
+            lateral_offset,
+            heading_offset,
+            dense_ds,
         )
         if length_lower < distance_budget:
             break
         lower = lower * 0.5
 
     upper_length = merge_path_length_torch(
-        center_xy, center_heading, center_s, upper, lateral_offset, heading_offset, dense_ds
+        center_xy,
+        center_heading,
+        center_curvature,
+        center_s,
+        upper,
+        lateral_offset,
+        heading_offset,
+        dense_ds,
     )
     if upper_length < distance_budget:
         raise RuntimeError("Unable to find a feasible merge point within the distance budget.")
@@ -348,7 +448,14 @@ def solve_merge_centerline_s_torch(
     for _ in range(50):
         mid = 0.5 * (lower + upper)
         mid_length = merge_path_length_torch(
-            center_xy, center_heading, center_s, mid, lateral_offset, heading_offset, dense_ds
+            center_xy,
+            center_heading,
+            center_curvature,
+            center_s,
+            mid,
+            lateral_offset,
+            heading_offset,
+            dense_ds,
         )
         if mid_length < distance_budget:
             lower = mid
@@ -414,33 +521,27 @@ def sample_dense_path_torch(
     return xy, heading
 
 
-def augment_segment_torch(
-    segment_xy: torch.Tensor,
-    segment_heading: torch.Tensor,
-    segment_time: torch.Tensor,
+def augment_segment_prepared_torch(
+    prepared: PreparedDirectedSegmentTorch,
     lateral_offset: torch.Tensor,
     heading_offset: torch.Tensor,
     connect_time_s: float,
-    dense_ds: float,
 ) -> SegmentAugmentationResultTorch:
-    center_s = cumulative_distance_torch(segment_xy)
-    # Use GT heading directly so past-bridge generation keeps the same lateral
-    # offset convention even when the past segment is traversed in reverse.
-    center_heading = normalize_angle_torch(segment_heading)
-    connect_time = torch.tensor(connect_time_s, dtype=segment_xy.dtype, device=segment_xy.device)
-    connect_time = torch.clamp(connect_time, min=segment_time[0], max=segment_time[-1])
-    distance_budget = interp1d_torch(segment_time, center_s, connect_time.unsqueeze(0))[0]
-    progress_samples, progress_time_lookup = build_progress_time_lookup_torch(center_s, segment_time)
-    total_distance = center_s[-1]
-
+    connect_time = torch.tensor(
+        connect_time_s, dtype=prepared.segment_xy.dtype, device=prepared.segment_xy.device
+    )
+    connect_time = torch.clamp(connect_time, min=prepared.segment_time[0], max=prepared.segment_time[-1])
+    distance_budget = interp1d_torch(
+        prepared.segment_time, prepared.center_s, connect_time.unsqueeze(0)
+    )[0]
     path_xy_candidate, path_sigma_candidate, path_heading_candidate = build_offset_path_torch(
-        center_xy=segment_xy,
-        center_heading=center_heading,
-        center_s=center_s,
+        center_xy=prepared.segment_xy,
+        center_heading=prepared.center_heading,
+        center_s=prepared.center_s,
         s_merge=distance_budget,
         lateral_offset=lateral_offset,
         heading_offset=heading_offset,
-        dense_ds=dense_ds,
+        dense_ds=prepared.dense_ds,
     )
     candidate_length = path_sigma_candidate[-1]
 
@@ -452,61 +553,102 @@ def augment_segment_torch(
         speed_scale = candidate_length / torch.clamp(distance_budget, min=1.0e-6)
     else:
         s_merge, merge_xy, merge_sigma, merge_heading = solve_merge_centerline_s_torch(
-            center_xy=segment_xy,
-            center_heading=center_heading,
-            center_s=center_s,
+            center_xy=prepared.segment_xy,
+            center_heading=prepared.center_heading,
+            center_curvature=prepared.center_curvature,
+            center_s=prepared.center_s,
             distance_budget=distance_budget,
             lateral_offset=lateral_offset,
             heading_offset=heading_offset,
-            dense_ds=dense_ds,
+            dense_ds=prepared.dense_ds,
         )
-        speed_scale = torch.tensor(1.0, dtype=segment_xy.dtype, device=segment_xy.device)
+        speed_scale = torch.tensor(
+            1.0, dtype=prepared.segment_xy.dtype, device=prepared.segment_xy.device
+        )
 
     dense_full_xy, dense_full_sigma, dense_full_heading = build_full_augmented_path_torch(
-        center_xy=segment_xy,
-        center_heading=center_heading,
-        center_s=center_s,
+        center_xy=prepared.segment_xy,
+        center_heading=prepared.center_heading,
+        center_s=prepared.center_s,
         merge_xy=merge_xy,
         merge_sigma=merge_sigma,
         merge_heading=merge_heading,
         s_merge=s_merge,
-        total_distance_m=total_distance,
-        dense_ds=dense_ds,
+        total_distance_m=prepared.total_distance_m,
+        dense_ds=prepared.dense_ds,
     )
 
-    connect_mask = segment_time <= connect_time + 1.0e-6
-    progress = torch.zeros_like(segment_time)
+    connect_mask = prepared.segment_time <= connect_time + 1.0e-6
+    progress = torch.zeros_like(prepared.segment_time)
     if distance_budget > 1.0e-9:
-        progress[connect_mask] = speed_scale * center_s[connect_mask]
+        progress[connect_mask] = speed_scale * prepared.center_s[connect_mask]
     else:
         progress[connect_mask] = 0.0
 
     continue_mask = ~connect_mask
     if torch.any(continue_mask):
         merge_time_on_gt = interp1d_torch(
-            progress_samples, progress_time_lookup, s_merge.unsqueeze(0)
+            prepared.progress_samples,
+            prepared.progress_time_lookup,
+            s_merge.unsqueeze(0),
         )[0]
-        shifted_gt_time = merge_time_on_gt + (segment_time[continue_mask] - connect_time)
-        shifted_gt_time = torch.clamp(shifted_gt_time, min=segment_time[0], max=segment_time[-1])
-        centerline_progress = interp1d_torch(segment_time, center_s, shifted_gt_time)
+        shifted_gt_time = merge_time_on_gt + (prepared.segment_time[continue_mask] - connect_time)
+        shifted_gt_time = torch.clamp(
+            shifted_gt_time,
+            min=prepared.segment_time[0],
+            max=prepared.segment_time[-1],
+        )
+        centerline_progress = interp1d_torch(
+            prepared.segment_time,
+            prepared.center_s,
+            shifted_gt_time,
+        )
         progress[continue_mask] = merge_sigma[-1] + (centerline_progress - s_merge)
 
     progress = torch.clamp(progress, min=0.0, max=dense_full_sigma[-1])
     query_xy, query_heading = sample_dense_path_torch(
         dense_full_sigma, dense_full_xy, dense_full_heading, progress
     )
-    exact_speed = speed_from_progress_torch(progress, segment_time)
+    exact_speed = speed_from_progress_torch(progress, prepared.segment_time)
+    exact_acceleration = acceleration_from_speed_torch(exact_speed, prepared.segment_time)
+    exact_jerk = jerk_from_acceleration_torch(exact_acceleration, prepared.segment_time)
     return SegmentAugmentationResultTorch(
         query_xy=query_xy,
         query_heading=query_heading,
         progress=progress,
         exact_speed=exact_speed,
-        distance_profile=center_s,
-        segment_time=segment_time,
+        exact_acceleration=exact_acceleration,
+        exact_jerk=exact_jerk,
+        distance_profile=prepared.center_s,
+        segment_time=prepared.segment_time,
+        connect_time_s=float(connect_time.item()),
         merge_centerline_s=float(s_merge.item()),
         merge_path_length_m=float(merge_sigma[-1].item()),
         connect_distance_budget_m=float(distance_budget.item()),
         connect_speed_scale=float(speed_scale.item()),
+    )
+
+
+def augment_segment_torch(
+    segment_xy: torch.Tensor,
+    segment_heading: torch.Tensor,
+    segment_time: torch.Tensor,
+    lateral_offset: torch.Tensor,
+    heading_offset: torch.Tensor,
+    connect_time_s: float,
+    dense_ds: float,
+) -> SegmentAugmentationResultTorch:
+    prepared = make_prepared_directed_segment_torch(
+        segment_xy=segment_xy,
+        segment_heading=segment_heading,
+        segment_time=segment_time,
+        dense_ds=dense_ds,
+    )
+    return augment_segment_prepared_torch(
+        prepared=prepared,
+        lateral_offset=lateral_offset,
+        heading_offset=heading_offset,
+        connect_time_s=connect_time_s,
     )
 
 
@@ -528,25 +670,18 @@ def generate_time_candidates(
 
 def segment_kinematics_torch(
     segment_result: SegmentAugmentationResultTorch,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    gt_speed = speed_from_progress_torch(
-        segment_result.distance_profile, segment_result.segment_time
-    )
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    gt_speed = speed_from_progress_torch(segment_result.distance_profile, segment_result.segment_time)
     augmented_speed = segment_result.exact_speed
     gt_acceleration = acceleration_from_speed_torch(gt_speed, segment_result.segment_time)
-    augmented_acceleration = acceleration_from_speed_torch(
-        augmented_speed, segment_result.segment_time
-    )
     gt_jerk = jerk_from_acceleration_torch(gt_acceleration, segment_result.segment_time)
-    augmented_jerk = jerk_from_acceleration_torch(
-        augmented_acceleration, segment_result.segment_time
-    )
+    augmented_jerk = segment_result.exact_jerk
     return gt_speed, augmented_speed, gt_jerk, augmented_jerk
 
 
 def bridge_constraint_series_torch(
     sample_result: AugmentedSampleTorchResult,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     past_gt_speed, past_aug_speed, past_gt_jerk, past_aug_jerk = segment_kinematics_torch(
         sample_result.past_segment
     )
@@ -567,6 +702,287 @@ def bridge_constraint_series_torch(
     gt_arc_speed = torch.cat([past_gt_speed.flip(0)[:-1], future_gt_speed], dim=0)
     augmented_arc_speed = torch.cat([past_aug_speed.flip(0)[:-1], future_aug_speed], dim=0)
     return gt_arc_speed, augmented_arc_speed, bridge_speed_gap, augmented_jerk
+
+
+def window_series_from_segments_torch(
+    past_series: torch.Tensor,
+    future_series: torch.Tensor,
+) -> torch.Tensor:
+    return torch.cat([past_series.flip(0)[:-1], future_series], dim=0)
+
+
+def build_window_gt_metrics_torch(
+    original_full_xy: torch.Tensor,
+    future_segment: PreparedDirectedSegmentTorch,
+    past_segment: PreparedDirectedSegmentTorch,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    gt_window_arc_speed = window_series_from_segments_torch(
+        past_segment.gt_exact_speed_profile,
+        future_segment.gt_exact_speed_profile,
+    )
+    original_sigma = cumulative_distance_torch(original_full_xy)
+    gt_curvature = curvature_from_xy_torch(original_full_xy, original_sigma)
+    gt_window_lateral_accel = lateral_acceleration_from_speed_and_curvature_torch(
+        gt_window_arc_speed,
+        gt_curvature,
+    )
+    gt_window_longitudinal_jerk = window_series_from_segments_torch(
+        past_segment.gt_longitudinal_jerk_profile,
+        future_segment.gt_longitudinal_jerk_profile,
+    )
+    return gt_window_arc_speed, gt_window_lateral_accel, gt_window_longitudinal_jerk
+
+
+def make_bidirectional_context_torch(
+    original_full_xy: torch.Tensor,
+    original_full_heading: torch.Tensor,
+    full_time: torch.Tensor,
+    current_index: int,
+    past_len: int,
+    future_len: int,
+    future_segment: PreparedDirectedSegmentTorch,
+    past_segment: PreparedDirectedSegmentTorch,
+) -> BidirectionalAugmentationContextTorch:
+    gt_window_arc_speed, gt_window_lateral_accel, gt_window_longitudinal_jerk = (
+        build_window_gt_metrics_torch(
+            original_full_xy=original_full_xy,
+            future_segment=future_segment,
+            past_segment=past_segment,
+        )
+    )
+    return BidirectionalAugmentationContextTorch(
+        original_full_xy=original_full_xy,
+        original_full_heading=original_full_heading,
+        full_time=full_time,
+        current_index=current_index,
+        past_len=past_len,
+        future_len=future_len,
+        future_segment=future_segment,
+        past_segment=past_segment,
+        gt_window_arc_speed=gt_window_arc_speed,
+        gt_window_lateral_accel=gt_window_lateral_accel,
+        gt_window_longitudinal_jerk=gt_window_longitudinal_jerk,
+    )
+
+
+def prepare_bidirectional_context_torch(
+    ego_past: torch.Tensor,
+    ego_current_state: torch.Tensor,
+    ego_future: torch.Tensor,
+    dense_sample_ds: float,
+) -> BidirectionalAugmentationContextTorch:
+    dt = TIME_INTERVAL
+    dtype = ego_past.dtype
+    device = ego_past.device
+
+    past_len = ego_past.shape[0]
+    future_len = ego_future.shape[0]
+
+    past_xy = ego_past[:, :2].clone()
+    past_heading = torch.atan2(ego_past[:, 3], ego_past[:, 2]).clone()
+    current_xy = ego_current_state[:2].clone()
+    current_heading = torch.atan2(ego_current_state[3], ego_current_state[2]).clone()
+    future_xy = ego_future[:, :2].clone()
+    future_heading = ego_future[:, 2].clone()
+
+    past_xy[-1] = current_xy
+    past_heading[-1] = current_heading
+
+    future_segment_xy = torch.cat([current_xy.unsqueeze(0), future_xy], dim=0)
+    future_segment_heading = torch.cat([current_heading.unsqueeze(0), future_heading], dim=0)
+    future_time = torch.arange(
+        0.0, (future_len + 1) * dt, dt, dtype=dtype, device=device
+    )
+
+    past_segment_xy = torch.flip(past_xy, dims=[0])
+    past_segment_heading = torch.flip(past_heading, dims=[0])
+    past_time = torch.arange(0.0, past_len * dt, dt, dtype=dtype, device=device)
+
+    original_full_xy = torch.cat([past_xy[:-1], future_segment_xy], dim=0)
+    original_full_heading = torch.cat(
+        [past_heading[:-1], current_heading.unsqueeze(0), future_heading],
+        dim=0,
+    )
+    full_time = torch.arange(
+        -(past_len - 1) * dt,
+        (future_len + 1) * dt,
+        dt,
+        dtype=dtype,
+        device=device,
+    )
+
+    future_segment = make_prepared_directed_segment_torch(
+        segment_xy=future_segment_xy,
+        segment_heading=future_segment_heading,
+        segment_time=future_time,
+        dense_ds=dense_sample_ds,
+    )
+    past_segment = make_prepared_directed_segment_torch(
+        segment_xy=past_segment_xy,
+        segment_heading=past_segment_heading,
+        segment_time=past_time,
+        dense_ds=dense_sample_ds,
+    )
+    return make_bidirectional_context_torch(
+        original_full_xy=original_full_xy,
+        original_full_heading=original_full_heading,
+        full_time=full_time,
+        current_index=past_len - 1,
+        past_len=past_len,
+        future_len=future_len,
+        future_segment=future_segment,
+        past_segment=past_segment,
+    )
+
+
+def evaluate_constraints_from_segments_torch(
+    context: BidirectionalAugmentationContextTorch,
+    past_result: SegmentAugmentationResultTorch,
+    future_result: SegmentAugmentationResultTorch,
+    max_lateral_accel_mps2: float,
+    max_bridge_speed_gap_mps: float,
+    max_bridge_jerk_mps3: float,
+) -> ConstraintDiagnosticsTorch:
+    augmented_arc_speed = window_series_from_segments_torch(
+        past_result.exact_speed,
+        future_result.exact_speed,
+    )
+    augmented_full_xy = window_series_from_segments_torch(
+        past_result.query_xy,
+        future_result.query_xy,
+    )
+    augmented_sigma = cumulative_distance_torch(augmented_full_xy)
+    augmented_curvature = curvature_from_xy_torch(augmented_full_xy, augmented_sigma)
+    augmented_lateral_accel = lateral_acceleration_from_speed_and_curvature_torch(
+        augmented_arc_speed,
+        augmented_curvature,
+    )
+    max_abs_augmented_lateral_accel = float(torch.max(torch.abs(augmented_lateral_accel)).item())
+
+    bridge_speed_gap = window_series_from_segments_torch(
+        torch.abs(past_result.exact_speed - context.past_segment.gt_exact_speed_profile),
+        torch.abs(future_result.exact_speed - context.future_segment.gt_exact_speed_profile),
+    )
+    augmented_longitudinal_jerk = window_series_from_segments_torch(
+        past_result.exact_jerk,
+        future_result.exact_jerk,
+    )
+    bridge_mask = (
+        (context.full_time >= -past_result.connect_time_s - 1.0e-9)
+        & (context.full_time <= future_result.connect_time_s + 1.0e-9)
+    )
+    max_speed_gap = 0.0
+    max_abs_bridge_jerk = 0.0
+    if torch.any(bridge_mask):
+        max_speed_gap = float(torch.max(bridge_speed_gap[bridge_mask]).item())
+        max_abs_bridge_jerk = float(torch.max(torch.abs(augmented_longitudinal_jerk[bridge_mask])).item())
+
+    lateral_accel_passes = max_abs_augmented_lateral_accel <= max_lateral_accel_mps2 + 1.0e-9
+    speed_gap_passes = max_speed_gap <= max_bridge_speed_gap_mps + 1.0e-9
+    jerk_passes = max_abs_bridge_jerk <= max_bridge_jerk_mps3 + 1.0e-9
+
+    return ConstraintDiagnosticsTorch(
+        max_abs_augmented_lateral_accel_mps2=max_abs_augmented_lateral_accel,
+        max_bridge_speed_gap_mps=max_speed_gap,
+        max_abs_bridge_jerk_mps3=max_abs_bridge_jerk,
+        lateral_accel_limit_mps2=max_lateral_accel_mps2,
+        speed_gap_limit_mps=max_bridge_speed_gap_mps,
+        jerk_limit_mps3=max_bridge_jerk_mps3,
+        lateral_accel_passes=lateral_accel_passes,
+        speed_gap_passes=speed_gap_passes,
+        jerk_passes=jerk_passes,
+        passes=lateral_accel_passes and speed_gap_passes and jerk_passes,
+    )
+
+
+def assemble_augmented_sample_from_segments_torch(
+    context: BidirectionalAugmentationContextTorch,
+    ego_current_state: torch.Tensor,
+    past_result: SegmentAugmentationResultTorch,
+    future_result: SegmentAugmentationResultTorch,
+    past_connect_time_s: float,
+    future_recover_time_s: float,
+    wheel_base: float,
+) -> AugmentedSampleTorchResult:
+    dt = TIME_INTERVAL
+    dtype = ego_current_state.dtype
+    device = ego_current_state.device
+
+    aug_past_xy = torch.flip(past_result.query_xy, dims=[0])
+    full_xy = torch.cat([aug_past_xy[:-1], future_result.query_xy], dim=0)
+    full_heading = heading_from_positions_torch(
+        full_xy,
+        fallback_heading=context.original_full_heading,
+    )
+
+    aug_past_heading = full_heading[: context.past_len]
+    aug_future_heading = full_heading[context.past_len :]
+
+    aug_past_4d = torch.stack(
+        [
+            aug_past_xy[:, 0],
+            aug_past_xy[:, 1],
+            torch.cos(aug_past_heading),
+            torch.sin(aug_past_heading),
+        ],
+        dim=-1,
+    )
+    aug_future_3d = torch.stack(
+        [full_xy[context.past_len :, 0], full_xy[context.past_len :, 1], aug_future_heading],
+        dim=-1,
+    )
+
+    current_index = context.current_index
+    if current_index == 0:
+        velocity = (full_xy[1] - full_xy[0]) / dt
+        acceleration = torch.zeros(2, dtype=dtype, device=device)
+        yaw_rate = normalize_angle_torch(full_heading[1] - full_heading[0]) / dt
+    elif current_index == full_xy.shape[0] - 1:
+        velocity = (full_xy[-1] - full_xy[-2]) / dt
+        acceleration = torch.zeros(2, dtype=dtype, device=device)
+        yaw_rate = normalize_angle_torch(full_heading[-1] - full_heading[-2]) / dt
+    else:
+        velocity = (full_xy[current_index + 1] - full_xy[current_index - 1]) / (2.0 * dt)
+        acceleration = (
+            full_xy[current_index + 1]
+            - 2.0 * full_xy[current_index]
+            + full_xy[current_index - 1]
+        ) / (dt**2)
+        yaw_rate = normalize_angle_torch(
+            full_heading[current_index + 1] - full_heading[current_index - 1]
+        ) / (2.0 * dt)
+
+    speed = torch.linalg.norm(velocity)
+    steering_angle = torch.tensor(0.0, dtype=dtype, device=device)
+    if speed >= 0.2:
+        steering_angle = torch.atan(yaw_rate * wheel_base / torch.abs(speed))
+        steering_angle = torch.clamp(steering_angle, -2.0 / 3.0 * np.pi, 2.0 / 3.0 * np.pi)
+    else:
+        yaw_rate = torch.tensor(0.0, dtype=dtype, device=device)
+
+    aug_current_state = ego_current_state.clone()
+    aug_current_state[:2] = full_xy[current_index]
+    aug_current_state[2] = torch.cos(full_heading[current_index])
+    aug_current_state[3] = torch.sin(full_heading[current_index])
+    aug_current_state[4:6] = velocity
+    aug_current_state[6:8] = acceleration
+    aug_current_state[8] = steering_angle
+    aug_current_state[9] = yaw_rate
+
+    return AugmentedSampleTorchResult(
+        aug_current_state=aug_current_state,
+        aug_past=aug_past_4d,
+        aug_future=aug_future_3d,
+        original_full_xy=context.original_full_xy,
+        augmented_full_xy=full_xy,
+        original_full_heading=context.original_full_heading,
+        augmented_full_heading=full_heading,
+        full_time=context.full_time,
+        past_segment=past_result,
+        future_segment=future_result,
+        past_connect_time_s=past_connect_time_s,
+        future_recover_time_s=future_recover_time_s,
+    )
 
 
 class StatePerturbation:
@@ -672,135 +1088,40 @@ class StatePerturbation:
         Rebuild ego past/current/future around a laterally perturbed current state while keeping
         the longitudinal progress aligned with the GT progress-time relation after merge.
         """
-        dt = self.time_interval
-        dtype = ego_past.dtype
-        device = ego_past.device
-
-        past_len = ego_past.shape[0]
-        future_len = ego_future.shape[0]
-
-        past_xy = ego_past[:, :2].clone()
-        past_heading = torch.atan2(ego_past[:, 3], ego_past[:, 2]).clone()
-        current_xy = ego_current_state[:2].clone()
-        current_heading = self._state_to_heading(ego_current_state).clone()
-        future_xy = ego_future[:, :2].clone()
-        future_heading = ego_future[:, 2].clone()
-
-        past_xy[-1] = current_xy
-        past_heading[-1] = current_heading
-
-        future_segment_xy = torch.cat([current_xy.unsqueeze(0), future_xy], dim=0)
-        future_segment_heading = torch.cat([current_heading.unsqueeze(0), future_heading], dim=0)
-        future_time = torch.arange(
-            0.0, (future_len + 1) * dt, dt, dtype=dtype, device=device
+        context = prepare_bidirectional_context_torch(
+            ego_past=ego_past,
+            ego_current_state=ego_current_state,
+            ego_future=ego_future,
+            dense_sample_ds=self.dense_sample_ds,
         )
-
-        past_segment_xy = torch.flip(past_xy, dims=[0])
-        past_segment_heading = torch.flip(past_heading, dims=[0])
-        past_time = torch.arange(0.0, past_len * dt, dt, dtype=dtype, device=device)
-
-        future_result = augment_segment_torch(
-            future_segment_xy,
-            future_segment_heading,
-            future_time,
-            lateral_offset,
-            heading_offset,
-            min(future_recover_time_s, float(future_time[-1].item())),
-            self.dense_sample_ds,
+        clamped_future_recover_time_s = min(
+            future_recover_time_s,
+            float(context.future_segment.segment_time[-1].item()),
         )
-        past_result = augment_segment_torch(
-            past_segment_xy,
-            past_segment_heading,
-            past_time,
-            lateral_offset,
-            -heading_offset,
-            min(past_connect_time_s, float(past_time[-1].item())),
-            self.dense_sample_ds,
+        clamped_past_connect_time_s = min(
+            past_connect_time_s,
+            float(context.past_segment.segment_time[-1].item()),
         )
-
-        aug_past_xy = torch.flip(past_result.query_xy, dims=[0])
-        full_xy = torch.cat([aug_past_xy[:-1], future_result.query_xy], dim=0)
-
-        original_full_heading = torch.cat(
-            [past_heading[:-1], current_heading.unsqueeze(0), future_heading], dim=0
+        future_result = augment_segment_prepared_torch(
+            prepared=context.future_segment,
+            lateral_offset=lateral_offset,
+            heading_offset=heading_offset,
+            connect_time_s=clamped_future_recover_time_s,
         )
-        original_full_xy = torch.cat([past_xy[:-1], future_segment_xy], dim=0)
-        full_heading = heading_from_positions_torch(full_xy, fallback_heading=original_full_heading)
-
-        current_index = past_len - 1
-        aug_past_heading = full_heading[:past_len]
-        aug_future_heading = full_heading[past_len:]
-
-        aug_past_4d = torch.stack(
-            [
-                aug_past_xy[:, 0],
-                aug_past_xy[:, 1],
-                torch.cos(aug_past_heading),
-                torch.sin(aug_past_heading),
-            ],
-            dim=-1,
+        past_result = augment_segment_prepared_torch(
+            prepared=context.past_segment,
+            lateral_offset=lateral_offset,
+            heading_offset=-heading_offset,
+            connect_time_s=clamped_past_connect_time_s,
         )
-        aug_future_3d = torch.stack(
-            [full_xy[past_len:, 0], full_xy[past_len:, 1], aug_future_heading], dim=-1
-        )
-
-        if current_index == 0:
-            velocity = (full_xy[1] - full_xy[0]) / dt
-            acceleration = torch.zeros(2, dtype=dtype, device=device)
-            yaw_rate = normalize_angle_torch(full_heading[1] - full_heading[0]) / dt
-        elif current_index == full_xy.shape[0] - 1:
-            velocity = (full_xy[-1] - full_xy[-2]) / dt
-            acceleration = torch.zeros(2, dtype=dtype, device=device)
-            yaw_rate = normalize_angle_torch(full_heading[-1] - full_heading[-2]) / dt
-        else:
-            velocity = (full_xy[current_index + 1] - full_xy[current_index - 1]) / (2.0 * dt)
-            acceleration = (
-                full_xy[current_index + 1]
-                - 2.0 * full_xy[current_index]
-                + full_xy[current_index - 1]
-            ) / (dt**2)
-            yaw_rate = normalize_angle_torch(
-                full_heading[current_index + 1] - full_heading[current_index - 1]
-            ) / (2.0 * dt)
-
-        speed = torch.linalg.norm(velocity)
-        steering_angle = torch.tensor(0.0, dtype=dtype, device=device)
-        if speed >= 0.2:
-            steering_angle = torch.atan(yaw_rate * self._wheel_base / torch.abs(speed))
-            steering_angle = torch.clamp(steering_angle, -2.0 / 3.0 * np.pi, 2.0 / 3.0 * np.pi)
-        else:
-            yaw_rate = torch.tensor(0.0, dtype=dtype, device=device)
-
-        aug_current_state = ego_current_state.clone()
-        aug_current_state[:2] = full_xy[current_index]
-        aug_current_state[2] = torch.cos(full_heading[current_index])
-        aug_current_state[3] = torch.sin(full_heading[current_index])
-        aug_current_state[4:6] = velocity
-        aug_current_state[6:8] = acceleration
-        aug_current_state[8] = steering_angle
-        aug_current_state[9] = yaw_rate
-
-        full_time = torch.arange(
-            -(past_len - 1) * dt,
-            (future_len + 1) * dt,
-            dt,
-            dtype=dtype,
-            device=device,
-        )
-
-        return AugmentedSampleTorchResult(
-            aug_current_state=aug_current_state,
-            aug_past=aug_past_4d,
-            aug_future=aug_future_3d,
-            original_full_xy=original_full_xy,
-            augmented_full_xy=full_xy,
-            original_full_heading=original_full_heading,
-            augmented_full_heading=full_heading,
-            full_time=full_time,
-            past_segment=past_result,
-            future_segment=future_result,
-            past_connect_time_s=past_connect_time_s,
-            future_recover_time_s=future_recover_time_s,
+        return assemble_augmented_sample_from_segments_torch(
+            context=context,
+            ego_current_state=ego_current_state,
+            past_result=past_result,
+            future_result=future_result,
+            past_connect_time_s=clamped_past_connect_time_s,
+            future_recover_time_s=clamped_future_recover_time_s,
+            wheel_base=self._wheel_base,
         )
 
     def _evaluate_constraints(
@@ -863,30 +1184,81 @@ class StatePerturbation:
         initial_past_connect_time_s: float,
         initial_future_recover_time_s: float,
     ) -> AugmentedSampleTorchResult:
-        def build_candidate(
+        context = prepare_bidirectional_context_torch(
+            ego_past=ego_past,
+            ego_current_state=ego_current_state,
+            ego_future=ego_future,
+            dense_sample_ds=self.dense_sample_ds,
+        )
+        max_future_recover_time_s = float(context.future_segment.segment_time[-1].item())
+        max_past_connect_time_s = float(context.past_segment.segment_time[-1].item())
+        initial_future_recover_time_s = min(initial_future_recover_time_s, max_future_recover_time_s)
+        initial_past_connect_time_s = min(initial_past_connect_time_s, max_past_connect_time_s)
+
+        future_segment_cache: dict[float, SegmentAugmentationResultTorch] = {}
+        past_segment_cache: dict[float, SegmentAugmentationResultTorch] = {}
+        candidate_cache: dict[tuple[float, float], ConstraintDiagnosticsTorch] = {}
+
+        def get_future_segment(recover_time_s: float) -> SegmentAugmentationResultTorch:
+            key = round(recover_time_s, 6)
+            cached = future_segment_cache.get(key)
+            if cached is None:
+                cached = augment_segment_prepared_torch(
+                    prepared=context.future_segment,
+                    lateral_offset=lateral_offset,
+                    heading_offset=heading_offset,
+                    connect_time_s=recover_time_s,
+                )
+                future_segment_cache[key] = cached
+            return cached
+
+        def get_past_segment(connect_time_s: float) -> SegmentAugmentationResultTorch:
+            key = round(connect_time_s, 6)
+            cached = past_segment_cache.get(key)
+            if cached is None:
+                cached = augment_segment_prepared_torch(
+                    prepared=context.past_segment,
+                    lateral_offset=lateral_offset,
+                    heading_offset=-heading_offset,
+                    connect_time_s=connect_time_s,
+                )
+                past_segment_cache[key] = cached
+            return cached
+
+        def evaluate_candidate(
             past_connect_time_s: float,
             future_recover_time_s: float,
-        ) -> AugmentedSampleTorchResult:
-            return self._build_augmented_sample(
-                ego_past=ego_past,
-                ego_current_state=ego_current_state,
-                ego_future=ego_future,
-                lateral_offset=lateral_offset,
-                heading_offset=heading_offset,
-                past_connect_time_s=past_connect_time_s,
-                future_recover_time_s=future_recover_time_s,
-            )
+        ) -> tuple[SegmentAugmentationResultTorch, SegmentAugmentationResultTorch, ConstraintDiagnosticsTorch]:
+            future_result = get_future_segment(future_recover_time_s)
+            past_result = get_past_segment(past_connect_time_s)
+            key = (round(past_connect_time_s, 6), round(future_recover_time_s, 6))
+            diag = candidate_cache.get(key)
+            if diag is None:
+                diag = evaluate_constraints_from_segments_torch(
+                    context=context,
+                    past_result=past_result,
+                    future_result=future_result,
+                    max_lateral_accel_mps2=self._max_lateral_accel_mps2,
+                    max_bridge_speed_gap_mps=self._max_bridge_speed_gap_mps,
+                    max_bridge_jerk_mps3=self._max_bridge_jerk_mps3,
+                )
+                candidate_cache[key] = diag
+            return past_result, future_result, diag
 
-        initial_result = build_candidate(
+        initial_past_result, initial_future_result, initial_diag = evaluate_candidate(
             past_connect_time_s=initial_past_connect_time_s,
             future_recover_time_s=initial_future_recover_time_s,
         )
-        initial_diag = self._evaluate_constraints(initial_result)
         if not self._adaptive_bridge_search or initial_diag.passes:
-            return initial_result
-
-        max_future_recover_time_s = float(ego_future.shape[0] * self.time_interval)
-        max_past_connect_time_s = float((ego_past.shape[0] - 1) * self.time_interval)
+            return assemble_augmented_sample_from_segments_torch(
+                context=context,
+                ego_current_state=ego_current_state,
+                past_result=initial_past_result,
+                future_result=initial_future_result,
+                past_connect_time_s=initial_past_connect_time_s,
+                future_recover_time_s=initial_future_recover_time_s,
+                wheel_base=self._wheel_base,
+            )
 
         future_candidates = generate_time_candidates(
             start_s=initial_future_recover_time_s + self.time_interval,
@@ -894,12 +1266,20 @@ class StatePerturbation:
             step_s=self.time_interval,
         )
         for candidate_n in future_candidates:
-            candidate_result = build_candidate(
+            past_result, future_result, diag = evaluate_candidate(
                 past_connect_time_s=initial_past_connect_time_s,
                 future_recover_time_s=candidate_n,
             )
-            if self._evaluate_constraints(candidate_result).passes:
-                return candidate_result
+            if diag.passes:
+                return assemble_augmented_sample_from_segments_torch(
+                    context=context,
+                    ego_current_state=ego_current_state,
+                    past_result=past_result,
+                    future_result=future_result,
+                    past_connect_time_s=initial_past_connect_time_s,
+                    future_recover_time_s=candidate_n,
+                    wheel_base=self._wheel_base,
+                )
 
         past_candidates = generate_time_candidates(
             start_s=initial_past_connect_time_s + self.time_interval,
@@ -913,14 +1293,30 @@ class StatePerturbation:
         )
         for candidate_m in past_candidates:
             for candidate_n in future_with_past_candidates:
-                candidate_result = build_candidate(
+                past_result, future_result, diag = evaluate_candidate(
                     past_connect_time_s=candidate_m,
                     future_recover_time_s=candidate_n,
                 )
-                if self._evaluate_constraints(candidate_result).passes:
-                    return candidate_result
+                if diag.passes:
+                    return assemble_augmented_sample_from_segments_torch(
+                        context=context,
+                        ego_current_state=ego_current_state,
+                        past_result=past_result,
+                        future_result=future_result,
+                        past_connect_time_s=candidate_m,
+                        future_recover_time_s=candidate_n,
+                        wheel_base=self._wheel_base,
+                    )
 
-        return initial_result
+        return assemble_augmented_sample_from_segments_torch(
+            context=context,
+            ego_current_state=ego_current_state,
+            past_result=initial_past_result,
+            future_result=initial_future_result,
+            past_connect_time_s=initial_past_connect_time_s,
+            future_recover_time_s=initial_future_recover_time_s,
+            wheel_base=self._wheel_base,
+        )
 
     def augment(self, inputs, ego_future):
         ego_current_state = inputs["ego_current_state"].clone()
