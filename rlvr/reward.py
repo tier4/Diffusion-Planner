@@ -353,6 +353,48 @@ def compute_feasibility_score_batch(
     far_from_any_lane = min_dist > _OFFROAD_DIST
     violations = torch.where(far_from_any_lane, _OFFMAP_PENALTY + min_dist, violations)
 
+    # --- Off-route penalty: on some lane but not on route lane ---
+    # Uses route_lanes to detect wrong-lane driving. Only applies at timesteps
+    # where route lanes have coverage (nearby). Penalty is moderate -- worse
+    # than margin but less than full off-road.
+    _OFF_ROUTE_PENALTY = 3.0
+    if "route_lanes" in data:
+        rl = data["route_lanes"]
+        if rl.dim() == 4:
+            rl = rl[0]
+        rl_S_P = rl.shape[0] * rl.shape[1]
+        rl_centers = rl[..., _LN_X:_LN_Y + 1].reshape(rl_S_P, 2)
+        rl_dirs = rl[..., _LN_DX:_LN_DY + 1].reshape(rl_S_P, 2)
+        rl_left = rl[..., _LN_LBX:_LN_LBY + 1].reshape(rl_S_P, 2)
+        rl_right = rl[..., _LN_RBX:_LN_RBY + 1].reshape(rl_S_P, 2)
+
+        rl_dirs_n = rl_dirs / (rl_dirs.norm(dim=-1, keepdim=True) + 1e-6)
+        rl_lat = torch.stack([-rl_dirs_n[..., 1], rl_dirs_n[..., 0]], dim=-1)
+        rl_valid = (
+            (rl_left.norm(dim=-1) + rl_right.norm(dim=-1)) > 1e-3
+        ) & (rl_dirs.norm(dim=-1) > 1e-6)
+        rl_lhw = (rl_left * rl_lat).sum(dim=-1)
+        rl_rhw = (rl_right * rl_lat).sum(dim=-1)
+
+        rl_diff = ego_pos.unsqueeze(2) - rl_centers.unsqueeze(0).unsqueeze(0)
+        rl_dist = rl_diff.norm(dim=-1)
+        rl_dist = rl_dist.masked_fill(~rl_valid.view(1, 1, -1).expand(N, T, -1), 1e6)
+
+        rl_ego_lat = (rl_diff * rl_lat.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+        rl_ego_lon = (rl_diff * rl_dirs_n.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+        rl_nearby = (rl_dist < _CHECK_RADIUS) & (rl_ego_lon.abs() < _MAX_LONGITUDINAL)
+        rl_viol_l = torch.relu(rl_ego_lat + half_w - rl_lhw.view(1, 1, -1))
+        rl_viol_r = torch.relu(rl_rhw.view(1, 1, -1) - rl_ego_lat + half_w)
+        rl_protrusion = rl_viol_l + rl_viol_r
+        in_route_lane = ((rl_protrusion == 0) & rl_nearby).any(dim=-1)  # (N, T)
+
+        # Route has coverage at this timestep if any route lane point is nearby
+        route_has_coverage = rl_nearby.any(dim=-1)  # (N, T)
+
+        # Off-route: in some lane, route has coverage here, but not in route lane
+        off_route = in_any_lane & route_has_coverage & ~in_route_lane
+        violations = torch.where(off_route, violations + _OFF_ROUTE_PENALTY, violations)
+
     # Time-weighted mean: early violations worse than late
     time_weights = torch.linspace(1.0, 0.3, T, device=device).unsqueeze(0)
     weighted_violations = violations * time_weights
