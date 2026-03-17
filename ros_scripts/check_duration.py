@@ -23,6 +23,7 @@ if __name__ == "__main__":
     for subdir in subdirs:
         # search "metadata.yaml"
         metadata_list = sorted(subdir.glob("**/metadata.yaml"))
+        last_date = metadata_list[-1].parent.parent.name
 
         total_duration_sec = 0.0
 
@@ -39,5 +40,5 @@ if __name__ == "__main__":
         total_sec -= total_min * 60
 
         print(
-            f"{subdir.name}\tTotal duration: {total_hou:03d} h {total_min:02d} min {total_sec:02d} sec ({total_duration_sec / 3600:.1f} h)"
+            f"{subdir.name}\tLast date: {last_date}\tTotal duration: {total_hou:03d} h {total_min:02d} min {total_sec:02d} sec ({total_duration_sec / 3600:.1f} h)"
         )
