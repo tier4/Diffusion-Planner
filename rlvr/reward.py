@@ -339,31 +339,26 @@ def compute_feasibility_score_batch(
     min_protrusion = protrusion_all.min(dim=-1).values  # (N, T)
     min_protrusion = min_protrusion.clamp(max=100.0)
 
-    # Build per-step violations
-    _BOUNDARY_STEP_PENALTY = 2.0
-    violations = torch.where(
-        ~in_any_lane,
-        _BOUNDARY_STEP_PENALTY + min_protrusion,
-        margin_penalty,
-    )
-
-    # Completely far from any lane (>10m) -- harsh penalty
+    # Build per-step violations with three severity levels:
+    #   - In-lane, in margin zone: mild (0-0.5 per step)
+    #   - Off-road (outside all lanes): severe (10 + protrusion per step)
+    #   - Completely off-map (>10m from any lane): very severe (20 + distance)
+    _OFFROAD_PENALTY = 10.0
+    _OFFMAP_PENALTY = 20.0
     _OFFROAD_DIST = 10.0
-    _OFFROAD_STEP_PENALTY = 5.0
-    far_from_any_lane = min_dist > _OFFROAD_DIST
-    violations = torch.where(
-        far_from_any_lane,
-        _OFFROAD_STEP_PENALTY + min_dist,
-        violations,
-    )
 
-    # Time weighting: going off road at t=2s is worse than at t=7s.
-    # t=0 -> weight=1.0, t=T-1 -> weight=0.3
+    violations = margin_penalty.clone()
+    violations = torch.where(~in_any_lane, _OFFROAD_PENALTY + min_protrusion, violations)
+
+    far_from_any_lane = min_dist > _OFFROAD_DIST
+    violations = torch.where(far_from_any_lane, _OFFMAP_PENALTY + min_dist, violations)
+
+    # Time-weighted mean: early violations worse than late
     time_weights = torch.linspace(1.0, 0.3, T, device=device).unsqueeze(0)
     weighted_violations = violations * time_weights
 
     off_road_fractions = (~in_any_lane).float().mean(dim=-1)  # (N,)
-    scores = scores - weighted_violations.sum(dim=-1)
+    scores = scores - weighted_violations.sum(dim=-1) / time_weights.sum()
 
     return scores, off_road_fractions
 
