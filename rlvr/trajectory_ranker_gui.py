@@ -455,7 +455,7 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
                     0.0, 20.0, value=5.0, step=0.5, label="w_safety"
                 )
                 w_progress = gr.Slider(
-                    0.0, 10.0, value=1.0, step=0.1, label="w_progress"
+                    0.0, 10.0, value=2.0, step=0.1, label="w_progress"
                 )
                 w_smooth = gr.Slider(
                     0.0, 10.0, value=0.5, step=0.1, label="w_smooth"

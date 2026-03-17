@@ -21,7 +21,7 @@ from diffusion_planner.model.guidance.collision import (
 @dataclass
 class RewardConfig:
     w_safety: float = 5.0
-    w_progress: float = 1.0
+    w_progress: float = 2.0
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
