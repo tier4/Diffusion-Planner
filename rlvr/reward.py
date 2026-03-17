@@ -437,15 +437,26 @@ def compute_centerline_score_batch(
     # 0 = centered, 1 = edge touching boundary, >1 = over boundary
     lane_usage = (ego_lat.abs() + half_w) / side_hw  # (N, T)
 
-    # Only trust when nearest route lane is close enough
+    # When near a route lane (<5m): penalize by lane usage (lateral position)
+    # When far from route (>5m): penalize by distance to route (off-route deviation)
+    # This ensures trajectories that abandon the route are always penalized.
     _PROXIMITY = 5.0
-    too_far = min_dist > _PROXIMITY
-    lane_usage = lane_usage.masked_fill(too_far, 0.0)
+    near_route = min_dist <= _PROXIMITY  # (N, T)
+
+    # Off-route penalty: normalized distance from route, scaled to be comparable
+    # to lane_usage (a 5m deviation = lane_usage of ~2.5 in a ~2m lane)
+    _ROUTE_DEVIATION_SCALE = 0.5
+    route_deviation = min_dist * _ROUTE_DEVIATION_SCALE  # (N, T)
+
+    per_step_penalty = torch.where(
+        near_route,
+        lane_usage ** 2,
+        route_deviation ** 2,
+    )  # (N, T)
 
     # Time-weighted mean: early deviations penalized more
     time_weights = torch.linspace(1.0, 0.3, T, device=device).unsqueeze(0)
-    # Penalize quadratically: being at 80% lane usage is much worse than 50%
-    penalty = lane_usage ** 2 * time_weights
+    penalty = per_step_penalty * time_weights
     return -(penalty.sum(dim=-1) / time_weights.sum())  # (N,)
 
 
