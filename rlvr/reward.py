@@ -1,6 +1,6 @@
 """Rule-based trajectory reward for GRPO training.
 
-Computes R = w_safety * S + w_progress * P + w_smooth * M + w_feasibility * F
+Computes R = w_safety * S + w_progress * P + w_smooth * M + w_feasibility * F + w_centerline * C
 using log-replay data. Reuses ego bbox construction and lane/neighbor penalty
 functions from diffusion_planner.loss for proper vehicle-footprint-aware checks.
 """
@@ -119,7 +119,9 @@ def compute_safety_score_batch(
         config: RewardConfig.
 
     Returns:
-        scores: (N,) tensor -- 0.0 if no collision, collision_penalty otherwise.
+        scores: (N,) tensor -- collision_penalty minus proximity penalty on collision,
+            or just negative proximity penalty if no collision. Proximity penalty is
+            the mean intrusion depth when ego passes within 1m of any NPC.
         collision_steps: list of length N -- timestep of first collision or None.
     """
     N, T, _ = ego_trajs.shape

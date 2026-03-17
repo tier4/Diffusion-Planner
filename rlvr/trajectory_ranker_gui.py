@@ -54,10 +54,10 @@ _DEFAULT_PROTOTYPES_PATH = str(Path(__file__).parent / "prototypes_k16.npy")
 _GENERATE_SCRIPT = Path(__file__).parent.parent / "guidance_gui" / "scripts" / "generate_prototypes.py"
 
 
-def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = False) -> str:
+def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = False) -> str | None:
     """Generate prototypes from npz_list if they don't exist (or force=True).
 
-    Returns the path to the prototypes file.
+    Returns the path to the prototypes file, or None if generation failed.
     """
     if not force and Path(prototypes_path).exists():
         print(f"Using existing prototypes: {prototypes_path}")
@@ -84,6 +84,10 @@ def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = Fa
         print(f"Warning: prototype generation failed: {e}")
     except subprocess.TimeoutExpired:
         print("Warning: prototype generation timed out")
+
+    if not Path(prototypes_path).exists():
+        print(f"Warning: prototypes file not created at {prototypes_path}")
+        return None
 
     return prototypes_path
 
@@ -509,7 +513,7 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
             proto_path,                                              # 11
         ]
         reward_inputs = [w_safety, w_progress, w_smooth, w_feasibility, w_centerline]  # 12-16
-        display_inputs = [zoom_sl, time_sl]                              # 16-17
+        display_inputs = [zoom_sl, time_sl]                              # 17-18
         all_inputs = sampler_inputs + reward_inputs + display_inputs
         N_SAMPLER = len(sampler_inputs)
         N_REWARD = len(reward_inputs)

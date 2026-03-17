@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -53,12 +54,15 @@ class SampledTrajectory:
     label: str
 
 
-def _detect_num_prototypes(path: str) -> int:
+def _detect_num_prototypes(path: str) -> int | None:
+    """Return number of prototypes, or None if the file is missing/unloadable."""
+    if not Path(path).exists():
+        return None
     try:
         protos = np.load(path)
         return protos.shape[0]
     except Exception:
-        return 16
+        return None
 
 
 def generate_diverse_group(
@@ -81,8 +85,17 @@ def generate_diverse_group(
         List of N SampledTrajectory instances.
     """
     num_protos = config.num_prototypes
+    prototypes_valid = False
     if config.prototypes_path is not None:
-        num_protos = _detect_num_prototypes(config.prototypes_path)
+        detected = _detect_num_prototypes(config.prototypes_path)
+        if detected is not None:
+            num_protos = detected
+            prototypes_valid = True
+        else:
+            print(
+                f"Warning: prototypes file not found or unloadable: "
+                f"{config.prototypes_path} -- anchor guidance disabled"
+            )
 
     norm_data = {
         k: v.clone() if isinstance(v, torch.Tensor) else v
@@ -130,6 +143,7 @@ def generate_diverse_group(
             if (
                 config.enable_anchor
                 and config.prototypes_path is not None
+                and prototypes_valid
                 and random.random() < config.guidance_prob
             ):
                 anchor_idx = random.randint(0, num_protos - 1)
