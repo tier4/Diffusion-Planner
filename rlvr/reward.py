@@ -357,7 +357,7 @@ def compute_feasibility_score_batch(
     # Uses route_lanes to detect wrong-lane driving. Only applies at timesteps
     # where route lanes have coverage (nearby). Penalty is moderate -- worse
     # than margin but less than full off-road.
-    _OFF_ROUTE_PENALTY = 10.0  # same severity as off-road
+    _OFF_ROUTE_PENALTY = 5.0
     if "route_lanes" in data:
         rl = data["route_lanes"]
         if rl.dim() == 4:
