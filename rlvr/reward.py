@@ -288,8 +288,11 @@ def compute_feasibility_score_batch(
     dist = dist.masked_fill(~lane_valid.view(1, 1, -1).expand(N, T, -1), 1e6)
     min_dist = dist.min(dim=-1).values  # (N, T)
 
-    # Only check lanes within a reasonable distance
-    _CHECK_RADIUS = 8.0
+    # Only check lanes within a tight radius. The lateral projection is only
+    # meaningful when the ego is close to the lane segment -- at 4m+ away the
+    # projection can falsely indicate "inside" when the ego is far off to the
+    # side along the lane direction.
+    _CHECK_RADIUS = 4.0
     nearby_mask = dist < _CHECK_RADIUS  # (N, T, S_P)
 
     # Lateral offset for all (ego, lane) pairs: (N, T, S_P)
