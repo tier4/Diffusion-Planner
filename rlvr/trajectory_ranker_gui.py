@@ -206,6 +206,16 @@ class TrajectoryRanker:
                     edgecolors="black", marker="D",
                 )
 
+            # Collision point: red X at the collision timestep
+            rb = self.reward_breakdowns[i]
+            if rb.collision_step is not None and 0 <= rb.collision_step < len(traj):
+                ct = rb.collision_step
+                ax.scatter(
+                    [traj[ct, 0]], [traj[ct, 1]],
+                    color="red", s=100, zorder=12,
+                    edgecolors="darkred", linewidths=1.5, marker="X",
+                )
+
         if "ego_agent_future" in data_cpu:
             gt = data_cpu["ego_agent_future"]
             if hasattr(gt, "numpy"):
