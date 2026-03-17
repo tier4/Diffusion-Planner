@@ -464,7 +464,7 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
                     0.0, 10.0, value=5.0, step=0.1, label="w_feasibility"
                 )
                 w_centerline = gr.Slider(
-                    0.0, 10.0, value=1.0, step=0.1, label="w_centerline"
+                    0.0, 10.0, value=5.0, step=0.1, label="w_centerline"
                 )
 
                 gr.Markdown("### Prototypes")

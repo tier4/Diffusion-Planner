@@ -24,7 +24,7 @@ class RewardConfig:
     w_progress: float = 1.0
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
-    w_centerline: float = 1.0
+    w_centerline: float = 5.0
     collision_penalty: float = -10.0
     max_accel: float = 8.0  # m/s^2
     dt: float = 0.1  # 10 Hz
@@ -342,12 +342,13 @@ _CL_MAX_DIST = 30.0
 
 def compute_centerline_score_batch(
     ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    """Batched negative mean lateral deviation from nearest route lane centerline.
+    """Batched normalized lane-usage penalty from nearest route lane centerline.
 
-    Uses route_lanes (the ego's intended path) to compute lateral offset at
-    each timestep. Trajectories closer to the centerline score higher (less negative).
+    Uses route_lanes to compute what fraction of the lane width the vehicle
+    occupies. A centered vehicle uses ~half_w/lane_hw; one at the boundary uses 1.0.
 
     Args:
         ego_trajs: (N, T, 4).
@@ -358,6 +359,7 @@ def compute_centerline_score_batch(
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
+    half_w = float(ego_shape[2]) / 2
 
     if "route_lanes" in data:
         lanes = data["route_lanes"]
@@ -372,10 +374,15 @@ def compute_centerline_score_batch(
     S_P = lanes.shape[0] * lanes.shape[1]
     lane_centers = lanes[..., _CL_X:_CL_Y + 1].reshape(S_P, 2)
     lane_dirs = lanes[..., _CL_DX:_CL_DY + 1].reshape(S_P, 2)
+    lane_left = lanes[..., 4:6].reshape(S_P, 2)
+    lane_right = lanes[..., 6:8].reshape(S_P, 2)
 
     lane_valid = lane_centers.norm(dim=-1) > 1e-3  # (S_P,)
     lane_dirs_n = lane_dirs / (lane_dirs.norm(dim=-1, keepdim=True) + 1e-6)
     lane_lat = torch.stack([-lane_dirs_n[..., 1], lane_dirs_n[..., 0]], dim=-1)  # (S_P, 2)
+
+    left_hw = (lane_left * lane_lat).sum(dim=-1)    # (S_P,)
+    right_hw = (lane_right * lane_lat).sum(dim=-1)  # (S_P,)
 
     ego_pos = ego_trajs[:, :, :2]  # (N, T, 2)
 
@@ -395,11 +402,31 @@ def compute_centerline_score_batch(
     # Lateral offset from centerline
     ego_lat = ((ego_pos - c) * lat).sum(dim=-1)  # (N, T)
 
-    # Mask out timesteps too far from any lane
-    no_lane = min_dist > _CL_MAX_DIST
-    ego_lat = ego_lat.masked_fill(no_lane, 0.0)
+    # Lane half-width on the side the ego is offset toward
+    lhw_gathered = left_hw[flat_idx].reshape(N, T)
+    rhw_gathered = right_hw[flat_idx].reshape(N, T)
 
-    return -(ego_lat ** 2).mean(dim=-1)  # (N,)
+    # Half-width on the ego's side: if ego_lat > 0, use left_hw; if < 0, use |right_hw|
+    side_hw = torch.where(
+        ego_lat >= 0,
+        lhw_gathered.clamp(min=0.5),
+        (-rhw_gathered).clamp(min=0.5),
+    )  # (N, T)
+
+    # Normalized lane usage: how close the vehicle edge is to the boundary
+    # 0 = centered, 1 = edge touching boundary, >1 = over boundary
+    lane_usage = (ego_lat.abs() + half_w) / side_hw  # (N, T)
+
+    # Only trust when nearest route lane is close enough
+    _PROXIMITY = 5.0
+    too_far = min_dist > _PROXIMITY
+    lane_usage = lane_usage.masked_fill(too_far, 0.0)
+
+    # Time-weighted mean: early deviations penalized more
+    time_weights = torch.linspace(1.0, 0.3, T, device=device).unsqueeze(0)
+    # Penalize quadratically: being at 80% lane usage is much worse than 50%
+    penalty = lane_usage ** 2 * time_weights
+    return -(penalty.sum(dim=-1) / time_weights.sum())  # (N,)
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +575,7 @@ def compute_reward_batch(
     feasibility_scores, off_road_fractions = compute_feasibility_score_batch(
         ego_trajs, ego_shape, data, config
     )
-    centerline_scores = compute_centerline_score_batch(ego_trajs, data)
+    centerline_scores = compute_centerline_score_batch(ego_trajs, ego_shape, data)
 
     totals = (
         config.w_safety * safety_scores
