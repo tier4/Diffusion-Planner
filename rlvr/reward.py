@@ -290,11 +290,32 @@ def compute_feasibility_score_batch(
     viol_right_all = torch.relu(right_hw.view(1, 1, -1) - ego_lat_all + half_w)
     protrusion_all = viol_left_all + viol_right_all  # (N, T, S_P)
 
+    # Margin zone: soft penalty when vehicle edge is within _MARGIN of boundary
+    # but not yet crossing it. Penalized less than actual protrusion.
+    _MARGIN = 0.5  # metres
+    margin_left = torch.relu(ego_lat_all + half_w + _MARGIN - left_hw.view(1, 1, -1))
+    margin_right = torch.relu(right_hw.view(1, 1, -1) - ego_lat_all + half_w + _MARGIN)
+    # Margin intrusion = in the margin zone but not actually protruding
+    margin_intrusion = (margin_left + margin_right) - protrusion_all  # (N, T, S_P)
+    margin_intrusion = margin_intrusion.clamp(min=0.0)
+
     # A lane is "containing" the ego if protrusion == 0
     inside_lane = (protrusion_all == 0) & nearby_mask  # (N, T, S_P)
 
     # Ego is off-road at a timestep if NO nearby lane contains it
     in_any_lane = inside_lane.any(dim=-1)  # (N, T)
+
+    # For in-lane timesteps: soft margin penalty from the best (least intrusion) lane
+    # For each timestep, find the lane with minimum margin intrusion
+    margin_intrusion_masked = margin_intrusion.masked_fill(~nearby_mask, 1e6)
+    min_margin = margin_intrusion_masked.min(dim=-1).values  # (N, T)
+    min_margin = min_margin.clamp(max=_MARGIN)
+    _MARGIN_PENALTY_SCALE = 0.5
+    margin_penalty = torch.where(
+        in_any_lane & (min_margin > 0),
+        min_margin * _MARGIN_PENALTY_SCALE,
+        torch.zeros_like(min_margin),
+    )
 
     # For off-road timesteps, compute the minimum protrusion across all nearby
     # lanes (how far outside the best candidate lane)
@@ -307,7 +328,7 @@ def compute_feasibility_score_batch(
     violations = torch.where(
         ~in_any_lane,
         _BOUNDARY_STEP_PENALTY + min_protrusion,
-        torch.zeros_like(min_protrusion),
+        margin_penalty,
     )
 
     # Completely far from any lane (>10m) -- harsh penalty
