@@ -1400,7 +1400,7 @@ class PreferenceAnnotator:
 
 
 def create_interface(
-    policy_model, model_args, npz_list: Path, target_count: int
+    policy_model, model_args, npz_list: Path, target_count: int, drift_info: str = ""
 ) -> tuple[gr.Blocks, PreferenceAnnotator]:
     """Create Gradio interface for preference annotation.
 
@@ -1458,6 +1458,13 @@ def create_interface(
                     interactive=False,
                     lines=1,
                 )
+                if drift_info:
+                    gr.Textbox(
+                        label="Model drift vs epoch 1",
+                        value=drift_info,
+                        interactive=False,
+                        lines=2,
+                    )
                 sidebar_status = gr.Markdown(value="Loading...")
                 
                 gr.Markdown("---")
@@ -1871,7 +1878,7 @@ def create_interface(
 
 
 def collect_preferences(
-    policy_model, model_args, npz_list: Path, target_count: int
+    policy_model, model_args, npz_list: Path, target_count: int, drift_info: str = ""
 ) -> list[dict]:
     """Collect trajectory preferences via Gradio GUI.
 
@@ -1883,6 +1890,9 @@ def collect_preferences(
         model_args: Model configuration arguments
         npz_list: Path to JSON file containing list of NPZ observation files
         target_count: Target number of preferences to collect
+        drift_info: Optional summary of model drift vs epoch-1 baselines, displayed
+            in the annotation sidebar so the annotator can see whether training is
+            producing any visible change.
 
     Returns:
         List of preference dictionaries
@@ -1892,7 +1902,7 @@ def collect_preferences(
     was_training = policy_model.training
     policy_model.eval()
 
-    demo, annotator = create_interface(policy_model, model_args, npz_list, target_count)
+    demo, annotator = create_interface(policy_model, model_args, npz_list, target_count, drift_info)
 
     # Store demo reference in annotator for shutdown
     annotator._demo = demo

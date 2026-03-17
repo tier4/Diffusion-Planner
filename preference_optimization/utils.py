@@ -375,3 +375,41 @@ def generate_trajectory_pair(
     else:
         # All max_retries candidates were pruned (only reachable when enable_initial_pruning=True)
         return traj_1, last_traj_2, 0.0, max_retries, ego_shape, last_disp, last_yaw_diff, True
+
+
+@torch.no_grad()
+def generate_deterministic_trajectory(
+    policy_model,
+    model_args,
+    data: dict,
+    device: torch.device | None = None,
+) -> np.ndarray:
+    """Generate a deterministic (zero-noise) ego trajectory for an observation.
+
+    Applies observation normalization internally; the input data must be raw (not
+    yet normalized).  This mirrors the traj_1 branch in generate_trajectory_pair.
+
+    Args:
+        policy_model: The diffusion planner model.
+        model_args: Model configuration arguments.
+        data: Raw observation dict (as returned by load_npz_data).
+        device: Computation device (defaults to model device).
+
+    Returns:
+        Trajectory [T, 4] (x, y, cos(yaw), sin(yaw)) in physical ego-centric metres.
+    """
+    device = device or next(policy_model.parameters()).device
+    data = {k: v.clone().to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    data = model_args.observation_normalizer(data)
+
+    B = data["ego_current_state"].shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+
+    _original_guidance_fn = policy_model.decoder._guidance_fn
+    policy_model.decoder._guidance_fn = None
+    data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4, device=device)
+    _, outputs = policy_model(data)
+    policy_model.decoder._guidance_fn = _original_guidance_fn
+
+    return outputs["prediction"][0, 0].cpu().numpy()
