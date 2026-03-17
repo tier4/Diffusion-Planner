@@ -12,7 +12,10 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from diffusion_planner.loss import neighbor_clearance_penalty
+from diffusion_planner.model.guidance.collision import (
+    batch_signed_distance_rect,
+    center_rect_to_points,
+)
 
 
 @dataclass
@@ -128,25 +131,43 @@ def compute_safety_score_batch(
 
     ego_corners = _build_ego_bbox_corners(ego_trajs, ego_shape)  # (N, T, 4, 2)
 
-    # Build neighbor data in the shape neighbor_clearance_penalty expects:
-    # neighbors_future: [B, P, T, 4], neighbors_future_valid: [B, P, T]
-    # We evaluate each of the N ego trajectories against the same set of neighbors.
-    # Expand neighbors to batch dimension N.
-    nf = neighbor_futures.unsqueeze(0).expand(N, -1, -1, -1)  # (N, N_nb, T, 4)
-    nv = neighbor_valid.unsqueeze(0).expand(N, -1, -1)        # (N, N_nb, T)
+    # Build NPC bounding box corners: (N_nb, T, 4, 2)
+    npc_pos = neighbor_futures[:, :, :2]
+    npc_cos = neighbor_futures[:, :, 2]
+    npc_sin = neighbor_futures[:, :, 3]
+    npc_norm = (npc_cos ** 2 + npc_sin ** 2).sqrt().clamp_min(1e-6)
+    npc_cos = npc_cos / npc_norm
+    npc_sin = npc_sin / npc_norm
 
-    # neighbor_agents_past needed for shapes: fake it with shapes in the right slots
-    # neighbor_clearance_penalty reads [:, :P, -1, 6] for width and [:, :P, -1, 7] for length
-    fake_past = torch.zeros(N, N_nb, 1, 8, device=device)
-    fake_past[:, :, 0, 6] = neighbor_shapes[:, 0].unsqueeze(0).expand(N, -1)  # width
-    fake_past[:, :, 0, 7] = neighbor_shapes[:, 1].unsqueeze(0).expand(N, -1)  # length
-    denorm_inputs = {"neighbor_agents_past": fake_past}
+    npc_width = neighbor_shapes[:, 0].unsqueeze(1).expand(-1, T)   # (N_nb, T)
+    npc_length = neighbor_shapes[:, 1].unsqueeze(1).expand(-1, T)  # (N_nb, T)
 
-    # neighbor_clearance_penalty returns [B, T] penalty
-    penalty = neighbor_clearance_penalty(ego_corners, nf, nv, denorm_inputs)  # (N, T)
+    npc_rect = torch.stack([
+        npc_pos[..., 0], npc_pos[..., 1],
+        npc_cos, npc_sin,
+        npc_length, npc_width,
+    ], dim=-1)  # (N_nb, T, 6)
+    npc_corners = center_rect_to_points(
+        npc_rect.reshape(-1, 6)
+    ).reshape(N_nb, T, 4, 2)
 
-    # Collision = any timestep with penalty > 0
-    has_collision_at_t = penalty > 0  # (N, T)
+    # Cross product: ego (N, T) x NPC (N_nb, T) -> (N, N_nb, T)
+    ego_exp = ego_corners.unsqueeze(1).expand(-1, N_nb, -1, -1, -1)  # (N, N_nb, T, 4, 2)
+    npc_exp = npc_corners.unsqueeze(0).expand(N, -1, -1, -1, -1)     # (N, N_nb, T, 4, 2)
+    nv_exp = neighbor_valid.unsqueeze(0).expand(N, -1, -1)            # (N, N_nb, T)
+
+    # Flatten for batch_signed_distance_rect
+    ego_flat = ego_exp.reshape(-1, 4, 2)
+    npc_flat = npc_exp.reshape(-1, 4, 2)
+    distances = batch_signed_distance_rect(ego_flat, npc_flat)  # (N * N_nb * T,)
+    distances = distances.reshape(N, N_nb, T)
+
+    # Mask out invalid NPC timesteps
+    distances = distances.masked_fill(~nv_exp, 1e6)
+
+    # Collision: negative signed distance = overlap
+    collision_mask = distances < 0  # (N, N_nb, T)
+    has_collision_at_t = collision_mask.any(dim=1)  # (N, T)
     has_collision = has_collision_at_t.any(dim=1)  # (N,)
     first_t = has_collision_at_t.float().argmax(dim=1)  # (N,)
 
@@ -475,13 +496,19 @@ def compute_reward_batch(
         nf = data["neighbor_agents_future"]
         if nf.dim() == 4:
             nf = nf[0]
-        if nf.shape[1] >= T and nf.shape[2] >= 4:
-            nf_data = nf[:, :T, :4]
-            slot_valid = nf_data.abs().sum(dim=(1, 2)) > 1e-6
+        if nf.shape[1] >= T and nf.shape[2] >= 3:
+            # NPZ stores (x, y, yaw_rad) -- convert to (x, y, cos, sin)
+            if nf.shape[2] == 3:
+                nf_xy = nf[:, :T, :2]
+                nf_yaw = nf[:, :T, 2:3]
+                nf_cos_sin = torch.cat([torch.cos(nf_yaw), torch.sin(nf_yaw)], dim=-1)
+                nf_data = torch.cat([nf_xy, nf_cos_sin], dim=-1)  # (N_nb, T, 4)
+            else:
+                nf_data = nf[:, :T, :4]
+            slot_valid = nf_data[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6
             if slot_valid.any():
                 neighbor_futures = nf_data[slot_valid]
-                # Per-timestep validity
-                neighbor_valid = neighbor_futures.abs().sum(dim=-1) > 1e-6  # (N_nb, T)
+                neighbor_valid = neighbor_futures[:, :, :2].abs().sum(dim=-1) > 1e-6
 
                 if "neighbor_agents_past" in data:
                     nap = data["neighbor_agents_past"]
