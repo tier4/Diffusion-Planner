@@ -321,6 +321,7 @@ class TrajectoryRanker:
         ))
         rows.sort(key=lambda r: r[1].total, reverse=True)
 
+        cfg = self.reward_config
         lines = [
             "| Rank | Safety | Progress | Smooth | Feasible | Centerline | Total | Adv | Config |",
             "|------|--------|----------|--------|----------|------------|-------|-----|--------|",
@@ -328,10 +329,16 @@ class TrajectoryRanker:
         for rank, (idx, rb, adv, st) in enumerate(rows, 1):
             config_col = f"**[DET]**" if st.is_deterministic else st.label
             b = "**" if st.is_deterministic else ""
+            # Show weighted values so columns add up to total
+            ws = cfg.w_safety * rb.safety
+            wp = cfg.w_progress * rb.progress
+            wm = cfg.w_smooth * rb.smoothness
+            wf = cfg.w_feasibility * rb.feasibility
+            wc = cfg.w_centerline * rb.centerline
             lines.append(
-                f"| {b}{rank}{b} | {b}{rb.safety:.1f}{b} | {b}{rb.progress:.1f}{b} | "
-                f"{b}{rb.smoothness:.1f}{b} | {b}{rb.feasibility:.2f}{b} | "
-                f"{b}{rb.centerline:.2f}{b} | "
+                f"| {b}{rank}{b} | {b}{ws:.1f}{b} | {b}{wp:.1f}{b} | "
+                f"{b}{wm:.1f}{b} | {b}{wf:.1f}{b} | "
+                f"{b}{wc:.1f}{b} | "
                 f"{b}{rb.total:.1f}{b} | {b}{adv:+.2f}{b} | {config_col} |"
             )
         return "\n".join(lines)
