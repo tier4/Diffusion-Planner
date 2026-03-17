@@ -1,32 +1,36 @@
 # Preference Optimization for Diffusion Planner
 
-Clean, modular implementation of Direct Preference Optimization (DPO) for trajectory planning.
-
-## Features
-
-- 🎯 **Modular Architecture** - Clean separation of concerns
-- 🚀 **FDE-based Generation** - Ensures diverse trajectory pairs
-- 🌐 **Web UI** - Modern Gradio interface for annotation
-- 📊 **Comprehensive Logging** - Track training metrics
-- 🔧 **Type-Safe** - Full type hints throughout
+Direct Preference Optimization (DPO) pipeline for fine-tuning the Diffusion Planner model. Supports full fine-tuning and parameter-efficient LoRA training.
 
 ## Quick Start
 
 ```bash
 # Install dependencies
-pip install gradio>=4.0.0
+pip install gradio>=4.0.0 peft
 
-# Train with GUI annotation
-python train_dpo.py \
+# Train with LoRA + GUI annotation (recommended)
+python3 -m preference_optimization.train_dpo \
   --model_path <path/to/model.pth> \
   --train_npz_list <path/to/train.json> \
   --valid_npz_list <path/to/valid.json> \
   --preference_mode gui \
-  --train_epochs 10 \
-  --exp_name my_experiment
+  --train_epochs 15 \
+  --use_lora \
+  --learning_rate 5e-4
 
-# Train with automatic (rule-based) annotation
-python train_dpo.py \
+# Merge LoRA adapter into a single .pth for deployment
+python3 -m preference_optimization.merge_lora \
+  --model_path <experiment_dir>/latest.pth \
+  --output <experiment_dir>/merged.pth
+
+# Export to ONNX
+python3 ros_scripts/torch2onnx.py <dir_containing_merged.pth>
+```
+
+### Full fine-tuning (no LoRA)
+
+```bash
+python3 -m preference_optimization.train_dpo \
   --model_path <path/to/model.pth> \
   --train_npz_list <path/to/train.json> \
   --valid_npz_list <path/to/valid.json> \
@@ -62,22 +66,104 @@ python train_dpo.py \
 ```
 
 
+## LoRA Training
+
+### Overview
+
+LoRA (Low-Rank Adaptation) freezes the base model and trains small adapter matrices
+on the DiT decoder's attention projections (`q_proj`, `k_proj`, `v_proj`, `out_proj`).
+Only ~1.3% of parameters are trainable, which prevents catastrophic forgetting, requires
+less GPU memory, and produces small checkpoint files (adapter weights only).
+
+### How it works
+
+At LoRA init time, `apply_lora()` in `lora_utils.py` replaces each `nn.MultiheadAttention`
+in the DiT decoder blocks with `UnfusedMHA` -- a numerically identical module that exposes
+separate `nn.Linear` sub-layers. PEFT then applies its standard `LinearLoRA` to each
+projection. The encoder and all other model components remain frozen.
+
+### LoRA CLI flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--use_lora` | `False` | Enable LoRA (otherwise full fine-tuning) |
+| `--lora_rank` | `16` | LoRA rank `r`. Lower = less capacity, less forgetting |
+| `--lora_alpha` | `16` | Scaling factor. Effective delta = `alpha/r * B @ A` |
+| `--lora_dropout` | `0.05` | Dropout on LoRA activations |
+| `--learning_rate` | `1e-5` | Recommended: `5e-4` for LoRA, `1e-5` for full FT |
+
+### LoRA checkpoint layout
+
+```
+<experiment_dir>/
+  latest.pth              # Base model (frozen, copied at start)
+  args.json               # Model config
+  dpo_args.json           # Training args
+  lora_epoch_001/         # Adapter weights + optimizer state
+    adapter_config.json
+    adapter_model.safetensors
+    optimizer.pth
+  lora_epoch_002/
+    ...
+  lora_latest -> lora_epoch_002   # Symlink to most recent
+```
+
+### Resuming LoRA training
+
+Point `--model_path` at a previous experiment's `latest.pth`. The script auto-detects
+`lora_latest/` next to the `.pth` and resumes from that adapter, including optimizer
+state (AdamW moments):
+
+```bash
+python3 -m preference_optimization.train_dpo \
+    --model_path <prev_experiment>/latest.pth \
+    --train_npz_list <train.json> \
+    --valid_npz_list <valid.json> \
+    --preference_mode gui \
+    --train_epochs 10 \
+    --use_lora
+```
+
+### Merging LoRA for deployment
+
+Use `merge_lora.py` to bake the LoRA deltas into the base weights and produce a single
+`.pth` file. The merged checkpoint has no PEFT dependency and can be used directly with
+`torch2onnx.py`:
+
+```bash
+# Auto-detect lora_latest/ next to the .pth
+python3 -m preference_optimization.merge_lora \
+    --model_path <experiment_dir>/latest.pth \
+    --output <experiment_dir>/merged.pth
+
+# Or specify a specific adapter
+python3 -m preference_optimization.merge_lora \
+    --model_path <experiment_dir>/latest.pth \
+    --lora_dir <experiment_dir>/lora_epoch_005 \
+    --output <experiment_dir>/merged_epoch5.pth
+
+# Then export to ONNX
+python3 ros_scripts/torch2onnx.py <experiment_dir>
+```
+
 ## Architecture
 
 ### Module Structure
 
 ```
 preference_optimization/
-├── train_dpo.py              # Main entry point (170 lines)
-├── trainer.py                # DPOTrainer class (220 lines)
-├── dpo_loss.py               # DPO loss computation (210 lines)
-├── model_utils.py            # Model loading (65 lines)
-├── preference_collection.py  # Preference generation (90 lines)
-├── annotation_gui.py         # Gradio web UI (450 lines)
-├── visualization.py          # Validation visualization (100 lines)
-├── datasets.py               # Dataset classes (70 lines)
-├── utils.py                  # Core utilities (150 lines)
-└── test_fde_standalone.py    # Unit tests (155 lines)
+├── train_dpo.py              # Main entry point, CLI args, training loop
+├── trainer.py                # DPOTrainer class, checkpoints, metrics
+├── dpo_loss.py               # DPO loss (shared-model or separate reference)
+├── lora_utils.py             # UnfusedMHA, apply/save/load LoRA, merge
+├── merge_lora.py             # Standalone: merge LoRA adapter into single .pth
+├── model_utils.py            # load_model() from checkpoint + args.json
+├── utils.py                  # Trajectory generation, FDE, pair sampling
+├── preference_collection.py  # Rule-based preference generation
+├── annotation_gui.py         # Gradio web UI for human annotation
+├── visualization.py          # Validation epoch visualizations
+├── datasets.py               # DPO and NPZ dataset classes
+└── test_fde_standalone.py    # Unit tests
 ```
 
 ### Design Principles
@@ -211,11 +297,15 @@ print(f"Loss: {metrics['loss']:.4f}")
 | `--train_npz_list` | Path | required | Training data list (JSON) |
 | `--valid_npz_list` | Path | required | Validation data list (JSON) |
 | `--exp_name` | str | "dpo_experiment" | Experiment name |
-| `--preference_mode` | str | "rule" | "rule" or "gui" |
-| `--train_epochs` | int | 10 | Number of epochs |
+| `--preference_mode` | str | "rule" | "rule", "gui", or "lichtblick" |
+| `--train_epochs` | int | 3 | Number of epochs |
 | `--batch_size` | int | 32 | Training batch size |
-| `--learning_rate` | float | 1e-5 | Optimizer learning rate |
+| `--learning_rate` | float | 1e-5 | Optimizer learning rate (use 5e-4 for LoRA) |
 | `--beta` | float | 0.1 | DPO regularization |
+| `--use_lora` | flag | False | Enable LoRA adapter training |
+| `--lora_rank` | int | 16 | LoRA rank |
+| `--lora_alpha` | int | 16 | LoRA alpha scaling |
+| `--lora_dropout` | float | 0.05 | LoRA dropout |
 
 ### Trajectory Generation Parameters
 
