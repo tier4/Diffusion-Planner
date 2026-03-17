@@ -628,9 +628,10 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
         for cb in [enable_guidance_cb, cb_centerline, cb_anchor, cb_collision, cb_route, cb_lane]:
             cb.change(_full_run, inputs=all_inputs, outputs=outputs)
 
-        # Reward weight changes -> rescore only
+        # Reward weight changes -> rescore only (both release and change for responsiveness)
         for sl in [w_safety, w_progress, w_smooth, w_feasibility, w_centerline]:
             sl.release(_rescore_and_render, inputs=all_inputs, outputs=outputs)
+            sl.change(_rescore_and_render, inputs=all_inputs, outputs=outputs)
 
         # Display changes -> rerender only
         for sl in [zoom_sl, time_sl]:

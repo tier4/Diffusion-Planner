@@ -310,10 +310,9 @@ def compute_feasibility_score_batch(
     margin_intrusion_masked = margin_intrusion.masked_fill(~nearby_mask, 1e6)
     min_margin = margin_intrusion_masked.min(dim=-1).values  # (N, T)
     min_margin = min_margin.clamp(max=_MARGIN)
-    _MARGIN_PENALTY_SCALE = 0.5
     margin_penalty = torch.where(
         in_any_lane & (min_margin > 0),
-        min_margin * _MARGIN_PENALTY_SCALE,
+        min_margin,
         torch.zeros_like(min_margin),
     )
 
