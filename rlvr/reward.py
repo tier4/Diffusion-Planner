@@ -439,19 +439,36 @@ def compute_centerline_score_batch(
 
     # When near a route lane (<5m): penalize by lane usage (lateral position)
     # When far from route (>5m): penalize by distance to route (off-route deviation)
-    # This ensures trajectories that abandon the route are always penalized.
+    # BUT: only apply route deviation if the trajectory was previously near the
+    # route and then drifted away. If route lanes simply don't extend far enough,
+    # don't penalize -- the trajectory may be following the road correctly beyond
+    # where route data ends.
     _PROXIMITY = 5.0
     near_route = min_dist <= _PROXIMITY  # (N, T)
 
-    # Off-route penalty: normalized distance from route, scaled to be comparable
-    # to lane_usage (a 5m deviation = lane_usage of ~2.5 in a ~2m lane)
+    # Detect "was near route, now drifted": cumulative max of near_route over time.
+    # If the trajectory was ever near the route, subsequent far timesteps are
+    # treated as route abandonment. If never near, it's a coverage gap.
+    was_near = near_route.cummax(dim=-1).values  # (N, T) -- True from first near timestep onward
+    left_route = was_near & ~near_route  # (N, T) -- was near but now far
+
+    # Route deviation penalty: only for timesteps where trajectory left the route
     _ROUTE_DEVIATION_SCALE = 0.5
-    route_deviation = min_dist * _ROUTE_DEVIATION_SCALE  # (N, T)
+    route_deviation = (min_dist * _ROUTE_DEVIATION_SCALE).clamp(max=5.0)  # cap to avoid explosion
+
+    # Cap lane_usage at 1.0 for centerline scoring -- being at the boundary
+    # is the max lateral penalty. Being beyond it (usage>1) means off-route,
+    # handled by route_deviation.
+    capped_usage = lane_usage.clamp(max=1.0)
 
     per_step_penalty = torch.where(
         near_route,
-        lane_usage ** 2,
-        route_deviation ** 2,
+        capped_usage ** 2,
+        torch.where(
+            left_route,
+            route_deviation ** 2,
+            torch.zeros_like(lane_usage),  # no penalty if route never covered this area
+        ),
     )  # (N, T)
 
     # Time-weighted mean: early deviations penalized more
