@@ -9,7 +9,7 @@ and computes group-relative normalized advantages.
 The GRPO pipeline differs from the existing DPO pipeline in two key ways:
 
 1. **Group size**: DPO generates 2 trajectories per scene (pairwise preference). GRPO generates N (default 32 for training, 8 for GUI debugging).
-2. **Automatic scoring**: DPO can use human annotation or simple heuristics. GRPO uses a multi-component reward function that evaluates safety, progress, smoothness, and feasibility -- all automatically.
+2. **Automatic scoring**: DPO can use human annotation or simple heuristics. GRPO uses a multi-component reward function that evaluates safety, progress, smoothness, feasibility, and centerline adherence -- all automatically.
 
 ## Architecture
 
@@ -29,10 +29,16 @@ rlvr/
 
 ### Components
 
-**Safety (S)**: Ego-NPC collision check using oriented bounding boxes and the Separating Axis Theorem.
-Reuses `neighbor_clearance_penalty` from `diffusion_planner/loss.py`. Uses actual vehicle dimensions
-(length, width from `ego_shape` and `neighbor_agents_past`) with a 0.5m safety margin. Returns
-`collision_penalty` (default -10) on first collision, 0 otherwise.
+**Safety (S)**: Ego-NPC collision check using oriented bounding boxes and the Separating Axis
+Theorem (SAT). Builds ego bbox corners from `ego_shape` (wheel_base, length, width) and NPC
+bboxes from `neighbor_agents_past` dimensions. Uses `neighbor_agents_future` GT positions (with
+yaw converted from radians to cos/sin). Returns `collision_penalty` (default -10) on first
+bounding box overlap. Additionally, a soft **proximity penalty** is applied when the ego passes
+within 1m of any NPC without colliding (scales with intrusion depth).
+
+Known limitation: NPC futures are open-loop (from log replay). If the ego deviates significantly
+(e.g., stops), NPCs don't react, causing ghost collisions that wouldn't happen in closed-loop
+simulation. TeraSim integration will address this.
 
 **Progress (P)**: Euclidean distance reduction toward `goal_pose`. Falls back to total path length
 if goal is unavailable (zeros).
@@ -40,33 +46,49 @@ if goal is unavailable (zeros).
 **Smoothness (M)**: Negative mean absolute jerk computed via finite differences on positions.
 Penalizes sharp direction changes and acceleration spikes.
 
-**Feasibility (F)**: Three sub-components:
-- *Lane boundary violations*: Reuses `lane_boundary_penalty` from `diffusion_planner/loss.py`.
-  Builds the ego vehicle's 4 bounding box corners at each timestep and checks whether any corner
-  protrudes beyond the actual left/right lane boundaries. Uses `route_lanes` (the ego's intended
-  path) rather than all nearby `lanes` to avoid false negatives from adjacent/oncoming lanes.
-  Includes a 0.3m margin before penalizing.
-- *No-coverage penalty*: Timesteps where the ego center is >10m from any route lane center receive
-  a large fixed penalty. Catches trajectories that leave the mapped route entirely.
-- *Acceleration violations*: Fraction of timesteps where longitudinal acceleration exceeds
-  `max_accel` (default 8 m/s^2).
+**Feasibility (F)**: Multi-level penalty system with four severity tiers:
 
-**Centerline (C)**: Negative mean squared lateral deviation from the nearest route lane centerline.
-Rewards trajectories that stay close to the center of the intended lane rather than weaving near
-boundaries. Uses `route_lanes` to ensure the ego follows its assigned route. Computed as
-`-mean(lateral_offset^2)` across all timesteps.
+| Severity | Condition | Penalty per step | Description |
+|----------|-----------|------------------|-------------|
+| Margin | In-lane, vehicle edge within 0.5m of boundary | 0-0.5 | Discourages riding lane edges |
+| Off-route | On a road but not in any route lane | 5.0 | Wrong lane / missed turn |
+| Off-road | Outside all lane boundaries | 10.0 + protrusion | Left the drivable surface |
+| Off-map | >10m from any lane center | 20.0 + distance | Completely off the map |
+
+Lane containment checks use ALL `lanes` data (not just route lanes) with both distance and
+longitudinal proximity constraints to prevent false positives from distant lane segments.
+Off-route detection uses `route_lanes` to identify wrong-lane driving where the ego is on a
+road but not on the planned route.
+
+Additionally penalizes acceleration violations (fraction of steps where `|accel| > max_accel`).
+
+All violations are time-weighted: early violations (t=0s) are penalized ~3x more than late
+violations (t=7.9s), and the result is a time-weighted mean.
+
+**Centerline (C)**: Normalized lane-usage penalty from the nearest route lane centerline. Computes
+`(|lateral_offset| + half_vehicle_width) / lane_half_width` to measure what fraction of the lane
+the vehicle occupies, accounting for actual lane width and vehicle dimensions. Values range from
+~0.5 (centered) to 1.0 (edge touching boundary). Capped at 1.0 (being beyond the boundary is
+handled by feasibility).
+
+When the trajectory leaves route lane coverage (was near route but drifted away), switches to a
+distance-based route deviation penalty (capped at 5.0) so trajectories that abandon the route are
+always penalized. Timesteps beyond where route data simply doesn't extend are not penalized.
+
+Time-weighted mean with early deviations penalized more.
 
 ### Default Weights
 
 | Weight | Default | Purpose |
 |--------|---------|---------|
 | `w_safety` | 5.0 | Collision avoidance dominates |
-| `w_progress` | 1.0 | Goal-directed driving |
+| `w_progress` | 2.0 | Goal-directed driving |
 | `w_smooth` | 0.5 | Comfortable trajectories |
 | `w_feasibility` | 5.0 | Stay on road, respect dynamics |
-| `w_centerline` | 1.0 | Prefer lane center over lane edges |
+| `w_centerline` | 5.0 | Follow route centerline |
 
-All weights are tunable in the GUI without regenerating trajectories.
+All weights are tunable in the GUI without regenerating trajectories. The reward table shows
+weighted values (column * weight) so that columns add up to the total.
 
 ### Group Advantages
 
@@ -102,8 +124,7 @@ Controlled by per-type checkboxes (GUI) or `SamplerConfig` booleans:
 | Lane keeping | Disabled | `diffusion_planner/model/guidance/lane_keeping.py` |
 
 Collision and lane keeping are disabled by default for sampling guidance because their `energy()`
-path has known numerical issues. Their scoring/reward path is fine and is used indirectly through
-the reward function (which calls `loss.py` functions directly).
+path has known numerical issues.
 
 ## Trajectory Ranker GUI
 
@@ -118,6 +139,11 @@ python3 -m rlvr.trajectory_ranker_gui \
   --npz_list /path/to/path_list.json
 ```
 
+Generate `path_list.json` with:
+```bash
+python3 diffusion_planner/util_scripts/create_train_set_path.py /path/to/npz_directory
+```
+
 Prototypes are auto-generated from the npz list on first run. Use `--regen-prototypes` to force
 regeneration, or `--prototypes /path/to/file.npy` to use a specific file.
 
@@ -125,14 +151,19 @@ regeneration, or `--prototypes /path/to/file.npy` to use a specific file.
 
 **Navigation**: Step through scenes (+-1, +-10, +-30), shuffle order, jump to index.
 
+**Re-do button**: Regenerates all trajectories with fresh random noise and guidance configs.
+
 **Noise**: Min/max noise scale sliders control the sampling range for stochastic trajectories.
 
 **Guidance**: Master enable checkbox + per-type checkboxes. Only checked types enter the random
 pool. "Per-type inclusion probability" controls how likely each type is applied per trajectory.
 
 **Reward weights**: Changing weights rescores existing trajectories instantly (no regeneration).
+The table and trajectory colors update live.
 
-**Re-do button**: Regenerates all trajectories with fresh random noise and guidance configs.
+**Save Scene**: Saves current trajectories, reward breakdowns, and a plot image to
+`.datasets/trajectory-dump-YY-MM-DD-HH-MM-SS/`. Multiple scenes accumulate in the same session
+directory. Saved data can be used for offline analysis and debugging.
 
 **Display**: Zoom and time step sliders rerender without regeneration or rescoring.
 
@@ -142,40 +173,35 @@ pool. "Per-type inclusion probability" controls how likely each type is applied 
 - Deterministic trajectory shown as blue dashed line with star marker, bold in reward table
 - Ground truth shown as black dashed line
 - Top-3 trajectories get diamond markers at the selected timestep
-- Reward table shows all components sorted by total score
+- Collision points shown as red X markers at the first collision timestep
+- Reward table shows weighted component values (columns add up to total)
 - Speed and curvature plots for top-3 trajectories
 
 ## Reused Code
 
-The reward function reuses production code from the training/validation pipeline:
-
 | Function | Source | Used For |
 |----------|--------|----------|
-| `lane_boundary_penalty` | `diffusion_planner/loss.py` | Feasibility: lane boundary check with vehicle footprint |
-| `neighbor_clearance_penalty` | `diffusion_planner/loss.py` | Safety: SAT collision check with oriented bounding boxes |
-| `_build_ego_bbox_corners` | Adapted from `compute_safety_penalty` in `loss.py` | Shared ego footprint construction |
+| `batch_signed_distance_rect` | `diffusion_planner/model/guidance/collision.py` | SAT signed distance for collision detection |
+| `center_rect_to_points` | `diffusion_planner/model/guidance/collision.py` | Oriented bounding box corner computation |
 | `generate_samples` | `guidance_gui/generate_samples.py` | Per-trajectory model inference |
 | `GuidanceComposer` | `diffusion_planner/model/guidance/composer.py` | Guidance injection during sampling |
+| `load_npz_data` | `preference_optimization/utils.py` | Scene data loading with heading conversion |
+| `load_model` | `preference_optimization/model_utils.py` | Model checkpoint loading |
+
+Note: `loss.py` functions (`lane_boundary_penalty`, `neighbor_clearance_penalty`) have known bugs
+(P/T reshape issue, baseline penalty from loose nearest-lane matching) and are NOT used. The
+reward module implements its own lane boundary and collision checks directly.
 
 ## Future: Imitation-Based Reward Components
 
-`loss.py` also contains `loss_func(pred, gt)` which returns per-timestep losses that could serve
+`loss.py` contains `loss_func(pred, gt)` which returns per-timestep losses that could serve
 as an imitation-based reward component:
 
 - `position_lat_loss` / `position_lon_loss`: Lateral and longitudinal error projected onto the GT
-  heading direction. More meaningful than raw L2 -- separates lane-departure error from
-  speed-mismatch error.
+  heading direction.
 - `cosine_similarity_loss`: Heading alignment with GT (1 - cos_sim).
 - `heading_l2_loss`: Raw heading vector error.
 
-These would score "how close is this sampled trajectory to the ground truth log-replay?" Adding
-them as a reward component (e.g., `w_imitation * -ADE_to_GT`) would anchor the GRPO reward
-partially to imitation learning. This creates a tradeoff:
-
-- **Pro**: Prevents reward hacking where trajectories score well on rule-based metrics but are
-  unrealistic (e.g., driving perfectly on the centerline at an unreasonable speed profile).
-- **Con**: Biases toward replicating logged behavior rather than discovering novel better
-  trajectories. The GT trajectory is not always optimal (human drivers make mistakes).
-
-The current reward is purely rule-based. Whether to mix in imitation signals depends on how much
-the rule-based reward alone can shape the policy without reward hacking.
+Adding these as a reward component would anchor the GRPO reward partially to imitation learning.
+Tradeoff: prevents reward hacking but biases toward replicating logged behavior (which may not
+be optimal). The current reward is purely rule-based.
