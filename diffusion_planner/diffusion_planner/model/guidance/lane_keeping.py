@@ -86,8 +86,8 @@ class LaneKeepingGuidance(BaseGuidance):
         rb  = gather2(lane_right)
 
         ego_lat  = ((ego_pos - c) * lat).sum(dim=-1)    # [B, T]
-        left_hw  = ((lb - c) * lat).sum(dim=-1)          # [B, T]
-        right_hw = ((rb - c) * lat).sum(dim=-1)          # [B, T]
+        left_hw  = (lb * lat).sum(dim=-1)                 # [B, T]
+        right_hw = (rb * lat).sum(dim=-1)                 # [B, T]
 
         half_w = inputs["ego_shape"][:, 2:3] / 2         # [B, 1]
 
