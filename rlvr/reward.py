@@ -288,15 +288,19 @@ def compute_feasibility_score_batch(
     dist = dist.masked_fill(~lane_valid.view(1, 1, -1).expand(N, T, -1), 1e6)
     min_dist = dist.min(dim=-1).values  # (N, T)
 
-    # Only check lanes within a tight radius. The lateral projection is only
-    # meaningful when the ego is close to the lane segment -- at 4m+ away the
-    # projection can falsely indicate "inside" when the ego is far off to the
-    # side along the lane direction.
+    # A lane point can only "contain" the ego if both:
+    # 1. Total distance is within radius (not too far in any direction)
+    # 2. Longitudinal distance is small (ego is alongside this lane segment,
+    #    not far ahead/behind where the lateral projection is meaningless)
     _CHECK_RADIUS = 4.0
-    nearby_mask = dist < _CHECK_RADIUS  # (N, T, S_P)
+    _MAX_LONGITUDINAL = 3.5  # must accommodate lane point spacing (median ~1.5m, max ~5.5m)
 
-    # Lateral offset for all (ego, lane) pairs: (N, T, S_P)
-    ego_lat_all = (diff * lane_lat.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+    # Decompose distance into lateral and longitudinal components
+    lane_dir_n = lane_dirs / (lane_dirs.norm(dim=-1, keepdim=True) + 1e-6)  # (S_P, 2)
+    ego_lon_all = (diff * lane_dir_n.unsqueeze(0).unsqueeze(0)).sum(dim=-1)  # (N, T, S_P)
+    ego_lat_all = (diff * lane_lat.unsqueeze(0).unsqueeze(0)).sum(dim=-1)    # (N, T, S_P)
+
+    nearby_mask = (dist < _CHECK_RADIUS) & (ego_lon_all.abs() < _MAX_LONGITUDINAL)  # (N, T, S_P)
 
     # Boundary violations per lane: (N, T, S_P)
     viol_left_all = torch.relu(ego_lat_all + half_w - left_hw.view(1, 1, -1))
