@@ -100,9 +100,9 @@ def test_collision_detected():
     scores, steps = compute_safety_score_batch(
         ego, _default_ego_shape(), npc, _default_neighbor_shapes(1), npc_valid, CONFIG
     )
-    assert scores[0].item() == CONFIG.collision_penalty, f"Expected {CONFIG.collision_penalty}, got {scores[0]}"
+    assert scores[0].item() <= CONFIG.collision_penalty, f"Expected <= {CONFIG.collision_penalty}, got {scores[0]}"
     assert steps[0] is not None and 0 <= steps[0] < T
-    print(f"  PASS  collision_detected (step={steps[0]})")
+    print(f"  PASS  collision_detected (step={steps[0]}, score={scores[0]:.1f})")
 
 
 def test_no_neighbors():
@@ -134,8 +134,8 @@ def test_multiple_neighbors_one_collision():
     scores, steps = compute_safety_score_batch(
         ego, _default_ego_shape(), npc_tensor, shapes, npc_valid, CONFIG
     )
-    assert scores[0].item() == CONFIG.collision_penalty
-    print(f"  PASS  multiple_neighbors_one_collision (step={steps[0]})")
+    assert scores[0].item() <= CONFIG.collision_penalty
+    print(f"  PASS  multiple_neighbors_one_collision (step={steps[0]}, score={scores[0]:.1f})")
 
 
 def test_near_miss_no_penalty():
@@ -148,6 +148,20 @@ def test_near_miss_no_penalty():
     assert scores[0].item() == 0.0
     assert steps[0] is None
     print("  PASS  near_miss_no_penalty")
+
+
+def test_proximity_penalty():
+    """NPC driving parallel at ~2.5m offset -- within proximity margin."""
+    ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    # NPC at y=2.5 -- close enough for proximity penalty (gap < 1m after bbox sizes)
+    npc = _npc_straight(offset_y=2.5, speed=0.5).unsqueeze(0)
+    npc_valid = torch.ones(1, T, dtype=torch.bool)
+    scores, steps = compute_safety_score_batch(
+        ego, _default_ego_shape(), npc, _default_neighbor_shapes(1), npc_valid, CONFIG
+    )
+    assert steps[0] is None, "Should not be a collision"
+    assert scores[0].item() < 0, f"Should have proximity penalty, got {scores[0]}"
+    print(f"  PASS  proximity_penalty: score={scores[0]:.3f}")
 
 
 # -------------------------------------------------------------------------
@@ -295,7 +309,7 @@ def test_batch_collision_mixed():
         trajs, _default_ego_shape(), npc_at_zero, _default_neighbor_shapes(1), npc_valid, CONFIG
     )
     assert scores[0].item() == 0.0, f"Safe traj should have no collision, got {scores[0]}"
-    assert scores[1].item() == CONFIG.collision_penalty, f"Colliding traj should have penalty"
+    assert scores[1].item() <= CONFIG.collision_penalty, f"Colliding traj should have penalty"
     assert steps[0] is None
     assert steps[1] is not None
     print(f"  PASS  batch_collision_mixed: scores={scores.tolist()}, steps={steps}")
@@ -394,6 +408,7 @@ if __name__ == "__main__":
         test_no_neighbors,
         test_multiple_neighbors_one_collision,
         test_near_miss_no_penalty,
+        test_proximity_penalty,
         test_progress_toward_goal,
         test_progress_away_from_goal,
         test_no_goal_fallback_path_length,

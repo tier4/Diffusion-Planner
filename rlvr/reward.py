@@ -171,10 +171,20 @@ def compute_safety_score_batch(
     has_collision = has_collision_at_t.any(dim=1)  # (N,)
     first_t = has_collision_at_t.float().argmax(dim=1)  # (N,)
 
+    # Proximity penalty: soft penalty for being close to any agent without
+    # colliding. Min signed distance across all neighbors per timestep.
+    # Penalize when closer than _PROXIMITY_MARGIN metres.
+    _PROXIMITY_MARGIN = 1.0  # metres
+    min_dist_to_any_npc = distances.min(dim=1).values  # (N, T)
+    proximity_intrusion = torch.relu(_PROXIMITY_MARGIN - min_dist_to_any_npc)  # (N, T)
+    # Don't double-count collision timesteps
+    proximity_intrusion = proximity_intrusion.masked_fill(has_collision_at_t, 0.0)
+    proximity_penalty = proximity_intrusion.mean(dim=-1)  # (N,)
+
     scores = torch.where(
         has_collision,
-        torch.tensor(config.collision_penalty, device=device),
-        torch.tensor(0.0, device=device),
+        torch.tensor(config.collision_penalty, device=device) - proximity_penalty,
+        -proximity_penalty,
     )
 
     collision_steps: list[int | None] = []
