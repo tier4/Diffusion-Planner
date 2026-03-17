@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 import yaml
+from tqdm import tqdm
 
 
 def parse_args():
@@ -20,11 +21,10 @@ if __name__ == "__main__":
 
     total_duration_sec = 0.0
 
-    for metadata_path in metadata_list:
+    for metadata_path in tqdm(metadata_list):
         metadata = yaml.safe_load(metadata_path.open("r"))
         nanoseconds = metadata["rosbag2_bagfile_information"]["duration"]["nanoseconds"]
         seconds = nanoseconds / 1e9
-        print(f"{metadata_path.parent}: {seconds:.3f} sec")
         total_duration_sec += seconds
 
     total_sec = int(total_duration_sec)
