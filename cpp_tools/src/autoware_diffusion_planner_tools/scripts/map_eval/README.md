@@ -54,7 +54,7 @@ For a polyline pair A and B:
 - `metrics_summary.csv`
 - `entity_metrics.csv`
 - `overlay_and_error_plots.png`
-- `interactive_overlay.html` (Leaflet-based dashboard with layer tabs; Key output for visualizing the results)
+- `interactive_overlay.html` (Leaflet-based dashboard with layer tabs; always generated as the primary output)
 - `worst_cases/` per-entity debug JSON for top-K worst lanes, line strings, and polygons (by symmetric Hausdorff)
 
 ## Usage
