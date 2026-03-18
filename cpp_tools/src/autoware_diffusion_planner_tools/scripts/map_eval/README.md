@@ -31,19 +31,16 @@ For a polyline pair A and B:
 
 ### Lane segments
 
-- centerline and boundary symmetric Chamfer-like and Hausdorff-like metrics
-- heading difference (deg)
+- centerline and boundary symmetric Hausdorff-like metrics
 - pass rate for `centerline_symmetric_hausdorff_like < 0.2 m` (key metric)
 
 ### Polygons (`intersection_area`)
 
 - symmetric Hausdorff-like distance
-- symmetric Chamfer-like distance
 
 ### Line strings (`stop_line`)
 
 - symmetric Hausdorff-like distance (main error)
-- symmetric Chamfer-like distance
 - orientation error (deg)
 
 ## Outputs
