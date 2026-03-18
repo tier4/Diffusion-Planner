@@ -681,9 +681,15 @@ def compute_reward_batch(
     )
     centerline_scores = compute_centerline_score_batch(ego_trajs, ego_shape, data)
 
+    # Scale progress by on-road fraction: off-road shortcuts should not
+    # be rewarded for "progress" toward the goal. A trajectory 37% off-road
+    # gets only 63% of its progress credit.
+    on_road_factor = (1.0 - off_road_fractions)  # (N,)
+    adjusted_progress = progress_scores * on_road_factor
+
     totals = (
         config.w_safety * safety_scores
-        + config.w_progress * progress_scores
+        + config.w_progress * adjusted_progress
         + config.w_smooth * smoothness_scores
         + config.w_feasibility * feasibility_scores
         + config.w_centerline * centerline_scores
@@ -693,7 +699,7 @@ def compute_reward_batch(
     for i in range(N):
         results.append(RewardBreakdown(
             safety=float(safety_scores[i]),
-            progress=float(progress_scores[i]),
+            progress=float(adjusted_progress[i]),
             smoothness=float(smoothness_scores[i]),
             feasibility=float(feasibility_scores[i]),
             centerline=float(centerline_scores[i]),
