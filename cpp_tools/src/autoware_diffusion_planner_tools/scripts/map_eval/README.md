@@ -51,11 +51,14 @@ For a polyline pair A and B:
 `compare_map.py` writes:
 
 - `metrics_summary.json`
-- `metrics_summary.csv`
-- `entity_metrics.csv`
-- `overlay_and_error_plots.png`
 - `interactive_overlay.html` (Leaflet-based dashboard with layer tabs; always generated as the primary output)
-- `worst_cases/` per-entity debug JSON for top-K worst lanes, line strings, and polygons (by symmetric Hausdorff)
+
+Notes:
+- `output_prefix` is supported for both output files
+  (for example, `foo_metrics_summary.json`, `foo_interactive_overlay.html`).
+- The current `evaluate_core()` path always renders HTML and does not emit
+  `metrics_summary.csv`, `entity_metrics.csv`, `overlay_and_error_plots.png`,
+  or `worst_cases/`.
 
 ## Usage
 
@@ -75,6 +78,20 @@ python3 src/autoware_diffusion_planner_tools/scripts/map_eval/compare_map.py eva
   --reference_map /tmp/reference.json \
   --out_dir /tmp/map_eval \
 ```
+
+### Common options
+
+- `--max_match_distance`: maximum geometry-match cost for lines/polygons
+- `--top_k_debug`: reserved for debug ranking in metrics payload
+- `--output_prefix`: prefix for output filenames
+- `--lane_threshold`, `--line_threshold`, `--poly_threshold`: heatmap color
+  saturation thresholds in the interactive dashboard
+- `--web`: open generated HTML in browser after completion
+
+### `export-eval` specific options
+
+- `--internal_json_out`, `--reference_json_out`: override export JSON paths
+- `--skip_export`: skip `ros2 run ... map_exporter` and evaluate existing JSONs
 
 ### Run exporter directly (ROS parameter style)
 
