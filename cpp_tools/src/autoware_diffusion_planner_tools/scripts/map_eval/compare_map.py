@@ -1,4 +1,52 @@
 #!/usr/bin/env python3
+"""Map preprocessing evaluator for Diffusion Planner.
+
+This module provides two entry paths:
+
+- `eval-only`: evaluate existing `internal_map.json` and `reference.json`
+- `export-eval`: run `map_exporter` first, then evaluate the exported JSON
+
+High-level call flow:
+
+    main
+      -> parse_args
+      -> (optional) run_export_stage
+      -> evaluate_core
+           -> compare_lane_segments
+           -> compare_line_strings
+           -> compare_polygons
+           -> build_error_maps
+           -> compute_point_errors
+           -> render_html_dashboard
+
+Design notes:
+- Matching is split by entity type: lanes are ID-matched; lines/polygons are
+  geometry-matched with start/end gating and chamfer-like ranking.
+- Metric computation is independent from rendering.
+- HTML rendering consumes precomputed metrics and point-error payloads.
+
+JSON format notes (from `map_exporter.cpp`):
+- Both map JSON files share top-level keys:
+  - `lane_segments`: list
+  - `line_strings`: list
+  - `polygons`: list
+  - `meta`: object (source path and export metadata)
+- Internal map (`internal_map.json`) lane segment format:
+  - `id`: lane ID
+  - `centerline` / `left_boundary` / `right_boundary`: each is a polyline
+    represented as `[[x, y, z], ...]`
+- Reference map (`reference.json`) lane segment format:
+  - `id`: original Lanelet2 lanelet ID
+  - `centerline` / `left_boundary` / `right_boundary`: each is a list of
+    point records with IDs:
+    `[{"id": point_id, "points": [x, y, z]}, ...]`
+- For `line_strings` and `polygons`, both internal and reference exports use:
+  - `{"points": [[x, y, z], ...]}`
+- Practical implication for this evaluator:
+  - lane boundaries use different representations between internal/reference,
+    so lane comparisons use dedicated converters (`points3_to_np` vs
+    `points3_id_to_np`), while line/polygon comparisons use plain point arrays.
+"""
 
 import argparse
 import csv
@@ -8,7 +56,9 @@ from pathlib import Path
 import subprocess
 import webbrowser
 from typing import Dict
+from typing import Any
 from typing import List
+from typing import Mapping
 from typing import Optional
 from typing import Tuple
 
@@ -32,7 +82,19 @@ class ErrorMaps:
     poly: Dict[int, float]
 
 
-def _safe_split_match(r: Dict) -> Optional[Tuple[int, int]]:
+JsonMap = Dict[str, Any]
+MetricRow = Dict[str, Any]
+InternalMap = JsonMap
+ReferenceMap = JsonMap
+LaneMetricRow = MetricRow
+LineMetricRow = MetricRow
+PolyMetricRow = MetricRow
+PointErrorRecord = Dict[str, Any]
+LanePointErrors = Dict[int, Dict[str, List[PointErrorRecord]]]
+LinePointErrors = Dict[int, List[PointErrorRecord]]
+
+
+def _safe_split_match(r: Mapping[str, Any]) -> Optional[Tuple[int, int]]:
     """Safely parse match_index field, returning tuple or None on failure."""
     parts = r.get("match_index", "").split(":")
     if len(parts) != 2:
@@ -44,11 +106,16 @@ def _safe_split_match(r: Dict) -> Optional[Tuple[int, int]]:
 
 
 def build_error_maps(
-    lane_rows: List[Dict],
-    line_rows: List[Dict],
-    poly_rows: List[Dict],
+    lane_rows: List[LaneMetricRow],
+    line_rows: List[LineMetricRow],
+    poly_rows: List[PolyMetricRow],
 ) -> ErrorMaps:
-    """Build error maps from comparison rows for efficient lookup."""
+    """Build per-entity Hausdorff lookup maps from comparison rows.
+
+    The returned maps are used by both static and interactive visualizations.
+    Lane entries are keyed by semantic lane ID, while line/polygon entries are
+    keyed by internal list index extracted from `match_index`.
+    """
     return ErrorMaps(
         lane={int(r["entity_id"]): max(float(r["center_sym_hausdorff_like"]), 
                                        float(r["left_sym_hausdorff_like"]),
@@ -87,12 +154,12 @@ def build_worst_k(
     return sorted(combined, key=lambda x: x["sym_hausdorff_like"], reverse=True)[:k]
 
 
-def load_json(path: Path) -> Dict:
+def load_json(path: Path) -> JsonMap:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def points3_to_np(points: List[List[float]]) -> np.ndarray:
+def points3_to_np(points: Any) -> np.ndarray:
     if not points:
         return np.zeros((0, 3), dtype=np.float64)
     return np.asarray(points, dtype=np.float64)
@@ -210,9 +277,9 @@ def _points_to_error_dicts(
     valid_mask = np.isfinite(pts_array[:, 2])
     valid_points = pts_array[valid_mask]
     point_ids_valid = point_ids[valid_mask] if point_ids is not None and len(point_ids) == len(pts) else None
-    out = []
+    out: List[PointErrorRecord] = []
     for idx, p in enumerate(valid_points):
-        item = {
+        item: PointErrorRecord = {
             "lat": float(p[0]),
             "lng": float(p[1]),
             "error": float(p[2]),
@@ -226,9 +293,9 @@ def _points_to_error_dicts(
 
 
 def _compute_point_errors_for_indexed_entities(
-    internal_list: List[Dict],
-    reference_list: List[Dict],
-    rows: List[Dict],
+    internal_list: List[MetricRow],
+    reference_list: List[MetricRow],
+    rows: List[MetricRow],
     points_key: str = "points",
 ) -> Dict:
     """Generic helper to compute point errors for index-matched entities (lines/polygons).
@@ -270,31 +337,28 @@ def _compute_point_errors_for_indexed_entities(
 
 
 def compute_point_errors(
-    internal: Dict,
-    reference: Dict,
-    lane_rows: List[Dict],
-    line_rows: List[Dict],
-) -> Tuple[Dict, Dict]:
-    """Compute per-point error data for lane and line entity types.
+    internal: InternalMap,
+    reference: ReferenceMap,
+    lane_rows: List[LaneMetricRow],
+    line_rows: List[LineMetricRow],
+) -> Tuple[LanePointErrors, LinePointErrors]:
+    """Compute point-level residual payloads used by the HTML dashboard.
 
-    Uses existing match_index from lane_rows, line_rows to find matches.
+    Lanes are matched by semantic lane ID from `lane_rows["entity_id"]`.
+    Line strings are matched via `match_index` pairs from `line_rows`.
+    Polygons are intentionally excluded from point-marker visualization.
 
     Returns:
-        lane_point_errors: {
-            lane_id: {
-                "centerline": [...],
-                "left_boundary": [...],
-                "right_boundary": [...],
-            }
-        }
-        line_point_errors: {index: [{"lat": y, "lng": x, "error": float}, ...]}
+        Tuple of:
+        - lane point errors keyed by lane ID and boundary type
+        - line point errors keyed by internal line index
     """
     # Build dictionary lookups for O(1) access
     int_lanes_by_id = {int(x["id"]): x for x in internal["lane_segments"]}
     ref_lanes_by_id = {int(x["id"]): x for x in reference["lane_segments"]}
 
     # Lane point errors - only for matched lanes (using O(1) dictionary lookup)
-    lane_point_errors = {}
+    lane_point_errors: LanePointErrors = {}
     for row in lane_rows:
         lane_id = int(row["entity_id"])
         int_lane = int_lanes_by_id.get(lane_id)
@@ -333,7 +397,15 @@ def compute_point_errors(
     return lane_point_errors, line_point_errors
 
 
-def compare_lane_segments(internal: Dict, reference: Dict) -> Tuple[Dict, List[Dict]]:
+def compare_lane_segments(
+    internal: InternalMap, reference: ReferenceMap
+) -> Tuple[Dict[str, Any], List[LaneMetricRow]]:
+    """Compare lane segments by semantic lane ID.
+
+    For every shared lane ID, computes symmetric distance stats for centerline,
+    left boundary, and right boundary. Returns aggregate lane metrics and
+    per-entity rows used downstream by error-map and dashboard generation.
+    """
     int_by_id = {int(x["id"]): x for x in internal["lane_segments"]}
     ref_by_id = {int(x["id"]): x for x in reference["lane_segments"]}
     matched_ids = sorted(set(int_by_id.keys()) & set(ref_by_id.keys()))
@@ -447,8 +519,14 @@ def match_geometry_only(
 
 
 def compare_line_strings(
-    internal: Dict, reference: Dict, max_match_distance: float
-) -> Tuple[Dict, List[Dict]]:
+    internal: InternalMap, reference: ReferenceMap, max_match_distance: float
+) -> Tuple[Dict[str, Any], List[LineMetricRow]]:
+    """Compare line strings after geometry-based matching.
+
+    Matching uses `match_geometry_only` with start/end gating and a chamfer-like
+    matching score, then computes symmetric distance metrics for matched pairs.
+    Returns aggregate metrics and per-pair rows.
+    """
     in_lines = internal["line_strings"]
     ref_lines = reference["line_strings"]
     matches = match_geometry_only(
@@ -490,8 +568,13 @@ def compare_line_strings(
 
 
 def compare_polygons(
-    internal: Dict, reference: Dict, max_match_distance: float
-) -> Tuple[Dict, List[Dict]]:
+    internal: InternalMap, reference: ReferenceMap, max_match_distance: float
+) -> Tuple[Dict[str, Any], List[PolyMetricRow]]:
+    """Compare polygons after geometry-based matching.
+
+    Uses the same matching policy as line strings and returns aggregate metrics
+    plus per-pair rows for visualization/debug outputs.
+    """
     in_polys = internal["polygons"]
     ref_polys = reference["polygons"]
     matches = match_geometry_only(
@@ -537,7 +620,7 @@ def make_static_plots(
     line_rows: List[Dict],
     poly_rows: List[Dict],
     out_path: Path,
-    error_maps: ErrorMaps = None,
+    error_maps: Optional[ErrorMaps] = None,
 ) -> None:
     if error_maps is None:
         error_maps = build_error_maps(lane_rows, line_rows, poly_rows)
@@ -552,7 +635,7 @@ def make_static_plots(
     vmax_lane = max(float(np.max(lane_haus)), 1e-6) if lane_haus else 1.0
     vmax_line = max(float(np.max(line_haus)), 1e-6) if line_haus else 1.0
     vmax_poly = max(float(np.max(poly_haus)), 1e-6) if poly_haus else 1.0
-    cmap = plt.cm.viridis
+    cmap = matplotlib.cm.get_cmap("viridis")
     norm_lane = matplotlib.colors.Normalize(vmin=0.0, vmax=vmax_lane)
     norm_line = matplotlib.colors.Normalize(vmin=0.0, vmax=vmax_line)
     norm_poly = matplotlib.colors.Normalize(vmin=0.0, vmax=vmax_poly)
@@ -680,17 +763,25 @@ def _close_ring(coords: List[List[float]]) -> List[List[float]]:
 
 
 def render_html_dashboard(
-    internal: Dict,
-    reference: Dict,
-    lane_rows: List[Dict],
-    line_rows: List[Dict],
-    poly_rows: List[Dict],
+    internal: InternalMap,
+    reference: ReferenceMap,
+    lane_rows: List[LaneMetricRow],
+    line_rows: List[LineMetricRow],
+    poly_rows: List[PolyMetricRow],
+    lane_point_errors: LanePointErrors,
+    line_point_errors: LinePointErrors,
     out_path: Path,
     lane_threshold: float = 0.2,
     line_threshold: float = 0.2,
     poly_threshold: float = 1.0,
-    error_maps: ErrorMaps = None,
+    error_maps: Optional[ErrorMaps] = None,
 ) -> None:
+    """Render the interactive Leaflet dashboard HTML.
+
+    This function is render-focused: it consumes precomputed comparison rows,
+    error maps, and point-error payloads, then serializes map geometries and
+    metrics into the Jinja template context and writes one HTML file.
+    """
     if error_maps is None:
         error_maps = build_error_maps(lane_rows, line_rows, poly_rows)
 
@@ -732,11 +823,6 @@ def render_html_dashboard(
     vmax_line = max(float(np.max(line_haus)), 1e-6) if line_haus else 1.0
     vmax_poly = max(float(np.max(poly_haus)), 1e-6) if poly_haus else 1.0
 
-    # Compute point-level errors for high-error point markers (lanes and lines only, not polygons)
-    lane_point_errors, line_point_errors = compute_point_errors(
-        internal, reference, lane_rows, line_rows
-    )
-
     # Build reference maps for zoom functionality
     ref_lanes_by_id = {int(x["id"]): x for x in reference["lane_segments"]}
     # Build match index maps for lines and polygons with safe parsing
@@ -759,7 +845,7 @@ def render_html_dashboard(
         r_i = points3_to_np(lane["right_boundary"])
         lane_id = int(lane["id"])
         ref_lane = ref_lanes_by_id.get(lane_id)
-        ref_geometries = {
+        ref_geometries: Dict[str, List[List[float]]] = {
             "centerline": [],
             "left_boundary": [],
             "right_boundary": [],
@@ -794,7 +880,7 @@ def render_html_dashboard(
         s_i = points3_to_np(line_string["points"])
         if len(s_i):
             # Find matching reference line using match_index
-            ref_coords = []
+            ref_coords: List[List[float]] = []
             ref_idx = line_match_map.get(i)
             if ref_idx is not None and ref_idx < len(reference["line_strings"]):
                 ref_line = reference["line_strings"][ref_idx]
@@ -816,18 +902,18 @@ def render_html_dashboard(
         p_i = points3_to_np(polygon["points"])
         if len(p_i):
             # Find matching reference polygon using match_index
-            ref_coords = []
+            ref_poly_coords: List[List[List[float]]] = []
             ref_idx = poly_match_map.get(i)
             if ref_idx is not None and ref_idx < len(reference["polygons"]):
                 ref_poly = reference["polygons"][ref_idx]
                 p_ref = points3_to_np(ref_poly["points"])
                 if len(p_ref) > 0:
-                    ref_coords = [_close_ring(_pts_to_coords(p_ref))]
+                    ref_poly_coords = [_close_ring(_pts_to_coords(p_ref))]
             ring = _close_ring(_pts_to_coords(p_i))
             polys_int.append(
                 {
                     "coordinates": [ring] if ring else [],
-                    "ref_coordinates": ref_coords,
+                    "ref_coordinates": ref_poly_coords,
                     "index": i,
                     "hausdorff": poly_error_map.get(i, 0.0),
                 }
@@ -924,7 +1010,6 @@ def add_common_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out_dir", required=True, type=Path)
     parser.add_argument("--max_match_distance", type=float, default=5.0)
     parser.add_argument("--top_k_debug", type=int, default=20)
-    parser.add_argument("--skip_html", action="store_true")
     parser.add_argument("--output_prefix", type=str, default="")
     parser.add_argument(
         "--web",
@@ -981,6 +1066,12 @@ def resolve_output_path(out_dir: Path, output_prefix: str, filename: str) -> Pat
 def run_export_stage(
     map_path: Path, internal_out: Path, reference_out: Path, skip_export: bool
 ) -> None:
+    """Run the ROS2 map exporter stage unless `skip_export` is enabled.
+
+    Side effects:
+    - invokes `ros2 run autoware_diffusion_planner_tools map_exporter`
+    - writes internal/reference JSON to the requested paths
+    """
     if skip_export:
         return
     cmd = [
@@ -1007,13 +1098,21 @@ def evaluate_core(
     out_dir: Path,
     max_match_distance: float,
     top_k_debug: int,
-    skip_html: bool,
     output_prefix: str,
     open_web: bool = False,
     lane_threshold: float = 0.2,
     line_threshold: float = 0.2,
     poly_threshold: float = 1.0,
 ) -> None:
+    """Execute the core evaluation pipeline from JSON input to reports.
+
+    Flow:
+    1) load internal/reference maps
+    2) compute entity metrics and matching rows (lane/line/polygon)
+    3) build error maps + point-error payloads
+    4) write summary JSON and interactive HTML dashboard
+    5) optionally open HTML in browser
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     print("[2/3] Computing metrics...")
     internal = load_json(internal_map_path)
@@ -1027,6 +1126,9 @@ def evaluate_core(
     poly_metrics, poly_rows = compare_polygons(internal, reference, max_match_distance)
 
     error_maps = build_error_maps(lane_rows, line_rows, poly_rows)
+    lane_point_errors, line_point_errors = compute_point_errors(
+        internal, reference, lane_rows, line_rows
+    )
 
     worst_k_by_hausdorff = build_worst_k(lane_rows, line_rows, poly_rows, 20)
 
@@ -1066,8 +1168,6 @@ def evaluate_core(
     print("[3/3] Writing plots/reports...")
 
     metrics_json_path = resolve_output_path(out_dir, output_prefix, "metrics_summary.json")
-    summary_csv_path = resolve_output_path(out_dir, output_prefix, "metrics_summary.csv")
-    overlay_png_path = resolve_output_path(out_dir, output_prefix, "overlay_and_error_plots.png")
     html_path = resolve_output_path(out_dir, output_prefix, "interactive_overlay.html")
 
     with metrics_json_path.open("w", encoding="utf-8") as f:
@@ -1079,70 +1179,30 @@ def evaluate_core(
         "symmetric_hausdorff_like_m",
     )
 
-    with summary_csv_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["entity", "metric", "count", "mean", "median", "p95", "max"])
-        for entity in ("lane_segments", "line_strings", "polygons"):
-            entity_metrics = metrics[entity]
-            seen = set()
-            ordered = []
-            for k in _HAUSDORFF_FIRST:
-                if k in entity_metrics and k not in seen:
-                    ordered.append((k, entity_metrics[k]))
-                    seen.add(k)
-            for metric_name, metric_value in entity_metrics.items():
-                if metric_name not in seen:
-                    ordered.append((metric_name, metric_value))
-                    seen.add(metric_name)
-            for metric_name, metric_value in ordered:
-                if isinstance(metric_value, dict) and {
-                    "count",
-                    "mean",
-                    "median",
-                    "p95",
-                    "max",
-                }.issubset(metric_value.keys()):
-                    writer.writerow(
-                        [
-                            entity,
-                            metric_name,
-                            metric_value["count"],
-                            metric_value["mean"],
-                            metric_value["median"],
-                            metric_value["p95"],
-                            metric_value["max"],
-                        ]
-                    )
-
-    write_entity_csv(out_dir, lane_rows, line_rows, poly_rows)
-    write_worst_case_debug(
-        internal, reference, lane_rows, line_rows, poly_rows, out_dir, top_k_debug
+    render_html_dashboard(
+        internal,
+        reference,
+        lane_rows,
+        line_rows,
+        poly_rows,
+        lane_point_errors,
+        line_point_errors,
+        html_path,
+        lane_threshold=lane_threshold,
+        line_threshold=line_threshold,
+        poly_threshold=poly_threshold,
+        error_maps=error_maps,
     )
-    make_static_plots(internal, reference, lane_rows, line_rows, poly_rows, overlay_png_path, error_maps)
-    if not skip_html:
-        render_html_dashboard(
-            internal,
-            reference,
-            lane_rows,
-            line_rows,
-            poly_rows,
-            html_path,
-            lane_threshold=lane_threshold,
-            line_threshold=line_threshold,
-            poly_threshold=poly_threshold,
-            error_maps=error_maps,
-        )
-        if open_web:
-            webbrowser.open(f"file://{html_path.resolve()}")
+    if open_web:
+        webbrowser.open(f"file://{html_path.resolve()}")
 
     print("Done.")
     print(f"- metrics: {metrics_json_path}")
-    print(f"- overlay: {overlay_png_path}")
-    if not skip_html:
-        print(f"- interactive: {html_path}")
+    print(f"- interactive: {html_path}")
 
 
 def main() -> None:
+    """CLI entry point for `eval-only` and `export-eval` workflows."""
     args = parse_args()
     if args.command == "eval-only":
         evaluate_core(
@@ -1151,7 +1211,6 @@ def main() -> None:
             out_dir=args.out_dir,
             max_match_distance=args.max_match_distance,
             top_k_debug=args.top_k_debug,
-            skip_html=args.skip_html,
             output_prefix=args.output_prefix,
             open_web=args.web,
             lane_threshold=args.lane_threshold,
@@ -1180,7 +1239,6 @@ def main() -> None:
         out_dir=out_dir,
         max_match_distance=args.max_match_distance,
         top_k_debug=args.top_k_debug,
-        skip_html=args.skip_html,
         output_prefix=args.output_prefix,
         open_web=args.web,
         lane_threshold=args.lane_threshold,

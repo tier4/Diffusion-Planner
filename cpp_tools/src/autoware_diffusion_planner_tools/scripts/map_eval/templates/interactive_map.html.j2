@@ -216,6 +216,39 @@
         .filter(coords => Array.isArray(coords) && coords.length > 0);
     }
 
+    function getLaneGeometryEntries(ent, fieldName) {
+      const geoms = ent && ent[fieldName] ? ent[fieldName] : null;
+      if (!geoms) return [];
+      return ["centerline", "left_boundary", "right_boundary"]
+        .map(boundary => ({ boundary, coords: geoms[boundary] }))
+        .filter(item => Array.isArray(item.coords) && item.coords.length > 0);
+    }
+
+    function laneBoundaryLabel(boundary) {
+      if (boundary === "centerline") return "centerline";
+      if (boundary === "left_boundary") return "left boundary";
+      if (boundary === "right_boundary") return "right boundary";
+      return boundary;
+    }
+
+    function laneBoundaryStyle(baseStyle, boundary, isReference) {
+      const style = { ...(baseStyle || {}) };
+      if (boundary === "centerline") {
+        return { ...style, weight: Math.max(style.weight || 2, 3), dashArray: null };
+      }
+      if (boundary === "left_boundary") {
+        return isReference
+          ? { ...style, weight: Math.max(style.weight || 2, 2), dashArray: "8,4" }
+          : { ...style, weight: Math.max((style.weight || 2) - 0.5, 1.5), dashArray: "8,4" };
+      }
+      if (boundary === "right_boundary") {
+        return isReference
+          ? { ...style, weight: Math.max(style.weight || 2, 2), dashArray: "2,6" }
+          : { ...style, weight: Math.max((style.weight || 2) - 0.5, 1.5), dashArray: "2,6" };
+      }
+      return style;
+    }
+
     function initMap() {
       const map = L.map('map', { crs: L.CRS.Simple });
       const allBounds = [];
@@ -466,8 +499,11 @@
 
         // Lanes use grouped center/left/right geometries
         if (type === "lane") {
-          getLaneGeometryLines(internalEnt, "ref_geometries").forEach(coords => {
-            const line = L.polyline(toLeafletCoords(coords), refStyle);
+          getLaneGeometryEntries(internalEnt, "ref_geometries").forEach(({ boundary, coords }) => {
+            const line = L.polyline(
+              toLeafletCoords(coords),
+              laneBoundaryStyle(refStyle, boundary, true)
+            );
             line.addTo(layerGroups.referenceHighlight);
           });
         } else if (internalEnt.ref_coordinates && internalEnt.ref_coordinates.length) {
@@ -522,8 +558,9 @@
         const popup = layer.getPopup && layer.getPopup();
         if (popup) {
           const content = popup.getContent();
-          if (type === 'lane' && content.startsWith('Lane ' + id + ':')) {
-            layer.setStyle(THEME.highlight);
+          if (type === 'lane' && content.startsWith('Lane ' + id)) {
+            const boundary = layer.__laneBoundary || "centerline";
+            layer.setStyle(laneBoundaryStyle(THEME.highlight, boundary, false));
             highlightedLayers.push(layer);
           } else if (type === 'line' && content.startsWith('Line ' + id + ':')) {
             layer.setStyle(THEME.highlight);
@@ -664,16 +701,22 @@
       entities.forEach(ent => {
         const style = styleFn ? styleFn(ent) : baseStyle;
         if (!isPolygon && ent.geometries) {
-          const geos = getLaneGeometryLines(ent, "geometries");
-          geos.forEach(coords => {
-            const geo = L.polyline(toLeafletCoords(coords), style);
+          const geos = getLaneGeometryEntries(ent, "geometries");
+          geos.forEach(({ boundary, coords }) => {
+            const geo = L.polyline(
+              toLeafletCoords(coords),
+              laneBoundaryStyle(style, boundary, isReference)
+            );
+            geo.__laneBoundary = boundary;
             if (!isReference) {
               const id = ent.id;
               geo.on('click', (e) => {
                 L.DomEvent.stopPropagation(e);
                 zoomToEntity(ent, null, null, entityType);
               });
-              geo.bindPopup(`Lane ${id}: ${(ent.hausdorff || 0).toFixed(4)} m (click to zoom)`);
+              geo.bindPopup(
+                `Lane ${id} (${laneBoundaryLabel(boundary)}): ${(ent.hausdorff || 0).toFixed(4)} m (click to zoom)`
+              );
             }
             geo.addTo(layerGroup);
           });
