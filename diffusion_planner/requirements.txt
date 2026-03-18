@@ -6,5 +6,7 @@ wandb
 onnx==1.17.0
 onnxsim>=0.4.36
 onnxruntime==1.21.0
+einops
 gradio>=4.0.0
+matplotlib>=3.7.0
 peft

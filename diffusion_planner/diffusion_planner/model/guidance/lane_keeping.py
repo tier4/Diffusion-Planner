@@ -82,12 +82,12 @@ class LaneKeepingGuidance(BaseGuidance):
 
         c   = gather2(lane_centers)
         lat = gather2(lane_lat)
-        lb  = gather2(lane_left)
-        rb  = gather2(lane_right)
+        lb  = gather2(lane_left)   # offset vectors from centerline, not absolute positions
+        rb  = gather2(lane_right)  # offset vectors from centerline, not absolute positions
 
         ego_lat  = ((ego_pos - c) * lat).sum(dim=-1)    # [B, T]
-        left_hw  = ((lb - c) * lat).sum(dim=-1)          # [B, T]
-        right_hw = ((rb - c) * lat).sum(dim=-1)          # [B, T]
+        left_hw  = (lb * lat).sum(dim=-1)                 # [B, T]
+        right_hw = (rb * lat).sum(dim=-1)                 # [B, T]
 
         half_w = inputs["ego_shape"][:, 2:3] / 2         # [B, 1]
 

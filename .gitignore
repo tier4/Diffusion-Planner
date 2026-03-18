@@ -2,10 +2,12 @@
 extension_ws/
 *.code-workspace
 
+.claude/
 .cursor
 *dpo_experiment
 sample*
 .vscode
+.datasets/
 
 */.agents/
 
