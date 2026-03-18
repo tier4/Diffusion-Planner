@@ -145,7 +145,7 @@ def get_args():
         choices=["x_start", "flow_matching"],
         default="x_start",
     )
-    parser.add_argument("--predicted_neighbor_num", type=int, default=32)
+    parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
 
