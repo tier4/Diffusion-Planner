@@ -314,36 +314,70 @@ class GRPOTrainer:
 
     @torch.no_grad()
     def evaluate_rewards(self, epoch: int, seed: int = 42) -> dict[str, float]:
-        """Evaluate reward distribution on fixed validation scenes.
+        """Evaluate on fixed validation scenes: deterministic + stochastic trajectories.
 
-        Generates 8 trajectories per scene, scores them, and returns
-        summary statistics. Results are appended to eval_log and saved to TSV.
+        For each scene:
+        1. Generate 1 deterministic trajectory (noise=0, no guidance) — the deployment output
+        2. Generate 8 stochastic trajectories (diverse noise/guidance) — for distribution stats
 
-        Uses a fixed random seed so that trajectory generation is deterministic
-        across epochs and across different training runs, enabling fair
-        comparison of different hyperparameter configurations.
+        Uses a fixed random seed for reproducibility across epochs and runs.
         """
         if not self._eval_scene_paths:
             return {}
 
+        from guidance_gui.generate_samples import generate_samples
+
         self.policy_model.eval()
 
         # Fix all random seeds for reproducible evaluation across runs.
-        # The model weights are the only variable between evaluations.
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
         random.seed(seed)
 
+        # Deterministic trajectory metrics (the deployment-relevant output)
+        det_totals = []
+        det_collisions = 0
+        det_offroad = []
+        det_components = {k: [] for k in ["safety", "progress", "smoothness", "feasibility", "centerline"]}
+
+        # Stochastic group metrics (for distribution/diversity stats)
         all_totals = []
         all_collisions = 0
         all_offroad = []
         scene_spreads = []
-        components = {k: [] for k in ["safety", "progress", "smoothness", "feasibility", "centerline"]}
+        scene_means = []
 
         for path in self._eval_scene_paths:
             try:
                 data = load_npz_data(path, self.device)
+
+                # Normalize data once for generate_samples
+                norm_data = {
+                    k: v.clone() if isinstance(v, torch.Tensor) else v
+                    for k, v in data.items()
+                }
+                norm_data = self.model_args.observation_normalizer(norm_data)
+
+                # 1. Deterministic trajectory (noise=0, no guidance)
+                det_traj = generate_samples(
+                    self.policy_model, self.model_args, norm_data,
+                    noise_scale=0.0, n_samples=1, composer=None, device=self.device,
+                )  # (1, T, 4)
+                det_traj_t = torch.tensor(det_traj, device=self.device, dtype=torch.float32)
+                det_reward = compute_reward_batch(det_traj_t, data, self.reward_config)[0]
+
+                det_totals.append(det_reward.total)
+                if det_reward.collision_step is not None:
+                    det_collisions += 1
+                det_offroad.append(det_reward.off_road_fraction)
+                det_components["safety"].append(det_reward.safety)
+                det_components["progress"].append(det_reward.progress)
+                det_components["smoothness"].append(det_reward.smoothness)
+                det_components["feasibility"].append(det_reward.feasibility)
+                det_components["centerline"].append(det_reward.centerline)
+
+                # 2. Stochastic group (8 diverse trajectories)
                 sampled = generate_diverse_group(
                     self.policy_model, self.model_args, data,
                     self._eval_sampler_config, self.device,
@@ -359,42 +393,44 @@ class GRPOTrainer:
                 all_collisions += sum(1 for r in rewards if r.collision_step is not None)
                 all_offroad.extend([r.off_road_fraction for r in rewards])
                 scene_spreads.append(max(totals) - min(totals))
-                for r in rewards:
-                    components["safety"].append(r.safety)
-                    components["progress"].append(r.progress)
-                    components["smoothness"].append(r.smoothness)
-                    components["feasibility"].append(r.feasibility)
-                    components["centerline"].append(r.centerline)
+                scene_means.append(float(np.mean(totals)))
+
             except Exception as e:
                 print(f"  [eval] skipping {path}: {e}")
 
-        if not all_totals:
+        if not det_totals:
             return {}
 
-        n_trajs = len(all_totals)
+        n_scenes = len(det_totals)
+        det_arr = np.array(det_totals)
+        det_offroad_arr = np.array(det_offroad)
         totals_arr = np.array(all_totals)
         offroad_arr = np.array(all_offroad)
         spreads_arr = np.array(scene_spreads)
+        scene_means_arr = np.array(scene_means)
         cfg = self.reward_config
 
         eval_metrics = {
             "epoch": epoch,
-            "n_scenes": len(scene_spreads),
-            "n_trajs": n_trajs,
-            "reward_mean": float(totals_arr.mean()),
-            "reward_std": float(totals_arr.std()),
-            "reward_median": float(np.median(totals_arr)),
-            "reward_min": float(totals_arr.min()),
-            "reward_max": float(totals_arr.max()),
-            "spread_mean": float(spreads_arr.mean()),
-            "collision_rate": all_collisions / n_trajs,
-            "offroad_rate": float((offroad_arr > 0.1).sum() / n_trajs),
-            "offroad_mean": float(offroad_arr.mean()),
-            "w_safety_mean": float(np.mean(components["safety"]) * cfg.w_safety),
-            "w_progress_mean": float(np.mean(components["progress"]) * cfg.w_progress),
-            "w_smooth_mean": float(np.mean(components["smoothness"]) * cfg.w_smooth),
-            "w_feasibility_mean": float(np.mean(components["feasibility"]) * cfg.w_feasibility),
-            "w_centerline_mean": float(np.mean(components["centerline"]) * cfg.w_centerline),
+            "n_scenes": n_scenes,
+            # Deterministic (deployment) metrics
+            "det_reward_mean": float(det_arr.mean()),
+            "det_reward_median": float(np.median(det_arr)),
+            "det_reward_std": float(det_arr.std()),
+            "det_collision_rate": det_collisions / n_scenes,
+            "det_offroad_mean": float(det_offroad_arr.mean()),
+            "det_w_safety": float(np.mean(det_components["safety"]) * cfg.w_safety),
+            "det_w_progress": float(np.mean(det_components["progress"]) * cfg.w_progress),
+            "det_w_smooth": float(np.mean(det_components["smoothness"]) * cfg.w_smooth),
+            "det_w_feasibility": float(np.mean(det_components["feasibility"]) * cfg.w_feasibility),
+            "det_w_centerline": float(np.mean(det_components["centerline"]) * cfg.w_centerline),
+            # Stochastic group metrics
+            "group_reward_mean": float(totals_arr.mean()),
+            "group_reward_median": float(np.median(totals_arr)),
+            "group_scene_mean": float(scene_means_arr.mean()),
+            "group_collision_rate": all_collisions / len(all_totals),
+            "group_offroad_mean": float(offroad_arr.mean()),
+            "group_spread_mean": float(spreads_arr.mean()),
         }
 
         self.eval_log.append(eval_metrics)
@@ -403,10 +439,11 @@ class GRPOTrainer:
         df.to_csv(eval_log_path, sep="\t", index=False)
 
         print(
-            f"  Eval (epoch {epoch}, {len(scene_spreads)} scenes): "
-            f"reward={totals_arr.mean():+.1f}±{totals_arr.std():.1f}  "
-            f"collision={all_collisions/n_trajs:.1%}  "
-            f"offroad={offroad_arr.mean():.1%}  "
+            f"  Eval (epoch {epoch}, {n_scenes} scenes):\n"
+            f"    DET:   reward={det_arr.mean():+.1f} median={np.median(det_arr):+.1f}  "
+            f"collision={det_collisions/n_scenes:.1%}  offroad={det_offroad_arr.mean():.1%}\n"
+            f"    GROUP: reward={totals_arr.mean():+.1f} scene_mean={scene_means_arr.mean():+.1f}  "
+            f"collision={all_collisions/len(all_totals):.1%}  offroad={offroad_arr.mean():.1%}  "
             f"spread={spreads_arr.mean():.1f}"
         )
 
