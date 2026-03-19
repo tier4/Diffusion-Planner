@@ -277,6 +277,12 @@ class AutoResearcher:
             print(f"  {exp_config.description}")
             print(f"{'='*70}")
 
+            # Fix random seeds for reproducibility across experiments
+            torch.manual_seed(42)
+            torch.cuda.manual_seed_all(42)
+            np.random.seed(42)
+            random.seed(42)
+
             # Build config
             grpo_config = self._build_grpo_config(exp_config.grpo_overrides)
             grpo_config.train_epochs = exp_config.max_epochs
