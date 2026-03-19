@@ -82,14 +82,18 @@ def compute_log_probs(
     data: dict[str, torch.Tensor],
     model_args,
     device: torch.device,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute log-probabilities (negative diffusion loss) for each trajectory.
 
     Used to store old_log_probs at rollout time for importance sampling.
-    Runs in eval mode, no gradient.
+    Also returns the (noise, t) used so they can be reused during training
+    for a consistent importance sampling ratio.
 
     Returns:
-        (N,) tensor of log-probs (negative MSE losses). Higher = more likely.
+        (old_log_probs, noise, t):
+        - old_log_probs: (N,) tensor of log-probs (negative MSE losses).
+        - noise: (B, P, T, 4) shared noise sample.
+        - t: (B,) diffusion timestep.
     """
     N = len(trajectories)
     B = data["ego_current_state"].shape[0]
@@ -100,8 +104,11 @@ def compute_log_probs(
     noise = torch.randn(B, P, future_len, 4, device=device)
     t = torch.rand(B, device=device) * (1 - eps) + eps
 
+    # Compute in train mode to match the mode used during GRPO loss computation.
+    # This ensures the IS ratio starts at exactly 1.0 on the first inner epoch
+    # (no bias from dropout differences between eval and train mode).
     was_training = policy_model.training
-    policy_model.eval()
+    policy_model.train()
 
     log_probs = []
     with torch.no_grad():
@@ -112,13 +119,12 @@ def compute_log_probs(
                 policy_model, data_c, trajectories[i],
                 model_args, noise, t, device,
             )
-            # log_prob ≈ -loss (MSE loss is proportional to -log pi)
             log_probs.append(-loss)
 
-    if was_training:
-        policy_model.train()
+    if not was_training:
+        policy_model.eval()
 
-    return torch.stack(log_probs)  # (N,)
+    return torch.stack(log_probs), noise, t  # (N,), (B,P,T,4), (B,)
 
 
 def compute_grpo_loss(
@@ -130,6 +136,8 @@ def compute_grpo_loss(
     config: GRPOConfig,
     device: torch.device,
     old_log_probs: torch.Tensor | None = None,
+    old_noise: torch.Tensor | None = None,
+    old_t: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute GRPO loss supporting both on-policy and multi-epoch modes.
 
@@ -168,9 +176,14 @@ def compute_grpo_loss(
     future_len = model_args.future_len
     eps = 1e-3
 
-    # K=1: shared noise sample across the group
-    noise = torch.randn(B, P, future_len, 4, device=device)
-    t = torch.rand(B, device=device) * (1 - eps) + eps
+    # Reuse stored (noise, t) from rollout time for consistent IS ratio.
+    # For on-policy mode or first inner epoch, generate fresh samples.
+    if old_noise is not None and old_t is not None:
+        noise = old_noise.to(device)
+        t = old_t.to(device)
+    else:
+        noise = torch.randn(B, P, future_len, 4, device=device)
+        t = torch.rand(B, device=device) * (1 - eps) + eps
 
     advantages_t = torch.tensor(advantages, dtype=torch.float32, device=device)
 
@@ -186,13 +199,31 @@ def compute_grpo_loss(
     # KL divergence against fixed SFT reference (always computed)
     kl_loss = (policy_loss_stack - ref_loss_stack).mean()
 
+    # Hard check: NaN losses indicate a bug, not a recoverable condition
+    if torch.isnan(policy_loss_stack).any() or torch.isnan(ref_loss_stack).any():
+        nan_policy = int(torch.isnan(policy_loss_stack).sum().item())
+        nan_ref = int(torch.isnan(ref_loss_stack).sum().item())
+        raise RuntimeError(
+            f"NaN in GRPO loss computation: {nan_policy}/{N} policy losses, "
+            f"{nan_ref}/{N} ref losses are NaN. Model weights may be corrupted."
+        )
+
     if old_log_probs is not None and config.uses_importance_sampling:
         # Multi-epoch mode: PPO-clipped importance sampling
         # new_log_probs = -policy_losses (log_prob ≈ -MSE_loss)
         new_log_probs = -policy_loss_stack  # (N,)
 
         # Importance sampling ratio: pi_new / pi_old
+        # Clamp log_ratio to prevent exp() overflow → inf → NaN
         log_ratio = new_log_probs - old_log_probs.to(device)
+        # Numerical safety: clamp to prevent exp() overflow. With consistent
+        # (noise, t) the ratio starts at 1.0 and drifts slowly; |log_ratio|>10
+        # means exp()>22000 which is far beyond PPO clip range and indicates
+        # something unexpected.
+        if (log_ratio.abs() > 10.0).any():
+            max_lr = float(log_ratio.abs().max().item())
+            print(f"  [grpo_loss] WARNING: log_ratio magnitude {max_lr:.1f} exceeds 10, clamping")
+        log_ratio = torch.clamp(log_ratio, -10.0, 10.0)
         ratio = torch.exp(log_ratio)  # (N,)
 
         # PPO clipping
@@ -215,6 +246,13 @@ def compute_grpo_loss(
         approx_kl_behavior = 0.0
 
     total_loss = policy_loss + config.kl_coef * kl_loss
+
+    if torch.isnan(total_loss):
+        raise RuntimeError(
+            f"NaN total loss: policy_loss={policy_loss.item()}, "
+            f"kl_loss={kl_loss.item()}, kl_coef={config.kl_coef}. "
+            f"Model weights may be corrupted."
+        )
 
     metrics = {
         "loss": float(total_loss.item()),

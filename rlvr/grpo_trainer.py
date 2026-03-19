@@ -142,9 +142,10 @@ class GRPOTrainer:
         )
         advantages = compute_group_advantages(reward_breakdowns)
 
-        # Store old log-probs for importance sampling (behavior reference).
-        # Computed under the current policy at rollout time.
-        old_log_probs = compute_log_probs(
+        # Store old log-probs and the (noise, t) used to compute them.
+        # Reusing the same (noise, t) during training ensures a consistent
+        # importance sampling ratio.
+        old_log_probs, old_noise, old_t = compute_log_probs(
             self.policy_model, trajectories, data, self.model_args, self.device,
         )
 
@@ -155,6 +156,8 @@ class GRPOTrainer:
             "reward_breakdowns": reward_breakdowns,
             "advantages": advantages,
             "old_log_probs": old_log_probs,
+            "old_noise": old_noise,
+            "old_t": old_t,
         }
 
     def train_on_groups(
@@ -192,6 +195,8 @@ class GRPOTrainer:
 
                 # For M=1, old_log_probs is ignored inside compute_grpo_loss
                 old_lp = group.get("old_log_probs") if M > 1 else None
+                old_noise = group.get("old_noise") if M > 1 else None
+                old_t = group.get("old_t") if M > 1 else None
 
                 loss, metrics = compute_grpo_loss(
                     policy_model=self.policy_model,
@@ -202,6 +207,8 @@ class GRPOTrainer:
                     config=self.config,
                     device=self.device,
                     old_log_probs=old_lp,
+                    old_noise=old_noise,
+                    old_t=old_t,
                 )
 
                 scaled_loss = loss / self.config.grad_accum_groups
@@ -313,12 +320,23 @@ class GRPOTrainer:
         M = self.config.inner_epochs
         mode_str = f"M={M}" + (" PPO-clip" if M > 1 else " on-policy")
         clip_str = f"  ClipFrac={metrics.get('clip_fraction', 0):.3f}" if M > 1 else ""
+
+        def _fmt(v: float) -> str:
+            """Adaptive formatting: use scientific notation for very small values."""
+            if v == 0.0:
+                return "0"
+            if abs(v) < 0.001:
+                return f"{v:.2e}"
+            return f"{v:.6f}"
+
+        loss = _fmt(metrics.get("loss", 0))
+        ploss = _fmt(metrics.get("policy_loss", 0))
+        kl = _fmt(metrics.get("kl_loss", 0))
+        logp = _fmt(metrics.get("mean_policy_logprob", 0))
         print(
             f"  Epoch {epoch} [{mode_str}]: "
-            f"Loss={metrics.get('loss', 0):.4f}, "
-            f"PolicyLoss={metrics.get('policy_loss', 0):.4f}, "
-            f"KL={metrics.get('kl_loss', 0):.4f}"
-            f"{clip_str}"
+            f"Loss={loss}, PolicyLoss={ploss}, KL={kl}, "
+            f"MeanLogProb={logp}{clip_str}"
         )
 
     def save_epoch1_baselines(self, npz_paths: list[str]) -> None:
