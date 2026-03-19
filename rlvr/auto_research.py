@@ -795,161 +795,100 @@ class AutoResearcher:
         print(f"\nAdaptive phase: best so far is '{best.name}' "
               f"(prob reward={best.prob_det_reward_mean:+.2f}, offroad={best.prob_det_offroad_mean:.1%})")
 
-        best_loss_mode = best.config.get("grpo_overrides", {}).get("loss_mode", "diffusion")
-
         follow_ups: list[ExperimentConfig] = []
 
-        # Strategy: Double down on the best loss mode with variations
-        if best_loss_mode == "direct_best":
-            # Try with more prob scenes, different LR, no KL
-            follow_ups.append(ExperimentConfig(
-                name="direct_best_100prob",
-                description="direct_best with 100% problematic scenes",
-                grpo_overrides={
-                    "loss_mode": "direct_best",
-                    "direct_loss_weight": 1.0,
-                    "num_generations": 16,
-                    "train_epochs": 10,
-                    "kl_coef": 0.0,
-                    "learning_rate": 1e-5,
-                    "lora_rank": 64,
-                    "lora_alpha": 64,
-                    "guidance_prob": 0.7,
-                    "enable_route_following": True,
-                    "enable_lane_keeping": True,
-                },
-                n_prob_scenes=100,
-                n_normal_scenes=0,
-                max_epochs=10,
-                max_minutes=25,
-            ))
-            follow_ups.append(ExperimentConfig(
-                name="direct_best_hi_lr",
-                description="direct_best with higher learning rate",
-                grpo_overrides={
-                    "loss_mode": "direct_best",
-                    "direct_loss_weight": 1.0,
-                    "num_generations": 16,
-                    "train_epochs": 10,
-                    "kl_coef": 0.1,
-                    "learning_rate": 5e-5,
-                    "lora_rank": 64,
-                    "lora_alpha": 64,
-                    "guidance_prob": 0.7,
-                    "enable_route_following": True,
-                    "enable_lane_keeping": True,
-                },
-                n_prob_scenes=50,
-                n_normal_scenes=50,
-                max_epochs=10,
-                max_minutes=25,
-            ))
-        elif best_loss_mode == "diffusion_low_t":
-            # Try narrower/wider t ranges
-            follow_ups.append(ExperimentConfig(
-                name="diffusion_low_t_narrow",
-                description="diffusion_low_t with t in [0.001, 0.05]",
-                grpo_overrides={
-                    "loss_mode": "diffusion_low_t",
-                    "diffusion_t_range": [0.001, 0.05],
-                    "num_generations": 16,
-                    "train_epochs": 10,
-                    "kl_coef": 0.2,
-                    "learning_rate": 1e-5,
-                    "lora_rank": 64,
-                    "lora_alpha": 64,
-                    "guidance_prob": 0.7,
-                    "enable_route_following": True,
-                    "enable_lane_keeping": True,
-                },
-                n_prob_scenes=50,
-                n_normal_scenes=50,
-                max_epochs=10,
-                max_minutes=25,
-            ))
-            follow_ups.append(ExperimentConfig(
-                name="diffusion_low_t_100prob",
-                description="diffusion_low_t with 100% prob scenes",
-                grpo_overrides={
-                    "loss_mode": "diffusion_low_t",
-                    "diffusion_t_range": [0.001, 0.1],
-                    "num_generations": 16,
-                    "train_epochs": 10,
-                    "kl_coef": 0.1,
-                    "learning_rate": 1e-5,
-                    "lora_rank": 64,
-                    "lora_alpha": 64,
-                    "guidance_prob": 0.7,
-                    "enable_route_following": True,
-                    "enable_lane_keeping": True,
-                },
-                n_prob_scenes=100,
-                n_normal_scenes=0,
-                max_epochs=10,
-                max_minutes=25,
-            ))
-        else:
-            # Standard diffusion or multistep was best — try reward tuning
-            follow_ups.append(ExperimentConfig(
-                name="reward_tuned_v1",
-                description="Standard diffusion with heavy feasibility+centerline weights",
-                grpo_overrides={
-                    "loss_mode": "diffusion",
-                    "num_generations": 16,
-                    "train_epochs": 10,
-                    "kl_coef": 0.1,
-                    "learning_rate": 1e-5,
-                    "lora_rank": 64,
-                    "lora_alpha": 64,
-                    "guidance_prob": 0.7,
-                    "enable_route_following": True,
-                    "enable_lane_keeping": True,
-                    "w_feasibility": 10.0,
-                    "w_centerline": 10.0,
-                    "w_progress": 1.0,
-                },
-                n_prob_scenes=50,
-                n_normal_scenes=50,
-                max_epochs=10,
-                max_minutes=25,
-            ))
-            # Also try direct_best with better config since standard was best
-            follow_ups.append(ExperimentConfig(
-                name="direct_best_v2",
-                description="direct_best with no KL and high LR (aggressive)",
-                grpo_overrides={
-                    "loss_mode": "direct_best",
-                    "direct_loss_weight": 1.0,
-                    "num_generations": 16,
-                    "train_epochs": 10,
-                    "kl_coef": 0.0,
-                    "learning_rate": 5e-5,
-                    "lora_rank": 64,
-                    "lora_alpha": 64,
-                    "guidance_prob": 0.7,
-                    "enable_route_following": True,
-                    "enable_lane_keeping": True,
-                },
-                n_prob_scenes=100,
-                n_normal_scenes=0,
-                max_epochs=10,
-                max_minutes=25,
-            ))
+        # Based on findings: lr=1e-3 works but is unstable.
+        # Key experiments: moderate LR (5e-4), more normal scenes, stronger KL.
 
-        # Always try one "all prob scenes, aggressive" experiment with the winner
+        # Experiment A: lr=5e-4 (sweet spot hypothesis)
         follow_ups.append(ExperimentConfig(
-            name=f"{best_loss_mode}_aggressive",
-            description=f"Best mode ({best_loss_mode}) with no KL, high LR, all prob scenes",
+            name="grpo_lr5e4_balanced",
+            description="GRPO lr=5e-4, kl=0.2, 50 prob + 150 normal (balanced)",
             grpo_overrides={
-                **best.config.get("grpo_overrides", {}),
-                "kl_coef": 0.0,
-                "learning_rate": 5e-5,
+                "loss_mode": "diffusion",
+                "num_generations": 16,
                 "train_epochs": 15,
+                "kl_coef": 0.2,
+                "learning_rate": 5e-4,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
             },
-            n_prob_scenes=100,
-            n_normal_scenes=0,
+            n_prob_scenes=50,
+            n_normal_scenes=150,
             max_epochs=15,
-            max_minutes=25,
+            max_minutes=35,
+        ))
+
+        # Experiment B: lr=1e-3 with strong KL (0.5) + more normal scenes
+        follow_ups.append(ExperimentConfig(
+            name="grpo_lr1e3_hi_kl",
+            description="GRPO lr=1e-3, kl=0.5, 50 prob + 200 normal (stabilized)",
+            grpo_overrides={
+                "loss_mode": "diffusion",
+                "num_generations": 16,
+                "train_epochs": 10,
+                "kl_coef": 0.5,
+                "learning_rate": 1e-3,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=200,
+            max_epochs=10,
+            max_minutes=35,
+        ))
+
+        # Experiment C: lr=5e-4 with heavy feasibility weights
+        follow_ups.append(ExperimentConfig(
+            name="grpo_lr5e4_heavy_feas",
+            description="GRPO lr=5e-4, heavy feasibility/centerline, 50p+150n",
+            grpo_overrides={
+                "loss_mode": "diffusion",
+                "num_generations": 16,
+                "train_epochs": 15,
+                "kl_coef": 0.2,
+                "learning_rate": 5e-4,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
+                "w_feasibility": 10.0,
+                "w_centerline": 10.0,
+                "w_progress": 1.0,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=150,
+            max_epochs=15,
+            max_minutes=35,
+        ))
+
+        # Experiment D: lr=3e-4 (even more conservative)
+        follow_ups.append(ExperimentConfig(
+            name="grpo_lr3e4_long",
+            description="GRPO lr=3e-4, kl=0.2, 50p+100n, 15 epochs",
+            grpo_overrides={
+                "loss_mode": "diffusion",
+                "num_generations": 16,
+                "train_epochs": 15,
+                "kl_coef": 0.2,
+                "learning_rate": 3e-4,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=100,
+            max_epochs=15,
+            max_minutes=35,
         ))
 
         # Run follow-ups until deadline
@@ -964,7 +903,7 @@ class AutoResearcher:
 
 
 def main():
-    deadline = datetime(2026, 3, 20, 16, 0, 0, tzinfo=JST)
+    deadline = datetime(2026, 3, 20, 22, 0, 0, tzinfo=JST)
     researcher = AutoResearcher()
     researcher.run(deadline)
 
