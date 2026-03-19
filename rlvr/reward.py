@@ -618,7 +618,19 @@ def compute_red_light_score_batch(
     heading alignment (cos > 0.5) to avoid penalizing trajectories that pass
     near but don't enter the red-light lane.
 
-    Only checks route_lanes (the ego's planned route), not all lanes.
+    Only checks route_lanes (the ego's planned route), NOT lanes[].
+
+    IMPORTANT: lanes[] contains red lights for cross-traffic at intersections.
+    These are ALWAYS red regardless of the ego's signal phase (they represent
+    the opposing traffic direction). Using lanes[] would cause false positives
+    because the cross-traffic red lanes don't change when the ego has green.
+    The ego's own traffic light state is on route_lanes, encoded as RED when
+    applicable or WHITE when the converter couldn't resolve it.
+
+    Known limitation: the C++ converter sometimes records the ego's traffic
+    light as WHITE (unresolved) instead of RED, even when the ego is clearly
+    stopped at a red light. In these cases the penalty won't fire. This is a
+    data-level issue, not a reward logic issue.
 
     Args:
         ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
