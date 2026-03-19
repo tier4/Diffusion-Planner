@@ -241,7 +241,7 @@ Key components:
 
 **Evaluation**: each epoch evaluates on 50 fixed validation scenes (seeded for cross-run comparability). Reports both deterministic trajectory metrics (the deployment output) and stochastic group metrics.
 
-Phase 1 (TeraSim ghost replay) design document: `rlvr/DESIGN.md`. Additional components:
+Additional components (TeraSim ghost replay):
 - `rlvr/npz_utils.py` — coordinate transforms (ego-centric ↔ world MGRS frame)
 - `rlvr/terasim_bridge.py` — HTTP client to TeraSim REST API (Docker container)
 - `rlvr/scripts/` — map conversion and ghost replay validator
