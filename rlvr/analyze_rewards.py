@@ -39,8 +39,17 @@ def analyze(
     n_scenes: int = 20,
     n_trajectories: int = 8,
     verbose_scenes: int = 3,
+    seed: int = 42,
 ):
-    rng = np.random.default_rng(42)
+    # Fix all random seeds for reproducible results across runs.
+    # Same seed as GRPOTrainer.evaluate_rewards() so results are comparable.
+    import random as _random
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    _random.seed(seed)
+
+    rng = np.random.default_rng(seed)
     sample_paths = rng.choice(npz_paths, size=min(n_scenes, len(npz_paths)), replace=False)
 
     config = SamplerConfig(n_trajectories=n_trajectories)

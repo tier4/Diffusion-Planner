@@ -313,16 +313,27 @@ class GRPOTrainer:
         print(f"  Fixed {n} eval scenes (from {len(valid_npz_paths)} validation) -> {eval_scenes_path}")
 
     @torch.no_grad()
-    def evaluate_rewards(self, epoch: int) -> dict[str, float]:
+    def evaluate_rewards(self, epoch: int, seed: int = 42) -> dict[str, float]:
         """Evaluate reward distribution on fixed validation scenes.
 
         Generates 8 trajectories per scene, scores them, and returns
         summary statistics. Results are appended to eval_log and saved to TSV.
+
+        Uses a fixed random seed so that trajectory generation is deterministic
+        across epochs and across different training runs, enabling fair
+        comparison of different hyperparameter configurations.
         """
         if not self._eval_scene_paths:
             return {}
 
         self.policy_model.eval()
+
+        # Fix all random seeds for reproducible evaluation across runs.
+        # The model weights are the only variable between evaluations.
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        random.seed(seed)
 
         all_totals = []
         all_collisions = 0
