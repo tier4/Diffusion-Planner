@@ -106,6 +106,38 @@ class AutoResearcher:
         self.master_log_path = self.output_dir / "master_log.json"
         self.results: list[ExperimentResult] = []
 
+        # Load existing results from previous runs
+        if self.master_log_path.exists():
+            try:
+                with open(self.master_log_path) as f:
+                    saved = json.load(f)
+                for entry in saved:
+                    r = ExperimentResult(
+                        name=entry.get("name", "unknown"),
+                        config=entry.get("config", {}),
+                        status=entry.get("status", "unknown"),
+                        prob_det_reward_mean=entry.get("prob_det_reward_mean", 0),
+                        prob_det_offroad_mean=entry.get("prob_det_offroad_mean", 0),
+                        prob_det_collision_rate=entry.get("prob_det_collision_rate", 0),
+                        val_det_reward_mean=entry.get("val_det_reward_mean", 0),
+                        val_det_offroad_mean=entry.get("val_det_offroad_mean", 0),
+                        epoch_history=entry.get("epoch_history", []),
+                        start_time=entry.get("start_time", ""),
+                        end_time=entry.get("end_time", ""),
+                        duration_minutes=entry.get("duration_minutes", 0),
+                        run_dir=entry.get("run_dir", ""),
+                        best_checkpoint=entry.get("best_checkpoint", ""),
+                        error=entry.get("error", ""),
+                    )
+                    # Only keep completed or failed (skip stale "running" from crashes)
+                    if r.status in ("completed", "failed"):
+                        self.results.append(r)
+                print(f"Loaded {len(self.results)} previous results from {self.master_log_path}")
+                for r in self.results:
+                    print(f"  {r.name}: {r.status}, prob_reward={r.prob_det_reward_mean:+.2f}, offroad={r.prob_det_offroad_mean:.1%}")
+            except Exception as e:
+                print(f"Warning: could not load master_log.json: {e}")
+
         # Load scene lists
         with open(POOL_71K) as f:
             self.pool_71k = json.load(f)
@@ -589,19 +621,44 @@ class AutoResearcher:
 
         experiments_queue: list[ExperimentConfig] = []
 
-        # Finding: GRPO at lr=1e-5 produces LoRA_B weights of ~0.0001 magnitude,
-        # which moves the deterministic output by only ~0.005m. Need weights at
-        # ~0.01-0.1 range to meaningfully change trajectories. Prioritize high LR.
+        # Previous findings:
+        # - lr=1e-5: no movement (LoRA weights ~0.0001)
+        # - lr=1e-4: no prob offroad movement (val improves)
+        # - lr=1e-3: prob offroad 7.2%→0.2% but oscillates wildly
+        # - lr=1e-3 prob-only no-KL: offroad 0.9% but unstable
+        # Sweet spot: lr=3e-4 to 5e-4 with KL regularization + normal scenes
 
-        # Experiment 1: GRPO with high LR (the critical test)
+        # Experiment 1: lr=5e-4, balanced (primary candidate)
         experiments_queue.append(ExperimentConfig(
-            name="grpo_lr1e3",
-            description="Standard GRPO with lr=1e-3 (100x baseline)",
+            name="grpo_lr5e4_balanced",
+            description="GRPO lr=5e-4, kl=0.2, 50 prob + 150 normal",
+            grpo_overrides={
+                "loss_mode": "diffusion",
+                "num_generations": 16,
+                "train_epochs": 15,
+                "kl_coef": 0.2,
+                "learning_rate": 5e-4,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=150,
+            max_epochs=15,
+            max_minutes=35,
+        ))
+
+        # Experiment 2: lr=1e-3 stabilized with strong KL + many normal scenes
+        experiments_queue.append(ExperimentConfig(
+            name="grpo_lr1e3_stabilized",
+            description="GRPO lr=1e-3, kl=0.5, 50 prob + 200 normal",
             grpo_overrides={
                 "loss_mode": "diffusion",
                 "num_generations": 16,
                 "train_epochs": 10,
-                "kl_coef": 0.1,
+                "kl_coef": 0.5,
                 "learning_rate": 1e-3,
                 "lora_rank": 64,
                 "lora_alpha": 64,
@@ -610,21 +667,21 @@ class AutoResearcher:
                 "enable_lane_keeping": True,
             },
             n_prob_scenes=50,
-            n_normal_scenes=50,
+            n_normal_scenes=200,
             max_epochs=10,
-            max_minutes=30,
+            max_minutes=35,
         ))
 
-        # Experiment 2: GRPO lr=1e-4 (10x baseline)
+        # Experiment 3: lr=3e-4 long run
         experiments_queue.append(ExperimentConfig(
-            name="grpo_lr1e4",
-            description="Standard GRPO with lr=1e-4 (10x baseline)",
+            name="grpo_lr3e4_long",
+            description="GRPO lr=3e-4, kl=0.2, 50p+100n, 15 epochs",
             grpo_overrides={
                 "loss_mode": "diffusion",
                 "num_generations": 16,
-                "train_epochs": 10,
-                "kl_coef": 0.1,
-                "learning_rate": 1e-4,
+                "train_epochs": 15,
+                "kl_coef": 0.2,
+                "learning_rate": 3e-4,
                 "lora_rank": 64,
                 "lora_alpha": 64,
                 "guidance_prob": 0.7,
@@ -632,91 +689,21 @@ class AutoResearcher:
                 "enable_lane_keeping": True,
             },
             n_prob_scenes=50,
-            n_normal_scenes=50,
-            max_epochs=10,
-            max_minutes=30,
+            n_normal_scenes=100,
+            max_epochs=15,
+            max_minutes=35,
         ))
 
-        # Experiment 3: GRPO lr=1e-3, no KL, 100% prob scenes
+        # Experiment 4: lr=5e-4 + heavy feasibility/centerline rewards
         experiments_queue.append(ExperimentConfig(
-            name="grpo_lr1e3_prob_only",
-            description="GRPO lr=1e-3, no KL, only problematic scenes",
+            name="grpo_lr5e4_heavy_feas",
+            description="GRPO lr=5e-4, heavy feasibility/centerline, 50p+150n",
             grpo_overrides={
                 "loss_mode": "diffusion",
                 "num_generations": 16,
-                "train_epochs": 10,
-                "kl_coef": 0.0,
-                "learning_rate": 1e-3,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=0,
-            max_epochs=10,
-            max_minutes=30,
-        ))
-
-        # Experiment 4: direct_best with high LR
-        experiments_queue.append(ExperimentConfig(
-            name="direct_best_lr1e3",
-            description="BC toward best traj at low-t, lr=1e-3",
-            grpo_overrides={
-                "loss_mode": "direct_best",
-                "direct_loss_weight": 1.0,
-                "diffusion_t_range": [0.001, 0.1],
-                "diffusion_k_steps": 4,
-                "num_generations": 16,
-                "train_epochs": 10,
-                "kl_coef": 0.0,
-                "learning_rate": 1e-3,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=0,
-            max_epochs=10,
-            max_minutes=30,
-        ))
-
-        # Experiment 5: diffusion_low_t with high LR
-        experiments_queue.append(ExperimentConfig(
-            name="low_t_lr1e3",
-            description="GRPO with t near 0 and lr=1e-3",
-            grpo_overrides={
-                "loss_mode": "diffusion_low_t",
-                "diffusion_t_range": [0.001, 0.1],
-                "num_generations": 16,
-                "train_epochs": 10,
-                "kl_coef": 0.1,
-                "learning_rate": 1e-3,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=50,
-            max_epochs=10,
-            max_minutes=30,
-        ))
-
-        # Experiment 6: Heavy reward weights + high LR
-        experiments_queue.append(ExperimentConfig(
-            name="grpo_lr1e3_heavy_reward",
-            description="GRPO lr=1e-3 with 2x feasibility+centerline weights",
-            grpo_overrides={
-                "loss_mode": "diffusion",
-                "num_generations": 16,
-                "train_epochs": 10,
-                "kl_coef": 0.1,
-                "learning_rate": 1e-3,
+                "train_epochs": 15,
+                "kl_coef": 0.2,
+                "learning_rate": 5e-4,
                 "lora_rank": 64,
                 "lora_alpha": 64,
                 "guidance_prob": 0.7,
@@ -727,39 +714,66 @@ class AutoResearcher:
                 "w_progress": 1.0,
             },
             n_prob_scenes=50,
-            n_normal_scenes=50,
-            max_epochs=10,
-            max_minutes=30,
+            n_normal_scenes=150,
+            max_epochs=15,
+            max_minutes=35,
         ))
 
-        # Experiment 7: Full fine-tuning (no LoRA), high LR
+        # Experiment 5: Full fine-tuning (no LoRA), lr=5e-5
         experiments_queue.append(ExperimentConfig(
-            name="full_ft_lr1e4",
-            description="Full fine-tuning (no LoRA) with lr=1e-4",
+            name="full_ft_lr5e5",
+            description="Full fine-tuning (no LoRA) with lr=5e-5, 50p+100n",
             grpo_overrides={
                 "loss_mode": "diffusion",
                 "num_generations": 16,
                 "train_epochs": 10,
                 "kl_coef": 0.0,
-                "learning_rate": 1e-4,
+                "learning_rate": 5e-5,
                 "use_lora": False,
                 "guidance_prob": 0.7,
                 "enable_route_following": True,
                 "enable_lane_keeping": True,
             },
             n_prob_scenes=50,
-            n_normal_scenes=50,
+            n_normal_scenes=100,
             max_epochs=10,
-            max_minutes=30,
+            max_minutes=35,
+        ))
+
+        # Experiment 6: low_t GRPO with lr=5e-4
+        experiments_queue.append(ExperimentConfig(
+            name="low_t_lr5e4",
+            description="GRPO low-t with lr=5e-4, 50p+150n",
+            grpo_overrides={
+                "loss_mode": "diffusion_low_t",
+                "diffusion_t_range": [0.001, 0.1],
+                "num_generations": 16,
+                "train_epochs": 15,
+                "kl_coef": 0.2,
+                "learning_rate": 5e-4,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=150,
+            max_epochs=15,
+            max_minutes=35,
         ))
 
         # =====================================================================
         # Phase 1: Run initial experiments
         # =====================================================================
+        completed_names = {r.name for r in self.results if r.status == "completed"}
         for exp_config in experiments_queue:
             if datetime.now(JST) > deadline - timedelta(hours=2):
                 print(f"\nApproaching deadline, stopping new experiments for final comparison")
                 break
+            if exp_config.name in completed_names:
+                print(f"\nSkipping '{exp_config.name}' — already completed in a previous run")
+                continue
             self.run_experiment(exp_config)
 
         # =====================================================================
@@ -892,13 +906,14 @@ class AutoResearcher:
         ))
 
         # Run follow-ups until deadline
+        completed_names = {r.name for r in self.results if r.status == "completed"}
         for exp_config in follow_ups:
             if datetime.now(JST) > deadline - timedelta(hours=1, minutes=30):
                 print(f"\nApproaching deadline, stopping for final comparison")
                 break
-            # Skip if name already exists
-            if any(r.name == exp_config.name for r in self.results):
-                exp_config.name = exp_config.name + "_v2"
+            if exp_config.name in completed_names:
+                print(f"\nSkipping '{exp_config.name}' — already completed")
+                continue
             self.run_experiment(exp_config)
 
 
