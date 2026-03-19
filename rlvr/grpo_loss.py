@@ -1,6 +1,6 @@
-"""GRPO loss computation with dual-mode support.
+"""GRPO loss computation with multiple loss mode support.
 
-Supports two modes controlled by GRPOConfig.inner_epochs:
+Supports two outer modes controlled by GRPOConfig.inner_epochs:
 
 1. On-policy (M=1): Single pass, advantage-weighted loss + KL.
    L = (1/G) * sum_i[ A_i * loss_i ] + kl_coef * KL
@@ -9,6 +9,16 @@ Supports two modes controlled by GRPOConfig.inner_epochs:
    Uses PPO-clipped importance sampling to bound policy drift within a batch.
    L = (1/G) * sum_i[ -min(r_i * A_i, clip(r_i) * A_i) ] + kl_coef * KL
    where r_i = exp(old_logprob_i - new_loss_i)  (ratio of behavior to current policy)
+
+Additionally, supports alternative loss modes via GRPOConfig.loss_mode:
+
+- "diffusion" (default): standard advantage-weighted diffusion loss at random t.
+- "direct_best": regress the model's deterministic DPM-Solver output toward the
+    best-in-group trajectory. Hypothesis: this may more directly affect the
+    deterministic output than the standard diffusion loss, which evaluates at a
+    random diffusion timestep that may not correspond to the DPM-Solver path.
+- "diffusion_low_t": sample t from [t_min, t_max] near 0.
+- "diffusion_multistep": average loss over K timesteps spread across the schedule.
 
 Dual-reference strategy:
 - Fixed SFT reference (disable_adapter): used for KL penalty.
@@ -23,9 +33,142 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import torch.nn.functional as F
+
 from preference_optimization.dpo_loss import compute_trajectory_loss
 
 from rlvr.grpo_config import GRPOConfig
+
+
+def _sample_t_for_mode(
+    config: GRPOConfig,
+    B: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Sample diffusion timestep(s) based on loss_mode.
+
+    For 'diffusion': uniform in [eps, 1).
+    For 'diffusion_low_t': uniform in [t_min, t_max] from config.diffusion_t_range.
+    For 'diffusion_multistep': not used (caller handles K samples).
+    """
+    eps = 1e-3
+    if config.loss_mode == "diffusion_low_t":
+        t_min, t_max = config.diffusion_t_range
+        return torch.rand(B, device=device) * (t_max - t_min) + t_min
+    else:
+        return torch.rand(B, device=device) * (1 - eps) + eps
+
+
+def compute_direct_best_loss(
+    policy_model: nn.Module,
+    best_trajectory: np.ndarray,
+    data: dict[str, torch.Tensor],
+    model_args,
+    device: torch.device,
+    config: GRPOConfig,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Compute direct regression loss from deterministic output to best trajectory.
+
+    Runs the model in eval mode through DPM-Solver to produce the deterministic
+    output, then computes MSE against the best-in-group trajectory (in normalized
+    space). This directly optimizes the trajectory that would be deployed.
+
+    The gradient flows through the DPM-Solver sampling process back to the model
+    parameters, requiring torch.enable_grad() during inference.
+
+    Args:
+        policy_model: Policy model (LoRA-wrapped).
+        best_trajectory: (T, 4) best trajectory from the group [x, y, cos, sin].
+        data: Raw observation dict (NOT normalized).
+        model_args: Config object from load_model.
+        device: Torch device.
+        config: GRPOConfig.
+
+    Returns:
+        (loss, metrics_dict)
+    """
+    B = data["ego_current_state"].shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+
+    # Convert target to normalized space
+    gt_traj = torch.tensor(best_trajectory, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T, 4]
+    ego_mean = model_args.state_normalizer.mean[0].to(device)
+    ego_std = model_args.state_normalizer.std[0].to(device)
+    gt_norm = (gt_traj - ego_mean) / ego_std  # [1, T, 4]
+
+    # Clone and normalize observations
+    data_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    data_norm = model_args.observation_normalizer(data_norm)
+
+    # Run model in eval mode with gradients enabled to get deterministic output
+    # through DPM-Solver. The gradient flows through the solver steps.
+    was_training = policy_model.training
+    policy_model.eval()
+
+    # Build zero-noise input (deterministic)
+    data_norm["sampled_trajectories"] = torch.zeros(
+        B, P, future_len + 1, 4, device=device
+    )
+
+    # Temporarily disable guidance for clean deterministic output
+    inner = policy_model.module if hasattr(policy_model, "module") else policy_model
+    decoder = inner.decoder if hasattr(inner, "decoder") else inner
+    orig_guidance_fn = decoder._guidance_fn
+    decoder._guidance_fn = None
+
+    with torch.enable_grad():
+        _, outputs = policy_model(data_norm)
+
+    decoder._guidance_fn = orig_guidance_fn
+
+    # Extract ego prediction in normalized space
+    # outputs["prediction"] is in physical space (inverse-normalized by decoder).
+    # We need to re-normalize it for loss computation against gt_norm.
+    pred_physical = outputs["prediction"][:, 0]  # [B, T, 4]
+    pred_norm = (pred_physical - ego_mean) / ego_std
+
+    # MSE loss between deterministic output and best trajectory
+    direct_loss = F.mse_loss(pred_norm, gt_norm, reduction="mean")
+
+    # KL term: run one diffusion loss for policy and ref to get KL estimate
+    kl_loss = torch.tensor(0.0, device=device)
+    if config.kl_coef > 0:
+        noise = torch.randn(B, P, future_len, 4, device=device)
+        t = _sample_t_for_mode(config, B, device)
+        data_p = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+        policy_model.train()
+        l_policy = compute_trajectory_loss(
+            policy_model, data_p, best_trajectory, model_args, noise, t, device,
+        )
+        use_lora_disable = hasattr(inner, "disable_adapter")
+        disable_ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
+        with disable_ctx, torch.no_grad():
+            data_r = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+            l_ref = compute_trajectory_loss(
+                policy_model, data_r, best_trajectory, model_args, noise.clone(), t, device,
+            )
+        kl_loss = l_policy - l_ref
+
+    total_loss = config.direct_loss_weight * direct_loss + config.kl_coef * kl_loss
+
+    if was_training:
+        policy_model.train()
+
+    metrics = {
+        "loss": float(total_loss.item()),
+        "policy_loss": float(direct_loss.item()),
+        "kl_loss": float(kl_loss.item()) if isinstance(kl_loss, torch.Tensor) else 0.0,
+        "mean_advantage": 0.0,
+        "advantage_std": 0.0,
+        "mean_policy_logprob": 0.0,
+        "mean_ref_logprob": 0.0,
+        "clip_fraction": 0.0,
+        "approx_kl_behavior": 0.0,
+        "direct_mse": float(direct_loss.item()),
+    }
+
+    return total_loss, metrics
 
 
 def _compute_losses_and_ref(
@@ -183,18 +326,34 @@ def compute_grpo_loss(
         t = old_t.to(device)
     else:
         noise = torch.randn(B, P, future_len, 4, device=device)
-        t = torch.rand(B, device=device) * (1 - eps) + eps
+        t = _sample_t_for_mode(config, B, device)
 
     advantages_t = torch.tensor(advantages, dtype=torch.float32, device=device)
 
-    # Compute policy losses (with grad) and SFT reference losses (no grad)
-    policy_losses, ref_losses = _compute_losses_and_ref(
-        policy_model, trajectories, data, model_args, device, noise, t,
-        compute_ref=True,
-    )
-
-    policy_loss_stack = torch.stack(policy_losses)  # (N,)
-    ref_loss_stack = torch.stack(ref_losses)         # (N,)
+    # For diffusion_multistep: average loss over K different timesteps
+    if config.loss_mode == "diffusion_multistep":
+        K = config.diffusion_k_steps
+        all_policy = []
+        all_ref = []
+        for k_idx in range(K):
+            t_k = _sample_t_for_mode(config, B, device)
+            noise_k = torch.randn(B, P, future_len, 4, device=device)
+            p_losses, r_losses = _compute_losses_and_ref(
+                policy_model, trajectories, data, model_args, device, noise_k, t_k,
+                compute_ref=True,
+            )
+            all_policy.append(torch.stack(p_losses))
+            all_ref.append(torch.stack(r_losses))
+        policy_loss_stack = torch.stack(all_policy).mean(dim=0)  # (N,)
+        ref_loss_stack = torch.stack(all_ref).mean(dim=0)        # (N,)
+    else:
+        # Standard single-sample: diffusion or diffusion_low_t
+        policy_losses, ref_losses = _compute_losses_and_ref(
+            policy_model, trajectories, data, model_args, device, noise, t,
+            compute_ref=True,
+        )
+        policy_loss_stack = torch.stack(policy_losses)  # (N,)
+        ref_loss_stack = torch.stack(ref_losses)         # (N,)
 
     # KL divergence against fixed SFT reference (always computed)
     kl_loss = (policy_loss_stack - ref_loss_stack).mean()

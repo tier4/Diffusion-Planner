@@ -82,6 +82,19 @@ class GRPOConfig:
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
 
+    # Loss mode: controls how gradients flow to affect the deterministic output.
+    # "diffusion" (default): standard advantage-weighted diffusion loss at random t.
+    # "direct_best": regress the model's deterministic output toward the best-in-group
+    #     trajectory via MSE, bypassing diffusion timestep sampling entirely.
+    # "diffusion_low_t": sample t from a narrow range near 0 where denoising is
+    #     closest to the final clean output.
+    # "diffusion_multistep": average loss over K timesteps spread across the schedule
+    #     for better coverage of the diffusion probability.
+    loss_mode: str = "diffusion"
+    direct_loss_weight: float = 1.0
+    diffusion_t_range: list[float] = field(default_factory=lambda: [0.001, 0.1])
+    diffusion_k_steps: int = 4
+
     # LoRA
     use_lora: bool = True
     lora_rank: int = 16

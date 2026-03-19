@@ -26,7 +26,7 @@ from preference_optimization.utils import (
 )
 
 from rlvr.grpo_config import GRPOConfig
-from rlvr.grpo_loss import compute_grpo_loss, compute_log_probs
+from rlvr.grpo_loss import compute_direct_best_loss, compute_grpo_loss, compute_log_probs
 from rlvr.grpo_sampler import SamplerConfig, generate_diverse_group
 from rlvr.reward import (
     RewardBreakdown,
@@ -212,23 +212,39 @@ class GRPOTrainer:
                 if np.all(advantages == 0):
                     continue
 
-                # For M=1, old_log_probs is ignored inside compute_grpo_loss
-                old_lp = group.get("old_log_probs") if M > 1 else None
-                old_noise = group.get("old_noise") if M > 1 else None
-                old_t = group.get("old_t") if M > 1 else None
+                if self.config.loss_mode == "direct_best":
+                    # Direct regression: find best trajectory, regress det output toward it
+                    rewards = group["reward_breakdowns"]
+                    best_idx = int(np.argmax([r.total for r in rewards]))
+                    best_traj = group["trajectories"][best_idx]
 
-                loss, metrics = compute_grpo_loss(
-                    policy_model=self.policy_model,
-                    trajectories=group["trajectories"],
-                    advantages=advantages,
-                    data=group["data"],
-                    model_args=self.model_args,
-                    config=self.config,
-                    device=self.device,
-                    old_log_probs=old_lp,
-                    old_noise=old_noise,
-                    old_t=old_t,
-                )
+                    loss, metrics = compute_direct_best_loss(
+                        policy_model=self.policy_model,
+                        best_trajectory=best_traj,
+                        data=group["data"],
+                        model_args=self.model_args,
+                        device=self.device,
+                        config=self.config,
+                    )
+                else:
+                    # Standard diffusion-based GRPO loss (diffusion, diffusion_low_t, diffusion_multistep)
+                    # For M=1, old_log_probs is ignored inside compute_grpo_loss
+                    old_lp = group.get("old_log_probs") if M > 1 else None
+                    old_noise = group.get("old_noise") if M > 1 else None
+                    old_t = group.get("old_t") if M > 1 else None
+
+                    loss, metrics = compute_grpo_loss(
+                        policy_model=self.policy_model,
+                        trajectories=group["trajectories"],
+                        advantages=advantages,
+                        data=group["data"],
+                        model_args=self.model_args,
+                        config=self.config,
+                        device=self.device,
+                        old_log_probs=old_lp,
+                        old_noise=old_noise,
+                        old_t=old_t,
+                    )
 
                 scaled_loss = loss / self.config.grad_accum_groups
                 scaled_loss.backward()
