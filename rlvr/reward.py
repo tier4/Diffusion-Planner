@@ -113,6 +113,15 @@ def compute_safety_score_batch(
 ) -> tuple[torch.Tensor, list[int | None]]:
     """Batched ego-NPC collision check using oriented bounding boxes.
 
+    Filters out rear-end collisions where an NPC hits the ego from behind,
+    since the ego cannot control the behavior of following vehicles.
+    A collision is only counted if the NPC center is ahead of or beside the
+    ego (dot product of ego heading with ego→NPC vector >= 0).
+
+    Known limitation: this filter may miss ego-at-fault collisions during
+    lane changes where the ego merges into a vehicle that is slightly behind.
+    The heading-based check treats "behind" as the full rear hemisphere.
+
     Args:
         ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
         ego_shape: (3,) wheel_base, length, width.
@@ -172,6 +181,23 @@ def compute_safety_score_batch(
 
     # Collision: negative signed distance = overlap
     collision_mask = distances < 0  # (N, N_nb, T)
+
+    # Filter out rear-end collisions: only count if NPC is ahead of or beside
+    # the ego (not approaching from behind). Check via dot product of ego
+    # heading with the ego→NPC displacement vector.
+    ego_xy = ego_trajs[:, :, :2]                           # (N, T, 2)
+    ego_heading = ego_trajs[:, :, 2:4]                     # (N, T, 2) [cos, sin]
+    npc_xy = neighbor_futures[:, :, :2]                    # (N_nb, T, 2)
+
+    # ego→NPC vector: (N, N_nb, T, 2)
+    ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
+    # Dot product with ego heading: positive = NPC ahead/beside, negative = NPC behind
+    dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)  # (N, N_nb, T)
+    npc_is_behind = dot < 0  # (N, N_nb, T)
+
+    # Suppress rear-end collisions
+    collision_mask = collision_mask & ~npc_is_behind
+
     has_collision_at_t = collision_mask.any(dim=1)  # (N, T)
     has_collision = has_collision_at_t.any(dim=1)  # (N,)
     first_t = has_collision_at_t.float().argmax(dim=1)  # (N,)
