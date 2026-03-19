@@ -589,39 +589,20 @@ class AutoResearcher:
 
         experiments_queue: list[ExperimentConfig] = []
 
-        # Experiment 1: Standard diffusion loss (baseline GRPO, short)
+        # Finding: GRPO at lr=1e-5 produces LoRA_B weights of ~0.0001 magnitude,
+        # which moves the deterministic output by only ~0.005m. Need weights at
+        # ~0.01-0.1 range to meaningfully change trajectories. Prioritize high LR.
+
+        # Experiment 1: GRPO with high LR (the critical test)
         experiments_queue.append(ExperimentConfig(
-            name="baseline_diffusion",
-            description="Standard GRPO with diffusion loss (control, 5 epochs)",
+            name="grpo_lr1e3",
+            description="Standard GRPO with lr=1e-3 (100x baseline)",
             grpo_overrides={
                 "loss_mode": "diffusion",
                 "num_generations": 16,
-                "train_epochs": 5,
-                "kl_coef": 0.2,
-                "learning_rate": 1e-5,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=50,
-            max_epochs=5,
-            max_minutes=25,
-        ))
-
-        # Experiment 2: direct_best (the primary hypothesis)
-        experiments_queue.append(ExperimentConfig(
-            name="direct_best_v1",
-            description="Direct regression of DPM-Solver output toward best trajectory",
-            grpo_overrides={
-                "loss_mode": "direct_best",
-                "direct_loss_weight": 1.0,
-                "num_generations": 16,
                 "train_epochs": 10,
                 "kl_coef": 0.1,
-                "learning_rate": 1e-5,
+                "learning_rate": 1e-3,
                 "lora_rank": 64,
                 "lora_alpha": 64,
                 "guidance_prob": 0.7,
@@ -634,17 +615,38 @@ class AutoResearcher:
             max_minutes=30,
         ))
 
-        # Experiment 2b: direct_best on worst 50 prob scenes only, higher LR
+        # Experiment 2: GRPO lr=1e-4 (10x baseline)
         experiments_queue.append(ExperimentConfig(
-            name="direct_best_worst50",
-            description="direct_best focused on 50 worst prob scenes, lr=5e-5, no KL",
+            name="grpo_lr1e4",
+            description="Standard GRPO with lr=1e-4 (10x baseline)",
             grpo_overrides={
-                "loss_mode": "direct_best",
-                "direct_loss_weight": 1.0,
+                "loss_mode": "diffusion",
+                "num_generations": 16,
+                "train_epochs": 10,
+                "kl_coef": 0.1,
+                "learning_rate": 1e-4,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=50,
+            max_epochs=10,
+            max_minutes=30,
+        ))
+
+        # Experiment 3: GRPO lr=1e-3, no KL, 100% prob scenes
+        experiments_queue.append(ExperimentConfig(
+            name="grpo_lr1e3_prob_only",
+            description="GRPO lr=1e-3, no KL, only problematic scenes",
+            grpo_overrides={
+                "loss_mode": "diffusion",
                 "num_generations": 16,
                 "train_epochs": 10,
                 "kl_coef": 0.0,
-                "learning_rate": 5e-5,
+                "learning_rate": 1e-3,
                 "lora_rank": 64,
                 "lora_alpha": 64,
                 "guidance_prob": 0.7,
@@ -653,22 +655,46 @@ class AutoResearcher:
             },
             n_prob_scenes=50,
             n_normal_scenes=0,
-            prob_scene_seed=42,
             max_epochs=10,
             max_minutes=30,
         ))
 
-        # Experiment 3: diffusion_low_t (sample near t=0)
+        # Experiment 4: direct_best with high LR
         experiments_queue.append(ExperimentConfig(
-            name="diffusion_low_t_v1",
-            description="Diffusion loss with t sampled near 0 ([0.001, 0.1])",
+            name="direct_best_lr1e3",
+            description="BC toward best traj at low-t, lr=1e-3",
+            grpo_overrides={
+                "loss_mode": "direct_best",
+                "direct_loss_weight": 1.0,
+                "diffusion_t_range": [0.001, 0.1],
+                "diffusion_k_steps": 4,
+                "num_generations": 16,
+                "train_epochs": 10,
+                "kl_coef": 0.0,
+                "learning_rate": 1e-3,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=0,
+            max_epochs=10,
+            max_minutes=30,
+        ))
+
+        # Experiment 5: diffusion_low_t with high LR
+        experiments_queue.append(ExperimentConfig(
+            name="low_t_lr1e3",
+            description="GRPO with t near 0 and lr=1e-3",
             grpo_overrides={
                 "loss_mode": "diffusion_low_t",
                 "diffusion_t_range": [0.001, 0.1],
                 "num_generations": 16,
                 "train_epochs": 10,
-                "kl_coef": 0.2,
-                "learning_rate": 1e-5,
+                "kl_coef": 0.1,
+                "learning_rate": 1e-3,
                 "lora_rank": 64,
                 "lora_alpha": 64,
                 "guidance_prob": 0.7,
@@ -681,61 +707,16 @@ class AutoResearcher:
             max_minutes=30,
         ))
 
-        # Experiment 4: diffusion_multistep (K=4 timesteps)
+        # Experiment 6: Heavy reward weights + high LR
         experiments_queue.append(ExperimentConfig(
-            name="diffusion_multistep_v1",
-            description="Diffusion loss averaged over K=4 timesteps",
-            grpo_overrides={
-                "loss_mode": "diffusion_multistep",
-                "diffusion_k_steps": 4,
-                "num_generations": 16,
-                "train_epochs": 10,
-                "kl_coef": 0.2,
-                "learning_rate": 1e-5,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=50,
-            max_epochs=10,
-            max_minutes=30,
-        ))
-
-        # Experiment 5: direct_best without LoRA (full fine-tuning)
-        experiments_queue.append(ExperimentConfig(
-            name="direct_best_full_ft",
-            description="direct_best with full fine-tuning (no LoRA)",
-            grpo_overrides={
-                "loss_mode": "direct_best",
-                "direct_loss_weight": 1.0,
-                "num_generations": 16,
-                "train_epochs": 10,
-                "kl_coef": 0.0,
-                "learning_rate": 1e-6,
-                "use_lora": False,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=50,
-            max_epochs=10,
-            max_minutes=30,
-        ))
-
-        # Experiment 6: heavy reward weights (feasibility + centerline)
-        experiments_queue.append(ExperimentConfig(
-            name="reward_heavy_feasibility",
-            description="Standard diffusion with 2x feasibility+centerline, 0.5x progress",
+            name="grpo_lr1e3_heavy_reward",
+            description="GRPO lr=1e-3 with 2x feasibility+centerline weights",
             grpo_overrides={
                 "loss_mode": "diffusion",
                 "num_generations": 16,
                 "train_epochs": 10,
-                "kl_coef": 0.2,
-                "learning_rate": 1e-5,
+                "kl_coef": 0.1,
+                "learning_rate": 1e-3,
                 "lora_rank": 64,
                 "lora_alpha": 64,
                 "guidance_prob": 0.7,
@@ -744,6 +725,27 @@ class AutoResearcher:
                 "w_feasibility": 10.0,
                 "w_centerline": 10.0,
                 "w_progress": 1.0,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=50,
+            max_epochs=10,
+            max_minutes=30,
+        ))
+
+        # Experiment 7: Full fine-tuning (no LoRA), high LR
+        experiments_queue.append(ExperimentConfig(
+            name="full_ft_lr1e4",
+            description="Full fine-tuning (no LoRA) with lr=1e-4",
+            grpo_overrides={
+                "loss_mode": "diffusion",
+                "num_generations": 16,
+                "train_epochs": 10,
+                "kl_coef": 0.0,
+                "learning_rate": 1e-4,
+                "use_lora": False,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
             },
             n_prob_scenes=50,
             n_normal_scenes=50,
