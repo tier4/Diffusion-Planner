@@ -589,14 +589,14 @@ class AutoResearcher:
 
         experiments_queue: list[ExperimentConfig] = []
 
-        # Experiment 1: Standard diffusion loss (baseline GRPO)
+        # Experiment 1: Standard diffusion loss (baseline GRPO, short)
         experiments_queue.append(ExperimentConfig(
             name="baseline_diffusion",
-            description="Standard GRPO with diffusion loss (control experiment)",
+            description="Standard GRPO with diffusion loss (control, 5 epochs)",
             grpo_overrides={
                 "loss_mode": "diffusion",
                 "num_generations": 16,
-                "train_epochs": 10,
+                "train_epochs": 5,
                 "kl_coef": 0.2,
                 "learning_rate": 1e-5,
                 "lora_rank": 64,
@@ -607,8 +607,8 @@ class AutoResearcher:
             },
             n_prob_scenes=50,
             n_normal_scenes=50,
-            max_epochs=10,
-            max_minutes=30,
+            max_epochs=5,
+            max_minutes=25,
         ))
 
         # Experiment 2: direct_best (the primary hypothesis)
@@ -630,6 +630,30 @@ class AutoResearcher:
             },
             n_prob_scenes=50,
             n_normal_scenes=50,
+            max_epochs=10,
+            max_minutes=30,
+        ))
+
+        # Experiment 2b: direct_best on worst 50 prob scenes only, higher LR
+        experiments_queue.append(ExperimentConfig(
+            name="direct_best_worst50",
+            description="direct_best focused on 50 worst prob scenes, lr=5e-5, no KL",
+            grpo_overrides={
+                "loss_mode": "direct_best",
+                "direct_loss_weight": 1.0,
+                "num_generations": 16,
+                "train_epochs": 10,
+                "kl_coef": 0.0,
+                "learning_rate": 5e-5,
+                "lora_rank": 64,
+                "lora_alpha": 64,
+                "guidance_prob": 0.7,
+                "enable_route_following": True,
+                "enable_lane_keeping": True,
+            },
+            n_prob_scenes=50,
+            n_normal_scenes=0,
+            prob_scene_seed=42,
             max_epochs=10,
             max_minutes=30,
         ))

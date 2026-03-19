@@ -67,14 +67,20 @@ def compute_direct_best_loss(
     device: torch.device,
     config: GRPOConfig,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Compute direct regression loss from deterministic output to best trajectory.
+    """Compute behavioral cloning loss toward the best-in-group trajectory.
 
-    Runs the model in eval mode through DPM-Solver to produce the deterministic
-    output, then computes MSE against the best-in-group trajectory (in normalized
-    space). This directly optimizes the trajectory that would be deployed.
+    Since the DPM-Solver's sample() method uses torch.no_grad() internally,
+    we cannot directly backpropagate through the deterministic generation path.
+    Instead, this mode treats the best trajectory as a supervised target and
+    trains the denoiser to reconstruct it, averaging over K diffusion timesteps
+    sampled near t=0 where the denoising is closest to the final clean output.
 
-    The gradient flows through the DPM-Solver sampling process back to the model
-    parameters, requiring torch.enable_grad() during inference.
+    This differs from standard GRPO in two ways:
+    1. Only the best trajectory is used (no advantage weighting over the group)
+    2. Timesteps are concentrated near t=0 via config.diffusion_t_range
+
+    The KL regularization term uses the same diffusion loss against the SFT
+    reference to prevent catastrophic drift.
 
     Args:
         policy_model: Policy model (LoRA-wrapped).
@@ -91,78 +97,55 @@ def compute_direct_best_loss(
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
-    # Convert target to normalized space
-    gt_traj = torch.tensor(best_trajectory, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T, 4]
-    ego_mean = model_args.state_normalizer.mean[0].to(device)
-    ego_std = model_args.state_normalizer.std[0].to(device)
-    gt_norm = (gt_traj - ego_mean) / ego_std  # [1, T, 4]
-
-    # Clone and normalize observations
-    data_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-    data_norm = model_args.observation_normalizer(data_norm)
-
-    # Run model in eval mode with gradients enabled to get deterministic output
-    # through DPM-Solver. The gradient flows through the solver steps.
-    was_training = policy_model.training
-    policy_model.eval()
-
-    # Build zero-noise input (deterministic)
-    data_norm["sampled_trajectories"] = torch.zeros(
-        B, P, future_len + 1, 4, device=device
-    )
-
-    # Temporarily disable guidance for clean deterministic output
     inner = policy_model.module if hasattr(policy_model, "module") else policy_model
-    decoder = inner.decoder if hasattr(inner, "decoder") else inner
-    orig_guidance_fn = decoder._guidance_fn
-    decoder._guidance_fn = None
+    use_lora_disable = hasattr(inner, "disable_adapter")
 
-    with torch.enable_grad():
-        _, outputs = policy_model(data_norm)
+    # Average over K timestep samples for stability
+    K = config.diffusion_k_steps
+    t_min, t_max = config.diffusion_t_range
 
-    decoder._guidance_fn = orig_guidance_fn
+    policy_losses = []
+    ref_losses = []
 
-    # Extract ego prediction in normalized space
-    # outputs["prediction"] is in physical space (inverse-normalized by decoder).
-    # We need to re-normalize it for loss computation against gt_norm.
-    pred_physical = outputs["prediction"][:, 0]  # [B, T, 4]
-    pred_norm = (pred_physical - ego_mean) / ego_std
-
-    # MSE loss between deterministic output and best trajectory
-    direct_loss = F.mse_loss(pred_norm, gt_norm, reduction="mean")
-
-    # KL term: run one diffusion loss for policy and ref to get KL estimate
-    kl_loss = torch.tensor(0.0, device=device)
-    if config.kl_coef > 0:
+    for _ in range(K):
         noise = torch.randn(B, P, future_len, 4, device=device)
-        t = _sample_t_for_mode(config, B, device)
+        t = torch.rand(B, device=device) * (t_max - t_min) + t_min
+
+        # Policy loss (with grad)
         data_p = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-        policy_model.train()
         l_policy = compute_trajectory_loss(
             policy_model, data_p, best_trajectory, model_args, noise, t, device,
         )
-        use_lora_disable = hasattr(inner, "disable_adapter")
-        disable_ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
-        with disable_ctx, torch.no_grad():
-            data_r = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-            l_ref = compute_trajectory_loss(
-                policy_model, data_r, best_trajectory, model_args, noise.clone(), t, device,
-            )
-        kl_loss = l_policy - l_ref
+        policy_losses.append(l_policy)
+
+        # Reference loss (no grad) for KL
+        if config.kl_coef > 0:
+            disable_ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
+            with disable_ctx, torch.no_grad():
+                data_r = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+                l_ref = compute_trajectory_loss(
+                    policy_model, data_r, best_trajectory, model_args, noise.clone(), t, device,
+                )
+            ref_losses.append(l_ref)
+
+    # Average over K samples
+    direct_loss = torch.stack(policy_losses).mean()
+
+    kl_loss = torch.tensor(0.0, device=device)
+    if ref_losses:
+        ref_loss = torch.stack(ref_losses).mean()
+        kl_loss = direct_loss - ref_loss
 
     total_loss = config.direct_loss_weight * direct_loss + config.kl_coef * kl_loss
-
-    if was_training:
-        policy_model.train()
 
     metrics = {
         "loss": float(total_loss.item()),
         "policy_loss": float(direct_loss.item()),
-        "kl_loss": float(kl_loss.item()) if isinstance(kl_loss, torch.Tensor) else 0.0,
+        "kl_loss": float(kl_loss.item()),
         "mean_advantage": 0.0,
         "advantage_std": 0.0,
-        "mean_policy_logprob": 0.0,
-        "mean_ref_logprob": 0.0,
+        "mean_policy_logprob": float((-direct_loss).item()),
+        "mean_ref_logprob": float((-ref_loss).item()) if ref_losses else 0.0,
         "clip_fraction": 0.0,
         "approx_kl_behavior": 0.0,
         "direct_mse": float(direct_loss.item()),
