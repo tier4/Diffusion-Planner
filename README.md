@@ -18,7 +18,6 @@ source ./.venv/bin/activate
 cd diffusion_planner
 python3 -m pip install pip==24.1
 
-pip install -r requirements_nuplan-devkit_fixed.txt
 pip install -r requirements.txt
 pip install -e .
 
