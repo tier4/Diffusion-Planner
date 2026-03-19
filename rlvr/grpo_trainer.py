@@ -105,6 +105,8 @@ class GRPOTrainer:
         )
         self._eval_scene_paths: list[str] | None = None
         self.eval_log: list[dict] = []
+        self.best_det_reward: float = float("-inf")
+        self.best_epoch: int = 0
 
         self.train_log: list[dict] = []
 
@@ -438,16 +440,93 @@ class GRPOTrainer:
         eval_log_path = self.run_dir / "grpo_eval_log.tsv"
         df.to_csv(eval_log_path, sep="\t", index=False)
 
+        # Track best deterministic reward and save best checkpoint
+        det_mean = eval_metrics["det_reward_mean"]
+        is_best = det_mean > self.best_det_reward
+        if is_best:
+            self.best_det_reward = det_mean
+            self.best_epoch = epoch
+            self._save_best_checkpoint(epoch)
+
+        best_tag = " ** NEW BEST **" if is_best else f" (best: epoch {self.best_epoch} = {self.best_det_reward:+.1f})"
+
         print(
             f"  Eval (epoch {epoch}, {n_scenes} scenes):\n"
             f"    DET:   reward={det_arr.mean():+.1f} median={np.median(det_arr):+.1f}  "
-            f"collision={det_collisions/n_scenes:.1%}  offroad={det_offroad_arr.mean():.1%}\n"
+            f"collision={det_collisions/n_scenes:.1%}  offroad={det_offroad_arr.mean():.1%}{best_tag}\n"
             f"    GROUP: reward={totals_arr.mean():+.1f} scene_mean={scene_means_arr.mean():+.1f}  "
             f"collision={all_collisions/len(all_totals):.1%}  offroad={offroad_arr.mean():.1%}  "
             f"spread={spreads_arr.mean():.1f}"
         )
 
+        # Write machine-readable summary for agentic consumption
+        self._write_run_summary(epoch, eval_metrics, is_best)
+
         return eval_metrics
+
+    def _save_best_checkpoint(self, epoch: int) -> None:
+        """Copy the current checkpoint as the best model."""
+        if self.use_lora:
+            from preference_optimization.lora_utils import save_lora_checkpoint
+            best_dir = str(self.run_dir / "lora_best")
+            save_lora_checkpoint(self.policy_model, best_dir)
+            self.config.to_json(Path(best_dir) / "grpo_config.json")
+            # Write epoch marker
+            with open(Path(best_dir) / "best_epoch.json", "w") as f:
+                json.dump({"epoch": epoch, "det_reward_mean": self.best_det_reward}, f, indent=2)
+            print(f"  Saved best checkpoint (epoch {epoch}) -> {best_dir}")
+        else:
+            best_path = self.run_dir / "best.pth"
+            latest_path = self.run_dir / "latest.pth"
+            if latest_path.exists():
+                shutil.copy2(latest_path, best_path)
+            with open(self.run_dir / "best_epoch.json", "w") as f:
+                json.dump({"epoch": epoch, "det_reward_mean": self.best_det_reward}, f, indent=2)
+            print(f"  Saved best checkpoint (epoch {epoch}) -> {best_path}")
+
+    def _write_run_summary(self, epoch: int, eval_metrics: dict, is_best: bool) -> None:
+        """Write a machine-readable JSON summary of the current run state.
+
+        Designed for agentic consumption: an auto-research agent can read this
+        file to decide whether to continue training, adjust hyperparameters,
+        or stop early.
+        """
+        # Gather training metrics from the latest epoch
+        train_metrics = self.train_log[-1] if self.train_log else {}
+
+        summary = {
+            "run_dir": str(self.run_dir),
+            "current_epoch": epoch,
+            "total_epochs": self.config.train_epochs,
+            "best_epoch": self.best_epoch,
+            "best_det_reward": self.best_det_reward,
+            "is_best_this_epoch": is_best,
+            "config": {
+                "num_generations": self.config.num_generations,
+                "inner_epochs": self.config.inner_epochs,
+                "kl_coef": self.config.kl_coef,
+                "learning_rate": self.config.learning_rate,
+                "grad_accum_groups": self.config.grad_accum_groups,
+                "use_lora": self.config.use_lora,
+                "lora_rank": self.config.lora_rank,
+            },
+            "eval": eval_metrics,
+            "train": train_metrics,
+            "eval_history": [
+                {
+                    "epoch": e["epoch"],
+                    "det_reward_mean": e["det_reward_mean"],
+                    "det_collision_rate": e["det_collision_rate"],
+                    "det_offroad_mean": e["det_offroad_mean"],
+                    "group_reward_mean": e["group_reward_mean"],
+                }
+                for e in self.eval_log
+            ],
+        }
+
+        summary_path = self.run_dir / "run_summary.json"
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
 
     def save_checkpoint(self, epoch: int, args_dict: dict) -> None:
         """Save model checkpoint (LoRA adapters or full state dict)."""
