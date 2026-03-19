@@ -3,7 +3,7 @@
   "train_epochs": 10,
   "inner_epochs": 1,
   "ppo_clip_epsilon": 0.2,
-  "kl_coef": 0.5,
+  "kl_coef": 0.2,
   "learning_rate": 1e-5,
   "grad_accum_groups": 4,
   "sampling_randomization": true,
@@ -23,7 +23,7 @@
   "w_feasibility": 5.0,
   "w_centerline": 5.0,
   "use_lora": true,
-  "lora_rank": 16,
-  "lora_alpha": 16,
+  "lora_rank": 64,
+  "lora_alpha": 64,
   "lora_dropout": 0.05
 }
