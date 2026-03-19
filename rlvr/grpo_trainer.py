@@ -89,6 +89,23 @@ class GRPOTrainer:
             w_centerline=config.w_centerline,
         )
 
+        # Evaluation: fixed scene subset from validation set, sampled once
+        self._eval_sampler_config = SamplerConfig(
+            n_trajectories=8,
+            noise_scale_range=tuple(config.noise_scale_range),
+            guidance_scale_range=tuple(config.guidance_scale_range),
+            enable_guidance=config.enable_guidance and config.sampling_randomization,
+            enable_centerline=config.enable_centerline,
+            enable_anchor=config.enable_anchor,
+            enable_collision=config.enable_collision,
+            enable_route_following=config.enable_route_following,
+            enable_lane_keeping=config.enable_lane_keeping,
+            guidance_prob=config.guidance_prob,
+            prototypes_path=config.prototypes_path,
+        )
+        self._eval_scene_paths: list[str] | None = None
+        self.eval_log: list[dict] = []
+
         self.train_log: list[dict] = []
 
     # Expose beta/grad_accum as properties so the GUI can tweak them
@@ -272,6 +289,117 @@ class GRPOTrainer:
             return _empty_metrics()
 
         return self.train_on_groups(groups, epoch, progress_callback)
+
+    def setup_eval_scenes(self, valid_npz_paths: list[str], n_scenes: int = 50) -> None:
+        """Sample and fix the validation scenes used for per-epoch evaluation.
+
+        Called once before training. The same scenes are reused every epoch
+        so reward trends are comparable across epochs.
+        """
+        eval_scenes_path = self.run_dir / "eval_scenes.json"
+        if eval_scenes_path.exists():
+            with open(eval_scenes_path) as f:
+                self._eval_scene_paths = json.load(f)
+            print(f"  Loaded {len(self._eval_scene_paths)} fixed eval scenes from {eval_scenes_path}")
+            return
+
+        rng = np.random.default_rng(42)
+        n = min(n_scenes, len(valid_npz_paths))
+        indices = rng.choice(len(valid_npz_paths), size=n, replace=False)
+        self._eval_scene_paths = [valid_npz_paths[i] for i in indices]
+
+        with open(eval_scenes_path, "w") as f:
+            json.dump(self._eval_scene_paths, f, indent=2)
+        print(f"  Fixed {n} eval scenes (from {len(valid_npz_paths)} validation) -> {eval_scenes_path}")
+
+    @torch.no_grad()
+    def evaluate_rewards(self, epoch: int) -> dict[str, float]:
+        """Evaluate reward distribution on fixed validation scenes.
+
+        Generates 8 trajectories per scene, scores them, and returns
+        summary statistics. Results are appended to eval_log and saved to TSV.
+        """
+        if not self._eval_scene_paths:
+            return {}
+
+        self.policy_model.eval()
+
+        all_totals = []
+        all_collisions = 0
+        all_offroad = []
+        scene_spreads = []
+        components = {k: [] for k in ["safety", "progress", "smoothness", "feasibility", "centerline"]}
+
+        for path in self._eval_scene_paths:
+            try:
+                data = load_npz_data(path, self.device)
+                sampled = generate_diverse_group(
+                    self.policy_model, self.model_args, data,
+                    self._eval_sampler_config, self.device,
+                )
+                trajs = torch.tensor(
+                    np.stack([s.trajectory for s in sampled]),
+                    device=self.device, dtype=torch.float32,
+                )
+                rewards = compute_reward_batch(trajs, data, self.reward_config)
+
+                totals = [r.total for r in rewards]
+                all_totals.extend(totals)
+                all_collisions += sum(1 for r in rewards if r.collision_step is not None)
+                all_offroad.extend([r.off_road_fraction for r in rewards])
+                scene_spreads.append(max(totals) - min(totals))
+                for r in rewards:
+                    components["safety"].append(r.safety)
+                    components["progress"].append(r.progress)
+                    components["smoothness"].append(r.smoothness)
+                    components["feasibility"].append(r.feasibility)
+                    components["centerline"].append(r.centerline)
+            except Exception as e:
+                print(f"  [eval] skipping {path}: {e}")
+
+        if not all_totals:
+            return {}
+
+        n_trajs = len(all_totals)
+        totals_arr = np.array(all_totals)
+        offroad_arr = np.array(all_offroad)
+        spreads_arr = np.array(scene_spreads)
+        cfg = self.reward_config
+
+        eval_metrics = {
+            "epoch": epoch,
+            "n_scenes": len(scene_spreads),
+            "n_trajs": n_trajs,
+            "reward_mean": float(totals_arr.mean()),
+            "reward_std": float(totals_arr.std()),
+            "reward_median": float(np.median(totals_arr)),
+            "reward_min": float(totals_arr.min()),
+            "reward_max": float(totals_arr.max()),
+            "spread_mean": float(spreads_arr.mean()),
+            "collision_rate": all_collisions / n_trajs,
+            "offroad_rate": float((offroad_arr > 0.1).sum() / n_trajs),
+            "offroad_mean": float(offroad_arr.mean()),
+            "w_safety_mean": float(np.mean(components["safety"]) * cfg.w_safety),
+            "w_progress_mean": float(np.mean(components["progress"]) * cfg.w_progress),
+            "w_smooth_mean": float(np.mean(components["smoothness"]) * cfg.w_smooth),
+            "w_feasibility_mean": float(np.mean(components["feasibility"]) * cfg.w_feasibility),
+            "w_centerline_mean": float(np.mean(components["centerline"]) * cfg.w_centerline),
+        }
+
+        self.eval_log.append(eval_metrics)
+        df = pd.DataFrame(self.eval_log)
+        eval_log_path = self.run_dir / "grpo_eval_log.tsv"
+        df.to_csv(eval_log_path, sep="\t", index=False)
+
+        print(
+            f"  Eval (epoch {epoch}, {len(scene_spreads)} scenes): "
+            f"reward={totals_arr.mean():+.1f}±{totals_arr.std():.1f}  "
+            f"collision={all_collisions/n_trajs:.1%}  "
+            f"offroad={offroad_arr.mean():.1%}  "
+            f"spread={spreads_arr.mean():.1f}"
+        )
+
+        return eval_metrics
 
     def save_checkpoint(self, epoch: int, args_dict: dict) -> None:
         """Save model checkpoint (LoRA adapters or full state dict)."""

@@ -185,17 +185,25 @@ def main():
     if args.mode == "gui":
         _run_gui_mode(args, trainer, train_npz_paths, config)
     else:
-        _run_rule_mode(args, trainer, train_npz_paths)
+        _run_rule_mode(args, trainer, train_npz_paths, valid_npz_paths)
 
 
 def _run_rule_mode(
     args: argparse.Namespace,
     trainer: GRPOTrainer,
     train_npz_paths: list[str],
+    valid_npz_paths: list[str],
 ):
     args_dict = {k: str(v) if isinstance(v, Path) else v
                  for k, v in vars(args).items()}
     drift_info = ""
+
+    # Fix evaluation scenes from validation set (sampled once, reused every epoch)
+    trainer.setup_eval_scenes(valid_npz_paths, n_scenes=50)
+
+    # Evaluate base model before any training (epoch 0)
+    print("\nEvaluating base model (epoch 0)...")
+    trainer.evaluate_rewards(epoch=0)
 
     print(f"\nStarting GRPO training for {trainer.config.train_epochs} epochs...")
     print("=" * 60)
@@ -216,12 +224,14 @@ def _run_rule_mode(
         drift_info = trainer.compute_trajectory_drift()
         trainer.log_metrics(epoch, metrics)
         trainer.save_checkpoint(epoch, args_dict)
+        trainer.evaluate_rewards(epoch)
 
         print("-" * 60)
 
     print("\n" + "=" * 60)
     print("Training complete!")
     print(f"Results saved to: {trainer.run_dir}")
+    print(f"Eval log: {trainer.run_dir / 'grpo_eval_log.tsv'}")
 
 
 def _run_gui_mode(
