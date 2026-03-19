@@ -27,7 +27,7 @@ repositories:
   core/autoware_core:
     type: git
     url: https://github.com/autowarefoundation/autoware_core.git
-    version: 1.7.0
+    version: e95111267c142f8f04cf7223e74fb5d2fab4ec37
   core/autoware_rviz_plugins:
     type: git
     url: https://github.com/autowarefoundation/autoware_rviz_plugins.git
