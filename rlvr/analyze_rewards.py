@@ -180,6 +180,8 @@ def main():
     parser = argparse.ArgumentParser(description="GRPO Reward Distribution Analyzer")
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--npz_list", type=Path, required=True)
+    parser.add_argument("--lora_path", type=Path, default=None,
+                        help="Path to LoRA adapter directory (e.g. lora_epoch_002/)")
     parser.add_argument("--n_scenes", type=int, default=20,
                         help="Number of scenes to sample for analysis")
     parser.add_argument("--n_trajectories", type=int, default=8,
@@ -190,6 +192,12 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, model_args = load_model(args.model_path, device)
+
+    if args.lora_path is not None:
+        from preference_optimization.lora_utils import load_lora_checkpoint
+        model = load_lora_checkpoint(model, str(args.lora_path), is_trainable=False)
+        print(f"Loaded LoRA adapter from {args.lora_path}")
+
     model.eval()
 
     with open(args.npz_list) as f:
