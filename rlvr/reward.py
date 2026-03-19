@@ -198,6 +198,17 @@ def compute_safety_score_batch(
     # Suppress rear-end collisions
     collision_mask = collision_mask & ~npc_is_behind
 
+    # Suppress low-speed bbox overlaps: two stopped/slow vehicles queued
+    # bumper-to-bumper at a red light or in traffic is not a collision.
+    # Only count collisions when the ego is moving faster than 1 m/s.
+    _COLLISION_MIN_SPEED = 1.0  # m/s
+    ego_vel = torch.diff(ego_xy, dim=1) / config.dt  # (N, T-1, 2)
+    ego_speed = ego_vel.norm(dim=-1)                  # (N, T-1)
+    # Pad last timestep
+    ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)  # (N, T)
+    ego_moving = ego_speed > _COLLISION_MIN_SPEED  # (N, T)
+    collision_mask = collision_mask & ego_moving.unsqueeze(1)  # broadcast over N_nb
+
     has_collision_at_t = collision_mask.any(dim=1)  # (N, T)
     has_collision = has_collision_at_t.any(dim=1)  # (N,)
     first_t = has_collision_at_t.float().argmax(dim=1)  # (N,)
