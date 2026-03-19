@@ -25,7 +25,9 @@ class RewardConfig:
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
+    w_red_light: float = 10.0
     collision_penalty: float = -10.0
+    red_light_penalty: float = -10.0
     max_accel: float = 8.0  # m/s^2
     dt: float = 0.1  # 10 Hz
 
@@ -37,6 +39,7 @@ class RewardBreakdown:
     smoothness: float
     feasibility: float
     centerline: float
+    red_light: float
     total: float
     collision_step: int | None
     off_road_fraction: float
@@ -587,6 +590,120 @@ def compute_smoothness_score_batch(
 
 
 # ---------------------------------------------------------------------------
+# Red light: penalize trajectories that enter red-light route lane segments
+# ---------------------------------------------------------------------------
+
+# Traffic light one-hot indices within the 33-dim lane point descriptor
+_TL_GREEN = 8
+_TL_YELLOW = 9
+_TL_RED = 10
+_TL_WHITE = 11
+_TL_NONE = 12
+
+# Proximity threshold: ego must be within this distance of a red-light
+# lane point AND moving along the lane direction to count as a violation.
+_RED_LIGHT_PROXIMITY = 3.0  # metres
+_RED_LIGHT_HEADING_THRESH = 0.5  # cos(60°) — ego heading must roughly align with lane
+
+
+def compute_red_light_score_batch(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    config: RewardConfig,
+) -> torch.Tensor:
+    """Batched red-light violation penalty.
+
+    Checks whether the ego trajectory enters route lane segments that have a
+    red traffic light. A violation requires both spatial proximity (< 3m) and
+    heading alignment (cos > 0.5) to avoid penalizing trajectories that pass
+    near but don't enter the red-light lane.
+
+    Only checks route_lanes (the ego's planned route), not all lanes.
+
+    Args:
+        ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
+        data: Observation dict with "route_lanes".
+        config: RewardConfig.
+
+    Returns:
+        (N,) scores — 0 if no violation, negative penalty if violated.
+    """
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+    scores = torch.zeros(N, device=device)
+
+    if "route_lanes" not in data:
+        return scores
+
+    rl = data["route_lanes"]
+    if rl.dim() == 4:
+        rl = rl[0]  # (S, P, 33)
+
+    # Find route lane points with red light
+    red_mask = rl[:, :, _TL_RED] > 0.5  # (S, P)
+    if not red_mask.any():
+        return scores
+
+    # Extract red-light lane point positions and directions
+    red_pts = rl[red_mask]  # (R, 33)
+    red_xy = red_pts[:, :2]  # (R, 2)
+    red_dir = red_pts[:, 2:4]  # (R, 2)
+
+    # Filter out zero-padded points
+    valid = red_xy.norm(dim=-1) > 0.1
+    if not valid.any():
+        return scores
+    red_xy = red_xy[valid]      # (R', 2)
+    red_dir = red_dir[valid]    # (R', 2)
+    R = red_xy.shape[0]
+
+    # Normalize lane directions
+    red_dir_norm = red_dir / (red_dir.norm(dim=-1, keepdim=True).clamp(min=1e-6))
+
+    # Ego positions and headings
+    ego_xy = ego_trajs[:, :, :2]        # (N, T, 2)
+    ego_cos = ego_trajs[:, :, 2]        # (N, T)
+    ego_sin = ego_trajs[:, :, 3]        # (N, T)
+    ego_heading = torch.stack([ego_cos, ego_sin], dim=-1)  # (N, T, 2)
+
+    # Distance from each ego position to each red-light point: (N, T, R')
+    diff = ego_xy.unsqueeze(2) - red_xy.unsqueeze(0).unsqueeze(0)  # (N, T, R', 2)
+    dist = diff.norm(dim=-1)  # (N, T, R')
+
+    # Heading alignment: dot product of ego heading with lane direction
+    # (N, T, 1, 2) . (1, 1, R', 2) -> (N, T, R')
+    cos_align = (ego_heading.unsqueeze(2) * red_dir_norm.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+
+    # Violation: close enough AND heading aligned AND ego is moving (not stopped)
+    # Compute ego speed to distinguish stopped vs moving
+    ego_vel = torch.diff(ego_xy, dim=1) / config.dt  # (N, T-1, 2)
+    ego_speed = ego_vel.norm(dim=-1)  # (N, T-1)
+    # Pad to match T timesteps
+    ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)  # (N, T)
+    is_moving = ego_speed > 0.5  # m/s threshold — ignore near-stationary
+
+    is_close = dist < _RED_LIGHT_PROXIMITY        # (N, T, R')
+    is_aligned = cos_align > _RED_LIGHT_HEADING_THRESH  # (N, T, R')
+
+    # Violation at timestep: close to any red point AND aligned AND moving
+    violation_per_point = is_close & is_aligned  # (N, T, R')
+    violation_at_t = violation_per_point.any(dim=-1) & is_moving  # (N, T)
+
+    # Number of violation timesteps
+    n_violations = violation_at_t.float().sum(dim=-1)  # (N,)
+
+    # Penalty: hard penalty for any violation + soft per-step penalty
+    has_violation = n_violations > 0
+    scores = torch.where(
+        has_violation,
+        torch.tensor(config.red_light_penalty, device=device) - n_violations * 0.5,
+        scores,
+    )
+
+    return scores
+
+
+# ---------------------------------------------------------------------------
 # Top-level batched reward computation
 # ---------------------------------------------------------------------------
 
@@ -680,6 +797,7 @@ def compute_reward_batch(
         ego_trajs, ego_shape, data, config
     )
     centerline_scores = compute_centerline_score_batch(ego_trajs, ego_shape, data)
+    red_light_scores = compute_red_light_score_batch(ego_trajs, data, config)
 
     # Scale progress by on-road fraction: off-road shortcuts should not
     # be rewarded for "progress" toward the goal. A trajectory 37% off-road
@@ -693,6 +811,7 @@ def compute_reward_batch(
         + config.w_smooth * smoothness_scores
         + config.w_feasibility * feasibility_scores
         + config.w_centerline * centerline_scores
+        + config.w_red_light * red_light_scores
     )
 
     results: list[RewardBreakdown] = []
@@ -703,6 +822,7 @@ def compute_reward_batch(
             smoothness=float(smoothness_scores[i]),
             feasibility=float(feasibility_scores[i]),
             centerline=float(centerline_scores[i]),
+            red_light=float(red_light_scores[i]),
             total=float(totals[i]),
             collision_step=collision_steps[i],
             off_road_fraction=float(off_road_fractions[i]),

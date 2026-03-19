@@ -346,8 +346,8 @@ class TrajectoryRanker:
 
         cfg = self.reward_config
         lines = [
-            "| Rank | Safety | Progress | Smooth | Feasible | Centerline | Total | Adv | Config |",
-            "|------|--------|----------|--------|----------|------------|-------|-----|--------|",
+            "| Rank | Safety | Progress | Smooth | Feasible | Centerline | RedLight | Total | Adv | Config |",
+            "|------|--------|----------|--------|----------|------------|----------|-------|-----|--------|",
         ]
         for rank, (idx, rb, adv, st) in enumerate(rows, 1):
             config_col = f"**[DET]**" if st.is_deterministic else st.label
@@ -358,10 +358,11 @@ class TrajectoryRanker:
             wm = cfg.w_smooth * rb.smoothness
             wf = cfg.w_feasibility * rb.feasibility
             wc = cfg.w_centerline * rb.centerline
+            wr = cfg.w_red_light * rb.red_light
             lines.append(
                 f"| {b}{rank}{b} | {b}{ws:.1f}{b} | {b}{wp:.1f}{b} | "
                 f"{b}{wm:.1f}{b} | {b}{wf:.1f}{b} | "
-                f"{b}{wc:.1f}{b} | "
+                f"{b}{wc:.1f}{b} | {b}{wr:.1f}{b} | "
                 f"{b}{rb.total:.1f}{b} | {b}{adv:+.2f}{b} | {config_col} |"
             )
         return "\n".join(lines)
@@ -396,6 +397,7 @@ class TrajectoryRanker:
                 "smoothness": [rb.smoothness for rb in self.reward_breakdowns],
                 "feasibility": [rb.feasibility for rb in self.reward_breakdowns],
                 "centerline": [rb.centerline for rb in self.reward_breakdowns],
+                "red_light": [rb.red_light for rb in self.reward_breakdowns],
                 "total": [rb.total for rb in self.reward_breakdowns],
                 "collision_step": [rb.collision_step for rb in self.reward_breakdowns],
                 "off_road_fraction": [rb.off_road_fraction for rb in self.reward_breakdowns],
