@@ -804,127 +804,215 @@ class AutoResearcher:
         print(f"{'#'*70}")
 
     def _run_adaptive_phase(self, deadline: datetime):
-        """Generate follow-up experiments based on Phase 1 results."""
-        completed = [r for r in self.results if r.status == "completed"]
-        if not completed:
-            print("No completed experiments to analyze for adaptive phase.")
-            return
+        """Continuously generate and run experiments until deadline.
 
-        # Find best so far
-        best = max(completed, key=lambda r: r.prob_det_reward_mean)
-        print(f"\nAdaptive phase: best so far is '{best.name}' "
-              f"(prob reward={best.prob_det_reward_mean:+.2f}, offroad={best.prob_det_offroad_mean:.1%})")
-
-        follow_ups: list[ExperimentConfig] = []
-
-        # Based on findings: lr=1e-3 works but is unstable.
-        # Key experiments: moderate LR (5e-4), more normal scenes, stronger KL.
-
-        # Experiment A: lr=5e-4 (sweet spot hypothesis)
-        follow_ups.append(ExperimentConfig(
-            name="grpo_lr5e4_balanced",
-            description="GRPO lr=5e-4, kl=0.2, 50 prob + 150 normal (balanced)",
-            grpo_overrides={
-                "loss_mode": "diffusion",
-                "num_generations": 16,
-                "train_epochs": 15,
-                "kl_coef": 0.2,
-                "learning_rate": 5e-4,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=150,
-            max_epochs=15,
-            max_minutes=35,
-        ))
-
-        # Experiment B: lr=1e-3 with strong KL (0.5) + more normal scenes
-        follow_ups.append(ExperimentConfig(
-            name="grpo_lr1e3_hi_kl",
-            description="GRPO lr=1e-3, kl=0.5, 50 prob + 200 normal (stabilized)",
-            grpo_overrides={
-                "loss_mode": "diffusion",
-                "num_generations": 16,
-                "train_epochs": 10,
-                "kl_coef": 0.5,
-                "learning_rate": 1e-3,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=200,
-            max_epochs=10,
-            max_minutes=35,
-        ))
-
-        # Experiment C: lr=5e-4 with heavy feasibility weights
-        follow_ups.append(ExperimentConfig(
-            name="grpo_lr5e4_heavy_feas",
-            description="GRPO lr=5e-4, heavy feasibility/centerline, 50p+150n",
-            grpo_overrides={
-                "loss_mode": "diffusion",
-                "num_generations": 16,
-                "train_epochs": 15,
-                "kl_coef": 0.2,
-                "learning_rate": 5e-4,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-                "w_feasibility": 10.0,
-                "w_centerline": 10.0,
-                "w_progress": 1.0,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=150,
-            max_epochs=15,
-            max_minutes=35,
-        ))
-
-        # Experiment D: lr=3e-4 (even more conservative)
-        follow_ups.append(ExperimentConfig(
-            name="grpo_lr3e4_long",
-            description="GRPO lr=3e-4, kl=0.2, 50p+100n, 15 epochs",
-            grpo_overrides={
-                "loss_mode": "diffusion",
-                "num_generations": 16,
-                "train_epochs": 15,
-                "kl_coef": 0.2,
-                "learning_rate": 3e-4,
-                "lora_rank": 64,
-                "lora_alpha": 64,
-                "guidance_prob": 0.7,
-                "enable_route_following": True,
-                "enable_lane_keeping": True,
-            },
-            n_prob_scenes=50,
-            n_normal_scenes=100,
-            max_epochs=15,
-            max_minutes=35,
-        ))
-
-        # Run follow-ups until deadline
-        completed_names = {r.name for r in self.results if r.status == "completed"}
-        for exp_config in follow_ups:
-            if datetime.now(JST) > deadline - timedelta(hours=1, minutes=30):
-                print(f"\nApproaching deadline, stopping for final comparison")
+        Each round analyzes completed results and generates a new batch of
+        experiments exploring the most promising directions. The loop continues
+        until ~1.5 hours before deadline (reserved for final comparison).
+        """
+        round_num = 0
+        while datetime.now(JST) < deadline - timedelta(hours=1, minutes=30):
+            round_num += 1
+            completed = [r for r in self.results if r.status == "completed"]
+            if not completed:
+                print("No completed experiments to analyze.")
                 break
-            if exp_config.name in completed_names:
-                print(f"\nSkipping '{exp_config.name}' — already completed")
-                continue
-            self.run_experiment(exp_config)
+
+            completed_names = {r.name for r in self.results if r.status in ("completed", "failed", "running")}
+            best = max(completed, key=lambda r: r.prob_det_reward_mean)
+            print(f"\n{'='*70}")
+            print(f"ADAPTIVE ROUND {round_num}")
+            print(f"Best so far: '{best.name}' (prob_reward={best.prob_det_reward_mean:+.2f}, "
+                  f"offroad={best.prob_det_offroad_mean:.1%})")
+            print(f"{'='*70}")
+
+            experiments = self._generate_adaptive_experiments(completed, completed_names, round_num)
+            if not experiments:
+                print("No new experiments to generate. Stopping adaptive phase.")
+                break
+
+            for exp in experiments:
+                if datetime.now(JST) > deadline - timedelta(hours=1, minutes=30):
+                    print(f"\nApproaching deadline, stopping for final comparison")
+                    return
+                self.run_experiment(exp)
+
+    def _generate_adaptive_experiments(
+        self,
+        completed: list[ExperimentResult],
+        existing_names: set[str],
+        round_num: int,
+    ) -> list[ExperimentConfig]:
+        """Generate new experiments based on what we've learned so far."""
+        experiments: list[ExperimentConfig] = []
+
+        def _unique_name(base: str) -> str:
+            """Ensure experiment name is unique."""
+            name = base
+            i = 2
+            while name in existing_names:
+                name = f"{base}_r{round_num}v{i}"
+                i += 1
+            return name
+
+        # Analyze completed results
+        best = max(completed, key=lambda r: r.prob_det_reward_mean)
+        best_offroad = min(completed, key=lambda r: r.prob_det_offroad_mean)
+
+        # Find experiments that reduced offroad without destroying val
+        good_results = [r for r in completed
+                        if r.prob_det_offroad_mean < 0.05  # < 5% offroad
+                        and r.val_det_reward_mean > 0]     # val still positive
+        if not good_results:
+            good_results = [r for r in completed if r.prob_det_offroad_mean < 0.07]
+
+        # Strategy 1: Vary LR around what's working
+        # Sample LR values between best performers
+        import math
+        for lr in [2e-4, 5e-4, 7e-4, 1e-3, 2e-3]:
+            for kl in [0.1, 0.2, 0.5, 1.0]:
+                for n_normal in [50, 100, 200, 300]:
+                    name = _unique_name(f"grpo_lr{lr:.0e}_kl{kl}_n{n_normal}")
+                    if name in existing_names:
+                        continue
+                    experiments.append(ExperimentConfig(
+                        name=name,
+                        description=f"GRPO lr={lr}, kl={kl}, 50p+{n_normal}n",
+                        grpo_overrides={
+                            "loss_mode": "diffusion",
+                            "num_generations": 16,
+                            "train_epochs": 15,
+                            "kl_coef": kl,
+                            "learning_rate": lr,
+                            "lora_rank": 64,
+                            "lora_alpha": 64,
+                            "guidance_prob": 0.7,
+                            "enable_route_following": True,
+                            "enable_lane_keeping": True,
+                        },
+                        n_prob_scenes=50,
+                        n_normal_scenes=n_normal,
+                        max_epochs=15,
+                        max_minutes=35,
+                    ))
+
+        # Strategy 2: Higher LoRA rank experiments
+        for rank in [128, 32]:
+            name = _unique_name(f"grpo_lr1e3_rank{rank}")
+            experiments.append(ExperimentConfig(
+                name=name,
+                description=f"GRPO lr=1e-3, kl=0.1, rank={rank}, 50p+100n",
+                grpo_overrides={
+                    "loss_mode": "diffusion",
+                    "num_generations": 16,
+                    "train_epochs": 10,
+                    "kl_coef": 0.1,
+                    "learning_rate": 1e-3,
+                    "lora_rank": rank,
+                    "lora_alpha": rank,
+                    "guidance_prob": 0.7,
+                    "enable_route_following": True,
+                    "enable_lane_keeping": True,
+                },
+                n_prob_scenes=50,
+                n_normal_scenes=100,
+                max_epochs=10,
+                max_minutes=30,
+            ))
+
+        # Strategy 3: More/fewer trajectory generations
+        for n_gen in [8, 32]:
+            name = _unique_name(f"grpo_lr1e3_gen{n_gen}")
+            experiments.append(ExperimentConfig(
+                name=name,
+                description=f"GRPO lr=1e-3, N={n_gen} trajectories, 50p+100n",
+                grpo_overrides={
+                    "loss_mode": "diffusion",
+                    "num_generations": n_gen,
+                    "train_epochs": 10,
+                    "kl_coef": 0.1,
+                    "learning_rate": 1e-3,
+                    "lora_rank": 64,
+                    "lora_alpha": 64,
+                    "guidance_prob": 0.7,
+                    "enable_route_following": True,
+                    "enable_lane_keeping": True,
+                },
+                n_prob_scenes=50,
+                n_normal_scenes=100,
+                max_epochs=10,
+                max_minutes=30,
+            ))
+
+        # Strategy 4: All 100 prob scenes + various normal counts
+        for n_normal in [100, 200, 300]:
+            name = _unique_name(f"grpo_lr1e3_100p_{n_normal}n")
+            experiments.append(ExperimentConfig(
+                name=name,
+                description=f"GRPO lr=1e-3, kl=0.2, 100p+{n_normal}n",
+                grpo_overrides={
+                    "loss_mode": "diffusion",
+                    "num_generations": 16,
+                    "train_epochs": 10,
+                    "kl_coef": 0.2,
+                    "learning_rate": 1e-3,
+                    "lora_rank": 64,
+                    "lora_alpha": 64,
+                    "guidance_prob": 0.7,
+                    "enable_route_following": True,
+                    "enable_lane_keeping": True,
+                },
+                n_prob_scenes=100,
+                n_normal_scenes=n_normal,
+                max_epochs=10,
+                max_minutes=35,
+            ))
+
+        # Strategy 5: Grad accumulation variations
+        for grad_accum in [1, 8]:
+            name = _unique_name(f"grpo_lr1e3_accum{grad_accum}")
+            experiments.append(ExperimentConfig(
+                name=name,
+                description=f"GRPO lr=1e-3, grad_accum={grad_accum}, 50p+100n",
+                grpo_overrides={
+                    "loss_mode": "diffusion",
+                    "num_generations": 16,
+                    "train_epochs": 10,
+                    "kl_coef": 0.1,
+                    "learning_rate": 1e-3,
+                    "grad_accum_groups": grad_accum,
+                    "lora_rank": 64,
+                    "lora_alpha": 64,
+                    "guidance_prob": 0.7,
+                    "enable_route_following": True,
+                    "enable_lane_keeping": True,
+                },
+                n_prob_scenes=50,
+                n_normal_scenes=100,
+                max_epochs=10,
+                max_minutes=30,
+            ))
+
+        # Shuffle to diversify exploration order, then take a batch
+        random.Random(round_num).shuffle(experiments)
+
+        # Filter out already-completed/running
+        experiments = [e for e in experiments if e.name not in existing_names]
+
+        # Take a batch of experiments for this round
+        batch_size = min(4, len(experiments))
+        batch = experiments[:batch_size]
+
+        if batch:
+            print(f"Generated {len(experiments)} candidates, running {len(batch)} this round:")
+            for e in batch:
+                print(f"  - {e.name}: {e.description}")
+
+        return batch
 
 
 def main():
-    deadline = datetime(2026, 3, 20, 22, 0, 0, tzinfo=JST)
+    deadline = datetime(2026, 3, 23, 10, 0, 0, tzinfo=JST)
     researcher = AutoResearcher()
     researcher.run(deadline)
 
