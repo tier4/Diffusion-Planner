@@ -2,8 +2,11 @@
 set -ux
 
 MODEL_PATH=$(readlink -f $1)
-MODEL_DIR=$(dirname $MODEL_PATH)
 EXP_NAME=$2
+TRAIN_SET_LIST=$(readlink -f $3)
+VALID_SET_LIST=$(readlink -f $4)
+
+MODEL_DIR=$(dirname $MODEL_PATH)
 
 cd $(dirname $0)
 
@@ -17,15 +20,13 @@ export NCCL_DEBUG=INFO
 
 rm -f /tmp/tmp_dist_init
 
-TRAIN_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/dataset_20260130/path_list_train_all.json"
-VALID_SET_LIST="/mnt/nvme2/sakoda/nas_copy/private_workspace/dataset_20260130/path_list_valid_all.json"
-
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
 --exp_name $EXP_NAME \
 --train_set_list $TRAIN_SET_LIST \
 --valid_set_list $VALID_SET_LIST \
 --resume_model_path $MODEL_PATH \
---train_epochs 100 \
+--train_epochs 70 \
+--save_utd 5 \
 --use_wandb True \
 --diffusion_model_type "x_start" \
 --save_dir $MODEL_DIR \
