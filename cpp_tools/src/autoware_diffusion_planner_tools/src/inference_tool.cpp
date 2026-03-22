@@ -22,6 +22,7 @@
 #include <autoware/diffusion_planner/utils/utils.hpp>
 #include <autoware/vehicle_info_utils/vehicle_info.hpp>
 #include <autoware_lanelet2_extension/projection/mgrs_projector.hpp>
+#include <autoware_utils_geometry/boost_polygon_utils.hpp>
 #include <autoware_utils_geometry/geometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 
@@ -35,7 +36,12 @@
 #include <lanelet2_io/Io.h>
 #include <rcl_yaml_param_parser/parser.h>
 
+#include <boost/geometry/algorithms/distance.hpp>
+#include <boost/geometry/algorithms/intersects.hpp>
+
+#include <cmath>
 #include <deque>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -278,6 +284,7 @@ int main(int argc, char ** argv)
       << "Usage: diffusion_planner_inference_tool <rosbag_path> <vector_map_path> <output_path>\n"
       << "  [--vehicle_model_path=<path>] [--planner_config_path=<path>]\n"
       << "  [--step=1] [--limit=-1]\n"
+      << "  [--metrics_output_path=<path>]  (output per-frame evaluation metrics CSV)\n"
       << "  [--<yaml_param_name>=<value>]  (override any parameter from the planner config YAML)\n";
     return 1;
   }
@@ -294,6 +301,7 @@ int main(int argc, char ** argv)
     "/config/diffusion_planner.param.yaml";
   int64_t step = 1;
   int64_t limit = -1;
+  std::string metrics_output_path;
 
   // CLI overrides for planner parameters
   std::unordered_map<std::string, std::string> cli_overrides;
@@ -308,6 +316,8 @@ int main(int argc, char ** argv)
       step = std::stoll(arg.substr(7));
     } else if (arg.find("--limit=") == 0) {
       limit = std::stoll(arg.substr(8));
+    } else if (arg.find("--metrics_output_path=") == 0) {
+      metrics_output_path = arg.substr(22);
     } else if (arg.substr(0, 2) == "--") {
       const auto eq_pos = arg.find('=');
       if (eq_pos != std::string::npos) {
@@ -430,6 +440,11 @@ int main(int argc, char ** argv)
   std::cout << "    vehicle_length: " << vehicle_info.vehicle_length_m << std::endl;
   std::cout << "    vehicle_width: " << vehicle_info.vehicle_width_m << std::endl;
   std::cout << "    max_steer_angle: " << vehicle_info.max_steer_angle_rad << std::endl;
+
+  // Ego footprint dimensions for metrics
+  const double ego_base_to_front = vehicle_info.front_overhang_m + vehicle_info.wheel_base_m;
+  const double ego_base_to_rear = vehicle_info.rear_overhang_m;
+  const double ego_width = vehicle_info.vehicle_width_m;
 
   // --- 2. Load lanelet map ---
   std::cout << "Loading lanelet map: " << vector_map_path << std::endl;
@@ -558,6 +573,18 @@ int main(int argc, char ** argv)
   std::cout << "  timer_interval: " << timer_interval_ns / 1'000'000 << "ms"
             << ", expected_frames: " << expected_frames << std::endl;
 
+  // --- Metrics CSV output ---
+  std::ofstream metrics_file;
+  if (!metrics_output_path.empty()) {
+    metrics_file.open(metrics_output_path);
+    if (!metrics_file.is_open()) {
+      std::cerr << "Failed to open metrics output: " << metrics_output_path << std::endl;
+      return 1;
+    }
+    metrics_file << "timestamp_ns,ade,fde,min_road_border_dist,road_border_contact,"
+                    "min_neighbor_dist,neighbor_collision\n";
+  }
+
   for (int64_t timer_ns = first_odom_ns; timer_ns <= last_odom_ns; timer_ns += timer_interval_ns) {
     ++total_frames;
 
@@ -630,6 +657,47 @@ int main(int argc, char ** argv)
       writer_parser.write_topic(lane_markers, frame_time, TOPIC_OUT_DEBUG_LANE_MARKER);
     }
 
+    // Extract road_border linestrings from input data (before normalization, in ego frame)
+    // line_strings shape: [1, NUM_LINE_STRINGS(60), POINTS_PER_LINE_STRING(20), 2+LINE_STRING_TYPE_NUM(4)]
+    // last dim: (x, y, stop_line_type, road_border_type)
+    std::vector<autoware_utils_geometry::LineString2d> frame_road_borders;
+    if (metrics_file.is_open()) {
+      constexpr int64_t feat_dim = 2 + LINE_STRING_TYPE_NUM;  // 4
+      constexpr int64_t road_border_idx = 2 + LINE_STRING_TYPE_ROAD_BORDER;  // 3
+      const auto & ls_data = input_data_map.at("line_strings");
+      const Eigen::Matrix4d & ego_to_map = frame_context->ego_to_map_transform;
+
+      for (int64_t ls_i = 0; ls_i < NUM_LINE_STRINGS; ++ls_i) {
+        const int64_t ls_offset = ls_i * POINTS_PER_LINE_STRING * feat_dim;
+        const float rb_flag = ls_data[ls_offset + road_border_idx];
+        if (rb_flag < 0.5f) {
+          continue;
+        }
+
+        autoware_utils_geometry::LineString2d ls2d;
+        bool has_nonzero = false;
+        for (int64_t pt_i = 0; pt_i < POINTS_PER_LINE_STRING; ++pt_i) {
+          const int64_t pt_offset = ls_offset + pt_i * feat_dim;
+          const double ex = static_cast<double>(ls_data[pt_offset + 0]);
+          const double ey = static_cast<double>(ls_data[pt_offset + 1]);
+          // Skip zero-padded points
+          if (std::abs(ex) < 1e-6 && std::abs(ey) < 1e-6 && has_nonzero) {
+            break;
+          }
+          if (std::abs(ex) > 1e-6 || std::abs(ey) > 1e-6) {
+            has_nonzero = true;
+          }
+          // Transform ego frame -> map frame
+          const Eigen::Vector4d ego_pt(ex, ey, 0.0, 1.0);
+          const Eigen::Vector4d map_pt = ego_to_map * ego_pt;
+          ls2d.emplace_back(map_pt(0), map_pt(1));
+        }
+        if (ls2d.size() >= 2) {
+          frame_road_borders.push_back(std::move(ls2d));
+        }
+      }
+    }
+
     preprocess::normalize_input_data(input_data_map, core.get_normalization_map());
 
     if (!utils::check_input_map(input_data_map)) {
@@ -668,11 +736,11 @@ int main(int argc, char ** argv)
       planner_output.turn_indicator_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
 
     // Build ground truth trajectory from future odometry with interpolation
+    autoware_planning_msgs::msg::Trajectory gt_trajectory;
     {
       const int64_t GT_DT_NS =
         static_cast<int64_t>(constants::PREDICTION_TIME_STEP_S * 1e9);  // 0.1s
 
-      autoware_planning_msgs::msg::Trajectory gt_trajectory;
       gt_trajectory.header = odom.header;
 
       size_t gt_search_hint = odom_search_idx;
@@ -699,12 +767,109 @@ int main(int argc, char ** argv)
       writer_parser.write_topic(gt_trajectory, frame_time, TOPIC_OUT_GT_TRAJECTORY);
     }
 
+    // --- Per-frame metrics ---
+    if (metrics_file.is_open()) {
+      // 1. ADE and FDE
+      double ade = std::numeric_limits<double>::quiet_NaN();
+      double fde = std::numeric_limits<double>::quiet_NaN();
+      {
+        const auto & pred_pts = planner_output.trajectory.points;
+        const auto & gt_pts = gt_trajectory.points;
+        const size_t n = std::min(pred_pts.size(), gt_pts.size());
+        if (n > 0) {
+          double sum_disp = 0.0;
+          for (size_t i = 0; i < n; ++i) {
+            const double dx = pred_pts[i].pose.position.x - gt_pts[i].pose.position.x;
+            const double dy = pred_pts[i].pose.position.y - gt_pts[i].pose.position.y;
+            sum_disp += std::sqrt(dx * dx + dy * dy);
+          }
+          ade = sum_disp / static_cast<double>(n);
+          const double fdx =
+            pred_pts[n - 1].pose.position.x - gt_pts[n - 1].pose.position.x;
+          const double fdy =
+            pred_pts[n - 1].pose.position.y - gt_pts[n - 1].pose.position.y;
+          fde = std::sqrt(fdx * fdx + fdy * fdy);
+        }
+      }
+
+      // 2. Road border contact (using per-frame input line_strings, not entire map)
+      double min_road_border_dist = std::numeric_limits<double>::quiet_NaN();
+      bool road_border_contact = false;
+      if (!frame_road_borders.empty()) {
+        min_road_border_dist = std::numeric_limits<double>::max();
+        const auto & traj_pts = planner_output.trajectory.points;
+        for (size_t i = 0; i < traj_pts.size(); ++i) {
+          const auto ego_poly = autoware_utils_geometry::to_footprint(
+            traj_pts[i].pose, ego_base_to_front, ego_base_to_rear, ego_width);
+          for (const auto & border_ls : frame_road_borders) {
+            const double dist = boost::geometry::distance(ego_poly, border_ls);
+            if (dist < min_road_border_dist) {
+              min_road_border_dist = dist;
+            }
+          }
+        }
+        if (min_road_border_dist < 1e-6) {
+          road_border_contact = true;
+        }
+      }
+
+      // 3. Ego-neighbor collision
+      double min_neighbor_dist = std::numeric_limits<double>::quiet_NaN();
+      bool neighbor_collision = false;
+      {
+        const auto & traj_pts = planner_output.trajectory.points;
+        const auto & pred_objects = planner_output.predicted_objects;
+        bool has_neighbor = false;
+
+        for (const auto & obj : pred_objects.objects) {
+          if (obj.kinematics.predicted_paths.empty()) {
+            continue;
+          }
+          const auto & pred_path = obj.kinematics.predicted_paths[0];
+          const size_t n = std::min(traj_pts.size(), pred_path.path.size());
+          if (n == 0) {
+            continue;
+          }
+          if (!has_neighbor) {
+            min_neighbor_dist = std::numeric_limits<double>::max();
+            has_neighbor = true;
+          }
+          for (size_t t = 0; t < n; ++t) {
+            const auto ego_poly = autoware_utils_geometry::to_footprint(
+              traj_pts[t].pose, ego_base_to_front, ego_base_to_rear, ego_width);
+            const auto obj_poly =
+              autoware_utils_geometry::to_polygon2d(pred_path.path[t], obj.shape);
+            if (boost::geometry::intersects(ego_poly, obj_poly)) {
+              min_neighbor_dist = 0.0;
+              neighbor_collision = true;
+            } else {
+              const double dist = boost::geometry::distance(ego_poly, obj_poly);
+              if (dist < min_neighbor_dist) {
+                min_neighbor_dist = dist;
+              }
+            }
+          }
+        }
+      }
+
+      // Write CSV row
+      metrics_file << timer_ns << "," << ade << "," << fde << "," << min_road_border_dist << ","
+                   << (road_border_contact ? 1 : 0) << "," << min_neighbor_dist << ","
+                   << (neighbor_collision ? 1 : 0) << "\n";
+    }
+
     ++processed_frames;
 
     if (processed_frames % 100 == 0) {
       std::cout << "  Processed " << processed_frames << " / " << expected_frames << " frames..."
                 << std::endl;
     }
+  }
+
+  // Close metrics file
+  if (metrics_file.is_open()) {
+    metrics_file.close();
+    std::cout << "  Metrics written to: " << metrics_output_path << std::endl;
   }
 
   // --- 7. Summary ---
