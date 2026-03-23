@@ -79,7 +79,7 @@ def get_args():
     parser.add_argument("--train_epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--save_utd", type=int, default=10)
-    parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--warm_up_epoch", type=int, default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
@@ -245,7 +245,7 @@ def model_training(args):
     if global_rank == 0:
         valid_loader = DataLoader(
             valid_set,
-            batch_size=batch_size // 2,
+            batch_size=batch_size // 4,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
