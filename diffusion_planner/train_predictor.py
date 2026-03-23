@@ -165,7 +165,7 @@ def get_args():
         choices=["x_start", "flow_matching"],
         default="x_start",
     )
-    parser.add_argument("--predicted_neighbor_num", type=int, default=32)
+    parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
 
@@ -248,7 +248,7 @@ def model_training(args):
             k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer, ControlNormalizer)) else v.to_dict()
             for k, v in args_dict.items()
         }
-        args_dict["major_version"] = 3
+        args_dict["major_version"] = 4
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
