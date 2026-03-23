@@ -759,7 +759,7 @@ int main(int argc, char ** argv)
         past_reference_time +
         rclcpp::Duration::from_seconds(OUTPUT_T * constants::PREDICTION_TIME_STEP_S);
       const auto ego_future_opt = create_ego_sequence(
-        seq.data_list, i, OUTPUT_T, map2bl, future_reference_time, use_interpolation);
+        seq.data_list, i + 1, OUTPUT_T, map2bl, future_reference_time, use_interpolation);
       if (!ego_future_opt) {
         std::cout << "Reached end of sequence at frame " << i << "/" << n << std::endl;
         break;
