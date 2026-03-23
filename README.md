@@ -16,20 +16,13 @@ source ./.venv/bin/activate
 ```bash
 # Diffusion-Planner
 cd diffusion_planner
-python -m pip install pip==24.1
+python3 -m pip install pip==24.1
 
-pip install -r requirements_nuplan-devkit_fixed.txt
 pip install -r requirements.txt
 pip install -e .
 
 # check torch
 python3 -c "import torch; print(torch.cuda.is_available())"
-
-# install ros-humble
-./ros_scripts/download_ros-humble.sh
-
-# prepare data_converter
-./data_converter/build_data_converter.sh
 ```
 
 ## 2. Create dataset
