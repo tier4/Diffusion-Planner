@@ -58,8 +58,8 @@ class TrainingDataReader:
             "route_lanes": NUM_SEGMENTS_IN_ROUTE * POINTS_PER_LANELET * SEGMENT_POINT_DIM,
             "route_lanes_speed_limit": NUM_SEGMENTS_IN_ROUTE,
             "route_lanes_has_speed_limit": NUM_SEGMENTS_IN_ROUTE,
-            "polygons": NUM_POLYGONS * POINTS_PER_POLYGON * 2,
-            "line_strings": NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * 2,
+            "polygons": NUM_POLYGONS * POINTS_PER_POLYGON * (2 + POLYGON_TYPE_NUM),
+            "line_strings": NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * (2 + LINE_STRING_TYPE_NUM),
             "goal_pose": POSE_DIM,
             "turn_indicators": self.PAST_TIME_STEPS,
             "ego_shape": 3,  # (wheel_base, length, width)
@@ -175,19 +175,19 @@ class TrainingDataReader:
         result["route_lanes_has_speed_limit"] = np.array(route_has_flat, dtype=bool).reshape(-1, 1)
         offset += size * 4
 
-        # polygons (10, 40, 2)
+        # polygons (10, 40, 2 + POLYGON_TYPE_NUM)
         size = self.sizes["polygons"]
         polygons_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         result["polygons"] = np.array(polygons_flat, dtype=np.float32).reshape(
-            NUM_POLYGONS, POINTS_PER_POLYGON, 2
+            NUM_POLYGONS, POINTS_PER_POLYGON, 2 + POLYGON_TYPE_NUM
         )
         offset += size * 4
 
-        # line_strings (10, 20, 2)
+        # line_strings (10, 20, 2 + LINE_STRING_TYPE_NUM)
         size = self.sizes["line_strings"]
         line_strings_flat = struct.unpack(f"<{size}f", data[offset : offset + size * 4])
         result["line_strings"] = np.array(line_strings_flat, dtype=np.float32).reshape(
-            NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 2
+            NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 2 + LINE_STRING_TYPE_NUM
         )
         offset += size * 4
 

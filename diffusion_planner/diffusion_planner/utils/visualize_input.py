@@ -378,7 +378,12 @@ def draw_polygons_and_lines(ax, inputs):
             line_string = inputs["line_strings"][0, i]
             if np.sum(np.abs(line_string)) < 1e-6:
                 continue
-            ax.plot(line_string[:, 0], line_string[:, 1], color="red")
+            # Check one-hot type: [x, y, stop_line, road_border]
+            is_road_border = line_string.shape[-1] > 3 and np.any(line_string[:, 3] > 0.5)
+            if is_road_border:
+                ax.plot(line_string[:, 0], line_string[:, 1], color="red", linewidth=1)
+            else:
+                ax.plot(line_string[:, 0], line_string[:, 1], color="orange", linewidth=1)
 
 
 def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):

@@ -1,21 +1,30 @@
 import argparse
 import logging
+import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 from parse_rosbag_by_cpp import main as parse_rosbag_main_cpp
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CPP_BINARY = (
+    PROJECT_ROOT / "cpp_tools" / "build" / "autoware_diffusion_planner_tools" / "data_converter"
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("target_dir_list", type=Path, nargs="+")
     parser.add_argument("--save_root", type=Path, required=True)
+    parser.add_argument("--cpp_binary_path", type=Path, default=DEFAULT_CPP_BINARY)
     parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
+    parser.add_argument("--min_distance", type=float, default=50.0)
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
     parser.add_argument("--convert_red", type=int, default=0)
+    parser.add_argument("--interpolation", type=int, default=0)
     parser.add_argument("--ego_wheel_base", type=float, default=2.75)
     parser.add_argument("--ego_length", type=float, default=4.34)
     parser.add_argument("--ego_width", type=float, default=1.70)
@@ -25,14 +34,17 @@ def parse_args():
 
 def process_single_bag(args_tuple):
     (
+        cpp_binary_path,
         bag_path,
         save_root,
         step,
         limit,
         min_frames,
+        min_distance,
         search_nearest_route,
         convert_yellow,
         convert_red,
+        interpolation,
         ego_wheel_base,
         ego_length,
         ego_width,
@@ -59,16 +71,18 @@ def process_single_bag(args_tuple):
 
     try:
         parse_rosbag_main_cpp(
-            Path("~/autoware/build/autoware_diffusion_planner/data_converter").expanduser(),
+            cpp_binary_path,
             rosbag_path=bag_path,
             vector_map_path=vector_map_path,
             save_dir=save_dir,
             step=step,
             limit=limit,
             min_frames=min_frames,
+            min_distance=min_distance,
             search_nearest_route=search_nearest_route,
             convert_yellow=convert_yellow,
             convert_red=convert_red,
+            interpolation=interpolation,
             ego_wheel_base=ego_wheel_base,
             ego_length=ego_length,
             ego_width=ego_width,
@@ -80,15 +94,19 @@ def process_single_bag(args_tuple):
 
 
 if __name__ == "__main__":
+    start_time = time.perf_counter()
     args = parse_args()
     target_dir_list = args.target_dir_list
     save_root = args.save_root
+    cpp_binary_path = args.cpp_binary_path
     step = args.step
     limit = args.limit
     min_frames = args.min_frames
+    min_distance = args.min_distance
     search_nearest_route = args.search_nearest_route
     convert_yellow = args.convert_yellow
     convert_red = args.convert_red
+    interpolation = args.interpolation
     ego_wheel_base = args.ego_wheel_base
     ego_length = args.ego_length
     ego_width = args.ego_width
@@ -122,14 +140,17 @@ if __name__ == "__main__":
     for bag_path in bag_dir_list:
         process_args.append(
             (
+                cpp_binary_path,
                 bag_path,
                 save_root,
                 step,
                 limit,
                 min_frames,
+                min_distance,
                 search_nearest_route,
                 convert_yellow,
                 convert_red,
+                interpolation,
                 ego_wheel_base,
                 ego_length,
                 ego_width,
@@ -139,3 +160,13 @@ if __name__ == "__main__":
     # Process bags in parallel
     with Pool(processes=num_workers) as pool:
         results = pool.map(process_single_bag, process_args)
+
+    elapsed_seconds = int(time.perf_counter() - start_time)
+    hours = elapsed_seconds // 3600
+    minutes = (elapsed_seconds % 3600) // 60
+    seconds = elapsed_seconds % 60
+    time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    print(f"Total elapsed time: {time_str}")
+
+    with open(save_root / "processing_time.txt", "w") as summary_file:
+        summary_file.write(f"Total elapsed time: {time_str}\n")

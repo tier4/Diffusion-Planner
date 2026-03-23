@@ -181,6 +181,7 @@ def model_wrapper(
 
     def noise_pred_fn(x, t_continuous, cond=None):
         if cond is None:
+            x = x.reshape(x.shape[0], x.shape[1], -1, 4)
             output = model(x, t_continuous, **model_kwargs)
         else:
             output = model(x, t_continuous, cond, **model_kwargs)
@@ -191,7 +192,7 @@ def model_wrapper(
                 noise_schedule.marginal_alpha(t_continuous),
                 noise_schedule.marginal_std(t_continuous),
             )
-            return (x - expand_dims(alpha_t, x.dim()) * output) / expand_dims(sigma_t, x.dim())
+            return (x - alpha_t * output) / sigma_t
         elif model_type == "v":
             alpha_t, sigma_t = (
                 noise_schedule.marginal_alpha(t_continuous),
@@ -245,17 +246,12 @@ class DPM_Solver:
         self,
         model_fn,
         noise_schedule,
-        correcting_x0_fn=None,
         correcting_xt_fn=None,
-        thresholding_max_val=1.0,
-        dynamic_thresholding_ratio=0.995,
     ):
         """Construct a DPM-Solver.
 
         We support only DPM-Solver++.
 
-        We also support the "dynamic thresholding" method in Imagen[1]. For pixel-space diffusion models, you
-        can set `correcting_x0_fn="dynamic_thresholding"` to use the dynamic thresholding.
         The "dynamic thresholding" can greatly improve the sample quality for pixel-space
         DPMs with large guidance scales. Note that the thresholding method is **unsuitable** for latent-space
         DPMs (such as stable-diffusion).
@@ -271,20 +267,6 @@ class DPM_Solver:
                 ``
                 The shape of `x` is `(batch_size, **shape)`, and the shape of `t_continuous` is `(batch_size,)`.
             noise_schedule: A noise schedule object, such as NoiseScheduleVP.
-            correcting_x0_fn: A `str` or a function with the following format:
-                ```
-                def correcting_x0_fn(x0, t):
-                    x0_new = ...
-                    return x0_new
-                ```
-                This function is to correct the outputs of the data prediction model at each sampling step. e.g.,
-                ```
-                x0_pred = data_pred_model(xt, t)
-                if correcting_x0_fn is not None:
-                    x0_pred = correcting_x0_fn(x0_pred, t)
-                xt_1 = update(x0_pred, xt, t)
-                ```
-                If `correcting_x0_fn="dynamic_thresholding"`, we use the dynamic thresholding proposed in Imagen[1].
             correcting_xt_fn: A function with the following format:
                 ```
                 def correcting_xt_fn(xt, t, step):
@@ -296,50 +278,25 @@ class DPM_Solver:
                 xt = ...
                 xt = correcting_xt_fn(xt, t, step)
                 ```
-            thresholding_max_val: A `float`. The max value for thresholding.
-                Valid only when use `dpmsolver++` and `correcting_x0_fn="dynamic_thresholding"`.
-            dynamic_thresholding_ratio: A `float`. The ratio for dynamic thresholding (see Imagen[1] for details).
-                Valid only when use `dpmsolver++` and `correcting_x0_fn="dynamic_thresholding"`.
-
         [1] Chitwan Saharia, William Chan, Saurabh Saxena, Lala Li, Jay Whang, Emily Denton, Seyed Kamyar Seyed Ghasemipour,
             Burcu Karagol Ayan, S Sara Mahdavi, Rapha Gontijo Lopes, et al. Photorealistic text-to-image diffusion models
             with deep language understanding. arXiv preprint arXiv:2205.11487, 2022b.
         """
-        self.model = lambda x, t: model_fn(x, t.expand((x.shape[0])))
+        self.model = model_fn
         self.noise_schedule = noise_schedule
-        if correcting_x0_fn == "dynamic_thresholding":
-            self.correcting_x0_fn = self.dynamic_thresholding_fn
-        else:
-            self.correcting_x0_fn = correcting_x0_fn
         self.correcting_xt_fn = correcting_xt_fn
-        self.dynamic_thresholding_ratio = dynamic_thresholding_ratio
-        self.thresholding_max_val = thresholding_max_val
-
-    def dynamic_thresholding_fn(self, x0, t):
-        """
-        The dynamic thresholding method.
-        """
-        dims = x0.dim()
-        p = self.dynamic_thresholding_ratio
-        s = torch.quantile(torch.abs(x0).reshape((x0.shape[0], -1)), p, dim=1)
-        s = expand_dims(
-            torch.maximum(s, self.thresholding_max_val * torch.ones_like(s).to(s.device)), dims
-        )
-        x0 = torch.clamp(x0, -s, s) / s
-        return x0
 
     def data_prediction_fn(self, x, t):
         """
         Return the data prediction model (with corrector).
         """
         noise = self.model(x, t)
+        x = x.reshape(x.shape[0], x.shape[1], -1, 4)
         alpha_t, sigma_t = (
             self.noise_schedule.marginal_alpha(t),
             self.noise_schedule.marginal_std(t),
         )
         x0 = (x - sigma_t * noise) / alpha_t
-        if self.correcting_x0_fn is not None:
-            x0 = self.correcting_x0_fn(x0, t)
         return x0
 
     def model_fn(self, x, t):
@@ -387,72 +344,6 @@ class DPM_Solver:
                 )
             )
 
-    def get_orders_and_timesteps_for_singlestep_solver(
-        self, steps, order, skip_type, t_T, t_0, device
-    ):
-        """
-        Get the order of each step for sampling by the singlestep DPM-Solver.
-
-        We combine both DPM-Solver-1,2,3 to use all the function evaluations, which is named as "DPM-Solver-fast".
-        Given a fixed number of function evaluations by `steps`, the sampling procedure by DPM-Solver-fast is:
-            - If order == 1:
-                We take `steps` of DPM-Solver-1 (i.e. DDIM).
-            - If order == 2:
-                - Denote K = (steps // 2). We take K or (K + 1) intermediate time steps for sampling.
-                - If steps % 2 == 0, we use K steps of DPM-Solver-2.
-                - If steps % 2 == 1, we use K steps of DPM-Solver-2 and 1 step of DPM-Solver-1.
-            - If order == 3:
-                - Denote K = (steps // 3 + 1). We take K intermediate time steps for sampling.
-                - If steps % 3 == 0, we use (K - 2) steps of DPM-Solver-3, and 1 step of DPM-Solver-2 and 1 step of DPM-Solver-1.
-                - If steps % 3 == 1, we use (K - 1) steps of DPM-Solver-3 and 1 step of DPM-Solver-1.
-                - If steps % 3 == 2, we use (K - 1) steps of DPM-Solver-3 and 1 step of DPM-Solver-2.
-
-        ============================================
-        Args:
-            order: A `int`. The max order for the solver (2 or 3).
-            steps: A `int`. The total number of function evaluations (NFE).
-            skip_type: A `str`. The type for the spacing of the time steps. We support three types:
-                - 'logSNR': uniform logSNR for the time steps.
-                - 'time_uniform': uniform time for the time steps. (**Recommended for high-resolutional data**.)
-                - 'time_quadratic': quadratic time for the time steps. (Used in DDIM for low-resolutional data.)
-            t_T: A `float`. The starting time of the sampling (default is T).
-            t_0: A `float`. The ending time of the sampling (default is epsilon).
-            device: A torch device.
-        Returns:
-            orders: A list of the solver order of each step.
-        """
-        if order == 3:
-            K = steps // 3 + 1
-            if steps % 3 == 0:
-                orders = [3] * (K - 2) + [2, 1]
-            elif steps % 3 == 1:
-                orders = [3] * (K - 1) + [1]
-            else:
-                orders = [3] * (K - 1) + [2]
-        elif order == 2:
-            if steps % 2 == 0:
-                K = steps // 2
-                orders = [2] * K
-            else:
-                K = steps // 2 + 1
-                orders = [2] * (K - 1) + [1]
-        elif order == 1:
-            K = steps
-            orders = [1] * steps
-        else:
-            raise ValueError("'order' must be '1' or '2' or '3'.")
-        if skip_type == "logSNR":
-            # To reproduce the results in DPM-Solver paper
-            timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, K, device)
-        else:
-            timesteps_outer = self.get_time_steps(skip_type, t_T, t_0, steps, device)[
-                torch.cumsum(
-                    torch.tensor([0] + orders),
-                    0,
-                ).to(device)
-            ]
-        return timesteps_outer, orders
-
     def dpm_solver_first_update(self, x, s, t, model_s=None, return_intermediate=False):
         """
         DPM-Solver-1 (equivalent to DDIM) from time `s` to time `t`.
@@ -477,6 +368,7 @@ class DPM_Solver:
         phi_1 = torch.expm1(-h)
         if model_s is None:
             model_s = self.model_fn(x, s)
+        model_s = model_s.reshape(x.shape)
         x_t = sigma_t / sigma_s * x - alpha_t * phi_1 * model_s
         if return_intermediate:
             return x_t, {"model_s": model_s}
@@ -515,6 +407,7 @@ class DPM_Solver:
         r0 = h_0 / h
         D1_0 = (1.0 / r0) * (model_prev_0 - model_prev_1)
         phi_1 = torch.expm1(-h)
+        x = x.reshape(x.shape[0], x.shape[1], -1, 4)
         x_t = (
             (sigma_t / sigma_prev_0) * x
             - (alpha_t * phi_1) * model_prev_0
@@ -542,7 +435,7 @@ class DPM_Solver:
         else:
             raise ValueError("Solver order must be 1 or 2, got {}".format(order))
 
-    def sample(self, x, steps, skip_type="time_uniform"):
+    def sample(self, x, steps, prefix_mask, skip_type="time_uniform"):
         """
         Compute the sample at time `t_end` by DPM-Solver, given the initial `x` at time `t_start`.
 
@@ -579,9 +472,9 @@ class DPM_Solver:
 
         =====================================================
         Args:
-            x: A pytorch tensor. The initial value at time `t_start`
-                e.g. if `t_start` == T, then `x` is a sample from the standard normal distribution.
+            x: (B, P, T, D)
             steps: A `int`. The total number of function evaluations (NFE).
+            prefix_mask: (B, P, T, 1)
             skip_type: A `str`. The type for the spacing of the time steps. 'time_uniform' or 'logSNR' or 'time_quadratic'.
         Returns:
             x_end: A pytorch tensor. The approximated solution at time `t_end`.
@@ -602,30 +495,45 @@ class DPM_Solver:
                 "Cannot use adaptive solver when correcting_xt_fn is not None"
             )
         device = x.device
+        T = 81
+        x = x.reshape(x.shape[0], x.shape[1], T, -1)
+        t_shape = (x.shape[0], x.shape[1], T, 1)
         with torch.no_grad():
             assert steps >= order
             timesteps = self.get_time_steps(
+                skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device
+            )
+            timesteps_masked = self.get_time_steps(
                 skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device
             )
             assert timesteps.shape[0] - 1 == steps
             # Init the initial values.
             step = 0
             t = timesteps[step]
+            t_masked = timesteps_masked[step]
+            t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+            t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
             t_prev_list = [t]
-            model_prev_list = [self.model_fn(x, t)]
+            model_prev_list = [self.model_fn(x, t_BPT1)]
             if self.correcting_xt_fn is not None:
                 x = self.correcting_xt_fn(x, t, step)
             # Init the first `order` values by lower order multistep DPM-Solver.
             for step in range(1, order):
                 t = timesteps[step]
+                t_masked = timesteps_masked[step]
+                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+                t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
                 x = self.multistep_dpm_solver_update(x, model_prev_list, t_prev_list, t, step)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step)
                 t_prev_list.append(t)
-                model_prev_list.append(self.model_fn(x, t))
+                model_prev_list.append(self.model_fn(x, t_BPT1))
             # Compute the remaining values by `order`-th order multistep DPM-Solver.
             for step in range(order, steps + 1):
                 t = timesteps[step]
+                t_masked = timesteps_masked[step]
+                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+                t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
                 # We only use lower order for steps < 10
                 if steps < 10:
                     step_order = min(order, steps + 1 - step)
@@ -640,10 +548,12 @@ class DPM_Solver:
                 t_prev_list[-1] = t
                 # We do not need to evaluate the final model value.
                 if step < steps:
-                    model_prev_list[-1] = self.model_fn(x, t)
+                    model_prev_list[-1] = self.model_fn(x, t_BPT1)
             if denoise_to_zero:
                 t = torch.ones((1,)).to(device) * t_0
-                x = self.data_prediction_fn(x, t)
+                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+                t_BPT1 = torch.where(prefix_mask, t_0, t_BPT1)
+                x = self.data_prediction_fn(x, t_BPT1)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step + 1)
         return x

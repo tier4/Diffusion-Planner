@@ -47,6 +47,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -97,8 +98,8 @@ struct TrainingDataBinary
   float route_lanes[NUM_SEGMENTS_IN_ROUTE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM];
   float route_lanes_speed_limit[NUM_SEGMENTS_IN_ROUTE];
   int32_t route_lanes_has_speed_limit[NUM_SEGMENTS_IN_ROUTE];
-  float polygons[NUM_POLYGONS * POINTS_PER_POLYGON * 2];
-  float line_strings[NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * 2];
+  float polygons[NUM_POLYGONS * POINTS_PER_POLYGON * (2 + POLYGON_TYPE_NUM)];
+  float line_strings[NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * (2 + LINE_STRING_TYPE_NUM)];
   float goal_pose[NEIGHBOR_FUTURE_DIM];
   int32_t turn_indicators[INPUT_T_WITH_CURRENT];
   float ego_shape[EGO_SHAPE_SHAPE[1]];
@@ -172,17 +173,47 @@ std::vector<T> check_and_update_msg(
   return result;
 }
 
-std::vector<float> create_ego_sequence(
-  const std::vector<FrameData> & data_list, const int64_t start_idx, const int64_t time_steps,
-  const Eigen::Matrix4d & map2bl_matrix)
+std::optional<std::vector<float>> create_ego_sequence(
+  const std::vector<FrameData> & data_list, const int64_t start_idx, const size_t num_timesteps,
+  const Eigen::Matrix4d & map2bl_matrix, const rclcpp::Time & reference_time,
+  const bool use_interpolation)
 {
-  // Extract pose messages from FrameData
   std::deque<nav_msgs::msg::Odometry> odom_deque;
-  for (int64_t j = 0; j < time_steps; ++j) {
-    const int64_t index = std::min(start_idx + j, static_cast<int64_t>(data_list.size()) - 1);
-    odom_deque.push_back(data_list[index].kinematic_state);
+
+  if (use_interpolation) {
+    // Collect odom messages from start_idx until timestamp >= reference_time
+    for (size_t j = static_cast<size_t>(std::max(int64_t(0), start_idx)); j < data_list.size();
+         ++j) {
+      odom_deque.push_back(data_list[j].kinematic_state);
+      if (rclcpp::Time(data_list[j].kinematic_state.header.stamp) >= reference_time) {
+        break;
+      }
+    }
+
+    // Error: data doesn't cover the reference_time
+    if (odom_deque.empty() || rclcpp::Time(odom_deque.back().header.stamp) < reference_time) {
+      return std::nullopt;
+    }
+
+    return preprocess::create_ego_agent_past(
+      odom_deque, num_timesteps, map2bl_matrix, reference_time);
+  } else {
+    // Without interpolation: collect exactly num_timesteps frames by index
+    for (size_t j = 0; j < num_timesteps; ++j) {
+      const int64_t index =
+        std::min(start_idx + static_cast<int64_t>(j), static_cast<int64_t>(data_list.size()) - 1);
+      if (index < 0) {
+        return std::nullopt;
+      }
+      odom_deque.push_back(data_list[index].kinematic_state);
+    }
+
+    if (odom_deque.empty()) {
+      return std::nullopt;
+    }
+
+    return preprocess::create_ego_agent_past(odom_deque, num_timesteps, map2bl_matrix);
   }
-  return preprocess::create_ego_agent_past(odom_deque, time_steps, map2bl_matrix);
 }
 
 std::pair<std::vector<float>, std::vector<float>> process_neighbor_agents_and_future(
@@ -352,7 +383,7 @@ int main(int argc, char ** argv)
   if (argc < 4) {
     std::cerr << "Usage: data_converter <rosbag_path> <vector_map_path> <save_dir> [--step=1] "
                  "[--limit=-1] [--min_frames=1700] [--min_distance=50.0] [--convert_yellow=0] "
-                 "[--convert_red=0] "
+                 "[--convert_red=0] [--interpolation=1] "
                  "[--ego_wheel_base=2.75] [--ego_length=4.34] [--ego_width=1.70]"
               << std::endl;
     return 1;
@@ -368,6 +399,7 @@ int main(int argc, char ** argv)
   int64_t search_nearest_route = 1;
   int64_t convert_yellow = 0;
   int64_t convert_red = 0;
+  int64_t interpolation = 1;
   double min_distance = 50.0;
   float ego_wheel_base = -1.0;
   float ego_length = -1.0;
@@ -391,6 +423,8 @@ int main(int argc, char ** argv)
       convert_yellow = std::stoll(arg.substr(17));
     } else if (arg.find("--convert_red=") == 0) {
       convert_red = std::stoll(arg.substr(14));
+    } else if (arg.find("--interpolation=") == 0) {
+      interpolation = std::stoll(arg.substr(16));
     } else if (arg.find("--ego_wheel_base=") == 0) {
       ego_wheel_base = std::stof(arg.substr(17));
     } else if (arg.find("--ego_length=") == 0) {
@@ -411,11 +445,12 @@ int main(int argc, char ** argv)
   std::cout << "Processing rosbag: " << rosbag_path << std::endl;
   std::cout << "Vector map: " << vector_map_path << std::endl;
   std::cout << "Save directory: " << save_dir << std::endl;
+  const bool use_interpolation = static_cast<bool>(interpolation);
   std::cout << "Step: " << step << ", Limit: " << limit << ", Min frames: " << min_frames
             << ", Min distance: " << min_distance
             << ", Search nearest route: " << search_nearest_route
             << ", Convert yellow: " << convert_yellow << ", Convert red: " << convert_red
-            << std::endl;
+            << ", Interpolation: " << use_interpolation << std::endl;
 
   // Load Lanelet2 map and create context like in diffusion_planner_node
   lanelet::ErrorMessages errors{};
@@ -652,6 +687,13 @@ int main(int argc, char ** argv)
     sequences.erase(sequences.begin() + i + 1);
   }
 
+  // Sort each sequence's data_list by timestamp to ensure ascending order
+  for (auto & seq : sequences) {
+    std::sort(
+      seq.data_list.begin(), seq.data_list.end(),
+      [](const FrameData & a, const FrameData & b) { return a.timestamp < b.timestamp; });
+  }
+
   const std::string rosbag_dir_name = std::filesystem::path(rosbag_path).filename();
   const int64_t sequence_num = static_cast<int64_t>(sequences.size());
   std::cout << "Total " << sequence_num << " sequences" << std::endl;
@@ -703,10 +745,26 @@ int main(int argc, char ** argv)
       const Eigen::Matrix4d map2bl = utils::inverse(bl2map);
 
       // Create ego sequences
-      const std::vector<float> ego_past = create_ego_sequence(
-        seq.data_list, i - INPUT_T_WITH_CURRENT + 1, INPUT_T_WITH_CURRENT, map2bl);
-      const std::vector<float> ego_future =
-        create_ego_sequence(seq.data_list, i + 1, OUTPUT_T, map2bl);
+      const rclcpp::Time past_reference_time(seq.data_list[i].kinematic_state.header.stamp);
+      const auto ego_past_opt = create_ego_sequence(
+        seq.data_list, i - INPUT_T_WITH_CURRENT + 1, INPUT_T_WITH_CURRENT, map2bl,
+        past_reference_time, use_interpolation);
+      if (!ego_past_opt) {
+        std::cout << "Failed to create ego past at frame " << i << std::endl;
+        break;
+      }
+      const std::vector<float> & ego_past = ego_past_opt.value();
+
+      const rclcpp::Time future_reference_time =
+        past_reference_time +
+        rclcpp::Duration::from_seconds(OUTPUT_T * constants::PREDICTION_TIME_STEP_S);
+      const auto ego_future_opt = create_ego_sequence(
+        seq.data_list, i + 1, OUTPUT_T, map2bl, future_reference_time, use_interpolation);
+      if (!ego_future_opt) {
+        std::cout << "Reached end of sequence at frame " << i << "/" << n << std::endl;
+        break;
+      }
+      const std::vector<float> & ego_future = ego_future_opt.value();
 
       // Create ego current state
       const std::vector<float> ego_current = preprocess::create_ego_current_state(

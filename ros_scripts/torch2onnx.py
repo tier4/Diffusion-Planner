@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("root_dir", type=Path)
     parser.add_argument("--eval_npz", type=Path, default=None)
+    parser.add_argument("--use_ema", action="store_true")
     parser.add_argument(
         "--output-name",
         type=str,
@@ -63,6 +64,7 @@ class ONNXWrapper(nn.Module):
         goal_pose,
         ego_shape,
         turn_indicators,
+        delay,
     ):
         inputs = {
             "sampled_trajectories": sampled_trajectories,
@@ -81,6 +83,7 @@ class ONNXWrapper(nn.Module):
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
+            "delay": delay,
         }
         encoder_outputs, decoder_outputs = self.model(inputs)
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
@@ -151,11 +154,16 @@ def build_inputs_from_npz(npz_path: Path) -> dict:
     inputs["turn_indicators"] = torch.tensor(
         data["turn_indicators"], dtype=torch.float32
     ).unsqueeze(0)
+    inputs["delay"] = torch.zeros(1, 1, dtype=torch.float32)
     return inputs
 
 
 def convert_model(
-    config_json_path: str, ckpt_path: str, onnx_path: str, eval_npz_path: Path | None,
+    config_json_path: str,
+    ckpt_path: str,
+    onnx_path: str,
+    eval_npz_path: Path | None,
+    use_ema: bool = False,
     use_simplify: bool = False,
 ):
     """Convert a single PyTorch model to ONNX format."""
@@ -163,6 +171,7 @@ def convert_model(
     print(f"Converting: {ckpt_path}")
     print(f"Config: {config_json_path}")
     print(f"Output: {onnx_path}")
+    print(f"Using EMA: {use_ema}")
     print(f"{'=' * 80}\n")
 
     # Load config
@@ -197,13 +206,16 @@ def convert_model(
     inputs["route_lanes_has_speed_limit"] = torch.ones(
         1, NUM_SEGMENTS_IN_ROUTE, 1, dtype=torch.bool
     )
-    inputs["polygons"] = torch.randn(1, NUM_POLYGONS, POINTS_PER_POLYGON, 2, dtype=torch.float32)
+    inputs["polygons"] = torch.randn(
+        1, NUM_POLYGONS, POINTS_PER_POLYGON, 2 + POLYGON_TYPE_NUM, dtype=torch.float32
+    )
     inputs["line_strings"] = torch.randn(
-        1, NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 2, dtype=torch.float32
+        1, NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 2 + LINE_STRING_TYPE_NUM, dtype=torch.float32
     )
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
     inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
+    inputs["delay"] = torch.zeros(inputs["ego_current_state"].shape[0], 1, dtype=torch.float32)
 
     for key in inputs.keys():
         print(f"{key}: {inputs[key].shape}, {inputs[key].dtype}")
@@ -219,7 +231,14 @@ def convert_model(
     model.decoder.training = False
 
     ckpt = torch.load(ckpt_path)
-    state_dict = ckpt["model"]
+    if use_ema:
+        if "ema_state_dict" not in ckpt:
+            raise ValueError(f"EMA state dict not found in checkpoint: {ckpt_path}")
+        state_dict = ckpt["ema_state_dict"]
+        print("Loading EMA model weights")
+    else:
+        state_dict = ckpt["model"]
+        print("Loading regular model weights")
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
 
@@ -237,6 +256,8 @@ def convert_model(
     dynamic_axes = {}
     # Add dynamic batch dimension for inputs
     for name in input_names:
+        if name == "delay":
+            continue
         dynamic_axes[name] = {0: "batch"}
     # Add dynamic batch dimension for outputs
     dynamic_axes["prediction"] = {0: "batch"}
@@ -389,6 +410,7 @@ if __name__ == "__main__":
             ckpt_path=str(pth_file),
             onnx_path=str(onnx_file),
             eval_npz_path=args.eval_npz,
+            use_ema=args.use_ema,
             use_simplify=args.use_simplify,
         )
 

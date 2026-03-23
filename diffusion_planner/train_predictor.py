@@ -98,8 +98,37 @@ def get_args():
         help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
     )
 
-    parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
+    parser.add_argument("--coeff_road_border_loss", type=float, default=1.0)
+    parser.add_argument("--road_border_margin", type=float, default=0.25)
+    parser.add_argument("--road_border_n_interp", type=int, default=2)
 
+    parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
+    parser.add_argument("--neighbor_collision_margin", type=float, default=2.0)
+
+    parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
+    parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
+
+    # Velocity representation & hybrid loss (HDP paper, Section IV-B)
+    parser.add_argument(
+        "--use_velocity_representation",
+        type=boolean,
+        default=False,
+        help="Output trajectory as per-frame displacement instead of absolute waypoints",
+    )
+    parser.add_argument(
+        "--hybrid_loss_omega",
+        type=float,
+        default=0.1,
+        help="Weight for waypoint loss term in hybrid loss (omega in the paper)",
+    )
+    parser.add_argument(
+        "--hybrid_loss_window",
+        type=int,
+        default=10,
+        help="Gradient detach window size W for the waypoint loss term",
+    )
+
+    parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
     parser.add_argument("--use_ema", default=True, type=boolean)
@@ -172,7 +201,7 @@ def model_training(args):
             k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
             for k, v in args_dict.items()
         }
-        args_dict["major_version"] = 3
+        args_dict["major_version"] = 4
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
@@ -327,6 +356,19 @@ def model_training(args):
         # Synchronize all processes before training
         if args.ddp:
             torch.distributed.barrier()
+
+        # Adjust learning rate for final 10 epochs
+        final_epoch_count = 10
+        if epoch >= train_epochs - final_epoch_count:
+            base_lr = args.learning_rate
+            if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
+                adjusted_lr = base_lr * 0.01
+            else:  # First 5 of final 10 epochs: LR * 1/10
+                adjusted_lr = base_lr * 0.1
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = adjusted_lr
+            if global_rank == 0:
+                print(f"Final phase: Epoch {epoch + 1}, LR adjusted to {adjusted_lr}")
 
         # training step
         train_loss, train_total_loss = train_epoch(
