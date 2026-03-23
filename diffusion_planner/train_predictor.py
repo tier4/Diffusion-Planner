@@ -81,9 +81,9 @@ def get_args():
     # Training
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--train_epochs", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--save_utd", type=int, default=10)
-    parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--warm_up_epoch", type=int, default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
@@ -102,7 +102,7 @@ def get_args():
         help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
     )
 
-    parser.add_argument("--coeff_road_border_loss", type=float, default=1.0)
+    parser.add_argument("--coeff_road_border_loss", type=float, default=10.0)
     parser.add_argument("--road_border_margin", type=float, default=0.25)
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
@@ -292,7 +292,7 @@ def model_training(args):
     if global_rank == 0:
         valid_loader = DataLoader(
             valid_set,
-            batch_size=batch_size // 2,
+            batch_size=batch_size // 4,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
