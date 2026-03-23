@@ -68,6 +68,9 @@ class GuidancePanelComponents:
     centerline_scale: gr.Slider
     anchor_cb: gr.Checkbox
     anchor_scale: gr.Slider
+    speed_cb: gr.Checkbox
+    speed_scale: gr.Slider
+    speed_limit: gr.Slider
     anchor_index: gr.Slider
     anchor_path: gr.Textbox
     gallery: gr.Gallery
@@ -85,6 +88,7 @@ class GuidancePanelComponents:
           lane_cb, lane_scale,
           centerline_cb, centerline_scale,
           anchor_cb, anchor_scale,
+          speed_cb, speed_scale, speed_limit,
           anchor_index, anchor_path,
           global_scale
         """
@@ -95,6 +99,7 @@ class GuidancePanelComponents:
             self.lane_cb,        self.lane_scale,
             self.centerline_cb,  self.centerline_scale,
             self.anchor_cb,      self.anchor_scale,
+            self.speed_cb,       self.speed_scale,    self.speed_limit,
             self.anchor_index,   self.anchor_path,
             self.global_scale,
         ]
@@ -198,6 +203,23 @@ def build_guidance_panel(
                 info="Path to prototypes .npy file (K, 80, 2)",
             )
 
+    with gr.Row():
+        with gr.Column():
+            speed_cb = gr.Checkbox(
+                value=False,
+                label="Target path speed",
+                info="Penalise path speed outside [0, v_high] m/s (squared hinge)",
+            )
+            speed_scale = gr.Slider(
+                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                label="Speed guidance scale",
+            )
+            speed_limit = gr.Slider(
+                minimum=2.0, maximum=40.0, value=14.0, step=0.5,
+                label="Speed upper bound v_high (m/s)",
+                info="Lower bound v_low is fixed at 0 m/s",
+            )
+
     with gr.Accordion("Prototype Gallery — click to select anchor", open=False):
         _default_gallery = render_prototype_gallery(default_prototypes_path) or []
         gallery = gr.Gallery(
@@ -224,6 +246,9 @@ def build_guidance_panel(
         centerline_scale=centerline_scale,
         anchor_cb=anchor_cb,
         anchor_scale=anchor_scale,
+        speed_cb=speed_cb,
+        speed_scale=speed_scale,
+        speed_limit=speed_limit,
         anchor_index=anchor_index,
         anchor_path=anchor_path,
         gallery=gallery,
@@ -271,6 +296,7 @@ def make_guidance_set_config(
     ulk: bool,  ulks: float,
     ucf: bool,  ucfs: float,
     ua: bool,   uas: float,
+    u_speed: bool, u_speed_scale: float, u_speed_limit: float,
     ai: int,    ap: str,
     gs: float,
 ) -> GuidanceSetConfig | None:
@@ -291,6 +317,9 @@ def make_guidance_set_config(
         ucfs: Centerline scale.
         ua:   Enable anchor following.
         uas:  Anchor following scale.
+        u_speed: Enable path-speed guidance.
+        u_speed_scale: Speed guidance per-function scale.
+        u_speed_limit: Upper speed bound v_high (m/s); v_low is 0.
         ai:   Anchor prototype index.
         ap:   Path to prototypes ``.npy`` file.
         gs:   Global guidance scale.
@@ -307,6 +336,8 @@ def make_guidance_set_config(
         GuidanceConfig("route_following",      enabled=bool(urf), scale=float(urfs)),
         GuidanceConfig("lane_keeping",         enabled=bool(ulk), scale=float(ulks)),
         GuidanceConfig("centerline_following", enabled=bool(ucf), scale=float(ucfs)),
+        GuidanceConfig("speed", enabled=bool(u_speed), scale=float(u_speed_scale), 
+                params={"v_low": 0.0, "v_high": u_speed_limit, "dt": 0.1})
     ]
     if ua and ap and os.path.exists(str(ap)):
         k = _get_prototype_k(str(ap))

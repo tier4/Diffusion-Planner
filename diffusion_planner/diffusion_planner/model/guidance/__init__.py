@@ -20,6 +20,7 @@ from . import centerline_following  # noqa: F401
 from . import collision  # noqa: F401
 from . import lane_keeping  # noqa: F401
 from . import route_following  # noqa: F401
+from . import speed_guidance  # noqa: F401
 
 __all__ = [
     "GuidanceComposer",
