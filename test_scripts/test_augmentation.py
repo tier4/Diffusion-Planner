@@ -1,4 +1,5 @@
 import argparse
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -75,10 +76,13 @@ plt.savefig(original_save_path, dpi=100)
 plt.close()
 
 trial_num = 10
+elapsed_times = []
 for i in range(trial_num):
+    t0 = time.perf_counter()
     aug_data, aug_ego_future, aug_neighbors_future = aug(
         deepcopy(data), ego_future.clone(), neighbors_future.clone()
     )
+    elapsed_times.append(time.perf_counter() - t0)
 
     # Save augmented data to npz file
     data_dict = {}
@@ -104,3 +108,6 @@ for i in range(trial_num):
     )
 
 print(f"Augmented data saved: {trial_num} files to {save_dir}")
+print(
+    f"Augmentation time: mean={sum(elapsed_times) / len(elapsed_times) * 1000:.1f}ms  min={min(elapsed_times) * 1000:.1f}ms  max={max(elapsed_times) * 1000:.1f}ms"
+)
