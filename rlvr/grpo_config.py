@@ -72,6 +72,7 @@ class GRPOConfig:
     enable_collision: bool = False
     enable_route_following: bool = False
     enable_lane_keeping: bool = False
+    enable_road_border: bool = True
     guidance_prob: float = 0.5
     prototypes_path: str | None = None
 
@@ -81,6 +82,16 @@ class GRPOConfig:
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
+
+    # Reward tuning (passed to RewardConfig for training)
+    near_edge_scale: float = 3.0
+    wide_edge_scale: float = 0.2
+    max_lat_accel: float = 2.0
+    lat_accel_scale: float = 3.0
+    enable_overprogress: bool = True
+    overprogress_margin: float = 1.1
+    overprogress_penalty: float = 0.3
+    stopped_penalty: float = 5.0
 
     # Loss mode: controls how gradients flow to affect the deterministic output.
     # "diffusion" (default): standard advantage-weighted diffusion loss at random t.
@@ -94,6 +105,10 @@ class GRPOConfig:
     direct_loss_weight: float = 1.0
     diffusion_t_range: list[float] = field(default_factory=lambda: [0.001, 0.1])
     diffusion_k_steps: int = 4
+
+    # Rejection sampling: generate num_generations trajectories but keep only
+    # the top rejection_keep by reward. Set to 0 or None to disable (keep all).
+    rejection_keep: int = 0
 
     # LoRA
     use_lora: bool = True

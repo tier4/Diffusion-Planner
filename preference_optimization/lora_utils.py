@@ -273,3 +273,46 @@ def merge_lora_and_unload(model: nn.Module) -> nn.Module:
     """
     inner = model.module if hasattr(model, "module") else model
     return inner.merge_and_unload()
+
+
+def fuse_unfused_mha_state_dict(state_dict: dict) -> dict:
+    """Convert UnfusedMHA q/k/v projections back to fused in_proj_weight format.
+
+    After merge_lora_and_unload, the state dict has separate q_proj/k_proj/v_proj
+    Linear layers. torch2onnx.py expects the original nn.MultiheadAttention format
+    with a single in_proj_weight = cat([q, k, v]). This function performs the
+    conversion and adds the 'module.' prefix expected by the checkpoint format.
+
+    Args:
+        state_dict: Output of merged_model.state_dict() (no 'module.' prefix).
+
+    Returns:
+        New state dict with 'module.' prefix and fused in_proj_weight/bias.
+    """
+    import torch
+
+    final = {}
+    attn_prefixes = set()
+
+    for key in state_dict:
+        if '.q_proj.weight' in key:
+            attn_prefixes.add(key.replace('.q_proj.weight', ''))
+
+    for prefix in attn_prefixes:
+        q_w = state_dict[f'{prefix}.q_proj.weight']
+        k_w = state_dict[f'{prefix}.k_proj.weight']
+        v_w = state_dict[f'{prefix}.v_proj.weight']
+        q_b = state_dict[f'{prefix}.q_proj.bias']
+        k_b = state_dict[f'{prefix}.k_proj.bias']
+        v_b = state_dict[f'{prefix}.v_proj.bias']
+        final[f'module.{prefix}.in_proj_weight'] = torch.cat([q_w, k_w, v_w], dim=0)
+        final[f'module.{prefix}.in_proj_bias'] = torch.cat([q_b, k_b, v_b], dim=0)
+
+    skip = ['.q_proj.weight', '.q_proj.bias', '.k_proj.weight', '.k_proj.bias',
+            '.v_proj.weight', '.v_proj.bias']
+    for key, val in state_dict.items():
+        if any(key.endswith(s) for s in skip):
+            continue
+        final[f'module.{key}'] = val
+
+    return final

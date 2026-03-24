@@ -35,9 +35,80 @@ import torch.nn as nn
 
 import torch.nn.functional as F
 
-from preference_optimization.dpo_loss import compute_trajectory_loss
+from preference_optimization.dpo_loss import compute_trajectory_loss as _compute_trajectory_loss_raw
 
 from rlvr.grpo_config import GRPOConfig
+
+
+def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, device):
+    """V4-compatible trajectory loss using 4D diffusion timestep.
+
+    The v4 DiT requires t as [B, P, T+1, 1] with t.shape[2] == x.shape[2].
+    The original dpo_loss.compute_trajectory_loss passes a single t to both
+    marginal_prob (which needs [B,P,T,1]) and diffusion_time (which needs
+    [B,P,T+1,1]). To resolve this, we replicate the essential logic here
+    with proper 4D t handling, matching the v4 training code in decoder.py.
+    """
+    from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+
+    B = data["ego_current_state"].shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+
+    # Expand t to [B, P, T+1, 1]
+    if t.dim() == 1:
+        t_4d = t.view(B, 1, 1, 1).expand(B, P, future_len + 1, 1).clone()
+    elif t.dim() == 4:
+        t_4d = t
+    else:
+        t_4d = t.view(B, 1, 1, 1).expand(B, P, future_len + 1, 1).clone()
+
+    gt_trajectory = torch.tensor(trajectory, dtype=torch.float32, device=device).unsqueeze(0)
+    ego_mean = model_args.state_normalizer.mean[0].to(device)
+    ego_std = model_args.state_normalizer.std[0].to(device)
+    gt_trajectory_norm = (gt_trajectory - ego_mean) / ego_std
+
+    gt_future = torch.zeros(B, P, future_len, 4, device=device)
+    gt_future[:, 0, :, :] = gt_trajectory_norm
+
+    ego_current = data["ego_current_state"][:, :4]
+    if P > 1:
+        neighbors_current = data["neighbor_agents_past"][:, :P - 1, -1, :4]
+        neighbors_current_norm = (neighbors_current - ego_mean) / ego_std
+    else:
+        neighbors_current_norm = torch.zeros(B, 0, 4, device=device)
+    ego_current_norm = (ego_current - ego_mean) / ego_std
+    current_states = torch.cat([ego_current_norm[:, None], neighbors_current_norm], dim=1)
+
+    all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, T+1, 4]
+
+    # marginal_prob on future part with sliced t (matching decoder.py:111)
+    mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
+    xT = mean + std * noise
+
+    xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)  # [B, P, T+1, 4]
+
+    data_for_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    data_normalized = model_args.observation_normalizer(data_for_norm)
+
+    merged_inputs = {**data_normalized}
+    merged_inputs["gt_trajectories"] = all_gt
+    merged_inputs["sampled_trajectories"] = xT_full
+    merged_inputs["diffusion_time"] = t_4d  # [B, P, T+1, 1]
+    if "delay" not in merged_inputs:
+        merged_inputs["delay"] = torch.zeros(B, dtype=torch.long, device=device)
+
+    _, outputs = model(merged_inputs)
+
+    if "model_output" in outputs:
+        # model_output is [B, P, T+1, 4] from _forward_training; skip prefix at index 0
+        model_output = outputs["model_output"][:, 0, 1:, :]  # [B, T, 4]
+    else:
+        model_output = outputs["prediction"][:, 0]
+
+    gt_target = all_gt[:, 0, 1:, :]  # [B, T, 4]
+    loss = F.mse_loss(model_output, gt_target)
+    return loss
 
 
 def _sample_t_for_mode(

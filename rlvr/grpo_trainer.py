@@ -22,7 +22,7 @@ from tqdm import tqdm
 from preference_optimization.utils import (
     calculate_ade,
     generate_deterministic_trajectory,
-    load_npz_data,
+    load_npz_data as _load_npz_data_raw,
 )
 
 from rlvr.grpo_config import GRPOConfig
@@ -34,6 +34,14 @@ from rlvr.reward import (
     compute_group_advantages,
     compute_reward_batch,
 )
+
+
+def load_npz_data(npz_path, device):
+    """Wrapper around preference_optimization load_npz_data that adds v4 delay key."""
+    data = _load_npz_data_raw(npz_path, device)
+    if "delay" not in data:
+        data["delay"] = torch.zeros(1, dtype=torch.long, device=device)
+    return data
 
 
 class GRPOTrainer:
@@ -78,6 +86,7 @@ class GRPOTrainer:
             enable_collision=config.enable_collision,
             enable_route_following=config.enable_route_following,
             enable_lane_keeping=config.enable_lane_keeping,
+            enable_road_border=config.enable_road_border,
             guidance_prob=config.guidance_prob,
             prototypes_path=config.prototypes_path,
         )
@@ -87,6 +96,14 @@ class GRPOTrainer:
             w_smooth=config.w_smooth,
             w_feasibility=config.w_feasibility,
             w_centerline=config.w_centerline,
+            near_edge_scale=config.near_edge_scale,
+            wide_edge_scale=config.wide_edge_scale,
+            max_lat_accel=config.max_lat_accel,
+            lat_accel_scale=config.lat_accel_scale,
+            enable_overprogress=config.enable_overprogress,
+            overprogress_margin=config.overprogress_margin,
+            overprogress_penalty=config.overprogress_penalty,
+            stopped_penalty=config.stopped_penalty,
         )
 
         # Evaluation: fixed scene subset from validation set, sampled once
@@ -100,6 +117,7 @@ class GRPOTrainer:
             enable_collision=config.enable_collision,
             enable_route_following=config.enable_route_following,
             enable_lane_keeping=config.enable_lane_keeping,
+            enable_road_border=config.enable_road_border,
             guidance_prob=config.guidance_prob,
             prototypes_path=config.prototypes_path,
         )
@@ -140,6 +158,36 @@ class GRPOTrainer:
             print(f"  [grpo] skipping {npz_path}: {e}")
             return None
 
+        # Skip scenes where GT barely moves (<1m)
+        if "ego_agent_future" in data:
+            gt = data["ego_agent_future"]
+            if gt.dim() == 3:
+                gt = gt[0]
+            gt_path = torch.diff(gt[:, :2], dim=0).norm(dim=-1).sum()
+            if gt_path < 1.0:
+                return None
+
+        # Skip scenes where ego starts offroad at t=0 — these are poison
+        # because the model can't control the starting position.
+        from rlvr.reward import _build_lane_polygons, _ego_on_road_polygon
+        t0_traj = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]], device=self.device)
+        es = data.get("ego_shape")
+        if es is not None:
+            if es.dim() == 2:
+                es = es[0]
+            es = es[:3]
+        else:
+            es = torch.tensor([2.79, 4.34, 1.70], device=self.device)
+        lanes = data["lanes"]
+        if lanes.dim() == 4:
+            lanes = lanes[0]
+        lane_polys = _build_lane_polygons(lanes)
+        _, frac_t0, _, _ = _ego_on_road_polygon(t0_traj, es, lane_polys)
+        # Use generous threshold — if even 1% of ego perimeter is offroad
+        # at t=0, the scene is likely at a boundary where clean driving is impossible.
+        if frac_t0[0, 0].item() > 0.01:
+            return None
+
         self.policy_model.eval()
         with torch.no_grad():
             sampled = generate_diverse_group(
@@ -159,6 +207,17 @@ class GRPOTrainer:
         reward_breakdowns = compute_reward_batch(
             traj_batch, data, self.reward_config,
         )
+
+        # Rejection sampling: keep only top K trajectories by reward
+        keep = self.config.rejection_keep
+        if keep and 0 < keep < len(trajectories):
+            totals = [r.total for r in reward_breakdowns]
+            top_indices = sorted(range(len(totals)), key=lambda i: totals[i], reverse=True)[:keep]
+            top_indices.sort()  # preserve order
+            trajectories = [trajectories[i] for i in top_indices]
+            reward_breakdowns = [reward_breakdowns[i] for i in top_indices]
+            traj_batch = traj_batch[top_indices]
+
         advantages = compute_group_advantages(reward_breakdowns)
 
         # Store old log-probs and the (noise, t) used to compute them.
@@ -357,6 +416,8 @@ class GRPOTrainer:
         det_totals = []
         det_collisions = 0
         det_offroad = []
+        det_rb_crossings = 0
+        det_rb_near = []
         det_components = {k: [] for k in ["safety", "progress", "smoothness", "feasibility", "centerline"]}
 
         # Stochastic group metrics (for distribution/diversity stats)
@@ -389,6 +450,9 @@ class GRPOTrainer:
                 if det_reward.collision_step is not None:
                     det_collisions += 1
                 det_offroad.append(det_reward.off_road_fraction)
+                if det_reward.rb_crossing:
+                    det_rb_crossings += 1
+                det_rb_near.append(det_reward.rb_near_frac)
                 det_components["safety"].append(det_reward.safety)
                 det_components["progress"].append(det_reward.progress)
                 det_components["smoothness"].append(det_reward.smoothness)
@@ -437,6 +501,8 @@ class GRPOTrainer:
             "det_reward_std": float(det_arr.std()),
             "det_collision_rate": det_collisions / n_scenes,
             "det_offroad_mean": float(det_offroad_arr.mean()),
+            "det_rb_crossings": det_rb_crossings,
+            "det_rb_near_mean": float(np.mean(det_rb_near)) if det_rb_near else 0.0,
             "det_w_safety": float(np.mean(det_components["safety"]) * cfg.w_safety),
             "det_w_progress": float(np.mean(det_components["progress"]) * cfg.w_progress),
             "det_w_smooth": float(np.mean(det_components["smoothness"]) * cfg.w_smooth),
@@ -469,7 +535,7 @@ class GRPOTrainer:
         print(
             f"  Eval (epoch {epoch}, {n_scenes} scenes):\n"
             f"    DET:   reward={det_arr.mean():+.1f} median={np.median(det_arr):+.1f}  "
-            f"collision={det_collisions/n_scenes:.1%}  offroad={det_offroad_arr.mean():.1%}{best_tag}\n"
+            f"collision={det_collisions/n_scenes:.1%}  rb_cross={det_rb_crossings}/{n_scenes}  rb_near={np.mean(det_rb_near):.2f}{best_tag}\n"
             f"    GROUP: reward={totals_arr.mean():+.1f} scene_mean={scene_means_arr.mean():+.1f}  "
             f"collision={all_collisions/len(all_totals):.1%}  offroad={offroad_arr.mean():.1%}  "
             f"spread={spreads_arr.mean():.1f}"

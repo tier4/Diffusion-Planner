@@ -28,36 +28,40 @@ import numpy as np
 import torch
 
 from preference_optimization.model_utils import load_model
-from preference_optimization.utils import load_npz_data
+from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from guidance_gui.generate_samples import generate_samples
+
+
+def load_npz_data(npz_path, device):
+    """Wrapper that adds v4 delay key."""
+    data = _load_npz_data_raw(npz_path, device)
+    if "delay" not in data:
+        data["delay"] = torch.zeros(1, dtype=torch.long, device=device)
+    return data
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_trainer import GRPOTrainer
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Data paths
+# Data paths — v4 model and data
 SSD = Path("/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207")
-BASE_MODEL = SSD / "xx1-best-model/v3.0/best_model.pth"
-PROB_SCENES_PATH = SSD / "path_lists/merged_20260216_20260224/path_list.json"
-NORMAL_POOL_PATH = SSD / "xx1_grpo_cleansed_data/path_list.json"
-VALID_SCENES_PATH = SSD / "xx1_validation_data/xx1_real_valid/path_list.json"
+BASE_MODEL = SSD / "v4.0/best_model.pth"
+PROB_SCENES_PATH = SSD / "auto_research/v4_train_prob_pool.json"
+NORMAL_POOL_PATH = SSD / "auto_research/v4_train_normal_pool.json"
+VALID_SCENES_PATH = SSD / "auto_research/v4_validation_100.json"
 OUTPUT_DIR = SSD / "auto_research"
 
 
 def load_scene_lists():
     with open(PROB_SCENES_PATH) as f:
         prob_all = json.load(f)
-    prob_100 = prob_all[:100]
     with open(NORMAL_POOL_PATH) as f:
         normal_pool = json.load(f)
     with open(VALID_SCENES_PATH) as f:
-        valid_all = json.load(f)
-    # Fixed 50 val scenes (seeded)
-    rng = np.random.default_rng(42)
-    val_idx = rng.choice(len(valid_all), size=50, replace=False)
-    val_50 = [valid_all[i] for i in val_idx]
-    return prob_100, normal_pool, val_50
+        val_scenes = json.load(f)
+    # v4 validation set is already curated (stopped scenes removed)
+    return prob_all, normal_pool, val_scenes
 
 
 def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
@@ -75,7 +79,8 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
 @torch.no_grad()
 def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label=""):
     model.eval()
-    totals, offroads, collisions = [], [], 0
+    totals, offroads, collisions, path_lengths = [], [], 0, []
+    rb_crossings, rb_nears = 0, []
     for path in scene_paths:
         try:
             data = load_npz_data(path, DEVICE)
@@ -89,23 +94,126 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="")
             offroads.append(reward.off_road_fraction)
             if reward.collision_step is not None:
                 collisions += 1
+            if reward.rb_crossing:
+                rb_crossings += 1
+            rb_nears.append(reward.rb_near_frac)
+            pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
+            path_lengths.append(pl)
         except Exception as e:
             print(f"  [eval] skipping {Path(path).name}: {e}")
 
     n = len(totals)
     if n == 0:
-        return {"n_scenes": 0, "reward_mean": 0, "offroad_mean": 0, "collision_rate": 0}
+        return {"n_scenes": 0, "reward_mean": 0, "offroad_mean": 0, "collision_rate": 0,
+                "path_length_mean": 0, "stopped_count": 0, "rb_crossings": 0, "rb_near_mean": 0}
 
+    pl_arr = np.array(path_lengths)
     result = {
         "n_scenes": n,
         "reward_mean": float(np.mean(totals)),
         "offroad_mean": float(np.mean(offroads)),
         "collision_rate": collisions / n,
+        "path_length_mean": float(pl_arr.mean()),
+        "stopped_count": int((pl_arr < 1.0).sum()),
+        "rb_crossings": rb_crossings,
+        "rb_near_mean": float(np.mean(rb_nears)),
     }
     tag = f" [{label}]" if label else ""
     print(f"  Eval{tag}: {n} scenes, reward={result['reward_mean']:+.2f}, "
-          f"offroad={result['offroad_mean']:.1%}, collision={result['collision_rate']:.1%}")
+          f"rb_cross={rb_crossings}/{n}, rb_near={np.mean(rb_nears):.2f}, "
+          f"collision={result['collision_rate']:.1%}, "
+          f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
     return result
+
+
+def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_dir, name):
+    """Generate trajectory comparison images for the worst offroad scenes."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    model.eval()
+
+    # Find scenes where base model goes offroad
+    offroad_indices = []
+    for i, path in enumerate(prob_scenes[:100]):
+        try:
+            data = load_npz_data(path, DEVICE)
+            norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+            norm = model_args.observation_normalizer(norm)
+            traj = generate_samples(model, model_args, norm, 0.0, 1, None, DEVICE)
+            traj_t = torch.tensor(traj, device=DEVICE, dtype=torch.float32)
+            data2 = load_npz_data(path, DEVICE)
+            r = compute_reward_batch(traj_t, data2, reward_config)[0]
+            offroad_indices.append((i, r.off_road_fraction, r.total,
+                                    np.linalg.norm(np.diff(traj[0,:,:2], axis=0), axis=1).sum()))
+        except Exception:
+            pass
+
+    # Sort by offroad fraction and pick 6 worst + 3 best for comparison
+    offroad_indices.sort(key=lambda x: -x[1])
+    selected = offroad_indices[:6]
+
+    if not selected:
+        print("  No scenes to visualize")
+        return
+
+    n = len(selected)
+    cols = min(3, n)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 5*rows))
+    if rows == 1 and cols == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes[None, :]
+    elif cols == 1:
+        axes = axes[:, None]
+
+    for idx, (scene_i, offroad_frac, total, path_len) in enumerate(selected):
+        ax = axes[idx // cols][idx % cols]
+        path = prob_scenes[scene_i]
+        data = load_npz_data(path, DEVICE)
+        norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+        norm = model_args.observation_normalizer(norm)
+        traj = generate_samples(model, model_args, norm, 0.0, 1, None, DEVICE)[0]
+
+        # Plot route lanes
+        if 'route_lanes' in data:
+            rl = data['route_lanes']
+            if rl.dim() == 4:
+                rl = rl[0]
+            for seg_idx in range(rl.shape[0]):
+                pts = rl[seg_idx, :, :2].cpu().numpy()
+                valid = np.abs(pts).sum(axis=1) > 0.1
+                if valid.sum() > 1:
+                    ax.plot(pts[valid, 0], pts[valid, 1], 'g-', alpha=0.4, linewidth=1)
+
+        # Plot lane boundaries
+        if 'lanes' in data:
+            lanes = data['lanes']
+            if lanes.dim() == 4:
+                lanes = lanes[0]
+            for seg_idx in range(min(lanes.shape[0], 60)):
+                pts = lanes[seg_idx, :, :2].cpu().numpy()
+                valid = np.abs(pts).sum(axis=1) > 0.1
+                if valid.sum() > 1:
+                    lb = lanes[seg_idx, :, 4:6].cpu().numpy()
+                    rb = lanes[seg_idx, :, 6:8].cpu().numpy()
+                    ax.plot((pts+lb)[valid, 0], (pts+lb)[valid, 1], 'k-', alpha=0.15, linewidth=0.5)
+                    ax.plot((pts+rb)[valid, 0], (pts+rb)[valid, 1], 'k-', alpha=0.15, linewidth=0.5)
+
+        ax.plot(traj[:, 0], traj[:, 1], 'r-', linewidth=2.5)
+        ax.plot(0, 0, 'go', markersize=8)
+        ax.set_title(f'Scene {scene_i}: offroad={offroad_frac:.0%} path={path_len:.1f}m rew={total:.1f}')
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+
+    plt.suptitle(f'{name}: trajectory visualization (6 worst offroad scenes)', fontsize=12)
+    plt.tight_layout()
+    out_path = run_dir / "trajectory_vis.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"  Visualization saved to {out_path}")
 
 
 def run(config_path: Path, name: str):
@@ -119,8 +227,12 @@ def run(config_path: Path, name: str):
     with open(config_path) as f:
         config_data = json.load(f)
 
+    config_data_raw = dict(config_data)  # save before popping
     n_prob = config_data.pop("n_prob_scenes", 50)
     n_normal = config_data.pop("n_normal_scenes", 100)
+    curated_normal_path = config_data.pop("curated_normal_path", None)
+    prob_scenes_path = config_data.pop("prob_scenes_path", None)
+    seed_lora_path = config_data.pop("seed_lora_path", None)
 
     grpo_config = GRPOConfig()
     for k, v in config_data.items():
@@ -134,7 +246,20 @@ def run(config_path: Path, name: str):
 
     # Load scenes
     prob_100, normal_pool, val_50 = load_scene_lists()
-    train_paths = create_training_set(prob_100, normal_pool, n_prob, n_normal)
+    if prob_scenes_path and Path(prob_scenes_path).exists():
+        with open(prob_scenes_path) as f:
+            prob_100 = json.load(f)
+        print(f"Using custom prob scenes: {len(prob_100)} from {prob_scenes_path}")
+    # Subsample prob scenes for eval (keep all for training, eval on 50)
+    eval_rng = np.random.default_rng(42)
+    prob_eval = [prob_100[i] for i in eval_rng.choice(len(prob_100), size=min(50, len(prob_100)), replace=False)]
+    if curated_normal_path and Path(curated_normal_path).exists():
+        with open(curated_normal_path) as f:
+            curated_pool = json.load(f)
+        print(f"Using curated normal pool: {len(curated_pool)} scenes from {curated_normal_path}")
+        train_paths = create_training_set(prob_100, curated_pool, n_prob, n_normal)
+    else:
+        train_paths = create_training_set(prob_100, normal_pool, n_prob, n_normal)
     print(f"Training set: {len(train_paths)} scenes")
 
     # Setup experiment dir
@@ -153,19 +278,36 @@ def run(config_path: Path, name: str):
     policy_model, model_args = load_model(checkpoint_path, DEVICE)
 
     if grpo_config.use_lora:
-        from preference_optimization.lora_utils import apply_lora
-        policy_model = apply_lora(policy_model, r=grpo_config.lora_rank,
-                                   lora_alpha=grpo_config.lora_alpha,
-                                   lora_dropout=grpo_config.lora_dropout)
+        if seed_lora_path and Path(seed_lora_path).exists():
+            from preference_optimization.lora_utils import load_lora_checkpoint
+            policy_model = load_lora_checkpoint(policy_model, seed_lora_path, is_trainable=True)
+            print(f"Seeded from LoRA: {seed_lora_path}")
+        else:
+            from preference_optimization.lora_utils import apply_lora
+            policy_model = apply_lora(policy_model, r=grpo_config.lora_rank,
+                                       lora_alpha=grpo_config.lora_alpha,
+                                       lora_dropout=grpo_config.lora_dropout)
 
     trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
 
-    reward_config = RewardConfig(
+    # Training reward config uses the configured weights (may boost w_progress
+    # to prevent reward hacking where the model learns to stop instead of drive)
+    train_reward_config = RewardConfig(
         w_safety=grpo_config.w_safety, w_progress=grpo_config.w_progress,
         w_smooth=grpo_config.w_smooth, w_feasibility=grpo_config.w_feasibility,
         w_centerline=grpo_config.w_centerline,
+        near_edge_scale=grpo_config.near_edge_scale,
+        wide_edge_scale=grpo_config.wide_edge_scale,
+        max_lat_accel=grpo_config.max_lat_accel,
+        lat_accel_scale=grpo_config.lat_accel_scale,
+        enable_overprogress=grpo_config.enable_overprogress,
+        overprogress_margin=grpo_config.overprogress_margin,
+        overprogress_penalty=grpo_config.overprogress_penalty,
+        stopped_penalty=grpo_config.stopped_penalty,
     )
+    # Eval reward config always uses STANDARD weights for cross-experiment comparability
+    eval_reward_config = RewardConfig()
 
     trainer = GRPOTrainer(
         policy_model=policy_model, model_args=model_args,
@@ -175,8 +317,8 @@ def run(config_path: Path, name: str):
 
     # Evaluate base model
     print("\nBase model evaluation:")
-    base_prob = evaluate_checkpoint(policy_model, model_args, prob_100, reward_config, "base-prob")
-    base_val = evaluate_checkpoint(policy_model, model_args, val_50, reward_config, "base-val")
+    base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")
+    base_val = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, "base-val")
 
     trainer._eval_scene_paths = val_50
 
@@ -191,8 +333,20 @@ def run(config_path: Path, name: str):
 
     args_dict = {"exp_name": name}
 
+    # Reward scheduling: epoch 1 uses softer w_feasibility to let model explore,
+    # epoch 2+ uses full strength to lock in on-road behavior.
+    reward_schedule = config_data_raw.get("reward_schedule", None)
+
     for epoch in range(1, grpo_config.train_epochs + 1):
         print(f"\n--- Epoch {epoch}/{grpo_config.train_epochs} ---")
+
+        # Apply reward schedule if provided
+        if reward_schedule and str(epoch) in reward_schedule:
+            sched = reward_schedule[str(epoch)]
+            for k, v in sched.items():
+                if hasattr(trainer.reward_config, k):
+                    setattr(trainer.reward_config, k, v)
+                    print(f"  [schedule] epoch {epoch}: {k}={v}")
 
         if epoch == 1:
             trainer.save_epoch1_baselines(train_paths)
@@ -201,13 +355,22 @@ def run(config_path: Path, name: str):
         trainer.log_metrics(epoch, metrics)
         trainer.save_checkpoint(epoch, args_dict)
 
-        prob_eval = evaluate_checkpoint(policy_model, model_args, prob_100, reward_config, f"epoch{epoch}-prob")
-        val_eval = evaluate_checkpoint(policy_model, model_args, val_50, reward_config, f"epoch{epoch}-val")
+        prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob")
+        val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val")
 
-        # Track best by prob_reward (but only if val is acceptable)
-        if prob_eval["reward_mean"] > best_prob_reward and val_eval["reward_mean"] > 0:
-            best_prob_offroad = prob_eval["offroad_mean"]
-            best_prob_reward = prob_eval["reward_mean"]
+        # Track best: minimize offroad while keeping val acceptable (> -5)
+        # Primary: lowest offroad. Tiebreak: highest val_reward.
+        is_better = False
+        if val_eval["reward_mean"] > -5:
+            if prob_result["offroad_mean"] < best_prob_offroad:
+                is_better = True
+            elif (prob_result["offroad_mean"] == best_prob_offroad
+                  and val_eval["reward_mean"] > best_val_reward):
+                is_better = True
+
+        if is_better:
+            best_prob_offroad = prob_result["offroad_mean"]
+            best_prob_reward = prob_result["reward_mean"]
             best_val_reward = val_eval["reward_mean"]
             best_val_collision = val_eval["collision_rate"]
             best_epoch = epoch
@@ -216,10 +379,6 @@ def run(config_path: Path, name: str):
             else:
                 best_checkpoint = str(run_dir / "latest.pth")
 
-        # Also track if offroad is better even with worse reward
-        if prob_eval["offroad_mean"] < best_prob_offroad and val_eval["reward_mean"] > -5:
-            best_prob_offroad = prob_eval["offroad_mean"]
-
         # Early stopping: val collapsed
         if val_eval["reward_mean"] < -20:
             print(f"  Val collapsed ({val_eval['reward_mean']:.1f}), stopping early")
@@ -227,11 +386,12 @@ def run(config_path: Path, name: str):
 
     duration = (time.time() - start_time) / 60
 
-    # Cleanup: remove per-epoch checkpoints except best
-    best_dir_name = Path(best_checkpoint).name if best_checkpoint else ""
-    for d in run_dir.glob("lora_epoch_*"):
-        if d.name != best_dir_name:
-            shutil.rmtree(d, ignore_errors=True)
+    # Keep ALL checkpoints — don't delete anything. Disk space is cheap,
+    # losing the best checkpoint is not.
+
+    # Generate trajectory visualization for the best checkpoint
+    if best_checkpoint and Path(best_checkpoint).exists():
+        _visualize_trajectories(policy_model, model_args, prob_100, eval_reward_config, run_dir, name)
 
     # Print final summary (machine-parseable)
     print("\n---")
