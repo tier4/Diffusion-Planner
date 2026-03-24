@@ -64,6 +64,16 @@ json lanelet_line_string_to_json(const LineStringT & ls)
   return out;
 }
 
+template <typename LineStringT>
+json lanelet_line_string_to_json_with_id(const LineStringT & ls)
+{
+  json out = json::array();
+  for (const auto & pt : ls) {
+    out.push_back(json{{"id", pt.id()}, {"points", json::array({pt.x(), pt.y(), pt.z()})}});
+  }
+  return out;
+}
+
 json to_json_lanelet_map(const LaneletMap & map)
 {
   json root;
@@ -94,9 +104,9 @@ json to_json_raw_lanelet_map(const lanelet::LaneletMapConstPtr & map_ptr)
   json root;
   root["lane_segments"] = json::array();
   for (const auto & ll : map_ptr->laneletLayer) {
-    const auto center = lanelet_line_string_to_json(ll.centerline3d());
-    const auto left = lanelet_line_string_to_json(ll.leftBound3d());
-    const auto right = lanelet_line_string_to_json(ll.rightBound3d());
+    const auto center = lanelet_line_string_to_json_with_id(ll.centerline3d());
+    const auto left = lanelet_line_string_to_json_with_id(ll.leftBound3d());
+    const auto right = lanelet_line_string_to_json_with_id(ll.rightBound3d());
     if (center.empty() || left.empty() || right.empty()) {
       continue;
     }

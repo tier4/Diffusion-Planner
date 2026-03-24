@@ -90,7 +90,7 @@ class CollisionGuidance(BaseGuidance):
     """
 
     name = "collision"
-    _energy_scale = 300.0
+    _energy_scale = 0.3
 
     def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
         """
