@@ -427,11 +427,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("target_npz", type=Path)
+    parser.add_argument("save_dir", type=Path)
     args = parser.parse_args()
 
     target_npz = args.target_npz
 
-    save_dir = target_npz.parent.parent / "augmented"
+    save_dir = args.save_dir
     save_dir.mkdir(parents=True, exist_ok=True)
 
     loaded = np.load(target_npz)
