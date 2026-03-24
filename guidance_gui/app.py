@@ -196,17 +196,18 @@ def build_playground_interface(annotator: PlaygroundAnnotator):
                 sample_info = gr.Markdown("Sample — / —")
 
         # ---- helpers ----
-        # panel.inputs order: [enable_cb, collision_cb, collision_scale, route_cb, route_scale,
-        #                       lane_cb, lane_scale, centerline_cb, centerline_scale,
-        #                       anchor_cb, anchor_scale, anchor_index, anchor_path, global_scale]
+        # panel.inputs order: enable, collision×2, route×2, lane×2, centerline×2,
+        #   anchor×2, speed×3 (cb, scale, v_high), anchor_index, anchor_path, global_scale
         _gen_inputs = [noise_scale, n_samples_sl, zoom_slider, time_slider] + panel.inputs
         _outputs = [traj_plot, vel_plot, lat_plot, sample_info]
 
-        def _run(ns, n, zl, ts, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs):
+        def _run(ns, n, zl, ts, eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, us, uss, usl, ai, ap, gs):
             result = annotator.load_sample(
                 noise_scale=ns, fde_threshold=2.0, ade_threshold=1.0, max_retries=1,
                 zoom_level=zl,
-                guidance=make_guidance_set_config(eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, ai, ap, gs),
+                guidance=make_guidance_set_config(
+                    eg, uc, ucs, urf, urfs, ulk, ulks, ucf, ucfs, ua, uas, us, uss, usl, ai, ap, gs
+                ),
                 time_step=int(ts), n_samples=int(n),
             )
             return result[0], result[1], result[2], result[3]
@@ -237,19 +238,20 @@ def build_playground_interface(annotator: PlaygroundAnnotator):
         for slider in [noise_scale, n_samples_sl, zoom_slider,
                        panel.global_scale,
                        panel.collision_scale, panel.route_scale,
-                       panel.lane_scale, panel.centerline_scale, panel.anchor_scale]:
+                       panel.lane_scale, panel.centerline_scale, panel.anchor_scale,
+                       panel.speed_scale, panel.speed_limit]:
             slider.release(_run, inputs=_gen_inputs, outputs=_outputs)
 
         time_slider.release(_run, inputs=_gen_inputs, outputs=_outputs)
 
         for cb in [panel.enable_cb, panel.collision_cb, panel.route_cb, panel.lane_cb,
-                   panel.centerline_cb, panel.anchor_cb]:
+                   panel.centerline_cb, panel.anchor_cb, panel.speed_cb]:
             cb.change(_run, inputs=_gen_inputs, outputs=_outputs)
 
         # Gallery click: inject evt.index directly to bypass potentially stale component value,
         # then regenerate immediately with the new anchor.
-        # anchor_index is at position 15 in _gen_inputs (4 app-level + 11 in panel.inputs).
-        _ANCHOR_IDX_POS = 4 + 11  # = 15
+        # anchor_index is at position 4 + 14 in _gen_inputs (panel.inputs has 17 entries).
+        _ANCHOR_IDX_POS = 4 + 14
 
         def _select_anchor(evt: gr.SelectData, *gen_args):
             gen_list = list(gen_args)

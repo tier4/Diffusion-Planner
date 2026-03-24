@@ -26,20 +26,57 @@
     .main { flex: 1; display: flex; overflow: hidden; }
     #map { flex: 1; min-height: 0; }
     .sidebar {
-      width: 200px; padding: 0.75rem; background: #16162a; color: #ddd;
-      border-left: 1px solid #333; overflow-y: auto;
+      width: 280px; padding: 0.75rem; background: #16162a; color: #ddd;
+      border-left: 1px solid #333; overflow-y: auto; display: flex; flex-direction: column;
     }
+    .sidebar-section { margin-bottom: 1rem; }
+    .sidebar-header {
+      display: flex; align-items: center; justify-content: space-between;
+      cursor: pointer; padding: 0.5rem; background: #2d2d44; border-radius: 4px;
+      margin-bottom: 0.5rem; user-select: none;
+    }
+    .sidebar-header:hover { background: #3d3d5c; }
+    .sidebar-title { font-weight: 600; font-size: 0.85rem; }
+    .sidebar-status {
+      font-size: 0.7rem; color: #888; padding: 0.5rem; margin-bottom: 0.5rem;
+      background: #2d2d44; border-radius: 4px; text-align: center;
+    }
+    .sidebar-toggle { font-size: 0.75rem; color: #888; }
+    .sidebar-list { max-height: 200px; overflow-y: auto; }
+    .entity-item {
+      display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.5rem;
+      border-radius: 3px; cursor: pointer; font-size: 0.8rem;
+    }
+    .entity-item:hover { background: #2d2d44; }
+    .entity-item.hidden { display: none; }
+    .entity-checkbox { flex-shrink: 0; }
+    .entity-id { font-weight: 500; min-width: 60px; }
+    .entity-error { color: #888; margin-left: auto; font-size: 0.75rem; }
+    .entity-error.high { color: #ff6b6b; }
+    .entity-error.medium { color: #feca57; }
+    .entity-error.low { color: #5ec962; }
+    .point-item {
+      padding: 0.35rem 0.5rem;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 0.76rem;
+      line-height: 1.35;
+    }
+    .point-item:hover { background: #2d2d44; }
+    .point-item .row { display: flex; justify-content: space-between; gap: 0.5rem; }
+    .point-item .meta { color: #aaa; }
     .legend-title { font-weight: 600; margin-bottom: 0.5rem; font-size: 0.9rem; }
-    .legend-wrap { display: flex; align-items: center; gap: 0.5rem; }
+    .legend-wrap { display: flex; align-items: center; gap: 0.5rem; margin-top: auto; padding-top: 0.75rem; border-top: 1px solid #333; }
     .legend-scale {
-      height: 120px; width: 24px; background: linear-gradient(to top,
+      height: 100px; width: 20px; background: linear-gradient(to top,
         #440154 0%, #3b528b 25%, #21918c 50%, #5ec962 75%, #fde725 100%);
       border: 1px solid #444; border-radius: 4px; flex-shrink: 0;
     }
     .legend-labels {
-      font-size: 0.75rem; color: #999;
-      height: 120px; display: flex; flex-direction: column; justify-content: space-between;
+      font-size: 0.7rem; color: #999;
+      height: 100px; display: flex; flex-direction: column; justify-content: space-between;
     }
+    .legend-hint { font-size: 0.7rem; color: #666; margin-top: 0.5rem; }
   </style>
 </head>
 <body>
@@ -60,8 +97,42 @@
     <div class="main">
       <div id="map"></div>
       <div class="sidebar">
+        <div class="sidebar-status" id="sidebar-status">Loading...</div>
+
+        <div class="sidebar-section">
+          <div class="sidebar-header" data-section="lanes">
+            <span class="sidebar-title">Lanes (Top Errors)</span>
+            <span class="sidebar-toggle" id="toggle-lanes">−</span>
+          </div>
+          <div class="sidebar-list" id="lane-list"></div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="sidebar-header" data-section="lines">
+            <span class="sidebar-title">Lines (Top Errors)</span>
+            <span class="sidebar-toggle" id="toggle-lines">−</span>
+          </div>
+          <div class="sidebar-list" id="line-list"></div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="sidebar-header" data-section="polys">
+            <span class="sidebar-title">Polygons (Top Errors)</span>
+            <span class="sidebar-toggle" id="toggle-polys">−</span>
+          </div>
+          <div class="sidebar-list" id="poly-list"></div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="sidebar-header" data-section="lane-points">
+            <span class="sidebar-title">Selected Lane Top-5 Ref Points</span>
+            <span class="sidebar-toggle" id="toggle-lane-points">−</span>
+          </div>
+          <div class="sidebar-list" id="lane-point-list">Select a lane to inspect point errors.</div>
+        </div>
+
         <div class="legend-title" id="legend-title">Hausdorff error (m)</div>
-        <p class="legend-hint" id="legend-hint" style="font-size: 0.75rem; color: #888; margin: 0 0 0.5rem 0; display: none;">Reference map (lanes) shown as background for context.</p>
+        <p class="legend-hint" id="legend-hint" style="display: none;">Reference map shown as background.</p>
         <div class="legend-wrap">
           <div class="legend-scale" id="legend-scale"></div>
           <div class="legend-labels">
@@ -86,11 +157,31 @@
     const THRESHOLD_LANE = {{ threshold_lane }};
     const THRESHOLD_LINE = {{ threshold_line }};
     const THRESHOLD_POLY = {{ threshold_poly }};
-    const METRICS = {{ metrics_json | tojson }};
+    const LANE_POINT_ERRORS = {{ lane_point_errors | tojson }};
+    const LINE_POINT_ERRORS = {{ line_point_errors | tojson }};
+
+    // Track reviewed entities
+    const reviewedEntities = new Set();
+
+    // Theme constants for consistent styling
+    const THEME = {
+      ref:       { color: '#2d5016', weight: 1.5, opacity: 0.4 },
+      refThin:   { color: '#2d5016', weight: 1.2, opacity: 0.3 },
+      refStrong: { color: '#2d5016', weight: 2, opacity: 0.8 },
+      refPoly:   { color: '#2d5016', weight: 1, fillOpacity: 0.2 },
+      refLight:  { color: '#2d5016', weight: 1, fillOpacity: 0.15 },
+      lane:      { color: '#4361ee', weight: 1.5, opacity: 0.7 },
+      line:      { color: '#e63946', weight: 1.5, opacity: 0.8 },
+      poly:      { color: '#2dc653', weight: 1, fillOpacity: 0.4 },
+      marker:    { color: '#ff0000', radius: 3 },
+      highlight: { color: '#ff00ff', weight: 5, opacity: 1.0 },
+      refHighlight: { color: '#0000ff', weight: 4, opacity: 1.0, dashArray: '10,5' },
+    };
 
     function toLeafletCoords(pts) {
       return pts.map(p => [p[1], p[0]]);
     }
+
     function rgbFromScalar(t) {
       t = Math.max(0, Math.min(1, t));
       const stops = [[0,'#440154'],[0.25,'#3b528b'],[0.5,'#21918c'],[0.75,'#5ec962'],[1,'#fde725']];
@@ -104,17 +195,70 @@
       const r = Math.round(ar + (br - ar) * local), g = Math.round(ag + (bg - ag) * local), bv = Math.round(ab + (bb - ab) * local);
       return `rgb(${r},${g},${bv})`;
     }
+
     function hausdorffToColor(v, threshold) {
       const t = threshold > 0 ? Math.min(v / threshold, 1.0) : 0;
       return rgbFromScalar(t);
     }
+
+    function getErrorClass(error, threshold) {
+      const ratio = threshold > 0 ? error / threshold : 0;
+      if (ratio >= 0.8) return 'high';
+      if (ratio >= 0.4) return 'medium';
+      return 'low';
+    }
+
+    function getLaneGeometryLines(ent, fieldName) {
+      const geoms = ent && ent[fieldName] ? ent[fieldName] : null;
+      if (!geoms) return [];
+      return ["centerline", "left_boundary", "right_boundary"]
+        .map(k => geoms[k])
+        .filter(coords => Array.isArray(coords) && coords.length > 0);
+    }
+
+    function getLaneGeometryEntries(ent, fieldName) {
+      const geoms = ent && ent[fieldName] ? ent[fieldName] : null;
+      if (!geoms) return [];
+      return ["centerline", "left_boundary", "right_boundary"]
+        .map(boundary => ({ boundary, coords: geoms[boundary] }))
+        .filter(item => Array.isArray(item.coords) && item.coords.length > 0);
+    }
+
+    function laneBoundaryLabel(boundary) {
+      if (boundary === "centerline") return "centerline";
+      if (boundary === "left_boundary") return "left boundary";
+      if (boundary === "right_boundary") return "right boundary";
+      return boundary;
+    }
+
+    function laneBoundaryStyle(baseStyle, boundary, isReference) {
+      const style = { ...(baseStyle || {}) };
+      if (boundary === "centerline") {
+        return { ...style, weight: Math.max(style.weight || 2, 3), dashArray: null };
+      }
+      if (boundary === "left_boundary") {
+        return isReference
+          ? { ...style, weight: Math.max(style.weight || 2, 2), dashArray: "8,4" }
+          : { ...style, weight: Math.max((style.weight || 2) - 0.5, 1.5), dashArray: "8,4" };
+      }
+      if (boundary === "right_boundary") {
+        return isReference
+          ? { ...style, weight: Math.max(style.weight || 2, 2), dashArray: "2,6" }
+          : { ...style, weight: Math.max((style.weight || 2) - 0.5, 1.5), dashArray: "2,6" };
+      }
+      return style;
+    }
+
     function initMap() {
       const map = L.map('map', { crs: L.CRS.Simple });
       const allBounds = [];
       function addToBounds(pts) {
         pts.forEach(p => { allBounds.push([p[1], p[0]]); });
       }
-      [...LANES_REF, ...LANES_INT, ...LINES_REF, ...LINES_INT].forEach(ent => {
+      [...LANES_REF, ...LANES_INT].forEach(ent => {
+        getLaneGeometryLines(ent, "geometries").forEach(coords => addToBounds(coords));
+      });
+      [...LINES_REF, ...LINES_INT].forEach(ent => {
         if (ent.coordinates && ent.coordinates.length) addToBounds(ent.coordinates);
       });
       [...POLYS_REF, ...POLYS_INT].forEach(ent => {
@@ -124,98 +268,681 @@
       map.fitBounds(bounds.pad(0.1));
       return { map, bounds };
     }
+
     const { map } = initMap();
+
+    // Point markers layer for high-error points
+    const pointMarkersLayer = L.layerGroup();
+    let selectedPointMarker = null;
+    let lastSelectedLaneId = null;
+
+    // Track currently highlighted entity - declared before functions that use it
+    let activeTab = 'overlay';
+
+    function getLaneErrorPointsForEntity(id) {
+      const laneData = LANE_POINT_ERRORS[id];
+      if (laneData === undefined) return [];
+      if (Array.isArray(laneData)) return laneData;
+      const all = [];
+      ["centerline", "left_boundary", "right_boundary"].forEach(boundary => {
+        const points = laneData[boundary];
+        if (Array.isArray(points)) {
+          points.forEach(pt => all.push({ ...pt, boundary_type: pt.boundary_type || boundary }));
+        }
+      });
+      return all;
+    }
+
+    function renderSelectedLaneTopPoints(laneId) {
+      const listEl = document.getElementById("lane-point-list");
+      if (!listEl) return;
+      lastSelectedLaneId = laneId;
+      const points = getLaneErrorPointsForEntity(String(laneId))
+        .slice()
+        .sort((a, b) => (b.error || 0) - (a.error || 0))
+        .slice(0, 5);
+      if (points.length === 0) {
+        listEl.textContent = `Lane ${laneId}: no reference point errors available.`;
+        return;
+      }
+      listEl.innerHTML = "";
+      points.forEach((pt, idx) => {
+        const pointIdText = pt.point_id !== undefined ? `#${pt.point_id}` : "(no-id)";
+        const boundary = pt.boundary_type || "centerline";
+        const item = document.createElement("div");
+        item.className = "point-item";
+        item.innerHTML = `
+          <div class="row"><span>P${idx + 1} ${boundary}</span><span>${(pt.error || 0).toFixed(4)}m</span></div>
+          <div class="meta">Point ${pointIdText}</div>
+        `;
+        item.addEventListener("click", () => {
+          if (selectedPointMarker && pointMarkersLayer.hasLayer(selectedPointMarker)) {
+            pointMarkersLayer.removeLayer(selectedPointMarker);
+          }
+          selectedPointMarker = L.circleMarker([pt.lat, pt.lng], {
+            color: "#00d4ff",
+            radius: 7,
+            fillColor: "#00d4ff",
+            fillOpacity: 0.9,
+            weight: 3
+          });
+          selectedPointMarker.bindPopup(
+            `Lane ${laneId}<br>Point ${pointIdText}<br>${boundary}<br>Error: ${(pt.error || 0).toFixed(4)} m`
+          );
+          selectedPointMarker.addTo(pointMarkersLayer);
+          selectedPointMarker.openPopup();
+          map.panTo([pt.lat, pt.lng]);
+        });
+        listEl.appendChild(item);
+      });
+    }
+
+    function showPointMarkers(entityKey) {
+      // Clear existing markers first
+      pointMarkersLayer.clearLayers();
+      selectedPointMarker = null;
+
+      // If no entityKey provided, just clear and return (used when switching tabs)
+      if (!entityKey) return;
+
+      // Determine which point errors to use based on entity type (lane/line/poly)
+      const type = getEntityType(entityKey);
+      if (!type) return;
+      const id = entityKey.replace(/^(lane|line|poly)/, '');
+
+      // Select correct error dict and threshold by entity type
+      let pointErrors = [];
+      let threshold = THRESHOLD_LANE;
+      if (type === 'lane') {
+        pointErrors = LANE_POINT_ERRORS;
+        threshold = THRESHOLD_LANE;
+        renderSelectedLaneTopPoints(parseInt(id, 10));
+      } else if (type === 'line') {
+        pointErrors = LINE_POINT_ERRORS;
+        threshold = THRESHOLD_LINE;
+      } else {
+        const listEl = document.getElementById("lane-point-list");
+        if (listEl) listEl.textContent = "Select a lane to inspect point errors.";
+      }
+      // Polygon heatmap does not show point errors
+
+      // Show high-error points (above 25% of threshold)
+      const highErrorThreshold = threshold * 0.25;
+
+      // Only show points for the specific entity
+      if (pointErrors[id] !== undefined) {
+        const points = type === "lane" ? getLaneErrorPointsForEntity(id) : pointErrors[id];
+        points.forEach(pt => {
+          if (pt.error >= highErrorThreshold) {
+            const marker = L.circleMarker([pt.lat, pt.lng], {
+              ...THEME.marker,
+              radius: 5,
+              fillColor: THEME.marker.color,
+              fillOpacity: 0.9,
+              weight: 2
+            });
+            const pointIdText = pt.point_id !== undefined ? `<br>Point #${pt.point_id}` : "";
+            const boundaryText = pt.boundary_type ? `<br>${pt.boundary_type}` : "";
+            marker.bindPopup(`Error: ${pt.error.toFixed(4)} m${pointIdText}${boundaryText}`);
+            marker.addTo(pointMarkersLayer);
+          }
+        });
+      }
+    }
 
     const layerGroups = {
       overlay: {},
       'lane-heatmap': {},
       'line-heatmap': {},
       'polygon-heatmap': {},
-      referenceBasemap: {}
+      referenceBasemap: null,
+      referenceHighlight: L.layerGroup()  // Initialized immediately
     };
+
+    // Track currently highlighted entity
+    let highlightedEntityKey = null;
+    let highlightedLayers = [];
+    let highlightedRefEntityKey = null;
+    let highlightedRefLayer = null;  // Layer for highlighted reference entity
+
+    // Entity type detection helper
+    function getEntityType(key) {
+      if (key.startsWith('lane')) return 'lane';
+      if (key.startsWith('line')) return 'line';
+      if (key.startsWith('poly')) return 'poly';
+      return null;
+    }
+
+    // Default styles per entity type
+    const DEFAULT_STYLES = {
+      lane: THEME.lane,
+      line: THEME.line,
+      poly: THEME.poly
+    };
+
+    // Heatmap default styles (color based on hausdorff, but weight needs reset)
+    function getHeatmapDefaultStyle(ent, type) {
+      const thresholds = { lane: THRESHOLD_LANE, line: THRESHOLD_LINE, poly: THRESHOLD_POLY };
+      const threshold = thresholds[type] || THRESHOLD_LANE;
+      const c = hausdorffToColor(ent.hausdorff || 0, threshold);
+      return type === 'poly'
+        ? { color: c, weight: 1, fillColor: c, fillOpacity: 0.5 }
+        : { color: c, weight: 2, opacity: 0.9 };
+    }
+
+    // Unhighlight the previously highlighted entity
+    function unhighlightEntity() {
+      // Clear point markers when unhighlighting
+      pointMarkersLayer.clearLayers();
+
+      if (!highlightedEntityKey || highlightedLayers.length === 0) return;
+
+      const type = getEntityType(highlightedEntityKey);
+      if (!type) return;
+
+      // Get the entity id from key
+      const id = highlightedEntityKey.replace(/^(lane|line|poly)/, '');
+
+      // Use stored layer reference directly for O(1) lookup
+      let ent;
+      if (type === 'lane') {
+        ent = LANES_INT.find(e => e.id == id);
+      } else if (type === 'line') {
+        ent = LINES_INT.find(e => e.index == id);
+      } else if (type === 'poly') {
+        ent = POLYS_INT.find(e => e.index == id);
+      }
+
+      if (ent) {
+        const style = activeTab === 'overlay' ? DEFAULT_STYLES[type] : getHeatmapDefaultStyle(ent, type);
+        highlightedLayers.forEach(layer => {
+          if (layer && layer.setStyle) layer.setStyle(style);
+        });
+      }
+
+      highlightedEntityKey = null;
+      highlightedLayers = [];
+
+      // Also unhighlight reference entity
+      unhighlightReferenceEntity();
+    }
+
+    // Unhighlight the reference entity
+    function unhighlightReferenceEntity() {
+      if (!highlightedRefEntityKey || !layerGroups.referenceHighlight) return;
+
+      const type = getEntityType(highlightedRefEntityKey);
+      if (!type) return;
+
+      if (layerGroups.referenceHighlight && layerGroups.referenceHighlight.clearLayers) {
+        layerGroups.referenceHighlight.clearLayers();
+      }
+      highlightedRefEntityKey = null;
+    }
+
+    // Highlight the corresponding reference entity
+    function highlightReferenceEntity(internalEnt, type, id) {
+      try {
+        // Ensure referenceHighlight is properly initialized
+        if (!layerGroups.referenceHighlight || typeof layerGroups.referenceHighlight.addTo !== 'function') {
+          layerGroups.referenceHighlight = L.layerGroup();
+          layerGroups.referenceHighlight.addTo(map);
+        }
+        if (layerGroups.referenceHighlight.clearLayers) {
+          layerGroups.referenceHighlight.clearLayers();
+        }
+
+        const refStyle = {
+          ...THEME.refHighlight,
+          fillOpacity: 0
+        };
+
+        // Lanes use grouped center/left/right geometries
+        if (type === "lane") {
+          getLaneGeometryEntries(internalEnt, "ref_geometries").forEach(({ boundary, coords }) => {
+            const line = L.polyline(
+              toLeafletCoords(coords),
+              laneBoundaryStyle(refStyle, boundary, true)
+            );
+            line.addTo(layerGroups.referenceHighlight);
+          });
+        } else if (internalEnt.ref_coordinates && internalEnt.ref_coordinates.length) {
+          const isPolygon = type === 'poly' &&
+            Array.isArray(internalEnt.ref_coordinates[0]) &&
+            Array.isArray(internalEnt.ref_coordinates[0][0]);
+
+          if (isPolygon) {
+            // Polygon: ref_coordinates is [[ring]] - array of rings
+            internalEnt.ref_coordinates.forEach(ring => {
+              const leafletRing = ring.map(r => toLeafletCoords(r));
+              const poly = L.polygon(leafletRing, refStyle);
+              poly.addTo(layerGroups.referenceHighlight);
+            });
+          } else {
+            // Line/Lane: ref_coordinates is [[lng,lat],...] - array of points
+            const pts = internalEnt.ref_coordinates;
+            if (pts && pts.length) {
+              const line = L.polyline(toLeafletCoords(pts), refStyle);
+              line.addTo(layerGroups.referenceHighlight);
+            }
+          }
+        }
+
+        highlightedRefEntityKey = type + id;
+        if (layerGroups.referenceHighlight && map.hasLayer(layerGroups.referenceHighlight)) {
+          try {
+            layerGroups.referenceHighlight.bringToFront();
+          } catch(e) {}
+        }
+      } catch(e) {
+        console.log('highlightReferenceEntity error:', e);
+      }
+    }
+
+    // Highlight an entity
+    function highlightEntity(key, layerGroup) {
+      // First unhighlight any existing highlight
+      unhighlightEntity();
+
+      highlightedEntityKey = key;
+
+      const type = getEntityType(key);
+      if (!type) return;
+
+      const id = key.replace(/^(lane|line|poly)/, '');
+
+      if (!layerGroup || !layerGroup.eachLayer) return;
+
+      // Find and store the specific layer for O(1) unhighlight later
+      layerGroup.eachLayer(layer => {
+        const popup = layer.getPopup && layer.getPopup();
+        if (popup) {
+          const content = popup.getContent();
+          if (type === 'lane' && content.startsWith('Lane ' + id)) {
+            const boundary = layer.__laneBoundary || "centerline";
+            layer.setStyle(laneBoundaryStyle(THEME.highlight, boundary, false));
+            highlightedLayers.push(layer);
+          } else if (type === 'line' && content.startsWith('Line ' + id + ':')) {
+            layer.setStyle(THEME.highlight);
+            highlightedLayers.push(layer);
+          } else if (type === 'poly' && content.startsWith('Polygon ' + id + ':')) {
+            layer.setStyle({ ...THEME.highlight, fillOpacity: 0.8 });
+            highlightedLayers.push(layer);
+          }
+        }
+      });
+
+      // Also highlight the corresponding reference entity
+      let internalEnt = null;
+      if (type === 'lane') internalEnt = LANES_INT.find(e => e.id == id);
+      else if (type === 'line') internalEnt = LINES_INT.find(e => e.index == id);
+      else if (type === 'poly') internalEnt = POLYS_INT.find(e => e.index == id);
+      if (internalEnt) highlightReferenceEntity(internalEnt, type, id);
+
+      // Show point errors for the selected entity
+      showPointMarkers(key);
+    }
 
     function addReferenceBasemap() {
       const lg = L.layerGroup();
       LANES_REF.forEach(ent => {
-        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 1.5, opacity: 0.4 });
-        line.addTo(lg);
+        getLaneGeometryLines(ent, "geometries").forEach(coords => {
+          const line = L.polyline(toLeafletCoords(coords), THEME.ref);
+          line.addTo(lg);
+        });
       });
       LINES_REF.forEach(ent => {
-        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 1.2, opacity: 0.3 });
+        const line = L.polyline(toLeafletCoords(ent.coordinates), THEME.refThin);
         line.addTo(lg);
       });
       POLYS_REF.forEach(ent => {
-        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: '#2d5016', weight: 1, fillOpacity: 0.15 });
+        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), THEME.refLight);
         poly.addTo(lg);
       });
       layerGroups.referenceBasemap = lg;
+      // Note: referenceHighlight is initialized once at module level, reuse it
     }
 
-    function addOverlayLayers() {
+    function zoomToEntity(internalEnt, refEnt, entityKey, entityType) {
+      // Use provided entityKey or compute from entity structure
+      if (!entityKey) {
+        if (internalEnt.id !== undefined) {
+          entityKey = 'lane' + internalEnt.id;
+          entityType = 'lane';
+        } else if (internalEnt.index !== undefined) {
+          // Use explicit entityType if provided, otherwise detect from data
+          if (!entityType) {
+            // Check which array it belongs to based on data presence
+            const existsInLines = LINES_INT.some(e => e.index === internalEnt.index);
+            const existsInPolys = POLYS_INT.some(e => e.index === internalEnt.index);
+            // Prefer line if index exists in both (polygons typically have fewer entries)
+            entityType = existsInLines ? 'line' : (existsInPolys ? 'poly' : 'line');
+          }
+          entityKey = entityType + internalEnt.index;
+        }
+      }
+
+      const allBounds = [];
+      const pushLineBounds = (coords) => {
+        if (!Array.isArray(coords)) return;
+        coords.forEach(p => allBounds.push([p[1], p[0]]));
+      };
+
+      // Add internal entity bounds
+      if (entityType === "lane") {
+        getLaneGeometryLines(internalEnt, "geometries").forEach(pushLineBounds);
+      } else if (internalEnt.coordinates && internalEnt.coordinates.length) {
+        // Check if it's a polygon (nested arrays) or line
+        if (Array.isArray(internalEnt.coordinates[0]) && Array.isArray(internalEnt.coordinates[0][0])) {
+          // Polygon: coordinates is array of rings, each ring is array of points
+          internalEnt.coordinates.forEach(ring => {
+            ring.forEach(p => allBounds.push([p[1], p[0]]));
+          });
+        } else if (Array.isArray(internalEnt.coordinates[0])) {
+          // Line: coordinates is array of points
+          internalEnt.coordinates.forEach(p => allBounds.push([p[1], p[0]]));
+        }
+      }
+
+      // Add reference entity bounds from the entity's ref_coordinates field
+      if (entityType === "lane") {
+        getLaneGeometryLines(internalEnt, "ref_geometries").forEach(pushLineBounds);
+      } else if (internalEnt.ref_coordinates && internalEnt.ref_coordinates.length) {
+        // Check if it's a polygon (nested arrays) or line
+        if (Array.isArray(internalEnt.ref_coordinates[0]) && Array.isArray(internalEnt.ref_coordinates[0][0])) {
+          // Polygon: ref_coordinates is array of rings
+          internalEnt.ref_coordinates.forEach(ring => {
+            ring.forEach(p => allBounds.push([p[1], p[0]]));
+          });
+        } else if (Array.isArray(internalEnt.ref_coordinates[0])) {
+          // Line: ref_coordinates is array of points
+          internalEnt.ref_coordinates.forEach(p => allBounds.push([p[1], p[0]]));
+        }
+      }
+
+      // Fallback to provided refEnt
+      if (allBounds.length === 0 && refEnt) {
+        if (refEnt.coordinates && refEnt.coordinates.length) {
+          if (Array.isArray(refEnt.coordinates[0]) && Array.isArray(refEnt.coordinates[0][0])) {
+            refEnt.coordinates.forEach(ring => {
+              ring.forEach(p => allBounds.push([p[1], p[0]]));
+            });
+          } else if (Array.isArray(refEnt.coordinates[0])) {
+            refEnt.coordinates.forEach(p => allBounds.push([p[1], p[0]]));
+          }
+        }
+      }
+
+      if (allBounds.length > 0) {
+        const bounds = L.latLngBounds(allBounds);
+        map.fitBounds(bounds.pad(0.2));
+      }
+
+      // Highlight the zoomed entity
+      let layerGroup;
+      if (activeTab === 'overlay') {
+        layerGroup = layerGroups.overlay;
+      } else if (activeTab === 'lane-heatmap') {
+        layerGroup = layerGroups['lane-heatmap'];
+      } else if (activeTab === 'line-heatmap') {
+        layerGroup = layerGroups['line-heatmap'];
+      } else if (activeTab === 'polygon-heatmap') {
+        layerGroup = layerGroups['polygon-heatmap'];
+      }
+
+      if (entityKey && layerGroup) {
+        highlightEntity(entityKey, layerGroup);
+      }
+    }
+
+    // Helper function to create entity layers (reduces duplication)
+    // If styleFn is provided, it's called with (entity) to compute the style dynamically
+    function addEntityLayer(entities, isPolygon, isReference, baseStyle, layerGroup, styleFn, entityType) {
+      entities.forEach(ent => {
+        const style = styleFn ? styleFn(ent) : baseStyle;
+        if (!isPolygon && ent.geometries) {
+          const geos = getLaneGeometryEntries(ent, "geometries");
+          geos.forEach(({ boundary, coords }) => {
+            const geo = L.polyline(
+              toLeafletCoords(coords),
+              laneBoundaryStyle(style, boundary, isReference)
+            );
+            geo.__laneBoundary = boundary;
+            if (!isReference) {
+              const id = ent.id;
+              geo.on('click', (e) => {
+                L.DomEvent.stopPropagation(e);
+                zoomToEntity(ent, null, null, entityType);
+              });
+              geo.bindPopup(
+                `Lane ${id} (${laneBoundaryLabel(boundary)}): ${(ent.hausdorff || 0).toFixed(4)} m (click to zoom)`
+              );
+            }
+            geo.addTo(layerGroup);
+          });
+          return;
+        }
+
+        const leafletCoords = isPolygon
+          ? ent.coordinates.map(r => toLeafletCoords(r))
+          : toLeafletCoords(ent.coordinates);
+
+        const geo = isPolygon
+          ? L.polygon(leafletCoords, style)
+          : L.polyline(leafletCoords, style);
+
+        if (!isReference) {
+          const id = ent.id !== undefined ? ent.id : ent.index;
+          const label = isPolygon ? 'Polygon' : (ent.id !== undefined ? 'Lane' : 'Line');
+          geo.on('click', (e) => {
+            L.DomEvent.stopPropagation(e);
+            zoomToEntity(ent, null, null, entityType);
+          });
+          geo.bindPopup(`${label} ${id}: ${(ent.hausdorff || 0).toFixed(4)} m (click to zoom)`);
+        }
+        geo.addTo(layerGroup);
+      });
+    }
+
+    function addOverlayLayers({ showLanes = true, showLines = true, showPolys = true } = {}) {
       const lg = L.layerGroup();
-      LANES_REF.forEach(ent => {
-        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 2, opacity: 0.8 });
-        line.addTo(lg);
-      });
-      LANES_INT.forEach(ent => {
-        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: 'blue', weight: 1.5, opacity: 0.7 });
-        line.addTo(lg);
-      });
-      LINES_REF.forEach(ent => {
-        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 2, opacity: 0.8 });
-        line.addTo(lg);
-      });
-      LINES_INT.forEach(ent => {
-        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: 'red', weight: 1.5, opacity: 0.8 });
-        line.addTo(lg);
-      });
-      POLYS_REF.forEach(ent => {
-        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: '#2d5016', weight: 2, fillOpacity: 0.2 });
-        poly.addTo(lg);
-      });
-      POLYS_INT.forEach(ent => {
-        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: 'green', weight: 1, fillOpacity: 0.4 });
-        poly.addTo(lg);
-      });
+
+      // Reference layers (no click handlers)
+      if (showLanes) addEntityLayer(LANES_REF, false, true, THEME.refStrong, lg);
+      if (showLines) addEntityLayer(LINES_REF, false, true, THEME.refStrong, lg);
+      if (showPolys) addEntityLayer(POLYS_REF, true, true, THEME.refPoly, lg);
+
+      // Internal layers (with click handlers)
+      if (showLanes) addEntityLayer(LANES_INT, false, false, THEME.lane, lg, null, 'lane');
+      if (showLines) addEntityLayer(LINES_INT, false, false, THEME.line, lg, null, 'line');
+      if (showPolys) addEntityLayer(POLYS_INT, true, false, THEME.poly, lg, null, 'poly');
+
       layerGroups.overlay = lg;
     }
 
     function addHeatmapLayers() {
+      // Lane heatmap
       const laneLg = L.layerGroup();
-      LANES_INT.forEach(ent => {
-        const c = hausdorffToColor(ent.hausdorff || 0, THRESHOLD_LANE);
-        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: c, weight: 2, opacity: 0.9 });
-        line.bindPopup(`Lane ${ent.id}: ${(ent.hausdorff || 0).toFixed(4)} m`);
-        line.addTo(laneLg);
-      });
+      addEntityLayer(LANES_INT, false, false, null, laneLg, ent => ({
+        color: hausdorffToColor(ent.hausdorff || 0, THRESHOLD_LANE),
+        weight: 2,
+        opacity: 0.9
+      }), 'lane');
       layerGroups['lane-heatmap'] = laneLg;
 
+      // Line heatmap
       const lineLg = L.layerGroup();
-      LINES_INT.forEach(ent => {
-        const c = hausdorffToColor(ent.hausdorff || 0, THRESHOLD_LINE);
-        const line = L.polyline(toLeafletCoords(ent.coordinates), { color: c, weight: 2, opacity: 0.9 });
-        line.bindPopup(`Line ${ent.index}: ${(ent.hausdorff || 0).toFixed(4)} m`);
-        line.addTo(lineLg);
-      });
+      addEntityLayer(LINES_INT, false, false, null, lineLg, ent => ({
+        color: hausdorffToColor(ent.hausdorff || 0, THRESHOLD_LINE),
+        weight: 2,
+        opacity: 0.9
+      }), 'line');
       layerGroups['line-heatmap'] = lineLg;
 
+      // Polygon heatmap
       const polyLg = L.layerGroup();
-      POLYS_INT.forEach(ent => {
+      addEntityLayer(POLYS_INT, true, false, null, polyLg, ent => {
         const c = hausdorffToColor(ent.hausdorff || 0, THRESHOLD_POLY);
-        const poly = L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: c, weight: 1, fillColor: c, fillOpacity: 0.5 });
-        poly.bindPopup(`Polygon ${ent.index}: ${(ent.hausdorff || 0).toFixed(4)} m`);
-        poly.addTo(polyLg);
-      });
+        return { color: c, weight: 1, fillColor: c, fillOpacity: 0.5 };
+      }, 'poly');
       layerGroups['polygon-heatmap'] = polyLg;
     }
 
     addReferenceBasemap();
     addOverlayLayers();
     addHeatmapLayers();
+    pointMarkersLayer.addTo(map);
+    // Add reference highlight layer to map (will be empty initially)
+    if (!layerGroups.referenceHighlight) {
+      layerGroups.referenceHighlight = L.layerGroup();
+    }
+    layerGroups.referenceHighlight.addTo(map);
+
+    // Build sidebar with worst entities
+    // Store all entities sorted by error (for dynamic top-5 rendering)
+    let allLanes = [];
+    let allLines = [];
+    let allPolys = [];
+
+    // Get top N unchecked entities from sorted list
+    function getTopUnchecked(entities, n, reviewed) {
+      return entities.filter(e => !reviewed.has(`${e.type}-${e.id}`)).slice(0, n);
+    }
+
+    // Render a single entity item
+    function createEntityItem(item, threshold) {
+      const div = document.createElement('div');
+      div.className = 'entity-item';
+      div.dataset.type = item.type;
+      div.dataset.id = item.id;
+      const errClass = getErrorClass(item.error, threshold);
+      const label = item.type === 'lane' ? 'Lane' : item.type === 'line' ? 'Line' : 'Poly';
+      div.innerHTML = `
+        <input type="checkbox" class="entity-checkbox" data-type="${item.type}" data-id="${item.id}">
+        <span class="entity-id">${label} ${item.id}</span>
+        <span class="entity-error ${errClass}">${item.error.toFixed(4)}m</span>
+      `;
+      div.addEventListener('click', (e) => {
+        if (e.target.type !== 'checkbox') {
+          const entityKey = `${item.type}${item.id}`;
+          zoomToEntity(item.internal, null, entityKey, item.type);
+        }
+      });
+      return div;
+    }
+
+    // Render all lists with top 5 unchecked entities
+    function renderAllLists() {
+      const laneList = document.getElementById('lane-list');
+      const lineList = document.getElementById('line-list');
+      const polyList = document.getElementById('poly-list');
+
+      laneList.innerHTML = '';
+      lineList.innerHTML = '';
+      polyList.innerHTML = '';
+
+      const topLanes = getTopUnchecked(allLanes, 5, reviewedEntities);
+      const topLines = getTopUnchecked(allLines, 5, reviewedEntities);
+      const topPolys = getTopUnchecked(allPolys, 5, reviewedEntities);
+
+      topLanes.forEach(item => laneList.appendChild(createEntityItem(item, THRESHOLD_LANE)));
+      topLines.forEach(item => lineList.appendChild(createEntityItem(item, THRESHOLD_LINE)));
+      topPolys.forEach(item => polyList.appendChild(createEntityItem(item, THRESHOLD_POLY)));
+
+      // Add checkbox listeners to new elements
+      document.querySelectorAll('.entity-checkbox').forEach(cb => {
+        cb.addEventListener('change', handleCheckboxChange);
+      });
+
+      // Update status text
+      updateSidebarStatus();
+    }
+
+    function handleCheckboxChange(e) {
+      const type = e.target.dataset.type;
+      const id = parseInt(e.target.dataset.id);
+      const key = `${type}-${id}`;
+
+      if (e.target.checked) {
+        reviewedEntities.add(key);
+      } else {
+        reviewedEntities.delete(key);
+      }
+      // Re-render to show next top 5 unchecked entities
+      renderAllLists();
+    }
+
+    function updateSidebarStatus() {
+      const remainingLanes = allLanes.filter(e => !reviewedEntities.has(`lane-${e.id}`)).length;
+      const remainingLines = allLines.filter(e => !reviewedEntities.has(`line-${e.id}`)).length;
+      const remainingPolys = allPolys.filter(e => !reviewedEntities.has(`poly-${e.id}`)).length;
+      const statusEl = document.getElementById('sidebar-status');
+      if (statusEl) {
+        if (remainingLanes === 0 && remainingLines === 0 && remainingPolys === 0) {
+          statusEl.textContent = 'All entities reviewed!';
+        } else {
+          statusEl.textContent = `Remaining: ${remainingLanes} lanes, ${remainingLines} lines, ${remainingPolys} polys`;
+        }
+      }
+    }
+
+    function buildSidebar() {
+      // Get all lanes sorted by error
+      allLanes = LANES_INT.map(ent => ({
+        type: 'lane',
+        id: ent.id,
+        error: ent.hausdorff || 0,
+        internal: ent
+      })).sort((a, b) => b.error - a.error);
+
+      // Get all lines sorted by error
+      allLines = LINES_INT.map(ent => ({
+        type: 'line',
+        id: ent.index,
+        error: ent.hausdorff || 0,
+        internal: ent
+      })).sort((a, b) => b.error - a.error);
+
+      // Get all polygons sorted by error
+      allPolys = POLYS_INT.map(ent => ({
+        type: 'poly',
+        id: ent.index,
+        error: ent.hausdorff || 0,
+        internal: ent
+      })).sort((a, b) => b.error - a.error);
+
+      // Initial render of top 5 for each type
+      renderAllLists();
+    }
+
+    // Toggle section collapse
+    document.querySelectorAll('.sidebar-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const section = header.dataset.section;
+        let listId;
+        if (section === 'lanes') listId = 'lane-list';
+        else if (section === 'lines') listId = 'line-list';
+        else if (section === 'polys') listId = 'poly-list';
+        else if (section === 'lane-points') listId = 'lane-point-list';
+        const list = document.getElementById(listId);
+        const toggle = header.querySelector('.sidebar-toggle');
+
+        if (list.style.display === 'none') {
+          list.style.display = 'block';
+          toggle.textContent = '−';
+        } else {
+          list.style.display = 'none';
+          toggle.textContent = '+';
+        }
+      });
+    });
+
+    buildSidebar();
 
     let currentLayer = null;
     let referenceBasemapVisible = false;
     const vmaxByTab = { overlay: THRESHOLD_LANE, 'lane-heatmap': THRESHOLD_LANE, 'line-heatmap': THRESHOLD_LINE, 'polygon-heatmap': THRESHOLD_POLY };
+
     function updateLegendForTab(tab) {
       const vmax = vmaxByTab[tab] || VMAX_LANE;
       const maxEl = document.getElementById('legend-max');
@@ -226,25 +953,65 @@
       if (titleEl) titleEl.textContent = tab === 'overlay' ? 'Hausdorff error (m)' : 'Hausdorff error (m) - ' + (tab === 'lane-heatmap' ? 'Lanes' : tab === 'line-heatmap' ? 'Lines' : 'Polygons');
       const hintEl = document.getElementById('legend-hint');
       if (hintEl) hintEl.style.display = ['lane-heatmap', 'line-heatmap', 'polygon-heatmap'].includes(tab) ? 'block' : 'none';
+
+      // Update point markers for the new tab
+      showPointMarkers();
     }
 
     function showTab(tab) {
+      // Reset highlight state BEFORE switching tabs to prevent stale references
+      if (highlightedEntityKey || highlightedLayers.length > 0 || highlightedRefEntityKey) {
+        if (highlightedLayers.length > 0) {
+          // Restore the layer's style directly if possible
+          const type = getEntityType(highlightedEntityKey);
+          if (type) {
+            const ent = type === 'lane' ? LANES_INT.find(e => e.id == highlightedEntityKey.replace(/^lane/, '')) :
+                        type === 'line' ? LINES_INT.find(e => e.index == highlightedEntityKey.replace(/^line/, '')) :
+                        POLYS_INT.find(e => e.index == highlightedEntityKey.replace(/^poly/, ''));
+            if (ent) {
+              const style = activeTab === 'overlay' ? DEFAULT_STYLES[type] : getHeatmapDefaultStyle(ent, type);
+              highlightedLayers.forEach(layer => {
+                if (layer && layer.setStyle) layer.setStyle(style);
+              });
+            }
+          }
+        }
+        highlightedEntityKey = null;
+        highlightedLayers = [];
+        highlightedRefEntityKey = null;
+        if (layerGroups.referenceHighlight) {
+          layerGroups.referenceHighlight.clearLayers();
+        }
+        pointMarkersLayer.clearLayers();
+        selectedPointMarker = null;
+        const lanePointList = document.getElementById("lane-point-list");
+        if (lanePointList) lanePointList.textContent = "Select a lane to inspect point errors.";
+      }
+
+      activeTab = tab;
       if (currentLayer && map.hasLayer(currentLayer)) {
         map.removeLayer(currentLayer);
       }
-      if (referenceBasemapVisible && map.hasLayer(layerGroups.referenceBasemap)) {
+      if (referenceBasemapVisible && layerGroups.referenceBasemap && map.hasLayer(layerGroups.referenceBasemap)) {
         map.removeLayer(layerGroups.referenceBasemap);
         referenceBasemapVisible = false;
       }
       const isHeatmap = ['lane-heatmap', 'line-heatmap', 'polygon-heatmap'].includes(tab);
       if (isHeatmap) {
-        layerGroups.referenceBasemap.addTo(map);
+        if (layerGroups.referenceBasemap) layerGroups.referenceBasemap.addTo(map);
         referenceBasemapVisible = true;
       }
       const lg = layerGroups[tab];
       if (lg && typeof lg.addTo === 'function') {
         lg.addTo(map);
         currentLayer = lg;
+      }
+      // Keep reference highlight on top so the yellow dashed line is visible
+      if (layerGroups.referenceHighlight && map.hasLayer(layerGroups.referenceHighlight) && typeof layerGroups.referenceHighlight.bringToFront === 'function') {
+        layerGroups.referenceHighlight.bringToFront();
+      }
+      if (pointMarkersLayer && map.hasLayer(pointMarkersLayer) && typeof pointMarkersLayer.bringToFront === 'function') {
+        pointMarkersLayer.bringToFront();
       }
       document.querySelectorAll('.tab').forEach(el => {
         el.classList.toggle('active', el.dataset.tab === tab);
@@ -254,21 +1021,46 @@
     showTab('overlay');
 
     document.querySelectorAll('.tab').forEach(btn => {
-      btn.addEventListener('click', () => showTab(btn.dataset.tab));
+      btn.addEventListener('click', function() {
+        // Reset highlight state before switching tabs
+        highlightedEntityKey = null;
+        highlightedLayers = [];
+        highlightedRefEntityKey = null;
+        highlightedRefLayer = null;
+        showTab(this.getAttribute('data-tab'));
+      });
     });
 
     function rebuildOverlayFromCheckboxes() {
+      // Reset stale highlight state before destroying old layers
+      highlightedEntityKey = null;
+      highlightedLayers = [];
+      highlightedRefEntityKey = null;
+      if (layerGroups.referenceHighlight) {
+        layerGroups.referenceHighlight.clearLayers();
+      }
+      pointMarkersLayer.clearLayers();
+      selectedPointMarker = null;
+
       const lanesCb = document.querySelector('input[data-layer="lanes"]');
       const linesCb = document.querySelector('input[data-layer="lines"]');
       const polysCb = document.querySelector('input[data-layer="polygons"]');
       const showLanes = !lanesCb || lanesCb.checked;
       const showLines = !linesCb || linesCb.checked;
       const showPolys = !polysCb || polysCb.checked;
+
+      // Remove current overlay if it's shown
       if (currentLayer === layerGroups.overlay && map.hasLayer(layerGroups.overlay)) {
-        layerGroups.overlay.clearLayers();
-        if (showLanes) { LANES_REF.forEach(ent => { L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 2, opacity: 0.8 }).addTo(layerGroups.overlay); }); LANES_INT.forEach(ent => { L.polyline(toLeafletCoords(ent.coordinates), { color: 'blue', weight: 1.5, opacity: 0.7 }).addTo(layerGroups.overlay); }); }
-        if (showLines) { LINES_REF.forEach(ent => { L.polyline(toLeafletCoords(ent.coordinates), { color: '#2d5016', weight: 2, opacity: 0.8 }).addTo(layerGroups.overlay); }); LINES_INT.forEach(ent => { L.polyline(toLeafletCoords(ent.coordinates), { color: 'red', weight: 1.5, opacity: 0.8 }).addTo(layerGroups.overlay); }); }
-        if (showPolys) { POLYS_REF.forEach(ent => { L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: '#2d5016', weight: 2, fillOpacity: 0.2 }).addTo(layerGroups.overlay); }); POLYS_INT.forEach(ent => { L.polygon(ent.coordinates.map(r => toLeafletCoords(r)), { color: 'green', weight: 1, fillOpacity: 0.4 }).addTo(layerGroups.overlay); }); }
+        map.removeLayer(layerGroups.overlay);
+      }
+
+      // Rebuild with visibility config
+      addOverlayLayers({ showLanes, showLines, showPolys });
+
+      // Re-add to map if it was the current layer
+      if (activeTab === 'overlay') {
+        layerGroups.overlay.addTo(map);
+        currentLayer = layerGroups.overlay;
       }
     }
     document.querySelectorAll('.layer-cb input').forEach(cb => {
