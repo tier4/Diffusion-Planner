@@ -40,7 +40,7 @@ def get_args():
     # Arguments
     parser = argparse.ArgumentParser(description="Training")
     parser.add_argument("--exp_name", type=str, required=True)
-    parser.add_argument("--save_dir", type=str, help="save dir for model ckpt", default=".")
+    parser.add_argument("--save_dir", type=str, help="save path for model ckpt", required=True)
 
     # Data
     parser.add_argument("--train_set_list", type=str, required=True)
@@ -193,12 +193,7 @@ def model_training(args):
         if args.resume_model_path is not None:
             save_path = os.path.dirname(args.resume_model_path)
         else:
-            from datetime import datetime
-
-            time = datetime.now()
-            time = time.strftime("%Y%m%d-%H%M%S")
-
-            save_path = f"{args.save_dir}/{time}_{args.exp_name}/"
+            save_path = args.save_dir
             os.makedirs(save_path, exist_ok=True)
 
         # Save args
