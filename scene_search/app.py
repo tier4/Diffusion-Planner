@@ -23,7 +23,12 @@ from scene_search.batch_search import Batch, build_index, find_batches, load_ind
 from scene_search.constraints import list_available as list_constraints
 from scene_search.constraints.registry import build as build_constraint
 from scene_search.map_renderer import MapRenderer, Viewport
-from scene_search.scene_previewer import render_batch_thumbnails, thumbnails_to_pil_images
+from scene_search.scene_previewer import (
+    render_batch_thumbnails,
+    render_central_thumbnail,
+    render_remaining_thumbnails,
+    thumbnails_to_pil_images,
+)
 
 MAX_VISIBLE_BATCHES = 10
 
@@ -395,16 +400,15 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 constraint_input_list.append(cc["params"][pn])
             constraint_input_meta.append((cname, param_names))
 
-        # --- Search ---
+        # --- Search (generator: yields central thumbnails first, then full) ---
         def on_search(x, y, heading, radius, heading_tol, n_before, n_after, idx, *constraint_vals):
-            outputs = []
             if x == 0 and y == 0:
-                outputs.append("Enter coordinates and click Search")
-                outputs.append(gr.update(visible=False))  # keep_all_btn
+                outputs = ["Enter coordinates and click Search", gr.update(visible=False)]
                 for _ in range(MAX_VISIBLE_BATCHES):
                     outputs.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
                 outputs.append([])
-                return outputs
+                yield outputs
+                return
 
             # Parse constraint values
             active_filters = []
@@ -434,19 +438,36 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             total = sum(b.n_scenes for b in batches)
             n_constraints = len(active_filters)
             constraint_info = f" ({n_constraints} constraint{'s' if n_constraints != 1 else ''} active)" if active_filters else ""
-            outputs.append(f"Found **{len(batches)} batches** ({total} total scenes){constraint_info}")
-            outputs.append(gr.update(visible=len(batches) > 0))  # keep_all_btn
 
+            # ── First yield: central thumbnails + grey placeholders ──
+            outputs = [
+                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info} — loading previews...",
+                gr.update(visible=len(batches) > 0),
+            ]
             for i in range(MAX_VISIBLE_BATCHES):
                 if i < len(batches):
                     b = batches[i]
-                    thumbs = render_batch_thumbnails(b, every_nth=10, max_workers=4)
-                    pils = thumbnails_to_pil_images(thumbs)
-                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {b.summary()}", pils])
+                    pils_with_placeholders, _ = render_central_thumbnail(b, every_nth=10)
+                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {b.summary()}", pils_with_placeholders])
                 else:
                     outputs.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
             outputs.append(batch_dicts)
-            return outputs
+            yield outputs
+
+            # ── Second yield: full hi-res thumbnails ──
+            outputs2 = [
+                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info}",
+                gr.update(visible=len(batches) > 0),
+            ]
+            for i in range(MAX_VISIBLE_BATCHES):
+                if i < len(batches):
+                    b = batches[i]
+                    full_pils = render_remaining_thumbnails(b, every_nth=10, max_workers=4)
+                    outputs2.extend([gr.update(visible=True), f"**Batch {i+1}**: {b.summary()}", full_pils])
+                else:
+                    outputs2.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
+            outputs2.append(batch_dicts)
+            yield outputs2
 
         search_outputs = [results_info, keep_all_btn]
         for i in range(MAX_VISIBLE_BATCHES):
