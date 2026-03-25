@@ -23,12 +23,7 @@ from scene_search.batch_search import Batch, build_index, find_batches, load_ind
 from scene_search.constraints import list_available as list_constraints
 from scene_search.constraints.registry import build as build_constraint
 from scene_search.map_renderer import MapRenderer, Viewport
-from scene_search.scene_previewer import (
-    render_batch_thumbnails,
-    render_central_thumbnail,
-    render_remaining_thumbnails,
-    thumbnails_to_pil_images,
-)
+from scene_search.scene_previewer import render_batch_thumbnails, thumbnails_to_pil_images
 
 MAX_VISIBLE_BATCHES = 10
 
@@ -400,12 +395,8 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 constraint_input_list.append(cc["params"][pn])
             constraint_input_meta.append((cname, param_names))
 
-        # --- Search: two-phase rendering ---
-        # Phase 1: find batches + render central thumbnails only (fast ~0.3s/batch)
-        # Phase 2: render remaining thumbnails (chained via .then())
-
-        def on_search_phase1(x, y, heading, radius, heading_tol, n_before, n_after, idx, *constraint_vals):
-            """Find batches and render central thumbnails with placeholders."""
+        # --- Search ---
+        def on_search(x, y, heading, radius, heading_tol, n_before, n_after, idx, *constraint_vals):
             if x == 0 and y == 0:
                 outputs = ["Enter coordinates and click Search", gr.update(visible=False)]
                 for _ in range(MAX_VISIBLE_BATCHES):
@@ -413,7 +404,6 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 outputs.append([])
                 return outputs
 
-            # Parse constraint values
             active_filters = []
             val_idx = 0
             for cname, param_names in constraint_input_meta:
@@ -442,62 +432,40 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             n_constraints = len(active_filters)
             constraint_info = f" ({n_constraints} constraint{'s' if n_constraints != 1 else ''} active)" if active_filters else ""
 
+            # Render all batches in parallel (each batch's thumbnails also parallel internally)
+            from concurrent.futures import ThreadPoolExecutor
+            def _render_one(b):
+                thumbs = render_batch_thumbnails(b, every_nth=10, max_workers=4)
+                return thumbnails_to_pil_images(thumbs)
+
+            all_pils = [None] * len(batches)
+            with ThreadPoolExecutor(max_workers=len(batches)) as tex:
+                futures = {tex.submit(_render_one, b): i for i, b in enumerate(batches)}
+                for fut in futures:
+                    all_pils[futures[fut]] = fut.result()
+
             outputs = [
-                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info} — loading thumbnails...",
+                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info}",
                 gr.update(visible=len(batches) > 0),
             ]
             for i in range(MAX_VISIBLE_BATCHES):
                 if i < len(batches):
-                    b = batches[i]
-                    pils_with_placeholders, _ = render_central_thumbnail(b, every_nth=10)
-                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {b.summary()}", pils_with_placeholders])
+                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {batches[i].summary()}", all_pils[i]])
                 else:
                     outputs.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
             outputs.append(batch_dicts)
             return outputs
 
-        def on_search_phase2(batch_dicts):
-            """Render full thumbnails for all batches (runs after phase 1)."""
-            if not batch_dicts:
-                outputs = [gr.update()]
-                for _ in range(MAX_VISIBLE_BATCHES):
-                    outputs.append(gr.update())
-                return outputs
-
-            total = sum(len(bd["scenes"]) for bd in batch_dicts)
-            outputs = [f"Found **{len(batch_dicts)} batches** ({total} total scenes)"]
-            # Reconstruct Batch objects and render
-            from scene_search.batch_search import Batch
-            for i in range(MAX_VISIBLE_BATCHES):
-                if i < len(batch_dicts):
-                    bd = batch_dicts[i]
-                    b = Batch(bag_prefix=bd["bag_prefix"], scenes=bd["scenes"],
-                              central_indices=bd["central_indices"], metadata=bd["metadata"])
-                    full_pils = render_remaining_thumbnails(b, every_nth=10, max_workers=8)
-                    outputs.append(full_pils)
-                else:
-                    outputs.append(gr.update())
-            return outputs
-
-        search_outputs_phase1 = [results_info, keep_all_btn]
+        search_outputs = [results_info, keep_all_btn]
         for i in range(MAX_VISIBLE_BATCHES):
-            search_outputs_phase1.extend([batch_groups[i], batch_labels[i], batch_galleries[i]])
-        search_outputs_phase1.append(search_results_state)
-
-        # Phase 2 only updates results_info + galleries (not groups/labels)
-        search_outputs_phase2 = [results_info]
-        for i in range(MAX_VISIBLE_BATCHES):
-            search_outputs_phase2.append(batch_galleries[i])
+            search_outputs.extend([batch_groups[i], batch_labels[i], batch_galleries[i]])
+        search_outputs.append(search_results_state)
 
         search_btn.click(
-            on_search_phase1,
+            on_search,
             inputs=[arrow_x, arrow_y, arrow_heading, radius_slider, heading_tol_slider,
                     n_before_slider, n_after_slider, index_state] + constraint_input_list,
-            outputs=search_outputs_phase1,
-        ).then(
-            on_search_phase2,
-            inputs=[search_results_state],
-            outputs=search_outputs_phase2,
+            outputs=search_outputs,
         )
 
         # --- Keep ---

@@ -59,17 +59,22 @@ def render_single_thumbnail(npz_path: str, view_range: float = 60.0, figsize: tu
     return fig
 
 
+# Size presets for thumbnails
+THUMB_CENTRAL = (5, 5, 90)  # figsize_w, figsize_h, dpi — crisp for the central match
+THUMB_FAST = (2.5, 2.5, 50) # tiny and fast for non-central gallery items
+
+
 def _render_thumbnail_to_bytes(args: tuple) -> tuple[int, bytes, str]:
     """Worker function for parallel thumbnail rendering.
 
-    Args: (index, npz_path, label, view_range)
+    Args: (index, npz_path, label, view_range, figsize_w, figsize_h, dpi)
     Returns: (index, png_bytes, label)
     """
-    idx, npz_path, label, view_range = args
+    idx, npz_path, label, view_range, fw, fh, dpi = args
     try:
-        fig = render_single_thumbnail(npz_path, view_range=view_range)
+        fig = render_single_thumbnail(npz_path, view_range=view_range, figsize=(fw, fh), dpi=dpi)
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=90, bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
         import matplotlib.pyplot as plt
         plt.close(fig)
         buf.seek(0)
@@ -125,7 +130,12 @@ def render_batch_thumbnails(
         if scene_idx in central_set and offset != 0:
             label += "*"
 
-        tasks.append((len(tasks), batch.scenes[scene_idx], label, view_range))
+        is_central = (scene_idx in central_set) or (offset == 0)
+        if is_central:
+            fw, fh, dpi = THUMB_CENTRAL
+        else:
+            fw, fh, dpi = THUMB_FAST
+        tasks.append((len(tasks), batch.scenes[scene_idx], label, view_range, fw, fh, dpi))
 
     # Render in parallel
     results = [None] * len(tasks)
