@@ -61,7 +61,7 @@ def render_single_thumbnail(npz_path: str, view_range: float = 60.0, figsize: tu
 
 # Size presets for thumbnails
 THUMB_CENTRAL = (5, 5, 90)  # figsize_w, figsize_h, dpi — crisp for the central match
-THUMB_FAST = (2.5, 2.5, 50) # tiny and fast for non-central gallery items
+THUMB_FAST = (5, 5, 90)     # same quality for all thumbnails
 
 
 def _render_thumbnail_to_bytes(args: tuple) -> tuple[int, bytes, str]:
