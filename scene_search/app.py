@@ -343,7 +343,9 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 )
 
                 gr.Markdown("### Search Results")
-                results_info = gr.Markdown("Shift+drag on the map to place an arrow, then click Search")
+                with gr.Row():
+                    results_info = gr.Markdown("Shift+drag on the map to place an arrow, then click Search")
+                    keep_all_btn = gr.Button("Keep All Batches", size="sm", variant="primary", visible=False)
 
                 batch_groups = []
                 batch_labels = []
@@ -398,6 +400,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             outputs = []
             if x == 0 and y == 0:
                 outputs.append("Enter coordinates and click Search")
+                outputs.append(gr.update(visible=False))  # keep_all_btn
                 for _ in range(MAX_VISIBLE_BATCHES):
                     outputs.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
                 outputs.append([])
@@ -432,6 +435,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             n_constraints = len(active_filters)
             constraint_info = f" ({n_constraints} constraint{'s' if n_constraints != 1 else ''} active)" if active_filters else ""
             outputs.append(f"Found **{len(batches)} batches** ({total} total scenes){constraint_info}")
+            outputs.append(gr.update(visible=len(batches) > 0))  # keep_all_btn
 
             for i in range(MAX_VISIBLE_BATCHES):
                 if i < len(batches):
@@ -444,7 +448,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             outputs.append(batch_dicts)
             return outputs
 
-        search_outputs = [results_info]
+        search_outputs = [results_info, keep_all_btn]
         for i in range(MAX_VISIBLE_BATCHES):
             search_outputs.extend([batch_groups[i], batch_labels[i], batch_galleries[i]])
         search_outputs.append(search_results_state)
@@ -469,6 +473,25 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 detail = "\n".join(f"- {k['bag_prefix'].split('/')[-1][:25]}... ({len(k['scenes'])} scenes)" for k in kept)
                 return kept, summary, detail
             return fn
+
+        # --- Keep All ---
+        def on_keep_all(search_results, kept_batches):
+            existing = {k["bag_prefix"] for k in kept_batches}
+            new_kept = kept_batches[:]
+            for b in search_results:
+                if b["bag_prefix"] not in existing:
+                    new_kept.append(b)
+                    existing.add(b["bag_prefix"])
+            total = sum(len(k["scenes"]) for k in new_kept)
+            summary = f"**{len(new_kept)} batches** kept ({total} scenes)"
+            detail = "\n".join(f"- {k['bag_prefix'].split('/')[-1][:25]}... ({len(k['scenes'])} scenes)" for k in new_kept)
+            return new_kept, summary, detail
+
+        keep_all_btn.click(
+            on_keep_all,
+            inputs=[search_results_state, kept_batches_state],
+            outputs=[kept_batches_state, kept_summary, kept_display],
+        )
 
         for i in range(MAX_VISIBLE_BATCHES):
             batch_keep_btns[i].click(
