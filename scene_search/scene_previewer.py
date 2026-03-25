@@ -60,8 +60,7 @@ def render_single_thumbnail(npz_path: str, view_range: float = 60.0, figsize: tu
 
 
 # Size presets for thumbnails
-THUMB_CENTRAL = (5, 5, 90)  # figsize_w, figsize_h, dpi — crisp for the central match
-THUMB_FAST = (5, 5, 90)     # same quality for all thumbnails
+THUMB_SIZE = (5, 5, 90)  # (figsize_w, figsize_h, dpi)
 
 
 def _render_thumbnail_to_bytes(args: tuple) -> tuple[int, bytes, str]:
@@ -130,11 +129,7 @@ def render_batch_thumbnails(
         if scene_idx in central_set and offset != 0:
             label += "*"
 
-        is_central = (scene_idx in central_set) or (offset == 0)
-        if is_central:
-            fw, fh, dpi = THUMB_CENTRAL
-        else:
-            fw, fh, dpi = THUMB_FAST
+        fw, fh, dpi = THUMB_SIZE
         tasks.append((len(tasks), batch.scenes[scene_idx], label, view_range, fw, fh, dpi))
 
     # Render in parallel
