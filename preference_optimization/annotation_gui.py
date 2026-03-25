@@ -1729,12 +1729,12 @@ def create_interface(
         panel.enable_cb.change(_regen_full, inputs=_full_inputs, outputs=_full_outputs)
 
         for _cb in [panel.collision_cb, panel.route_cb, panel.lane_cb,
-                    panel.centerline_cb, panel.anchor_cb, panel.speed_cb]:
+                    panel.centerline_cb, panel.anchor_cb, panel.road_border_cb, panel.speed_cb]:
             _cb.change(_regen_if_guidance_active, inputs=_full_inputs, outputs=_full_outputs)
 
         for _sl in [panel.global_scale, panel.collision_scale, panel.route_scale,
                     panel.lane_scale, panel.centerline_scale, panel.anchor_scale,
-                    panel.speed_scale, panel.speed_limit,
+                    panel.road_border_scale, panel.speed_scale, panel.speed_limit,
                     panel.anchor_index]:
             _sl.release(_regen_if_guidance_active, inputs=_full_inputs, outputs=_full_outputs)
 
@@ -1742,9 +1742,9 @@ def create_interface(
 
         # Gallery click: inject evt.index directly (programmatic gr.update on anchor_index
         # does not fire .release), then regen if guidance is active.
-        # anchor_index sits at _full_inputs[len(_std_inputs) + len(_pruning_inputs) + 14]
-        # (panel.inputs: … anchor_scale, speed×3, then anchor_index).
-        _ANCHOR_IDX_POS = len(_std_inputs) + len(_pruning_inputs) + 14  # = 23
+        # anchor_index sits at _full_inputs[len(_std_inputs) + len(_pruning_inputs) + 16]
+        # (panel.inputs: … anchor_scale, road_border×2, speed×3, then anchor_index).
+        _ANCHOR_IDX_POS = len(_std_inputs) + len(_pruning_inputs) + 16  # = 25
         _EG_POS = len(_std_inputs) + len(_pruning_inputs)               # = 9
 
         def _on_anchor_gallery_select(evt: gr.SelectData, *full_args):

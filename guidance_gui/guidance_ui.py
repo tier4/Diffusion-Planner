@@ -194,6 +194,23 @@ def build_guidance_panel(
                 label="Road Border Scale",
             )
         with gr.Column():
+            speed_cb = gr.Checkbox(
+                value=False,
+                label="Target path speed",
+                info="Penalise path speed outside [0, v_high] m/s (squared hinge)",
+            )
+            speed_scale = gr.Slider(
+                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                label="Speed guidance scale",
+            )
+            speed_limit = gr.Slider(
+                minimum=2.0, maximum=40.0, value=14.0, step=0.5,
+                label="Speed upper bound v_high (m/s)",
+                info="Lower bound v_low is fixed at 0 m/s",
+            )
+
+    with gr.Row():
+        with gr.Column():
             anchor_cb = gr.Checkbox(
                 value=False,
                 label="Anchor Following",
@@ -214,23 +231,6 @@ def build_guidance_panel(
                 value=default_prototypes_path,
                 label="Prototypes Path",
                 info="Path to prototypes .npy file (K, 80, 2)",
-            )
-
-    with gr.Row():
-        with gr.Column():
-            speed_cb = gr.Checkbox(
-                value=False,
-                label="Target path speed",
-                info="Penalise path speed outside [0, v_high] m/s (squared hinge)",
-            )
-            speed_scale = gr.Slider(
-                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
-                label="Speed guidance scale",
-            )
-            speed_limit = gr.Slider(
-                minimum=2.0, maximum=40.0, value=14.0, step=0.5,
-                label="Speed upper bound v_high (m/s)",
-                info="Lower bound v_low is fixed at 0 m/s",
             )
 
     with gr.Accordion("Prototype Gallery — click to select anchor", open=False):
