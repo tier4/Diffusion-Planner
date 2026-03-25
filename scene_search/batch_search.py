@@ -152,77 +152,65 @@ def find_batches(
     if not filtered:
         return []
 
-    # 4. Group matching scenes by bag sequence and expand to batches
-    # Parse frame info for all matches
-    match_frames: dict[str, list[int]] = {}  # prefix → [frame_numbers]
-    pad_length = 19  # Default padding length
+    # 4. Score each match by distance + heading similarity to the arrow,
+    #    pick the single best match per bag prefix, expand exactly n_before + 1 + n_after.
+    import math
+
+    def _score(entry):
+        """Lower = better match. Combines position distance and heading difference."""
+        dx = entry["x"] - center_x
+        dy = entry["y"] - center_y
+        pos_dist = math.sqrt(dx * dx + dy * dy)
+        # Heading difference (handles wraparound)
+        h_diff = abs(entry["heading_deg"] - heading_deg)
+        if h_diff > 180:
+            h_diff = 360 - h_diff
+        # Weight heading difference as 1 deg ≈ 1 meter
+        return pos_dist + h_diff
+
+    # Group by bag prefix, pick best per bag
+    best_per_bag: dict[str, tuple[float, dict]] = {}  # prefix → (score, entry)
+    pad_length = 19
     for entry in filtered:
         try:
             prefix, frame = _parse_frame_info(entry["npz_path"])
-            # Detect padding length from the actual filename
-            match = re.search(r"_(\d+)\.npz$", entry["npz_path"])
-            if match:
-                pad_length = len(match.group(1))
-            match_frames.setdefault(prefix, []).append(frame)
+            m = re.search(r"_(\d+)\.npz$", entry["npz_path"])
+            if m:
+                pad_length = len(m.group(1))
         except ValueError:
             continue
+        s = _score(entry)
+        if prefix not in best_per_bag or s < best_per_bag[prefix][0]:
+            best_per_bag[prefix] = (s, entry)
 
-    # 5. For each prefix, merge overlapping expansions
+    # 5. Expand each best match into a batch
     batches = []
-    for prefix, frames in match_frames.items():
-        frames.sort()
+    for prefix, (score, entry) in best_per_bag.items():
+        _, central_frame = _parse_frame_info(entry["npz_path"])
+        m = re.search(r"_(\d+)\.npz$", entry["npz_path"])
+        pl = len(m.group(1)) if m else pad_length
 
-        # Expand each central frame and merge overlapping ranges
-        expanded_ranges: list[tuple[int, int, list[int]]] = []  # (start, end, central_frames)
-        for f in frames:
-            expanded = _expand_contiguous(prefix, f, n_before, n_after, pad_length)
-            if not expanded:
-                continue
-            first_prefix, first_frame = _parse_frame_info(expanded[0])
-            last_prefix, last_frame = _parse_frame_info(expanded[-1])
+        scenes = _expand_contiguous(prefix, central_frame, n_before, n_after, pl)
+        if not scenes:
+            continue
 
-            if expanded_ranges and first_frame <= expanded_ranges[-1][1] + 1:
-                # Overlaps with previous — merge
-                prev_start, prev_end, prev_centrals = expanded_ranges[-1]
-                merged_end = max(prev_end, last_frame)
-                prev_centrals.append(f)
-                expanded_ranges[-1] = (prev_start, merged_end, prev_centrals)
-            else:
-                expanded_ranges.append((first_frame, last_frame, [f]))
+        # Find central index within the scene list
+        central_path = _frame_path(prefix, central_frame, pl)
+        central_idx = next((i for i, s in enumerate(scenes) if s == central_path), 0)
 
-        # Build Batch objects from merged ranges
-        for start_frame, end_frame, central_frames in expanded_ranges:
-            scenes = []
-            for frame_num in range(start_frame, end_frame + 1):
-                path = _frame_path(prefix, frame_num, pad_length)
-                if os.path.exists(path):
-                    scenes.append(path)
+        meta = {
+            "n_matches_in_radius": sum(1 for e in filtered if e["npz_path"].startswith(prefix)),
+            "best_score": round(score, 2),
+            "x": entry["x"],
+            "y": entry["y"],
+            "heading_deg": entry["heading_deg"],
+        }
 
-            if not scenes:
-                continue
-
-            # Find central indices within the scene list
-            scene_set = {s: i for i, s in enumerate(scenes)}
-            central_indices = []
-            for cf in central_frames:
-                cp = _frame_path(prefix, cf, pad_length)
-                if cp in scene_set:
-                    central_indices.append(scene_set[cp])
-
-            # Compute metadata from sidecar of first central scene
-            meta = {"n_matches": len(central_frames)}
-            first_central = _frame_path(prefix, central_frames[0], pad_length)
-            sidecar = read_sidecar(first_central)
-            if sidecar:
-                meta["x"] = sidecar["x"]
-                meta["y"] = sidecar["y"]
-                meta["heading_deg"] = sidecar["heading_deg"]
-
-            batches.append(Batch(
-                bag_prefix=prefix,
-                scenes=scenes,
-                central_indices=central_indices,
-                metadata=meta,
-            ))
+        batches.append(Batch(
+            bag_prefix=prefix,
+            scenes=scenes,
+            central_indices=[central_idx],
+            metadata=meta,
+        ))
 
     return batches
