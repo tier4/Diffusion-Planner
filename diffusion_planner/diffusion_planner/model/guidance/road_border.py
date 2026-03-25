@@ -59,12 +59,13 @@ class RoadBorderGuidance(BaseGuidance):
     border point, and applies a smooth penalty that increases sharply as the
     ego edge approaches the border.
 
-    _energy_scale = 0.05 keeps the DPM-Solver correction magnitude comparable
-    to lane_keeping and route_following guidance at default settings.
+    _energy_scale = 5.0 so that scale=1 in the GUI produces meaningful repulsion.
+    The raw reward sums over 80 timesteps with penalty in [0,1], giving values
+    up to -80. With _energy_scale=5.0 and scale=1, effective energy is up to -400.
     """
 
     name = "road_border"
-    _energy_scale = 0.05
+    _energy_scale = 5.0
 
     def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
         """

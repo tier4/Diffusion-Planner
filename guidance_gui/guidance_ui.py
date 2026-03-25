@@ -190,7 +190,7 @@ def build_guidance_panel(
                 info="Repel trajectory from road border line_strings using ego perimeter sampling",
             )
             road_border_scale = gr.Slider(
-                minimum=1.0, maximum=200.0, value=100.0, step=5.0,
+                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
                 label="Road Border Scale",
             )
         with gr.Column():

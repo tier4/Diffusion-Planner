@@ -41,7 +41,7 @@ class SamplerConfig:
     collision_scale_range: tuple[float, float] = (0.5, 2.0)
     route_following_scale_range: tuple[float, float] = (0.5, 2.0)
     lane_keeping_scale_range: tuple[float, float] = (0.5, 2.0)
-    road_border_scale_range: tuple[float, float] = (20.0, 150.0)
+    road_border_scale_range: tuple[float, float] = (0.2, 1.5)
 
     prototypes_path: str | None = None
     num_prototypes: int = 16
@@ -150,7 +150,7 @@ def generate_diverse_group(
     # on problem miraikan scenes (verified: LK=5, CL=3, SPD=5 eliminates all offroad).
     guided_fns = [
         GuidanceConfig("lane_keeping", enabled=True, scale=5.0),
-        GuidanceConfig("road_border", enabled=True, scale=100.0),
+        GuidanceConfig("road_border", enabled=True, scale=1.0),
         GuidanceConfig("route_following", enabled=True, scale=1.0),
     ]
     if gt_max_speed is not None:
@@ -166,9 +166,9 @@ def generate_diverse_group(
     # Generate multiple guided trajectories with varying scales to provide
     # more on-road examples. Each uses zero noise + different guidance strength.
     for g_idx, (lk_s, rb_s, gs_val) in enumerate([
-        (5.0, 100.0, 1.0),   # strong guidance
-        (3.0, 50.0, 0.5),    # medium guidance
-        (2.0, 20.0, 0.3),    # light guidance
+        (5.0, 1.0, 1.0),   # strong guidance
+        (3.0, 0.5, 0.5),   # medium guidance
+        (2.0, 0.2, 0.3),   # light guidance
     ]):
         g_fns = [
             GuidanceConfig("lane_keeping", enabled=True, scale=lk_s),
