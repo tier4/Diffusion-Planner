@@ -439,44 +439,20 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             n_constraints = len(active_filters)
             constraint_info = f" ({n_constraints} constraint{'s' if n_constraints != 1 else ''} active)" if active_filters else ""
 
-            # ── First yield: central thumbnails + grey placeholders ──
             outputs = [
-                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info} — loading previews...",
+                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info}",
                 gr.update(visible=len(batches) > 0),
             ]
             for i in range(MAX_VISIBLE_BATCHES):
                 if i < len(batches):
                     b = batches[i]
-                    pils_with_placeholders, _ = render_central_thumbnail(b, every_nth=10)
-                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {b.summary()}", pils_with_placeholders])
+                    thumbs = render_batch_thumbnails(b, every_nth=10, max_workers=8)
+                    pils = thumbnails_to_pil_images(thumbs)
+                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {b.summary()}", pils])
                 else:
                     outputs.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
             outputs.append(batch_dicts)
-            yield outputs
-
-            # ── Progressive yields: render one batch at a time ──
-            # Keep a cache of rendered galleries, fill in one by one
-            rendered_galleries = [None] * len(batches)
-            for batch_idx in range(len(batches)):
-                b = batches[batch_idx]
-                rendered_galleries[batch_idx] = render_remaining_thumbnails(b, every_nth=10, max_workers=4)
-
-                # Yield updated state with this batch's full thumbnails
-                prog = f"Found **{len(batches)} batches** ({total} scenes){constraint_info} — rendered {batch_idx+1}/{len(batches)}..."
-                if batch_idx == len(batches) - 1:
-                    prog = f"Found **{len(batches)} batches** ({total} total scenes){constraint_info}"
-                out = [prog, gr.update(visible=len(batches) > 0)]
-                for i in range(MAX_VISIBLE_BATCHES):
-                    if i < len(batches):
-                        label = f"**Batch {i+1}**: {batches[i].summary()}"
-                        if rendered_galleries[i] is not None:
-                            out.extend([gr.update(visible=True), label, rendered_galleries[i]])
-                        else:
-                            out.extend([gr.update(visible=True), label, gr.update()])
-                    else:
-                        out.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
-                out.append(batch_dicts)
-                yield out
+            return outputs
 
         search_outputs = [results_info, keep_all_btn]
         for i in range(MAX_VISIBLE_BATCHES):

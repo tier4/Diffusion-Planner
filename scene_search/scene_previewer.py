@@ -45,7 +45,7 @@ def _load_npz_as_viz_data(npz_path: str) -> dict[str, torch.Tensor]:
     return data
 
 
-def render_single_thumbnail(npz_path: str, view_range: float = 60.0, figsize: tuple = (6, 6), dpi: int = 100) -> Figure:
+def render_single_thumbnail(npz_path: str, view_range: float = 60.0, figsize: tuple = (5, 5), dpi: int = 90) -> Figure:
     """Render a single scene thumbnail using visualize_inputs().
 
     Returns a matplotlib Figure.
@@ -69,7 +69,7 @@ def _render_thumbnail_to_bytes(args: tuple) -> tuple[int, bytes, str]:
     try:
         fig = render_single_thumbnail(npz_path, view_range=view_range)
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=90, bbox_inches="tight")
         import matplotlib.pyplot as plt
         plt.close(fig)
         buf.seek(0)
