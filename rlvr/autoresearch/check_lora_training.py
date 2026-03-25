@@ -21,7 +21,7 @@ from diffusion_planner.utils.config import Config
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 
 
-DEVICE = "cuda"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_model_with_lora(base_model_path, lora_path=None):
@@ -131,13 +131,8 @@ def main():
     if args.scene:
         compare_trajectories(args.base_model, args.exp_dir, args.scene)
     else:
-        # Use a default miraikan prob scene
-        prob_list = f"{SSD}/auto_research/v4_prob_miraikan_exit.json"
-        if os.path.exists(prob_list):
-            with open(prob_list) as f:
-                scenes = json.load(f)
-            if scenes:
-                compare_trajectories(args.base_model, args.exp_dir, scenes[50])
+        print("No --scene provided. Skipping trajectory comparison.")
+        print("Provide --scene <npz_path> to compare deterministic trajectories.")
 
 
 if __name__ == "__main__":

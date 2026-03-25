@@ -322,7 +322,6 @@ def run(config_path: Path, name: str):
 
     # Training loop
     start_time = time.time()
-    best_prob_offroad = base_prob["offroad_mean"]
     best_epoch = 0
     best_prob_reward = base_prob["reward_mean"]
     best_val_reward = base_val["reward_mean"]
@@ -356,18 +355,11 @@ def run(config_path: Path, name: str):
         prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob")
         val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val")
 
-        # Track best: minimize offroad while keeping val acceptable (> -5)
-        # Primary: lowest offroad. Tiebreak: highest val_reward.
-        is_better = False
-        if val_eval["reward_mean"] > -5:
-            if prob_result["offroad_mean"] < best_prob_offroad:
-                is_better = True
-            elif (prob_result["offroad_mean"] == best_prob_offroad
-                  and val_eval["reward_mean"] > best_val_reward):
-                is_better = True
+        # Track best: highest prob deterministic reward (with val sanity check > -5)
+        is_better = (prob_result["reward_mean"] > best_prob_reward
+                     and val_eval["reward_mean"] > -5)
 
         if is_better:
-            best_prob_offroad = prob_result["offroad_mean"]
             best_prob_reward = prob_result["reward_mean"]
             best_val_reward = val_eval["reward_mean"]
             best_val_collision = val_eval["collision_rate"]
@@ -394,7 +386,7 @@ def run(config_path: Path, name: str):
     # Print final summary (machine-parseable)
     print("\n---")
     print(f"name:             {name}")
-    print(f"prob_offroad:     {best_prob_offroad:.4f}")
+    print(f"prob_rb_crossings: {best_prob_rb_crossings}")
     print(f"prob_reward:      {best_prob_reward:.2f}")
     print(f"val_reward:       {best_val_reward:.2f}")
     print(f"val_collision:    {best_val_collision:.2f}")
