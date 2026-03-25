@@ -518,11 +518,13 @@ def build_interface(
                     label="Guidance scale max",
                 )
                 gr.Markdown("**Guidance types in random pool:**")
-                cb_centerline = gr.Checkbox(value=True, label="Centerline following")
-                cb_anchor = gr.Checkbox(value=True, label="Anchor following")
+                cb_centerline = gr.Checkbox(value=False, label="Centerline following")
+                cb_anchor = gr.Checkbox(value=False, label="Anchor following")
                 cb_collision = gr.Checkbox(value=False, label="Collision")
-                cb_route = gr.Checkbox(value=False, label="Route following")
-                cb_lane = gr.Checkbox(value=False, label="Lane keeping")
+                cb_route = gr.Checkbox(value=True, label="Route following")
+                cb_lane = gr.Checkbox(value=True, label="Lane keeping")
+                cb_road_border = gr.Checkbox(value=True, label="Road border")
+                cb_speed = gr.Checkbox(value=True, label="Speed (GT cap)")
 
                 gr.Markdown("### Reward Weights")
                 w_safety = gr.Slider(
@@ -611,7 +613,8 @@ def build_interface(
             n_traj_sl, noise_lo, noise_hi,                          # 0-2
             enable_guidance_cb, guidance_prob_sl, guidance_scale_sl, # 3-5
             cb_centerline, cb_anchor, cb_collision, cb_route, cb_lane,  # 6-10
-            proto_path,                                              # 11
+            cb_road_border, cb_speed,                                # 11-12
+            proto_path,                                              # 13
         ]
         reward_inputs = [w_safety, w_progress, w_smooth, w_feasibility, w_centerline]  # 12-16
         display_inputs = [zoom_sl, time_sl]                              # 17-18
@@ -624,6 +627,7 @@ def build_interface(
             n_traj, ns_lo, ns_hi,
             enable_guidance, guidance_prob, gs_max,
             use_cl, use_anchor, use_col, use_route, use_lane,
+            use_rb, use_speed,
             p_path,
         ):
             ranker.sampler_config = SamplerConfig(
@@ -637,6 +641,7 @@ def build_interface(
                 enable_collision=bool(use_col),
                 enable_route_following=bool(use_route),
                 enable_lane_keeping=bool(use_lane),
+                enable_road_border=bool(use_rb),
                 prototypes_path=p_path if p_path else None,
             )
 
@@ -737,7 +742,7 @@ def build_interface(
         # Sampler param changes -> full regeneration
         for sl in [n_traj_sl, noise_lo, noise_hi, guidance_prob_sl, guidance_scale_sl]:
             sl.release(_full_run, inputs=all_inputs, outputs=outputs)
-        for cb in [enable_guidance_cb, cb_centerline, cb_anchor, cb_collision, cb_route, cb_lane]:
+        for cb in [enable_guidance_cb, cb_centerline, cb_anchor, cb_collision, cb_route, cb_lane, cb_road_border, cb_speed]:
             cb.change(_full_run, inputs=all_inputs, outputs=outputs)
 
         # Reward weight changes -> rescore only (both release and change for responsiveness)
