@@ -32,6 +32,7 @@ class SamplerConfig:
     enable_route_following: bool = False
     enable_lane_keeping: bool = False
     enable_road_border: bool = True
+    enable_speed: bool = True
 
     # Probability that each enabled type is included for a given trajectory
     guidance_prob: float = 0.5
@@ -258,8 +259,8 @@ def generate_diverse_group(
                 ))
                 label_parts.append(f"rb={rb_scale:.1f}")
 
-            # Speed guidance always on when GT available — caps speed at GT max
-            if gt_max_speed is not None:
+            # Speed guidance caps speed at GT max when enabled and GT available
+            if config.enable_speed and gt_max_speed is not None:
                 spd_scale = random.uniform(3.0, 8.0)
                 guidance_fns.append(GuidanceConfig(
                     name="speed", enabled=True, scale=spd_scale,

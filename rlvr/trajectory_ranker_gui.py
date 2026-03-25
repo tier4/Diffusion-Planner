@@ -642,6 +642,7 @@ def build_interface(
                 enable_route_following=bool(use_route),
                 enable_lane_keeping=bool(use_lane),
                 enable_road_border=bool(use_rb),
+                enable_speed=bool(use_speed),
                 prototypes_path=p_path if p_path else None,
             )
 

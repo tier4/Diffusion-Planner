@@ -50,7 +50,8 @@ class GuidanceComposer:
         x_phys = state_normalizer.inverse(x_corrected.detach())
         inputs = observation_normalizer.inverse(kwargs["inputs"])
 
-        t_scalar = t_input.reshape(-1)[0].unsqueeze(0) if t_input.dim() > 1 else t_input
+        # Extract one scalar t per batch element for time-gating in BaseGuidance.energy()
+        t_scalar = t_input.reshape(B, -1)[:, 0] if t_input.dim() > 1 else t_input
 
         # Compute guidance gradient on detached 4D trajectory, then use
         # surrogate energy = dot(grad, x_in) so autograd returns a gradient

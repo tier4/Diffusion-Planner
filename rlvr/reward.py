@@ -1407,7 +1407,7 @@ def compute_reward_batch(
             red_light=float(red_light_scores[i]),
             total=float(totals[i]),
             collision_step=collision_steps[i],
-            off_road_fraction=float(off_road_fractions[i]),
+            off_road_fraction=float(rb_near_frac[i]),  # from road border proximity (polygon check disabled)
             rb_crossing=bool(rb_crossing_gate[i] < 0.5),
             rb_near_frac=float(rb_near_frac[i]),
         ))
