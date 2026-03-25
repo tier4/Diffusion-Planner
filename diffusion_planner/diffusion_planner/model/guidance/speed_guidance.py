@@ -1,18 +1,10 @@
 """Target speed maintenance guidance for the Diffusion Planner.
 
-Penalises ego path speed deviations outside a deadband [v_low, v_high]
-using a squared hinge loss.  Within the band the energy is zero (no
-interference with normal driving); outside the band the gradient grows
-linearly with violation magnitude — making speed control predictable.
-
-Implements Eq. (10) from the paper (same hinge form; speed is path speed in
-the ego plane rather than x-only):
-    E = Σ_τ [ max(v_τ - v_high, 0)² + max(v_low - v_τ, 0)² ]
-
-Path speed is ||Δp|| / dt where p = (x, y) in the ego-centric frame and Δ
-is between consecutive future waypoints (index 0 along time is the pinned
-current state).  Inputs to _compute are already physical metres
-(GuidanceComposer applies inverse normalisation before energy()).
+Uses a surrogate gradient approach (same pattern as collision guidance) to
+produce stable gradients through DPM-Solver sampling. For each timestep where
+speed exceeds v_high, computes the target position that would achieve v_high
+and uses dot(target_correction.detach(), x) as the energy — making the
+gradient of energy w.r.t. x equal to the desired correction direction.
 
 Compatible with BaseGuidance interface:
     x:       [B, P, T+1, 4]  physical ego-centric metres
@@ -20,7 +12,6 @@ Compatible with BaseGuidance interface:
 """
 
 import torch
-import torch.nn.functional as F
 
 from .base import BaseGuidance
 from .registry import register
@@ -28,46 +19,63 @@ from .registry import register
 
 @register
 class SpeedGuidance(BaseGuidance):
-    """
-    Deadband squared-hinge path-speed energy (Eq. 10 form, Appendix C.3).
+    """Surrogate-gradient speed guidance for DPM-Solver.
 
-    Energy is zero when ego path speed is in [v_low, v_high].
-    Outside the band a squared penalty applies — linear gradient growth
-    makes speed corrections predictable and tunable.
+    Instead of autograd through relu(v-v_high)² (which produces unstable
+    gradients through multi-step denoising), compute the explicit position
+    correction needed to cap speed at v_high. The correction vector dotted
+    with x creates a surrogate energy whose gradient equals the correction.
 
-    _energy_scale = 300.0 aligns the gradient magnitude with collision guidance.
+    _energy_scale = 0.05 similar to route/lane guidance.
     """
 
     name = "speed"
-    _energy_scale = 20.0
-    _t_min = 0.001
-    _t_max = 0.2
+    _energy_scale = 1.0
+    _t_min = 0.005
+    _t_max = 0.1
 
     def __init__(self, config: "GuidanceConfig", **kwargs):  # noqa: F821
         super().__init__(config)
         p = config.params
-        self._v_low    = p.get("v_low", 0.0)      # m/s  lower speed bound
-        self._v_high   = p.get("v_high", 14.0)   # m/s  upper speed bound
-        self._dt       = p.get("dt", 0.1)         # s    time step between waypoints
+        self._v_low = p.get("v_low", 0.0)
+        self._v_high = p.get("v_high", 14.0)
+        self._dt = p.get("dt", 0.1)
 
     def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
         """
-        x:       [B, P, T+1, 4]  physical ego-centric metres (x, y, cos_h, sin_h)
+        x:       [B, P, T+1, 4]  physical ego-centric metres
         inputs:  observation dict in physical units
 
-        Returns [B] reward (higher = speed within acceptable band).
+        Returns [B] surrogate energy for DPM-Solver guidance.
         """
-        # Ego future positions (excluding pinned current state at index 0)
+        B, P, T_plus1, _ = x.shape
+        T = T_plus1 - 1
+
+        # Ego future positions
         pos = x[:, 0, 1:, :2]  # [B, T, 2]
         disp = pos[:, 1:, :] - pos[:, :-1, :]  # [B, T-1, 2]
-        v = torch.linalg.vector_norm(disp, dim=-1) / self._dt  # [B, T-1]
+        dist = disp.norm(dim=-1, keepdim=True).clamp_min(1e-6)  # [B, T-1, 1]
+        v = dist.squeeze(-1) / self._dt  # [B, T-1]
 
-        # Squared hinge penalty: zero inside [v_low, v_high]
-        penalty_high = F.relu(v - self._v_high) ** 2      # penalise v > v_high
-        penalty_low  = F.relu(self._v_low - v) ** 2      # penalise v < v_low
+        # For timesteps where v > v_high, compute the target displacement
+        # that would achieve exactly v_high in the same direction.
+        direction = disp / dist  # [B, T-1, 2] unit direction
+        target_dist = (self._v_high * self._dt)  # scalar
+        # Correction: pull pos[t+1] back toward pos[t] to match target_dist
+        # correction = target_pos - actual_pos = (direction * target_dist - disp)
+        # Only active when v > v_high
+        overspeed = (v > self._v_high).float().unsqueeze(-1)  # [B, T-1, 1]
+        correction = (direction * target_dist - disp) * overspeed  # [B, T-1, 2]
 
-        raw_energy = (penalty_high + penalty_low).mean(dim=1)   # [B]
+        # Also handle v < v_low (push forward)
+        if self._v_low > 0:
+            target_dist_low = self._v_low * self._dt
+            underspeed = (v < self._v_low).float().unsqueeze(-1)
+            correction = correction + (direction * target_dist_low - disp) * underspeed
 
-        # BaseGuidance convention: higher reward = better trajectory
-        reward = -raw_energy
+        # Surrogate energy: dot(correction.detach(), pos[1:])
+        # ∇_x dot(c, x) = c — so the gradient of this energy equals the correction.
+        # DPM-Solver does x += gs * ∇energy = gs * correction → moves toward target speed.
+        reward = torch.sum(correction.detach() * pos[:, 1:, :2], dim=(1, 2))  # [B]
+
         return reward
