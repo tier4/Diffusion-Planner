@@ -68,6 +68,8 @@ class GuidancePanelComponents:
     centerline_scale: gr.Slider
     anchor_cb: gr.Checkbox
     anchor_scale: gr.Slider
+    road_border_cb: gr.Checkbox
+    road_border_scale: gr.Slider
     speed_cb: gr.Checkbox
     speed_scale: gr.Slider
     speed_limit: gr.Slider
@@ -99,6 +101,7 @@ class GuidancePanelComponents:
             self.lane_cb,        self.lane_scale,
             self.centerline_cb,  self.centerline_scale,
             self.anchor_cb,      self.anchor_scale,
+            self.road_border_cb, self.road_border_scale,
             self.speed_cb,       self.speed_scale,    self.speed_limit,
             self.anchor_index,   self.anchor_path,
             self.global_scale,
@@ -181,6 +184,16 @@ def build_guidance_panel(
                 label="Centerline Scale",
             )
         with gr.Column():
+            road_border_cb = gr.Checkbox(
+                value=False,
+                label="Road Border Avoidance",
+                info="Repel trajectory from road border line_strings using ego perimeter sampling",
+            )
+            road_border_scale = gr.Slider(
+                minimum=1.0, maximum=200.0, value=100.0, step=5.0,
+                label="Road Border Scale",
+            )
+        with gr.Column():
             anchor_cb = gr.Checkbox(
                 value=False,
                 label="Anchor Following",
@@ -246,6 +259,8 @@ def build_guidance_panel(
         centerline_scale=centerline_scale,
         anchor_cb=anchor_cb,
         anchor_scale=anchor_scale,
+        road_border_cb=road_border_cb,
+        road_border_scale=road_border_scale,
         speed_cb=speed_cb,
         speed_scale=speed_scale,
         speed_limit=speed_limit,
@@ -296,6 +311,7 @@ def make_guidance_set_config(
     ulk: bool,  ulks: float,
     ucf: bool,  ucfs: float,
     ua: bool,   uas: float,
+    urb: bool,  urbs: float,
     u_speed: bool, u_speed_scale: float, u_speed_limit: float,
     ai: int,    ap: str,
     gs: float,
@@ -336,8 +352,9 @@ def make_guidance_set_config(
         GuidanceConfig("route_following",      enabled=bool(urf), scale=float(urfs)),
         GuidanceConfig("lane_keeping",         enabled=bool(ulk), scale=float(ulks)),
         GuidanceConfig("centerline_following", enabled=bool(ucf), scale=float(ucfs)),
-        GuidanceConfig("speed", enabled=bool(u_speed), scale=float(u_speed_scale), 
-                params={"v_low": 0.0, "v_high": u_speed_limit, "dt": 0.1})
+        GuidanceConfig("speed", enabled=bool(u_speed), scale=float(u_speed_scale),
+                params={"v_low": 0.0, "v_high": u_speed_limit, "dt": 0.1}),
+        GuidanceConfig("road_border", enabled=bool(urb), scale=float(urbs)),
     ]
     if ua and ap and os.path.exists(str(ap)):
         k = _get_prototype_k(str(ap))

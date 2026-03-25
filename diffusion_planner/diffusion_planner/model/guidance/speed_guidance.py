@@ -70,5 +70,4 @@ class SpeedGuidance(BaseGuidance):
 
         # BaseGuidance convention: higher reward = better trajectory
         reward = -raw_energy
-        print(f"speed reward: {reward.item()}")
         return reward
