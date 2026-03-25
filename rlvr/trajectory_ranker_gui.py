@@ -358,7 +358,7 @@ class TrajectoryRanker:
             wm = cfg.w_smooth * rb.smoothness
             wf = cfg.w_feasibility * rb.feasibility
             wc = cfg.w_centerline * rb.centerline
-            wr = cfg.w_red_light * rb.red_light
+            wr = rb.red_light  # red light is a hard gate, not weighted
             lines.append(
                 f"| {b}{rank}{b} | {b}{ws:.1f}{b} | {b}{wp:.1f}{b} | "
                 f"{b}{wm:.1f}{b} | {b}{wf:.1f}{b} | "

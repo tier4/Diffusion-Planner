@@ -25,7 +25,6 @@ class RewardConfig:
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
-    w_red_light: float = 10.0
     collision_penalty: float = -10.0
     red_light_penalty: float = -10.0
     max_accel: float = 8.0  # m/s^2
