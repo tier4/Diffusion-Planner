@@ -24,6 +24,21 @@ python -m rlvr.autoresearch.check_lora_training \
   /path/to/experiment_dir \
   --base-model /path/to/best_model.pth \
   --scene /path/to/test_scene.npz
+
+# Visualize scenes (baseline only)
+python -m rlvr.autoresearch.visualize_scenes \
+  --model_path /path/to/best_model.pth \
+  --scenes /path/to/scenes.json \
+  --output_dir /path/to/output_images/ \
+  --n_scenes 12
+
+# Visualize comparison: baseline vs LoRA
+python -m rlvr.autoresearch.visualize_scenes \
+  --model_path /path/to/best_model.pth \
+  --scenes /path/to/scenes.json \
+  --lora_path /path/to/lora_epoch_004 \
+  --output_dir /path/to/output_images/ \
+  --indices 87 89 91 93 95
 ```
 
 ## Tools
@@ -70,6 +85,27 @@ Checks that LoRA training actually changed the model's behavior by:
 **Important:** Always uses `load_lora_checkpoint()` (not `PeftModel.from_pretrained()`
 directly) because the v4 DiT uses `nn.MultiheadAttention` which must be replaced
 with `UnfusedMHA` before loading LoRA weights.
+
+### `visualize_scenes.py` — Scene Visualization with Road Borders
+
+Generates publication-quality trajectory visualizations with:
+- Lane boundaries (gray), road borders (red), GT trajectory (green)
+- Ego vehicle rectangle at t=0 and footprints along the trajectory
+- Road border metrics (rb_cross, rb_near) per scene
+- Comparison mode: overlaps baseline (blue) and LoRA (orange) on same plot
+
+**Modes:**
+- **Single model**: `--model_path` only → grid of scenes with deterministic trajectory
+- **Comparison**: add `--lora_path` → baseline vs LoRA overlapped on each scene
+
+**Args:**
+- `--model_path`: Base model `.pth` (required)
+- `--scenes`: JSON list of NPZ paths (required)
+- `--lora_path`: LoRA checkpoint dir for comparison (optional)
+- `--output_dir`: Save images here (required)
+- `--indices`: Specific scene indices to show (optional)
+- `--n_scenes`: Number of evenly-spaced scenes if `--indices` not given (default: 12)
+- `--cols`: Grid columns (default: 3)
 
 ## Scene Lists
 
