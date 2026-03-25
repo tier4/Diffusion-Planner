@@ -26,7 +26,9 @@ if str(parent_dir) not in sys.path:
 
 import torch
 from torch import optim
+from torch.utils.data import DataLoader
 
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from preference_optimization.annotation_gui import collect_preferences
 from preference_optimization.annotation_ros_node import AnnotationRosServer
 from preference_optimization.model_utils import load_model
@@ -165,89 +167,44 @@ def setup_experiment(args: argparse.Namespace) -> tuple[Path, Path, Path | None]
     Raises:
         FileNotFoundError: If model or args.json not found
     """
-    B = data["ego_current_state"].shape[0]
-    P = 1 + model_args.predicted_neighbor_num
-    future_len = model_args.future_len
-    # Convert trajectory to tensor and normalize
-    gt_trajectory = torch.tensor(trajectory).float().to(DEVICE).unsqueeze(0)  # [1, T, 4]
+    # Validate paths
+    if not args.model_path.exists():
+        raise FileNotFoundError(f"Model checkpoint not found: {args.model_path}")
 
-    # Normalize using ego stats only (StateNormalizer broadcasts to [P, T, 4] which causes shape mismatch)
-    ego_mean = model_args.state_normalizer.mean[0].to(DEVICE)
-    ego_std = model_args.state_normalizer.std[0].to(DEVICE)
-    gt_trajectory_norm = (gt_trajectory - ego_mean) / ego_std  # [1, T, 4]
+    args_json_path = args.model_path.parent / "args.json"
+    if not args_json_path.exists():
+        raise FileNotFoundError(f"args.json not found: {args_json_path}")
 
-    # Create full gt with ego + neighbors (neighbors are zeros)
-    gt_future = torch.zeros(B, P, future_len, 4, device=DEVICE)
-    gt_future[:, 0, :, :] = gt_trajectory_norm  # Only ego has ground truth
+    # Create experiment directory
+    save_dir = args.train_npz_list.parent
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = save_dir / f"{timestamp}_{args.exp_name}"
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Current states
-    ego_current = data["ego_current_state"][:, :4]
-    neighbors_current = (
-        data["neighbor_agents_past"][:, : P - 1, -1, :4]
-        if P > 1
-        else torch.zeros(B, 0, 4, device=DEVICE)
-    )
-    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
+    # Copy model and config to experiment directory
+    checkpoint_path = run_dir / "latest.pth"
+    shutil.copy2(args.model_path, checkpoint_path)
+    shutil.copy2(args_json_path, run_dir / "args.json")
 
-    # Concatenate current state with future
-    all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, 1+T, 4]
+    # If a LoRA adapter exists next to model_path and --use_lora is requested,
+    # copy it into the new run dir so we can resume from the trained adapter.
+    seed_lora_dir: Path | None = None
+    if getattr(args, "use_lora", False):
+        src_lora = _find_lora_dir(args.model_path.parent)
+        if src_lora is not None:
+            seed_lora_dir = run_dir / "lora_seed"
+            shutil.copytree(src_lora, seed_lora_dir)
+            print(f"Found previous LoRA adapter: {src_lora}")
+            print(f"  → copied to {seed_lora_dir} (will resume from these weights)")
 
-    # Add noise to future part only
-    mean, std = model.sde.marginal_prob(all_gt[..., 1:, :], t)
-    std = std.view(-1, *([1] * (len(all_gt[..., 1:, :].shape) - 1)))
+    # Save training arguments
+    args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    with open(run_dir / "dpo_args.json", "w") as f:
+        json.dump(args_dict, f, indent=4)
 
-    if model_args.diffusion_model_type == "flow_matching":
-        t_expanded = t.reshape(-1, *([1] * (len(all_gt.shape) - 1)))  # [B, 1, 1, 1]
-        xT = (1 - t_expanded) * noise + t_expanded * all_gt[:, :, 1:, :]  # [B, P, T, 4]
-    else:
-        xT = mean + std * noise
+    print(f"Experiment directory: {run_dir}")
 
-    # Concatenate current state with noisy future
-    xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)  # [B, P, 1+T, 4]
-
-    # Clone data before normalization to avoid inplace modifications
-    data_for_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-
-    # Normalize observations (important: this should not modify data inplace)
-    data_normalized = model_args.observation_normalizer(data_for_norm)
-
-    # Prepare model inputs - create new dict to avoid modifying original
-    merged_inputs = {}
-    for k, v in data_normalized.items():
-        merged_inputs[k] = v
-    merged_inputs["gt_trajectories"] = all_gt
-    merged_inputs["sampled_trajectories"] = xT_full
-    merged_inputs["diffusion_time"] = t
-
-    # Run model
-    _, outputs = model(merged_inputs)
-    if "model_output" in outputs:
-        outputs = outputs["model_output"]
-        outputs = outputs[:, 0, 1:, :]  # [B, T, 4] - ego only
-    else:
-        outputs = outputs["prediction"]
-        outputs = outputs[:, 0, :, :]  # [B, T, 4] - ego only
-    model_output = outputs  # [B, T, 4]
-
-    # Compute loss based on model type
-    if model_args.diffusion_model_type == "score":
-        # Score matching loss
-        mse_loss = F.mse_loss(
-            (model_output * std[:, 0] + noise[:, 0]),
-            torch.zeros_like(model_output),
-            reduction="mean",
-        )
-    elif model_args.diffusion_model_type == "x_start":
-        # Direct prediction loss
-        mse_loss = F.mse_loss(model_output, gt_trajectory_norm, reduction="mean")
-    elif model_args.diffusion_model_type == "flow_matching":
-        # Flow matching loss
-        target_v = all_gt[:, 0, 1:, :] - noise[:, 0]
-        mse_loss = F.mse_loss(model_output, target_v, reduction="mean")
-    else:
-        raise ValueError(f"Unknown model type: {model_args.diffusion_model_type}")
-
-    return mse_loss
+    return run_dir, checkpoint_path, seed_lora_dir
 
 
 def compute_dpo_loss(

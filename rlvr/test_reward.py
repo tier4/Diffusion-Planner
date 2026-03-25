@@ -22,6 +22,7 @@ from rlvr.reward import (
     compute_feasibility_score_batch,
     compute_group_advantages,
     compute_progress_score_batch,
+    compute_red_light_score_batch,
     compute_reward_batch,
     compute_safety_score_batch,
     compute_smoothness_score_batch,
@@ -354,10 +355,10 @@ def test_compute_reward_full_pipeline():
 
 def test_advantages_zero_mean():
     rewards = [
-        RewardBreakdown(0, 5.0, -0.5, -0.1, 0.0, 4.4, None, 0.0),
-        RewardBreakdown(0, 3.0, -1.0, -0.2, 0.0, 1.8, None, 0.1),
-        RewardBreakdown(0, 8.0, -0.3, -0.0, 0.0, 7.7, None, 0.0),
-        RewardBreakdown(-10, 2.0, -2.0, -0.5, 0.0, -10.5, 5, 0.3),
+        RewardBreakdown(0, 5.0, -0.5, -0.1, 0.0, 0.0, 4.4, None, 0.0),
+        RewardBreakdown(0, 3.0, -1.0, -0.2, 0.0, 0.0, 1.8, None, 0.1),
+        RewardBreakdown(0, 8.0, -0.3, -0.0, 0.0, 0.0, 7.7, None, 0.0),
+        RewardBreakdown(-10, 2.0, -2.0, -0.5, 0.0, 0.0, -10.5, 5, 0.3),
     ]
     adv = compute_group_advantages(rewards)
     assert abs(adv.mean()) < 1e-6, f"Expected zero mean, got {adv.mean()}"
@@ -366,7 +367,7 @@ def test_advantages_zero_mean():
 
 def test_advantages_unit_variance():
     rewards = [
-        RewardBreakdown(0, i * 2.0, -0.5, -0.1, 0.0, i * 2.0 - 0.6, None, 0.0)
+        RewardBreakdown(0, i * 2.0, -0.5, -0.1, 0.0, 0.0, i * 2.0 - 0.6, None, 0.0)
         for i in range(10)
     ]
     adv = compute_group_advantages(rewards)
@@ -376,7 +377,7 @@ def test_advantages_unit_variance():
 
 def test_identical_rewards():
     rewards = [
-        RewardBreakdown(0, 5.0, -0.5, -0.1, 0.0, 4.4, None, 0.0)
+        RewardBreakdown(0, 5.0, -0.5, -0.1, 0.0, 0.0, 4.4, None, 0.0)
         for _ in range(5)
     ]
     adv = compute_group_advantages(rewards)
@@ -386,15 +387,105 @@ def test_identical_rewards():
 
 def test_one_outlier():
     rewards = [
-        RewardBreakdown(0, 1.0, 0, 0, 0.0, 1.0, None, 0.0),
-        RewardBreakdown(0, 1.0, 0, 0, 0.0, 1.0, None, 0.0),
-        RewardBreakdown(0, 1.0, 0, 0, 0.0, 1.0, None, 0.0),
-        RewardBreakdown(0, 100.0, 0, 0, 0.0, 100.0, None, 0.0),
+        RewardBreakdown(0, 1.0, 0, 0, 0.0, 0.0, 1.0, None, 0.0),
+        RewardBreakdown(0, 1.0, 0, 0, 0.0, 0.0, 1.0, None, 0.0),
+        RewardBreakdown(0, 1.0, 0, 0, 0.0, 0.0, 1.0, None, 0.0),
+        RewardBreakdown(0, 100.0, 0, 0, 0.0, 0.0, 100.0, None, 0.0),
     ]
     adv = compute_group_advantages(rewards)
     assert adv[3] > 0, f"Outlier should have positive advantage, got {adv[3]}"
     assert all(adv[i] < 0 for i in range(3)), f"Others should be negative: {adv[:3]}"
     print(f"  PASS  one_outlier: adv={adv}")
+
+
+# -------------------------------------------------------------------------
+# Red light tests
+# -------------------------------------------------------------------------
+
+def test_red_light_no_violation():
+    """Trajectory that stays away from red-light lane points gets no penalty."""
+    N, T = 1, 80
+    # Ego goes straight ahead at y=0
+    ego = torch.zeros(N, T, 4)
+    ego[:, :, 0] = torch.linspace(0, 40, T)
+    ego[:, :, 2] = 1.0  # cos heading = forward
+
+    # Red light on a perpendicular lane at (20, -15), direction (0, 1) — not on ego's path
+    route_lanes = torch.zeros(1, 25, 20, 33)
+    for pt in range(10):
+        route_lanes[0, 2, pt, 0] = 20.0       # x
+        route_lanes[0, 2, pt, 1] = -15 + pt   # y
+        route_lanes[0, 2, pt, 2] = 0.0         # dx (perpendicular)
+        route_lanes[0, 2, pt, 3] = 1.5         # dy
+        route_lanes[0, 2, pt, 10] = 1.0        # RED light
+
+    data = {"route_lanes": route_lanes}
+    config = RewardConfig()
+    scores = compute_red_light_score_batch(ego, data, config)
+    assert scores[0].item() == 0.0, f"Expected no penalty, got {scores[0].item()}"
+    print(f"  PASS  red_light_no_violation: score={scores[0].item():.1f}")
+
+
+def test_red_light_violation():
+    """Trajectory that enters a red-light lane gets penalized."""
+    N, T = 1, 80
+    # Ego goes straight, passing through red-light lane points at (10-20, 0)
+    ego = torch.zeros(N, T, 4)
+    ego[:, :, 0] = torch.linspace(0, 30, T)
+    ego[:, :, 2] = 1.0  # cos heading = forward
+
+    # Red light directly ahead on ego's lane, direction (1, 0) — aligned with ego
+    route_lanes = torch.zeros(1, 25, 20, 33)
+    for pt in range(10):
+        route_lanes[0, 1, pt, 0] = 10 + pt * 1.5  # x = 10 to 23.5
+        route_lanes[0, 1, pt, 1] = 0.0              # y = 0 (on ego's path)
+        route_lanes[0, 1, pt, 2] = 1.5              # dx (forward)
+        route_lanes[0, 1, pt, 3] = 0.0              # dy
+        route_lanes[0, 1, pt, 10] = 1.0             # RED light
+
+    data = {"route_lanes": route_lanes}
+    config = RewardConfig()
+    scores = compute_red_light_score_batch(ego, data, config)
+    assert scores[0].item() < -5.0, f"Expected strong penalty, got {scores[0].item()}"
+    print(f"  PASS  red_light_violation: score={scores[0].item():.1f}")
+
+
+def test_red_light_stopped_no_penalty():
+    """Ego stopped near red light but not moving through it — no penalty."""
+    N, T = 1, 80
+    # Ego is stationary at (0, 0)
+    ego = torch.zeros(N, T, 4)
+    ego[:, :, 0] = 0.0  # not moving
+    ego[:, :, 2] = 1.0  # heading forward
+
+    # Red light at (5, 0) directly ahead
+    route_lanes = torch.zeros(1, 25, 20, 33)
+    for pt in range(5):
+        route_lanes[0, 1, pt, 0] = 5 + pt
+        route_lanes[0, 1, pt, 1] = 0.0
+        route_lanes[0, 1, pt, 2] = 1.5
+        route_lanes[0, 1, pt, 3] = 0.0
+        route_lanes[0, 1, pt, 10] = 1.0
+
+    data = {"route_lanes": route_lanes}
+    config = RewardConfig()
+    scores = compute_red_light_score_batch(ego, data, config)
+    assert scores[0].item() == 0.0, f"Stopped ego should not be penalized, got {scores[0].item()}"
+    print(f"  PASS  red_light_stopped_no_penalty: score={scores[0].item():.1f}")
+
+
+def test_red_light_no_data():
+    """No route_lanes in data — no penalty."""
+    N, T = 1, 80
+    ego = torch.zeros(N, T, 4)
+    ego[:, :, 0] = torch.linspace(0, 30, T)
+    ego[:, :, 2] = 1.0
+
+    data = {}
+    config = RewardConfig()
+    scores = compute_red_light_score_batch(ego, data, config)
+    assert scores[0].item() == 0.0
+    print(f"  PASS  red_light_no_data: score={scores[0].item():.1f}")
 
 
 # -------------------------------------------------------------------------
@@ -428,6 +519,10 @@ if __name__ == "__main__":
         test_advantages_unit_variance,
         test_identical_rewards,
         test_one_outlier,
+        test_red_light_no_violation,
+        test_red_light_violation,
+        test_red_light_stopped_no_penalty,
+        test_red_light_no_data,
     ]
 
     print("=" * 60)

@@ -223,7 +223,11 @@ def model_wrapper(
             cond_grad = cond_grad_fn(x, t_continuous)
             sigma_t = noise_schedule.marginal_std(t_continuous)
             noise = noise_pred_fn(x, t_continuous)
-            return noise - guidance_scale * expand_dims(sigma_t, x.dim()) * cond_grad
+            # Reshape cond_grad to match noise shape for compatibility.
+            # cond_grad may be 3D [B,P,T*4] while noise is 4D [B,P,T,4]
+            # when prefix_constraint flattens x between solver steps.
+            cond_grad = cond_grad.reshape(noise.shape)
+            return noise - guidance_scale * expand_dims(sigma_t, noise.dim()) * cond_grad
         elif guidance_type == "classifier-free":
             if guidance_scale == 1.0 or unconditional_condition is None:
                 return noise_pred_fn(x, t_continuous, cond=condition)
@@ -574,4 +578,6 @@ def expand_dims(v, dims):
     Returns:
         a PyTorch tensor with shape [N, 1, 1, ..., 1] and the total dimension is `dims`.
     """
+    if v.dim() >= dims:
+        return v
     return v[(...,) + (None,) * (dims - 1)]
