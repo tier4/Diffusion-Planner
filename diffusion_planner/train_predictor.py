@@ -104,7 +104,7 @@ def get_args():
         help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
     )
 
-    parser.add_argument("--coeff_road_border_loss", type=float, default=10.0)
+    parser.add_argument("--coeff_road_border_loss", type=float, default=1.0)
     parser.add_argument("--road_border_margin", type=float, default=0.25)
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
