@@ -21,7 +21,6 @@ from diffusion_planner.utils.config import Config
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 
 
-SSD = "/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207"
 DEVICE = "cuda"
 
 
@@ -35,8 +34,8 @@ def load_model_with_lora(base_model_path, lora_path=None):
     model.to(DEVICE).eval()
 
     if lora_path:
-        from peft import PeftModel
-        model = PeftModel.from_pretrained(model, lora_path)
+        from preference_optimization.lora_utils import load_lora_checkpoint
+        model = load_lora_checkpoint(model, lora_path)
         model.eval()
 
     return model, args
@@ -122,7 +121,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("exp_dir", help="Experiment directory")
     parser.add_argument("--scene", default=None, help="NPZ path for trajectory comparison")
-    parser.add_argument("--base-model", default=f"{SSD}/v4.0/best_model.pth")
+    parser.add_argument("--base-model", required=True, help="Path to base model .pth")
     args = parser.parse_args()
 
     print(f"Experiment: {args.exp_dir}")

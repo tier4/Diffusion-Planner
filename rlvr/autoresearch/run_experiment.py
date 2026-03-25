@@ -44,13 +44,12 @@ from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Data paths — v4 model and data
-SSD = Path("/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207")
-BASE_MODEL = SSD / "v4.0/best_model.pth"
-PROB_SCENES_PATH = SSD / "auto_research/v4_train_prob_pool.json"
-NORMAL_POOL_PATH = SSD / "auto_research/v4_train_normal_pool.json"
-VALID_SCENES_PATH = SSD / "auto_research/v4_validation_100.json"
-OUTPUT_DIR = SSD / "auto_research"
+# These are set from CLI args in main() — no hardcoded paths.
+BASE_MODEL: Path = Path(".")
+PROB_SCENES_PATH: Path = Path(".")
+NORMAL_POOL_PATH: Path = Path(".")
+VALID_SCENES_PATH: Path = Path(".")
+OUTPUT_DIR: Path = Path(".")
 
 
 def load_scene_lists():
@@ -60,7 +59,6 @@ def load_scene_lists():
         normal_pool = json.load(f)
     with open(VALID_SCENES_PATH) as f:
         val_scenes = json.load(f)
-    # v4 validation set is already curated (stopped scenes removed)
     return prob_all, normal_pool, val_scenes
 
 
@@ -410,11 +408,24 @@ def main():
     parser = argparse.ArgumentParser(description="Run a single GRPO experiment")
     parser.add_argument("--config", type=Path, required=True, help="Path to experiment config JSON")
     parser.add_argument("--name", type=str, required=True, help="Experiment name")
+    parser.add_argument("--model_path", type=Path, required=True, help="Path to base model .pth")
+    parser.add_argument("--prob_scenes", type=Path, required=True, help="JSON list of problem scene NPZ paths")
+    parser.add_argument("--normal_scenes", type=Path, required=True, help="JSON list of normal scene NPZ paths")
+    parser.add_argument("--val_scenes", type=Path, required=True, help="JSON list of validation scene NPZ paths")
+    parser.add_argument("--output_dir", type=Path, required=True, help="Output directory for experiment results")
     args = parser.parse_args()
 
     if not args.config.exists():
         print(f"Config not found: {args.config}")
         sys.exit(1)
+
+    # Set module-level paths from CLI args
+    global BASE_MODEL, PROB_SCENES_PATH, NORMAL_POOL_PATH, VALID_SCENES_PATH, OUTPUT_DIR
+    BASE_MODEL = args.model_path
+    PROB_SCENES_PATH = args.prob_scenes
+    NORMAL_POOL_PATH = args.normal_scenes
+    VALID_SCENES_PATH = args.val_scenes
+    OUTPUT_DIR = args.output_dir
 
     try:
         run(args.config, args.name)
