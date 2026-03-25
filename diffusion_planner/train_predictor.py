@@ -11,6 +11,9 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation_bridge import (
+    StatePerturbation as BridgeStatePerturbation,
+)
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import (
@@ -72,6 +75,9 @@ def get_args():
     # DataLoader parameters
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, help="augmentation probability", default=0.5)
+    parser.add_argument(
+        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+    )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
@@ -102,7 +108,7 @@ def get_args():
         help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
     )
 
-    parser.add_argument("--coeff_road_border_loss", type=float, default=10.0)
+    parser.add_argument("--coeff_road_border_loss", type=float, default=1.0)
     parser.add_argument("--road_border_margin", type=float, default=0.25)
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
@@ -260,11 +266,13 @@ def model_training(args):
     save_utd = args.save_utd
 
     # set up data loaders
-    aug = (
-        StatePerturbation(augment_prob=args.augment_prob, device=args.device)
-        if args.use_data_augment
-        else None
-    )
+    if args.use_data_augment:
+        if args.augment_type == "bridge":
+            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        else:
+            aug = StatePerturbation(augment_prob=args.augment_prob, device=args.device)
+    else:
+        aug = None
 
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
