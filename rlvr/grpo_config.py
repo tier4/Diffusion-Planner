@@ -73,6 +73,7 @@ class GRPOConfig:
     enable_route_following: bool = False
     enable_lane_keeping: bool = False
     enable_road_border: bool = True
+    enable_speed: bool = True
     guidance_prob: float = 0.5
     prototypes_path: str | None = None
 
