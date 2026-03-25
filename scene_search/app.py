@@ -587,7 +587,12 @@ def main():
 
     print(f"Index: {len(index)} scenes")
     demo = build_interface(renderer, index, args.index)
-    demo.launch(server_port=args.port, share=args.share, inbrowser=True)
+    try:
+        demo.launch(server_port=args.port, share=args.share, inbrowser=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        demo.close()
 
 
 if __name__ == "__main__":
