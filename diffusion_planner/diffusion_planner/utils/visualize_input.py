@@ -29,20 +29,21 @@ def get_traffic_light_color(traffic_light):
         # raise ValueError(f"Unknown traffic light state: {traffic_light}")
 
 
+_TURN_INDICATOR_LABELS = {
+    0: "Straight",
+    1: "Straight",
+    2: "Left",
+    3: "Right",
+    4: "Keep",
+}
+
+
 def turn_indicator_int_to_str(turn_indicator):
     """Convert turn indicator integer to string."""
-    if turn_indicator == 0:
-        return "turn_indicator=0"
-    if turn_indicator == 1:
-        return "None"
-    elif turn_indicator == 2:
-        return "<-"
-    elif turn_indicator == 3:
-        return "->"
-    elif turn_indicator == 4:
-        return "Keep"
-    else:
+    label = _TURN_INDICATOR_LABELS.get(int(turn_indicator))
+    if label is None:
         raise ValueError(f"Unknown turn command: {turn_indicator}")
+    return label
 
 
 def draw_bounding_box(ax, x, y, cos, sin, len_x, len_y, color, alpha):
@@ -407,8 +408,11 @@ def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
     if "turn_indicators" in inputs:
         turn_indicator = inputs["turn_indicators"][0][-1]
         if inputs["turn_indicators"][0][-2] == turn_indicator:
-            turn_indicator = TURN_INDICATOR_OUTPUT_KEEP
-        turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
+            # Same as previous timestep — prefix with "Keep" to indicate sustained signal
+            label = turn_indicator_int_to_str(turn_indicator)
+            turn_indicator_text_gt = label if label == "Keep" else f"Keep {label}"
+        else:
+            turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
 
     if "turn_indicator_pred" in inputs:
         turn_indicator_pred = inputs["turn_indicator_pred"]
