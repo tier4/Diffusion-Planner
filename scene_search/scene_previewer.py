@@ -52,9 +52,10 @@ def render_single_thumbnail(npz_path: str, view_range: float = 60.0, figsize: tu
     """
     data = _load_npz_as_viz_data(npz_path)
     fig = Figure(figsize=figsize, dpi=dpi)
-    ax = fig.add_axes([0.02, 0.02, 0.96, 0.96])  # skip tight_layout overhead
+    ax = fig.add_subplot(111)
     visualize_inputs(data, save_path=None, ax=ax, view_ranges=[view_range])
     ax.set_aspect("equal")
+    fig.tight_layout(pad=0.5)
     return fig
 
 
@@ -72,7 +73,7 @@ def _render_thumbnail_to_bytes(args: tuple) -> tuple[int, bytes, str]:
     try:
         fig = render_single_thumbnail(npz_path, view_range=view_range, figsize=(fw, fh), dpi=dpi)
         buf = io.BytesIO()
-        fig.savefig(buf, format="jpg", dpi=dpi, pil_kwargs={"quality": 85})
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
         import matplotlib.pyplot as plt
         plt.close(fig)
         buf.seek(0)
