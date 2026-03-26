@@ -41,9 +41,12 @@ from diffusion_planner.model.guidance import (
     list_available,
 )
 from diffusion_planner.model.guidance.lateral_guidance import LateralGuidance
-from diffusion_planner.model.guidance.longitudinal_guidance import (
-    LongitudinalGuidance,
-    _time_shift_trajectory,
+from diffusion_planner.model.guidance.longitudinal_guidance import LongitudinalGuidance
+from diffusion_planner.model.guidance.frenet import (
+    perturb_trajectory,
+    cartesian_to_frenet,
+    frenet_to_cartesian,
+    _compute_arc_lengths,
 )
 
 # ======================================================================
@@ -153,11 +156,11 @@ def test_longitudinal_build_and_defaults():
     cfg = GuidanceConfig("longitudinal", scale=1.0)
     fn = build(cfg)
     assert fn.name == "longitudinal"
-    assert fn._time_shift == 5.0, f"Default shift should be 5.0, got {fn._time_shift}"
+    assert fn._longitudinal_offset == 2.0, f"Default offset should be 2.0, got {fn._longitudinal_offset}"
 
-    cfg2 = GuidanceConfig("longitudinal", scale=1.0, params={"time_shift": -3.0})
+    cfg2 = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": -3.0})
     fn2 = build(cfg2)
-    assert fn2._time_shift == -3.0, f"Custom shift should be -3.0, got {fn2._time_shift}"
+    assert fn2._longitudinal_offset == -3.0, f"Custom offset should be -3.0, got {fn2._longitudinal_offset}"
     print("  PASS  test_longitudinal_build_and_defaults")
 
 
@@ -175,7 +178,7 @@ def test_lateral_no_reference_returns_zero():
 
 def test_longitudinal_no_reference_returns_zero():
     """Longitudinal guidance returns zeros when no reference trajectory is provided."""
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"time_shift": 5.0})
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": 5.0})
     fn = build(cfg)
     ego = _straight_trajectory(speed=5.0)
     x, inputs = _build_guidance_input(ego, ref_traj=None)
@@ -253,10 +256,10 @@ def test_lateral_reward_scales_with_distance():
 
 
 def test_longitudinal_zero_shift():
-    """Ego on reference with shift=0 should give reward=0."""
+    """Ego on reference with offset=0 should give reward=0."""
     ref = _straight_trajectory(speed=5.0)
     ego = ref.clone()
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"time_shift": 0.0})
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": 0.0})
     fn = build(cfg)
     x, inputs = _build_guidance_input(ego, ref_traj=ref)
     r = fn._compute(x, inputs)
@@ -265,10 +268,10 @@ def test_longitudinal_zero_shift():
 
 
 def test_longitudinal_shift_direction():
-    """Positive shift should prefer ego AHEAD of reference (faster).
+    """Positive offset should prefer ego AHEAD of reference (faster).
 
-    For a 5 m/s trajectory, shift=+10 means target is 10 steps ahead = +5m in X.
-    Ego that is 5m ahead should score better than ego that is 5m behind.
+    For a 5 m/s trajectory heading along +X, longitudinal_offset=+5m
+    means target is 5m further along the path.
     """
     ref = _straight_trajectory(speed=5.0, heading=0.0)
 
@@ -278,7 +281,7 @@ def test_longitudinal_shift_direction():
     ego_behind = ref.clone()
     ego_behind[:, 0] -= 5.0
 
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"time_shift": 10.0})
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": 5.0})
     fn = build(cfg)
 
     x_ahead, inp_ahead = _build_guidance_input(ego_ahead, ref_traj=ref)
@@ -293,45 +296,64 @@ def test_longitudinal_shift_direction():
     print(f"  PASS  test_longitudinal_shift_direction: r_ahead={r_ahead:.2f}, r_behind={r_behind:.2f}")
 
 
-def test_time_shift_trajectory_basic():
-    """_time_shift_trajectory: integer shift forward/backward with clamping."""
-    ref = torch.arange(10).float().unsqueeze(0).unsqueeze(-1).expand(1, 10, 2)
+def test_frenet_roundtrip_straight():
+    """Frenet: cartesian → frenet → cartesian roundtrip on a straight path."""
+    ref = _straight_trajectory(speed=5.0, heading=0.0).unsqueeze(0)  # [1, T, 4]
+    ref_xy = ref[..., :2]
 
-    # Shift +3: [3,4,5,6,7,8,9,9,9,9]
-    shifted = _time_shift_trajectory(ref, 3.0)
-    expected = torch.tensor([3, 4, 5, 6, 7, 8, 9, 9, 9, 9], dtype=torch.float32)
-    assert torch.allclose(shifted[0, :, 0], expected), (
-        f"Shift +3 failed: {shifted[0, :, 0].tolist()} vs {expected.tolist()}"
-    )
+    s, d = cartesian_to_frenet(ref, ref_xy)
+    # d should be ~0 (points are on the reference)
+    assert d.abs().max() < 1e-4, f"Lateral deviation should be ~0, got max={d.abs().max():.6f}"
+    # s should be monotonically increasing
+    assert (s[0, 1:] >= s[0, :-1] - 1e-6).all(), "Arc-length should be monotonic"
 
-    # Shift -2: [0,0,0,1,2,3,4,5,6,7]
-    shifted_neg = _time_shift_trajectory(ref, -2.0)
-    expected_neg = torch.tensor([0, 0, 0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.float32)
-    assert torch.allclose(shifted_neg[0, :, 0], expected_neg), (
-        f"Shift -2 failed: {shifted_neg[0, :, 0].tolist()} vs {expected_neg.tolist()}"
-    )
-
-    # Shift 0: identity
-    shifted_zero = _time_shift_trajectory(ref, 0.0)
-    assert torch.allclose(shifted_zero, ref), "Shift 0 should be identity"
-
-    print("  PASS  test_time_shift_trajectory_basic")
+    # Roundtrip
+    xy_recovered = frenet_to_cartesian(ref, s, d)
+    err = (xy_recovered - ref_xy).abs().max()
+    assert err < 0.1, f"Roundtrip error should be small, got {err:.4f}"
+    print(f"  PASS  test_frenet_roundtrip_straight: max_d={d.abs().max():.6f}, roundtrip_err={err:.6f}")
 
 
-def test_time_shift_trajectory_fractional():
-    """_time_shift_trajectory: fractional shifts use linear interpolation."""
-    ref = torch.arange(10).float().unsqueeze(0).unsqueeze(-1).expand(1, 10, 2)
+def test_frenet_roundtrip_curve():
+    """Frenet: roundtrip on a curved trajectory."""
+    ref = _curved_trajectory(speed=5.0, curvature=0.02).unsqueeze(0)  # [1, T, 4]
+    ref_xy = ref[..., :2]
 
-    shifted = _time_shift_trajectory(ref, 2.5)
-    # At index 0: interp between ref[2]=2 and ref[3]=3 → 2.5
-    # At index 5: interp between ref[7]=7 and ref[8]=8 → 7.5
-    assert abs(shifted[0, 0, 0].item() - 2.5) < 1e-5, (
-        f"Fractional shift at idx 0: expected 2.5, got {shifted[0, 0, 0].item()}"
-    )
-    assert abs(shifted[0, 5, 0].item() - 7.5) < 1e-5, (
-        f"Fractional shift at idx 5: expected 7.5, got {shifted[0, 5, 0].item()}"
-    )
-    print("  PASS  test_time_shift_trajectory_fractional")
+    s, d = cartesian_to_frenet(ref, ref_xy)
+    assert d.abs().max() < 0.5, f"Lateral deviation on curve should be small, got {d.abs().max():.4f}"
+
+    xy_recovered = frenet_to_cartesian(ref, s, d)
+    err = (xy_recovered - ref_xy).abs().max()
+    assert err < 0.5, f"Roundtrip error on curve should be small, got {err:.4f}"
+    print(f"  PASS  test_frenet_roundtrip_curve: max_d={d.abs().max():.4f}, roundtrip_err={err:.4f}")
+
+
+def test_perturb_lateral_only():
+    """perturb_trajectory with lateral offset on straight path."""
+    ref = _straight_trajectory(speed=5.0, heading=0.0).unsqueeze(0)
+    perturbed = perturb_trajectory(ref, lateral_offset=2.0, longitudinal_offset=0.0)
+
+    # On a straight +X path, lateral +2m should shift Y by +2
+    y_diff = (perturbed[0, :, 1] - ref[0, :, 1]).mean().item()
+    assert abs(y_diff - 2.0) < 0.5, f"Expected ~2.0m Y shift, got {y_diff:.3f}"
+    # X should be roughly unchanged
+    x_diff = (perturbed[0, :, 0] - ref[0, :, 0]).abs().mean().item()
+    assert x_diff < 0.5, f"X should be ~unchanged, got mean diff={x_diff:.3f}"
+    print(f"  PASS  test_perturb_lateral_only: y_diff={y_diff:.3f}, x_diff={x_diff:.3f}")
+
+
+def test_perturb_longitudinal_only():
+    """perturb_trajectory with longitudinal offset on straight path."""
+    ref = _straight_trajectory(speed=5.0, heading=0.0).unsqueeze(0)
+    perturbed = perturb_trajectory(ref, lateral_offset=0.0, longitudinal_offset=3.0)
+
+    # On a straight +X path, longitudinal +3m should shift X by +3
+    x_diff = (perturbed[0, :, 0] - ref[0, :, 0]).mean().item()
+    assert x_diff > 0, f"Expected positive X shift, got {x_diff:.3f}"
+    # Y should be roughly unchanged
+    y_diff = (perturbed[0, :, 1] - ref[0, :, 1]).abs().mean().item()
+    assert y_diff < 0.5, f"Y should be ~unchanged, got mean diff={y_diff:.3f}"
+    print(f"  PASS  test_perturb_longitudinal_only: x_diff={x_diff:.3f}, y_diff={y_diff:.3f}")
 
 
 def test_lateral_on_curve():
@@ -360,24 +382,25 @@ def test_lateral_on_curve():
 
 
 def test_longitudinal_on_curve():
-    """Longitudinal guidance on a curve: time-shifted ego tracks the arc."""
+    """Longitudinal guidance on a curve: Frenet arc-length offset."""
     ref = _curved_trajectory(speed=5.0, curvature=0.02)
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"time_shift": 5.0})
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": 2.0})
     fn = build(cfg)
 
-    # Ego equal to time-shifted reference should have reward ~0
-    shifted_ref = _time_shift_trajectory(ref.unsqueeze(0), 5.0).squeeze(0)
-    x_shifted, inputs = _build_guidance_input(shifted_ref, ref_traj=ref)
-    r = fn._compute(x_shifted, inputs).item()
-    assert abs(r) < 1e-3, (
-        f"Ego at time-shifted target on curve should have ~0 reward, got {r:.4f}"
+    # Ego at the Frenet-perturbed target should have reward ~0
+    ref_b = ref.unsqueeze(0)
+    target = perturb_trajectory(ref_b, lateral_offset=0.0, longitudinal_offset=2.0).squeeze(0)
+    x_target, inputs = _build_guidance_input(target, ref_traj=ref)
+    r = fn._compute(x_target, inputs).item()
+    assert abs(r) < 1.0, (
+        f"Ego at Frenet target on curve should have small penalty, got {r:.4f}"
     )
 
-    # Ego at original reference should have penalty
+    # Ego at original reference should have larger penalty
     x_orig, inputs_orig = _build_guidance_input(ref.clone(), ref_traj=ref)
     r_orig = fn._compute(x_orig, inputs_orig).item()
-    assert r_orig < 0, f"Ego at ref with shift=5 should have penalty, got {r_orig}"
-    print(f"  PASS  test_longitudinal_on_curve: r_at_target={r:.6f}, r_at_ref={r_orig:.2f}")
+    assert r_orig < 0, f"Ego at ref with offset=2 should have penalty, got {r_orig}"
+    print(f"  PASS  test_longitudinal_on_curve: r_at_target={r:.4f}, r_at_ref={r_orig:.2f}")
 
 
 def test_energy_method_time_gating():
@@ -554,13 +577,13 @@ def visualize_longitudinal_test(
         ax.plot(
             traj[:, 0], traj[:, 1],
             color=color, linewidth=2, alpha=0.85,
-            label=f"shift={shift:+.0f}steps",
+            label=f"lon={shift:+.0f}m",
             zorder=9,
         )
         ax.plot(traj[-1, 0], traj[-1, 1], "o", color=color, markersize=4, zorder=10)
 
     ax.legend(loc="upper left", fontsize=7, framealpha=0.8)
-    ax.set_title("Longitudinal Guidance Test: time-shift along deterministic reference", fontsize=10)
+    ax.set_title("Longitudinal Guidance Test: Frenet arc-length offset from deterministic reference", fontsize=10)
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -777,7 +800,7 @@ def run_model_tests(model_path, npz_path, save_dir, device):
 
     # --- Longitudinal guidance sweep ---
     print("\n  Longitudinal guidance sweep...")
-    time_shifts = [-15, -10, -5, -2, 2, 5, 10, 15]
+    time_shifts = [-8, -5, -3, -1, 1, 3, 5, 8]  # metres of arc-length offset
     longitudinal_trajs = {}
 
     for shift in time_shifts:
@@ -789,7 +812,7 @@ def run_model_tests(model_path, npz_path, save_dir, device):
 
         set_cfg = GuidanceSetConfig(
             global_scale=1.0,
-            functions=[GuidanceConfig("longitudinal", scale=5.0, params={"time_shift": float(shift)})],
+            functions=[GuidanceConfig("longitudinal", scale=5.0, params={"longitudinal_offset": float(shift)})],
         )
         composer = GuidanceComposer(set_cfg)
         traj = generate_with_guidance(model, model_args, norm_data_copy, composer, device)
@@ -809,26 +832,26 @@ def run_model_tests(model_path, npz_path, save_dir, device):
 
     # Numerical check: positive shift (faster) should travel more distance
     det_travel = np.linalg.norm(np.diff(det_traj[:, :2], axis=0), axis=1).sum()
-    for shift in [5, 10, 15]:
+    for shift in [3, 5, 8]:
         traj = longitudinal_trajs[shift]
         guided_travel = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
         if guided_travel > det_travel:
-            print(f"  CHECK shift={shift:+d}: guided_travel={guided_travel:.1f}m > det={det_travel:.1f}m ✓")
+            print(f"  CHECK lon={shift:+d}m: guided_travel={guided_travel:.1f}m > det={det_travel:.1f}m ✓")
         else:
             print(
-                f"  WARN  shift={shift:+d}: guided_travel={guided_travel:.1f}m <= det={det_travel:.1f}m "
-                f"(expected faster)"
+                f"  WARN  lon={shift:+d}m: guided_travel={guided_travel:.1f}m <= det={det_travel:.1f}m "
+                f"(may saturate at large offsets)"
             )
 
-    for shift in [-5, -10, -15]:
+    for shift in [-3, -5, -8]:
         traj = longitudinal_trajs[shift]
         guided_travel = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
         if guided_travel < det_travel:
-            print(f"  CHECK shift={shift:+d}: guided_travel={guided_travel:.1f}m < det={det_travel:.1f}m ✓")
+            print(f"  CHECK lon={shift:+d}m: guided_travel={guided_travel:.1f}m < det={det_travel:.1f}m ✓")
         else:
             print(
-                f"  WARN  shift={shift:+d}: guided_travel={guided_travel:.1f}m >= det={det_travel:.1f}m "
-                f"(expected slower)"
+                f"  WARN  lon={shift:+d}m: guided_travel={guided_travel:.1f}m >= det={det_travel:.1f}m "
+                f"(may saturate at large offsets)"
             )
 
     save_lon = os.path.join(save_dir, f"{scene_name}_longitudinal_sweep.png")
@@ -838,12 +861,12 @@ def run_model_tests(model_path, npz_path, save_dir, device):
     print("\n  Combined guidance test...")
     combined_trajs = {}
     combos = [
-        ("lat+1 lon+5", 1.0, 5.0),
-        ("lat+2 lon+10", 2.0, 10.0),
-        ("lat-1 lon-5", -1.0, -5.0),
-        ("lat-2 lon-10", -2.0, -10.0),
-        ("lat+2 lon-5", 2.0, -5.0),
-        ("lat-2 lon+5", -2.0, 5.0),
+        ("lat+1 lon+3", 1.0, 3.0),
+        ("lat+2 lon+5", 2.0, 5.0),
+        ("lat-1 lon-3", -1.0, -3.0),
+        ("lat-2 lon-5", -2.0, -5.0),
+        ("lat+2 lon-3", 2.0, -3.0),
+        ("lat-2 lon+3", -2.0, 3.0),
     ]
     for label, lat_off, lon_shift in combos:
         norm_data_copy = {
@@ -895,8 +918,10 @@ if __name__ == "__main__":
         test_lateral_reward_scales_with_distance,
         test_longitudinal_zero_shift,
         test_longitudinal_shift_direction,
-        test_time_shift_trajectory_basic,
-        test_time_shift_trajectory_fractional,
+        test_frenet_roundtrip_straight,
+        test_frenet_roundtrip_curve,
+        test_perturb_lateral_only,
+        test_perturb_longitudinal_only,
         test_lateral_on_curve,
         test_longitudinal_on_curve,
         test_energy_method_time_gating,

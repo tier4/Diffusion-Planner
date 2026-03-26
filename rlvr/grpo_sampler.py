@@ -46,11 +46,11 @@ class SamplerConfig:
     lane_keeping_scale_range: tuple[float, float] = (0.5, 2.0)
     road_border_scale_range: tuple[float, float] = (0.2, 1.5)
 
-    # Lateral offset range in metres (positive=left, negative=right)
+    # PlannerRFT Frenet frame exploration offsets (metres)
     lateral_offset_range: tuple[float, float] = (-2.0, 2.0)
     lateral_scale_range: tuple[float, float] = (0.5, 3.0)
-    # Longitudinal time-shift range in timesteps (at dt=0.1s)
-    longitudinal_shift_range: tuple[float, float] = (-10.0, 10.0)
+    # Longitudinal arc-length offset range in metres (positive=ahead, negative=behind)
+    longitudinal_offset_range: tuple[float, float] = (-5.0, 5.0)
     longitudinal_scale_range: tuple[float, float] = (0.5, 3.0)
 
     prototypes_path: str | None = None
@@ -275,7 +275,7 @@ def generate_diverse_group(
                 ))
                 label_parts.append(f"rb={rb_scale:.1f}")
 
-            # Lateral guidance: perpendicular offset from deterministic reference
+            # PlannerRFT Frenet frame exploration: lateral offset (metres)
             if config.enable_lateral and random.random() < config.guidance_prob:
                 lat_offset = random.uniform(*config.lateral_offset_range)
                 lat_scale = random.uniform(*config.lateral_scale_range)
@@ -283,17 +283,17 @@ def generate_diverse_group(
                     name="lateral", enabled=True, scale=lat_scale,
                     params={"lateral_offset": lat_offset},
                 ))
-                label_parts.append(f"lat={lat_offset:+.1f}")
+                label_parts.append(f"lat={lat_offset:+.1f}m")
 
-            # Longitudinal guidance: time-shift along deterministic reference
+            # PlannerRFT Frenet frame exploration: longitudinal offset (metres)
             if config.enable_longitudinal and random.random() < config.guidance_prob:
-                time_shift = random.uniform(*config.longitudinal_shift_range)
-                long_scale = random.uniform(*config.longitudinal_scale_range)
+                lon_offset = random.uniform(*config.longitudinal_offset_range)
+                lon_scale = random.uniform(*config.longitudinal_scale_range)
                 guidance_fns.append(GuidanceConfig(
-                    name="longitudinal", enabled=True, scale=long_scale,
-                    params={"time_shift": time_shift},
+                    name="longitudinal", enabled=True, scale=lon_scale,
+                    params={"longitudinal_offset": lon_offset},
                 ))
-                label_parts.append(f"lon={time_shift:+.1f}")
+                label_parts.append(f"lon={lon_offset:+.1f}m")
 
             # Speed guidance caps speed at GT max when enabled and GT available
             if config.enable_speed and gt_max_speed is not None:
