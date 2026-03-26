@@ -325,8 +325,8 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 gr.Markdown("### Kept Batches")
                 kept_summary = gr.Markdown("No batches kept yet")
                 save_btn = gr.Button("Save All Kept → JSON", variant="secondary")
-                _default_save = str(Path.cwd() / "kept_scenes.json")
-                save_path_input = gr.Textbox(label="Save path", value=_default_save)
+                _default_save = str(Path.cwd() / "kept_scenes")
+                save_path_input = gr.Textbox(label="Save base name", value=_default_save)
                 downsample_n = gr.Number(label="Downsample to N (0=all)", value=0, precision=0)
                 save_status = gr.Markdown("")
                 clear_kept_btn = gr.Button("Clear All Kept", variant="stop")
@@ -545,11 +545,10 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
 
         # --- Save ---
         def _next_available_path(base_path: str) -> str:
-            """Auto-increment suffix: kept_scenes.json → kept_scenes_0.json → kept_scenes_1.json ..."""
+            """Auto-increment: kept_scenes → kept_scenes_0.json, kept_scenes_1.json, ..."""
             p = Path(base_path)
-            if not p.exists():
-                return str(p.resolve())
-            stem, suffix = p.stem, p.suffix
+            stem = p.stem
+            suffix = p.suffix or ".json"
             parent = p.parent
             i = 0
             while True:
