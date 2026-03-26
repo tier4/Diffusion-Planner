@@ -185,16 +185,16 @@ class MapRenderer:
         fig = Figure(figsize=(fig_w, fig_h), dpi=dpi)
         ax = fig.add_axes([0, 0, 1, 1])  # Full figure, no margins
 
-        # Draw boundaries (light gray, thin)
+        # Draw boundaries
         cropped_boundaries = self._crop_segments(self.boundary_segments, viewport)
         if cropped_boundaries:
-            lc = LineCollection(cropped_boundaries, colors="#d0d0d0", linewidths=0.5)
+            lc = LineCollection(cropped_boundaries, colors="#404040", linewidths=0.5)
             ax.add_collection(lc)
 
-        # Draw vehicle lane centerlines (dark gray)
+        # Draw vehicle lane centerlines
         cropped_vehicle = self._crop_segments(self.vehicle_segments, viewport)
         if cropped_vehicle:
-            lc = LineCollection(cropped_vehicle, colors="#404040", linewidths=0.8)
+            lc = LineCollection(cropped_vehicle, colors="#000000", linewidths=0.8)
             ax.add_collection(lc)
 
         # Draw pedestrian lanes (light red)
