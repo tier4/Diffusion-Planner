@@ -137,6 +137,40 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `rejection_keep` | 8 | Keep top 8 of 16 trajectories |
 | `n_prob_scenes` | 50 | Problem scenes in training set |
 | `n_normal_scenes` | 150 | Normal scenes (total ~200) |
+| `advantage_mode` | `"normalized"` | `"normalized"` or `"vd_grpo"` (see below) |
+| `advantage_fixed_scale` | 10.0 | Denominator for VD-GRPO mode |
+
+### Available Config Templates
+
+| Config | Description |
+|--------|-------------|
+| `grpo_onpolicy.json` | Standard on-policy (M=1), normalized advantages |
+| `grpo_onpolicy_vdgrpo.json` | On-policy with VD-GRPO advantage computation |
+| `grpo_multi_epoch.json` | Multi-epoch (M=4), PPO-clipped IS, normalized advantages |
+| `grpo_multi_epoch_vdgrpo.json` | Multi-epoch with VD-GRPO advantage computation |
+
+### Advantage Mode: VD-GRPO (Variance-Decoupled GRPO)
+
+Inspired by [Plan-R1](https://arxiv.org/abs/2505.17659). Standard GRPO normalizes
+advantages per group to zero mean and unit variance. This compresses the signal
+from rare high-risk groups: if 30 of 32 trajectories are safe and 2 crash, the
+crash advantage gets normalized to ~-1.5 regardless of the actual reward gap.
+
+VD-GRPO replaces per-group std normalization with a fixed denominator
+(`advantage_fixed_scale`). Advantages are still centered (subtract group mean)
+but divided by the fixed scale instead of per-group std. This preserves the
+absolute magnitude of negative rewards for crashes across groups.
+
+**When to use VD-GRPO:**
+- When training on safety-critical scenes where crash signals are being diluted
+- When most trajectories in a group are similar quality (low variance) but a
+  few are catastrophically bad
+- Pair with `rejection_keep` to filter out the worst trajectories while still
+  preserving the crash signal magnitude for the remaining ones
+
+**`advantage_fixed_scale` tuning:** Controls advantage magnitude. Larger values
+produce smaller advantages (more conservative updates). Start with 10.0. If
+training is too aggressive, increase to 20.0. If too slow, decrease to 5.0.
 
 ## V4-Specific Notes
 

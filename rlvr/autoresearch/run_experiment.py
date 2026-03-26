@@ -324,6 +324,7 @@ def run(config_path: Path, name: str):
     start_time = time.time()
     best_epoch = 0
     best_prob_reward = base_prob["reward_mean"]
+    best_prob_rb_crossings = base_prob["rb_crossings"]
     best_val_reward = base_val["reward_mean"]
     best_val_collision = base_val["collision_rate"]
     best_checkpoint = ""
@@ -361,6 +362,7 @@ def run(config_path: Path, name: str):
 
         if is_better:
             best_prob_reward = prob_result["reward_mean"]
+            best_prob_rb_crossings = prob_result["rb_crossings"]
             best_val_reward = val_eval["reward_mean"]
             best_val_collision = val_eval["collision_rate"]
             best_epoch = epoch

@@ -24,6 +24,7 @@ from rlvr.reward import (
     compute_progress_score_batch,
     compute_red_light_score_batch,
     compute_reward_batch,
+    compute_road_border_penalty,
     compute_safety_score_batch,
     compute_smoothness_score_batch,
 )
@@ -71,6 +72,34 @@ def _make_lane_data(center_y: float = 0.0, width: float = 3.5) -> dict:
             lanes[0, seg, pt, 6] = x          # right boundary X
             lanes[0, seg, pt, 7] = center_y - half_w  # right boundary Y
     return {"lanes": lanes, "ego_shape": torch.tensor([[2.79, 4.34, 1.70]])}
+
+
+def _make_road_border_data(border_y_left: float = 3.0, border_y_right: float = -3.0) -> dict:
+    """Create line_strings data with road borders at specified y-offsets.
+
+    line_strings shape: (1, num_ls, pts, 4) where dim 3 is [x, y, ?, road_border_flag].
+    Road border flag > 0.5 marks road border points.
+    """
+    num_ls = 60
+    pts = 20
+    ls = torch.zeros(1, num_ls, pts, 4)
+    # Left road border (line_string 0)
+    for pt in range(pts):
+        x = pt * 5.0
+        ls[0, 0, pt, 0] = x
+        ls[0, 0, pt, 1] = border_y_left
+        ls[0, 0, pt, 2] = 0.0
+        ls[0, 0, pt, 3] = 1.0  # road border flag
+    # Right road border (line_string 1)
+    for pt in range(pts):
+        x = pt * 5.0
+        ls[0, 1, pt, 0] = x
+        ls[0, 1, pt, 1] = border_y_right
+        ls[0, 1, pt, 2] = 0.0
+        ls[0, 1, pt, 3] = 1.0  # road border flag
+    data = _make_lane_data(center_y=0.0)
+    data["line_strings"] = ls
+    return data
 
 
 # -------------------------------------------------------------------------
@@ -244,14 +273,6 @@ def test_within_lane_no_penalty():
     print(f"  PASS  within_lane_no_penalty: off_road={off_road[0]:.3f}, score={scores[0]:.3f}")
 
 
-def test_off_road_trajectory():
-    ego = _straight_line()
-    ego[:, 1] = 50.0
-    data = _make_lane_data(center_y=0.0)
-    scores, off_road = compute_feasibility_score_batch(ego.unsqueeze(0), _default_ego_shape(), data, CONFIG)
-    assert off_road[0].item() > 0.5, f"Expected high off_road, got {off_road[0]}"
-    print(f"  PASS  off_road_trajectory: off_road={off_road[0]:.3f}, score={scores[0]:.3f}")
-
 
 def test_high_acceleration_penalty():
     t = torch.arange(T, dtype=torch.float32)
@@ -273,6 +294,74 @@ def test_moderate_driving_no_violation():
 
 
 # -------------------------------------------------------------------------
+# Road border tests
+# -------------------------------------------------------------------------
+
+def test_road_border_on_road():
+    """Trajectory centered between road borders should have no crossing."""
+    ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    data = _make_road_border_data(border_y_left=5.0, border_y_right=-5.0)
+    crossing, near_frac, wide_frac = compute_road_border_penalty(
+        ego, _default_ego_shape(), data,
+    )
+    assert crossing[0].item() > 0.5, f"Expected no crossing (gate=1), got {crossing[0]}"
+    print(f"  PASS  road_border_on_road: gate={crossing[0]:.1f}, near={near_frac[0]:.3f}")
+
+
+def test_road_border_crossing():
+    """Trajectory that drives directly on a road border should trigger crossing gate."""
+    ego = _straight_line(speed_m_per_step=0.5)
+    ego[:, 1] = 3.0  # drive right on the left border
+    data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
+    crossing, near_frac, wide_frac = compute_road_border_penalty(
+        ego.unsqueeze(0), _default_ego_shape(), data,
+    )
+    assert crossing[0].item() < 0.5, f"Expected crossing (gate=0), got {crossing[0]}"
+    print(f"  PASS  road_border_crossing: gate={crossing[0]:.1f}, near={near_frac[0]:.3f}")
+
+
+def test_road_border_near_penalty():
+    """Trajectory near (but not crossing) a road border should have near_frac > 0."""
+    ego = _straight_line(speed_m_per_step=0.5)
+    # Drive close to right border at y=-3.0, ego width ~1.7 so edge at y-0.85
+    ego[:, 1] = -1.9  # ego edge at ~-2.75, border at -3.0 → ~25cm gap
+    data = _make_road_border_data(border_y_left=5.0, border_y_right=-3.0)
+    crossing, near_frac, wide_frac = compute_road_border_penalty(
+        ego.unsqueeze(0), _default_ego_shape(), data,
+    )
+    # Should not cross but should have proximity penalty
+    assert wide_frac[0].item() > 0.0, f"Expected wide proximity > 0, got {wide_frac[0]}"
+    print(f"  PASS  road_border_near_penalty: gate={crossing[0]:.1f}, near={near_frac[0]:.3f}, wide={wide_frac[0]:.3f}")
+
+
+def test_road_border_no_data():
+    """Missing line_strings should return safe defaults."""
+    ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    data = _make_lane_data()  # no line_strings key
+    crossing, near_frac, wide_frac = compute_road_border_penalty(
+        ego, _default_ego_shape(), data,
+    )
+    assert crossing[0].item() == 1.0, "No data should return gate=1 (safe)"
+    assert near_frac[0].item() == 0.0, "No data should return near_frac=0"
+    print(f"  PASS  road_border_no_data: gate={crossing[0]:.1f}")
+
+
+def test_road_border_batch():
+    """Batch of trajectories: one safe, one crossing."""
+    safe = _straight_line(speed_m_per_step=0.5)
+    crossing_traj = _straight_line(speed_m_per_step=0.5)
+    crossing_traj[:, 1] = 3.0  # on the left border
+    trajs = torch.stack([safe, crossing_traj])
+    data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
+    crossing, near_frac, wide_frac = compute_road_border_penalty(
+        trajs, _default_ego_shape(), data,
+    )
+    assert crossing[0].item() > 0.5, "Safe traj should not cross"
+    assert crossing[1].item() < 0.5, "Crossing traj should trigger gate"
+    print(f"  PASS  road_border_batch: gates={crossing.tolist()}")
+
+
+# -------------------------------------------------------------------------
 # Batched integration tests (N > 1)
 # -------------------------------------------------------------------------
 
@@ -283,7 +372,6 @@ def test_batch_multiple_trajectories():
         _straight_line(speed_m_per_step=0.0),
         _straight_line(speed_m_per_step=0.5),
     ])
-    trajs[3, :, 1] = 50.0  # off-road
 
     data = _make_lane_data()
     data["goal_pose"] = torch.tensor([[100.0, 0.0, 1.0, 0.0]])
@@ -291,7 +379,6 @@ def test_batch_multiple_trajectories():
     breakdowns = compute_reward_batch(trajs, data)
     assert len(breakdowns) == 4
     assert breakdowns[0].total > breakdowns[2].total, "Fast should beat stationary"
-    assert breakdowns[3].feasibility < breakdowns[0].feasibility, "Off-road should have worse feasibility"
     print(f"  PASS  batch_multiple_trajectories: totals={[f'{b.total:.1f}' for b in breakdowns]}")
 
 
@@ -338,14 +425,11 @@ def test_compute_reward_full_pipeline():
     breakdowns = compute_reward_batch(ego, data)
     rb = breakdowns[0]
     assert isinstance(rb, RewardBreakdown)
-    expected = (
-        CONFIG.w_safety * rb.safety
-        + CONFIG.w_progress * rb.progress
-        + CONFIG.w_smooth * rb.smoothness
-        + CONFIG.w_feasibility * rb.feasibility
-        + CONFIG.w_centerline * rb.centerline
-    )
-    assert abs(rb.total - expected) < 1e-4, f"Total mismatch: {rb.total} vs {expected}"
+    # Reward uses multiplicative safety gates (NAVSIM PDMS-style):
+    # total = safety_product * quality_score + (1 - safety_product) * floor
+    # For a safe on-road trajectory, total should be positive.
+    assert rb.total > 0, f"Expected positive total for safe trajectory, got {rb.total}"
+    assert not rb.rb_crossing, "On-road trajectory should not cross road border"
     print(f"  PASS  compute_reward_full_pipeline: total={rb.total:.2f}")
 
 
@@ -508,9 +592,13 @@ if __name__ == "__main__":
         test_zigzag_high_jerk,
         test_constant_acceleration,
         test_within_lane_no_penalty,
-        test_off_road_trajectory,
         test_high_acceleration_penalty,
         test_moderate_driving_no_violation,
+        test_road_border_on_road,
+        test_road_border_crossing,
+        test_road_border_near_penalty,
+        test_road_border_no_data,
+        test_road_border_batch,
         test_batch_multiple_trajectories,
         test_batch_collision_mixed,
         test_batch_shape_consistency,

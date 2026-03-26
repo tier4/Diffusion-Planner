@@ -220,7 +220,11 @@ class GRPOTrainer:
             reward_breakdowns = [reward_breakdowns[i] for i in top_indices]
             traj_batch = traj_batch[top_indices]
 
-        advantages = compute_group_advantages(reward_breakdowns)
+        advantages = compute_group_advantages(
+            reward_breakdowns,
+            mode=self.config.advantage_mode,
+            fixed_scale=self.config.advantage_fixed_scale,
+        )
 
         # Store old log-probs and the (noise, t) used to compute them.
         # Reusing the same (noise, t) during training ensures a consistent

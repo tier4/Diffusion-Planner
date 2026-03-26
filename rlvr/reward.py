@@ -1430,19 +1430,35 @@ def compute_reward(
 def compute_group_advantages(
     rewards: list[RewardBreakdown],
     epsilon: float = 1e-8,
+    mode: str = "normalized",
+    fixed_scale: float = 10.0,
 ) -> np.ndarray:
     """Compute GRPO-style group-relative advantages.
 
     Args:
         rewards: List of RewardBreakdown for each trajectory in the group.
         epsilon: Small constant for numerical stability.
+        mode: "normalized" for standard GRPO (mean=0, std=1 per group),
+              "vd_grpo" for Variance-Decoupled GRPO (center only, fixed scale).
+              VD-GRPO preserves the absolute magnitude of negative rewards
+              (e.g. crashes) across groups instead of normalizing them away.
+        fixed_scale: Denominator for vd_grpo mode. Controls the magnitude of
+              advantages. Larger values = smaller advantages = more conservative.
 
     Returns:
-        (G,) array of normalized advantages with ~zero mean and ~unit variance.
+        (G,) array of advantages.
     """
     totals = np.array([r.total for r in rewards])
     mean = totals.mean()
-    std = totals.std()
-    if std < epsilon:
-        return np.zeros(len(rewards))
-    return (totals - mean) / (std + epsilon)
+
+    if mode == "vd_grpo":
+        # Variance-Decoupled GRPO: center but use fixed scale.
+        # A crash group with rewards [-50, -50, -50, +5] keeps the large
+        # negative advantages instead of normalizing them to ~[-0.5, ..., +1.5].
+        return (totals - mean) / fixed_scale
+    else:
+        # Standard GRPO: per-group normalization to zero mean, unit variance.
+        std = totals.std()
+        if std < epsilon:
+            return np.zeros(len(rewards))
+        return (totals - mean) / (std + epsilon)

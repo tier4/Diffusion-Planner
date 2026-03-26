@@ -107,6 +107,14 @@ class GRPOConfig:
     diffusion_t_range: list[float] = field(default_factory=lambda: [0.001, 0.1])
     diffusion_k_steps: int = 4
 
+    # Advantage computation mode:
+    # "normalized" (default): standard GRPO per-group normalization (mean=0, std=1).
+    # "vd_grpo": Variance-Decoupled GRPO (Plan-R1). Center only (subtract mean),
+    #   divide by a fixed scale instead of per-group std. Preserves absolute
+    #   magnitude of negative rewards (e.g. crashes) across groups.
+    advantage_mode: str = "normalized"
+    advantage_fixed_scale: float = 10.0
+
     # Rejection sampling: generate num_generations trajectories but keep only
     # the top rejection_keep by reward. Set to 0 or None to disable (keep all).
     rejection_keep: int = 0
