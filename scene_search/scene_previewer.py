@@ -69,7 +69,11 @@ def _render_thumbnail_to_bytes(args: tuple) -> tuple[int, bytes, str]:
     Args: (index, npz_path, label, view_range, figsize_w, figsize_h, dpi)
     Returns: (index, png_bytes, label)
     """
-    idx, npz_path, label, view_range, fw, fh, dpi = args
+    if len(args) == 7:
+        idx, npz_path, label, view_range, fw, fh, dpi = args
+    else:
+        idx, npz_path, label, view_range = args
+        fw, fh, dpi = THUMB_SIZE
     try:
         fig = render_single_thumbnail(npz_path, view_range=view_range, figsize=(fw, fh), dpi=dpi)
         buf = io.BytesIO()

@@ -8,6 +8,7 @@ Requires ROS + Autoware environment sourced for lanelet2 / MGRSProjector imports
 """
 
 import io
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -18,13 +19,18 @@ import numpy as np
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 
-# lanelet2 requires ROS paths
-_ROS_PATHS = [
+# lanelet2 requires ROS/Autoware Python paths (set by sourcing setup.bash).
+# Fallback to common locations if not already on sys.path.
+_ROS_FALLBACK_PATHS = [
     "/opt/ros/humble/lib/python3.10/site-packages",
-    "/home/danielsanchez/autoware/install/autoware_lanelet2_extension_python/local/lib/python3.10/dist-packages",
 ]
-for p in _ROS_PATHS:
-    if p not in sys.path:
+# Autoware install path from env or common default
+_AUTOWARE_DIR = os.environ.get("AUTOWARE_INSTALL", os.path.expanduser("~/autoware/install"))
+_ROS_FALLBACK_PATHS.append(
+    f"{_AUTOWARE_DIR}/autoware_lanelet2_extension_python/local/lib/python3.10/dist-packages"
+)
+for p in _ROS_FALLBACK_PATHS:
+    if os.path.isdir(p) and p not in sys.path:
         sys.path.insert(0, p)
 
 
@@ -170,12 +176,14 @@ class MapRenderer:
         xmax, ymax = vp.xmax + margin, vp.ymax + margin
         result = []
         for seg in segments:
-            mask = (
-                (seg[:, 0] >= xmin) & (seg[:, 0] <= xmax) &
-                (seg[:, 1] >= ymin) & (seg[:, 1] <= ymax)
-            )
-            if np.any(mask):
-                result.append(seg)
+            if seg.size == 0:
+                continue
+            # Use segment bounding box intersection (catches lines that cross viewport
+            # even if no vertex is inside)
+            if (seg[:, 0].max() < xmin or seg[:, 0].min() > xmax or
+                    seg[:, 1].max() < ymin or seg[:, 1].min() > ymax):
+                continue
+            result.append(seg)
         return result
 
     def render_viewport(self, viewport: Viewport, dpi: int = 100) -> bytes:

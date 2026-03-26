@@ -233,6 +233,7 @@ MAP_CANVAS_JS = r"""
     });
     canvas.addEventListener('mouseleave', () => {
         if (isPanning) { isPanning = false; panPrev = null; canvas.style.cursor = 'grab'; }
+        if (isDrawing) { isDrawing = false; canvas.style.cursor = 'grab'; }
     });
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
@@ -467,10 +468,11 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 thumbs = render_batch_thumbnails(b, every_nth=10, max_workers=4)
                 return thumbnails_to_pil_images(thumbs)
 
+            from concurrent.futures import as_completed as _as_completed
             all_pils = [None] * len(batch_dicts)
             with ThreadPoolExecutor(max_workers=min(len(batch_dicts), 6)) as tex:
                 futures = {tex.submit(_render_one, bd): i for i, bd in enumerate(batch_dicts)}
-                for fut in futures:
+                for fut in _as_completed(futures):
                     all_pils[futures[fut]] = fut.result()
 
             total = sum(len(bd["scenes"]) for bd in batch_dicts)

@@ -409,7 +409,8 @@ def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
         turn_indicator = inputs["turn_indicators"][0][-1]
         if inputs["turn_indicators"][0][-2] == turn_indicator:
             # Same as previous timestep — prefix with "Keep" to indicate sustained signal
-            turn_indicator_text_gt = f"Keep {turn_indicator_int_to_str(turn_indicator)}"
+            label = turn_indicator_int_to_str(turn_indicator)
+            turn_indicator_text_gt = label if label == "Keep" else f"Keep {label}"
         else:
             turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
 

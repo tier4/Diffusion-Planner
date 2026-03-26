@@ -29,5 +29,5 @@ def build(name: str) -> "BaseConstraint":
 
 
 def list_available() -> list[str]:
-    """Return names of all registered constraints."""
-    return list(_REGISTRY.keys())
+    """Return names of all registered constraints (sorted for stable UI ordering)."""
+    return sorted(_REGISTRY.keys())

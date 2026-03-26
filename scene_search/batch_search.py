@@ -139,12 +139,12 @@ def find_batches(
     if constraint_filters:
         passing = []
         for entry in filtered:
-            npz_data = np.load(entry["npz_path"])
-            passes_all = True
-            for constraint, params in constraint_filters:
-                if not constraint.filter(entry["npz_path"], npz_data, params):
-                    passes_all = False
-                    break
+            with np.load(entry["npz_path"]) as npz_data:
+                passes_all = True
+                for constraint, params in constraint_filters:
+                    if not constraint.filter(entry["npz_path"], npz_data, params):
+                        passes_all = False
+                        break
             if passes_all:
                 passing.append(entry)
         filtered = passing
