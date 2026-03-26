@@ -568,10 +568,11 @@ def visualize_longitudinal_test(
     for i, shift in enumerate(shifts):
         traj = guided_trajs[shift]
         color = cmap(i / max(len(shifts) - 1, 1))
+        _eta = max(-1.0, min(1.0, float(shift) / 8.0))
         ax.plot(
             traj[:, 0], traj[:, 1],
             color=color, linewidth=2, alpha=0.85,
-            label=f"lon={shift:+.0f}m",
+            label=f"η_lon={_eta:+.2f}",
             zorder=9,
         )
         ax.plot(traj[-1, 0], traj[-1, 1], "o", color=color, markersize=4, zorder=10)
@@ -823,34 +824,36 @@ def run_model_tests(model_path, npz_path, save_dir, device):
         det_travel = np.linalg.norm(np.diff(det_traj[:, :2], axis=0), axis=1).sum()
         guided_travel = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
         print(
-            f"    shift={shift:+3d}steps → "
+            f"    η_lon={eta_lon:+.2f} → "
             f"mean_longitudinal={mean_lon:+.3f}m, "
             f"travel: det={det_travel:.1f}m, guided={guided_travel:.1f}m, "
             f"endpoint_delta={ep_dist:.2f}m"
         )
 
-    # Numerical check: positive shift (faster) should travel more distance
+    # Numerical check: positive η should modulate speed
     det_travel = np.linalg.norm(np.diff(det_traj[:, :2], axis=0), axis=1).sum()
     for shift in [3, 5, 8]:
         traj = longitudinal_trajs[shift]
         guided_travel = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
+        _eta = max(-1.0, min(1.0, float(shift) / 8.0))
         if guided_travel > det_travel:
-            print(f"  CHECK lon={shift:+d}m: guided_travel={guided_travel:.1f}m > det={det_travel:.1f}m ✓")
+            print(f"  CHECK η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m > det={det_travel:.1f}m ✓")
         else:
             print(
-                f"  WARN  lon={shift:+d}m: guided_travel={guided_travel:.1f}m <= det={det_travel:.1f}m "
-                f"(may saturate at large offsets)"
+                f"  WARN  η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m <= det={det_travel:.1f}m "
+                f"(may saturate at extreme η)"
             )
 
     for shift in [-3, -5, -8]:
         traj = longitudinal_trajs[shift]
         guided_travel = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
+        _eta = max(-1.0, min(1.0, float(shift) / 8.0))
         if guided_travel < det_travel:
-            print(f"  CHECK lon={shift:+d}m: guided_travel={guided_travel:.1f}m < det={det_travel:.1f}m ✓")
+            print(f"  CHECK η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m < det={det_travel:.1f}m ✓")
         else:
             print(
-                f"  WARN  lon={shift:+d}m: guided_travel={guided_travel:.1f}m >= det={det_travel:.1f}m "
-                f"(may saturate at large offsets)"
+                f"  WARN  η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m >= det={det_travel:.1f}m "
+                f"(may saturate at extreme η)"
             )
 
     save_lon = os.path.join(save_dir, f"{scene_name}_longitudinal_sweep.png")

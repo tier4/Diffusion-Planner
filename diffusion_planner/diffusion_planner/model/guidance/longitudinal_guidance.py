@@ -6,13 +6,13 @@ to a reference trajectory during DPM-Solver denoising.
 At each timestep τ, the longitudinal energy penalizes the squared
 deviation of the ego's tangential velocity from a scaled reference velocity:
 
-    Ψ_lon = (1/T) Σ_τ (n∥_τ · (v_τ - λ_lon · η_lon · v^ref_τ))²
+    Ψ_lon = (1/(T-1)) Σ_τ (n∥_τ · (v_τ - λ_lon · η_lon · v^ref_τ))²
 
 where:
     n∥_τ   = unit tangent (heading direction) of the reference
     v_τ    = ego velocity (finite difference of positions / dt)
     v^ref  = reference velocity (finite difference of reference / dt)
-    λ_lon  = constant maximum relative speed deviation
+    λ_lon  = speed scaling constant (target = λ · η · v_ref)
     η_lon  = guidance scale in [-1, 1] (later learned by PPO)
 
 Target tangential velocity = λ_lon · η_lon · v^ref_tangential.
@@ -106,6 +106,6 @@ class LongitudinalGuidance(BaseGuidance):
         # Target: λ_lon · η_lon · v^ref_tangent
         target = self._lambda_lon * self._eta_lon * ref_v_tangent  # [B, T-1]
 
-        # Ψ_lon = (1/T) Σ (n∥ · (v - λ·η·v^ref))²
+        # Ψ_lon = (1/(T-1)) Σ (n∥ · (v - λ·η·v^ref))²
         psi = ((ego_v_tangent - target) ** 2).mean(dim=-1)  # [B]
         return -psi

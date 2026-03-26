@@ -285,25 +285,25 @@ def generate_diverse_group(
                 ))
                 label_parts.append(f"spd={spd_scale:.1f}")
 
-        # PlannerRFT lateral/longitudinal guidance (Eq. 2-3, arxiv 2601.12901).
-        # η values sampled uniformly from [-1, 1]; later replaced by PPO policy.
-        if config.enable_lateral and random.random() < config.guidance_prob:
-            eta_lat = random.uniform(-1.0, 1.0)
-            lat_scale = random.uniform(*config.lateral_scale_range)
-            guidance_fns.append(GuidanceConfig(
-                name="lateral", enabled=True, scale=lat_scale,
-                params={"lambda_lat": config.lambda_lat, "eta_lat": eta_lat},
-            ))
-            label_parts.append(f"ηlat={eta_lat:+.2f}")
+            # PlannerRFT lateral/longitudinal guidance (Eq. 2-3, arxiv 2601.12901).
+            # η values sampled uniformly from [-1, 1]; later replaced by PPO policy.
+            if config.enable_lateral and random.random() < config.guidance_prob:
+                eta_lat = random.uniform(-1.0, 1.0)
+                lat_scale = random.uniform(*config.lateral_scale_range)
+                guidance_fns.append(GuidanceConfig(
+                    name="lateral", enabled=True, scale=lat_scale,
+                    params={"lambda_lat": config.lambda_lat, "eta_lat": eta_lat},
+                ))
+                label_parts.append(f"ηlat={eta_lat:+.2f}")
 
-        if config.enable_longitudinal and random.random() < config.guidance_prob:
-            eta_lon = random.uniform(-1.0, 1.0)
-            lon_scale = random.uniform(*config.longitudinal_scale_range)
-            guidance_fns.append(GuidanceConfig(
-                name="longitudinal", enabled=True, scale=lon_scale,
-                params={"lambda_lon": config.lambda_lon, "eta_lon": eta_lon},
-            ))
-            label_parts.append(f"ηlon={eta_lon:+.2f}")
+            if config.enable_longitudinal and random.random() < config.guidance_prob:
+                eta_lon = random.uniform(-1.0, 1.0)
+                lon_scale = random.uniform(*config.longitudinal_scale_range)
+                guidance_fns.append(GuidanceConfig(
+                    name="longitudinal", enabled=True, scale=lon_scale,
+                    params={"lambda_lon": config.lambda_lon, "eta_lon": eta_lon},
+                ))
+                label_parts.append(f"ηlon={eta_lon:+.2f}")
 
         composer = None
         set_config = None
