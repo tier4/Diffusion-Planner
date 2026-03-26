@@ -360,6 +360,12 @@ class GRPOTrainer:
         progress_callback=None,
     ) -> dict[str, float]:
         """Full epoch: generate groups for all scenes, then train (with inner epochs)."""
+        # Apply KL schedule
+        scheduled_kl = self.config.get_kl_coef(epoch, self.config.train_epochs)
+        if scheduled_kl != self.config.kl_coef:
+            print(f"  [kl_schedule] epoch {epoch}: kl_coef {self.config.kl_coef:.4f} -> {scheduled_kl:.4f}")
+            self.config.kl_coef = scheduled_kl
+
         print(f"  Generating trajectory groups for {len(npz_paths)} scenes (N={self.config.num_generations})...")
         groups = []
         for npz_path in tqdm(npz_paths, desc="Generating groups"):
@@ -653,7 +659,7 @@ class GRPOTrainer:
 
     def log_metrics(self, epoch: int, metrics: dict[str, float]) -> None:
         """Log training metrics to TSV file."""
-        log_entry = {"epoch": epoch, **{f"train_{k}": v for k, v in metrics.items()}}
+        log_entry = {"epoch": epoch, "kl_coef": self.config.kl_coef, **{f"train_{k}": v for k, v in metrics.items()}}
         self.train_log.append(log_entry)
 
         df = pd.DataFrame(self.train_log)

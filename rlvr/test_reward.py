@@ -79,24 +79,32 @@ def _make_road_border_data(border_y_left: float = 3.0, border_y_right: float = -
 
     line_strings shape: (1, num_ls, pts, 4) where dim 3 is [x, y, ?, road_border_flag].
     Road border flag > 0.5 marks road border points.
+
+    Uses multiple line_strings with dense point spacing (0.05m) to ensure
+    crossing/proximity detection works reliably — the reward function checks
+    minimum distance to the nearest border point.
     """
     num_ls = 60
     pts = 20
+    # Dense coverage: 30 line_strings per side × 20 pts × 0.05m = 30m per side
+    # Total X coverage = 30m, enough for test trajectories
     ls = torch.zeros(1, num_ls, pts, 4)
-    # Left road border (line_string 0)
-    for pt in range(pts):
-        x = pt * 5.0
-        ls[0, 0, pt, 0] = x
-        ls[0, 0, pt, 1] = border_y_left
-        ls[0, 0, pt, 2] = 0.0
-        ls[0, 0, pt, 3] = 1.0  # road border flag
-    # Right road border (line_string 1)
-    for pt in range(pts):
-        x = pt * 5.0
-        ls[0, 1, pt, 0] = x
-        ls[0, 1, pt, 1] = border_y_right
-        ls[0, 1, pt, 2] = 0.0
-        ls[0, 1, pt, 3] = 1.0  # road border flag
+    # Left road border (line_strings 0-29)
+    for seg in range(30):
+        for pt in range(pts):
+            x = seg * (pts * 0.05) + pt * 0.05
+            ls[0, seg, pt, 0] = x
+            ls[0, seg, pt, 1] = border_y_left
+            ls[0, seg, pt, 2] = 0.0
+            ls[0, seg, pt, 3] = 1.0  # road border flag
+    # Right road border (line_strings 30-59)
+    for seg in range(30):
+        for pt in range(pts):
+            x = seg * (pts * 0.05) + pt * 0.05
+            ls[0, 30 + seg, pt, 0] = x
+            ls[0, 30 + seg, pt, 1] = border_y_right
+            ls[0, 30 + seg, pt, 2] = 0.0
+            ls[0, 30 + seg, pt, 3] = 1.0  # road border flag
     data = _make_lane_data(center_y=0.0)
     data["line_strings"] = ls
     return data
@@ -321,7 +329,11 @@ def test_road_border_crossing():
 
 
 def test_road_border_near_penalty():
-    """Trajectory near (but not crossing) a road border should have near_frac > 0."""
+    """Trajectory near (but not crossing) a road border should have wide_frac > 0.
+
+    wide_frac measures the fraction of timesteps where ego edge is within 40cm
+    of the border. near_frac uses a tighter 25cm threshold.
+    """
     ego = _straight_line(speed_m_per_step=0.5)
     # Drive close to right border at y=-3.0, ego width ~1.7 so edge at y-0.85
     ego[:, 1] = -1.9  # ego edge at ~-2.75, border at -3.0 → ~25cm gap
@@ -329,8 +341,8 @@ def test_road_border_near_penalty():
     crossing, near_frac, wide_frac = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
-    # Should not cross but should have proximity penalty
-    assert wide_frac[0].item() > 0.0, f"Expected wide proximity > 0, got {wide_frac[0]}"
+    # Should not cross but should have wide proximity penalty (within 40cm)
+    assert wide_frac[0].item() > 0.0, f"Expected wide proximity (40cm) > 0, got {wide_frac[0]}"
     print(f"  PASS  road_border_near_penalty: gate={crossing[0]:.1f}, near={near_frac[0]:.3f}, wide={wide_frac[0]:.3f}")
 
 

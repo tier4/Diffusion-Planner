@@ -1455,7 +1455,9 @@ def compute_group_advantages(
         # Variance-Decoupled GRPO: center but use fixed scale.
         # A crash group with rewards [-50, -50, -50, +5] keeps the large
         # negative advantages instead of normalizing them to ~[-0.5, ..., +1.5].
-        return (totals - mean) / fixed_scale
+        if fixed_scale <= 0.0:
+            raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
+        return (totals - mean) / max(fixed_scale, epsilon)
     else:
         # Standard GRPO: per-group normalization to zero mean, unit variance.
         std = totals.std()

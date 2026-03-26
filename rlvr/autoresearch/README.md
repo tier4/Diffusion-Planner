@@ -139,6 +139,9 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `n_normal_scenes` | 150 | Normal scenes (total ~200) |
 | `advantage_mode` | `"normalized"` | `"normalized"` or `"vd_grpo"` (see below) |
 | `advantage_fixed_scale` | 10.0 | Denominator for VD-GRPO mode |
+| `kl_schedule` | `"constant"` | `"constant"`, `"linear"`, `"cosine"`, or `"step"` (see below) |
+| `kl_coef_final` | 0.05 | Target KL coef at end of training (for non-constant schedules) |
+| `kl_warmup_fraction` | 0.5 | Fraction of epochs to hold initial `kl_coef` (for `"step"` schedule) |
 
 ### Available Config Templates
 
@@ -146,6 +149,8 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 |--------|-------------|
 | `grpo_onpolicy.json` | Standard on-policy (M=1), normalized advantages |
 | `grpo_onpolicy_vdgrpo.json` | On-policy with VD-GRPO advantage computation |
+| `grpo_onpolicy_kl_cosine.json` | On-policy with cosine KL decay (0.3 → 0.05) |
+| `grpo_onpolicy_vdgrpo_kl_cosine.json` | On-policy + VD-GRPO + cosine KL decay |
 | `grpo_multi_epoch.json` | Multi-epoch (M=4), PPO-clipped IS, normalized advantages |
 | `grpo_multi_epoch_vdgrpo.json` | Multi-epoch with VD-GRPO advantage computation |
 
@@ -171,6 +176,40 @@ absolute magnitude of negative rewards for crashes across groups.
 **`advantage_fixed_scale` tuning:** Controls advantage magnitude. Larger values
 produce smaller advantages (more conservative updates). Start with 10.0. If
 training is too aggressive, increase to 20.0. If too slow, decrease to 5.0.
+
+### KL Schedule: Decaying KL Coefficient
+
+Inspired by Plan-R1's multi-stage objective alignment. Early in training, a
+high KL coefficient keeps the model close to the SFT base (preserving driving
+realism). As training progresses, decaying KL gives the model more freedom to
+deviate from the base to fix safety issues (e.g., road border avoidance).
+
+**Schedules available:**
+- `"constant"` (default): `kl_coef` stays fixed throughout training.
+- `"linear"`: linearly interpolates from `kl_coef` to `kl_coef_final`.
+- `"cosine"`: cosine annealing — slow decay early, faster in the middle, slow
+  at the end. Good default for most runs.
+- `"step"`: holds `kl_coef` for `kl_warmup_fraction` of training, then drops
+  to `kl_coef_final`. Sharp transition, useful when you want a clear "alignment
+  phase" followed by a "freedom phase".
+
+**Example (cosine, 4 epochs, 0.3 → 0.05):**
+```
+epoch 1: kl=0.300  (conservative, stay close to base)
+epoch 2: kl=0.238
+epoch 3: kl=0.113
+epoch 4: kl=0.050  (more freedom to deviate for safety)
+```
+
+**Tuning guidance:**
+- `kl_coef` (start): higher = more conservative early training. 0.2-0.3 for
+  short runs (3-4 epochs), 0.3-0.5 for longer runs (10+ epochs).
+- `kl_coef_final` (end): how much freedom at the end. 0.05 is a good default.
+  Set to 0.0 for maximum freedom (no KL penalty at all in final epochs).
+- For short runs (3-4 epochs), cosine and linear behave similarly.
+- For longer runs (10+ epochs), cosine decays slowly at first which is safer.
+- The `"step"` schedule is useful when you want explicit "phases" (e.g., hold
+  KL high for 50% of training, then release).
 
 ## V4-Specific Notes
 

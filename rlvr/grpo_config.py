@@ -9,6 +9,7 @@ Supports two modes:
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -115,6 +116,15 @@ class GRPOConfig:
     advantage_mode: str = "normalized"
     advantage_fixed_scale: float = 10.0
 
+    # KL coefficient scheduling over training epochs.
+    # "constant" (default): kl_coef stays fixed.
+    # "linear": linearly interpolate from kl_coef to kl_coef_final.
+    # "cosine": cosine annealing from kl_coef to kl_coef_final.
+    # "step": hold kl_coef for kl_warmup_fraction of training, then drop to kl_coef_final.
+    kl_schedule: str = "constant"
+    kl_coef_final: float = 0.01
+    kl_warmup_fraction: float = 0.5  # fraction of epochs to hold initial kl_coef (for "step" schedule)
+
     # Rejection sampling: generate num_generations trajectories but keep only
     # the top rejection_keep by reward. Set to 0 or None to disable (keep all).
     rejection_keep: int = 0
@@ -136,6 +146,38 @@ class GRPOConfig:
         """Save config to JSON file."""
         with open(path, "w") as f:
             json.dump(asdict(self), f, indent=2)
+
+    def get_kl_coef(self, epoch: int, total_epochs: int) -> float:
+        """Compute KL coefficient for the given epoch based on schedule.
+
+        Args:
+            epoch: Current epoch (1-indexed).
+            total_epochs: Total number of training epochs.
+
+        Returns:
+            KL coefficient for this epoch.
+        """
+        if self.kl_schedule == "constant" or total_epochs <= 1:
+            return self.kl_coef
+
+        # progress: 0.0 at epoch 1, 1.0 at final epoch
+        progress = (epoch - 1) / (total_epochs - 1)
+        start, end = self.kl_coef, self.kl_coef_final
+
+        if self.kl_schedule == "linear":
+            return start + (end - start) * progress
+
+        if self.kl_schedule == "cosine":
+            # Cosine annealing: slow decay at start/end, faster in middle
+            return end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        if self.kl_schedule == "step":
+            # Hold at start value, then drop to end value
+            if progress < self.kl_warmup_fraction:
+                return start
+            return end
+
+        return self.kl_coef
 
     @property
     def uses_importance_sampling(self) -> bool:
