@@ -105,6 +105,7 @@ class GRPOTrainer:
             overprogress_margin=config.overprogress_margin,
             overprogress_penalty=config.overprogress_penalty,
             stopped_penalty=config.stopped_penalty,
+            reward_mode=config.reward_mode,
         )
 
         # Evaluation: fixed scene subset from validation set, sampled once

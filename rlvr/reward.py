@@ -44,6 +44,13 @@ class RewardConfig:
     overprogress_penalty: float = 0.3
     stopped_penalty: float = 50.0
 
+    # Reward aggregation mode:
+    # "gate" (default): binary safety gates × quality. Any terminal event → floor (-50).
+    # "survival" (PlannerRFT): proportional credit based on how long the trajectory
+    #   survives before the first terminal event. A crash at t=60/80 gets 75% of the
+    #   quality score. Prevents gradient death on hard scenes where all trajectories fail.
+    reward_mode: str = "gate"
+
 
 @dataclass
 class RewardBreakdown:
@@ -1097,14 +1104,18 @@ def compute_road_border_penalty(
         crossing_gate: (N,) 1.0 if no crossing, 0.0 if any timestep crosses border
         near_penalty: (N,) mean penalty for being within 25cm (0=safe, 1=touching)
         wide_penalty: (N,) mean penalty for being within 40cm
+        first_crossing_step: list of N ints or None — first timestep of crossing
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
 
+    no_crossing_steps: list[int | None] = [None] * N
+
     if "line_strings" not in data:
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
-                torch.zeros(N, device=device))
+                torch.zeros(N, device=device),
+                no_crossing_steps)
 
     ls = data["line_strings"]
     if ls.dim() == 4:
@@ -1112,7 +1123,8 @@ def compute_road_border_penalty(
     if ls.shape[-1] < 4:
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
-                torch.zeros(N, device=device))
+                torch.zeros(N, device=device),
+                no_crossing_steps)
 
     # Extract road border points
     border_flag = ls[..., 3]  # (num_ls, pts)
@@ -1125,7 +1137,8 @@ def compute_road_border_penalty(
     if border_pts.shape[0] == 0:
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
-                torch.zeros(N, device=device))
+                torch.zeros(N, device=device),
+                no_crossing_steps)
 
     # Build ego perimeter points (20 per side = 80 total)
     wb = ego_shape[0].item()
@@ -1182,8 +1195,17 @@ def compute_road_border_penalty(
 
     # Crossing gate: any timestep with min dist < 0.10m = crossing
     _CROSS_THRESH = 0.10
-    has_crossing = (per_timestep_min < _CROSS_THRESH).any(dim=1)  # (N,)
+    is_crossing = per_timestep_min < _CROSS_THRESH  # (N, T)
+    has_crossing = is_crossing.any(dim=1)  # (N,)
     crossing_gate = (~has_crossing).float()  # (N,) 1.0=safe, 0.0=crossing
+
+    # First crossing timestep per trajectory
+    first_crossing_steps: list[int | None] = []
+    for i in range(N):
+        if has_crossing[i]:
+            first_crossing_steps.append(int(is_crossing[i].nonzero(as_tuple=True)[0][0].item()))
+        else:
+            first_crossing_steps.append(None)
 
     # Near penalty: fraction of timesteps within 25cm
     _NEAR_THRESH = 0.25
@@ -1193,7 +1215,7 @@ def compute_road_border_penalty(
     _WIDE_THRESH = 0.40
     wide_frac = (per_timestep_min[:, 1:] < _WIDE_THRESH).float().mean(dim=1)  # (N,)
 
-    return crossing_gate, near_frac, wide_frac
+    return crossing_gate, near_frac, wide_frac, first_crossing_steps
 
 
 # ---------------------------------------------------------------------------
@@ -1296,7 +1318,7 @@ def compute_reward_batch(
     )
 
     # Road border penalty using ego perimeter sampling
-    rb_crossing_gate, rb_near_frac, rb_wide_frac = compute_road_border_penalty(
+    rb_crossing_gate, rb_near_frac, rb_wide_frac, rb_crossing_steps = compute_road_border_penalty(
         ego_trajs, ego_shape, data,
     )
 
@@ -1384,12 +1406,32 @@ def compute_reward_batch(
         - rb_penalty
     )
 
-    # Blend between quality_score (on-road) and a negative floor (offroad).
-    # When safety_product=1 (on-road): total = quality_score
-    # When safety_product=0 (offroad): total = -50 (always below any on-road traj)
-    # This prevents the old reward=0 problem where offroad beat negative-quality on-road.
     _OFFROAD_FLOOR = -50.0
-    totals = safety_product * quality_score + (1.0 - safety_product) * _OFFROAD_FLOOR
+
+    if config.reward_mode == "survival":
+        # PlannerRFT-style survival reward: proportional credit based on how
+        # long the trajectory survives before the first terminal event.
+        # survival_frac = first_terminal_step / T. A crash at t=60/80 gets 75%
+        # of quality_score. This prevents gradient death on hard scenes where
+        # all trajectories fail — later crashes still rank higher.
+        survival_frac = torch.ones(N, device=device)
+        for i in range(N):
+            first_terminal = T  # no failure → full survival
+            if collision_steps[i] is not None:
+                first_terminal = min(first_terminal, collision_steps[i])
+            if rb_crossing_steps[i] is not None:
+                first_terminal = min(first_terminal, rb_crossing_steps[i])
+            if has_red_light_violation[i] > 0.5:
+                # Red light doesn't have a per-timestep step; treat as late failure
+                first_terminal = min(first_terminal, T)
+            survival_frac[i] = max(first_terminal, 1) / T  # at least 1/T to avoid 0
+
+        # Blend: survived portion gets quality, failed portion gets floor
+        totals = survival_frac * quality_score + (1.0 - survival_frac) * _OFFROAD_FLOOR
+    else:
+        # Default "gate" mode: binary safety gates × quality.
+        # Any terminal event → full floor penalty regardless of when it happens.
+        totals = safety_product * quality_score + (1.0 - safety_product) * _OFFROAD_FLOOR
 
     # Also compute additive total for backward compat in breakdown
     on_road_factor = (1.0 - off_road_fractions)
@@ -1458,9 +1500,13 @@ def compute_group_advantages(
         if fixed_scale <= 0.0:
             raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
         return (totals - mean) / max(fixed_scale, epsilon)
-    else:
+    elif mode == "normalized":
         # Standard GRPO: per-group normalization to zero mean, unit variance.
         std = totals.std()
         if std < epsilon:
             return np.zeros(len(rewards))
         return (totals - mean) / (std + epsilon)
+    else:
+        raise ValueError(
+            f"Unknown advantage mode: {mode!r}. Expected 'normalized' or 'vd_grpo'."
+        )

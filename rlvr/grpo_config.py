@@ -95,6 +95,12 @@ class GRPOConfig:
     overprogress_penalty: float = 0.3
     stopped_penalty: float = 5.0
 
+    # Reward aggregation mode (passed to RewardConfig):
+    # "gate": binary safety gates (default). Any terminal event → floor.
+    # "survival": PlannerRFT-style proportional credit. Crash at t=60/80 gets
+    #   75% quality score. Prevents gradient death on hard scenes.
+    reward_mode: str = "gate"
+
     # Loss mode: controls how gradients flow to affect the deterministic output.
     # "diffusion" (default): standard advantage-weighted diffusion loss at random t.
     # "direct_best": regress the model's deterministic output toward the best-in-group
@@ -122,6 +128,7 @@ class GRPOConfig:
     # "cosine": cosine annealing from kl_coef to kl_coef_final.
     # "step": hold kl_coef for kl_warmup_fraction of training, then drop to kl_coef_final.
     kl_schedule: str = "constant"
+    kl_coef_initial: float | None = None  # set automatically from kl_coef at first call
     kl_coef_final: float = 0.01
     kl_warmup_fraction: float = 0.5  # fraction of epochs to hold initial kl_coef (for "step" schedule)
 
@@ -150,6 +157,10 @@ class GRPOConfig:
     def get_kl_coef(self, epoch: int, total_epochs: int) -> float:
         """Compute KL coefficient for the given epoch based on schedule.
 
+        Uses kl_coef_initial (captured from kl_coef on first call) as the
+        stable starting point, so the schedule is stateless and independent
+        of any mutations to kl_coef during training.
+
         Args:
             epoch: Current epoch (1-indexed).
             total_epochs: Total number of training epochs.
@@ -157,27 +168,32 @@ class GRPOConfig:
         Returns:
             KL coefficient for this epoch.
         """
+        # Capture the initial kl_coef on first call
+        if self.kl_coef_initial is None:
+            self.kl_coef_initial = self.kl_coef
+
         if self.kl_schedule == "constant" or total_epochs <= 1:
-            return self.kl_coef
+            return self.kl_coef_initial
 
         # progress: 0.0 at epoch 1, 1.0 at final epoch
         progress = (epoch - 1) / (total_epochs - 1)
-        start, end = self.kl_coef, self.kl_coef_final
+        start, end = self.kl_coef_initial, self.kl_coef_final
 
         if self.kl_schedule == "linear":
             return start + (end - start) * progress
 
         if self.kl_schedule == "cosine":
-            # Cosine annealing: slow decay at start/end, faster in middle
             return end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
         if self.kl_schedule == "step":
-            # Hold at start value, then drop to end value
             if progress < self.kl_warmup_fraction:
                 return start
             return end
 
-        return self.kl_coef
+        raise ValueError(
+            f"Unknown kl_schedule: {self.kl_schedule!r}. "
+            f"Expected 'constant', 'linear', 'cosine', or 'step'."
+        )
 
     @property
     def uses_importance_sampling(self) -> bool:

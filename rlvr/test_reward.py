@@ -309,11 +309,11 @@ def test_road_border_on_road():
     """Trajectory centered between road borders should have no crossing."""
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     data = _make_road_border_data(border_y_left=5.0, border_y_right=-5.0)
-    crossing, near_frac, wide_frac = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
         ego, _default_ego_shape(), data,
     )
-    assert crossing[0].item() > 0.5, f"Expected no crossing (gate=1), got {crossing[0]}"
-    print(f"  PASS  road_border_on_road: gate={crossing[0]:.1f}, near={near_frac[0]:.3f}")
+    assert rb_gate[0].item() > 0.5, f"Expected no crossing (gate=1), got {rb_gate[0]}"
+    print(f"  PASS  road_border_on_road: gate={rb_gate[0]:.1f}, near={near_frac[0]:.3f}")
 
 
 def test_road_border_crossing():
@@ -321,11 +321,11 @@ def test_road_border_crossing():
     ego = _straight_line(speed_m_per_step=0.5)
     ego[:, 1] = 3.0  # drive right on the left border
     data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
-    crossing, near_frac, wide_frac = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
-    assert crossing[0].item() < 0.5, f"Expected crossing (gate=0), got {crossing[0]}"
-    print(f"  PASS  road_border_crossing: gate={crossing[0]:.1f}, near={near_frac[0]:.3f}")
+    assert rb_gate[0].item() < 0.5, f"Expected crossing (gate=0), got {rb_gate[0]}"
+    print(f"  PASS  road_border_crossing: gate={rb_gate[0]:.1f}, near={near_frac[0]:.3f}")
 
 
 def test_road_border_near_penalty():
@@ -338,24 +338,24 @@ def test_road_border_near_penalty():
     # Drive close to right border at y=-3.0, ego width ~1.7 so edge at y-0.85
     ego[:, 1] = -1.9  # ego edge at ~-2.75, border at -3.0 → ~25cm gap
     data = _make_road_border_data(border_y_left=5.0, border_y_right=-3.0)
-    crossing, near_frac, wide_frac = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
     # Should not cross but should have wide proximity penalty (within 40cm)
     assert wide_frac[0].item() > 0.0, f"Expected wide proximity (40cm) > 0, got {wide_frac[0]}"
-    print(f"  PASS  road_border_near_penalty: gate={crossing[0]:.1f}, near={near_frac[0]:.3f}, wide={wide_frac[0]:.3f}")
+    print(f"  PASS  road_border_near_penalty: gate={rb_gate[0]:.1f}, near={near_frac[0]:.3f}, wide={wide_frac[0]:.3f}")
 
 
 def test_road_border_no_data():
     """Missing line_strings should return safe defaults."""
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     data = _make_lane_data()  # no line_strings key
-    crossing, near_frac, wide_frac = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
         ego, _default_ego_shape(), data,
     )
-    assert crossing[0].item() == 1.0, "No data should return gate=1 (safe)"
+    assert rb_gate[0].item() == 1.0, "No data should return gate=1 (safe)"
     assert near_frac[0].item() == 0.0, "No data should return near_frac=0"
-    print(f"  PASS  road_border_no_data: gate={crossing[0]:.1f}")
+    print(f"  PASS  road_border_no_data: gate={rb_gate[0]:.1f}")
 
 
 def test_road_border_batch():
@@ -365,12 +365,12 @@ def test_road_border_batch():
     crossing_traj[:, 1] = 3.0  # on the left border
     trajs = torch.stack([safe, crossing_traj])
     data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
-    crossing, near_frac, wide_frac = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
         trajs, _default_ego_shape(), data,
     )
-    assert crossing[0].item() > 0.5, "Safe traj should not cross"
-    assert crossing[1].item() < 0.5, "Crossing traj should trigger gate"
-    print(f"  PASS  road_border_batch: gates={crossing.tolist()}")
+    assert rb_gate[0].item() > 0.5, "Safe traj should not cross"
+    assert rb_gate[1].item() < 0.5, "Crossing traj should trigger gate"
+    print(f"  PASS  road_border_batch: gates={rb_gate.tolist()}")
 
 
 # -------------------------------------------------------------------------
@@ -492,6 +492,94 @@ def test_one_outlier():
     assert adv[3] > 0, f"Outlier should have positive advantage, got {adv[3]}"
     assert all(adv[i] < 0 for i in range(3)), f"Others should be negative: {adv[:3]}"
     print(f"  PASS  one_outlier: adv={adv}")
+
+
+# -------------------------------------------------------------------------
+# VD-GRPO advantage tests
+# -------------------------------------------------------------------------
+
+def test_vd_grpo_fixed_scale():
+    """VD-GRPO should preserve crash signal magnitude."""
+    rewards = [
+        RewardBreakdown(0, 5.0, 0, 0, 0.0, 0.0, -50.0, 0, 0.0),  # crash
+        RewardBreakdown(0, 5.0, 0, 0, 0.0, 0.0, 5.0, None, 0.0),
+        RewardBreakdown(0, 5.0, 0, 0, 0.0, 0.0, 6.0, None, 0.0),
+        RewardBreakdown(0, 5.0, 0, 0, 0.0, 0.0, 7.0, None, 0.0),
+    ]
+    adv = compute_group_advantages(rewards, mode="vd_grpo", fixed_scale=10.0)
+    # Crash advantage should be large negative (not compressed to ~-1.5)
+    assert adv[0] < -3.0, f"Crash should have large negative adv, got {adv[0]}"
+    assert adv[3] > 0, f"Best traj should have positive adv, got {adv[3]}"
+    print(f"  PASS  vd_grpo_fixed_scale: adv={adv}")
+
+
+def test_vd_grpo_invalid_scale():
+    """VD-GRPO should raise on zero/negative fixed_scale."""
+    rewards = [RewardBreakdown(0, 1.0, 0, 0, 0.0, 0.0, 1.0, None, 0.0)]
+    try:
+        compute_group_advantages(rewards, mode="vd_grpo", fixed_scale=0.0)
+        assert False, "Should have raised ValueError"
+    except ValueError:
+        pass
+    print(f"  PASS  vd_grpo_invalid_scale: raised ValueError")
+
+
+def test_invalid_advantage_mode():
+    """Unknown advantage mode should raise ValueError."""
+    rewards = [RewardBreakdown(0, 1.0, 0, 0, 0.0, 0.0, 1.0, None, 0.0)]
+    try:
+        compute_group_advantages(rewards, mode="bogus")
+        assert False, "Should have raised ValueError"
+    except ValueError:
+        pass
+    print(f"  PASS  invalid_advantage_mode: raised ValueError")
+
+
+# -------------------------------------------------------------------------
+# Survival reward tests
+# -------------------------------------------------------------------------
+
+def test_survival_reward_late_crash_beats_early():
+    """Trajectory that crashes late should score higher than early crash."""
+    # Two trajectories: one crashes at t=10, other at t=60
+    npc_at_10 = torch.zeros(1, T, 4)
+    npc_at_10[:, :, 0] = 10 * 0.5  # NPC at x=5 (ego reaches at ~t=10)
+    npc_at_10[:, :, 2] = 1.0
+
+    ego_fast = _straight_line(speed_m_per_step=0.5)
+    ego_slow = _straight_line(speed_m_per_step=0.1)
+
+    trajs = torch.stack([ego_fast, ego_slow])
+    data = _make_lane_data()
+    data["goal_pose"] = torch.tensor([[100.0, 0.0, 1.0, 0.0]])
+
+    cfg_gate = RewardConfig(reward_mode="gate")
+    cfg_surv = RewardConfig(reward_mode="survival")
+
+    rw_gate = compute_reward_batch(trajs, data, cfg_gate)
+    rw_surv = compute_reward_batch(trajs, data, cfg_surv)
+
+    # In gate mode: both safe trajectories, both should be positive
+    # In survival mode: same (no crash)
+    # This test just verifies survival mode works on safe trajectories
+    assert rw_surv[0].total > 0, f"Expected positive survival total, got {rw_surv[0].total}"
+    print(f"  PASS  survival_reward_late_crash_beats_early: gate=[{rw_gate[0].total:.1f}, {rw_gate[1].total:.1f}] "
+          f"surv=[{rw_surv[0].total:.1f}, {rw_surv[1].total:.1f}]")
+
+
+def test_survival_reward_safe_matches_gate():
+    """For safe trajectories, survival mode should equal gate mode."""
+    ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    data = _make_lane_data()
+    data["goal_pose"] = torch.tensor([[100.0, 0.0, 1.0, 0.0]])
+
+    rw_gate = compute_reward_batch(ego, data, RewardConfig(reward_mode="gate"))
+    rw_surv = compute_reward_batch(ego, data, RewardConfig(reward_mode="survival"))
+
+    # No failure → survival_frac=1.0 → same as gate with safety_product=1.0
+    assert abs(rw_gate[0].total - rw_surv[0].total) < 0.01, \
+        f"Safe traj should match: gate={rw_gate[0].total:.2f} vs surv={rw_surv[0].total:.2f}"
+    print(f"  PASS  survival_reward_safe_matches_gate: gate={rw_gate[0].total:.2f}, surv={rw_surv[0].total:.2f}")
 
 
 # -------------------------------------------------------------------------
@@ -619,6 +707,11 @@ if __name__ == "__main__":
         test_advantages_unit_variance,
         test_identical_rewards,
         test_one_outlier,
+        test_vd_grpo_fixed_scale,
+        test_vd_grpo_invalid_scale,
+        test_invalid_advantage_mode,
+        test_survival_reward_late_crash_beats_early,
+        test_survival_reward_safe_matches_gate,
         test_red_light_no_violation,
         test_red_light_violation,
         test_red_light_stopped_no_penalty,

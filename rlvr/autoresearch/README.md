@@ -151,6 +151,7 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `grpo_onpolicy_vdgrpo.json` | On-policy with VD-GRPO advantage computation |
 | `grpo_onpolicy_kl_cosine.json` | On-policy with cosine KL decay (0.3 → 0.05) |
 | `grpo_onpolicy_vdgrpo_kl_cosine.json` | On-policy + VD-GRPO + cosine KL decay |
+| `grpo_onpolicy_hybrid.json` | All features: VD-GRPO + survival reward + cosine KL decay |
 | `grpo_multi_epoch.json` | Multi-epoch (M=4), PPO-clipped IS, normalized advantages |
 | `grpo_multi_epoch_vdgrpo.json` | Multi-epoch with VD-GRPO advantage computation |
 
@@ -210,6 +211,30 @@ epoch 4: kl=0.050  (more freedom to deviate for safety)
 - For longer runs (10+ epochs), cosine decays slowly at first which is safer.
 - The `"step"` schedule is useful when you want explicit "phases" (e.g., hold
   KL high for 50% of training, then release).
+
+### Reward Mode: Survival Reward (PlannerRFT)
+
+Inspired by [PlannerRFT](https://arxiv.org/abs/2601.12901). Standard gate mode
+applies a flat -50 floor penalty when any terminal event occurs (collision, road
+border crossing), regardless of *when* it happens. This kills the gradient signal
+on hard scenes where all trajectories fail.
+
+Survival reward gives proportional credit: a trajectory that crashes at t=60/80
+gets 75% of the quality score, while one crashing at t=10/80 gets only 12.5%.
+This preserves ranking among failed trajectories and provides gradient signal
+even on the hardest scenes.
+
+**Config:** `reward_mode: "survival"` (default: `"gate"`)
+
+**When to use survival mode:**
+- Training on safety-critical scenes where most/all trajectories have failures
+- When gate mode produces flat rewards (all trajectories hit the -50 floor)
+- When you want to teach the model to "delay" failures even if it can't fully
+  avoid them yet
+
+**The hybrid config** (`grpo_onpolicy_hybrid.json`) combines all three features:
+VD-GRPO advantages + survival reward + cosine KL decay. This is the recommended
+starting point for difficult training scenarios.
 
 ## V4-Specific Notes
 
