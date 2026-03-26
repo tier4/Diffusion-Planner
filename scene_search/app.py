@@ -260,33 +260,6 @@ MAP_CANVAS_JS = r"""
 """
 
 
-LIGHTBOX_JS = """
-<style>
-#img-lightbox {
-    display:none; position:fixed; top:0; left:0; width:100%; height:100%;
-    background:rgba(0,0,0,0.85); z-index:99999; cursor:zoom-out;
-    justify-content:center; align-items:center;
-}
-#img-lightbox img {
-    max-width:90%; max-height:90%; object-fit:contain; border-radius:4px;
-}
-#img-lightbox.active { display:flex; }
-</style>
-<div id="img-lightbox" onclick="this.classList.remove('active')">
-    <img id="img-lightbox-img" src="">
-</div>
-<script>
-document.addEventListener('click', function(e) {
-    const img = e.target.closest('.gallery-item img, .thumbnail-item img, .grid-wrap img');
-    if (!img) return;
-    e.preventDefault(); e.stopPropagation();
-    document.getElementById('img-lightbox-img').src = img.src;
-    document.getElementById('img-lightbox').classList.add('active');
-}, true);
-</script>
-"""
-
-
 def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | None = None):
     """Build the complete Gradio interface."""
 
@@ -384,7 +357,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                         lbl = gr.Markdown(f"Batch {i+1}")
                         gal = gr.Gallery(label=f"Batch {i+1}", columns=6, rows=2,
                                          height=220, object_fit="contain",
-                                         allow_preview=False)
+                                         preview=True)
                         with gr.Row():
                             keep_b = gr.Button(f"Keep Batch {i+1}", size="sm", variant="primary")
                     batch_groups.append(grp)
@@ -622,7 +595,7 @@ def main():
     print(f"Index: {len(index)} scenes")
     demo = build_interface(renderer, index, args.index)
     try:
-        demo.launch(server_port=args.port, share=args.share, inbrowser=True, head=LIGHTBOX_JS)
+        demo.launch(server_port=args.port, share=args.share, inbrowser=True)
     except KeyboardInterrupt:
         pass
     finally:
