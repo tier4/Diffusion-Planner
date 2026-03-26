@@ -560,7 +560,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
 
         def on_save(kept, path, ds):
             if not kept:
-                return "No batches to save", gr.update()
+                return "No batches to save"
             scenes = []
             seen = set()
             for k in kept:
@@ -573,10 +573,10 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             Path(actual_path).parent.mkdir(parents=True, exist_ok=True)
             with open(actual_path, "w") as f:
                 json.dump(scenes, f, indent=4)
-            return f"Saved **{len(scenes)}** scenes to `{actual_path}`", gr.update(value=actual_path)
+            return f"Saved **{len(scenes)}** scenes to `{actual_path}`"
 
         save_btn.click(on_save, inputs=[kept_batches_state, save_path_input, downsample_n],
-                       outputs=[save_status, save_path_input])
+                       outputs=[save_status])
 
     return demo
 
