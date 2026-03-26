@@ -23,7 +23,8 @@ from scene_search.batch_search import Batch, build_index, find_batches, load_ind
 from scene_search.constraints import list_available as list_constraints
 from scene_search.constraints.registry import build as build_constraint
 from scene_search.map_renderer import MapRenderer, Viewport
-from scene_search.scene_previewer import render_batch_thumbnails, thumbnails_to_pil_images
+from scene_search.scene_previewer import render_batch_thumbnails, render_single_thumbnail, thumbnails_to_pil_images
+from PIL import Image as PILImage
 
 MAX_VISIBLE_BATCHES = 10
 
@@ -432,25 +433,24 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             n_constraints = len(active_filters)
             constraint_info = f" ({n_constraints} constraint{'s' if n_constraints != 1 else ''} active)" if active_filters else ""
 
-            # Render all batches in parallel (each batch's thumbnails also parallel internally)
-            from concurrent.futures import ThreadPoolExecutor
-            def _render_one(b):
-                thumbs = render_batch_thumbnails(b, every_nth=10, max_workers=4)
-                return thumbnails_to_pil_images(thumbs)
-
-            all_pils = [None] * len(batches)
-            with ThreadPoolExecutor(max_workers=len(batches)) as tex:
-                futures = {tex.submit(_render_one, b): i for i, b in enumerate(batches)}
-                for fut in futures:
-                    all_pils[futures[fut]] = fut.result()
-
+            # Phase 1: render ONLY the central thumbnail per batch (fast)
+            import io as _io
             outputs = [
-                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info}",
+                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info} — loading...",
                 gr.update(visible=len(batches) > 0),
             ]
             for i in range(MAX_VISIBLE_BATCHES):
                 if i < len(batches):
-                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {batches[i].summary()}", all_pils[i]])
+                    b = batches[i]
+                    central_path = b.scenes[b.central_indices[0]] if b.central_indices else b.scenes[len(b.scenes)//2]
+                    fig = render_single_thumbnail(central_path, view_range=60.0)
+                    buf = _io.BytesIO()
+                    fig.savefig(buf, format="png", dpi=90, bbox_inches="tight")
+                    import matplotlib.pyplot as _plt
+                    _plt.close(fig)
+                    buf.seek(0)
+                    central_img = PILImage.open(buf)
+                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {b.summary()}", [(central_img, "t=0* (loading rest...)")]])
                 else:
                     outputs.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
             outputs.append(batch_dicts)
@@ -461,11 +461,49 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             search_outputs.extend([batch_groups[i], batch_labels[i], batch_galleries[i]])
         search_outputs.append(search_results_state)
 
+        def on_search_fill(batch_dicts):
+            """Phase 2: fill in all thumbnails for each batch."""
+            if not batch_dicts:
+                return [gr.update()] * (1 + MAX_VISIBLE_BATCHES)
+
+            from concurrent.futures import ThreadPoolExecutor
+            from scene_search.batch_search import Batch
+
+            def _render_one(bd):
+                b = Batch(bag_prefix=bd["bag_prefix"], scenes=bd["scenes"],
+                          central_indices=bd["central_indices"], metadata=bd["metadata"])
+                thumbs = render_batch_thumbnails(b, every_nth=10, max_workers=4)
+                return thumbnails_to_pil_images(thumbs)
+
+            all_pils = [None] * len(batch_dicts)
+            with ThreadPoolExecutor(max_workers=min(len(batch_dicts), 6)) as tex:
+                futures = {tex.submit(_render_one, bd): i for i, bd in enumerate(batch_dicts)}
+                for fut in futures:
+                    all_pils[futures[fut]] = fut.result()
+
+            total = sum(len(bd["scenes"]) for bd in batch_dicts)
+            outputs = [f"Found **{len(batch_dicts)} batches** ({total} total scenes)"]
+            for i in range(MAX_VISIBLE_BATCHES):
+                if i < len(batch_dicts):
+                    outputs.append(all_pils[i])
+                else:
+                    outputs.append(gr.update())
+            return outputs
+
+        # Phase 2 outputs: results_info + one gallery per slot
+        fill_outputs = [results_info]
+        for i in range(MAX_VISIBLE_BATCHES):
+            fill_outputs.append(batch_galleries[i])
+
         search_btn.click(
             on_search,
             inputs=[arrow_x, arrow_y, arrow_heading, radius_slider, heading_tol_slider,
                     n_before_slider, n_after_slider, index_state] + constraint_input_list,
             outputs=search_outputs,
+        ).then(
+            on_search_fill,
+            inputs=[search_results_state],
+            outputs=fill_outputs,
         )
 
         # --- Keep ---
