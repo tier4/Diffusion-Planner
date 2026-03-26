@@ -499,30 +499,38 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         )
 
         # --- Keep ---
+        def _batch_key(b):
+            """Unique key for a batch: central scene path."""
+            ci = b["central_indices"]
+            return b["scenes"][ci[0]] if ci else b["scenes"][0]
+
+        def _kept_summary(kept):
+            total = sum(len(k["scenes"]) for k in kept)
+            summary = f"**{len(kept)} batches** kept ({total} scenes)"
+            detail = "\n".join(f"- {k['bag_prefix'].split('/')[-1][:25]}... ({len(k['scenes'])} scenes)" for k in kept)
+            return summary, detail
+
         def make_keep_handler(idx):
             def fn(results, kept):
                 if idx >= len(results):
                     return kept, gr.update(), gr.update()
                 b = results[idx]
-                if b["bag_prefix"] not in {k["bag_prefix"] for k in kept}:
+                existing_keys = {_batch_key(k) for k in kept}
+                if _batch_key(b) not in existing_keys:
                     kept = kept + [b]
-                total = sum(len(k["scenes"]) for k in kept)
-                summary = f"**{len(kept)} batches** kept ({total} scenes)"
-                detail = "\n".join(f"- {k['bag_prefix'].split('/')[-1][:25]}... ({len(k['scenes'])} scenes)" for k in kept)
+                summary, detail = _kept_summary(kept)
                 return kept, summary, detail
             return fn
 
         # --- Keep All ---
         def on_keep_all(search_results, kept_batches):
-            existing = {k["bag_prefix"] for k in kept_batches}
+            existing_keys = {_batch_key(k) for k in kept_batches}
             new_kept = kept_batches[:]
             for b in search_results:
-                if b["bag_prefix"] not in existing:
+                if _batch_key(b) not in existing_keys:
                     new_kept.append(b)
-                    existing.add(b["bag_prefix"])
-            total = sum(len(k["scenes"]) for k in new_kept)
-            summary = f"**{len(new_kept)} batches** kept ({total} scenes)"
-            detail = "\n".join(f"- {k['bag_prefix'].split('/')[-1][:25]}... ({len(k['scenes'])} scenes)" for k in new_kept)
+                    existing_keys.add(_batch_key(b))
+            summary, detail = _kept_summary(new_kept)
             return new_kept, summary, detail
 
         keep_all_btn.click(
