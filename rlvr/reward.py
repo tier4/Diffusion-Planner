@@ -1089,7 +1089,7 @@ def compute_road_border_penalty(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None]]:
     """Compute per-trajectory road border penalties using ego perimeter sampling.
 
     Uses 80 points around the ego rectangle (20 per side) and checks min
@@ -1101,10 +1101,11 @@ def compute_road_border_penalty(
         data: Observation dict with 'line_strings' key.
 
     Returns:
-        crossing_gate: (N,) 1.0 if no crossing, 0.0 if any timestep crosses border
-        near_penalty: (N,) mean penalty for being within 25cm (0=safe, 1=touching)
-        wide_penalty: (N,) mean penalty for being within 40cm
-        first_crossing_step: list of N ints or None — first timestep of crossing
+        Tuple of (crossing_gate, near_penalty, wide_penalty, first_crossing_steps):
+        - crossing_gate: (N,) 1.0 if no crossing, 0.0 if any timestep crosses border
+        - near_penalty: (N,) mean penalty for being within 25cm (0=safe, 1=touching)
+        - wide_penalty: (N,) mean penalty for being within 40cm
+        - first_crossing_steps: list of N (int | None) — first timestep of crossing
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
@@ -1421,13 +1422,14 @@ def compute_reward_batch(
                 first_terminal = min(first_terminal, collision_steps[i])
             if rb_crossing_steps[i] is not None:
                 first_terminal = min(first_terminal, rb_crossing_steps[i])
-            if has_red_light_violation[i] > 0.5:
-                # Red light doesn't have a per-timestep step; treat as late failure
-                first_terminal = min(first_terminal, T)
             survival_frac[i] = max(first_terminal, 1) / T  # at least 1/T to avoid 0
 
-        # Blend: survived portion gets quality, failed portion gets floor
+        # Blend: survived portion gets quality, failed portion gets floor.
+        # Red light violations still use a hard gate on top of survival —
+        # red light doesn't have a per-timestep failure point, so we apply
+        # it as a binary multiplier like in gate mode.
         totals = survival_frac * quality_score + (1.0 - survival_frac) * _OFFROAD_FLOOR
+        totals = totals * red_light_gate + (1.0 - red_light_gate) * _OFFROAD_FLOOR
     else:
         # Default "gate" mode: binary safety gates × quality.
         # Any terminal event → full floor penalty regardless of when it happens.

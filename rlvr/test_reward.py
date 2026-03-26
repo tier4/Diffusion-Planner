@@ -540,31 +540,60 @@ def test_invalid_advantage_mode():
 # -------------------------------------------------------------------------
 
 def test_survival_reward_late_crash_beats_early():
-    """Trajectory that crashes late should score higher than early crash."""
-    # Two trajectories: one crashes at t=10, other at t=60
-    npc_at_10 = torch.zeros(1, T, 4)
-    npc_at_10[:, :, 0] = 10 * 0.5  # NPC at x=5 (ego reaches at ~t=10)
-    npc_at_10[:, :, 2] = 1.0
+    """Same trajectory hitting an early vs late NPC: survival mode differentiates, gate doesn't."""
+    # Same ego speed, two NPCs at different distances.
+    # Ego at 0.3m/step hits NPC at x=5 around t=12, NPC at x=20 around t=63.
+    ego = _straight_line(speed_m_per_step=0.3)
 
-    ego_fast = _straight_line(speed_m_per_step=0.5)
-    ego_slow = _straight_line(speed_m_per_step=0.1)
+    # Traj 0: collides with NPC at x=5 (early crash)
+    # Traj 1: collides with NPC at x=20 (late crash)
+    # Use the same ego trajectory for both, but different NPC positions per eval.
+    data_early = _make_lane_data()
+    data_early["goal_pose"] = torch.tensor([[100.0, 0.0, 1.0, 0.0]])
+    npc_early = torch.zeros(1, 1, T, 4)
+    npc_early[:, :, :, 0] = 5.0
+    npc_early[:, :, :, 2] = 1.0
+    data_early["neighbor_agents_future"] = npc_early
+    data_early["neighbor_agents_past"] = torch.zeros(1, 1, 21, 11)
+    data_early["neighbor_agents_past"][:, :, -1, 6] = 2.0
+    data_early["neighbor_agents_past"][:, :, -1, 7] = 4.5
+    data_early["neighbor_agents_past"][:, :, :, 0] = 5.0
+    data_early["neighbor_agents_past"][:, :, :, 2] = 1.0
 
-    trajs = torch.stack([ego_fast, ego_slow])
-    data = _make_lane_data()
-    data["goal_pose"] = torch.tensor([[100.0, 0.0, 1.0, 0.0]])
+    data_late = _make_lane_data()
+    data_late["goal_pose"] = torch.tensor([[100.0, 0.0, 1.0, 0.0]])
+    npc_late = torch.zeros(1, 1, T, 4)
+    npc_late[:, :, :, 0] = 20.0
+    npc_late[:, :, :, 2] = 1.0
+    data_late["neighbor_agents_future"] = npc_late
+    data_late["neighbor_agents_past"] = torch.zeros(1, 1, 21, 11)
+    data_late["neighbor_agents_past"][:, :, -1, 6] = 2.0
+    data_late["neighbor_agents_past"][:, :, -1, 7] = 4.5
+    data_late["neighbor_agents_past"][:, :, :, 0] = 20.0
+    data_late["neighbor_agents_past"][:, :, :, 2] = 1.0
 
     cfg_gate = RewardConfig(reward_mode="gate")
     cfg_surv = RewardConfig(reward_mode="survival")
 
-    rw_gate = compute_reward_batch(trajs, data, cfg_gate)
-    rw_surv = compute_reward_batch(trajs, data, cfg_surv)
+    rw_gate_early = compute_reward_batch(ego.unsqueeze(0), data_early, cfg_gate)[0]
+    rw_gate_late = compute_reward_batch(ego.unsqueeze(0), data_late, cfg_gate)[0]
+    rw_surv_early = compute_reward_batch(ego.unsqueeze(0), data_early, cfg_surv)[0]
+    rw_surv_late = compute_reward_batch(ego.unsqueeze(0), data_late, cfg_surv)[0]
 
-    # In gate mode: both safe trajectories, both should be positive
-    # In survival mode: same (no crash)
-    # This test just verifies survival mode works on safe trajectories
-    assert rw_surv[0].total > 0, f"Expected positive survival total, got {rw_surv[0].total}"
-    print(f"  PASS  survival_reward_late_crash_beats_early: gate=[{rw_gate[0].total:.1f}, {rw_gate[1].total:.1f}] "
-          f"surv=[{rw_surv[0].total:.1f}, {rw_surv[1].total:.1f}]")
+    assert rw_gate_early.collision_step is not None, "Early NPC should cause collision"
+    assert rw_gate_late.collision_step is not None, "Late NPC should cause collision"
+    assert rw_gate_late.collision_step > rw_gate_early.collision_step, \
+        f"Late NPC should crash later: {rw_gate_late.collision_step} vs {rw_gate_early.collision_step}"
+    # Gate mode: both get same floor
+    assert rw_gate_early.total == rw_gate_late.total, \
+        f"Gate mode should give same floor: {rw_gate_early.total} vs {rw_gate_late.total}"
+    # Survival mode: late crash should score higher (more survived quality)
+    assert rw_surv_late.total > rw_surv_early.total, \
+        f"Late crash should beat early: late={rw_surv_late.total:.1f} vs early={rw_surv_early.total:.1f}"
+    print(f"  PASS  survival_reward_late_crash_beats_early: "
+          f"gate=[{rw_gate_early.total:.1f}, {rw_gate_late.total:.1f}] "
+          f"surv=[{rw_surv_early.total:.1f}, {rw_surv_late.total:.1f}] "
+          f"collision_steps=[{rw_gate_early.collision_step}, {rw_gate_late.collision_step}]")
 
 
 def test_survival_reward_safe_matches_gate():
