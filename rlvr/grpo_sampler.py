@@ -33,6 +33,8 @@ class SamplerConfig:
     enable_lane_keeping: bool = False
     enable_road_border: bool = True
     enable_speed: bool = True
+    enable_lateral: bool = False
+    enable_longitudinal: bool = False
 
     # Probability that each enabled type is included for a given trajectory
     guidance_prob: float = 0.5
@@ -43,6 +45,14 @@ class SamplerConfig:
     route_following_scale_range: tuple[float, float] = (0.5, 2.0)
     lane_keeping_scale_range: tuple[float, float] = (0.5, 2.0)
     road_border_scale_range: tuple[float, float] = (0.2, 1.5)
+
+    # PlannerRFT guidance params (Eq. 2-3, arxiv 2601.12901)
+    # λ_lat: max lateral offset in metres; η_lat sampled from [-1, 1]
+    lambda_lat: float = 3.0
+    # λ_lon: speed scaling in Eq. 3; target tangential velocity = λ_lon · η_lon · v_ref
+    lambda_lon: float = 0.5
+    lateral_scale_range: tuple[float, float] = (0.5, 3.0)
+    longitudinal_scale_range: tuple[float, float] = (0.5, 3.0)
 
     prototypes_path: str | None = None
     num_prototypes: int = 16
@@ -125,6 +135,13 @@ def generate_diverse_group(
         is_deterministic=True,
         label="det",
     ))
+
+    # Store deterministic trajectory as reference for PlannerRFT Eq. 2-3 guidance.
+    # Injected into norm_data so it reaches the guidance functions via the
+    # decoder's inputs dict. ObservationNormalizer passes unknown keys through.
+    if config.enable_guidance and (config.enable_lateral or config.enable_longitudinal):
+        ref_traj = torch.from_numpy(samples[0]).unsqueeze(0).to(device)  # [1, T, 4]
+        norm_data["reference_trajectory"] = ref_traj
 
     # GT seed REMOVED: raw GT trajectory gets -27 reward due to bad centerline
     # score (heading conversion mismatch), causing GRPO to learn AWAY from GT.
@@ -267,6 +284,26 @@ def generate_diverse_group(
                     params={"v_high": gt_max_speed, "v_low": gt_min_speed},
                 ))
                 label_parts.append(f"spd={spd_scale:.1f}")
+
+            # PlannerRFT lateral/longitudinal guidance (Eq. 2-3, arxiv 2601.12901).
+            # η values sampled uniformly from [-1, 1]; later replaced by PPO policy.
+            if config.enable_lateral and random.random() < config.guidance_prob:
+                eta_lat = random.uniform(-1.0, 1.0)
+                lat_scale = random.uniform(*config.lateral_scale_range)
+                guidance_fns.append(GuidanceConfig(
+                    name="lateral", enabled=True, scale=lat_scale,
+                    params={"lambda_lat": config.lambda_lat, "eta_lat": eta_lat},
+                ))
+                label_parts.append(f"ηlat={eta_lat:+.2f}")
+
+            if config.enable_longitudinal and random.random() < config.guidance_prob:
+                eta_lon = random.uniform(-1.0, 1.0)
+                lon_scale = random.uniform(*config.longitudinal_scale_range)
+                guidance_fns.append(GuidanceConfig(
+                    name="longitudinal", enabled=True, scale=lon_scale,
+                    params={"lambda_lon": config.lambda_lon, "eta_lon": eta_lon},
+                ))
+                label_parts.append(f"ηlon={eta_lon:+.2f}")
 
         composer = None
         set_config = None
