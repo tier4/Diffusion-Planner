@@ -1,46 +1,51 @@
-"""PlannerRFT-style longitudinal guidance for structured trajectory exploration.
+"""PlannerRFT longitudinal guidance energy (Eq. 3 from arxiv 2601.12901).
 
-Applies an arc-length offset along a reference trajectory in the Frenet
-frame, making the ego travel faster or slower than the reference. The
-target trajectory is computed by shifting each reference point along
-the path by the specified arc-length offset.
+Energy-based classifier guidance that modulates the ego's speed relative
+to a reference trajectory during DPM-Solver denoising.
 
-This follows PlannerRFT's (arxiv 2601.12901) lateral/longitudinal
-decomposition of the exploration space. In PlannerRFT, a learned PPO
-policy outputs Beta-distributed longitudinal offsets per scene; here we
-accept a fixed offset parameter (random sampling is done by the GRPO
-sampler). The Frenet frame math is in frenet.py.
+At each timestep τ, the longitudinal energy penalizes the squared
+deviation of the ego's tangential velocity from a scaled reference velocity:
 
-Can be used in two ways:
-  1. As a guidance energy during DPM-Solver denoising (via GuidanceComposer)
-  2. The underlying frenet.perturb_trajectory() can create perturbed xT
-     initial conditions for the sampler (bypassing guidance entirely).
+    Ψ_lon = (1/T) Σ_τ (n∥_τ · (v_τ - λ_lon · η_lon · v^ref_τ))²
+
+where:
+    n∥_τ   = unit tangent (heading direction) of the reference
+    v_τ    = ego velocity (finite difference of positions / dt)
+    v^ref  = reference velocity
+    λ_lon  = maximum relative speed deviation (fraction, e.g. 0.5 = ±50%)
+    η_lon  = guidance scale in [-1, 1] (later learned by PPO)
+
+When η_lon > 0, the ego is encouraged to go faster than reference.
+When η_lon < 0, slower. η_lon = 0 matches reference speed.
+
+The target speed is v^ref * (1 + λ_lon * η_lon) effectively, since
+the energy penalizes (v_tangential - λ_lon * η_lon * v^ref_tangential)².
+Note: this formulation from the paper uses λ_lon as a scaling on v^ref,
+so the actual target tangential speed is (1 - λ_lon·η_lon)·v^ref when
+the energy is zero (v_τ projected along tangent equals λ_lon·η_lon·v^ref).
 
 Requires ``reference_trajectory`` in the inputs dict:
     inputs["reference_trajectory"]: [B, T, 4] — (x, y, cos_yaw, sin_yaw)
-    in physical ego-centric metres, typically the deterministic model output.
 
 Params:
-    longitudinal_offset (float): Arc-length offset in metres (Frenet Δs).
-        Positive = ahead on path (faster). Negative = behind (slower).
+    lambda_lon (float): Maximum relative speed deviation. Default 0.5 (±50%).
+    eta_lon (float): Guidance scale in [-1, 1]. Default 0.0 (match ref speed).
+        Positive = faster, negative = slower. Later replaced by PPO policy output.
+    dt (float): Timestep for velocity computation. Default 0.1s.
 """
 
 import torch
 
 from .base import BaseGuidance
-from .frenet import perturb_trajectory
 from .registry import register
 
 
 @register
 class LongitudinalGuidance(BaseGuidance):
-    """Guidance energy that pulls ego toward a Frenet-frame longitudinal offset.
+    """PlannerRFT longitudinal classifier guidance (Eq. 3).
 
-    Computes the target trajectory by applying a longitudinal (arc-length)
-    offset in the Frenet frame of the reference, then returns negative
-    squared distance from ego to target as the energy.
-
-    _energy_scale = 1.0; use config.scale to tune strength.
+    Operates on velocity (speed scaling) not position (arc-length offset).
+    _energy_scale = 1.0; tune via config.scale and eta_lon.
     """
 
     name = "longitudinal"
@@ -48,14 +53,16 @@ class LongitudinalGuidance(BaseGuidance):
 
     def __init__(self, config: "GuidanceConfig", **kwargs):  # noqa: F821
         super().__init__(config)
-        self._longitudinal_offset = config.params.get("longitudinal_offset", 2.0)
+        self._lambda_lon = config.params.get("lambda_lon", 0.5)
+        self._eta_lon = config.params.get("eta_lon", 0.0)
+        self._dt = config.params.get("dt", 0.1)
 
     def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
         """
         x: [B, P, T+1, 4] physical ego-centric metres.
         inputs: must contain "reference_trajectory" [B, T, 4].
 
-        Returns [B] reward (higher = closer to Frenet-offset target).
+        Returns [B] negative energy (higher = better alignment with target speed).
         """
         B, P, T_plus1, _ = x.shape
         T = T_plus1 - 1
@@ -67,12 +74,39 @@ class LongitudinalGuidance(BaseGuidance):
 
         ref = ref[:, :T, :]
 
-        # Compute target via Frenet perturbation (longitudinal only, no lateral)
-        target = perturb_trajectory(ref, lateral_offset=0.0, longitudinal_offset=self._longitudinal_offset)
-        target_xy = target[..., :2]  # [B, T, 2]
+        # Reference heading → unit tangent
+        cos_h = ref[..., 2]  # [B, T]
+        sin_h = ref[..., 3]
+        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        cos_h = cos_h / h_norm
+        sin_h = sin_h / h_norm
+        # n∥ = (cos, sin) — tangent direction
+        n_par_x = cos_h  # [B, T-1] (we'll slice to T-1 for velocity)
+        n_par_y = sin_h
 
+        # Ego velocity via finite differences
         ego_pos = x[:, 0, 1:, :2]  # [B, T, 2]
+        ego_vel = (ego_pos[:, 1:, :] - ego_pos[:, :-1, :]) / self._dt  # [B, T-1, 2]
 
-        diff = ego_pos - target_xy
-        reward = -(diff ** 2).sum(dim=-1).sum(dim=-1)  # [B]
-        return reward
+        # Reference velocity via finite differences
+        ref_pos = ref[..., :2]  # [B, T, 2]
+        ref_vel = (ref_pos[:, 1:, :] - ref_pos[:, :-1, :]) / self._dt  # [B, T-1, 2]
+
+        # Slice tangent to T-1 to match velocity dimensions
+        n_par_x = n_par_x[:, :T - 1]
+        n_par_y = n_par_y[:, :T - 1]
+
+        # Project ego velocity onto tangent: n∥ · v
+        ego_v_tangent = n_par_x * ego_vel[..., 0] + n_par_y * ego_vel[..., 1]  # [B, T-1]
+
+        # Project reference velocity onto tangent: n∥ · v^ref
+        ref_v_tangent = n_par_x * ref_vel[..., 0] + n_par_y * ref_vel[..., 1]  # [B, T-1]
+
+        # Target: λ_lon · η_lon · v^ref_tangent
+        target = self._lambda_lon * self._eta_lon * ref_v_tangent  # [B, T-1]
+
+        # Ψ_lon = (1/T) Σ (n∥ · (v - λ·η·v^ref))²
+        # The paper formulation: (n∥ · (v - λ·η·v^ref))²
+        # Since we already projected both onto n∥:
+        psi = ((ego_v_tangent - target) ** 2).mean(dim=-1)  # [B]
+        return -psi

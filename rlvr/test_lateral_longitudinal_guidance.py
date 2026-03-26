@@ -42,12 +42,6 @@ from diffusion_planner.model.guidance import (
 )
 from diffusion_planner.model.guidance.lateral_guidance import LateralGuidance
 from diffusion_planner.model.guidance.longitudinal_guidance import LongitudinalGuidance
-from diffusion_planner.model.guidance.frenet import (
-    perturb_trajectory,
-    cartesian_to_frenet,
-    frenet_to_cartesian,
-    _compute_arc_lengths,
-)
 
 # ======================================================================
 # Synthetic data builders
@@ -143,11 +137,12 @@ def test_lateral_build_and_defaults():
     cfg = GuidanceConfig("lateral", scale=1.0)
     fn = build(cfg)
     assert fn.name == "lateral"
-    assert fn._offset == 1.0, f"Default offset should be 1.0, got {fn._offset}"
+    assert fn._lambda_lat == 3.0, f"Default lambda_lat should be 3.0, got {fn._lambda_lat}"
+    assert fn._eta_lat == 0.0, f"Default eta_lat should be 0.0, got {fn._eta_lat}"
 
-    cfg2 = GuidanceConfig("lateral", scale=2.0, params={"lateral_offset": -1.5})
+    cfg2 = GuidanceConfig("lateral", scale=2.0, params={"lambda_lat": 2.0, "eta_lat": -0.5})
     fn2 = build(cfg2)
-    assert fn2._offset == -1.5, f"Custom offset should be -1.5, got {fn2._offset}"
+    assert fn2._lambda_lat == 2.0 and fn2._eta_lat == -0.5
     print("  PASS  test_lateral_build_and_defaults")
 
 
@@ -156,17 +151,18 @@ def test_longitudinal_build_and_defaults():
     cfg = GuidanceConfig("longitudinal", scale=1.0)
     fn = build(cfg)
     assert fn.name == "longitudinal"
-    assert fn._longitudinal_offset == 2.0, f"Default offset should be 2.0, got {fn._longitudinal_offset}"
+    assert fn._lambda_lon == 0.5, f"Default lambda_lon should be 0.5, got {fn._lambda_lon}"
+    assert fn._eta_lon == 0.0, f"Default eta_lon should be 0.0, got {fn._eta_lon}"
 
-    cfg2 = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": -3.0})
+    cfg2 = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 0.3, "eta_lon": -0.8})
     fn2 = build(cfg2)
-    assert fn2._longitudinal_offset == -3.0, f"Custom offset should be -3.0, got {fn2._longitudinal_offset}"
+    assert fn2._lambda_lon == 0.3 and fn2._eta_lon == -0.8
     print("  PASS  test_longitudinal_build_and_defaults")
 
 
 def test_lateral_no_reference_returns_zero():
     """Lateral guidance returns zeros when no reference trajectory is provided."""
-    cfg = GuidanceConfig("lateral", scale=1.0, params={"lateral_offset": 2.0})
+    cfg = GuidanceConfig("lateral", scale=1.0, params={"lambda_lat": 2.0, "eta_lat": 1.0})
     fn = build(cfg)
     ego = _straight_trajectory(speed=5.0)
     x, inputs = _build_guidance_input(ego, ref_traj=None)
@@ -178,7 +174,7 @@ def test_lateral_no_reference_returns_zero():
 
 def test_longitudinal_no_reference_returns_zero():
     """Longitudinal guidance returns zeros when no reference trajectory is provided."""
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": 5.0})
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 0.5, "eta_lon": 1.0})
     fn = build(cfg)
     ego = _straight_trajectory(speed=5.0)
     x, inputs = _build_guidance_input(ego, ref_traj=None)
@@ -188,10 +184,10 @@ def test_longitudinal_no_reference_returns_zero():
 
 
 def test_lateral_zero_offset_on_reference():
-    """Ego on reference with offset=0 should give reward=0 (no penalty)."""
+    """Ego on reference with eta=0 should give reward=0 (no penalty)."""
     ref = _straight_trajectory(speed=5.0)
     ego = ref.clone()
-    cfg = GuidanceConfig("lateral", scale=1.0, params={"lateral_offset": 0.0})
+    cfg = GuidanceConfig("lateral", scale=1.0, params={"lambda_lat": 3.0, "eta_lat": 0.0})
     fn = build(cfg)
     x, inputs = _build_guidance_input(ego, ref_traj=ref)
     r = fn._compute(x, inputs)
@@ -214,7 +210,8 @@ def test_lateral_offset_direction():
     ego_right = ref.clone()
     ego_right[:, 1] -= 1.0
 
-    cfg_pos = GuidanceConfig("lateral", scale=1.0, params={"lateral_offset": 1.0})
+    # eta_lat=1.0, lambda_lat=1.0 → target offset = +1.0m left
+    cfg_pos = GuidanceConfig("lateral", scale=1.0, params={"lambda_lat": 1.0, "eta_lat": 1.0})
     fn = build(cfg_pos)
 
     x_left, inputs_left = _build_guidance_input(ego_left, ref_traj=ref)
@@ -235,7 +232,7 @@ def test_lateral_offset_direction():
 def test_lateral_reward_scales_with_distance():
     """Reward magnitude should increase with distance from target."""
     ref = _straight_trajectory(speed=5.0)
-    cfg = GuidanceConfig("lateral", scale=1.0, params={"lateral_offset": 0.0})
+    cfg = GuidanceConfig("lateral", scale=1.0, params={"lambda_lat": 3.0, "eta_lat": 0.0})
     fn = build(cfg)
 
     rewards = []
@@ -256,15 +253,16 @@ def test_lateral_reward_scales_with_distance():
 
 
 def test_longitudinal_zero_shift():
-    """Ego on reference with offset=0 should give reward=0."""
+    """Stopped ego with eta=0 should have zero penalty (target velocity = 0)."""
     ref = _straight_trajectory(speed=5.0)
-    ego = ref.clone()
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": 0.0})
+    # Stopped ego: all positions same → velocity = 0
+    ego = _straight_trajectory(speed=0.0)
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 0.5, "eta_lon": 0.0})
     fn = build(cfg)
     x, inputs = _build_guidance_input(ego, ref_traj=ref)
     r = fn._compute(x, inputs)
-    assert abs(r.item()) < 1e-6, f"Expected ~0 for ego on ref with shift=0, got {r.item()}"
-    print("  PASS  test_longitudinal_zero_shift")
+    assert abs(r.item()) < 0.1, f"Stopped ego with eta=0 should have ~0 penalty, got {r.item()}"
+    print(f"  PASS  test_longitudinal_zero_shift: r={r.item():.4f}")
 
 
 def test_longitudinal_shift_direction():
@@ -281,7 +279,7 @@ def test_longitudinal_shift_direction():
     ego_behind = ref.clone()
     ego_behind[:, 0] -= 5.0
 
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": 5.0})
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 0.5, "eta_lon": 1.0})
     fn = build(cfg)
 
     x_ahead, inp_ahead = _build_guidance_input(ego_ahead, ref_traj=ref)
@@ -296,78 +294,80 @@ def test_longitudinal_shift_direction():
     print(f"  PASS  test_longitudinal_shift_direction: r_ahead={r_ahead:.2f}, r_behind={r_behind:.2f}")
 
 
-def test_frenet_roundtrip_straight():
-    """Frenet: cartesian → frenet → cartesian roundtrip on a straight path."""
-    ref = _straight_trajectory(speed=5.0, heading=0.0).unsqueeze(0)  # [1, T, 4]
-    ref_xy = ref[..., :2]
+def test_lateral_negative_eta():
+    """Negative eta should prefer ego to the RIGHT of reference."""
+    ref = _straight_trajectory(speed=5.0, heading=0.0)
+    # eta=-1, lambda=2 → target = -2m (right)
+    cfg = GuidanceConfig("lateral", scale=1.0, params={"lambda_lat": 2.0, "eta_lat": -1.0})
+    fn = build(cfg)
 
-    s, d = cartesian_to_frenet(ref, ref_xy)
-    # d should be ~0 (points are on the reference)
-    assert d.abs().max() < 1e-4, f"Lateral deviation should be ~0, got max={d.abs().max():.6f}"
-    # s should be monotonically increasing
-    assert (s[0, 1:] >= s[0, :-1] - 1e-6).all(), "Arc-length should be monotonic"
+    ego_right = ref.clone()
+    ego_right[:, 1] -= 2.0  # 2m to the right
+    ego_left = ref.clone()
+    ego_left[:, 1] += 2.0
 
-    # Roundtrip
-    xy_recovered = frenet_to_cartesian(ref, s, d)
-    err = (xy_recovered - ref_xy).abs().max()
-    assert err < 0.1, f"Roundtrip error should be small, got {err:.4f}"
-    print(f"  PASS  test_frenet_roundtrip_straight: max_d={d.abs().max():.6f}, roundtrip_err={err:.6f}")
-
-
-def test_frenet_roundtrip_curve():
-    """Frenet: roundtrip on a curved trajectory."""
-    ref = _curved_trajectory(speed=5.0, curvature=0.02).unsqueeze(0)  # [1, T, 4]
-    ref_xy = ref[..., :2]
-
-    s, d = cartesian_to_frenet(ref, ref_xy)
-    assert d.abs().max() < 0.5, f"Lateral deviation on curve should be small, got {d.abs().max():.4f}"
-
-    xy_recovered = frenet_to_cartesian(ref, s, d)
-    err = (xy_recovered - ref_xy).abs().max()
-    assert err < 0.5, f"Roundtrip error on curve should be small, got {err:.4f}"
-    print(f"  PASS  test_frenet_roundtrip_curve: max_d={d.abs().max():.4f}, roundtrip_err={err:.4f}")
+    x_right, inp_right = _build_guidance_input(ego_right, ref_traj=ref)
+    x_left, inp_left = _build_guidance_input(ego_left, ref_traj=ref)
+    r_right = fn._compute(x_right, inp_right).item()
+    r_left = fn._compute(x_left, inp_left).item()
+    assert r_right > r_left, f"Negative eta should prefer right: r_right={r_right:.2f} vs r_left={r_left:.2f}"
+    print(f"  PASS  test_lateral_negative_eta: r_right={r_right:.4f}, r_left={r_left:.2f}")
 
 
-def test_perturb_lateral_only():
-    """perturb_trajectory with lateral offset on straight path."""
-    ref = _straight_trajectory(speed=5.0, heading=0.0).unsqueeze(0)
-    perturbed = perturb_trajectory(ref, lateral_offset=2.0, longitudinal_offset=0.0)
+def test_longitudinal_velocity_based():
+    """Longitudinal guidance operates on velocity, not position."""
+    ref = _straight_trajectory(speed=5.0, heading=0.0)
+    # eta=1, lambda=1.0 → target = 1.0 * 1.0 * v_ref = v_ref
+    # Ego matching ref speed should have ~0 penalty
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 1.0, "eta_lon": 1.0})
+    fn = build(cfg)
 
-    # On a straight +X path, lateral +2m should shift Y by +2
-    y_diff = (perturbed[0, :, 1] - ref[0, :, 1]).mean().item()
-    assert abs(y_diff - 2.0) < 0.5, f"Expected ~2.0m Y shift, got {y_diff:.3f}"
-    # X should be roughly unchanged
-    x_diff = (perturbed[0, :, 0] - ref[0, :, 0]).abs().mean().item()
-    assert x_diff < 0.5, f"X should be ~unchanged, got mean diff={x_diff:.3f}"
-    print(f"  PASS  test_perturb_lateral_only: y_diff={y_diff:.3f}, x_diff={x_diff:.3f}")
+    x_same, inputs = _build_guidance_input(ref.clone(), ref_traj=ref)
+    r = fn._compute(x_same, inputs).item()
+    assert abs(r) < 0.1, f"Ego matching target speed should have ~0 penalty, got {r:.4f}"
+
+    # Faster ego should have penalty
+    ego_fast = _straight_trajectory(speed=8.0, heading=0.0)
+    x_fast, inp_fast = _build_guidance_input(ego_fast, ref_traj=ref)
+    r_fast = fn._compute(x_fast, inp_fast).item()
+    assert r_fast < r, f"Faster ego should have more penalty: {r_fast:.2f} vs {r:.2f}"
+    print(f"  PASS  test_longitudinal_velocity_based: r_match={r:.4f}, r_fast={r_fast:.2f}")
 
 
-def test_perturb_longitudinal_only():
-    """perturb_trajectory with longitudinal offset on straight path."""
-    ref = _straight_trajectory(speed=5.0, heading=0.0).unsqueeze(0)
-    perturbed = perturb_trajectory(ref, lateral_offset=0.0, longitudinal_offset=3.0)
+def test_longitudinal_positive_eta_prefers_faster():
+    """Higher positive eta targets higher speed."""
+    ref = _straight_trajectory(speed=5.0, heading=0.0)
+    # eta=1, lambda=1.0 → target = v_ref (5 m/s)
+    # 7 m/s ego is 2 m/s over target; 3 m/s ego is 2 m/s under target → same penalty
+    # But with lambda=0.5: target = 0.5 * v_ref = 2.5 m/s
+    # 3 m/s ego is closer to 2.5 than 7 m/s ego
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 0.5, "eta_lon": 1.0})
+    fn = build(cfg)
 
-    # On a straight +X path, longitudinal +3m should shift X by +3
-    x_diff = (perturbed[0, :, 0] - ref[0, :, 0]).mean().item()
-    assert x_diff > 0, f"Expected positive X shift, got {x_diff:.3f}"
-    # Y should be roughly unchanged
-    y_diff = (perturbed[0, :, 1] - ref[0, :, 1]).abs().mean().item()
-    assert y_diff < 0.5, f"Y should be ~unchanged, got mean diff={y_diff:.3f}"
-    print(f"  PASS  test_perturb_longitudinal_only: x_diff={x_diff:.3f}, y_diff={y_diff:.3f}")
+    ego_2_5 = _straight_trajectory(speed=2.5, heading=0.0)  # matches target exactly
+    ego_far = _straight_trajectory(speed=7.0, heading=0.0)
+
+    x_match, inp_match = _build_guidance_input(ego_2_5, ref_traj=ref)
+    x_far, inp_far = _build_guidance_input(ego_far, ref_traj=ref)
+    r_match = fn._compute(x_match, inp_match).item()
+    r_far = fn._compute(x_far, inp_far).item()
+    assert r_match > r_far, f"Ego at target speed should score better: r_match={r_match:.2f} vs r_far={r_far:.2f}"
+    print(f"  PASS  test_longitudinal_positive_eta_prefers_faster: r_match={r_match:.4f}, r_far={r_far:.2f}")
 
 
 def test_lateral_on_curve():
     """Lateral guidance on a curved trajectory produces perpendicular offsets."""
     ref = _curved_trajectory(speed=5.0, curvature=0.02)
-    cfg = GuidanceConfig("lateral", scale=1.0, params={"lateral_offset": 2.0})
+    # lambda=2, eta=1 → target offset = 2m left
+    cfg = GuidanceConfig("lateral", scale=1.0, params={"lambda_lat": 2.0, "eta_lat": 1.0})
     fn = build(cfg)
 
     # Ego at reference (no offset) should have reward < 0 (pulled toward target)
     x_on_ref, inputs = _build_guidance_input(ref.clone(), ref_traj=ref)
     r_on_ref = fn._compute(x_on_ref, inputs).item()
-    assert r_on_ref < 0, f"Ego on curved ref with offset=2 should have penalty, got {r_on_ref}"
+    assert r_on_ref < 0, f"Ego on curved ref with target=2m should have penalty, got {r_on_ref}"
 
-    # Ego shifted perpendicular to heading at each point
+    # Ego shifted perpendicular to heading by 2m at each point
     ego_at_target = ref.clone()
     cos_h = ref[:, 2]
     sin_h = ref[:, 3]
@@ -384,29 +384,28 @@ def test_lateral_on_curve():
 def test_longitudinal_on_curve():
     """Longitudinal guidance on a curve: Frenet arc-length offset."""
     ref = _curved_trajectory(speed=5.0, curvature=0.02)
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"longitudinal_offset": 2.0})
+    # eta=1, lambda=1 → target = v_ref. Ego matching ref should have ~0 penalty
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 1.0, "eta_lon": 1.0})
     fn = build(cfg)
 
-    # Ego at the Frenet-perturbed target should have reward ~0
-    ref_b = ref.unsqueeze(0)
-    target = perturb_trajectory(ref_b, lateral_offset=0.0, longitudinal_offset=2.0).squeeze(0)
-    x_target, inputs = _build_guidance_input(target, ref_traj=ref)
-    r = fn._compute(x_target, inputs).item()
-    assert abs(r) < 1.0, (
-        f"Ego at Frenet target on curve should have small penalty, got {r:.4f}"
+    x_on_ref, inputs = _build_guidance_input(ref.clone(), ref_traj=ref)
+    r_on_ref = fn._compute(x_on_ref, inputs).item()
+    assert abs(r_on_ref) < 0.5, (
+        f"Ego matching ref speed on curve should have small penalty, got {r_on_ref:.4f}"
     )
 
-    # Ego at original reference should have larger penalty
-    x_orig, inputs_orig = _build_guidance_input(ref.clone(), ref_traj=ref)
-    r_orig = fn._compute(x_orig, inputs_orig).item()
-    assert r_orig < 0, f"Ego at ref with offset=2 should have penalty, got {r_orig}"
-    print(f"  PASS  test_longitudinal_on_curve: r_at_target={r:.4f}, r_at_ref={r_orig:.2f}")
+    # eta=-1 → target = -v_ref (opposite direction). Should have large penalty
+    cfg2 = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 1.0, "eta_lon": -1.0})
+    fn2 = build(cfg2)
+    r_opposite = fn2._compute(x_on_ref, inputs).item()
+    assert r_opposite < r_on_ref, f"Opposite target should have more penalty"
+    print(f"  PASS  test_longitudinal_on_curve: r_match={r_on_ref:.4f}, r_opposite={r_opposite:.2f}")
 
 
 def test_energy_method_time_gating():
     """energy() should gate output to zero outside the diffusion time window."""
     ref = _straight_trajectory(speed=5.0)
-    cfg = GuidanceConfig("lateral", scale=1.0, params={"lateral_offset": 2.0})
+    cfg = GuidanceConfig("lateral", scale=1.0, params={"lambda_lat": 2.0, "eta_lat": 1.0})
     fn = build(cfg)
     x, inputs = _build_guidance_input(ref.clone(), ref_traj=ref)
 
@@ -430,7 +429,7 @@ def test_energy_method_time_gating():
 def test_reward_method():
     """reward() should return scaled reward without requiring time input."""
     ref = _straight_trajectory(speed=5.0)
-    cfg = GuidanceConfig("lateral", scale=2.0, params={"lateral_offset": 1.0})
+    cfg = GuidanceConfig("lateral", scale=2.0, params={"lambda_lat": 1.0, "eta_lat": 1.0})
     fn = build(cfg)
 
     ego = ref.clone()
@@ -452,8 +451,8 @@ def test_composer_integration():
     set_cfg = GuidanceSetConfig(
         global_scale=1.0,
         functions=[
-            GuidanceConfig("lateral", scale=1.0, params={"lateral_offset": 0.0}),
-            GuidanceConfig("longitudinal", scale=1.0, params={"time_shift": 5.0}),
+            GuidanceConfig("lateral", scale=1.0, params={"lambda_lat": 3.0, "eta_lat": 0.5}),
+            GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 0.5, "eta_lon": 0.5}),
         ],
     )
     composer = GuidanceComposer(set_cfg)
@@ -752,10 +751,13 @@ def run_model_tests(model_path, npz_path, save_dir, device):
             for k, v in norm_data.items()
         }
         norm_data_copy["reference_trajectory"] = ref_tensor
-
+        # η_lat = offset / λ_lat, clamped to [-1, 1]
+        lambda_lat = 3.0
+        eta_lat = max(-1.0, min(1.0, offset / lambda_lat))
         set_cfg = GuidanceSetConfig(
             global_scale=1.0,
-            functions=[GuidanceConfig("lateral", scale=5.0, params={"lateral_offset": offset})],
+            functions=[GuidanceConfig("lateral", scale=50.0,
+                                      params={"lambda_lat": lambda_lat, "eta_lat": eta_lat})],
         )
         composer = GuidanceComposer(set_cfg)
         traj = generate_with_guidance(model, model_args, norm_data_copy, composer, device)
@@ -809,10 +811,12 @@ def run_model_tests(model_path, npz_path, save_dir, device):
             for k, v in norm_data.items()
         }
         norm_data_copy["reference_trajectory"] = ref_tensor
-
+        eta_lon = float(shift) / 8.0  # normalize to ~[-1, 1]
+        eta_lon = max(-1.0, min(1.0, eta_lon))
         set_cfg = GuidanceSetConfig(
             global_scale=1.0,
-            functions=[GuidanceConfig("longitudinal", scale=5.0, params={"longitudinal_offset": float(shift)})],
+            functions=[GuidanceConfig("longitudinal", scale=50.0,
+                                      params={"lambda_lon": 0.5, "eta_lon": eta_lon})],
         )
         composer = GuidanceComposer(set_cfg)
         traj = generate_with_guidance(model, model_args, norm_data_copy, composer, device)
@@ -874,11 +878,15 @@ def run_model_tests(model_path, npz_path, save_dir, device):
             for k, v in norm_data.items()
         }
         norm_data_copy["reference_trajectory"] = ref_tensor
+        eta_lat = max(-1.0, min(1.0, lat_off / 3.0))
+        eta_lon = max(-1.0, min(1.0, lon_shift / 5.0))
         set_cfg = GuidanceSetConfig(
             global_scale=1.0,
             functions=[
-                GuidanceConfig("lateral", scale=5.0, params={"lateral_offset": lat_off}),
-                GuidanceConfig("longitudinal", scale=5.0, params={"time_shift": lon_shift}),
+                GuidanceConfig("lateral", scale=50.0,
+                               params={"lambda_lat": 3.0, "eta_lat": eta_lat}),
+                GuidanceConfig("longitudinal", scale=50.0,
+                               params={"lambda_lon": 0.5, "eta_lon": eta_lon}),
             ],
         )
         composer = GuidanceComposer(set_cfg)
@@ -918,10 +926,9 @@ if __name__ == "__main__":
         test_lateral_reward_scales_with_distance,
         test_longitudinal_zero_shift,
         test_longitudinal_shift_direction,
-        test_frenet_roundtrip_straight,
-        test_frenet_roundtrip_curve,
-        test_perturb_lateral_only,
-        test_perturb_longitudinal_only,
+        test_lateral_negative_eta,
+        test_longitudinal_velocity_based,
+        test_longitudinal_positive_eta_prefers_faster,
         test_lateral_on_curve,
         test_longitudinal_on_curve,
         test_energy_method_time_gating,
