@@ -33,6 +33,8 @@ class SamplerConfig:
     enable_lane_keeping: bool = False
     enable_road_border: bool = True
     enable_speed: bool = True
+    enable_lateral: bool = False
+    enable_longitudinal: bool = False
 
     # Probability that each enabled type is included for a given trajectory
     guidance_prob: float = 0.5
@@ -43,6 +45,13 @@ class SamplerConfig:
     route_following_scale_range: tuple[float, float] = (0.5, 2.0)
     lane_keeping_scale_range: tuple[float, float] = (0.5, 2.0)
     road_border_scale_range: tuple[float, float] = (0.2, 1.5)
+
+    # Lateral offset range in metres (positive=left, negative=right)
+    lateral_offset_range: tuple[float, float] = (-2.0, 2.0)
+    lateral_scale_range: tuple[float, float] = (0.5, 3.0)
+    # Longitudinal time-shift range in timesteps (at dt=0.1s)
+    longitudinal_shift_range: tuple[float, float] = (-10.0, 10.0)
+    longitudinal_scale_range: tuple[float, float] = (0.5, 3.0)
 
     prototypes_path: str | None = None
     num_prototypes: int = 16
@@ -125,6 +134,13 @@ def generate_diverse_group(
         is_deterministic=True,
         label="det",
     ))
+
+    # Store deterministic trajectory as reference for lateral/longitudinal guidance.
+    # Shape: [1, T, 4] in physical ego-centric metres (x, y, cos, sin).
+    # ObservationNormalizer.inverse() passes unknown keys through unchanged.
+    if config.enable_lateral or config.enable_longitudinal:
+        ref_traj = torch.from_numpy(samples[0]).unsqueeze(0).to(device)  # [1, T, 4]
+        norm_data["reference_trajectory"] = ref_traj
 
     # GT seed REMOVED: raw GT trajectory gets -27 reward due to bad centerline
     # score (heading conversion mismatch), causing GRPO to learn AWAY from GT.
@@ -258,6 +274,26 @@ def generate_diverse_group(
                     name="road_border", enabled=True, scale=rb_scale,
                 ))
                 label_parts.append(f"rb={rb_scale:.1f}")
+
+            # Lateral guidance: perpendicular offset from deterministic reference
+            if config.enable_lateral and random.random() < config.guidance_prob:
+                lat_offset = random.uniform(*config.lateral_offset_range)
+                lat_scale = random.uniform(*config.lateral_scale_range)
+                guidance_fns.append(GuidanceConfig(
+                    name="lateral", enabled=True, scale=lat_scale,
+                    params={"lateral_offset": lat_offset},
+                ))
+                label_parts.append(f"lat={lat_offset:+.1f}")
+
+            # Longitudinal guidance: time-shift along deterministic reference
+            if config.enable_longitudinal and random.random() < config.guidance_prob:
+                time_shift = random.uniform(*config.longitudinal_shift_range)
+                long_scale = random.uniform(*config.longitudinal_scale_range)
+                guidance_fns.append(GuidanceConfig(
+                    name="longitudinal", enabled=True, scale=long_scale,
+                    params={"time_shift": time_shift},
+                ))
+                label_parts.append(f"lon={time_shift:+.1f}")
 
             # Speed guidance caps speed at GT max when enabled and GT available
             if config.enable_speed and gt_max_speed is not None:
