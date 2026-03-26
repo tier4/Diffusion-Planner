@@ -40,7 +40,7 @@ class LateralGuidance(BaseGuidance):
     """
 
     name = "lateral"
-    _energy_scale = 1.0
+    _energy_scale = 10.0
 
     def __init__(self, config: "GuidanceConfig", **kwargs):  # noqa: F821
         super().__init__(config)
