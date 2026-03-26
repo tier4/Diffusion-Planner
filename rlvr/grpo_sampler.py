@@ -49,7 +49,7 @@ class SamplerConfig:
     # PlannerRFT guidance params (Eq. 2-3, arxiv 2601.12901)
     # λ_lat: max lateral offset in metres; η_lat sampled from [-1, 1]
     lambda_lat: float = 3.0
-    # λ_lon: max relative speed deviation (fraction); η_lon sampled from [-1, 1]
+    # λ_lon: speed scaling in Eq. 3; target tangential velocity = λ_lon · η_lon · v_ref
     lambda_lon: float = 0.5
     lateral_scale_range: tuple[float, float] = (0.5, 3.0)
     longitudinal_scale_range: tuple[float, float] = (0.5, 3.0)

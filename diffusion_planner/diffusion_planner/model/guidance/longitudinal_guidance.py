@@ -16,8 +16,8 @@ where:
     η_lon  = guidance scale in [-1, 1] (later learned by PPO)
 
 Target tangential velocity = λ_lon · η_lon · v^ref_tangential.
-    η_lon = 0  → target = 0 (penalizes all velocity, no guidance effect
-                 when combined with scale=0 from exploration policy)
+    η_lon = 0  → target = 0 (penalizes all tangential velocity, encourages
+                 stopping; only neutral when overall guidance scale is also 0)
     η_lon = 1, λ_lon = 1.0  → target = v_ref (match reference speed)
     η_lon = 1, λ_lon = 0.5  → target = 0.5 * v_ref (half reference speed)
     η_lon = -1 → target = -λ·v_ref (penalizes forward motion)

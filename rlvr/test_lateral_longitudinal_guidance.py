@@ -797,7 +797,7 @@ def run_model_tests(model_path, npz_path, save_dir, device):
 
     # --- Longitudinal guidance sweep ---
     print("\n  Longitudinal guidance sweep...")
-    time_shifts = [-8, -5, -3, -1, 1, 3, 5, 8]  # metres of arc-length offset
+    time_shifts = [-8, -5, -3, -1, 1, 3, 5, 8]  # η_lon sweep values (mapped to [-1, 1])
     longitudinal_trajs = {}
 
     for shift in time_shifts:
