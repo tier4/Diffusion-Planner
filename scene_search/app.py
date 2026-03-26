@@ -325,7 +325,8 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 gr.Markdown("### Kept Batches")
                 kept_summary = gr.Markdown("No batches kept yet")
                 save_btn = gr.Button("Save All Kept → JSON", variant="secondary")
-                save_path_input = gr.Textbox(label="Save path", value="kept_scenes.json")
+                _default_save = str(Path.cwd() / "kept_scenes.json")
+                save_path_input = gr.Textbox(label="Save path", value=_default_save)
                 downsample_n = gr.Number(label="Downsample to N (0=all)", value=0, precision=0)
                 save_status = gr.Markdown("")
                 clear_kept_btn = gr.Button("Clear All Kept", variant="stop")
@@ -543,8 +544,23 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         clear_kept_btn.click(on_clear, outputs=[kept_batches_state, kept_summary, kept_display, save_status])
 
         # --- Save ---
+        def _next_available_path(base_path: str) -> str:
+            """Auto-increment suffix: kept_scenes.json → kept_scenes_0.json → kept_scenes_1.json ..."""
+            p = Path(base_path)
+            if not p.exists():
+                return str(p.resolve())
+            stem, suffix = p.stem, p.suffix
+            parent = p.parent
+            i = 0
+            while True:
+                candidate = parent / f"{stem}_{i}{suffix}"
+                if not candidate.exists():
+                    return str(candidate.resolve())
+                i += 1
+
         def on_save(kept, path, ds):
-            if not kept: return "No batches to save"
+            if not kept:
+                return "No batches to save", gr.update()
             scenes = []
             seen = set()
             for k in kept:
@@ -553,12 +569,14 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                         seen.add(s); scenes.append(s)
             if ds and int(ds) > 0 and int(ds) < len(scenes):
                 scenes = sorted(random.sample(scenes, int(ds)))
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w") as f:
+            actual_path = _next_available_path(path)
+            Path(actual_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(actual_path, "w") as f:
                 json.dump(scenes, f, indent=4)
-            return f"Saved **{len(scenes)}** scenes to `{path}`"
+            return f"Saved **{len(scenes)}** scenes to `{actual_path}`", gr.update(value=actual_path)
 
-        save_btn.click(on_save, inputs=[kept_batches_state, save_path_input, downsample_n], outputs=[save_status])
+        save_btn.click(on_save, inputs=[kept_batches_state, save_path_input, downsample_n],
+                       outputs=[save_status, save_path_input])
 
     return demo
 
