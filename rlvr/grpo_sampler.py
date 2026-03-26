@@ -136,7 +136,7 @@ def generate_diverse_group(
         label="det",
     ))
 
-    # Store deterministic trajectory as reference for PlannerRFT Frenet guidance.
+    # Store deterministic trajectory as reference for PlannerRFT Eq. 2-3 guidance.
     # Injected into norm_data so it reaches the guidance functions via the
     # decoder's inputs dict. ObservationNormalizer passes unknown keys through.
     if config.enable_lateral or config.enable_longitudinal:

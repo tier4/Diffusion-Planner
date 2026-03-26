@@ -266,32 +266,27 @@ def test_longitudinal_zero_shift():
 
 
 def test_longitudinal_shift_direction():
-    """Positive offset should prefer ego AHEAD of reference (faster).
-
-    For a 5 m/s trajectory heading along +X, longitudinal_offset=+5m
-    means target is 5m further along the path.
-    """
+    """Positive eta with lambda=1 targets v_ref; ego at ref speed scores best."""
     ref = _straight_trajectory(speed=5.0, heading=0.0)
 
-    ego_ahead = ref.clone()
-    ego_ahead[:, 0] += 5.0
+    ego_match = ref.clone()  # 5 m/s, matches λ=1·η=1·v_ref = v_ref
+    ego_fast = _straight_trajectory(speed=8.0, heading=0.0)
+    ego_slow = _straight_trajectory(speed=2.0, heading=0.0)
 
-    ego_behind = ref.clone()
-    ego_behind[:, 0] -= 5.0
-
-    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 0.5, "eta_lon": 1.0})
+    cfg = GuidanceConfig("longitudinal", scale=1.0, params={"lambda_lon": 1.0, "eta_lon": 1.0})
     fn = build(cfg)
 
-    x_ahead, inp_ahead = _build_guidance_input(ego_ahead, ref_traj=ref)
-    x_behind, inp_behind = _build_guidance_input(ego_behind, ref_traj=ref)
+    x_match, inp_match = _build_guidance_input(ego_match, ref_traj=ref)
+    x_fast, inp_fast = _build_guidance_input(ego_fast, ref_traj=ref)
+    x_slow, inp_slow = _build_guidance_input(ego_slow, ref_traj=ref)
 
-    r_ahead = fn._compute(x_ahead, inp_ahead).item()
-    r_behind = fn._compute(x_behind, inp_behind).item()
+    r_match = fn._compute(x_match, inp_match).item()
+    r_fast = fn._compute(x_fast, inp_fast).item()
+    r_slow = fn._compute(x_slow, inp_slow).item()
 
-    assert r_ahead > r_behind, (
-        f"Positive shift should prefer ahead ego: r_ahead={r_ahead:.2f}, r_behind={r_behind:.2f}"
-    )
-    print(f"  PASS  test_longitudinal_shift_direction: r_ahead={r_ahead:.2f}, r_behind={r_behind:.2f}")
+    assert r_match > r_fast, f"Ego at target speed should beat faster: r_match={r_match:.2f}, r_fast={r_fast:.2f}"
+    assert r_match > r_slow, f"Ego at target speed should beat slower: r_match={r_match:.2f}, r_slow={r_slow:.2f}"
+    print(f"  PASS  test_longitudinal_shift_direction: r_match={r_match:.4f}, r_fast={r_fast:.2f}, r_slow={r_slow:.2f}")
 
 
 def test_lateral_negative_eta():
@@ -582,7 +577,7 @@ def visualize_longitudinal_test(
         ax.plot(traj[-1, 0], traj[-1, 1], "o", color=color, markersize=4, zorder=10)
 
     ax.legend(loc="upper left", fontsize=7, framealpha=0.8)
-    ax.set_title("Longitudinal Guidance Test: Frenet arc-length offset from deterministic reference", fontsize=10)
+    ax.set_title("Longitudinal Guidance Test: velocity scaling (Eq. 3) from deterministic reference", fontsize=10)
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

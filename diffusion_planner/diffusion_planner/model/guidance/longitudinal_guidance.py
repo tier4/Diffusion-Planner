@@ -11,26 +11,27 @@ deviation of the ego's tangential velocity from a scaled reference velocity:
 where:
     n∥_τ   = unit tangent (heading direction) of the reference
     v_τ    = ego velocity (finite difference of positions / dt)
-    v^ref  = reference velocity
-    λ_lon  = maximum relative speed deviation (fraction, e.g. 0.5 = ±50%)
+    v^ref  = reference velocity (finite difference of reference / dt)
+    λ_lon  = constant maximum relative speed deviation
     η_lon  = guidance scale in [-1, 1] (later learned by PPO)
 
-When η_lon > 0, the ego is encouraged to go faster than reference.
-When η_lon < 0, slower. η_lon = 0 matches reference speed.
+Target tangential velocity = λ_lon · η_lon · v^ref_tangential.
+    η_lon = 0  → target = 0 (penalizes all velocity, no guidance effect
+                 when combined with scale=0 from exploration policy)
+    η_lon = 1, λ_lon = 1.0  → target = v_ref (match reference speed)
+    η_lon = 1, λ_lon = 0.5  → target = 0.5 * v_ref (half reference speed)
+    η_lon = -1 → target = -λ·v_ref (penalizes forward motion)
 
-The target speed is v^ref * (1 + λ_lon * η_lon) effectively, since
-the energy penalizes (v_tangential - λ_lon * η_lon * v^ref_tangential)².
-Note: this formulation from the paper uses λ_lon as a scaling on v^ref,
-so the actual target tangential speed is (1 - λ_lon·η_lon)·v^ref when
-the energy is zero (v_τ projected along tangent equals λ_lon·η_lon·v^ref).
+The PPO exploration policy will learn to output (η_lat, η_lon) from
+Beta distributions per scene, controlling the exploration direction.
 
 Requires ``reference_trajectory`` in the inputs dict:
     inputs["reference_trajectory"]: [B, T, 4] — (x, y, cos_yaw, sin_yaw)
 
 Params:
-    lambda_lon (float): Maximum relative speed deviation. Default 0.5 (±50%).
-    eta_lon (float): Guidance scale in [-1, 1]. Default 0.0 (match ref speed).
-        Positive = faster, negative = slower. Later replaced by PPO policy output.
+    lambda_lon (float): Speed scaling constant. Default 0.5.
+    eta_lon (float): Guidance scale in [-1, 1]. Default 0.0.
+        Later replaced by PPO policy output.
     dt (float): Timestep for velocity computation. Default 0.1s.
 """
 
@@ -45,7 +46,7 @@ class LongitudinalGuidance(BaseGuidance):
     """PlannerRFT longitudinal classifier guidance (Eq. 3).
 
     Operates on velocity (speed scaling) not position (arc-length offset).
-    _energy_scale = 1.0; tune via config.scale and eta_lon.
+    _energy_scale = 10.0; tune via config.scale and eta_lon.
     """
 
     name = "longitudinal"
@@ -81,7 +82,7 @@ class LongitudinalGuidance(BaseGuidance):
         cos_h = cos_h / h_norm
         sin_h = sin_h / h_norm
         # n∥ = (cos, sin) — tangent direction
-        n_par_x = cos_h  # [B, T-1] (we'll slice to T-1 for velocity)
+        n_par_x = cos_h  # [B, T]
         n_par_y = sin_h
 
         # Ego velocity via finite differences
@@ -106,7 +107,5 @@ class LongitudinalGuidance(BaseGuidance):
         target = self._lambda_lon * self._eta_lon * ref_v_tangent  # [B, T-1]
 
         # Ψ_lon = (1/T) Σ (n∥ · (v - λ·η·v^ref))²
-        # The paper formulation: (n∥ · (v - λ·η·v^ref))²
-        # Since we already projected both onto n∥:
         psi = ((ego_v_tangent - target) ** 2).mean(dim=-1)  # [B]
         return -psi

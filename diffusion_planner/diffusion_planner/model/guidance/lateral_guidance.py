@@ -36,7 +36,7 @@ from .registry import register
 class LateralGuidance(BaseGuidance):
     """PlannerRFT lateral classifier guidance (Eq. 2).
 
-    _energy_scale = 1.0; tune via config.scale and eta_lat.
+    _energy_scale = 10.0; tune via config.scale and eta_lat.
     """
 
     name = "lateral"
