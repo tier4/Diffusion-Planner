@@ -356,7 +356,8 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                     with gr.Group(visible=False) as grp:
                         lbl = gr.Markdown(f"Batch {i+1}")
                         gal = gr.Gallery(label=f"Batch {i+1}", columns=6, rows=2,
-                                         height=220, object_fit="contain")
+                                         height=220, object_fit="contain",
+                                         preview=True)
                         with gr.Row():
                             keep_b = gr.Button(f"Keep Batch {i+1}", size="sm", variant="primary")
                     batch_groups.append(grp)
