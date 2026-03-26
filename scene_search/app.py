@@ -433,24 +433,14 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             n_constraints = len(active_filters)
             constraint_info = f" ({n_constraints} constraint{'s' if n_constraints != 1 else ''} active)" if active_filters else ""
 
-            # Phase 1: render ONLY the central thumbnail per batch (fast)
-            import io as _io
+            # Phase 1: show batch info instantly, no thumbnail rendering
             outputs = [
-                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info} — loading...",
+                f"Found **{len(batches)} batches** ({total} total scenes){constraint_info} — rendering thumbnails...",
                 gr.update(visible=len(batches) > 0),
             ]
             for i in range(MAX_VISIBLE_BATCHES):
                 if i < len(batches):
-                    b = batches[i]
-                    central_path = b.scenes[b.central_indices[0]] if b.central_indices else b.scenes[len(b.scenes)//2]
-                    fig = render_single_thumbnail(central_path, view_range=60.0)
-                    buf = _io.BytesIO()
-                    fig.savefig(buf, format="png", dpi=90, bbox_inches="tight")
-                    import matplotlib.pyplot as _plt
-                    _plt.close(fig)
-                    buf.seek(0)
-                    central_img = PILImage.open(buf)
-                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {b.summary()}", [(central_img, "t=0* (loading rest...)")]])
+                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {batches[i].summary()}", gr.update(value=None)])
                 else:
                     outputs.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
             outputs.append(batch_dicts)
