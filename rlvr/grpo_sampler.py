@@ -139,7 +139,7 @@ def generate_diverse_group(
     # Store deterministic trajectory as reference for PlannerRFT Eq. 2-3 guidance.
     # Injected into norm_data so it reaches the guidance functions via the
     # decoder's inputs dict. ObservationNormalizer passes unknown keys through.
-    if config.enable_lateral or config.enable_longitudinal:
+    if config.enable_guidance and (config.enable_lateral or config.enable_longitudinal):
         ref_traj = torch.from_numpy(samples[0]).unsqueeze(0).to(device)  # [1, T, 4]
         norm_data["reference_trajectory"] = ref_traj
 

@@ -30,8 +30,12 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "diffusion_planner"))
+_repo_root = os.path.join(os.path.dirname(__file__), "..")
+_dp_root = os.path.join(_repo_root, "diffusion_planner")
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+if _dp_root not in sys.path:
+    sys.path.insert(0, _dp_root)
 
 from diffusion_planner.model.guidance import (
     GuidanceComposer,
@@ -40,8 +44,6 @@ from diffusion_planner.model.guidance import (
     build,
     list_available,
 )
-from diffusion_planner.model.guidance.lateral_guidance import LateralGuidance
-from diffusion_planner.model.guidance.longitudinal_guidance import LongitudinalGuidance
 
 # ======================================================================
 # Synthetic data builders
