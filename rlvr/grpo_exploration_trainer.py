@@ -228,6 +228,7 @@ class GRPOExplorationTrainer:
 
             # 6. Generate K trajectories (noise=0, each with its own η)
             trajectories = []
+            noise_min, noise_max = self.config.noise_scale_range
             for k in range(K):
                 eta_lat = eta_lat_vals[k].item()
                 eta_lon = eta_lon_vals[k].item()
@@ -245,9 +246,13 @@ class GRPOExplorationTrainer:
                 set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
                 composer = GuidanceComposer(set_cfg)
 
+                # Add random noise alongside policy guidance for diversity
+                # First trajectory (k=0) is deterministic (no noise) for reference
+                noise = 0.0 if k == 0 else random.uniform(noise_min, noise_max)
+
                 traj = generate_samples(
                     model=self.policy_model, model_args=self.model_args,
-                    data=norm_data, noise_scale=0.0, n_samples=1,
+                    data=norm_data, noise_scale=noise, n_samples=1,
                     composer=composer, device=self.device,
                 )[0]
                 trajectories.append(traj)
