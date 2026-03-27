@@ -67,6 +67,21 @@ class SampledTrajectory:
     label: str
 
 
+@dataclass
+class PolicyGroupMetadata:
+    """Metadata for policy-guided generation of exploration parameters.
+
+    Stores sampled η values and distribution params per scene. The trainer
+    reconstructs distributions and recomputes log-probs from model inputs
+    (scene_encoding, x_ref) during training to maintain gradient flow.
+    """
+    log_probs: torch.Tensor     # [K] placeholder (recomputed during training with grad)
+    lat_dist_params: tuple[torch.Tensor, torch.Tensor]  # (concentration1, concentration0) for monitoring
+    lon_dist_params: tuple[torch.Tensor, torch.Tensor]  # (concentration1, concentration0) for monitoring
+    eta_lat_samples: torch.Tensor  # [K] sampled η_lat values in [-1, 1]
+    eta_lon_samples: torch.Tensor  # [K] sampled η_lon values in [-1, 1]
+
+
 def _detect_num_prototypes(path: str) -> int | None:
     """Return number of prototypes, or None if the file is missing/unloadable."""
     if not Path(path).exists():
@@ -286,7 +301,7 @@ def generate_diverse_group(
                 label_parts.append(f"spd={spd_scale:.1f}")
 
             # PlannerRFT lateral/longitudinal guidance (Eq. 2-3, arxiv 2601.12901).
-            # η values sampled uniformly from [-1, 1]; later replaced by PPO policy.
+            # η values sampled uniformly from [-1, 1].
             if config.enable_lateral and random.random() < config.guidance_prob:
                 eta_lat = random.uniform(-1.0, 1.0)
                 lat_scale = random.uniform(*config.lateral_scale_range)
