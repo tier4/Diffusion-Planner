@@ -307,11 +307,19 @@ def run(config_path: Path, name: str):
     # Eval reward config always uses STANDARD weights for cross-experiment comparability
     eval_reward_config = RewardConfig()
 
-    trainer = GRPOTrainer(
-        policy_model=policy_model, model_args=model_args,
-        optimizer=optimizer, device=DEVICE, run_dir=run_dir,
-        config=grpo_config, use_lora=grpo_config.use_lora,
-    )
+    if grpo_config.use_exploration_policy:
+        from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
+        trainer = GRPOExplorationTrainer(
+            policy_model=policy_model, model_args=model_args,
+            dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+            config=grpo_config, use_lora=grpo_config.use_lora,
+        )
+    else:
+        trainer = GRPOTrainer(
+            policy_model=policy_model, model_args=model_args,
+            optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+            config=grpo_config, use_lora=grpo_config.use_lora,
+        )
 
     # Evaluate base model
     print("\nBase model evaluation:")
@@ -346,7 +354,7 @@ def run(config_path: Path, name: str):
                     setattr(trainer.reward_config, k, v)
                     print(f"  [schedule] epoch {epoch}: {k}={v}")
 
-        if epoch == 1:
+        if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
             trainer.save_epoch1_baselines(train_paths)
 
         metrics = trainer.train_epoch(train_paths, epoch)
