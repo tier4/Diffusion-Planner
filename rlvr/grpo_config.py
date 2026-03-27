@@ -142,6 +142,29 @@ class GRPOConfig:
     lora_alpha: int = 16
     lora_dropout: float = 0.05
 
+    # Exploration Policy: learned guidance for adaptive GRPO sampling.
+    # When enabled, a learned policy outputs (eta_lat, eta_lon) from Beta
+    # distributions instead of uniform random sampling.
+    use_exploration_policy: bool = False
+    exploration_hidden_dim: int = 128
+    exploration_n_mixer_layers: int = 2
+    exploration_n_attn_heads: int = 4
+    exploration_dropout: float = 0.1
+    exploration_lr: float = 1e-4
+    exploration_checkpoint_path: str | None = None
+    # REINFORCE loss coefficients for exploration policy training
+    exploration_entropy_coef: float = 0.05
+    exploration_kl_coef: float = 0.01
+    # Inverse KL scheduling: policy KL ramps UP over training (opposite of DiT KL).
+    # Early: low policy KL (free exploration) + high DiT KL (stable planner).
+    # Late: high policy KL (anchor learned policy) + low DiT KL (planner adapts).
+    exploration_kl_schedule: str = "constant"  # "constant", "linear", "cosine"
+    exploration_kl_coef_final: float = 0.05
+    # Lateral/longitudinal guidance parameters for exploration policy
+    exploration_lambda_lat: float = 2.5   # max lateral offset in metres
+    exploration_lambda_lon: float = 0.25  # max speed deviation fraction
+    exploration_guidance_scale: float = 0.5  # global guidance scale for policy-guided trajectories
+
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
         """Load config from JSON file."""
@@ -193,6 +216,44 @@ class GRPOConfig:
         raise ValueError(
             f"Unknown kl_schedule: {self.kl_schedule!r}. "
             f"Expected 'constant', 'linear', 'cosine', or 'step'."
+        )
+
+    def get_exploration_kl_coef(self, epoch: int, total_epochs: int) -> float:
+        """Compute exploration policy KL coefficient (ramps UP, inverse of DiT KL).
+
+        Early training: low KL → policy explores freely.
+        Late training: high KL → anchor learned policy to prevent drift.
+
+        Uses a captured initial value so the schedule is stateless w.r.t.
+        later mutations to exploration_kl_coef.
+
+        Args:
+            epoch: Current epoch (1-indexed).
+            total_epochs: Total number of training epochs.
+
+        Returns:
+            Exploration policy KL coefficient for this epoch.
+        """
+        # Capture the initial value on first call (same pattern as get_kl_coef)
+        if not hasattr(self, "_exploration_kl_coef_initial"):
+            self._exploration_kl_coef_initial = self.exploration_kl_coef
+
+        if self.exploration_kl_schedule == "constant" or total_epochs <= 1:
+            return self._exploration_kl_coef_initial
+
+        progress = (epoch - 1) / (total_epochs - 1)
+        start = self._exploration_kl_coef_initial
+        end = self.exploration_kl_coef_final
+
+        if self.exploration_kl_schedule == "linear":
+            return start + (end - start) * progress
+
+        if self.exploration_kl_schedule == "cosine":
+            return end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        raise ValueError(
+            f"Unknown exploration_kl_schedule: {self.exploration_kl_schedule!r}. "
+            f"Expected 'constant', 'linear', or 'cosine'."
         )
 
     @property
