@@ -214,7 +214,7 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
     print(f"  Visualization saved to {out_path}")
 
 
-def run(config_path: Path, name: str):
+def run(config_path: Path, name: str, skip_baseline: bool = False):
     # Fix seeds
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
@@ -321,10 +321,15 @@ def run(config_path: Path, name: str):
             config=grpo_config, use_lora=grpo_config.use_lora,
         )
 
-    # Evaluate base model
-    print("\nBase model evaluation:")
-    base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")
-    base_val = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, "base-val")
+    # Evaluate base model (can skip if baseline numbers are already known)
+    if skip_baseline:
+        print("\nSkipping base model evaluation (--skip_baseline)")
+        base_prob = {"reward_mean": 0.0, "rb_crossings": 0, "collision_rate": 0.0}
+        base_val = {"reward_mean": 0.0, "rb_crossings": 0, "collision_rate": 0.0}
+    else:
+        print("\nBase model evaluation:")
+        base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")
+        base_val = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, "base-val")
 
     trainer._eval_scene_paths = val_50
 
@@ -415,6 +420,7 @@ def main():
     parser.add_argument("--normal_scenes", type=Path, required=True, help="JSON list of normal scene NPZ paths")
     parser.add_argument("--val_scenes", type=Path, required=True, help="JSON list of validation scene NPZ paths")
     parser.add_argument("--output_dir", type=Path, required=True, help="Output directory for experiment results")
+    parser.add_argument("--skip_baseline", action="store_true", help="Skip base model evaluation (reuse known baseline numbers)")
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -430,7 +436,7 @@ def main():
     OUTPUT_DIR = args.output_dir
 
     try:
-        run(args.config, args.name)
+        run(args.config, args.name, skip_baseline=args.skip_baseline)
     except Exception as e:
         print(f"\n---")
         print(f"name:             {args.name}")
