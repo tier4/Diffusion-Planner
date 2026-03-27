@@ -145,6 +145,8 @@ class GRPOConfig:
     # Exploration Policy: learned guidance for adaptive GRPO sampling.
     # When enabled, a learned policy outputs (eta_lat, eta_lon) from Beta
     # distributions instead of uniform random sampling.
+    # NOTE: requires using GRPOExplorationTrainer (rlvr/grpo_exploration_trainer.py)
+    # instead of GRPOTrainer. The standard GRPOTrainer ignores this flag.
     use_exploration_policy: bool = False
     exploration_hidden_dim: int = 128
     exploration_n_mixer_layers: int = 2
