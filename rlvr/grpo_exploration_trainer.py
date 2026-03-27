@@ -34,7 +34,7 @@ from guidance_gui.generate_samples import generate_samples
 from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_loss import compute_grpo_loss
-from rlvr.grpo_sampler import PolicyGroupMetadata
+from rlvr.grpo_sampler import PolicyGroupMetadata, SamplerConfig
 from rlvr.reward import RewardConfig, compute_group_advantages, compute_reward_batch
 
 
@@ -350,8 +350,10 @@ class GRPOExplorationTrainer:
             eta_lat_01 = group["eta_lat_01"]          # [K] detached sampled values
             eta_lon_01 = group["eta_lon_01"]          # [K] detached sampled values
 
-            # Forward pass with grad through the CURRENT policy weights
-            policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=False)
+            # Forward pass with grad through the CURRENT policy weights.
+            # deterministic=True avoids unnecessary sampling — we only need
+            # the distributions for log_prob evaluation of stored eta values.
+            policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
             lat_dist = policy_output.lat_dist
             lon_dist = policy_output.lon_dist
 
