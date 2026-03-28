@@ -131,6 +131,14 @@ def parse_args() -> argparse.Namespace:
         default=0.05,
         help="Dropout probability on LoRA activations.",
     )
+    parser.add_argument(
+        "--lora_target",
+        type=str,
+        default="first",
+        choices=["all", "first", "last", "blocks01"],
+        help="Which DiT decoder blocks to target. 'first' (block 0 only) recommended: "
+             "preserves neighbor predictions and turn signals. 'all' targets all 3 blocks.",
+    )
 
     return parser.parse_args()
 
@@ -539,13 +547,21 @@ def main():
             policy_model.print_trainable_parameters()
             print(f"Resumed LoRA adapter from {seed_lora_dir}")
         else:
-            from preference_optimization.lora_utils import apply_lora
-            policy_model = apply_lora(
-                policy_model,
-                r=args.lora_rank,
-                lora_alpha=args.lora_alpha,
-                lora_dropout=args.lora_dropout,
+            from preference_optimization.lora_utils import (
+                apply_lora,
+                LORA_TARGET_FIRST_BLOCK_REGEX,
+                LORA_TARGET_LAST_BLOCK_REGEX,
+                LORA_TARGET_BLOCKS_01_REGEX,
             )
+            target_map = {"last": LORA_TARGET_LAST_BLOCK_REGEX,
+                          "first": LORA_TARGET_FIRST_BLOCK_REGEX,
+                          "blocks01": LORA_TARGET_BLOCKS_01_REGEX}
+            kwargs = dict(r=args.lora_rank, lora_alpha=args.lora_alpha,
+                         lora_dropout=args.lora_dropout)
+            lora_target = getattr(args, "lora_target", "first")
+            if lora_target in target_map:
+                kwargs["target_modules"] = target_map[lora_target]
+            policy_model = apply_lora(policy_model, **kwargs)
 
     # Create optimizer over trainable parameters only
     trainable_params = [p for p in policy_model.parameters() if p.requires_grad]

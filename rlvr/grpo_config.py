@@ -142,7 +142,7 @@ class GRPOConfig:
     lora_rank: int = 16
     lora_alpha: int = 16
     lora_dropout: float = 0.05
-    lora_target: str = "all"  # "all" = all decoder blocks, "last" = last block only
+    lora_target: str = "first"  # "first" = block 0 only (recommended), "all" = all decoder blocks, "blocks01" = blocks 0+1, "last" = block 2 only
 
     # Exploration Policy: learned guidance for adaptive GRPO sampling.
     # When enabled, a learned policy outputs (eta_lat, eta_lon) from Beta
