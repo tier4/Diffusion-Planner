@@ -32,8 +32,13 @@ class GuidanceHead(nn.Module):
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden_dim, 4)  # alpha_lat, beta_lat, alpha_lon, beta_lon
 
-        # Zero-init the output layer for unbiased exploration at init
-        nn.init.zeros_(self.fc2.weight)
+        # Small random init for the output layer weights so that output is
+        # input-dependent from the start (enables gradient flow).
+        # Zero-init was too aggressive — the policy never learned because
+        # fc2.weight=0 means the output is constant regardless of input,
+        # and gradients through zero weights are too small to overcome.
+        # Bias is zero so initial mean eta ≈ 0 (unbiased).
+        nn.init.normal_(self.fc2.weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, fused: torch.Tensor) -> tuple[Beta, Beta]:
