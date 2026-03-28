@@ -88,6 +88,7 @@ class GRPOConfig:
     # Reward tuning (passed to RewardConfig for training)
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
+    cont_edge_scale: float = 0.0
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     enable_overprogress: bool = True

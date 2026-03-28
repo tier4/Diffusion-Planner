@@ -297,6 +297,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         w_centerline=grpo_config.w_centerline,
         near_edge_scale=grpo_config.near_edge_scale,
         wide_edge_scale=grpo_config.wide_edge_scale,
+        cont_edge_scale=grpo_config.cont_edge_scale,
         max_lat_accel=grpo_config.max_lat_accel,
         lat_accel_scale=grpo_config.lat_accel_scale,
         enable_overprogress=grpo_config.enable_overprogress,

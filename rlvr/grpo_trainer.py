@@ -99,6 +99,7 @@ class GRPOTrainer:
             w_centerline=config.w_centerline,
             near_edge_scale=config.near_edge_scale,
             wide_edge_scale=config.wide_edge_scale,
+            cont_edge_scale=config.cont_edge_scale,
             max_lat_accel=config.max_lat_accel,
             lat_accel_scale=config.lat_accel_scale,
             enable_overprogress=config.enable_overprogress,

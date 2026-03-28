@@ -30,9 +30,10 @@ class RewardConfig:
     max_accel: float = 8.0  # m/s^2
     dt: float = 0.1  # 10 Hz
 
-    # Near-edge / wide-edge penalty scales (in compute_feasibility_score_batch)
+    # Near-edge / wide-edge / continuous penalty scales
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
+    cont_edge_scale: float = 0.0  # continuous penalty within 80cm (0=disabled)
 
     # Lateral acceleration penalty
     max_lat_accel: float = 2.0  # m/s^2
@@ -1216,7 +1217,13 @@ def compute_road_border_penalty(
     _WIDE_THRESH = 0.40
     wide_frac = (per_timestep_min[:, 1:] < _WIDE_THRESH).float().mean(dim=1)  # (N,)
 
-    return crossing_gate, near_frac, wide_frac, first_crossing_steps
+    # Continuous proximity penalty: smooth gradient from 0 to _CONT_THRESH
+    # penalty = mean over timesteps of max(0, 1 - dist/_CONT_THRESH)
+    # This creates a linear gradient pulling the trajectory away from the border
+    _CONT_THRESH = 0.80
+    cont_penalty = (1.0 - per_timestep_min[:, 1:] / _CONT_THRESH).clamp(min=0).mean(dim=1)  # (N,)
+
+    return crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty
 
 
 # ---------------------------------------------------------------------------
@@ -1319,7 +1326,7 @@ def compute_reward_batch(
     )
 
     # Road border penalty using ego perimeter sampling
-    rb_crossing_gate, rb_near_frac, rb_wide_frac, rb_crossing_steps = compute_road_border_penalty(
+    rb_crossing_gate, rb_near_frac, rb_wide_frac, rb_crossing_steps, rb_cont_penalty = compute_road_border_penalty(
         ego_trajs, ego_shape, data,
     )
 
@@ -1396,7 +1403,7 @@ def compute_reward_batch(
     # near (< 25cm): considerable penalty; wide (< 40cm): lighter penalty
     _RB_NEAR_SCALE = config.near_edge_scale  # reuse near_edge config
     _RB_WIDE_SCALE = config.wide_edge_scale
-    rb_penalty = _RB_NEAR_SCALE * rb_near_frac + _RB_WIDE_SCALE * rb_wide_frac
+    rb_penalty = _RB_NEAR_SCALE * rb_near_frac + _RB_WIDE_SCALE * rb_wide_frac + config.cont_edge_scale * rb_cont_penalty
 
     quality_score = (
         config.w_progress * clamped_progress
