@@ -32,9 +32,15 @@ LORA_TARGET_MODULES_REGEX = (
     r"decoder\.dit\.blocks\.[0-9]+\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
 )
 
-# Alternative: only target the last decoder block to minimize neighbor/turn signal impact
+# Alternative: only target the last decoder block
 LORA_TARGET_LAST_BLOCK_REGEX = (
     r"decoder\.dit\.blocks\.2\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
+)
+
+# Alternative: only target the first decoder block (best ego/neighbor trade-off —
+# block 0 gives -2.5% ego improvement with ~0% neighbor degradation)
+LORA_TARGET_FIRST_BLOCK_REGEX = (
+    r"decoder\.dit\.blocks\.0\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
 )
 
 

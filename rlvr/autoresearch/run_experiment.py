@@ -281,8 +281,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
             policy_model = load_lora_checkpoint(policy_model, seed_lora_path, is_trainable=True)
             print(f"Seeded from LoRA: {seed_lora_path}")
         else:
-            from preference_optimization.lora_utils import apply_lora, LORA_TARGET_LAST_BLOCK_REGEX
-            target = LORA_TARGET_LAST_BLOCK_REGEX if grpo_config.lora_target == "last" else None
+            from preference_optimization.lora_utils import apply_lora, LORA_TARGET_LAST_BLOCK_REGEX, LORA_TARGET_FIRST_BLOCK_REGEX
+            target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX}.get(grpo_config.lora_target)
             kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
                          lora_dropout=grpo_config.lora_dropout)
             if target:
