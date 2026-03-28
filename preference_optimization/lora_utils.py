@@ -32,6 +32,11 @@ LORA_TARGET_MODULES_REGEX = (
     r"decoder\.dit\.blocks\.[0-9]+\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
 )
 
+# Alternative: only target the last decoder block to minimize neighbor/turn signal impact
+LORA_TARGET_LAST_BLOCK_REGEX = (
+    r"decoder\.dit\.blocks\.2\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
+)
+
 
 class UnfusedMHA(nn.Module):
     """nn.MultiheadAttention equivalent with separate q/k/v/out projection Linear layers.

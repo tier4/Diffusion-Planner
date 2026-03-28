@@ -281,10 +281,13 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
             policy_model = load_lora_checkpoint(policy_model, seed_lora_path, is_trainable=True)
             print(f"Seeded from LoRA: {seed_lora_path}")
         else:
-            from preference_optimization.lora_utils import apply_lora
-            policy_model = apply_lora(policy_model, r=grpo_config.lora_rank,
-                                       lora_alpha=grpo_config.lora_alpha,
-                                       lora_dropout=grpo_config.lora_dropout)
+            from preference_optimization.lora_utils import apply_lora, LORA_TARGET_LAST_BLOCK_REGEX
+            target = LORA_TARGET_LAST_BLOCK_REGEX if grpo_config.lora_target == "last" else None
+            kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
+                         lora_dropout=grpo_config.lora_dropout)
+            if target:
+                kwargs["target_modules"] = target
+            policy_model = apply_lora(policy_model, **kwargs)
 
     trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
