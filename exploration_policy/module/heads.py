@@ -32,13 +32,18 @@ class GuidanceHead(nn.Module):
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden_dim, 4)  # alpha_lat, beta_lat, alpha_lon, beta_lon
 
-        # Small random init for the output layer weights so that output is
-        # input-dependent from the start (enables gradient flow).
-        # Zero-init was too aggressive — the policy never learned because
-        # fc2.weight=0 means the output is constant regardless of input,
-        # and gradients through zero weights are too small to overcome.
-        # Bias is zero so initial mean eta ≈ 0 (unbiased).
-        nn.init.normal_(self.fc2.weight, mean=0.0, std=0.01)
+        # Zero-init the output layer. This makes the policy transparent (eta≈0),
+        # which is currently the CORRECT behavior — the policy doesn't learn useful
+        # guidance with the current REINFORCE-based training (gradients too weak,
+        # softplus compression). All results come from standard GRPO noise + rejection.
+        #
+        # TODO: To make the policy actually learn, need:
+        # 1. Inner PPO epochs with clipping for stronger policy gradients
+        # 2. Different parameterization (scale raw output or use tanh instead of softplus)
+        # 3. Much higher exploration_lr (1e-3+)
+        # 4. Inverse KL scheduling (low→high) for exploration policy
+        # See NEXT_SESSION_BRIEFING.md for details.
+        nn.init.zeros_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, fused: torch.Tensor) -> tuple[Beta, Beta]:
