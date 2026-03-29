@@ -36,7 +36,12 @@ class GuidanceHead(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.act = nn.GELU()
-        self.fc2 = nn.Linear(hidden_dim, 4)  # alpha_lat, beta_lat, alpha_lon, beta_lon
+        # bias=False forces scene-dependent output: output = W @ fused_input.
+        # With bias, training takes the easy path: push the bias (global, same for
+        # all scenes) instead of the weights (scene-dependent). Removing bias means
+        # the network MUST use the input to produce non-zero output.
+        # Zero-init still works: zero weights → output=0 → softplus(0)+1 ≈ 1.693.
+        self.fc2 = nn.Linear(hidden_dim, 4, bias=False)
         self.raw_scale = raw_scale
 
         # Output layer initialization controls the initial exploration behavior:
@@ -44,10 +49,8 @@ class GuidanceHead(nn.Module):
         # "normal": non-zero init for faster policy learning (may need tuning)
         if init_mode == "zeros":
             nn.init.zeros_(self.fc2.weight)
-            nn.init.zeros_(self.fc2.bias)
         elif init_mode == "normal":
             nn.init.normal_(self.fc2.weight, mean=0.0, std=init_std)
-            nn.init.normal_(self.fc2.bias, mean=0.0, std=init_std)
         else:
             raise ValueError(f"Unknown init_mode: {init_mode!r} (expected 'zeros' or 'normal')")
 

@@ -188,6 +188,11 @@ class GRPOConfig:
     # but its weights stop updating. Useful when the policy helps early but
     # develops harmful global bias in later epochs.
     exploration_freeze_after_epoch: int = 0
+    # Step the policy optimizer per-group instead of accumulating across all
+    # groups and stepping once at epoch end. Per-group stepping gives immediate
+    # per-scene gradient signal, forcing the network to learn scene-dependent
+    # guidance instead of a global mean shift. Default False = accumulate.
+    exploration_step_per_group: bool = False
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
