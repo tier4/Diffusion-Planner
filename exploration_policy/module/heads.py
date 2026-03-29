@@ -67,10 +67,12 @@ class GuidanceHead(nn.Module):
         scaled = raw * self.raw_scale
 
         # softplus + 1.0 ensures params >= 1.0 (unimodal Beta)
-        alpha_lat = F.softplus(scaled[:, 0]) + 1.0
-        beta_lat = F.softplus(scaled[:, 1]) + 1.0
-        alpha_lon = F.softplus(scaled[:, 2]) + 1.0
-        beta_lon = F.softplus(scaled[:, 3]) + 1.0
+        # Clamp to max_conc to prevent distribution collapse (alpha=20 → near-deterministic)
+        max_conc = 10.0
+        alpha_lat = torch.clamp(F.softplus(scaled[:, 0]) + 1.0, max=max_conc)
+        beta_lat = torch.clamp(F.softplus(scaled[:, 1]) + 1.0, max=max_conc)
+        alpha_lon = torch.clamp(F.softplus(scaled[:, 2]) + 1.0, max=max_conc)
+        beta_lon = torch.clamp(F.softplus(scaled[:, 3]) + 1.0, max=max_conc)
 
         return Beta(alpha_lat, beta_lat), Beta(alpha_lon, beta_lon)
 
