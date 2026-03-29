@@ -102,6 +102,27 @@ python3 << 'EOF'
 EOF
 ```
 
+## Visualization
+
+Use the proper visualize_scenes script for trajectory comparison with road borders + ego footprints:
+```bash
+# Compare baseline vs LoRA on miraikan problem scenes
+python -m rlvr.autoresearch.visualize_scenes \
+  --model_path <base_model.pth> \
+  --scenes <miraikan_scenes.json> \
+  --lora_path <lora_epoch_NNN> \
+  --output_dir ~/Pictures/<experiment>_viz \
+  --n_scenes 12
+
+# For guidance direction analysis (with policy eta overlay)
+python rlvr/viz_policy_guidance.py \
+  --model_path <base_model.pth> \
+  --policy_path <lora_epoch_NNN/exploration_policy.pth> \
+  --scenes <scenes.json> \
+  --output <output.png>
+```
+Shows: blue=baseline, orange=LoRA, green=GT, red=road borders, ego footprints, rb_crossing flags.
+
 ## Lat Accel Metric
 
 reward.py uses curvature-based lat accel (accurate). For standalone reporting:
