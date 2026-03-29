@@ -47,6 +47,15 @@ class ExplorationPolicyConfig:
     learning_rate: float = 1e-4
     # Encoder hidden dim (must match the planner's encoder output)
     encoder_hidden_dim: int = 256
+    # GuidanceHead output layer init: "zeros" or "normal"
+    # "zeros": alpha=beta≈1.693, unbiased eta with std≈0.48 (recommended)
+    # "normal": nn.init.normal_(std=head_init_std) for faster policy learning
+    head_init: str = "zeros"
+    head_init_std: float = 0.01
+    # Scale factor applied to raw output before softplus. Amplifies gradient
+    # flow through the softplus compression. Default 1.0 (no scaling).
+    # Set to 10.0 to make the policy learn ~12x faster.
+    head_raw_scale: float = 1.0
 
     def to_json(self, path: str | Path) -> None:
         with open(path, "w") as f:
@@ -102,7 +111,12 @@ class ExplorationPolicy(nn.Module):
             dropout=config.dropout,
         )
 
-        self.guidance_head = GuidanceHead(config.hidden_dim)
+        self.guidance_head = GuidanceHead(
+            config.hidden_dim,
+            init_mode=config.head_init,
+            init_std=config.head_init_std,
+            raw_scale=config.head_raw_scale,
+        )
         self.value_head = ValueHead(config.hidden_dim)
 
     def forward(

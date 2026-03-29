@@ -75,6 +75,10 @@ class GRPOConfig:
     enable_lane_keeping: bool = False
     enable_road_border: bool = True
     enable_speed: bool = True
+    enable_lateral: bool = False
+    enable_longitudinal: bool = False
+    lambda_lat: float = 2.5    # max lateral offset in metres (PlannerRFT Eq. 2)
+    lambda_lon: float = 0.25   # max speed deviation fraction (PlannerRFT Eq. 3)
     guidance_prob: float = 0.5
     prototypes_path: str | None = None
 
@@ -168,6 +172,17 @@ class GRPOConfig:
     exploration_lambda_lat: float = 2.5   # max lateral offset in metres
     exploration_lambda_lon: float = 0.25  # max speed deviation fraction
     exploration_guidance_scale: float = 0.5  # global guidance scale for policy-guided trajectories
+    # GuidanceHead init mode: "zeros" (recommended) or "normal"
+    exploration_head_init: str = "zeros"
+    exploration_head_init_std: float = 0.01
+    # Scale factor for raw output before softplus. Amplifies gradient flow.
+    # 1.0 = no scaling (default, preserves backward compat).
+    # 10.0 = recommended for policy learning (12x stronger eta signal).
+    exploration_head_raw_scale: float = 1.0
+    # Inner PPO epochs for exploration policy. Each scene's rollout is reused
+    # for this many gradient steps with PPO clipping. Default 1 = REINFORCE.
+    exploration_inner_epochs: int = 1
+    exploration_clip_epsilon: float = 0.2
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:

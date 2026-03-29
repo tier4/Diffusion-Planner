@@ -26,25 +26,30 @@ class GuidanceHead(nn.Module):
     prevents performance drops at the start of training.
     """
 
-    def __init__(self, hidden_dim: int):
+    def __init__(
+        self,
+        hidden_dim: int,
+        init_mode: str = "zeros",
+        init_std: float = 0.01,
+        raw_scale: float = 1.0,
+    ):
         super().__init__()
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden_dim, 4)  # alpha_lat, beta_lat, alpha_lon, beta_lon
+        self.raw_scale = raw_scale
 
-        # Zero-init the output layer. This makes the policy transparent (eta≈0),
-        # which is currently the CORRECT behavior — the policy doesn't learn useful
-        # guidance with the current REINFORCE-based training (gradients too weak,
-        # softplus compression). All results come from standard GRPO noise + rejection.
-        #
-        # TODO: To make the policy actually learn, need:
-        # 1. Inner PPO epochs with clipping for stronger policy gradients
-        # 2. Different parameterization (scale raw output or use tanh instead of softplus)
-        # 3. Much higher exploration_lr (1e-3+)
-        # 4. Inverse KL scheduling (low→high) for exploration policy
-        # See NEXT_SESSION_BRIEFING.md for details.
-        nn.init.zeros_(self.fc2.weight)
-        nn.init.zeros_(self.fc2.bias)
+        # Output layer initialization controls the initial exploration behavior:
+        # "zeros": alpha=beta≈1.693, symmetric Beta with std≈0.48 (unbiased, wide)
+        # "normal": non-zero init for faster policy learning (may need tuning)
+        if init_mode == "zeros":
+            nn.init.zeros_(self.fc2.weight)
+            nn.init.zeros_(self.fc2.bias)
+        elif init_mode == "normal":
+            nn.init.normal_(self.fc2.weight, mean=0.0, std=init_std)
+            nn.init.normal_(self.fc2.bias, mean=0.0, std=init_std)
+        else:
+            raise ValueError(f"Unknown init_mode: {init_mode!r} (expected 'zeros' or 'normal')")
 
     def forward(self, fused: torch.Tensor) -> tuple[Beta, Beta]:
         """
@@ -56,11 +61,16 @@ class GuidanceHead(nn.Module):
         """
         raw = self.fc2(self.act(self.fc1(fused)))  # [B, 4]
 
+        # raw_scale amplifies gradients through softplus to overcome compression.
+        # Without scaling (raw_scale=1): raw=0.03 → softplus(0.03)+1=1.72, eta≈0.004
+        # With raw_scale=10: raw=0.03 → softplus(0.3)+1=1.84, eta≈0.05 (12x more)
+        scaled = raw * self.raw_scale
+
         # softplus + 1.0 ensures params >= 1.0 (unimodal Beta)
-        alpha_lat = F.softplus(raw[:, 0]) + 1.0
-        beta_lat = F.softplus(raw[:, 1]) + 1.0
-        alpha_lon = F.softplus(raw[:, 2]) + 1.0
-        beta_lon = F.softplus(raw[:, 3]) + 1.0
+        alpha_lat = F.softplus(scaled[:, 0]) + 1.0
+        beta_lat = F.softplus(scaled[:, 1]) + 1.0
+        alpha_lon = F.softplus(scaled[:, 2]) + 1.0
+        beta_lon = F.softplus(scaled[:, 3]) + 1.0
 
         return Beta(alpha_lat, beta_lat), Beta(alpha_lon, beta_lon)
 

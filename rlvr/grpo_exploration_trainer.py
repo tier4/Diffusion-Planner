@@ -128,6 +128,9 @@ class GRPOExplorationTrainer:
             dropout=config.exploration_dropout,
             learning_rate=config.exploration_lr,
             encoder_hidden_dim=model_args.hidden_dim,
+            head_init=config.exploration_head_init,
+            head_init_std=config.exploration_head_init_std,
+            head_raw_scale=config.exploration_head_raw_scale,
         )
         self.exploration_policy = ExplorationPolicy(
             ep_config, ref_seq_len=model_args.future_len,
@@ -346,9 +349,7 @@ class GRPOExplorationTrainer:
                 self.dit_optimizer.zero_grad()
                 dit_accum = 0
 
-            # --- Exploration policy REINFORCE loss ---
-            # Recompute the policy forward pass WITH grad so that
-            # backward() reaches the exploration policy parameters.
+            # --- Exploration policy loss (REINFORCE or inner PPO) ---
             advantages_t = torch.tensor(advantages_np, device=self.device, dtype=torch.float32)
 
             scene_encoding = group["scene_encoding"]  # [1, N, D] detached
@@ -356,33 +357,78 @@ class GRPOExplorationTrainer:
             eta_lat_01 = group["eta_lat_01"]          # [K] detached sampled values
             eta_lon_01 = group["eta_lon_01"]          # [K] detached sampled values
 
-            # Forward pass with grad through the CURRENT policy weights.
-            # deterministic=True avoids unnecessary sampling — we only need
-            # the distributions for log_prob evaluation of stored eta values.
-            policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
-            lat_dist = policy_output.lat_dist
-            lon_dist = policy_output.lon_dist
+            inner_epochs = self.config.exploration_inner_epochs
+            clip_eps = self.config.exploration_clip_epsilon
 
-            # Evaluate log_prob of the previously sampled eta values under
-            # the current policy (creates grad-carrying computation graph).
-            # Squeeze any singleton batch dim to ensure log_probs is [K].
-            log_probs = lat_dist.log_prob(eta_lat_01) + lon_dist.log_prob(eta_lon_01)
-            if log_probs.dim() > 1:
-                log_probs = log_probs.squeeze(-1)  # [K,1] -> [K]
+            # Compute old log_probs (detached) for PPO ratio when inner_epochs > 1
+            if inner_epochs > 1:
+                with torch.no_grad():
+                    old_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+                    old_lp = old_output.lat_dist.log_prob(eta_lat_01) + old_output.lon_dist.log_prob(eta_lon_01)
+                    if old_lp.dim() > 1:
+                        old_lp = old_lp.squeeze(-1)
+                    old_log_probs = old_lp.detach()
 
-            policy_loss, policy_metrics = compute_exploration_loss(
-                advantages=advantages_t,
-                log_probs=log_probs,
-                lat_dist=lat_dist,
-                lon_dist=lon_dist,
-                entropy_coef=self.config.exploration_entropy_coef,
-                kl_coef=self.config.exploration_kl_coef,
-            )
+            for inner_ep in range(inner_epochs):
+                # Forward pass with grad through CURRENT policy weights
+                policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+                lat_dist = policy_output.lat_dist
+                lon_dist = policy_output.lon_dist
 
-            # Accumulate policy gradients per-group (avoids OOM from storing
-            # all autograd graphs). We backward() each loss unscaled, then
-            # normalize by actual contributing group count before step().
-            policy_loss.backward()
+                log_probs = lat_dist.log_prob(eta_lat_01) + lon_dist.log_prob(eta_lon_01)
+                if log_probs.dim() > 1:
+                    log_probs = log_probs.squeeze(-1)
+
+                if inner_epochs > 1:
+                    # PPO clipped objective
+                    ratio = (log_probs - old_log_probs).exp()
+                    clipped_ratio = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps)
+                    surr1 = ratio * advantages_t
+                    surr2 = clipped_ratio * advantages_t
+                    ppo_loss = -torch.min(surr1, surr2).mean()
+
+                    # Entropy bonus + KL penalty (same as REINFORCE path)
+                    entropy_value = (lat_dist.entropy() + lon_dist.entropy()).mean()
+                    from exploration_policy.loss import _get_init_distributions
+                    from torch.distributions import kl_divergence as kl_div
+                    init_lat, init_lon = _get_init_distributions(self.device)
+                    kl_value = (kl_div(lat_dist, init_lat) + kl_div(lon_dist, init_lon)).mean()
+
+                    policy_loss = (
+                        ppo_loss
+                        + self.config.exploration_entropy_coef * (-entropy_value)
+                        + self.config.exploration_kl_coef * kl_value
+                    )
+                    policy_metrics = {
+                        "exploration_policy_loss": ppo_loss.item(),
+                        "exploration_entropy": entropy_value.item(),
+                        "exploration_kl": kl_value.item(),
+                        "exploration_total_loss": policy_loss.item(),
+                        "exploration_eta_lat_mean": lat_dist.mean.mean().item() * 2 - 1,
+                        "exploration_eta_lon_mean": lon_dist.mean.mean().item() * 2 - 1,
+                        "exploration_eta_lat_std": (lat_dist.variance.mean().item() * 4) ** 0.5,
+                        "exploration_eta_lon_std": (lon_dist.variance.mean().item() * 4) ** 0.5,
+                    }
+
+                    # Step per inner epoch per group
+                    self.policy_optimizer.zero_grad()
+                    policy_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.exploration_policy.parameters(), max_norm=1.0,
+                    )
+                    self.policy_optimizer.step()
+                else:
+                    # Original REINFORCE (single step, accumulated across groups)
+                    policy_loss, policy_metrics = compute_exploration_loss(
+                        advantages=advantages_t,
+                        log_probs=log_probs,
+                        lat_dist=lat_dist,
+                        lon_dist=lon_dist,
+                        entropy_coef=self.config.exploration_entropy_coef,
+                        kl_coef=self.config.exploration_kl_coef,
+                    )
+                    policy_loss.backward()
+
             n_policy_accum += 1
 
             # Merge metrics
@@ -409,10 +455,9 @@ class GRPOExplorationTrainer:
             self.dit_optimizer.step()
             self.dit_optimizer.zero_grad()
 
-        # Policy optimizer step (once per epoch, gradients already accumulated).
-        # Normalize by actual contributing group count (not len(groups), which
-        # includes skipped groups with zero advantages).
-        if n_policy_accum > 0:
+        # Policy optimizer step: only needed for REINFORCE (inner_epochs=1).
+        # With inner PPO (inner_epochs>1), optimizer steps happen per group above.
+        if n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1:
             for p in self.exploration_policy.parameters():
                 if p.grad is not None:
                     p.grad.div_(n_policy_accum)

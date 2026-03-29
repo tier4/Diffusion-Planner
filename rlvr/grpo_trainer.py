@@ -88,6 +88,10 @@ class GRPOTrainer:
             enable_lane_keeping=config.enable_lane_keeping,
             enable_road_border=config.enable_road_border,
             enable_speed=config.enable_speed,
+            enable_lateral=config.enable_lateral,
+            enable_longitudinal=config.enable_longitudinal,
+            lambda_lat=config.lambda_lat,
+            lambda_lon=config.lambda_lon,
             guidance_prob=config.guidance_prob,
             prototypes_path=config.prototypes_path,
         )
@@ -122,6 +126,10 @@ class GRPOTrainer:
             enable_lane_keeping=config.enable_lane_keeping,
             enable_road_border=config.enable_road_border,
             enable_speed=config.enable_speed,
+            enable_lateral=config.enable_lateral,
+            enable_longitudinal=config.enable_longitudinal,
+            lambda_lat=config.lambda_lat,
+            lambda_lon=config.lambda_lon,
             guidance_prob=config.guidance_prob,
             prototypes_path=config.prototypes_path,
         )
