@@ -317,6 +317,9 @@ class GRPOExplorationTrainer:
 
         all_metrics: dict[str, float] = {}
         num_groups = 0
+        # Track per-scene η to measure scene-dependence (not just the mean)
+        per_scene_eta_lat: list[float] = []
+        per_scene_eta_lon: list[float] = []
 
         self.policy_model.train()
         if not policy_frozen:
@@ -443,6 +446,10 @@ class GRPOExplorationTrainer:
 
             n_policy_accum += 1
 
+            # Track per-scene η for variance computation
+            per_scene_eta_lat.append(lat_dist.mean.mean().item() * 2 - 1)
+            per_scene_eta_lon.append(lon_dist.mean.mean().item() * 2 - 1)
+
             # Merge metrics
             for k, v in dit_metrics.items():
                 all_metrics[k] = all_metrics.get(k, 0.0) + v
@@ -482,7 +489,13 @@ class GRPOExplorationTrainer:
         if num_groups == 0:
             return _empty_metrics()
 
-        return {k: v / num_groups for k, v in all_metrics.items()}
+        result = {k: v / num_groups for k, v in all_metrics.items()}
+        # Add per-scene η variance (measures scene-dependence of policy output)
+        if per_scene_eta_lat:
+            import numpy as _np
+            result["exploration_eta_lat_scene_std"] = float(_np.std(per_scene_eta_lat))
+            result["exploration_eta_lon_scene_std"] = float(_np.std(per_scene_eta_lon))
+        return result
 
     def train_epoch(
         self,
@@ -549,10 +562,13 @@ class GRPOExplorationTrainer:
         eta_lon = _fmt(metrics.get("exploration_eta_lon_mean", 0))
         eta_std = _fmt(metrics.get("exploration_eta_lat_std", 0))
 
+        scene_std_lat = _fmt(metrics.get("exploration_eta_lat_scene_std", 0))
+        scene_std_lon = _fmt(metrics.get("exploration_eta_lon_scene_std", 0))
         print(
             f"  Epoch {epoch}: DiT_loss={dit_loss}, "
             f"Policy_loss={pol_loss}, Entropy={entropy}, "
-            f"η_lat={eta_lat}, η_lon={eta_lon}, η_std={eta_std}"
+            f"η_lat={eta_lat}, η_lon={eta_lon}, η_std={eta_std}, "
+            f"scene_var_lat={scene_std_lat}, scene_var_lon={scene_std_lon}"
         )
 
     def save_checkpoint(self, epoch: int, args_dict: dict) -> None:
