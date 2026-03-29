@@ -676,21 +676,25 @@ def compute_feasibility_score_batch(
         accel_violations = (acc.abs() > config.max_accel).float().mean(dim=-1)
         scores = scores - accel_violations
 
-    # --- Lateral acceleration check ---
-    # Penalize lateral acceleration exceeding what a human driver produces.
-    # GT trajectories peak at ~2.5 m/s²; the model reaches 3.5 m/s² on curves.
+    # --- Lateral acceleration check (curvature-based) ---
+    # Uses heading from cos/sin to compute angular velocity, then lat_accel = speed * omega.
+    # This avoids the double finite diff noise amplification (~5x inflation) of the old method.
+    # GT trajectories peak at ~2.0 m/s²; model at ~1.7 m/s² (curvature-based).
     _MAX_LAT_ACCEL = config.max_lat_accel
     _LAT_ACCEL_SCALE = config.lat_accel_scale
-    if vel.shape[1] >= 2:
-        accel_vec = torch.diff(vel, dim=1) / config.dt  # (N, T-2, 2)
-        heading = vel[:, :-1]  # (N, T-2, 2)
-        heading_norm = heading / (heading.norm(dim=-1, keepdim=True).clamp_min(1e-6))
-        lat_dir = torch.stack([-heading_norm[..., 1], heading_norm[..., 0]], dim=-1)
-        lat_accel = (accel_vec * lat_dir).sum(dim=-1)  # (N, T-2)
-        if lat_accel.shape[1] > 2:
-            lat_accel_trimmed = lat_accel[:, 2:]
-            lat_violations = torch.relu(lat_accel_trimmed.abs() - _MAX_LAT_ACCEL)
-            scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
+    cos_h = ego_trajs[:, :, 2]  # (N, T)
+    sin_h = ego_trajs[:, :, 3]  # (N, T)
+    theta = torch.atan2(sin_h, cos_h)  # (N, T)
+    dtheta = torch.diff(theta, dim=1)  # (N, T-1)
+    # Unwrap large jumps
+    dtheta = (dtheta + torch.pi) % (2 * torch.pi) - torch.pi
+    omega = dtheta / config.dt  # angular velocity (N, T-1)
+    # lat_accel = speed * omega (equivalent to v^2 * curvature)
+    lat_accel = speed * omega  # (N, T-1)
+    if lat_accel.shape[1] > 2:
+        lat_accel_trimmed = lat_accel[:, 2:]
+        lat_violations = torch.relu(lat_accel_trimmed.abs() - _MAX_LAT_ACCEL)
+        scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
 
     # --- Lane boundary check ---
     # Use ALL lanes for boundary checking (not just route_lanes).
