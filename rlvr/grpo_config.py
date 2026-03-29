@@ -183,6 +183,11 @@ class GRPOConfig:
     # for this many gradient steps with PPO clipping. Default 1 = REINFORCE.
     exploration_inner_epochs: int = 1
     exploration_clip_epsilon: float = 0.2
+    # Freeze exploration policy after this many epochs (0 = never freeze).
+    # The policy still runs inference (produces η for trajectory generation)
+    # but its weights stop updating. Useful when the policy helps early but
+    # develops harmful global bias in later epochs.
+    exploration_freeze_after_epoch: int = 0
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:

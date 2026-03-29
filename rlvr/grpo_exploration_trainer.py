@@ -309,13 +309,23 @@ class GRPOExplorationTrainer:
         if not groups:
             return _empty_metrics()
 
+        # Check if policy should be frozen this epoch
+        freeze_after = self.config.exploration_freeze_after_epoch
+        policy_frozen = freeze_after > 0 and epoch > freeze_after
+        if policy_frozen and epoch == freeze_after + 1:
+            print(f"  [policy_freeze] Freezing exploration policy after epoch {freeze_after}")
+
         all_metrics: dict[str, float] = {}
         num_groups = 0
 
         self.policy_model.train()
-        self.exploration_policy.train()
+        if not policy_frozen:
+            self.exploration_policy.train()
+        else:
+            self.exploration_policy.eval()
         self.dit_optimizer.zero_grad()
-        self.policy_optimizer.zero_grad()
+        if not policy_frozen:
+            self.policy_optimizer.zero_grad()
 
         dit_accum = 0
         n_policy_accum = 0
@@ -411,12 +421,13 @@ class GRPOExplorationTrainer:
                     }
 
                     # Step per inner epoch per group
-                    self.policy_optimizer.zero_grad()
-                    policy_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        self.exploration_policy.parameters(), max_norm=1.0,
-                    )
-                    self.policy_optimizer.step()
+                    if not policy_frozen:
+                        self.policy_optimizer.zero_grad()
+                        policy_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            self.exploration_policy.parameters(), max_norm=1.0,
+                        )
+                        self.policy_optimizer.step()
                 else:
                     # Original REINFORCE (single step, accumulated across groups)
                     policy_loss, policy_metrics = compute_exploration_loss(
@@ -427,7 +438,8 @@ class GRPOExplorationTrainer:
                         entropy_coef=self.config.exploration_entropy_coef,
                         kl_coef=self.config.exploration_kl_coef,
                     )
-                    policy_loss.backward()
+                    if not policy_frozen:
+                        policy_loss.backward()
 
             n_policy_accum += 1
 
@@ -457,7 +469,7 @@ class GRPOExplorationTrainer:
 
         # Policy optimizer step: only needed for REINFORCE (inner_epochs=1).
         # With inner PPO (inner_epochs>1), optimizer steps happen per group above.
-        if n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1:
+        if n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1 and not policy_frozen:
             for p in self.exploration_policy.parameters():
                 if p.grad is not None:
                     p.grad.div_(n_policy_accum)
