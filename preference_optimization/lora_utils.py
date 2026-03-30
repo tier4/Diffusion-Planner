@@ -32,6 +32,23 @@ LORA_TARGET_MODULES_REGEX = (
     r"decoder\.dit\.blocks\.[0-9]+\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
 )
 
+# Alternative: only target the last decoder block
+LORA_TARGET_LAST_BLOCK_REGEX = (
+    r"decoder\.dit\.blocks\.2\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
+)
+
+# Alternative: only target the first decoder block (best ego/neighbor trade-off —
+# block 0 gives -2.5% ego improvement with ~0% neighbor degradation)
+LORA_TARGET_FIRST_BLOCK_REGEX = (
+    r"decoder\.dit\.blocks\.0\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
+)
+
+# Alternative: blocks 0+1 only (skip block 2 which causes most neighbor damage)
+# Best overall trade-off: ego +9%, neighbor +12%, good border + teleport
+LORA_TARGET_BLOCKS_01_REGEX = (
+    r"decoder\.dit\.blocks\.[01]\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
+)
+
 
 class UnfusedMHA(nn.Module):
     """nn.MultiheadAttention equivalent with separate q/k/v/out projection Linear layers.

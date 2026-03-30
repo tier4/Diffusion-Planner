@@ -15,3 +15,4 @@ rlvr/configs/autoresearch/
 CLAUDE.md
 program.md
 ros_scripts/convert_all_v4.sh
+.claude/

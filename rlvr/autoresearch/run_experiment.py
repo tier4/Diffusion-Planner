@@ -214,7 +214,7 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
     print(f"  Visualization saved to {out_path}")
 
 
-def run(config_path: Path, name: str):
+def run(config_path: Path, name: str, skip_baseline: bool = False):
     # Fix seeds
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
@@ -231,6 +231,7 @@ def run(config_path: Path, name: str):
     curated_normal_path = config_data.pop("curated_normal_path", None)
     prob_scenes_path = config_data.pop("prob_scenes_path", None)
     seed_lora_path = config_data.pop("seed_lora_path", None)
+    train_scenes_path = config_data.pop("train_scenes_path", None)
 
     grpo_config = GRPOConfig()
     for k, v in config_data.items():
@@ -251,7 +252,11 @@ def run(config_path: Path, name: str):
     # Subsample prob scenes for eval (keep all for training, eval on 50)
     eval_rng = np.random.default_rng(42)
     prob_eval = [prob_100[i] for i in eval_rng.choice(len(prob_100), size=min(50, len(prob_100)), replace=False)]
-    if curated_normal_path and Path(curated_normal_path).exists():
+    if train_scenes_path and Path(train_scenes_path).exists():
+        with open(train_scenes_path) as f:
+            train_paths = json.load(f)
+        print(f"Using exact training scenes: {len(train_paths)} from {train_scenes_path}")
+    elif curated_normal_path and Path(curated_normal_path).exists():
         with open(curated_normal_path) as f:
             curated_pool = json.load(f)
         print(f"Using curated normal pool: {len(curated_pool)} scenes from {curated_normal_path}")
@@ -281,10 +286,13 @@ def run(config_path: Path, name: str):
             policy_model = load_lora_checkpoint(policy_model, seed_lora_path, is_trainable=True)
             print(f"Seeded from LoRA: {seed_lora_path}")
         else:
-            from preference_optimization.lora_utils import apply_lora
-            policy_model = apply_lora(policy_model, r=grpo_config.lora_rank,
-                                       lora_alpha=grpo_config.lora_alpha,
-                                       lora_dropout=grpo_config.lora_dropout)
+            from preference_optimization.lora_utils import apply_lora, LORA_TARGET_LAST_BLOCK_REGEX, LORA_TARGET_FIRST_BLOCK_REGEX, LORA_TARGET_BLOCKS_01_REGEX
+            target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX}.get(grpo_config.lora_target)
+            kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
+                         lora_dropout=grpo_config.lora_dropout)
+            if target:
+                kwargs["target_modules"] = target
+            policy_model = apply_lora(policy_model, **kwargs)
 
     trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
@@ -297,6 +305,7 @@ def run(config_path: Path, name: str):
         w_centerline=grpo_config.w_centerline,
         near_edge_scale=grpo_config.near_edge_scale,
         wide_edge_scale=grpo_config.wide_edge_scale,
+        cont_edge_scale=grpo_config.cont_edge_scale,
         max_lat_accel=grpo_config.max_lat_accel,
         lat_accel_scale=grpo_config.lat_accel_scale,
         enable_overprogress=grpo_config.enable_overprogress,
@@ -307,16 +316,29 @@ def run(config_path: Path, name: str):
     # Eval reward config always uses STANDARD weights for cross-experiment comparability
     eval_reward_config = RewardConfig()
 
-    trainer = GRPOTrainer(
-        policy_model=policy_model, model_args=model_args,
-        optimizer=optimizer, device=DEVICE, run_dir=run_dir,
-        config=grpo_config, use_lora=grpo_config.use_lora,
-    )
+    if grpo_config.use_exploration_policy:
+        from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
+        trainer = GRPOExplorationTrainer(
+            policy_model=policy_model, model_args=model_args,
+            dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+            config=grpo_config, use_lora=grpo_config.use_lora,
+        )
+    else:
+        trainer = GRPOTrainer(
+            policy_model=policy_model, model_args=model_args,
+            optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+            config=grpo_config, use_lora=grpo_config.use_lora,
+        )
 
-    # Evaluate base model
-    print("\nBase model evaluation:")
-    base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")
-    base_val = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, "base-val")
+    # Evaluate base model (can skip if baseline numbers are already known)
+    if skip_baseline:
+        print("\nSkipping base model evaluation (--skip_baseline)")
+        base_prob = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
+        base_val = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
+    else:
+        print("\nBase model evaluation:")
+        base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")
+        base_val = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, "base-val")
 
     trainer._eval_scene_paths = val_50
 
@@ -346,7 +368,7 @@ def run(config_path: Path, name: str):
                     setattr(trainer.reward_config, k, v)
                     print(f"  [schedule] epoch {epoch}: {k}={v}")
 
-        if epoch == 1:
+        if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
             trainer.save_epoch1_baselines(train_paths)
 
         metrics = trainer.train_epoch(train_paths, epoch)
@@ -407,6 +429,7 @@ def main():
     parser.add_argument("--normal_scenes", type=Path, required=True, help="JSON list of normal scene NPZ paths")
     parser.add_argument("--val_scenes", type=Path, required=True, help="JSON list of validation scene NPZ paths")
     parser.add_argument("--output_dir", type=Path, required=True, help="Output directory for experiment results")
+    parser.add_argument("--skip_baseline", action="store_true", help="Skip base model evaluation (reuse known baseline numbers)")
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -422,7 +445,7 @@ def main():
     OUTPUT_DIR = args.output_dir
 
     try:
-        run(args.config, args.name)
+        run(args.config, args.name, skip_baseline=args.skip_baseline)
     except Exception as e:
         print(f"\n---")
         print(f"name:             {args.name}")

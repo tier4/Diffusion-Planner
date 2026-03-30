@@ -30,9 +30,10 @@ class RewardConfig:
     max_accel: float = 8.0  # m/s^2
     dt: float = 0.1  # 10 Hz
 
-    # Near-edge / wide-edge penalty scales (in compute_feasibility_score_batch)
+    # Near-edge / wide-edge / continuous penalty scales
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
+    cont_edge_scale: float = 0.0  # continuous penalty within 80cm (0=disabled)
 
     # Lateral acceleration penalty
     max_lat_accel: float = 2.0  # m/s^2
@@ -678,6 +679,9 @@ def compute_feasibility_score_batch(
     # --- Lateral acceleration check ---
     # Penalize lateral acceleration exceeding what a human driver produces.
     # GT trajectories peak at ~2.5 m/s²; the model reaches 3.5 m/s² on curves.
+    # NOTE: This uses double finite diff which inflates values ~5x vs curvature-based.
+    # For accurate REPORTING use eval_teleport_metrics.py. But do NOT change this
+    # penalty — it was used for all prior successful training runs (p4e, p6m etc).
     _MAX_LAT_ACCEL = config.max_lat_accel
     _LAT_ACCEL_SCALE = config.lat_accel_scale
     if vel.shape[1] >= 2:
@@ -1089,7 +1093,7 @@ def compute_road_border_penalty(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor]:
     """Compute per-trajectory road border penalties using ego perimeter sampling.
 
     Uses 80 points around the ego rectangle (20 per side) and checks min
@@ -1101,11 +1105,12 @@ def compute_road_border_penalty(
         data: Observation dict with 'line_strings' key.
 
     Returns:
-        Tuple of (crossing_gate, near_penalty, wide_penalty, first_crossing_steps):
+        Tuple of (crossing_gate, near_penalty, wide_penalty, first_crossing_steps, cont_penalty):
         - crossing_gate: (N,) 1.0 if no crossing, 0.0 if any timestep crosses border
         - near_penalty: (N,) mean penalty for being within 25cm (0=safe, 1=touching)
         - wide_penalty: (N,) mean penalty for being within 40cm
         - first_crossing_steps: list of N (int | None) — first timestep of crossing
+        - cont_penalty: (N,) continuous proximity penalty (linear decay from 0.8m)
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
@@ -1116,7 +1121,8 @@ def compute_road_border_penalty(
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
                 torch.zeros(N, device=device),
-                no_crossing_steps)
+                no_crossing_steps,
+                torch.zeros(N, device=device))
 
     ls = data["line_strings"]
     if ls.dim() == 4:
@@ -1125,7 +1131,8 @@ def compute_road_border_penalty(
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
                 torch.zeros(N, device=device),
-                no_crossing_steps)
+                no_crossing_steps,
+                torch.zeros(N, device=device))
 
     # Extract road border points
     border_flag = ls[..., 3]  # (num_ls, pts)
@@ -1139,7 +1146,8 @@ def compute_road_border_penalty(
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
                 torch.zeros(N, device=device),
-                no_crossing_steps)
+                no_crossing_steps,
+                torch.zeros(N, device=device))
 
     # Build ego perimeter points (20 per side = 80 total)
     wb = ego_shape[0].item()
@@ -1216,7 +1224,13 @@ def compute_road_border_penalty(
     _WIDE_THRESH = 0.40
     wide_frac = (per_timestep_min[:, 1:] < _WIDE_THRESH).float().mean(dim=1)  # (N,)
 
-    return crossing_gate, near_frac, wide_frac, first_crossing_steps
+    # Continuous proximity penalty: smooth gradient from 0 to _CONT_THRESH
+    # penalty = mean over timesteps of max(0, 1 - dist/_CONT_THRESH)
+    # This creates a linear gradient pulling the trajectory away from the border
+    _CONT_THRESH = 0.80
+    cont_penalty = (1.0 - per_timestep_min[:, 1:] / _CONT_THRESH).clamp(min=0).mean(dim=1)  # (N,)
+
+    return crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty
 
 
 # ---------------------------------------------------------------------------
@@ -1319,7 +1333,7 @@ def compute_reward_batch(
     )
 
     # Road border penalty using ego perimeter sampling
-    rb_crossing_gate, rb_near_frac, rb_wide_frac, rb_crossing_steps = compute_road_border_penalty(
+    rb_crossing_gate, rb_near_frac, rb_wide_frac, rb_crossing_steps, rb_cont_penalty = compute_road_border_penalty(
         ego_trajs, ego_shape, data,
     )
 
@@ -1396,7 +1410,7 @@ def compute_reward_batch(
     # near (< 25cm): considerable penalty; wide (< 40cm): lighter penalty
     _RB_NEAR_SCALE = config.near_edge_scale  # reuse near_edge config
     _RB_WIDE_SCALE = config.wide_edge_scale
-    rb_penalty = _RB_NEAR_SCALE * rb_near_frac + _RB_WIDE_SCALE * rb_wide_frac
+    rb_penalty = _RB_NEAR_SCALE * rb_near_frac + _RB_WIDE_SCALE * rb_wide_frac + config.cont_edge_scale * rb_cont_penalty
 
     quality_score = (
         config.w_progress * clamped_progress

@@ -27,9 +27,10 @@ from tqdm import tqdm
 
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
-from exploration_policy.loss import compute_exploration_loss
+from exploration_policy.loss import compute_exploration_loss, _get_init_distributions
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
+from torch.distributions import kl_divergence as kl_div
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.grpo_config import GRPOConfig
@@ -93,6 +94,7 @@ class GRPOExplorationTrainer:
             w_centerline=config.w_centerline,
             near_edge_scale=config.near_edge_scale,
             wide_edge_scale=config.wide_edge_scale,
+            cont_edge_scale=config.cont_edge_scale,
             max_lat_accel=config.max_lat_accel,
             lat_accel_scale=config.lat_accel_scale,
             enable_overprogress=config.enable_overprogress,
@@ -127,6 +129,9 @@ class GRPOExplorationTrainer:
             dropout=config.exploration_dropout,
             learning_rate=config.exploration_lr,
             encoder_hidden_dim=model_args.hidden_dim,
+            head_init=config.exploration_head_init,
+            head_init_std=config.exploration_head_init_std,
+            head_raw_scale=config.exploration_head_raw_scale,
         )
         self.exploration_policy = ExplorationPolicy(
             ep_config, ref_seq_len=model_args.future_len,
@@ -136,7 +141,9 @@ class GRPOExplorationTrainer:
             ckpt_path = Path(config.exploration_checkpoint_path)
             if ckpt_path.exists():
                 state = torch.load(ckpt_path, map_location=device)
-                self.exploration_policy.load_state_dict(state)
+                missing, unexpected = self.exploration_policy.load_state_dict(state, strict=False)
+                if missing or unexpected:
+                    print(f"  Warning: missing={missing}, unexpected={unexpected}")
                 print(f"  Loaded exploration policy from {ckpt_path}")
 
         n_params = sum(p.numel() for p in self.exploration_policy.parameters())
@@ -228,6 +235,7 @@ class GRPOExplorationTrainer:
 
             # 6. Generate K trajectories (noise=0, each with its own η)
             trajectories = []
+            noise_min, noise_max = self.config.noise_scale_range
             for k in range(K):
                 eta_lat = eta_lat_vals[k].item()
                 eta_lon = eta_lon_vals[k].item()
@@ -245,9 +253,13 @@ class GRPOExplorationTrainer:
                 set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
                 composer = GuidanceComposer(set_cfg)
 
+                # Add random noise alongside policy guidance for diversity
+                # First trajectory (k=0) is deterministic (no noise) for reference
+                noise = 0.0 if k == 0 else random.uniform(noise_min, noise_max)
+
                 traj = generate_samples(
                     model=self.policy_model, model_args=self.model_args,
-                    data=norm_data, noise_scale=0.0, n_samples=1,
+                    data=norm_data, noise_scale=noise, n_samples=1,
                     composer=composer, device=self.device,
                 )[0]
                 trajectories.append(traj)
@@ -300,13 +312,26 @@ class GRPOExplorationTrainer:
         if not groups:
             return _empty_metrics()
 
+        # Check if policy should be frozen this epoch
+        freeze_after = self.config.exploration_freeze_after_epoch
+        policy_frozen = freeze_after > 0 and epoch > freeze_after
+        if policy_frozen and epoch == freeze_after + 1:
+            print(f"  [policy_freeze] Freezing exploration policy after epoch {freeze_after}")
+
         all_metrics: dict[str, float] = {}
         num_groups = 0
+        # Track per-scene η to measure scene-dependence (not just the mean)
+        per_scene_eta_lat: list[float] = []
+        per_scene_eta_lon: list[float] = []
 
         self.policy_model.train()
-        self.exploration_policy.train()
+        if not policy_frozen:
+            self.exploration_policy.train()
+        else:
+            self.exploration_policy.eval()
         self.dit_optimizer.zero_grad()
-        self.policy_optimizer.zero_grad()
+        if not policy_frozen:
+            self.policy_optimizer.zero_grad()
 
         dit_accum = 0
         n_policy_accum = 0
@@ -340,44 +365,105 @@ class GRPOExplorationTrainer:
                 self.dit_optimizer.zero_grad()
                 dit_accum = 0
 
-            # --- Exploration policy REINFORCE loss ---
-            # Recompute the policy forward pass WITH grad so that
-            # backward() reaches the exploration policy parameters.
-            advantages_t = torch.tensor(advantages_np, device=self.device, dtype=torch.float32)
-
+            # --- Exploration policy loss (REINFORCE or inner PPO) ---
             scene_encoding = group["scene_encoding"]  # [1, N, D] detached
             x_ref = group["x_ref"]                    # [1, T, 4] detached
             eta_lat_01 = group["eta_lat_01"]          # [K] detached sampled values
             eta_lon_01 = group["eta_lon_01"]          # [K] detached sampled values
 
-            # Forward pass with grad through the CURRENT policy weights.
-            # deterministic=True avoids unnecessary sampling — we only need
-            # the distributions for log_prob evaluation of stored eta values.
-            policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
-            lat_dist = policy_output.lat_dist
-            lon_dist = policy_output.lon_dist
+            # Skip grad computation entirely when policy is frozen
+            grad_enabled = not policy_frozen
+            advantages_t = torch.tensor(advantages_np, device=self.device, dtype=torch.float32)
 
-            # Evaluate log_prob of the previously sampled eta values under
-            # the current policy (creates grad-carrying computation graph).
-            # Squeeze any singleton batch dim to ensure log_probs is [K].
-            log_probs = lat_dist.log_prob(eta_lat_01) + lon_dist.log_prob(eta_lon_01)
-            if log_probs.dim() > 1:
-                log_probs = log_probs.squeeze(-1)  # [K,1] -> [K]
+            inner_epochs = self.config.exploration_inner_epochs
+            clip_eps = self.config.exploration_clip_epsilon
 
-            policy_loss, policy_metrics = compute_exploration_loss(
-                advantages=advantages_t,
-                log_probs=log_probs,
-                lat_dist=lat_dist,
-                lon_dist=lon_dist,
-                entropy_coef=self.config.exploration_entropy_coef,
-                kl_coef=self.config.exploration_kl_coef,
-            )
+            # Compute old log_probs (detached) for PPO ratio when inner_epochs > 1
+            if inner_epochs > 1:
+                with torch.no_grad():
+                    old_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+                    old_lp = old_output.lat_dist.log_prob(eta_lat_01) + old_output.lon_dist.log_prob(eta_lon_01)
+                    if old_lp.dim() > 1:
+                        old_lp = old_lp.squeeze(-1)
+                    old_log_probs = old_lp.detach()
 
-            # Accumulate policy gradients per-group (avoids OOM from storing
-            # all autograd graphs). We backward() each loss unscaled, then
-            # normalize by actual contributing group count before step().
-            policy_loss.backward()
-            n_policy_accum += 1
+            for inner_ep in range(inner_epochs):
+                # Forward pass — only build autograd graph when policy is not frozen
+                with torch.set_grad_enabled(grad_enabled):
+                    policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+                lat_dist = policy_output.lat_dist
+                lon_dist = policy_output.lon_dist
+
+                log_probs = lat_dist.log_prob(eta_lat_01) + lon_dist.log_prob(eta_lon_01)
+                if log_probs.dim() > 1:
+                    log_probs = log_probs.squeeze(-1)
+
+                if inner_epochs > 1:
+                    # PPO clipped objective
+                    ratio = (log_probs - old_log_probs).exp()
+                    clipped_ratio = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps)
+                    surr1 = ratio * advantages_t
+                    surr2 = clipped_ratio * advantages_t
+                    ppo_loss = -torch.min(surr1, surr2).mean()
+
+                    # Entropy bonus + KL penalty (same as REINFORCE path)
+                    entropy_value = (lat_dist.entropy() + lon_dist.entropy()).mean()
+                    init_lat, init_lon = _get_init_distributions(self.device)
+                    kl_value = (kl_div(lat_dist, init_lat) + kl_div(lon_dist, init_lon)).mean()
+
+                    policy_loss = (
+                        ppo_loss
+                        + self.config.exploration_entropy_coef * (-entropy_value)
+                        + self.config.exploration_kl_coef * kl_value
+                    )
+                    policy_metrics = {
+                        "exploration_policy_loss": ppo_loss.item(),
+                        "exploration_entropy": entropy_value.item(),
+                        "exploration_kl": kl_value.item(),
+                        "exploration_total_loss": policy_loss.item(),
+                        "exploration_eta_lat_mean": lat_dist.mean.mean().item() * 2 - 1,
+                        "exploration_eta_lon_mean": lon_dist.mean.mean().item() * 2 - 1,
+                        "exploration_eta_lat_std": (lat_dist.variance.mean().item() * 4) ** 0.5,
+                        "exploration_eta_lon_std": (lon_dist.variance.mean().item() * 4) ** 0.5,
+                    }
+
+                    # Step per inner epoch per group
+                    if not policy_frozen:
+                        self.policy_optimizer.zero_grad()
+                        policy_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            self.exploration_policy.parameters(), max_norm=1.0,
+                        )
+                        self.policy_optimizer.step()
+                else:
+                    # Original REINFORCE (single step, accumulated across groups)
+                    policy_loss, policy_metrics = compute_exploration_loss(
+                        advantages=advantages_t,
+                        log_probs=log_probs,
+                        lat_dist=lat_dist,
+                        lon_dist=lon_dist,
+                        entropy_coef=self.config.exploration_entropy_coef,
+                        kl_coef=self.config.exploration_kl_coef,
+                    )
+                    if not policy_frozen:
+                        policy_loss.backward()
+                        # Per-group stepping: immediate per-scene gradient signal
+                        if self.config.exploration_step_per_group:
+                            n_policy_accum += 1
+                            if n_policy_accum >= self.config.exploration_grad_accum_groups:
+                                torch.nn.utils.clip_grad_norm_(
+                                    self.exploration_policy.parameters(), max_norm=1.0,
+                                )
+                                self.policy_optimizer.step()
+                                self.policy_optimizer.zero_grad()
+                                n_policy_accum = 0
+
+            if not self.config.exploration_step_per_group:
+                n_policy_accum += 1
+
+            # Track per-scene η for variance computation
+            per_scene_eta_lat.append(lat_dist.mean.mean().item() * 2 - 1)
+            per_scene_eta_lon.append(lon_dist.mean.mean().item() * 2 - 1)
 
             # Merge metrics
             for k, v in dit_metrics.items():
@@ -403,10 +489,9 @@ class GRPOExplorationTrainer:
             self.dit_optimizer.step()
             self.dit_optimizer.zero_grad()
 
-        # Policy optimizer step (once per epoch, gradients already accumulated).
-        # Normalize by actual contributing group count (not len(groups), which
-        # includes skipped groups with zero advantages).
-        if n_policy_accum > 0:
+        # Policy optimizer step: only needed for REINFORCE (inner_epochs=1)
+        # without per-group stepping. PPO and per-group both step above.
+        if n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1 and not policy_frozen:
             for p in self.exploration_policy.parameters():
                 if p.grad is not None:
                     p.grad.div_(n_policy_accum)
@@ -419,7 +504,13 @@ class GRPOExplorationTrainer:
         if num_groups == 0:
             return _empty_metrics()
 
-        return {k: v / num_groups for k, v in all_metrics.items()}
+        result = {k: v / num_groups for k, v in all_metrics.items()}
+        # Add per-scene η variance (measures scene-dependence of policy output)
+        if per_scene_eta_lat:
+            import numpy as _np
+            result["exploration_eta_lat_scene_std"] = float(_np.std(per_scene_eta_lat))
+            result["exploration_eta_lon_scene_std"] = float(_np.std(per_scene_eta_lon))
+        return result
 
     def train_epoch(
         self,
@@ -486,10 +577,13 @@ class GRPOExplorationTrainer:
         eta_lon = _fmt(metrics.get("exploration_eta_lon_mean", 0))
         eta_std = _fmt(metrics.get("exploration_eta_lat_std", 0))
 
+        scene_std_lat = _fmt(metrics.get("exploration_eta_lat_scene_std", 0))
+        scene_std_lon = _fmt(metrics.get("exploration_eta_lon_scene_std", 0))
         print(
             f"  Epoch {epoch}: DiT_loss={dit_loss}, "
             f"Policy_loss={pol_loss}, Entropy={entropy}, "
-            f"η_lat={eta_lat}, η_lon={eta_lon}, η_std={eta_std}"
+            f"η_lat={eta_lat}, η_lon={eta_lon}, η_std={eta_std}, "
+            f"scene_var_lat={scene_std_lat}, scene_var_lon={scene_std_lon}"
         )
 
     def save_checkpoint(self, epoch: int, args_dict: dict) -> None:

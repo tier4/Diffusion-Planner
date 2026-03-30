@@ -75,6 +75,10 @@ class GRPOConfig:
     enable_lane_keeping: bool = False
     enable_road_border: bool = True
     enable_speed: bool = True
+    enable_lateral: bool = False
+    enable_longitudinal: bool = False
+    lambda_lat: float = 2.5    # max lateral offset in metres (PlannerRFT Eq. 2)
+    lambda_lon: float = 0.25   # max speed deviation fraction (PlannerRFT Eq. 3)
     guidance_prob: float = 0.5
     prototypes_path: str | None = None
 
@@ -88,6 +92,7 @@ class GRPOConfig:
     # Reward tuning (passed to RewardConfig for training)
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
+    cont_edge_scale: float = 0.0
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     enable_overprogress: bool = True
@@ -141,6 +146,7 @@ class GRPOConfig:
     lora_rank: int = 16
     lora_alpha: int = 16
     lora_dropout: float = 0.05
+    lora_target: str = "first"  # "first" = block 0 only (recommended), "all" = all decoder blocks, "blocks01" = blocks 0+1, "last" = block 2 only
 
     # Exploration Policy: learned guidance for adaptive GRPO sampling.
     # When enabled, a learned policy outputs (eta_lat, eta_lon) from Beta
@@ -166,6 +172,31 @@ class GRPOConfig:
     exploration_lambda_lat: float = 2.5   # max lateral offset in metres
     exploration_lambda_lon: float = 0.25  # max speed deviation fraction
     exploration_guidance_scale: float = 0.5  # global guidance scale for policy-guided trajectories
+    # GuidanceHead init mode: "zeros" (recommended) or "normal"
+    exploration_head_init: str = "zeros"
+    exploration_head_init_std: float = 0.01
+    # Scale factor for raw output before softplus. Amplifies gradient flow.
+    # 1.0 = no scaling (default, preserves backward compat).
+    # 10.0 = recommended for policy learning (12x stronger eta signal).
+    exploration_head_raw_scale: float = 1.0
+    # Inner PPO epochs for exploration policy. Each scene's rollout is reused
+    # for this many gradient steps with PPO clipping. Default 1 = REINFORCE.
+    exploration_inner_epochs: int = 1
+    exploration_clip_epsilon: float = 0.2
+    # Freeze exploration policy after this many epochs (0 = never freeze).
+    # The policy still runs inference (produces η for trajectory generation)
+    # but its weights stop updating. Useful when the policy helps early but
+    # develops harmful global bias in later epochs.
+    exploration_freeze_after_epoch: int = 0
+    # Step the policy optimizer per-group instead of accumulating across all
+    # groups and stepping once at epoch end. Per-group stepping gives immediate
+    # per-scene gradient signal, forcing the network to learn scene-dependent
+    # guidance instead of a global mean shift. Default False = accumulate.
+    exploration_step_per_group: bool = False
+    # Number of groups to accumulate before stepping the policy optimizer.
+    # Only used when exploration_step_per_group=True.
+    # 1 = step every scene (original per-group), 4 = match DiT rhythm.
+    exploration_grad_accum_groups: int = 1
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
