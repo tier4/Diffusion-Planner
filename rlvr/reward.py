@@ -1093,7 +1093,7 @@ def compute_road_border_penalty(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor]:
     """Compute per-trajectory road border penalties using ego perimeter sampling.
 
     Uses 80 points around the ego rectangle (20 per side) and checks min
@@ -1105,11 +1105,12 @@ def compute_road_border_penalty(
         data: Observation dict with 'line_strings' key.
 
     Returns:
-        Tuple of (crossing_gate, near_penalty, wide_penalty, first_crossing_steps):
+        Tuple of (crossing_gate, near_penalty, wide_penalty, first_crossing_steps, cont_penalty):
         - crossing_gate: (N,) 1.0 if no crossing, 0.0 if any timestep crosses border
         - near_penalty: (N,) mean penalty for being within 25cm (0=safe, 1=touching)
         - wide_penalty: (N,) mean penalty for being within 40cm
         - first_crossing_steps: list of N (int | None) — first timestep of crossing
+        - cont_penalty: (N,) continuous proximity penalty (linear decay from 0.8m)
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
@@ -1120,7 +1121,8 @@ def compute_road_border_penalty(
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
                 torch.zeros(N, device=device),
-                no_crossing_steps)
+                no_crossing_steps,
+                torch.zeros(N, device=device))
 
     ls = data["line_strings"]
     if ls.dim() == 4:
@@ -1129,7 +1131,8 @@ def compute_road_border_penalty(
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
                 torch.zeros(N, device=device),
-                no_crossing_steps)
+                no_crossing_steps,
+                torch.zeros(N, device=device))
 
     # Extract road border points
     border_flag = ls[..., 3]  # (num_ls, pts)
@@ -1143,7 +1146,8 @@ def compute_road_border_penalty(
         return (torch.ones(N, device=device),
                 torch.zeros(N, device=device),
                 torch.zeros(N, device=device),
-                no_crossing_steps)
+                no_crossing_steps,
+                torch.zeros(N, device=device))
 
     # Build ego perimeter points (20 per side = 80 total)
     wb = ego_shape[0].item()

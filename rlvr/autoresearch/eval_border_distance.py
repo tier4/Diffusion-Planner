@@ -186,10 +186,10 @@ def visualize_scene_border(ego_traj_np, min_dists_np, data, scene_path, save_pat
                 fontsize=8, ha='left', color='red', fontweight='bold')
 
     ax.set_aspect('equal')
+    t20_str = f'border_t20={min_dists_np[20]:.3f}m' if len(min_dists_np) > 20 else ''
     ax.set_title(f'{tag} — {Path(scene_path).stem}\n'
                  f'rb_cross={"YES" if rb_crossing else "no"}  '
-                 f'min_dist={min_dists_np.min():.3f}m  '
-                 f'border_t20={min_dists_np[20]:.3f}m' if len(min_dists_np) > 20 else '')
+                 f'min_dist={min_dists_np.min():.3f}m  {t20_str}')
     ax.legend(fontsize=8)
 
     # Auto-zoom

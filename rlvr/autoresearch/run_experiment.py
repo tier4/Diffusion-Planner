@@ -328,8 +328,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
     # Evaluate base model (can skip if baseline numbers are already known)
     if skip_baseline:
         print("\nSkipping base model evaluation (--skip_baseline)")
-        base_prob = {"reward_mean": 0.0, "rb_crossings": 0, "collision_rate": 0.0}
-        base_val = {"reward_mean": 0.0, "rb_crossings": 0, "collision_rate": 0.0}
+        base_prob = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
+        base_val = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
     else:
         print("\nBase model evaluation:")
         base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")

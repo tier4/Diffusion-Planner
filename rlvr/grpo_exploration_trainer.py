@@ -27,9 +27,10 @@ from tqdm import tqdm
 
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
-from exploration_policy.loss import compute_exploration_loss
+from exploration_policy.loss import compute_exploration_loss, _get_init_distributions
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
+from torch.distributions import kl_divergence as kl_div
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.grpo_config import GRPOConfig
@@ -140,7 +141,9 @@ class GRPOExplorationTrainer:
             ckpt_path = Path(config.exploration_checkpoint_path)
             if ckpt_path.exists():
                 state = torch.load(ckpt_path, map_location=device)
-                self.exploration_policy.load_state_dict(state)
+                missing, unexpected = self.exploration_policy.load_state_dict(state, strict=False)
+                if missing or unexpected:
+                    print(f"  Warning: missing={missing}, unexpected={unexpected}")
                 print(f"  Loaded exploration policy from {ckpt_path}")
 
         n_params = sum(p.numel() for p in self.exploration_policy.parameters())
@@ -402,8 +405,6 @@ class GRPOExplorationTrainer:
 
                     # Entropy bonus + KL penalty (same as REINFORCE path)
                     entropy_value = (lat_dist.entropy() + lon_dist.entropy()).mean()
-                    from exploration_policy.loss import _get_init_distributions
-                    from torch.distributions import kl_divergence as kl_div
                     init_lat, init_lon = _get_init_distributions(self.device)
                     kl_value = (kl_div(lat_dist, init_lat) + kl_div(lon_dist, init_lon)).mean()
 
@@ -487,7 +488,6 @@ class GRPOExplorationTrainer:
 
         # Policy optimizer step: only needed for REINFORCE (inner_epochs=1)
         # without per-group stepping. PPO and per-group both step above.
-        step_per_group = self.config.exploration_step_per_group
         if n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1 and not policy_frozen:
             for p in self.exploration_policy.parameters():
                 if p.grad is not None:
