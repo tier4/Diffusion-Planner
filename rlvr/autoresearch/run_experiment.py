@@ -231,6 +231,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
     curated_normal_path = config_data.pop("curated_normal_path", None)
     prob_scenes_path = config_data.pop("prob_scenes_path", None)
     seed_lora_path = config_data.pop("seed_lora_path", None)
+    train_scenes_path = config_data.pop("train_scenes_path", None)
 
     grpo_config = GRPOConfig()
     for k, v in config_data.items():
@@ -251,7 +252,11 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
     # Subsample prob scenes for eval (keep all for training, eval on 50)
     eval_rng = np.random.default_rng(42)
     prob_eval = [prob_100[i] for i in eval_rng.choice(len(prob_100), size=min(50, len(prob_100)), replace=False)]
-    if curated_normal_path and Path(curated_normal_path).exists():
+    if train_scenes_path and Path(train_scenes_path).exists():
+        with open(train_scenes_path) as f:
+            train_paths = json.load(f)
+        print(f"Using exact training scenes: {len(train_paths)} from {train_scenes_path}")
+    elif curated_normal_path and Path(curated_normal_path).exists():
         with open(curated_normal_path) as f:
             curated_pool = json.load(f)
         print(f"Using curated normal pool: {len(curated_pool)} scenes from {curated_normal_path}")
