@@ -181,9 +181,9 @@ class ClosedLoopExplorationTrainer:
 
         K = self.config.num_generations
         # GRPO chunk size: N scenes × K trajectories must fit in GPU memory.
-        # With K=16, N=8 gives B=128 per forward pass (safe for most GPUs).
-        # Don't reuse rollout batch_size (288) — N×K=4608 would OOM.
-        grpo_batch = min(self.config.closed_loop_batch_size, max(8, 96 // K))
+        # With K=16, N=16 gives B=256 per forward pass.
+        # Rollout memory is freed before GRPO, so more VRAM is available.
+        grpo_batch = min(self.config.closed_loop_batch_size, max(16, 256 // K))
         noise_min, noise_max = self.config.noise_scale_range
         rejection_keep = self.config.rejection_keep
 
@@ -531,7 +531,14 @@ class ClosedLoopExplorationTrainer:
 
         self.train_log.append(metrics)
 
+        # --- Free rollout data from GPU before GRPO to avoid OOM ---
+        # (eta stats already collected above from rollout_buffers)
+        del rollout_buffers
+        import gc; gc.collect()
+        torch.cuda.empty_cache()
+
         # --- Phase 3: DiT GRPO (if not frozen) ---
+
         if not self.config.closed_loop_freeze_dit and self.dit_optimizer is not None:
             dit_metrics = self._run_dit_grpo(scene_paths, epoch)
             metrics.update(dit_metrics)
