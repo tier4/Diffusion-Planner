@@ -505,12 +505,30 @@ class ClosedLoopExplorationTrainer:
             self.policy_optimizer.step()
 
         # --- Collect eta statistics ---
+        # Per-step etas (across all scenes and steps)
         eta_lats = [s.eta_lat_01 * 2 - 1 for buf in rollout_buffers for s in buf.steps]
         eta_lons = [s.eta_lon_01 * 2 - 1 for buf in rollout_buffers for s in buf.steps]
         eta_lat_mean = sum(eta_lats) / len(eta_lats) if eta_lats else 0.0
         eta_lon_mean = sum(eta_lons) / len(eta_lons) if eta_lons else 0.0
         eta_lat_std = (sum((e - eta_lat_mean) ** 2 for e in eta_lats) / len(eta_lats)) ** 0.5 if eta_lats else 0.0
         eta_lon_std = (sum((e - eta_lon_mean) ** 2 for e in eta_lons) / len(eta_lons)) ** 0.5 if eta_lons else 0.0
+
+        # Per-scene mean eta (measures scene-dependence: high variance = good)
+        per_scene_lat = []
+        per_scene_lon = []
+        for buf in rollout_buffers:
+            if buf.steps:
+                scene_lat = sum(s.eta_lat_01 * 2 - 1 for s in buf.steps) / len(buf.steps)
+                scene_lon = sum(s.eta_lon_01 * 2 - 1 for s in buf.steps) / len(buf.steps)
+                per_scene_lat.append(scene_lat)
+                per_scene_lon.append(scene_lon)
+        scene_var_lat = 0.0
+        scene_var_lon = 0.0
+        if len(per_scene_lat) > 1:
+            m_lat = sum(per_scene_lat) / len(per_scene_lat)
+            m_lon = sum(per_scene_lon) / len(per_scene_lon)
+            scene_var_lat = (sum((x - m_lat) ** 2 for x in per_scene_lat) / len(per_scene_lat)) ** 0.5
+            scene_var_lon = (sum((x - m_lon) ** 2 for x in per_scene_lon) / len(per_scene_lon)) ** 0.5
 
         metrics = {
             "epoch": epoch,
@@ -527,6 +545,8 @@ class ClosedLoopExplorationTrainer:
             "eta_lon_mean": eta_lon_mean,
             "eta_lat_std": eta_lat_std,
             "eta_lon_std": eta_lon_std,
+            "scene_var_lat": scene_var_lat,
+            "scene_var_lon": scene_var_lon,
         }
 
         self.train_log.append(metrics)
@@ -556,7 +576,8 @@ class ClosedLoopExplorationTrainer:
             f"value_loss={metrics['value_loss']:.4f}, "
             f"entropy={metrics['entropy']:.4f}, "
             f"η_lat={eta_lat_mean:.4f}±{eta_lat_std:.4f} ({lat_shift_cm:+.1f}cm), "
-            f"η_lon={eta_lon_mean:.4f}±{eta_lon_std:.4f} ({lon_shift_pct:+.1f}%)"
+            f"η_lon={eta_lon_mean:.4f}±{eta_lon_std:.4f} ({lon_shift_pct:+.1f}%), "
+            f"scene_var_lat={scene_var_lat:.4f}, scene_var_lon={scene_var_lon:.4f}"
         )
         if "dit_loss" in metrics:
             print(f"  DiT GRPO loss: {metrics['dit_loss']:.4f}")
