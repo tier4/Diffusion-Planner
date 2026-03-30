@@ -167,145 +167,57 @@ class ClosedLoopExplorationTrainer:
         return data
 
     def _run_dit_grpo(self, scene_paths: list[str], epoch: int) -> dict:
-        """Run sequential GRPO identical to GRPOExplorationTrainer.
+        """Run GRPO using the ACTUAL GRPOExplorationTrainer code path.
 
-        Uses the exact same per-scene, per-trajectory sequential code path
-        as the original zi trainer to ensure matching results.
+        Delegates to a temporary GRPOExplorationTrainer instance that shares
+        the same model, optimizer, explorer, and config. This guarantees
+        identical behavior to zi training.
         """
-        from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
-        from guidance_gui.generate_samples import generate_samples as _gen_samples
+        from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
 
-        self.exploration_policy.eval()
-        self.dit_optimizer.zero_grad()
+        # Create a temporary trainer sharing all state
+        # We can't instantiate fully (it creates a new explorer), so we
+        # call the methods directly with our shared objects.
+        temp_trainer = object.__new__(GRPOExplorationTrainer)
+        temp_trainer.policy_model = self.policy_model
+        temp_trainer.model_args = self.model_args
+        temp_trainer.dit_optimizer = self.dit_optimizer
+        temp_trainer.device = self.device
+        temp_trainer.config = self.config
+        temp_trainer.use_lora = self.use_lora
+        temp_trainer.reward_config = self.reward_config
+        temp_trainer.exploration_policy = self.exploration_policy
+        temp_trainer.policy_optimizer = self.policy_optimizer
+        temp_trainer.lambda_lat = self.lambda_lat
+        temp_trainer.lambda_lon = self.lambda_lon
+        temp_trainer.guidance_scale = self.guidance_scale
+        temp_trainer.train_log = []
+        temp_trainer.eval_log = []
 
-        K = self.config.num_generations
-        noise_min, noise_max = self.config.noise_scale_range
-        rejection_keep = self.config.rejection_keep
+        # Also need sampler_config for eval (not used in GRPO but required by trainer)
+        from rlvr.grpo_sampler import SamplerConfig
+        temp_trainer.sampler_config = SamplerConfig(
+            n_trajectories=self.config.num_generations,
+            noise_scale_range=tuple(self.config.noise_scale_range),
+            guidance_scale_range=tuple(self.config.guidance_scale_range),
+        )
 
-        total_dit_loss = 0.0
-        n_groups = 0
-        dit_accum = 0
-
+        # Generate groups using the exact zi code path
+        groups = []
         for path in tqdm(scene_paths, desc=f"Epoch {epoch} DiT GRPO"):
-            try:
-                data = self._load_npz(path)
-            except Exception:
-                continue
+            group = temp_trainer.generate_policy_guided_group(path)
+            if group is not None:
+                groups.append(group)
 
-            # Skip stationary scenes (same filter as GRPOExplorationTrainer)
-            if "ego_agent_future" in data:
-                gt = data["ego_agent_future"]
-                if gt.dim() == 3:
-                    gt = gt[0]
-                gt_path = torch.diff(gt[:, :2], dim=0).norm(dim=-1).sum()
-                if gt_path < 1.0:
-                    continue
+        if not groups:
+            return {"dit_loss": 0.0, "dit_groups": 0}
 
-            norm_data = copy.deepcopy(self.model_args.observation_normalizer)(
-                {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()}
-            )
+        # Train using the exact zi code path
+        metrics = temp_trainer.train_on_groups(groups, epoch)
 
-            self.policy_model.eval()
-
-            with torch.no_grad():
-                # Identical to GRPOExplorationTrainer
-                x_ref_np = generate_reference_trajectory(
-                    self.policy_model, self.model_args, norm_data, self.device,
-                )
-                x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)
-                norm_data["reference_trajectory"] = x_ref
-
-                scene_encoding = run_frozen_encoder(self.policy_model, norm_data)
-                policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
-                lat_dist = policy_output.lat_dist
-                lon_dist = policy_output.lon_dist
-
-                eta_lat_01 = lat_dist.rsample((K,)).squeeze(-1)
-                eta_lon_01 = lon_dist.rsample((K,)).squeeze(-1)
-                eta_lat_vals = 2.0 * eta_lat_01 - 1.0
-                eta_lon_vals = 2.0 * eta_lon_01 - 1.0
-
-                # Sequential K trajectory generation (identical to zi)
-                trajectories = []
-                for k in range(K):
-                    eta_lat = eta_lat_vals[k].item()
-                    eta_lon = eta_lon_vals[k].item()
-                    guidance_fns = [
-                        GuidanceConfig(
-                            name="lateral", enabled=True, scale=1.0,
-                            params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat},
-                        ),
-                        GuidanceConfig(
-                            name="longitudinal", enabled=True, scale=1.0,
-                            params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon},
-                        ),
-                    ]
-                    set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
-                    composer = GuidanceComposer(set_cfg)
-                    noise = 0.0 if k == 0 else random.uniform(noise_min, noise_max)
-                    traj = _gen_samples(
-                        model=self.policy_model, model_args=self.model_args,
-                        data=norm_data, noise_scale=noise, n_samples=1,
-                        composer=composer, device=self.device,
-                    )[0]
-                    trajectories.append(traj)
-
-            traj_batch = torch.tensor(
-                np.stack(trajectories), device=self.device, dtype=torch.float32,
-            )
-            rewards = compute_reward_batch(traj_batch, data, self.reward_config)
-
-            if rejection_keep > 0 and rejection_keep < K:
-                reward_vals = np.array([r.total for r in rewards])
-                top_idx = np.argsort(reward_vals)[-rejection_keep:]
-                traj_batch = traj_batch[top_idx]
-                rewards = [rewards[i] for i in top_idx]
-
-            advantages = compute_group_advantages(
-                rewards, mode=self.config.advantage_mode,
-                fixed_scale=self.config.advantage_fixed_scale,
-            )
-
-            if np.all(advantages == 0):
-                continue
-
-            self.policy_model.train()
-            dit_loss, _ = compute_grpo_loss(
-                policy_model=self.policy_model,
-                trajectories=traj_batch.cpu().numpy(),
-                advantages=advantages,
-                data=norm_data,
-                model_args=self.model_args,
-                config=self.config,
-                device=self.device,
-            )
-
-            scaled_loss = dit_loss / self.config.grad_accum_groups
-            scaled_loss.backward()
-            dit_accum += 1
-            total_dit_loss += dit_loss.item()
-            n_groups += 1
-
-            if dit_accum >= self.config.grad_accum_groups:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.policy_model.parameters() if p.requires_grad],
-                    max_norm=5.0,
-                )
-                self.dit_optimizer.step()
-                self.dit_optimizer.zero_grad()
-                dit_accum = 0
-
-        if dit_accum > 0:
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in self.policy_model.parameters() if p.requires_grad],
-                max_norm=5.0,
-            )
-            self.dit_optimizer.step()
-            self.dit_optimizer.zero_grad()
-
-        avg_dit_loss = total_dit_loss / max(n_groups, 1)
-        print(f"  DiT GRPO: {n_groups} groups, avg_loss={avg_dit_loss:.4f}")
-        return {"dit_loss": avg_dit_loss, "dit_groups": n_groups}
+        avg_loss = metrics.get("loss", 0.0)
+        print(f"  DiT GRPO: {len(groups)} groups, avg_loss={avg_loss:.4f}")
+        return {"dit_loss": avg_loss, "dit_groups": len(groups)}
 
     def train_epoch(
         self,
