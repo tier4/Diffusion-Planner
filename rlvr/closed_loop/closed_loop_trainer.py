@@ -321,12 +321,12 @@ class ClosedLoopExplorationTrainer:
                     pbar.update(1)
                     continue
 
-                # Train mode for GRPO loss — batched: all N trajectories in one forward pass
+                # Train mode for GRPO loss — sequential (matches zi quality)
                 self.policy_model.train()
 
-                dit_loss, _ = compute_batched_grpo_loss(
+                dit_loss, _ = compute_grpo_loss(
                     policy_model=self.policy_model,
-                    trajectories_tensor=traj_K,
+                    trajectories=traj_K.cpu().numpy(),
                     advantages=advantages,
                     data=norm_i,
                     model_args=self.model_args,
