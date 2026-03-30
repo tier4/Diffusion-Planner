@@ -236,7 +236,6 @@ class GRPOExplorationTrainer:
             # 6. Generate K trajectories — batched: expand scene to B=K
             from rlvr.closed_loop.batched_rollout import _batched_generate
             noise_min, noise_max = self.config.noise_scale_range
-            noise = random.uniform(noise_min, noise_max)
 
             # Expand scene data from B=1 to B=K
             K_data = {}
@@ -260,9 +259,14 @@ class GRPOExplorationTrainer:
             set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
             composer = GuidanceComposer(set_cfg)
 
-            traj_tensor = _batched_generate(
+            # Per-trajectory noise scales: k=0 deterministic, rest random
+            # Apply via pre-built noisy xT with per-element scales
+            from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+            traj_tensor = _batched_generate_varied_noise(
                 self.policy_model, self.model_args, K_data,
-                noise_scale=noise, composer=composer, device=self.device,
+                noise_min=noise_min, noise_max=noise_max,
+                first_deterministic=True,
+                composer=composer, device=self.device,
             )  # [K, T, 4]
             trajectories = [traj_tensor[k].cpu().numpy() for k in range(K)]
 

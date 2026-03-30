@@ -116,6 +116,71 @@ def _batched_encoder(model: nn.Module, batch_data: dict[str, torch.Tensor]) -> t
     return planner.encoder(batch_data).detach()
 
 
+@torch.no_grad()
+def _batched_generate_varied_noise(
+    model: nn.Module,
+    model_args,
+    batch_data: dict[str, torch.Tensor],
+    noise_min: float,
+    noise_max: float,
+    first_deterministic: bool,
+    composer: GuidanceComposer | None,
+    device: torch.device,
+) -> torch.Tensor:
+    """Generate trajectories with per-element independent noise scales.
+
+    Unlike _batched_generate which uses a single noise_scale for all B elements,
+    this generates independent random noise_scale per trajectory, preserving
+    the diversity of sequential generation while keeping batched GPU execution.
+
+    Args:
+        noise_min, noise_max: Range for uniform random noise scale per trajectory.
+        first_deterministic: If True, element 0 gets noise=0 (deterministic).
+
+    Returns:
+        [B, T, 4] ego trajectories.
+    """
+    _orig_fn = model.decoder._guidance_fn
+    _orig_scale = model.decoder._guidance_scale
+    model.decoder._guidance_fn = composer
+    if composer is not None:
+        model.decoder._guidance_scale = composer._set_config.global_scale
+    else:
+        model.decoder._guidance_scale = 0.5
+
+    B = batch_data["ego_current_state"].shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+
+    ego_current = batch_data["ego_current_state"][:, :4]
+    neighbors_current = batch_data["neighbor_agents_past"][:, :P - 1, -1, :4]
+    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)
+
+    xT = current_states[:, :, None, :].expand(-1, -1, future_len + 1, -1).clone()
+
+    # Per-element noise with independent scales
+    noise_scales = torch.zeros(B, 1, 1, 1, device=device)
+    for i in range(B):
+        if first_deterministic and i == 0:
+            noise_scales[i] = 0.0
+        else:
+            noise_scales[i] = random.uniform(noise_min, noise_max)
+
+    raw_noise = torch.randn(B, P, future_len, 4, device=device)
+    xT[:, :, 1:, :] = noise_scales * raw_noise
+
+    batch_data["sampled_trajectories"] = xT
+
+    try:
+        _, decoder_output = model(batch_data)
+        ego_trajs = decoder_output["prediction"][:, 0].detach()
+    finally:
+        model.decoder._guidance_fn = _orig_fn
+        model.decoder._guidance_scale = _orig_scale
+
+    return ego_trajs
+
+
 class BatchedRolloutManager:
     """Processes all scenes in parallel at each timestep.
 

@@ -173,7 +173,7 @@ class ClosedLoopExplorationTrainer:
         N×K batching: encode N scenes at once, expand to N×K for trajectory generation,
         then score and compute GRPO loss per scene.
         """
-        from rlvr.closed_loop.batched_rollout import _batched_encoder, _batched_generate
+        from rlvr.closed_loop.batched_rollout import _batched_encoder, _batched_generate, _batched_generate_varied_noise
 
         if self.exploration_policy is not None:
             self.exploration_policy.eval()
@@ -285,11 +285,12 @@ class ClosedLoopExplorationTrainer:
                 set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
                 composer = GuidanceComposer(set_cfg)
 
-                # Single batched forward pass: N*K trajectories at once
-                noise = random.uniform(noise_min, noise_max)
-                all_trajs = _batched_generate(
+                # Batched forward pass with per-trajectory independent noise
+                all_trajs = _batched_generate_varied_noise(
                     self.policy_model, self.model_args, NK_data,
-                    noise_scale=noise, composer=composer, device=self.device,
+                    noise_min=noise_min, noise_max=noise_max,
+                    first_deterministic=False,  # no deterministic in GRPO N×K
+                    composer=composer, device=self.device,
                 )  # [N_chunk*K, T, 4]
 
                 # Reshape to [N_chunk, K, T, 4]
