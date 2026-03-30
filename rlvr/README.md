@@ -15,23 +15,55 @@ The GRPO pipeline differs from the existing DPO pipeline in two key ways:
 
 ```
 rlvr/
-  reward.py                Rule-based reward (road border + safety + progress + feasibility)
-  grpo_loss.py             Advantage-weighted diffusion loss with PPO clipping + KL
-  grpo_config.py           Dataclass config with JSON serialization
-  grpo_trainer.py          Training loop with per-epoch eval, LoRA checkpointing
-  grpo_sampler.py          Diverse trajectory generation with random noise + guidance
-  trajectory_ranker_gui.py Gradio GUI for visualizing rankings and tuning reward weights
+  reward.py                  Rule-based reward (road border + safety + progress + feasibility)
+  grpo_loss.py               Advantage-weighted diffusion loss with PPO clipping + KL
+                             + compute_batched_grpo_loss for N-trajectory batched loss
+  grpo_config.py             Dataclass config with JSON serialization
+  grpo_trainer.py            Standard GRPO training loop
+  grpo_exploration_trainer.py  Joint GRPO + exploration policy trainer (batched K trajectories)
+  grpo_sampler.py            Diverse trajectory generation with random noise + guidance
   configs/
-    grpo_onpolicy.json     Recommended on-policy config (best for v4)
-    grpo_multi_epoch.json  Multi-epoch PPO-clip config
+    grpo_onpolicy.json       Recommended on-policy config (best for v4)
+    grpo_zi_300sc.json       Zero-init exploration + Block 0 LoRA (best baseline)
+  closed_loop/               Closed-loop explorer training (PlannerRFT-style)
+    state_update.py          Scene re-centering after ego moves one step
+    per_step_reward.py       Per-step collision, road border, progress reward
+    gae.py                   Generalized Advantage Estimation
+    rollout.py               Sequential rollout manager (B=1)
+    batched_rollout.py       GPU-parallel rollout manager (B=N, all scenes per step)
+    closed_loop_trainer.py   Hybrid trainer: CL rollout + open-loop GRPO for DiT
+    test_state_update.py     Unit tests for coordinate transforms
+    test_gae.py              Unit tests for GAE
+    test_real_scene.py       Integration test with real NPZ
   autoresearch/
-    run_experiment.py      Single experiment runner (all paths via CLI)
-    check_lora_training.py LoRA weight verification tool
-    visualize_scenes.py    Scene visualization with road borders + ego footprints
-    README.md              Full autoresearch documentation
-  test_reward.py           Unit tests for reward (no model needed)
-  test_grpo_sampler.py     Unit tests for sampler (needs model for full suite)
+    run_experiment.py        Single experiment runner (batched eval, all paths via CLI)
+    check_lora_training.py   LoRA weight verification tool
+    visualize_scenes.py      Scene visualization with road borders + ego footprints
+    eval_border_distance.py  Miraikan border distance metrics
+    README.md                Full autoresearch documentation
+  test_reward.py             Unit tests for reward (no model needed)
+  test_grpo_sampler.py       Unit tests for sampler (needs model for full suite)
 ```
+
+## Training Modes
+
+| Mode | Config | Trainer | Description |
+|------|--------|---------|-------------|
+| Standard GRPO | `use_exploration_policy: false` | `GRPOTrainer` | Random sampling, GRPO loss |
+| Explorer (open-loop) | `use_exploration_policy: true` | `GRPOExplorationTrainer` | Learned Beta guidance + GRPO |
+| Explorer (closed-loop) | `use_closed_loop: true` | `ClosedLoopExplorationTrainer` | Per-step rollout + GAE + GRPO |
+
+All modes support GPU-batched trajectory generation and evaluation.
+
+## Batching
+
+All trajectory generation, GRPO loss computation, and evaluation support GPU batching:
+- K trajectories per scene generated in one forward pass (B=K)
+- N×K batched generation in closed-loop GRPO (B=N×K)
+- Batched eval with configurable `batch_size` (default 32)
+- `compute_batched_grpo_loss`: N diffusion losses in one forward pass
+
+Configure via `closed_loop_batch_size` in `GRPOConfig` (default 8 for 24GB VRAM).
 
 ## Reward Function
 
