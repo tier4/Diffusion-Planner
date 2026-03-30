@@ -75,30 +75,92 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
 
 
 @torch.no_grad()
-def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label=""):
+def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
+                        batch_size=32):
+    """Evaluate model on scenes. Uses batched inference when batch_size > 1."""
     model.eval()
     totals, offroads, collisions, path_lengths = [], [], 0, []
     rb_crossings, rb_nears = 0, []
-    for path in scene_paths:
-        try:
-            data = load_npz_data(path, DEVICE)
-            norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-            norm_data = model_args.observation_normalizer(norm_data)
-            det_traj = generate_samples(model, model_args, norm_data, noise_scale=0.0,
-                                        n_samples=1, composer=None, device=DEVICE)
-            det_traj_t = torch.tensor(det_traj, device=DEVICE, dtype=torch.float32)
-            reward = compute_reward_batch(det_traj_t, data, reward_config)[0]
-            totals.append(reward.total)
-            offroads.append(reward.off_road_fraction)
-            if reward.collision_step is not None:
-                collisions += 1
-            if reward.rb_crossing:
-                rb_crossings += 1
-            rb_nears.append(reward.rb_near_frac)
-            pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
-            path_lengths.append(pl)
-        except Exception as e:
-            print(f"  [eval] skipping {Path(path).name}: {e}")
+
+    if batch_size > 1:
+        # Batched evaluation
+        from rlvr.closed_loop.batched_rollout import _batched_generate
+
+        # Load all scenes
+        all_data = []
+        all_paths = []
+        for path in scene_paths:
+            try:
+                data = load_npz_data(path, DEVICE)
+                all_data.append(data)
+                all_paths.append(path)
+            except Exception as e:
+                print(f"  [eval] skipping {Path(path).name}: {e}")
+
+        # Process in batches
+        for chunk_start in range(0, len(all_data), batch_size):
+            chunk_data = all_data[chunk_start:chunk_start + batch_size]
+            B_chunk = len(chunk_data)
+
+            # Stack into batch
+            import copy
+            batch = {}
+            for k in chunk_data[0]:
+                vals = [d[k] for d in chunk_data]
+                if isinstance(vals[0], torch.Tensor):
+                    batch[k] = torch.cat(vals, dim=0)
+                else:
+                    batch[k] = vals[0]
+
+            # Normalize
+            normalizer = copy.deepcopy(model_args.observation_normalizer)
+            norm_batch = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+            norm_batch = normalizer(norm_batch)
+
+            # Batched deterministic trajectory generation
+            with torch.no_grad():
+                det_trajs = _batched_generate(
+                    model, model_args, norm_batch,
+                    noise_scale=0.0, composer=None, device=DEVICE,
+                )  # [B_chunk, T, 4]
+
+            # Per-scene reward scoring (uses per-scene neighbor data)
+            for local_i in range(B_chunk):
+                traj_t = det_trajs[local_i:local_i+1]  # [1, T, 4]
+                data_i = chunk_data[local_i]
+                reward = compute_reward_batch(traj_t, data_i, reward_config)[0]
+                totals.append(reward.total)
+                offroads.append(reward.off_road_fraction)
+                if reward.collision_step is not None:
+                    collisions += 1
+                if reward.rb_crossing:
+                    rb_crossings += 1
+                rb_nears.append(reward.rb_near_frac)
+                traj_np = det_trajs[local_i].cpu().numpy()
+                pl = np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum()
+                path_lengths.append(pl)
+    else:
+        # Sequential evaluation (original)
+        for path in scene_paths:
+            try:
+                data = load_npz_data(path, DEVICE)
+                norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+                norm_data = model_args.observation_normalizer(norm_data)
+                det_traj = generate_samples(model, model_args, norm_data, noise_scale=0.0,
+                                            n_samples=1, composer=None, device=DEVICE)
+                det_traj_t = torch.tensor(det_traj, device=DEVICE, dtype=torch.float32)
+                reward = compute_reward_batch(det_traj_t, data, reward_config)[0]
+                totals.append(reward.total)
+                offroads.append(reward.off_road_fraction)
+                if reward.collision_step is not None:
+                    collisions += 1
+                if reward.rb_crossing:
+                    rb_crossings += 1
+                rb_nears.append(reward.rb_near_frac)
+                pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
+                path_lengths.append(pl)
+            except Exception as e:
+                print(f"  [eval] skipping {Path(path).name}: {e}")
 
     n = len(totals)
     if n == 0:
