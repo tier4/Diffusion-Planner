@@ -366,12 +366,14 @@ class GRPOExplorationTrainer:
                 dit_accum = 0
 
             # --- Exploration policy loss (REINFORCE or inner PPO) ---
-            advantages_t = torch.tensor(advantages_np, device=self.device, dtype=torch.float32)
-
             scene_encoding = group["scene_encoding"]  # [1, N, D] detached
             x_ref = group["x_ref"]                    # [1, T, 4] detached
             eta_lat_01 = group["eta_lat_01"]          # [K] detached sampled values
             eta_lon_01 = group["eta_lon_01"]          # [K] detached sampled values
+
+            # Skip grad computation entirely when policy is frozen
+            grad_enabled = not policy_frozen
+            advantages_t = torch.tensor(advantages_np, device=self.device, dtype=torch.float32)
 
             inner_epochs = self.config.exploration_inner_epochs
             clip_eps = self.config.exploration_clip_epsilon
@@ -386,8 +388,9 @@ class GRPOExplorationTrainer:
                     old_log_probs = old_lp.detach()
 
             for inner_ep in range(inner_epochs):
-                # Forward pass with grad through CURRENT policy weights
-                policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+                # Forward pass — only build autograd graph when policy is not frozen
+                with torch.set_grad_enabled(grad_enabled):
+                    policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
                 lat_dist = policy_output.lat_dist
                 lon_dist = policy_output.lon_dist
 

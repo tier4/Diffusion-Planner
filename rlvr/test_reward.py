@@ -309,7 +309,7 @@ def test_road_border_on_road():
     """Trajectory centered between road borders should have no crossing."""
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     data = _make_road_border_data(border_y_left=5.0, border_y_right=-5.0)
-    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
         ego, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() > 0.5, f"Expected no crossing (gate=1), got {rb_gate[0]}"
@@ -321,7 +321,7 @@ def test_road_border_crossing():
     ego = _straight_line(speed_m_per_step=0.5)
     ego[:, 1] = 3.0  # drive right on the left border
     data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
     assert rb_gate[0].item() < 0.5, f"Expected crossing (gate=0), got {rb_gate[0]}"
@@ -338,7 +338,7 @@ def test_road_border_near_penalty():
     # Drive close to right border at y=-3.0, ego width ~1.7 so edge at y-0.85
     ego[:, 1] = -1.9  # ego edge at ~-2.75, border at -3.0 → ~25cm gap
     data = _make_road_border_data(border_y_left=5.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
     # Should not cross but should have wide proximity penalty (within 40cm)
@@ -350,7 +350,7 @@ def test_road_border_no_data():
     """Missing line_strings should return safe defaults."""
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     data = _make_lane_data()  # no line_strings key
-    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
         ego, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() == 1.0, "No data should return gate=1 (safe)"
@@ -365,7 +365,7 @@ def test_road_border_batch():
     crossing_traj[:, 1] = 3.0  # on the left border
     trajs = torch.stack([safe, crossing_traj])
     data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
         trajs, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() > 0.5, "Safe traj should not cross"
