@@ -247,18 +247,15 @@ class ClosedLoopExplorationTrainer:
                     )  # [N_chunk, T, 4]
                 batch_norm["x_ref"] = ref_trajs
 
-                # Batched explorer: [N_chunk] etas
-                if self.exploration_policy is not None:
-                    policy_out = self.exploration_policy(scene_encoding, ref_trajs, deterministic=False)
-                    # Sample K etas per scene: [K, N_chunk] -> reshape to [N_chunk*K]
-                    lat_samples = policy_out.lat_dist.rsample((K,)).squeeze(-1)  # [K, N_chunk]
-                    lon_samples = policy_out.lon_dist.rsample((K,)).squeeze(-1)
-                    # Interleave: scene0_k0, scene0_k1, ..., scene0_kK, scene1_k0, ...
-                    eta_lat_NK = (2.0 * lat_samples - 1.0).T.reshape(-1)  # [N_chunk*K]
-                    eta_lon_NK = (2.0 * lon_samples - 1.0).T.reshape(-1)
-                else:
-                    eta_lat_NK = torch.zeros(N_chunk * K, device=self.device)
-                    eta_lon_NK = torch.zeros(N_chunk * K, device=self.device)
+                # GRPO sampling: use zero-init Beta distribution (NOT learned explorer)
+                # This preserves the diverse sampling that zi relies on.
+                # The explorer is trained separately via closed-loop rollout.
+                from exploration_policy.loss import _get_init_distributions
+                init_lat, init_lon = _get_init_distributions(self.device)
+                lat_samples = init_lat.rsample((K, N_chunk))  # [K, N_chunk]
+                lon_samples = init_lon.rsample((K, N_chunk))
+                eta_lat_NK = (2.0 * lat_samples - 1.0).T.reshape(-1)  # [N_chunk*K]
+                eta_lon_NK = (2.0 * lon_samples - 1.0).T.reshape(-1)
 
                 # Expand scene data from [N_chunk,...] to [N_chunk*K,...] by repeating each scene K times
                 NK_data = {}
