@@ -115,7 +115,26 @@ class ClosedLoopExplorationTrainer:
             w_rb_crossing=5.0,
         )
 
-        # Rollout manager
+        # Rollout manager — batched version for GPU parallelism
+        from rlvr.closed_loop.batched_rollout import BatchedRolloutManager
+        self.batched_rollout_manager = BatchedRolloutManager(
+            policy_model=policy_model,
+            model_args=model_args,
+            exploration_policy=self.exploration_policy,
+            device=device,
+            lambda_lat=config.exploration_lambda_lat,
+            lambda_lon=config.exploration_lambda_lon,
+            guidance_scale=config.exploration_guidance_scale,
+            rollout_steps=config.closed_loop_rollout_steps,
+            noise_range=tuple(config.noise_scale_range),
+            gamma=config.closed_loop_gamma,
+            gae_lambda=config.closed_loop_gae_lambda,
+            step_reward_config=self.step_reward_config,
+            reward_config=self.reward_config,
+            batch_size=config.closed_loop_batch_size,
+            drop_last=config.closed_loop_drop_last,
+        )
+        # Keep sequential rollout as fallback
         self.rollout_manager = RolloutManager(
             policy_model=policy_model,
             model_args=model_args,
@@ -316,19 +335,35 @@ class ClosedLoopExplorationTrainer:
         n_collision = 0
         n_rb = 0
 
-        for path in tqdm(scene_paths, desc=f"Epoch {epoch} rollout"):
-            buf = self.rollout_manager.run_rollout(path)
-            if buf is not None and len(buf.steps) > 0:
-                rollout_buffers.append(buf)
+        # Use batched rollout for GPU parallelism
+        use_batched = self.config.closed_loop_batch_size > 1
+        if use_batched:
+            print(f"  Batched rollout: {len(scene_paths)} scenes, batch_size={self.config.closed_loop_batch_size}")
+            rollout_buffers = self.batched_rollout_manager.run_rollouts(scene_paths)
+            for buf in rollout_buffers:
                 total_steps += buf.episode_length
                 total_return += buf.total_return
                 if buf.steps[-1].terminal:
                     n_terminal += 1
                     last = buf.steps[-1]
-                    if last.reward < -8.0:  # collision penalty
+                    if last.reward < -8.0:
                         n_collision += 1
-                    elif last.reward < -3.0:  # rb crossing penalty
+                    elif last.reward < -3.0:
                         n_rb += 1
+        else:
+            for path in tqdm(scene_paths, desc=f"Epoch {epoch} rollout"):
+                buf = self.rollout_manager.run_rollout(path)
+                if buf is not None and len(buf.steps) > 0:
+                    rollout_buffers.append(buf)
+                    total_steps += buf.episode_length
+                    total_return += buf.total_return
+                    if buf.steps[-1].terminal:
+                        n_terminal += 1
+                        last = buf.steps[-1]
+                        if last.reward < -8.0:
+                            n_collision += 1
+                        elif last.reward < -3.0:
+                            n_rb += 1
 
         n_scenes = len(rollout_buffers)
         if n_scenes == 0:

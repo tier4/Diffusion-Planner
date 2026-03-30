@@ -208,6 +208,8 @@ class GRPOConfig:
     closed_loop_value_coef: float = 0.5     # value loss coefficient
     closed_loop_alive_bonus: float = 0.5    # per-step alive reward
     closed_loop_freeze_dit: bool = True     # freeze DiT during explorer training
+    closed_loop_batch_size: int = 8        # scenes per batch in rollout (8 fits ~24GB VRAM)
+    closed_loop_drop_last: bool = True     # drop incomplete last batch
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
