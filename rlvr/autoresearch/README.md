@@ -107,6 +107,44 @@ Generates publication-quality trajectory visualizations with:
 - `--n_scenes`: Number of evenly-spaced scenes if `--indices` not given (default: 12)
 - `--cols`: Grid columns (default: 3)
 
+### `eval_border_distance.py` — Border Distance Evaluation
+
+Computes per-scene minimum distance from ego perimeter to road border. Reports
+aggregate stats (min, mean, p5) and optionally visualizes worst scenes.
+
+```bash
+# Evaluate with merged model
+python -m rlvr.autoresearch.eval_border_distance \
+  --merged_model_path /path/to/merged.pth \
+  --args_json /path/to/args.json \
+  --scenes /path/to/miraikan_scenes.json \
+  --tag model_name \
+  --output_dir /path/to/output/
+
+# With visualization of worst 10 scenes
+python -m rlvr.autoresearch.eval_border_distance \
+  --model_path /path/to/best_model.pth \
+  --scenes /path/to/scenes.json \
+  --tag baseline \
+  --visualize --worst_n 10 \
+  --output_dir /path/to/output/
+```
+
+### `compare_models.py` — Multi-Model Comparison
+
+Overlays baseline + multiple trained models on the same scenes. Shows road borders,
+lanes, ego footprints, and per-model border distance annotations.
+
+```bash
+python -m rlvr.autoresearch.compare_models \
+  --base_model /path/to/best_model.pth \
+  --models name1:/path/to/merged1.pth name2:/path/to/merged2.pth \
+  --args_jsons /path/to/args1.json /path/to/args2.json \
+  --scenes /path/to/scenes.json \
+  --output_dir /path/to/output/ \
+  --indices 48 47 49 1 3 --cols 2
+```
+
 ## Scene Lists
 
 Training requires three JSON files, each a list of NPZ paths:
@@ -135,8 +173,9 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `wide_edge_scale` | 0.5 | Wider proximity penalty |
 | `train_epochs` | 3-4 | On-policy converges in 3-4 epochs |
 | `rejection_keep` | 8 | Keep top 8 of 16 trajectories |
-| `n_prob_scenes` | 50 | Problem scenes in training set |
-| `n_normal_scenes` | 150 | Normal scenes (total ~200) |
+| `n_prob_scenes` | 0-50 | Problem scenes in training set. **Always set explicitly.** |
+| `n_normal_scenes` | 250-300 | Normal scenes. **Always set explicitly.** |
+| `lora_target` | `"first"` | Block 0 only. Other blocks degrade neighbor predictions. |
 | `advantage_mode` | `"normalized"` | `"normalized"` or `"vd_grpo"` (see below) |
 | `advantage_fixed_scale` | 10.0 | Denominator for VD-GRPO mode |
 | `kl_schedule` | `"constant"` | `"constant"`, `"linear"`, `"cosine"`, or `"step"` (see below) |
@@ -154,6 +193,7 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `grpo_onpolicy_hybrid.json` | All features: VD-GRPO + survival reward + cosine KL decay |
 | `grpo_multi_epoch.json` | Multi-epoch (M=4), PPO-clipped IS, normalized advantages |
 | `grpo_multi_epoch_vdgrpo.json` | Multi-epoch with VD-GRPO advantage computation |
+| `grpo_zi_300sc.json` | **Best result**: zero-init exploration, 300sc, block 0 LoRA |
 
 ### Advantage Mode: VD-GRPO (Variance-Decoupled GRPO)
 

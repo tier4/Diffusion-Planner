@@ -140,9 +140,32 @@ python exploration_policy/test_integration.py \
   "exploration_entropy_coef": 0.05,
   "exploration_kl_coef": 0.01,
   "exploration_kl_schedule": "linear",
-  "exploration_kl_coef_final": 0.05
+  "exploration_kl_coef_final": 0.05,
+  "exploration_head_init": "zeros",
+  "exploration_head_raw_scale": 10.0,
+  "exploration_inner_epochs": 1,
+  "exploration_step_per_group": true,
+  "exploration_grad_accum_groups": 1,
+  "exploration_freeze_after_epoch": 0
 }
 ```
+
+### Key Config Fields
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `exploration_head_init` | `"zeros"` | `"zeros"` or `"normal"`. Zero-init gives unbiased η_mean=0. |
+| `exploration_head_raw_scale` | `10.0` | Amplifies gradient through softplus. Higher = faster learning. |
+| `exploration_inner_epochs` | `1` | 1=REINFORCE, >1=PPO with clipping. PPO collapsed in tests but may work with lower LR. |
+| `exploration_step_per_group` | `false` | Step optimizer per-scene instead of per-epoch. Essential for per-scene learning. |
+| `exploration_grad_accum_groups` | `1` | When `step_per_group=true`: accumulate N scenes before stepping. 4 matches DiT rhythm. |
+| `exploration_freeze_after_epoch` | `0` | Stop updating policy after N epochs (0=never freeze). |
+
+### GuidanceHead Details
+
+- `fc2` has `bias=False` to encourage scene-dependent output (no global offset shortcut)
+- Alpha/beta clamped to `max_conc=10` to prevent Beta distribution collapse
+- Zero-init: W=0 → output=0 → softplus(0)+1 ≈ 1.693 → symmetric Beta with η_std≈0.48
 
 ### Monitoring
 
