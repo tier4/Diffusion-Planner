@@ -198,6 +198,17 @@ class GRPOConfig:
     # 1 = step every scene (original per-group), 4 = match DiT rhythm.
     exploration_grad_accum_groups: int = 1
 
+    # --- Closed-loop training ---
+    # When True, uses ClosedLoopExplorationTrainer instead of GRPOExplorationTrainer.
+    # The explorer operates per-step (0.1s) with GAE temporal credit assignment.
+    use_closed_loop: bool = False
+    closed_loop_rollout_steps: int = 40     # 4s at 10Hz
+    closed_loop_gamma: float = 0.99         # GAE discount factor
+    closed_loop_gae_lambda: float = 0.95    # GAE lambda
+    closed_loop_value_coef: float = 0.5     # value loss coefficient
+    closed_loop_alive_bonus: float = 0.5    # per-step alive reward
+    closed_loop_freeze_dit: bool = True     # freeze DiT during explorer training
+
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
         """Load config from JSON file."""

@@ -316,7 +316,14 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
     # Eval reward config always uses STANDARD weights for cross-experiment comparability
     eval_reward_config = RewardConfig()
 
-    if grpo_config.use_exploration_policy:
+    if grpo_config.use_closed_loop:
+        from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer
+        trainer = ClosedLoopExplorationTrainer(
+            policy_model=policy_model, model_args=model_args,
+            dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+            config=grpo_config, use_lora=grpo_config.use_lora,
+        )
+    elif grpo_config.use_exploration_policy:
         from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
         trainer = GRPOExplorationTrainer(
             policy_model=policy_model, model_args=model_args,
