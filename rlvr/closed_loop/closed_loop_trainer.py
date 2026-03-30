@@ -180,7 +180,10 @@ class ClosedLoopExplorationTrainer:
         self.dit_optimizer.zero_grad()
 
         K = self.config.num_generations
-        grpo_batch = self.config.closed_loop_batch_size  # reuse rollout batch size for GRPO
+        # GRPO chunk size: N scenes × K trajectories must fit in GPU memory.
+        # With K=16, N=8 gives B=128 per forward pass (safe for most GPUs).
+        # Don't reuse rollout batch_size (288) — N×K=4608 would OOM.
+        grpo_batch = min(self.config.closed_loop_batch_size, max(8, 96 // K))
         noise_min, noise_max = self.config.noise_scale_range
         rejection_keep = self.config.rejection_keep
 
