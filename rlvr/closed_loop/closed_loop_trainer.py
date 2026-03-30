@@ -490,6 +490,12 @@ class ClosedLoopExplorationTrainer:
         import gc; gc.collect()
         torch.cuda.empty_cache()
 
+        # --- Reset RNG before GRPO to match zi's random state ---
+        # The CL rollout consumes ~12K RNG draws which diverges from zi.
+        # Re-seeding ensures GRPO gets the same noise as zi for fair comparison.
+        torch.manual_seed(42 + epoch)
+        torch.cuda.manual_seed_all(42 + epoch)
+
         # --- Phase 3: DiT GRPO (if not frozen) ---
 
         if not self.config.closed_loop_freeze_dit and self.dit_optimizer is not None:
