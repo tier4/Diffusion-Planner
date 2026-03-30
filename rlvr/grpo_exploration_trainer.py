@@ -445,13 +445,17 @@ class GRPOExplorationTrainer:
                         policy_loss.backward()
                         # Per-group stepping: immediate per-scene gradient signal
                         if self.config.exploration_step_per_group:
-                            torch.nn.utils.clip_grad_norm_(
-                                self.exploration_policy.parameters(), max_norm=1.0,
-                            )
-                            self.policy_optimizer.step()
-                            self.policy_optimizer.zero_grad()
+                            n_policy_accum += 1
+                            if n_policy_accum >= self.config.exploration_grad_accum_groups:
+                                torch.nn.utils.clip_grad_norm_(
+                                    self.exploration_policy.parameters(), max_norm=1.0,
+                                )
+                                self.policy_optimizer.step()
+                                self.policy_optimizer.zero_grad()
+                                n_policy_accum = 0
 
-            n_policy_accum += 1
+            if not self.config.exploration_step_per_group:
+                n_policy_accum += 1
 
             # Track per-scene η for variance computation
             per_scene_eta_lat.append(lat_dist.mean.mean().item() * 2 - 1)
@@ -484,7 +488,7 @@ class GRPOExplorationTrainer:
         # Policy optimizer step: only needed for REINFORCE (inner_epochs=1)
         # without per-group stepping. PPO and per-group both step above.
         step_per_group = self.config.exploration_step_per_group
-        if n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1 and not policy_frozen and not step_per_group:
+        if n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1 and not policy_frozen:
             for p in self.exploration_policy.parameters():
                 if p.grad is not None:
                     p.grad.div_(n_policy_accum)

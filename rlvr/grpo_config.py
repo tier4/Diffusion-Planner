@@ -193,6 +193,10 @@ class GRPOConfig:
     # per-scene gradient signal, forcing the network to learn scene-dependent
     # guidance instead of a global mean shift. Default False = accumulate.
     exploration_step_per_group: bool = False
+    # Number of groups to accumulate before stepping the policy optimizer.
+    # Only used when exploration_step_per_group=True.
+    # 1 = step every scene (original per-group), 4 = match DiT rhythm.
+    exploration_grad_accum_groups: int = 1
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
