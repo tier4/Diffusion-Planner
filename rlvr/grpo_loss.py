@@ -225,6 +225,104 @@ def compute_direct_best_loss(
     return total_loss, metrics
 
 
+def compute_batched_trajectory_losses(
+    model, data, trajectories_tensor, model_args, noise, t, device,
+):
+    """Compute diffusion losses for N trajectories in ONE forward pass.
+
+    Instead of looping N times with B=1, expands scene data to B=N
+    and processes all trajectories at once.
+
+    Args:
+        model: Diffusion planner model (in train mode).
+        data: Scene observation dict with B=1.
+        trajectories_tensor: [N, T, 4] tensor of trajectories.
+        model_args: Config with state_normalizer, etc.
+        noise: [1, P, T, 4] noise (will be expanded to [N, ...]).
+        t: [1] diffusion timestep (will be expanded to [N]).
+        device: Torch device.
+
+    Returns:
+        [N] tensor of per-trajectory MSE losses.
+    """
+    from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+
+    N = trajectories_tensor.shape[0]
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+
+    # Expand data from B=1 to B=N
+    batch_data = {}
+    for k, v in data.items():
+        if isinstance(v, torch.Tensor) and v.shape[0] == 1:
+            batch_data[k] = v.expand(N, *v.shape[1:]).contiguous()
+        else:
+            batch_data[k] = v
+
+    # Expand t to [N, P, T+1, 1]
+    if t.dim() == 1:
+        t_N = t.expand(N)
+        t_4d = t_N.view(N, 1, 1, 1).expand(N, P, future_len + 1, 1).clone()
+    else:
+        t_4d = t.expand(N, *t.shape[1:]).contiguous() if t.shape[0] == 1 else t
+
+    # Expand noise to [N, P, T, 4]
+    if noise.shape[0] == 1:
+        noise_N = noise.expand(N, -1, -1, -1).contiguous()
+    else:
+        noise_N = noise
+
+    # Normalize trajectories: [N, T, 4]
+    ego_mean = model_args.state_normalizer.mean[0].to(device)
+    ego_std = model_args.state_normalizer.std[0].to(device)
+    gt_traj_norm = (trajectories_tensor - ego_mean) / ego_std
+
+    # Build gt_future: [N, P, T, 4] with ego trajectory only
+    gt_future = torch.zeros(N, P, future_len, 4, device=device)
+    gt_future[:, 0, :, :] = gt_traj_norm
+
+    # Current states
+    ego_current = batch_data["ego_current_state"][:, :4]  # [N, 4]
+    if P > 1:
+        neighbors_current = batch_data["neighbor_agents_past"][:, :P - 1, -1, :4]
+        neighbors_current_norm = (neighbors_current - ego_mean) / ego_std
+    else:
+        neighbors_current_norm = torch.zeros(N, 0, 4, device=device)
+    ego_current_norm = (ego_current - ego_mean) / ego_std
+    current_states = torch.cat([ego_current_norm[:, None], neighbors_current_norm], dim=1)
+
+    all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [N, P, T+1, 4]
+
+    # Diffusion noise
+    mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
+    xT = mean + std * noise_N
+    xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+
+    # Normalize observation data
+    data_for_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in batch_data.items()}
+    data_normalized = model_args.observation_normalizer(data_for_norm)
+
+    merged = {**data_normalized}
+    merged["gt_trajectories"] = all_gt
+    merged["sampled_trajectories"] = xT_full
+    merged["diffusion_time"] = t_4d
+    if "delay" not in merged:
+        merged["delay"] = torch.zeros(N, dtype=torch.long, device=device)
+
+    _, outputs = model(merged)
+
+    if "model_output" in outputs:
+        model_output = outputs["model_output"][:, 0, 1:, :]  # [N, T, 4]
+    else:
+        model_output = outputs["prediction"][:, 0]
+
+    gt_target = all_gt[:, 0, 1:, :]  # [N, T, 4]
+
+    # Per-trajectory MSE loss: [N]
+    per_traj_loss = F.mse_loss(model_output, gt_target, reduction='none').mean(dim=(1, 2))
+    return per_traj_loss
+
+
 def _compute_losses_and_ref(
     policy_model: nn.Module,
     trajectories: list[np.ndarray],
@@ -271,6 +369,102 @@ def _compute_losses_and_ref(
             ref_losses.append(l_ref)
 
     return policy_losses, ref_losses
+
+
+def _compute_batched_losses_and_ref(
+    policy_model: nn.Module,
+    trajectories_tensor: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    model_args,
+    device: torch.device,
+    noise: torch.Tensor,
+    t: torch.Tensor,
+    compute_ref: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched version: compute all N trajectory losses in ONE forward pass.
+
+    Returns:
+        (policy_losses [N], ref_losses [N])
+    """
+    inner = policy_model.module if hasattr(policy_model, "module") else policy_model
+    use_lora_disable = hasattr(inner, "disable_adapter")
+
+    # Policy losses: one batched forward pass for all N trajectories
+    policy_losses = compute_batched_trajectory_losses(
+        policy_model, data, trajectories_tensor, model_args, noise, t, device,
+    )  # [N]
+
+    ref_losses = torch.zeros_like(policy_losses)
+    if compute_ref:
+        disable_ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
+        with disable_ctx, torch.no_grad():
+            ref_losses = compute_batched_trajectory_losses(
+                policy_model, data, trajectories_tensor, model_args,
+                noise.clone(), t, device,
+            )  # [N]
+
+    return policy_losses, ref_losses
+
+
+def compute_batched_grpo_loss(
+    policy_model: nn.Module,
+    trajectories_tensor: torch.Tensor,
+    advantages: np.ndarray,
+    data: dict[str, torch.Tensor],
+    model_args,
+    config: GRPOConfig,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Batched GRPO loss: all N trajectories processed in ONE forward pass.
+
+    Drop-in replacement for compute_grpo_loss for on-policy mode (inner_epochs=1).
+    Processes N trajectories simultaneously instead of looping.
+
+    Args:
+        trajectories_tensor: [N, T, 4] tensor (not list of numpy arrays).
+        Other args same as compute_grpo_loss.
+
+    Returns:
+        (loss, metrics_dict)
+    """
+    N = trajectories_tensor.shape[0]
+    if N == 0:
+        zero = torch.tensor(0.0, device=device, requires_grad=True)
+        return zero, _empty_metrics()
+
+    B = data["ego_current_state"].shape[0]  # should be 1
+    P = 1 + model_args.predicted_neighbor_num
+    future_len = model_args.future_len
+    eps = 1e-3
+
+    noise = torch.randn(1, P, future_len, 4, device=device)
+    t = torch.rand(1, device=device) * (1 - eps) + eps
+
+    advantages_t = torch.tensor(advantages, dtype=torch.float32, device=device)
+
+    policy_losses, ref_losses = _compute_batched_losses_and_ref(
+        policy_model, trajectories_tensor, data, model_args, device, noise, t,
+        compute_ref=True,
+    )
+
+    kl_loss = (policy_losses - ref_losses).mean()
+
+    if torch.isnan(policy_losses).any() or torch.isnan(ref_losses).any():
+        raise RuntimeError("NaN in batched GRPO loss computation")
+
+    # On-policy mode: advantage-weighted loss + KL
+    weighted_loss = (advantages_t * policy_losses).sum() / max(N, 1)
+    total_loss = weighted_loss + config.kl_coef * kl_loss
+
+    metrics = {
+        "loss": total_loss.item(),
+        "policy_loss_mean": policy_losses.mean().item(),
+        "ref_loss_mean": ref_losses.mean().item(),
+        "kl": kl_loss.item(),
+        "weighted_loss": weighted_loss.item(),
+    }
+
+    return total_loss, metrics
 
 
 def compute_log_probs(

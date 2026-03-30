@@ -29,7 +29,7 @@ from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.closed_loop.per_step_reward import StepRewardConfig
 from rlvr.closed_loop.rollout import RolloutBuffer, RolloutManager
 from rlvr.grpo_config import GRPOConfig
-from rlvr.grpo_loss import compute_grpo_loss
+from rlvr.grpo_loss import compute_batched_grpo_loss, compute_grpo_loss
 from rlvr.reward import RewardConfig, compute_group_advantages, compute_reward_batch
 
 
@@ -317,12 +317,12 @@ class ClosedLoopExplorationTrainer:
                     pbar.update(1)
                     continue
 
-                # Train mode for GRPO loss
+                # Train mode for GRPO loss — batched: all N trajectories in one forward pass
                 self.policy_model.train()
 
-                dit_loss, _ = compute_grpo_loss(
+                dit_loss, _ = compute_batched_grpo_loss(
                     policy_model=self.policy_model,
-                    trajectories=traj_K.cpu().numpy(),
+                    trajectories_tensor=traj_K,
                     advantages=advantages,
                     data=norm_i,
                     model_args=self.model_args,
