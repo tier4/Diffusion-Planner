@@ -167,23 +167,18 @@ class ClosedLoopExplorationTrainer:
         return data
 
     def _run_dit_grpo(self, scene_paths: list[str], epoch: int) -> dict:
-        """Run batched open-loop GRPO to train DiT using explorer-guided trajectories.
+        """Run sequential GRPO identical to GRPOExplorationTrainer.
 
-        Processes chunks of N scenes × K trajectories in batched forward passes.
-        N×K batching: encode N scenes at once, expand to N×K for trajectory generation,
-        then score and compute GRPO loss per scene.
+        Uses the exact same per-scene, per-trajectory sequential code path
+        as the original zi trainer to ensure matching results.
         """
-        from rlvr.closed_loop.batched_rollout import _batched_encoder, _batched_generate, _batched_generate_varied_noise
+        from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
+        from guidance_gui.generate_samples import generate_samples as _gen_samples
 
-        if self.exploration_policy is not None:
-            self.exploration_policy.eval()
+        self.exploration_policy.eval()
         self.dit_optimizer.zero_grad()
 
         K = self.config.num_generations
-        # GRPO chunk size: N scenes × K trajectories must fit in GPU memory.
-        # With K=16, N=16 gives B=256 per forward pass.
-        # Rollout memory is freed before GRPO, so more VRAM is available.
-        grpo_batch = min(self.config.closed_loop_batch_size, max(16, 256 // K))
         noise_min, noise_max = self.config.noise_scale_range
         rejection_keep = self.config.rejection_keep
 
@@ -191,166 +186,106 @@ class ClosedLoopExplorationTrainer:
         n_groups = 0
         dit_accum = 0
 
-        # Load all scenes
-        all_data: list[dict[str, torch.Tensor]] = []
-        all_norm: list[dict[str, torch.Tensor]] = []
-        for path in scene_paths:
+        for path in tqdm(scene_paths, desc=f"Epoch {epoch} DiT GRPO"):
             try:
                 data = self._load_npz(path)
-                normalizer = copy.deepcopy(self.model_args.observation_normalizer)
-                norm = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()}
-                norm = normalizer(norm)
-                all_data.append(data)
-                all_norm.append(norm)
             except Exception:
                 continue
 
-        N_total = len(all_data)
-        if N_total == 0:
-            return {"dit_loss": 0.0, "dit_groups": 0}
+            norm_data = copy.deepcopy(self.model_args.observation_normalizer)(
+                {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()}
+            )
 
-        # Process in chunks of grpo_batch scenes
-        from tqdm import tqdm as _tqdm
-        n_chunks = (N_total + grpo_batch - 1) // grpo_batch
-        pbar = _tqdm(total=N_total, desc=f"Epoch {epoch} DiT GRPO")
-
-        for chunk_start in range(0, N_total, grpo_batch):
-            chunk_end = min(chunk_start + grpo_batch, N_total)
-            chunk_data = all_data[chunk_start:chunk_end]
-            chunk_norm = all_norm[chunk_start:chunk_end]
-            N_chunk = len(chunk_data)
-
-            # Stack chunk into batched tensors [N_chunk, ...]
-            batch_norm = {}
-            for k in chunk_norm[0]:
-                vals = [d[k] for d in chunk_norm]
-                if isinstance(vals[0], torch.Tensor):
-                    batch_norm[k] = torch.cat(vals, dim=0)
-                else:
-                    batch_norm[k] = vals[0]
-
-            # Eval mode for trajectory generation
             self.policy_model.eval()
 
             with torch.no_grad():
-                # Batched encoder: [N_chunk, N_tokens, D]
-                scene_encoding = _batched_encoder(self.policy_model, batch_norm)
-
-                # Batched reference trajectory: [N_chunk, T, 4]
-                import contextlib
-                inner = self.policy_model.module if hasattr(self.policy_model, "module") else self.policy_model
-                disable_ctx = inner.disable_adapter() if hasattr(inner, "disable_adapter") else contextlib.nullcontext()
-                with disable_ctx:
-                    ref_trajs = _batched_generate(
-                        self.policy_model, self.model_args, batch_norm,
-                        noise_scale=0.0, composer=None, device=self.device,
-                    )  # [N_chunk, T, 4]
-                batch_norm["x_ref"] = ref_trajs
-
-                # GRPO sampling: use zero-init Beta distribution (NOT learned explorer)
-                # This preserves the diverse sampling that zi relies on.
-                # The explorer is trained separately via closed-loop rollout.
-                from exploration_policy.loss import _get_init_distributions
-                init_lat, init_lon = _get_init_distributions(self.device)
-                lat_samples = init_lat.rsample((K, N_chunk))  # [K, N_chunk]
-                lon_samples = init_lon.rsample((K, N_chunk))
-                eta_lat_NK = (2.0 * lat_samples - 1.0).T.reshape(-1)  # [N_chunk*K]
-                eta_lon_NK = (2.0 * lon_samples - 1.0).T.reshape(-1)
-
-                # Expand scene data from [N_chunk,...] to [N_chunk*K,...] by repeating each scene K times
-                NK_data = {}
-                for k_key, v in batch_norm.items():
-                    if isinstance(v, torch.Tensor) and v.shape[0] == N_chunk:
-                        # [N, ...] -> [N, 1, ...] -> [N, K, ...] -> [N*K, ...]
-                        NK_data[k_key] = v.unsqueeze(1).expand(
-                            -1, K, *v.shape[1:]
-                        ).reshape(N_chunk * K, *v.shape[1:])
-                    else:
-                        NK_data[k_key] = v
-
-                # Build batched composer with N*K etas
-                guidance_fns = [
-                    GuidanceConfig(
-                        name="lateral", enabled=True, scale=1.0,
-                        params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat_NK},
-                    ),
-                    GuidanceConfig(
-                        name="longitudinal", enabled=True, scale=1.0,
-                        params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon_NK},
-                    ),
-                ]
-                set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
-                composer = GuidanceComposer(set_cfg)
-
-                # Batched forward pass with per-trajectory independent noise
-                all_trajs = _batched_generate_varied_noise(
-                    self.policy_model, self.model_args, NK_data,
-                    noise_min=noise_min, noise_max=noise_max,
-                    first_deterministic=False,  # no deterministic in GRPO N×K
-                    composer=composer, device=self.device,
-                )  # [N_chunk*K, T, 4]
-
-                # Reshape to [N_chunk, K, T, 4]
-                T_len = all_trajs.shape[1]
-                all_trajs = all_trajs.reshape(N_chunk, K, T_len, 4)
-
-            # Per-scene: reward scoring, rejection, advantages, GRPO loss
-            for local_i in range(N_chunk):
-                global_i = chunk_start + local_i
-                traj_K = all_trajs[local_i]  # [K, T, 4]
-                data_i = chunk_data[local_i]
-                norm_i = {k: (v[local_i:local_i+1] if isinstance(v, torch.Tensor) and v.shape[0] == N_chunk else v) for k, v in batch_norm.items()}
-
-                rewards = compute_reward_batch(traj_K, data_i, self.reward_config)
-
-                if rejection_keep > 0 and rejection_keep < K:
-                    reward_vals = np.array([r.total for r in rewards])
-                    top_idx = np.argsort(reward_vals)[-rejection_keep:]
-                    traj_K = traj_K[top_idx]
-                    rewards = [rewards[i] for i in top_idx]
-
-                advantages = compute_group_advantages(
-                    rewards, mode=self.config.advantage_mode,
-                    fixed_scale=self.config.advantage_fixed_scale,
+                # Identical to GRPOExplorationTrainer
+                x_ref_np = generate_reference_trajectory(
+                    self.policy_model, self.model_args, norm_data, self.device,
                 )
+                x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)
+                norm_data["reference_trajectory"] = x_ref
 
-                if np.all(advantages == 0):
-                    pbar.update(1)
-                    continue
+                scene_encoding = run_frozen_encoder(self.policy_model, norm_data)
+                policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+                lat_dist = policy_output.lat_dist
+                lon_dist = policy_output.lon_dist
 
-                # Train mode for GRPO loss — sequential (matches zi quality)
-                self.policy_model.train()
+                eta_lat_01 = lat_dist.rsample((K,)).squeeze(-1)
+                eta_lon_01 = lon_dist.rsample((K,)).squeeze(-1)
+                eta_lat_vals = 2.0 * eta_lat_01 - 1.0
+                eta_lon_vals = 2.0 * eta_lon_01 - 1.0
 
-                dit_loss, _ = compute_grpo_loss(
-                    policy_model=self.policy_model,
-                    trajectories=traj_K.cpu().numpy(),
-                    advantages=advantages,
-                    data=norm_i,
-                    model_args=self.model_args,
-                    config=self.config,
-                    device=self.device,
+                # Sequential K trajectory generation (identical to zi)
+                trajectories = []
+                for k in range(K):
+                    eta_lat = eta_lat_vals[k].item()
+                    eta_lon = eta_lon_vals[k].item()
+                    guidance_fns = [
+                        GuidanceConfig(
+                            name="lateral", enabled=True, scale=1.0,
+                            params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat},
+                        ),
+                        GuidanceConfig(
+                            name="longitudinal", enabled=True, scale=1.0,
+                            params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon},
+                        ),
+                    ]
+                    set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
+                    composer = GuidanceComposer(set_cfg)
+                    noise = 0.0 if k == 0 else random.uniform(noise_min, noise_max)
+                    traj = _gen_samples(
+                        model=self.policy_model, model_args=self.model_args,
+                        data=norm_data, noise_scale=noise, n_samples=1,
+                        composer=composer, device=self.device,
+                    )[0]
+                    trajectories.append(traj)
+
+            traj_batch = torch.tensor(
+                np.stack(trajectories), device=self.device, dtype=torch.float32,
+            )
+            rewards = compute_reward_batch(traj_batch, data, self.reward_config)
+
+            if rejection_keep > 0 and rejection_keep < K:
+                reward_vals = np.array([r.total for r in rewards])
+                top_idx = np.argsort(reward_vals)[-rejection_keep:]
+                traj_batch = traj_batch[top_idx]
+                rewards = [rewards[i] for i in top_idx]
+
+            advantages = compute_group_advantages(
+                rewards, mode=self.config.advantage_mode,
+                fixed_scale=self.config.advantage_fixed_scale,
+            )
+
+            if np.all(advantages == 0):
+                continue
+
+            self.policy_model.train()
+            dit_loss, _ = compute_grpo_loss(
+                policy_model=self.policy_model,
+                trajectories=traj_batch.cpu().numpy(),
+                advantages=advantages,
+                data=norm_data,
+                model_args=self.model_args,
+                config=self.config,
+                device=self.device,
+            )
+
+            scaled_loss = dit_loss / self.config.grad_accum_groups
+            scaled_loss.backward()
+            dit_accum += 1
+            total_dit_loss += dit_loss.item()
+            n_groups += 1
+
+            if dit_accum >= self.config.grad_accum_groups:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in self.policy_model.parameters() if p.requires_grad],
+                    max_norm=5.0,
                 )
+                self.dit_optimizer.step()
+                self.dit_optimizer.zero_grad()
+                dit_accum = 0
 
-                scaled_loss = dit_loss / self.config.grad_accum_groups
-                scaled_loss.backward()
-                dit_accum += 1
-                total_dit_loss += dit_loss.item()
-                n_groups += 1
-
-                if dit_accum >= self.config.grad_accum_groups:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in self.policy_model.parameters() if p.requires_grad],
-                        max_norm=5.0,
-                    )
-                    self.dit_optimizer.step()
-                    self.dit_optimizer.zero_grad()
-                    dit_accum = 0
-
-                pbar.update(1)
-
-        pbar.close()
-
-        # Flush remaining
         if dit_accum > 0:
             torch.nn.utils.clip_grad_norm_(
                 [p for p in self.policy_model.parameters() if p.requires_grad],
