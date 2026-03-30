@@ -114,6 +114,17 @@ python -m rlvr.autoresearch.visualize_scenes \
   --lora_path <lora_dir> --output_dir <images/>
 ```
 
+**Evaluate border distance on miraikan problem scenes:**
+```bash
+python -m rlvr.autoresearch.eval_border_distance \
+  --model_path <model.pth> --scenes <prob_scenes.json> --tag <name> \
+  --output_dir <output/> [--visualize --worst_n 10]
+# Or with merged model:
+python -m rlvr.autoresearch.eval_border_distance \
+  --merged_model_path <merged.pth> --args_json <args.json> \
+  --scenes <prob_scenes.json> --tag <name> --output_dir <output/>
+```
+
 **GRPO reward distribution analysis:**
 ```bash
 python rlvr/analyze_rewards.py \

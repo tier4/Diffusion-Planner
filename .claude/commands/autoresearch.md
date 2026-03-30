@@ -44,7 +44,7 @@ source .venv/bin/activate && python -m rlvr.autoresearch.run_experiment \
   --config $EXP_DIR/configs/<config>.json \
   --name <experiment_name> \
   --model_path /media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/v4.0/best_model.pth \
-  --prob_scenes $EXP_DIR/prob_from_train_50.json \
+  --prob_scenes $EXP_DIR/miraikan_left_turn_train_53.json \
   --normal_scenes /media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/auto_research/odaiba_medium_scale_rl/grpo_scenes_300.json \
   --val_scenes $EXP_DIR/val_v4_100.json \
   --output_dir $EXP_DIR \
@@ -89,6 +89,7 @@ For every epoch, report ALL of these:
 - prob_reward, prob_rb_cross, prob_stopped
 - η_lat, η_lon, η_std, entropy, scene_var_lat, scene_var_lon
 - For promising results: `python rlvr/eval_teleport_metrics.py` (accurate speed/lat_accel)
+- For promising results: `python -m rlvr.autoresearch.eval_border_distance` on miraikan prob scenes (min/avg/t20 distance)
 - For promising results: `python -m rlvr.autoresearch.visualize_scenes` on miraikan + teleport
 
 ## How to Verify Per-Scene Guidance Works
@@ -123,6 +124,23 @@ python rlvr/viz_policy_guidance.py \
 ```
 Shows: blue=baseline, orange=LoRA, green=GT, red=road borders, ego footprints, rb_crossing flags.
 
+## Border Distance Metric
+
+Computes min/avg/t20 distance from ego perimeter to road border on miraikan problem scenes:
+```bash
+python -m rlvr.autoresearch.eval_border_distance \
+  --model_path <base_model.pth> --scenes <miraikan_prob.json> --tag <name> \
+  --output_dir <ssd_path>/border_distance
+
+# With visualization of worst N scenes:
+python -m rlvr.autoresearch.eval_border_distance \
+  --merged_model_path <merged.pth> --args_json <args.json> \
+  --scenes <miraikan_prob.json> --tag <name> \
+  --visualize --worst_n 10 --output_dir <ssd_path>/border_distance
+```
+Reports: rb_crossings, min_dist (mean/min/p5), avg_dist (mean/min), border_t20 (mean/min/p5).
+Visualizations show trajectory colored by distance + time-series plot of border distance.
+
 ## Lat Accel Metric
 
 reward.py uses curvature-based lat accel (accurate). For standalone reporting:
@@ -147,8 +165,22 @@ python3 ros_scripts/torch2onnx.py <dir_containing_merged.pth>
 | Base model | `/media/.../v4.0/best_model.pth` |
 | Training scenes (300) | `.../odaiba_medium_scale_rl/grpo_scenes_300.json` |
 | Validation 100 | `.../odaiba_grpo_experiments/val_v4_100.json` |
-| Prob scenes (50) | `.../odaiba_grpo_experiments/prob_from_train_50.json` |
-| Miraikan scenes (141) | `.../auto_research/v4_prob_miraikan_exit_clean.json` |
+| Prob scenes (50, mixed locations) | `.../odaiba_grpo_experiments/prob_from_train_50.json` |
+| Miraikan left-turn train (53) | `.../odaiba_grpo_experiments/miraikan_left_turn_train_53.json` |
+| Miraikan left-turn all (111) | `.../odaiba_grpo_experiments/miraikan_left_turn_111.json` |
+| Miraikan all (141) | `.../odaiba_grpo_experiments/miraikan_train_70.json` + `miraikan_val_71.json` |
 | Teleport scenes (51) | `.../auto_research/v4_anchor_teleport_51.json` |
 
 All paths on SSD: `/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/auto_research/`
+
+## Miraikan Scene Selection
+
+The 141 miraikan scenes come from 2 bags:
+- **98d3d86e** (111 scenes): the critical **left turn** at miraikan exit (+54 deg yaw change). This is where baseline crosses road borders.
+- **c62ee2a9** (30 scenes): straight section near border (+11 deg yaw change). Not the critical area.
+
+**For training prob scenes, use `miraikan_left_turn_train_53.json`** (left-turn only, train split).
+**For evaluation, use `miraikan_left_turn_111.json`** (all left-turn scenes) or the full 141.
+
+Do NOT use `prob_from_train_50.json` for miraikan-specific training — it's a mix of locations (only 6 of 50 are miraikan).
+All scenes verified: ego starts on-road with >= 30cm margin at t=0.
