@@ -211,43 +211,42 @@ class ClosedLoopExplorationTrainer:
                 K = self.config.num_generations
                 lat_dist = policy_out.lat_dist
                 lon_dist = policy_out.lon_dist
-                eta_lat_01 = lat_dist.rsample((K,)).squeeze(-1)
-                eta_lon_01 = lon_dist.rsample((K,)).squeeze(-1)
-                eta_lat_vals = 2.0 * eta_lat_01 - 1.0
+                eta_lat_01 = lat_dist.rsample((K,)).squeeze(-1)  # [K]
+                eta_lon_01 = lon_dist.rsample((K,)).squeeze(-1)  # [K]
+                eta_lat_vals = 2.0 * eta_lat_01 - 1.0  # [K] in [-1, 1]
                 eta_lon_vals = 2.0 * eta_lon_01 - 1.0
 
-                # Generate K trajectories
-                trajectories = []
-                noise_min, noise_max = self.config.noise_scale_range
-                for k in range(K):
-                    eta_lat = eta_lat_vals[k].item()
-                    eta_lon = eta_lon_vals[k].item()
-                    guidance_fns = [
-                        GuidanceConfig(
-                            name="lateral", enabled=True, scale=1.0,
-                            params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat},
-                        ),
-                        GuidanceConfig(
-                            name="longitudinal", enabled=True, scale=1.0,
-                            params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon},
-                        ),
-                    ]
-                    set_cfg = GuidanceSetConfig(
-                        functions=guidance_fns, global_scale=self.guidance_scale,
-                    )
-                    composer = GuidanceComposer(set_cfg)
-                    noise = 0.0 if k == 0 else random.uniform(noise_min, noise_max)
-                    traj = generate_samples(
-                        model=self.policy_model, model_args=self.model_args,
-                        data=norm_data, noise_scale=noise, n_samples=1,
-                        composer=composer, device=self.device,
-                    )[0]
-                    trajectories.append(traj)
+                # Batched K trajectory generation: expand scene data to B=K
+                from rlvr.closed_loop.batched_rollout import _batched_generate
+                K_data = {}
+                for k_key, v in norm_data.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == 1:
+                        K_data[k_key] = v.expand(K, *v.shape[1:]).contiguous()
+                    else:
+                        K_data[k_key] = v
 
-                # Score trajectories
-                traj_batch = torch.tensor(
-                    np.stack(trajectories), device=self.device, dtype=torch.float32,
+                # Build batched composer with K etas
+                guidance_fns = [
+                    GuidanceConfig(
+                        name="lateral", enabled=True, scale=1.0,
+                        params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat_vals},
+                    ),
+                    GuidanceConfig(
+                        name="longitudinal", enabled=True, scale=1.0,
+                        params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon_vals},
+                    ),
+                ]
+                set_cfg = GuidanceSetConfig(
+                    functions=guidance_fns, global_scale=self.guidance_scale,
                 )
+                composer = GuidanceComposer(set_cfg)
+
+                # Single batched forward pass: B=K trajectories at once
+                noise = random.uniform(*self.config.noise_scale_range)
+                traj_batch = _batched_generate(
+                    self.policy_model, self.model_args, K_data,
+                    noise_scale=noise, composer=composer, device=self.device,
+                )  # [K, T, 4]
 
             # Reward scoring outside no_grad (compute_reward_batch has its own)
             rewards = compute_reward_batch(traj_batch, data, self.reward_config)
