@@ -110,7 +110,9 @@ def main():
     )
     policy = ExplorationPolicy(policy_config).to(device)
     ckpt = torch.load(args.policy_path, map_location=device)
-    policy.load_state_dict(ckpt)
+    missing, unexpected = policy.load_state_dict(ckpt, strict=False)
+    if missing or unexpected:
+        print(f"Warning: missing={missing}, unexpected={unexpected}")
     policy.eval()
     encoder = get_frozen_encoder(model)
 

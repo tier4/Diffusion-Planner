@@ -186,10 +186,12 @@ def visualize_scene_border(ego_traj_np, min_dists_np, data, scene_path, save_pat
                 fontsize=8, ha='left', color='red', fontweight='bold')
 
     ax.set_aspect('equal')
-    t20_str = f'border_t20={min_dists_np[20]:.3f}m' if len(min_dists_np) > 20 else ''
-    ax.set_title(f'{tag} — {Path(scene_path).stem}\n'
-                 f'rb_cross={"YES" if rb_crossing else "no"}  '
-                 f'min_dist={min_dists_np.min():.3f}m  {t20_str}')
+    title = (f'{tag} — {Path(scene_path).stem}\n'
+             f'rb_cross={"YES" if rb_crossing else "no"}  '
+             f'min_dist={min_dists_np.min():.3f}m')
+    if len(min_dists_np) > 20:
+        title += f'  border_t20={min_dists_np[20]:.3f}m'
+    ax.set_title(title)
     ax.legend(fontsize=8)
 
     # Auto-zoom
@@ -274,7 +276,7 @@ def main():
                 "rb_crossing": rb_crossing,
                 "min_dists": min_dists_np,
                 "ego_traj": ego_traj[0].cpu().numpy(),
-                "data": data,
+                "data": data if args.visualize else None,
             })
         except Exception as e:
             print(f"  Error on scene {i}: {e}")

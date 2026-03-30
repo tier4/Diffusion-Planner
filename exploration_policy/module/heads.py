@@ -36,10 +36,12 @@ class GuidanceHead(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.act = nn.GELU()
-        # bias=False forces scene-dependent output: output = W @ fused_input.
-        # With bias, training takes the easy path: push the bias (global, same for
-        # all scenes) instead of the weights (scene-dependent). Removing bias means
-        # the network MUST use the input to produce non-zero output.
+        # bias=False removes a direct global offset at the output layer:
+        # output = W @ fused_input. This encourages the head to use scene-dependent
+        # features rather than relying on an output bias. Note that upstream layers
+        # (fc1) still include biases, so this is not a strict guarantee of
+        # scene-dependence — but empirically it significantly improves per-scene
+        # variation vs having bias=True on fc2.
         # Zero-init still works: zero weights → output=0 → softplus(0)+1 ≈ 1.693.
         self.fc2 = nn.Linear(hidden_dim, 4, bias=False)
         self.raw_scale = raw_scale
@@ -70,7 +72,7 @@ class GuidanceHead(nn.Module):
         scaled = raw * self.raw_scale
 
         # softplus + 1.0 ensures params >= 1.0 (unimodal Beta)
-        # Clamp to max_conc to prevent distribution collapse (alpha=20 → near-deterministic)
+        # Clamp to max_conc to prevent distribution collapse (alpha=10 → high concentration)
         max_conc = 10.0
         alpha_lat = torch.clamp(F.softplus(scaled[:, 0]) + 1.0, max=max_conc)
         beta_lat = torch.clamp(F.softplus(scaled[:, 1]) + 1.0, max=max_conc)
