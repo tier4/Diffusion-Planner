@@ -192,6 +192,15 @@ class ClosedLoopExplorationTrainer:
             except Exception:
                 continue
 
+            # Skip stationary scenes (same filter as GRPOExplorationTrainer)
+            if "ego_agent_future" in data:
+                gt = data["ego_agent_future"]
+                if gt.dim() == 3:
+                    gt = gt[0]
+                gt_path = torch.diff(gt[:, :2], dim=0).norm(dim=-1).sum()
+                if gt_path < 1.0:
+                    continue
+
             norm_data = copy.deepcopy(self.model_args.observation_normalizer)(
                 {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()}
             )
