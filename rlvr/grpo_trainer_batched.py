@@ -254,8 +254,9 @@ def train_epoch_batched(
     print(f"  Training on {N_kept} scenes (batched GRPO)...")
     keep_per = kept_trajs[0].shape[0]
 
-    # Process in chunks to avoid OOM
-    chunk_size = max(1, min(32, N_kept))  # ~32 scenes per forward pass
+    # Process in small chunks: keep normalization per-scene-like
+    # chunk_size=4 means 4 scenes × keep_per trajs per forward pass
+    chunk_size = max(1, min(4, N_kept))
     model.train()
     optimizer.zero_grad()
 
@@ -294,12 +295,14 @@ def train_epoch_batched(
             device=device,
         )
 
-        # Scale: compute_batched_grpo_loss already divides by N_trajs_in_chunk.
-        # We want effective LR matching sequential trainer where each scene
-        # contributes loss/grad_accum_groups. With chunking, each chunk has
-        # c_n scenes, so scale by c_n/grad_accum to match.
-        n_chunks_total = (N_kept + chunk_size - 1) // chunk_size
-        scaled_loss = loss / max(n_chunks_total, 1)
+        # compute_batched_grpo_loss divides by total trajs in chunk (c_n * keep_per).
+        # Sequential trainer divides by keep_per only (per scene), then by grad_accum.
+        # To match: multiply by c_n to undo the cross-scene averaging, then divide
+        # by grad_accum equivalent (n_chunks acts as grad_accum).
+        c_n = len(c_trajs)
+        # With chunk_size=4: loss already normalized by ~32 trajs (4 scenes × 8).
+        # Scale by c_n/grad_accum to match sequential trainer's effective gradient.
+        scaled_loss = loss * c_n / config.grad_accum_groups
         scaled_loss.backward()
 
         for k, v in metrics.items():

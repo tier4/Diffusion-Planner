@@ -389,6 +389,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         lane_near_scale=grpo_config.lane_near_scale,
         lane_wide_scale=grpo_config.lane_wide_scale,
         lane_cont_scale=grpo_config.lane_cont_scale,
+        reward_mode=grpo_config.reward_mode,
     )
     # Eval reward config: standard weights but always check lane departure for metrics
     eval_reward_config = RewardConfig(enable_lane_departure=True)
