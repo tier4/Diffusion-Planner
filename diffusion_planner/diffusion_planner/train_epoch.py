@@ -28,6 +28,12 @@ def heading_to_cos_sin(x):
 
 def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
     epoch_loss = []
+    use_bf16 = bool(
+        args.use_bf16
+        and str(args.device).startswith("cuda")
+        and torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported()
+    )
 
     model.train()
 
@@ -59,7 +65,12 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # call the model
         optimizer.zero_grad()
 
-        loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
+        with torch.autocast(
+            device_type="cuda",
+            dtype=torch.bfloat16,
+            enabled=use_bf16,
+        ):
+            loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
 
         loss["loss"] = (
             args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]

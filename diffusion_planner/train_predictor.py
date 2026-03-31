@@ -132,6 +132,12 @@ def get_args():
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
     parser.add_argument("--use_ema", default=True, type=boolean)
+    parser.add_argument(
+        "--use_bf16",
+        default=True,
+        type=boolean,
+        help="Enable bfloat16 autocast during training when supported by the GPU",
+    )
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
