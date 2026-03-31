@@ -15,6 +15,7 @@ from diffusion_planner.dimensions import (
     output_dim_for_mode,
 )
 from diffusion_planner.loss import (
+    compute_control_traj_loss,
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
@@ -404,6 +405,29 @@ def compute_training_loss(
         loss["neighbor_collision_loss"] = nc_loss.mean()
     else:
         loss["neighbor_collision_loss"] = torch.tensor(0.0, device=dpm_loss.device)
+
+    # Control-to-trajectory loss (sliding window)
+    ctrl_traj_horizon = args.control_traj_loss_horizon
+    if ctrl_traj_horizon > 0 and model_type == "x_start" and output_mode != OUTPUT_MODE_TRAJECTORY:
+        if output_mode == OUTPUT_MODE_CONTROL:
+            ego_ctrl_pred = model_output[:, 0]  # [B, T, 2]
+        else:  # trajectory_and_control
+            ego_ctrl_pred = model_output[:, 0, :, POSE_DIM:]  # [B, T, 2]
+
+        raw_inputs = obs_norm.inverse(inputs)
+        ego_current_raw = raw_inputs["ego_current_state"][:, :4]  # [B, 4]
+        ego_v0_raw = raw_inputs["ego_current_state"][:, 4]  # [B]
+
+        loss["control_traj_loss"] = compute_control_traj_loss(
+            ego_ctrl_pred,
+            ego_future,
+            ego_current_raw,
+            ego_v0_raw,
+            control_norm,
+            ctrl_traj_horizon,
+        )
+    else:
+        loss["control_traj_loss"] = torch.tensor(0.0, device=dpm_loss.device)
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 

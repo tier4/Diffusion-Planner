@@ -153,6 +153,18 @@ def get_args():
         default=1.0,
         help="Weight for control loss when output_mode includes control",
     )
+    parser.add_argument(
+        "--control_traj_loss_horizon",
+        type=int,
+        default=0,
+        help="Sliding-window horizon for control-to-trajectory loss (0 = disabled)",
+    )
+    parser.add_argument(
+        "--coeff_control_traj_loss",
+        type=float,
+        default=1.0,
+        help="Weight for control-to-trajectory sliding-window loss",
+    )
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
