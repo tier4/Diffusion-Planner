@@ -552,6 +552,17 @@ class GRPOExplorationTrainer:
         if not groups:
             return _empty_metrics()
 
+        # Scene-level reward trimming: drop top and bottom X% of scenes by mean reward
+        trim = self.config.reward_trim_pct
+        if trim > 0 and len(groups) >= 10:
+            n = len(groups)
+            n_trim = max(1, int(n * trim))
+            mean_rewards = [np.mean([r.total for r in g["reward_breakdowns"]]) for g in groups]
+            sorted_idx = sorted(range(n), key=lambda i: mean_rewards[i])
+            keep_idx = sorted_idx[n_trim:n - n_trim]
+            groups = [groups[i] for i in keep_idx]
+            print(f"  Trimmed {2*n_trim} scenes ({trim*100:.0f}% each end), keeping {len(groups)}/{n}")
+
         random.shuffle(groups)
         return self.train_on_groups(groups, epoch, progress_callback)
 

@@ -97,14 +97,17 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
                 ax.plot((pts + lb)[v, 0], (pts + lb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7)
                 ax.plot((pts + rb)[v, 0], (pts + rb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7)
 
-    # Road borders
+    # Road borders (from line_strings channel 3 — same as reward uses)
     ls = npz["line_strings"]
     for i in range(ls.shape[0]):
         line = ls[i]
         if np.abs(line[:, :2]).sum() < 1e-6:
             continue
         if ls.shape[-1] >= 4 and line[:, 3].max() > 0.5:
-            ax.plot(line[:, 0], line[:, 1], color="red", lw=3, alpha=0.7, zorder=4)
+            # Only plot points with border flag and nonzero coords
+            valid = (line[:, 3] > 0.5) & (np.abs(line[:, :2]).sum(axis=1) > 0.01)
+            if valid.sum() > 1:
+                ax.plot(line[valid, 0], line[valid, 1], color="red", lw=3, alpha=0.7, zorder=4)
 
     # GT
     if show_gt:

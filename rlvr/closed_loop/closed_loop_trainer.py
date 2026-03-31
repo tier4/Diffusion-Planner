@@ -140,6 +140,7 @@ class ClosedLoopExplorationTrainer:
             self.batched_rollout_manager.online_lr = config.exploration_lr
             self.batched_rollout_manager.online_entropy_coef = config.exploration_entropy_coef
             self.batched_rollout_manager.online_value_coef = config.closed_loop_value_coef
+            self.batched_rollout_manager.explorer_mini_batch = config.closed_loop_explorer_mini_batch
         # Keep sequential rollout as fallback
         self.rollout_manager = RolloutManager(
             policy_model=policy_model,

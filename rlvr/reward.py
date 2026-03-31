@@ -30,10 +30,17 @@ class RewardConfig:
     max_accel: float = 8.0  # m/s^2
     dt: float = 0.1  # 10 Hz
 
-    # Near-edge / wide-edge / continuous penalty scales
+    # Near-edge / wide-edge / continuous penalty scales (road border)
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
     cont_edge_scale: float = 0.0  # continuous penalty within 80cm (0=disabled)
+
+    # Lane departure penalty scales
+    enable_lane_departure: bool = False
+    lane_gate_enabled: bool = False  # if True, lane crossing kills reward (too strict for most scenes)
+    lane_near_scale: float = 3.0
+    lane_wide_scale: float = 0.2
+    lane_cont_scale: float = 0.0
 
     # Lateral acceleration penalty
     max_lat_accel: float = 2.0  # m/s^2
@@ -66,6 +73,8 @@ class RewardBreakdown:
     off_road_fraction: float
     rb_crossing: bool = False
     rb_near_frac: float = 0.0
+    lane_crossing: bool = False
+    lane_near_frac: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1271,6 +1280,203 @@ def compute_road_border_penalty(
 
 
 # ---------------------------------------------------------------------------
+# Lane departure penalty
+# ---------------------------------------------------------------------------
+
+_LANE_CROSS_THRESH = 0.10
+_LANE_NEAR_THRESH = 0.25
+_LANE_WIDE_THRESH = 0.40
+_LANE_CONT_THRESH = 0.80
+_LANE_PTS_PER_SIDE = 20  # 80 total perimeter points
+
+
+@torch.no_grad()
+def compute_lane_departure_penalty(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    data: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute per-trajectory lane departure penalties using ego perimeter sampling.
+
+    For each of 80 ego perimeter points at each timestep, finds the K=3 nearest
+    lane centerline points from different lane segments and checks if the point
+    is inside any of those lanes. Uses the full `lanes` tensor (140 segments),
+    not just route_lanes, since ego can legitimately be in any lane.
+
+    Args:
+        ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
+        ego_shape: (3,) wheel_base, length, width.
+        data: Observation dict with 'lanes' key.
+
+    Returns:
+        Tuple of (crossing_gate, near_frac, wide_frac, cont_penalty):
+        - crossing_gate: (N,) 1.0 if always in-lane, 0.0 if leaves lane
+        - near_frac: (N,) fraction of timesteps within 25cm of lane edge
+        - wide_frac: (N,) fraction of timesteps within 40cm of lane edge
+        - cont_penalty: (N,) continuous proximity penalty (linear decay from 80cm)
+    """
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+
+    safe_return = (
+        torch.ones(N, device=device),
+        torch.zeros(N, device=device),
+        torch.zeros(N, device=device),
+        torch.zeros(N, device=device),
+    )
+
+    if "lanes" not in data:
+        return safe_return
+
+    lanes = data["lanes"]
+    if lanes.dim() == 4:
+        lanes = lanes[0]  # remove batch dim → (S, P, D)
+    if lanes.shape[-1] < 8:
+        return safe_return
+
+    # Extract lane geometry
+    S, P, D = lanes.shape
+    center = lanes[..., :2].reshape(-1, 2)       # (S*P, 2)
+    direction = lanes[..., 2:4].reshape(-1, 2)    # (S*P, 2)
+    lb_offset = lanes[..., 4:6].reshape(-1, 2)    # (S*P, 2)
+    rb_offset = lanes[..., 6:8].reshape(-1, 2)    # (S*P, 2)
+
+    dir_norm = direction.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    dir_unit = direction / dir_norm
+    n_left = torch.stack([-dir_unit[..., 1], dir_unit[..., 0]], dim=-1)  # (S*P, 2)
+
+    # Lane half-widths: project boundary offsets onto n_left
+    width_left = (lb_offset * n_left).sum(dim=-1)    # (S*P,) positive = left
+    width_right = (rb_offset * n_left).sum(dim=-1)   # (S*P,) negative = right
+
+    # Valid mask: nonzero direction and nonzero center
+    valid = (direction.norm(dim=-1) > 1e-6) & (center.norm(dim=-1) > 1e-3)
+    num_valid = valid.sum().item()
+    if num_valid == 0:
+        return safe_return
+
+    # Segment IDs for each centerline point (for K=3 from different segments)
+    seg_ids = torch.arange(S, device=device).unsqueeze(1).expand(S, P).reshape(-1)  # (S*P,)
+
+    # Build ego perimeter points (same as road border)
+    wb = ego_shape[0].item()
+    length = ego_shape[1].item()
+    width = ego_shape[2].item()
+    ro = (length - wb) / 2
+    local_pts = []
+    for j in range(_LANE_PTS_PER_SIDE):
+        f = j / (_LANE_PTS_PER_SIDE - 1)
+        local_pts.append((-ro + f * length, -width / 2))
+        local_pts.append((-ro + f * length,  width / 2))
+        local_pts.append((-ro, -width / 2 + f * width))
+        local_pts.append((length - ro, -width / 2 + f * width))
+    local_pts = torch.tensor(local_pts, device=device, dtype=ego_trajs.dtype)
+    K_pts = local_pts.shape[0]  # 80
+
+    # Transform perimeter to world frame
+    cos_h = ego_trajs[..., 2]
+    sin_h = ego_trajs[..., 3]
+    h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+    cos_h = cos_h / h_norm
+    sin_h = sin_h / h_norm
+    rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=-1).reshape(N, T, 2, 2)
+    rotated = torch.einsum("btij,kj->btki", rot, local_pts)
+    world_pts = ego_trajs[..., :2].unsqueeze(2) + rotated  # (N, T, 80, 2)
+
+    # Flatten query points
+    Q = N * T * K_pts
+    query = world_pts.reshape(Q, 2)  # (Q, 2)
+
+    # Filter to valid centerline points only
+    valid_center = center[valid]       # (V, 2)
+    valid_n_left = n_left[valid]       # (V, 2)
+    valid_wl = width_left[valid]       # (V,)
+    valid_wr = width_right[valid]      # (V,)
+    valid_seg = seg_ids[valid]         # (V,)
+    V = valid_center.shape[0]
+
+    # Compute distances from query points to valid centerline points
+    # Process in chunks to avoid OOM
+    best_clearance = torch.full((Q,), -1e6, device=device)
+    chunk_size = 4000
+
+    for q_start in range(0, Q, chunk_size):
+        q_end = min(q_start + chunk_size, Q)
+        q_chunk = query[q_start:q_end]  # (C, 2)
+        C = q_chunk.shape[0]
+
+        # Distance to all valid centerline points
+        dist2 = torch.cdist(q_chunk, valid_center).pow(2) if False else \
+            ((q_chunk.unsqueeze(1) - valid_center.unsqueeze(0)) ** 2).sum(-1)  # (C, V)
+
+        # For K=3 candidates from different segments
+        chunk_clearance = torch.full((C,), -1e6, device=device)
+
+        remaining_mask = torch.ones(C, V, dtype=torch.bool, device=device)
+        for _k in range(3):
+            # Mask out already-used segments
+            masked_dist2 = dist2.clone()
+            masked_dist2[~remaining_mask] = float('inf')
+
+            # Find nearest
+            min_d2, min_idx = masked_dist2.min(dim=1)  # (C,)
+            has_valid = torch.isfinite(min_d2)
+
+            if not has_valid.any():
+                break
+
+            # Get lane geometry at nearest point
+            sel_center = valid_center[min_idx]     # (C, 2)
+            sel_n_left = valid_n_left[min_idx]     # (C, 2)
+            sel_wl = valid_wl[min_idx]             # (C,)
+            sel_wr = valid_wr[min_idx]             # (C,)
+            sel_seg = valid_seg[min_idx]           # (C,)
+
+            # Lateral distance
+            lat = ((q_chunk - sel_center) * sel_n_left).sum(dim=-1)  # (C,)
+            dist_left = sel_wl - lat    # positive = inside on left side
+            dist_right = lat - sel_wr   # positive = inside on right side
+
+            # Clearance = min distance to either boundary (positive = inside lane)
+            clearance = torch.minimum(dist_left, dist_right)  # (C,)
+            clearance = torch.where(has_valid, clearance, torch.full_like(clearance, -1e6))
+
+            # Update best clearance (max across K candidates = least violation)
+            chunk_clearance = torch.maximum(chunk_clearance, clearance)
+
+            # Mask out this segment for next iteration
+            seg_mask = valid_seg.unsqueeze(0) == sel_seg.unsqueeze(1)  # (C, V)
+            remaining_mask = remaining_mask & ~seg_mask
+
+        best_clearance[q_start:q_end] = chunk_clearance
+
+    # Reshape to (N, T, 80)
+    best_clearance = best_clearance.reshape(N, T, K_pts)
+
+    # Per-timestep: min clearance across all 80 perimeter points
+    per_ts_min = best_clearance.min(dim=2).values  # (N, T)
+
+    # Skip t=0
+    per_ts_min[:, 0] = 10.0
+
+    # Crossing gate: any timestep with clearance < 10cm = lane departure
+    is_crossing = per_ts_min < _LANE_CROSS_THRESH
+    has_crossing = is_crossing.any(dim=1)
+    crossing_gate = (~has_crossing).float()
+
+    # Near penalty
+    near_frac = (per_ts_min[:, 1:] < _LANE_NEAR_THRESH).float().mean(dim=1)
+
+    # Wide penalty
+    wide_frac = (per_ts_min[:, 1:] < _LANE_WIDE_THRESH).float().mean(dim=1)
+
+    # Continuous proximity penalty
+    cont_penalty = (1.0 - per_ts_min[:, 1:] / _LANE_CONT_THRESH).clamp(min=0).mean(dim=1)
+
+    return crossing_gate, near_frac, wide_frac, cont_penalty
+
+
+# ---------------------------------------------------------------------------
 # Top-level batched reward computation
 # ---------------------------------------------------------------------------
 
@@ -1374,6 +1580,17 @@ def compute_reward_batch(
         ego_trajs, ego_shape, data,
     )
 
+    # Lane departure penalty
+    if config.enable_lane_departure:
+        lane_crossing_gate, lane_near_frac, lane_wide_frac, lane_cont_penalty = compute_lane_departure_penalty(
+            ego_trajs, ego_shape, data,
+        )
+    else:
+        lane_crossing_gate = torch.ones(N, device=device)
+        lane_near_frac = torch.zeros(N, device=device)
+        lane_wide_frac = torch.zeros(N, device=device)
+        lane_cont_penalty = torch.zeros(N, device=device)
+
     # NAVSIM PDMS-style multiplicative reward aggregation.
     # Safety gates: binary 0/1 multipliers. If any gate is 0, total is 0.
     # This prevents reward hacking (e.g. stopping to avoid offroad penalty)
@@ -1408,6 +1625,8 @@ def compute_reward_batch(
     # Lane polygon drivable_gate is kept as a soft penalty only, not a hard gate,
     # since lane polygons can disagree with road borders at intersection corners.
     safety_product = collision_gate * red_light_gate * rb_crossing_gate  # (N,)
+    if config.lane_gate_enabled:
+        safety_product = safety_product * lane_crossing_gate
 
     # Weighted quality metrics (only matter when safety gates pass)
     # Progress is the primary positive signal. Smoothness/centerline are penalties.
@@ -1449,6 +1668,9 @@ def compute_reward_batch(
     _RB_WIDE_SCALE = config.wide_edge_scale
     rb_penalty = _RB_NEAR_SCALE * rb_near_frac + _RB_WIDE_SCALE * rb_wide_frac + config.cont_edge_scale * rb_cont_penalty
 
+    # Lane departure proximity penalties
+    lane_penalty = config.lane_near_scale * lane_near_frac + config.lane_wide_scale * lane_wide_frac + config.lane_cont_scale * lane_cont_penalty
+
     quality_score = (
         config.w_progress * clamped_progress
         + config.w_safety * safety_scores
@@ -1456,6 +1678,7 @@ def compute_reward_batch(
         + config.w_centerline * centerline_scores
         + ttc_bonus
         - rb_penalty
+        - lane_penalty
     )
 
     _OFFROAD_FLOOR = -50.0
@@ -1504,6 +1727,8 @@ def compute_reward_batch(
             off_road_fraction=float(off_road_fractions[i]),  # always 0 (polygon disabled); use rb_crossing/rb_near_frac instead
             rb_crossing=bool(rb_crossing_gate[i] < 0.5),
             rb_near_frac=float(rb_near_frac[i]),
+            lane_crossing=bool(lane_crossing_gate[i] < 0.5),
+            lane_near_frac=float(lane_near_frac[i]),
         ))
 
     return results

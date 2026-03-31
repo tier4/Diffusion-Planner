@@ -81,6 +81,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
     model.eval()
     totals, offroads, collisions, path_lengths = [], [], 0, []
     rb_crossings, rb_nears = 0, []
+    lane_departures, lane_nears = 0, []
 
     if batch_size > 1:
         # Batched evaluation
@@ -136,6 +137,9 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                 if reward.rb_crossing:
                     rb_crossings += 1
                 rb_nears.append(reward.rb_near_frac)
+                if reward.lane_crossing:
+                    lane_departures += 1
+                lane_nears.append(reward.lane_near_frac)
                 traj_np = det_trajs[local_i].cpu().numpy()
                 pl = np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
@@ -157,6 +161,9 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                 if reward.rb_crossing:
                     rb_crossings += 1
                 rb_nears.append(reward.rb_near_frac)
+                if reward.lane_crossing:
+                    lane_departures += 1
+                lane_nears.append(reward.lane_near_frac)
                 pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
             except Exception as e:
@@ -177,10 +184,13 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
         "stopped_count": int((pl_arr < 1.0).sum()),
         "rb_crossings": rb_crossings,
         "rb_near_mean": float(np.mean(rb_nears)),
+        "lane_departures": lane_departures,
+        "lane_near_mean": float(np.mean(lane_nears)) if lane_nears else 0.0,
     }
     tag = f" [{label}]" if label else ""
     print(f"  Eval{tag}: {n} scenes, reward={result['reward_mean']:+.2f}, "
-          f"rb_cross={rb_crossings}/{n}, rb_near={np.mean(rb_nears):.2f}, "
+          f"rb_cross={rb_crossings}/{n}, lane_dep={lane_departures}/{n}, "
+          f"rb_near={np.mean(rb_nears):.2f}, "
           f"collision={result['collision_rate']:.1%}, "
           f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
     return result
@@ -374,9 +384,14 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         overprogress_margin=grpo_config.overprogress_margin,
         overprogress_penalty=grpo_config.overprogress_penalty,
         stopped_penalty=grpo_config.stopped_penalty,
+        enable_lane_departure=grpo_config.enable_lane_departure,
+        lane_gate_enabled=grpo_config.lane_gate_enabled,
+        lane_near_scale=grpo_config.lane_near_scale,
+        lane_wide_scale=grpo_config.lane_wide_scale,
+        lane_cont_scale=grpo_config.lane_cont_scale,
     )
-    # Eval reward config always uses STANDARD weights for cross-experiment comparability
-    eval_reward_config = RewardConfig()
+    # Eval reward config: standard weights but always check lane departure for metrics
+    eval_reward_config = RewardConfig(enable_lane_departure=True)
 
     if grpo_config.use_closed_loop:
         from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer
@@ -440,7 +455,16 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
             trainer.save_epoch1_baselines(train_paths)
 
-        metrics = trainer.train_epoch(train_paths, epoch)
+        if not grpo_config.use_exploration_policy and not grpo_config.use_closed_loop:
+            # Fully batched training: all scenes in ~5 forward passes
+            from rlvr.grpo_trainer_batched import train_epoch_batched
+            metrics = train_epoch_batched(
+                model=policy_model, model_args=model_args, optimizer=optimizer,
+                scene_paths=train_paths, config=grpo_config,
+                reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+            )
+        else:
+            metrics = trainer.train_epoch(train_paths, epoch)
         trainer.log_metrics(epoch, metrics)
         trainer.save_checkpoint(epoch, args_dict)
 

@@ -93,6 +93,11 @@ class GRPOConfig:
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
     cont_edge_scale: float = 0.0
+    enable_lane_departure: bool = False
+    lane_gate_enabled: bool = False
+    lane_near_scale: float = 3.0
+    lane_wide_scale: float = 0.2
+    lane_cont_scale: float = 0.0
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     enable_overprogress: bool = True
@@ -140,6 +145,10 @@ class GRPOConfig:
     # Rejection sampling: generate num_generations trajectories but keep only
     # the top rejection_keep by reward. Set to 0 or None to disable (keep all).
     rejection_keep: int = 0
+    # Reward trimming: drop top and bottom X% of trajectories by reward before
+    # computing advantages. Prevents learning from outliers (e.g., high-progress
+    # lane-departing trajs at top, crashed trajs at bottom).
+    reward_trim_pct: float = 0.0  # 0.05 = trim 5% from each end
 
     # LoRA
     use_lora: bool = True
@@ -211,6 +220,7 @@ class GRPOConfig:
     closed_loop_batch_size: int = 8        # scenes per batch in rollout (8 fits ~24GB VRAM)
     closed_loop_drop_last: bool = True     # drop incomplete last batch
     closed_loop_online_interval: int = 0   # online explorer update every N steps (0=off, 10=PlannerRFT-style)
+    closed_loop_explorer_mini_batch: int = 0  # step explorer optimizer every N scenes (0=all scenes at once)
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:

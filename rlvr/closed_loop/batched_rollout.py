@@ -228,6 +228,7 @@ class BatchedRolloutManager:
         self.online_lr = 2.5e-4
         self.online_entropy_coef = 0.01
         self.online_value_coef = 0.5
+        self.explorer_mini_batch = 0  # 0 = accumulate all scenes, >0 = step every N scenes
         self.batch_size = batch_size
         self.drop_last = drop_last
 
@@ -530,14 +531,20 @@ class BatchedRolloutManager:
 
         Computes GAE on recent steps and does a gradient update on the explorer.
         This lets the explorer improve DURING the rollout, not just after.
+
+        When explorer_mini_batch > 0, steps the optimizer every N scenes
+        instead of accumulating across all scenes. This prevents the gradient
+        from averaging out per-scene signal into a global bias.
         """
         if self.exploration_policy is None:
             return
 
+        import torch
+
         interval = self.online_update_interval
+        mini_batch = self.explorer_mini_batch
         self.exploration_policy.train()
 
-        # Create a temporary optimizer if we don't have one
         if not hasattr(self, '_online_optimizer'):
             from torch import optim
             self._online_optimizer = optim.AdamW(
@@ -545,13 +552,12 @@ class BatchedRolloutManager:
             )
 
         self._online_optimizer.zero_grad()
-        n_updates = 0
+        n_in_batch = 0
 
         for i, buf in enumerate(buffers):
             if not active[i] or len(buf.steps) < interval:
                 continue
 
-            # Get the last `interval` steps
             recent = buf.steps[-interval:]
             rewards = [s.reward for s in recent]
             values = [s.value for s in recent]
@@ -562,9 +568,14 @@ class BatchedRolloutManager:
                 gamma=self.gamma, lam=self.gae_lambda,
             )
 
-            # Normalize advantages
             if advantages.numel() > 1:
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+            # Determine divisor: mini_batch size or total active scenes
+            if mini_batch > 0:
+                divisor = interval * mini_batch
+            else:
+                divisor = interval * max(sum(active), 1)
 
             for t, step in enumerate(recent):
                 scene_enc = step.scene_encoding.to(self.device)
@@ -572,7 +583,6 @@ class BatchedRolloutManager:
 
                 policy_out = self.exploration_policy(scene_enc, x_ref, deterministic=False)
 
-                import torch
                 eta_lat_01 = torch.tensor(
                     step.eta_lat_01, dtype=torch.float32, device=self.device,
                 ).clamp(1e-6, 1 - 1e-6)
@@ -591,12 +601,20 @@ class BatchedRolloutManager:
                 step_loss = (reinforce_loss
                             + self.online_value_coef * value_loss
                             - self.online_entropy_coef * entropy)
-                step_loss = step_loss / (interval * max(sum(active), 1))
+                step_loss = step_loss / divisor
                 step_loss.backward()
-                n_updates += 1
 
-        if n_updates > 0:
-            import torch
+            n_in_batch += 1
+
+            # Step optimizer every mini_batch scenes
+            if mini_batch > 0 and n_in_batch >= mini_batch:
+                torch.nn.utils.clip_grad_norm_(self.exploration_policy.parameters(), max_norm=1.0)
+                self._online_optimizer.step()
+                self._online_optimizer.zero_grad()
+                n_in_batch = 0
+
+        # Final step for remaining scenes (or all scenes if mini_batch=0)
+        if n_in_batch > 0:
             torch.nn.utils.clip_grad_norm_(self.exploration_policy.parameters(), max_norm=1.0)
             self._online_optimizer.step()
 
