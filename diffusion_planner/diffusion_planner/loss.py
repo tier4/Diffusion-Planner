@@ -184,7 +184,7 @@ def compute_control_traj_loss(
     B, T = ego_ctrl_pred.shape[:2]
     device = ego_ctrl_pred.device
 
-    n_win = T - horizon
+    n_win = T - horizon + 1
     if n_win <= 0:
         return torch.tensor(0.0, device=device)
 
