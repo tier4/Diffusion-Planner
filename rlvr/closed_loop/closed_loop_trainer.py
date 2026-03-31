@@ -29,7 +29,7 @@ from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.closed_loop.per_step_reward import StepRewardConfig
 from rlvr.closed_loop.rollout import RolloutBuffer, RolloutManager
 from rlvr.grpo_config import GRPOConfig
-from rlvr.grpo_loss import compute_batched_grpo_loss, compute_grpo_loss
+from rlvr.grpo_loss import compute_batched_grpo_loss
 from rlvr.reward import RewardConfig, compute_group_advantages, compute_reward_batch
 
 
@@ -134,6 +134,12 @@ class ClosedLoopExplorationTrainer:
             batch_size=config.closed_loop_batch_size,
             drop_last=config.closed_loop_drop_last,
         )
+        # Enable online explorer updates during rollout (PlannerRFT-style)
+        if config.closed_loop_online_interval > 0:
+            self.batched_rollout_manager.online_update_interval = config.closed_loop_online_interval
+            self.batched_rollout_manager.online_lr = config.exploration_lr
+            self.batched_rollout_manager.online_entropy_coef = config.exploration_entropy_coef
+            self.batched_rollout_manager.online_value_coef = config.closed_loop_value_coef
         # Keep sequential rollout as fallback
         self.rollout_manager = RolloutManager(
             policy_model=policy_model,

@@ -210,6 +210,7 @@ class GRPOConfig:
     closed_loop_freeze_dit: bool = True     # freeze DiT during explorer training
     closed_loop_batch_size: int = 8        # scenes per batch in rollout (8 fits ~24GB VRAM)
     closed_loop_drop_last: bool = True     # drop incomplete last batch
+    closed_loop_online_interval: int = 0   # online explorer update every N steps (0=off, 10=PlannerRFT-style)
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:

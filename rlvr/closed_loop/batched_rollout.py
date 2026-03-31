@@ -221,6 +221,13 @@ class BatchedRolloutManager:
         self.gae_lambda = gae_lambda
         self.step_reward_config = step_reward_config or StepRewardConfig()
         self.reward_config = reward_config or RewardConfig()
+        # Online explorer training: update every N steps during rollout
+        # 0 = offline (default, train after full rollout)
+        # >0 = online PPO update every N steps (PlannerRFT-style)
+        self.online_update_interval = 0
+        self.online_lr = 2.5e-4
+        self.online_entropy_coef = 0.01
+        self.online_value_coef = 0.5
         self.batch_size = batch_size
         self.drop_last = drop_last
 
@@ -497,6 +504,12 @@ class BatchedRolloutManager:
                         gp = scene_data[global_idx]["goal_pose"]
                         goal_xy = gp[0, :2] if gp.dim() == 2 else gp[:2]
 
+            # --- Online explorer update (PlannerRFT-style) ---
+            if (self.online_update_interval > 0
+                and self.exploration_policy is not None
+                and (step_t + 1) % self.online_update_interval == 0):
+                self._online_explorer_update(buffers, active, step_t)
+
         # --- Phase 3: Compute GAE for all buffers ---
         for buf in buffers:
             if len(buf.steps) > 0:
@@ -511,3 +524,80 @@ class BatchedRolloutManager:
                 buf.value_targets = value_targets
 
         return [b for b in buffers if len(b.steps) > 0]
+
+    def _online_explorer_update(self, buffers, active, current_step):
+        """Mid-rollout PPO update for exploration policy (PlannerRFT-style).
+
+        Computes GAE on recent steps and does a gradient update on the explorer.
+        This lets the explorer improve DURING the rollout, not just after.
+        """
+        if self.exploration_policy is None:
+            return
+
+        interval = self.online_update_interval
+        self.exploration_policy.train()
+
+        # Create a temporary optimizer if we don't have one
+        if not hasattr(self, '_online_optimizer'):
+            from torch import optim
+            self._online_optimizer = optim.AdamW(
+                self.exploration_policy.parameters(), lr=self.online_lr,
+            )
+
+        self._online_optimizer.zero_grad()
+        n_updates = 0
+
+        for i, buf in enumerate(buffers):
+            if not active[i] or len(buf.steps) < interval:
+                continue
+
+            # Get the last `interval` steps
+            recent = buf.steps[-interval:]
+            rewards = [s.reward for s in recent]
+            values = [s.value for s in recent]
+            terminal_value = 0.0 if recent[-1].terminal else values[-1]
+
+            advantages, value_targets = compute_gae(
+                rewards, values, terminal_value,
+                gamma=self.gamma, lam=self.gae_lambda,
+            )
+
+            # Normalize advantages
+            if advantages.numel() > 1:
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+            for t, step in enumerate(recent):
+                scene_enc = step.scene_encoding.to(self.device)
+                x_ref = step.x_ref.to(self.device)
+
+                policy_out = self.exploration_policy(scene_enc, x_ref, deterministic=False)
+
+                import torch
+                eta_lat_01 = torch.tensor(
+                    step.eta_lat_01, dtype=torch.float32, device=self.device,
+                ).clamp(1e-6, 1 - 1e-6)
+                eta_lon_01 = torch.tensor(
+                    step.eta_lon_01, dtype=torch.float32, device=self.device,
+                ).clamp(1e-6, 1 - 1e-6)
+
+                log_prob = (policy_out.lat_dist.log_prob(eta_lat_01)
+                           + policy_out.lon_dist.log_prob(eta_lon_01))
+
+                adv = advantages[t].to(self.device)
+                reinforce_loss = -(log_prob * adv.detach())
+                value_loss = (policy_out.value.squeeze() - value_targets[t].to(self.device).detach()) ** 2
+                entropy = policy_out.lat_dist.entropy() + policy_out.lon_dist.entropy()
+
+                step_loss = (reinforce_loss
+                            + self.online_value_coef * value_loss
+                            - self.online_entropy_coef * entropy)
+                step_loss = step_loss / (interval * max(sum(active), 1))
+                step_loss.backward()
+                n_updates += 1
+
+        if n_updates > 0:
+            import torch
+            torch.nn.utils.clip_grad_norm_(self.exploration_policy.parameters(), max_norm=1.0)
+            self._online_optimizer.step()
+
+        self.exploration_policy.eval()
