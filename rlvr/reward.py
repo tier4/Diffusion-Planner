@@ -936,11 +936,29 @@ def compute_progress_score_batch(
 # Smoothness: batched jerk penalty
 # ---------------------------------------------------------------------------
 
+def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta: float = 0.1) -> torch.Tensor:
+    """Build Savitzky-Golay differentiation kernel (precomputed, cached).
+
+    Returns a 1D convolution kernel that computes the deriv-th derivative
+    using a local polynomial fit over `window` points.
+    """
+    import numpy as np
+    from scipy.signal import savgol_coeffs
+    coeffs = savgol_coeffs(window, poly, deriv=deriv, delta=delta)
+    return torch.tensor(coeffs, dtype=torch.float32).flip(0)  # flip for conv1d
+
+# Precompute SG jerk kernel (window=11, poly=3, deriv=3, dt=0.1)
+_SG_JERK_KERNEL = None
+
 def compute_smoothness_score_batch(
     ego_trajs: torch.Tensor,
     config: RewardConfig,
 ) -> torch.Tensor:
-    """Batched negative mean absolute jerk.
+    """Batched negative mean absolute jerk using Savitzky-Golay convolution.
+
+    Uses a precomputed SG kernel applied via torch conv1d for GPU speed.
+    Raw finite differences amplify noise ~1000x on 10Hz data.
+    SG filtering gives physically meaningful jerk values.
 
     Args:
         ego_trajs: (N, T, 4).
@@ -949,13 +967,32 @@ def compute_smoothness_score_batch(
     Returns:
         (N,) scores (negative, closer to 0 = smoother).
     """
-    pos = ego_trajs[:, :, :2]
-    vel = torch.diff(pos, dim=1) / config.dt
-    acc = torch.diff(vel, dim=1) / config.dt
-    jerk = torch.diff(acc, dim=1) / config.dt
-    if jerk.numel() == 0:
-        return torch.zeros(ego_trajs.shape[0], device=ego_trajs.device)
-    return -(jerk.abs().sum(dim=-1)).mean(dim=-1)
+    global _SG_JERK_KERNEL
+    N, T, _ = ego_trajs.shape
+    if T < 12:
+        return torch.zeros(N, device=ego_trajs.device)
+
+    # Build kernel once, cache on correct device
+    if _SG_JERK_KERNEL is None or _SG_JERK_KERNEL.device != ego_trajs.device:
+        _SG_JERK_KERNEL = _build_sg_diff_kernel(
+            window=11, poly=3, deriv=3, delta=config.dt
+        ).to(ego_trajs.device)
+
+    kernel = _SG_JERK_KERNEL  # [11]
+    pad = kernel.shape[0] // 2
+
+    # pos: [N, T, 2] -> [N, 2, T] for conv1d
+    pos = ego_trajs[:, :, :2].detach().permute(0, 2, 1)  # [N, 2, T]
+
+    # Pad and convolve: conv1d with kernel [1, 1, W] on [N, 2, T]
+    pos_padded = torch.nn.functional.pad(pos, (pad, pad), mode='replicate')
+    jerk = torch.nn.functional.conv1d(
+        pos_padded, kernel.view(1, 1, -1).expand(2, 1, -1),
+        groups=2,
+    )  # [N, 2, T]
+
+    jerk_mag = jerk.norm(dim=1)  # [N, T]
+    return -jerk_mag.mean(dim=1)  # [N]
 
 
 # ---------------------------------------------------------------------------
