@@ -233,36 +233,39 @@ class GRPOExplorationTrainer:
             eta_lat_vals = 2.0 * eta_lat_01 - 1.0  # [K] in [-1, 1]
             eta_lon_vals = 2.0 * eta_lon_01 - 1.0  # [K] in [-1, 1]
 
-            # 6. Generate K trajectories (noise=0, each with its own η)
-            trajectories = []
+            # 6. Generate K trajectories — batched with per-trajectory varied noise
+            from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
             noise_min, noise_max = self.config.noise_scale_range
-            for k in range(K):
-                eta_lat = eta_lat_vals[k].item()
-                eta_lon = eta_lon_vals[k].item()
 
-                guidance_fns = [
-                    GuidanceConfig(
-                        name="lateral", enabled=True, scale=1.0,
-                        params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat},
-                    ),
-                    GuidanceConfig(
-                        name="longitudinal", enabled=True, scale=1.0,
-                        params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon},
-                    ),
-                ]
-                set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
-                composer = GuidanceComposer(set_cfg)
+            # Expand scene data from B=1 to B=K
+            K_data = {}
+            for k_key, v in norm_data.items():
+                if isinstance(v, torch.Tensor) and v.shape[0] == 1:
+                    K_data[k_key] = v.expand(K, *v.shape[1:]).contiguous()
+                else:
+                    K_data[k_key] = v
 
-                # Add random noise alongside policy guidance for diversity
-                # First trajectory (k=0) is deterministic (no noise) for reference
-                noise = 0.0 if k == 0 else random.uniform(noise_min, noise_max)
+            # Build batched composer with K etas
+            guidance_fns = [
+                GuidanceConfig(
+                    name="lateral", enabled=True, scale=1.0,
+                    params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat_vals},
+                ),
+                GuidanceConfig(
+                    name="longitudinal", enabled=True, scale=1.0,
+                    params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon_vals},
+                ),
+            ]
+            set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
+            composer = GuidanceComposer(set_cfg)
 
-                traj = generate_samples(
-                    model=self.policy_model, model_args=self.model_args,
-                    data=norm_data, noise_scale=noise, n_samples=1,
-                    composer=composer, device=self.device,
-                )[0]
-                trajectories.append(traj)
+            traj_tensor = _batched_generate_varied_noise(
+                self.policy_model, self.model_args, K_data,
+                noise_min=noise_min, noise_max=noise_max,
+                first_deterministic=True,
+                composer=composer, device=self.device,
+            )  # [K, T, 4]
+            trajectories = [traj_tensor[k].cpu().numpy() for k in range(K)]
 
         # 7. Score all K trajectories
         traj_batch = torch.tensor(
@@ -341,10 +344,16 @@ class GRPOExplorationTrainer:
             if np.all(advantages_np == 0):
                 continue
 
-            # --- DiT GRPO loss (standard) ---
-            dit_loss, dit_metrics = compute_grpo_loss(
+            # --- DiT GRPO loss (batched) ---
+            from rlvr.grpo_loss import compute_batched_grpo_loss
+            traj_list = group["trajectories"]
+            traj_tensor = torch.tensor(
+                np.stack(traj_list) if isinstance(traj_list[0], np.ndarray) else traj_list,
+                device=self.device, dtype=torch.float32,
+            )
+            dit_loss, dit_metrics = compute_batched_grpo_loss(
                 policy_model=self.policy_model,
-                trajectories=group["trajectories"],
+                trajectories_tensor=traj_tensor,
                 advantages=advantages_np,
                 data=group["data"],
                 model_args=self.model_args,
