@@ -75,6 +75,7 @@ def generate_all_scenes_batched(
     noise_range: tuple[float, float],
     device: torch.device,
     gen_chunk_size: int = 64,
+    gt_max_speed: float = 3.0,
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
 
@@ -99,7 +100,7 @@ def generate_all_scenes_batched(
         fns = [
             GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
             GuidanceConfig("speed", enabled=True, scale=spd_scale,
-                           params={"v_high": 8.0, "v_low": 1.0}),
+                           params={"v_high": gt_max_speed, "v_low": 0.5}),
         ]
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
         trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
@@ -193,12 +194,32 @@ def train_epoch_batched(
     batch_data = _stack_scene_data(all_data, device)
     norm_batch = _normalize_batch(batch_data, model_args)
 
+    # Compute per-scene GT max speed for speed guidance (use raw data, not normalized)
+    import numpy as _np2
+    gt_speeds_list = []
+    for d in all_data:
+        gt = d.get("ego_agent_future")
+        if gt is not None:
+            if gt.dim() == 3: gt = gt[0]
+            gt_np = gt.cpu().numpy()
+            gt_valid = ~((gt_np[:, 0] == 0) & (gt_np[:, 1] == 0))
+            if gt_valid.sum() >= 5:
+                vel = _np2.diff(gt_np[gt_valid][:, :2], axis=0) / 0.1
+                gt_speeds_list.append(float(_np2.linalg.norm(vel, axis=-1).max()))
+            else:
+                gt_speeds_list.append(3.0)
+        else:
+            gt_speeds_list.append(3.0)
+    median_gt_speed = float(_np2.median(gt_speeds_list))
+    print(f"  Median GT max speed: {median_gt_speed:.1f} m/s")
+
     # 3. Generate K trajectories for all scenes (batched)
     print(f"  Generating {K} trajectories × {N} scenes (batched)...")
     model.eval()
     with torch.no_grad():
         all_trajs = generate_all_scenes_batched(
             model, model_args, norm_batch, K, config.noise_scale_range, device,
+            gt_max_speed=median_gt_speed,
         )  # [N, K, T, 4]
 
     # Free generation memory before scoring + training
