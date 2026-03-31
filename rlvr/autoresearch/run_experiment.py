@@ -76,7 +76,7 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
 
 @torch.no_grad()
 def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
-                        batch_size=32):
+                        batch_size=150):
     """Evaluate model on scenes. Uses batched inference when batch_size > 1."""
     model.eval()
     totals, offroads, collisions, path_lengths = [], [], 0, []
