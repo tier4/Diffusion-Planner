@@ -278,7 +278,7 @@ def model_training(args):
         model_ema = ModelEma(
             diffusion_planner,
             decay=0.999,
-            device=args.device,
+            device="cpu",
         )
 
     if global_rank == 0:
