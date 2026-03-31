@@ -207,6 +207,14 @@ class GRPOConfig:
     # 1 = step every scene (original per-group), 4 = match DiT rhythm.
     exploration_grad_accum_groups: int = 1
 
+    # Random guidance mode: replaces exploration policy with direct η sampling.
+    # "explorer" (default): use learned exploration policy (Beta distributions).
+    # "uniform": random η ~ U[-1, 1] (matches zero-init explorer output).
+    # "narrow": random η_lat ~ U[-0.5, 0.5], η_lon ~ U[-0.25, 0.25].
+    # "gaussian": random η_lat ~ N(0, 0.3), η_lon ~ N(0, 0.15).
+    # "none": η=0 always (no guidance, pure noise diversity).
+    random_guidance_mode: str = "explorer"
+
     # --- Closed-loop training ---
     # When True, uses ClosedLoopExplorationTrainer instead of GRPOExplorationTrainer.
     # The explorer operates per-step (0.1s) with GAE temporal credit assignment.
