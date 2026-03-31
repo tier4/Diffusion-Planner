@@ -89,14 +89,18 @@ def generate_all_scenes_batched(
     det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
     all_k_trajs.append(det_trajs)
 
-    # --- Config 2-4: CL guidance sweep ---
-    cl_configs = [
-        (3.5, 0.0, 0.5),
-        (5.0, 0.3, 1.0),
-        (8.0, 0.5, 1.5),
+    # --- Config 2-4: CL + SPD guidance sweep (stay in-lane AND drive) ---
+    cl_spd_configs = [
+        (3.0, 5.0, 0.0, 0.0),   # CL3+SPD5, deterministic
+        (5.0, 5.0, 0.0, 0.0),   # CL5+SPD5, deterministic
+        (5.0, 8.0, 0.0, 0.5),   # CL5+SPD8, small noise
     ]
-    for cl_scale, n_min, n_max in cl_configs:
-        fns = [GuidanceConfig("centerline_following", enabled=True, scale=cl_scale)]
+    for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
+        fns = [
+            GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
+            GuidanceConfig("speed", enabled=True, scale=spd_scale,
+                           params={"v_high": 8.0, "v_low": 1.0}),
+        ]
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
         trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
         all_k_trajs.append(trajs)
@@ -162,6 +166,11 @@ def train_epoch_batched(
 
     K = config.num_generations
     keep = config.rejection_keep
+    if epoch == 1:
+        print(f"  [DEBUG] reward_config.reward_mode = {reward_config.reward_mode}")
+        print(f"  [DEBUG] reward_config.enable_lane_departure = {reward_config.enable_lane_departure}")
+        print(f"  [DEBUG] reward_config.lane_gate_enabled = {reward_config.lane_gate_enabled}")
+        print(f"  [DEBUG] reward_config.lane_near_scale = {reward_config.lane_near_scale}")
 
     # 1. Load all scenes
     print(f"  Loading {len(scene_paths)} scenes...")
@@ -254,9 +263,9 @@ def train_epoch_batched(
     print(f"  Training on {N_kept} scenes (batched GRPO)...")
     keep_per = kept_trajs[0].shape[0]
 
-    # Process in small chunks: keep normalization per-scene-like
-    # chunk_size=4 means 4 scenes × keep_per trajs per forward pass
-    chunk_size = max(1, min(4, N_kept))
+    # Process one scene at a time: matches sequential trainer's gradient behavior.
+    # Each scene's loss is normalized by keep_per trajs only (not cross-scene).
+    chunk_size = 1
     model.train()
     optimizer.zero_grad()
 
