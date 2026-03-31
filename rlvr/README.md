@@ -15,17 +15,38 @@ The GRPO pipeline differs from the existing DPO pipeline in two key ways:
 
 ```
 rlvr/
-  reward.py               Rule-based reward (batched over N trajectories)
+  reward.py                Rule-based reward (road border + safety + progress + feasibility)
+  grpo_loss.py             Advantage-weighted diffusion loss with PPO clipping + KL
+  grpo_config.py           Dataclass config with JSON serialization
+  grpo_trainer.py          Training loop with per-epoch eval, LoRA checkpointing
   grpo_sampler.py          Diverse trajectory generation with random noise + guidance
   trajectory_ranker_gui.py Gradio GUI for visualizing rankings and tuning reward weights
-  __init__.py              Package exports
+  configs/
+    grpo_onpolicy.json     Recommended on-policy config (best for v4)
+    grpo_multi_epoch.json  Multi-epoch PPO-clip config
+  autoresearch/
+    run_experiment.py      Single experiment runner (all paths via CLI)
+    check_lora_training.py LoRA weight verification tool
+    visualize_scenes.py    Scene visualization with road borders + ego footprints
+    README.md              Full autoresearch documentation
   test_reward.py           Unit tests for reward (no model needed)
   test_grpo_sampler.py     Unit tests for sampler (needs model for full suite)
 ```
 
 ## Reward Function
 
-`R = w_safety * S + w_progress * P + w_smooth * M + w_feasibility * F + w_centerline * C`
+`R = safety_product * quality_score + (1 - safety_product) * (-50)`
+
+**Safety gates** (hard, binary — any trigger floors reward to -50):
+- Collision gate: ego collides with neighbor vehicle
+- Road border gate: ego perimeter (80 sample points) crosses road border (within 10cm)
+- Red light gate: ego runs red light
+
+**Quality score** (soft, weighted sum):
+`quality = w_progress * progress + w_safety * safety + w_smooth * smoothness + w_centerline * centerline + ttc_bonus - rb_near_penalty - rb_wide_penalty`
+
+Road border proximity penalties (`near_edge_scale`, `wide_edge_scale`) subtract from quality
+even when the ego doesn't cross the border, penalizing trajectories that get close.
 
 ### Components
 

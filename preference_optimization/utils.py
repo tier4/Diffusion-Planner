@@ -39,6 +39,10 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
             [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=device
         )
 
+    # v4 decoder requires delay (always 0 at inference, training uses random delay)
+    if "delay" not in data:
+        data["delay"] = torch.zeros(1, dtype=torch.long, device=device)
+
     return data
 
 

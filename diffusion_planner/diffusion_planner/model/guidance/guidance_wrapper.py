@@ -50,14 +50,15 @@ class GuidanceWrapper:
         state_normalizer = kwargs["state_normalizer"]
         observation_normalizer = kwargs["observation_normalizer"]
 
-        B, P, _ = x_in.shape
+        B = x_in.shape[0]
+        P = x_in.shape[1]
         model = kwargs["model"]
         model_condition = kwargs["model_condition"]
 
         x_fix = model(x_in, t_input, **model_condition).detach() - x_in.detach()
         x_fix = x_fix.reshape(B, P, -1, 4)
         x_fix[:, :, 0] = 0.0
-        x_in = x_in + x_fix.reshape(B, P, -1)
+        x_in = x_in + x_fix.reshape(x_in.shape)
 
         x_in = state_normalizer.inverse(x_in.reshape(B, P, -1, 4))
         kwargs["inputs"] = observation_normalizer.inverse(kwargs["inputs"])
