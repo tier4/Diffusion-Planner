@@ -138,6 +138,12 @@ def get_args():
         type=boolean,
         help="Enable bfloat16 autocast during training when supported by the GPU",
     )
+    parser.add_argument(
+        "--use_activation_checkpointing",
+        default=True,
+        type=boolean,
+        help="Recompute encoder/decoder activations during backward to reduce GPU memory",
+    )
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
