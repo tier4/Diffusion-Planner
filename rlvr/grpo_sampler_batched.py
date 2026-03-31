@@ -33,9 +33,14 @@ def _expand_data(norm_data, n, device):
     return expanded
 
 
-def _batched_cl_pass(model, model_args, norm_data, n, cl_scale, noise_min, noise_max, device):
-    """Batch of n trajectories with centerline guidance at cl_scale, varied noise."""
-    fns = [GuidanceConfig("centerline_following", enabled=True, scale=cl_scale)]
+def _batched_cl_spd_pass(model, model_args, norm_data, n, cl_scale, spd_scale, v_high,
+                          noise_min, noise_max, device):
+    """Batch of n trajectories with CL + SPD guidance, varied noise."""
+    fns = [
+        GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
+        GuidanceConfig("speed", enabled=True, scale=spd_scale,
+                       params={"v_high": v_high, "v_low": 0.5}),
+    ]
     comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
     batch = _expand_data(norm_data, n, device)
     return _batched_generate_varied_noise(
@@ -71,13 +76,38 @@ def generate_diverse_group_batched(
     det = generate_samples(model, model_args, norm_data, 0.0, 1, None, device)
     all_trajs.append(torch.from_numpy(det[0]).to(device))
 
-    # --- Pass 2: Low CL sweep (B=4, CL=2-5, noise 0-0.5) ---
-    trajs_lo = _batched_cl_pass(model, model_args, norm_data, 4, 3.5, 0.0, 0.5, device)
-    for i in range(4):
+    # Compute GT max speed for speed guidance
+    import numpy as _np
+    if "ego_agent_future" in data:
+        _gt = data["ego_agent_future"]
+        if _gt.dim() == 3: _gt = _gt[0]
+        _gt_np = _gt.cpu().numpy()
+        _gt_valid = ~((_gt_np[:, 0] == 0) & (_gt_np[:, 1] == 0))
+        if _gt_valid.sum() >= 5:
+            _gt_vel = _np.diff(_gt_np[_gt_valid][:, :2], axis=0) / 0.1
+            gt_v_high = float(_np.linalg.norm(_gt_vel, axis=-1).max())
+        else:
+            gt_v_high = 3.0
+    else:
+        gt_v_high = 3.0
+
+    # --- Pass 2: CL+SPD deterministic (B=1, noise=0) + 3 with noise ---
+    # First: one deterministic CL5+SPD5 (guaranteed in-lane if CL works)
+    fns_det = [
+        GuidanceConfig("centerline_following", enabled=True, scale=5.0),
+        GuidanceConfig("speed", enabled=True, scale=5.0, params={"v_high": gt_v_high, "v_low": 0.5}),
+    ]
+    comp_det = GuidanceComposer(GuidanceSetConfig(functions=fns_det, global_scale=1.0))
+    det_cl = generate_samples(model, model_args, norm_data, 0.0, 1, comp_det, device)
+    all_trajs.append(torch.from_numpy(det_cl[0]).to(device))
+
+    # Then 3 with small noise
+    trajs_lo = _batched_cl_spd_pass(model, model_args, norm_data, 3, 3.5, 5.0, gt_v_high, 0.3, 0.8, device)
+    for i in range(3):
         all_trajs.append(trajs_lo[i])
 
-    # --- Pass 3: High CL sweep (B=3, CL=7-10, noise 0.5-1.0) ---
-    trajs_hi = _batched_cl_pass(model, model_args, norm_data, 3, 8.0, 0.5, 1.5, device)
+    # --- Pass 3: High CL+SPD sweep (B=3, CL=8, SPD=8, noise 0.5-1.5) ---
+    trajs_hi = _batched_cl_spd_pass(model, model_args, norm_data, 3, 8.0, 8.0, gt_v_high, 0.5, 1.5, device)
     for i in range(3):
         all_trajs.append(trajs_hi[i])
 
