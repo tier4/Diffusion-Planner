@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
     parser.add_argument("--convert_red", type=int, default=0)
-    parser.add_argument("--interpolation", type=int, default=0)
+    parser.add_argument("--interpolation", type=int, default=1)
     parser.add_argument("--ego_wheel_base", type=float, default=2.75)
     parser.add_argument("--ego_length", type=float, default=4.34)
     parser.add_argument("--ego_width", type=float, default=1.70)

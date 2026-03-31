@@ -1,15 +1,28 @@
-"""Trajectory Ranker GUI -- visualization and reward debugging for diverse trajectory groups.
+"""Trajectory Ranker GUI -- visualization, reward debugging, and optional GRPO training.
 
 Generates N trajectories per scene with diverse noise/guidance configs, scores
 them with the rule-based reward, computes group-relative advantages, and
 visualizes everything with a red-to-green advantage colormap.
 
+When training is enabled (default), the GUI also provides Accept/Skip controls
+to collect groups and a "Train Epoch" button for GRPO updates.
+Pass --no-training to disable training controls (visualization-only mode).
+
 Launch
 ------
 source .venv/bin/activate
+
+# Visualization + GRPO training (default):
 python rlvr/trajectory_ranker_gui.py \\
   --model_path /path/to/model.pth \\
-  --npz_list   /path/to/train_or_valid.json
+  --npz_list   /path/to/train_or_valid.json \\
+  --use_lora
+
+# Visualization only (no training controls):
+python rlvr/trajectory_ranker_gui.py \\
+  --model_path /path/to/model.pth \\
+  --npz_list   /path/to/train_or_valid.json \\
+  --no-training
 
 Prototypes are auto-generated from the npz_list if not provided.
 Use --prototypes to point to an existing file, or --regen-prototypes to force
@@ -119,6 +132,9 @@ class TrajectoryRanker:
         self.advantages: np.ndarray = np.array([])
         self.saved_scenes: list[dict] = []
 
+        # GRPO training state: groups accepted by the user for the next training step
+        self.accepted_groups: list[dict] = []
+
     def load_sample(self) -> None:
         if not self.npz_paths or self.current_index >= len(self.npz_paths):
             return
@@ -126,6 +142,9 @@ class TrajectoryRanker:
         self.current_data = load_npz_data(
             self.npz_paths[self.current_index], self.device
         )
+        # Ensure eval mode for inference (DPM-Solver sampling).
+        # Training mode is set only during GRPO loss computation.
+        self.policy_model.eval()
         self.sampled_trajectories = generate_diverse_group(
             model=self.policy_model,
             model_args=self.model_args,
@@ -327,8 +346,8 @@ class TrajectoryRanker:
 
         cfg = self.reward_config
         lines = [
-            "| Rank | Safety | Progress | Smooth | Feasible | Centerline | Total | Adv | Config |",
-            "|------|--------|----------|--------|----------|------------|-------|-----|--------|",
+            "| Rank | Safety | Progress | Smooth | Feasible | Centerline | RedLight | Total | Adv | Config |",
+            "|------|--------|----------|--------|----------|------------|----------|-------|-----|--------|",
         ]
         for rank, (idx, rb, adv, st) in enumerate(rows, 1):
             config_col = f"**[DET]**" if st.is_deterministic else st.label
@@ -339,10 +358,11 @@ class TrajectoryRanker:
             wm = cfg.w_smooth * rb.smoothness
             wf = cfg.w_feasibility * rb.feasibility
             wc = cfg.w_centerline * rb.centerline
+            wr = rb.red_light  # red light is a hard gate, not weighted
             lines.append(
                 f"| {b}{rank}{b} | {b}{ws:.1f}{b} | {b}{wp:.1f}{b} | "
                 f"{b}{wm:.1f}{b} | {b}{wf:.1f}{b} | "
-                f"{b}{wc:.1f}{b} | "
+                f"{b}{wc:.1f}{b} | {b}{wr:.1f}{b} | "
                 f"{b}{rb.total:.1f}{b} | {b}{adv:+.2f}{b} | {config_col} |"
             )
         return "\n".join(lines)
@@ -377,6 +397,7 @@ class TrajectoryRanker:
                 "smoothness": [rb.smoothness for rb in self.reward_breakdowns],
                 "feasibility": [rb.feasibility for rb in self.reward_breakdowns],
                 "centerline": [rb.centerline for rb in self.reward_breakdowns],
+                "red_light": [rb.red_light for rb in self.reward_breakdowns],
                 "total": [rb.total for rb in self.reward_breakdowns],
                 "collision_step": [rb.collision_step for rb in self.reward_breakdowns],
                 "off_road_fraction": [rb.off_road_fraction for rb in self.reward_breakdowns],
@@ -404,14 +425,56 @@ class TrajectoryRanker:
 
         return f"Saved scene {self.current_index} ({len(self.saved_scenes)} total) -> {img_path.name}"
 
+    def accept_current_group(self) -> str:
+        """Accept the current scene's trajectory group for GRPO training.
+
+        Returns a status message.
+        """
+        if not self.sampled_trajectories or self.current_data is None:
+            return "Nothing to accept (no trajectories loaded)"
+
+        if np.all(self.advantages == 0):
+            return "Skipped: all advantages are zero (no gradient signal)"
+
+        self.accepted_groups.append({
+            "npz_path": self.npz_paths[self.current_index],
+            "data": self.current_data,
+            "trajectories": [st.trajectory for st in self.sampled_trajectories],
+            "reward_breakdowns": self.reward_breakdowns,
+            "advantages": self.advantages,
+        })
+        return (
+            f"Accepted scene {self.current_index} "
+            f"({len(self.accepted_groups)} groups queued)"
+        )
+
+    def clear_accepted_groups(self) -> str:
+        """Clear all accepted groups."""
+        count = len(self.accepted_groups)
+        self.accepted_groups.clear()
+        return f"Cleared {count} groups"
+
 
 # ---------------------------------------------------------------------------
 # Gradio interface
 # ---------------------------------------------------------------------------
 
-def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
-    with gr.Blocks(title="Trajectory Ranker") as demo:
-        gr.Markdown("# Trajectory Ranker")
+def build_interface(
+    ranker: TrajectoryRanker,
+    trainer=None,
+) -> gr.Blocks:
+    """Build Gradio interface.
+
+    Args:
+        ranker: TrajectoryRanker instance.
+        trainer: Optional GRPOTrainer. When provided, training controls are shown.
+            When None, the GUI is visualization-only.
+    """
+    training_enabled = trainer is not None
+    title = "Trajectory Ranker + GRPO" if training_enabled else "Trajectory Ranker"
+
+    with gr.Blocks(title=title) as demo:
+        gr.Markdown(f"# {title}")
 
         with gr.Row():
             # --- Left sidebar ---
@@ -455,11 +518,13 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
                     label="Guidance scale max",
                 )
                 gr.Markdown("**Guidance types in random pool:**")
-                cb_centerline = gr.Checkbox(value=True, label="Centerline following")
-                cb_anchor = gr.Checkbox(value=True, label="Anchor following")
+                cb_centerline = gr.Checkbox(value=False, label="Centerline following")
+                cb_anchor = gr.Checkbox(value=False, label="Anchor following")
                 cb_collision = gr.Checkbox(value=False, label="Collision")
-                cb_route = gr.Checkbox(value=False, label="Route following")
-                cb_lane = gr.Checkbox(value=False, label="Lane keeping")
+                cb_route = gr.Checkbox(value=True, label="Route following")
+                cb_lane = gr.Checkbox(value=True, label="Lane keeping")
+                cb_road_border = gr.Checkbox(value=True, label="Road border")
+                cb_speed = gr.Checkbox(value=True, label="Speed (GT cap)")
 
                 gr.Markdown("### Reward Weights")
                 w_safety = gr.Slider(
@@ -505,12 +570,51 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
                     speed_curv_plot = gr.Plot(label="Speed & Curvature")
                 sample_info = gr.Markdown("Scene -- / --")
 
+                # --- GRPO Training Controls (only when trainer is provided) ---
+                if training_enabled:
+                    with gr.Accordion("GRPO Training", open=True):
+                        with gr.Row():
+                            btn_accept = gr.Button(
+                                "Accept Group", variant="primary", size="sm",
+                            )
+                            btn_skip = gr.Button("Skip", size="sm")
+                            btn_clear_queue = gr.Button(
+                                "Clear Queue", size="sm",
+                            )
+                        queue_status = gr.Markdown("0 groups queued")
+
+                        gr.Markdown("### Training Parameters")
+                        with gr.Row():
+                            beta_sl = gr.Slider(
+                                0.0, 1.0, value=0.1, step=0.01,
+                                label="KL beta",
+                            )
+                            lr_sl = gr.Slider(
+                                1e-6, 1e-3, value=1e-5, step=1e-6,
+                                label="Learning rate",
+                            )
+                            accum_sl = gr.Slider(
+                                1, 16, value=4, step=1,
+                                label="Grad accum groups",
+                            )
+
+                        with gr.Row():
+                            btn_train = gr.Button(
+                                "Train on Queued Groups", variant="primary",
+                            )
+                            epoch_display = gr.Number(
+                                value=0, label="Current epoch",
+                                interactive=False,
+                            )
+                        train_log = gr.Markdown("No training yet.")
+
         # --- Input lists (order matters for positional unpacking) ---
         sampler_inputs = [
             n_traj_sl, noise_lo, noise_hi,                          # 0-2
             enable_guidance_cb, guidance_prob_sl, guidance_scale_sl, # 3-5
             cb_centerline, cb_anchor, cb_collision, cb_route, cb_lane,  # 6-10
-            proto_path,                                              # 11
+            cb_road_border, cb_speed,                                # 11-12
+            proto_path,                                              # 13
         ]
         reward_inputs = [w_safety, w_progress, w_smooth, w_feasibility, w_centerline]  # 12-16
         display_inputs = [zoom_sl, time_sl]                              # 17-18
@@ -523,6 +627,7 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
             n_traj, ns_lo, ns_hi,
             enable_guidance, guidance_prob, gs_max,
             use_cl, use_anchor, use_col, use_route, use_lane,
+            use_rb, use_speed,
             p_path,
         ):
             ranker.sampler_config = SamplerConfig(
@@ -536,6 +641,8 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
                 enable_collision=bool(use_col),
                 enable_route_following=bool(use_route),
                 enable_lane_keeping=bool(use_lane),
+                enable_road_border=bool(use_rb),
+                enable_speed=bool(use_speed),
                 prototypes_path=p_path if p_path else None,
             )
 
@@ -636,7 +743,7 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
         # Sampler param changes -> full regeneration
         for sl in [n_traj_sl, noise_lo, noise_hi, guidance_prob_sl, guidance_scale_sl]:
             sl.release(_full_run, inputs=all_inputs, outputs=outputs)
-        for cb in [enable_guidance_cb, cb_centerline, cb_anchor, cb_collision, cb_route, cb_lane]:
+        for cb in [enable_guidance_cb, cb_centerline, cb_anchor, cb_collision, cb_route, cb_lane, cb_road_border, cb_speed]:
             cb.change(_full_run, inputs=all_inputs, outputs=outputs)
 
         # Reward weight changes -> rescore only (both release and change for responsiveness)
@@ -656,6 +763,104 @@ def build_interface(ranker: TrajectoryRanker) -> gr.Blocks:
             lambda d, z, ts: ranker.save_current_scene(d, zoom=z, time_step=ts),
             inputs=[save_dir, zoom_sl, time_sl], outputs=[save_status],
         )
+
+        # --- GRPO training event wiring ---
+        if training_enabled:
+            _grpo_epoch_counter = [0]
+
+            def _accept_and_advance(*args):
+                msg = ranker.accept_current_group()
+                # Auto-advance to next scene
+                ranker.current_index = min(
+                    len(ranker.npz_paths) - 1, ranker.current_index + 1
+                )
+                render_out = _full_run(*args)
+                return (msg, *render_out)
+
+            def _skip_and_advance(*args):
+                ranker.current_index = min(
+                    len(ranker.npz_paths) - 1, ranker.current_index + 1
+                )
+                render_out = _full_run(*args)
+                msg = f"Skipped. {len(ranker.accepted_groups)} groups queued"
+                return (msg, *render_out)
+
+            def _clear_queue():
+                return ranker.clear_accepted_groups()
+
+            def _train_epoch(beta_val, lr_val, accum_val, *args):
+                if not ranker.accepted_groups:
+                    empty_render = _render(
+                        *args[N_SAMPLER + N_REWARD:]
+                    ) if args else (None, "", None, "")
+                    return (
+                        "No groups queued. Accept some scenes first.",
+                        _grpo_epoch_counter[0],
+                        *empty_render,
+                    )
+
+                # Update trainer params from GUI sliders
+                trainer.beta = float(beta_val)
+                trainer.grad_accum_groups = int(accum_val)
+
+                # Update learning rate
+                for pg in trainer.optimizer.param_groups:
+                    pg["lr"] = float(lr_val)
+
+                _grpo_epoch_counter[0] += 1
+                epoch = _grpo_epoch_counter[0]
+
+                # Save baselines on first epoch
+                if epoch == 1:
+                    npz_paths = [g["npz_path"] for g in ranker.accepted_groups]
+                    trainer.save_epoch1_baselines(npz_paths)
+
+                groups = list(ranker.accepted_groups)
+                metrics = trainer.train_on_groups(groups, epoch)
+
+                # Drift tracking
+                drift = trainer.compute_trajectory_drift()
+                trainer.log_metrics(epoch, metrics)
+                trainer.save_checkpoint(epoch, {})
+
+                # Clear the queue after training
+                ranker.accepted_groups.clear()
+
+                log_lines = [
+                    f"**Epoch {epoch}** — trained on {len(groups)} groups",
+                    f"- Loss: {metrics.get('loss', 0):.4f}",
+                    f"- Policy loss: {metrics.get('policy_loss', 0):.4f}",
+                    f"- KL loss: {metrics.get('kl_loss', 0):.4f}",
+                ]
+                if drift:
+                    log_lines.append(f"- {drift}")
+                log_lines.append(f"\nQueue cleared. Regenerating current scene with updated model...")
+
+                # Regenerate current scene with the updated model (now in eval mode)
+                render_out = _full_run(*args) if args else (None, "", None, "")
+
+                return ("\n".join(log_lines), epoch, *render_out)
+
+            btn_accept.click(
+                _accept_and_advance,
+                inputs=all_inputs,
+                outputs=[queue_status] + outputs,
+            )
+            btn_skip.click(
+                _skip_and_advance,
+                inputs=all_inputs,
+                outputs=[queue_status] + outputs,
+            )
+            btn_clear_queue.click(
+                _clear_queue,
+                inputs=[],
+                outputs=[queue_status],
+            )
+            btn_train.click(
+                _train_epoch,
+                inputs=[beta_sl, lr_sl, accum_sl] + all_inputs,
+                outputs=[train_log, epoch_display] + outputs,
+            )
 
         demo.load(_full_run, inputs=all_inputs, outputs=outputs)
 
@@ -678,13 +883,23 @@ def main():
     parser.add_argument("--n_trajectories", type=int, default=8)
     parser.add_argument("--port", type=int, default=7862)
     parser.add_argument("--share", action="store_true")
+
+    # Training controls
+    parser.add_argument("--no-training", action="store_true",
+                        help="Disable GRPO training controls (visualization-only mode)")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Path to GRPO config JSON (default: on-policy M=1)")
+    parser.add_argument("--use_lora", action="store_true", default=False,
+                        help="Apply LoRA adapters for training")
+    parser.add_argument("--exp_name", type=str, default="grpo_gui",
+                        help="Experiment name for checkpoint directory")
+
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     model, model_args = load_model(args.model_path, device)
-    model.eval()
 
     with open(args.npz_list) as f:
         npz_paths = json.load(f)
@@ -703,6 +918,63 @@ def main():
     )
     print(f"Prototypes: {prototypes_path}")
 
+    # Setup GRPO trainer (unless --no-training)
+    grpo_trainer = None
+    if not args.no_training:
+        from rlvr.grpo_config import GRPOConfig
+
+        if args.config and args.config.exists():
+            grpo_cfg = GRPOConfig.from_json(args.config)
+            print(f"Loaded GRPO config from {args.config}")
+        else:
+            grpo_cfg = GRPOConfig()
+            print("Using default GRPOConfig (on-policy: M=1)")
+
+        # CLI --use_lora overrides config
+        if args.use_lora:
+            grpo_cfg.use_lora = True
+
+        if grpo_cfg.use_lora:
+            from preference_optimization.lora_utils import apply_lora
+            model = apply_lora(
+                model,
+                r=grpo_cfg.lora_rank,
+                lora_alpha=grpo_cfg.lora_alpha,
+                lora_dropout=grpo_cfg.lora_dropout,
+            )
+
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        if not trainable_params:
+            print("Warning: no trainable parameters found. Use --use_lora or ensure model is not frozen.")
+        else:
+            from datetime import datetime
+            from torch import optim
+            from rlvr.grpo_trainer import GRPOTrainer
+
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            run_dir = args.npz_list.parent / f"{timestamp}_{args.exp_name}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Training output: {run_dir}")
+
+            optimizer = optim.AdamW(trainable_params, lr=grpo_cfg.learning_rate)
+
+            grpo_trainer = GRPOTrainer(
+                policy_model=model,
+                model_args=model_args,
+                optimizer=optimizer,
+                device=device,
+                run_dir=run_dir,
+                config=grpo_cfg,
+                use_lora=grpo_cfg.use_lora,
+            )
+            mode_str = "multi-epoch" if grpo_cfg.uses_importance_sampling else "on-policy"
+            print(f"GRPO training enabled [{mode_str}] "
+                  f"(N={grpo_cfg.num_generations}, M={grpo_cfg.inner_epochs}, "
+                  f"kl={grpo_cfg.kl_coef}, lr={grpo_cfg.learning_rate})")
+    else:
+        model.eval()
+        print("Visualization-only mode (--no-training)")
+
     ranker = TrajectoryRanker(
         policy_model=model,
         model_args=model_args,
@@ -712,7 +984,7 @@ def main():
     )
     ranker.sampler_config.n_trajectories = args.n_trajectories
 
-    demo = build_interface(ranker)
+    demo = build_interface(ranker, trainer=grpo_trainer)
     demo.launch(server_port=args.port, share=args.share, inbrowser=True)
 
 

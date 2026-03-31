@@ -80,8 +80,11 @@ class BaseGuidance(ABC):
         Returns:
             [B] energy tensor.
         """
-        mask = (t < self._t_max) * (t > self._t_min)
-        mask = mask.view(x.shape[0], 1, 1, 1)
+        # t may be scalar [B] (v3) or per-timestep [B, P, T, 1] (v4).
+        # Use the first element per batch for the time window check.
+        t_scalar = t.reshape(t.shape[0], -1)[:, 0] if t.dim() > 1 else t
+        mask = (t_scalar < self._t_max) * (t_scalar > self._t_min)
+        mask = mask.view(x.shape[0], *([1] * (x.dim() - 1)))
         x_gated = torch.where(mask, x, x.detach())
         raw = self._compute(x_gated, inputs)
         return self._energy_scale * self.config.scale * raw
