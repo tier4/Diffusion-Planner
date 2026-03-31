@@ -290,11 +290,14 @@ class ClosedLoopExplorationTrainer:
                 T_len = all_trajs.shape[1]
                 all_trajs = all_trajs.reshape(N_chunk, K, T_len, 4)
 
-            # Per-scene: reward, rejection, advantages, GRPO loss
+            # Per-scene: reward scoring + rejection (must be per-scene for neighbor data)
+            kept_trajs = []
+            kept_advantages = []
+            kept_norm_data = []
+
             for local_i in range(N_chunk):
                 traj_K = all_trajs[local_i]
                 data_i = chunk_data[local_i]
-                norm_i = {k: (v[local_i:local_i+1] if isinstance(v, torch.Tensor) and v.shape[0] == N_chunk else v) for k, v in batch_norm.items()}
 
                 rewards = compute_reward_batch(traj_K, data_i, self.reward_config)
 
@@ -313,22 +316,48 @@ class ClosedLoopExplorationTrainer:
                     pbar.update(1)
                     continue
 
+                kept_trajs.append(traj_K)
+                kept_advantages.append(advantages)
+                norm_i = {k: (v[local_i:local_i+1] if isinstance(v, torch.Tensor) and v.shape[0] == N_chunk else v) for k, v in batch_norm.items()}
+                kept_norm_data.append(norm_i)
+                pbar.update(1)
+
+            # Multi-scene batched GRPO loss: stack scenes into one forward pass
+            if kept_trajs:
                 self.policy_model.train()
+                N_kept = len(kept_trajs)
+                keep_per = kept_trajs[0].shape[0]  # trajectories per scene after rejection
+
+                # Stack all scenes' trajectories: [N_kept * keep_per, T, 4]
+                all_kept = torch.cat(kept_trajs, dim=0)
+                # Stack advantages: [N_kept * keep_per]
+                all_adv = np.concatenate(kept_advantages)
+                # Stack norm data: expand each scene's B=1 to B=keep_per, then concat
+                merged_norm = {}
+                for k in kept_norm_data[0]:
+                    vals = [d[k] for d in kept_norm_data]
+                    if isinstance(vals[0], torch.Tensor):
+                        # Each is [1, ...], expand to [keep_per, ...] then cat
+                        expanded = [v.expand(keep_per, *v.shape[1:]) for v in vals]
+                        merged_norm[k] = torch.cat(expanded, dim=0)  # [N_kept*keep_per, ...]
+                    else:
+                        merged_norm[k] = vals[0]
+
                 dit_loss, _ = compute_batched_grpo_loss(
                     policy_model=self.policy_model,
-                    trajectories_tensor=traj_K,
-                    advantages=advantages,
-                    data=norm_i,
+                    trajectories_tensor=all_kept,
+                    advantages=all_adv,
+                    data=merged_norm,
                     model_args=self.model_args,
                     config=self.config,
                     device=self.device,
                 )
 
-                scaled_loss = dit_loss / self.config.grad_accum_groups
+                scaled_loss = dit_loss / max(N_kept / self.config.grad_accum_groups, 1)
                 scaled_loss.backward()
-                dit_accum += 1
-                total_dit_loss += dit_loss.item()
-                n_groups += 1
+                dit_accum += N_kept
+                total_dit_loss += dit_loss.item() * N_kept
+                n_groups += N_kept
 
                 if dit_accum >= self.config.grad_accum_groups:
                     torch.nn.utils.clip_grad_norm_(
@@ -336,8 +365,6 @@ class ClosedLoopExplorationTrainer:
                     self.dit_optimizer.step()
                     self.dit_optimizer.zero_grad()
                     dit_accum = 0
-
-                pbar.update(1)
 
         pbar.close()
 
