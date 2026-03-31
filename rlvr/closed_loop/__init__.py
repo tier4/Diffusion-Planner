@@ -1,54 +1,52 @@
 
-def verify_lora_loaded(model, model_args, device, label=""):
+def verify_lora_loaded(model, model_args, scene_path, device, label=""):
     """Verify LoRA adapter is active and changes model output.
-    
+
+    Uses a real scene (not dummy data) to avoid missing-key errors.
     Call after loading LoRA to ensure it's not silently inactive.
-    Raises RuntimeError if LoRA has no effect.
+
+    Args:
+        model: Model with LoRA adapter loaded.
+        model_args: Config from load_model.
+        scene_path: Path to a real NPZ scene file.
+        device: Torch device.
+        label: Label for log messages.
+
+    Returns:
+        True if LoRA has measurable effect, False otherwise.
     """
-    import torch, copy
+    import torch, copy, numpy as np
+    from preference_optimization.utils import load_npz_data
     from guidance_gui.generate_samples import generate_samples
-    
-    # Create a dummy input
-    dummy = {
-        "ego_current_state": torch.zeros(1, 10, device=device),
-        "ego_agent_past": torch.zeros(1, 31, 4, device=device),
-        "neighbor_agents_past": torch.zeros(1, 32, 31, 11, device=device),
-        "lanes": torch.zeros(1, 140, 20, 33, device=device),
-        "route_lanes": torch.zeros(1, 25, 20, 33, device=device),
-        "line_strings": torch.zeros(1, 60, 20, 4, device=device),
-        "polygons": torch.zeros(1, 10, 40, 3, device=device),
-        "static_objects": torch.zeros(1, 5, 10, device=device),
-        "goal_pose": torch.zeros(1, 4, device=device),
-        "ego_shape": torch.tensor([[2.79, 4.34, 1.70]], device=device),
-        "delay": torch.zeros(1, dtype=torch.long, device=device),
-    }
-    dummy["ego_current_state"][0, 2] = 1.0  # cos heading
-    
-    norm = copy.deepcopy(model_args.observation_normalizer)(
-        {k: v.clone() for k, v in dummy.items()})
-    
+
+    data = load_npz_data(scene_path, device)
+    if "delay" not in data:
+        data["delay"] = torch.zeros(1, dtype=torch.long, device=device)
+
     model.eval()
     inner = model.module if hasattr(model, "module") else model
     has_adapter = hasattr(inner, "disable_adapter")
-    
+
     if not has_adapter:
         print(f"  [{label}] WARNING: model has no LoRA adapter")
         return False
-    
+
     with torch.no_grad():
-        # With LoRA
-        traj_lora = generate_samples(model, model_args, norm, 0.0, 1, None, device)[0]
-        # Without LoRA
+        norm1 = copy.deepcopy(model_args.observation_normalizer)(
+            {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()})
+        traj_lora = generate_samples(model, model_args, norm1, 0.0, 1, None, device)[0]
+
         with inner.disable_adapter():
             norm2 = copy.deepcopy(model_args.observation_normalizer)(
-                {k: v.clone() for k, v in dummy.items()})
+                {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()})
             traj_base = generate_samples(model, model_args, norm2, 0.0, 1, None, device)[0]
-    
-    import numpy as np
+
     diff = np.abs(traj_lora - traj_base).max()
-    print(f"  [{label}] LoRA effect: max_diff={diff:.6f}m")
-    
+    fde = np.linalg.norm(traj_lora[-1, :2] - traj_base[-1, :2])
+    print(f"  [{label}] LoRA effect: max_diff={diff:.4f}m FDE={fde:.4f}m")
+
     if diff < 1e-5:
-        print(f"  [{label}] WARNING: LoRA has ZERO effect on output!")
+        print(f"  [{label}] WARNING: LoRA has ZERO effect! Check loading method.")
+        print(f"  [{label}] Use load_lora_checkpoint(), NOT PeftModel.from_pretrained()")
         return False
     return True
