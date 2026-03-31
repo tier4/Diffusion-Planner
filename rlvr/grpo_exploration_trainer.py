@@ -259,9 +259,15 @@ class GRPOExplorationTrainer:
             else:
                 # Random guidance path: sample η directly
                 eta_lat_vals, eta_lon_vals = self._sample_random_eta(K)
-                # No explorer state needed
+
+                # Generate reference trajectory (needed by lateral/longitudinal guidance)
+                x_ref_np = generate_reference_trajectory(
+                    self.policy_model, self.model_args, norm_data, self.device,
+                )
+                x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)
+                norm_data["reference_trajectory"] = x_ref
+
                 scene_encoding = None
-                x_ref = None
                 lat_dist = None
                 lon_dist = None
                 eta_lat_01 = (eta_lat_vals + 1.0) / 2.0  # map to (0,1) for compatibility
