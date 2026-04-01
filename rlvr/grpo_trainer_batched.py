@@ -413,8 +413,13 @@ def _train_logprob(
             optimizer.zero_grad()
             accum_count = 0
 
-    # Flush remaining
+    # Flush remaining — rescale gradients for incomplete last group
     if accum_count > 0:
+        if accum_count < config.grad_accum_groups:
+            scale_fix = config.grad_accum_groups / accum_count
+            for p in model.parameters():
+                if p.requires_grad and p.grad is not None:
+                    p.grad.mul_(scale_fix)
         torch.nn.utils.clip_grad_norm_(
             [p for p in model.parameters() if p.requires_grad],
             max_norm=5.0,

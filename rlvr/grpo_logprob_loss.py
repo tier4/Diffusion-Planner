@@ -35,7 +35,7 @@ def _build_model_inputs(
     model_args,
     device: torch.device,
     N: int,
-) -> dict:
+) -> Tuple[dict, torch.Tensor]:
     """Build merged model input dict for N trajectories at a specific (x_t, t).
 
     This reuses the pattern from compute_batched_trajectory_losses in grpo_loss.py
@@ -305,12 +305,14 @@ def compute_logprob_grpo_loss(
     model_args,
     config,
     device: torch.device,
-    ref_model: Optional[torch.nn.Module] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Stage 2: Re-run denoising on stored chain, compute RL + IL loss.
 
     Mirrors DDV2 get_rlloss (lines 1028-1120): re-run the model on stored chain
     states to get new log-probs, then compute advantage-weighted policy gradient.
+
+    KL regularization uses model.disable_adapter_layers() for reference when
+    the model has LoRA adapters and config.kl_coef > 0.
 
     Args:
         model: Diffusion planner model (train mode).
@@ -320,7 +322,6 @@ def compute_logprob_grpo_loss(
         model_args: Config namespace.
         config: GRPOConfig with logprob settings.
         device: Torch device.
-        ref_model: Optional reference model for KL regularization.
 
     Returns:
         (loss, metrics_dict) where loss is a scalar tensor and metrics_dict
@@ -518,48 +519,5 @@ def compute_logprob_grpo_loss(
     return total_loss, metrics
 
 
-@torch.no_grad()
-def _compute_ref_log_probs(
-    ref_model, chain, schedule, batch_data, traj_norm, all_gt,
-    model_args, config, device, sde,
-):
-    """Compute log-probs under the reference model for KL regularization."""
-    num_steps = config.logprob_num_steps
-    min_std = config.logprob_min_std
-    N = traj_norm.shape[0]
-
-    ref_log_probs = []
-    ref_model.eval()
-    for step_idx in range(num_steps):
-        t_current = schedule[step_idx].item()
-        t_prev = schedule[step_idx + 1].item()
-
-        x_t = chain[step_idx].detach()
-        merged, _ = _build_model_inputs(
-            batch_data, traj_norm, t_current, x_t, model_args, device, N
-        )
-
-        _, outputs = ref_model(merged)
-        if "model_output" in outputs:
-            x0_pred = outputs["model_output"][:, :, 1:, :]
-        else:
-            x0_pred = outputs["prediction"]
-
-        stored_x_prev = chain[step_idx + 1][:, :, 1:, :].detach()
-        t_prev_tensor = torch.tensor(t_prev, device=device).view(1, 1, 1, 1)
-
-        # Ego-only log-prob for ref model
-        mean_all, std_all = sde.marginal_prob(x0_pred, t_prev_tensor)
-        std_all = std_all.clamp(min=min_std)
-        ego_mean = mean_all[:, 0]
-        ego_sample = stored_x_prev[:, 0]
-        ego_std = std_all.squeeze()
-        log_prob = (
-            -((ego_sample - ego_mean) ** 2) / (2 * ego_std ** 2)
-            - torch.log(ego_std)
-            - 0.5 * math.log(2 * math.pi)
-        )
-        log_prob = log_prob.reshape(N, -1).mean(dim=-1)
-        ref_log_probs.append(log_prob)
-
-    return torch.stack(ref_log_probs, dim=-1)  # [N, num_steps]
+    # (Old _compute_ref_log_probs helper removed — KL now uses analytical
+    # mean-divergence computed inline in compute_logprob_grpo_loss above.)

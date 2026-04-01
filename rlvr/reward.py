@@ -1028,7 +1028,7 @@ def compute_smoothness_score_batch(
     )  # [N, 2, T]
 
     jerk_mag = jerk.norm(dim=1)  # [N, T]
-    # Trim SG edge artifacts (pad//2 from each side)
+    # Trim SG edge artifacts (pad from each side)
     if jerk_mag.shape[1] > 2 * pad + 1:
         jerk_mag = jerk_mag[:, pad:-pad]
     return -jerk_mag.mean(dim=1)  # [N]

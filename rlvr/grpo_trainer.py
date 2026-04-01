@@ -280,8 +280,8 @@ class GRPOTrainer:
                 config=self.config,
                 device=self.device,
             )
-            if not was_training:
-                self.policy_model.eval()
+            if was_training:
+                self.policy_model.train()
             result["rollout"] = rollout
 
         return result
