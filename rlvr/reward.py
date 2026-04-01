@@ -698,36 +698,55 @@ def compute_feasibility_score_batch(
     # --- Lateral acceleration check ---
     # Penalize lateral acceleration exceeding what a human driver produces.
     # GT trajectories peak at ~2.5 m/s²; the model reaches 3.5 m/s² on curves.
-    # Uses Savitzky-Golay filtered derivatives for accurate measurement.
-    # Previous version used raw double finite diff which inflated values ~5x.
+    # Uses Savitzky-Golay filtered derivatives via torch conv1d (GPU, no CPU round-trip).
+    # lat_accel = |v × a| / |v| (cross product formula for curvature × speed²)
     _MAX_LAT_ACCEL = config.max_lat_accel
     _LAT_ACCEL_SCALE = config.lat_accel_scale
     if T >= 5:
-        # SG-filtered lat accel: compute on CPU (scipy), return to device
-        from scipy.signal import savgol_filter
-        _sg_window = min(11, T - (1 if T % 2 == 0 else 0))  # must be odd and <= T
+        global _SG_VEL_KERNEL, _SG_ACCEL_KERNEL, _SG_LAT_CACHE_KEY
+        _sg_window = min(11, T - (1 if T % 2 == 0 else 0))
         if _sg_window >= 5:
-            pos_np = pos.detach().cpu().numpy()  # (N, T, 2)
-            dt = config.dt
-            lat_accel_list = []
-            for n in range(N):
-                vx = savgol_filter(pos_np[n, :, 0], _sg_window, 3, deriv=1, delta=dt)
-                vy = savgol_filter(pos_np[n, :, 1], _sg_window, 3, deriv=1, delta=dt)
-                ax = savgol_filter(pos_np[n, :, 0], _sg_window, 3, deriv=2, delta=dt)
-                ay = savgol_filter(pos_np[n, :, 1], _sg_window, 3, deriv=2, delta=dt)
-                speed = np.sqrt(vx**2 + vy**2)
-                # lat_accel = |v x a| / |v|  (cross product formula)
-                cross = np.abs(vx * ay - vy * ax)
-                la = np.where(speed > 0.5, cross / np.maximum(speed, 0.5), 0.0)
-                lat_accel_list.append(la)
-            lat_accel_sg = torch.tensor(
-                np.stack(lat_accel_list), device=device, dtype=scores.dtype
-            )  # (N, T)
-            # Skip first 2 timesteps (SG edge effects)
-            if lat_accel_sg.shape[1] > 4:
-                lat_accel_trimmed = lat_accel_sg[:, 2:-2]
-                lat_violations = torch.relu(lat_accel_trimmed - _MAX_LAT_ACCEL)
-                scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
+            _lat_cache_key = (device, config.dt, _sg_window)
+            if _SG_VEL_KERNEL is None or _SG_LAT_CACHE_KEY != _lat_cache_key:
+                _SG_VEL_KERNEL = _build_sg_diff_kernel(
+                    window=_sg_window, poly=3, deriv=1, delta=config.dt
+                ).to(device)
+                _SG_ACCEL_KERNEL = _build_sg_diff_kernel(
+                    window=_sg_window, poly=3, deriv=2, delta=config.dt
+                ).to(device)
+                _SG_LAT_CACHE_KEY = _lat_cache_key
+
+            pad = _sg_window // 2
+            # pos: [N, T, 2] -> [N, 2, T] for conv1d
+            pos_2d = pos.detach().permute(0, 2, 1)  # [N, 2, T]
+            pos_padded = torch.nn.functional.pad(pos_2d, (pad, pad), mode='replicate')
+
+            # Velocity via SG deriv=1
+            vel_sg = torch.nn.functional.conv1d(
+                pos_padded, _SG_VEL_KERNEL.view(1, 1, -1).expand(2, 1, -1), groups=2
+            )  # [N, 2, T]
+            # Acceleration via SG deriv=2
+            accel_sg = torch.nn.functional.conv1d(
+                pos_padded, _SG_ACCEL_KERNEL.view(1, 1, -1).expand(2, 1, -1), groups=2
+            )  # [N, 2, T]
+
+            vx, vy = vel_sg[:, 0], vel_sg[:, 1]  # [N, T]
+            ax_sg, ay_sg = accel_sg[:, 0], accel_sg[:, 1]  # [N, T]
+            speed_sg = (vx ** 2 + vy ** 2).sqrt()  # [N, T]
+
+            # lat_accel = |vx*ay - vy*ax| / max(|v|, 0.5)
+            cross = (vx * ay_sg - vy * ax_sg).abs()
+            lat_accel_sg = cross / speed_sg.clamp(min=0.5)
+            # Zero out low-speed regions
+            lat_accel_sg = torch.where(speed_sg > 0.5, lat_accel_sg, torch.zeros_like(lat_accel_sg))
+
+            # Trim SG edge artifacts (pad from each side)
+            if lat_accel_sg.shape[1] > 2 * pad + 1:
+                lat_accel_trimmed = lat_accel_sg[:, pad:-pad]
+            else:
+                lat_accel_trimmed = lat_accel_sg
+            lat_violations = torch.relu(lat_accel_trimmed - _MAX_LAT_ACCEL)
+            scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
 
     # --- Lane boundary check ---
     # Use ALL lanes for boundary checking (not just route_lanes).
@@ -983,6 +1002,11 @@ def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta
 # Precompute SG jerk kernel; cache by (device, dt)
 _SG_JERK_KERNEL = None
 _SG_JERK_CACHE_KEY = None
+
+# Precompute SG velocity/acceleration kernels for lat_accel; cache by (device, dt, window)
+_SG_VEL_KERNEL = None
+_SG_ACCEL_KERNEL = None
+_SG_LAT_CACHE_KEY = None
 
 def compute_smoothness_score_batch(
     ego_trajs: torch.Tensor,
