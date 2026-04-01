@@ -178,7 +178,7 @@ weighted values (column * weight) so that columns add up to the total.
 
 1. Find K=3 nearest centerlines from **different lane segments** (not just closest points)
 2. For each of 80 ego perimeter sample points, check containment against all K lanes
-3. Thresholds: crossing (>10cm outside), near (>25cm), wide (>40cm), continuous (>80cm)
+3. Thresholds: crossing (clearance <10cm from lane edge, including outside), near (<25cm), wide (<40cm), continuous (<80cm)
 4. Returns `lane_crossing` (bool) and `lane_near_frac` (fraction of timesteps where min perimeter clearance is below threshold)
 
 Enabled via `enable_lane_departure: true` in config. Can be used as gate (hard penalty)

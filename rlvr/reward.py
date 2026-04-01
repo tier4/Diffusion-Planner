@@ -951,13 +951,13 @@ def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta
     Returns a 1D convolution kernel that computes the deriv-th derivative
     using a local polynomial fit over `window` points.
     """
-    import numpy as np
     from scipy.signal import savgol_coeffs
     coeffs = savgol_coeffs(window, poly, deriv=deriv, delta=delta)
     return torch.tensor(coeffs, dtype=torch.float32).flip(0)  # flip for conv1d
 
-# Precompute SG jerk kernel (window=11, poly=3, deriv=3, dt=0.1)
+# Precompute SG jerk kernel; cache by (device, dt)
 _SG_JERK_KERNEL = None
+_SG_JERK_CACHE_KEY = None
 
 def compute_smoothness_score_batch(
     ego_trajs: torch.Tensor,
@@ -976,18 +976,18 @@ def compute_smoothness_score_batch(
     Returns:
         (N,) scores (negative, closer to 0 = smoother).
     """
-    global _SG_JERK_KERNEL
+    global _SG_JERK_KERNEL, _SG_JERK_CACHE_KEY
     N, T, _ = ego_trajs.shape
     if T < 12:
         return torch.zeros(N, device=ego_trajs.device)
 
-    # Build kernel once, cache on correct device
+    # Build kernel once, cache by (device, dt)
     _cache_key = (ego_trajs.device, config.dt)
-    if _SG_JERK_KERNEL is None or (_SG_JERK_KERNEL.device, _SG_JERK_KERNEL._cache_dt) != _cache_key:
+    if _SG_JERK_KERNEL is None or _SG_JERK_CACHE_KEY != _cache_key:
         _SG_JERK_KERNEL = _build_sg_diff_kernel(
             window=11, poly=3, deriv=3, delta=config.dt
         ).to(ego_trajs.device)
-        _SG_JERK_KERNEL._cache_dt = config.dt
+        _SG_JERK_CACHE_KEY = _cache_key
 
     kernel = _SG_JERK_KERNEL  # [11]
     pad = kernel.shape[0] // 2

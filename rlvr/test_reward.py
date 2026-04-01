@@ -705,6 +705,88 @@ def test_red_light_no_data():
 # Runner
 # -------------------------------------------------------------------------
 
+def test_advantage_raw_all_bad():
+    """Raw mode: all-bad group should have all negative or zero advantages."""
+    class FakeReward:
+        def __init__(self, t): self.total = t
+    # All trajectories are bad (e.g., all gated at -50)
+    rewards = [FakeReward(-50.0 + i * 0.1) for i in range(8)]
+    adv = compute_group_advantages(rewards, mode="raw", fixed_scale=10.0)
+    # Centered: mean ~ -49.65, so all are close to zero (centered)
+    # But importantly, NOT normalized to have half positive
+    assert adv.std() < 0.1, f"Raw advantages should have small spread: std={adv.std():.3f}"
+    print("  PASS  test_advantage_raw_all_bad")
+
+
+def test_advantage_positive_only():
+    """Positive-only mode: negative advantages should be clipped to zero."""
+    class FakeReward:
+        def __init__(self, t): self.total = t
+    rewards = [FakeReward(1.0), FakeReward(2.0), FakeReward(3.0), FakeReward(10.0)]
+    adv = compute_group_advantages(rewards, mode="positive_only")
+    # Only the above-mean trajectories should have positive advantages
+    assert all(a >= 0 for a in adv), f"All advantages should be >= 0: {adv}"
+    # The best trajectory should have the highest advantage
+    assert adv[3] > adv[0], f"Best traj should have highest adv: {adv}"
+    # At least one should be zero (below mean)
+    assert any(a == 0 for a in adv), f"Some advantages should be exactly 0: {adv}"
+    print("  PASS  test_advantage_positive_only")
+
+
+def test_lane_departure_in_lane():
+    """Trajectory staying in-lane should not trigger lane departure."""
+    from rlvr.reward import compute_lane_departure_penalty
+    device = torch.device("cpu")
+    T = 20
+    # Ego trajectory going straight at y=0, well within lane
+    ego = torch.zeros(1, T, 4, device=device)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5  # x moves forward
+        ego[0, t, 2] = 1.0      # cos(heading) = 1
+    # Lane centerline at y=0, width=3.5m (half_width=1.75m)
+    lanes = torch.zeros(1, 10, 20, 33, device=device)
+    for pt in range(20):
+        lanes[0, 0, pt, 0] = pt * 0.5    # center X
+        lanes[0, 0, pt, 1] = 0.0          # center Y
+        lanes[0, 0, pt, 2] = 1.0          # direction cos
+        lanes[0, 0, pt, 4] = 0.0          # left boundary dX
+        lanes[0, 0, pt, 5] = 1.75         # left boundary dY
+        lanes[0, 0, pt, 6] = 0.0          # right boundary dX
+        lanes[0, 0, pt, 7] = -1.75        # right boundary dY
+    ego_shape = torch.tensor([2.75, 4.34, 1.70])
+    data = {"lanes": lanes}
+    crossing_gate, near_frac, wide_frac, cont = compute_lane_departure_penalty(ego, ego_shape, data)
+    assert crossing_gate[0] == 1.0, f"In-lane trajectory should not cross: gate={crossing_gate[0]}"
+    print("  PASS  test_lane_departure_in_lane")
+
+
+def test_lane_departure_out_of_lane():
+    """Trajectory far outside lane should trigger lane departure."""
+    from rlvr.reward import compute_lane_departure_penalty
+    device = torch.device("cpu")
+    T = 20
+    # Ego trajectory at y=5.0 (well outside 1.75m half-width lane)
+    ego = torch.zeros(1, T, 4, device=device)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 1] = 5.0      # far outside lane
+        ego[0, t, 2] = 1.0
+    lanes = torch.zeros(1, 10, 20, 33, device=device)
+    for pt in range(20):
+        lanes[0, 0, pt, 0] = pt * 0.5
+        lanes[0, 0, pt, 1] = 0.0
+        lanes[0, 0, pt, 2] = 1.0
+        lanes[0, 0, pt, 4] = 0.0
+        lanes[0, 0, pt, 5] = 1.75
+        lanes[0, 0, pt, 6] = 0.0
+        lanes[0, 0, pt, 7] = -1.75
+    ego_shape = torch.tensor([2.75, 4.34, 1.70])
+    data = {"lanes": lanes}
+    crossing_gate, near_frac, wide_frac, cont = compute_lane_departure_penalty(ego, ego_shape, data)
+    assert crossing_gate[0] == 0.0, f"Out-of-lane trajectory should cross: gate={crossing_gate[0]}"
+    print("  PASS  test_lane_departure_out_of_lane")
+
+
 if __name__ == "__main__":
     tests = [
         test_no_collision_straight_line,
@@ -745,6 +827,10 @@ if __name__ == "__main__":
         test_red_light_violation,
         test_red_light_stopped_no_penalty,
         test_red_light_no_data,
+        test_advantage_raw_all_bad,
+        test_advantage_positive_only,
+        test_lane_departure_in_lane,
+        test_lane_departure_out_of_lane,
     ]
 
     print("=" * 60)
