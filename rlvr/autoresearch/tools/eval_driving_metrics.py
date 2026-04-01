@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate full teleport metrics (speed, lat accel, reward) with corrected calculations.
+"""Evaluate driving quality metrics (speed, lat accel, path length, stopped).
 
 Reports:
   - max/mean/p95 speed
@@ -10,9 +10,9 @@ Reports:
 
 Usage:
     source .venv/bin/activate
-    python rlvr/eval_teleport_metrics.py \
+    python -m rlvr.autoresearch.tools.eval_driving_metrics \
         --model_path /path/to/best_model.pth \
-        --scenes /path/to/teleport_scenes.json \
+        --scenes /path/to/scenes.json \
         [--lora_path /path/to/lora_epoch_NNN] \
         [--tag "ep4"]
 """
@@ -26,13 +26,8 @@ import numpy as np
 import torch
 from scipy.signal import savgol_filter
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "diffusion_planner"))
-sys.path.insert(0, str(PROJECT_ROOT / "preference_optimization"))
-
-from model_utils import load_model
-from utils import load_npz_data
+from preference_optimization.model_utils import load_model
+from preference_optimization.utils import load_npz_data
 
 DT = 0.1
 
@@ -61,15 +56,25 @@ def lat_accel_current(positions: np.ndarray) -> np.ndarray:
     return np.sum(acc_vec * lat_dir, axis=-1)
 
 
-def lat_accel_smoothed(positions: np.ndarray, window: int = 7, order: int = 3) -> np.ndarray:
-    """positions: [T, 2] -> lat_accel: [T-2] (smoothed then finite diff)"""
+def lat_accel_smoothed(positions: np.ndarray, window: int = 11, order: int = 3) -> np.ndarray:
+    """positions: [T, 2] -> lat_accel: [T] using SG derivative (no finite diff noise).
+
+    Computes velocity and acceleration directly from SG polynomial fit,
+    then projects acceleration onto the lateral (perpendicular to velocity) direction.
+    """
     if positions.shape[0] < window:
         return lat_accel_current(positions)
-    smoothed = np.stack([
-        savgol_filter(positions[:, 0], window, order),
-        savgol_filter(positions[:, 1], window, order),
-    ], axis=-1)
-    return lat_accel_current(smoothed)
+    # SG derivatives: velocity and acceleration directly from polynomial fit
+    vx = savgol_filter(positions[:, 0], window, order, deriv=1, delta=DT)
+    vy = savgol_filter(positions[:, 1], window, order, deriv=1, delta=DT)
+    ax = savgol_filter(positions[:, 0], window, order, deriv=2, delta=DT)
+    ay = savgol_filter(positions[:, 1], window, order, deriv=2, delta=DT)
+
+    speed = np.sqrt(vx**2 + vy**2).clip(min=1e-6)
+    # Lateral acceleration = |v × a| / |v|
+    cross = np.abs(vx * ay - vy * ax)
+    lat_acc = cross / speed
+    return lat_acc
 
 
 @torch.no_grad()

@@ -15,23 +15,84 @@ The GRPO pipeline differs from the existing DPO pipeline in two key ways:
 
 ```
 rlvr/
-  reward.py                Rule-based reward (road border + safety + progress + feasibility)
-  grpo_loss.py             Advantage-weighted diffusion loss with PPO clipping + KL
-  grpo_config.py           Dataclass config with JSON serialization
-  grpo_trainer.py          Training loop with per-epoch eval, LoRA checkpointing
-  grpo_sampler.py          Diverse trajectory generation with random noise + guidance
-  trajectory_ranker_gui.py Gradio GUI for visualizing rankings and tuning reward weights
+  reward.py                  Rule-based reward (road border + safety + progress + feasibility
+                             + lane departure detection with K=3 nearest centerlines)
+  grpo_loss.py               Advantage-weighted diffusion loss with PPO clipping + KL
+                             + compute_batched_grpo_loss for N-trajectory batched loss
+                             + compute_batched_trajectory_losses for SFT regression
+  grpo_config.py             Dataclass config with JSON serialization
+                             + random_guidance_mode, lane departure config
+  grpo_trainer.py            Standard GRPO training loop (batched loss)
+  grpo_trainer_batched.py    Fully batched GRPO trainer (all scenes in ~5 forward passes)
+  grpo_exploration_trainer.py  Joint GRPO + exploration policy trainer
+                             + random_guidance_mode: skip explorer, sample η directly
+  grpo_sampler.py            Diverse trajectory generation with random noise + guidance
+  grpo_sampler_batched.py    CL+SPD focused sampler (deterministic + guided + random)
   configs/
-    grpo_onpolicy.json     Recommended on-policy config (best for v4)
-    grpo_multi_epoch.json  Multi-epoch PPO-clip config
+    grpo_onpolicy.json       Recommended on-policy config (best for v4)
+    grpo_zi_300sc.json       Zero-init exploration + Block 0 LoRA (best baseline)
+  closed_loop/               Closed-loop explorer training (PlannerRFT-style)
+    state_update.py          Scene re-centering after ego moves one step
+    per_step_reward.py       Per-step collision, road border, progress reward
+    gae.py                   Generalized Advantage Estimation
+    rollout.py               Sequential rollout manager (B=1)
+    batched_rollout.py       GPU-parallel rollout manager (B=N, all scenes per step)
+    closed_loop_trainer.py   Hybrid trainer: CL rollout + open-loop GRPO for DiT
   autoresearch/
-    run_experiment.py      Single experiment runner (all paths via CLI)
-    check_lora_training.py LoRA weight verification tool
-    visualize_scenes.py    Scene visualization with road borders + ego footprints
-    README.md              Full autoresearch documentation
-  test_reward.py           Unit tests for reward (no model needed)
-  test_grpo_sampler.py     Unit tests for sampler (needs model for full suite)
+    run_experiment.py        Single experiment runner (batched eval, all paths via CLI)
+    check_lora_training.py   LoRA weight verification tool
+    visualize_scenes.py      Scene visualization with road borders + ego footprints
+    eval_border_distance.py  Road border distance metrics
+    README.md                Full autoresearch documentation
+  autoresearch/tools/         Evaluation and diagnostic tools (see tools/README.md)
+    cleanse_lane_scenes.py   Filter scenes by t=0 lane/border clearance
+    diagnose_grpo_signal.py  Diagnose per-scene GRPO reward signal (batched)
+    eval_lane_border_distance.py  Combined lane departure + border distance eval
+    eval_reward_vs_gt.py     Per-scene reward breakdown vs ground truth
+    eval_driving_metrics.py  Speed/lat_accel/path length/stopped metrics
+    viz_guidance_actual.py   Visualize actual DiT inference with/without guidance
+  autoresearch/tests/         Tests for closed-loop components
+    test_gae.py              Unit tests for GAE computation
+    test_state_update.py     Unit tests for coordinate transforms
+    test_real_scene.py       Integration test with real NPZ scene
+  test_reward.py             Unit tests for reward (no model needed)
+  test_grpo_sampler.py       Unit tests for sampler (needs model for full suite)
 ```
+
+## Training Modes
+
+| Mode | Config | Trainer | Description |
+|------|--------|---------|-------------|
+| Standard GRPO | `use_exploration_policy: false` | `GRPOTrainer` → `train_epoch_batched` | Fully batched, ~5 forward passes per epoch |
+| Random guidance | `use_exploration_policy: true, random_guidance_mode: "uniform"` | `GRPOExplorationTrainer` | Random η ∈ [-1,1] lateral/longitudinal guidance. **Best mode.** |
+| Explorer (open-loop) | `use_exploration_policy: true, random_guidance_mode: "explorer"` | `GRPOExplorationTrainer` | Learned Beta guidance + GRPO |
+| Explorer (closed-loop) | `use_closed_loop: true` | `ClosedLoopExplorationTrainer` | Per-step rollout + GAE + GRPO |
+
+All modes support GPU-batched trajectory generation and evaluation.
+
+### Random Guidance Mode
+
+The `random_guidance_mode` config replaces the learned exploration policy with direct η sampling:
+
+| Mode | η distribution | Notes |
+|------|---------------|-------|
+| `"uniform"` | U[-1, 1] | **Recommended.** Matches zero-init explorer, +2 pts over no guidance |
+| `"gaussian"` | N(0, 0.3) clipped | Similar to uniform, slightly worse on rb_cross |
+| `"narrow"` | U[-0.5, 0.5] | Too little diversity, -7 pts vs uniform |
+| `"none"` | η = 0 always | No lateral/longitudinal guidance, pure noise diversity |
+| `"explorer"` | Learned Beta | Default. Explorer never learns, matches uniform output |
+
+When mode ≠ "explorer", the 227K-param exploration policy network is not loaded.
+
+## Batching
+
+All trajectory generation, GRPO loss computation, and evaluation support GPU batching:
+- K trajectories per scene generated in one forward pass (B=K)
+- N×K batched generation in closed-loop GRPO (B=N×K)
+- Batched eval with configurable `batch_size` (default 32)
+- `compute_batched_grpo_loss`: N diffusion losses in one forward pass
+
+Configure via `closed_loop_batch_size` in `GRPOConfig` (default 8 for 24GB VRAM).
 
 ## Reward Function
 
@@ -110,6 +171,18 @@ Time-weighted mean with early deviations penalized more.
 
 All weights are tunable in the GUI without regenerating trajectories. The reward table shows
 weighted values (column * weight) so that columns add up to the total.
+
+### Lane Departure Detection
+
+`compute_lane_departure_penalty()` detects when the ego vehicle leaves its lane:
+
+1. Find K=3 nearest centerlines from **different lane segments** (not just closest points)
+2. For each of 80 ego perimeter sample points, check containment against all K lanes
+3. Thresholds: crossing (clearance <10cm from lane edge, including outside), near (<25cm), wide (<40cm), continuous (<80cm)
+4. Returns `lane_crossing` (bool) and `lane_near_frac` (fraction of timesteps where min perimeter clearance is below threshold)
+
+Enabled via `enable_lane_departure: true` in config. Can be used as gate (hard penalty)
+or soft penalty via `lane_near_scale`, `lane_wide_scale`, `lane_cont_scale`.
 
 ### Group Advantages
 

@@ -104,7 +104,11 @@ class LongitudinalGuidance(BaseGuidance):
         ref_v_tangent = n_par_x * ref_vel[..., 0] + n_par_y * ref_vel[..., 1]  # [B, T-1]
 
         # Target: λ_lon · η_lon · v^ref_tangent
-        target = self._lambda_lon * self._eta_lon * ref_v_tangent  # [B, T-1]
+        # Supports both scalar eta and batched [B] tensor eta
+        eta = self._eta_lon
+        if isinstance(eta, torch.Tensor) and eta.dim() >= 1:
+            eta = eta.unsqueeze(-1)  # [B, 1] for broadcasting with [B, T-1]
+        target = self._lambda_lon * eta * ref_v_tangent  # [B, T-1]
 
         # Ψ_lon = (1/(T-1)) Σ (n∥ · (v - λ·η·v^ref))²
         psi = ((ego_v_tangent - target) ** 2).mean(dim=-1)  # [B]

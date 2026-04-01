@@ -93,6 +93,11 @@ class GRPOConfig:
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
     cont_edge_scale: float = 0.0
+    enable_lane_departure: bool = False
+    lane_gate_enabled: bool = False
+    lane_near_scale: float = 3.0
+    lane_wide_scale: float = 0.2
+    lane_cont_scale: float = 0.0
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     enable_overprogress: bool = True
@@ -140,6 +145,10 @@ class GRPOConfig:
     # Rejection sampling: generate num_generations trajectories but keep only
     # the top rejection_keep by reward. Set to 0 or None to disable (keep all).
     rejection_keep: int = 0
+    # Reward trimming: drop top and bottom X% of scenes by their mean group
+    # reward before training. Prevents learning from outlier scenes (e.g.,
+    # high-progress lane-departing scenes at top, heavily crashed scenes at bottom).
+    reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
 
     # LoRA
     use_lora: bool = True
@@ -197,6 +206,29 @@ class GRPOConfig:
     # Only used when exploration_step_per_group=True.
     # 1 = step every scene (original per-group), 4 = match DiT rhythm.
     exploration_grad_accum_groups: int = 1
+
+    # Random guidance mode: replaces exploration policy with direct η sampling.
+    # "explorer" (default): use learned exploration policy (Beta distributions).
+    # "uniform": random η ~ U[-1, 1] (matches zero-init explorer output).
+    # "narrow": random η_lat ~ U[-0.5, 0.5], η_lon ~ U[-0.25, 0.25].
+    # "gaussian": random η_lat ~ N(0, 0.3), η_lon ~ N(0, 0.15).
+    # "none": η=0 always (no guidance, pure noise diversity).
+    random_guidance_mode: str = "explorer"
+
+    # --- Closed-loop training ---
+    # When True, uses ClosedLoopExplorationTrainer instead of GRPOExplorationTrainer.
+    # The explorer operates per-step (0.1s) with GAE temporal credit assignment.
+    use_closed_loop: bool = False
+    closed_loop_rollout_steps: int = 40     # 4s at 10Hz
+    closed_loop_gamma: float = 0.99         # GAE discount factor
+    closed_loop_gae_lambda: float = 0.95    # GAE lambda
+    closed_loop_value_coef: float = 0.5     # value loss coefficient
+    closed_loop_alive_bonus: float = 0.5    # per-step alive reward
+    closed_loop_freeze_dit: bool = True     # freeze DiT during explorer training
+    closed_loop_batch_size: int = 8        # scenes per batch in rollout (8 fits ~24GB VRAM)
+    closed_loop_drop_last: bool = True     # drop incomplete last batch
+    closed_loop_online_interval: int = 0   # online explorer update every N steps (0=off, 10=PlannerRFT-style)
+    closed_loop_explorer_mini_batch: int = 0  # step explorer optimizer every N scenes (0=all scenes at once)
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
