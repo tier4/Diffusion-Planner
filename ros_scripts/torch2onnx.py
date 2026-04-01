@@ -176,9 +176,9 @@ def convert_model(
     ckpt_path: str,
     onnx_path: str,
     eval_npz_path: Path | None,
-    use_ema: bool = False,
-    use_simplify: bool = False,
-    ego_from_control: bool = False,
+    use_ema: bool,
+    use_simplify: bool,
+    ego_from_control: bool,
 ):
     """Convert a single PyTorch model to ONNX format."""
     print(f"\n{'=' * 80}")
