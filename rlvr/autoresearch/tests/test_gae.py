@@ -1,6 +1,6 @@
 """Unit tests for rlvr.closed_loop.gae.
 
-Run: python -m rlvr.closed_loop.test_gae
+Run: python -m rlvr.autoresearch.tests.test_gae
 """
 
 from __future__ import annotations

@@ -451,7 +451,9 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
             for k, v in sched.items():
                 if hasattr(trainer.reward_config, k):
                     setattr(trainer.reward_config, k, v)
-                    print(f"  [schedule] epoch {epoch}: {k}={v}")
+                if hasattr(train_reward_config, k):
+                    setattr(train_reward_config, k, v)
+                print(f"  [schedule] epoch {epoch}: {k}={v}")
 
         if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
             trainer.save_epoch1_baselines(train_paths)

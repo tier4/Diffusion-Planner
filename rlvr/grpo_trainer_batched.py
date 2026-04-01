@@ -328,13 +328,9 @@ def train_epoch_batched(
             device=device,
         )
 
-        # compute_batched_grpo_loss divides by total trajs in chunk (c_n * keep_per).
-        # Sequential trainer divides by keep_per only (per scene), then by grad_accum.
-        # To match: multiply by c_n to undo the cross-scene averaging, then divide
-        # by grad_accum equivalent (n_chunks acts as grad_accum).
+        # Scale loss to match sequential trainer gradient magnitude.
+        # With chunk_size=1, c_n=1 and this simplifies to loss / grad_accum.
         c_n = len(c_trajs)
-        # With chunk_size=4: loss already normalized by ~32 trajs (4 scenes × 8).
-        # Scale by c_n/grad_accum to match sequential trainer's effective gradient.
         scaled_loss = loss * c_n / config.grad_accum_groups
         scaled_loss.backward()
 

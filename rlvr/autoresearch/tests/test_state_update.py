@@ -1,7 +1,7 @@
 """Unit tests for rlvr.closed_loop.state_update.
 
 Uses synthetic tensors (no model needed).
-Run: python -m rlvr.closed_loop.test_state_update
+Run: python -m rlvr.autoresearch.tests.test_state_update
 """
 
 from __future__ import annotations
