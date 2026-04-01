@@ -5,12 +5,12 @@ All tools use `python -m` and require the project root in PYTHONPATH.
 
 ## Evaluation Tools
 
-### eval_teleport_metrics.py
-Evaluates teleport driving quality: speed, lateral acceleration (curvature-based), path length, stopped scenes.
+### eval_driving_metrics.py
+Evaluates driving quality: speed, lateral acceleration (curvature-based), path length, stopped scenes.
 ```bash
-python -m rlvr.autoresearch.tools.eval_teleport_metrics \
+python -m rlvr.autoresearch.tools.eval_driving_metrics \
   --model_path <base_model.pth> --lora_path <lora_dir> \
-  --scenes <teleport_51.json> --tag <name>
+  --scenes <driving_scenes.json> --tag <name>
 ```
 
 ### eval_lane_border_distance.py
@@ -46,7 +46,7 @@ python -m rlvr.autoresearch.tools.viz_guidance_actual \
 ## Data Preparation
 
 ### cleanse_lane_scenes.py
-Filters scene lists by t=0 lane/border clearance. Removes scenes where ego starts out of lane or too close to road border. Used to clean miraikan training/eval scene lists.
+Filters scene lists by t=0 lane/border clearance. Removes scenes where ego starts out of lane or too close to road border. Used to clean training/eval scene lists.
 ```bash
 python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
   --scenes <input.json> --output <cleaned.json> --min_clearance 0.2

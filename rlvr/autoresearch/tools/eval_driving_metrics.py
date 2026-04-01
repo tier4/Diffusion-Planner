@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate full teleport metrics (speed, lat accel, reward) with corrected calculations.
+"""Evaluate driving quality metrics (speed, lat accel, path length, stopped).
 
 Reports:
   - max/mean/p95 speed
@@ -10,9 +10,9 @@ Reports:
 
 Usage:
     source .venv/bin/activate
-    python -m rlvr.autoresearch.tools.eval_teleport_metrics \
+    python -m rlvr.autoresearch.tools.eval_driving_metrics \
         --model_path /path/to/best_model.pth \
-        --scenes /path/to/teleport_scenes.json \
+        --scenes /path/to/scenes.json \
         [--lora_path /path/to/lora_epoch_NNN] \
         [--tag "ep4"]
 """

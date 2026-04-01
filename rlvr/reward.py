@@ -689,7 +689,7 @@ def compute_feasibility_score_batch(
     # Penalize lateral acceleration exceeding what a human driver produces.
     # GT trajectories peak at ~2.5 m/s²; the model reaches 3.5 m/s² on curves.
     # NOTE: This uses double finite diff which inflates values ~5x vs curvature-based.
-    # For accurate REPORTING use eval_teleport_metrics.py. But do NOT change this
+    # For accurate REPORTING use eval_driving_metrics.py. But do NOT change this
     # penalty — it was used for all prior successful training runs (p4e, p6m etc).
     _MAX_LAT_ACCEL = config.max_lat_accel
     _LAT_ACCEL_SCALE = config.lat_accel_scale

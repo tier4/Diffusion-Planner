@@ -117,7 +117,7 @@ aggregate stats (min, mean, p5) and optionally visualizes worst scenes.
 python -m rlvr.autoresearch.eval_border_distance \
   --merged_model_path /path/to/merged.pth \
   --args_json /path/to/args.json \
-  --scenes /path/to/miraikan_scenes.json \
+  --scenes /path/to/problem_scenes.json \
   --tag model_name \
   --output_dir /path/to/output/
 
@@ -150,7 +150,7 @@ python -m rlvr.autoresearch.compare_models \
 Training requires three JSON files, each a list of NPZ paths:
 
 - **Problem scenes**: Scenes where the baseline model has issues (e.g., road border
-  crossings at miraikan exit). Should be < 30% of total training scenes.
+  crossings at critical intersections). Should be < 30% of total training scenes.
 - **Normal scenes**: Diverse driving scenes for general performance preservation.
 - **Validation scenes**: Fixed set for per-epoch evaluation (not used in training).
   Should include a mix of problem + normal + anchor scenes.

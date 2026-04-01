@@ -42,14 +42,14 @@ rlvr/
     run_experiment.py        Single experiment runner (batched eval, all paths via CLI)
     check_lora_training.py   LoRA weight verification tool
     visualize_scenes.py      Scene visualization with road borders + ego footprints
-    eval_border_distance.py  Miraikan border distance metrics
+    eval_border_distance.py  Road border distance metrics
     README.md                Full autoresearch documentation
   autoresearch/tools/         Evaluation and diagnostic tools (see tools/README.md)
     cleanse_lane_scenes.py   Filter scenes by t=0 lane/border clearance
     diagnose_grpo_signal.py  Diagnose per-scene GRPO reward signal (batched)
     eval_lane_border_distance.py  Combined lane departure + border distance eval
     eval_reward_vs_gt.py     Per-scene reward breakdown vs ground truth
-    eval_teleport_metrics.py Teleport speed/lat_accel/path metrics
+    eval_driving_metrics.py  Speed/lat_accel/path length/stopped metrics
     viz_guidance_actual.py   Visualize actual DiT inference with/without guidance
   autoresearch/tests/         Tests for closed-loop components
     test_gae.py              Unit tests for GAE computation
