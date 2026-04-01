@@ -112,8 +112,7 @@ def main():
 
     # Load LoRA if specified
     if args.lora_path:
-        sys.path.insert(0, str(PROJECT_ROOT / "preference_optimization"))
-        from lora_utils import load_lora_checkpoint
+        from preference_optimization.lora_utils import load_lora_checkpoint
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
         print(f"Loaded LoRA from {args.lora_path}")

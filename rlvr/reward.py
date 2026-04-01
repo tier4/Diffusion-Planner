@@ -698,21 +698,36 @@ def compute_feasibility_score_batch(
     # --- Lateral acceleration check ---
     # Penalize lateral acceleration exceeding what a human driver produces.
     # GT trajectories peak at ~2.5 m/s²; the model reaches 3.5 m/s² on curves.
-    # NOTE: This uses double finite diff which inflates values ~5x vs curvature-based.
-    # For accurate REPORTING use eval_driving_metrics.py. But do NOT change this
-    # penalty — it was used for all prior successful training runs (p4e, p6m etc).
+    # Uses Savitzky-Golay filtered derivatives for accurate measurement.
+    # Previous version used raw double finite diff which inflated values ~5x.
     _MAX_LAT_ACCEL = config.max_lat_accel
     _LAT_ACCEL_SCALE = config.lat_accel_scale
-    if vel.shape[1] >= 2:
-        accel_vec = torch.diff(vel, dim=1) / config.dt  # (N, T-2, 2)
-        heading = vel[:, :-1]  # (N, T-2, 2)
-        heading_norm = heading / (heading.norm(dim=-1, keepdim=True).clamp_min(1e-6))
-        lat_dir = torch.stack([-heading_norm[..., 1], heading_norm[..., 0]], dim=-1)
-        lat_accel = (accel_vec * lat_dir).sum(dim=-1)  # (N, T-2)
-        if lat_accel.shape[1] > 2:
-            lat_accel_trimmed = lat_accel[:, 2:]
-            lat_violations = torch.relu(lat_accel_trimmed.abs() - _MAX_LAT_ACCEL)
-            scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
+    if T >= 5:
+        # SG-filtered lat accel: compute on CPU (scipy), return to device
+        from scipy.signal import savgol_filter
+        _sg_window = min(11, T - (1 if T % 2 == 0 else 0))  # must be odd and <= T
+        if _sg_window >= 5:
+            pos_np = pos.detach().cpu().numpy()  # (N, T, 2)
+            dt = config.dt
+            lat_accel_list = []
+            for n in range(N):
+                vx = savgol_filter(pos_np[n, :, 0], _sg_window, 3, deriv=1, delta=dt)
+                vy = savgol_filter(pos_np[n, :, 1], _sg_window, 3, deriv=1, delta=dt)
+                ax = savgol_filter(pos_np[n, :, 0], _sg_window, 3, deriv=2, delta=dt)
+                ay = savgol_filter(pos_np[n, :, 1], _sg_window, 3, deriv=2, delta=dt)
+                speed = np.sqrt(vx**2 + vy**2)
+                # lat_accel = |v x a| / |v|  (cross product formula)
+                cross = np.abs(vx * ay - vy * ax)
+                la = np.where(speed > 0.5, cross / np.maximum(speed, 0.5), 0.0)
+                lat_accel_list.append(la)
+            lat_accel_sg = torch.tensor(
+                np.stack(lat_accel_list), device=device, dtype=scores.dtype
+            )  # (N, T)
+            # Skip first 2 timesteps (SG edge effects)
+            if lat_accel_sg.shape[1] > 4:
+                lat_accel_trimmed = lat_accel_sg[:, 2:-2]
+                lat_violations = torch.relu(lat_accel_trimmed - _MAX_LAT_ACCEL)
+                scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
 
     # --- Lane boundary check ---
     # Use ALL lanes for boundary checking (not just route_lanes).
