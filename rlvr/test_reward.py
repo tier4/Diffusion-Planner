@@ -755,7 +755,7 @@ def test_lane_departure_in_lane():
         lanes[0, 0, pt, 7] = -1.75        # right boundary dY
     ego_shape = torch.tensor([2.75, 4.34, 1.70])
     data = {"lanes": lanes}
-    crossing_gate, near_frac, wide_frac, cont = compute_lane_departure_penalty(ego, ego_shape, data)
+    crossing_gate, near_frac, wide_frac, _, cont = compute_lane_departure_penalty(ego, ego_shape, data)
     assert crossing_gate[0] == 1.0, f"In-lane trajectory should not cross: gate={crossing_gate[0]}"
     print("  PASS  test_lane_departure_in_lane")
 
@@ -782,7 +782,7 @@ def test_lane_departure_out_of_lane():
         lanes[0, 0, pt, 7] = -1.75
     ego_shape = torch.tensor([2.75, 4.34, 1.70])
     data = {"lanes": lanes}
-    crossing_gate, near_frac, wide_frac, cont = compute_lane_departure_penalty(ego, ego_shape, data)
+    crossing_gate, near_frac, wide_frac, _, cont = compute_lane_departure_penalty(ego, ego_shape, data)
     assert crossing_gate[0] == 0.0, f"Out-of-lane trajectory should cross: gate={crossing_gate[0]}"
     print("  PASS  test_lane_departure_out_of_lane")
 

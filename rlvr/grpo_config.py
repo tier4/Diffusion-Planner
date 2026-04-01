@@ -104,6 +104,9 @@ class GRPOConfig:
     overprogress_margin: float = 1.1
     overprogress_penalty: float = 0.3
     stopped_penalty: float = 5.0
+    underprogress_penalty: float = 0.0  # penalize model driving << GT (0=disabled)
+    underprogress_threshold: float = 0.5  # penalize if model_path/gt_path < threshold
+    progress_norm_scale: float = 20.0  # max progress points at 100% GT match
 
     # Reward aggregation mode (passed to RewardConfig):
     # "gate": binary safety gates (default). Any terminal event → floor.
@@ -149,6 +152,7 @@ class GRPOConfig:
     # reward before training. Prevents learning from outlier scenes (e.g.,
     # high-progress lane-departing scenes at top, heavily crashed scenes at bottom).
     reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
+    lane_dep_trim_n: int = 0  # drop N scenes with highest lane departure fraction (0=disabled)
 
     # LoRA
     use_lora: bool = True

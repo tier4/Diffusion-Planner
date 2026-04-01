@@ -90,11 +90,17 @@ def generate_all_scenes_batched(
     det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
     all_k_trajs.append(det_trajs)
 
-    # --- Config 2-4: CL + SPD guidance sweep (stay in-lane AND drive) ---
+    # --- Config 2-9: Strong CL + SPD guidance sweep for lane keeping ---
+    # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
     cl_spd_configs = [
-        (3.0, 5.0, 0.0, 0.0),   # CL3+SPD5, deterministic
-        (5.0, 5.0, 0.0, 0.0),   # CL5+SPD5, deterministic
-        (5.0, 8.0, 0.0, 0.5),   # CL5+SPD8, small noise
+        (5.0,  5.0,  0.0, 0.0),   # CL5+SPD5, deterministic
+        (8.0,  5.0,  0.0, 0.0),   # CL8+SPD5, deterministic
+        (10.0, 8.0,  0.0, 0.0),   # CL10+SPD8, deterministic
+        (10.0, 10.0, 0.0, 0.0),   # CL10+SPD10, deterministic
+        (5.0,  5.0,  0.3, 0.8),   # CL5+SPD5, noise
+        (8.0,  8.0,  0.3, 0.8),   # CL8+SPD8, noise
+        (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
+        (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
     ]
     for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
         fns = [
@@ -232,12 +238,17 @@ def train_epoch_batched(
     kept_advantages = []
     kept_mean_rewards = []
     kept_norm_data = []
+    kept_lane_dep_fracs = []  # fraction of K trajs that depart lane per scene
 
     for i in tqdm(range(N), desc="Scoring"):
         traj_K = all_trajs[i]  # [K, T, 4]
         data_i = all_data[i]
 
         rewards = compute_reward_batch(traj_K, data_i, reward_config)
+
+        # Track lane departure fraction before rejection sampling
+        n_lane_dep = sum(1 for r in rewards if r.lane_crossing)
+        lane_dep_frac = n_lane_dep / len(rewards)
 
         if keep and 0 < keep < K:
             reward_vals = np.array([r.total for r in rewards])
@@ -256,6 +267,7 @@ def train_epoch_batched(
         kept_trajs.append(traj_K)
         kept_advantages.append(advantages)
         kept_mean_rewards.append(float(np.mean([r.total for r in rewards])))
+        kept_lane_dep_fracs.append(lane_dep_frac)
         # Extract per-scene norm data (B=1 slice)
         norm_i = {}
         for k, v in norm_batch.items():
@@ -269,7 +281,27 @@ def train_epoch_batched(
     if N_kept == 0:
         return {}
 
-    # Scene trimming
+    # Lane departure scene trimming: drop scenes with highest lane departure fraction.
+    # E.g., lane_dep_trim_n=10 drops the 10 scenes where most trajectories leave lane.
+    lane_trim = config.lane_dep_trim_n
+    if lane_trim > 0 and N_kept > lane_trim:
+        # Sort by lane_dep_frac descending, drop the worst lane_trim scenes
+        sorted_idx = sorted(range(N_kept), key=lambda j: kept_lane_dep_fracs[j])
+        keep_idx = sorted_idx[:N_kept - lane_trim]
+        n_dropped = N_kept - len(keep_idx)
+        avg_dep_dropped = np.mean([kept_lane_dep_fracs[j] for j in sorted_idx[len(keep_idx):]])
+        avg_dep_kept = np.mean([kept_lane_dep_fracs[j] for j in keep_idx])
+        kept_trajs = [kept_trajs[j] for j in keep_idx]
+        kept_advantages = [kept_advantages[j] for j in keep_idx]
+        kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
+        kept_lane_dep_fracs = [kept_lane_dep_fracs[j] for j in keep_idx]
+        kept_norm_data = [kept_norm_data[j] for j in keep_idx]
+        print(f"  Lane-dep trim: dropped {n_dropped} worst scenes "
+              f"(avg_dep={avg_dep_dropped:.0%}), keeping {len(kept_trajs)} "
+              f"(avg_dep={avg_dep_kept:.0%})")
+        N_kept = len(kept_trajs)
+
+    # Scene trimming by reward
     trim = config.reward_trim_pct
     if trim > 0 and N_kept >= 10:
         n_trim = max(1, int(N_kept * trim))
@@ -296,6 +328,8 @@ def train_epoch_batched(
     total_loss = 0.0
     all_metrics = {}
     n_chunks = 0
+    accum_count = 0
+    accum_count_target = config.grad_accum_groups
 
     for c_start in range(0, N_kept, chunk_size):
         c_end = min(c_start + chunk_size, N_kept)
@@ -328,23 +362,34 @@ def train_epoch_batched(
             device=device,
         )
 
-        # Scale loss to match sequential trainer gradient magnitude.
-        # With chunk_size=1, c_n=1 and this simplifies to loss / grad_accum.
-        c_n = len(c_trajs)
-        scaled_loss = loss * c_n / config.grad_accum_groups
+        # Scale loss by chunk size for correct accumulation.
+        # Track actual accumulation count to handle last incomplete group correctly.
+        accum_count += 1
+        scaled_loss = loss * c_n / accum_count_target
         scaled_loss.backward()
 
         for k, v in metrics.items():
             all_metrics[k] = all_metrics.get(k, 0.0) + v
         n_chunks += 1
 
-        # Step optimizer every few chunks
-        if (c_end % (chunk_size * config.grad_accum_groups) == 0) or c_end == N_kept:
+        # Step optimizer every grad_accum_groups chunks, or at the end.
+        is_accum_boundary = (c_end % (chunk_size * config.grad_accum_groups) == 0)
+        is_last = (c_end == N_kept)
+        if is_accum_boundary or is_last:
+            if is_last and not is_accum_boundary and accum_count < accum_count_target:
+                # Last incomplete group: re-scale gradients to correct for under-accumulation.
+                # We accumulated `accum_count` gradients each divided by `accum_count_target`.
+                # Multiply by (accum_count_target / accum_count) to compensate.
+                scale_fix = accum_count_target / accum_count
+                for p in model.parameters():
+                    if p.requires_grad and p.grad is not None:
+                        p.grad.mul_(scale_fix)
             torch.nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad],
                 max_norm=5.0,
             )
             optimizer.step()
             optimizer.zero_grad()
+            accum_count = 0
 
     return {k: v / max(n_chunks, 1) for k, v in all_metrics.items()}

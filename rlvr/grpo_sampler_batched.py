@@ -11,6 +11,7 @@ Total: ~5 forward passes instead of 16 sequential.
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -90,28 +91,30 @@ def generate_diverse_group_batched(
     else:
         gt_v_high = 3.0
 
-    # --- Pass 2: CL+SPD deterministic (B=1, noise=0) + 3 with noise ---
-    # First: one deterministic CL5+SPD5 (guaranteed in-lane if CL works)
-    fns_det = [
-        GuidanceConfig("centerline_following", enabled=True, scale=5.0),
-        GuidanceConfig("speed", enabled=True, scale=5.0, params={"v_high": gt_v_high, "v_low": 0.5}),
+    # --- Pass 2-5: Strong CL + SPD guidance sweep for lane keeping (8 trajectories) ---
+    # 8 guided at CL5-10 to ensure ~8-10/16 stay in-lane on hard curves.
+    cl_spd_configs = [
+        (5.0,  5.0,  0.0, 0.0),   # CL5+SPD5, deterministic
+        (8.0,  5.0,  0.0, 0.0),   # CL8+SPD5, deterministic
+        (10.0, 8.0,  0.0, 0.0),   # CL10+SPD8, deterministic
+        (10.0, 10.0, 0.0, 0.0),   # CL10+SPD10, deterministic
+        (5.0,  5.0,  0.3, 0.8),   # CL5+SPD5, noise
+        (8.0,  8.0,  0.3, 0.8),   # CL8+SPD8, noise
+        (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
+        (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
     ]
-    comp_det = GuidanceComposer(GuidanceSetConfig(functions=fns_det, global_scale=1.0))
-    det_cl = generate_samples(model, model_args, norm_data, 0.0, 1, comp_det, device)
-    all_trajs.append(torch.from_numpy(det_cl[0]).to(device))
+    for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
+        fns_cl = [
+            GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
+            GuidanceConfig("speed", enabled=True, scale=spd_scale, params={"v_high": gt_v_high, "v_low": 0.5}),
+        ]
+        comp_cl = GuidanceComposer(GuidanceSetConfig(functions=fns_cl, global_scale=1.0))
+        noise_scale = random.uniform(n_min, n_max) if n_max > 0 else 0.0
+        cl_traj = generate_samples(model, model_args, norm_data, noise_scale, 1, comp_cl, device)
+        all_trajs.append(torch.from_numpy(cl_traj[0]).to(device))
 
-    # Then 3 with small noise
-    trajs_lo = _batched_cl_spd_pass(model, model_args, norm_data, 3, 3.5, 5.0, gt_v_high, 0.3, 0.8, device)
-    for i in range(3):
-        all_trajs.append(trajs_lo[i])
-
-    # --- Pass 3: High CL+SPD sweep (B=3, CL=8, SPD=8, noise 0.5-1.5) ---
-    trajs_hi = _batched_cl_spd_pass(model, model_args, norm_data, 3, 8.0, 8.0, gt_v_high, 0.5, 1.5, device)
-    for i in range(3):
-        all_trajs.append(trajs_hi[i])
-
-    # --- Pass 4: Random CL+RB (B=4) ---
-    n_rand1 = min(4, K - len(all_trajs))
+    # --- Pass 6: Random CL+RB (fill remaining except last 3 for noise-only) ---
+    n_rand1 = max(0, min(4, K - len(all_trajs) - 3))
     if n_rand1 > 0:
         fns1 = [GuidanceConfig("centerline_following", enabled=True, scale=random.uniform(2.0, 8.0))]
         if random.random() < 0.5:
@@ -126,7 +129,7 @@ def generate_diverse_group_batched(
         for i in range(n_rand1):
             all_trajs.append(trajs_r1[i])
 
-    # --- Pass 5: Noise-only or light guidance (B=remaining) ---
+    # --- Pass 7: Noise-only or light guidance (B=remaining) ---
     n_rand2 = K - len(all_trajs)
     if n_rand2 > 0:
         fns2 = []

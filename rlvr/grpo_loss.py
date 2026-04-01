@@ -63,7 +63,9 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
     else:
         t_4d = t.view(B, 1, 1, 1).expand(B, P, future_len + 1, 1).clone()
 
-    gt_trajectory = torch.tensor(trajectory, dtype=torch.float32, device=device).unsqueeze(0)
+    gt_trajectory = torch.as_tensor(trajectory, dtype=torch.float32, device=device)
+    if gt_trajectory.dim() == 2:
+        gt_trajectory = gt_trajectory.unsqueeze(0)  # [T, 4] → [1, T, 4]
     ego_mean = model_args.state_normalizer.mean[0].to(device)
     ego_std = model_args.state_normalizer.std[0].to(device)
     gt_trajectory_norm = (gt_trajectory - ego_mean) / ego_std
@@ -230,8 +232,8 @@ def compute_batched_trajectory_losses(
 ):
     """Compute diffusion losses for N trajectories in ONE forward pass.
 
-    Instead of looping N times with B=1, expands scene data to B=N
-    and processes all trajectories at once.
+    Matches the SFT training path in decoder.py: includes prefix mask with
+    random delay, per-timestep t modulation, and proper noising.
 
     Args:
         model: Diffusion planner model (in train mode).
@@ -245,11 +247,14 @@ def compute_batched_trajectory_losses(
     Returns:
         [N] tensor of per-trajectory MSE losses.
     """
+    import random as _random
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+    from diffusion_planner.model.module.decoder import generate_prefix_mask
 
     N = trajectories_tensor.shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
+    eps = 1e-3
 
     # Expand data from B=1 to B=N
     batch_data = {}
@@ -259,7 +264,7 @@ def compute_batched_trajectory_losses(
         else:
             batch_data[k] = v
 
-    # Expand t to [N, P, T+1, 1]
+    # Expand t to [N, P, T+1, 1] — matches SFT (decoder.py line 90-92)
     if t.dim() == 1:
         t_N = t.expand(N)
         t_4d = t_N.view(N, 1, 1, 1).expand(N, P, future_len + 1, 1).clone()
@@ -272,6 +277,16 @@ def compute_batched_trajectory_losses(
     else:
         noise_N = noise
 
+    # Prefix mask with random delay — matches SFT (decoder.py line 95-100)
+    # Forces first `delay` steps to use clean GT, training the model to
+    # predict the trajectory conditioned on a clean prefix.
+    max_delay = 5
+    delay = torch.randint(0, max_delay + 1, (N,), device=device)
+    prefix_mask = generate_prefix_mask(delay, P, future_len + 1)  # (N, P, T+1, 1)
+    mask_coeff = _random.uniform(0.0, 1.0)
+    curr_mask_time = torch.maximum(t_4d * mask_coeff, torch.tensor(eps, device=device))
+    t_4d = torch.where(prefix_mask, curr_mask_time, t_4d)
+
     # Normalize trajectories: [N, T, 4]
     ego_mean = model_args.state_normalizer.mean[0].to(device)
     ego_std = model_args.state_normalizer.std[0].to(device)
@@ -281,7 +296,7 @@ def compute_batched_trajectory_losses(
     gt_future = torch.zeros(N, P, future_len, 4, device=device)
     gt_future[:, 0, :, :] = gt_traj_norm
 
-    # Current states
+    # Current states — normalized (matches SFT decoder.py line 60-67)
     ego_current = batch_data["ego_current_state"][:, :4]  # [N, 4]
     if P > 1:
         neighbors_current = batch_data["neighbor_agents_past"][:, :P - 1, -1, :4]
@@ -293,10 +308,12 @@ def compute_batched_trajectory_losses(
 
     all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [N, P, T+1, 4]
 
-    # Diffusion noise
+    # Diffusion noise with prefix masking — matches SFT (decoder.py line 111-116)
     mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
     xT = mean + std * noise_N
     xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+    # Prefix: replace noised steps with clean GT for delay steps
+    xT_full = torch.where(prefix_mask, all_gt, xT_full)
 
     # Normalize observation data
     data_for_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in batch_data.items()}
@@ -306,8 +323,9 @@ def compute_batched_trajectory_losses(
     merged["gt_trajectories"] = all_gt
     merged["sampled_trajectories"] = xT_full
     merged["diffusion_time"] = t_4d
+    merged["prefix_mask"] = prefix_mask
     if "delay" not in merged:
-        merged["delay"] = torch.zeros(N, dtype=torch.long, device=device)
+        merged["delay"] = delay
 
     _, outputs = model(merged)
 
@@ -437,15 +455,28 @@ def compute_batched_grpo_loss(
     future_len = model_args.future_len
     eps = 1e-3
 
-    noise = torch.randn(1, P, future_len, 4, device=device)
-    t = torch.rand(1, device=device) * (1 - eps) + eps
-
+    # Average over K (noise, t) samples for stable gradients — matches DPO which
+    # uses K=8. A single sample is dominated by noise at that specific timestep
+    # and doesn't reliably push the deterministic (t=0) trajectory.
+    K = 8
     advantages_t = torch.tensor(advantages, dtype=torch.float32, device=device)
 
-    policy_losses, ref_losses = _compute_batched_losses_and_ref(
-        policy_model, trajectories_tensor, data, model_args, device, noise, t,
-        compute_ref=True,
-    )
+    policy_losses_sum = torch.zeros(N, device=device)
+    ref_losses_sum = torch.zeros(N, device=device)
+
+    for _ in range(K):
+        noise = torch.randn(1, P, future_len, 4, device=device)
+        t = torch.rand(1, device=device) * (1 - eps) + eps
+
+        policy_losses_k, ref_losses_k = _compute_batched_losses_and_ref(
+            policy_model, trajectories_tensor, data, model_args, device, noise, t,
+            compute_ref=True,
+        )
+        policy_losses_sum = policy_losses_sum + policy_losses_k
+        ref_losses_sum = ref_losses_sum + ref_losses_k
+
+    policy_losses = policy_losses_sum / K
+    ref_losses = ref_losses_sum / K
 
     kl_loss = (policy_losses - ref_losses).mean()
 

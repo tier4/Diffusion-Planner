@@ -113,7 +113,7 @@ def main():
             rb_min_dists.append(float('inf'))
 
         # Lane departure
-        lane_gate, lane_near, lane_wide, lane_cont = compute_lane_departure_penalty(
+        lane_gate, lane_near, lane_wide, _, lane_cont = compute_lane_departure_penalty(
             traj_t, ego_shape, data
         )
         if lane_gate.item() < 0.5:
