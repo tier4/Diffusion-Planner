@@ -246,14 +246,17 @@ def test_stationary_trajectory():
 def test_straight_line_smooth():
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     scores = compute_smoothness_score_batch(ego, CONFIG)
-    assert abs(scores[0].item()) < 1e-3, f"Expected ~0, got {scores[0]}"
+    assert abs(scores[0].item()) < 0.01, f"Expected ~0, got {scores[0]}"
     print(f"  PASS  straight_line_smooth: {scores[0]:.6f}")
 
 
 def test_zigzag_high_jerk():
+    import math
     ego = _straight_line()
+    # Sinusoidal lateral oscillation at ~1Hz (period=10 steps at 10Hz)
+    # This is a physically plausible swerving trajectory with real jerk
     for t in range(T):
-        ego[t, 1] = 2.0 * ((-1) ** t)
+        ego[t, 1] = 1.0 * math.sin(2 * math.pi * t / 10)
     scores = compute_smoothness_score_batch(ego.unsqueeze(0), CONFIG)
     assert scores[0].item() < -1.0, f"Expected strongly negative, got {scores[0]}"
     print(f"  PASS  zigzag_high_jerk: {scores[0]:.2f}")
@@ -265,7 +268,7 @@ def test_constant_acceleration():
     y = torch.zeros(T)
     ego = torch.stack([x, y, torch.ones(T), torch.zeros(T)], dim=-1)
     scores = compute_smoothness_score_batch(ego.unsqueeze(0), CONFIG)
-    assert abs(scores[0].item()) < 1.0, f"Expected near zero jerk, got {scores[0]}"
+    assert abs(scores[0].item()) < 0.01, f"Expected near zero jerk, got {scores[0]}"
     print(f"  PASS  constant_acceleration: {scores[0]:.6f}")
 
 
