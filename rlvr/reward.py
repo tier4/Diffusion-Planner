@@ -1307,7 +1307,7 @@ def compute_lane_departure_penalty(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor]:
     """Compute per-trajectory lane departure penalties using ego perimeter sampling.
 
     For each of 80 ego perimeter points at each timestep, finds the K=3 nearest
@@ -1671,7 +1671,7 @@ def compute_reward_batch(
 
             # Normalize progress to [0, 1] as fraction of GT, capped at margin.
             # 100% GT = 1.0 (max), >margin% GT = capped + penalized.
-            progress_frac = (clamped_progress / gt_path_len).clamp(max=config.overprogress_margin)
+            progress_frac = (clamped_progress / gt_path_len.clamp(min=1e-3)).clamp(max=config.overprogress_margin)
             clamped_progress = progress_frac * config.progress_norm_scale
 
             # Overprogress: penalize model path exceeding margin × GT

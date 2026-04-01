@@ -313,12 +313,14 @@ def compute_batched_trajectory_losses(
     neighbor_future_valid = None
     nf_pn = 0
     if Pn > 0 and "neighbor_agents_future" in batch_data:
-        nf = batch_data["neighbor_agents_future"]  # [N, Pn_data, T, 3+]
+        nf = batch_data["neighbor_agents_future"]  # [N, Pn_data, T, 3] — x, y, heading_rad
         nf_pn = min(nf.shape[1], Pn)
-        # neighbor_agents_future has [x, y, valid] — pad to 4 dims with zeros for heading
-        nf_xy = nf[:, :nf_pn, :future_len, :2]  # [N, Pn', T, 2]
         nf_4d = torch.zeros(N, nf_pn, future_len, 4, device=device)
-        nf_4d[..., :2] = nf_xy
+        nf_4d[..., :2] = nf[:, :nf_pn, :future_len, :2]  # x, y
+        if nf.shape[-1] >= 3:
+            heading = nf[:, :nf_pn, :future_len, 2]  # heading_rad
+            nf_4d[..., 2] = torch.cos(heading)  # cos_yaw
+            nf_4d[..., 3] = torch.sin(heading)  # sin_yaw
         nf_4d_norm = (nf_4d - ego_mean) / ego_std
         gt_future[:, 1:1 + nf_pn, :, :] = nf_4d_norm
         # Track validity for neighbor loss
@@ -346,7 +348,9 @@ def compute_batched_trajectory_losses(
             nf_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)
             nf_mask = ~nf_valid  # [N, Pn', T]
             full_neighbor_mask = torch.cat([neighbor_current_mask_final[:, :nf_pn].unsqueeze(-1), nf_mask], dim=-1)  # [N, Pn', T+1]
-            all_gt[:, 1:1 + nf_pn][full_neighbor_mask.unsqueeze(-1).expand_as(all_gt[:, 1:1 + nf_pn])] = 0.0
+            # Use named slice + masked_fill_ to avoid chained indexing issues
+            neighbor_slice = all_gt[:, 1:1 + nf_pn]  # view into all_gt
+            neighbor_slice.masked_fill_(full_neighbor_mask.unsqueeze(-1).expand_as(neighbor_slice), 0.0)
 
     # Diffusion noise with prefix masking — matches SFT (decoder.py line 111-116)
     mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
