@@ -994,9 +994,20 @@ def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta
 
     Returns a 1D convolution kernel that computes the deriv-th derivative
     using a local polynomial fit over `window` points.
+    Pure numpy implementation — no scipy dependency.
     """
-    from scipy.signal import savgol_coeffs
-    coeffs = savgol_coeffs(window, poly, deriv=deriv, delta=delta)
+    # SG coefficients via least-squares polynomial fitting
+    half = window // 2
+    x = np.arange(-half, half + 1, dtype=np.float64)
+    # Build Vandermonde matrix
+    A = np.vander(x, N=poly + 1, increasing=True)  # [window, poly+1]
+    # Pseudo-inverse gives the coefficient extraction matrix
+    pinv = np.linalg.pinv(A)  # [poly+1, window]
+    # The deriv-th row of pinv gives smoothing coefficients for the deriv-th derivative
+    import math as _math
+    coeffs = pinv[deriv] * _math.factorial(deriv) / (delta ** deriv)
+    # Reverse to match convolution convention (scipy savgol_coeffs convention)
+    coeffs = coeffs[::-1].copy()
     return torch.tensor(coeffs, dtype=torch.float32).flip(0)  # flip for conv1d
 
 # Precompute SG jerk kernel; cache by (device, dt)
