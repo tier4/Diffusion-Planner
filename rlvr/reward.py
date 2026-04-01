@@ -1406,8 +1406,7 @@ def compute_lane_departure_penalty(
         C = q_chunk.shape[0]
 
         # Distance to all valid centerline points
-        dist2 = torch.cdist(q_chunk, valid_center).pow(2) if False else \
-            ((q_chunk.unsqueeze(1) - valid_center.unsqueeze(0)) ** 2).sum(-1)  # (C, V)
+        dist2 = ((q_chunk.unsqueeze(1) - valid_center.unsqueeze(0)) ** 2).sum(-1)  # (C, V)
 
         # For K=3 candidates from different segments
         chunk_clearance = torch.full((C,), -1e6, device=device)

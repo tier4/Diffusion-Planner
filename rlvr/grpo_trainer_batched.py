@@ -230,6 +230,7 @@ def train_epoch_batched(
     print(f"  Scoring rewards...")
     kept_trajs = []
     kept_advantages = []
+    kept_mean_rewards = []
     kept_norm_data = []
 
     for i in tqdm(range(N), desc="Scoring"):
@@ -254,6 +255,7 @@ def train_epoch_batched(
 
         kept_trajs.append(traj_K)
         kept_advantages.append(advantages)
+        kept_mean_rewards.append(float(np.mean([r.total for r in rewards])))
         # Extract per-scene norm data (B=1 slice)
         norm_i = {}
         for k, v in norm_batch.items():
@@ -271,11 +273,12 @@ def train_epoch_batched(
     trim = config.reward_trim_pct
     if trim > 0 and N_kept >= 10:
         n_trim = max(1, int(N_kept * trim))
-        mean_rews = [float(t.mean()) for t in kept_trajs]  # rough proxy
+        mean_rews = kept_mean_rewards
         sorted_idx = sorted(range(N_kept), key=lambda j: mean_rews[j])
         keep_idx = sorted_idx[n_trim:N_kept - n_trim]
         kept_trajs = [kept_trajs[j] for j in keep_idx]
         kept_advantages = [kept_advantages[j] for j in keep_idx]
+        kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
         print(f"  Trimmed {2*n_trim} scenes, keeping {len(kept_trajs)}/{N_kept}")
         N_kept = len(kept_trajs)

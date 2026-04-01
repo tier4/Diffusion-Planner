@@ -38,21 +38,23 @@ rlvr/
     rollout.py               Sequential rollout manager (B=1)
     batched_rollout.py       GPU-parallel rollout manager (B=N, all scenes per step)
     closed_loop_trainer.py   Hybrid trainer: CL rollout + open-loop GRPO for DiT
-    test_state_update.py     Unit tests for coordinate transforms
-    test_gae.py              Unit tests for GAE
-    test_real_scene.py       Integration test with real NPZ
   autoresearch/
     run_experiment.py        Single experiment runner (batched eval, all paths via CLI)
     check_lora_training.py   LoRA weight verification tool
     visualize_scenes.py      Scene visualization with road borders + ego footprints
     eval_border_distance.py  Miraikan border distance metrics
     README.md                Full autoresearch documentation
-  cleanse_lane_scenes.py     Filter scenes by t=0 lane/border clearance
-  diagnose_grpo_signal.py    Diagnose per-scene GRPO reward signal (batched)
-  eval_lane_border_distance.py  Combined lane departure + border distance eval
-  eval_reward_vs_gt.py       Per-scene reward breakdown vs ground truth
-  eval_teleport_metrics.py   Teleport speed/lat_accel/path metrics
-  viz_guidance_actual.py     Visualize actual DiT inference with/without guidance
+  autoresearch/tools/         Evaluation and diagnostic tools (see tools/README.md)
+    cleanse_lane_scenes.py   Filter scenes by t=0 lane/border clearance
+    diagnose_grpo_signal.py  Diagnose per-scene GRPO reward signal (batched)
+    eval_lane_border_distance.py  Combined lane departure + border distance eval
+    eval_reward_vs_gt.py     Per-scene reward breakdown vs ground truth
+    eval_teleport_metrics.py Teleport speed/lat_accel/path metrics
+    viz_guidance_actual.py   Visualize actual DiT inference with/without guidance
+  autoresearch/tests/         Tests for closed-loop components
+    test_gae.py              Unit tests for GAE computation
+    test_state_update.py     Unit tests for coordinate transforms
+    test_real_scene.py       Integration test with real NPZ scene
   test_reward.py             Unit tests for reward (no model needed)
   test_grpo_sampler.py       Unit tests for sampler (needs model for full suite)
 ```
@@ -177,7 +179,7 @@ weighted values (column * weight) so that columns add up to the total.
 1. Find K=3 nearest centerlines from **different lane segments** (not just closest points)
 2. For each of 80 ego perimeter sample points, check containment against all K lanes
 3. Thresholds: crossing (>10cm outside), near (>25cm), wide (>40cm), continuous (>80cm)
-4. Returns `lane_crossing` (bool) and `lane_near_frac` (fraction of perimeter points near edge)
+4. Returns `lane_crossing` (bool) and `lane_near_frac` (fraction of timesteps where min perimeter clearance is below threshold)
 
 Enabled via `enable_lane_departure: true` in config. Can be used as gate (hard penalty)
 or soft penalty via `lane_near_scale`, `lane_wide_scale`, `lane_cont_scale`.

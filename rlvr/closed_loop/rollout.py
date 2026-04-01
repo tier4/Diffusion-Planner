@@ -203,6 +203,7 @@ class RolloutManager:
             )
             x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)  # [1, T, 4]
             norm_data["x_ref"] = x_ref
+            norm_data["reference_trajectory"] = x_ref  # Required by lateral/longitudinal guidance
 
             # 3. Explorer policy: sample eta, get value + log_prob
             policy_out = self.exploration_policy(scene_encoding, x_ref, deterministic=False)

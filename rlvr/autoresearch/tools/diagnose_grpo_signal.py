@@ -5,7 +5,7 @@ Uses the batched CL sampler (1 det + 7 CL sweep + 8 random) to match
 what the training loop generates.
 
 Usage:
-    python -m rlvr.diagnose_grpo_signal \
+    python -m rlvr.autoresearch.tools.diagnose_grpo_signal \
         --model_path /path/to/best_model.pth \
         --scenes /path/to/scenes.json \
         [--lora_path /path/to/lora_epoch_NNN] \

@@ -145,10 +145,10 @@ class GRPOConfig:
     # Rejection sampling: generate num_generations trajectories but keep only
     # the top rejection_keep by reward. Set to 0 or None to disable (keep all).
     rejection_keep: int = 0
-    # Reward trimming: drop top and bottom X% of trajectories by reward before
-    # computing advantages. Prevents learning from outliers (e.g., high-progress
-    # lane-departing trajs at top, crashed trajs at bottom).
-    reward_trim_pct: float = 0.0  # 0.05 = trim 5% from each end
+    # Reward trimming: drop top and bottom X% of scenes by their mean group
+    # reward before training. Prevents learning from outlier scenes (e.g.,
+    # high-progress lane-departing scenes at top, heavily crashed scenes at bottom).
+    reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
 
     # LoRA
     use_lora: bool = True

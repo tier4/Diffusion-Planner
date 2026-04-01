@@ -252,6 +252,7 @@ class ClosedLoopExplorationTrainer:
                         noise_scale=0.0, composer=None, device=self.device,
                     )
                 batch_norm["x_ref"] = ref_trajs
+                batch_norm["reference_trajectory"] = ref_trajs  # Required by lateral/longitudinal guidance
 
                 # Explorer etas
                 if self.exploration_policy is not None:

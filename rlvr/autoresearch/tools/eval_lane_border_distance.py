@@ -4,7 +4,7 @@
 Reports per-epoch summary table with both lane and road border metrics.
 
 Usage:
-    python -m rlvr.eval_lane_border_distance \
+    python -m rlvr.autoresearch.tools.eval_lane_border_distance \
         --model_path /path/to/best_model.pth \
         --scenes /path/to/scenes.json \
         [--lora_path /path/to/lora_epoch_NNN] \

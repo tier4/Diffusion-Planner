@@ -10,7 +10,7 @@ Reports:
 
 Usage:
     source .venv/bin/activate
-    python rlvr/eval_teleport_metrics.py \
+    python -m rlvr.autoresearch.tools.eval_teleport_metrics \
         --model_path /path/to/best_model.pth \
         --scenes /path/to/teleport_scenes.json \
         [--lora_path /path/to/lora_epoch_NNN] \
@@ -26,13 +26,8 @@ import numpy as np
 import torch
 from scipy.signal import savgol_filter
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "diffusion_planner"))
-sys.path.insert(0, str(PROJECT_ROOT / "preference_optimization"))
-
-from model_utils import load_model
-from utils import load_npz_data
+from preference_optimization.model_utils import load_model
+from preference_optimization.utils import load_npz_data
 
 DT = 0.1
 

@@ -366,6 +366,7 @@ class BatchedRolloutManager:
                     )  # [B_chunk, T, 4]
 
                 norm_data["x_ref"] = ref_trajs
+                norm_data["reference_trajectory"] = ref_trajs  # Required by lateral/longitudinal guidance
 
                 # Explorer policy (batched) — or zero-init if no explorer
                 noise = random.uniform(*self.noise_range)

@@ -5,7 +5,7 @@ Runs the DiT twice per scene: once without guidance, once with the explorer's et
 applied through GuidanceComposer — exactly like training.
 
 Usage:
-    python -m rlvr.viz_guidance_actual \
+    python -m rlvr.autoresearch.tools.viz_guidance_actual \
       --model_path /path/to/best_model.pth \
       --policy_path /path/to/lora_epoch_NNN/exploration_policy.pth \
       --scenes /path/to/scenes.json \

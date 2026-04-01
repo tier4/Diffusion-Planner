@@ -3,13 +3,14 @@
 Loads an actual scene, applies GT ego trajectory step-by-step,
 verifies ego stays at origin and neighbors track correctly.
 
-Run: python -m rlvr.closed_loop.test_real_scene
+Run: python -m rlvr.autoresearch.tests.test_real_scene
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 
 import torch
 
@@ -21,8 +22,8 @@ from rlvr.closed_loop.state_update import (
 )
 
 DEVICE = torch.device("cpu")
-SSD = "/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/auto_research"
-VAL_SCENES = f"{SSD}/odaiba_grpo_experiments/val_v4_100.json"
+SSD = os.environ.get("AUTORESEARCH_SSD", "/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/auto_research")
+VAL_SCENES = os.environ.get("VAL_SCENES", f"{SSD}/odaiba_grpo_experiments/val_v4_100.json")
 
 
 def test_gt_rollout():

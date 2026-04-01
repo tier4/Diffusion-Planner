@@ -5,7 +5,7 @@ Uses compute_lane_departure_penalty on a single-timestep trajectory at the
 ego starting position to check if the ego perimeter is inside a lane.
 
 Usage:
-    python -m rlvr.cleanse_lane_scenes \
+    python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
         --scenes /path/to/scenes.json \
         --output /path/to/clean_scenes.json \
         [--threshold 0.15] \

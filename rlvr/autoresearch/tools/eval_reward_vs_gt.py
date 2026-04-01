@@ -5,7 +5,7 @@ Reports per-scene and aggregate reward breakdown (total, progress, smoothness,
 rb_near, rb_crossing) for both the model's deterministic trajectory and GT.
 
 Usage:
-    python -m rlvr.eval_reward_vs_gt \
+    python -m rlvr.autoresearch.tools.eval_reward_vs_gt \
         --model_path /path/to/best_model.pth \
         --scenes /path/to/scenes.json \
         [--lora_path /path/to/lora_epoch_NNN] \
