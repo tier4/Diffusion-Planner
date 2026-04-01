@@ -1757,12 +1757,18 @@ def compute_group_advantages(
     Args:
         rewards: List of RewardBreakdown for each trajectory in the group.
         epsilon: Small constant for numerical stability.
-        mode: "normalized" for standard GRPO (mean=0, std=1 per group),
-              "vd_grpo" for Variance-Decoupled GRPO (center only, fixed scale).
-              VD-GRPO preserves the absolute magnitude of negative rewards
-              (e.g. crashes) across groups instead of normalizing them away.
-        fixed_scale: Denominator for vd_grpo mode. Controls the magnitude of
-              advantages. Larger values = smaller advantages = more conservative.
+        mode: Advantage computation mode:
+            "normalized": Standard GRPO (mean=0, std=1 per group).
+            "vd_grpo": Variance-Decoupled GRPO (center only, fixed scale).
+                Preserves absolute magnitude of negative rewards across groups.
+            "raw": Centered advantages without std normalization. Uses
+                fixed_scale as denominator. If all trajectories in a group
+                are bad (e.g., all leave lane), all get negative advantages
+                instead of half getting positive weight.
+            "positive_only": Like "normalized" but clips negative advantages
+                to zero. Only updates on trajectories that are better than
+                the group mean.
+        fixed_scale: Denominator for vd_grpo and raw modes.
 
     Returns:
         (G,) array of advantages.
@@ -1771,19 +1777,32 @@ def compute_group_advantages(
     mean = totals.mean()
 
     if mode == "vd_grpo":
-        # Variance-Decoupled GRPO: center but use fixed scale.
-        # A crash group with rewards [-50, -50, -50, +5] keeps the large
-        # negative advantages instead of normalizing them to ~[-0.5, ..., +1.5].
         if fixed_scale <= 0.0:
             raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
         return (totals - mean) / max(fixed_scale, epsilon)
     elif mode == "normalized":
-        # Standard GRPO: per-group normalization to zero mean, unit variance.
         std = totals.std()
         if std < epsilon:
             return np.zeros(len(rewards))
         return (totals - mean) / (std + epsilon)
+    elif mode == "raw":
+        # Centered advantages without per-group std normalization.
+        # If all K trajectories are bad, all get negative advantages.
+        # This prevents normalized advantages from giving half of an
+        # all-bad group positive weight.
+        if fixed_scale <= 0.0:
+            raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
+        return (totals - mean) / max(fixed_scale, epsilon)
+    elif mode == "positive_only":
+        # Standard normalization but clip negatives to zero.
+        # Only reinforces trajectories better than the group mean.
+        std = totals.std()
+        if std < epsilon:
+            return np.zeros(len(rewards))
+        advantages = (totals - mean) / (std + epsilon)
+        return np.maximum(advantages, 0.0)
     else:
         raise ValueError(
-            f"Unknown advantage mode: {mode!r}. Expected 'normalized' or 'vd_grpo'."
+            f"Unknown advantage mode: {mode!r}. "
+            f"Expected 'normalized', 'vd_grpo', 'raw', or 'positive_only'."
         )
