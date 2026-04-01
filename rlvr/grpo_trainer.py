@@ -256,7 +256,7 @@ class GRPOTrainer:
         if not was_training:
             self.policy_model.eval()
 
-        return {
+        result = {
             "npz_path": npz_path,
             "data": data,
             "trajectories": trajectories,
@@ -266,6 +266,25 @@ class GRPOTrainer:
             "old_noise": old_noise,
             "old_t": old_t,
         }
+
+        # For logprob loss: also collect the denoising rollout chain
+        if self.config.grpo_loss_type == "logprob":
+            from rlvr.grpo_logprob_loss import collect_logprob_rollout
+            was_training = self.policy_model.training
+            self.policy_model.eval()
+            rollout = collect_logprob_rollout(
+                model=self.policy_model,
+                data=data,
+                trajectories=traj_batch,
+                model_args=self.model_args,
+                config=self.config,
+                device=self.device,
+            )
+            if not was_training:
+                self.policy_model.eval()
+            result["rollout"] = rollout
+
+        return result
 
     def train_on_groups(
         self,
@@ -300,7 +319,22 @@ class GRPOTrainer:
                 if np.all(advantages == 0):
                     continue
 
-                if self.config.loss_mode == "direct_best":
+                if self.config.grpo_loss_type == "logprob":
+                    # DDV2-style log-probability GRPO loss
+                    from rlvr.grpo_logprob_loss import compute_logprob_grpo_loss
+                    rollout = group.get("rollout")
+                    if rollout is None:
+                        continue
+                    loss, metrics = compute_logprob_grpo_loss(
+                        model=self.policy_model,
+                        rollout=rollout,
+                        advantages=advantages,
+                        data=group["data"],
+                        model_args=self.model_args,
+                        config=self.config,
+                        device=self.device,
+                    )
+                elif self.config.loss_mode == "direct_best":
                     # Direct regression: find best trajectory, regress det output toward it
                     rewards = group["reward_breakdowns"]
                     best_idx = int(np.argmax([r.total for r in rewards]))

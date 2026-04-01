@@ -1862,8 +1862,28 @@ def compute_group_advantages(
             return np.zeros(len(rewards))
         advantages = (totals - mean) / (std + epsilon)
         return np.maximum(advantages, 0.0)
+    elif mode == "ddv2":
+        # DDV2-style Inter-Anchor Truncated GRPO (paper Eq. 8):
+        # 1. Standard intra-group normalization
+        # 2. Clip ALL negative advantages to 0 (only reward improvements)
+        # 3. Hard -1 penalty for safety violations (collision, off-road, lane departure)
+        # This provides a clear learning signal: reward relative improvements,
+        # but only penalize absolute failures.
+        std = totals.std()
+        if std < epsilon:
+            advantages = np.zeros(len(rewards))
+        else:
+            advantages = (totals - mean) / (std + epsilon)
+        # Clip negative to 0
+        advantages = np.maximum(advantages, 0.0)
+        # Hard -1 for safety violations
+        for i, rb in enumerate(rewards):
+            if rb.collision_step is not None or rb.rb_crossing or rb.lane_crossing:
+                advantages[i] = -1.0
+        return advantages
     else:
         raise ValueError(
             f"Unknown advantage mode: {mode!r}. "
-            f"Expected 'normalized', 'vd_grpo', 'raw', 'absolute', 'softmax', or 'positive_only'."
+            f"Expected 'normalized', 'vd_grpo', 'raw', 'absolute', 'softmax', "
+            f"'positive_only', or 'ddv2'."
         )
