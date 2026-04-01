@@ -27,6 +27,17 @@ python -m rlvr.autoresearch.tools.eval_reward_vs_gt \
   --model_path <model.pth> --scenes <scenes.json> --tag <name>
 ```
 
+### grpo_viz.py
+Visualizes all K GRPO trajectories per scene with reward breakdown. Each scene gets one figure:
+left panel shows trajectories colored by rank (green=best, red=worst) with road borders and lane
+boundaries; right panel shows per-trajectory reward table with progress, smoothness, lane status, path length.
+```bash
+python -m rlvr.autoresearch.tools.grpo_viz \
+  --model_path <model.pth> --scenes <scenes.json> --output_dir <dir> \
+  --indices 0 4 8 --K 16 --enable_lane --survival \
+  --w_progress 1.0 --lane_near_scale 50.0
+```
+
 ## Diagnostic Tools
 
 ### diagnose_grpo_signal.py
