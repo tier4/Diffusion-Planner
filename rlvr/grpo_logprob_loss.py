@@ -426,37 +426,82 @@ def compute_logprob_grpo_loss(
     total_loss = rl_loss + il_weight * il_loss
 
     # KL regularization against reference model (optional)
-    # If ref_model is None but model has LoRA adapters, use disable_adapter()
-    # to get the SFT reference model's log-probs.
+    # Uses mean-divergence KL: KL(policy || ref) ≈ mean((μ_policy - μ_ref)² / (2σ²))
+    # This avoids the chain-based KL magnitude bug where both policy and ref log-probs
+    # are huge negative numbers on stored chain samples.
     kl_loss = torch.tensor(0.0, device=device)
-    if config.kl_coef > 0:
-        if ref_model is not None:
-            ref_for_kl = ref_model
-        elif hasattr(model, 'disable_adapter_layers'):
-            # LoRA model: use base model (adapters disabled) as reference
-            ref_for_kl = model  # will be called with disable_adapter context
-        else:
-            ref_for_kl = None
+    if config.kl_coef > 0 and hasattr(model, 'disable_adapter_layers'):
+        kl_per_step = []
+        model.disable_adapter_layers()
+        try:
+            for step_idx in range(num_steps):
+                t_current = schedule[step_idx].item()
+                t_prev = schedule[step_idx + 1].item()
+                x_t = chain[step_idx].detach()
 
-        if ref_for_kl is not None:
-            if ref_for_kl is model and hasattr(model, 'disable_adapter_layers'):
-                # Use LoRA's disable_adapter context for reference pass
-                model.disable_adapter_layers()
-                try:
-                    ref_log_probs = _compute_ref_log_probs(
-                        model, chain, schedule, batch_data, traj_norm, all_gt,
-                        model_args, config, device, sde
-                    )
-                finally:
-                    model.enable_adapter_layers()
-            else:
-                ref_log_probs = _compute_ref_log_probs(
-                    ref_for_kl, chain, schedule, batch_data, traj_norm, all_gt,
-                    model_args, config, device, sde
+                # Reference model forward pass (adapters disabled = SFT base)
+                merged_ref, _ = _build_model_inputs(
+                    batch_data, traj_norm, t_current, x_t, model_args, device, N
                 )
-            # KL ≈ mean(policy_logp - ref_logp)
-            kl_loss = (log_probs - ref_log_probs.detach()).mean()
-            total_loss = total_loss + config.kl_coef * kl_loss
+                with torch.no_grad():
+                    _, ref_outputs = model(merged_ref)
+                if "model_output" in ref_outputs:
+                    ref_x0 = ref_outputs["model_output"][:, :, 1:, :]
+                else:
+                    ref_x0 = ref_outputs["prediction"]
+
+                # Compute reference mean for ego
+                t_prev_t = torch.tensor(t_prev, device=device).view(1, 1, 1, 1)
+                ref_mean, ref_std = sde.marginal_prob(ref_x0, t_prev_t)
+                ref_ego_mean = ref_mean[:, 0]  # [N, T, 4]
+
+                # Policy mean was already computed during the main loop
+                # We stored the chain, so we can get the policy x0 from the forward pass
+                # But we don't have it cached. Use the log_prob computation instead:
+                # KL = mean((ego_mean_policy - ego_mean_ref)²) / (2 * std²)
+                # We need to re-run policy forward pass... but we already did that above.
+                # Instead, use a simpler approach: compute KL from the stored chain.
+                # The policy mean at this step was used to produce chain[step_idx+1].
+                # We can recover it: chain[step_idx+1] = mean + std * noise
+                # So mean_policy = chain[step_idx+1] - std * noise... but we don't have noise.
+                #
+                # Simplest fix: just re-run the policy forward pass here.
+                pass  # Will compute below
+
+                ref_ego_mean_detached = ref_ego_mean.detach()
+                kl_per_step.append(ref_ego_mean_detached)
+        finally:
+            model.enable_adapter_layers()
+
+        # Now compute policy means (with adapters enabled)
+        policy_ego_means = []
+        for step_idx in range(num_steps):
+            t_current = schedule[step_idx].item()
+            t_prev = schedule[step_idx + 1].item()
+            x_t = chain[step_idx].detach()
+
+            merged_pol, _ = _build_model_inputs(
+                batch_data, traj_norm, t_current, x_t, model_args, device, N
+            )
+            _, pol_outputs = model(merged_pol)
+            if "model_output" in pol_outputs:
+                pol_x0 = pol_outputs["model_output"][:, :, 1:, :]
+            else:
+                pol_x0 = pol_outputs["prediction"]
+
+            t_prev_t = torch.tensor(t_prev, device=device).view(1, 1, 1, 1)
+            pol_mean, pol_std = sde.marginal_prob(pol_x0, t_prev_t)
+            pol_ego_mean = pol_mean[:, 0]  # [N, T, 4]
+            pol_std_val = pol_std.squeeze().clamp(min=min_std)
+
+            ref_ego_mean = kl_per_step[step_idx]
+
+            # KL between N(μ_pol, σ) and N(μ_ref, σ) = (μ_pol - μ_ref)² / (2σ²)
+            step_kl = ((pol_ego_mean - ref_ego_mean) ** 2 / (2 * pol_std_val ** 2)).mean()
+            policy_ego_means.append(step_kl)
+
+        kl_loss = torch.stack(policy_ego_means).mean()
+        total_loss = total_loss + config.kl_coef * kl_loss
 
     metrics = {
         "rl_loss": rl_loss.item(),
