@@ -238,6 +238,7 @@ def compute_direct_best_loss(
 
 def compute_batched_trajectory_losses(
     model, data, trajectories_tensor, model_args, noise, t, device,
+    neighbor_loss_weight: float = 0.0,
 ):
     """Compute diffusion losses for N trajectories in ONE forward pass.
 
@@ -397,9 +398,9 @@ def compute_batched_trajectory_losses(
     # Neighbor regularization loss: per-trajectory MSE on valid neighbor predictions.
     # This prevents the LoRA from distorting neighbor predictions, which feeds back
     # into the joint denoising and corrupts ego output over time.
-    # Weight = 0.5 to keep ego as primary signal.
-    _NEIGHBOR_LOSS_WEIGHT = 0.5
-    if P > 1 and neighbor_future_valid is not None:
+    # Disabled by default (neighbor_loss_weight=0). Set >0 to enable.
+    _NEIGHBOR_LOSS_WEIGHT = neighbor_loss_weight
+    if _NEIGHBOR_LOSS_WEIGHT > 0 and P > 1 and neighbor_future_valid is not None:
         neighbor_output = full_output[:, 1:1 + nf_pn]  # [N, Pn', T, 4]
         neighbor_gt = full_gt[:, 1:1 + nf_pn]  # [N, Pn', T, 4]
         neighbor_mse = F.mse_loss(neighbor_output, neighbor_gt, reduction='none')  # [N, Pn', T, 4]
@@ -473,6 +474,7 @@ def _compute_batched_losses_and_ref(
     noise: torch.Tensor,
     t: torch.Tensor,
     compute_ref: bool = True,
+    neighbor_loss_weight: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Batched version: compute all N trajectory losses in ONE forward pass.
 
@@ -485,6 +487,7 @@ def _compute_batched_losses_and_ref(
     # Policy losses: one batched forward pass for all N trajectories
     policy_losses = compute_batched_trajectory_losses(
         policy_model, data, trajectories_tensor, model_args, noise, t, device,
+        neighbor_loss_weight=neighbor_loss_weight,
     )  # [N]
 
     ref_losses = torch.zeros_like(policy_losses)
@@ -494,6 +497,7 @@ def _compute_batched_losses_and_ref(
             ref_losses = compute_batched_trajectory_losses(
                 policy_model, data, trajectories_tensor, model_args,
                 noise.clone(), t, device,
+                neighbor_loss_weight=neighbor_loss_weight,
             )  # [N]
 
     return policy_losses, ref_losses
@@ -546,6 +550,7 @@ def compute_batched_grpo_loss(
         policy_losses_k, ref_losses_k = _compute_batched_losses_and_ref(
             policy_model, trajectories_tensor, data, model_args, device, noise, t,
             compute_ref=True,
+            neighbor_loss_weight=getattr(config, 'neighbor_loss_weight', 0.0),
         )
         policy_losses_sum = policy_losses_sum + policy_losses_k
         ref_losses_sum = ref_losses_sum + ref_losses_k

@@ -153,6 +153,7 @@ class GRPOConfig:
     # high-progress lane-departing scenes at top, heavily crashed scenes at bottom).
     reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
     lane_dep_trim_n: int = 0  # drop N scenes with highest lane departure fraction (0=disabled)
+    neighbor_loss_weight: float = 0.0  # weight for neighbor prediction regularization (0=disabled)
 
     # LoRA
     use_lora: bool = True
