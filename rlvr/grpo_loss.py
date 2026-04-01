@@ -43,17 +43,17 @@ from rlvr.grpo_config import GRPOConfig
 def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, device):
     """V4-compatible trajectory loss using 4D diffusion timestep.
 
-    The v4 DiT requires t as [B, P, T+1, 1] with t.shape[2] == x.shape[2].
-    The original dpo_loss.compute_trajectory_loss passes a single t to both
-    marginal_prob (which needs [B,P,T,1]) and diffusion_time (which needs
-    [B,P,T+1,1]). To resolve this, we replicate the essential logic here
-    with proper 4D t handling, matching the v4 training code in decoder.py.
+    Matches SFT training in decoder.py: includes prefix mask with random delay,
+    per-timestep t modulation, and clean prefix injection.
     """
+    import random as _random
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+    from diffusion_planner.model.module.decoder import generate_prefix_mask
 
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
+    eps = 1e-3
 
     # Expand t to [B, P, T+1, 1]
     if t.dim() == 1:
@@ -62,6 +62,14 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
         t_4d = t
     else:
         t_4d = t.view(B, 1, 1, 1).expand(B, P, future_len + 1, 1).clone()
+
+    # Prefix mask with random delay — matches SFT (decoder.py line 95-100)
+    max_delay = 5
+    delay = torch.randint(0, max_delay + 1, (B,), device=device)
+    prefix_mask = generate_prefix_mask(delay, P, future_len + 1)  # (B, P, T+1, 1)
+    mask_coeff = _random.uniform(0.0, 1.0)
+    curr_mask_time = torch.maximum(t_4d * mask_coeff, torch.tensor(eps, device=device))
+    t_4d = torch.where(prefix_mask, curr_mask_time, t_4d)
 
     gt_trajectory = torch.as_tensor(trajectory, dtype=torch.float32, device=device)
     if gt_trajectory.dim() == 2:
@@ -84,11 +92,12 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
 
     all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, T+1, 4]
 
-    # marginal_prob on future part with sliced t (matching decoder.py:111)
+    # Diffusion noise with prefix masking — matches SFT (decoder.py line 111-116)
     mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
     xT = mean + std * noise
-
     xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)  # [B, P, T+1, 4]
+    # Prefix: replace noised steps with clean GT
+    xT_full = torch.where(prefix_mask, all_gt, xT_full)
 
     data_for_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     data_normalized = model_args.observation_normalizer(data_for_norm)
@@ -97,13 +106,13 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
     merged_inputs["gt_trajectories"] = all_gt
     merged_inputs["sampled_trajectories"] = xT_full
     merged_inputs["diffusion_time"] = t_4d  # [B, P, T+1, 1]
+    merged_inputs["prefix_mask"] = prefix_mask
     if "delay" not in merged_inputs:
-        merged_inputs["delay"] = torch.zeros(B, dtype=torch.long, device=device)
+        merged_inputs["delay"] = delay
 
     _, outputs = model(merged_inputs)
 
     if "model_output" in outputs:
-        # model_output is [B, P, T+1, 4] from _forward_training; skip prefix at index 0
         model_output = outputs["model_output"][:, 0, 1:, :]  # [B, T, 4]
     else:
         model_output = outputs["prediction"][:, 0]
@@ -458,7 +467,7 @@ def compute_batched_grpo_loss(
     # Average over K (noise, t) samples for stable gradients — matches DPO which
     # uses K=8. A single sample is dominated by noise at that specific timestep
     # and doesn't reliably push the deterministic (t=0) trajectory.
-    K = 8
+    K = max(config.diffusion_k_steps, 1)
     advantages_t = torch.tensor(advantages, dtype=torch.float32, device=device)
 
     policy_losses_sum = torch.zeros(N, device=device)

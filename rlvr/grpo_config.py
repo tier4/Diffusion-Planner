@@ -125,7 +125,7 @@ class GRPOConfig:
     loss_mode: str = "diffusion"
     direct_loss_weight: float = 1.0
     diffusion_t_range: list[float] = field(default_factory=lambda: [0.001, 0.1])
-    diffusion_k_steps: int = 4
+    diffusion_k_steps: int = 8  # K (noise, t) samples averaged per GRPO loss (matches DPO K=8)
 
     # Advantage computation mode:
     # "normalized" (default): standard GRPO per-group normalization (mean=0, std=1).
