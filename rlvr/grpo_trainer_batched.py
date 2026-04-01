@@ -90,37 +90,26 @@ def generate_all_scenes_batched(
     det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
     all_k_trajs.append(det_trajs)
 
-    # Inject deterministic trajectory as reference for longitudinal guidance.
-    # This lets LON guidance push other trajectories to match baseline speed.
-    norm_batch_with_ref = dict(norm_batch)
-    # det_trajs is [N, T, 4] in physical coords — inject as reference_trajectory
-    norm_batch_with_ref["reference_trajectory"] = det_trajs.clone()
-
-    # --- Config 2-9: Strong CL + SPD + LON guidance sweep for lane keeping ---
-    # CL keeps trajectory in-lane, SPD maintains target speed, LON extends path length.
+    # --- Config 2-9: Strong CL + SPD guidance sweep for lane keeping ---
+    # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
     cl_spd_configs = [
-        # (CL, SPD, LON_eta, LON_lambda, noise_min, noise_max)
-        (5.0,  5.0,  0.0, 0.0, 0.0, 0.0),   # CL5+SPD5, no LON, deterministic
-        (8.0,  5.0,  0.0, 0.0, 0.0, 0.0),   # CL8+SPD5, no LON, deterministic
-        (10.0, 8.0,  0.0, 0.0, 0.0, 0.0),   # CL10+SPD8, no LON, deterministic
-        (10.0, 10.0, 1.0, 1.0, 0.0, 0.0),   # CL10+SPD10+LON(η=1,λ=1), deterministic
-        (5.0,  5.0,  1.0, 0.5, 0.3, 0.8),   # CL5+SPD5+LON(η=1,λ=0.5), noise
-        (8.0,  8.0,  1.0, 0.8, 0.3, 0.8),   # CL8+SPD8+LON(η=1,λ=0.8), noise
-        (10.0, 8.0,  1.0, 1.0, 0.3, 0.8),   # CL10+SPD8+LON(η=1,λ=1), noise
-        (10.0, 10.0, 1.0, 1.0, 0.5, 1.0),   # CL10+SPD10+LON(η=1,λ=1), noise
+        (5.0,  5.0,  0.0, 0.0),   # CL5+SPD5, deterministic
+        (8.0,  5.0,  0.0, 0.0),   # CL8+SPD5, deterministic
+        (10.0, 8.0,  0.0, 0.0),   # CL10+SPD8, deterministic
+        (10.0, 10.0, 0.0, 0.0),   # CL10+SPD10, deterministic
+        (5.0,  5.0,  0.3, 0.8),   # CL5+SPD5, noise
+        (8.0,  8.0,  0.3, 0.8),   # CL8+SPD8, noise
+        (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
+        (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
     ]
-    for cl_scale, spd_scale, lon_eta, lon_lambda, n_min, n_max in cl_spd_configs:
+    for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
         fns = [
             GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
             GuidanceConfig("speed", enabled=True, scale=spd_scale,
                            params={"v_high": gt_max_speed, "v_low": 0.5}),
         ]
-        if lon_eta > 0:
-            fns.append(GuidanceConfig("longitudinal", enabled=True, scale=5.0,
-                                       params={"eta_lon": lon_eta, "lambda_lon": lon_lambda}))
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
-        batch_for_gen = norm_batch_with_ref if lon_eta > 0 else norm_batch
-        trajs = _chunked_generate(model, model_args, batch_for_gen, n_min, n_max, comp, device, gen_chunk_size)
+        trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
         all_k_trajs.append(trajs)
 
     # --- Config 5+: Random guidance (no road_border to avoid OOM) ---
