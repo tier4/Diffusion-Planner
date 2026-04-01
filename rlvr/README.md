@@ -16,18 +16,24 @@ The GRPO pipeline differs from the existing DPO pipeline in two key ways:
 ```
 rlvr/
   reward.py                  Rule-based reward (road border + safety + progress + feasibility
-                             + lane departure detection with K=3 nearest centerlines)
-  grpo_loss.py               Advantage-weighted diffusion loss with PPO clipping + KL
+                             + lane departure detection with K=3 nearest centerlines
+                             + underprogress penalty, GT-normalized progress, survival mode
+                             + lane_crossing_steps as terminal event in survival mode)
+  grpo_loss.py               Advantage-weighted diffusion loss with K=8 (noise,t) averaging
+                             + prefix mask matching SFT training distribution
+                             + optional neighbor prediction regularization
                              + compute_batched_grpo_loss for N-trajectory batched loss
-                             + compute_batched_trajectory_losses for SFT regression
   grpo_config.py             Dataclass config with JSON serialization
-                             + random_guidance_mode, lane departure config
+                             + lane departure, underprogress, progress normalization config
+                             + diffusion_k_steps, neighbor_loss_weight, lane_dep_trim_n
   grpo_trainer.py            Standard GRPO training loop (batched loss)
   grpo_trainer_batched.py    Fully batched GRPO trainer (all scenes in ~5 forward passes)
+                             + lane_dep_trim_n: drop worst lane-departure scenes per epoch
+                             + fixed gradient accumulation scaling for incomplete last chunks
   grpo_exploration_trainer.py  Joint GRPO + exploration policy trainer
                              + random_guidance_mode: skip explorer, sample η directly
   grpo_sampler.py            Diverse trajectory generation with random noise + guidance
-  grpo_sampler_batched.py    CL+SPD focused sampler (deterministic + guided + random)
+  grpo_sampler_batched.py    Strong CL+SPD sampler (1 det + 8 CL5-10 guided + 7 random)
   configs/
     grpo_onpolicy.json       Recommended on-policy config (best for v4)
     grpo_zi_300sc.json       Zero-init exploration + Block 0 LoRA (best baseline)
@@ -51,6 +57,7 @@ rlvr/
     eval_reward_vs_gt.py     Per-scene reward breakdown vs ground truth
     eval_driving_metrics.py  Speed/lat_accel/path length/stopped metrics
     viz_guidance_actual.py   Visualize actual DiT inference with/without guidance
+    grpo_viz.py              Visualize K trajectories per scene with reward ranking table
   autoresearch/tests/         Tests for closed-loop components
     test_gae.py              Unit tests for GAE computation
     test_state_update.py     Unit tests for coordinate transforms
@@ -179,10 +186,15 @@ weighted values (column * weight) so that columns add up to the total.
 1. Find K=3 nearest centerlines from **different lane segments** (not just closest points)
 2. For each of 80 ego perimeter sample points, check containment against all K lanes
 3. Thresholds: crossing (clearance <10cm from lane edge, including outside), near (<25cm), wide (<40cm), continuous (<80cm)
-4. Returns `lane_crossing` (bool) and `lane_near_frac` (fraction of timesteps where min perimeter clearance is below threshold)
+4. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
+   - `lane_crossing_steps`: first timestep of lane departure per trajectory (for survival mode)
+   - `lane_wide_frac`: fraction of timesteps within 40cm of lane edge
 
-Enabled via `enable_lane_departure: true` in config. Can be used as gate (hard penalty)
-or soft penalty via `lane_near_scale`, `lane_wide_scale`, `lane_cont_scale`.
+Enabled via `enable_lane_departure: true` in config. Can be used as:
+- **Soft penalty** via `lane_near_scale`, `lane_wide_scale`, `lane_cont_scale`
+- **Hard gate** via `lane_gate_enabled: true` (lane crossing zeros the reward in gate mode)
+- **Survival terminal event** when `reward_mode: "survival"` + `enable_lane_departure: true`,
+  lane departure reduces `survival_frac` proportionally to when it occurs
 
 ### Group Advantages
 

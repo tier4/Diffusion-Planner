@@ -45,7 +45,7 @@ def diagnose_scene(model, model_args, npz_path, K, reward_config, sampler_config
     for k_i in range(trajs.shape[0]):
         traj_t = trajs[k_i:k_i+1]
         r = compute_reward_batch(traj_t, data, reward_config)[0]
-        gate, near, _, _ = compute_lane_departure_penalty(traj_t, ego_shape, data)
+        gate, near, _, _, _ = compute_lane_departure_penalty(traj_t, ego_shape, data)
         results.append({
             "k": k_i, "total": r.total, "progress": r.progress,
             "smoothness": r.smoothness, "lane_crossing": r.lane_crossing,

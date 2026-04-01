@@ -46,7 +46,7 @@ def check_scene_t0(npz_path: str, device: torch.device, threshold: float = 0.15,
 
     # Lane check — we need t=1 to not be skipped
     # Temporarily patch: compute on full trajectory but only t=1 matters
-    lane_gate, lane_near, lane_wide, lane_cont = compute_lane_departure_penalty(
+    lane_gate, lane_near, lane_wide, _, lane_cont = compute_lane_departure_penalty(
         traj_t0, ego_shape, data
     )
 

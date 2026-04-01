@@ -52,6 +52,15 @@ class RewardConfig:
     overprogress_penalty: float = 0.3
     stopped_penalty: float = 50.0
 
+    # Underprogress: penalize trajectories that drive much less than GT
+    underprogress_penalty: float = 0.0   # scale (0=disabled). Penalty = scale * max(0, threshold - ratio)
+    underprogress_threshold: float = 0.5  # penalize if model_path / gt_path < threshold
+
+    # Progress normalization scale: when enable_overprogress=True, progress is
+    # normalized to [0, 1] as fraction of GT, then multiplied by this scale.
+    # 100% GT progress → progress_norm_scale points. Default 20.
+    progress_norm_scale: float = 20.0
+
     # Reward aggregation mode:
     # "gate" (default): binary safety gates × quality. Any terminal event → floor (-50).
     # "survival" (PlannerRFT): proportional credit based on how long the trajectory
@@ -75,6 +84,7 @@ class RewardBreakdown:
     rb_near_frac: float = 0.0
     lane_crossing: bool = False
     lane_near_frac: float = 0.0
+    lane_wide_frac: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1297,7 +1307,7 @@ def compute_lane_departure_penalty(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor]:
     """Compute per-trajectory lane departure penalties using ego perimeter sampling.
 
     For each of 80 ego perimeter points at each timestep, finds the K=3 nearest
@@ -1311,7 +1321,7 @@ def compute_lane_departure_penalty(
         data: Observation dict with 'lanes' key.
 
     Returns:
-        Tuple of (crossing_gate, near_frac, wide_frac, cont_penalty):
+        Tuple of (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty):
         - crossing_gate: (N,) 1.0 if always in-lane, 0.0 if leaves lane
         - near_frac: (N,) fraction of timesteps within 25cm of lane edge
         - wide_frac: (N,) fraction of timesteps within 40cm of lane edge
@@ -1320,10 +1330,12 @@ def compute_lane_departure_penalty(
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
 
+    no_lane_crossing_steps: list[int | None] = [None] * N
     safe_return = (
         torch.ones(N, device=device),
         torch.zeros(N, device=device),
         torch.zeros(N, device=device),
+        no_lane_crossing_steps,
         torch.zeros(N, device=device),
     )
 
@@ -1467,6 +1479,13 @@ def compute_lane_departure_penalty(
     has_crossing = is_crossing.any(dim=1)
     crossing_gate = (~has_crossing).float()
 
+    # First crossing step per trajectory (for survival mode) — vectorized to avoid CUDA syncs
+    # argmax on float returns first True index; use has_crossing to mask non-crossing trajs
+    first_crossing_idx = is_crossing.float().argmax(dim=1)  # [N] — 0 if no crossing (need mask)
+    lane_crossing_steps: list[int | None] = [
+        int(first_crossing_idx[i].item()) if has_crossing[i] else None for i in range(N)
+    ]
+
     # Near penalty
     near_frac = (per_ts_min[:, 1:] < _LANE_NEAR_THRESH).float().mean(dim=1)
 
@@ -1476,7 +1495,7 @@ def compute_lane_departure_penalty(
     # Continuous proximity penalty
     cont_penalty = (1.0 - per_ts_min[:, 1:] / _LANE_CONT_THRESH).clamp(min=0, max=1).mean(dim=1)
 
-    return crossing_gate, near_frac, wide_frac, cont_penalty
+    return crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty
 
 
 # ---------------------------------------------------------------------------
@@ -1585,13 +1604,14 @@ def compute_reward_batch(
 
     # Lane departure penalty
     if config.enable_lane_departure:
-        lane_crossing_gate, lane_near_frac, lane_wide_frac, lane_cont_penalty = compute_lane_departure_penalty(
+        lane_crossing_gate, lane_near_frac, lane_wide_frac, lane_crossing_steps, lane_cont_penalty = compute_lane_departure_penalty(
             ego_trajs, ego_shape, data,
         )
     else:
         lane_crossing_gate = torch.ones(N, device=device)
         lane_near_frac = torch.zeros(N, device=device)
         lane_wide_frac = torch.zeros(N, device=device)
+        lane_crossing_steps: list[int | None] = [None] * N
         lane_cont_penalty = torch.zeros(N, device=device)
 
     # NAVSIM PDMS-style multiplicative reward aggregation.
@@ -1636,11 +1656,10 @@ def compute_reward_batch(
     # Safety score includes proximity penalty to NPCs (closer = more negative).
     clamped_progress = progress_scores.clamp(min=0)
 
-    # Overprogress penalty: cap reward at GT path length × 1.3.
-    # Trajectories that go much further than the human drove get penalized,
-    # preventing the model from learning to drive too fast through curves.
-    # Overprogress: cap progress reward at GT path length × 1.1, then penalize
-    # excess mildly. Disabled by default — causes stopping when penalty is too
+    # Normalize progress as percentage of GT path length, then apply
+    # overprogress/underprogress/stopped penalties.
+    # This ensures a 10m path on a 12m GT scene and a 10m path on a 22m GT scene
+    # get different progress scores (83% vs 45%).
     if config.enable_overprogress and "ego_agent_future" in data:
         gt_future = data["ego_agent_future"]
         if gt_future.dim() == 3:
@@ -1649,18 +1668,31 @@ def compute_reward_batch(
         gt_valid = gt_xy.abs().sum(dim=-1) > 0.1
         if gt_valid.sum() >= 10:
             gt_path_len = torch.diff(gt_xy[gt_valid], dim=0).norm(dim=-1).sum()
-            cap = config.overprogress_margin * gt_path_len
             model_path_lens = torch.diff(ego_trajs[:, :, :2], dim=1).norm(dim=-1).sum(dim=-1)  # (N,)
-            # Cap: progress can't exceed cap value. Excess gets penalized.
-            capped = torch.minimum(clamped_progress, cap.expand(N))
+
+            # Normalize progress to [0, 1] as fraction of GT, capped at margin.
+            # 100% GT = 1.0 (max), >margin% GT = capped + penalized.
+            progress_frac = (clamped_progress / gt_path_len.clamp(min=1e-3)).clamp(max=config.overprogress_margin)
+            clamped_progress = progress_frac * config.progress_norm_scale
+
+            # Overprogress: penalize model path exceeding margin × GT
+            cap = config.overprogress_margin * gt_path_len
             excess = torch.relu(model_path_lens - cap)
-            clamped_progress = capped - config.overprogress_penalty * excess
+            clamped_progress = clamped_progress - config.overprogress_penalty * excess
 
             # Stopped penalty: if GT drives (>5m) but model barely moves (<1m),
             # apply extra negative progress to discourage stopping.
             if gt_path_len > 5.0:
                 is_stopped = (model_path_lens < 1.0).float()
                 clamped_progress = clamped_progress - config.stopped_penalty * is_stopped
+
+            # Underprogress penalty: penalize trajectories that drive much less than GT.
+            # Continuous penalty proportional to how far below threshold the ratio is.
+            # E.g., penalty=100, threshold=0.5: at 25% GT path → 100*(0.5-0.25)=25 penalty.
+            if config.underprogress_penalty > 0 and gt_path_len > 3.0:
+                progress_ratio = (model_path_lens / gt_path_len).clamp(max=1.0)
+                underprogress = torch.relu(config.underprogress_threshold - progress_ratio)
+                clamped_progress = clamped_progress - config.underprogress_penalty * underprogress
 
     # TTC as quality bonus
     ttc_bonus = config.w_safety * (ttc_scores - 0.5) * 2
@@ -1699,6 +1731,8 @@ def compute_reward_batch(
                 first_terminal = min(first_terminal, collision_steps[i])
             if rb_crossing_steps[i] is not None:
                 first_terminal = min(first_terminal, rb_crossing_steps[i])
+            if config.enable_lane_departure and lane_crossing_steps[i] is not None:
+                first_terminal = min(first_terminal, lane_crossing_steps[i])
             survival_frac[i] = max(first_terminal, 1) / T  # at least 1/T to avoid 0
 
         # Blend: survived portion gets quality, failed portion gets floor.
@@ -1732,6 +1766,7 @@ def compute_reward_batch(
             rb_near_frac=float(rb_near_frac[i]),
             lane_crossing=bool(lane_crossing_gate[i] < 0.5),
             lane_near_frac=float(lane_near_frac[i]),
+            lane_wide_frac=float(lane_wide_frac[i]),
         ))
 
     return results
@@ -1797,6 +1832,28 @@ def compute_group_advantages(
         if fixed_scale <= 0.0:
             raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
         return (totals - mean) / max(fixed_scale, epsilon)
+    elif mode == "absolute":
+        # No centering, no normalization. Advantage = total / fixed_scale.
+        # Positive reward → positive advantage, negative reward → negative advantage.
+        # A group where all trajs score -30 gets ALL negative advantages.
+        # Only trajs with positive absolute reward get reinforced.
+        if fixed_scale <= 0.0:
+            raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
+        return totals / max(fixed_scale, epsilon)
+    elif mode == "softmax":
+        # Softmax-weighted advantages. Temperature = fixed_scale.
+        # Rank 1 gets disproportionately strong signal (~0.9), others decay sharply.
+        # Low temperature (5) = very sharp (rank 1 dominates).
+        # High temperature (20) = softer (more spread across top trajs).
+        # Centered so mean≈0 for stable GRPO training.
+        temp = max(fixed_scale, epsilon)
+        logits = totals / temp
+        logits = logits - logits.max()  # numerical stability
+        exp_logits = np.exp(logits)
+        weights = exp_logits / exp_logits.sum()
+        # Center and scale: mean=0, max≈1
+        advantages = (weights - weights.mean()) / max(weights.max(), epsilon)
+        return advantages
     elif mode == "positive_only":
         # Standard normalization but clip negatives to zero.
         # Only reinforces trajectories better than the group mean.
@@ -1808,5 +1865,5 @@ def compute_group_advantages(
     else:
         raise ValueError(
             f"Unknown advantage mode: {mode!r}. "
-            f"Expected 'normalized', 'vd_grpo', 'raw', or 'positive_only'."
+            f"Expected 'normalized', 'vd_grpo', 'raw', 'absolute', 'softmax', or 'positive_only'."
         )

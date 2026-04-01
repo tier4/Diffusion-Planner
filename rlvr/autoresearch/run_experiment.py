@@ -81,7 +81,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
     model.eval()
     totals, offroads, collisions, path_lengths = [], [], 0, []
     rb_crossings, rb_nears = 0, []
-    lane_departures, lane_nears = 0, []
+    lane_departures, lane_nears, lane_wides = 0, [], []
 
     if batch_size > 1:
         # Batched evaluation
@@ -140,6 +140,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                 if reward.lane_crossing:
                     lane_departures += 1
                 lane_nears.append(reward.lane_near_frac)
+                lane_wides.append(reward.lane_wide_frac)
                 traj_np = det_trajs[local_i].cpu().numpy()
                 pl = np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
@@ -164,6 +165,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                 if reward.lane_crossing:
                     lane_departures += 1
                 lane_nears.append(reward.lane_near_frac)
+                lane_wides.append(reward.lane_wide_frac)
                 pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
             except Exception as e:
@@ -186,11 +188,13 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
         "rb_near_mean": float(np.mean(rb_nears)),
         "lane_departures": lane_departures,
         "lane_near_mean": float(np.mean(lane_nears)) if lane_nears else 0.0,
+        "lane_wide_mean": float(np.mean(lane_wides)) if lane_wides else 0.0,
     }
     tag = f" [{label}]" if label else ""
     print(f"  Eval{tag}: {n} scenes, reward={result['reward_mean']:+.2f}, "
           f"rb_cross={rb_crossings}/{n}, lane_dep={lane_departures}/{n}, "
           f"rb_near={np.mean(rb_nears):.2f}, "
+          f"lane_near={result['lane_near_mean']:.2f}, lane_wide={result['lane_wide_mean']:.2f}, "
           f"collision={result['collision_rate']:.1%}, "
           f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
     return result
@@ -384,6 +388,9 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         overprogress_margin=grpo_config.overprogress_margin,
         overprogress_penalty=grpo_config.overprogress_penalty,
         stopped_penalty=grpo_config.stopped_penalty,
+        underprogress_penalty=grpo_config.underprogress_penalty,
+        underprogress_threshold=grpo_config.underprogress_threshold,
+        progress_norm_scale=grpo_config.progress_norm_scale,
         enable_lane_departure=grpo_config.enable_lane_departure,
         lane_gate_enabled=grpo_config.lane_gate_enabled,
         lane_near_scale=grpo_config.lane_near_scale,
