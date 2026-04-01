@@ -1479,11 +1479,12 @@ def compute_lane_departure_penalty(
     has_crossing = is_crossing.any(dim=1)
     crossing_gate = (~has_crossing).float()
 
-    # First crossing step per trajectory (for survival mode)
-    lane_crossing_steps: list[int | None] = []
-    for i in range(N):
-        crossing_ts = is_crossing[i].nonzero(as_tuple=False)
-        lane_crossing_steps.append(int(crossing_ts[0].item()) if crossing_ts.numel() > 0 else None)
+    # First crossing step per trajectory (for survival mode) — vectorized to avoid CUDA syncs
+    # argmax on float returns first True index; use has_crossing to mask non-crossing trajs
+    first_crossing_idx = is_crossing.float().argmax(dim=1)  # [N] — 0 if no crossing (need mask)
+    lane_crossing_steps: list[int | None] = [
+        int(first_crossing_idx[i].item()) if has_crossing[i] else None for i in range(N)
+    ]
 
     # Near penalty
     near_frac = (per_ts_min[:, 1:] < _LANE_NEAR_THRESH).float().mean(dim=1)

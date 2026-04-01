@@ -535,7 +535,7 @@ def compute_batched_grpo_loss(
 
     for _ in range(K):
         noise = torch.randn(1, P, future_len, 4, device=device)
-        t = torch.rand(1, device=device) * (1 - eps) + eps
+        t = _sample_t_for_mode(config, 1, device)
 
         policy_losses_k, ref_losses_k = _compute_batched_losses_and_ref(
             policy_model, trajectories_tensor, data, model_args, device, noise, t,
