@@ -26,22 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("root_dir", type=Path)
     parser.add_argument("--eval_npz", type=Path, default=None)
     parser.add_argument("--use_ema", action="store_true")
-    parser.add_argument(
-        "--output-name",
-        type=str,
-        default="diffusion_planner",
-        help="Base name for output ONNX files (default: diffusion_planner)",
-    )
-    parser.add_argument(
-        "--use-simplify",
-        action="store_true",
-        help="Run onnxsim to produce a simplified ONNX model",
-    )
-    parser.add_argument(
-        "--ego-from-control",
-        action="store_true",
-        help="For trajectory_and_control mode: ego prediction uses control→trajectory conversion via unicycle model",
-    )
+    parser.add_argument("--output_name", type=str, default="diffusion_planner")
+    parser.add_argument("--use_simplify", action="store_true")
+    parser.add_argument("--no_ego_from_control", action="store_true")
     args = parser.parse_args()
     return args
 
@@ -75,8 +62,10 @@ class ONNXWrapper(nn.Module):
         D = self.model.decoder._D
         if D > POSE_DIM:
             pad = torch.zeros(
-                *sampled_trajectories.shape[:-1], D - POSE_DIM,
-                device=sampled_trajectories.device, dtype=sampled_trajectories.dtype,
+                *sampled_trajectories.shape[:-1],
+                D - POSE_DIM,
+                device=sampled_trajectories.device,
+                dtype=sampled_trajectories.dtype,
             )
             sampled_trajectories = torch.cat([sampled_trajectories, pad], dim=-1)
         inputs = {
@@ -258,6 +247,7 @@ def convert_model(
 
     if ego_from_control:
         from diffusion_planner.dimensions import OUTPUT_MODE_TRAJECTORY_AND_CONTROL
+
         if model.decoder._output_mode != OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
             raise ValueError(
                 f"--ego-from-control requires output_mode='trajectory_and_control', "
@@ -350,7 +340,9 @@ np.savez("{output_path}", **{{f"out_{{i}}": o for i, o in enumerate(outputs)}})
 """
             result = subprocess.run(
                 [sys.executable, "-c", script],
-                capture_output=True, text=True, timeout=300,
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"ORT subprocess failed:\n{result.stderr[-1000:]}")
@@ -436,7 +428,7 @@ if __name__ == "__main__":
             eval_npz_path=args.eval_npz,
             use_ema=args.use_ema,
             use_simplify=args.use_simplify,
-            ego_from_control=args.ego_from_control,
+            ego_from_control=not args.no_ego_from_control,
         )
 
     # Print summary
