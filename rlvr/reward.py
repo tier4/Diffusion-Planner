@@ -1848,7 +1848,8 @@ def compute_group_advantages(
         temp = max(fixed_scale, epsilon)
         logits = totals / temp
         logits = logits - logits.max()  # numerical stability
-        weights = np.exp(logits) / np.exp(logits).sum()
+        exp_logits = np.exp(logits)
+        weights = exp_logits / exp_logits.sum()
         # Center and scale: mean=0, max≈1
         advantages = (weights - weights.mean()) / max(weights.max(), epsilon)
         return advantages

@@ -787,6 +787,37 @@ def test_lane_departure_out_of_lane():
     print("  PASS  test_lane_departure_out_of_lane")
 
 
+def test_advantage_absolute():
+    """Absolute mode: no centering, positive reward → positive advantage."""
+    from rlvr.reward import compute_group_advantages, RewardBreakdown
+    rewards = [RewardBreakdown(safety=0, progress=0, smoothness=0, feasibility=0, centerline=0,
+                               red_light=0, total=t, collision_step=None, off_road_fraction=0)
+               for t in [+10, +5, -5, -20]]
+    adv = compute_group_advantages(rewards, mode="absolute", fixed_scale=10.0)
+    assert adv[0] > 0, f"Positive reward should give positive advantage: {adv[0]}"
+    assert adv[1] > 0, f"Positive reward should give positive advantage: {adv[1]}"
+    assert adv[2] < 0, f"Negative reward should give negative advantage: {adv[2]}"
+    assert adv[3] < 0, f"Negative reward should give negative advantage: {adv[3]}"
+    assert abs(adv[0] - 1.0) < 1e-6, f"10/10 should be 1.0: {adv[0]}"
+    print("  PASS  test_advantage_absolute")
+
+
+def test_advantage_softmax():
+    """Softmax mode: rank 1 gets disproportionately high weight."""
+    from rlvr.reward import compute_group_advantages, RewardBreakdown
+    rewards = [RewardBreakdown(safety=0, progress=0, smoothness=0, feasibility=0, centerline=0,
+                               red_light=0, total=t, collision_step=None, off_road_fraction=0)
+               for t in [+20, +5, 0, -10, -30]]
+    adv = compute_group_advantages(rewards, mode="softmax", fixed_scale=5.0)
+    # Rank 1 should have the highest advantage
+    assert adv[0] > adv[1], f"Rank 1 should beat rank 2: {adv[0]} vs {adv[1]}"
+    # Rank 1 should be much larger than rank 2 (softmax concentrates)
+    assert adv[0] > 2 * adv[1], f"Softmax T=5 should concentrate on rank 1: {adv[0]} vs {adv[1]}"
+    # Last rank should be negative (centered)
+    assert adv[-1] < 0, f"Worst trajectory should have negative advantage: {adv[-1]}"
+    print("  PASS  test_advantage_softmax")
+
+
 if __name__ == "__main__":
     tests = [
         test_no_collision_straight_line,
@@ -831,6 +862,8 @@ if __name__ == "__main__":
         test_advantage_positive_only,
         test_lane_departure_in_lane,
         test_lane_departure_out_of_lane,
+        test_advantage_absolute,
+        test_advantage_softmax,
     ]
 
     print("=" * 60)

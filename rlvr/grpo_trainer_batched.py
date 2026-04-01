@@ -285,7 +285,7 @@ def train_epoch_batched(
     # E.g., lane_dep_trim_n=10 drops the 10 scenes where most trajectories leave lane.
     lane_trim = config.lane_dep_trim_n
     if lane_trim > 0 and N_kept > lane_trim:
-        # Sort by lane_dep_frac descending, drop the worst lane_trim scenes
+        # Sort by lane_dep_frac ascending, drop the worst lane_trim scenes (highest fractions)
         sorted_idx = sorted(range(N_kept), key=lambda j: kept_lane_dep_fracs[j])
         keep_idx = sorted_idx[:N_kept - lane_trim]
         n_dropped = N_kept - len(keep_idx)

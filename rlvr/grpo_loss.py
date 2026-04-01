@@ -310,6 +310,8 @@ def compute_batched_trajectory_losses(
 
     # Fill neighbor GT from data (matches SFT)
     Pn = P - 1
+    neighbor_future_valid = None
+    nf_pn = 0
     if Pn > 0 and "neighbor_agents_future" in batch_data:
         nf = batch_data["neighbor_agents_future"]  # [N, Pn_data, T, 3+]
         nf_pn = min(nf.shape[1], Pn)
@@ -319,25 +321,9 @@ def compute_batched_trajectory_losses(
         nf_4d[..., :2] = nf_xy
         nf_4d_norm = (nf_4d - ego_mean) / ego_std
         gt_future[:, 1:1 + nf_pn, :, :] = nf_4d_norm
-
-    # Neighbor validity mask — zero out invalid neighbors (matches SFT decoder.py line 108)
-    neighbor_future_valid = None
-    if Pn > 0 and "neighbor_agents_future" in batch_data:
-        nf = batch_data["neighbor_agents_future"]
-        nf_pn = min(nf.shape[1], Pn)
+        # Track validity for neighbor loss
         if nf.shape[-1] >= 3:
-            # Valid flag is typically indicated by non-zero xy
             neighbor_future_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)  # [N, Pn', T]
-        # Zero out invalid neighbor positions in gt_future
-        neighbors_current = batch_data["neighbor_agents_past"][:, :Pn, -1, :4]
-        neighbor_current_mask = (neighbors_current[..., :4].abs().sum(dim=-1) == 0)  # [N, Pn]
-        neighbor_future_mask = ~neighbor_future_valid if neighbor_future_valid is not None else torch.ones(N, nf_pn, future_len, dtype=torch.bool, device=device)
-        # Build full mask [N, Pn, T+1] and zero out
-        full_mask = torch.cat([neighbor_current_mask.unsqueeze(-1), neighbor_future_mask], dim=-1)  # [N, Pn, T+1]
-        gt_future_with_current = torch.cat([
-            torch.zeros(N, Pn, 1, 4, device=device),  # placeholder, will be overwritten
-            gt_future[:, 1:1 + nf_pn]
-        ], dim=2)  # not used directly, mask applied below
 
     # Current states — normalized (matches SFT decoder.py line 60-67)
     ego_current = batch_data["ego_current_state"][:, :4]  # [N, 4]
