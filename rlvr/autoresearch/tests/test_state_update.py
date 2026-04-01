@@ -55,10 +55,10 @@ def _make_scene_data(device: torch.device = torch.device("cpu")) -> dict[str, to
         lanes[0, 0, pt, 0] = x       # center X
         lanes[0, 0, pt, 1] = 0.0     # center Y
         lanes[0, 0, pt, 2] = 1.0     # direction dX
-        lanes[0, 0, pt, 4] = x       # left boundary X
-        lanes[0, 0, pt, 5] = 1.75    # left boundary Y
-        lanes[0, 0, pt, 6] = x       # right boundary X
-        lanes[0, 0, pt, 7] = -1.75   # right boundary Y
+        lanes[0, 0, pt, 4] = 0.0     # left boundary dX (offset from center)
+        lanes[0, 0, pt, 5] = 1.75    # left boundary dY (offset from center)
+        lanes[0, 0, pt, 6] = 0.0     # right boundary dX (offset from center)
+        lanes[0, 0, pt, 7] = -1.75   # right boundary dY (offset from center)
     data["lanes"] = lanes
 
     # Route lanes (same structure)

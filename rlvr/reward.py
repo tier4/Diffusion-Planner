@@ -982,10 +982,12 @@ def compute_smoothness_score_batch(
         return torch.zeros(N, device=ego_trajs.device)
 
     # Build kernel once, cache on correct device
-    if _SG_JERK_KERNEL is None or _SG_JERK_KERNEL.device != ego_trajs.device:
+    _cache_key = (ego_trajs.device, config.dt)
+    if _SG_JERK_KERNEL is None or (_SG_JERK_KERNEL.device, _SG_JERK_KERNEL._cache_dt) != _cache_key:
         _SG_JERK_KERNEL = _build_sg_diff_kernel(
             window=11, poly=3, deriv=3, delta=config.dt
         ).to(ego_trajs.device)
+        _SG_JERK_KERNEL._cache_dt = config.dt
 
     kernel = _SG_JERK_KERNEL  # [11]
     pad = kernel.shape[0] // 2
@@ -1274,7 +1276,7 @@ def compute_road_border_penalty(
     # penalty = mean over timesteps of max(0, 1 - dist/_CONT_THRESH)
     # This creates a linear gradient pulling the trajectory away from the border
     _CONT_THRESH = 0.80
-    cont_penalty = (1.0 - per_timestep_min[:, 1:] / _CONT_THRESH).clamp(min=0).mean(dim=1)  # (N,)
+    cont_penalty = (1.0 - per_timestep_min[:, 1:] / _CONT_THRESH).clamp(min=0, max=1).mean(dim=1)  # (N,)
 
     return crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty
 
@@ -1458,7 +1460,9 @@ def compute_lane_departure_penalty(
     # Skip t=0
     per_ts_min[:, 0] = 10.0
 
-    # Crossing gate: any timestep with clearance < 10cm = lane departure
+    # Crossing gate: clearance is positive when inside lane, negative when outside.
+    # Threshold is +0.10m (conservative): triggers when within 10cm of edge OR outside,
+    # treating near-edge trajectories as lane departures for safety margin.
     is_crossing = per_ts_min < _LANE_CROSS_THRESH
     has_crossing = is_crossing.any(dim=1)
     crossing_gate = (~has_crossing).float()
@@ -1470,7 +1474,7 @@ def compute_lane_departure_penalty(
     wide_frac = (per_ts_min[:, 1:] < _LANE_WIDE_THRESH).float().mean(dim=1)
 
     # Continuous proximity penalty
-    cont_penalty = (1.0 - per_ts_min[:, 1:] / _LANE_CONT_THRESH).clamp(min=0).mean(dim=1)
+    cont_penalty = (1.0 - per_ts_min[:, 1:] / _LANE_CONT_THRESH).clamp(min=0, max=1).mean(dim=1)
 
     return crossing_gate, near_frac, wide_frac, cont_penalty
 
