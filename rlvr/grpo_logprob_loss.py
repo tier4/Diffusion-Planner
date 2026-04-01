@@ -426,16 +426,37 @@ def compute_logprob_grpo_loss(
     total_loss = rl_loss + il_weight * il_loss
 
     # KL regularization against reference model (optional)
+    # If ref_model is None but model has LoRA adapters, use disable_adapter()
+    # to get the SFT reference model's log-probs.
     kl_loss = torch.tensor(0.0, device=device)
-    if ref_model is not None and config.kl_coef > 0:
-        # Run reference model on same chain, compute log-probs
-        ref_log_probs = _compute_ref_log_probs(
-            ref_model, chain, schedule, batch_data, traj_norm, all_gt,
-            model_args, config, device, sde
-        )
-        # KL ≈ mean(policy_logp - ref_logp)
-        kl_loss = (log_probs - ref_log_probs).mean()
-        total_loss = total_loss + config.kl_coef * kl_loss
+    if config.kl_coef > 0:
+        if ref_model is not None:
+            ref_for_kl = ref_model
+        elif hasattr(model, 'disable_adapter_layers'):
+            # LoRA model: use base model (adapters disabled) as reference
+            ref_for_kl = model  # will be called with disable_adapter context
+        else:
+            ref_for_kl = None
+
+        if ref_for_kl is not None:
+            if ref_for_kl is model and hasattr(model, 'disable_adapter_layers'):
+                # Use LoRA's disable_adapter context for reference pass
+                model.disable_adapter_layers()
+                try:
+                    ref_log_probs = _compute_ref_log_probs(
+                        model, chain, schedule, batch_data, traj_norm, all_gt,
+                        model_args, config, device, sde
+                    )
+                finally:
+                    model.enable_adapter_layers()
+            else:
+                ref_log_probs = _compute_ref_log_probs(
+                    ref_for_kl, chain, schedule, batch_data, traj_norm, all_gt,
+                    model_args, config, device, sde
+                )
+            # KL ≈ mean(policy_logp - ref_logp)
+            kl_loss = (log_probs - ref_log_probs.detach()).mean()
+            total_loss = total_loss + config.kl_coef * kl_loss
 
     metrics = {
         "rl_loss": rl_loss.item(),
