@@ -301,9 +301,42 @@ def compute_batched_trajectory_losses(
     ego_std = model_args.state_normalizer.std[0].to(device)
     gt_traj_norm = (trajectories_tensor - ego_mean) / ego_std
 
-    # Build gt_future: [N, P, T, 4] with ego trajectory only
+    # Build gt_future: [N, P, T, 4] with ego + neighbor GT
+    # Ego uses the GRPO sampled trajectory; neighbors use their actual GT futures.
+    # This matches SFT (decoder.py line 84-86) and provides neighbor regularization.
     gt_future = torch.zeros(N, P, future_len, 4, device=device)
     gt_future[:, 0, :, :] = gt_traj_norm
+
+    # Fill neighbor GT from data (matches SFT)
+    Pn = P - 1
+    if Pn > 0 and "neighbor_agents_future" in batch_data:
+        nf = batch_data["neighbor_agents_future"]  # [N, Pn_data, T, 3+]
+        nf_pn = min(nf.shape[1], Pn)
+        # neighbor_agents_future has [x, y, valid] — pad to 4 dims with zeros for heading
+        nf_xy = nf[:, :nf_pn, :future_len, :2]  # [N, Pn', T, 2]
+        nf_4d = torch.zeros(N, nf_pn, future_len, 4, device=device)
+        nf_4d[..., :2] = nf_xy
+        nf_4d_norm = (nf_4d - ego_mean) / ego_std
+        gt_future[:, 1:1 + nf_pn, :, :] = nf_4d_norm
+
+    # Neighbor validity mask — zero out invalid neighbors (matches SFT decoder.py line 108)
+    neighbor_future_valid = None
+    if Pn > 0 and "neighbor_agents_future" in batch_data:
+        nf = batch_data["neighbor_agents_future"]
+        nf_pn = min(nf.shape[1], Pn)
+        if nf.shape[-1] >= 3:
+            # Valid flag is typically indicated by non-zero xy
+            neighbor_future_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)  # [N, Pn', T]
+        # Zero out invalid neighbor positions in gt_future
+        neighbors_current = batch_data["neighbor_agents_past"][:, :Pn, -1, :4]
+        neighbor_current_mask = (neighbors_current[..., :4].abs().sum(dim=-1) == 0)  # [N, Pn]
+        neighbor_future_mask = ~neighbor_future_valid if neighbor_future_valid is not None else torch.ones(N, nf_pn, future_len, dtype=torch.bool, device=device)
+        # Build full mask [N, Pn, T+1] and zero out
+        full_mask = torch.cat([neighbor_current_mask.unsqueeze(-1), neighbor_future_mask], dim=-1)  # [N, Pn, T+1]
+        gt_future_with_current = torch.cat([
+            torch.zeros(N, Pn, 1, 4, device=device),  # placeholder, will be overwritten
+            gt_future[:, 1:1 + nf_pn]
+        ], dim=2)  # not used directly, mask applied below
 
     # Current states — normalized (matches SFT decoder.py line 60-67)
     ego_current = batch_data["ego_current_state"][:, :4]  # [N, 4]
@@ -316,6 +349,17 @@ def compute_batched_trajectory_losses(
     current_states = torch.cat([ego_current_norm[:, None], neighbors_current_norm], dim=1)
 
     all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [N, P, T+1, 4]
+
+    # Zero out invalid neighbor entries in all_gt (matches SFT decoder.py line 108)
+    if Pn > 0:
+        neighbor_current_mask_final = (batch_data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0)  # [N, Pn]
+        if "neighbor_agents_future" in batch_data:
+            nf = batch_data["neighbor_agents_future"]
+            nf_pn = min(nf.shape[1], Pn)
+            nf_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)
+            nf_mask = ~nf_valid  # [N, Pn', T]
+            full_neighbor_mask = torch.cat([neighbor_current_mask_final[:, :nf_pn].unsqueeze(-1), nf_mask], dim=-1)  # [N, Pn', T+1]
+            all_gt[:, 1:1 + nf_pn][full_neighbor_mask.unsqueeze(-1).expand_as(all_gt[:, 1:1 + nf_pn])] = 0.0
 
     # Diffusion noise with prefix masking — matches SFT (decoder.py line 111-116)
     mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
@@ -339,14 +383,36 @@ def compute_batched_trajectory_losses(
     _, outputs = model(merged)
 
     if "model_output" in outputs:
-        model_output = outputs["model_output"][:, 0, 1:, :]  # [N, T, 4]
+        full_output = outputs["model_output"][:, :, 1:, :]  # [N, P, T, 4]
     else:
-        model_output = outputs["prediction"][:, 0]
+        full_output = outputs["prediction"]  # [N, P, T, 4]
 
-    gt_target = all_gt[:, 0, 1:, :]  # [N, T, 4]
+    full_gt = all_gt[:, :, 1:, :]  # [N, P, T, 4]
 
-    # Per-trajectory MSE loss: [N]
-    per_traj_loss = F.mse_loss(model_output, gt_target, reduction='none').mean(dim=(1, 2))
+    # Ego loss: [N]
+    ego_output = full_output[:, 0]  # [N, T, 4]
+    ego_gt = full_gt[:, 0]  # [N, T, 4]
+    per_traj_ego_loss = F.mse_loss(ego_output, ego_gt, reduction='none').mean(dim=(1, 2))
+
+    # Neighbor regularization loss: per-trajectory MSE on valid neighbor predictions.
+    # This prevents the LoRA from distorting neighbor predictions, which feeds back
+    # into the joint denoising and corrupts ego output over time.
+    # Weight = 0.5 to keep ego as primary signal.
+    _NEIGHBOR_LOSS_WEIGHT = 0.5
+    if P > 1 and neighbor_future_valid is not None:
+        neighbor_output = full_output[:, 1:1 + nf_pn]  # [N, Pn', T, 4]
+        neighbor_gt = full_gt[:, 1:1 + nf_pn]  # [N, Pn', T, 4]
+        neighbor_mse = F.mse_loss(neighbor_output, neighbor_gt, reduction='none')  # [N, Pn', T, 4]
+        # Mask invalid neighbors to zero
+        valid_mask = neighbor_future_valid.unsqueeze(-1).expand_as(neighbor_mse)  # [N, Pn', T, 4]
+        neighbor_mse = neighbor_mse * valid_mask.float()
+        # Per-trajectory neighbor loss: [N] — average over valid neighbors, timesteps, dims
+        n_valid_per_traj = valid_mask.float().sum(dim=(1, 2, 3)).clamp(min=1)
+        per_traj_neighbor_loss = neighbor_mse.sum(dim=(1, 2, 3)) / n_valid_per_traj
+        per_traj_loss = per_traj_ego_loss + _NEIGHBOR_LOSS_WEIGHT * per_traj_neighbor_loss
+    else:
+        per_traj_loss = per_traj_ego_loss
+
     return per_traj_loss
 
 
