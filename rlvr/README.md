@@ -15,13 +15,19 @@ The GRPO pipeline differs from the existing DPO pipeline in two key ways:
 
 ```
 rlvr/
-  reward.py                  Rule-based reward (road border + safety + progress + feasibility)
+  reward.py                  Rule-based reward (road border + safety + progress + feasibility
+                             + lane departure detection with K=3 nearest centerlines)
   grpo_loss.py               Advantage-weighted diffusion loss with PPO clipping + KL
                              + compute_batched_grpo_loss for N-trajectory batched loss
+                             + compute_batched_trajectory_losses for SFT regression
   grpo_config.py             Dataclass config with JSON serialization
-  grpo_trainer.py            Standard GRPO training loop
-  grpo_exploration_trainer.py  Joint GRPO + exploration policy trainer (batched K trajectories)
+                             + random_guidance_mode, lane departure config
+  grpo_trainer.py            Standard GRPO training loop (batched loss)
+  grpo_trainer_batched.py    Fully batched GRPO trainer (all scenes in ~5 forward passes)
+  grpo_exploration_trainer.py  Joint GRPO + exploration policy trainer
+                             + random_guidance_mode: skip explorer, sample η directly
   grpo_sampler.py            Diverse trajectory generation with random noise + guidance
+  grpo_sampler_batched.py    CL+SPD focused sampler (deterministic + guided + random)
   configs/
     grpo_onpolicy.json       Recommended on-policy config (best for v4)
     grpo_zi_300sc.json       Zero-init exploration + Block 0 LoRA (best baseline)
@@ -41,6 +47,12 @@ rlvr/
     visualize_scenes.py      Scene visualization with road borders + ego footprints
     eval_border_distance.py  Miraikan border distance metrics
     README.md                Full autoresearch documentation
+  cleanse_lane_scenes.py     Filter scenes by t=0 lane/border clearance
+  diagnose_grpo_signal.py    Diagnose per-scene GRPO reward signal (batched)
+  eval_lane_border_distance.py  Combined lane departure + border distance eval
+  eval_reward_vs_gt.py       Per-scene reward breakdown vs ground truth
+  eval_teleport_metrics.py   Teleport speed/lat_accel/path metrics
+  viz_guidance_actual.py     Visualize actual DiT inference with/without guidance
   test_reward.py             Unit tests for reward (no model needed)
   test_grpo_sampler.py       Unit tests for sampler (needs model for full suite)
 ```
@@ -49,11 +61,26 @@ rlvr/
 
 | Mode | Config | Trainer | Description |
 |------|--------|---------|-------------|
-| Standard GRPO | `use_exploration_policy: false` | `GRPOTrainer` | Random sampling, GRPO loss |
-| Explorer (open-loop) | `use_exploration_policy: true` | `GRPOExplorationTrainer` | Learned Beta guidance + GRPO |
+| Standard GRPO | `use_exploration_policy: false` | `GRPOTrainer` → `train_epoch_batched` | Fully batched, ~5 forward passes per epoch |
+| Random guidance | `use_exploration_policy: true, random_guidance_mode: "uniform"` | `GRPOExplorationTrainer` | Random η ∈ [-1,1] lateral/longitudinal guidance. **Best mode.** |
+| Explorer (open-loop) | `use_exploration_policy: true, random_guidance_mode: "explorer"` | `GRPOExplorationTrainer` | Learned Beta guidance + GRPO |
 | Explorer (closed-loop) | `use_closed_loop: true` | `ClosedLoopExplorationTrainer` | Per-step rollout + GAE + GRPO |
 
 All modes support GPU-batched trajectory generation and evaluation.
+
+### Random Guidance Mode
+
+The `random_guidance_mode` config replaces the learned exploration policy with direct η sampling:
+
+| Mode | η distribution | Notes |
+|------|---------------|-------|
+| `"uniform"` | U[-1, 1] | **Recommended.** Matches zero-init explorer, +2 pts over no guidance |
+| `"gaussian"` | N(0, 0.3) clipped | Similar to uniform, slightly worse on rb_cross |
+| `"narrow"` | U[-0.5, 0.5] | Too little diversity, -7 pts vs uniform |
+| `"none"` | η = 0 always | No lateral/longitudinal guidance, pure noise diversity |
+| `"explorer"` | Learned Beta | Default. Explorer never learns, matches uniform output |
+
+When mode ≠ "explorer", the 227K-param exploration policy network is not loaded.
 
 ## Batching
 
@@ -142,6 +169,18 @@ Time-weighted mean with early deviations penalized more.
 
 All weights are tunable in the GUI without regenerating trajectories. The reward table shows
 weighted values (column * weight) so that columns add up to the total.
+
+### Lane Departure Detection
+
+`compute_lane_departure_penalty()` detects when the ego vehicle leaves its lane:
+
+1. Find K=3 nearest centerlines from **different lane segments** (not just closest points)
+2. For each of 80 ego perimeter sample points, check containment against all K lanes
+3. Thresholds: crossing (>10cm outside), near (>25cm), wide (>40cm), continuous (>80cm)
+4. Returns `lane_crossing` (bool) and `lane_near_frac` (fraction of perimeter points near edge)
+
+Enabled via `enable_lane_departure: true` in config. Can be used as gate (hard penalty)
+or soft penalty via `lane_near_scale`, `lane_wide_scale`, `lane_cont_scale`.
 
 ### Group Advantages
 
