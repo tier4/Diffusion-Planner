@@ -238,6 +238,7 @@ def train_epoch_batched(
     kept_advantages = []
     kept_mean_rewards = []
     kept_norm_data = []
+    kept_raw_data = []  # raw (unnormalized) per-scene data for logprob path
     kept_lane_dep_fracs = []  # fraction of K trajs that depart lane per scene
 
     for i in tqdm(range(N), desc="Scoring"):
@@ -276,6 +277,9 @@ def train_epoch_batched(
             else:
                 norm_i[k] = v
         kept_norm_data.append(norm_i)
+        # Also keep raw data for logprob path (needs unnormalized data)
+        if config.grpo_loss_type == "logprob":
+            kept_raw_data.append(data_i)
 
     N_kept = len(kept_trajs)
     if N_kept == 0:
@@ -296,6 +300,8 @@ def train_epoch_batched(
         kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
         kept_lane_dep_fracs = [kept_lane_dep_fracs[j] for j in keep_idx]
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
+        if config.grpo_loss_type == "logprob":
+            kept_raw_data = [kept_raw_data[j] for j in keep_idx]
         print(f"  Lane-dep trim: dropped {n_dropped} worst scenes "
               f"(avg_dep={avg_dep_dropped:.0%}), keeping {len(kept_trajs)} "
               f"(avg_dep={avg_dep_kept:.0%})")
@@ -312,20 +318,134 @@ def train_epoch_batched(
         kept_advantages = [kept_advantages[j] for j in keep_idx]
         kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
+        if config.grpo_loss_type == "logprob":
+            kept_raw_data = [kept_raw_data[j] for j in keep_idx]
         print(f"  Trimmed {2*n_trim} scenes, keeping {len(kept_trajs)}/{N_kept}")
         N_kept = len(kept_trajs)
 
-    # 5. Batched GRPO training: stack all scenes into one forward pass
+    # 5. Training
+    if config.grpo_loss_type == "logprob":
+        return _train_logprob(
+            model, model_args, optimizer, config,
+            kept_trajs, kept_advantages, kept_raw_data,
+            N, N_kept, device,
+        )
+    else:
+        return _train_mse(
+            model, model_args, optimizer, config,
+            kept_trajs, kept_advantages, kept_norm_data,
+            N_kept, device,
+        )
+
+
+def _train_logprob(
+    model, model_args, optimizer, config,
+    kept_trajs, kept_advantages, kept_raw_data,
+    N_total, N_kept, device,
+):
+    """DDV2-style logprob GRPO: per-scene collect + train."""
+    from rlvr.grpo_logprob_loss import collect_logprob_rollout, compute_logprob_grpo_loss
+
+    print(f"  Training on {N_kept} scenes (logprob GRPO)...")
+
+    # Stage 1: Collect rollouts for all scenes (no grad)
+    # Uses raw (unnormalized) data — collect_logprob_rollout normalizes internally
+    print(f"  Collecting denoising rollouts...")
+    rollouts = []
+    model.eval()
+    for i in tqdm(range(N_kept), desc="Collecting"):
+        raw_data_i = kept_raw_data[i]
+        # Ensure B=1 format
+        data_i = {}
+        for k, v in raw_data_i.items():
+            if isinstance(v, torch.Tensor):
+                data_i[k] = v[:1] if v.shape[0] > 1 else v
+            else:
+                data_i[k] = v
+        rollout = collect_logprob_rollout(
+            model=model,
+            data=data_i,
+            trajectories=kept_trajs[i],
+            model_args=model_args,
+            config=config,
+            device=device,
+        )
+        rollouts.append(rollout)
+
+    # Stage 2: Optimize using collected rollouts
+    print(f"  Optimizing...")
+    model.train()
+    optimizer.zero_grad()
+    all_metrics = {}
+    n_scenes = 0
+    accum_count = 0
+
+    for i in tqdm(range(N_kept), desc="Training"):
+        raw_data_i = kept_raw_data[i]
+        data_i = {}
+        for k, v in raw_data_i.items():
+            if isinstance(v, torch.Tensor):
+                data_i[k] = v[:1] if v.shape[0] > 1 else v
+            else:
+                data_i[k] = v
+
+        loss, metrics = compute_logprob_grpo_loss(
+            model=model,
+            rollout=rollouts[i],
+            advantages=kept_advantages[i],
+            data=data_i,
+            model_args=model_args,
+            config=config,
+            device=device,
+        )
+
+        scaled_loss = loss / config.grad_accum_groups
+        scaled_loss.backward()
+        accum_count += 1
+
+        for k, v in metrics.items():
+            all_metrics[k] = all_metrics.get(k, 0.0) + v
+        n_scenes += 1
+
+        if accum_count >= config.grad_accum_groups:
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad],
+                max_norm=5.0,
+            )
+            optimizer.step()
+            optimizer.zero_grad()
+            accum_count = 0
+
+    # Flush remaining — rescale gradients for incomplete last group
+    if accum_count > 0:
+        if accum_count < config.grad_accum_groups:
+            scale_fix = config.grad_accum_groups / accum_count
+            for p in model.parameters():
+                if p.requires_grad and p.grad is not None:
+                    p.grad.mul_(scale_fix)
+        torch.nn.utils.clip_grad_norm_(
+            [p for p in model.parameters() if p.requires_grad],
+            max_norm=5.0,
+        )
+        optimizer.step()
+        optimizer.zero_grad()
+
+    return {k: v / max(n_scenes, 1) for k, v in all_metrics.items()}
+
+
+def _train_mse(
+    model, model_args, optimizer, config,
+    kept_trajs, kept_advantages, kept_norm_data,
+    N_kept, device,
+):
+    """Original MSE-based batched GRPO training."""
     print(f"  Training on {N_kept} scenes (batched GRPO)...")
     keep_per = kept_trajs[0].shape[0]
 
-    # Process one scene at a time: matches sequential trainer's gradient behavior.
-    # Each scene's loss is normalized by keep_per trajs only (not cross-scene).
     chunk_size = 1
     model.train()
     optimizer.zero_grad()
 
-    total_loss = 0.0
     all_metrics = {}
     n_chunks = 0
     accum_count = 0
@@ -338,11 +458,9 @@ def train_epoch_batched(
         c_norms = kept_norm_data[c_start:c_end]
         c_n = len(c_trajs)
 
-        # Stack trajectories: [c_n * keep_per, T, 4]
         all_kept = torch.cat(c_trajs, dim=0)
         all_adv = np.concatenate(c_advs)
 
-        # Stack norm data
         merged_norm = {}
         for k in c_norms[0]:
             vals = [d[k] for d in c_norms]
@@ -362,8 +480,6 @@ def train_epoch_batched(
             device=device,
         )
 
-        # Scale loss by chunk size for correct accumulation.
-        # Track actual accumulation count to handle last incomplete group correctly.
         accum_count += 1
         scaled_loss = loss * c_n / accum_count_target
         scaled_loss.backward()
@@ -372,14 +488,10 @@ def train_epoch_batched(
             all_metrics[k] = all_metrics.get(k, 0.0) + v
         n_chunks += 1
 
-        # Step optimizer every grad_accum_groups chunks, or at the end.
         is_accum_boundary = (c_end % (chunk_size * config.grad_accum_groups) == 0)
         is_last = (c_end == N_kept)
         if is_accum_boundary or is_last:
             if is_last and not is_accum_boundary and accum_count < accum_count_target:
-                # Last incomplete group: re-scale gradients to correct for under-accumulation.
-                # We accumulated `accum_count` gradients each divided by `accum_count_target`.
-                # Multiply by (accum_count_target / accum_count) to compensate.
                 scale_fix = accum_count_target / accum_count
                 for p in model.parameters():
                     if p.requires_grad and p.grad is not None:

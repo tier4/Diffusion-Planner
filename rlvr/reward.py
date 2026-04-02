@@ -698,20 +698,54 @@ def compute_feasibility_score_batch(
     # --- Lateral acceleration check ---
     # Penalize lateral acceleration exceeding what a human driver produces.
     # GT trajectories peak at ~2.5 m/s²; the model reaches 3.5 m/s² on curves.
-    # NOTE: This uses double finite diff which inflates values ~5x vs curvature-based.
-    # For accurate REPORTING use eval_driving_metrics.py. But do NOT change this
-    # penalty — it was used for all prior successful training runs (p4e, p6m etc).
+    # Uses Savitzky-Golay filtered derivatives via torch conv1d (GPU, no CPU round-trip).
+    # lat_accel = |v × a| / |v| (cross product formula for curvature × speed²)
     _MAX_LAT_ACCEL = config.max_lat_accel
     _LAT_ACCEL_SCALE = config.lat_accel_scale
-    if vel.shape[1] >= 2:
-        accel_vec = torch.diff(vel, dim=1) / config.dt  # (N, T-2, 2)
-        heading = vel[:, :-1]  # (N, T-2, 2)
-        heading_norm = heading / (heading.norm(dim=-1, keepdim=True).clamp_min(1e-6))
-        lat_dir = torch.stack([-heading_norm[..., 1], heading_norm[..., 0]], dim=-1)
-        lat_accel = (accel_vec * lat_dir).sum(dim=-1)  # (N, T-2)
-        if lat_accel.shape[1] > 2:
-            lat_accel_trimmed = lat_accel[:, 2:]
-            lat_violations = torch.relu(lat_accel_trimmed.abs() - _MAX_LAT_ACCEL)
+    if T >= 5:
+        global _SG_VEL_KERNEL, _SG_ACCEL_KERNEL, _SG_LAT_CACHE_KEY
+        _sg_window = min(11, T - (1 if T % 2 == 0 else 0))
+        if _sg_window >= 5:
+            _lat_cache_key = (device, config.dt, _sg_window)
+            if _SG_VEL_KERNEL is None or _SG_LAT_CACHE_KEY != _lat_cache_key:
+                _SG_VEL_KERNEL = _build_sg_diff_kernel(
+                    window=_sg_window, poly=3, deriv=1, delta=config.dt
+                ).to(device)
+                _SG_ACCEL_KERNEL = _build_sg_diff_kernel(
+                    window=_sg_window, poly=3, deriv=2, delta=config.dt
+                ).to(device)
+                _SG_LAT_CACHE_KEY = _lat_cache_key
+
+            pad = _sg_window // 2
+            # pos: [N, T, 2] -> [N, 2, T] for conv1d
+            pos_2d = pos.detach().permute(0, 2, 1)  # [N, 2, T]
+            pos_padded = torch.nn.functional.pad(pos_2d, (pad, pad), mode='replicate')
+
+            # Velocity via SG deriv=1
+            vel_sg = torch.nn.functional.conv1d(
+                pos_padded, _SG_VEL_KERNEL.view(1, 1, -1).expand(2, 1, -1), groups=2
+            )  # [N, 2, T]
+            # Acceleration via SG deriv=2
+            accel_sg = torch.nn.functional.conv1d(
+                pos_padded, _SG_ACCEL_KERNEL.view(1, 1, -1).expand(2, 1, -1), groups=2
+            )  # [N, 2, T]
+
+            vx, vy = vel_sg[:, 0], vel_sg[:, 1]  # [N, T]
+            ax_sg, ay_sg = accel_sg[:, 0], accel_sg[:, 1]  # [N, T]
+            speed_sg = (vx ** 2 + vy ** 2).sqrt()  # [N, T]
+
+            # lat_accel = |vx*ay - vy*ax| / max(|v|, 0.5)
+            cross = (vx * ay_sg - vy * ax_sg).abs()
+            lat_accel_sg = cross / speed_sg.clamp(min=0.5)
+            # Zero out low-speed regions
+            lat_accel_sg = torch.where(speed_sg > 0.5, lat_accel_sg, torch.zeros_like(lat_accel_sg))
+
+            # Trim SG edge artifacts (pad from each side)
+            if lat_accel_sg.shape[1] > 2 * pad + 1:
+                lat_accel_trimmed = lat_accel_sg[:, pad:-pad]
+            else:
+                lat_accel_trimmed = lat_accel_sg
+            lat_violations = torch.relu(lat_accel_trimmed - _MAX_LAT_ACCEL)
             scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
 
     # --- Lane boundary check ---
@@ -960,14 +994,29 @@ def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta
 
     Returns a 1D convolution kernel that computes the deriv-th derivative
     using a local polynomial fit over `window` points.
+    Pure numpy implementation — no scipy dependency.
     """
-    from scipy.signal import savgol_coeffs
-    coeffs = savgol_coeffs(window, poly, deriv=deriv, delta=delta)
-    return torch.tensor(coeffs, dtype=torch.float32).flip(0)  # flip for conv1d
+    # SG coefficients via least-squares polynomial fitting
+    half = window // 2
+    x = np.arange(-half, half + 1, dtype=np.float64)
+    # Build Vandermonde matrix
+    A = np.vander(x, N=poly + 1, increasing=True)  # [window, poly+1]
+    # Pseudo-inverse gives the coefficient extraction matrix
+    pinv = np.linalg.pinv(A)  # [poly+1, window]
+    # The deriv-th row of pinv gives smoothing coefficients for the deriv-th derivative
+    import math as _math
+    coeffs = pinv[deriv] * _math.factorial(deriv) / (delta ** deriv)
+    # Reverse to match convolution convention (scipy savgol_coeffs convention)
+    return torch.tensor(coeffs.copy(), dtype=torch.float32).flip(0)  # flip for conv1d
 
 # Precompute SG jerk kernel; cache by (device, dt)
 _SG_JERK_KERNEL = None
 _SG_JERK_CACHE_KEY = None
+
+# Precompute SG velocity/acceleration kernels for lat_accel; cache by (device, dt, window)
+_SG_VEL_KERNEL = None
+_SG_ACCEL_KERNEL = None
+_SG_LAT_CACHE_KEY = None
 
 def compute_smoothness_score_batch(
     ego_trajs: torch.Tensor,
@@ -1013,6 +1062,9 @@ def compute_smoothness_score_batch(
     )  # [N, 2, T]
 
     jerk_mag = jerk.norm(dim=1)  # [N, T]
+    # Trim SG edge artifacts (pad from each side)
+    if jerk_mag.shape[1] > 2 * pad + 1:
+        jerk_mag = jerk_mag[:, pad:-pad]
     return -jerk_mag.mean(dim=1)  # [N]
 
 
@@ -1862,8 +1914,28 @@ def compute_group_advantages(
             return np.zeros(len(rewards))
         advantages = (totals - mean) / (std + epsilon)
         return np.maximum(advantages, 0.0)
+    elif mode == "ddv2":
+        # DDV2-style Inter-Anchor Truncated GRPO (paper Eq. 8):
+        # 1. Standard intra-group normalization
+        # 2. Clip ALL negative advantages to 0 (only reward improvements)
+        # 3. Hard -1 penalty for safety violations (collision, off-road, lane departure)
+        # This provides a clear learning signal: reward relative improvements,
+        # but only penalize absolute failures.
+        std = totals.std()
+        if std < epsilon:
+            advantages = np.zeros(len(rewards))
+        else:
+            advantages = (totals - mean) / (std + epsilon)
+        # Clip negative to 0
+        advantages = np.maximum(advantages, 0.0)
+        # Hard -1 for safety violations
+        for i, rb in enumerate(rewards):
+            if rb.collision_step is not None or rb.rb_crossing or rb.lane_crossing:
+                advantages[i] = -1.0
+        return advantages
     else:
         raise ValueError(
             f"Unknown advantage mode: {mode!r}. "
-            f"Expected 'normalized', 'vd_grpo', 'raw', 'absolute', 'softmax', or 'positive_only'."
+            f"Expected 'normalized', 'vd_grpo', 'raw', 'absolute', 'softmax', "
+            f"'positive_only', or 'ddv2'."
         )

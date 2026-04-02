@@ -127,6 +127,17 @@ class GRPOConfig:
     diffusion_t_range: list[float] = field(default_factory=lambda: [0.001, 0.1])
     diffusion_k_steps: int = 8  # K (noise, t) samples averaged per GRPO loss (matches DPO K=8)
 
+    # Log-probability GRPO (DDV2-style). When grpo_loss_type="logprob", the loss
+    # uses actual Gaussian log-probabilities from a truncated denoising rollout
+    # instead of MSE. This enables proper policy gradient for trajectory shape.
+    grpo_loss_type: str = "mse"  # "mse" (current) or "logprob" (DDV2-style)
+    logprob_num_steps: int = 10  # denoising steps for rollout
+    logprob_t_start: float = 0.01  # starting noise level (truncated)
+    logprob_discount: float = 0.8  # per-step advantage discount (DDV2 uses 0.8)
+    logprob_min_std: float = 0.1  # minimum std for log-prob stability (DDV2 supplementary)
+    il_loss_weight: float = 0.1  # IL (imitation learning) regularization weight
+    il_adaptive: bool = True  # if True: IL weight=1.0 when no positive advantages, else il_loss_weight
+
     # Advantage computation mode:
     # "normalized" (default): standard GRPO per-group normalization (mean=0, std=1).
     # "vd_grpo": Variance-Decoupled GRPO (Plan-R1). Center only (subtract mean),

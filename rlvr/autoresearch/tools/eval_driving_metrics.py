@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from scipy.signal import savgol_filter
+from rlvr.reward import _build_sg_diff_kernel
 
 from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
@@ -59,16 +59,25 @@ def lat_accel_current(positions: np.ndarray) -> np.ndarray:
 def lat_accel_smoothed(positions: np.ndarray, window: int = 11, order: int = 3) -> np.ndarray:
     """positions: [T, 2] -> lat_accel: [T] using SG derivative (no finite diff noise).
 
-    Computes velocity and acceleration directly from SG polynomial fit,
-    then projects acceleration onto the lateral (perpendicular to velocity) direction.
+    Uses the same torch conv1d approach as reward.py for consistency.
+    Runs on CPU (no GPU needed for eval).
     """
     if positions.shape[0] < window:
         return lat_accel_current(positions)
-    # SG derivatives: velocity and acceleration directly from polynomial fit
-    vx = savgol_filter(positions[:, 0], window, order, deriv=1, delta=DT)
-    vy = savgol_filter(positions[:, 1], window, order, deriv=1, delta=DT)
-    ax = savgol_filter(positions[:, 0], window, order, deriv=2, delta=DT)
-    ay = savgol_filter(positions[:, 1], window, order, deriv=2, delta=DT)
+    # Use torch conv1d on CPU (same as reward.py for exact consistency)
+    vel_kernel = _build_sg_diff_kernel(window, order, deriv=1, delta=DT)
+    accel_kernel = _build_sg_diff_kernel(window, order, deriv=2, delta=DT)
+    pad = window // 2
+    pos_t = torch.from_numpy(positions).float().unsqueeze(0).permute(0, 2, 1)  # [1, 2, T]
+    pos_padded = torch.nn.functional.pad(pos_t, (pad, pad), mode='replicate')
+    vel_t = torch.nn.functional.conv1d(
+        pos_padded, vel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2)
+    accel_t = torch.nn.functional.conv1d(
+        pos_padded, accel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2)
+    vx = vel_t[0, 0].numpy()
+    vy = vel_t[0, 1].numpy()
+    ax = accel_t[0, 0].numpy()
+    ay = accel_t[0, 1].numpy()
 
     speed = np.sqrt(vx**2 + vy**2).clip(min=1e-6)
     # Lateral acceleration = |v × a| / |v|
@@ -112,8 +121,7 @@ def main():
 
     # Load LoRA if specified
     if args.lora_path:
-        sys.path.insert(0, str(PROJECT_ROOT / "preference_optimization"))
-        from lora_utils import load_lora_checkpoint
+        from preference_optimization.lora_utils import load_lora_checkpoint
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
         print(f"Loaded LoRA from {args.lora_path}")

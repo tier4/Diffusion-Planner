@@ -4,6 +4,14 @@ Infrastructure for Group Relative Policy Optimization (GRPO) training of the Dif
 Generates N diverse trajectories per scene, scores them with a rule-based reward function,
 and computes group-relative normalized advantages.
 
+## Credits
+
+The logprob GRPO implementation is based on **DiffusionDriveV2** by Li et al.:
+- Paper: [DiffusionDriveV2: Multi-Modal Diffusion Policy Model for Closed-Loop Autonomous Driving](https://arxiv.org/abs/2512.07745)
+- Code: [hustvl/DiffusionDriveV2](https://github.com/hustvl/DiffusionDriveV2)
+- Key adaptations: VPSDE noise schedule (vs DDIM), ego-only log-prob (vs per-anchor),
+  mean-normalized log-prob (vs sum), analytical mean-divergence KL (vs IL regularization)
+
 ## Overview
 
 The GRPO pipeline differs from the existing DPO pipeline in two key ways:
@@ -18,25 +26,36 @@ rlvr/
   reward.py                  Rule-based reward (road border + safety + progress + feasibility
                              + lane departure detection with K=3 nearest centerlines
                              + underprogress penalty, GT-normalized progress, survival mode
-                             + lane_crossing_steps as terminal event in survival mode)
-  grpo_loss.py               Advantage-weighted diffusion loss with K=8 (noise,t) averaging
-                             + prefix mask matching SFT training distribution
-                             + optional neighbor prediction regularization
-                             + compute_batched_grpo_loss for N-trajectory batched loss
+                             + lane_crossing_steps as terminal event in survival mode
+                             + SG-filtered lat_accel penalty, SG-trimmed jerk computation)
+  grpo_loss.py               MSE-based advantage-weighted diffusion loss with K=8 averaging
+                             (DEPRECATED — use logprob loss instead for trajectory shape learning)
+  grpo_logprob_loss.py       DDV2-style Gaussian log-probability GRPO loss (NEW)
+                             + Two-stage: collect_logprob_rollout + compute_logprob_grpo_loss
+                             + REINFORCE gradient via truncated VPSDE denoising rollout
+                             + Mean-divergence KL regularization (analytical, properly scaled)
+                             + Adaptive IL regularization
+  vpsde_logprob.py           VPSDE denoising step with Gaussian log-probability (NEW)
+                             + create_timestep_schedule, compute_discount_weights
   grpo_config.py             Dataclass config with JSON serialization
-                             + lane departure, underprogress, progress normalization config
-                             + diffusion_k_steps, neighbor_loss_weight, lane_dep_trim_n
+                             + logprob config: grpo_loss_type, logprob_num_steps, logprob_t_start,
+                               logprob_discount, logprob_min_std, il_loss_weight, il_adaptive
+                             + advantage_mode: "ddv2" (inter-anchor truncated GRPO)
   grpo_trainer.py            Standard GRPO training loop (batched loss)
+                             + logprob loss path when grpo_loss_type="logprob"
   grpo_trainer_batched.py    Fully batched GRPO trainer (all scenes in ~5 forward passes)
-                             + lane_dep_trim_n: drop worst lane-departure scenes per epoch
-                             + fixed gradient accumulation scaling for incomplete last chunks
+                             + logprob loss path with per-scene collect + train
   grpo_exploration_trainer.py  Joint GRPO + exploration policy trainer
-                             + random_guidance_mode: skip explorer, sample η directly
   grpo_sampler.py            Diverse trajectory generation with random noise + guidance
   grpo_sampler_batched.py    Strong CL+SPD sampler (1 det + 8 CL5-10 guided + 7 random)
   configs/
     grpo_onpolicy.json       Recommended on-policy config (best for v4)
     grpo_zi_300sc.json       Zero-init exploration + Block 0 LoRA (best baseline)
+    logprob_curve20_norm.json    Logprob GRPO on 20 miraikan curves (0/20 lane_dep at ep9)
+    logprob_balanced_40sc.json   Logprob GRPO balanced 50/50 prob/normal (val stable)
+  tests/
+    test_vpsde_logprob.py    9 unit tests for log-prob math
+    test_logprob_loss.py     7 unit tests for loss computation
   closed_loop/               Closed-loop explorer training (PlannerRFT-style)
     state_update.py          Scene re-centering after ego moves one step
     per_step_reward.py       Per-step collision, road border, progress reward
@@ -70,12 +89,50 @@ rlvr/
 
 | Mode | Config | Trainer | Description |
 |------|--------|---------|-------------|
-| Standard GRPO | `use_exploration_policy: false` | `GRPOTrainer` → `train_epoch_batched` | Fully batched, ~5 forward passes per epoch |
-| Random guidance | `use_exploration_policy: true, random_guidance_mode: "uniform"` | `GRPOExplorationTrainer` | Random η ∈ [-1,1] lateral/longitudinal guidance. **Best mode.** |
-| Explorer (open-loop) | `use_exploration_policy: true, random_guidance_mode: "explorer"` | `GRPOExplorationTrainer` | Learned Beta guidance + GRPO |
+| **Logprob GRPO** | `grpo_loss_type: "logprob"` | `train_epoch_batched` | **Recommended.** DDV2-style Gaussian log-prob from VPSDE denoising. Can learn trajectory curvature. |
+| Standard GRPO (MSE) | `grpo_loss_type: "mse"` | `train_epoch_batched` | Legacy. Cannot change trajectory shape, only length. |
+| Random guidance | `random_guidance_mode: "uniform"` | `GRPOExplorationTrainer` | Random η guidance diversity. |
+| Explorer (open-loop) | `random_guidance_mode: "explorer"` | `GRPOExplorationTrainer` | Learned Beta guidance + GRPO |
 | Explorer (closed-loop) | `use_closed_loop: true` | `ClosedLoopExplorationTrainer` | Per-step rollout + GAE + GRPO |
 
 All modes support GPU-batched trajectory generation and evaluation.
+
+### Logprob GRPO (DDV2-style)
+
+The logprob loss computes actual Gaussian log-probabilities during a truncated VPSDE denoising
+rollout, enabling proper REINFORCE gradient for trajectory shape learning. Based on
+DiffusionDriveV2 (arXiv:2512.07745).
+
+**Two-stage approach:**
+1. **Collection** (no grad): Run model through multi-step denoising, store chain states + log-probs
+2. **Optimization** (with grad): Re-run model on stored chain, compute REINFORCE loss
+
+**Config:**
+```json
+{
+    "grpo_loss_type": "logprob",
+    "logprob_num_steps": 5,
+    "logprob_t_start": 0.01,
+    "logprob_discount": 0.8,
+    "logprob_min_std": 0.1,
+    "il_loss_weight": 0.0,
+    "kl_coef": 0.1,
+    "advantage_mode": "normalized"
+}
+```
+
+**Key results (30+ experiments):**
+- curve20 (20 miraikan scenes): 11→0/20 lane departures at epoch 9
+- Clean val (86 scenes): 18→14/86 lane departures with warm-start + mixed training
+- KL=0.1 eliminates stopped-scene regression (0 stopped for 12 epochs)
+
+**Advantage modes:**
+- `"normalized"` (recommended): standard GRPO, works with logprob
+- `"ddv2"`: inter-anchor truncated GRPO (clip negative→0, safety→-1). Too harsh for our scenes.
+- `"positive_only"`: only reinforce above-mean. Model tends to stop instead of curve.
+
+**KL regularization:** Mean-divergence KL: `KL = mean((μ_policy - μ_ref)² / (2σ²))`.
+Uses LoRA `disable_adapter_layers()` for reference model. Properly scaled (0.01→7 over epochs).
 
 ### Random Guidance Mode
 
@@ -132,8 +189,9 @@ simulation. TeraSim integration will address this.
 **Progress (P)**: Euclidean distance reduction toward `goal_pose`. Falls back to total path length
 if goal is unavailable (zeros).
 
-**Smoothness (M)**: Negative mean absolute jerk computed via finite differences on positions.
-Penalizes sharp direction changes and acceleration spikes.
+**Smoothness (M)**: Negative mean absolute jerk computed via Savitzky-Golay conv1d kernel
+(window=11, poly=3, deriv=3). Edge artifacts trimmed by pad//2 from each side. Raw finite
+differences amplify noise ~1000x on 10Hz data; SG gives physically correct jerk values.
 
 **Feasibility (F)**: Multi-level penalty system with four severity tiers:
 
@@ -149,7 +207,9 @@ longitudinal proximity constraints to prevent false positives from distant lane 
 Off-route detection uses `route_lanes` to identify wrong-lane driving where the ego is on a
 road but not on the planned route.
 
-Additionally penalizes acceleration violations (fraction of steps where `|accel| > max_accel`).
+Additionally penalizes acceleration violations (fraction of steps where `|accel| > max_accel`)
+and lateral acceleration violations using Savitzky-Golay filtered derivatives (curvature-based,
+accurate — replaces the old noisy double-finite-diff method that inflated values ~5x).
 
 All violations are time-weighted: early violations (t=0s) are penalized ~3x more than late
 violations (t=7.9s), and the result is a time-weighted mean.
