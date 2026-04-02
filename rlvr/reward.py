@@ -1433,6 +1433,19 @@ def _point_in_polygons(
     v1x, v1y = edge_v1[:, 0], edge_v1[:, 1]
     v2x, v2y = edge_v2[:, 0], edge_v2[:, 1]
 
+    # Prefilter: discard edges that can't be crossed by any query point's +x ray
+    keep = ((torch.maximum(v1x, v2x) >= px.min())
+            & (torch.maximum(v1y, v2y) >= py.min())
+            & (torch.minimum(v1y, v2y) <= py.max()))
+
+    if not keep.any():
+        return torch.zeros(Q, dtype=torch.bool, device=device)
+
+    v1x = v1x[keep]; v1y = v1y[keep]
+    v2x = v2x[keep]; v2y = v2y[keep]
+    edge_poly_id = edge_poly_id[keep]
+    E = int(keep.sum().item())
+
     py_exp = py[:, None]
     above1 = v1y[None, :] > py_exp
     above2 = v2y[None, :] > py_exp
