@@ -44,7 +44,7 @@ def vpsde_denoising_step_with_logprob(
 
     Returns:
         sample: The (possibly new) sample x_{t_prev}. Same shape as x0_pred.
-        log_prob: Gaussian log-probability, summed over all dims except batch.
+        log_prob: Gaussian log-probability, averaged (mean) over all dims except batch.
             Shape: (B,) where B = x0_pred.shape[0].
         mean: The predicted mean of the transition distribution. Same shape as x0_pred.
     """

@@ -10,7 +10,7 @@ Reference: DiffusionDriveV2 diffusiondrivev2_model_rl.py lines 800-1120
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -22,7 +22,6 @@ from diffusion_planner.model.module.decoder import generate_prefix_mask
 from rlvr.vpsde_logprob import (
     compute_discount_weights,
     create_timestep_schedule,
-    vpsde_denoising_step_with_logprob,
 )
 
 
@@ -147,7 +146,7 @@ def collect_logprob_rollout(
     model_args,
     config,
     device: torch.device,
-) -> Dict[str, torch.Tensor]:
+) -> Dict[str, Any]:
     """Stage 1: Run truncated denoising rollout, collect chain states and log-probs.
 
     Mirrors DDV2 forward_train_rl (lines 800-939): start from noised trajectories,
@@ -272,7 +271,7 @@ def collect_logprob_rollout(
         ego_sample = x_t_prev_future[:, 0]  # [N, T, 4]
         ego_mean = mean_all[:, 0]  # [N, T, 4]
         # std_all is typically (1,1,1,1) broadcast — squeeze to scalar for clean broadcasting
-        ego_std = std_all.squeeze().clamp(min=min_std)  # scalar or broadcastable
+        ego_std = std_all.view(-1).mean().clamp(min=min_std)  # scalar std from VPSDE
 
         log_prob = (
             -((ego_sample.detach() - ego_mean) ** 2) / (2 * ego_std ** 2)
@@ -380,7 +379,7 @@ def compute_logprob_grpo_loss(
         # Ego-only log-prob (agent 0)
         ego_mean = mean_all[:, 0]  # [N, T, 4]
         ego_sample = stored_x_prev[:, 0].detach()  # [N, T, 4]
-        ego_std = std_all.squeeze().clamp(min=min_std)  # scalar or broadcastable
+        ego_std = std_all.view(-1).mean().clamp(min=min_std)  # scalar std from VPSDE
 
         log_prob = (
             -((ego_sample - ego_mean) ** 2) / (2 * ego_std ** 2)

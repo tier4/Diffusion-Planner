@@ -301,6 +301,11 @@ class GRPOTrainer:
             return _empty_metrics()
 
         M = self.config.inner_epochs
+        if M > 1 and self.config.grpo_loss_type == "logprob":
+            raise ValueError(
+                "inner_epochs > 1 is not supported with grpo_loss_type='logprob'. "
+                "Logprob GRPO uses on-policy REINFORCE without importance sampling."
+            )
         all_metrics: dict[str, float] = {}
         total_inner_steps = 0
 
