@@ -4,10 +4,8 @@ Tests the core loss computation logic without requiring a full model.
 Run: python -m rlvr.tests.test_logprob_loss
 """
 
-import math
 import torch
 import torch.nn.functional as F
-import numpy as np
 
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from rlvr.vpsde_logprob import (

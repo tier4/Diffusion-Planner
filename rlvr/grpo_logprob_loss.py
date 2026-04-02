@@ -10,7 +10,6 @@ Reference: DiffusionDriveV2 diffusiondrivev2_model_rl.py lines 800-1120
 from __future__ import annotations
 
 import math
-import random as _random
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -273,7 +272,7 @@ def collect_logprob_rollout(
         ego_sample = x_t_prev_future[:, 0]  # [N, T, 4]
         ego_mean = mean_all[:, 0]  # [N, T, 4]
         # std_all is typically (1,1,1,1) broadcast — squeeze to scalar for clean broadcasting
-        ego_std = std_all.squeeze()  # scalar or broadcastable
+        ego_std = std_all.squeeze().clamp(min=min_std)  # scalar or broadcastable
 
         log_prob = (
             -((ego_sample.detach() - ego_mean) ** 2) / (2 * ego_std ** 2)
@@ -381,7 +380,7 @@ def compute_logprob_grpo_loss(
         # Ego-only log-prob (agent 0)
         ego_mean = mean_all[:, 0]  # [N, T, 4]
         ego_sample = stored_x_prev[:, 0].detach()  # [N, T, 4]
-        ego_std = std_all.squeeze()  # scalar or broadcastable
+        ego_std = std_all.squeeze().clamp(min=min_std)  # scalar or broadcastable
 
         log_prob = (
             -((ego_sample - ego_mean) ** 2) / (2 * ego_std ** 2)
@@ -432,7 +431,7 @@ def compute_logprob_grpo_loss(
     # are huge negative numbers on stored chain samples.
     kl_loss = torch.tensor(0.0, device=device)
     if config.kl_coef > 0 and hasattr(model, 'disable_adapter_layers'):
-        kl_per_step = []
+        ref_ego_means = []
         model.disable_adapter_layers()
         try:
             for step_idx in range(num_steps):
@@ -456,21 +455,8 @@ def compute_logprob_grpo_loss(
                 ref_mean, ref_std = sde.marginal_prob(ref_x0, t_prev_t)
                 ref_ego_mean = ref_mean[:, 0]  # [N, T, 4]
 
-                # Policy mean was already computed during the main loop
-                # We stored the chain, so we can get the policy x0 from the forward pass
-                # But we don't have it cached. Use the log_prob computation instead:
-                # KL = mean((ego_mean_policy - ego_mean_ref)²) / (2 * std²)
-                # We need to re-run policy forward pass... but we already did that above.
-                # Instead, use a simpler approach: compute KL from the stored chain.
-                # The policy mean at this step was used to produce chain[step_idx+1].
-                # We can recover it: chain[step_idx+1] = mean + std * noise
-                # So mean_policy = chain[step_idx+1] - std * noise... but we don't have noise.
-                #
-                # Simplest fix: just re-run the policy forward pass here.
-                pass  # Will compute below
-
                 ref_ego_mean_detached = ref_ego_mean.detach()
-                kl_per_step.append(ref_ego_mean_detached)
+                ref_ego_means.append(ref_ego_mean_detached)
         finally:
             model.enable_adapter_layers()
 
@@ -495,7 +481,7 @@ def compute_logprob_grpo_loss(
             pol_ego_mean = pol_mean[:, 0]  # [N, T, 4]
             pol_std_val = pol_std.squeeze().clamp(min=min_std)
 
-            ref_ego_mean = kl_per_step[step_idx]
+            ref_ego_mean = ref_ego_means[step_idx]
 
             # KL between N(μ_pol, σ) and N(μ_ref, σ) = (μ_pol - μ_ref)² / (2σ²)
             step_kl = ((pol_ego_mean - ref_ego_mean) ** 2 / (2 * pol_std_val ** 2)).mean()

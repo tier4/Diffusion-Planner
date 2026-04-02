@@ -1007,8 +1007,7 @@ def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta
     import math as _math
     coeffs = pinv[deriv] * _math.factorial(deriv) / (delta ** deriv)
     # Reverse to match convolution convention (scipy savgol_coeffs convention)
-    coeffs = coeffs[::-1].copy()
-    return torch.tensor(coeffs, dtype=torch.float32).flip(0)  # flip for conv1d
+    return torch.tensor(coeffs.copy(), dtype=torch.float32).flip(0)  # flip for conv1d
 
 # Precompute SG jerk kernel; cache by (device, dt)
 _SG_JERK_KERNEL = None

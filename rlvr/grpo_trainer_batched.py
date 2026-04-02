@@ -278,7 +278,8 @@ def train_epoch_batched(
                 norm_i[k] = v
         kept_norm_data.append(norm_i)
         # Also keep raw data for logprob path (needs unnormalized data)
-        kept_raw_data.append(data_i)
+        if config.grpo_loss_type == "logprob":
+            kept_raw_data.append(data_i)
 
     N_kept = len(kept_trajs)
     if N_kept == 0:

@@ -3,7 +3,6 @@
 Run: python -m rlvr.tests.test_vpsde_logprob
 """
 
-import math
 import torch
 import torch.distributions as dist
 
