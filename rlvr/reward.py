@@ -1358,9 +1358,10 @@ _LANE_PTS_PER_SIDE = 20  # 80 total perimeter points
 def _build_lane_polygons(lanes: torch.Tensor) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, int
 ]:
-    """Build lane polygon edges from lane tensor. SFT interpretation: boundary = center + offset.
+    """Build lane polygon edges from lane tensor. Vectorized, no python loops.
 
-    Includes zero-direction endpoint markers (they connect lane segments at junctions).
+    Each lane polygon = left boundary edges + right boundary edges (reversed winding)
+    + two closing edges connecting the ends. Boundary = center + offset.
 
     Args:
         lanes: (S, P, D) lane tensor.
@@ -1374,33 +1375,49 @@ def _build_lane_polygons(lanes: torch.Tensor) -> tuple[
     S, P, D = lanes.shape
     device = lanes.device
 
-    all_v1 = []; all_v2 = []; all_poly_id = []
-    poly_idx = 0
+    center = lanes[..., :2]  # (S, P, 2)
+    valid = center.norm(dim=-1) > 1e-3  # (S, P)
+    left_pts = center + lanes[..., 4:6]
+    right_pts = center + lanes[..., 6:8]
 
-    for s in range(S):
-        center = lanes[s, :, :2]
-        valid = center.norm(dim=-1) > 1e-3
-        idx = torch.where(valid)[0]
-        if len(idx) < 2:
-            continue
+    n_valid = valid.sum(dim=1)
+    has_poly = n_valid >= 2
 
-        left_pts = center[idx] + lanes[s, idx, 4:6]
-        right_pts = center[idx] + lanes[s, idx, 6:8]
-        poly = torch.cat([left_pts, right_pts.flip(0)], dim=0)
-        n_verts = poly.shape[0]
+    if not has_poly.any():
+        z = torch.zeros(0, 2, device=device)
+        return z, z, torch.zeros(0, dtype=torch.int32, device=device), 0
 
-        v1 = poly
-        v2 = torch.roll(poly, -1, dims=0)
-        all_v1.append(v1)
-        all_v2.append(v2)
-        all_poly_id.append(torch.full((n_verts,), poly_idx, device=device, dtype=torch.int32))
-        poly_idx += 1
+    poly_id_per_lane = torch.cumsum(has_poly.int(), dim=0) - 1  # (S,)
+    n_polys = int(has_poly.sum().item())
 
-    if not all_v1:
-        return (torch.zeros(0, 2, device=device), torch.zeros(0, 2, device=device),
-                torch.zeros(0, dtype=torch.int32, device=device), 0)
+    # Consecutive boundary edges (left forward, right reversed for winding)
+    valid_pair = valid[:, :-1] & valid[:, 1:]  # (S, P-1)
+    lane_ids_pair = torch.arange(S, device=device).unsqueeze(1).expand(S, P - 1)
+    idx = torch.where(valid_pair.reshape(-1))[0]
 
-    return torch.cat(all_v1), torch.cat(all_v2), torch.cat(all_poly_id), poly_idx
+    if len(idx) == 0:
+        z = torch.zeros(0, 2, device=device)
+        return z, z, torch.zeros(0, dtype=torch.int32, device=device), 0
+
+    l_v1 = left_pts[:, :-1].reshape(-1, 2)[idx]
+    l_v2 = left_pts[:, 1:].reshape(-1, 2)[idx]
+    r_v1 = right_pts[:, 1:].reshape(-1, 2)[idx]  # reversed winding
+    r_v2 = right_pts[:, :-1].reshape(-1, 2)[idx]
+    edge_pid = poly_id_per_lane[lane_ids_pair.reshape(-1)[idx]]
+
+    # Closing edges: connect left end→right end and right start→left start
+    pl = torch.where(has_poly)[0]
+    fv = valid.float().argmax(dim=1)[pl]
+    lv = P - 1 - valid.flip(1).float().argmax(dim=1)[pl]
+    c1_v1 = left_pts[pl, lv]; c1_v2 = right_pts[pl, lv]
+    c2_v1 = right_pts[pl, fv]; c2_v2 = left_pts[pl, fv]
+    c_pid = poly_id_per_lane[pl].int()
+
+    all_v1 = torch.cat([l_v1, r_v1, c1_v1, c2_v1])
+    all_v2 = torch.cat([l_v2, r_v2, c1_v2, c2_v2])
+    all_pid = torch.cat([edge_pid, edge_pid, c_pid, c_pid]).int()
+
+    return all_v1, all_v2, all_pid, n_polys
 
 
 def _point_in_polygons(
