@@ -1354,18 +1354,213 @@ _LANE_CONT_THRESH = 0.80
 _LANE_PTS_PER_SIDE = 20  # 80 total perimeter points
 
 
+
+def _build_lane_polygons(lanes: torch.Tensor) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, int
+]:
+    """Build lane polygon edges from lane tensor. SFT interpretation: boundary = center + offset.
+
+    Includes zero-direction endpoint markers (they connect lane segments at junctions).
+
+    Args:
+        lanes: (S, P, D) lane tensor.
+
+    Returns:
+        edge_v1: (E, 2) polygon edge start vertices (all polygons concatenated)
+        edge_v2: (E, 2) polygon edge end vertices
+        edge_poly_id: (E,) int — which polygon each edge belongs to
+        n_polys: total number of polygons
+    """
+    S, P, D = lanes.shape
+    device = lanes.device
+
+    all_v1 = []; all_v2 = []; all_poly_id = []
+    poly_idx = 0
+
+    for s in range(S):
+        center = lanes[s, :, :2]
+        valid = center.norm(dim=-1) > 1e-3
+        idx = torch.where(valid)[0]
+        if len(idx) < 2:
+            continue
+
+        left_pts = center[idx] + lanes[s, idx, 4:6]
+        right_pts = center[idx] + lanes[s, idx, 6:8]
+        poly = torch.cat([left_pts, right_pts.flip(0)], dim=0)
+        n_verts = poly.shape[0]
+
+        v1 = poly
+        v2 = torch.roll(poly, -1, dims=0)
+        all_v1.append(v1)
+        all_v2.append(v2)
+        all_poly_id.append(torch.full((n_verts,), poly_idx, device=device, dtype=torch.int32))
+        poly_idx += 1
+
+    if not all_v1:
+        return (torch.zeros(0, 2, device=device), torch.zeros(0, 2, device=device),
+                torch.zeros(0, dtype=torch.int32, device=device), 0)
+
+    return torch.cat(all_v1), torch.cat(all_v2), torch.cat(all_poly_id), poly_idx
+
+
+def _point_in_polygons(
+    points: torch.Tensor,
+    edge_v1: torch.Tensor,
+    edge_v2: torch.Tensor,
+    edge_poly_id: torch.Tensor,
+    n_polys: int,
+) -> torch.Tensor:
+    """GPU-parallel point-in-polygon via ray casting. No python loops.
+
+    Args:
+        points: (Q, 2) query points.
+        edge_v1, edge_v2: (E, 2) polygon edge endpoints.
+        edge_poly_id: (E,) which polygon each edge belongs to.
+        n_polys: total number of polygons.
+
+    Returns:
+        inside: (Q,) bool — True if inside ANY polygon.
+    """
+    Q = points.shape[0]
+    E = edge_v1.shape[0]
+    device = points.device
+
+    if E == 0 or n_polys == 0:
+        return torch.zeros(Q, dtype=torch.bool, device=device)
+
+    px = points[:, 0]
+    py = points[:, 1]
+    v1x, v1y = edge_v1[:, 0], edge_v1[:, 1]
+    v2x, v2y = edge_v2[:, 0], edge_v2[:, 1]
+
+    py_exp = py[:, None]
+    above1 = v1y[None, :] > py_exp
+    above2 = v2y[None, :] > py_exp
+    straddles = above1 != above2
+
+    dy = (v2y - v1y)[None, :]
+    dy_safe = dy.clone()
+    dy_safe[dy_safe.abs() < 1e-10] = 1.0
+    t = (py_exp - v1y[None, :]) / dy_safe
+    x_int = v1x[None, :] + t * (v2x - v1x)[None, :]
+
+    crossing = straddles & (x_int > px[:, None])
+
+    counts = torch.zeros(Q, n_polys, dtype=torch.int32, device=device)
+    counts.scatter_add_(1, edge_poly_id[None, :].expand(Q, E).long(), crossing.int())
+
+    inside_any = ((counts % 2) == 1).any(dim=1)
+    return inside_any
+
+
+def _point_to_segments_dist(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+) -> torch.Tensor:
+    """Distance from each point to each segment. Fully parallel on GPU.
+
+    Args:
+        points: (Q, 2)
+        seg_p1, seg_p2: (E, 2)
+
+    Returns:
+        dist: (Q, E) distance matrix.
+    """
+    seg = seg_p2 - seg_p1
+    seg_len2 = (seg ** 2).sum(-1).clamp(min=1e-10)
+    diff = points[:, None, :] - seg_p1[None, :, :]
+    t = ((diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]).clamp(0, 1)
+    closest = seg_p1[None, :, :] + t[:, :, None] * seg[None, :, :]
+    return (points[:, None, :] - closest).norm(dim=-1)
+
+
+def _classify_outer_boundaries(
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+    seg_dir: torch.Tensor,
+    seg_lane: torch.Tensor,
+    edge_v1: torch.Tensor,
+    edge_v2: torch.Tensor,
+    edge_poly_id: torch.Tensor,
+    n_polys: int,
+    nudge: float = 0.05,
+    gap_threshold: float = 0.5,
+) -> torch.Tensor:
+    """Classify boundary segments as outer (road edge) via midpoint nudge + containment.
+
+    For each segment, nudge its midpoint outward (perpendicular to lane direction).
+    If the nudged point lands inside any lane polygon → shared boundary.
+    If outside but close to a different lane's boundary → junction gap (shared).
+    Otherwise → road edge (outer).
+
+    Segments alternate left/right per lane: even=left boundary, odd=right boundary.
+
+    Args:
+        seg_p1, seg_p2: (M, 2) boundary segment endpoints.
+        seg_dir: (M, 2) unit lane direction at each segment.
+        seg_lane: (M,) lane index.
+        edge_v1, edge_v2: polygon edge vertices for containment check.
+        edge_poly_id: polygon IDs for edges.
+        n_polys: total polygon count.
+        nudge: outward nudge distance in meters.
+        gap_threshold: max distance to different-lane segment to be a junction gap.
+
+    Returns:
+        is_outer: (M,) bool.
+    """
+    M = seg_p1.shape[0]
+    device = seg_p1.device
+
+    # Midpoint of each segment
+    mid = (seg_p1 + seg_p2) / 2
+
+    # Outward normal from lane direction: left_normal = (-dy, dx)
+    left_normal = torch.stack([-seg_dir[:, 1], seg_dir[:, 0]], dim=-1)
+
+    # Even indices = left boundary → outward = left normal
+    # Odd indices = right boundary → outward = -left normal (right normal)
+    is_left = torch.arange(M, device=device) % 2 == 0
+    outward = torch.where(is_left[:, None], left_normal, -left_normal)
+
+    nudged = mid + nudge * outward
+
+    # Check if nudged point is inside any polygon
+    inside = _point_in_polygons(nudged, edge_v1, edge_v2, edge_poly_id, n_polys)
+
+    # Inside → shared. Outside → candidate road edge.
+    candidate_outer = ~inside
+
+    # At intersections, nudged point may land in gap between polygons.
+    # If close to a different lane's boundary segment → junction gap, not road edge.
+    if candidate_outer.any():
+        nudged_outer = nudged[candidate_outer]
+        d = _point_to_segments_dist(nudged_outer, seg_p1, seg_p2)  # (n_cand, M)
+        # Mask out same-lane segments
+        outer_lane = seg_lane[candidate_outer]
+        same_lane_mask = (outer_lane[:, None] == seg_lane[None, :])
+        d[same_lane_mask] = 999.0
+        # Close to different-lane segment → junction gap
+        min_d = d.min(dim=1).values
+        is_junction_gap = min_d < gap_threshold
+        outer_indices = torch.where(candidate_outer)[0]
+        candidate_outer[outer_indices[is_junction_gap]] = False
+
+    return candidate_outer
+
+
 @torch.no_grad()
 def compute_lane_departure_penalty(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor]:
-    """Compute per-trajectory lane departure penalties using ego perimeter sampling.
+    """Compute lane departure using polygon containment + distance to road edge. Pure torch.
 
-    For each of 80 ego perimeter points at each timestep, finds the K=3 nearest
-    lane centerline points from different lane segments and checks if the point
-    is inside any of those lanes. Uses the full `lanes` tensor (140 segments),
-    not just route_lanes, since ego can legitimately be in any lane.
+    1. Polygon containment (GPU ray casting) for crossing gate.
+    2. Distance to outer boundary segments for near/wide/cont soft penalties.
+    Lane boundaries use SFT interpretation: boundary = center + offset.
+    Includes zero-direction endpoint markers.
 
     Args:
         ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
@@ -1373,178 +1568,137 @@ def compute_lane_departure_penalty(
         data: Observation dict with 'lanes' key.
 
     Returns:
-        Tuple of (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty):
-        - crossing_gate: (N,) 1.0 if always in-lane, 0.0 if leaves lane
-        - near_frac: (N,) fraction of timesteps within 25cm of lane edge
-        - wide_frac: (N,) fraction of timesteps within 40cm of lane edge
-        - cont_penalty: (N,) continuous proximity penalty (linear decay from 80cm)
+        (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
 
-    no_lane_crossing_steps: list[int | None] = [None] * N
-    safe_return = (
-        torch.ones(N, device=device),
-        torch.zeros(N, device=device),
-        torch.zeros(N, device=device),
-        no_lane_crossing_steps,
-        torch.zeros(N, device=device),
-    )
+    no_steps: list[int | None] = [None] * N
+    safe = (torch.ones(N, device=device), torch.zeros(N, device=device),
+            torch.zeros(N, device=device), no_steps, torch.zeros(N, device=device))
 
     if "lanes" not in data:
-        return safe_return
-
+        return safe
     lanes = data["lanes"]
     if lanes.dim() == 4:
-        lanes = lanes[0]  # remove batch dim → (S, P, D)
+        lanes = lanes[0]
     if lanes.shape[-1] < 8:
-        return safe_return
+        return safe
 
-    # Extract lane geometry
     S, P, D = lanes.shape
-    center = lanes[..., :2].reshape(-1, 2)       # (S*P, 2)
-    direction = lanes[..., 2:4].reshape(-1, 2)    # (S*P, 2)
-    lb_offset = lanes[..., 4:6].reshape(-1, 2)    # (S*P, 2)
-    rb_offset = lanes[..., 6:8].reshape(-1, 2)    # (S*P, 2)
 
-    dir_norm = direction.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    dir_unit = direction / dir_norm
-    n_left = torch.stack([-dir_unit[..., 1], dir_unit[..., 0]], dim=-1)  # (S*P, 2)
+    # Build polygon edges for containment
+    edge_v1, edge_v2, edge_poly_id, n_polys = _build_lane_polygons(lanes)
+    if n_polys == 0:
+        return safe
 
-    # Lane half-widths: project boundary offsets onto n_left
-    width_left = (lb_offset * n_left).sum(dim=-1)    # (S*P,) positive = left
-    width_right = (rb_offset * n_left).sum(dim=-1)   # (S*P,) negative = right
+    # Build boundary segments for distance + classify outer (vectorized, no python loops)
+    center = lanes[..., :2]
+    direction = lanes[..., 2:4]
+    lb_offset = lanes[..., 4:6]
+    rb_offset = lanes[..., 6:8]
+    valid = center.norm(dim=-1) > 1e-3
 
-    # Valid mask: nonzero direction and nonzero center
-    valid = (direction.norm(dim=-1) > 1e-6) & (center.norm(dim=-1) > 1e-3)
-    num_valid = valid.sum().item()
-    if num_valid == 0:
-        return safe_return
+    left_pts = center + lb_offset    # (S, P, 2)
+    right_pts = center + rb_offset   # (S, P, 2)
 
-    # Segment IDs for each centerline point (for K=3 from different segments)
-    seg_ids = torch.arange(S, device=device).unsqueeze(1).expand(S, P).reshape(-1)  # (S*P,)
+    # Fill zero-direction points with per-lane average direction
+    dirs = direction.clone()
+    has_dir = dirs.norm(dim=-1) > 1e-6  # (S, P)
+    dir_sum = (dirs * has_dir.unsqueeze(-1)).sum(dim=1)  # (S, 2)
+    dir_avg = dir_sum / dir_sum.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    dirs = torch.where(has_dir.unsqueeze(-1), dirs, dir_avg.unsqueeze(1).expand_as(dirs))
 
-    # Build ego perimeter points (same as road border)
+    # Segments between consecutive valid points
+    valid_pair = valid[:, :-1] & valid[:, 1:]  # (S, P-1)
+    mid_dirs = (dirs[:, :-1] + dirs[:, 1:]) / 2
+    mid_dirs = mid_dirs / mid_dirs.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+
+    lane_ids = torch.arange(S, device=device).unsqueeze(1).expand(S, P - 1)
+
+    vp_flat = valid_pair.reshape(-1)
+    idx = torch.where(vp_flat)[0]
+
+    if len(idx) == 0:
+        return safe
+
+    # Gather valid segments and interleave left/right
+    M = len(idx)
+    l_p1 = left_pts[:, :-1].reshape(-1, 2)[idx]
+    l_p2 = left_pts[:, 1:].reshape(-1, 2)[idx]
+    r_p1 = right_pts[:, :-1].reshape(-1, 2)[idx]
+    r_p2 = right_pts[:, 1:].reshape(-1, 2)[idx]
+    md_f = mid_dirs.reshape(-1, 2)[idx]
+    lid_f = lane_ids.reshape(-1)[idx]
+
+    seg_p1 = torch.stack([l_p1, r_p1], dim=1).reshape(2 * M, 2)
+    seg_p2 = torch.stack([l_p2, r_p2], dim=1).reshape(2 * M, 2)
+    seg_dir = torch.stack([md_f, md_f], dim=1).reshape(2 * M, 2)
+    seg_lane = torch.stack([lid_f, lid_f], dim=1).reshape(2 * M)
+
+    is_outer = _classify_outer_boundaries(
+        seg_p1, seg_p2, seg_dir, seg_lane,
+        edge_v1, edge_v2, edge_poly_id, n_polys,
+    )
+    outer_p1 = seg_p1[is_outer]
+    outer_p2 = seg_p2[is_outer]
+
+    # Build ego perimeter points
     wb = ego_shape[0].item()
     length = ego_shape[1].item()
     width = ego_shape[2].item()
     ro = (length - wb) / 2
-    local_pts = []
+    lp_list = []
     for j in range(_LANE_PTS_PER_SIDE):
         f = j / (_LANE_PTS_PER_SIDE - 1)
-        local_pts.append((-ro + f * length, -width / 2))
-        local_pts.append((-ro + f * length,  width / 2))
-        local_pts.append((-ro, -width / 2 + f * width))
-        local_pts.append((length - ro, -width / 2 + f * width))
-    local_pts = torch.tensor(local_pts, device=device, dtype=ego_trajs.dtype)
-    K_pts = local_pts.shape[0]  # 80
+        lp_list.append((-ro + f * length, -width / 2))
+        lp_list.append((-ro + f * length,  width / 2))
+        lp_list.append((-ro, -width / 2 + f * width))
+        lp_list.append((length - ro, -width / 2 + f * width))
+    local_pts = torch.tensor(lp_list, device=device, dtype=ego_trajs.dtype)
+    K_pts = local_pts.shape[0]
 
-    # Transform perimeter to world frame
-    cos_h = ego_trajs[..., 2]
-    sin_h = ego_trajs[..., 3]
+    cos_h = ego_trajs[..., 2]; sin_h = ego_trajs[..., 3]
     h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
-    cos_h = cos_h / h_norm
-    sin_h = sin_h / h_norm
+    cos_h = cos_h / h_norm; sin_h = sin_h / h_norm
     rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=-1).reshape(N, T, 2, 2)
     rotated = torch.einsum("btij,kj->btki", rot, local_pts)
-    world_pts = ego_trajs[..., :2].unsqueeze(2) + rotated  # (N, T, 80, 2)
+    world_pts = ego_trajs[..., :2].unsqueeze(2) + rotated
 
-    # Flatten query points
     Q = N * T * K_pts
-    query = world_pts.reshape(Q, 2)  # (Q, 2)
+    query = world_pts.reshape(Q, 2)
 
-    # Filter to valid centerline points only
-    valid_center = center[valid]       # (V, 2)
-    valid_n_left = n_left[valid]       # (V, 2)
-    valid_wl = width_left[valid]       # (V,)
-    valid_wr = width_right[valid]      # (V,)
-    valid_seg = seg_ids[valid]         # (V,)
-    V = valid_center.shape[0]
+    # Containment check (crossing gate)
+    inside = _point_in_polygons(query, edge_v1, edge_v2, edge_poly_id, n_polys)
+    inside_2d = inside.reshape(N, T, K_pts)
+    all_inside_ts = inside_2d.all(dim=2)
+    all_inside_ts[:, 0] = True
 
-    # Compute distances from query points to valid centerline points
-    # Process in chunks to avoid OOM
-    best_clearance = torch.full((Q,), -1e6, device=device)
-    chunk_size = 4000
-
-    for q_start in range(0, Q, chunk_size):
-        q_end = min(q_start + chunk_size, Q)
-        q_chunk = query[q_start:q_end]  # (C, 2)
-        C = q_chunk.shape[0]
-
-        # Distance to all valid centerline points
-        dist2 = ((q_chunk.unsqueeze(1) - valid_center.unsqueeze(0)) ** 2).sum(-1)  # (C, V)
-
-        # For K=3 candidates from different segments
-        chunk_clearance = torch.full((C,), -1e6, device=device)
-
-        remaining_mask = torch.ones(C, V, dtype=torch.bool, device=device)
-        for _k in range(3):
-            # Mask out already-used segments
-            masked_dist2 = dist2.clone()
-            masked_dist2[~remaining_mask] = float('inf')
-
-            # Find nearest
-            min_d2, min_idx = masked_dist2.min(dim=1)  # (C,)
-            has_valid = torch.isfinite(min_d2)
-
-            if not has_valid.any():
-                break
-
-            # Get lane geometry at nearest point
-            sel_center = valid_center[min_idx]     # (C, 2)
-            sel_n_left = valid_n_left[min_idx]     # (C, 2)
-            sel_wl = valid_wl[min_idx]             # (C,)
-            sel_wr = valid_wr[min_idx]             # (C,)
-            sel_seg = valid_seg[min_idx]           # (C,)
-
-            # Lateral distance
-            lat = ((q_chunk - sel_center) * sel_n_left).sum(dim=-1)  # (C,)
-            dist_left = sel_wl - lat    # positive = inside on left side
-            dist_right = lat - sel_wr   # positive = inside on right side
-
-            # Clearance = min distance to either boundary (positive = inside lane)
-            clearance = torch.minimum(dist_left, dist_right)  # (C,)
-            clearance = torch.where(has_valid, clearance, torch.full_like(clearance, -1e6))
-
-            # Update best clearance (max across K candidates = least violation)
-            chunk_clearance = torch.maximum(chunk_clearance, clearance)
-
-            # Mask out this segment for next iteration
-            seg_mask = valid_seg.unsqueeze(0) == sel_seg.unsqueeze(1)  # (C, V)
-            remaining_mask = remaining_mask & ~seg_mask
-
-        best_clearance[q_start:q_end] = chunk_clearance
-
-    # Reshape to (N, T, 80)
-    best_clearance = best_clearance.reshape(N, T, K_pts)
-
-    # Per-timestep: min clearance across all 80 perimeter points
-    per_ts_min = best_clearance.min(dim=2).values  # (N, T)
-
-    # Skip t=0
-    per_ts_min[:, 0] = 10.0
-
-    # Crossing gate: clearance is positive when inside lane, negative when outside.
-    # Threshold is +0.10m (conservative): triggers when within 10cm of edge OR outside,
-    # treating near-edge trajectories as lane departures for safety margin.
-    is_crossing = per_ts_min < _LANE_CROSS_THRESH
-    has_crossing = is_crossing.any(dim=1)
+    has_crossing = ~all_inside_ts.all(dim=1)
     crossing_gate = (~has_crossing).float()
 
-    # First crossing step per trajectory (for survival mode) — vectorized to avoid CUDA syncs
-    # argmax on float returns first True index; use has_crossing to mask non-crossing trajs
-    first_crossing_idx = is_crossing.float().argmax(dim=1)  # [N] — 0 if no crossing (need mask)
+    is_crossing_ts = ~all_inside_ts; is_crossing_ts[:, 0] = False
+    first_idx = is_crossing_ts.float().argmax(dim=1)
     lane_crossing_steps: list[int | None] = [
-        int(first_crossing_idx[i].item()) if has_crossing[i] else None for i in range(N)
+        int(first_idx[i].item()) if has_crossing[i] else None for i in range(N)
     ]
 
-    # Near penalty
+    # Distance to outer boundaries (soft penalties)
+    if outer_p1.shape[0] > 0:
+        min_outer = torch.full((Q,), 100.0, device=device)
+        chunk = 4000
+        for qs in range(0, Q, chunk):
+            qe = min(qs + chunk, Q)
+            d = _point_to_segments_dist(query[qs:qe], outer_p1, outer_p2)
+            min_outer[qs:qe] = d.min(dim=1).values
+        per_ts_min = min_outer.reshape(N, T, K_pts).min(dim=2).values
+    else:
+        per_ts_min = torch.full((N, T), 100.0, device=device)
+
+    per_ts_min[:, 0] = 10.0
+
     near_frac = (per_ts_min[:, 1:] < _LANE_NEAR_THRESH).float().mean(dim=1)
-
-    # Wide penalty
     wide_frac = (per_ts_min[:, 1:] < _LANE_WIDE_THRESH).float().mean(dim=1)
-
-    # Continuous proximity penalty
     cont_penalty = (1.0 - per_ts_min[:, 1:] / _LANE_CONT_THRESH).clamp(min=0, max=1).mean(dim=1)
 
     return crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty
