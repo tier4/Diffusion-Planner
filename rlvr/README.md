@@ -4,6 +4,14 @@ Infrastructure for Group Relative Policy Optimization (GRPO) training of the Dif
 Generates N diverse trajectories per scene, scores them with a rule-based reward function,
 and computes group-relative normalized advantages.
 
+## Credits
+
+The logprob GRPO implementation is based on **DiffusionDriveV2** by Li et al.:
+- Paper: [DiffusionDriveV2: Multi-Modal Diffusion Policy Model for Closed-Loop Autonomous Driving](https://arxiv.org/abs/2512.07745)
+- Code: [hustvl/DiffusionDriveV2](https://github.com/hustvl/DiffusionDriveV2)
+- Key adaptations: VPSDE noise schedule (vs DDIM), ego-only log-prob (vs per-anchor),
+  mean-normalized log-prob (vs sum), analytical mean-divergence KL (vs IL regularization)
+
 ## Overview
 
 The GRPO pipeline differs from the existing DPO pipeline in two key ways:
