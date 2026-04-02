@@ -1728,13 +1728,8 @@ def compute_lane_departure_penalty(
 
     # Distance to outer boundaries (soft penalties)
     if outer_p1.shape[0] > 0:
-        min_outer = torch.full((Q,), 100.0, device=device)
-        chunk = 4000
-        for qs in range(0, Q, chunk):
-            qe = min(qs + chunk, Q)
-            d = _point_to_segments_dist(query[qs:qe], outer_p1, outer_p2)
-            min_outer[qs:qe] = d.min(dim=1).values
-        per_ts_min = min_outer.reshape(N, T, K_pts).min(dim=2).values
+        per_ts_min = _point_to_segments_dist(query, outer_p1, outer_p2) \
+            .min(dim=1).values.reshape(N, T, K_pts).min(dim=2).values
     else:
         per_ts_min = torch.full((N, T), 100.0, device=device)
 
