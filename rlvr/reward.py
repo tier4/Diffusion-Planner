@@ -1549,23 +1549,28 @@ def _classify_outer_boundaries(
     return candidate_outer
 
 
+_LANE_K_NEAREST = 12  # number of nearest lanes to consider (0 = all)
+
+
 @torch.no_grad()
 def compute_lane_departure_penalty(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
+    k_nearest_lanes: int = _LANE_K_NEAREST,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor]:
     """Compute lane departure using polygon containment + distance to road edge. Pure torch.
 
     1. Polygon containment (GPU ray casting) for crossing gate.
     2. Distance to outer boundary segments for near/wide/cont soft penalties.
     Lane boundaries use SFT interpretation: boundary = center + offset.
-    Includes zero-direction endpoint markers.
 
     Args:
         ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
         ego_shape: (3,) wheel_base, length, width.
         data: Observation dict with 'lanes' key.
+        k_nearest_lanes: Only consider K nearest lanes (by min centerline distance).
+            0 = use all lanes. Default 12.
 
     Returns:
         (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)
@@ -1586,6 +1591,31 @@ def compute_lane_departure_penalty(
         return safe
 
     S, P, D = lanes.shape
+
+    # Select K nearest lanes by min centerline-point distance to any trajectory point
+    if k_nearest_lanes > 0 and S > k_nearest_lanes:
+        center_all = lanes[..., :2]  # (S, P, 2)
+        valid_all = center_all.norm(dim=-1) > 1e-3
+        # Use trajectory bbox center + half-diagonal as reference
+        # to catch lanes near any part of the trajectory
+        traj_xy = ego_trajs[:, :, :2].reshape(-1, 2)  # (N*T, 2)
+        traj_min = traj_xy.min(dim=0).values
+        traj_max = traj_xy.max(dim=0).values
+        traj_center = (traj_min + traj_max) / 2
+        # Min distance from each centerline point to trajectory center
+        dist_to_pts = (center_all - traj_center).norm(dim=-1)  # (S, P)
+        dist_to_pts[~valid_all] = 1e6
+        min_dist_per_lane = dist_to_pts.min(dim=1).values  # (S,)
+        # Also include lanes within bbox + margin
+        half_diag = (traj_max - traj_min).norm() / 2 + 5.0  # margin
+        has_lane = valid_all.any(dim=1)
+        min_dist_per_lane[~has_lane] = 1e6
+        # Take max(K, lanes within bbox) to be safe
+        n_nearby = (min_dist_per_lane < half_diag).sum().item()
+        k = max(k_nearest_lanes, min(n_nearby, S))
+        _, topk_idx = min_dist_per_lane.topk(k, largest=False)
+        lanes = lanes[topk_idx]
+        S = k
 
     # Build polygon edges for containment
     edge_v1, edge_v2, edge_poly_id, n_polys = _build_lane_polygons(lanes)
