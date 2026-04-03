@@ -1215,10 +1215,10 @@ def compute_road_border_penalty(
         data: Observation dict with 'line_strings' key.
 
     Returns:
-        Tuple of (crossing_gate, near_penalty, wide_penalty, first_crossing_steps, cont_penalty):
+        Tuple of (crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty):
         - crossing_gate: (N,) 1.0 if no crossing, 0.0 if any timestep crosses border
-        - near_penalty: (N,) mean penalty for being within 25cm (0=safe, 1=touching)
-        - wide_penalty: (N,) mean penalty for being within 40cm
+        - near_frac: (N,) fraction of in-bounds timesteps within 25cm of border
+        - wide_frac: (N,) fraction of in-bounds timesteps between 25-40cm of border (exclusive of near)
         - first_crossing_steps: list of N (int | None) — first timestep of crossing
         - cont_penalty: (N,) continuous proximity penalty (linear decay from 0.8m)
     """
@@ -1629,7 +1629,12 @@ def compute_lane_departure_penalty(
             0 = use all lanes. Default 12.
 
     Returns:
-        (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)
+        Tuple of (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty):
+        - crossing_gate: (N,) 1.0 if fully inside lane, 0.0 if any timestep exits
+        - near_frac: (N,) fraction of in-lane timesteps within 25cm of outer boundary
+        - wide_frac: (N,) fraction of in-lane timesteps between 25-40cm (exclusive of near)
+        - lane_crossing_steps: list of N (int | None) — first timestep of lane exit
+        - cont_penalty: (N,) continuous proximity penalty (linear decay from 0.8m)
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
