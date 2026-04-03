@@ -1326,19 +1326,20 @@ def compute_road_border_penalty(
         else:
             first_crossing_steps.append(None)
 
-    # Near penalty: fraction of timesteps within 25cm
+    # Exclusive categories: crossing > near > wide > safe. No double counting.
     _NEAR_THRESH = 0.25
-    near_frac = (per_timestep_min[:, 1:] < _NEAR_THRESH).float().mean(dim=1)  # (N,)
-
-    # Wide penalty: fraction of timesteps within 40cm
     _WIDE_THRESH = 0.40
-    wide_frac = (per_timestep_min[:, 1:] < _WIDE_THRESH).float().mean(dim=1)  # (N,)
-
-    # Continuous proximity penalty: smooth gradient from 0 to _CONT_THRESH
-    # penalty = mean over timesteps of max(0, 1 - dist/_CONT_THRESH)
-    # This creates a linear gradient pulling the trajectory away from the border
     _CONT_THRESH = 0.80
-    cont_penalty = (1.0 - per_timestep_min[:, 1:] / _CONT_THRESH).clamp(min=0, max=1).mean(dim=1)  # (N,)
+
+    is_not_crossing = ~is_crossing[:, 1:]  # (N, T-1) — timesteps that are NOT crossing
+    near_frac = (is_not_crossing & (per_timestep_min[:, 1:] < _NEAR_THRESH)).float().mean(dim=1)
+    wide_frac = (is_not_crossing & (per_timestep_min[:, 1:] >= _NEAR_THRESH)
+                 & (per_timestep_min[:, 1:] < _WIDE_THRESH)).float().mean(dim=1)
+    cont_penalty = torch.where(
+        is_not_crossing,
+        (1.0 - per_timestep_min[:, 1:] / _CONT_THRESH).clamp(min=0, max=1),
+        torch.zeros_like(per_timestep_min[:, 1:]),
+    ).mean(dim=1)
 
     return crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty
 
@@ -1756,9 +1757,19 @@ def compute_lane_departure_penalty(
 
     per_ts_min[:, 0] = 10.0
 
-    near_frac = (per_ts_min[:, 1:] < _LANE_NEAR_THRESH).float().mean(dim=1)
-    wide_frac = (per_ts_min[:, 1:] < _LANE_WIDE_THRESH).float().mean(dim=1)
-    cont_penalty = (1.0 - per_ts_min[:, 1:] / _LANE_CONT_THRESH).clamp(min=0, max=1).mean(dim=1)
+    # Exclusive categories: out > near > wide > safe. No double counting.
+    # Timesteps where ego is outside lane don't count as near/wide.
+    is_out_ts = ~all_inside_ts[:, 1:]  # (N, T-1)
+    is_in_ts = ~is_out_ts
+
+    near_frac = (is_in_ts & (per_ts_min[:, 1:] < _LANE_NEAR_THRESH)).float().mean(dim=1)
+    wide_frac = (is_in_ts & (per_ts_min[:, 1:] >= _LANE_NEAR_THRESH)
+                 & (per_ts_min[:, 1:] < _LANE_WIDE_THRESH)).float().mean(dim=1)
+    cont_penalty = torch.where(
+        is_in_ts,
+        (1.0 - per_ts_min[:, 1:] / _LANE_CONT_THRESH).clamp(min=0, max=1),
+        torch.zeros_like(per_ts_min[:, 1:]),
+    ).mean(dim=1)
 
     return crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty
 
