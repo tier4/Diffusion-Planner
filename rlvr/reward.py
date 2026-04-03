@@ -1464,7 +1464,7 @@ def _point_in_polygons(
     E = v1x.shape[0]
 
     # Chunk over query points when Q×E is large to avoid OOM
-    _MAX_QE = 50_000_000  # ~200 MB of float32 intermediates
+    _MAX_QE = 10_000_000  # ~200 MB accounting for multiple intermediates (bool, float, int64 index)
     chunk_size = max(1, _MAX_QE // E) if E > 0 else Q
 
     if chunk_size >= Q:
@@ -1667,6 +1667,7 @@ def compute_lane_departure_penalty(
         has_lane = valid_all.any(dim=1)
         min_dist_per_lane[~has_lane] = 1e6
         # Take max(K, lanes within bbox) to be safe
+        # Note: .sum().item() syncs CPU↔GPU but runs once per scene (not per traj), negligible cost
         n_nearby = (min_dist_per_lane < half_diag).sum().item()
         k = max(k_nearest_lanes, min(n_nearby, S))
         _, topk_idx = min_dist_per_lane.topk(k, largest=False)

@@ -11,12 +11,12 @@ Usage:
         --min_yaw 30 --min_path 10 --max_per_bag 5 \
         --clean --clean_threshold 0.15
 
-    # With baseline model path filtering (remove scenes where baseline barely moves):
+    # With lane/road-border cleaning:
     python -m rlvr.autoresearch.tools.curate_curve_scenes \
         --pool grpo_scenes_2421.json \
         --output curated_curves.json \
         --min_yaw 30 --min_path 10 --max_per_bag 5 \
-        --clean --model_path /path/to/base_model.pth --min_det_path 4.0
+        --clean --clean_threshold 0.15
 """
 
 import argparse
@@ -59,7 +59,10 @@ def get_bag_and_frame(scene_path: str) -> tuple[str, int]:
     basename = os.path.basename(scene_path)
     parts = basename.replace(".npz", "").rsplit("_", 1)
     if len(parts) == 2:
-        return parts[0], int(parts[1])
+        try:
+            return parts[0], int(parts[1])
+        except ValueError:
+            return basename, 0
     return basename, 0
 
 

@@ -1,7 +1,8 @@
 """Build RewardConfig from a GRPO config JSON file.
 
-Ensures cleaning, visualization, and eval tools use the EXACT same
-reward settings as training. Import and call load_reward_config(path).
+Maps reward-related fields from the config JSON to RewardConfig.
+Fields not present in the JSON fall back to RewardConfig dataclass defaults.
+Note: only maps commonly-used reward fields, not every RewardConfig attribute.
 """
 
 import json
