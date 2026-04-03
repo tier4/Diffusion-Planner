@@ -1711,10 +1711,11 @@ def compute_lane_departure_penalty(
     lp_list = []
     for j in range(_LANE_PTS_PER_SIDE):
         f = j / (_LANE_PTS_PER_SIDE - 1)
-        lp_list.append((-ro + f * length, -width / 2))
-        lp_list.append((-ro + f * length,  width / 2))
-        lp_list.append((-ro, -width / 2 + f * width))
-        lp_list.append((length - ro, -width / 2 + f * width))
+        lp_list.append((-ro + f * length, -width / 2))  # bottom edge
+        lp_list.append((-ro + f * length,  width / 2))  # top edge
+        if 0 < f < 1:  # skip corners (already in top/bottom)
+            lp_list.append((-ro, -width / 2 + f * width))         # left edge
+            lp_list.append((length - ro, -width / 2 + f * width)) # right edge
     local_pts = torch.tensor(lp_list, device=device, dtype=ego_trajs.dtype)
     K_pts = local_pts.shape[0]
 
