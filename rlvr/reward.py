@@ -1351,7 +1351,7 @@ _LANE_CROSS_THRESH = 0.10
 _LANE_NEAR_THRESH = 0.25
 _LANE_WIDE_THRESH = 0.40
 _LANE_CONT_THRESH = 0.80
-_LANE_PTS_PER_SIDE = 20  # 80 total perimeter points
+_LANE_PTS_PER_SIDE = 10  # 36 unique perimeter points (corners not duplicated)
 
 
 
