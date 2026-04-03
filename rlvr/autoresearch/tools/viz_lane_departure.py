@@ -43,7 +43,7 @@ def check_scene(scene_path, step=None):
 
     Returns dict with all data needed for visualization.
     """
-    device = "cuda"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     data = load_npz_data(scene_path, device)
     raw = np.load(scene_path)
     gt_raw = raw["ego_agent_future"]
@@ -124,14 +124,15 @@ def check_scene(scene_path, step=None):
         is_outer = torch.zeros(0, dtype=torch.bool, device=device)
         seg_p1 = torch.zeros(0, 2, device=device)
 
-    # Build ego perimeter at step
+    # Build ego perimeter at step (must match reward.py: corners not duplicated)
     lp_list = []
     for j in range(_LANE_PTS_PER_SIDE):
         f = j / (_LANE_PTS_PER_SIDE - 1)
         lp_list.append((-ro + f * length, -half_w))
         lp_list.append((-ro + f * length, half_w))
-        lp_list.append((-ro, -half_w + f * width_val))
-        lp_list.append((length - ro, -half_w + f * width_val))
+        if 0 < f < 1:  # skip corners (already in top/bottom)
+            lp_list.append((-ro, -half_w + f * width_val))
+            lp_list.append((length - ro, -half_w + f * width_val))
     local_pts = torch.tensor(lp_list, device=device, dtype=torch.float32)
 
     rot_m = torch.tensor([[cos_h, -sin_h], [sin_h, cos_h]], device=device, dtype=torch.float32)
@@ -152,7 +153,7 @@ def check_scene(scene_path, step=None):
         t_param = t_param.clamp(0, 1)
         closest_boundary_pt = (outer_p1[closest_seg_idx] + t_param * seg_vec).cpu().numpy()
     else:
-        pt_dists = np.full(80, 100.0)
+        pt_dists = np.full(world_pts.shape[0], 100.0)
         worst = 0
         closest_boundary_pt = np.array([cx, cy])
 
@@ -243,7 +244,7 @@ def draw_scene(result, output_path, zoom=None):
     # Perimeter points colored by distance
     cmap_c = cmx.RdYlGn
     norm_v = plt.Normalize(vmin=0, vmax=2.0)
-    for p in range(80):
+    for p in range(len(r["pt_dists"])):
         col = cmap_c(norm_v(r["pt_dists"][p]))
         sz = 25; mk = 'o'
         if not r["pt_in_any"][p]:
