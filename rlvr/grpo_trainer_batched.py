@@ -323,7 +323,13 @@ def train_epoch_batched(
         print(f"  Trimmed {2*n_trim} scenes, keeping {len(kept_trajs)}/{N_kept}")
         N_kept = len(kept_trajs)
 
-    # 5. Training
+    # 5. Apply KL scheduling (persists on config for logging/checkpointing)
+    scheduled_kl = config.get_kl_coef(epoch, config.train_epochs)
+    if scheduled_kl != config.kl_coef:
+        print(f"  [kl_schedule] epoch {epoch}: kl_coef {config.kl_coef:.4f} -> {scheduled_kl:.4f}")
+        config.kl_coef = scheduled_kl
+
+    # 6. Training
     if config.grpo_loss_type == "logprob":
         return _train_logprob(
             model, model_args, optimizer, config,
@@ -346,7 +352,7 @@ def _train_logprob(
     """DDV2-style logprob GRPO: per-scene collect + train."""
     from rlvr.grpo_logprob_loss import collect_logprob_rollout, compute_logprob_grpo_loss
 
-    print(f"  Training on {N_kept} scenes (logprob GRPO)...")
+    print(f"  Training on {N_kept} scenes (logprob GRPO, kl_coef={config.kl_coef:.6f})...")
 
     # Stage 1: Collect rollouts for all scenes (no grad)
     # Uses raw (unnormalized) data — collect_logprob_rollout normalizes internally
@@ -439,7 +445,7 @@ def _train_mse(
     N_kept, device,
 ):
     """Original MSE-based batched GRPO training."""
-    print(f"  Training on {N_kept} scenes (batched GRPO)...")
+    print(f"  Training on {N_kept} scenes (batched GRPO, kl_coef={config.kl_coef:.6f})...")
     keep_per = kept_trajs[0].shape[0]
 
     chunk_size = 1
@@ -447,7 +453,7 @@ def _train_mse(
     optimizer.zero_grad()
 
     all_metrics = {}
-    n_chunks = 0
+    n_scenes_total = 0
     accum_count = 0
     accum_count_target = config.grad_accum_groups
 
@@ -485,8 +491,8 @@ def _train_mse(
         scaled_loss.backward()
 
         for k, v in metrics.items():
-            all_metrics[k] = all_metrics.get(k, 0.0) + v
-        n_chunks += 1
+            all_metrics[k] = all_metrics.get(k, 0.0) + v * c_n
+        n_scenes_total += c_n
 
         is_accum_boundary = (c_end % (chunk_size * config.grad_accum_groups) == 0)
         is_last = (c_end == N_kept)
@@ -504,4 +510,4 @@ def _train_mse(
             optimizer.zero_grad()
             accum_count = 0
 
-    return {k: v / max(n_chunks, 1) for k, v in all_metrics.items()}
+    return {k: v / max(n_scenes_total, 1) for k, v in all_metrics.items()}
