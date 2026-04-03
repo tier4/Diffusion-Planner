@@ -1584,6 +1584,40 @@ def _point_to_segments_dist(
     return (points[:, None, :] - closest).norm(dim=-1)
 
 
+def _point_to_segments_min_dist(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+) -> torch.Tensor:
+    """Min distance from each point to nearest segment. Chunks to avoid OOM.
+
+    Like _point_to_segments_dist but only returns (Q,) min distances
+    instead of the full (Q, E) matrix. Chunks over query points when
+    Q×E > 10M elements.
+
+    Args:
+        points: (Q, 2)
+        seg_p1, seg_p2: (E, 2)
+
+    Returns:
+        min_dist: (Q,) min distance per point.
+    """
+    Q = points.shape[0]
+    E = seg_p1.shape[0]
+    _MAX_QE = 10_000_000
+    chunk_size = max(1, _MAX_QE // E) if E > 0 else Q
+
+    if chunk_size >= Q:
+        return _point_to_segments_dist(points, seg_p1, seg_p2).min(dim=1).values
+
+    results = []
+    for start in range(0, Q, chunk_size):
+        end = min(start + chunk_size, Q)
+        d = _point_to_segments_dist(points[start:end], seg_p1, seg_p2)
+        results.append(d.min(dim=1).values)
+    return torch.cat(results)
+
+
 def _classify_outer_boundaries(
     seg_p1: torch.Tensor,
     seg_p2: torch.Tensor,
@@ -1836,8 +1870,7 @@ def compute_lane_departure_penalty(
     # Only measure distance for points INSIDE the lane — outside points get distance 0
     # (they are already penalized by the crossing gate)
     if outer_p1.shape[0] > 0:
-        raw_dist = _point_to_segments_dist(query, outer_p1, outer_p2) \
-            .min(dim=1).values  # (Q,)
+        raw_dist = _point_to_segments_min_dist(query, outer_p1, outer_p2)  # (Q,)
         raw_dist = torch.where(inside, raw_dist, torch.zeros_like(raw_dist))
         per_ts_min = raw_dist.reshape(N, T, K_pts).min(dim=2).values
     else:

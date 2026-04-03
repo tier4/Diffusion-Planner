@@ -39,7 +39,7 @@ def compute_gt_stats(scene_path: str) -> dict | None:
         # Total yaw change
         dh = np.diff(gt[:, 2])
         dh = np.arctan2(np.sin(dh), np.cos(dh))
-        total_yaw_deg = np.degrees(np.abs(np.sum(dh)))
+        total_yaw_deg = np.degrees(np.sum(np.abs(dh)))
 
         # Path length
         dx = np.diff(gt[:, 0])

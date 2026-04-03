@@ -159,7 +159,7 @@ def check_scene(scene_path, step=None):
 
     # Yaw
     dh = np.diff(gt_raw[:, 2])
-    total_yaw = np.degrees(np.abs(np.sum(np.arctan2(np.sin(dh), np.cos(dh)))))
+    total_yaw = np.degrees(np.sum(np.abs(np.arctan2(np.sin(dh), np.cos(dh)))))
 
     return {
         "scene_path": scene_path,
