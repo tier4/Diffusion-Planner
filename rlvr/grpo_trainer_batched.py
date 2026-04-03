@@ -323,20 +323,24 @@ def train_epoch_batched(
         print(f"  Trimmed {2*n_trim} scenes, keeping {len(kept_trajs)}/{N_kept}")
         N_kept = len(kept_trajs)
 
-    # 5. Training
+    # 5. Apply KL scheduling (persists on config for logging/checkpointing)
+    scheduled_kl = config.get_kl_coef(epoch, config.train_epochs)
+    if scheduled_kl != config.kl_coef:
+        print(f"  [kl_schedule] epoch {epoch}: kl_coef {config.kl_coef:.4f} -> {scheduled_kl:.4f}")
+        config.kl_coef = scheduled_kl
+
+    # 6. Training
     if config.grpo_loss_type == "logprob":
         return _train_logprob(
             model, model_args, optimizer, config,
             kept_trajs, kept_advantages, kept_raw_data,
             N, N_kept, device,
-            epoch=epoch, total_epochs=config.train_epochs,
         )
     else:
         return _train_mse(
             model, model_args, optimizer, config,
             kept_trajs, kept_advantages, kept_norm_data,
             N_kept, device,
-            epoch=epoch, total_epochs=config.train_epochs,
         )
 
 
@@ -344,14 +348,10 @@ def _train_logprob(
     model, model_args, optimizer, config,
     kept_trajs, kept_advantages, kept_raw_data,
     N_total, N_kept, device,
-    epoch: int = 1, total_epochs: int = 1,
 ):
     """DDV2-style logprob GRPO: per-scene collect + train."""
     from rlvr.grpo_logprob_loss import collect_logprob_rollout, compute_logprob_grpo_loss
 
-    # Apply KL scheduling
-    original_kl = config.kl_coef
-    config.kl_coef = config.get_kl_coef(epoch, total_epochs)
     print(f"  Training on {N_kept} scenes (logprob GRPO, kl_coef={config.kl_coef:.6f})...")
 
     # Stage 1: Collect rollouts for all scenes (no grad)
@@ -436,7 +436,6 @@ def _train_logprob(
         optimizer.step()
         optimizer.zero_grad()
 
-    config.kl_coef = original_kl
     return {k: v / max(n_scenes, 1) for k, v in all_metrics.items()}
 
 
@@ -444,12 +443,8 @@ def _train_mse(
     model, model_args, optimizer, config,
     kept_trajs, kept_advantages, kept_norm_data,
     N_kept, device,
-    epoch: int = 1, total_epochs: int = 1,
 ):
     """Original MSE-based batched GRPO training."""
-    # Apply KL scheduling
-    original_kl = config.kl_coef
-    config.kl_coef = config.get_kl_coef(epoch, total_epochs)
     print(f"  Training on {N_kept} scenes (batched GRPO, kl_coef={config.kl_coef:.6f})...")
     keep_per = kept_trajs[0].shape[0]
 
@@ -515,5 +510,4 @@ def _train_mse(
             optimizer.zero_grad()
             accum_count = 0
 
-    config.kl_coef = original_kl
     return {k: v / max(n_scenes_total, 1) for k, v in all_metrics.items()}
