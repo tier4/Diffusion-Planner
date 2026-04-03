@@ -744,18 +744,19 @@ def test_lane_departure_in_lane():
     # Ego trajectory going straight at y=0, well within lane
     ego = torch.zeros(1, T, 4, device=device)
     for t in range(T):
-        ego[0, t, 0] = t * 0.5  # x moves forward
-        ego[0, t, 2] = 1.0      # cos(heading) = 1
+        ego[0, t, 0] = 2.0 + t * 0.5  # x moves forward, start at x=2
+        ego[0, t, 2] = 1.0             # cos(heading) = 1
     # Lane centerline at y=0, width=3.5m (half_width=1.75m)
+    # Lane extends well beyond ego to avoid polygon boundary issues
     lanes = torch.zeros(1, 10, 20, 33, device=device)
     for pt in range(20):
-        lanes[0, 0, pt, 0] = pt * 0.5    # center X
-        lanes[0, 0, pt, 1] = 0.0          # center Y
+        lanes[0, 0, pt, 0] = pt * 1.0    # center X (0 to 19, covers ego range)
+        lanes[0, 0, pt, 1] = 0.01         # center Y slightly off-zero (avoid origin validity filter)
         lanes[0, 0, pt, 2] = 1.0          # direction cos
         lanes[0, 0, pt, 4] = 0.0          # left boundary dX
-        lanes[0, 0, pt, 5] = 1.75         # left boundary dY
+        lanes[0, 0, pt, 5] = 1.74         # left boundary dY
         lanes[0, 0, pt, 6] = 0.0          # right boundary dX
-        lanes[0, 0, pt, 7] = -1.75        # right boundary dY
+        lanes[0, 0, pt, 7] = -1.76        # right boundary dY
     ego_shape = torch.tensor([2.75, 4.34, 1.70])
     data = {"lanes": lanes}
     crossing_gate, near_frac, wide_frac, _, cont = compute_lane_departure_penalty(ego, ego_shape, data)
