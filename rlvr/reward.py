@@ -1745,9 +1745,12 @@ def compute_lane_departure_penalty(
     ]
 
     # Distance to outer boundaries (soft penalties)
+    # Only measure distance for points INSIDE the lane — outside points get distance 0
     if outer_p1.shape[0] > 0:
-        per_ts_min = _point_to_segments_dist(query, outer_p1, outer_p2) \
-            .min(dim=1).values.reshape(N, T, K_pts).min(dim=2).values
+        raw_dist = _point_to_segments_dist(query, outer_p1, outer_p2) \
+            .min(dim=1).values  # (Q,)
+        raw_dist = torch.where(inside, raw_dist, torch.zeros_like(raw_dist))
+        per_ts_min = raw_dist.reshape(N, T, K_pts).min(dim=2).values
     else:
         per_ts_min = torch.full((N, T), 100.0, device=device)
 
