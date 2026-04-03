@@ -468,15 +468,16 @@ int main(int argc, char ** argv)
     rosbag2_storage::MetadataIo metadata_io;
     if (metadata_io.metadata_file_exists(rosbag_path)) {
       const auto input_metadata = metadata_io.read_metadata(rosbag_path);
-      if (input_metadata.files.size() <= 1) {
+      const size_t n_files = input_metadata.relative_file_paths.size();
+      if (n_files <= 1) {
         std::cout << "  --split-output: only 1 input file, falling back to single output"
                   << std::endl;
         split_output = false;
       } else {
-        std::cout << "Creating split output (" << input_metadata.files.size()
-                  << " files): " << output_path << std::endl;
-        split_manager =
-          std::make_unique<rosbag_parser::SplitWriterManager>(output_path, input_metadata);
+        std::cout << "Creating split output (" << n_files << " files): " << output_path
+                  << std::endl;
+        split_manager = std::make_unique<rosbag_parser::SplitWriterManager>(
+          output_path, input_metadata, rosbag_path);
       }
     } else {
       std::cout << "  --split-output: no metadata.yaml found, falling back to single output"

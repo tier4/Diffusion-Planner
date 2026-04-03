@@ -237,19 +237,45 @@ struct FileBoundary
   std::string filename;  // e.g. "bag_0.mcap"
 };
 
-/// Parse file boundaries from BagMetadata
+/// Parse file boundaries from BagMetadata.
+/// If metadata.files is populated, use it directly.
+/// Otherwise, fall back to reading each MCAP file's statistics for time boundaries.
 inline std::vector<FileBoundary> parse_file_boundaries(
-  const rosbag2_storage::BagMetadata & metadata)
+  const rosbag2_storage::BagMetadata & metadata, const std::string & bag_dir)
 {
   std::vector<FileBoundary> boundaries;
-  for (const auto & fi : metadata.files) {
-    const int64_t start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                               fi.starting_time.time_since_epoch())
-                               .count();
-    const int64_t end_ns = start_ns + fi.duration.count();
-    boundaries.push_back({start_ns, end_ns, fi.path});
+
+  if (!metadata.files.empty()) {
+    // Use FileInformation directly
+    for (const auto & fi : metadata.files) {
+      const int64_t start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 fi.starting_time.time_since_epoch())
+                                 .count();
+      const int64_t end_ns = start_ns + fi.duration.count();
+      boundaries.push_back({start_ns, end_ns, fi.path});
+    }
+  } else {
+    // Fallback: read each file individually to get time boundaries
+    for (const auto & rel_path : metadata.relative_file_paths) {
+      const std::string full_path = bag_dir + "/" + rel_path;
+      const std::string storage_id = determine_storage_id(bag_dir);
+
+      rosbag2_cpp::Reader file_reader;
+      rosbag2_storage::StorageOptions so{full_path, storage_id};
+      rosbag2_cpp::ConverterOptions co{"cdr", "cdr"};
+      file_reader.open(so, co);
+
+      const auto file_meta = file_reader.get_metadata();
+      const int64_t start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 file_meta.starting_time.time_since_epoch())
+                                 .count();
+      const int64_t end_ns = start_ns + file_meta.duration.count();
+      boundaries.push_back({start_ns, end_ns, rel_path});
+      file_reader.close();
+    }
   }
-  // Sort by start time (should already be sorted, but be safe)
+
+  // Sort by start time
   std::sort(
     boundaries.begin(), boundaries.end(),
     [](const FileBoundary & a, const FileBoundary & b) { return a.start_ns < b.start_ns; });
@@ -261,9 +287,9 @@ class SplitWriterManager
 public:
   SplitWriterManager(
     const std::string & output_dir, const rosbag2_storage::BagMetadata & metadata,
-    const std::string & storage_id = "mcap")
+    const std::string & bag_dir, const std::string & storage_id = "mcap")
   {
-    boundaries_ = parse_file_boundaries(metadata);
+    boundaries_ = parse_file_boundaries(metadata, bag_dir);
 
     // Pre-compute sorted start times for binary search
     for (const auto & b : boundaries_) {
