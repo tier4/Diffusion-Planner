@@ -1464,6 +1464,32 @@ def _point_in_polygons(
     edge_poly_id = edge_poly_id[keep]
     E = int(keep.sum().item())
 
+    # Chunk over query points when Q×E is large to avoid OOM
+    _MAX_QE = 50_000_000  # ~200 MB of float32 intermediates
+    chunk_size = max(1, _MAX_QE // E) if E > 0 else Q
+
+    if chunk_size >= Q:
+        return _pip_core(px, py, v1x, v1y, v2x, v2y, edge_poly_id, E, n_polys, device)
+
+    results = []
+    for start in range(0, Q, chunk_size):
+        end = min(start + chunk_size, Q)
+        results.append(_pip_core(
+            px[start:end], py[start:end],
+            v1x, v1y, v2x, v2y, edge_poly_id, E, n_polys, device,
+        ))
+    return torch.cat(results)
+
+
+def _pip_core(
+    px: torch.Tensor, py: torch.Tensor,
+    v1x: torch.Tensor, v1y: torch.Tensor,
+    v2x: torch.Tensor, v2y: torch.Tensor,
+    edge_poly_id: torch.Tensor, E: int, n_polys: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Core ray-casting kernel for a chunk of query points."""
+    Q = px.shape[0]
     py_exp = py[:, None]
     above1 = v1y[None, :] > py_exp
     above2 = v2y[None, :] > py_exp
