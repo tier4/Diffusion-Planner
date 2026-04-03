@@ -203,11 +203,14 @@ def main():
     if args.clean:
         print(f"\nCleaning with threshold={args.clean_threshold}m...")
         clean_output = args.output.replace(".json", "_clean.json")
-        os.system(
-            f"python -m rlvr.autoresearch.tools.cleanse_lane_scenes "
-            f"--scenes {args.output} --output {clean_output} "
-            f"--threshold {args.clean_threshold} --also_check_road_border"
-        )
+        import subprocess
+        subprocess.run([
+            "python", "-m", "rlvr.autoresearch.tools.cleanse_lane_scenes",
+            "--scenes", args.output,
+            "--output", clean_output,
+            "--threshold", str(args.clean_threshold),
+            "--also_check_road_border",
+        ], check=True)
 
     # Summary stats
     bags = defaultdict(int)
