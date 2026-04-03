@@ -45,8 +45,8 @@ def check_scene(scene_path, step=None):
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     data = load_npz_data(scene_path, device)
-    raw = np.load(scene_path)
-    gt_raw = raw["ego_agent_future"]
+    with np.load(scene_path) as raw:
+        gt_raw = raw["ego_agent_future"].copy()
 
     es = data.get("ego_shape")
     ego_shape = es[0] if es is not None and es.dim() > 1 else es

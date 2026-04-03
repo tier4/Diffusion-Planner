@@ -1348,7 +1348,6 @@ def compute_road_border_penalty(
 # Lane departure penalty
 # ---------------------------------------------------------------------------
 
-_LANE_CROSS_THRESH = 0.10
 _LANE_NEAR_THRESH = 0.25
 _LANE_WIDE_THRESH = 0.40
 _LANE_CONT_THRESH = 0.80
@@ -1462,7 +1461,7 @@ def _point_in_polygons(
     v1x = v1x[keep]; v1y = v1y[keep]
     v2x = v2x[keep]; v2y = v2y[keep]
     edge_poly_id = edge_poly_id[keep]
-    E = int(keep.sum().item())
+    E = v1x.shape[0]
 
     # Chunk over query points when Q×E is large to avoid OOM
     _MAX_QE = 50_000_000  # ~200 MB of float32 intermediates

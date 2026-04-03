@@ -751,7 +751,7 @@ def test_lane_departure_in_lane():
     lanes = torch.zeros(1, 10, 20, 33, device=device)
     for pt in range(20):
         lanes[0, 0, pt, 0] = pt * 1.0    # center X (0 to 19, covers ego range)
-        lanes[0, 0, pt, 1] = 0.01         # center Y (avoid origin filter)
+        lanes[0, 0, pt, 1] = 0.01         # center Y slightly off-zero (avoid origin validity filter)
         lanes[0, 0, pt, 2] = 1.0          # direction cos
         lanes[0, 0, pt, 4] = 0.0          # left boundary dX
         lanes[0, 0, pt, 5] = 1.74         # left boundary dY

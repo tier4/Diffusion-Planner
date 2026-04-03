@@ -31,8 +31,8 @@ import numpy as np
 def compute_gt_stats(scene_path: str) -> dict | None:
     """Compute GT trajectory statistics for a scene."""
     try:
-        data = np.load(scene_path)
-        gt = data["ego_agent_future"]
+        with np.load(scene_path) as data:
+            gt = data["ego_agent_future"].copy()
         if gt.shape[0] < 20:
             return None
 
