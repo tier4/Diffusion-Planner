@@ -2073,10 +2073,16 @@ def compute_reward_batch(
             progress_frac = (clamped_progress / gt_path_len.clamp(min=1e-3)).clamp(max=config.overprogress_margin)
             clamped_progress = progress_frac * config.progress_norm_scale
 
-            # Overprogress: penalize model path exceeding margin × GT
-            cap = config.overprogress_margin * gt_path_len
-            excess = torch.relu(model_path_lens - cap)
-            clamped_progress = clamped_progress - config.overprogress_penalty * excess
+            # Compute path ratio for symmetric over/under progress penalties.
+            # Both use the same ratio-based method: penalty * |deviation from threshold|.
+            path_ratio = (model_path_lens / gt_path_len.clamp(min=1e-3))
+
+            # Overprogress: penalize path exceeding margin × GT (ratio-based).
+            # Reference = GT path (the ideal trajectory length).
+            # E.g., margin=1.0, penalty=100: at 1.5x GT → 100*(1.5-1.0)=50 penalty.
+            gt_ratio = model_path_lens / gt_path_len.clamp(min=1e-3)
+            overprogress = torch.relu(gt_ratio - config.overprogress_margin)
+            clamped_progress = clamped_progress - config.overprogress_penalty * overprogress
 
             # Stopped penalty: if GT drives (>5m) but model barely moves (<1m),
             # apply extra negative progress to discourage stopping.
@@ -2084,12 +2090,15 @@ def compute_reward_batch(
                 is_stopped = (model_path_lens < 1.0).float()
                 clamped_progress = clamped_progress - config.stopped_penalty * is_stopped
 
-            # Underprogress penalty: penalize trajectories that drive much less than GT.
-            # Continuous penalty proportional to how far below threshold the ratio is.
-            # E.g., penalty=100, threshold=0.5: at 25% GT path → 100*(0.5-0.25)=25 penalty.
-            if config.underprogress_penalty > 0 and gt_path_len > 3.0:
-                progress_ratio = (model_path_lens / gt_path_len).clamp(max=1.0)
-                underprogress = torch.relu(config.underprogress_threshold - progress_ratio)
+            # Underprogress: penalize trajectories shorter than deterministic traj.
+            # Reference = deterministic trajectory (traj[0]) path length, NOT GT.
+            # The det traj is what the model currently produces — it's a realistic
+            # baseline. GT may be much longer (perfect curve navigation) and
+            # penalizing against GT makes even good trajectories look bad.
+            if config.underprogress_penalty > 0 and N > 1:
+                det_path_len = model_path_lens[0].clamp(min=1e-3)
+                det_ratio = model_path_lens / det_path_len
+                underprogress = torch.relu(config.underprogress_threshold - det_ratio.clamp(max=1.0))
                 clamped_progress = clamped_progress - config.underprogress_penalty * underprogress
 
     # TTC as quality bonus
