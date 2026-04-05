@@ -211,16 +211,48 @@ def main():
             traj_b, data_b, r_b = infer(model_base, model_args, scenes[si])
             traj_l, data_l, r_l = infer(model_lora, model_args, scenes[si])
 
-            # Draw both on same axes
+            # Draw baseline with borders, GT, and footprints
             draw_scene(ax, scenes[si], traj_b, "Baseline", "blue", r_b, show_gt=True)
-            # Overlay LoRA trajectory
+            # Overlay LoRA trajectory with footprints
+            npz = np.load(scenes[si], allow_pickle=True)
+            es = npz.get("ego_shape", None)
+            length = float(es[0]) if es is not None and len(es) >= 2 else 4.34
+            width = float(es[2]) if es is not None and len(es) >= 3 else 1.70
+            ro = length * 0.35
             pl_l = np.linalg.norm(np.diff(traj_l[:, :2], axis=0), axis=1).sum()
             ax.plot(traj_l[:, 0], traj_l[:, 1], "-", color="orange", lw=2, alpha=0.6, zorder=12)
             ax.plot(traj_l[::3, 0], traj_l[::3, 1], "o", color="orange", ms=3.5, alpha=0.9, mew=0,
                     zorder=13, label=f"LoRA ({pl_l:.1f}m)")
+            # LoRA footprints every 10 steps
+            for ts in range(5, len(traj_l), 10):
+                cx, cy = traj_l[ts, 0], traj_l[ts, 1]
+                cos_h, sin_h = traj_l[ts, 2], traj_l[ts, 3]
+                hn = np.sqrt(cos_h ** 2 + sin_h ** 2)
+                if hn > 0.01:
+                    heading = np.arctan2(sin_h / hn, cos_h / hn)
+                    t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
+                    ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=0.5,
+                                           ec="orange", fc="orange", alpha=0.15, zorder=12, transform=t_rot))
+            # LoRA endpoint footprint
+            t_end = len(traj_l) - 1
+            cx, cy = traj_l[t_end, 0], traj_l[t_end, 1]
+            cos_h, sin_h = traj_l[t_end, 2], traj_l[t_end, 3]
+            hn = np.sqrt(cos_h ** 2 + sin_h ** 2)
+            if hn > 0.01:
+                heading = np.arctan2(sin_h / hn, cos_h / hn)
+                t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
+                ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=1.5,
+                                       ec="orange", fc="orange", alpha=0.4, zorder=12, transform=t_rot))
+            # Expand view to include LoRA trajectory
+            all_pts = np.vstack([traj_b[:, :2], traj_l[:, :2], npz["ego_agent_future"][:, :2], [[0, 0]]])
+            cx_v, cy_v = np.mean(all_pts[:, 0]), np.mean(all_pts[:, 1])
+            half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8
+            ax.set_xlim(cx_v - half, cx_v + half)
+            ax.set_ylim(cy_v - half, cy_v + half)
             ax.legend(fontsize=7, loc="upper left")
-            ax.set_title(f"[{si}] base: rb_x={'Y' if r_b.rb_crossing else 'N'} | "
-                         f"lora: rb_x={'Y' if r_l.rb_crossing else 'N'}", fontsize=8)
+            ld_b = "LD" if r_b.lane_crossing else "OK"
+            ld_l = "LD" if r_l.lane_crossing else "OK"
+            ax.set_title(f"[{si}] base:{ld_b} lora:{ld_l}", fontsize=9)
 
         for j in range(len(indices), len(axes_flat)):
             axes_flat[j].set_visible(False)
