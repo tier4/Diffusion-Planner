@@ -2080,8 +2080,7 @@ def compute_reward_batch(
             # Overprogress: penalize path exceeding margin × GT (ratio-based).
             # Reference = GT path (the ideal trajectory length).
             # E.g., margin=1.0, penalty=100: at 1.5x GT → 100*(1.5-1.0)=50 penalty.
-            gt_ratio = model_path_lens / gt_path_len.clamp(min=1e-3)
-            overprogress = torch.relu(gt_ratio - config.overprogress_margin)
+            overprogress = torch.relu(path_ratio - config.overprogress_margin)
             clamped_progress = clamped_progress - config.overprogress_penalty * overprogress
 
             # Stopped penalty: if GT drives (>5m) but model barely moves (<1m),
@@ -2092,9 +2091,10 @@ def compute_reward_batch(
 
             # Underprogress: penalize trajectories shorter than deterministic traj.
             # Reference = deterministic trajectory (traj[0]) path length, NOT GT.
-            # The det traj is what the model currently produces — it's a realistic
-            # baseline. GT may be much longer (perfect curve navigation) and
-            # penalizing against GT makes even good trajectories look bad.
+            # This is intentional: the det traj represents what the model currently
+            # produces without noise — a realistic achievable baseline. Using GT as
+            # reference would penalize even good trajectories because GT may be much
+            # longer (e.g., perfect curve navigation that the model can't yet match).
             if config.underprogress_penalty > 0 and N > 1:
                 det_path_len = model_path_lens[0].clamp(min=1e-3)
                 det_ratio = model_path_lens / det_path_len

@@ -398,8 +398,19 @@ def compute_logprob_grpo_loss(
         # Ego IL (agent 0)
         ego_il = F.mse_loss(x0_pred[:, 0], full_gt[:, 0], reduction='none').mean(dim=(1, 2))  # [N]
         # Neighbor IL (agents 1+) — preserves neighbor prediction quality
+        # Mask out padded/invalid neighbors (zeroed out in all_gt) to avoid
+        # training toward zero targets.
         if x0_pred.shape[1] > 1:
-            neigh_il = F.mse_loss(x0_pred[:, 1:], full_gt[:, 1:], reduction='none').mean(dim=(1, 2, 3))  # [N]
+            neigh_pred = x0_pred[:, 1:]   # [N, Pn, T, 4]
+            neigh_gt = full_gt[:, 1:]     # [N, Pn, T, 4]
+            neigh_mse = F.mse_loss(neigh_pred, neigh_gt, reduction='none')  # [N, Pn, T, 4]
+            # Valid mask: neighbor timestep is valid if GT has non-zero xy
+            neigh_valid = neigh_gt[..., :2].abs().sum(dim=-1) > 0.1  # [N, Pn, T]
+            neigh_valid_4d = neigh_valid.unsqueeze(-1).expand_as(neigh_mse)  # [N, Pn, T, 4]
+            if neigh_valid_4d.any():
+                neigh_il = (neigh_mse * neigh_valid_4d).sum(dim=(1, 2, 3)) / neigh_valid_4d.sum(dim=(1, 2, 3)).clamp(min=1)  # [N]
+            else:
+                neigh_il = torch.zeros_like(ego_il)
         else:
             neigh_il = torch.zeros_like(ego_il)
         il_loss_step = ego_il + neigh_il  # combined, neighbor IL same weight as ego

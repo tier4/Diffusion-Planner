@@ -141,6 +141,9 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
         "model": {f"module.{k}": v for k, v in fused_state_dict.items()},
+        # model_no_ddp: bare keys (without module. prefix) for future non-DDP
+        # loading paths. Currently unused by resume_model (which only reads
+        # "model"), but kept for forward-compatibility with single-GPU tools.
         "model_no_ddp": dict(fused_state_dict),
     }
     torch.save(checkpoint, output_path)

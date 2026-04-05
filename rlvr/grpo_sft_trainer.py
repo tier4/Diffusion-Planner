@@ -16,7 +16,6 @@ Two neighbor modes:
 from __future__ import annotations
 
 import contextlib
-import copy
 import gc
 import random as _random
 
@@ -197,7 +196,10 @@ def _compute_sft_diffusion_loss(
 
     total_ego_loss = 0.0
     total_neighbor_loss = 0.0
+    # Combine future padding mask with current-timestep validity:
+    # a neighbor absent at the current timestep should not contribute to loss.
     neighbors_future_valid = ~neighbor_mask  # [B, Pn, T]
+    neighbors_future_valid = neighbors_future_valid & (~neighbor_current_mask.unsqueeze(-1))  # [B, Pn, T]
 
     for _ in range(K):
         # Sample random timestep
@@ -487,13 +489,10 @@ def train_epoch_ranked_sft(
         else:
             # baseline_neighbor mode
             neighbor_pred = baseline_neighbor_preds[i]  # [Pn, T, 4]
-            # The baseline predictions are already in normalized space from the model output.
-            # Denormalize them to raw space for consistency with the loss function
-            # (the loss function normalizes internally).
-            norm_s = model_args.state_normalizer
-            ego_mean = norm_s.mean[0].to(device)
-            ego_std = norm_s.std[0].to(device)
-            neighbors_future = (neighbor_pred * ego_std + ego_mean).unsqueeze(0)  # [1, Pn, T, 4]
+            # The baseline predictions are already denormalized by the decoder
+            # (inference mode applies state_normalizer.inverse). No further
+            # denormalization needed — the loss function normalizes internally.
+            neighbors_future = neighbor_pred.unsqueeze(0)  # [1, Pn, T, 4]
             # Truncate/pad to future_len
             T_n = neighbors_future.shape[2]
             if T_n > future_len:

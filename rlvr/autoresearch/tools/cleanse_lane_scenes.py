@@ -100,8 +100,14 @@ def check_gt_lane_departure(npz_path: str, device: torch.device,
     raw = np.load(npz_path, allow_pickle=True)
     gt = raw["ego_agent_future"]  # [T, 3] = x, y, heading
 
-    # GT path length
-    gt_path = float(np.sqrt(np.diff(gt[:, 0])**2 + np.diff(gt[:, 1])**2).sum())
+    # GT path length — only over valid (non-padded) timesteps
+    gt_xy = gt[:, :2]
+    valid_mask = np.abs(gt_xy).sum(axis=-1) > 0.1
+    valid_xy = gt_xy[valid_mask]
+    if len(valid_xy) >= 2:
+        gt_path = float(np.sqrt(np.diff(valid_xy[:, 0])**2 + np.diff(valid_xy[:, 1])**2).sum())
+    else:
+        gt_path = 0.0
     gt_path_ok = gt_path >= min_gt_path
 
     data = load_npz_data(npz_path, device)
@@ -110,9 +116,11 @@ def check_gt_lane_departure(npz_path: str, device: torch.device,
     if ego_shape is None:
         ego_shape = torch.tensor([2.75, 4.34, 1.70], device=device)
 
-    # Pad GT to [T, 4] (add velocity=0)
+    # Pad GT to [T, 4] = [x, y, cos_yaw, sin_yaw] for compute_lane_departure_penalty
     gt_padded = np.zeros((gt.shape[0], 4), dtype=np.float32)
-    gt_padded[:, :3] = gt
+    gt_padded[:, :2] = gt[:, :2]
+    gt_padded[:, 2] = np.cos(gt[:, 2])  # heading radians → cos_yaw
+    gt_padded[:, 3] = np.sin(gt[:, 2])  # heading radians → sin_yaw
 
     # Check first gt_max_t timesteps
     t_check = min(gt_max_t, gt.shape[0])
