@@ -347,6 +347,8 @@ def compute_logprob_grpo_loss(
 
     all_log_probs = []
     il_losses = []
+    ego_il_losses = []
+    neigh_il_losses = []
 
     model.train()
     for step_idx in range(num_steps):
@@ -390,11 +392,20 @@ def compute_logprob_grpo_loss(
 
         all_log_probs.append(log_prob)
 
-        # IL loss: MSE between model's x_0 prediction and GT (ego only)
-        ego_gt = all_gt[:, 0, 1:, :]  # [N, T, 4]
-        ego_pred = x0_pred[:, 0]  # [N, T, 4]
-        il_loss_step = F.mse_loss(ego_pred, ego_gt, reduction='none').mean(dim=(1, 2))  # [N]
+        # IL loss: MSE between model's x_0 prediction and GT
+        # all_gt: [N, P, T+1, 4], x0_pred: [N, P, T, 4]
+        full_gt = all_gt[:, :, 1:, :]  # [N, P, T, 4] — skip current state
+        # Ego IL (agent 0)
+        ego_il = F.mse_loss(x0_pred[:, 0], full_gt[:, 0], reduction='none').mean(dim=(1, 2))  # [N]
+        # Neighbor IL (agents 1+) — preserves neighbor prediction quality
+        if x0_pred.shape[1] > 1:
+            neigh_il = F.mse_loss(x0_pred[:, 1:], full_gt[:, 1:], reduction='none').mean(dim=(1, 2, 3))  # [N]
+        else:
+            neigh_il = torch.zeros_like(ego_il)
+        il_loss_step = ego_il + neigh_il  # combined, neighbor IL same weight as ego
         il_losses.append(il_loss_step)
+        ego_il_losses.append(ego_il.mean().item())
+        neigh_il_losses.append(neigh_il.mean().item())
 
     # Stack log-probs: [N, num_steps]
     log_probs = torch.stack(all_log_probs, dim=-1)
@@ -492,6 +503,8 @@ def compute_logprob_grpo_loss(
     metrics = {
         "rl_loss": rl_loss.item(),
         "il_loss": il_loss.item(),
+        "il_ego": sum(ego_il_losses) / max(len(ego_il_losses), 1),
+        "il_neigh": sum(neigh_il_losses) / max(len(neigh_il_losses), 1),
         "il_weight": il_weight,
         "kl_loss": kl_loss.item(),
         "total_loss": total_loss.item(),
