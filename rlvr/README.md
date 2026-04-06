@@ -41,6 +41,10 @@ rlvr/
                              + logprob config: grpo_loss_type, logprob_num_steps, logprob_t_start,
                                logprob_discount, logprob_min_std, il_loss_weight, il_adaptive
                              + advantage_mode: "ddv2" (inter-anchor truncated GRPO)
+  grpo_sft_trainer.py        Ranked SFT trainer: generate N trajs, pick best by reward,
+                             SG-filter, train with SFT diffusion loss (ego + neighbor GT)
+                             + "gt_neighbor" and "baseline_neighbor" modes
+                             + Post-hoc no_block0 trick for L2 preservation
   grpo_trainer.py            Standard GRPO training loop (batched loss)
                              + logprob loss path when grpo_loss_type="logprob"
   grpo_trainer_batched.py    Fully batched GRPO trainer (all scenes in ~5 forward passes)
@@ -89,7 +93,8 @@ rlvr/
 
 | Mode | Config | Trainer | Description |
 |------|--------|---------|-------------|
-| **Logprob GRPO** | `grpo_loss_type: "logprob"` | `train_epoch_batched` | **Recommended.** DDV2-style Gaussian log-prob from VPSDE denoising. Can learn trajectory curvature. |
+| **Ranked SFT** | `ranked_sft_mode: "gt_neighbor"` | `train_epoch_ranked_sft` | **Best for lane keeping.** Generate N trajs, pick best by reward, SG-filter, SFT loss on ego+neighbor. |
+| Logprob GRPO | `grpo_loss_type: "logprob"` | `train_epoch_batched` | DDV2-style Gaussian log-prob. Can learn curvature but degrades neighbor L2. |
 | Standard GRPO (MSE) | `grpo_loss_type: "mse"` | `train_epoch_batched` | Legacy. Cannot change trajectory shape, only length. |
 | Random guidance | `random_guidance_mode: "uniform"` | `GRPOExplorationTrainer` | Random η guidance diversity. |
 | Explorer (open-loop) | `random_guidance_mode: "explorer"` | `GRPOExplorationTrainer` | Learned Beta guidance + GRPO |
@@ -133,6 +138,60 @@ DiffusionDriveV2 (arXiv:2512.07745).
 
 **KL regularization:** Mean-divergence KL: `KL = mean((μ_policy - μ_ref)² / (2σ²))`.
 Uses LoRA `disable_adapter_layers()` for reference model. Properly scaled (0.01→7 over epochs).
+
+### Ranked SFT (GRPO-Ranked Self-Distillation)
+
+The ranked SFT approach combines GRPO's trajectory generation and reward scoring with standard
+SFT diffusion training. Instead of computing RL gradients, it treats the best-ranked trajectory
+as a pseudo-GT and trains with MSE loss. This preserves neighbor prediction quality because
+the SFT loss naturally covers all agents (ego + neighbors).
+
+Inspired by self-distillation approaches in LLMs ([Zhang et al. 2026](https://arxiv.org/abs/2604.01193)),
+adapted for diffusion planners with reward-based selection and Savitzky-Golay trajectory smoothing.
+
+**Pipeline:**
+1. Generate N=16 trajectories per scene (batched, with noise + guidance diversity)
+2. Score all trajectories with the rule-based reward function
+3. Select the highest-reward trajectory per scene
+4. Apply Savitzky-Golay filter (window=11, order=3) to smooth the selected trajectory
+5. Train LoRA with standard SFT diffusion loss: sample random t, noise, denoise, MSE vs pseudo-GT
+6. **Post-hoc: zero LoRA block 0 weights** for better L2 preservation (the "no_block0 trick")
+
+**Neighbor modes:**
+- `"gt_neighbor"` (recommended): use real GT neighbor trajectories from NPZ data
+- `"baseline_neighbor"`: use baseline (no-LoRA) model predictions as neighbor target
+
+**Config:**
+```json
+{
+    "ranked_sft_mode": "gt_neighbor",
+    "sg_filter_window": 11,
+    "sg_filter_order": 3,
+    "learning_rate": 1e-5,
+    "train_epochs": 20,
+    "seed_lora_path": "<warm-start checkpoint>"
+}
+```
+
+**Key results (April 2026, 10+ experiments):**
+- Miraikan exit val: 25/50 → **0/50 lane departures** (with no_block0 trick)
+- Full 1076 miraikan scenes: 70/1076 → **4/1076** lane departures (94% reduction)
+- Ego L2: +1.9% (baseline 5.388), Neighbor L2: +29% (baseline 4.393)
+- Outperforms GRPO logprob on all metrics (GRPO best: 4/50 LD, +1.7% ego, +48% neighbor)
+
+**The no_block0 trick:** After training with `lora_target="all"` (3 DiT blocks), zero out
+block 0 LoRA weights. This consistently improves lane keeping (e.g. 2/50 → 0/50) AND halves
+L2 degradation. Block 0 learns noisy patterns that interfere with the precise lane-keeping
+signal in blocks 1+2. Training all blocks then removing block 0 is better than training only
+block 2, because distributing gradients across all blocks produces smaller per-parameter changes.
+
+**LR sweep:**
+
+| LR | Best LD | Epoch | Stable window | no_block0 ego/neigh Δ |
+|----|---------|-------|---------------|----------------------|
+| 5e-5 | 1/50 | 5 | ep3-9 | +4.8% / +55% |
+| 2e-5 | 0/50 | 12 | ep11-13 | +2.9% / +38% |
+| 1e-5 | 2/50 (0 w/ no_block0) | 20 | ep14-20 | **+1.9% / +29%** |
 
 ### Random Guidance Mode
 

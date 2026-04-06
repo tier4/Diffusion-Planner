@@ -132,9 +132,20 @@ def main() -> None:
         if key not in handled:
             fused_state_dict[key] = val
 
-    # Save as a standard checkpoint (same format as trainer saves)
+    # Save as a standard checkpoint compatible with both DDP and non-DDP loading.
+    # Include both module.-prefixed keys (for DDP / torchrun) and bare keys (for
+    # single-GPU valid_predictor.py --ddp false).  The resume_model helper tries
+    # ckpt["model"] first; with DDP the model expects module.* keys, without DDP
+    # it expects bare keys.  We save the module.* version (matching trainer output)
+    # so torchrun works, and also stash bare keys under "model_no_ddp".
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint = {"model": {f"module.{k}": v for k, v in fused_state_dict.items()}}
+    checkpoint = {
+        "model": {f"module.{k}": v for k, v in fused_state_dict.items()},
+        # model_no_ddp: bare keys (without module. prefix) for future non-DDP
+        # loading paths. Currently unused by resume_model (which only reads
+        # "model"), but kept for forward-compatibility with single-GPU tools.
+        "model_no_ddp": dict(fused_state_dict),
+    }
     torch.save(checkpoint, output_path)
 
     # Copy args.json alongside the merged checkpoint if saving elsewhere

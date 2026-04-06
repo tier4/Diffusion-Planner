@@ -466,13 +466,22 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
             trainer.save_epoch1_baselines(train_paths)
 
         if not grpo_config.use_exploration_policy and not grpo_config.use_closed_loop:
-            # Fully batched training: all scenes in ~5 forward passes
-            from rlvr.grpo_trainer_batched import train_epoch_batched
-            metrics = train_epoch_batched(
-                model=policy_model, model_args=model_args, optimizer=optimizer,
-                scene_paths=train_paths, config=grpo_config,
-                reward_config=train_reward_config, device=DEVICE, epoch=epoch,
-            )
+            if grpo_config.ranked_sft_mode != "none":
+                # Ranked SFT: generate N trajs, pick best, SFT on it
+                from rlvr.grpo_sft_trainer import train_epoch_ranked_sft
+                metrics = train_epoch_ranked_sft(
+                    model=policy_model, model_args=model_args, optimizer=optimizer,
+                    scene_paths=train_paths, config=grpo_config,
+                    reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                )
+            else:
+                # Fully batched training: all scenes in ~5 forward passes
+                from rlvr.grpo_trainer_batched import train_epoch_batched
+                metrics = train_epoch_batched(
+                    model=policy_model, model_args=model_args, optimizer=optimizer,
+                    scene_paths=train_paths, config=grpo_config,
+                    reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                )
         else:
             metrics = trainer.train_epoch(train_paths, epoch)
         trainer.log_metrics(epoch, metrics)
