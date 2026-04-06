@@ -278,7 +278,7 @@ int main(int argc, char ** argv)
       << "Usage: diffusion_planner_inference_tool <rosbag_path> <vector_map_path> <output_path>\n"
       << "  [--vehicle_model_path=<path>] [--planner_config_path=<path>]\n"
       << "  [--step=1] [--limit=-1]\n"
-      << "  [--split-output]            Write one output MCAP per input MCAP file\n"
+      << "  [--inference-only]          Write only planner output topics (no pass-through)\n"
       << "  [--<yaml_param_name>=<value>]  (override any parameter from the planner config YAML)\n";
     return 1;
   }
@@ -295,15 +295,15 @@ int main(int argc, char ** argv)
     "/config/diffusion_planner.param.yaml";
   int64_t step = 1;
   int64_t limit = -1;
-  bool split_output = false;
+  bool inference_only = false;
 
   // CLI overrides for planner parameters
   std::unordered_map<std::string, std::string> cli_overrides;
 
   for (int i = 4; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "--split-output") {
-      split_output = true;
+    if (arg == "--inference-only") {
+      inference_only = true;
     } else if (arg.find("--vehicle_model_path=") == 0) {
       vehicle_model_path = arg.substr(21);
     } else if (arg.find("--planner_config_path=") == 0) {
@@ -457,102 +457,10 @@ int main(int argc, char ** argv)
   unique_identifier_msgs::msg::UUID generator_uuid{};
   generator_uuid.uuid.fill(0);
 
-  // --- 4. Prepare output rosbag and stream-read input rosbag ---
+  // --- 4. Read input rosbag ---
   std::cout << "Reading rosbag: " << rosbag_path << std::endl;
   rosbag_parser::RosbagParser parser(rosbag_path);
   parser.create_reader(rosbag_path);
-
-  // Read input metadata for split-output mode
-  std::unique_ptr<rosbag_parser::SplitWriterManager> split_manager;
-  if (split_output) {
-    rosbag2_storage::MetadataIo metadata_io;
-    if (metadata_io.metadata_file_exists(rosbag_path)) {
-      const auto input_metadata = metadata_io.read_metadata(rosbag_path);
-      const size_t n_files = input_metadata.relative_file_paths.size();
-      if (n_files <= 1) {
-        std::cout << "  --split-output: only 1 input file, falling back to single output"
-                  << std::endl;
-        split_output = false;
-      } else {
-        std::cout << "Creating split output (" << n_files << " files): " << output_path
-                  << std::endl;
-        split_manager = std::make_unique<rosbag_parser::SplitWriterManager>(
-          output_path, input_metadata, rosbag_path);
-      }
-    } else {
-      std::cout << "  --split-output: no metadata.yaml found, falling back to single output"
-                << std::endl;
-      split_output = false;
-    }
-  }
-
-  // Single-writer fallback (original behavior)
-  std::unique_ptr<rosbag_parser::RosbagParser> single_writer;
-  if (!split_output) {
-    std::cout << "Creating output rosbag: " << output_path << std::endl;
-    single_writer = std::make_unique<rosbag_parser::RosbagParser>(rosbag_path);
-    single_writer->create_writer(output_path);
-  }
-
-  // Unified write lambdas
-  auto write_passthrough = [&](const rosbag2_storage::SerializedBagMessageSharedPtr & msg) {
-    if (split_output) {
-      split_manager->write_topic(msg);
-    } else {
-      single_writer->write_topic(msg);
-    }
-  };
-
-  auto create_all_topics = [&](const rosbag2_storage::TopicMetadata & meta) {
-    if (split_output) {
-      split_manager->create_topic(meta);
-    } else {
-      single_writer->create_topic(meta);
-    }
-  };
-
-  auto create_output_topic = [&](const std::string & name, const std::string & type) {
-    if (split_output) {
-      split_manager->create_topic(name, type);
-    } else {
-      single_writer->create_topic(name, type);
-    }
-  };
-
-  // Create pass-through topics before streaming raw messages.
-  //
-  // Motivation:
-  // The previous implementation buffered every serialized bag message in memory and only wrote
-  // them back out after the full read pass. On large MCAP inputs this can drive RSS into the
-  // tens of GB. Streaming raw messages directly to the output bag avoids duplicating the full
-  // input bag in RAM while still keeping the topic-specific deques needed for planner inference.
-  const auto all_topics = split_output
-                            ? parser.get_all_topic_data()
-                            : single_writer->get_all_topic_data();
-  for (const auto & topic_meta : all_topics) {
-    create_all_topics(topic_meta);
-  }
-
-  // Create output topics
-  create_output_topic(TOPIC_OUT_TRAJECTORY, "autoware_planning_msgs/msg/Trajectory");
-  create_output_topic(
-    TOPIC_OUT_TRAJECTORIES, "autoware_internal_planning_msgs/msg/CandidateTrajectories");
-  create_output_topic(
-    TOPIC_OUT_PREDICTED_OBJECTS, "autoware_perception_msgs/msg/PredictedObjects");
-  create_output_topic(
-    TOPIC_OUT_TURN_INDICATORS, "autoware_vehicle_msgs/msg/TurnIndicatorsCommand");
-  create_output_topic(TOPIC_OUT_GT_TRAJECTORY, "autoware_planning_msgs/msg/Trajectory");
-  create_output_topic(TOPIC_OUT_DEBUG_ROUTE_MARKER, "visualization_msgs/msg/MarkerArray");
-  create_output_topic(TOPIC_OUT_DEBUG_LANE_MARKER, "visualization_msgs/msg/MarkerArray");
-
-  // Unified typed write helper (template lambda requires C++20 or later)
-  auto write_typed = [&](const auto & msg, const rclcpp::Time & stamp, const std::string & topic) {
-    if (split_output) {
-      split_manager->write_topic(msg, stamp, topic);
-    } else {
-      single_writer->write_topic(msg, stamp, topic);
-    }
-  };
 
   std::deque<Odometry> odometry_msgs;
   std::deque<AccelWithCovarianceStamped> acceleration_msgs;
@@ -561,10 +469,15 @@ int main(int argc, char ** argv)
   std::deque<TurnIndicatorsReport> turn_indicator_msgs;
   std::deque<LaneletRoute> route_msgs;
 
+  // Store raw messages for pass-through (skip in inference-only mode to save memory)
+  std::vector<rosbag2_storage::SerializedBagMessageSharedPtr> raw_messages;
+
   int64_t read_count = 0;
   while (parser.has_next() && (limit < 0 || read_count < limit)) {
     const auto msg = parser.read_next();
-    write_passthrough(msg);
+    if (!inference_only) {
+      raw_messages.push_back(msg);
+    }
 
     const auto & topic = msg->topic_name;
     if (topic == TOPIC_KINEMATIC_STATE) {
@@ -594,6 +507,38 @@ int main(int argc, char ** argv)
     std::cerr << "No odometry messages found. Exiting." << std::endl;
     return 1;
   }
+
+  // --- 5. Create output rosbag ---
+  std::cout << "Creating output rosbag: " << output_path << std::endl;
+  rosbag_parser::RosbagParser writer_parser(rosbag_path);
+  writer_parser.create_writer(output_path);
+
+  // Create pass-through topics (skip in inference-only mode)
+  if (!inference_only) {
+    for (const auto & topic_meta : writer_parser.get_all_topic_data()) {
+      writer_parser.create_topic(topic_meta);
+    }
+  }
+
+  // Create output topics
+  writer_parser.create_topic(TOPIC_OUT_TRAJECTORY, "autoware_planning_msgs/msg/Trajectory");
+  writer_parser.create_topic(
+    TOPIC_OUT_TRAJECTORIES, "autoware_internal_planning_msgs/msg/CandidateTrajectories");
+  writer_parser.create_topic(
+    TOPIC_OUT_PREDICTED_OBJECTS, "autoware_perception_msgs/msg/PredictedObjects");
+  writer_parser.create_topic(
+    TOPIC_OUT_TURN_INDICATORS, "autoware_vehicle_msgs/msg/TurnIndicatorsCommand");
+  writer_parser.create_topic(TOPIC_OUT_GT_TRAJECTORY, "autoware_planning_msgs/msg/Trajectory");
+  writer_parser.create_topic(TOPIC_OUT_DEBUG_ROUTE_MARKER, "visualization_msgs/msg/MarkerArray");
+  writer_parser.create_topic(TOPIC_OUT_DEBUG_LANE_MARKER, "visualization_msgs/msg/MarkerArray");
+
+  // Pass-through all raw input messages (skip in inference-only mode)
+  if (!inference_only) {
+    for (const auto & msg : raw_messages) {
+      writer_parser.write_topic(msg);
+    }
+  }
+  raw_messages.clear();  // free memory
 
   // --- 6. Process frames ---
   std::cout << "Processing frames (step=" << step << ")..." << std::endl;
@@ -686,13 +631,13 @@ int main(int argc, char ** argv)
         frame_context->ego_to_map_transform, input_data_map.at("route_lanes"),
         std::vector<int64_t>(ROUTE_LANES_SHAPE.begin(), ROUTE_LANES_SHAPE.end()), frame_time,
         lifetime, {0.8f, 0.8f, 0.8f, 0.8f}, "map", true);
-      write_typed(route_markers, frame_time, TOPIC_OUT_DEBUG_ROUTE_MARKER);
+      writer_parser.write_topic(route_markers, frame_time, TOPIC_OUT_DEBUG_ROUTE_MARKER);
 
       const auto lane_markers = utils::create_lane_marker(
         frame_context->ego_to_map_transform, input_data_map.at("lanes"),
         std::vector<int64_t>(LANES_SHAPE.begin(), LANES_SHAPE.end()), frame_time, lifetime,
         {0.1f, 0.1f, 0.7f, 0.8f}, "map", true);
-      write_typed(lane_markers, frame_time, TOPIC_OUT_DEBUG_LANE_MARKER);
+      writer_parser.write_topic(lane_markers, frame_time, TOPIC_OUT_DEBUG_LANE_MARKER);
     }
 
     preprocess::normalize_input_data(input_data_map, core.get_normalization_map());
@@ -724,12 +669,12 @@ int main(int argc, char ** argv)
     }
 
     // Write output to rosbag
-    write_typed(planner_output.trajectory, frame_time, TOPIC_OUT_TRAJECTORY);
-    write_typed(
+    writer_parser.write_topic(planner_output.trajectory, frame_time, TOPIC_OUT_TRAJECTORY);
+    writer_parser.write_topic(
       planner_output.candidate_trajectories, frame_time, TOPIC_OUT_TRAJECTORIES);
-    write_typed(
+    writer_parser.write_topic(
       planner_output.predicted_objects, frame_time, TOPIC_OUT_PREDICTED_OBJECTS);
-    write_typed(
+    writer_parser.write_topic(
       planner_output.turn_indicator_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
 
     // Build ground truth trajectory from future odometry with interpolation
@@ -761,9 +706,10 @@ int main(int argc, char ** argv)
         gt_trajectory.points.push_back(tp);
       }
 
-      write_typed(gt_trajectory, frame_time, TOPIC_OUT_GT_TRAJECTORY);
-
+      writer_parser.write_topic(gt_trajectory, frame_time, TOPIC_OUT_GT_TRAJECTORY);
     }
+
+    ++processed_frames;
 
     if (processed_frames % 100 == 0) {
       std::cout << "  Processed " << processed_frames << " / " << expected_frames << " frames..."
@@ -777,9 +723,6 @@ int main(int argc, char ** argv)
   std::cout << "  Processed:        " << processed_frames << std::endl;
   std::cout << "  Skipped:          " << skipped_frames << std::endl;
   std::cout << "  Failed:           " << failed_frames << std::endl;
-  if (split_output) {
-    std::cout << "  Split output:     " << split_manager->num_writers() << " files" << std::endl;
-  }
   std::cout << "  Output written to: " << output_path << std::endl;
 
   return 0;

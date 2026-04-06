@@ -23,18 +23,14 @@
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
 #include <rosbag2_cpp/typesupport_helpers.hpp>
 #include <rosbag2_cpp/writer.hpp>
-#include <rosbag2_storage/bag_metadata.hpp>
-#include <rosbag2_storage/metadata_io.hpp>
 
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
-#include <algorithm>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <memory>
 #include <sstream>
 #include <utility>
 
@@ -224,156 +220,6 @@ private:
 
   std::string rosbag_path_;
   std::vector<rosbag2_storage::TopicMetadata> all_topic_data_;
-};
-
-// =============================================================================
-// SplitWriterManager: routes messages to per-file writers based on timestamp
-// =============================================================================
-
-struct FileBoundary
-{
-  int64_t start_ns;
-  int64_t end_ns;
-  std::string filename;  // e.g. "bag_0.mcap"
-};
-
-/// Parse file boundaries from BagMetadata.
-/// If metadata.files is populated, use it directly.
-/// Otherwise, fall back to reading each MCAP file's statistics for time boundaries.
-inline std::vector<FileBoundary> parse_file_boundaries(
-  const rosbag2_storage::BagMetadata & metadata, const std::string & bag_dir)
-{
-  std::vector<FileBoundary> boundaries;
-
-  if (!metadata.files.empty()) {
-    // Use FileInformation directly
-    for (const auto & fi : metadata.files) {
-      const int64_t start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                 fi.starting_time.time_since_epoch())
-                                 .count();
-      const int64_t end_ns = start_ns + fi.duration.count();
-      boundaries.push_back({start_ns, end_ns, fi.path});
-    }
-  } else {
-    // Fallback: read each file individually to get time boundaries
-    for (const auto & rel_path : metadata.relative_file_paths) {
-      const std::string full_path = bag_dir + "/" + rel_path;
-      const std::string storage_id = determine_storage_id(bag_dir);
-
-      rosbag2_cpp::Reader file_reader;
-      rosbag2_storage::StorageOptions so{full_path, storage_id};
-      rosbag2_cpp::ConverterOptions co{"cdr", "cdr"};
-      file_reader.open(so, co);
-
-      const auto file_meta = file_reader.get_metadata();
-      const int64_t start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                 file_meta.starting_time.time_since_epoch())
-                                 .count();
-      const int64_t end_ns = start_ns + file_meta.duration.count();
-      boundaries.push_back({start_ns, end_ns, rel_path});
-      file_reader.close();
-    }
-  }
-
-  // Sort by start time
-  std::sort(
-    boundaries.begin(), boundaries.end(),
-    [](const FileBoundary & a, const FileBoundary & b) { return a.start_ns < b.start_ns; });
-  return boundaries;
-}
-
-class SplitWriterManager
-{
-public:
-  SplitWriterManager(
-    const std::string & output_dir, const rosbag2_storage::BagMetadata & metadata,
-    const std::string & bag_dir, const std::string & storage_id = "mcap")
-  {
-    boundaries_ = parse_file_boundaries(metadata, bag_dir);
-
-    // Pre-compute sorted start times for binary search
-    for (const auto & b : boundaries_) {
-      start_times_ns_.push_back(b.start_ns);
-    }
-
-    // Create one writer per input file
-    std::filesystem::create_directories(output_dir);
-    for (const auto & b : boundaries_) {
-      // Output path: output_dir/input_stem (as a bag directory)
-      const std::string stem = std::filesystem::path(b.filename).stem().string();
-      const std::string writer_uri = output_dir + "/" + stem;
-
-      auto writer = std::make_unique<rosbag2_cpp::Writer>();
-      rosbag2_storage::StorageOptions storage_options{};
-      storage_options.uri = writer_uri;
-      storage_options.storage_id = storage_id;
-      rosbag2_cpp::ConverterOptions converter_options{"cdr", "cdr"};
-      writer->open(storage_options, converter_options);
-      writers_.push_back(std::move(writer));
-    }
-  }
-
-  void create_topic(const rosbag2_storage::TopicMetadata & meta_data)
-  {
-    for (auto & w : writers_) {
-      w->create_topic(meta_data);
-    }
-  }
-
-  void create_topic(const std::string & topic_name, const std::string & type)
-  {
-    rosbag2_storage::TopicMetadata meta_data;
-    meta_data.name = topic_name;
-    meta_data.type = type;
-    meta_data.serialization_format = "cdr";
-#if defined(ROSBAG2_QOS_PROFILES_AS_VECTOR)
-    rclcpp::QoS qos(rclcpp::KeepLast(1));
-    qos.reliability(rclcpp::ReliabilityPolicy::Reliable);
-    qos.durability(rclcpp::DurabilityPolicy::Volatile);
-    meta_data.offered_qos_profiles = {qos};
-#else
-    meta_data.offered_qos_profiles =
-      "- history: 1\n  depth: 1\n  reliability: 1\n  durability: 2\n"
-      "  deadline:\n    sec: 9223372036\n    nsec: 854775807\n"
-      "  lifespan:\n    sec: 9223372036\n    nsec: 854775807\n"
-      "  liveliness: 1\n  liveliness_lease_duration:\n"
-      "    sec: 9223372036\n    nsec: 854775807\n"
-      "  avoid_ros_namespace_conventions: false";
-#endif
-    for (auto & w : writers_) {
-      w->create_topic(meta_data);
-    }
-  }
-
-  void write_topic(const rosbag2_storage::SerializedBagMessageSharedPtr & msg)
-  {
-    const size_t idx = find_writer_index(msg->time_stamp);
-    writers_[idx]->write(msg);
-  }
-
-  template <typename T>
-  void write_topic(const T & msg, const rclcpp::Time & stamp, const std::string & topic_name)
-  {
-    const size_t idx = find_writer_index(stamp.nanoseconds());
-    writers_[idx]->write(msg, topic_name, stamp);
-  }
-
-  size_t num_writers() const { return writers_.size(); }
-
-private:
-  size_t find_writer_index(int64_t timestamp_ns) const
-  {
-    // Binary search: find last file whose start_ns <= timestamp_ns
-    auto it = std::upper_bound(start_times_ns_.begin(), start_times_ns_.end(), timestamp_ns);
-    if (it == start_times_ns_.begin()) {
-      return 0;  // before first file → route to first
-    }
-    return static_cast<size_t>(std::distance(start_times_ns_.begin(), it) - 1);
-  }
-
-  std::vector<FileBoundary> boundaries_;
-  std::vector<int64_t> start_times_ns_;
-  std::vector<std::unique_ptr<rosbag2_cpp::Writer>> writers_;
 };
 
 }  // namespace rosbag_parser
