@@ -101,31 +101,24 @@ class StatePerturbation:
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
 
-        # Scale past trajectory with truncated normal coefficient
-        inputs["ego_agent_past"][aug_flag] = self.scale_past_trajectory(
-            inputs["ego_agent_past"][aug_flag]
-        )
+        # Scale past trajectory and current state velocity/acceleration
+        B_aug = aug_flag.sum().item()
+        if B_aug > 0:
+            W = 0.15
+            scale = torch.normal(mean=1.0, std=W, size=(B_aug, 1, 1)).to(
+                inputs["ego_agent_past"].device
+            )
+            scale = torch.clamp(scale, 1.0 - 2 * W, 1.0 + 2 * W)
+
+            ego_past_aug = inputs["ego_agent_past"][aug_flag].clone()
+            ego_past_aug[..., :2] = ego_past_aug[..., :2] * scale
+            inputs["ego_agent_past"][aug_flag] = ego_past_aug
+
+            scale_1d = scale.squeeze(-1)  # (B_aug, 1)
+            inputs["ego_current_state"][aug_flag, 4:6] *= scale_1d  # vx, vy
+            inputs["ego_current_state"][aug_flag, 6:8] *= scale_1d  # ax, ay
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
-
-    def scale_past_trajectory(self, ego_past: torch.Tensor) -> torch.Tensor:
-        """
-        Scale past trajectory positions by a coefficient sampled from
-        a truncated normal distribution.
-
-        Args:
-            ego_past: (B, T, D) past trajectory where [..., :2] are x, y positions
-
-        Returns:
-            Scaled past trajectory
-        """
-        B = ego_past.shape[0]
-        W = 0.15
-        scale = torch.normal(mean=1.0, std=W, size=(B, 1, 1)).to(ego_past.device)
-        scale = torch.clamp(scale, 1.0 - 2 * W, 1.0 + 2 * W)
-        ego_past = ego_past.clone()
-        ego_past[..., :2] = ego_past[..., :2] * scale
-        return ego_past
 
     def augment(self, inputs):
         # Only aug current state
