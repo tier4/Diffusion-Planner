@@ -173,6 +173,19 @@ class GRPOConfig:
     ranked_sft_mode: str = "none"
     sg_filter_window: int = 11  # Savitzky-Golay filter window length (must be odd)
     sg_filter_order: int = 3    # Savitzky-Golay filter polynomial order
+    # Neighbor regularization: penalize LoRA neighbor outputs diverging from base model.
+    # Computes MSE(lora_neighbor_pred, base_neighbor_pred) at the same (noise, timestep)
+    # by running a second forward pass with LoRA disabled. Adds ~2x training cost.
+    # loss += neighbor_reg_weight * MSE(neighbor_pred_lora, neighbor_pred_base)
+    # Active in both ranked SFT and GRPO paths. 0 = disabled.
+    neighbor_reg_weight: float = 0.0
+    # Controls whether to include the neighbor SFT loss (MSE vs GT neighbors).
+    # When True (recommended): loss = ego_sft + neighbor_reg (no GT neighbor loss).
+    #   The base model already learned good neighbor predictions; the reg term anchors
+    #   them while ego improves freely. Neighbor L2 degradation: +1.8% (vs +91% without).
+    # When False: loss = ego_sft + neighbor_sft + neighbor_reg (all 3 terms).
+    #   Adding GT neighbor loss on top of reg causes overfitting at high LR (collapses by ep12).
+    neighbor_reg_only: bool = True
 
     # LoRA
     use_lora: bool = True

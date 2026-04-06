@@ -130,6 +130,8 @@ def _compute_sft_diffusion_loss(
     neighbor_mask: torch.Tensor,
     device: torch.device,
     K: int = 8,
+    neighbor_reg_weight: float = 0.0,
+    neighbor_reg_only: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute standard SFT diffusion loss with ego + neighbor targets.
 
@@ -138,6 +140,10 @@ def _compute_sft_diffusion_loss(
     - Add noise via VPSDE marginal_prob
     - Model predicts x_0 from x_t
     - MSE loss against GT
+
+    When neighbor_reg_weight > 0, adds a regularization term that penalizes
+    the LoRA model's neighbor predictions from diverging from the base model's
+    neighbor predictions at the same (noise, timestep) inputs.
 
     Args:
         model: Policy model (LoRA-wrapped).
@@ -148,6 +154,10 @@ def _compute_sft_diffusion_loss(
         neighbor_mask: [B, Pn, T] boolean mask (True = invalid/padded).
         device: Torch device.
         K: Number of (noise, timestep) samples to average over.
+        neighbor_reg_weight: Weight for neighbor regularization loss (0=disabled).
+        neighbor_reg_only: If True, drop the neighbor SFT loss and only use the
+            reg term. Only takes effect when neighbor reg is active (model has
+            disable_adapter and neighbor_reg_weight > 0).
 
     Returns:
         (loss, metrics_dict)
@@ -196,10 +206,15 @@ def _compute_sft_diffusion_loss(
 
     total_ego_loss = 0.0
     total_neighbor_loss = 0.0
+    total_neighbor_reg_loss = 0.0
     # Combine future padding mask with current-timestep validity:
     # a neighbor absent at the current timestep should not contribute to loss.
     neighbors_future_valid = ~neighbor_mask  # [B, Pn, T]
     neighbors_future_valid = neighbors_future_valid & (~neighbor_current_mask.unsqueeze(-1))  # [B, Pn, T]
+
+    # Check if model supports LoRA disable (needed for neighbor regularization)
+    inner = model.module if hasattr(model, "module") else model
+    use_neighbor_reg = neighbor_reg_weight > 0.0 and Pn > 0 and hasattr(inner, "disable_adapter")
 
     for _ in range(K):
         # Sample random timestep
@@ -243,8 +258,10 @@ def _compute_sft_diffusion_loss(
         ego_loss = F.mse_loss(model_output[:, 0], gt_target[:, 0])
         total_ego_loss += ego_loss
 
-        # Neighbor loss: MSE over valid timesteps only
-        if Pn > 0 and neighbors_future_valid.any():
+        # Neighbor loss: MSE over valid timesteps only.
+        # Skipped when neighbor_reg_only=True AND reg is actually active.
+        skip_neighbor_sft = neighbor_reg_only and use_neighbor_reg
+        if Pn > 0 and neighbors_future_valid.any() and not skip_neighbor_sft:
             neighbor_pred = model_output[:, 1:]  # [B, Pn, T, 4]
             neighbor_target = gt_target[:, 1:]  # [B, Pn, T, 4]
             # Per-element MSE, then mask
@@ -253,16 +270,31 @@ def _compute_sft_diffusion_loss(
             if masked_loss.numel() > 0:
                 total_neighbor_loss += masked_loss.mean()
 
+        # Neighbor regularization: MSE(lora_neighbor, base_neighbor) at same inputs
+        if use_neighbor_reg and neighbors_future_valid.any():
+            with inner.disable_adapter(), torch.no_grad():
+                _, base_outputs = model(merged_inputs)
+            base_neighbor = base_outputs["model_output"][:, 1:, 1:, :]  # [B, Pn, T, 4]
+            lora_neighbor = model_output[:, 1:]  # [B, Pn, T, 4]
+            reg_mse = ((lora_neighbor - base_neighbor.detach()) ** 2).mean(dim=-1)  # [B, Pn, T]
+            masked_reg = reg_mse[neighbors_future_valid]
+            if masked_reg.numel() > 0:
+                total_neighbor_reg_loss += masked_reg.mean()
+
     ego_loss_avg = total_ego_loss / K
     neighbor_loss_avg = total_neighbor_loss / K if isinstance(total_neighbor_loss, torch.Tensor) else torch.tensor(0.0, device=device)
+    neighbor_reg_avg = total_neighbor_reg_loss / K if isinstance(total_neighbor_reg_loss, torch.Tensor) else torch.tensor(0.0, device=device)
 
-    # Combined loss: ego + neighbor (neighbor weight = 1.0 to match SFT)
+    # Combined loss: ego + neighbor (neighbor weight = 1.0 to match SFT) + neighbor reg
     loss = ego_loss_avg + neighbor_loss_avg
+    if use_neighbor_reg:
+        loss = loss + neighbor_reg_weight * neighbor_reg_avg
 
     metrics = {
         "sft_ego_loss": ego_loss_avg.item(),
         "sft_neighbor_loss": neighbor_loss_avg.item() if isinstance(neighbor_loss_avg, torch.Tensor) else 0.0,
         "sft_total_loss": loss.item(),
+        "sft_neighbor_reg_loss": neighbor_reg_avg.item() if isinstance(neighbor_reg_avg, torch.Tensor) else 0.0,
     }
     return loss, metrics
 
@@ -310,7 +342,8 @@ def train_epoch_ranked_sft(
 
     if epoch == 1:
         print(f"  [ranked-sft] mode={mode}, K={K}, "
-              f"sg_window={config.sg_filter_window}, sg_order={config.sg_filter_order}")
+              f"sg_window={config.sg_filter_window}, sg_order={config.sg_filter_order}, "
+              f"neighbor_reg={config.neighbor_reg_weight}, reg_only={config.neighbor_reg_only}")
 
     # 1. Load all scenes
     print(f"  Loading {len(scene_paths)} scenes...")
@@ -513,6 +546,8 @@ def train_epoch_ranked_sft(
             neighbor_mask=neighbor_mask,
             device=device,
             K=config.diffusion_k_steps,
+            neighbor_reg_weight=config.neighbor_reg_weight,
+            neighbor_reg_only=config.neighbor_reg_only,
         )
 
         scaled_loss = loss / accum_target
