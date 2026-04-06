@@ -791,6 +791,61 @@ def test_lane_departure_out_of_lane():
     print("  PASS  test_lane_departure_out_of_lane")
 
 
+def test_overprogress_underprogress_penalties():
+    """Over/underprogress ratio-based penalties work correctly at 0.25x, 1.0x, 1.5x path lengths."""
+    # GT trajectory: straight line 20m (speed=0.25 m/step * 80 steps)
+    gt_speed = 0.25
+    gt = torch.zeros(80, 3)
+    for t in range(80):
+        gt[t, 0] = t * gt_speed
+        gt[t, 2] = 0.0  # heading=0
+
+    # Build 3 ego trajectories at different path ratios relative to GT (20m)
+    def _make_ego(speed):
+        traj = torch.zeros(T, 4)
+        for t in range(T):
+            traj[t, 0] = t * speed
+            traj[t, 2] = 1.0  # cos(0)
+        return traj
+
+    # 0.25x GT = 5m, 1.0x GT = 20m, 1.5x GT = 30m
+    slow_ego = _make_ego(5.0 / T)    # 0.25x
+    match_ego = _make_ego(20.0 / T)  # 1.0x
+    fast_ego = _make_ego(30.0 / T)   # 1.5x
+
+    trajs = torch.stack([match_ego, slow_ego, fast_ego])  # N=3, det traj = match_ego (index 0)
+
+    data = _make_lane_data(center_y=0.0)
+    data["goal_pose"] = torch.tensor([[100.0, 0.0, 1.0, 0.0]])
+    data["ego_agent_future"] = gt.unsqueeze(0)  # [1, T, 3]
+
+    # Config: enable both over and underprogress
+    cfg = RewardConfig(
+        enable_overprogress=True,
+        overprogress_margin=1.1,
+        overprogress_penalty=100.0,
+        underprogress_penalty=100.0,
+        underprogress_threshold=0.5,
+        progress_norm_scale=20.0,
+        stopped_penalty=0.0,
+    )
+    breakdowns = compute_reward_batch(trajs, data, cfg)
+
+    # 1.0x traj (index 0): no over/underprogress penalty
+    # 1.5x traj (index 2): overprogress penalty (1.5 > 1.1 margin)
+    # 0.25x traj (index 1): underprogress penalty (0.25/1.0 < 0.5 threshold)
+    # Compare total reward (not just progress component) since base progress scales with path length
+    assert breakdowns[0].total > breakdowns[2].total, \
+        f"1.0x should beat 1.5x on total reward (overprogress penalty): {breakdowns[0].total:.2f} vs {breakdowns[2].total:.2f}"
+    assert breakdowns[0].total > breakdowns[1].total, \
+        f"1.0x should beat 0.25x on total reward (underprogress penalty): {breakdowns[0].total:.2f} vs {breakdowns[1].total:.2f}"
+    # Verify penalties are actually applied (not zero)
+    assert breakdowns[1].total < breakdowns[0].total - 1.0, \
+        f"0.25x should be significantly penalized: {breakdowns[1].total:.2f} vs {breakdowns[0].total:.2f}"
+    print(f"  PASS  test_overprogress_underprogress_penalties: "
+          f"match={breakdowns[0].total:.2f}, slow={breakdowns[1].total:.2f}, fast={breakdowns[2].total:.2f}")
+
+
 def test_advantage_absolute():
     """Absolute mode: no centering, positive reward → positive advantage."""
     from rlvr.reward import compute_group_advantages, RewardBreakdown
@@ -866,6 +921,7 @@ if __name__ == "__main__":
         test_advantage_positive_only,
         test_lane_departure_in_lane,
         test_lane_departure_out_of_lane,
+        test_overprogress_underprogress_penalties,
         test_advantage_absolute,
         test_advantage_softmax,
     ]

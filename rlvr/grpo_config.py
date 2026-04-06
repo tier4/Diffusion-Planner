@@ -166,6 +166,14 @@ class GRPOConfig:
     lane_dep_trim_n: int = 0  # drop N scenes with highest lane departure fraction (0=disabled)
     neighbor_loss_weight: float = 0.0  # weight for neighbor prediction regularization (0=disabled)
 
+    # Ranked SFT mode: generate N trajectories, pick best by reward, SFT on it.
+    # "none": standard GRPO training (default).
+    # "gt_neighbor": use real GT neighbors from NPZ as neighbor target.
+    # "baseline_neighbor": use baseline (no-LoRA) model prediction as neighbor target.
+    ranked_sft_mode: str = "none"
+    sg_filter_window: int = 11  # Savitzky-Golay filter window length (must be odd)
+    sg_filter_order: int = 3    # Savitzky-Golay filter polynomial order
+
     # LoRA
     use_lora: bool = True
     lora_rank: int = 16
