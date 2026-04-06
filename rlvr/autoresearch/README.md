@@ -194,7 +194,7 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `lane_dep_trim_n` | 0 | Drop N scenes with worst lane departure fraction per epoch (0=disabled) |
 | `neighbor_loss_weight` | 0.0 | Neighbor prediction regularization weight vs GT (0=disabled) |
 | `neighbor_reg_weight` | 0.0 | Neighbor reg: MSE(lora_neighbor, base_neighbor). Prevents neighbor L2 drift. |
-| `neighbor_reg_only` | `false` | When true, drop neighbor SFT loss; only use reg term (loss = ego_sft + reg) |
+| `neighbor_reg_only` | `true` | When true, drop neighbor SFT loss; only use reg term (loss = ego_sft + reg) |
 | `kl_schedule` | `"constant"` | `"constant"`, `"linear"`, `"cosine"`, or `"step"` (see below) |
 | `kl_coef_final` | 0.05 | Target KL coef at end of training (for non-constant schedules) |
 | `kl_warmup_fraction` | 0.5 | Fraction of epochs to hold initial `kl_coef` (for `"step"` schedule) |

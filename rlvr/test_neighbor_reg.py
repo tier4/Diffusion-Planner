@@ -83,8 +83,8 @@ def _make_scene_data(B=1, P=5, T=80, device="cpu"):
         "ego_agent_future": torch.randn(B, T, 4, device=device),
     }
     # Make neighbor data non-zero so validity checks pass
-    data["neighbor_agents_past"][:, :, -1, :4] = torch.ones(B, Pn, 4) * 0.5
-    data["neighbor_agents_future"][:, :, :, :2] = torch.ones(B, Pn, T, 2) * 0.5
+    data["neighbor_agents_past"][:, :, -1, :4] = torch.ones(B, Pn, 4, device=device) * 0.5
+    data["neighbor_agents_future"][:, :, :, :2] = torch.ones(B, Pn, T, 2, device=device) * 0.5
     return data
 
 

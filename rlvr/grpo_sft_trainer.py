@@ -155,6 +155,9 @@ def _compute_sft_diffusion_loss(
         device: Torch device.
         K: Number of (noise, timestep) samples to average over.
         neighbor_reg_weight: Weight for neighbor regularization loss (0=disabled).
+        neighbor_reg_only: If True, drop the neighbor SFT loss and only use the
+            reg term. Only takes effect when neighbor reg is active (model has
+            disable_adapter and neighbor_reg_weight > 0).
 
     Returns:
         (loss, metrics_dict)
