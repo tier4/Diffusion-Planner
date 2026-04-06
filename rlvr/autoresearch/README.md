@@ -72,9 +72,13 @@ output_dir/YYYYMMDD-HHMMSS_name/
 **Key eval metrics reported:**
 - `rb_cross`: scenes where ego perimeter crosses road border (within 10cm)
 - `rb_near`: fraction of timesteps with ego edge within 25cm of border
+- `lane_dep`: scenes where ego departs lane (within 10cm of lane edge)
+- `lane_near`: fraction of timesteps within 25cm of lane edge
+- `lane_wide`: fraction of timesteps within 40cm of lane edge
 - `reward`: total reward (road border + progress + safety + feasibility)
 - `collision`: collision rate
 - `path`: mean trajectory path length
+- `stopped`: count of scenes where model path < 1m
 
 ### `check_lora_training.py` — LoRA Verification
 
@@ -117,7 +121,7 @@ aggregate stats (min, mean, p5) and optionally visualizes worst scenes.
 python -m rlvr.autoresearch.eval_border_distance \
   --merged_model_path /path/to/merged.pth \
   --args_json /path/to/args.json \
-  --scenes /path/to/miraikan_scenes.json \
+  --scenes /path/to/problem_scenes.json \
   --tag model_name \
   --output_dir /path/to/output/
 
@@ -150,7 +154,7 @@ python -m rlvr.autoresearch.compare_models \
 Training requires three JSON files, each a list of NPZ paths:
 
 - **Problem scenes**: Scenes where the baseline model has issues (e.g., road border
-  crossings at miraikan exit). Should be < 30% of total training scenes.
+  crossings at critical intersections). Should be < 30% of total training scenes.
 - **Normal scenes**: Diverse driving scenes for general performance preservation.
 - **Validation scenes**: Fixed set for per-epoch evaluation (not used in training).
   Should include a mix of problem + normal + anchor scenes.
@@ -176,8 +180,19 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `n_prob_scenes` | 0-50 | Problem scenes in training set. **Always set explicitly.** |
 | `n_normal_scenes` | 250-300 | Normal scenes. **Always set explicitly.** |
 | `lora_target` | `"first"` | Block 0 only. Other blocks degrade neighbor predictions. |
-| `advantage_mode` | `"normalized"` | `"normalized"` or `"vd_grpo"` (see below) |
-| `advantage_fixed_scale` | 10.0 | Denominator for VD-GRPO mode |
+| `advantage_mode` | `"normalized"` | `"normalized"`, `"vd_grpo"`, `"raw"`, `"positive_only"`, `"absolute"`, `"softmax"` |
+| `advantage_fixed_scale` | 10.0 | Denominator for vd_grpo/raw/absolute; temperature for softmax |
+| `diffusion_k_steps` | 8 | Number of (noise, t) samples averaged per GRPO loss (matches DPO K=8) |
+| `enable_lane_departure` | `false` | Enable lane departure detection in reward |
+| `lane_gate_enabled` | `false` | Lane crossing as hard gate in survival mode |
+| `lane_near_scale` | 3.0 | Soft penalty for being within 25cm of lane edge |
+| `lane_wide_scale` | 0.2 | Soft penalty for being within 40cm of lane edge |
+| `lane_cont_scale` | 0.0 | Continuous lane proximity penalty |
+| `underprogress_penalty` | 0.0 | Penalize model driving << GT path (0=disabled) |
+| `underprogress_threshold` | 0.5 | Penalize if model_path/gt_path < threshold |
+| `progress_norm_scale` | 20.0 | Max progress points at 100% GT match (when overprogress enabled) |
+| `lane_dep_trim_n` | 0 | Drop N scenes with worst lane departure fraction per epoch (0=disabled) |
+| `neighbor_loss_weight` | 0.0 | Neighbor prediction regularization weight (0=disabled) |
 | `kl_schedule` | `"constant"` | `"constant"`, `"linear"`, `"cosine"`, or `"step"` (see below) |
 | `kl_coef_final` | 0.05 | Target KL coef at end of training (for non-constant schedules) |
 | `kl_warmup_fraction` | 0.5 | Fraction of epochs to hold initial `kl_coef` (for `"step"` schedule) |
@@ -217,6 +232,27 @@ absolute magnitude of negative rewards for crashes across groups.
 **`advantage_fixed_scale` tuning:** Controls advantage magnitude. Larger values
 produce smaller advantages (more conservative updates). Start with 10.0. If
 training is too aggressive, increase to 20.0. If too slow, decrease to 5.0.
+
+### Additional Advantage Modes
+
+- **`raw`**: Centered (subtract group mean), divided by `advantage_fixed_scale`. Same as
+  VD-GRPO. If all trajectories are bad, all get negative advantages.
+- **`positive_only`**: Standard normalization but clips negative advantages to zero. Only
+  reinforces trajectories better than group mean; never pushes away from bad ones.
+- **`absolute`**: No centering. `advantage = total / fixed_scale`. Positive reward → positive
+  advantage. Unstable in practice (can explode), use with caution.
+- **`softmax`**: Softmax-weighted advantages with temperature = `advantage_fixed_scale`.
+  Rank 1 gets disproportionate weight. Low temperature (5) = very sharp; high (20) = softer.
+
+### GRPO Loss: K-Averaging and Prefix Mask
+
+The GRPO loss averages over `diffusion_k_steps` (default 8) different (noise, timestep)
+samples per trajectory, matching DPO's K=8 approach. A single sample gives noisy gradients
+that can point in the wrong direction. K=8 was verified to fix gradient direction.
+
+The loss also applies SFT-style prefix masking: a random delay (0-5 steps) conditions
+the denoising on clean initial timesteps, matching the training distribution the model
+was pretrained with. Without prefix mask, gradient signal is 27x weaker.
 
 ### KL Schedule: Decaying KL Coefficient
 

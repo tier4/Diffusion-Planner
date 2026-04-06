@@ -83,8 +83,10 @@ class LateralGuidance(BaseGuidance):
         # Perpendicular projection: n⊥ · (x - x_ref)
         lateral_proj = n_perp_x * dx + n_perp_y * dy  # [B, T]
 
-        # Target offset
+        # Target offset — supports both scalar eta and batched [B] tensor eta
         target = self._lambda_lat * self._eta_lat
+        if isinstance(target, torch.Tensor) and target.dim() >= 1:
+            target = target.unsqueeze(-1)  # [B, 1] for broadcasting with [B, T]
 
         # Ψ_lat = (1/T) Σ (lateral_proj - target)²
         # Return negative because guidance maximizes energy (lower Ψ = better)

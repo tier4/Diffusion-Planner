@@ -30,10 +30,17 @@ class RewardConfig:
     max_accel: float = 8.0  # m/s^2
     dt: float = 0.1  # 10 Hz
 
-    # Near-edge / wide-edge / continuous penalty scales
+    # Near-edge / wide-edge / continuous penalty scales (road border)
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
     cont_edge_scale: float = 0.0  # continuous penalty within 80cm (0=disabled)
+
+    # Lane departure penalty scales
+    enable_lane_departure: bool = False
+    lane_gate_enabled: bool = False  # if True, lane crossing kills reward (too strict for most scenes)
+    lane_near_scale: float = 3.0
+    lane_wide_scale: float = 0.2
+    lane_cont_scale: float = 0.0
 
     # Lateral acceleration penalty
     max_lat_accel: float = 2.0  # m/s^2
@@ -44,6 +51,15 @@ class RewardConfig:
     overprogress_margin: float = 1.1
     overprogress_penalty: float = 0.3
     stopped_penalty: float = 50.0
+
+    # Underprogress: penalize trajectories that drive much less than GT
+    underprogress_penalty: float = 0.0   # scale (0=disabled). Penalty = scale * max(0, threshold - ratio)
+    underprogress_threshold: float = 0.5  # penalize if model_path / gt_path < threshold
+
+    # Progress normalization scale: when enable_overprogress=True, progress is
+    # normalized to [0, 1] as fraction of GT, then multiplied by this scale.
+    # 100% GT progress → progress_norm_scale points. Default 20.
+    progress_norm_scale: float = 20.0
 
     # Reward aggregation mode:
     # "gate" (default): binary safety gates × quality. Any terminal event → floor (-50).
@@ -66,6 +82,9 @@ class RewardBreakdown:
     off_road_fraction: float
     rb_crossing: bool = False
     rb_near_frac: float = 0.0
+    lane_crossing: bool = False
+    lane_near_frac: float = 0.0
+    lane_wide_frac: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -679,20 +698,54 @@ def compute_feasibility_score_batch(
     # --- Lateral acceleration check ---
     # Penalize lateral acceleration exceeding what a human driver produces.
     # GT trajectories peak at ~2.5 m/s²; the model reaches 3.5 m/s² on curves.
-    # NOTE: This uses double finite diff which inflates values ~5x vs curvature-based.
-    # For accurate REPORTING use eval_teleport_metrics.py. But do NOT change this
-    # penalty — it was used for all prior successful training runs (p4e, p6m etc).
+    # Uses Savitzky-Golay filtered derivatives via torch conv1d (GPU, no CPU round-trip).
+    # lat_accel = |v × a| / |v| (cross product formula for curvature × speed²)
     _MAX_LAT_ACCEL = config.max_lat_accel
     _LAT_ACCEL_SCALE = config.lat_accel_scale
-    if vel.shape[1] >= 2:
-        accel_vec = torch.diff(vel, dim=1) / config.dt  # (N, T-2, 2)
-        heading = vel[:, :-1]  # (N, T-2, 2)
-        heading_norm = heading / (heading.norm(dim=-1, keepdim=True).clamp_min(1e-6))
-        lat_dir = torch.stack([-heading_norm[..., 1], heading_norm[..., 0]], dim=-1)
-        lat_accel = (accel_vec * lat_dir).sum(dim=-1)  # (N, T-2)
-        if lat_accel.shape[1] > 2:
-            lat_accel_trimmed = lat_accel[:, 2:]
-            lat_violations = torch.relu(lat_accel_trimmed.abs() - _MAX_LAT_ACCEL)
+    if T >= 5:
+        global _SG_VEL_KERNEL, _SG_ACCEL_KERNEL, _SG_LAT_CACHE_KEY
+        _sg_window = min(11, T - (1 if T % 2 == 0 else 0))
+        if _sg_window >= 5:
+            _lat_cache_key = (device, config.dt, _sg_window)
+            if _SG_VEL_KERNEL is None or _SG_LAT_CACHE_KEY != _lat_cache_key:
+                _SG_VEL_KERNEL = _build_sg_diff_kernel(
+                    window=_sg_window, poly=3, deriv=1, delta=config.dt
+                ).to(device)
+                _SG_ACCEL_KERNEL = _build_sg_diff_kernel(
+                    window=_sg_window, poly=3, deriv=2, delta=config.dt
+                ).to(device)
+                _SG_LAT_CACHE_KEY = _lat_cache_key
+
+            pad = _sg_window // 2
+            # pos: [N, T, 2] -> [N, 2, T] for conv1d
+            pos_2d = pos.detach().permute(0, 2, 1)  # [N, 2, T]
+            pos_padded = torch.nn.functional.pad(pos_2d, (pad, pad), mode='replicate')
+
+            # Velocity via SG deriv=1
+            vel_sg = torch.nn.functional.conv1d(
+                pos_padded, _SG_VEL_KERNEL.view(1, 1, -1).expand(2, 1, -1), groups=2
+            )  # [N, 2, T]
+            # Acceleration via SG deriv=2
+            accel_sg = torch.nn.functional.conv1d(
+                pos_padded, _SG_ACCEL_KERNEL.view(1, 1, -1).expand(2, 1, -1), groups=2
+            )  # [N, 2, T]
+
+            vx, vy = vel_sg[:, 0], vel_sg[:, 1]  # [N, T]
+            ax_sg, ay_sg = accel_sg[:, 0], accel_sg[:, 1]  # [N, T]
+            speed_sg = (vx ** 2 + vy ** 2).sqrt()  # [N, T]
+
+            # lat_accel = |vx*ay - vy*ax| / max(|v|, 0.5)
+            cross = (vx * ay_sg - vy * ax_sg).abs()
+            lat_accel_sg = cross / speed_sg.clamp(min=0.5)
+            # Zero out low-speed regions
+            lat_accel_sg = torch.where(speed_sg > 0.5, lat_accel_sg, torch.zeros_like(lat_accel_sg))
+
+            # Trim SG edge artifacts (pad from each side)
+            if lat_accel_sg.shape[1] > 2 * pad + 1:
+                lat_accel_trimmed = lat_accel_sg[:, pad:-pad]
+            else:
+                lat_accel_trimmed = lat_accel_sg
+            lat_violations = torch.relu(lat_accel_trimmed - _MAX_LAT_ACCEL)
             scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
 
     # --- Lane boundary check ---
@@ -936,11 +989,44 @@ def compute_progress_score_batch(
 # Smoothness: batched jerk penalty
 # ---------------------------------------------------------------------------
 
+def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta: float = 0.1) -> torch.Tensor:
+    """Build Savitzky-Golay differentiation kernel (precomputed, cached).
+
+    Returns a 1D convolution kernel that computes the deriv-th derivative
+    using a local polynomial fit over `window` points.
+    Pure numpy implementation — no scipy dependency.
+    """
+    # SG coefficients via least-squares polynomial fitting
+    half = window // 2
+    x = np.arange(-half, half + 1, dtype=np.float64)
+    # Build Vandermonde matrix
+    A = np.vander(x, N=poly + 1, increasing=True)  # [window, poly+1]
+    # Pseudo-inverse gives the coefficient extraction matrix
+    pinv = np.linalg.pinv(A)  # [poly+1, window]
+    # The deriv-th row of pinv gives smoothing coefficients for the deriv-th derivative
+    import math as _math
+    coeffs = pinv[deriv] * _math.factorial(deriv) / (delta ** deriv)
+    # Reverse to match convolution convention (scipy savgol_coeffs convention)
+    return torch.tensor(coeffs.copy(), dtype=torch.float32).flip(0)  # flip for conv1d
+
+# Precompute SG jerk kernel; cache by (device, dt)
+_SG_JERK_KERNEL = None
+_SG_JERK_CACHE_KEY = None
+
+# Precompute SG velocity/acceleration kernels for lat_accel; cache by (device, dt, window)
+_SG_VEL_KERNEL = None
+_SG_ACCEL_KERNEL = None
+_SG_LAT_CACHE_KEY = None
+
 def compute_smoothness_score_batch(
     ego_trajs: torch.Tensor,
     config: RewardConfig,
 ) -> torch.Tensor:
-    """Batched negative mean absolute jerk.
+    """Batched negative mean absolute jerk using Savitzky-Golay convolution.
+
+    Uses a precomputed SG kernel applied via torch conv1d for GPU speed.
+    Raw finite differences amplify noise ~1000x on 10Hz data.
+    SG filtering gives physically meaningful jerk values.
 
     Args:
         ego_trajs: (N, T, 4).
@@ -949,13 +1035,37 @@ def compute_smoothness_score_batch(
     Returns:
         (N,) scores (negative, closer to 0 = smoother).
     """
-    pos = ego_trajs[:, :, :2]
-    vel = torch.diff(pos, dim=1) / config.dt
-    acc = torch.diff(vel, dim=1) / config.dt
-    jerk = torch.diff(acc, dim=1) / config.dt
-    if jerk.numel() == 0:
-        return torch.zeros(ego_trajs.shape[0], device=ego_trajs.device)
-    return -(jerk.abs().sum(dim=-1)).mean(dim=-1)
+    global _SG_JERK_KERNEL, _SG_JERK_CACHE_KEY
+    N, T, _ = ego_trajs.shape
+    if T < 12:
+        return torch.zeros(N, device=ego_trajs.device)
+
+    # Build kernel once, cache by (device, dt)
+    _cache_key = (ego_trajs.device, config.dt)
+    if _SG_JERK_KERNEL is None or _SG_JERK_CACHE_KEY != _cache_key:
+        _SG_JERK_KERNEL = _build_sg_diff_kernel(
+            window=11, poly=3, deriv=3, delta=config.dt
+        ).to(ego_trajs.device)
+        _SG_JERK_CACHE_KEY = _cache_key
+
+    kernel = _SG_JERK_KERNEL  # [11]
+    pad = kernel.shape[0] // 2
+
+    # pos: [N, T, 2] -> [N, 2, T] for conv1d
+    pos = ego_trajs[:, :, :2].detach().permute(0, 2, 1)  # [N, 2, T]
+
+    # Pad and convolve: conv1d with kernel [1, 1, W] on [N, 2, T]
+    pos_padded = torch.nn.functional.pad(pos, (pad, pad), mode='replicate')
+    jerk = torch.nn.functional.conv1d(
+        pos_padded, kernel.view(1, 1, -1).expand(2, 1, -1),
+        groups=2,
+    )  # [N, 2, T]
+
+    jerk_mag = jerk.norm(dim=1)  # [N, T]
+    # Trim SG edge artifacts (pad from each side)
+    if jerk_mag.shape[1] > 2 * pad + 1:
+        jerk_mag = jerk_mag[:, pad:-pad]
+    return -jerk_mag.mean(dim=1)  # [N]
 
 
 # ---------------------------------------------------------------------------
@@ -1105,10 +1215,10 @@ def compute_road_border_penalty(
         data: Observation dict with 'line_strings' key.
 
     Returns:
-        Tuple of (crossing_gate, near_penalty, wide_penalty, first_crossing_steps, cont_penalty):
+        Tuple of (crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty):
         - crossing_gate: (N,) 1.0 if no crossing, 0.0 if any timestep crosses border
-        - near_penalty: (N,) mean penalty for being within 25cm (0=safe, 1=touching)
-        - wide_penalty: (N,) mean penalty for being within 40cm
+        - near_frac: (N,) fraction of in-bounds timesteps within 25cm of border
+        - wide_frac: (N,) fraction of in-bounds timesteps between 25-40cm of border (exclusive of near)
         - first_crossing_steps: list of N (int | None) — first timestep of crossing
         - cont_penalty: (N,) continuous proximity penalty (linear decay from 0.8m)
     """
@@ -1216,21 +1326,574 @@ def compute_road_border_penalty(
         else:
             first_crossing_steps.append(None)
 
-    # Near penalty: fraction of timesteps within 25cm
+    # Exclusive categories: crossing > near > wide > safe. No double counting.
     _NEAR_THRESH = 0.25
-    near_frac = (per_timestep_min[:, 1:] < _NEAR_THRESH).float().mean(dim=1)  # (N,)
-
-    # Wide penalty: fraction of timesteps within 40cm
     _WIDE_THRESH = 0.40
-    wide_frac = (per_timestep_min[:, 1:] < _WIDE_THRESH).float().mean(dim=1)  # (N,)
-
-    # Continuous proximity penalty: smooth gradient from 0 to _CONT_THRESH
-    # penalty = mean over timesteps of max(0, 1 - dist/_CONT_THRESH)
-    # This creates a linear gradient pulling the trajectory away from the border
     _CONT_THRESH = 0.80
-    cont_penalty = (1.0 - per_timestep_min[:, 1:] / _CONT_THRESH).clamp(min=0).mean(dim=1)  # (N,)
+
+    is_not_crossing = ~is_crossing[:, 1:]  # (N, T-1) — timesteps that are NOT crossing
+    near_frac = (is_not_crossing & (per_timestep_min[:, 1:] < _NEAR_THRESH)).float().mean(dim=1)
+    wide_frac = (is_not_crossing & (per_timestep_min[:, 1:] >= _NEAR_THRESH)
+                 & (per_timestep_min[:, 1:] < _WIDE_THRESH)).float().mean(dim=1)
+    cont_penalty = torch.where(
+        is_not_crossing,
+        (1.0 - per_timestep_min[:, 1:] / _CONT_THRESH).clamp(min=0, max=1),
+        torch.zeros_like(per_timestep_min[:, 1:]),
+    ).mean(dim=1)
 
     return crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty
+
+
+# ---------------------------------------------------------------------------
+# Lane departure penalty
+# ---------------------------------------------------------------------------
+#
+# Detects whether the ego vehicle leaves the drivable lane area using polygon
+# containment and measures proximity to the road edge (outer lane boundary).
+#
+# Algorithm overview:
+#
+#   1. **Lane polygon construction** (_build_lane_polygons):
+#      Each lane in the NPZ data has left/right boundary offsets relative to
+#      its centerline. We construct closed polygons per lane:
+#        boundary_point = centerline + offset   (SFT interpretation)
+#      Each polygon has left edges (forward winding), right edges (reversed
+#      winding), and two closing edges connecting the ends.
+#
+#   2. **K-nearest lane selection**:
+#      To bound GPU memory, only the K=12 closest lanes (by min centerline-
+#      point distance to trajectory bbox center) are used. Verified to produce
+#      identical results to using all lanes on 100 validation scenes.
+#
+#   3. **Outer boundary classification** (_classify_outer_boundaries):
+#      Not all lane boundary segments are road edges — segments shared between
+#      adjacent lanes are interior. We classify via midpoint nudge:
+#        a) Nudge segment midpoint outward (perpendicular to lane direction)
+#        b) If nudged point falls inside any lane polygon → shared boundary
+#        c) If outside but within 0.5m of a different lane's segment → junction
+#           gap (still shared, common at intersections)
+#        d) Otherwise → road edge (outer boundary)
+#      Only outer segments are used for distance-based soft penalties.
+#
+#   4. **Ego perimeter sampling**:
+#      36 points around the ego rectangle (10 per side, corners not duplicated),
+#      rotated and translated to world coordinates at each timestep.
+#
+#   5. **Containment check** (_point_in_polygons):
+#      GPU ray casting (+x direction) against all polygon edges. A point is
+#      inside if it has an odd number of edge crossings for any polygon.
+#      Pre-filters edges by Y-range and X-min to reduce the Q×E matrix.
+#      Chunks query points when Q×E > 10M to prevent OOM.
+#
+#   6. **Distance to road edge**:
+#      For perimeter points that ARE inside a lane, compute min distance to
+#      the nearest outer boundary segment. Points outside a lane get distance=0
+#      (they are already penalized by the crossing gate, not by proximity).
+#
+#   7. **Exclusive zone categories** (per timestep, skipping t=0):
+#      - OUT:  any perimeter point outside all lane polygons → crossing_gate=0
+#      - NEAR: all points inside, but min distance to road edge < 0.25m
+#      - WIDE: all points inside, min distance between 0.25m and 0.40m
+#      - SAFE: all points inside, min distance >= 0.40m
+#      Each timestep belongs to exactly one category (no double counting).
+#      near_frac and wide_frac report the fraction of in-lane timesteps in
+#      each band. cont_penalty is a continuous linear decay from 0.80m.
+#
+# ---------------------------------------------------------------------------
+
+_LANE_NEAR_THRESH = 0.25
+_LANE_WIDE_THRESH = 0.40
+_LANE_CONT_THRESH = 0.80
+_LANE_PTS_PER_SIDE = 10  # 36 unique perimeter points (corners not duplicated)
+
+
+
+def _build_lane_polygons(lanes: torch.Tensor) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, int
+]:
+    """Build lane polygon edges from lane tensor. Vectorized, no python loops.
+
+    Each lane polygon = left boundary edges + right boundary edges (reversed winding)
+    + two closing edges connecting the ends. Boundary = center + offset.
+
+    Args:
+        lanes: (S, P, D) lane tensor.
+
+    Returns:
+        edge_v1: (E, 2) polygon edge start vertices (all polygons concatenated)
+        edge_v2: (E, 2) polygon edge end vertices
+        edge_poly_id: (E,) int — which polygon each edge belongs to
+        n_polys: total number of polygons
+    """
+    S, P, D = lanes.shape
+    device = lanes.device
+
+    center = lanes[..., :2]  # (S, P, 2)
+    valid = center.norm(dim=-1) > 1e-3  # (S, P)
+    left_pts = center + lanes[..., 4:6]
+    right_pts = center + lanes[..., 6:8]
+
+    n_valid = valid.sum(dim=1)
+    has_poly = n_valid >= 2
+
+    if not has_poly.any():
+        z = torch.zeros(0, 2, device=device)
+        return z, z, torch.zeros(0, dtype=torch.int32, device=device), 0
+
+    poly_id_per_lane = torch.cumsum(has_poly.int(), dim=0) - 1  # (S,)
+    n_polys = int(has_poly.sum().item())
+
+    # Consecutive boundary edges (left forward, right reversed for winding)
+    valid_pair = valid[:, :-1] & valid[:, 1:]  # (S, P-1)
+    lane_ids_pair = torch.arange(S, device=device).unsqueeze(1).expand(S, P - 1)
+    idx = torch.where(valid_pair.reshape(-1))[0]
+
+    if len(idx) == 0:
+        z = torch.zeros(0, 2, device=device)
+        return z, z, torch.zeros(0, dtype=torch.int32, device=device), 0
+
+    l_v1 = left_pts[:, :-1].reshape(-1, 2)[idx]
+    l_v2 = left_pts[:, 1:].reshape(-1, 2)[idx]
+    r_v1 = right_pts[:, 1:].reshape(-1, 2)[idx]  # reversed winding
+    r_v2 = right_pts[:, :-1].reshape(-1, 2)[idx]
+    edge_pid = poly_id_per_lane[lane_ids_pair.reshape(-1)[idx]]
+
+    # Closing edges: connect left end→right end and right start→left start
+    pl = torch.where(has_poly)[0]
+    fv = valid.float().argmax(dim=1)[pl]
+    lv = P - 1 - valid.flip(1).float().argmax(dim=1)[pl]
+    c1_v1 = left_pts[pl, lv]; c1_v2 = right_pts[pl, lv]
+    c2_v1 = right_pts[pl, fv]; c2_v2 = left_pts[pl, fv]
+    c_pid = poly_id_per_lane[pl].int()
+
+    all_v1 = torch.cat([l_v1, r_v1, c1_v1, c2_v1])
+    all_v2 = torch.cat([l_v2, r_v2, c1_v2, c2_v2])
+    all_pid = torch.cat([edge_pid, edge_pid, c_pid, c_pid]).int()
+
+    return all_v1, all_v2, all_pid, n_polys
+
+
+def _point_in_polygons(
+    points: torch.Tensor,
+    edge_v1: torch.Tensor,
+    edge_v2: torch.Tensor,
+    edge_poly_id: torch.Tensor,
+    n_polys: int,
+) -> torch.Tensor:
+    """GPU-parallel point-in-polygon via ray casting. No python loops.
+
+    Args:
+        points: (Q, 2) query points.
+        edge_v1, edge_v2: (E, 2) polygon edge endpoints.
+        edge_poly_id: (E,) which polygon each edge belongs to.
+        n_polys: total number of polygons.
+
+    Returns:
+        inside: (Q,) bool — True if inside ANY polygon.
+    """
+    Q = points.shape[0]
+    E = edge_v1.shape[0]
+    device = points.device
+
+    if E == 0 or n_polys == 0:
+        return torch.zeros(Q, dtype=torch.bool, device=device)
+
+    px = points[:, 0]
+    py = points[:, 1]
+    v1x, v1y = edge_v1[:, 0], edge_v1[:, 1]
+    v2x, v2y = edge_v2[:, 0], edge_v2[:, 1]
+
+    # Prefilter: discard edges that can't be crossed by any query point's +x ray
+    keep = ((torch.maximum(v1x, v2x) >= px.min())
+            & (torch.maximum(v1y, v2y) >= py.min())
+            & (torch.minimum(v1y, v2y) <= py.max()))
+
+    if not keep.any():
+        return torch.zeros(Q, dtype=torch.bool, device=device)
+
+    v1x = v1x[keep]; v1y = v1y[keep]
+    v2x = v2x[keep]; v2y = v2y[keep]
+    edge_poly_id = edge_poly_id[keep]
+    E = v1x.shape[0]
+
+    # Chunk over query points when Q×E is large to avoid OOM
+    _MAX_QE = 10_000_000  # ~200 MB accounting for multiple intermediates (bool, float, int64 index)
+    chunk_size = max(1, _MAX_QE // E) if E > 0 else Q
+
+    if chunk_size >= Q:
+        return _pip_core(px, py, v1x, v1y, v2x, v2y, edge_poly_id, E, n_polys, device)
+
+    results = []
+    for start in range(0, Q, chunk_size):
+        end = min(start + chunk_size, Q)
+        results.append(_pip_core(
+            px[start:end], py[start:end],
+            v1x, v1y, v2x, v2y, edge_poly_id, E, n_polys, device,
+        ))
+    return torch.cat(results)
+
+
+def _pip_core(
+    px: torch.Tensor, py: torch.Tensor,
+    v1x: torch.Tensor, v1y: torch.Tensor,
+    v2x: torch.Tensor, v2y: torch.Tensor,
+    edge_poly_id: torch.Tensor, E: int, n_polys: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Core ray-casting kernel for a chunk of query points."""
+    Q = px.shape[0]
+    py_exp = py[:, None]
+    above1 = v1y[None, :] > py_exp
+    above2 = v2y[None, :] > py_exp
+    straddles = above1 != above2
+
+    dy = (v2y - v1y)[None, :]
+    dy_safe = dy.clone()
+    dy_safe[dy_safe.abs() < 1e-10] = 1.0
+    t = (py_exp - v1y[None, :]) / dy_safe
+    x_int = v1x[None, :] + t * (v2x - v1x)[None, :]
+
+    crossing = straddles & (x_int > px[:, None])
+
+    counts = torch.zeros(Q, n_polys, dtype=torch.int32, device=device)
+    counts.scatter_add_(1, edge_poly_id[None, :].expand(Q, E).long(), crossing.int())
+
+    inside_any = ((counts % 2) == 1).any(dim=1)
+    return inside_any
+
+
+def _point_to_segments_dist(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+) -> torch.Tensor:
+    """Distance from each point to each segment. Fully parallel on GPU.
+
+    Args:
+        points: (Q, 2)
+        seg_p1, seg_p2: (E, 2)
+
+    Returns:
+        dist: (Q, E) distance matrix.
+    """
+    seg = seg_p2 - seg_p1
+    seg_len2 = (seg ** 2).sum(-1).clamp(min=1e-10)
+    diff = points[:, None, :] - seg_p1[None, :, :]
+    t = ((diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]).clamp(0, 1)
+    closest = seg_p1[None, :, :] + t[:, :, None] * seg[None, :, :]
+    return (points[:, None, :] - closest).norm(dim=-1)
+
+
+def _point_to_segments_min_dist(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+) -> torch.Tensor:
+    """Min distance from each point to nearest segment. Chunks to avoid OOM.
+
+    Like _point_to_segments_dist but only returns (Q,) min distances
+    instead of the full (Q, E) matrix. Chunks over query points when
+    Q×E > 10M elements.
+
+    Args:
+        points: (Q, 2)
+        seg_p1, seg_p2: (E, 2)
+
+    Returns:
+        min_dist: (Q,) min distance per point.
+    """
+    Q = points.shape[0]
+    E = seg_p1.shape[0]
+    _MAX_QE = 10_000_000
+    chunk_size = max(1, _MAX_QE // E) if E > 0 else Q
+
+    if chunk_size >= Q:
+        return _point_to_segments_dist(points, seg_p1, seg_p2).min(dim=1).values
+
+    results = []
+    for start in range(0, Q, chunk_size):
+        end = min(start + chunk_size, Q)
+        d = _point_to_segments_dist(points[start:end], seg_p1, seg_p2)
+        results.append(d.min(dim=1).values)
+    return torch.cat(results)
+
+
+def _classify_outer_boundaries(
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+    seg_dir: torch.Tensor,
+    seg_lane: torch.Tensor,
+    edge_v1: torch.Tensor,
+    edge_v2: torch.Tensor,
+    edge_poly_id: torch.Tensor,
+    n_polys: int,
+    nudge: float = 0.05,
+    gap_threshold: float = 0.5,
+) -> torch.Tensor:
+    """Classify boundary segments as outer (road edge) via midpoint nudge + containment.
+
+    For each segment, nudge its midpoint outward (perpendicular to lane direction).
+    If the nudged point lands inside any lane polygon → shared boundary.
+    If outside but close to a different lane's boundary → junction gap (shared).
+    Otherwise → road edge (outer).
+
+    Segments alternate left/right per lane: even=left boundary, odd=right boundary.
+
+    Args:
+        seg_p1, seg_p2: (M, 2) boundary segment endpoints.
+        seg_dir: (M, 2) unit lane direction at each segment.
+        seg_lane: (M,) lane index.
+        edge_v1, edge_v2: polygon edge vertices for containment check.
+        edge_poly_id: polygon IDs for edges.
+        n_polys: total polygon count.
+        nudge: outward nudge distance in meters.
+        gap_threshold: max distance to different-lane segment to be a junction gap.
+
+    Returns:
+        is_outer: (M,) bool.
+    """
+    M = seg_p1.shape[0]
+    device = seg_p1.device
+
+    # Midpoint of each segment
+    mid = (seg_p1 + seg_p2) / 2
+
+    # Outward normal from lane direction: left_normal = (-dy, dx)
+    left_normal = torch.stack([-seg_dir[:, 1], seg_dir[:, 0]], dim=-1)
+
+    # Even indices = left boundary → outward = left normal
+    # Odd indices = right boundary → outward = -left normal (right normal)
+    is_left = torch.arange(M, device=device) % 2 == 0
+    outward = torch.where(is_left[:, None], left_normal, -left_normal)
+
+    nudged = mid + nudge * outward
+
+    # Check if nudged point is inside any polygon
+    inside = _point_in_polygons(nudged, edge_v1, edge_v2, edge_poly_id, n_polys)
+
+    # Inside → shared. Outside → candidate road edge.
+    candidate_outer = ~inside
+
+    # At intersections, nudged point may land in gap between polygons.
+    # If close to a different lane's boundary segment → junction gap, not road edge.
+    if candidate_outer.any():
+        nudged_outer = nudged[candidate_outer]
+        d = _point_to_segments_dist(nudged_outer, seg_p1, seg_p2)  # (n_cand, M)
+        # Mask out same-lane segments
+        outer_lane = seg_lane[candidate_outer]
+        same_lane_mask = (outer_lane[:, None] == seg_lane[None, :])
+        d[same_lane_mask] = 999.0
+        # Close to different-lane segment → junction gap
+        min_d = d.min(dim=1).values
+        is_junction_gap = min_d < gap_threshold
+        outer_indices = torch.where(candidate_outer)[0]
+        candidate_outer[outer_indices[is_junction_gap]] = False
+
+    return candidate_outer
+
+
+_LANE_K_NEAREST = 12  # number of nearest lanes to consider (0 = all)
+
+
+@torch.no_grad()
+def compute_lane_departure_penalty(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    k_nearest_lanes: int = _LANE_K_NEAREST,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor]:
+    """Compute lane departure using polygon containment + distance to road edge. Pure torch.
+
+    1. Polygon containment (GPU ray casting) for crossing gate.
+    2. Distance to outer boundary segments for near/wide/cont soft penalties.
+    Lane boundaries use SFT interpretation: boundary = center + offset.
+
+    Args:
+        ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
+        ego_shape: (3,) wheel_base, length, width.
+        data: Observation dict with 'lanes' key.
+        k_nearest_lanes: Only consider K nearest lanes (by min centerline distance).
+            0 = use all lanes. Default 12.
+
+    Returns:
+        Tuple of (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty):
+        - crossing_gate: (N,) 1.0 if fully inside lane, 0.0 if any timestep exits
+        - near_frac: (N,) fraction of in-lane timesteps within 25cm of outer boundary
+        - wide_frac: (N,) fraction of in-lane timesteps between 25-40cm (exclusive of near)
+        - lane_crossing_steps: list of N (int | None) — first timestep of lane exit
+        - cont_penalty: (N,) continuous proximity penalty (linear decay from 0.8m)
+    """
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+
+    no_steps: list[int | None] = [None] * N
+    safe = (torch.ones(N, device=device), torch.zeros(N, device=device),
+            torch.zeros(N, device=device), no_steps, torch.zeros(N, device=device))
+
+    if "lanes" not in data:
+        return safe
+    lanes = data["lanes"]
+    if lanes.dim() == 4:
+        lanes = lanes[0]
+    if lanes.shape[-1] < 8:
+        return safe
+
+    S, P, D = lanes.shape
+
+    # Select K nearest lanes by min centerline-point distance to any trajectory point
+    if k_nearest_lanes > 0 and S > k_nearest_lanes:
+        center_all = lanes[..., :2]  # (S, P, 2)
+        valid_all = center_all.norm(dim=-1) > 1e-3
+        # Use trajectory bbox center + half-diagonal as reference
+        # to catch lanes near any part of the trajectory
+        traj_xy = ego_trajs[:, :, :2].reshape(-1, 2)  # (N*T, 2)
+        traj_min = traj_xy.min(dim=0).values
+        traj_max = traj_xy.max(dim=0).values
+        traj_center = (traj_min + traj_max) / 2
+        # Min distance from each centerline point to trajectory center
+        dist_to_pts = (center_all - traj_center).norm(dim=-1)  # (S, P)
+        dist_to_pts[~valid_all] = 1e6
+        min_dist_per_lane = dist_to_pts.min(dim=1).values  # (S,)
+        # Also include lanes within bbox + margin
+        half_diag = (traj_max - traj_min).norm() / 2 + 5.0  # margin
+        has_lane = valid_all.any(dim=1)
+        min_dist_per_lane[~has_lane] = 1e6
+        # Take max(K, lanes within bbox) to be safe
+        # Note: .sum().item() syncs CPU↔GPU but runs once per scene (not per traj), negligible cost
+        n_nearby = (min_dist_per_lane < half_diag).sum().item()
+        k = max(k_nearest_lanes, min(n_nearby, S))
+        _, topk_idx = min_dist_per_lane.topk(k, largest=False)
+        lanes = lanes[topk_idx]
+        S = k
+
+    # Build polygon edges for containment
+    edge_v1, edge_v2, edge_poly_id, n_polys = _build_lane_polygons(lanes)
+    if n_polys == 0:
+        return safe
+
+    # --- Step 3: Build boundary segments and classify outer vs shared ---
+    # Lane tensor layout: [center_x, center_y, dir_cos, dir_sin, lb_dx, lb_dy, rb_dx, rb_dy, ...]
+    center = lanes[..., :2]
+    direction = lanes[..., 2:4]
+    lb_offset = lanes[..., 4:6]
+    rb_offset = lanes[..., 6:8]
+    valid = center.norm(dim=-1) > 1e-3
+
+    # Boundary = center + offset (SFT interpretation, NOT lateral projection)
+    left_pts = center + lb_offset    # (S, P, 2)
+    right_pts = center + rb_offset   # (S, P, 2)
+
+    # Some centerline points have zero direction; fill with lane average
+    dirs = direction.clone()
+    has_dir = dirs.norm(dim=-1) > 1e-6  # (S, P)
+    dir_sum = (dirs * has_dir.unsqueeze(-1)).sum(dim=1)  # (S, 2)
+    dir_avg = dir_sum / dir_sum.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    dirs = torch.where(has_dir.unsqueeze(-1), dirs, dir_avg.unsqueeze(1).expand_as(dirs))
+
+    # Build segments between consecutive valid centerline points
+    valid_pair = valid[:, :-1] & valid[:, 1:]  # (S, P-1)
+    mid_dirs = (dirs[:, :-1] + dirs[:, 1:]) / 2
+    mid_dirs = mid_dirs / mid_dirs.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+
+    lane_ids = torch.arange(S, device=device).unsqueeze(1).expand(S, P - 1)
+
+    vp_flat = valid_pair.reshape(-1)
+    idx = torch.where(vp_flat)[0]
+
+    if len(idx) == 0:
+        return safe
+
+    # Interleave left/right segments: [left_seg_0, right_seg_0, left_seg_1, right_seg_1, ...]
+    # This ordering is required by _classify_outer_boundaries (even=left, odd=right)
+    M = len(idx)
+    l_p1 = left_pts[:, :-1].reshape(-1, 2)[idx]
+    l_p2 = left_pts[:, 1:].reshape(-1, 2)[idx]
+    r_p1 = right_pts[:, :-1].reshape(-1, 2)[idx]
+    r_p2 = right_pts[:, 1:].reshape(-1, 2)[idx]
+    md_f = mid_dirs.reshape(-1, 2)[idx]
+    lid_f = lane_ids.reshape(-1)[idx]
+
+    seg_p1 = torch.stack([l_p1, r_p1], dim=1).reshape(2 * M, 2)
+    seg_p2 = torch.stack([l_p2, r_p2], dim=1).reshape(2 * M, 2)
+    seg_dir = torch.stack([md_f, md_f], dim=1).reshape(2 * M, 2)
+    seg_lane = torch.stack([lid_f, lid_f], dim=1).reshape(2 * M)
+
+    is_outer = _classify_outer_boundaries(
+        seg_p1, seg_p2, seg_dir, seg_lane,
+        edge_v1, edge_v2, edge_poly_id, n_polys,
+    )
+    outer_p1 = seg_p1[is_outer]
+    outer_p2 = seg_p2[is_outer]
+
+    # --- Step 4: Sample ego perimeter points at each timestep ---
+    wb = ego_shape[0].item()
+    length = ego_shape[1].item()
+    width = ego_shape[2].item()
+    ro = (length - wb) / 2
+    lp_list = []
+    for j in range(_LANE_PTS_PER_SIDE):
+        f = j / (_LANE_PTS_PER_SIDE - 1)
+        lp_list.append((-ro + f * length, -width / 2))  # bottom edge
+        lp_list.append((-ro + f * length,  width / 2))  # top edge
+        if 0 < f < 1:  # skip corners (already in top/bottom)
+            lp_list.append((-ro, -width / 2 + f * width))         # left edge
+            lp_list.append((length - ro, -width / 2 + f * width)) # right edge
+    local_pts = torch.tensor(lp_list, device=device, dtype=ego_trajs.dtype)
+    K_pts = local_pts.shape[0]
+
+    cos_h = ego_trajs[..., 2]; sin_h = ego_trajs[..., 3]
+    h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+    cos_h = cos_h / h_norm; sin_h = sin_h / h_norm
+    rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=-1).reshape(N, T, 2, 2)
+    rotated = torch.einsum("btij,kj->btki", rot, local_pts)
+    world_pts = ego_trajs[..., :2].unsqueeze(2) + rotated
+
+    Q = N * T * K_pts
+    query = world_pts.reshape(Q, 2)
+
+    # --- Step 5: Containment check (crossing gate) ---
+    inside = _point_in_polygons(query, edge_v1, edge_v2, edge_poly_id, n_polys)
+    inside_2d = inside.reshape(N, T, K_pts)
+    all_inside_ts = inside_2d.all(dim=2)
+    all_inside_ts[:, 0] = True
+
+    has_crossing = ~all_inside_ts.all(dim=1)
+    crossing_gate = (~has_crossing).float()
+
+    is_crossing_ts = ~all_inside_ts; is_crossing_ts[:, 0] = False
+    first_idx = is_crossing_ts.float().argmax(dim=1)
+    lane_crossing_steps: list[int | None] = [
+        int(first_idx[i].item()) if has_crossing[i] else None for i in range(N)
+    ]
+
+    # --- Step 6: Distance to outer (road-edge) boundary segments ---
+    # Only measure distance for points INSIDE the lane — outside points get distance 0
+    # (they are already penalized by the crossing gate)
+    if outer_p1.shape[0] > 0:
+        raw_dist = _point_to_segments_min_dist(query, outer_p1, outer_p2)  # (Q,)
+        raw_dist = torch.where(inside, raw_dist, torch.zeros_like(raw_dist))
+        per_ts_min = raw_dist.reshape(N, T, K_pts).min(dim=2).values
+    else:
+        per_ts_min = torch.full((N, T), 100.0, device=device)
+
+    per_ts_min[:, 0] = 10.0
+
+    # --- Step 7: Exclusive zone categories (skip t=0) ---
+    # Each timestep belongs to exactly one: OUT > NEAR > WIDE > SAFE.
+    # Timesteps where ego is outside lane are OUT — not counted as near/wide.
+    is_out_ts = ~all_inside_ts[:, 1:]  # (N, T-1)
+    is_in_ts = ~is_out_ts
+
+    near_frac = (is_in_ts & (per_ts_min[:, 1:] < _LANE_NEAR_THRESH)).float().mean(dim=1)
+    wide_frac = (is_in_ts & (per_ts_min[:, 1:] >= _LANE_NEAR_THRESH)
+                 & (per_ts_min[:, 1:] < _LANE_WIDE_THRESH)).float().mean(dim=1)
+    cont_penalty = torch.where(
+        is_in_ts,
+        (1.0 - per_ts_min[:, 1:] / _LANE_CONT_THRESH).clamp(min=0, max=1),
+        torch.zeros_like(per_ts_min[:, 1:]),
+    ).mean(dim=1)
+
+    return crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty
 
 
 # ---------------------------------------------------------------------------
@@ -1337,6 +2000,18 @@ def compute_reward_batch(
         ego_trajs, ego_shape, data,
     )
 
+    # Lane departure penalty
+    if config.enable_lane_departure:
+        lane_crossing_gate, lane_near_frac, lane_wide_frac, lane_crossing_steps, lane_cont_penalty = compute_lane_departure_penalty(
+            ego_trajs, ego_shape, data,
+        )
+    else:
+        lane_crossing_gate = torch.ones(N, device=device)
+        lane_near_frac = torch.zeros(N, device=device)
+        lane_wide_frac = torch.zeros(N, device=device)
+        lane_crossing_steps: list[int | None] = [None] * N
+        lane_cont_penalty = torch.zeros(N, device=device)
+
     # NAVSIM PDMS-style multiplicative reward aggregation.
     # Safety gates: binary 0/1 multipliers. If any gate is 0, total is 0.
     # This prevents reward hacking (e.g. stopping to avoid offroad penalty)
@@ -1371,17 +2046,18 @@ def compute_reward_batch(
     # Lane polygon drivable_gate is kept as a soft penalty only, not a hard gate,
     # since lane polygons can disagree with road borders at intersection corners.
     safety_product = collision_gate * red_light_gate * rb_crossing_gate  # (N,)
+    if config.lane_gate_enabled:
+        safety_product = safety_product * lane_crossing_gate
 
     # Weighted quality metrics (only matter when safety gates pass)
     # Progress is the primary positive signal. Smoothness/centerline are penalties.
     # Safety score includes proximity penalty to NPCs (closer = more negative).
     clamped_progress = progress_scores.clamp(min=0)
 
-    # Overprogress penalty: cap reward at GT path length × 1.3.
-    # Trajectories that go much further than the human drove get penalized,
-    # preventing the model from learning to drive too fast through curves.
-    # Overprogress: cap progress reward at GT path length × 1.1, then penalize
-    # excess mildly. Disabled by default — causes stopping when penalty is too
+    # Normalize progress as percentage of GT path length, then apply
+    # overprogress/underprogress/stopped penalties.
+    # This ensures a 10m path on a 12m GT scene and a 10m path on a 22m GT scene
+    # get different progress scores (83% vs 45%).
     if config.enable_overprogress and "ego_agent_future" in data:
         gt_future = data["ego_agent_future"]
         if gt_future.dim() == 3:
@@ -1390,18 +2066,31 @@ def compute_reward_batch(
         gt_valid = gt_xy.abs().sum(dim=-1) > 0.1
         if gt_valid.sum() >= 10:
             gt_path_len = torch.diff(gt_xy[gt_valid], dim=0).norm(dim=-1).sum()
-            cap = config.overprogress_margin * gt_path_len
             model_path_lens = torch.diff(ego_trajs[:, :, :2], dim=1).norm(dim=-1).sum(dim=-1)  # (N,)
-            # Cap: progress can't exceed cap value. Excess gets penalized.
-            capped = torch.minimum(clamped_progress, cap.expand(N))
+
+            # Normalize progress to [0, 1] as fraction of GT, capped at margin.
+            # 100% GT = 1.0 (max), >margin% GT = capped + penalized.
+            progress_frac = (clamped_progress / gt_path_len.clamp(min=1e-3)).clamp(max=config.overprogress_margin)
+            clamped_progress = progress_frac * config.progress_norm_scale
+
+            # Overprogress: penalize model path exceeding margin × GT
+            cap = config.overprogress_margin * gt_path_len
             excess = torch.relu(model_path_lens - cap)
-            clamped_progress = capped - config.overprogress_penalty * excess
+            clamped_progress = clamped_progress - config.overprogress_penalty * excess
 
             # Stopped penalty: if GT drives (>5m) but model barely moves (<1m),
             # apply extra negative progress to discourage stopping.
             if gt_path_len > 5.0:
                 is_stopped = (model_path_lens < 1.0).float()
                 clamped_progress = clamped_progress - config.stopped_penalty * is_stopped
+
+            # Underprogress penalty: penalize trajectories that drive much less than GT.
+            # Continuous penalty proportional to how far below threshold the ratio is.
+            # E.g., penalty=100, threshold=0.5: at 25% GT path → 100*(0.5-0.25)=25 penalty.
+            if config.underprogress_penalty > 0 and gt_path_len > 3.0:
+                progress_ratio = (model_path_lens / gt_path_len).clamp(max=1.0)
+                underprogress = torch.relu(config.underprogress_threshold - progress_ratio)
+                clamped_progress = clamped_progress - config.underprogress_penalty * underprogress
 
     # TTC as quality bonus
     ttc_bonus = config.w_safety * (ttc_scores - 0.5) * 2
@@ -1412,6 +2101,9 @@ def compute_reward_batch(
     _RB_WIDE_SCALE = config.wide_edge_scale
     rb_penalty = _RB_NEAR_SCALE * rb_near_frac + _RB_WIDE_SCALE * rb_wide_frac + config.cont_edge_scale * rb_cont_penalty
 
+    # Lane departure proximity penalties
+    lane_penalty = config.lane_near_scale * lane_near_frac + config.lane_wide_scale * lane_wide_frac + config.lane_cont_scale * lane_cont_penalty
+
     quality_score = (
         config.w_progress * clamped_progress
         + config.w_safety * safety_scores
@@ -1419,6 +2111,7 @@ def compute_reward_batch(
         + config.w_centerline * centerline_scores
         + ttc_bonus
         - rb_penalty
+        - lane_penalty
     )
 
     _OFFROAD_FLOOR = -50.0
@@ -1436,6 +2129,8 @@ def compute_reward_batch(
                 first_terminal = min(first_terminal, collision_steps[i])
             if rb_crossing_steps[i] is not None:
                 first_terminal = min(first_terminal, rb_crossing_steps[i])
+            if config.enable_lane_departure and lane_crossing_steps[i] is not None:
+                first_terminal = min(first_terminal, lane_crossing_steps[i])
             survival_frac[i] = max(first_terminal, 1) / T  # at least 1/T to avoid 0
 
         # Blend: survived portion gets quality, failed portion gets floor.
@@ -1467,6 +2162,9 @@ def compute_reward_batch(
             off_road_fraction=float(off_road_fractions[i]),  # always 0 (polygon disabled); use rb_crossing/rb_near_frac instead
             rb_crossing=bool(rb_crossing_gate[i] < 0.5),
             rb_near_frac=float(rb_near_frac[i]),
+            lane_crossing=bool(lane_crossing_gate[i] < 0.5),
+            lane_near_frac=float(lane_near_frac[i]),
+            lane_wide_frac=float(lane_wide_frac[i]),
         ))
 
     return results
@@ -1496,12 +2194,18 @@ def compute_group_advantages(
     Args:
         rewards: List of RewardBreakdown for each trajectory in the group.
         epsilon: Small constant for numerical stability.
-        mode: "normalized" for standard GRPO (mean=0, std=1 per group),
-              "vd_grpo" for Variance-Decoupled GRPO (center only, fixed scale).
-              VD-GRPO preserves the absolute magnitude of negative rewards
-              (e.g. crashes) across groups instead of normalizing them away.
-        fixed_scale: Denominator for vd_grpo mode. Controls the magnitude of
-              advantages. Larger values = smaller advantages = more conservative.
+        mode: Advantage computation mode:
+            "normalized": Standard GRPO (mean=0, std=1 per group).
+            "vd_grpo": Variance-Decoupled GRPO (center only, fixed scale).
+                Preserves absolute magnitude of negative rewards across groups.
+            "raw": Centered advantages without std normalization. Uses
+                fixed_scale as denominator. If all trajectories in a group
+                are bad (e.g., all leave lane), all get negative advantages
+                instead of half getting positive weight.
+            "positive_only": Like "normalized" but clips negative advantages
+                to zero. Only updates on trajectories that are better than
+                the group mean.
+        fixed_scale: Denominator for vd_grpo and raw modes.
 
     Returns:
         (G,) array of advantages.
@@ -1510,19 +2214,74 @@ def compute_group_advantages(
     mean = totals.mean()
 
     if mode == "vd_grpo":
-        # Variance-Decoupled GRPO: center but use fixed scale.
-        # A crash group with rewards [-50, -50, -50, +5] keeps the large
-        # negative advantages instead of normalizing them to ~[-0.5, ..., +1.5].
         if fixed_scale <= 0.0:
             raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
         return (totals - mean) / max(fixed_scale, epsilon)
     elif mode == "normalized":
-        # Standard GRPO: per-group normalization to zero mean, unit variance.
         std = totals.std()
         if std < epsilon:
             return np.zeros(len(rewards))
         return (totals - mean) / (std + epsilon)
+    elif mode == "raw":
+        # Centered advantages without per-group std normalization.
+        # If all K trajectories are bad, all get negative advantages.
+        # This prevents normalized advantages from giving half of an
+        # all-bad group positive weight.
+        if fixed_scale <= 0.0:
+            raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
+        return (totals - mean) / max(fixed_scale, epsilon)
+    elif mode == "absolute":
+        # No centering, no normalization. Advantage = total / fixed_scale.
+        # Positive reward → positive advantage, negative reward → negative advantage.
+        # A group where all trajs score -30 gets ALL negative advantages.
+        # Only trajs with positive absolute reward get reinforced.
+        if fixed_scale <= 0.0:
+            raise ValueError(f"advantage_fixed_scale must be positive, got {fixed_scale}")
+        return totals / max(fixed_scale, epsilon)
+    elif mode == "softmax":
+        # Softmax-weighted advantages. Temperature = fixed_scale.
+        # Rank 1 gets disproportionately strong signal (~0.9), others decay sharply.
+        # Low temperature (5) = very sharp (rank 1 dominates).
+        # High temperature (20) = softer (more spread across top trajs).
+        # Centered so mean≈0 for stable GRPO training.
+        temp = max(fixed_scale, epsilon)
+        logits = totals / temp
+        logits = logits - logits.max()  # numerical stability
+        exp_logits = np.exp(logits)
+        weights = exp_logits / exp_logits.sum()
+        # Center and scale: mean=0, max≈1
+        advantages = (weights - weights.mean()) / max(weights.max(), epsilon)
+        return advantages
+    elif mode == "positive_only":
+        # Standard normalization but clip negatives to zero.
+        # Only reinforces trajectories better than the group mean.
+        std = totals.std()
+        if std < epsilon:
+            return np.zeros(len(rewards))
+        advantages = (totals - mean) / (std + epsilon)
+        return np.maximum(advantages, 0.0)
+    elif mode == "ddv2":
+        # DDV2-style Inter-Anchor Truncated GRPO (paper Eq. 8):
+        # 1. Standard intra-group normalization
+        # 2. Clip ALL negative advantages to 0 (only reward improvements)
+        # 3. Hard -1 penalty for safety violations (collision, off-road, lane departure)
+        # This provides a clear learning signal: reward relative improvements,
+        # but only penalize absolute failures.
+        std = totals.std()
+        if std < epsilon:
+            advantages = np.zeros(len(rewards))
+        else:
+            advantages = (totals - mean) / (std + epsilon)
+        # Clip negative to 0
+        advantages = np.maximum(advantages, 0.0)
+        # Hard -1 for safety violations
+        for i, rb in enumerate(rewards):
+            if rb.collision_step is not None or rb.rb_crossing or rb.lane_crossing:
+                advantages[i] = -1.0
+        return advantages
     else:
         raise ValueError(
-            f"Unknown advantage mode: {mode!r}. Expected 'normalized' or 'vd_grpo'."
+            f"Unknown advantage mode: {mode!r}. "
+            f"Expected 'normalized', 'vd_grpo', 'raw', 'absolute', 'softmax', "
+            f"'positive_only', or 'ddv2'."
         )

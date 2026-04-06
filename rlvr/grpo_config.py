@@ -93,12 +93,20 @@ class GRPOConfig:
     near_edge_scale: float = 3.0
     wide_edge_scale: float = 0.2
     cont_edge_scale: float = 0.0
+    enable_lane_departure: bool = False
+    lane_gate_enabled: bool = False
+    lane_near_scale: float = 3.0
+    lane_wide_scale: float = 0.2
+    lane_cont_scale: float = 0.0
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     enable_overprogress: bool = True
     overprogress_margin: float = 1.1
     overprogress_penalty: float = 0.3
     stopped_penalty: float = 5.0
+    underprogress_penalty: float = 0.0  # penalize model driving << GT (0=disabled)
+    underprogress_threshold: float = 0.5  # penalize if model_path/gt_path < threshold
+    progress_norm_scale: float = 20.0  # max progress points at 100% GT match
 
     # Reward aggregation mode (passed to RewardConfig):
     # "gate": binary safety gates (default). Any terminal event → floor.
@@ -117,7 +125,18 @@ class GRPOConfig:
     loss_mode: str = "diffusion"
     direct_loss_weight: float = 1.0
     diffusion_t_range: list[float] = field(default_factory=lambda: [0.001, 0.1])
-    diffusion_k_steps: int = 4
+    diffusion_k_steps: int = 8  # K (noise, t) samples averaged per GRPO loss (matches DPO K=8)
+
+    # Log-probability GRPO (DDV2-style). When grpo_loss_type="logprob", the loss
+    # uses actual Gaussian log-probabilities from a truncated denoising rollout
+    # instead of MSE. This enables proper policy gradient for trajectory shape.
+    grpo_loss_type: str = "mse"  # "mse" (current) or "logprob" (DDV2-style)
+    logprob_num_steps: int = 10  # denoising steps for rollout
+    logprob_t_start: float = 0.01  # starting noise level (truncated)
+    logprob_discount: float = 0.8  # per-step advantage discount (DDV2 uses 0.8)
+    logprob_min_std: float = 0.1  # minimum std for log-prob stability (DDV2 supplementary)
+    il_loss_weight: float = 0.1  # IL (imitation learning) regularization weight
+    il_adaptive: bool = True  # if True: IL weight=1.0 when no positive advantages, else il_loss_weight
 
     # Advantage computation mode:
     # "normalized" (default): standard GRPO per-group normalization (mean=0, std=1).
@@ -140,6 +159,12 @@ class GRPOConfig:
     # Rejection sampling: generate num_generations trajectories but keep only
     # the top rejection_keep by reward. Set to 0 or None to disable (keep all).
     rejection_keep: int = 0
+    # Reward trimming: drop top and bottom X% of scenes by their mean group
+    # reward before training. Prevents learning from outlier scenes (e.g.,
+    # high-progress lane-departing scenes at top, heavily crashed scenes at bottom).
+    reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
+    lane_dep_trim_n: int = 0  # drop N scenes with highest lane departure fraction (0=disabled)
+    neighbor_loss_weight: float = 0.0  # weight for neighbor prediction regularization (0=disabled)
 
     # LoRA
     use_lora: bool = True
@@ -197,6 +222,29 @@ class GRPOConfig:
     # Only used when exploration_step_per_group=True.
     # 1 = step every scene (original per-group), 4 = match DiT rhythm.
     exploration_grad_accum_groups: int = 1
+
+    # Random guidance mode: replaces exploration policy with direct η sampling.
+    # "explorer" (default): use learned exploration policy (Beta distributions).
+    # "uniform": random η ~ U[-1, 1] (matches zero-init explorer output).
+    # "narrow": random η_lat ~ U[-0.5, 0.5], η_lon ~ U[-0.25, 0.25].
+    # "gaussian": random η_lat ~ N(0, 0.3), η_lon ~ N(0, 0.15).
+    # "none": η=0 always (no guidance, pure noise diversity).
+    random_guidance_mode: str = "explorer"
+
+    # --- Closed-loop training ---
+    # When True, uses ClosedLoopExplorationTrainer instead of GRPOExplorationTrainer.
+    # The explorer operates per-step (0.1s) with GAE temporal credit assignment.
+    use_closed_loop: bool = False
+    closed_loop_rollout_steps: int = 40     # 4s at 10Hz
+    closed_loop_gamma: float = 0.99         # GAE discount factor
+    closed_loop_gae_lambda: float = 0.95    # GAE lambda
+    closed_loop_value_coef: float = 0.5     # value loss coefficient
+    closed_loop_alive_bonus: float = 0.5    # per-step alive reward
+    closed_loop_freeze_dit: bool = True     # freeze DiT during explorer training
+    closed_loop_batch_size: int = 8        # scenes per batch in rollout (8 fits ~24GB VRAM)
+    closed_loop_drop_last: bool = True     # drop incomplete last batch
+    closed_loop_online_interval: int = 0   # online explorer update every N steps (0=off, 10=PlannerRFT-style)
+    closed_loop_explorer_mini_batch: int = 0  # step explorer optimizer every N scenes (0=all scenes at once)
 
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:

@@ -12,20 +12,20 @@ Usage:
     # Baseline model
     python rlvr/eval_border_distance.py \
         --model_path /path/to/best_model.pth \
-        --scenes /path/to/miraikan_prob.json \
+        --scenes /path/to/problem_scenes.json \
         --tag baseline
 
     # LoRA model
     python rlvr/eval_border_distance.py \
         --model_path /path/to/best_model.pth \
-        --scenes /path/to/miraikan_prob.json \
+        --scenes /path/to/problem_scenes.json \
         --lora_path /path/to/lora_epoch_003 \
         --tag p6m_ep3
 
     # With visualization of worst 10 scenes
     python rlvr/eval_border_distance.py \
         --model_path /path/to/best_model.pth \
-        --scenes /path/to/miraikan_prob.json \
+        --scenes /path/to/problem_scenes.json \
         --lora_path /path/to/lora_epoch_003 \
         --tag p6m_ep3 --visualize --output_dir ~/Pictures/border_viz
 
@@ -33,7 +33,7 @@ Usage:
     python rlvr/eval_border_distance.py \
         --merged_model_path /path/to/merged.pth \
         --args_json /path/to/args.json \
-        --scenes /path/to/miraikan_prob.json \
+        --scenes /path/to/problem_scenes.json \
         --tag p6m_ep3
 """
 

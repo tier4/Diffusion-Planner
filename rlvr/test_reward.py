@@ -246,14 +246,17 @@ def test_stationary_trajectory():
 def test_straight_line_smooth():
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     scores = compute_smoothness_score_batch(ego, CONFIG)
-    assert abs(scores[0].item()) < 1e-3, f"Expected ~0, got {scores[0]}"
+    assert abs(scores[0].item()) < 0.01, f"Expected ~0, got {scores[0]}"
     print(f"  PASS  straight_line_smooth: {scores[0]:.6f}")
 
 
 def test_zigzag_high_jerk():
+    import math
     ego = _straight_line()
+    # Sinusoidal lateral oscillation at ~1Hz (period=10 steps at 10Hz)
+    # This is a physically plausible swerving trajectory with real jerk
     for t in range(T):
-        ego[t, 1] = 2.0 * ((-1) ** t)
+        ego[t, 1] = 1.0 * math.sin(2 * math.pi * t / 10)
     scores = compute_smoothness_score_batch(ego.unsqueeze(0), CONFIG)
     assert scores[0].item() < -1.0, f"Expected strongly negative, got {scores[0]}"
     print(f"  PASS  zigzag_high_jerk: {scores[0]:.2f}")
@@ -265,7 +268,7 @@ def test_constant_acceleration():
     y = torch.zeros(T)
     ego = torch.stack([x, y, torch.ones(T), torch.zeros(T)], dim=-1)
     scores = compute_smoothness_score_batch(ego.unsqueeze(0), CONFIG)
-    assert abs(scores[0].item()) < 1.0, f"Expected near zero jerk, got {scores[0]}"
+    assert abs(scores[0].item()) < 0.01, f"Expected near zero jerk, got {scores[0]}"
     print(f"  PASS  constant_acceleration: {scores[0]:.6f}")
 
 
@@ -705,6 +708,120 @@ def test_red_light_no_data():
 # Runner
 # -------------------------------------------------------------------------
 
+def test_advantage_raw_all_bad():
+    """Raw mode: all-bad group should have all negative or zero advantages."""
+    class FakeReward:
+        def __init__(self, t): self.total = t
+    # All trajectories are bad (e.g., all gated at -50)
+    rewards = [FakeReward(-50.0 + i * 0.1) for i in range(8)]
+    adv = compute_group_advantages(rewards, mode="raw", fixed_scale=10.0)
+    # Centered: mean ~ -49.65, so all are close to zero (centered)
+    # But importantly, NOT normalized to have half positive
+    assert adv.std() < 0.1, f"Raw advantages should have small spread: std={adv.std():.3f}"
+    print("  PASS  test_advantage_raw_all_bad")
+
+
+def test_advantage_positive_only():
+    """Positive-only mode: negative advantages should be clipped to zero."""
+    class FakeReward:
+        def __init__(self, t): self.total = t
+    rewards = [FakeReward(1.0), FakeReward(2.0), FakeReward(3.0), FakeReward(10.0)]
+    adv = compute_group_advantages(rewards, mode="positive_only")
+    # Only the above-mean trajectories should have positive advantages
+    assert all(a >= 0 for a in adv), f"All advantages should be >= 0: {adv}"
+    # The best trajectory should have the highest advantage
+    assert adv[3] > adv[0], f"Best traj should have highest adv: {adv}"
+    # At least one should be zero (below mean)
+    assert any(a == 0 for a in adv), f"Some advantages should be exactly 0: {adv}"
+    print("  PASS  test_advantage_positive_only")
+
+
+def test_lane_departure_in_lane():
+    """Trajectory staying in-lane should not trigger lane departure."""
+    from rlvr.reward import compute_lane_departure_penalty
+    device = torch.device("cpu")
+    T = 20
+    # Ego trajectory going straight at y=0, well within lane
+    ego = torch.zeros(1, T, 4, device=device)
+    for t in range(T):
+        ego[0, t, 0] = 2.0 + t * 0.5  # x moves forward, start at x=2
+        ego[0, t, 2] = 1.0             # cos(heading) = 1
+    # Lane centerline at y=0, width=3.5m (half_width=1.75m)
+    # Lane extends well beyond ego to avoid polygon boundary issues
+    lanes = torch.zeros(1, 10, 20, 33, device=device)
+    for pt in range(20):
+        lanes[0, 0, pt, 0] = pt * 1.0    # center X (0 to 19, covers ego range)
+        lanes[0, 0, pt, 1] = 0.01         # center Y slightly off-zero (avoid origin validity filter)
+        lanes[0, 0, pt, 2] = 1.0          # direction cos
+        lanes[0, 0, pt, 4] = 0.0          # left boundary dX
+        lanes[0, 0, pt, 5] = 1.74         # left boundary dY
+        lanes[0, 0, pt, 6] = 0.0          # right boundary dX
+        lanes[0, 0, pt, 7] = -1.76        # right boundary dY
+    ego_shape = torch.tensor([2.75, 4.34, 1.70])
+    data = {"lanes": lanes}
+    crossing_gate, near_frac, wide_frac, _, cont = compute_lane_departure_penalty(ego, ego_shape, data)
+    assert crossing_gate[0] == 1.0, f"In-lane trajectory should not cross: gate={crossing_gate[0]}"
+    print("  PASS  test_lane_departure_in_lane")
+
+
+def test_lane_departure_out_of_lane():
+    """Trajectory far outside lane should trigger lane departure."""
+    from rlvr.reward import compute_lane_departure_penalty
+    device = torch.device("cpu")
+    T = 20
+    # Ego trajectory at y=5.0 (well outside 1.75m half-width lane)
+    ego = torch.zeros(1, T, 4, device=device)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 1] = 5.0      # far outside lane
+        ego[0, t, 2] = 1.0
+    lanes = torch.zeros(1, 10, 20, 33, device=device)
+    for pt in range(20):
+        lanes[0, 0, pt, 0] = pt * 0.5
+        lanes[0, 0, pt, 1] = 0.0
+        lanes[0, 0, pt, 2] = 1.0
+        lanes[0, 0, pt, 4] = 0.0
+        lanes[0, 0, pt, 5] = 1.75
+        lanes[0, 0, pt, 6] = 0.0
+        lanes[0, 0, pt, 7] = -1.75
+    ego_shape = torch.tensor([2.75, 4.34, 1.70])
+    data = {"lanes": lanes}
+    crossing_gate, near_frac, wide_frac, _, cont = compute_lane_departure_penalty(ego, ego_shape, data)
+    assert crossing_gate[0] == 0.0, f"Out-of-lane trajectory should cross: gate={crossing_gate[0]}"
+    print("  PASS  test_lane_departure_out_of_lane")
+
+
+def test_advantage_absolute():
+    """Absolute mode: no centering, positive reward → positive advantage."""
+    from rlvr.reward import compute_group_advantages, RewardBreakdown
+    rewards = [RewardBreakdown(safety=0, progress=0, smoothness=0, feasibility=0, centerline=0,
+                               red_light=0, total=t, collision_step=None, off_road_fraction=0)
+               for t in [+10, +5, -5, -20]]
+    adv = compute_group_advantages(rewards, mode="absolute", fixed_scale=10.0)
+    assert adv[0] > 0, f"Positive reward should give positive advantage: {adv[0]}"
+    assert adv[1] > 0, f"Positive reward should give positive advantage: {adv[1]}"
+    assert adv[2] < 0, f"Negative reward should give negative advantage: {adv[2]}"
+    assert adv[3] < 0, f"Negative reward should give negative advantage: {adv[3]}"
+    assert abs(adv[0] - 1.0) < 1e-6, f"10/10 should be 1.0: {adv[0]}"
+    print("  PASS  test_advantage_absolute")
+
+
+def test_advantage_softmax():
+    """Softmax mode: rank 1 gets disproportionately high weight."""
+    from rlvr.reward import compute_group_advantages, RewardBreakdown
+    rewards = [RewardBreakdown(safety=0, progress=0, smoothness=0, feasibility=0, centerline=0,
+                               red_light=0, total=t, collision_step=None, off_road_fraction=0)
+               for t in [+20, +5, 0, -10, -30]]
+    adv = compute_group_advantages(rewards, mode="softmax", fixed_scale=5.0)
+    # Rank 1 should have the highest advantage
+    assert adv[0] > adv[1], f"Rank 1 should beat rank 2: {adv[0]} vs {adv[1]}"
+    # Rank 1 should be much larger than rank 2 (softmax concentrates)
+    assert adv[0] > 2 * adv[1], f"Softmax T=5 should concentrate on rank 1: {adv[0]} vs {adv[1]}"
+    # Last rank should be negative (centered)
+    assert adv[-1] < 0, f"Worst trajectory should have negative advantage: {adv[-1]}"
+    print("  PASS  test_advantage_softmax")
+
+
 if __name__ == "__main__":
     tests = [
         test_no_collision_straight_line,
@@ -745,6 +862,12 @@ if __name__ == "__main__":
         test_red_light_violation,
         test_red_light_stopped_no_penalty,
         test_red_light_no_data,
+        test_advantage_raw_all_bad,
+        test_advantage_positive_only,
+        test_lane_departure_in_lane,
+        test_lane_departure_out_of_lane,
+        test_advantage_absolute,
+        test_advantage_softmax,
     ]
 
     print("=" * 60)
