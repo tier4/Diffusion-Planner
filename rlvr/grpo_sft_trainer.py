@@ -255,8 +255,10 @@ def _compute_sft_diffusion_loss(
         ego_loss = F.mse_loss(model_output[:, 0], gt_target[:, 0])
         total_ego_loss += ego_loss
 
-        # Neighbor loss: MSE over valid timesteps only (skipped when neighbor_reg_only)
-        if Pn > 0 and neighbors_future_valid.any() and not neighbor_reg_only:
+        # Neighbor loss: MSE over valid timesteps only.
+        # Skipped when neighbor_reg_only=True AND reg is actually active.
+        skip_neighbor_sft = neighbor_reg_only and use_neighbor_reg
+        if Pn > 0 and neighbors_future_valid.any() and not skip_neighbor_sft:
             neighbor_pred = model_output[:, 1:]  # [B, Pn, T, 4]
             neighbor_target = gt_target[:, 1:]  # [B, Pn, T, 4]
             # Per-element MSE, then mask

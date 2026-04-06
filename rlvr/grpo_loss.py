@@ -501,10 +501,16 @@ def _compute_neighbor_reg_loss(
     Runs K forward passes with random (noise, t), compares neighbor predictions
     from the LoRA model vs the base model (LoRA disabled). Returns a scalar loss
     with gradients flowing only through the LoRA model.
+
+    NOTE: assumes B=1 (single scene per call), which matches the GRPO trainer's
+    per-scene processing loop. Will raise AssertionError if B>1.
     """
     import random as _random
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
     from diffusion_planner.model.module.decoder import generate_prefix_mask
+
+    B = data["ego_current_state"].shape[0]
+    assert B == 1, f"_compute_neighbor_reg_loss requires B=1, got B={B}"
 
     inner = policy_model.module if hasattr(policy_model, "module") else policy_model
     if not hasattr(inner, "disable_adapter"):

@@ -177,7 +177,7 @@ class GRPOConfig:
     # Computes MSE(lora_neighbor_pred, base_neighbor_pred) at the same (noise, timestep)
     # by running a second forward pass with LoRA disabled. Adds ~2x training cost.
     # loss += neighbor_reg_weight * MSE(neighbor_pred_lora, neighbor_pred_base)
-    # Active in both ranked SFT and GRPO modes. 0 = disabled.
+    # Active in both ranked SFT and GRPO paths. 0 = disabled.
     neighbor_reg_weight: float = 0.0
     # Controls whether to include the neighbor SFT loss (MSE vs GT neighbors).
     # When True (recommended): loss = ego_sft + neighbor_reg (no GT neighbor loss).
