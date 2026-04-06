@@ -2078,7 +2078,9 @@ def compute_reward_batch(
             path_ratio = (model_path_lens / gt_path_len.clamp(min=1e-3))
 
             # Overprogress: penalize path exceeding margin × GT (ratio-based).
-            # Reference = GT path (the ideal trajectory length).
+            # NOTE: Changed from meter-based (pre-April 2026) to ratio-based.
+            # Old: penalty * relu(path_meters - cap_meters). New: penalty * relu(ratio - margin).
+            # Configs must use ratio-scale penalties (e.g. 100.0), not meter-scale (e.g. 0.3).
             # E.g., margin=1.0, penalty=100: at 1.5x GT → 100*(1.5-1.0)=50 penalty.
             overprogress = torch.relu(path_ratio - config.overprogress_margin)
             clamped_progress = clamped_progress - config.overprogress_penalty * overprogress

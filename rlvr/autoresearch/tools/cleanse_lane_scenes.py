@@ -97,8 +97,8 @@ def check_gt_lane_departure(npz_path: str, device: torch.device,
 
     Returns: (gt_in_lane, gt_path_len, gt_path_ok)
     """
-    raw = np.load(npz_path, allow_pickle=True)
-    gt = raw["ego_agent_future"]  # [T, 3] = x, y, heading
+    with np.load(npz_path, allow_pickle=True) as raw:
+        gt = raw["ego_agent_future"].copy()  # [T, 3] = x, y, heading
 
     # GT path length — only over valid (non-padded) timesteps
     gt_xy = gt[:, :2]

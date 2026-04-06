@@ -146,7 +146,7 @@ SFT diffusion training. Instead of computing RL gradients, it treats the best-ra
 as a pseudo-GT and trains with MSE loss. This preserves neighbor prediction quality because
 the SFT loss naturally covers all agents (ego + neighbors).
 
-Inspired by self-distillation approaches in LLMs ([Zhang et al. 2025](https://arxiv.org/abs/2604.01193)),
+Inspired by self-distillation approaches in LLMs ([Zhang et al. 2026](https://arxiv.org/abs/2604.01193)),
 adapted for diffusion planners with reward-based selection and Savitzky-Golay trajectory smoothing.
 
 **Pipeline:**
