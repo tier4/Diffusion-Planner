@@ -173,6 +173,13 @@ class GRPOConfig:
     ranked_sft_mode: str = "none"
     sg_filter_window: int = 11  # Savitzky-Golay filter window length (must be odd)
     sg_filter_order: int = 3    # Savitzky-Golay filter polynomial order
+    # Neighbor regularization: penalize LoRA neighbor outputs diverging from base model.
+    # loss += neighbor_reg_weight * MSE(neighbor_pred_lora, neighbor_pred_base)
+    # Only active in ranked SFT mode. 0 = disabled.
+    neighbor_reg_weight: float = 0.0
+    # When True, drop the neighbor SFT loss (term 2) and only use reg (term 3).
+    # Loss = ego_sft + neighbor_reg_weight * MSE(lora_neighbor, base_neighbor)
+    neighbor_reg_only: bool = False
 
     # LoRA
     use_lora: bool = True
