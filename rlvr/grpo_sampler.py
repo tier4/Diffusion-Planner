@@ -180,7 +180,7 @@ def generate_diverse_group(
             gt_min_speed = float(np.percentile(_gt_speeds, 10))
 
     # Trajectory 2: guided deterministic — strong LK+CL+SPD produces 0% offroad
-    # on problem miraikan scenes (verified: LK=5, CL=3, SPD=5 eliminates all offroad).
+    # on problem curve scenes (verified: LK=5, CL=3, SPD=5 eliminates all offroad).
     guided_fns = [
         GuidanceConfig("lane_keeping", enabled=True, scale=5.0),
         GuidanceConfig("road_border", enabled=True, scale=1.0),

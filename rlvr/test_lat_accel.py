@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from scipy.signal import savgol_filter
+from rlvr.reward import _build_sg_diff_kernel
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -56,9 +56,15 @@ def lat_accel_smoothed(positions: np.ndarray, window: int = 7, order: int = 3) -
     """positions: [T, 2] -> lat_accel: [T-2]"""
     if positions.shape[0] < window:
         return lat_accel_current(positions)
+    # SG smoothing (deriv=0) via numpy convolution
+    smooth_kernel = _build_sg_diff_kernel(window, order, deriv=0, delta=1.0).numpy()
+    pad = window // 2
+    def _sg_smooth(signal):
+        padded = np.pad(signal, pad, mode='edge')
+        return np.convolve(padded, smooth_kernel, mode='valid')
     smoothed = np.stack([
-        savgol_filter(positions[:, 0], window, order),
-        savgol_filter(positions[:, 1], window, order),
+        _sg_smooth(positions[:, 0]),
+        _sg_smooth(positions[:, 1]),
     ], axis=-1)
     return lat_accel_current(smoothed)
 

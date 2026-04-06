@@ -202,20 +202,17 @@ class GRPOTrainer:
 
         self.policy_model.eval()
         with torch.no_grad():
-            sampled = generate_diverse_group(
+            # Use batched generation (~3 forward passes instead of K sequential)
+            from rlvr.grpo_sampler_batched import generate_diverse_group_batched
+            traj_batch = generate_diverse_group_batched(
                 model=self.policy_model,
                 model_args=self.model_args,
                 data=data,
                 config=self.sampler_config,
                 device=self.device,
-            )
+            )  # [K, T, 4]
 
-        trajectories = [st.trajectory for st in sampled]
-
-        # Score with rewards
-        traj_batch = torch.tensor(
-            np.stack(trajectories), device=self.device, dtype=torch.float32,
-        )
+        trajectories = [traj_batch[k].cpu().numpy() for k in range(traj_batch.shape[0])]
         reward_breakdowns = compute_reward_batch(
             traj_batch, data, self.reward_config,
         )
@@ -239,11 +236,27 @@ class GRPOTrainer:
         # Store old log-probs and the (noise, t) used to compute them.
         # Reusing the same (noise, t) during training ensures a consistent
         # importance sampling ratio.
-        old_log_probs, old_noise, old_t = compute_log_probs(
-            self.policy_model, trajectories, data, self.model_args, self.device,
-        )
+        # Use batched log-prob computation (1 forward pass for all K trajs)
+        from rlvr.grpo_loss import compute_batched_trajectory_losses
+        B = data["ego_current_state"].shape[0]
+        P = 1 + self.model_args.predicted_neighbor_num
+        future_len = self.model_args.future_len
+        eps = 1e-3
+        old_noise = torch.randn(1, P, future_len, 4, device=self.device)
+        old_t = torch.rand(1, device=self.device) * (1 - eps) + eps
 
-        return {
+        was_training = self.policy_model.training
+        self.policy_model.train()
+        with torch.no_grad():
+            losses = compute_batched_trajectory_losses(
+                self.policy_model, data, traj_batch, self.model_args,
+                old_noise, old_t, self.device,
+            )
+            old_log_probs = -losses  # (K,)
+        if not was_training:
+            self.policy_model.eval()
+
+        result = {
             "npz_path": npz_path,
             "data": data,
             "trajectories": trajectories,
@@ -253,6 +266,25 @@ class GRPOTrainer:
             "old_noise": old_noise,
             "old_t": old_t,
         }
+
+        # For logprob loss: also collect the denoising rollout chain
+        if self.config.grpo_loss_type == "logprob":
+            from rlvr.grpo_logprob_loss import collect_logprob_rollout
+            was_training = self.policy_model.training
+            self.policy_model.eval()
+            rollout = collect_logprob_rollout(
+                model=self.policy_model,
+                data=data,
+                trajectories=traj_batch,
+                model_args=self.model_args,
+                config=self.config,
+                device=self.device,
+            )
+            if was_training:
+                self.policy_model.train()
+            result["rollout"] = rollout
+
+        return result
 
     def train_on_groups(
         self,
@@ -269,6 +301,11 @@ class GRPOTrainer:
             return _empty_metrics()
 
         M = self.config.inner_epochs
+        if M > 1 and self.config.grpo_loss_type == "logprob":
+            raise ValueError(
+                "inner_epochs > 1 is not supported with grpo_loss_type='logprob'. "
+                "Logprob GRPO uses on-policy REINFORCE without importance sampling."
+            )
         all_metrics: dict[str, float] = {}
         total_inner_steps = 0
 
@@ -287,7 +324,22 @@ class GRPOTrainer:
                 if np.all(advantages == 0):
                     continue
 
-                if self.config.loss_mode == "direct_best":
+                if self.config.grpo_loss_type == "logprob":
+                    # DDV2-style log-probability GRPO loss
+                    from rlvr.grpo_logprob_loss import compute_logprob_grpo_loss
+                    rollout = group.get("rollout")
+                    if rollout is None:
+                        continue
+                    loss, metrics = compute_logprob_grpo_loss(
+                        model=self.policy_model,
+                        rollout=rollout,
+                        advantages=advantages,
+                        data=group["data"],
+                        model_args=self.model_args,
+                        config=self.config,
+                        device=self.device,
+                    )
+                elif self.config.loss_mode == "direct_best":
                     # Direct regression: find best trajectory, regress det output toward it
                     rewards = group["reward_breakdowns"]
                     best_idx = int(np.argmax([r.total for r in rewards]))
@@ -302,24 +354,39 @@ class GRPOTrainer:
                         config=self.config,
                     )
                 else:
-                    # Standard diffusion-based GRPO loss (diffusion, diffusion_low_t, diffusion_multistep)
-                    # For M=1, old_log_probs is ignored inside compute_grpo_loss
-                    old_lp = group.get("old_log_probs") if M > 1 else None
-                    old_noise = group.get("old_noise") if M > 1 else None
-                    old_t = group.get("old_t") if M > 1 else None
-
-                    loss, metrics = compute_grpo_loss(
-                        policy_model=self.policy_model,
-                        trajectories=group["trajectories"],
-                        advantages=advantages,
-                        data=group["data"],
-                        model_args=self.model_args,
-                        config=self.config,
-                        device=self.device,
-                        old_log_probs=old_lp,
-                        old_noise=old_noise,
-                        old_t=old_t,
-                    )
+                    if M == 1:
+                        # Batched GRPO loss: all K trajectories in ONE forward pass
+                        from rlvr.grpo_loss import compute_batched_grpo_loss
+                        traj_tensor = torch.tensor(
+                            np.stack(group["trajectories"]),
+                            device=self.device, dtype=torch.float32,
+                        )
+                        loss, metrics = compute_batched_grpo_loss(
+                            policy_model=self.policy_model,
+                            trajectories_tensor=traj_tensor,
+                            advantages=advantages,
+                            data=group["data"],
+                            model_args=self.model_args,
+                            config=self.config,
+                            device=self.device,
+                        )
+                    else:
+                        # Sequential GRPO loss for inner_epochs > 1 (importance sampling)
+                        old_lp = group.get("old_log_probs")
+                        old_noise = group.get("old_noise")
+                        old_t = group.get("old_t")
+                        loss, metrics = compute_grpo_loss(
+                            policy_model=self.policy_model,
+                            trajectories=group["trajectories"],
+                            advantages=advantages,
+                            data=group["data"],
+                            model_args=self.model_args,
+                            config=self.config,
+                            device=self.device,
+                            old_log_probs=old_lp,
+                            old_noise=old_noise,
+                            old_t=old_t,
+                        )
 
                 scaled_loss = loss / self.config.grad_accum_groups
                 scaled_loss.backward()
@@ -386,6 +453,17 @@ class GRPOTrainer:
         print(f"  Generated {len(groups)} valid groups")
         if not groups:
             return _empty_metrics()
+
+        # Scene-level reward trimming: drop top and bottom X% of scenes by mean reward
+        trim = self.config.reward_trim_pct
+        if trim > 0 and len(groups) >= 10:
+            n = len(groups)
+            n_trim = max(1, int(n * trim))
+            mean_rewards = [np.mean([r.total for r in g["reward_breakdowns"]]) for g in groups]
+            sorted_idx = sorted(range(n), key=lambda i: mean_rewards[i])
+            keep_idx = sorted_idx[n_trim:n - n_trim]
+            groups = [groups[i] for i in keep_idx]
+            print(f"  Trimmed {2*n_trim} scenes ({trim*100:.0f}% each end), keeping {len(groups)}/{n}")
 
         return self.train_on_groups(groups, epoch, progress_callback)
 

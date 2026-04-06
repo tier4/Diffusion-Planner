@@ -75,30 +75,101 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
 
 
 @torch.no_grad()
-def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label=""):
+def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
+                        batch_size=150):
+    """Evaluate model on scenes. Uses batched inference when batch_size > 1."""
     model.eval()
     totals, offroads, collisions, path_lengths = [], [], 0, []
     rb_crossings, rb_nears = 0, []
-    for path in scene_paths:
-        try:
-            data = load_npz_data(path, DEVICE)
-            norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-            norm_data = model_args.observation_normalizer(norm_data)
-            det_traj = generate_samples(model, model_args, norm_data, noise_scale=0.0,
-                                        n_samples=1, composer=None, device=DEVICE)
-            det_traj_t = torch.tensor(det_traj, device=DEVICE, dtype=torch.float32)
-            reward = compute_reward_batch(det_traj_t, data, reward_config)[0]
-            totals.append(reward.total)
-            offroads.append(reward.off_road_fraction)
-            if reward.collision_step is not None:
-                collisions += 1
-            if reward.rb_crossing:
-                rb_crossings += 1
-            rb_nears.append(reward.rb_near_frac)
-            pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
-            path_lengths.append(pl)
-        except Exception as e:
-            print(f"  [eval] skipping {Path(path).name}: {e}")
+    lane_departures, lane_nears, lane_wides = 0, [], []
+
+    if batch_size > 1:
+        # Batched evaluation
+        from rlvr.closed_loop.batched_rollout import _batched_generate
+
+        # Load all scenes
+        all_data = []
+        all_paths = []
+        for path in scene_paths:
+            try:
+                data = load_npz_data(path, DEVICE)
+                all_data.append(data)
+                all_paths.append(path)
+            except Exception as e:
+                print(f"  [eval] skipping {Path(path).name}: {e}")
+
+        # Process in batches
+        for chunk_start in range(0, len(all_data), batch_size):
+            chunk_data = all_data[chunk_start:chunk_start + batch_size]
+            B_chunk = len(chunk_data)
+
+            # Stack into batch
+            import copy
+            batch = {}
+            for k in chunk_data[0]:
+                vals = [d[k] for d in chunk_data]
+                if isinstance(vals[0], torch.Tensor):
+                    batch[k] = torch.cat(vals, dim=0)
+                else:
+                    batch[k] = vals[0]
+
+            # Normalize
+            normalizer = copy.deepcopy(model_args.observation_normalizer)
+            norm_batch = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+            norm_batch = normalizer(norm_batch)
+
+            # Batched deterministic trajectory generation
+            with torch.no_grad():
+                det_trajs = _batched_generate(
+                    model, model_args, norm_batch,
+                    noise_scale=0.0, composer=None, device=DEVICE,
+                )  # [B_chunk, T, 4]
+
+            # Per-scene reward scoring (uses per-scene neighbor data)
+            for local_i in range(B_chunk):
+                traj_t = det_trajs[local_i:local_i+1]  # [1, T, 4]
+                data_i = chunk_data[local_i]
+                reward = compute_reward_batch(traj_t, data_i, reward_config)[0]
+                totals.append(reward.total)
+                offroads.append(reward.off_road_fraction)
+                if reward.collision_step is not None:
+                    collisions += 1
+                if reward.rb_crossing:
+                    rb_crossings += 1
+                rb_nears.append(reward.rb_near_frac)
+                if reward.lane_crossing:
+                    lane_departures += 1
+                lane_nears.append(reward.lane_near_frac)
+                lane_wides.append(reward.lane_wide_frac)
+                traj_np = det_trajs[local_i].cpu().numpy()
+                pl = np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum()
+                path_lengths.append(pl)
+    else:
+        # Sequential evaluation (original)
+        for path in scene_paths:
+            try:
+                data = load_npz_data(path, DEVICE)
+                norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+                norm_data = model_args.observation_normalizer(norm_data)
+                det_traj = generate_samples(model, model_args, norm_data, noise_scale=0.0,
+                                            n_samples=1, composer=None, device=DEVICE)
+                det_traj_t = torch.tensor(det_traj, device=DEVICE, dtype=torch.float32)
+                reward = compute_reward_batch(det_traj_t, data, reward_config)[0]
+                totals.append(reward.total)
+                offroads.append(reward.off_road_fraction)
+                if reward.collision_step is not None:
+                    collisions += 1
+                if reward.rb_crossing:
+                    rb_crossings += 1
+                rb_nears.append(reward.rb_near_frac)
+                if reward.lane_crossing:
+                    lane_departures += 1
+                lane_nears.append(reward.lane_near_frac)
+                lane_wides.append(reward.lane_wide_frac)
+                pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
+                path_lengths.append(pl)
+            except Exception as e:
+                print(f"  [eval] skipping {Path(path).name}: {e}")
 
     n = len(totals)
     if n == 0:
@@ -115,10 +186,15 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="")
         "stopped_count": int((pl_arr < 1.0).sum()),
         "rb_crossings": rb_crossings,
         "rb_near_mean": float(np.mean(rb_nears)),
+        "lane_departures": lane_departures,
+        "lane_near_mean": float(np.mean(lane_nears)) if lane_nears else 0.0,
+        "lane_wide_mean": float(np.mean(lane_wides)) if lane_wides else 0.0,
     }
     tag = f" [{label}]" if label else ""
     print(f"  Eval{tag}: {n} scenes, reward={result['reward_mean']:+.2f}, "
-          f"rb_cross={rb_crossings}/{n}, rb_near={np.mean(rb_nears):.2f}, "
+          f"rb_cross={rb_crossings}/{n}, lane_dep={lane_departures}/{n}, "
+          f"rb_near={np.mean(rb_nears):.2f}, "
+          f"lane_near={result['lane_near_mean']:.2f}, lane_wide={result['lane_wide_mean']:.2f}, "
           f"collision={result['collision_rate']:.1%}, "
           f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
     return result
@@ -312,11 +388,27 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         overprogress_margin=grpo_config.overprogress_margin,
         overprogress_penalty=grpo_config.overprogress_penalty,
         stopped_penalty=grpo_config.stopped_penalty,
+        underprogress_penalty=grpo_config.underprogress_penalty,
+        underprogress_threshold=grpo_config.underprogress_threshold,
+        progress_norm_scale=grpo_config.progress_norm_scale,
+        enable_lane_departure=grpo_config.enable_lane_departure,
+        lane_gate_enabled=grpo_config.lane_gate_enabled,
+        lane_near_scale=grpo_config.lane_near_scale,
+        lane_wide_scale=grpo_config.lane_wide_scale,
+        lane_cont_scale=grpo_config.lane_cont_scale,
+        reward_mode=grpo_config.reward_mode,
     )
-    # Eval reward config always uses STANDARD weights for cross-experiment comparability
-    eval_reward_config = RewardConfig()
+    # Eval reward config: standard weights but always check lane departure for metrics
+    eval_reward_config = RewardConfig(enable_lane_departure=True)
 
-    if grpo_config.use_exploration_policy:
+    if grpo_config.use_closed_loop:
+        from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer
+        trainer = ClosedLoopExplorationTrainer(
+            policy_model=policy_model, model_args=model_args,
+            dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+            config=grpo_config, use_lora=grpo_config.use_lora,
+        )
+    elif grpo_config.use_exploration_policy:
         from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
         trainer = GRPOExplorationTrainer(
             policy_model=policy_model, model_args=model_args,
@@ -366,12 +458,32 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
             for k, v in sched.items():
                 if hasattr(trainer.reward_config, k):
                     setattr(trainer.reward_config, k, v)
-                    print(f"  [schedule] epoch {epoch}: {k}={v}")
+                if hasattr(train_reward_config, k):
+                    setattr(train_reward_config, k, v)
+                print(f"  [schedule] epoch {epoch}: {k}={v}")
 
         if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
             trainer.save_epoch1_baselines(train_paths)
 
-        metrics = trainer.train_epoch(train_paths, epoch)
+        if not grpo_config.use_exploration_policy and not grpo_config.use_closed_loop:
+            if grpo_config.ranked_sft_mode != "none":
+                # Ranked SFT: generate N trajs, pick best, SFT on it
+                from rlvr.grpo_sft_trainer import train_epoch_ranked_sft
+                metrics = train_epoch_ranked_sft(
+                    model=policy_model, model_args=model_args, optimizer=optimizer,
+                    scene_paths=train_paths, config=grpo_config,
+                    reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                )
+            else:
+                # Fully batched training: all scenes in ~5 forward passes
+                from rlvr.grpo_trainer_batched import train_epoch_batched
+                metrics = train_epoch_batched(
+                    model=policy_model, model_args=model_args, optimizer=optimizer,
+                    scene_paths=train_paths, config=grpo_config,
+                    reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                )
+        else:
+            metrics = trainer.train_epoch(train_paths, epoch)
         trainer.log_metrics(epoch, metrics)
         trainer.save_checkpoint(epoch, args_dict)
 

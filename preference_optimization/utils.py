@@ -18,13 +18,13 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
     Returns:
         Dictionary of tensors with observation data
     """
-    loaded = np.load(str(npz_path))
-    data: dict[str, torch.Tensor] = {}
+    with np.load(str(npz_path)) as loaded:
+        data: dict[str, torch.Tensor] = {}
 
-    for key, value in loaded.items():
-        if key in {"map_name", "token", "delay"}:
-            continue
-        data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
+        for key, value in loaded.items():
+            if key in {"map_name", "token", "delay"}:
+                continue
+            data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
 
     if "goal_pose" in data:
         data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate full teleport metrics (speed, lat accel, reward) with corrected calculations.
+"""Evaluate driving quality metrics (speed, lat accel, path length, stopped).
 
 Reports:
   - max/mean/p95 speed
@@ -10,9 +10,9 @@ Reports:
 
 Usage:
     source .venv/bin/activate
-    python rlvr/eval_teleport_metrics.py \
+    python -m rlvr.autoresearch.tools.eval_driving_metrics \
         --model_path /path/to/best_model.pth \
-        --scenes /path/to/teleport_scenes.json \
+        --scenes /path/to/scenes.json \
         [--lora_path /path/to/lora_epoch_NNN] \
         [--tag "ep4"]
 """
@@ -24,15 +24,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from scipy.signal import savgol_filter
+from rlvr.reward import _build_sg_diff_kernel
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "diffusion_planner"))
-sys.path.insert(0, str(PROJECT_ROOT / "preference_optimization"))
-
-from model_utils import load_model
-from utils import load_npz_data
+from preference_optimization.model_utils import load_model
+from preference_optimization.utils import load_npz_data
 
 DT = 0.1
 
@@ -61,15 +56,34 @@ def lat_accel_current(positions: np.ndarray) -> np.ndarray:
     return np.sum(acc_vec * lat_dir, axis=-1)
 
 
-def lat_accel_smoothed(positions: np.ndarray, window: int = 7, order: int = 3) -> np.ndarray:
-    """positions: [T, 2] -> lat_accel: [T-2] (smoothed then finite diff)"""
+def lat_accel_smoothed(positions: np.ndarray, window: int = 11, order: int = 3) -> np.ndarray:
+    """positions: [T, 2] -> lat_accel: [T] using SG derivative (no finite diff noise).
+
+    Uses the same torch conv1d approach as reward.py for consistency.
+    Runs on CPU (no GPU needed for eval).
+    """
     if positions.shape[0] < window:
         return lat_accel_current(positions)
-    smoothed = np.stack([
-        savgol_filter(positions[:, 0], window, order),
-        savgol_filter(positions[:, 1], window, order),
-    ], axis=-1)
-    return lat_accel_current(smoothed)
+    # Use torch conv1d on CPU (same as reward.py for exact consistency)
+    vel_kernel = _build_sg_diff_kernel(window, order, deriv=1, delta=DT)
+    accel_kernel = _build_sg_diff_kernel(window, order, deriv=2, delta=DT)
+    pad = window // 2
+    pos_t = torch.from_numpy(positions).float().unsqueeze(0).permute(0, 2, 1)  # [1, 2, T]
+    pos_padded = torch.nn.functional.pad(pos_t, (pad, pad), mode='replicate')
+    vel_t = torch.nn.functional.conv1d(
+        pos_padded, vel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2)
+    accel_t = torch.nn.functional.conv1d(
+        pos_padded, accel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2)
+    vx = vel_t[0, 0].numpy()
+    vy = vel_t[0, 1].numpy()
+    ax = accel_t[0, 0].numpy()
+    ay = accel_t[0, 1].numpy()
+
+    speed = np.sqrt(vx**2 + vy**2).clip(min=1e-6)
+    # Lateral acceleration = |v × a| / |v|
+    cross = np.abs(vx * ay - vy * ax)
+    lat_acc = cross / speed
+    return lat_acc
 
 
 @torch.no_grad()
@@ -107,8 +121,7 @@ def main():
 
     # Load LoRA if specified
     if args.lora_path:
-        sys.path.insert(0, str(PROJECT_ROOT / "preference_optimization"))
-        from lora_utils import load_lora_checkpoint
+        from preference_optimization.lora_utils import load_lora_checkpoint
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
         print(f"Loaded LoRA from {args.lora_path}")
