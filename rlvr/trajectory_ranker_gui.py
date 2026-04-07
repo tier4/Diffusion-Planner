@@ -148,6 +148,9 @@ def slot_config_to_composer(
         if name == "speed" and gt_max_speed is not None:
             p.setdefault("v_high", gt_max_speed)
             p.setdefault("v_low", gt_min_speed)
+        if name == "anchor_following":
+            p.setdefault("prototypes_path", _DEFAULT_PROTOTYPES_PATH)
+            p.setdefault("anchor_index", 0)
         fns.append(GuidanceConfig(name=name, enabled=True, scale=scale, params=p))
     if not fns:
         return None, None
@@ -376,6 +379,9 @@ class TrajectoryRanker:
             self._norm_data["reference_trajectory"] = self._ref_trajectory
         self.policy_model.eval()
         traj = self._generate_from_slot(slot)
+        if index == 0 and slot.is_deterministic:
+            self._ref_trajectory = torch.from_numpy(traj).unsqueeze(0).to(self.device)
+            self._norm_data["reference_trajectory"] = self._ref_trajectory
         self.sampled_trajectories[index] = SampledTrajectory(
             trajectory=traj,
             noise_scale=0.0 if slot.is_deterministic else slot.noise_scale,
@@ -426,9 +432,12 @@ class TrajectoryRanker:
             display_rank = N - ranks[i]
             is_selected = (i == selected_idx)
 
-            if st.is_deterministic and not any(
-                en for en, _, _ in self.slot_configs[i].guidance.values()
-            ) if i < len(self.slot_configs) else st.is_deterministic:
+            has_guidance = (
+                any(en for en, _, _ in self.slot_configs[i].guidance.values())
+                if i < len(self.slot_configs) else False
+            )
+            is_det_baseline = st.is_deterministic and not has_guidance
+            if is_det_baseline:
                 color = "dodgerblue"
                 lw = 3.0
                 alpha = 1.0
