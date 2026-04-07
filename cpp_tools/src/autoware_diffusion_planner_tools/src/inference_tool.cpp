@@ -526,11 +526,13 @@ int main(int argc, char ** argv)
     TOPIC_OUT_TRAJECTORIES, "autoware_internal_planning_msgs/msg/CandidateTrajectories");
   writer_parser.create_topic(
     TOPIC_OUT_PREDICTED_OBJECTS, "autoware_perception_msgs/msg/PredictedObjects");
-  writer_parser.create_topic(
-    TOPIC_OUT_TURN_INDICATORS, "autoware_vehicle_msgs/msg/TurnIndicatorsCommand");
   writer_parser.create_topic(TOPIC_OUT_GT_TRAJECTORY, "autoware_planning_msgs/msg/Trajectory");
-  writer_parser.create_topic(TOPIC_OUT_DEBUG_ROUTE_MARKER, "visualization_msgs/msg/MarkerArray");
-  writer_parser.create_topic(TOPIC_OUT_DEBUG_LANE_MARKER, "visualization_msgs/msg/MarkerArray");
+  if (!inference_only) {
+    writer_parser.create_topic(
+      TOPIC_OUT_TURN_INDICATORS, "autoware_vehicle_msgs/msg/TurnIndicatorsCommand");
+    writer_parser.create_topic(TOPIC_OUT_DEBUG_ROUTE_MARKER, "visualization_msgs/msg/MarkerArray");
+    writer_parser.create_topic(TOPIC_OUT_DEBUG_LANE_MARKER, "visualization_msgs/msg/MarkerArray");
+  }
 
   // Pass-through all raw input messages (skip in inference-only mode)
   if (!inference_only) {
@@ -625,7 +627,7 @@ int main(int argc, char ** argv)
     const rclcpp::Time frame_time(frame_context->frame_time);
 
     // Write debug markers before normalization
-    {
+    if (!inference_only) {
       const auto lifetime = rclcpp::Duration::from_seconds(0.2);
       const auto route_markers = utils::create_lane_marker(
         frame_context->ego_to_map_transform, input_data_map.at("route_lanes"),
@@ -674,8 +676,10 @@ int main(int argc, char ** argv)
       planner_output.candidate_trajectories, frame_time, TOPIC_OUT_TRAJECTORIES);
     writer_parser.write_topic(
       planner_output.predicted_objects, frame_time, TOPIC_OUT_PREDICTED_OBJECTS);
-    writer_parser.write_topic(
-      planner_output.turn_indicator_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
+    if (!inference_only) {
+      writer_parser.write_topic(
+        planner_output.turn_indicator_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
+    }
 
     // Build ground truth trajectory from future odometry with interpolation
     {
