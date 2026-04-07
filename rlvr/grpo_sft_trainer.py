@@ -22,12 +22,12 @@ import random as _random
 import numpy as np
 import torch
 import torch.nn.functional as F
+from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+from diffusion_planner.model.module.decoder import generate_prefix_mask
 from scipy.signal import savgol_filter
 from torch import nn
 from tqdm import tqdm
 
-from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import generate_prefix_mask
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_trainer_batched import (
@@ -400,8 +400,6 @@ def train_epoch_ranked_sft(
     # 4. Score and select best trajectory per scene
     print(f"  Scoring and selecting best trajectories...")
     best_ego_trajs = []  # [T, 4] numpy arrays
-    scene_norm_data = []  # per-scene normalized data dicts
-    scene_raw_data = []  # per-scene raw data dicts
     best_rewards_list = []
 
     for i in tqdm(range(N), desc="Scoring"):
@@ -422,16 +420,6 @@ def train_epoch_ranked_sft(
         best_ego_trajs.append(best_traj_smooth)
         best_rewards_list.append(best_reward)
 
-        # Per-scene normalized data (B=1 slice)
-        norm_i = {}
-        for k, v in norm_batch.items():
-            if isinstance(v, torch.Tensor) and v.shape[0] == N:
-                norm_i[k] = v[i:i + 1]
-            else:
-                norm_i[k] = v
-        scene_norm_data.append(norm_i)
-        scene_raw_data.append(data_i)
-
     mean_best_reward = float(np.mean(best_rewards_list))
     print(f"  Mean best-of-{K} reward: {mean_best_reward:.2f}")
 
@@ -446,58 +434,52 @@ def train_epoch_ranked_sft(
         print(f"  Computing baseline neighbor predictions...")
         model.eval()
         for i in tqdm(range(N), desc="Baseline neighbors"):
+            norm_i = {
+                k: v[i:i + 1] if isinstance(v, torch.Tensor) and v.shape[0] == N else v
+                for k, v in norm_batch.items()
+            }
             neighbor_pred = _get_baseline_neighbor_prediction(
-                model, model_args, scene_norm_data[i], device
+                model, model_args, norm_i, device
             )  # [Pn, T, 4]
             baseline_neighbor_preds.append(neighbor_pred)
         torch.cuda.empty_cache()
 
-    # 6. Train with SFT diffusion loss
-    print(f"  Training on {N} scenes (ranked SFT, mode={mode})...")
-    model.train()
-    optimizer.zero_grad()
-
-    all_metrics = {}
-    n_scenes = 0
-    accum_count = 0
-    accum_target = config.grad_accum_groups
-
+    # 6. Prepare all training targets (ego GT + neighbor GT) upfront
     Pn = model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
-    for i in tqdm(range(N), desc="Training"):
-        data_i = scene_raw_data[i]
+    print(f"  Preparing training targets for {N} scenes...")
+    all_ego_gt = []       # list of [1, T, 4]
+    all_neighbor_gt = []  # list of [1, Pn, T, 4]
+    all_neighbor_mask = []  # list of [1, Pn, T]
 
+    for i in range(N):
         # Ego GT: the filtered best trajectory
         ego_gt_np = best_ego_trajs[i]  # [T, 4]
         ego_gt = torch.tensor(ego_gt_np, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T, 4]
-        # Truncate or pad to future_len
         T_actual = ego_gt.shape[1]
         if T_actual > future_len:
             ego_gt = ego_gt[:, :future_len, :]
         elif T_actual < future_len:
             pad = torch.zeros(1, future_len - T_actual, 4, device=device)
             ego_gt = torch.cat([ego_gt, pad], dim=1)
+        all_ego_gt.append(ego_gt)
 
         # Neighbor GT
         if mode == "gt_neighbor":
-            # Use real GT from NPZ data
+            data_i = all_data[i]
             neighbors_future = data_i.get("neighbor_agents_future")
             if neighbors_future is not None:
                 if neighbors_future.dim() == 3:
                     neighbors_future = neighbors_future.unsqueeze(0)
-                # [B, Pn_raw, T, D] -> truncate to predicted_neighbor_num
                 neighbors_future = neighbors_future[:, :Pn, :, :]
-                # Convert heading to cos/sin if needed (3D -> 4D)
                 if neighbors_future.shape[-1] == 3:
                     neighbors_future = torch.cat([
                         neighbors_future[..., :2],
                         neighbors_future[..., 2:3].cos(),
                         neighbors_future[..., 2:3].sin(),
                     ], dim=-1)
-                # Mask invalid timesteps
-                neighbor_mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0  # [B, Pn, T]
-                # Pad to future_len if needed
+                neighbor_mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0
                 T_n = neighbors_future.shape[2]
                 if T_n < future_len:
                     pad_n = torch.zeros(1, Pn, future_len - T_n, 4, device=device)
@@ -507,7 +489,6 @@ def train_epoch_ranked_sft(
                 elif T_n > future_len:
                     neighbors_future = neighbors_future[:, :, :future_len, :]
                     neighbor_mask = neighbor_mask[:, :, :future_len]
-                # Pad Pn dimension if needed
                 actual_pn = neighbors_future.shape[1]
                 if actual_pn < Pn:
                     pad_pn = torch.zeros(1, Pn - actual_pn, future_len, 4, device=device)
@@ -520,45 +501,89 @@ def train_epoch_ranked_sft(
                 neighbors_future = torch.zeros(1, Pn, future_len, 4, device=device)
                 neighbor_mask = torch.ones(1, Pn, future_len, dtype=torch.bool, device=device)
         else:
-            # baseline_neighbor mode
             neighbor_pred = baseline_neighbor_preds[i]  # [Pn, T, 4]
-            # The baseline predictions are already denormalized by the decoder
-            # (inference mode applies state_normalizer.inverse). No further
-            # denormalization needed — the loss function normalizes internally.
             neighbors_future = neighbor_pred.unsqueeze(0)  # [1, Pn, T, 4]
-            # Truncate/pad to future_len
             T_n = neighbors_future.shape[2]
             if T_n > future_len:
                 neighbors_future = neighbors_future[:, :, :future_len, :]
             elif T_n < future_len:
                 pad_n = torch.zeros(1, Pn, future_len - T_n, 4, device=device)
                 neighbors_future = torch.cat([neighbors_future, pad_n], dim=2)
-            # Mask: non-zero positions are valid
-            neighbor_mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0  # [1, Pn, T]
+            neighbor_mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0
 
-        # Compute SFT diffusion loss
+        all_neighbor_gt.append(neighbors_future)
+        all_neighbor_mask.append(neighbor_mask)
+
+    # Stack all targets: [N, T, 4], [N, Pn, T, 4], [N, Pn, T]
+    ego_gt_all = torch.cat(all_ego_gt, dim=0)
+    neighbor_gt_all = torch.cat(all_neighbor_gt, dim=0)
+    neighbor_mask_all = torch.cat(all_neighbor_mask, dim=0)
+    del all_ego_gt, all_neighbor_gt, all_neighbor_mask
+
+    # 7. Batched training with SFT diffusion loss
+    # sft_batch_size: scenes per forward pass (1 = sequential, same as original)
+    # accum_steps: how many forward passes before optimizer step
+    # Effective batch per step = sft_batch_size * accum_steps = grad_accum_groups
+    sft_bs = max(1, config.sft_batch_size)
+    if config.grad_accum_groups % sft_bs != 0:
+        raise ValueError(
+            "grad_accum_groups must be divisible by sft_batch_size: "
+            f"grad_accum_groups={config.grad_accum_groups}, sft_batch_size={sft_bs}."
+        )
+    accum_steps = config.grad_accum_groups // sft_bs
+    scenes_per_step = sft_bs * accum_steps  # for proper loss/metric weighting
+    print(f"  Training on {N} scenes (ranked SFT, mode={mode}, "
+          f"sft_batch_size={sft_bs}, accum_steps={accum_steps})...")
+    model.train()
+    optimizer.zero_grad()
+
+    # Shuffle scene order
+    indices = list(range(N))
+    _random.shuffle(indices)
+
+    all_metrics = {}
+    n_scenes = 0
+    accum_count = 0
+
+    for batch_start in range(0, N, sft_bs):
+        batch_idx = indices[batch_start:batch_start + sft_bs]
+        bs = len(batch_idx)
+
+        # Slice raw observation data for this mini-batch
+        mini_data = {
+            k: v[batch_idx] if isinstance(v, torch.Tensor) and v.shape[0] == N else v
+            for k, v in batch_data.items()
+        }
+        mini_ego_gt = ego_gt_all[batch_idx]           # [bs, T, 4]
+        mini_neighbor_gt = neighbor_gt_all[batch_idx]  # [bs, Pn, T, 4]
+        mini_neighbor_mask = neighbor_mask_all[batch_idx]  # [bs, Pn, T]
+
         loss, metrics = _compute_sft_diffusion_loss(
             model=model,
             model_args=model_args,
-            data=data_i,
-            ego_gt=ego_gt,
-            neighbor_gt=neighbors_future,
-            neighbor_mask=neighbor_mask,
+            data=mini_data,
+            ego_gt=mini_ego_gt,
+            neighbor_gt=mini_neighbor_gt,
+            neighbor_mask=mini_neighbor_mask,
             device=device,
             K=config.diffusion_k_steps,
             neighbor_reg_weight=config.neighbor_reg_weight,
             neighbor_reg_only=config.neighbor_reg_only,
         )
 
-        scaled_loss = loss / accum_target
+        # Scale loss to preserve per-scene gradient magnitude:
+        # loss is a batch-mean over bs scenes; we want the gradient contribution
+        # proportional to bs/scenes_per_step so the optimizer step averages over
+        # scenes_per_step scenes total.
+        scaled_loss = loss * (bs / scenes_per_step)
         scaled_loss.backward()
         accum_count += 1
 
         for k, v in metrics.items():
-            all_metrics[k] = all_metrics.get(k, 0.0) + v
-        n_scenes += 1
+            all_metrics[k] = all_metrics.get(k, 0.0) + v * bs
+        n_scenes += bs
 
-        if accum_count >= accum_target:
+        if accum_count >= accum_steps:
             torch.nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad],
                 max_norm=5.0,
@@ -569,8 +594,8 @@ def train_epoch_ranked_sft(
 
     # Flush remaining gradients
     if accum_count > 0:
-        if accum_count < accum_target:
-            scale_fix = accum_target / accum_count
+        if accum_count < accum_steps:
+            scale_fix = accum_steps / accum_count
             for p in model.parameters():
                 if p.requires_grad and p.grad is not None:
                     p.grad.mul_(scale_fix)
