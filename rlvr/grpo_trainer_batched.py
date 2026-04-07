@@ -173,11 +173,6 @@ def train_epoch_batched(
 
     K = config.num_generations
     keep = config.rejection_keep
-    if epoch == 1:
-        print(f"  [DEBUG] reward_config.reward_mode = {reward_config.reward_mode}")
-        print(f"  [DEBUG] reward_config.enable_lane_departure = {reward_config.enable_lane_departure}")
-        print(f"  [DEBUG] reward_config.lane_gate_enabled = {reward_config.lane_gate_enabled}")
-        print(f"  [DEBUG] reward_config.lane_near_scale = {reward_config.lane_near_scale}")
 
     # 1. Load all scenes
     print(f"  Loading {len(scene_paths)} scenes...")
