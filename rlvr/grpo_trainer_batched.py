@@ -100,10 +100,10 @@ def generate_all_scenes_batched(
     all_k_trajs.append(det_trajs)
 
     # Use deterministic trajectory as reference for longitudinal guidance.
-    # det_trajs is already in (x, y, cos_yaw, sin_yaw) format.
+    # det_trajs is already in (x, y, cos_yaw, sin_yaw) format — no conversion needed.
     use_lon = abs(longitudinal_eta) > 1e-6
     if use_lon:
-        norm_batch["reference_trajectory"] = det_trajs.clone()
+        norm_batch["reference_trajectory"] = det_trajs  # no clone needed, not mutated
 
     # --- Config 2-9: Strong CL + SPD guidance sweep for lane keeping ---
     # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
@@ -117,7 +117,6 @@ def generate_all_scenes_batched(
         (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
         (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
     ]
-    use_lon = abs(longitudinal_eta) > 1e-6
     for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
         fns = [
             GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),

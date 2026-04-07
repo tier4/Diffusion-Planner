@@ -417,6 +417,10 @@ class GRPOConfig:
 
         if stype == "step":
             warmup = float(spec.get("warmup_fraction", 0.5))
+            if not 0.0 <= warmup <= 1.0:
+                raise ValueError(
+                    f"warmup_fraction for '{name}' must be in [0, 1], got {warmup}"
+                )
             return start if progress < warmup else end
 
         raise ValueError(
