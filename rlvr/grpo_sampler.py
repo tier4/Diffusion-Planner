@@ -21,7 +21,7 @@ from guidance_gui.generate_samples import generate_samples
 @dataclass
 class SamplerConfig:
     n_trajectories: int = 8
-    noise_scale_range: tuple[float, float] = (0.5, 4.0)
+    noise_scale_range: tuple[float, float] = (0.5, 2.0)
     guidance_scale_range: tuple[float, float] = (0.1, 2.0)
 
     enable_guidance: bool = True
@@ -41,7 +41,7 @@ class SamplerConfig:
 
     centerline_scale_range: tuple[float, float] = (0.5, 3.0)
     anchor_scale_range: tuple[float, float] = (0.5, 3.0)
-    collision_scale_range: tuple[float, float] = (0.5, 2.0)
+    collision_scale_range: tuple[float, float] = (0.1, 1.0)
     route_following_scale_range: tuple[float, float] = (0.5, 2.0)
     lane_keeping_scale_range: tuple[float, float] = (0.5, 2.0)
     road_border_scale_range: tuple[float, float] = (0.2, 1.5)

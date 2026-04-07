@@ -65,7 +65,7 @@ class GRPOConfig:
 
     # Sampling
     sampling_randomization: bool = True
-    noise_scale_range: list[float] = field(default_factory=lambda: [0.5, 4.0])
+    noise_scale_range: list[float] = field(default_factory=lambda: [0.5, 2.0])
     guidance_scale_range: list[float] = field(default_factory=lambda: [0.1, 2.0])
     enable_guidance: bool = True
     enable_centerline: bool = True
