@@ -49,15 +49,18 @@ class StatePerturbation:
         augment_prob: float,
         num_refine: int,
         device: torch.device | str,
+        ego_past_noise_std: float,
     ) -> None:
         """
         Initialize the augmentor,
         :param augment_prob: probability between 0 and 1 of applying the data augmentation
         :param num_refine: number of refinement steps for quintic interpolation
         :param device: torch device
+        :param ego_past_noise_std: std of noise applied to ego past trajectory
         """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
+        self._ego_past_noise_std = ego_past_noise_std
         lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
         hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
@@ -102,7 +105,7 @@ class StatePerturbation:
         # Scale past trajectory and current state velocity/acceleration
         B_aug = aug_flag.sum().item()
         if B_aug > 0:
-            W = 0.15
+            W = self._ego_past_noise_std
             scale = torch.normal(mean=1.0, std=W, size=(B_aug, 1, 1)).to(
                 inputs["ego_agent_past"].device
             )

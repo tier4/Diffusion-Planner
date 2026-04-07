@@ -39,7 +39,7 @@ ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
 neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
 
 if args.augment_type == "quintic":
-    aug = StatePerturbation(augment_prob=1.0, num_refine=20, device="cpu")
+    aug = StatePerturbation(augment_prob=1.0, num_refine=20, device="cpu", ego_past_noise_std=0.1)
 else:
     aug = BridgeStatePerturbation(augment_prob=1.0, device="cpu")
 
