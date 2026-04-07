@@ -18,6 +18,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("target_npz", type=Path)
 parser.add_argument("save_dir", type=Path)
 parser.add_argument("--augment_type", choices=["quintic", "bridge"], default="quintic")
+parser.add_argument(
+    "--no_smoothing_future_trajectory",
+    action="store_true",
+    help="disable smoothing future trajectory",
+)
 args = parser.parse_args()
 
 target_npz = args.target_npz
@@ -39,7 +44,13 @@ ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
 neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
 
 if args.augment_type == "quintic":
-    aug = StatePerturbation(augment_prob=1.0, num_refine=20, device="cpu", ego_past_noise_std=0.1)
+    aug = StatePerturbation(
+        augment_prob=1.0,
+        num_refine=20,
+        device="cpu",
+        ego_past_noise_std=0.1,
+        use_smoothing_future_trajectory=not args.no_smoothing_future_trajectory,
+    )
 else:
     aug = BridgeStatePerturbation(augment_prob=1.0, device="cpu")
 

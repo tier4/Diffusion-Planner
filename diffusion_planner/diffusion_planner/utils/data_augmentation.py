@@ -50,6 +50,7 @@ class StatePerturbation:
         num_refine: int,
         device: torch.device | str,
         ego_past_noise_std: float,
+        use_smoothing_future_trajectory: bool,
     ) -> None:
         """
         Initialize the augmentor,
@@ -57,10 +58,12 @@ class StatePerturbation:
         :param num_refine: number of refinement steps for quintic interpolation
         :param device: torch device
         :param ego_past_noise_std: std of noise applied to ego past trajectory
+        :param use_smoothing_future_trajectory: whether to apply smoothing to future trajectory
         """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
         self._ego_past_noise_std = ego_past_noise_std
+        self._use_smoothing_future_trajectory = use_smoothing_future_trajectory
         lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
         hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
@@ -246,9 +249,10 @@ class StatePerturbation:
             dim=-1,
         )
 
-        ego_future4d = smoothing_future_trajectory(
-            ego_past4d, inputs["ego_current_state"], ego_future4d
-        )
+        if self._use_smoothing_future_trajectory:
+            ego_future4d = smoothing_future_trajectory(
+                ego_past4d, inputs["ego_current_state"], ego_future4d
+            )
 
         ego_future = torch.cat(
             [
