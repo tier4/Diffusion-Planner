@@ -237,6 +237,23 @@ def train_epoch_batched(
     median_gt_speed = float(_np2.median(gt_speeds_list))
     print(f"  Median GT max speed: {median_gt_speed:.1f} m/s")
 
+    # 2b. Apply per-epoch schedules to reward weights and guidance params
+    scheduled = config.get_all_scheduled_values(epoch, config.train_epochs)
+    reward_weight_names = {
+        "w_progress", "w_safety", "w_smooth", "w_feasibility", "w_centerline",
+        "stopped_penalty", "underprogress_penalty", "progress_norm_scale",
+    }
+    for name, value in scheduled.items():
+        if name in reward_weight_names and hasattr(reward_config, name):
+            setattr(reward_config, name, value)
+    if scheduled:
+        sched_str = ", ".join(f"{k}={v:.3f}" for k, v in scheduled.items())
+        print(f"  [schedule] epoch {epoch}: {sched_str}")
+
+    lon_eta = scheduled.get("longitudinal_eta", 0.0)
+    lon_lambda = scheduled.get("longitudinal_lambda", config.lambda_lon)
+    lon_scale = scheduled.get("longitudinal_scale", 10.0)
+
     # 3. Generate K trajectories for all scenes (batched)
     print(f"  Generating {K} trajectories × {N} scenes (batched)...")
     model.eval()
@@ -244,6 +261,9 @@ def train_epoch_batched(
         all_trajs = generate_all_scenes_batched(
             model, model_args, norm_batch, K, config.noise_scale_range, device,
             gt_max_speed=median_gt_speed,
+            longitudinal_eta=lon_eta,
+            longitudinal_lambda=lon_lambda,
+            longitudinal_scale=lon_scale,
         )  # [N, K, T, 4]
 
     # Free generation memory before scoring + training
