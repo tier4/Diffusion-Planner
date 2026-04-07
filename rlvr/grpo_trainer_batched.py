@@ -99,15 +99,11 @@ def generate_all_scenes_batched(
     det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
     all_k_trajs.append(det_trajs)
 
-    # Use deterministic trajectory as reference for longitudinal guidance
+    # Use deterministic trajectory as reference for longitudinal guidance.
+    # det_trajs is already in (x, y, cos_yaw, sin_yaw) format.
     use_lon = abs(longitudinal_eta) > 1e-6
     if use_lon:
-        # det_trajs: [N, T, 4] — need [N, T, 4] with (x, y, cos_yaw, sin_yaw)
-        ref = det_trajs.clone()
-        heading = ref[..., 2]  # heading angle
-        ref[..., 2] = torch.cos(heading)  # cos_yaw
-        ref[..., 3] = torch.sin(heading)  # sin_yaw
-        norm_batch["reference_trajectory"] = ref
+        norm_batch["reference_trajectory"] = det_trajs.clone()
 
     # --- Config 2-9: Strong CL + SPD guidance sweep for lane keeping ---
     # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.

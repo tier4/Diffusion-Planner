@@ -277,7 +277,7 @@ class GRPOConfig:
     # --- Per-epoch scheduling for arbitrary parameters ---
     # Generic scheduling system for reward weights, guidance scales, etc.
     # Each entry maps a parameter name to a schedule spec:
-    #   {"type": "linear"|"cosine"|"step", "start": float, "end": float,
+    #   {"type": "constant"|"linear"|"cosine"|"step", "start": float, "end": float,
     #    "warmup_fraction": float (for "step" only, default 0.5)}
     #
     # Schedulable parameters:
@@ -431,11 +431,12 @@ class GRPOConfig:
 
         Returns dict of {name: value} for all parameters with schedules defined.
         """
-        return {
-            name: self.get_scheduled_value(name, epoch, total_epochs)
-            for name in self.schedules
-            if self.get_scheduled_value(name, epoch, total_epochs) is not None
-        }
+        result: dict[str, float] = {}
+        for name in self.schedules:
+            value = self.get_scheduled_value(name, epoch, total_epochs)
+            if value is not None:
+                result[name] = value
+        return result
 
     @property
     def uses_importance_sampling(self) -> bool:
