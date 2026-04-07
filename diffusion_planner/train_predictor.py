@@ -161,7 +161,7 @@ def get_args():
     parser.add_argument(
         "--control_traj_loss_horizon",
         type=int,
-        default=0,
+        default=10,
         help="Sliding-window horizon for control-to-trajectory loss (0 = disabled)",
     )
     parser.add_argument(
