@@ -76,8 +76,17 @@ def generate_all_scenes_batched(
     device: torch.device,
     gen_chunk_size: int = 64,
     gt_max_speed: float = 3.0,
+    longitudinal_eta: float = 0.0,
+    longitudinal_lambda: float = 0.5,
+    longitudinal_scale: float = 10.0,
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
+
+    Args:
+        longitudinal_eta: Longitudinal guidance eta (0=off, >0=faster than ref).
+            Applied to CL-guided trajectories when nonzero.
+        longitudinal_lambda: Speed scaling constant for longitudinal guidance.
+        longitudinal_scale: Guidance scale for longitudinal guidance.
 
     Returns:
         [N, K, T, 4] tensor.
@@ -89,6 +98,16 @@ def generate_all_scenes_batched(
     # --- Config 1: Deterministic ---
     det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
     all_k_trajs.append(det_trajs)
+
+    # Use deterministic trajectory as reference for longitudinal guidance
+    use_lon = abs(longitudinal_eta) > 1e-6
+    if use_lon:
+        # det_trajs: [N, T, 4] — need [N, T, 4] with (x, y, cos_yaw, sin_yaw)
+        ref = det_trajs.clone()
+        heading = ref[..., 2]  # heading angle
+        ref[..., 2] = torch.cos(heading)  # cos_yaw
+        ref[..., 3] = torch.sin(heading)  # sin_yaw
+        norm_batch["reference_trajectory"] = ref
 
     # --- Config 2-9: Strong CL + SPD guidance sweep for lane keeping ---
     # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
@@ -102,12 +121,18 @@ def generate_all_scenes_batched(
         (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
         (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
     ]
+    use_lon = abs(longitudinal_eta) > 1e-6
     for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
         fns = [
             GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
             GuidanceConfig("speed", enabled=True, scale=spd_scale,
                            params={"v_high": gt_max_speed, "v_low": 0.5}),
         ]
+        if use_lon:
+            fns.append(GuidanceConfig(
+                "longitudinal", enabled=True, scale=longitudinal_scale,
+                params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},
+            ))
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
         trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
         all_k_trajs.append(trajs)
