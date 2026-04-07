@@ -173,17 +173,29 @@ adapted for diffusion planners with reward-based selection and Savitzky-Golay tr
 }
 ```
 
-**Key results (April 2026, 10+ experiments):**
-- Miraikan exit val: 25/50 → **0/50 lane departures** (with no_block0 trick)
-- Full 1076 miraikan scenes: 70/1076 → **4/1076** lane departures (94% reduction)
-- Ego L2: +1.9% (baseline 5.388), Neighbor L2: +29% (baseline 4.393)
-- Outperforms GRPO logprob on all metrics (GRPO best: 4/50 LD, +1.7% ego, +48% neighbor)
+**Key results (April 2026, 70+ experiments):**
 
-**The no_block0 trick:** After training with `lora_target="all"` (3 DiT blocks), zero out
-block 0 LoRA weights. This consistently improves lane keeping (e.g. 2/50 → 0/50) AND halves
-L2 degradation. Block 0 learns noisy patterns that interfere with the precise lane-keeping
-signal in blocks 1+2. Training all blocks then removing block 0 is better than training only
-block 2, because distributing gradients across all blocks produces smaller per-parameter changes.
+*Legacy (no neighbor reg):*
+- Miraikan exit val: 25/50 → **0/50 lane departures** (with no_block0 trick)
+- Ego L2: +1.9% (baseline 5.388), Neighbor L2: +29% (baseline 4.393)
+
+*With neighbor regularization (current best):*
+- Two-stage training: S1 (50 scenes, lr=5e-4) → S2 (500 scenes, lr=1e-5)
+- **Best deployable: S1 ep7 no_blk1** — 0/50 val LD, ego +2.0%, neighbor +2.0%
+- Neighbor reg (`neighbor_reg_only=true, neighbor_reg_weight=1.0`) reduces neighbor degradation from +91% to +1.8%
+
+**Block ablation trick:** After training with `lora_target="all"` (3 DiT blocks), zero out
+one block's LoRA weights post-hoc. With neighbor reg, **no_blk1 is best**. Without reg,
+**no_blk0 is best**. **NEVER zero block 2** — it's critical for lane keeping (22/50 LD).
+
+Training all blocks then removing one post-hoc is strictly better than training only a
+subset of blocks — tested `lora_target="last"` (block 2 only), which converges fast (1/50 LD
+by ep3) but diverges by ep9. Distributing gradients across all blocks produces smaller
+per-parameter changes, preventing destabilization.
+
+**neighbor_reg_weight must be ≥ 1.0** at lr=5e-4. Tested 0.5 and 0.75 — both diverge at
+epoch 5-6 with rb_cross>20. Lower reg gives the ego loss more freedom but insufficient
+constraint on neighbor weights causes catastrophic drift through shared DiT parameters.
 
 **LR sweep:**
 
