@@ -664,12 +664,11 @@ def compute_feasibility_score_batch(
     data: dict[str, torch.Tensor],
     config: RewardConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Batched lane boundary violation + acceleration penalty.
+    """Acceleration feasibility penalty.
 
-    Checks whether the ego vehicle (center +/- half_width) protrudes beyond
-    the actual left/right lane boundaries of route_lanes. Boundary offsets in
-    the lane tensor (indices 4-7) are offset vectors from centerline, not
-    absolute positions.
+    Penalizes longitudinal and lateral acceleration violations via
+    Savitzky-Golay filtered derivatives. Lane-boundary off-road detection
+    is disabled — offroad is handled by compute_road_border_penalty instead.
 
     Args:
         ego_trajs: (N, T, 4).
@@ -678,8 +677,8 @@ def compute_feasibility_score_batch(
         config: RewardConfig.
 
     Returns:
-        scores: (N,) negative penalty.
-        off_road_fractions: (N,) fraction of timesteps with boundary violation.
+        scores: (N,) negative acceleration penalty.
+        off_road_fractions: (N,) always zeros (lane-boundary check disabled).
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
