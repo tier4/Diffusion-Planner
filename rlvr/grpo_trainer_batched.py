@@ -132,6 +132,9 @@ def generate_all_scenes_batched(
         trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
         all_k_trajs.append(trajs)
 
+    # Clean up reference_trajectory before random passes (not needed, wastes VRAM on expand)
+    norm_batch.pop("reference_trajectory", None)
+
     # --- Config 5+: Random guidance (no road_border to avoid OOM) ---
     n_fixed = len(all_k_trajs)
     n_random = K - n_fixed

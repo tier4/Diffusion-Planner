@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import pytest
 
 from rlvr.grpo_config import GRPOConfig
@@ -124,21 +123,16 @@ def test_invalid_schedule_type():
         c.get_scheduled_value("x", 1, 20)
 
 
-def test_json_roundtrip():
-    import json
-    import tempfile
-    import os
-
+def test_json_roundtrip(tmp_path):
     c = GRPOConfig(schedules={
         "w_progress": {"type": "cosine", "start": 3.0, "end": 10.0},
         "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 0.5},
     })
-    path = os.path.join(tempfile.gettempdir(), "test_sched_roundtrip.json")
-    c.to_json(path)
-    c2 = GRPOConfig.from_json(path)
+    path = tmp_path / "test_sched_roundtrip.json"
+    c.to_json(str(path))
+    c2 = GRPOConfig.from_json(str(path))
     assert c2.schedules == c.schedules
     assert c2.get_scheduled_value("w_progress", 20, 20) == pytest.approx(10.0)
-    os.unlink(path)
 
 
 if __name__ == "__main__":
