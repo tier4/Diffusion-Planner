@@ -138,6 +138,7 @@ def slot_config_to_composer(
     slot: TrajectorySlotConfig,
     gt_max_speed: float | None,
     gt_min_speed: float,
+    prototypes_path: str | None = None,
 ) -> tuple[GuidanceComposer | None, GuidanceSetConfig | None]:
     fns = []
     for name in ALL_GUIDANCE_NAMES:
@@ -149,7 +150,8 @@ def slot_config_to_composer(
             p.setdefault("v_high", gt_max_speed)
             p.setdefault("v_low", gt_min_speed)
         if name == "anchor_following":
-            p.setdefault("prototypes_path", _DEFAULT_PROTOTYPES_PATH)
+            if prototypes_path:
+                p.setdefault("prototypes_path", prototypes_path)
             p.setdefault("anchor_index", 0)
         fns.append(GuidanceConfig(name=name, enabled=True, scale=scale, params=p))
     if not fns:
@@ -356,7 +358,7 @@ class TrajectoryRanker:
 
     def _generate_from_slot(self, slot: TrajectorySlotConfig) -> np.ndarray:
         composer, set_cfg = slot_config_to_composer(
-            slot, self._gt_max_speed, self._gt_min_speed,
+            slot, self._gt_max_speed, self._gt_min_speed, self.prototypes_path,
         )
         noise = 0.0 if slot.is_deterministic else slot.noise_scale
         samples = generate_samples(
@@ -371,7 +373,11 @@ class TrajectoryRanker:
         return samples[0]
 
     def regenerate_single(self, index: int) -> None:
-        if self._norm_data is None or index >= len(self.slot_configs):
+        if (
+            self._norm_data is None
+            or index >= len(self.slot_configs)
+            or index >= len(self.sampled_trajectories)
+        ):
             return
         slot = self.slot_configs[index]
         # Ensure reference_trajectory is in norm_data for lat/lon guidance
@@ -1170,6 +1176,7 @@ def build_interface(
                     return (
                         "No groups queued. Accept some scenes first.",
                         _grpo_epoch_counter[0],
+                        f"0 groups queued",
                     )
 
                 trainer.beta = float(beta_val)
@@ -1201,7 +1208,7 @@ def build_interface(
                     log_lines.append(f"- {drift}")
                 log_lines.append(f"\nQueue cleared.")
 
-                return ("\n".join(log_lines), epoch)
+                return ("\n".join(log_lines), epoch, "0 groups queued")
 
             btn_accept.click(
                 _accept_and_advance,
@@ -1219,7 +1226,7 @@ def build_interface(
             btn_train.click(
                 _train_epoch,
                 inputs=[beta_sl, lr_sl, accum_sl],
-                outputs=[train_log, epoch_display],
+                outputs=[train_log, epoch_display, queue_status],
             )
 
         demo.load(_full_run, inputs=full_run_inputs, outputs=full_run_outputs)
