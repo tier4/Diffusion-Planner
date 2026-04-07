@@ -274,6 +274,25 @@ class GRPOConfig:
     closed_loop_online_interval: int = 0   # online explorer update every N steps (0=off, 10=PlannerRFT-style)
     closed_loop_explorer_mini_batch: int = 0  # step explorer optimizer every N scenes (0=all scenes at once)
 
+    # --- Per-epoch scheduling for arbitrary parameters ---
+    # Generic scheduling system for reward weights, guidance scales, etc.
+    # Each entry maps a parameter name to a schedule spec:
+    #   {"type": "constant"|"linear"|"cosine"|"step"|"peak", "start": float, "end": float,
+    #    "warmup_fraction": float (for "step" only, default 0.5),
+    #    "peak": float, "peak_fraction": float (for "peak" only, default 0.5)}
+    #
+    # Schedulable parameters:
+    #   Reward weights: w_progress, w_safety, w_smooth, w_feasibility, w_centerline,
+    #                   stopped_penalty, underprogress_penalty, progress_norm_scale
+    #   Guidance:       longitudinal_eta, longitudinal_lambda, longitudinal_scale
+    #
+    # Example config JSON:
+    #   "schedules": {
+    #     "w_progress": {"type": "linear", "start": 3.0, "end": 10.0},
+    #     "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 1.0}
+    #   }
+    schedules: dict = field(default_factory=dict)
+
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
         """Load config from JSON file."""
@@ -364,6 +383,81 @@ class GRPOConfig:
             f"Unknown exploration_kl_schedule: {self.exploration_kl_schedule!r}. "
             f"Expected 'constant', 'linear', or 'cosine'."
         )
+
+    def get_scheduled_value(
+        self, name: str, epoch: int, total_epochs: int,
+    ) -> float | None:
+        """Get the scheduled value for a parameter at the given epoch.
+
+        Returns None if no schedule is defined for this parameter.
+        Looks up the schedule spec in self.schedules[name].
+
+        Args:
+            name: Parameter name (e.g. "w_progress", "longitudinal_eta").
+            epoch: Current epoch (1-indexed).
+            total_epochs: Total number of training epochs.
+        """
+        spec = self.schedules.get(name)
+        if spec is None:
+            return None
+
+        stype = spec.get("type", "linear")
+        start = float(spec["start"])
+        end = float(spec["end"])
+
+        if stype == "constant" or total_epochs <= 1:
+            return start
+
+        progress = (epoch - 1) / (total_epochs - 1)
+
+        if stype == "linear":
+            return start + (end - start) * progress
+
+        if stype == "cosine":
+            return end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        if stype == "step":
+            warmup = float(spec.get("warmup_fraction", 0.5))
+            if not 0.0 <= warmup <= 1.0:
+                raise ValueError(
+                    f"warmup_fraction for '{name}' must be in [0, 1], got {warmup}"
+                )
+            return start if progress < warmup else end
+
+        if stype == "peak":
+            # Ramp start → peak → end. Linear interpolation on each half.
+            #   {"type": "peak", "start": 0.0, "end": 0.0, "peak": 0.3, "peak_fraction": 0.5}
+            peak_val = float(spec["peak"])
+            peak_frac = float(spec.get("peak_fraction", 0.5))
+            if not 0.0 < peak_frac < 1.0:
+                raise ValueError(
+                    f"peak_fraction for '{name}' must be in (0, 1), got {peak_frac}"
+                )
+            if progress <= peak_frac:
+                t = progress / peak_frac
+                return start + (peak_val - start) * t
+            else:
+                t = (progress - peak_frac) / (1.0 - peak_frac)
+                return peak_val + (end - peak_val) * t
+
+        raise ValueError(
+            f"Unknown schedule type for '{name}': {stype!r}. "
+            f"Expected 'constant', 'linear', 'cosine', 'step', or 'peak'."
+        )
+
+    def get_all_scheduled_values(
+        self, epoch: int, total_epochs: int,
+    ) -> dict[str, float]:
+        """Get all scheduled values for the given epoch.
+
+        Returns dict of {name: value} for all parameters with schedules defined.
+        """
+        result: dict[str, float] = {}
+        for name in self.schedules:
+            value = self.get_scheduled_value(name, epoch, total_epochs)
+            if value is not None:
+                result[name] = value
+        return result
 
     @property
     def uses_importance_sampling(self) -> bool:

@@ -41,10 +41,12 @@ rlvr/
                              + logprob config: grpo_loss_type, logprob_num_steps, logprob_t_start,
                                logprob_discount, logprob_min_std, il_loss_weight, il_adaptive
                              + advantage_mode: "ddv2" (inter-anchor truncated GRPO)
+                             + per-epoch scheduling: schedules dict with linear/cosine/step/peak types
   grpo_sft_trainer.py        Ranked SFT trainer: generate N trajs, pick best by reward,
                              SG-filter, train with SFT diffusion loss (ego + neighbor GT)
                              + "gt_neighbor" and "baseline_neighbor" modes
-                             + Post-hoc no_block0 trick for L2 preservation
+                             + Post-hoc no_block1 trick for L2 preservation (with neighbor reg)
+                             + Per-epoch scheduled reward weights and longitudinal guidance
   grpo_trainer.py            Standard GRPO training loop (batched loss)
                              + logprob loss path when grpo_loss_type="logprob"
   grpo_trainer_batched.py    Fully batched GRPO trainer (all scenes in ~5 forward passes)
@@ -87,6 +89,7 @@ rlvr/
     test_real_scene.py       Integration test with real NPZ scene
   test_reward.py             Unit tests for reward (no model needed)
   test_grpo_sampler.py       Unit tests for sampler (needs model for full suite)
+  test_scheduling.py         Unit tests for per-epoch scheduling (14 tests)
 ```
 
 ## Training Modes
@@ -179,10 +182,11 @@ adapted for diffusion planners with reward-based selection and Savitzky-Golay tr
 - Miraikan exit val: 25/50 → **0/50 lane departures** (with no_block0 trick)
 - Ego L2: +1.9% (baseline 5.388), Neighbor L2: +29% (baseline 4.393)
 
-*With neighbor regularization (current best):*
-- Two-stage training: S1 (50 scenes, lr=5e-4) → S2 (500 scenes, lr=1e-5)
-- **Best deployable: S1 ep7 no_blk1** — 0/50 val LD, ego +2.0%, neighbor +2.0%
-- Neighbor reg (`neighbor_reg_only=true, neighbor_reg_weight=1.0`) reduces neighbor degradation from +91% to +1.8%
+*With neighbor regularization + longitudinal guidance scheduling (current best):*
+- noise_scale_range [0.5, 2.0], gentle lon guidance (eta 0→0.3)
+- **Best deployable: S1 ep7 no_blk1** — 0/50 val LD, **15.0m path**, ego +1.4%, neighbor +1.6%
+- Without lon guidance: S1 ep3 — 0/50 val LD, 13.1m path, ego +1.0%, neighbor +0.8%
+- Neighbor reg (`neighbor_reg_only=true, neighbor_reg_weight=1.0`) reduces neighbor degradation from +91% to +1.6%
 
 **Block ablation trick:** After training with `lora_target="all"` (3 DiT blocks), zero out
 one block's LoRA weights post-hoc. With neighbor reg, **no_blk1 is best**. Without reg,

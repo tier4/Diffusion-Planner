@@ -445,22 +445,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
 
     args_dict = {"exp_name": name}
 
-    # Reward scheduling: epoch 1 uses softer w_feasibility to let model explore,
-    # epoch 2+ uses full strength to lock in on-road behavior.
-    reward_schedule = config_data_raw.get("reward_schedule", None)
-
     for epoch in range(1, grpo_config.train_epochs + 1):
         print(f"\n--- Epoch {epoch}/{grpo_config.train_epochs} ---")
-
-        # Apply reward schedule if provided
-        if reward_schedule and str(epoch) in reward_schedule:
-            sched = reward_schedule[str(epoch)]
-            for k, v in sched.items():
-                if hasattr(trainer.reward_config, k):
-                    setattr(trainer.reward_config, k, v)
-                if hasattr(train_reward_config, k):
-                    setattr(train_reward_config, k, v)
-                print(f"  [schedule] epoch {epoch}: {k}={v}")
 
         if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
             trainer.save_epoch1_baselines(train_paths)

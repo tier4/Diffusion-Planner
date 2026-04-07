@@ -76,8 +76,17 @@ def generate_all_scenes_batched(
     device: torch.device,
     gen_chunk_size: int = 64,
     gt_max_speed: float = 3.0,
+    longitudinal_eta: float = 0.0,
+    longitudinal_lambda: float = 0.5,
+    longitudinal_scale: float = 10.0,
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
+
+    Args:
+        longitudinal_eta: Longitudinal guidance eta (0=off, >0=faster than ref).
+            Applied to CL-guided trajectories when nonzero.
+        longitudinal_lambda: Speed scaling constant for longitudinal guidance.
+        longitudinal_scale: Guidance scale for longitudinal guidance.
 
     Returns:
         [N, K, T, 4] tensor.
@@ -89,6 +98,12 @@ def generate_all_scenes_batched(
     # --- Config 1: Deterministic ---
     det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
     all_k_trajs.append(det_trajs)
+
+    # Use deterministic trajectory as reference for longitudinal guidance.
+    # det_trajs is already in (x, y, cos_yaw, sin_yaw) format — no conversion needed.
+    use_lon = abs(longitudinal_eta) > 1e-6
+    if use_lon:
+        norm_batch["reference_trajectory"] = det_trajs  # no clone needed, not mutated
 
     # --- Config 2-9: Strong CL + SPD guidance sweep for lane keeping ---
     # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
@@ -108,9 +123,17 @@ def generate_all_scenes_batched(
             GuidanceConfig("speed", enabled=True, scale=spd_scale,
                            params={"v_high": gt_max_speed, "v_low": 0.5}),
         ]
+        if use_lon:
+            fns.append(GuidanceConfig(
+                "longitudinal", enabled=True, scale=longitudinal_scale,
+                params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},
+            ))
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
         trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
         all_k_trajs.append(trajs)
+
+    # Clean up reference_trajectory before random passes (not needed, wastes VRAM on expand)
+    norm_batch.pop("reference_trajectory", None)
 
     # --- Config 5+: Random guidance (no road_border to avoid OOM) ---
     n_fixed = len(all_k_trajs)
@@ -214,6 +237,23 @@ def train_epoch_batched(
     median_gt_speed = float(_np2.median(gt_speeds_list))
     print(f"  Median GT max speed: {median_gt_speed:.1f} m/s")
 
+    # 2b. Apply per-epoch schedules to reward weights and guidance params
+    scheduled = config.get_all_scheduled_values(epoch, config.train_epochs)
+    reward_weight_names = {
+        "w_progress", "w_safety", "w_smooth", "w_feasibility", "w_centerline",
+        "stopped_penalty", "underprogress_penalty", "progress_norm_scale",
+    }
+    for name, value in scheduled.items():
+        if name in reward_weight_names and hasattr(reward_config, name):
+            setattr(reward_config, name, value)
+    if scheduled:
+        sched_str = ", ".join(f"{k}={v:.3f}" for k, v in scheduled.items())
+        print(f"  [schedule] epoch {epoch}: {sched_str}")
+
+    lon_eta = scheduled.get("longitudinal_eta", 0.0)
+    lon_lambda = scheduled.get("longitudinal_lambda", config.lambda_lon)
+    lon_scale = scheduled.get("longitudinal_scale", 10.0)
+
     # 3. Generate K trajectories for all scenes (batched)
     print(f"  Generating {K} trajectories × {N} scenes (batched)...")
     model.eval()
@@ -221,6 +261,9 @@ def train_epoch_batched(
         all_trajs = generate_all_scenes_batched(
             model, model_args, norm_batch, K, config.noise_scale_range, device,
             gt_max_speed=median_gt_speed,
+            longitudinal_eta=lon_eta,
+            longitudinal_lambda=lon_lambda,
+            longitudinal_scale=lon_scale,
         )  # [N, K, T, 4]
 
     # Free generation memory before scoring + training
