@@ -63,6 +63,9 @@ def _batched_generate(
     Returns:
         [B, T, 4] ego trajectories (x, y, cos, sin).
     """
+    # NOTE: directly accessing decoder private attrs (_guidance_fn, _guidance_scale)
+    # because the decoder has no public API for temporary guidance override.
+    # The try/finally blocks below ensure restoration even on exceptions.
     _orig_fn = model.decoder._guidance_fn
     _orig_scale = model.decoder._guidance_scale
     model.decoder._guidance_fn = composer
@@ -140,6 +143,7 @@ def _batched_generate_varied_noise(
     Returns:
         [B, T, 4] ego trajectories.
     """
+    # NOTE: same private-attr pattern as _batched_generate above (see comment there).
     _orig_fn = model.decoder._guidance_fn
     _orig_scale = model.decoder._guidance_scale
     model.decoder._guidance_fn = composer

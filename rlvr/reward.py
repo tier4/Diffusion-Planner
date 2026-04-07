@@ -50,7 +50,7 @@ class RewardConfig:
     enable_overprogress: bool = False
     overprogress_margin: float = 1.1
     overprogress_penalty: float = 0.3
-    stopped_penalty: float = 50.0
+    stopped_penalty: float = 50.0  # applied in compute_reward_batch progress section
 
     # Underprogress: penalize trajectories that drive much less than GT
     underprogress_penalty: float = 0.0   # scale (0=disabled). Penalty = scale * max(0, threshold - ratio)
@@ -664,12 +664,11 @@ def compute_feasibility_score_batch(
     data: dict[str, torch.Tensor],
     config: RewardConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Batched lane boundary violation + acceleration penalty.
+    """Acceleration feasibility penalty.
 
-    Checks whether the ego vehicle (center +/- half_width) protrudes beyond
-    the actual left/right lane boundaries of route_lanes. Boundary offsets in
-    the lane tensor (indices 4-7) are offset vectors from centerline, not
-    absolute positions.
+    Penalizes longitudinal and lateral acceleration violations via
+    Savitzky-Golay filtered derivatives. Lane-boundary off-road detection
+    is disabled — offroad is handled by compute_road_border_penalty instead.
 
     Args:
         ego_trajs: (N, T, 4).
@@ -678,8 +677,8 @@ def compute_feasibility_score_batch(
         config: RewardConfig.
 
     Returns:
-        scores: (N,) negative penalty.
-        off_road_fractions: (N,) fraction of timesteps with boundary violation.
+        scores: (N,) negative acceleration penalty.
+        off_road_fractions: (N,) always zeros (lane-boundary check disabled).
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
@@ -748,64 +747,8 @@ def compute_feasibility_score_batch(
             lat_violations = torch.relu(lat_accel_trimmed - _MAX_LAT_ACCEL)
             scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
 
-    # --- Lane boundary check ---
-    # Use ALL lanes for boundary checking (not just route_lanes).
-    # Off-road = leaving all drivable surface. Off-route (taking a different
-    # road) is penalized softly by the centerline reward, not here.
-    if "lanes" not in data:
-        return scores, off_road_fractions
-    lanes = data["lanes"]
-
-    if lanes.dim() == 4:
-        lanes = lanes[0]  # (S, P, 33)
-
-    S_P = lanes.shape[0] * lanes.shape[1]
-    lane_centers = lanes[..., _LN_X:_LN_Y + 1].reshape(S_P, 2)
-    lane_dirs = lanes[..., _LN_DX:_LN_DY + 1].reshape(S_P, 2)
-    lane_left = lanes[..., _LN_LBX:_LN_LBY + 1].reshape(S_P, 2)   # offset vectors
-    lane_right = lanes[..., _LN_RBX:_LN_RBY + 1].reshape(S_P, 2)  # offset vectors
-
-    lane_dirs_n = lane_dirs / (lane_dirs.norm(dim=-1, keepdim=True) + 1e-6)
-    lane_lat = torch.stack([-lane_dirs_n[..., 1], lane_dirs_n[..., 0]], dim=-1)  # (S_P, 2)
-
-    # Valid: both boundary offsets and direction must be nonzero
-    lane_valid = (
-        (lane_left.norm(dim=-1) + lane_right.norm(dim=-1)) > 1e-3
-    ) & (lane_dirs.norm(dim=-1) > 1e-6)  # (S_P,)
-
-    # Boundary half-widths: project offset vectors onto lateral normal
-    # These are signed: left_hw > 0 (left side), right_hw < 0 (right side)
-    left_hw = (lane_left * lane_lat).sum(dim=-1)    # (S_P,)
-    right_hw = (lane_right * lane_lat).sum(dim=-1)  # (S_P,)
-
-    ego_pos = ego_trajs[:, :, :2]  # (N, T, 2)
-    half_w = float(ego_shape[2]) / 2  # vehicle half-width
-
-    # For each ego position, check ALL nearby lanes (not just the nearest center).
-    # The ego is off-road only if it is outside the boundaries of EVERY lane.
-    # Compute lateral offset and boundary violations for all (ego, lane) pairs.
-
-    # Distance from ego to all lane centers: (N, T, S_P)
-    diff = ego_pos.unsqueeze(2) - lane_centers.unsqueeze(0).unsqueeze(0)
-    dist = diff.norm(dim=-1)
-    dist = dist.masked_fill(~lane_valid.view(1, 1, -1).expand(N, T, -1), 1e6)
-    min_dist = dist.min(dim=-1).values  # (N, T)
-
-    # A lane point can only "contain" the ego if both:
-    # 1. Total distance is within radius (not too far in any direction)
-    # 2. Longitudinal distance is small (ego is alongside this lane segment,
-    #    not far ahead/behind where the lateral projection is meaningless)
-    _CHECK_RADIUS = 4.0
-    _MAX_LONGITUDINAL = 3.5  # must accommodate lane point spacing (median ~1.5m, max ~5.5m)
-
-    # Decompose distance into lateral and longitudinal components
-    lane_dir_n = lane_dirs / (lane_dirs.norm(dim=-1, keepdim=True) + 1e-6)  # (S_P, 2)
-    ego_lon_all = (diff * lane_dir_n.unsqueeze(0).unsqueeze(0)).sum(dim=-1)  # (N, T, S_P)
-    ego_lat_all = (diff * lane_lat.unsqueeze(0).unsqueeze(0)).sum(dim=-1)    # (N, T, S_P)
-
-    # All polygon/lane-boundary protrusion, margin, and off-route penalties DISABLED.
-    # Road border perimeter check (compute_road_border_penalty) handles offroad.
-    # Feasibility score keeps only the lane-proximity base score computed above.
+    # Lane-boundary off-road check DISABLED — compute_road_border_penalty handles
+    # offroad detection. Feasibility score returns only the base score above.
     off_road_fractions = torch.zeros(N, device=device)
     return scores, off_road_fractions
 
@@ -1009,11 +952,13 @@ def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta
     # Reverse to match convolution convention (scipy savgol_coeffs convention)
     return torch.tensor(coeffs.copy(), dtype=torch.float32).flip(0)  # flip for conv1d
 
-# Precompute SG jerk kernel; cache by (device, dt)
+# Precompute SG jerk kernel; cache by (device, dt).
+# Safe in DDP: each process has its own Python interpreter and module-level state.
 _SG_JERK_KERNEL = None
 _SG_JERK_CACHE_KEY = None
 
-# Precompute SG velocity/acceleration kernels for lat_accel; cache by (device, dt, window)
+# Precompute SG velocity/acceleration kernels for lat_accel; cache by (device, dt, window).
+# Same DDP safety note as above.
 _SG_VEL_KERNEL = None
 _SG_ACCEL_KERNEL = None
 _SG_LAT_CACHE_KEY = None
@@ -2272,12 +2217,13 @@ def compute_group_advantages(
         advantages = (totals - mean) / (std + epsilon)
         return np.maximum(advantages, 0.0)
     elif mode == "ddv2":
-        # DDV2-style Inter-Anchor Truncated GRPO (paper Eq. 8):
+        # DiffusionDriveV2 Inter-Anchor Truncated GRPO (arXiv:2512.07745, Eq. 10):
         # 1. Standard intra-group normalization
-        # 2. Clip ALL negative advantages to 0 (only reward improvements)
+        # 2. Clip negative advantages to 0 (only reinforce improvements over group mean)
         # 3. Hard -1 penalty for safety violations (collision, off-road, lane departure)
-        # This provides a clear learning signal: reward relative improvements,
-        # but only penalize absolute failures.
+        # Extension vs paper: paper only penalizes collisions; we also penalize
+        # road-border crossings and lane departures. No inter-anchor distinction
+        # since we don't use DDV2's multi-anchor GMM architecture.
         std = totals.std()
         if std < epsilon:
             advantages = np.zeros(len(rewards))

@@ -526,7 +526,3 @@ def compute_logprob_grpo_loss(
     }
 
     return total_loss, metrics
-
-
-    # (Old _compute_ref_log_probs helper removed — KL now uses analytical
-    # mean-divergence computed inline in compute_logprob_grpo_loss above.)
