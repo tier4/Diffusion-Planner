@@ -187,6 +187,13 @@ class GRPOConfig:
     #   Adding GT neighbor loss on top of reg causes overfitting at high LR (collapses by ep12).
     neighbor_reg_only: bool = True
 
+    # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
+    # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
+    # steps = grad_accum_groups // sft_batch_size, so the effective batch per optimizer
+    # step stays the same only when B evenly divides grad_accum_groups (enforced at
+    # runtime). Set to grad_accum_groups for maximum throughput.
+    sft_batch_size: int = 1
+
     # LoRA
     use_lora: bool = True
     lora_rank: int = 16
