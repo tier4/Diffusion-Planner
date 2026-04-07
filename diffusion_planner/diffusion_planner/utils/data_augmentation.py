@@ -3,7 +3,6 @@ import torch
 
 from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
-NUM_REFINE = 20
 TIME_INTERVAL = 0.1
 
 
@@ -47,15 +46,15 @@ class StatePerturbation:
 
     def __init__(
         self,
-        augment_prob: float = 0.5,
-        wheel_base: float = 2.75,
-        device: torch.device | str = "cpu",
+        augment_prob: float,
+        num_refine: int,
+        device: torch.device | str,
     ) -> None:
         """
         Initialize the augmentor,
-        :param low: Parameter to set lower bound vector of the Uniform noise on [x, y, yaw, vx, vy, ax, ay, steering angle, yaw rate].
-        :param high: Parameter to set upper bound vector of the Uniform noise on [x, y, yaw, vx, vy, ax, ay, steering angle, yaw rate].
         :param augment_prob: probability between 0 and 1 of applying the data augmentation
+        :param num_refine: number of refinement steps for quintic interpolation
+        :param device: torch device
         """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
@@ -63,12 +62,11 @@ class StatePerturbation:
         hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
         self._high = torch.tensor(hi).to(self._device)
-        self._wheel_base = wheel_base
 
-        self.num_refine = NUM_REFINE
+        self.num_refine = num_refine
         self.time_interval = TIME_INTERVAL
 
-        REFINE_HORIZON = NUM_REFINE * TIME_INTERVAL
+        REFINE_HORIZON = num_refine * TIME_INTERVAL
 
         T = REFINE_HORIZON + TIME_INTERVAL
         self.coeff_matrix = torch.linalg.inv(
@@ -86,7 +84,7 @@ class StatePerturbation:
             )
         )
         self.t_matrix = torch.pow(
-            torch.linspace(TIME_INTERVAL, REFINE_HORIZON, NUM_REFINE).unsqueeze(1),
+            torch.linspace(TIME_INTERVAL, REFINE_HORIZON, num_refine).unsqueeze(1),
             torch.arange(6).unsqueeze(0),
         ).to(device=device)  # shape (B, N+1)
 
@@ -123,6 +121,7 @@ class StatePerturbation:
     def augment(self, inputs):
         # Only aug current state
         ego_current_state = inputs["ego_current_state"].clone()
+        wheel_base = inputs["ego_shape"][:, 0]  # (B,)
 
         B = ego_current_state.shape[0]
         aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
@@ -156,7 +155,7 @@ class StatePerturbation:
         mask = torch.abs(cur_velocity) < 0.2
         not_mask = ~mask
         steering_angle[not_mask] = torch.atan(
-            yaw_rate[not_mask] * self._wheel_base / torch.abs(cur_velocity[not_mask])
+            yaw_rate[not_mask] * wheel_base[not_mask] / torch.abs(cur_velocity[not_mask])
         )
         steering_angle[not_mask] = torch.clamp(
             steering_angle[not_mask], -2 / 3 * np.pi, 2 / 3 * np.pi
