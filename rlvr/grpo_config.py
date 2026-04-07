@@ -277,8 +277,9 @@ class GRPOConfig:
     # --- Per-epoch scheduling for arbitrary parameters ---
     # Generic scheduling system for reward weights, guidance scales, etc.
     # Each entry maps a parameter name to a schedule spec:
-    #   {"type": "constant"|"linear"|"cosine"|"step", "start": float, "end": float,
-    #    "warmup_fraction": float (for "step" only, default 0.5)}
+    #   {"type": "constant"|"linear"|"cosine"|"step"|"peak", "start": float, "end": float,
+    #    "warmup_fraction": float (for "step" only, default 0.5),
+    #    "peak": float, "peak_fraction": float (for "peak" only, default 0.5)}
     #
     # Schedulable parameters:
     #   Reward weights: w_progress, w_safety, w_smooth, w_feasibility, w_centerline,
@@ -423,9 +424,25 @@ class GRPOConfig:
                 )
             return start if progress < warmup else end
 
+        if stype == "peak":
+            # Ramp start → peak → end. Linear interpolation on each half.
+            #   {"type": "peak", "start": 0.0, "end": 0.0, "peak": 0.3, "peak_fraction": 0.5}
+            peak_val = float(spec["peak"])
+            peak_frac = float(spec.get("peak_fraction", 0.5))
+            if not 0.0 < peak_frac < 1.0:
+                raise ValueError(
+                    f"peak_fraction for '{name}' must be in (0, 1), got {peak_frac}"
+                )
+            if progress <= peak_frac:
+                t = progress / peak_frac
+                return start + (peak_val - start) * t
+            else:
+                t = (progress - peak_frac) / (1.0 - peak_frac)
+                return peak_val + (end - peak_val) * t
+
         raise ValueError(
             f"Unknown schedule type for '{name}': {stype!r}. "
-            f"Expected 'constant', 'linear', 'cosine', or 'step'."
+            f"Expected 'constant', 'linear', 'cosine', 'step', or 'peak'."
         )
 
     def get_all_scheduled_values(
