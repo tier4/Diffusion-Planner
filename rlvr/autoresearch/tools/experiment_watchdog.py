@@ -12,7 +12,8 @@ Usage:
     # Read status:
     cat /tmp/experiment_status.log
 
-Tracks named experiments. Outputs only NEW eval lines as they appear.
+Tracks named experiments via run_experiment.py logs. Outputs only NEW eval lines
+(matching "Eval [epochN-val]" / "Eval [epochN-prob]" format) as they appear.
 Alerts on stopped>2, rb_cross>10. Detects process death.
 Never exits — sleeps and watches for new experiments via add-file.
 """
@@ -21,6 +22,7 @@ import argparse
 import os
 import re
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 
@@ -40,17 +42,26 @@ def is_experiment_running(name):
         return False
 
 
-def get_new_eval_lines(log_path, seen_count):
-    """Read new eval lines from a log file since seen_count."""
-    val_lines = []
+_EVAL_RE = re.compile(r"Eval \[epoch\d+-(val|prob)\]")
+
+
+def get_new_eval_lines(log_path, byte_offset):
+    """Read new eval lines from a log file starting from byte_offset.
+
+    Returns (new_lines, new_byte_offset).
+    Uses seek() to avoid re-reading the entire file each interval.
+    """
+    new_lines = []
     try:
         with open(log_path) as f:
+            f.seek(byte_offset)
             for line in f:
-                if re.search(r"Eval \[epoch\d+-(val|prob)\]", line):
-                    val_lines.append(line.strip())
+                if _EVAL_RE.search(line):
+                    new_lines.append(line.strip())
+            new_offset = f.tell()
     except Exception:
-        return [], seen_count
-    return val_lines[seen_count:], len(val_lines)
+        return [], byte_offset
+    return new_lines, new_offset
 
 
 def check_alerts(name, eval_line):
@@ -73,28 +84,30 @@ def write_status(sf, message):
 
 
 def snapshot_log(exp_dir, name):
-    """Count existing eval lines in a log so we only report new ones."""
+    """Seek to end of existing log so we only report new lines."""
     log_path = os.path.join(exp_dir, f"{name}.log")
-    count = 0
+    byte_offset = 0
     if os.path.exists(log_path):
         try:
-            with open(log_path) as f:
-                for line in f:
-                    if re.search(r"Eval \[epoch\d+-(val|prob)\]", line):
-                        count += 1
+            byte_offset = os.path.getsize(log_path)
         except Exception:
             pass
-    return {"log": log_path, "seen_count": count, "alive": True, "finished_reported": False}
+    return {"log": log_path, "byte_offset": byte_offset, "alive": True, "finished_reported": False}
 
 
 def check_add_file(add_file, exp_dir, tracked, status_file):
-    """Check if new experiment names were written to the add-file."""
+    """Check if new experiment names were written to the add-file.
+
+    Atomically rotates the file to avoid race conditions with concurrent writers.
+    """
     if not os.path.exists(add_file):
         return
     try:
-        with open(add_file) as f:
+        tmp_path = add_file + ".reading"
+        os.rename(add_file, tmp_path)
+        with open(tmp_path) as f:
             names = [line.strip() for line in f if line.strip()]
-        os.remove(add_file)
+        os.remove(tmp_path)
         for name in names:
             if name not in tracked:
                 tracked[name] = snapshot_log(exp_dir, name)
@@ -130,7 +143,6 @@ def main():
     print(f"Add file: {args.add_file}")
 
     while True:
-        # Check for dynamically added experiments
         check_add_file(args.add_file, args.exp_dir, tracked, args.status_file)
 
         new_output = []
@@ -139,10 +151,10 @@ def main():
             if state["finished_reported"]:
                 continue
 
-            # Check for new eval lines
+            # Check for new eval lines (seek-based, O(new data) not O(file size))
             if os.path.exists(state["log"]):
-                new_lines, new_count = get_new_eval_lines(state["log"], state["seen_count"])
-                state["seen_count"] = new_count
+                new_lines, new_offset = get_new_eval_lines(state["log"], state["byte_offset"])
+                state["byte_offset"] = new_offset
 
                 for line in new_lines:
                     new_output.append(f"  [{name}] {line}")

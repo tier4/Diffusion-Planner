@@ -166,7 +166,7 @@ echo "exp3" >> /tmp/watchdog_add.txt
 # Check status:
 cat /tmp/experiment_status.log
 
-# Kill when done (avoid zombie processes):
+# Kill when done (avoid leaving a stray background process):
 pkill -f experiment_watchdog
 ```
 
@@ -200,7 +200,7 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `rejection_keep` | 8 | Keep top 8 of 16 trajectories |
 | `n_prob_scenes` | 0-50 | Problem scenes in training set. **Always set explicitly.** |
 | `n_normal_scenes` | 250-300 | Normal scenes. **Always set explicitly.** |
-| `lora_target` | `"all"` | All blocks + post-hoc block removal. `"last"` (block 2 only) diverges by ep9. |
+| `lora_target` | `"first"` | Block 0 only for standard GRPO. For ranked SFT, use `"all"` + post-hoc block removal (`"last"` diverges by ep9). |
 | `advantage_mode` | `"normalized"` | `"normalized"`, `"vd_grpo"`, `"raw"`, `"positive_only"`, `"absolute"`, `"softmax"` |
 | `advantage_fixed_scale` | 10.0 | Denominator for vd_grpo/raw/absolute; temperature for softmax |
 | `diffusion_k_steps` | 8 | Number of (noise, t) samples averaged per GRPO loss (matches DPO K=8) |
@@ -214,7 +214,7 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `progress_norm_scale` | 20.0 | Max progress points at 100% GT match (when overprogress enabled) |
 | `lane_dep_trim_n` | 0 | Drop N scenes with worst lane departure fraction per epoch (0=disabled) |
 | `neighbor_loss_weight` | 0.0 | Neighbor prediction regularization weight vs GT (0=disabled) |
-| `neighbor_reg_weight` | 1.0 | Neighbor reg: MSE(lora_neighbor, base_neighbor). Must be ≥1.0 at lr=5e-4 (0.5/0.75 diverge at ep5-6). |
+| `neighbor_reg_weight` | 0.0 | Neighbor reg: MSE(lora_neighbor, base_neighbor). 0 for standard GRPO. For ranked SFT, set to ≥1.0 (0.5/0.75 diverge at ep5-6). |
 | `neighbor_reg_only` | `true` | When true, drop neighbor SFT loss; only use reg term (loss = ego_sft + reg) |
 | `kl_schedule` | `"constant"` | `"constant"`, `"linear"`, `"cosine"`, or `"step"` (see below) |
 | `kl_coef_final` | 0.05 | Target KL coef at end of training (for non-constant schedules) |
