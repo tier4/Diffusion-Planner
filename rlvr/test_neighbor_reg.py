@@ -202,52 +202,46 @@ class TestRankedSFTNeighborReg:
 class TestGRPONeighborReg:
     """Tests for _compute_neighbor_reg_loss in GRPO loss path."""
 
-    def test_b1_assertion(self):
-        """Should raise AssertionError when B > 1."""
-        from rlvr.grpo_config import GRPOConfig
+    def test_b_gt1_slices_to_first(self):
+        """Should handle B > 1 by slicing to first element."""
         from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = _StubDiT(P=5, T=80)
-        data = _make_scene_data(B=2, P=5, T=80)  # B=2 should fail
+        data = _make_scene_data(B=4, P=5, T=80)  # B=4 should work
         model_args = _make_model_args(P=5, T=80)
-        config = GRPOConfig(neighbor_reg_weight=1.0)
 
-        with pytest.raises(AssertionError, match="B=1"):
-            _compute_neighbor_reg_loss(
-                model, data, model_args, torch.device("cpu"),
-                K=1, P=5, future_len=80, config=config,
-            )
+        loss = _compute_neighbor_reg_loss(
+            model, data, model_args, torch.device("cpu"),
+            K=1, P=5, future_len=80,
+        )
+        assert isinstance(loss, torch.Tensor)
 
     def test_reg_loss_nonzero(self):
         """Should produce non-zero loss for B=1."""
-        from rlvr.grpo_config import GRPOConfig
         from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = _StubDiT(P=5, T=80)
         data = _make_scene_data(B=1, P=5, T=80)
         model_args = _make_model_args(P=5, T=80)
-        config = GRPOConfig(neighbor_reg_weight=1.0)
 
         loss = _compute_neighbor_reg_loss(
             model, data, model_args, torch.device("cpu"),
-            K=1, P=5, future_len=80, config=config,
+            K=1, P=5, future_len=80,
         )
         assert isinstance(loss, torch.Tensor)
         assert loss.item() > 0, "Reg loss should be non-zero when LoRA changes output"
 
     def test_no_adapter_returns_zero(self):
         """Model without disable_adapter should return zero loss."""
-        from rlvr.grpo_config import GRPOConfig
         from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = nn.Linear(10, 10)
         data = _make_scene_data(B=1, P=5, T=80)
         model_args = _make_model_args(P=5, T=80)
-        config = GRPOConfig(neighbor_reg_weight=1.0)
 
         loss = _compute_neighbor_reg_loss(
             model, data, model_args, torch.device("cpu"),
-            K=1, P=5, future_len=80, config=config,
+            K=1, P=5, future_len=80,
         )
         assert loss.item() == 0.0
 
