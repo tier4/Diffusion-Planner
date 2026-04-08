@@ -445,7 +445,7 @@ def train_epoch_ranked_sft(
                 norm_i["reference_trajectory"] = x_ref
 
                 # Get Beta distributions and sample K etas
-                output = exploration_policy(scene_enc, x_ref, deterministic=True)
+                output = exploration_policy(scene_enc, x_ref, deterministic=False)
                 eta_lat_01 = output.lat_dist.rsample((K,)).squeeze(-1)  # [K]
                 eta_lon_01 = output.lon_dist.rsample((K,)).squeeze(-1)  # [K]
                 eta_lat_vals = 2.0 * eta_lat_01 - 1.0  # map to [-1, 1]
@@ -583,7 +583,7 @@ def train_epoch_ranked_sft(
                     kl_coef=config.exploration_kl_coef,
                 )
 
-            (policy_loss / max(N, 1)).backward()
+            (policy_loss / N).backward()
             total_policy_loss += policy_loss.item()
             n_explorer += 1
 
@@ -782,4 +782,5 @@ def train_epoch_ranked_sft(
 
     avg_metrics = {k: v / max(n_scenes, 1) for k, v in all_metrics.items()}
     avg_metrics["mean_best_reward"] = mean_best_reward
+    avg_metrics.update(explorer_metrics)
     return avg_metrics

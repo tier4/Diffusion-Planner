@@ -491,6 +491,14 @@ class GRPOConfig:
             self.grpo_loss_type = _loss_renames[self.grpo_loss_type]
         if self.exploration_loss_type in _loss_renames:
             self.exploration_loss_type = _loss_renames[self.exploration_loss_type]
+        # Validate: best_sample_mse is not compatible with PPO (inner_epochs > 1)
+        if (self.exploration_loss_type == "best_sample_mse"
+                and self.exploration_inner_epochs > 1):
+            raise ValueError(
+                "exploration_loss_type='best_sample_mse' is not compatible with "
+                f"exploration_inner_epochs={self.exploration_inner_epochs} (PPO). "
+                "Use exploration_inner_epochs=1 or exploration_loss_type='advantage_logprob'."
+            )
 
     @property
     def uses_importance_sampling(self) -> bool:

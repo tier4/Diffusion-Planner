@@ -313,6 +313,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
     for k, v in config_data.items():
         if hasattr(grpo_config, k):
             setattr(grpo_config, k, v)
+    # Re-run __post_init__ to normalize legacy loss type names
+    grpo_config.__post_init__()
 
     print(f"Experiment: {name}")
     print(f"Config: lr={grpo_config.learning_rate}, kl={grpo_config.kl_coef}, "
