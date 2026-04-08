@@ -4,7 +4,8 @@ Extends the standard GRPO training with a learned exploration policy that
 outputs (eta_lat, eta_lon) from Beta distributions. The policy and DiT
 planner are trained simultaneously:
 
-- Policy: REINFORCE with GRPO group-relative advantages + entropy + KL
+- Policy: advantage-weighted log_prob (advantage_logprob) or MSE regression
+  toward best eta (best_eta_mse). Controlled by exploration_loss_type.
 - DiT: Standard GRPO diffusion loss (unchanged)
 
 The exploration policy samples K eta values from one distribution per scene,
@@ -47,16 +48,16 @@ def _load_npz(npz_path, device):
 
 
 class GRPOExplorationTrainer:
-    """Joint trainer for DiT planner (GRPO) + exploration policy (REINFORCE).
+    """Joint trainer for DiT planner (GRPO) + exploration policy.
 
     Per scene:
       1. Frozen encoder → scene_encoding
       2. LoRA-disabled DiT → x_ref (reference trajectory)
       3. Exploration policy(scene_encoding, x_ref) → Beta distributions
       4. Sample K η values → K trajectories (noise=0, lat+lon guidance)
-      5. Score → GRPO advantages
+      5. Score → group-relative advantages
       6. DiT loss: standard GRPO diffusion loss
-      7. Policy loss: REINFORCE + entropy + KL
+      7. Policy loss: advantage_logprob or best_eta_mse (see exploration_loss_type)
 
     Supports inverse KL scheduling: high DiT KL (stable planner) + low policy
     KL (free exploration) early, then swap as policy learns.
@@ -416,7 +417,7 @@ class GRPOExplorationTrainer:
                 self.dit_optimizer.zero_grad()
                 dit_accum = 0
 
-            # --- Exploration policy loss (REINFORCE or inner PPO) ---
+            # --- Exploration policy loss (advantage_logprob, best_eta_mse, or PPO) ---
             if self.use_explorer:
                 scene_encoding = group["scene_encoding"]
                 x_ref = group["x_ref"]
@@ -481,9 +482,9 @@ class GRPOExplorationTrainer:
                                 self.exploration_policy.parameters(), max_norm=1.0,
                             )
                             self.policy_optimizer.step()
-                    elif self.config.exploration_loss_type == "rsft":
+                    elif self.config.exploration_loss_type == "best_eta_mse":
                         # Ranked SFT for explorer: MSE regression of policy mean toward best eta.
-                        # Unlike REINFORCE which uses all K samples, this directly supervises
+                        # Unlike advantage_logprob which uses all K samples, this directly supervises
                         # the policy to output the best-reward eta for each scene.
                         best_idx = advantages_t.argmax()
                         best_eta_lat_01 = eta_lat_01[best_idx].detach()  # target (0,1)
@@ -517,7 +518,7 @@ class GRPOExplorationTrainer:
                             entropy_coef=self.config.exploration_entropy_coef,
                             kl_coef=self.config.exploration_kl_coef,
                         )
-                    # Backward pass for RSFT and REINFORCE paths
+                    # Backward pass for advantage_logprob and best_eta_mse paths
                     # (PPO path handles its own backward+step above)
                     if not policy_frozen and inner_epochs <= 1:
                         policy_loss.backward()
@@ -579,7 +580,7 @@ class GRPOExplorationTrainer:
             self.dit_optimizer.step()
             self.dit_optimizer.zero_grad()
 
-        # Policy optimizer step: only needed for REINFORCE (inner_epochs=1)
+        # Policy optimizer step: only needed for non-PPO (inner_epochs=1)
         # without per-group stepping. PPO and per-group both step above.
         if self.use_explorer and n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1 and not policy_frozen:
             for p in self.exploration_policy.parameters():

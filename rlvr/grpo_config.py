@@ -251,9 +251,12 @@ class GRPOConfig:
     # 1 = step every scene (original per-group), 4 = match DiT rhythm.
     exploration_grad_accum_groups: int = 1
 
-    # Explorer loss type: "reinforce" (default GRPO advantages), "rsft" (MSE
-    # regression toward best eta — ranked SFT for the explorer policy).
-    exploration_loss_type: str = "reinforce"
+    # Explorer loss type:
+    #   "advantage_logprob" (default): advantage-weighted negative log_prob of sampled etas.
+    #       Pushes policy toward etas that got above-average reward.
+    #   "best_eta_mse": MSE regression of policy mean toward the best-reward eta.
+    #       Directly supervises policy to output the best eta per scene.
+    exploration_loss_type: str = "advantage_logprob"
 
     # Use a pre-trained exploration policy during ranked SFT generation.
     # The explorer provides per-scene (eta_lat, eta_lon) guidance for trajectory generation.
