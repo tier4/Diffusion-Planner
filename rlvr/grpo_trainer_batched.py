@@ -82,8 +82,6 @@ def generate_all_scenes_batched(
     lateral_eta: float = 0.0,
     lateral_lambda: float = 2.0,
     lateral_scale: float = 5.0,
-    per_scene_eta_lat: torch.Tensor | None = None,
-    per_scene_eta_lon: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
 
@@ -116,39 +114,39 @@ def generate_all_scenes_batched(
         norm_batch["reference_trajectory"] = det_trajs  # no clone needed, not mutated
 
     # --- Config 2-9: CL + SPD guidance sweep for lane keeping ---
-        # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
-        cl_spd_configs = [
-            (5.0,  5.0,  0.0, 0.0),   # CL5+SPD5, deterministic
-            (8.0,  5.0,  0.0, 0.0),   # CL8+SPD5, deterministic
-            (10.0, 8.0,  0.0, 0.0),   # CL10+SPD8, deterministic
-            (10.0, 10.0, 0.0, 0.0),   # CL10+SPD10, deterministic
-            (5.0,  5.0,  0.3, 0.8),   # CL5+SPD5, noise
-            (8.0,  8.0,  0.3, 0.8),   # CL8+SPD8, noise
-            (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
-            (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
+    # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
+    cl_spd_configs = [
+        (5.0,  5.0,  0.0, 0.0),   # CL5+SPD5, deterministic
+        (8.0,  5.0,  0.0, 0.0),   # CL8+SPD5, deterministic
+        (10.0, 8.0,  0.0, 0.0),   # CL10+SPD8, deterministic
+        (10.0, 10.0, 0.0, 0.0),   # CL10+SPD10, deterministic
+        (5.0,  5.0,  0.3, 0.8),   # CL5+SPD5, noise
+        (8.0,  8.0,  0.3, 0.8),   # CL8+SPD8, noise
+        (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
+        (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
+    ]
+    for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
+        fns = [
+            GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
+            GuidanceConfig("speed", enabled=True, scale=spd_scale,
+                           params={"v_high": gt_max_speed, "v_low": 0.5}),
         ]
-        for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
-            fns = [
-                GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
-                GuidanceConfig("speed", enabled=True, scale=spd_scale,
-                               params={"v_high": gt_max_speed, "v_low": 0.5}),
-            ]
-            if use_lon:
-                fns.append(GuidanceConfig(
-                    "longitudinal", enabled=True, scale=longitudinal_scale,
-                    params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},
-                ))
-            if use_lat:
-                fns.append(GuidanceConfig(
-                    "lateral", enabled=True, scale=lateral_scale,
-                    params={"eta_lat": lateral_eta, "lambda_lat": lateral_lambda},
-                ))
-            comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
-            trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
-            all_k_trajs.append(trajs)
+        if use_lon:
+            fns.append(GuidanceConfig(
+                "longitudinal", enabled=True, scale=longitudinal_scale,
+                params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},
+            ))
+        if use_lat:
+            fns.append(GuidanceConfig(
+                "lateral", enabled=True, scale=lateral_scale,
+                params={"eta_lat": lateral_eta, "lambda_lat": lateral_lambda},
+            ))
+        comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
+        trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
+        all_k_trajs.append(trajs)
 
-        # Clean up reference_trajectory before random passes (not needed, wastes VRAM on expand)
-        norm_batch.pop("reference_trajectory", None)
+    # Clean up reference_trajectory before random passes (not needed, wastes VRAM on expand)
+    norm_batch.pop("reference_trajectory", None)
 
     # --- Config 5+: Random guidance (no road_border to avoid OOM) ---
     n_fixed = len(all_k_trajs)

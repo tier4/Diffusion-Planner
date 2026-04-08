@@ -468,7 +468,10 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
 
                     from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
                     _ckpt = _P(grpo_config.exploration_checkpoint_path)
-                    if _ckpt.exists() and not hasattr(run, '_cached_explorer'):
+                    if not _ckpt.exists():
+                        print(f"  WARNING: exploration_checkpoint_path not found: {_ckpt}")
+                        print(f"  Falling back to standard generation (no explorer)")
+                    elif not hasattr(run, '_cached_explorer'):
                         _ep_cfg = ExplorationPolicyConfig(
                             hidden_dim=grpo_config.exploration_hidden_dim,
                             n_mixer_layers=grpo_config.exploration_n_mixer_layers,

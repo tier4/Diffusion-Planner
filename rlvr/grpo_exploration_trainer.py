@@ -482,25 +482,26 @@ class GRPOExplorationTrainer:
                             )
                             self.policy_optimizer.step()
                     elif self.config.exploration_loss_type == "rsft":
-                        # Ranked SFT for explorer: maximize log_prob of best eta only
+                        # Ranked SFT for explorer: MSE regression toward best eta
+                        # Find the best-reward trajectory's eta and regress toward it
                         best_idx = advantages_t.argmax()
-                        best_log_prob = log_probs[best_idx]
-                        rsft_loss = -best_log_prob
+                        best_eta_lat_01 = eta_lat_01[best_idx].detach()  # target (0,1)
+                        best_eta_lon_01 = eta_lon_01[best_idx].detach()
 
-                        entropy_value = (lat_dist.entropy() + lon_dist.entropy()).mean()
-                        init_lat, init_lon = _get_init_distributions(self.device)
-                        kl_value = (kl_div(lat_dist, init_lat) + kl_div(lon_dist, init_lon)).mean()
-
-                        policy_loss = (
-                            rsft_loss
-                            + self.config.exploration_entropy_coef * (-entropy_value)
-                            + self.config.exploration_kl_coef * kl_value
+                        # MSE between policy's deterministic mean and the best eta
+                        pred_lat_mean = lat_dist.mean.squeeze()  # policy's predicted mean in (0,1)
+                        pred_lon_mean = lon_dist.mean.squeeze()
+                        rsft_loss = (
+                            (pred_lat_mean - best_eta_lat_01) ** 2
+                            + (pred_lon_mean - best_eta_lon_01) ** 2
                         )
+
+                        policy_loss = rsft_loss
                         policy_metrics = {
                             "exploration_policy_loss": rsft_loss.item(),
-                            "exploration_entropy": entropy_value.item(),
-                            "exploration_kl": kl_value.item(),
-                            "exploration_total_loss": policy_loss.item(),
+                            "exploration_entropy": (lat_dist.entropy() + lon_dist.entropy()).mean().item(),
+                            "exploration_kl": 0.0,
+                            "exploration_total_loss": rsft_loss.item(),
                             "exploration_eta_lat_mean": lat_dist.mean.mean().item() * 2 - 1,
                             "exploration_eta_lon_mean": lon_dist.mean.mean().item() * 2 - 1,
                             "exploration_eta_lat_std": (lat_dist.variance.mean().item() * 4) ** 0.5,
@@ -515,17 +516,18 @@ class GRPOExplorationTrainer:
                             entropy_coef=self.config.exploration_entropy_coef,
                             kl_coef=self.config.exploration_kl_coef,
                         )
-                        if not policy_frozen:
-                            policy_loss.backward()
-                            if self.config.exploration_step_per_group:
-                                n_policy_accum += 1
-                                if n_policy_accum >= self.config.exploration_grad_accum_groups:
-                                    torch.nn.utils.clip_grad_norm_(
-                                        self.exploration_policy.parameters(), max_norm=1.0,
-                                    )
-                                    self.policy_optimizer.step()
-                                    self.policy_optimizer.zero_grad()
-                                    n_policy_accum = 0
+                    # Backward pass for both RSFT and REINFORCE paths
+                    if not policy_frozen:
+                        policy_loss.backward()
+                        if self.config.exploration_step_per_group:
+                            n_policy_accum += 1
+                            if n_policy_accum >= self.config.exploration_grad_accum_groups:
+                                torch.nn.utils.clip_grad_norm_(
+                                    self.exploration_policy.parameters(), max_norm=1.0,
+                                )
+                                self.policy_optimizer.step()
+                                self.policy_optimizer.zero_grad()
+                                n_policy_accum = 0
 
                 if not self.config.exploration_step_per_group:
                     n_policy_accum += 1

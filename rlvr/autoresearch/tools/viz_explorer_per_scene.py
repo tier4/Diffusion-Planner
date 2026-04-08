@@ -68,7 +68,11 @@ def load_explorer(
     exp_dir: Path, epoch: int, model_args, device: torch.device,
 ) -> ExplorationPolicy | None:
     """Load exploration policy from experiment checkpoint."""
-    with open(exp_dir / "grpo_config.json") as f:
+    config_path = exp_dir / "grpo_config.json"
+    if not config_path.exists():
+        print(f"Config not found: {config_path}")
+        return None
+    with open(config_path) as f:
         cfg_dict = json.load(f)
     config = GRPOConfig()
     for k, v in cfg_dict.items():
