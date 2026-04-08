@@ -516,8 +516,9 @@ class GRPOExplorationTrainer:
                             entropy_coef=self.config.exploration_entropy_coef,
                             kl_coef=self.config.exploration_kl_coef,
                         )
-                    # Backward pass for both RSFT and REINFORCE paths
-                    if not policy_frozen:
+                    # Backward pass for RSFT and REINFORCE paths
+                    # (PPO path handles its own backward+step above)
+                    if not policy_frozen and inner_epochs <= 1:
                         policy_loss.backward()
                         if self.config.exploration_step_per_group:
                             n_policy_accum += 1

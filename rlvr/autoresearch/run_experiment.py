@@ -471,7 +471,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
                     if not _ckpt.exists():
                         print(f"  WARNING: exploration_checkpoint_path not found: {_ckpt}")
                         print(f"  Falling back to standard generation (no explorer)")
-                    elif not hasattr(run, '_cached_explorer'):
+                    elif not hasattr(run, '_cached_explorer') or getattr(run, '_cached_explorer_path', None) != str(_ckpt):
                         _ep_cfg = ExplorationPolicyConfig(
                             hidden_dim=grpo_config.exploration_hidden_dim,
                             n_mixer_layers=grpo_config.exploration_n_mixer_layers,
@@ -487,6 +487,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
                         _state = torch.load(_ckpt, map_location=DEVICE, weights_only=False)
                         run._cached_explorer.load_state_dict(_state, strict=False)
                         run._cached_explorer.eval()
+                        run._cached_explorer_path = str(_ckpt)
                         print(f"  Loaded frozen explorer from {_ckpt}")
                     _explorer = getattr(run, '_cached_explorer', None)
 

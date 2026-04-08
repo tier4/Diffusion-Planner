@@ -417,6 +417,9 @@ def train_epoch_ranked_sft(
 
         from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
         from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+        # NOTE: per-scene loop matches grpo_exploration_trainer's generate_policy_guided_group.
+        # Batching across scenes would require handling per-scene Beta distributions in a single
+        # forward pass, which is complex. For 50-500 scenes this takes ~3 min, acceptable.
         print(f"  Explorer-guided generation: {K} samples from Beta distribution per scene...")
         exploration_policy.eval()
         model.eval()
@@ -433,7 +436,7 @@ def train_epoch_ranked_sft(
             with torch.no_grad():
                 scene_enc = run_frozen_encoder(model, norm_i)
                 x_ref_np = generate_reference_trajectory(model, model_args, norm_i, device)
-                x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(device)
+                x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(device=device, dtype=torch.float32)
                 norm_i["reference_trajectory"] = x_ref
 
                 # Get Beta distributions and sample K etas
