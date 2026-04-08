@@ -491,11 +491,21 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
                         print(f"  Loaded frozen explorer from {_ckpt}")
                     _explorer = getattr(run, '_cached_explorer', None)
 
+                # Create explorer optimizer if training jointly
+                _explorer_opt = None
+                if _explorer is not None and not grpo_config.ranked_sft_freeze_explorer:
+                    if not hasattr(run, '_cached_explorer_opt'):
+                        run._cached_explorer_opt = torch.optim.AdamW(
+                            _explorer.parameters(), lr=grpo_config.exploration_lr,
+                        )
+                    _explorer_opt = run._cached_explorer_opt
+
                 metrics = train_epoch_ranked_sft(
                     model=policy_model, model_args=model_args, optimizer=optimizer,
                     scene_paths=train_paths, config=grpo_config,
                     reward_config=train_reward_config, device=DEVICE, epoch=epoch,
                     exploration_policy=_explorer,
+                    exploration_optimizer=_explorer_opt,
                 )
             else:
                 # Fully batched training: all scenes in ~5 forward passes

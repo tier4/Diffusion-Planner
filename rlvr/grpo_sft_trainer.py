@@ -309,6 +309,7 @@ def train_epoch_ranked_sft(
     device: torch.device,
     epoch: int,
     exploration_policy=None,
+    exploration_optimizer=None,
 ) -> dict[str, float]:
     """GRPO-ranked SFT epoch: generate, rank, filter, train with SFT loss.
 
@@ -406,7 +407,7 @@ def train_epoch_ranked_sft(
 
     # Extract lateral guidance params from schedule (default: off)
     lat_eta = scheduled.get("lateral_eta", 0.0)
-    lat_lambda = scheduled.get("lateral_lambda", 2.0)
+    lat_lambda = scheduled.get("lateral_lambda", config.lambda_lat)
     lat_scale = scheduled.get("lateral_scale", 5.0)
 
     # 2c. Optionally use exploration policy to generate K diverse trajectories per scene
@@ -428,8 +429,12 @@ def train_epoch_ranked_sft(
         _lon_lambda = config.exploration_lambda_lon
         _guide_scale = config.exploration_guidance_scale
         noise_min, noise_max = config.noise_scale_range
+        _train_explorer = exploration_optimizer is not None
 
         all_scene_trajs = []  # will be [N, K, T, 4]
+        # Store per-scene explorer data for training
+        _explorer_scenes = []  # list of dicts with distributions and sampled etas
+
         for i in range(N):
             norm_i = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == N else v
                       for k, v in norm_batch.items()}
@@ -445,6 +450,14 @@ def train_epoch_ranked_sft(
                 eta_lon_01 = output.lon_dist.rsample((K,)).squeeze(-1)  # [K]
                 eta_lat_vals = 2.0 * eta_lat_01 - 1.0  # map to [-1, 1]
                 eta_lon_vals = 2.0 * eta_lon_01 - 1.0
+
+                if _train_explorer:
+                    _explorer_scenes.append({
+                        "scene_enc": scene_enc.detach(),
+                        "x_ref": x_ref.detach(),
+                        "eta_lat_01": eta_lat_01.detach(),
+                        "eta_lon_01": eta_lon_01.detach(),
+                    })
 
                 # Expand scene data from B=1 to B=K
                 K_data = {}
@@ -521,6 +534,68 @@ def train_epoch_ranked_sft(
 
     mean_best_reward = float(np.mean(best_rewards_list))
     print(f"  Mean best-of-{K} reward: {mean_best_reward:.2f}")
+
+    # --- Train explorer on trajectory rewards (if optimizer provided) ---
+    explorer_metrics = {}
+    if exploration_policy is not None and exploration_optimizer is not None and _explorer_scenes:
+        from exploration_policy.loss import compute_exploration_loss
+        from rlvr.reward import compute_group_advantages
+        print(f"  Training explorer on {len(_explorer_scenes)} scenes...")
+        exploration_policy.train()
+        exploration_optimizer.zero_grad()
+        total_policy_loss = 0.0
+        n_explorer = 0
+
+        for i in range(N):
+            if i >= len(_explorer_scenes):
+                break
+            es = _explorer_scenes[i]
+            traj_K = all_trajs[i]  # [K, T, 4]
+            data_i = all_data[i]
+
+            # Compute rewards for this scene's K trajectories
+            rewards = compute_reward_batch(traj_K, data_i, reward_config)
+            advantages = compute_group_advantages(rewards)
+
+            if np.all(advantages == 0):
+                continue
+
+            # Recompute explorer distributions (with grad)
+            policy_output = exploration_policy(es["scene_enc"], es["x_ref"], deterministic=True)
+            log_probs = (policy_output.lat_dist.log_prob(es["eta_lat_01"])
+                         + policy_output.lon_dist.log_prob(es["eta_lon_01"]))
+            if log_probs.dim() > 1:
+                log_probs = log_probs.squeeze(-1)
+
+            advantages_t = torch.tensor(advantages, device=device, dtype=torch.float32)
+
+            if config.exploration_loss_type == "rsft":
+                best_idx = advantages_t.argmax()
+                pred_lat = policy_output.lat_dist.mean.squeeze()
+                pred_lon = policy_output.lon_dist.mean.squeeze()
+                policy_loss = (pred_lat - es["eta_lat_01"][best_idx].detach()) ** 2 \
+                            + (pred_lon - es["eta_lon_01"][best_idx].detach()) ** 2
+            else:
+                policy_loss, _ = compute_exploration_loss(
+                    advantages=advantages_t, log_probs=log_probs,
+                    lat_dist=policy_output.lat_dist, lon_dist=policy_output.lon_dist,
+                    entropy_coef=config.exploration_entropy_coef,
+                    kl_coef=config.exploration_kl_coef,
+                )
+
+            (policy_loss / max(N, 1)).backward()
+            total_policy_loss += policy_loss.item()
+            n_explorer += 1
+
+        if n_explorer > 0:
+            torch.nn.utils.clip_grad_norm_(exploration_policy.parameters(), max_norm=1.0)
+            exploration_optimizer.step()
+            exploration_optimizer.zero_grad()
+            explorer_metrics["explorer_loss"] = total_policy_loss / n_explorer
+            print(f"  Explorer loss: {explorer_metrics['explorer_loss']:.4f} ({n_explorer} scenes)")
+
+        exploration_policy.eval()
+        del _explorer_scenes
 
     # Free generation tensors
     del all_trajs

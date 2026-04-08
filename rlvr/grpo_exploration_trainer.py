@@ -482,8 +482,9 @@ class GRPOExplorationTrainer:
                             )
                             self.policy_optimizer.step()
                     elif self.config.exploration_loss_type == "rsft":
-                        # Ranked SFT for explorer: MSE regression toward best eta
-                        # Find the best-reward trajectory's eta and regress toward it
+                        # Ranked SFT for explorer: MSE regression of policy mean toward best eta.
+                        # Unlike REINFORCE which uses all K samples, this directly supervises
+                        # the policy to output the best-reward eta for each scene.
                         best_idx = advantages_t.argmax()
                         best_eta_lat_01 = eta_lat_01[best_idx].detach()  # target (0,1)
                         best_eta_lon_01 = eta_lon_01[best_idx].detach()
