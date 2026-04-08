@@ -29,7 +29,6 @@ from rlvr.reward import (
     compute_smoothness_score_batch,
 )
 
-
 T = 80
 CONFIG = RewardConfig()
 
@@ -848,7 +847,7 @@ def test_overprogress_underprogress_penalties():
 
 def test_advantage_absolute():
     """Absolute mode: no centering, positive reward → positive advantage."""
-    from rlvr.reward import compute_group_advantages, RewardBreakdown
+    from rlvr.reward import RewardBreakdown, compute_group_advantages
     rewards = [RewardBreakdown(safety=0, progress=0, smoothness=0, feasibility=0, centerline=0,
                                red_light=0, total=t, collision_step=None, off_road_fraction=0)
                for t in [+10, +5, -5, -20]]
@@ -863,7 +862,7 @@ def test_advantage_absolute():
 
 def test_advantage_softmax():
     """Softmax mode: rank 1 gets disproportionately high weight."""
-    from rlvr.reward import compute_group_advantages, RewardBreakdown
+    from rlvr.reward import RewardBreakdown, compute_group_advantages
     rewards = [RewardBreakdown(safety=0, progress=0, smoothness=0, feasibility=0, centerline=0,
                                red_light=0, total=t, collision_step=None, off_road_fraction=0)
                for t in [+20, +5, 0, -10, -30]]

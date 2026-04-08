@@ -32,11 +32,9 @@ import contextlib
 import numpy as np
 import torch
 import torch.nn as nn
-
 import torch.nn.functional as F
 
 from preference_optimization.dpo_loss import compute_trajectory_loss as _compute_trajectory_loss_raw
-
 from rlvr.grpo_config import GRPOConfig
 
 
@@ -47,6 +45,7 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
     per-timestep t modulation, and clean prefix injection.
     """
     import random as _random
+
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
     from diffusion_planner.model.module.decoder import generate_prefix_mask
 
@@ -258,6 +257,7 @@ def compute_batched_trajectory_losses(
         [N] tensor of per-trajectory MSE losses.
     """
     import random as _random
+
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
     from diffusion_planner.model.module.decoder import generate_prefix_mask
 
@@ -506,6 +506,7 @@ def _compute_neighbor_reg_loss(
     per-scene processing loop. Will raise AssertionError if B>1.
     """
     import random as _random
+
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
     from diffusion_planner.model.module.decoder import generate_prefix_mask
 

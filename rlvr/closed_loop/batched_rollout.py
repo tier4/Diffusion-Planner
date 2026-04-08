@@ -16,10 +16,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import torch
-from torch import nn
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+from torch import nn
+
 from exploration_policy.model import ExplorationPolicy
 from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.closed_loop.gae import compute_gae

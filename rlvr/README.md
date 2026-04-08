@@ -32,7 +32,7 @@ rlvr/
                              (DEPRECATED — use logprob loss instead for trajectory shape learning)
   grpo_logprob_loss.py       DDV2-style Gaussian log-probability GRPO loss (NEW)
                              + Two-stage: collect_logprob_rollout + compute_logprob_grpo_loss
-                             + REINFORCE gradient via truncated VPSDE denoising rollout
+                             + advantage-weighted gradient via truncated VPSDE denoising rollout
                              + Mean-divergence KL regularization (analytical, properly scaled)
                              + Adaptive IL regularization
   vpsde_logprob.py           VPSDE denoising step with Gaussian log-probability (NEW)
@@ -48,7 +48,7 @@ rlvr/
                              + Post-hoc no_block1 trick for L2 preservation (with neighbor reg)
                              + Per-epoch scheduled reward weights and longitudinal guidance
   grpo_trainer.py            Standard GRPO training loop (batched loss)
-                             + logprob loss path when grpo_loss_type="logprob"
+                             + advantage_logprob loss path when grpo_loss_type="advantage_logprob"
   grpo_trainer_batched.py    Fully batched GRPO trainer (all scenes in ~5 forward passes)
                              + logprob loss path with per-scene collect + train
   grpo_exploration_trainer.py  Joint GRPO + exploration policy trainer
@@ -97,28 +97,28 @@ rlvr/
 | Mode | Config | Trainer | Description |
 |------|--------|---------|-------------|
 | **Ranked SFT** | `ranked_sft_mode: "gt_neighbor"` | `train_epoch_ranked_sft` | **Best for lane keeping.** Generate N trajs, pick best by reward, SG-filter, SFT loss on ego+neighbor. |
-| Logprob GRPO | `grpo_loss_type: "logprob"` | `train_epoch_batched` | DDV2-style Gaussian log-prob. Can learn curvature but degrades neighbor L2. |
-| Standard GRPO (MSE) | `grpo_loss_type: "mse"` | `train_epoch_batched` | Legacy. Cannot change trajectory shape, only length. |
+| Advantage Logprob GRPO | `grpo_loss_type: "advantage_logprob"` | `train_epoch_batched` | DDV2-style Gaussian log-prob. Can learn curvature but degrades neighbor L2. |
+| Advantage MSE GRPO | `grpo_loss_type: "advantage_mse"` | `train_epoch_batched` | Legacy. Cannot change trajectory shape, only length. |
 | Random guidance | `random_guidance_mode: "uniform"` | `GRPOExplorationTrainer` | Random η guidance diversity. |
 | Explorer (open-loop) | `random_guidance_mode: "explorer"` | `GRPOExplorationTrainer` | Learned Beta guidance + GRPO |
 | Explorer (closed-loop) | `use_closed_loop: true` | `ClosedLoopExplorationTrainer` | Per-step rollout + GAE + GRPO |
 
 All modes support GPU-batched trajectory generation and evaluation.
 
-### Logprob GRPO (DDV2-style)
+### Advantage Logprob GRPO (DDV2-style)
 
-The logprob loss computes actual Gaussian log-probabilities during a truncated VPSDE denoising
-rollout, enabling proper REINFORCE gradient for trajectory shape learning. Based on
+The advantage_logprob loss computes actual Gaussian log-probabilities during a truncated VPSDE denoising
+rollout, enabling proper advantage-weighted gradient for trajectory shape learning. Based on
 DiffusionDriveV2 (arXiv:2512.07745).
 
 **Two-stage approach:**
 1. **Collection** (no grad): Run model through multi-step denoising, store chain states + log-probs
-2. **Optimization** (with grad): Re-run model on stored chain, compute REINFORCE loss
+2. **Optimization** (with grad): Re-run model on stored chain, compute advantage-weighted loss
 
 **Config:**
 ```json
 {
-    "grpo_loss_type": "logprob",
+    "grpo_loss_type": "advantage_logprob",
     "logprob_num_steps": 5,
     "logprob_t_start": 0.01,
     "logprob_discount": 0.8,

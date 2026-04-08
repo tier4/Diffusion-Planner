@@ -19,9 +19,10 @@ import json
 import sys
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import torch
-import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
@@ -31,9 +32,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "diffusion_planner"))
 sys.path.insert(0, str(PROJECT_ROOT / "preference_optimization"))
 
 from model_utils import load_model
-from exploration_policy import ExplorationPolicy, ExplorationPolicyConfig
-from exploration_policy.utils import get_frozen_encoder, generate_reference_trajectory
 from utils import load_npz_data
+
+from exploration_policy import ExplorationPolicy, ExplorationPolicyConfig
+from exploration_policy.utils import generate_reference_trajectory, get_frozen_encoder
 
 
 def draw_road_borders(ax, data_raw, max_dist=25):

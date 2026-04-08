@@ -24,10 +24,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from rlvr.reward import _build_sg_diff_kernel
 
 from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
+from rlvr.reward import _build_sg_diff_kernel
 
 DT = 0.1
 

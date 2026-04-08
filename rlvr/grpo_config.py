@@ -127,10 +127,12 @@ class GRPOConfig:
     diffusion_t_range: list[float] = field(default_factory=lambda: [0.001, 0.1])
     diffusion_k_steps: int = 8  # K (noise, t) samples averaged per GRPO loss (matches DPO K=8)
 
-    # Log-probability GRPO (DDV2-style). When grpo_loss_type="logprob", the loss
-    # uses actual Gaussian log-probabilities from a truncated denoising rollout
-    # instead of MSE. This enables proper policy gradient for trajectory shape.
-    grpo_loss_type: str = "mse"  # "mse" (current) or "logprob" (DDV2-style)
+    # DiT GRPO loss type:
+    #   "advantage_mse" (default): advantage-weighted MSE diffusion loss.
+    #   "advantage_logprob": advantage-weighted Gaussian log-probabilities from
+    #       a truncated denoising rollout (DDV2-style). Enables proper policy
+    #       gradient for trajectory shape.
+    grpo_loss_type: str = "advantage_mse"
     logprob_num_steps: int = 10  # denoising steps for rollout
     logprob_t_start: float = 0.01  # starting noise level (truncated)
     logprob_discount: float = 0.8  # per-step advantage discount (DDV2 uses 0.8)
@@ -250,6 +252,22 @@ class GRPOConfig:
     # Only used when exploration_step_per_group=True.
     # 1 = step every scene (original per-group), 4 = match DiT rhythm.
     exploration_grad_accum_groups: int = 1
+
+    # Explorer loss type:
+    #   "advantage_logprob" (default): advantage-weighted negative log_prob of sampled etas.
+    #       Pushes policy toward etas that got above-average reward.
+    #   "best_sample_mse": MSE regression of policy mean toward the best-reward eta.
+    #       Directly supervises policy to output the best eta per scene.
+    #       Same principle as ranked SFT for the DiT (best trajectory MSE).
+    exploration_loss_type: str = "advantage_logprob"
+
+    # Use a pre-trained exploration policy during ranked SFT generation.
+    # The explorer provides per-scene (eta_lat, eta_lon) guidance for trajectory generation.
+    # Set exploration_checkpoint_path to the .pth file.
+    ranked_sft_use_explorer: bool = False
+    # If True, explorer stays frozen during RSFT. If False, explorer trains jointly
+    # with DiT (explorer via REINFORCE/MSE on rewards, DiT via SFT loss).
+    ranked_sft_freeze_explorer: bool = True
 
     # Random guidance mode: replaces exploration policy with direct η sampling.
     # "explorer" (default): use learned exploration policy (Beta distributions).
@@ -458,6 +476,29 @@ class GRPOConfig:
             if value is not None:
                 result[name] = value
         return result
+
+    def __post_init__(self):
+        """Normalize legacy loss type names to current names."""
+        _loss_renames = {
+            "mse": "advantage_mse",
+            "logprob": "advantage_logprob",
+            "reinforce": "advantage_logprob",
+            "rsft": "best_sample_mse",
+            "best_eta_mse": "best_sample_mse",
+            "grpo": "advantage_logprob",
+        }
+        if self.grpo_loss_type in _loss_renames:
+            self.grpo_loss_type = _loss_renames[self.grpo_loss_type]
+        if self.exploration_loss_type in _loss_renames:
+            self.exploration_loss_type = _loss_renames[self.exploration_loss_type]
+        # Validate: best_sample_mse is not compatible with PPO (inner_epochs > 1)
+        if (self.exploration_loss_type == "best_sample_mse"
+                and self.exploration_inner_epochs > 1):
+            raise ValueError(
+                "exploration_loss_type='best_sample_mse' is not compatible with "
+                f"exploration_inner_epochs={self.exploration_inner_epochs} (PPO). "
+                "Use exploration_inner_epochs=1 or exploration_loss_type='advantage_logprob'."
+            )
 
     @property
     def uses_importance_sampling(self) -> bool:

@@ -21,20 +21,21 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
 from matplotlib.patches import Rectangle
 
-from preference_optimization.utils import load_npz_data
 from preference_optimization.lora_utils import load_lora_checkpoint
-from diffusion_planner.utils.config import Config
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from preference_optimization.utils import load_npz_data
 from rlvr.grpo_sampler import SamplerConfig
 from rlvr.grpo_sampler_batched import generate_diverse_group_batched
-from rlvr.reward import RewardConfig, compute_reward_batch, compute_lane_departure_penalty
+from rlvr.reward import RewardConfig, compute_lane_departure_penalty, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

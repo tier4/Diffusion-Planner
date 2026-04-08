@@ -27,9 +27,9 @@ if str(parent_dir) not in sys.path:
 import numpy as np
 import torch
 
+from guidance_gui.generate_samples import generate_samples
 from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data as _load_npz_data_raw
-from guidance_gui.generate_samples import generate_samples
 
 
 def load_npz_data(npz_path, device):
@@ -313,6 +313,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
     for k, v in config_data.items():
         if hasattr(grpo_config, k):
             setattr(grpo_config, k, v)
+    # Re-run __post_init__ to normalize legacy loss type names
+    grpo_config.__post_init__()
 
     print(f"Experiment: {name}")
     print(f"Config: lr={grpo_config.learning_rate}, kl={grpo_config.kl_coef}, "
@@ -362,7 +364,12 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
             policy_model = load_lora_checkpoint(policy_model, seed_lora_path, is_trainable=True)
             print(f"Seeded from LoRA: {seed_lora_path}")
         else:
-            from preference_optimization.lora_utils import apply_lora, LORA_TARGET_LAST_BLOCK_REGEX, LORA_TARGET_FIRST_BLOCK_REGEX, LORA_TARGET_BLOCKS_01_REGEX
+            from preference_optimization.lora_utils import (
+                LORA_TARGET_BLOCKS_01_REGEX,
+                LORA_TARGET_FIRST_BLOCK_REGEX,
+                LORA_TARGET_LAST_BLOCK_REGEX,
+                apply_lora,
+            )
             target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX}.get(grpo_config.lora_target)
             kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
                          lora_dropout=grpo_config.lora_dropout)
@@ -455,10 +462,52 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
             if grpo_config.ranked_sft_mode != "none":
                 # Ranked SFT: generate N trajs, pick best, SFT on it
                 from rlvr.grpo_sft_trainer import train_epoch_ranked_sft
+
+                # Optionally load a pre-trained exploration policy for guided generation
+                _explorer = None
+                if grpo_config.ranked_sft_use_explorer and grpo_config.exploration_checkpoint_path:
+                    from pathlib import Path as _P
+
+                    from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
+                    _ckpt = _P(grpo_config.exploration_checkpoint_path)
+                    if not _ckpt.exists():
+                        print(f"  WARNING: exploration_checkpoint_path not found: {_ckpt}")
+                        print(f"  Falling back to standard generation (no explorer)")
+                    elif not hasattr(run, '_cached_explorer') or getattr(run, '_cached_explorer_path', None) != str(_ckpt):
+                        _ep_cfg = ExplorationPolicyConfig(
+                            hidden_dim=grpo_config.exploration_hidden_dim,
+                            n_mixer_layers=grpo_config.exploration_n_mixer_layers,
+                            n_attn_heads=grpo_config.exploration_n_attn_heads,
+                            dropout=grpo_config.exploration_dropout,
+                            encoder_hidden_dim=model_args.hidden_dim,
+                            head_init=grpo_config.exploration_head_init,
+                            head_raw_scale=grpo_config.exploration_head_raw_scale,
+                        )
+                        run._cached_explorer = ExplorationPolicy(
+                            _ep_cfg, ref_seq_len=model_args.future_len,
+                        ).to(DEVICE)
+                        _state = torch.load(_ckpt, map_location=DEVICE, weights_only=False)
+                        run._cached_explorer.load_state_dict(_state, strict=False)
+                        run._cached_explorer.eval()
+                        run._cached_explorer_path = str(_ckpt)
+                        print(f"  Loaded frozen explorer from {_ckpt}")
+                    _explorer = getattr(run, '_cached_explorer', None)
+
+                # Create explorer optimizer if training jointly
+                _explorer_opt = None
+                if _explorer is not None and not grpo_config.ranked_sft_freeze_explorer:
+                    if not hasattr(run, '_cached_explorer_opt'):
+                        run._cached_explorer_opt = torch.optim.AdamW(
+                            _explorer.parameters(), lr=grpo_config.exploration_lr,
+                        )
+                    _explorer_opt = run._cached_explorer_opt
+
                 metrics = train_epoch_ranked_sft(
                     model=policy_model, model_args=model_args, optimizer=optimizer,
                     scene_paths=train_paths, config=grpo_config,
                     reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                    exploration_policy=_explorer,
+                    exploration_optimizer=_explorer_opt,
                 )
             else:
                 # Fully batched training: all scenes in ~5 forward passes

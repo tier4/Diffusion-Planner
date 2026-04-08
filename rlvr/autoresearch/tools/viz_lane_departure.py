@@ -16,21 +16,23 @@ import argparse
 import json
 import os
 
+import matplotlib
 import numpy as np
 import torch
-import matplotlib
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon as MplPolygon, Patch
 import matplotlib.cm as cmx
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from matplotlib.patches import Polygon as MplPolygon
 
 from preference_optimization.utils import load_npz_data
 from rlvr.reward import (
+    _LANE_PTS_PER_SIDE,
     _build_lane_polygons,
     _classify_outer_boundaries,
     _point_in_polygons,
     _point_to_segments_dist,
-    _LANE_PTS_PER_SIDE,
 )
 
 
@@ -338,7 +340,8 @@ def main():
             print(f"  Saved: {fname}")
         except Exception as e:
             print(f"  FAILED: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
 
 
 if __name__ == "__main__":

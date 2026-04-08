@@ -20,12 +20,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-from preference_optimization.utils import load_npz_data
-from preference_optimization.lora_utils import load_lora_checkpoint
-from diffusion_planner.utils.config import Config
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
+
 from guidance_gui.generate_samples import generate_samples
+from preference_optimization.lora_utils import load_lora_checkpoint
+from preference_optimization.utils import load_npz_data
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

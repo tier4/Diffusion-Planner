@@ -204,8 +204,8 @@ class TestGRPONeighborReg:
 
     def test_b1_assertion(self):
         """Should raise AssertionError when B > 1."""
-        from rlvr.grpo_loss import _compute_neighbor_reg_loss
         from rlvr.grpo_config import GRPOConfig
+        from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = _StubDiT(P=5, T=80)
         data = _make_scene_data(B=2, P=5, T=80)  # B=2 should fail
@@ -220,8 +220,8 @@ class TestGRPONeighborReg:
 
     def test_reg_loss_nonzero(self):
         """Should produce non-zero loss for B=1."""
-        from rlvr.grpo_loss import _compute_neighbor_reg_loss
         from rlvr.grpo_config import GRPOConfig
+        from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = _StubDiT(P=5, T=80)
         data = _make_scene_data(B=1, P=5, T=80)
@@ -237,8 +237,8 @@ class TestGRPONeighborReg:
 
     def test_no_adapter_returns_zero(self):
         """Model without disable_adapter should return zero loss."""
-        from rlvr.grpo_loss import _compute_neighbor_reg_loss
         from rlvr.grpo_config import GRPOConfig
+        from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = nn.Linear(10, 10)
         data = _make_scene_data(B=1, P=5, T=80)

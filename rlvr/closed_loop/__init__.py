@@ -15,9 +15,13 @@ def verify_lora_loaded(model, model_args, scene_path, device, label=""):
     Returns:
         True if LoRA has measurable effect, False otherwise.
     """
-    import torch, copy, numpy as np
-    from preference_optimization.utils import load_npz_data
+    import copy
+
+    import numpy as np
+    import torch
+
     from guidance_gui.generate_samples import generate_samples
+    from preference_optimization.utils import load_npz_data
 
     data = load_npz_data(scene_path, device)
     if "delay" not in data:
