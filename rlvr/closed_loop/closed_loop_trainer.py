@@ -17,11 +17,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from diffusion_planner.model.guidance.composer import GuidanceComposer
+from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from torch import nn, optim
 from tqdm import tqdm
 
-from diffusion_planner.model.guidance.composer import GuidanceComposer
-from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
 from guidance_gui.generate_samples import generate_samples
@@ -181,7 +181,9 @@ class ClosedLoopExplorationTrainer:
         ~6x faster than sequential. Use sequential only for zi reproduction.
         """
         from rlvr.closed_loop.batched_rollout import (
-            _batched_encoder, _batched_generate, _batched_generate_varied_noise,
+            _batched_encoder,
+            _batched_generate,
+            _batched_generate_varied_noise,
         )
 
         if self.exploration_policy is not None:
@@ -569,7 +571,8 @@ class ClosedLoopExplorationTrainer:
         # --- Free rollout data from GPU before GRPO to avoid OOM ---
         # (eta stats already collected above from rollout_buffers)
         del rollout_buffers
-        import gc; gc.collect()
+        import gc
+        gc.collect()
         torch.cuda.empty_cache()
 
         # --- Reset RNG before GRPO to match zi's random state ---

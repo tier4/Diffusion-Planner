@@ -329,7 +329,7 @@ def train_epoch_batched(
                 norm_i[k] = v
         kept_norm_data.append(norm_i)
         # Also keep raw data for logprob path (needs unnormalized data)
-        if config.grpo_loss_type == "logprob":
+        if config.grpo_loss_type == "advantage_logprob":
             kept_raw_data.append(data_i)
 
     N_kept = len(kept_trajs)
@@ -351,7 +351,7 @@ def train_epoch_batched(
         kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
         kept_lane_dep_fracs = [kept_lane_dep_fracs[j] for j in keep_idx]
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
-        if config.grpo_loss_type == "logprob":
+        if config.grpo_loss_type == "advantage_logprob":
             kept_raw_data = [kept_raw_data[j] for j in keep_idx]
         print(f"  Lane-dep trim: dropped {n_dropped} worst scenes "
               f"(avg_dep={avg_dep_dropped:.0%}), keeping {len(kept_trajs)} "
@@ -369,7 +369,7 @@ def train_epoch_batched(
         kept_advantages = [kept_advantages[j] for j in keep_idx]
         kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
-        if config.grpo_loss_type == "logprob":
+        if config.grpo_loss_type == "advantage_logprob":
             kept_raw_data = [kept_raw_data[j] for j in keep_idx]
         print(f"  Trimmed {2*n_trim} scenes, keeping {len(kept_trajs)}/{N_kept}")
         N_kept = len(kept_trajs)
@@ -381,7 +381,7 @@ def train_epoch_batched(
         config.kl_coef = scheduled_kl
 
     # 6. Training
-    if config.grpo_loss_type == "logprob":
+    if config.grpo_loss_type == "advantage_logprob":
         return _train_logprob(
             model, model_args, optimizer, config,
             kept_trajs, kept_advantages, kept_raw_data,

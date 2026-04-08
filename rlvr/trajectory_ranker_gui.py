@@ -37,11 +37,11 @@ import gradio as gr
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.figure import Figure
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from diffusion_planner.utils.visualize_input import visualize_inputs
+from matplotlib.figure import Figure
+
 from guidance_gui.generate_samples import generate_samples
 from guidance_gui.visualization import (
     _calculate_curvature,
@@ -52,8 +52,12 @@ from guidance_gui.visualization import (
 from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_sampler import SampledTrajectory
-from rlvr.reward import RewardBreakdown, RewardConfig, compute_group_advantages, compute_reward_batch
-
+from rlvr.reward import (
+    RewardBreakdown,
+    RewardConfig,
+    compute_group_advantages,
+    compute_reward_batch,
+)
 
 _DIVERGING_CMAP = plt.get_cmap("RdYlGn")
 
@@ -1311,7 +1315,9 @@ def main():
             print("Warning: no trainable parameters found. Use --use_lora or ensure model is not frozen.")
         else:
             from datetime import datetime
+
             from torch import optim
+
             from rlvr.grpo_trainer import GRPOTrainer
 
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

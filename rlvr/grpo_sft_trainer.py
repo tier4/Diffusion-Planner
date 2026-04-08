@@ -569,7 +569,7 @@ def train_epoch_ranked_sft(
 
             advantages_t = torch.tensor(advantages, device=device, dtype=torch.float32)
 
-            if config.exploration_loss_type == "best_eta_mse":
+            if config.exploration_loss_type == "best_sample_mse":
                 best_idx = advantages_t.argmax()
                 pred_lat = policy_output.lat_dist.mean.squeeze()
                 pred_lon = policy_output.lon_dist.mean.squeeze()

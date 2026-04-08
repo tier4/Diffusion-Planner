@@ -20,21 +20,22 @@ import json
 import sys
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import torch
-import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
-from preference_optimization.utils import load_npz_data
-from preference_optimization.lora_utils import load_lora_checkpoint
-from diffusion_planner.utils.config import Config
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+from diffusion_planner.utils.config import Config
+
 from exploration_policy import ExplorationPolicy, ExplorationPolicyConfig
-from exploration_policy.utils import get_frozen_encoder, generate_reference_trajectory
+from exploration_policy.utils import generate_reference_trajectory, get_frozen_encoder
 from guidance_gui.generate_samples import generate_samples
+from preference_optimization.lora_utils import load_lora_checkpoint
+from preference_optimization.utils import load_npz_data
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

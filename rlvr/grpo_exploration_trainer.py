@@ -5,7 +5,7 @@ outputs (eta_lat, eta_lon) from Beta distributions. The policy and DiT
 planner are trained simultaneously:
 
 - Policy: advantage-weighted log_prob (advantage_logprob) or MSE regression
-  toward best eta (best_eta_mse). Controlled by exploration_loss_type.
+  toward best eta (best_sample_mse). Controlled by exploration_loss_type.
 - DiT: Standard GRPO diffusion loss (unchanged)
 
 The exploration policy samples K eta values from one distribution per scene,
@@ -57,7 +57,7 @@ class GRPOExplorationTrainer:
       4. Sample K η values → K trajectories (noise=0, lat+lon guidance)
       5. Score → group-relative advantages
       6. DiT loss: standard GRPO diffusion loss
-      7. Policy loss: advantage_logprob or best_eta_mse (see exploration_loss_type)
+      7. Policy loss: advantage_logprob or best_sample_mse (see exploration_loss_type)
 
     Supports inverse KL scheduling: high DiT KL (stable planner) + low policy
     KL (free exploration) early, then swap as policy learns.
@@ -417,7 +417,7 @@ class GRPOExplorationTrainer:
                 self.dit_optimizer.zero_grad()
                 dit_accum = 0
 
-            # --- Exploration policy loss (advantage_logprob, best_eta_mse, or PPO) ---
+            # --- Exploration policy loss (advantage_logprob, best_sample_mse, or PPO) ---
             if self.use_explorer:
                 scene_encoding = group["scene_encoding"]
                 x_ref = group["x_ref"]
@@ -482,7 +482,7 @@ class GRPOExplorationTrainer:
                                 self.exploration_policy.parameters(), max_norm=1.0,
                             )
                             self.policy_optimizer.step()
-                    elif self.config.exploration_loss_type == "best_eta_mse":
+                    elif self.config.exploration_loss_type == "best_sample_mse":
                         # Ranked SFT for explorer: MSE regression of policy mean toward best eta.
                         # Unlike advantage_logprob which uses all K samples, this directly supervises
                         # the policy to output the best-reward eta for each scene.
@@ -518,7 +518,7 @@ class GRPOExplorationTrainer:
                             entropy_coef=self.config.exploration_entropy_coef,
                             kl_coef=self.config.exploration_kl_coef,
                         )
-                    # Backward pass for advantage_logprob and best_eta_mse paths
+                    # Backward pass for advantage_logprob and best_sample_mse paths
                     # (PPO path handles its own backward+step above)
                     if not policy_frozen and inner_epochs <= 1:
                         policy_loss.backward()

@@ -11,7 +11,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-
 from diffusion_planner.model.guidance.collision import (
     batch_signed_distance_rect,
     center_rect_to_points,

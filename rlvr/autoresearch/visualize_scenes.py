@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
@@ -39,11 +40,12 @@ _repo = str(Path(__file__).resolve().parent.parent.parent)
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
-from preference_optimization.utils import load_npz_data
-from preference_optimization.lora_utils import load_lora_checkpoint
-from guidance_gui.generate_samples import generate_samples
-from diffusion_planner.utils.config import Config
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
+
+from guidance_gui.generate_samples import generate_samples
+from preference_optimization.lora_utils import load_lora_checkpoint
+from preference_optimization.utils import load_npz_data
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

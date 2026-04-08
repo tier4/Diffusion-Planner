@@ -19,10 +19,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import torch
-from torch import nn
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+from torch import nn
+
 from exploration_policy.model import ExplorationPolicy
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
 from guidance_gui.generate_samples import generate_samples

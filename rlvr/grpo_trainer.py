@@ -22,9 +22,10 @@ from tqdm import tqdm
 from preference_optimization.utils import (
     calculate_ade,
     generate_deterministic_trajectory,
+)
+from preference_optimization.utils import (
     load_npz_data as _load_npz_data_raw,
 )
-
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_loss import compute_direct_best_loss, compute_grpo_loss, compute_log_probs
 from rlvr.grpo_sampler import SamplerConfig, generate_diverse_group
@@ -268,7 +269,7 @@ class GRPOTrainer:
         }
 
         # For logprob loss: also collect the denoising rollout chain
-        if self.config.grpo_loss_type == "logprob":
+        if self.config.grpo_loss_type == "advantage_logprob":
             from rlvr.grpo_logprob_loss import collect_logprob_rollout
             was_training = self.policy_model.training
             self.policy_model.eval()
@@ -301,9 +302,9 @@ class GRPOTrainer:
             return _empty_metrics()
 
         M = self.config.inner_epochs
-        if M > 1 and self.config.grpo_loss_type == "logprob":
+        if M > 1 and self.config.grpo_loss_type == "advantage_logprob":
             raise ValueError(
-                "inner_epochs > 1 is not supported with grpo_loss_type='logprob'. "
+                "inner_epochs > 1 is not supported with grpo_loss_type='advantage_logprob'. "
                 "Logprob GRPO uses on-policy REINFORCE without importance sampling."
             )
         all_metrics: dict[str, float] = {}
@@ -324,7 +325,7 @@ class GRPOTrainer:
                 if np.all(advantages == 0):
                     continue
 
-                if self.config.grpo_loss_type == "logprob":
+                if self.config.grpo_loss_type == "advantage_logprob":
                     # DDV2-style log-probability GRPO loss
                     from rlvr.grpo_logprob_loss import compute_logprob_grpo_loss
                     rollout = group.get("rollout")

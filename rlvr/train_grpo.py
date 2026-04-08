@@ -236,10 +236,10 @@ def _run_gui_mode(
     config: GRPOConfig,
 ):
     from rlvr.trajectory_ranker_gui import (
+        _DEFAULT_PROTOTYPES_PATH,
         TrajectoryRanker,
         build_interface,
         ensure_prototypes,
-        _DEFAULT_PROTOTYPES_PATH,
     )
 
     prototypes_path = config.prototypes_path or _DEFAULT_PROTOTYPES_PATH
