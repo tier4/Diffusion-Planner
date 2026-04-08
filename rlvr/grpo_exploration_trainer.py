@@ -22,15 +22,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch import nn, optim
-from tqdm import tqdm
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
-from exploration_policy.loss import compute_exploration_loss, _get_init_distributions
+from torch import nn, optim
+from torch.distributions import kl_divergence as kl_div
+from tqdm import tqdm
+
+from exploration_policy.loss import _get_init_distributions, compute_exploration_loss
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
-from torch.distributions import kl_divergence as kl_div
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.grpo_config import GRPOConfig
@@ -481,6 +481,31 @@ class GRPOExplorationTrainer:
                                 self.exploration_policy.parameters(), max_norm=1.0,
                             )
                             self.policy_optimizer.step()
+                    elif self.config.exploration_loss_type == "rsft":
+                        # Ranked SFT for explorer: maximize log_prob of best eta only
+                        best_idx = advantages_t.argmax()
+                        best_log_prob = log_probs[best_idx]
+                        rsft_loss = -best_log_prob
+
+                        entropy_value = (lat_dist.entropy() + lon_dist.entropy()).mean()
+                        init_lat, init_lon = _get_init_distributions(self.device)
+                        kl_value = (kl_div(lat_dist, init_lat) + kl_div(lon_dist, init_lon)).mean()
+
+                        policy_loss = (
+                            rsft_loss
+                            + self.config.exploration_entropy_coef * (-entropy_value)
+                            + self.config.exploration_kl_coef * kl_value
+                        )
+                        policy_metrics = {
+                            "exploration_policy_loss": rsft_loss.item(),
+                            "exploration_entropy": entropy_value.item(),
+                            "exploration_kl": kl_value.item(),
+                            "exploration_total_loss": policy_loss.item(),
+                            "exploration_eta_lat_mean": lat_dist.mean.mean().item() * 2 - 1,
+                            "exploration_eta_lon_mean": lon_dist.mean.mean().item() * 2 - 1,
+                            "exploration_eta_lat_std": (lat_dist.variance.mean().item() * 4) ** 0.5,
+                            "exploration_eta_lon_std": (lon_dist.variance.mean().item() * 4) ** 0.5,
+                        }
                     else:
                         policy_loss, policy_metrics = compute_exploration_loss(
                             advantages=advantages_t,

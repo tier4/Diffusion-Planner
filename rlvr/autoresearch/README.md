@@ -170,6 +170,38 @@ cat /tmp/experiment_status.log
 pkill -f experiment_watchdog
 ```
 
+### `tools/viz_explorer_per_scene.py` — Exploration Policy Per-Scene Analysis
+
+Loads a trained exploration policy checkpoint and runs deterministic inference
+on each scene to show the learned eta_lat/eta_lon guidance parameters.
+
+```bash
+python -m rlvr.autoresearch.tools.viz_explorer_per_scene \
+  --model_path /path/to/base_model.pth \
+  --exp_dir /path/to/experiment_dir \
+  --scenes /path/to/scenes.json \
+  --epoch 10
+```
+
+Prints per-scene eta values, scene-to-scene statistics, and extreme scenes.
+
+### `tools/viz_explorer_trajectories.py` — Explorer Trajectory Visualization
+
+Generates images showing reference trajectory (blue) vs explorer-guided
+trajectory (red) for each scene, with road borders and lane geometry.
+
+```bash
+python -m rlvr.autoresearch.tools.viz_explorer_trajectories \
+  --model_path /path/to/base_model.pth \
+  --exp_dir /path/to/experiment_dir \
+  --scenes /path/to/scenes.json \
+  --epoch 10 \
+  --output_dir /path/to/output \
+  --n_scenes 12
+```
+
+Outputs a grid image and individual per-scene images with eta annotations.
+
 ## Scene Lists
 
 Training requires three JSON files, each a list of NPZ paths:

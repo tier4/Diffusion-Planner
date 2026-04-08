@@ -251,6 +251,15 @@ class GRPOConfig:
     # 1 = step every scene (original per-group), 4 = match DiT rhythm.
     exploration_grad_accum_groups: int = 1
 
+    # Explorer loss type: "reinforce" (default GRPO advantages), "rsft" (maximize
+    # log_prob of best eta only — ranked SFT for the explorer policy).
+    exploration_loss_type: str = "reinforce"
+
+    # Use a pre-trained exploration policy during ranked SFT generation.
+    # The explorer provides per-scene (eta_lat, eta_lon) guidance for trajectory generation.
+    # Set exploration_checkpoint_path to the .pth file. Explorer stays frozen during RSFT.
+    ranked_sft_use_explorer: bool = False
+
     # Random guidance mode: replaces exploration policy with direct η sampling.
     # "explorer" (default): use learned exploration policy (Beta distributions).
     # "uniform": random η ~ U[-1, 1] (matches zero-init explorer output).

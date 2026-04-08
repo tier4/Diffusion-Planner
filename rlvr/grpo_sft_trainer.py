@@ -308,6 +308,7 @@ def train_epoch_ranked_sft(
     reward_config: RewardConfig,
     device: torch.device,
     epoch: int,
+    exploration_policy=None,
 ) -> dict[str, float]:
     """GRPO-ranked SFT epoch: generate, rank, filter, train with SFT loss.
 
@@ -403,17 +404,91 @@ def train_epoch_ranked_sft(
     lon_lambda = scheduled.get("longitudinal_lambda", config.lambda_lon)
     lon_scale = scheduled.get("longitudinal_scale", 10.0)
 
-    # 3. Generate K trajectories for all scenes (batched)
-    print(f"  Generating {K} trajectories x {N} scenes (batched)...")
-    model.eval()
-    with torch.no_grad():
-        all_trajs = generate_all_scenes_batched(
-            model, model_args, norm_batch, K, config.noise_scale_range, device,
-            gt_max_speed=median_gt_speed,
-            longitudinal_eta=lon_eta,
-            longitudinal_lambda=lon_lambda,
-            longitudinal_scale=lon_scale,
-        )  # [N, K, T, 4]
+    # Extract lateral guidance params from schedule (default: off)
+    lat_eta = scheduled.get("lateral_eta", 0.0)
+    lat_lambda = scheduled.get("lateral_lambda", 2.0)
+    lat_scale = scheduled.get("lateral_scale", 5.0)
+
+    # 2c. Optionally use exploration policy to generate K diverse trajectories per scene
+    if exploration_policy is not None:
+        from diffusion_planner.model.guidance.composer import GuidanceComposer
+        from diffusion_planner.model.guidance.config import GuidanceConfig as _GC
+        from diffusion_planner.model.guidance.config import GuidanceSetConfig
+
+        from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
+        from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+        print(f"  Explorer-guided generation: {K} samples from Beta distribution per scene...")
+        exploration_policy.eval()
+        model.eval()
+
+        _lat_lambda = config.exploration_lambda_lat
+        _lon_lambda = config.exploration_lambda_lon
+        _guide_scale = config.exploration_guidance_scale
+        noise_min, noise_max = config.noise_scale_range
+
+        all_scene_trajs = []  # will be [N, K, T, 4]
+        for i in range(N):
+            norm_i = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == N else v
+                      for k, v in norm_batch.items()}
+            with torch.no_grad():
+                scene_enc = run_frozen_encoder(model, norm_i)
+                x_ref_np = generate_reference_trajectory(model, model_args, norm_i, device)
+                x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(device)
+                norm_i["reference_trajectory"] = x_ref
+
+                # Get Beta distributions and sample K etas
+                output = exploration_policy(scene_enc, x_ref, deterministic=True)
+                eta_lat_01 = output.lat_dist.rsample((K,)).squeeze(-1)  # [K]
+                eta_lon_01 = output.lon_dist.rsample((K,)).squeeze(-1)  # [K]
+                eta_lat_vals = 2.0 * eta_lat_01 - 1.0  # map to [-1, 1]
+                eta_lon_vals = 2.0 * eta_lon_01 - 1.0
+
+                # Expand scene data from B=1 to B=K
+                K_data = {}
+                for k_key, v in norm_i.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == 1:
+                        K_data[k_key] = v.expand(K, *v.shape[1:]).contiguous()
+                    else:
+                        K_data[k_key] = v
+
+                # Build batched guidance with K different etas
+                guidance_fns = [
+                    _GC("lateral", enabled=True, scale=1.0,
+                         params={"lambda_lat": _lat_lambda, "eta_lat": eta_lat_vals}),
+                    _GC("longitudinal", enabled=True, scale=1.0,
+                         params={"lambda_lon": _lon_lambda, "eta_lon": eta_lon_vals}),
+                ]
+                composer = GuidanceComposer(GuidanceSetConfig(
+                    functions=guidance_fns, global_scale=_guide_scale))
+
+                # Generate K trajectories (first deterministic, rest with varied noise)
+                traj_tensor = _batched_generate_varied_noise(
+                    model, model_args, K_data,
+                    noise_min=noise_min, noise_max=noise_max,
+                    first_deterministic=True,
+                    composer=composer, device=device,
+                )  # [K, T, 4]
+                all_scene_trajs.append(traj_tensor)
+
+        all_trajs = torch.stack(all_scene_trajs)  # [N, K, T, 4]
+        print(f"  Explorer: K={K}, guide_scale={_guide_scale}, noise=[{noise_min},{noise_max}]")
+        torch.cuda.empty_cache()
+        gc.collect()
+    else:
+        # 3. Standard generation: K trajectories for all scenes (batched)
+        print(f"  Generating {K} trajectories x {N} scenes (batched)...")
+        model.eval()
+        with torch.no_grad():
+            all_trajs = generate_all_scenes_batched(
+                model, model_args, norm_batch, K, config.noise_scale_range, device,
+                gt_max_speed=median_gt_speed,
+                longitudinal_eta=lon_eta,
+                longitudinal_lambda=lon_lambda,
+                longitudinal_scale=lon_scale,
+                lateral_eta=lat_eta,
+                lateral_lambda=lat_lambda,
+                lateral_scale=lat_scale,
+            )  # [N, K, T, 4]
 
     torch.cuda.empty_cache()
     gc.collect()
