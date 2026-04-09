@@ -82,6 +82,7 @@ def generate_all_scenes_batched(
     lateral_eta: float = 0.0,
     lateral_lambda: float = 2.0,
     lateral_scale: float = 5.0,
+    speed_stretch: float = 1.0,
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
 
@@ -125,11 +126,12 @@ def generate_all_scenes_batched(
         (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
         (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
     ]
+    use_stretch = abs(speed_stretch - 1.0) > 1e-6
     for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
+        spd_params = {"stretch": speed_stretch} if use_stretch else {"v_high": gt_max_speed, "v_low": 0.5}
         fns = [
             GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
-            GuidanceConfig("speed", enabled=True, scale=spd_scale,
-                           params={"v_high": gt_max_speed, "v_low": 0.5}),
+            GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params),
         ]
         if use_lon:
             fns.append(GuidanceConfig(
@@ -269,6 +271,7 @@ def train_epoch_batched(
     lat_eta = scheduled.get("lateral_eta", 0.0)
     lat_lambda = scheduled.get("lateral_lambda", config.lambda_lat)
     lat_scale = scheduled.get("lateral_scale", 5.0)
+    spd_stretch = scheduled.get("speed_stretch", 1.0)
 
     # 3. Generate K trajectories for all scenes (batched)
     print(f"  Generating {K} trajectories × {N} scenes (batched)...")
@@ -283,6 +286,7 @@ def train_epoch_batched(
             lateral_eta=lat_eta,
             lateral_lambda=lat_lambda,
             lateral_scale=lat_scale,
+            speed_stretch=spd_stretch,
         )  # [N, K, T, 4]
 
     # Free generation memory before scoring + training

@@ -135,5 +135,44 @@ def test_json_roundtrip(tmp_path):
     assert c2.get_scheduled_value("w_progress", 20, 20) == pytest.approx(10.0)
 
 
+def test_linear_end_epoch():
+    c = GRPOConfig(schedules={
+        "speed_stretch": {"type": "linear", "start": 1.2, "end": 1.0, "end_epoch": 8},
+    })
+    # ep1: start
+    assert c.get_scheduled_value("speed_stretch", 1, 20) == pytest.approx(1.2)
+    # ep8: reaches end
+    assert c.get_scheduled_value("speed_stretch", 8, 20) == pytest.approx(1.0)
+    # ep9+: holds at end
+    assert c.get_scheduled_value("speed_stretch", 9, 20) == pytest.approx(1.0)
+    assert c.get_scheduled_value("speed_stretch", 20, 20) == pytest.approx(1.0)
+    # midpoint (ep4-5 ish)
+    mid = c.get_scheduled_value("speed_stretch", 5, 20)
+    assert 1.05 < mid < 1.15
+
+
+def test_linear_end_epoch_rampup():
+    c = GRPOConfig(schedules={
+        "speed_stretch": {"type": "linear", "start": 1.0, "end": 1.2, "end_epoch": 8},
+    })
+    assert c.get_scheduled_value("speed_stretch", 1, 20) == pytest.approx(1.0)
+    assert c.get_scheduled_value("speed_stretch", 8, 20) == pytest.approx(1.2)
+    assert c.get_scheduled_value("speed_stretch", 15, 20) == pytest.approx(1.2)
+
+
+def test_linear_end_epoch_invalid():
+    c = GRPOConfig(schedules={
+        "x": {"type": "linear", "start": 1.0, "end": 2.0, "end_epoch": 0},
+    })
+    with pytest.raises(ValueError, match="end_epoch"):
+        c.get_scheduled_value("x", 1, 20)
+
+    c2 = GRPOConfig(schedules={
+        "x": {"type": "linear", "start": 1.0, "end": 2.0, "end_epoch": 25},
+    })
+    with pytest.raises(ValueError, match="end_epoch"):
+        c2.get_scheduled_value("x", 1, 20)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -410,6 +410,9 @@ def train_epoch_ranked_sft(
     lat_lambda = scheduled.get("lateral_lambda", config.lambda_lat)
     lat_scale = scheduled.get("lateral_scale", 5.0)
 
+    # Extract speed stretch from schedule (default: 1.0 = no stretch)
+    spd_stretch = scheduled.get("speed_stretch", 1.0)
+
     # 2c. Optionally use exploration policy to generate K diverse trajectories per scene
     if exploration_policy is not None:
         from diffusion_planner.model.guidance.composer import GuidanceComposer
@@ -504,6 +507,7 @@ def train_epoch_ranked_sft(
                 lateral_eta=lat_eta,
                 lateral_lambda=lat_lambda,
                 lateral_scale=lat_scale,
+                speed_stretch=spd_stretch,
             )  # [N, K, T, 4]
 
     torch.cuda.empty_cache()
