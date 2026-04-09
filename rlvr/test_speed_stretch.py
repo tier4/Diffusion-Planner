@@ -35,20 +35,28 @@ def test_stretch_1_is_noop():
     assert energy.abs().item() < 1e-6
 
 
-def test_stretch_gt1_positive_energy():
-    """stretch>1 should produce positive energy (pushes trajectory faster)."""
+def test_stretch_gt1_nonzero_energy_and_forward_gradient():
+    """stretch>1 should yield nonzero energy and push trajectory faster."""
     g = _build_guidance(stretch=1.5)
     x = _make_trajectory(speed=2.0)
+    x.requires_grad_(True)
     energy = g._compute(x, {})
-    assert energy.item() > 0
+    assert abs(energy.item()) > 1e-6
+    grad = torch.autograd.grad(energy.sum(), x)[0]
+    mean_x_grad = grad[0, 0, 10:, 0].mean()
+    assert mean_x_grad.item() > 0
 
 
-def test_stretch_lt1_negative_energy():
-    """stretch<1 should produce negative energy (pushes trajectory slower)."""
+def test_stretch_lt1_nonzero_energy_and_backward_gradient():
+    """stretch<1 should yield nonzero energy and push trajectory slower."""
     g = _build_guidance(stretch=0.5)
     x = _make_trajectory(speed=2.0)
+    x.requires_grad_(True)
     energy = g._compute(x, {})
-    assert energy.item() < 0
+    assert abs(energy.item()) > 1e-6
+    grad = torch.autograd.grad(energy.sum(), x)[0]
+    mean_x_grad = grad[0, 0, 10:, 0].mean()
+    assert mean_x_grad.item() < 0
 
 
 def test_stretch_gradient_direction():
