@@ -1,5 +1,8 @@
 """Profile training epoch performance for RSFT, Exploration, and Closed-Loop trainers.
 
+Requires CUDA. Instruments key phases with wall-clock + CUDA timing and produces
+a breakdown table.
+
 Usage:
     python -m rlvr.autoresearch.tools.profile_training \
         --model_path <base_model.pth> \
@@ -8,8 +11,6 @@ Usage:
         [--config <config.json>] \
         [--n_scenes 10] \
         [--n_epochs 1]
-
-Instruments key phases with wall-clock + CUDA timing and produces a breakdown table.
 """
 
 import argparse
@@ -17,11 +18,9 @@ import contextlib
 import gc
 import json
 import time
-from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import torch
 
 
@@ -78,7 +77,7 @@ class Profiler:
             self._stack.pop()
 
     def wrap_function(self, obj, attr: str, label: str | None = None):
-        """Monkey-patch obj.attr with a timed wrapper. Returns original."""
+        """Monkey-patch obj.attr with a timed wrapper."""
         original = getattr(obj, attr)
         name = label or f"{type(obj).__name__}.{attr}"
         rec = self._get_or_create(name)
@@ -152,18 +151,12 @@ class Profiler:
             )
 
         lines.append("-" * 90)
-        accounted = sum(r.total_wall for r in sorted_recs)
-        unaccounted = total_epoch_wall - accounted
         lines.append(f"  {'TOTAL EPOCH':<43} {'':>6} {total_epoch_wall:>9.2f}")
-        if unaccounted > 1.0:
-            pct = unaccounted / total_epoch_wall * 100
-            lines.append(f"  {'(unaccounted overhead)':<43} {'':>6} {unaccounted:>9.2f} {'':>9} {pct:>6.1f}%")
+        lines.append("  Note: nested phases overlap; Wall% is not additive.")
         lines.append("=" * 90)
 
-        # GPU memory summary
-        if torch.cuda.is_available():
-            lines.append(f"\nGPU Memory: peak={torch.cuda.max_memory_allocated()/1e9:.2f}GB, "
-                         f"reserved={torch.cuda.max_memory_reserved()/1e9:.2f}GB")
+        lines.append(f"\nGPU Memory: peak={torch.cuda.max_memory_allocated()/1e9:.2f}GB, "
+                     f"reserved={torch.cuda.max_memory_reserved()/1e9:.2f}GB")
 
         return "\n".join(lines)
 
@@ -172,7 +165,7 @@ class Profiler:
 # Model loading (shared)
 # ---------------------------------------------------------------------------
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda")
 
 
 def load_model(model_path: str):
@@ -190,9 +183,14 @@ def load_scene_paths(scenes_json: str, n_scenes: int) -> list[str]:
     """Load scene paths from JSON, limit to n_scenes."""
     with open(scenes_json) as f:
         paths = json.load(f)
+    if not paths:
+        raise ValueError(f"No scenes in {scenes_json}")
     if isinstance(paths[0], dict):
         paths = [p["path"] for p in paths]
-    return paths[:n_scenes]
+    result = paths[:n_scenes]
+    if not result:
+        raise ValueError(f"No scenes selected (n_scenes={n_scenes})")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -245,11 +243,9 @@ def profile_rsft(model, model_args, scene_paths, config_path: str | None, profil
     profiler.wrap_module_function(sft_mod, "_compute_sft_diffusion_loss", "training.sft_diffusion_loss")
     profiler.wrap_module_function(sft_mod, "_smooth_trajectory", "cpu.sg_filter")
 
-    # Also instrument load_npz_data
     import preference_optimization.utils as po_utils
     profiler.wrap_module_function(po_utils, "load_npz_data", "io.load_npz")
 
-    # Run the epoch
     from rlvr.grpo_sft_trainer import train_epoch_ranked_sft
 
     torch.cuda.reset_peak_memory_stats()
@@ -275,7 +271,6 @@ def profile_explorer(model, model_args, scene_paths, config_path: str | None, pr
 
     from rlvr.grpo_config import GRPOConfig
     from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
-    from rlvr.reward import RewardConfig
 
     if config_path:
         config = GRPOConfig.from_json(config_path)
@@ -294,51 +289,51 @@ def profile_explorer(model, model_args, scene_paths, config_path: str | None, pr
     dit_optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=5e-4
     )
-    run_dir = Path(tempfile.mkdtemp(prefix="profile_explorer_"))
 
-    trainer = GRPOExplorationTrainer(
-        policy_model=model,
-        model_args=model_args,
-        dit_optimizer=dit_optimizer,
-        device=DEVICE,
-        run_dir=run_dir,
-        config=config,
-    )
+    with tempfile.TemporaryDirectory(prefix="profile_explorer_") as tmp_dir:
+        run_dir = Path(tmp_dir)
 
-    # Instrument key functions
-    import rlvr.reward as reward_mod
-    from rlvr.closed_loop import batched_rollout as br_mod
-    from rlvr import grpo_loss as loss_mod
+        trainer = GRPOExplorationTrainer(
+            policy_model=model,
+            model_args=model_args,
+            dit_optimizer=dit_optimizer,
+            device=DEVICE,
+            run_dir=run_dir,
+            config=config,
+        )
 
-    profiler.wrap_module_function(br_mod, "_batched_generate_varied_noise", "generation.varied_noise")
-    profiler.wrap_module_function(reward_mod, "compute_reward_batch", "reward.compute_batch")
-    profiler.wrap_module_function(reward_mod, "compute_road_border_penalty", "reward.road_border")
-    profiler.wrap_module_function(reward_mod, "compute_lane_departure_penalty", "reward.lane_departure")
-    profiler.wrap_module_function(reward_mod, "compute_safety_score_batch", "reward.safety")
-    profiler.wrap_module_function(reward_mod, "compute_progress_score_batch", "reward.progress")
-    profiler.wrap_module_function(reward_mod, "compute_feasibility_score_batch", "reward.feasibility")
-    profiler.wrap_module_function(reward_mod, "compute_centerline_score_batch", "reward.centerline")
-    profiler.wrap_module_function(loss_mod, "compute_batched_grpo_loss", "training.grpo_loss")
+        # Instrument key functions
+        import rlvr.reward as reward_mod
+        from rlvr.closed_loop import batched_rollout as br_mod
+        from rlvr import grpo_loss as loss_mod
 
-    # Instrument exploration-specific functions
-    from exploration_policy import utils as ep_utils
-    profiler.wrap_module_function(ep_utils, "generate_reference_trajectory", "generation.reference_traj")
-    profiler.wrap_module_function(ep_utils, "run_frozen_encoder", "generation.frozen_encoder")
+        profiler.wrap_module_function(br_mod, "_batched_generate_varied_noise", "generation.varied_noise")
+        profiler.wrap_module_function(reward_mod, "compute_reward_batch", "reward.compute_batch")
+        profiler.wrap_module_function(reward_mod, "compute_road_border_penalty", "reward.road_border")
+        profiler.wrap_module_function(reward_mod, "compute_lane_departure_penalty", "reward.lane_departure")
+        profiler.wrap_module_function(reward_mod, "compute_safety_score_batch", "reward.safety")
+        profiler.wrap_module_function(reward_mod, "compute_progress_score_batch", "reward.progress")
+        profiler.wrap_module_function(reward_mod, "compute_feasibility_score_batch", "reward.feasibility")
+        profiler.wrap_module_function(reward_mod, "compute_centerline_score_batch", "reward.centerline")
+        profiler.wrap_module_function(loss_mod, "compute_batched_grpo_loss", "training.grpo_loss")
 
-    # Instrument the two phases of the trainer
-    profiler.wrap_function(trainer, "generate_policy_guided_group", "phase.generate_group")
-    profiler.wrap_function(trainer, "train_on_groups", "phase.train_on_groups")
+        from exploration_policy import utils as ep_utils
+        profiler.wrap_module_function(ep_utils, "generate_reference_trajectory", "generation.reference_traj")
+        profiler.wrap_module_function(ep_utils, "run_frozen_encoder", "generation.frozen_encoder")
 
-    # Also instrument load_npz
-    import preference_optimization.utils as po_utils
-    profiler.wrap_module_function(po_utils, "load_npz_data", "io.load_npz")
+        profiler.wrap_function(trainer, "generate_policy_guided_group", "phase.generate_group")
+        profiler.wrap_function(trainer, "train_on_groups", "phase.train_on_groups")
 
-    torch.cuda.reset_peak_memory_stats()
-    wall_start = time.perf_counter()
+        import preference_optimization.utils as po_utils
+        profiler.wrap_module_function(po_utils, "load_npz_data", "io.load_npz")
 
-    metrics = trainer.train_epoch(scene_paths, epoch=1)
+        torch.cuda.reset_peak_memory_stats()
+        wall_start = time.perf_counter()
 
-    total_wall = time.perf_counter() - wall_start
+        metrics = trainer.train_epoch(scene_paths, epoch=1)
+
+        total_wall = time.perf_counter() - wall_start
+
     return total_wall, metrics
 
 
@@ -352,7 +347,6 @@ def profile_closed_loop(model, model_args, scene_paths, config_path: str | None,
 
     from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer
     from rlvr.grpo_config import GRPOConfig
-    from rlvr.reward import RewardConfig
 
     if config_path:
         config = GRPOConfig.from_json(config_path)
@@ -372,72 +366,68 @@ def profile_closed_loop(model, model_args, scene_paths, config_path: str | None,
     dit_optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=5e-4
     )
-    run_dir = Path(tempfile.mkdtemp(prefix="profile_closed_loop_"))
 
-    trainer = ClosedLoopExplorationTrainer(
-        policy_model=model,
-        model_args=model_args,
-        dit_optimizer=dit_optimizer,
-        device=DEVICE,
-        run_dir=run_dir,
-        config=config,
-    )
+    with tempfile.TemporaryDirectory(prefix="profile_closed_loop_") as tmp_dir:
+        run_dir = Path(tmp_dir)
 
-    # Instrument key functions — MUST patch module globals for same-module references
-    import rlvr.reward as reward_mod
-    from rlvr.closed_loop import batched_rollout as br_mod
-    from rlvr import grpo_loss as loss_mod
-    from rlvr.closed_loop import per_step_reward as step_reward_mod
+        trainer = ClosedLoopExplorationTrainer(
+            policy_model=model,
+            model_args=model_args,
+            dit_optimizer=dit_optimizer,
+            device=DEVICE,
+            run_dir=run_dir,
+            config=config,
+        )
 
-    # Patch module globals so that run_rollouts sees the wrapped versions
-    profiler.wrap_module_function(br_mod, "_batched_generate_varied_noise", "cl.generation.varied_noise")
-    profiler.wrap_module_function(br_mod, "_batched_generate", "cl.generation.batched_generate")
-    profiler.wrap_module_function(br_mod, "_batched_encoder", "cl.encoder")
-    profiler.wrap_module_function(br_mod, "_load_npz", "cl.io.load_npz")
-    profiler.wrap_module_function(step_reward_mod, "compute_step_reward", "cl.step_reward_orig")
-    # Also patch in the importing module's namespace (batched_rollout imports it)
-    profiler.wrap_module_function(br_mod, "compute_step_reward", "cl.step_reward")
-    profiler.wrap_module_function(reward_mod, "compute_reward_batch", "reward.compute_batch")
-    profiler.wrap_module_function(reward_mod, "compute_road_border_penalty", "reward.road_border")
-    profiler.wrap_module_function(reward_mod, "compute_lane_departure_penalty", "reward.lane_departure")
-    profiler.wrap_module_function(reward_mod, "compute_safety_score_batch", "reward.safety")
-    profiler.wrap_module_function(reward_mod, "compute_progress_score_batch", "reward.progress")
-    profiler.wrap_module_function(reward_mod, "compute_feasibility_score_batch", "reward.feasibility")
-    profiler.wrap_module_function(reward_mod, "compute_centerline_score_batch", "reward.centerline")
-    profiler.wrap_module_function(loss_mod, "compute_batched_grpo_loss", "training.grpo_loss")
+        # Instrument key functions — MUST patch module globals for same-module references
+        import rlvr.reward as reward_mod
+        from rlvr.closed_loop import batched_rollout as br_mod
+        from rlvr import grpo_loss as loss_mod
+        from rlvr.closed_loop import per_step_reward as step_reward_mod
 
-    # Instrument exploration-specific functions
-    from exploration_policy import utils as ep_utils
-    profiler.wrap_module_function(ep_utils, "generate_reference_trajectory", "generation.reference_traj")
-    profiler.wrap_module_function(ep_utils, "run_frozen_encoder", "generation.frozen_encoder")
+        profiler.wrap_module_function(br_mod, "_batched_generate_varied_noise", "cl.generation.varied_noise")
+        profiler.wrap_module_function(br_mod, "_batched_generate", "cl.generation.batched_generate")
+        profiler.wrap_module_function(br_mod, "_batched_encoder", "cl.encoder")
+        profiler.wrap_module_function(br_mod, "_load_npz", "cl.io.load_npz")
+        profiler.wrap_module_function(step_reward_mod, "compute_step_reward", "cl.step_reward_orig")
+        profiler.wrap_module_function(br_mod, "compute_step_reward", "cl.step_reward")
+        profiler.wrap_module_function(reward_mod, "compute_reward_batch", "reward.compute_batch")
+        profiler.wrap_module_function(reward_mod, "compute_road_border_penalty", "reward.road_border")
+        profiler.wrap_module_function(reward_mod, "compute_lane_departure_penalty", "reward.lane_departure")
+        profiler.wrap_module_function(reward_mod, "compute_safety_score_batch", "reward.safety")
+        profiler.wrap_module_function(reward_mod, "compute_progress_score_batch", "reward.progress")
+        profiler.wrap_module_function(reward_mod, "compute_feasibility_score_batch", "reward.feasibility")
+        profiler.wrap_module_function(reward_mod, "compute_centerline_score_batch", "reward.centerline")
+        profiler.wrap_module_function(loss_mod, "compute_batched_grpo_loss", "training.grpo_loss")
 
-    # Instrument rollout manager
-    if hasattr(trainer, 'batched_rollout_manager'):
-        profiler.wrap_function(trainer.batched_rollout_manager, "run_rollouts", "phase.batched_rollouts")
-        profiler.wrap_function(trainer.batched_rollout_manager, "_normalize_batch", "cl.normalize")
-        profiler.wrap_function(trainer.batched_rollout_manager, "_build_batched_composer", "cl.build_composer")
-    if hasattr(trainer, 'rollout_manager'):
-        profiler.wrap_function(trainer.rollout_manager, "run_rollout", "phase.single_rollout")
+        from exploration_policy import utils as ep_utils
+        profiler.wrap_module_function(ep_utils, "generate_reference_trajectory", "generation.reference_traj")
+        profiler.wrap_module_function(ep_utils, "run_frozen_encoder", "generation.frozen_encoder")
 
-    # Instrument the DiT GRPO phase
-    profiler.wrap_function(trainer, "_run_dit_grpo", "phase.dit_grpo")
+        if hasattr(trainer, 'batched_rollout_manager'):
+            profiler.wrap_function(trainer.batched_rollout_manager, "run_rollouts", "phase.batched_rollouts")
+            profiler.wrap_function(trainer.batched_rollout_manager, "_normalize_batch", "cl.normalize")
+            profiler.wrap_function(trainer.batched_rollout_manager, "_build_batched_composer", "cl.build_composer")
+        if hasattr(trainer, 'rollout_manager'):
+            profiler.wrap_function(trainer.rollout_manager, "run_rollout", "phase.single_rollout")
 
-    # State update functions — patch both original module and importing module
-    from rlvr.closed_loop import state_update as su_mod
-    profiler.wrap_module_function(su_mod, "update_scene_state", "cl.state_update_orig")
-    profiler.wrap_module_function(br_mod, "update_scene_state", "cl.state_update")
-    profiler.wrap_module_function(br_mod, "transform_positions_to_ego_frame", "cl.transform_positions")
+        profiler.wrap_function(trainer, "_run_dit_grpo", "phase.dit_grpo")
 
-    # Also instrument load_npz
-    import preference_optimization.utils as po_utils
-    profiler.wrap_module_function(po_utils, "load_npz_data", "io.load_npz")
+        from rlvr.closed_loop import state_update as su_mod
+        profiler.wrap_module_function(su_mod, "update_scene_state", "cl.state_update_orig")
+        profiler.wrap_module_function(br_mod, "update_scene_state", "cl.state_update")
+        profiler.wrap_module_function(br_mod, "transform_positions_to_ego_frame", "cl.transform_positions")
 
-    torch.cuda.reset_peak_memory_stats()
-    wall_start = time.perf_counter()
+        import preference_optimization.utils as po_utils
+        profiler.wrap_module_function(po_utils, "load_npz_data", "io.load_npz")
 
-    metrics = trainer.train_epoch(scene_paths, epoch=1)
+        torch.cuda.reset_peak_memory_stats()
+        wall_start = time.perf_counter()
 
-    total_wall = time.perf_counter() - wall_start
+        metrics = trainer.train_epoch(scene_paths, epoch=1)
+
+        total_wall = time.perf_counter() - wall_start
+
     return total_wall, metrics
 
 
@@ -474,7 +464,10 @@ def profile_eval(model, model_args, scene_paths, profiler: Profiler):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Profile training epoch")
+    if not torch.cuda.is_available():
+        raise RuntimeError("This profiler requires CUDA. No GPU detected.")
+
+    parser = argparse.ArgumentParser(description="Profile training epoch (requires CUDA)")
     parser.add_argument("--model_path", required=True, help="Base model .pth path")
     parser.add_argument("--scenes", required=True, help="Scene list JSON")
     parser.add_argument("--mode", required=True, choices=["rsft", "explorer", "closed_loop", "eval"],
@@ -509,30 +502,31 @@ def main():
     for epoch_i in range(args.n_epochs):
         profiler = Profiler()
 
-        print(f"\n{'='*60}")
-        print(f"PROFILING: mode={args.mode}, n_scenes={len(scene_paths)}, epoch={epoch_i+1}/{args.n_epochs}")
-        print(f"{'='*60}\n")
+        try:
+            print(f"\n{'='*60}")
+            print(f"PROFILING: mode={args.mode}, n_scenes={len(scene_paths)}, epoch={epoch_i+1}/{args.n_epochs}")
+            print(f"{'='*60}\n")
 
-        if args.mode == "rsft":
-            total_wall, metrics = profile_rsft(model, model_args, scene_paths, args.config, profiler)
-        elif args.mode == "explorer":
-            total_wall, metrics = profile_explorer(model, model_args, scene_paths, args.config, profiler)
-        elif args.mode == "closed_loop":
-            total_wall, metrics = profile_closed_loop(model, model_args, scene_paths, args.config, profiler)
-        elif args.mode == "eval":
-            total_wall, metrics = profile_eval(model, model_args, scene_paths, profiler)
-        else:
-            raise ValueError(f"Unknown mode: {args.mode}")
+            if args.mode == "rsft":
+                total_wall, metrics = profile_rsft(model, model_args, scene_paths, args.config, profiler)
+            elif args.mode == "explorer":
+                total_wall, metrics = profile_explorer(model, model_args, scene_paths, args.config, profiler)
+            elif args.mode == "closed_loop":
+                total_wall, metrics = profile_closed_loop(model, model_args, scene_paths, args.config, profiler)
+            elif args.mode == "eval":
+                total_wall, metrics = profile_eval(model, model_args, scene_paths, profiler)
+            else:
+                raise ValueError(f"Unknown mode: {args.mode}")
 
-        print(profiler.report(total_wall))
-        profiler.unpatch_all()
+            print(profiler.report(total_wall))
 
-        # Print key metrics
-        if isinstance(metrics, dict):
-            print("\nTraining metrics:")
-            for k, v in sorted(metrics.items()):
-                if isinstance(v, float):
-                    print(f"  {k}: {v:.4f}")
+            if isinstance(metrics, dict):
+                print("\nTraining metrics:")
+                for k, v in sorted(metrics.items()):
+                    if isinstance(v, float):
+                        print(f"  {k}: {v:.4f}")
+        finally:
+            profiler.unpatch_all()
 
 
 if __name__ == "__main__":
