@@ -267,17 +267,19 @@ def compute_batched_trajectory_losses(
     eps = 1e-3
 
     # Expand data to B=N. Supports B=1 (expand) and B=N (pass through).
+    # Only validate/expand tensors whose dim0 matches the scene batch size;
+    # non-batched metadata tensors (e.g. ego_shape [3], lane geometry) pass through.
+    B_scene = data["ego_current_state"].shape[0]
     batch_data = {}
     for k, v in data.items():
-        if isinstance(v, torch.Tensor):
-            B = v.shape[0]
-            if B == 1:
+        if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == B_scene:
+            if B_scene == 1:
                 batch_data[k] = v.expand(N, *v.shape[1:]).contiguous()
-            elif B == N:
+            elif B_scene == N:
                 batch_data[k] = v
             else:
                 raise ValueError(
-                    f"data['{k}'] has B={B}, expected 1 or N={N}"
+                    f"data['{k}'] has B={B_scene}, expected 1 or N={N}"
                 )
         else:
             batch_data[k] = v

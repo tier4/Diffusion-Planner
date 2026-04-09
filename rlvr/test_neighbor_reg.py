@@ -287,5 +287,27 @@ class TestBatchedTrajectoryLossesValidation:
             )
 
 
+    def test_non_batched_metadata_tensors_are_allowed(self):
+        """Non-batched metadata tensors should not be rejected or reshaped."""
+        from rlvr.grpo_loss import compute_batched_trajectory_losses
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        N = 4
+        trajectories = torch.randn(N, 80, 4)
+        noise = torch.randn(1, 5, 80, 4)
+        t = torch.tensor([0.5])
+
+        data = _make_scene_data(B=1, P=5, T=80)
+        data["ego_shape"] = torch.tensor([4.8, 2.0, 1.7])
+        data["lane_geometry"] = torch.randn(8, 20, 2)
+
+        losses = compute_batched_trajectory_losses(
+            model, data, trajectories, model_args, noise, t,
+            torch.device("cpu"),
+        )
+        assert losses is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
