@@ -267,7 +267,7 @@ def train_epoch_batched(
     lon_lambda = scheduled.get("longitudinal_lambda", config.lambda_lon)
     lon_scale = scheduled.get("longitudinal_scale", 10.0)
     lat_eta = scheduled.get("lateral_eta", 0.0)
-    lat_lambda = scheduled.get("lateral_lambda", getattr(config, 'lambda_lat', 2.0))
+    lat_lambda = scheduled.get("lateral_lambda", config.lambda_lat)
     lat_scale = scheduled.get("lateral_scale", 5.0)
 
     # 3. Generate K trajectories for all scenes (batched)

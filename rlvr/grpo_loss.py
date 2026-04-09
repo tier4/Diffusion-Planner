@@ -520,6 +520,14 @@ def _compute_neighbor_reg_loss(
 
     B = data["ego_current_state"].shape[0]
     if B > 1:
+        # All B entries must be the same scene (batched trainers expand per-scene
+        # data to B=keep_per). Bail out if different scenes are mixed in.
+        ego = data["ego_current_state"]
+        if not torch.allclose(ego[:1].expand_as(ego), ego):
+            raise ValueError(
+                f"_compute_neighbor_reg_loss: B={B} with mixed scenes. "
+                "Neighbor reg requires single-scene batches."
+            )
         data = {k: v[:1] if isinstance(v, torch.Tensor) else v for k, v in data.items()}
 
     inner = policy_model.module if hasattr(policy_model, "module") else policy_model
