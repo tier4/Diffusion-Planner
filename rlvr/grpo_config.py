@@ -429,6 +429,20 @@ class GRPOConfig:
         progress = (epoch - 1) / (total_epochs - 1)
 
         if stype == "linear":
+            # Optional end_epoch: ramp completes at this epoch, then holds end value.
+            # E.g. {"type": "linear", "start": 1.2, "end": 1.0, "end_epoch": 8}
+            end_ep = spec.get("end_epoch")
+            if end_ep is not None:
+                end_ep = int(end_ep)
+                if not 1 < end_ep <= total_epochs:
+                    raise ValueError(
+                        f"end_epoch for '{name}' must be in (1, {total_epochs}], "
+                        f"got {end_ep}"
+                    )
+                if epoch >= end_ep:
+                    return end
+                local_progress = (epoch - 1) / (end_ep - 1)
+                return start + (end - start) * local_progress
             return start + (end - start) * progress
 
         if stype == "cosine":

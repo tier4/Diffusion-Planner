@@ -551,6 +551,9 @@ class TrajectoryRanker:
         plot_indices = [selected_idx] if selected_idx not in top3_indices else []
         plot_indices += [i for i in rank_order[-min(3, N):][::-1]]
 
+        all_speeds = []
+        all_curvs = []
+
         for plot_i, idx in enumerate(plot_indices):
             st = self.sampled_trajectories[idx]
             traj = st.trajectory
@@ -564,8 +567,10 @@ class TrajectoryRanker:
                 color = _DIVERGING_CMAP(rank_frac)
                 lw = 1.8
 
-            vel = _calculate_velocities(traj, ego_state)
+            vel = _calculate_velocities(traj, ego_state) / 3.6  # km/h -> m/s
             curv = _calculate_curvature(traj, ego_state)
+            all_speeds.append(vel)
+            all_curvs.append(curv)
             t = np.arange(len(vel))
             sel_tag = " [SEL]" if is_sel else ""
             ax_speed.plot(
@@ -582,25 +587,37 @@ class TrajectoryRanker:
             gt_vel = _gt_velocities(ego_future, ego_state)
             gt_curv = _gt_curvature(ego_future, ego_state)
             if gt_vel is not None:
+                gt_vel_ms = gt_vel / 3.6  # km/h -> m/s
+                all_speeds.append(gt_vel_ms)
                 ax_speed.plot(
-                    np.arange(len(gt_vel)), gt_vel,
+                    np.arange(len(gt_vel_ms)), gt_vel_ms,
                     "k--", linewidth=2, alpha=0.7, label="GT",
                 )
             if gt_curv is not None:
+                all_curvs.append(gt_curv)
                 ax_curv.plot(
                     np.arange(len(gt_curv)), gt_curv,
                     "k--", linewidth=2, alpha=0.7,
                 )
 
-        ax_speed.set_ylabel("Speed (km/h)")
-        ax_speed.set_ylim(0, 80)
+        # Auto-scale y-axes with 10% padding
+        if all_speeds:
+            all_v = np.concatenate(all_speeds)
+            v_min, v_max = float(all_v.min()), float(all_v.max())
+            v_pad = max(0.5, (v_max - v_min) * 0.1)
+            ax_speed.set_ylim(max(0, v_min - v_pad), v_max + v_pad)
+        ax_speed.set_ylabel("Speed (m/s)")
         ax_speed.set_title("Speed (top-3 + selected)")
         ax_speed.legend(loc="upper right", fontsize=7)
         ax_speed.grid(True, alpha=0.3)
 
+        if all_curvs:
+            all_c = np.concatenate(all_curvs)
+            c_min, c_max = float(all_c.min()), float(all_c.max())
+            c_pad = max(0.01, (c_max - c_min) * 0.1)
+            ax_curv.set_ylim(c_min - c_pad, c_max + c_pad)
         ax_curv.set_ylabel("Curvature (1/m)")
         ax_curv.set_xlabel("Time step")
-        ax_curv.set_ylim(-0.2, 0.2)
         ax_curv.set_title("Curvature (top-3 + selected)")
         ax_curv.grid(True, alpha=0.3)
         ax_curv.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
@@ -837,8 +854,9 @@ def build_interface(
                 cb_cl = gr.Checkbox(value=False, label="Centerline following")
                 sl_cl = gr.Slider(0.1, 15.0, value=5.0, step=0.1, label="CL scale")
 
-                cb_spd = gr.Checkbox(value=False, label="Speed (GT cap)")
+                cb_spd = gr.Checkbox(value=False, label="Speed")
                 sl_spd = gr.Slider(0.1, 15.0, value=5.0, step=0.1, label="SPD scale")
+                spd_stretch = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="SPD stretch (1.0=keep, 1.3=30% faster)")
 
                 cb_lk = gr.Checkbox(value=False, label="Lane keeping")
                 sl_lk = gr.Slider(0.1, 15.0, value=5.0, step=0.1, label="LK scale")
@@ -870,7 +888,7 @@ def build_interface(
 
         # --- Component lists for callbacks ---
         editor_guidance_components = [
-            cb_cl, sl_cl, cb_spd, sl_spd, cb_lk, sl_lk,
+            cb_cl, sl_cl, cb_spd, sl_spd, spd_stretch, cb_lk, sl_lk,
             cb_rb, sl_rb, cb_rf, sl_rf, cb_col, sl_col,
             cb_anc, sl_anc, cb_lat, sl_lat, eta_lat, cb_lon, sl_lon, eta_lon,
         ]
@@ -899,6 +917,7 @@ def build_interface(
                 g.get("centerline_following", (False, 5.0, {}))[1],
                 g.get("speed", (False, 1.0, {}))[0],
                 g.get("speed", (False, 5.0, {}))[1],
+                g.get("speed", (False, 1.0, {}))[2].get("stretch", 1.0),
                 g.get("lane_keeping", (False, 1.0, {}))[0],
                 g.get("lane_keeping", (False, 5.0, {}))[1],
                 g.get("road_border", (False, 1.0, {}))[0],
@@ -920,7 +939,7 @@ def build_interface(
         # --- Helper: read editor into slot config ---
         def _read_editor_into_slot(
             noise_val, global_g_val, is_det,
-            cl_on, cl_s, spd_on, spd_s, lk_on, lk_s,
+            cl_on, cl_s, spd_on, spd_s, spd_stretch_val, lk_on, lk_s,
             rb_on, rb_s, rf_on, rf_s, col_on, col_s,
             anc_on, anc_s, lat_on, lat_s, eta_lat_val, lon_on, lon_s, eta_lon_val,
         ) -> TrajectorySlotConfig:
@@ -930,7 +949,9 @@ def build_interface(
                 is_deterministic=bool(is_det),
             )
             slot.guidance["centerline_following"] = (bool(cl_on), float(cl_s), {})
-            slot.guidance["speed"] = (bool(spd_on), float(spd_s), {})
+            slot.guidance["speed"] = (bool(spd_on), float(spd_s), {
+                "stretch": float(spd_stretch_val),
+            })
             slot.guidance["lane_keeping"] = (bool(lk_on), float(lk_s), {})
             slot.guidance["road_border"] = (bool(rb_on), float(rb_s), {})
             slot.guidance["route_following"] = (bool(rf_on), float(rf_s), {})
