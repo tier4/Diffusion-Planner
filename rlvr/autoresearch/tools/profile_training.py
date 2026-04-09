@@ -197,7 +197,8 @@ def load_scene_paths(scenes_json: str, n_scenes: int) -> list[str]:
 # RSFT profiling
 # ---------------------------------------------------------------------------
 
-def profile_rsft(model, model_args, scene_paths, config_path: str | None, profiler: Profiler):
+def profile_rsft(model, model_args, scene_paths, config_path: str | None, profiler: Profiler,
+                  epoch: int = 1, n_epochs: int = 1):
     """Profile Ranked SFT training epoch."""
     from rlvr.grpo_config import GRPOConfig
     from rlvr.reward import RewardConfig
@@ -214,7 +215,7 @@ def profile_rsft(model, model_args, scene_paths, config_path: str | None, profil
         config.diffusion_k_steps = 8
         config.grad_accum_groups = 8
         config.sft_batch_size = 1
-        config.train_epochs = 1
+        config.train_epochs = n_epochs
 
     reward_config = RewardConfig()
     reward_config.enable_lane_departure = True
@@ -254,7 +255,7 @@ def profile_rsft(model, model_args, scene_paths, config_path: str | None, profil
     metrics = train_epoch_ranked_sft(
         model=model, model_args=model_args, optimizer=optimizer,
         scene_paths=scene_paths, config=config,
-        reward_config=reward_config, device=DEVICE, epoch=1,
+        reward_config=reward_config, device=DEVICE, epoch=epoch,
     )
 
     total_wall = time.perf_counter() - wall_start
@@ -265,7 +266,8 @@ def profile_rsft(model, model_args, scene_paths, config_path: str | None, profil
 # Explorer profiling
 # ---------------------------------------------------------------------------
 
-def profile_explorer(model, model_args, scene_paths, config_path: str | None, profiler: Profiler):
+def profile_explorer(model, model_args, scene_paths, config_path: str | None, profiler: Profiler,
+                     epoch: int = 1, n_epochs: int = 1):
     """Profile Guidance Explorer training epoch."""
     import tempfile
 
@@ -281,7 +283,7 @@ def profile_explorer(model, model_args, scene_paths, config_path: str | None, pr
         config.noise_scale_range = [0.5, 2.0]
         config.diffusion_k_steps = 8
         config.grad_accum_groups = 8
-        config.train_epochs = 1
+        config.train_epochs = n_epochs
         config.exploration_loss_type = "advantage_logprob"
 
     config.use_exploration_policy = True
@@ -330,7 +332,7 @@ def profile_explorer(model, model_args, scene_paths, config_path: str | None, pr
         torch.cuda.reset_peak_memory_stats()
         wall_start = time.perf_counter()
 
-        metrics = trainer.train_epoch(scene_paths, epoch=1)
+        metrics = trainer.train_epoch(scene_paths, epoch=epoch)
 
         total_wall = time.perf_counter() - wall_start
 
@@ -341,7 +343,8 @@ def profile_explorer(model, model_args, scene_paths, config_path: str | None, pr
 # Closed-Loop profiling
 # ---------------------------------------------------------------------------
 
-def profile_closed_loop(model, model_args, scene_paths, config_path: str | None, profiler: Profiler):
+def profile_closed_loop(model, model_args, scene_paths, config_path: str | None, profiler: Profiler,
+                        epoch: int = 1, n_epochs: int = 1):
     """Profile Closed-Loop Exploration training epoch."""
     import tempfile
 
@@ -359,7 +362,7 @@ def profile_closed_loop(model, model_args, scene_paths, config_path: str | None,
         config.noise_scale_range = [0.5, 2.0]
         config.diffusion_k_steps = 8
         config.grad_accum_groups = 8
-        config.train_epochs = 1
+        config.train_epochs = n_epochs
 
     config.use_closed_loop = True
 
@@ -424,7 +427,7 @@ def profile_closed_loop(model, model_args, scene_paths, config_path: str | None,
         torch.cuda.reset_peak_memory_stats()
         wall_start = time.perf_counter()
 
-        metrics = trainer.train_epoch(scene_paths, epoch=1)
+        metrics = trainer.train_epoch(scene_paths, epoch=epoch)
 
         total_wall = time.perf_counter() - wall_start
 
@@ -507,12 +510,16 @@ def main():
             print(f"PROFILING: mode={args.mode}, n_scenes={len(scene_paths)}, epoch={epoch_i+1}/{args.n_epochs}")
             print(f"{'='*60}\n")
 
+            ep = epoch_i + 1
             if args.mode == "rsft":
-                total_wall, metrics = profile_rsft(model, model_args, scene_paths, args.config, profiler)
+                total_wall, metrics = profile_rsft(model, model_args, scene_paths, args.config, profiler,
+                                                   epoch=ep, n_epochs=args.n_epochs)
             elif args.mode == "explorer":
-                total_wall, metrics = profile_explorer(model, model_args, scene_paths, args.config, profiler)
+                total_wall, metrics = profile_explorer(model, model_args, scene_paths, args.config, profiler,
+                                                       epoch=ep, n_epochs=args.n_epochs)
             elif args.mode == "closed_loop":
-                total_wall, metrics = profile_closed_loop(model, model_args, scene_paths, args.config, profiler)
+                total_wall, metrics = profile_closed_loop(model, model_args, scene_paths, args.config, profiler,
+                                                          epoch=ep, n_epochs=args.n_epochs)
             elif args.mode == "eval":
                 total_wall, metrics = profile_eval(model, model_args, scene_paths, profiler)
             else:
