@@ -246,7 +246,7 @@ def compute_batched_trajectory_losses(
 
     Args:
         model: Diffusion planner model (in train mode).
-        data: Scene observation dict with B=1.
+        data: Scene observation dict with B=1 or B=N.
         trajectories_tensor: [N, T, 4] tensor of trajectories.
         model_args: Config with state_normalizer, etc.
         noise: [1, P, T, 4] noise (will be expanded to [N, ...]).
@@ -266,11 +266,21 @@ def compute_batched_trajectory_losses(
     future_len = model_args.future_len
     eps = 1e-3
 
-    # Expand data from B=1 to B=N
+    # Expand data to B=N. Supports B=1 (expand) and B=N (pass through).
+    # Only validate/expand tensors whose dim0 matches the scene batch size;
+    # non-batched metadata tensors (e.g. ego_shape [3], lane geometry) pass through.
+    B_scene = data["ego_current_state"].shape[0]
     batch_data = {}
     for k, v in data.items():
-        if isinstance(v, torch.Tensor) and v.shape[0] == 1:
-            batch_data[k] = v.expand(N, *v.shape[1:]).contiguous()
+        if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == B_scene:
+            if B_scene == 1:
+                batch_data[k] = v.expand(N, *v.shape[1:]).contiguous()
+            elif B_scene == N:
+                batch_data[k] = v
+            else:
+                raise ValueError(
+                    f"data['{k}'] has B={B_scene}, expected 1 or N={N}"
+                )
         else:
             batch_data[k] = v
 
@@ -494,7 +504,7 @@ def _compute_batched_losses_and_ref(
 
 
 def _compute_neighbor_reg_loss(
-    policy_model, data, model_args, device, K, P, future_len, config,
+    policy_model, data, model_args, device, K, P, future_len,
 ):
     """Compute MSE between LoRA and base model neighbor outputs.
 
@@ -502,8 +512,8 @@ def _compute_neighbor_reg_loss(
     from the LoRA model vs the base model (LoRA disabled). Returns a scalar loss
     with gradients flowing only through the LoRA model.
 
-    NOTE: assumes B=1 (single scene per call), which matches the GRPO trainer's
-    per-scene processing loop. Will raise AssertionError if B>1.
+    When B>1 (batched trainers expand per-scene data), uses only the first
+    element since all B entries come from the same scene.
     """
     import random as _random
 
@@ -511,7 +521,16 @@ def _compute_neighbor_reg_loss(
     from diffusion_planner.model.module.decoder import generate_prefix_mask
 
     B = data["ego_current_state"].shape[0]
-    assert B == 1, f"_compute_neighbor_reg_loss requires B=1, got B={B}"
+    if B > 1:
+        # All B entries must be the same scene (batched trainers expand per-scene
+        # data to B=keep_per). Bail out if different scenes are mixed in.
+        ego = data["ego_current_state"]
+        if not torch.allclose(ego[:1].expand_as(ego), ego):
+            raise ValueError(
+                f"_compute_neighbor_reg_loss: B={B} with mixed scenes. "
+                "Neighbor reg requires single-scene batches."
+            )
+        data = {k: v[:1] if isinstance(v, torch.Tensor) else v for k, v in data.items()}
 
     inner = policy_model.module if hasattr(policy_model, "module") else policy_model
     if not hasattr(inner, "disable_adapter"):
@@ -642,10 +661,8 @@ def compute_batched_grpo_loss(
         zero = torch.tensor(0.0, device=device, requires_grad=True)
         return zero, _empty_metrics()
 
-    B = data["ego_current_state"].shape[0]  # should be 1
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
-    eps = 1e-3
 
     # Average over K (noise, t) samples for stable gradients — matches DPO which
     # uses K=8. A single sample is dominated by noise at that specific timestep
@@ -686,7 +703,7 @@ def compute_batched_grpo_loss(
     neighbor_reg_loss_val = 0.0
     if neighbor_reg_w > 0 and P > 1:
         neighbor_reg_loss_val = _compute_neighbor_reg_loss(
-            policy_model, data, model_args, device, K, P, future_len, config,
+            policy_model, data, model_args, device, K, P, future_len,
         )
         total_loss = total_loss + neighbor_reg_w * neighbor_reg_loss_val
 

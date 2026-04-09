@@ -266,6 +266,9 @@ def train_epoch_batched(
     lon_eta = scheduled.get("longitudinal_eta", 0.0)
     lon_lambda = scheduled.get("longitudinal_lambda", config.lambda_lon)
     lon_scale = scheduled.get("longitudinal_scale", 10.0)
+    lat_eta = scheduled.get("lateral_eta", 0.0)
+    lat_lambda = scheduled.get("lateral_lambda", config.lambda_lat)
+    lat_scale = scheduled.get("lateral_scale", 5.0)
 
     # 3. Generate K trajectories for all scenes (batched)
     print(f"  Generating {K} trajectories × {N} scenes (batched)...")
@@ -277,6 +280,9 @@ def train_epoch_batched(
             longitudinal_eta=lon_eta,
             longitudinal_lambda=lon_lambda,
             longitudinal_scale=lon_scale,
+            lateral_eta=lat_eta,
+            lateral_lambda=lat_lambda,
+            lateral_scale=lat_scale,
         )  # [N, K, T, 4]
 
     # Free generation memory before scoring + training

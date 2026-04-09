@@ -5,7 +5,8 @@ Tests that:
 2. Gradients flow only through the LoRA model (base model is no_grad)
 3. neighbor_reg_only=True skips the neighbor SFT loss when reg is active
 4. neighbor_reg_only=True falls back to neighbor SFT loss when reg can't run
-5. B=1 assertion in GRPO path
+5. B>1 handling in GRPO path (same-scene slice, mixed-scene rejection)
+6. Batch dimension validation in compute_batched_trajectory_losses
 """
 
 from __future__ import annotations
@@ -202,54 +203,110 @@ class TestRankedSFTNeighborReg:
 class TestGRPONeighborReg:
     """Tests for _compute_neighbor_reg_loss in GRPO loss path."""
 
-    def test_b1_assertion(self):
-        """Should raise AssertionError when B > 1."""
-        from rlvr.grpo_config import GRPOConfig
+    def test_b_gt1_same_scene_slices_to_first(self):
+        """Should handle B > 1 by slicing to first element when all entries are same scene."""
         from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = _StubDiT(P=5, T=80)
-        data = _make_scene_data(B=2, P=5, T=80)  # B=2 should fail
+        # Build B=1 data then expand to B=4 (same scene repeated)
+        data_b1 = _make_scene_data(B=1, P=5, T=80)
+        data = {k: v.expand(4, *v.shape[1:]).contiguous() if isinstance(v, torch.Tensor) else v
+                for k, v in data_b1.items()}
         model_args = _make_model_args(P=5, T=80)
-        config = GRPOConfig(neighbor_reg_weight=1.0)
 
-        with pytest.raises(AssertionError, match="B=1"):
+        loss = _compute_neighbor_reg_loss(
+            model, data, model_args, torch.device("cpu"),
+            K=1, P=5, future_len=80,
+        )
+        assert isinstance(loss, torch.Tensor)
+
+    def test_b_gt1_mixed_scenes_raises(self):
+        """Should raise ValueError when B > 1 with different scenes."""
+        from rlvr.grpo_loss import _compute_neighbor_reg_loss
+
+        model = _StubDiT(P=5, T=80)
+        data = _make_scene_data(B=4, P=5, T=80)  # random data = different scenes
+        model_args = _make_model_args(P=5, T=80)
+
+        with pytest.raises(ValueError, match="mixed scenes"):
             _compute_neighbor_reg_loss(
                 model, data, model_args, torch.device("cpu"),
-                K=1, P=5, future_len=80, config=config,
+                K=1, P=5, future_len=80,
             )
 
     def test_reg_loss_nonzero(self):
         """Should produce non-zero loss for B=1."""
-        from rlvr.grpo_config import GRPOConfig
         from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = _StubDiT(P=5, T=80)
         data = _make_scene_data(B=1, P=5, T=80)
         model_args = _make_model_args(P=5, T=80)
-        config = GRPOConfig(neighbor_reg_weight=1.0)
 
         loss = _compute_neighbor_reg_loss(
             model, data, model_args, torch.device("cpu"),
-            K=1, P=5, future_len=80, config=config,
+            K=1, P=5, future_len=80,
         )
         assert isinstance(loss, torch.Tensor)
         assert loss.item() > 0, "Reg loss should be non-zero when LoRA changes output"
 
     def test_no_adapter_returns_zero(self):
         """Model without disable_adapter should return zero loss."""
-        from rlvr.grpo_config import GRPOConfig
         from rlvr.grpo_loss import _compute_neighbor_reg_loss
 
         model = nn.Linear(10, 10)
         data = _make_scene_data(B=1, P=5, T=80)
         model_args = _make_model_args(P=5, T=80)
-        config = GRPOConfig(neighbor_reg_weight=1.0)
 
         loss = _compute_neighbor_reg_loss(
             model, data, model_args, torch.device("cpu"),
-            K=1, P=5, future_len=80, config=config,
+            K=1, P=5, future_len=80,
         )
         assert loss.item() == 0.0
+
+
+class TestBatchedTrajectoryLossesValidation:
+    """Tests for data batch dimension validation in compute_batched_trajectory_losses."""
+
+    def test_invalid_batch_dim_raises(self):
+        """Should raise ValueError when data tensor has B != 1 and B != N."""
+        from rlvr.grpo_loss import compute_batched_trajectory_losses
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        N = 4
+        trajectories = torch.randn(N, 80, 4)
+        noise = torch.randn(1, 5, 80, 4)
+        t = torch.tensor([0.5])
+        # B=3 is neither 1 nor N=4
+        data = _make_scene_data(B=3, P=5, T=80)
+
+        with pytest.raises(ValueError, match="expected 1 or N=4"):
+            compute_batched_trajectory_losses(
+                model, data, trajectories, model_args, noise, t,
+                torch.device("cpu"),
+            )
+
+
+    def test_non_batched_metadata_tensors_are_allowed(self):
+        """Non-batched metadata tensors should not be rejected or reshaped."""
+        from rlvr.grpo_loss import compute_batched_trajectory_losses
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        N = 4
+        trajectories = torch.randn(N, 80, 4)
+        noise = torch.randn(1, 5, 80, 4)
+        t = torch.tensor([0.5])
+
+        data = _make_scene_data(B=1, P=5, T=80)
+        data["ego_shape"] = torch.tensor([4.8, 2.0, 1.7])
+        data["lane_geometry"] = torch.randn(8, 20, 2)
+
+        losses = compute_batched_trajectory_losses(
+            model, data, trajectories, model_args, noise, t,
+            torch.device("cpu"),
+        )
+        assert losses is not None
 
 
 if __name__ == "__main__":
