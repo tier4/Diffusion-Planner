@@ -102,9 +102,15 @@ class GRPOTrainer:
             w_smooth=config.w_smooth,
             w_feasibility=config.w_feasibility,
             w_centerline=config.w_centerline,
-            near_edge_scale=config.near_edge_scale,
-            wide_edge_scale=config.wide_edge_scale,
-            cont_edge_scale=config.cont_edge_scale,
+            rb_near_scale=config.rb_near_scale,
+            rb_wide_scale=config.rb_wide_scale,
+            rb_cont_scale=config.rb_cont_scale,
+            rb_gate_enabled=config.rb_gate_enabled,
+            rb_penalty_mode=config.rb_penalty_mode,
+            rb_cross_thresh=config.rb_cross_thresh,
+            rb_near_thresh=config.rb_near_thresh,
+            rb_wide_thresh=config.rb_wide_thresh,
+            rb_cont_thresh=config.rb_cont_thresh,
             max_lat_accel=config.max_lat_accel,
             lat_accel_scale=config.lat_accel_scale,
             enable_overprogress=config.enable_overprogress,
@@ -112,6 +118,14 @@ class GRPOTrainer:
             overprogress_penalty=config.overprogress_penalty,
             stopped_penalty=config.stopped_penalty,
             reward_mode=config.reward_mode,
+            enable_lane_departure=config.enable_lane_departure,
+            lane_gate_enabled=config.lane_gate_enabled,
+            lane_near_scale=config.lane_near_scale,
+            lane_wide_scale=config.lane_wide_scale,
+            lane_cont_scale=config.lane_cont_scale,
+            lane_near_thresh=config.lane_near_thresh,
+            lane_wide_thresh=config.lane_wide_thresh,
+            lane_cont_thresh=config.lane_cont_thresh,
         )
 
         # Evaluation: fixed scene subset from validation set, sampled once
@@ -553,7 +567,7 @@ class GRPOTrainer:
                 det_offroad.append(det_reward.off_road_fraction)
                 if det_reward.rb_crossing:
                     det_rb_crossings += 1
-                det_rb_near.append(det_reward.rb_near_frac)
+                det_rb_near.append(det_reward.rb_near_penalty)
                 det_components["safety"].append(det_reward.safety)
                 det_components["progress"].append(det_reward.progress)
                 det_components["smoothness"].append(det_reward.smoothness)

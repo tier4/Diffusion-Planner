@@ -93,8 +93,8 @@ def compute_step_reward(
 
     # --- Road border check ---
     rb_crossing = False
-    crossing_gate, _, _, rb_steps, _ = compute_road_border_penalty(
-        ego_mini, ego_shape, data,
+    crossing_gate, _, _, rb_steps, _, _ = compute_road_border_penalty(
+        ego_mini, ego_shape, data, config=reward_config,
     )
     if crossing_gate[0].item() < 0.5:
         rb_crossing = True

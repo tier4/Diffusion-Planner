@@ -311,7 +311,7 @@ def test_road_border_on_road():
     """Trajectory centered between road borders should have no crossing."""
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     data = _make_road_border_data(border_y_left=5.0, border_y_right=-5.0)
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         ego, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() > 0.5, f"Expected no crossing (gate=1), got {rb_gate[0]}"
@@ -323,7 +323,7 @@ def test_road_border_crossing():
     ego = _straight_line(speed_m_per_step=0.5)
     ego[:, 1] = 3.0  # drive right on the left border
     data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
     assert rb_gate[0].item() < 0.5, f"Expected crossing (gate=0), got {rb_gate[0]}"
@@ -331,20 +331,20 @@ def test_road_border_crossing():
 
 
 def test_road_border_near_penalty():
-    """Trajectory near (but not crossing) a road border should have wide_frac > 0.
+    """Trajectory near (but not crossing) a road border should have near_frac > 0.
 
-    wide_frac measures the fraction of timesteps where ego edge is within 40cm
-    of the border. near_frac uses a tighter 25cm threshold.
+    With default thresholds (near < 0.45m, wide = 0.45-0.60m), ego edge ~25cm
+    from border falls in the "near" zone.
     """
     ego = _straight_line(speed_m_per_step=0.5)
     # Drive close to right border at y=-3.0, ego width ~1.7 so edge at y-0.85
     ego[:, 1] = -1.9  # ego edge at ~-2.75, border at -3.0 → ~25cm gap
     data = _make_road_border_data(border_y_left=5.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
-    # Should not cross but should have wide proximity penalty (within 40cm)
-    assert wide_frac[0].item() > 0.0, f"Expected wide proximity (40cm) > 0, got {wide_frac[0]}"
+    # ~25cm gap is within the near zone (< 0.45m) with default thresholds
+    assert near_frac[0].item() > 0.0, f"Expected near proximity (45cm) > 0, got {near_frac[0]}"
     print(f"  PASS  road_border_near_penalty: gate={rb_gate[0]:.1f}, near={near_frac[0]:.3f}, wide={wide_frac[0]:.3f}")
 
 
@@ -352,7 +352,7 @@ def test_road_border_no_data():
     """Missing line_strings should return safe defaults."""
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     data = _make_lane_data()  # no line_strings key
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         ego, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() == 1.0, "No data should return gate=1 (safe)"
@@ -367,12 +367,53 @@ def test_road_border_batch():
     crossing_traj[:, 1] = 3.0  # on the left border
     trajs = torch.stack([safe, crossing_traj])
     data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         trajs, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() > 0.5, "Safe traj should not cross"
     assert rb_gate[1].item() < 0.5, "Crossing traj should trigger gate"
     print(f"  PASS  road_border_batch: gates={rb_gate.tolist()}")
+
+
+def test_road_border_survival_mode():
+    """In survival mode, early violations should get higher penalty than late ones.
+
+    We create two trajectories near the right border:
+    - traj_early: swerves near border from t=5 onward (early violation)
+    - traj_late: swerves near border only from t=60 onward (late violation)
+
+    The survival penalty = (T_valid - first_violation) / T_valid over timesteps 1..T-1,
+    so earlier first_violation → larger penalty.
+    """
+    survival_config = RewardConfig(rb_penalty_mode="survival", rb_near_thresh=0.45)
+    data = _make_road_border_data(border_y_left=5.0, border_y_right=-3.0)
+
+    # Early violation: drive near border starting at t=5
+    traj_early = _straight_line(speed_m_per_step=0.5)
+    for t in range(5, T):
+        traj_early[t, 1] = -1.9  # ego edge ~25cm from border at y=-3.0
+
+    # Late violation: drive near border starting at t=60
+    traj_late = _straight_line(speed_m_per_step=0.5)
+    for t in range(60, T):
+        traj_late[t, 1] = -1.9
+
+    trajs = torch.stack([traj_early, traj_late])
+    rb_gate, near_penalty, wide_penalty, _, _, _ = compute_road_border_penalty(
+        trajs, _default_ego_shape(), data, survival_config,
+    )
+    # Both should be non-crossing (gate=1)
+    assert rb_gate[0].item() > 0.5, f"Expected no crossing for early, got gate={rb_gate[0]}"
+    assert rb_gate[1].item() > 0.5, f"Expected no crossing for late, got gate={rb_gate[1]}"
+    # Both should have near penalty > 0
+    assert near_penalty[0].item() > 0, f"Expected near penalty for early, got {near_penalty[0]}"
+    assert near_penalty[1].item() > 0, f"Expected near penalty for late, got {near_penalty[1]}"
+    # Early violation should have strictly higher penalty
+    assert near_penalty[0].item() > near_penalty[1].item(), (
+        f"Early violation should have higher penalty than late: "
+        f"early={near_penalty[0]:.4f}, late={near_penalty[1]:.4f}"
+    )
+    print(f"  PASS  road_border_survival_mode: early={near_penalty[0]:.4f}, late={near_penalty[1]:.4f}")
 
 
 # -------------------------------------------------------------------------

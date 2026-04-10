@@ -12,6 +12,7 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 
 @dataclass
@@ -90,14 +91,25 @@ class GRPOConfig:
     w_centerline: float = 5.0
 
     # Reward tuning (passed to RewardConfig for training)
-    near_edge_scale: float = 3.0
-    wide_edge_scale: float = 0.2
-    cont_edge_scale: float = 0.0
+    # Road border penalty scales and thresholds
+    rb_near_scale: float = 3.0
+    rb_wide_scale: float = 0.2
+    rb_cont_scale: float = 0.0
+    rb_gate_enabled: bool = True   # if True, rb crossing is a hard safety gate
+    rb_penalty_mode: str = "frac"  # "frac" = fraction of timesteps (original), "survival" = first-violation time-decay
+    rb_cross_thresh: float = 0.20  # metres — ego perimeter within this = crossing
+    rb_near_thresh: float = 0.45   # metres — near zone boundary (+20cm vs lane)
+    rb_wide_thresh: float = 0.60   # metres — wide zone boundary (+20cm vs lane)
+    rb_cont_thresh: float = 1.00   # metres — continuous penalty max distance (+20cm vs lane)
+    # Lane departure penalty scales and thresholds
     enable_lane_departure: bool = False
     lane_gate_enabled: bool = False
     lane_near_scale: float = 3.0
     lane_wide_scale: float = 0.2
     lane_cont_scale: float = 0.0
+    lane_near_thresh: float = 0.25  # metres — near zone boundary
+    lane_wide_thresh: float = 0.40  # metres — wide zone boundary
+    lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     enable_overprogress: bool = True
@@ -311,11 +323,24 @@ class GRPOConfig:
     #   }
     schedules: dict = field(default_factory=dict)
 
+    # Backward compat: old field names → new field names
+    _FIELD_RENAMES: ClassVar[dict[str, str]] = {
+        "near_edge_scale": "rb_near_scale",
+        "wide_edge_scale": "rb_wide_scale",
+        "cont_edge_scale": "rb_cont_scale",
+    }
+
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
         """Load config from JSON file."""
         with open(path) as f:
             data = json.load(f)
+        # Rename legacy fields so old config JSONs keep working
+        for old, new in cls._FIELD_RENAMES.items():
+            if old in data and new not in data:
+                data[new] = data.pop(old)
+            elif old in data:
+                data.pop(old)  # new name takes precedence
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
     def to_json(self, path: str | Path) -> None:

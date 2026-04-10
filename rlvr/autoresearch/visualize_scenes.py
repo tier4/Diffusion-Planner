@@ -159,7 +159,7 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
     ax.grid(True, alpha=0.15)
     ax.legend(fontsize=7, loc="upper left")
 
-    rb_tag = f"rb_x={'Y' if r.rb_crossing else 'N'} rb_n={r.rb_near_frac:.2f}"
+    rb_tag = f"rb_x={'Y' if r.rb_crossing else 'N'} rb_n={r.rb_near_penalty:.2f}"
     ax.set_title(f"{rb_tag} rw={r.total:.1f}", fontsize=8)
 
 
@@ -288,7 +288,7 @@ def main():
             traj, data, r = infer(model_base, model_args, scenes[si])
             draw_scene(ax, scenes[si], traj, "Det", "blue", r)
             ax.set_title(f"[{si}] rb_x={'Y' if r.rb_crossing else 'N'} "
-                         f"rb_n={r.rb_near_frac:.2f} rw={r.total:.1f}", fontsize=8)
+                         f"rb_n={r.rb_near_penalty:.2f} rw={r.total:.1f}", fontsize=8)
 
         for j in range(len(indices), len(axes_flat)):
             axes_flat[j].set_visible(False)
