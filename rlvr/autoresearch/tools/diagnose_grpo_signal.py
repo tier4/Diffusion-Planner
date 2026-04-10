@@ -50,7 +50,7 @@ def diagnose_scene(model, model_args, npz_path, K, reward_config, sampler_config
             "k": k_i, "total": r.total, "progress": r.progress,
             "smoothness": r.smoothness, "lane_crossing": r.lane_crossing,
             "lane_near": r.lane_near_frac, "rb_crossing": r.rb_crossing,
-            "rb_near": r.rb_near_frac,
+            "rb_near": r.rb_near_penalty,
         })
 
     results.sort(key=lambda x: -x["total"])
@@ -70,8 +70,8 @@ def main():
     parser.add_argument("--enable_lane", action="store_true")
     parser.add_argument("--lane_gate", action="store_true")
     parser.add_argument("--w_progress", type=float, default=3.0)
-    parser.add_argument("--near_edge_scale", type=float, default=20.0)
-    parser.add_argument("--wide_edge_scale", type=float, default=5.0)
+    parser.add_argument("--rb_near_scale", type=float, default=20.0)
+    parser.add_argument("--rb_wide_scale", type=float, default=5.0)
     parser.add_argument("--lane_near_scale", type=float, default=30.0)
     parser.add_argument("--lane_wide_scale", type=float, default=10.0)
     parser.add_argument("--lane_cont_scale", type=float, default=5.0)
@@ -100,8 +100,8 @@ def main():
         enable_lane_departure=args.enable_lane,
         lane_gate_enabled=args.lane_gate,
         w_progress=args.w_progress,
-        near_edge_scale=args.near_edge_scale,
-        wide_edge_scale=args.wide_edge_scale,
+        rb_near_scale=args.rb_near_scale,
+        rb_wide_scale=args.rb_wide_scale,
         lane_near_scale=args.lane_near_scale,
         lane_wide_scale=args.lane_wide_scale,
         lane_cont_scale=args.lane_cont_scale,

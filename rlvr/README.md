@@ -24,10 +24,14 @@ The GRPO pipeline differs from the existing DPO pipeline in two key ways:
 ```
 rlvr/
   reward.py                  Rule-based reward (road border + safety + progress + feasibility
-                             + lane departure detection with K=3 nearest centerlines
+                             + lane departure detection with K=12 nearest lanes
                              + underprogress penalty, GT-normalized progress, survival mode
                              + lane_crossing_steps as terminal event in survival mode
-                             + SG-filtered lat_accel penalty, SG-trimmed jerk computation)
+                             + SG-filtered lat_accel penalty, SG-trimmed jerk computation
+                             + point-to-segment RB distance with pre-filtering
+                             + rb_penalty_mode: "frac" or "survival" (first-violation time-decay)
+                             + rear-end collision permanent exclusion
+                             + rb_min_dist in RewardBreakdown for eval reporting)
   grpo_loss.py               MSE-based advantage-weighted diffusion loss with K=8 averaging
                              (DEPRECATED — use logprob loss instead for trajectory shape learning)
   grpo_logprob_loss.py       DDV2-style Gaussian log-probability GRPO loss (NEW)
@@ -45,8 +49,9 @@ rlvr/
   grpo_sft_trainer.py        Ranked SFT trainer: generate N trajs, pick best by reward,
                              SG-filter, train with SFT diffusion loss (ego + neighbor GT)
                              + "gt_neighbor" and "baseline_neighbor" modes
-                             + Post-hoc no_block1 trick for L2 preservation (with neighbor reg)
-                             + Per-epoch scheduled reward weights and longitudinal guidance
+                             + neighbor_reg_only: MSE(lora_neighbor, base_neighbor) regularization
+                             + Post-hoc block ablation trick for L2 preservation
+                             + Per-epoch scheduled reward weights and guidance
   grpo_trainer.py            Standard GRPO training loop (batched loss)
                              + advantage_logprob loss path when grpo_loss_type="advantage_logprob"
   grpo_trainer_batched.py    Fully batched GRPO trainer (all scenes in ~5 forward passes)
@@ -82,7 +87,10 @@ rlvr/
     eval_reward_vs_gt.py     Per-scene reward breakdown vs ground truth
     eval_driving_metrics.py  Speed/lat_accel/path length/stopped metrics
     viz_guidance_actual.py   Visualize actual DiT inference with/without guidance
+    viz_lane_departure.py    Lane departure + road border distance viz (--mode lane/rb/both)
     grpo_viz.py              Visualize K trajectories per scene with reward ranking table
+    compute_baseline_cache.py  Precompute baseline/GT paths for progress ratio metrics
+    rb_campaign_launcher.py  Auto-queue experiment batches (env: RB_CAMPAIGN_EXP_DIR, RB_CAMPAIGN_MODEL)
   autoresearch/tests/         Tests for closed-loop components
     test_gae.py              Unit tests for GAE computation
     test_state_update.py     Unit tests for coordinate transforms
@@ -129,11 +137,6 @@ DiffusionDriveV2 (arXiv:2512.07745).
 }
 ```
 
-**Key results (30+ experiments):**
-- curve20 (20 miraikan scenes): 11→0/20 lane departures at epoch 9
-- Clean val (86 scenes): 18→14/86 lane departures with warm-start + mixed training
-- KL=0.1 eliminates stopped-scene regression (0 stopped for 12 epochs)
-
 **Advantage modes:**
 - `"normalized"` (recommended): standard GRPO, works with logprob
 - `"ddv2"`: inter-anchor truncated GRPO (clip negative→0, safety→-1). Too harsh for our scenes.
@@ -176,17 +179,9 @@ adapted for diffusion planners with reward-based selection and Savitzky-Golay tr
 }
 ```
 
-**Key results (April 2026, 70+ experiments):**
-
-*Legacy (no neighbor reg):*
-- Miraikan exit val: 25/50 → **0/50 lane departures** (with no_block0 trick)
-- Ego L2: +1.9% (baseline 5.388), Neighbor L2: +29% (baseline 4.393)
-
-*With neighbor regularization + longitudinal guidance scheduling (current best):*
-- noise_scale_range [0.5, 2.0], gentle lon guidance (eta 0→0.3)
-- **Best deployable: S1 ep7 no_blk1** — 0/50 val LD, **15.0m path**, ego +1.4%, neighbor +1.6%
-- Without lon guidance: S1 ep3 — 0/50 val LD, 13.1m path, ego +1.0%, neighbor +0.8%
-- Neighbor reg (`neighbor_reg_only=true, neighbor_reg_weight=1.0`) reduces neighbor degradation from +91% to +1.6%
+*With neighbor regularization:*
+- `neighbor_reg_only=true, neighbor_reg_weight=1.0` reduces neighbor L2 degradation significantly
+- noise_scale_range [0.5, 2.0] recommended
 
 **Block ablation trick:** After training with `lora_target="all"` (3 DiT blocks), zero out
 one block's LoRA weights post-hoc. With neighbor reg, **no_blk1 is best**. Without reg,
@@ -200,14 +195,6 @@ per-parameter changes, preventing destabilization.
 **neighbor_reg_weight must be ≥ 1.0** at lr=5e-4. Tested 0.5 and 0.75 — both diverge at
 epoch 5-6 with rb_cross>20. Lower reg gives the ego loss more freedom but insufficient
 constraint on neighbor weights causes catastrophic drift through shared DiT parameters.
-
-**LR sweep:**
-
-| LR | Best LD | Epoch | Stable window | no_block0 ego/neigh Δ |
-|----|---------|-------|---------------|----------------------|
-| 5e-5 | 1/50 | 5 | ep3-9 | +4.8% / +55% |
-| 2e-5 | 0/50 | 12 | ep11-13 | +2.9% / +38% |
-| 1e-5 | 2/50 (0 w/ no_block0) | 20 | ep14-20 | **+1.9% / +29%** |
 
 ### Random Guidance Mode
 
@@ -238,15 +225,17 @@ Configure via `closed_loop_batch_size` in `GRPOConfig` (default 8 for 24GB VRAM)
 `R = safety_product * quality_score + (1 - safety_product) * (-50)`
 
 **Safety gates** (hard, binary — any trigger floors reward to -50):
-- Collision gate: ego collides with neighbor vehicle
-- Road border gate: ego perimeter (80 sample points) crosses road border (within 10cm)
+- Collision gate: ego collides with neighbor vehicle (rear-end collisions permanently excluded: once an NPC overlaps ego from behind at any timestep, that NPC is excluded from all future collision checks)
+- Road border gate (`rb_gate_enabled`): ego perimeter (80 sample points) crosses road border (within `rb_cross_thresh`, default 0.20m)
 - Red light gate: ego runs red light
 
 **Quality score** (soft, weighted sum):
-`quality = w_progress * progress + w_safety * safety + w_smooth * smoothness + w_centerline * centerline + ttc_bonus - rb_near_penalty - rb_wide_penalty`
+`quality = w_progress * progress + w_safety * safety + w_smooth * smoothness + w_centerline * centerline + ttc_bonus - rb_penalty - lane_penalty`
 
-Road border proximity penalties (`near_edge_scale`, `wide_edge_scale`) subtract from quality
-even when the ego doesn't cross the border, penalizing trajectories that get close.
+Road border proximity penalties (`rb_near_scale`, `rb_wide_scale`, `rb_cont_scale`) subtract from quality
+even when the ego doesn't cross the border, penalizing trajectories that get close. Configurable
+distance thresholds: `rb_cross_thresh`/`rb_near_thresh`/`rb_wide_thresh`/`rb_cont_thresh` (defaults: 0.20/0.45/0.60/1.00m).
+`rb_penalty_mode`: `"frac"` (fraction of timesteps in violation) or `"survival"` (first-violation time-decay — early violations penalized more than late ones).
 
 ### Components
 
@@ -318,12 +307,12 @@ weighted values (column * weight) so that columns add up to the total.
 
 `compute_lane_departure_penalty()` detects when the ego vehicle leaves its lane:
 
-1. Find K=3 nearest centerlines from **different lane segments** (not just closest points)
-2. For each of 80 ego perimeter sample points, check containment against all K lanes
-3. Thresholds: crossing (clearance <10cm from lane edge, including outside), near (<25cm), wide (<40cm), continuous (<80cm)
-4. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
-   - `lane_crossing_steps`: first timestep of lane departure per trajectory (for survival mode)
-   - `lane_wide_frac`: fraction of timesteps within 40cm of lane edge
+1. Find K=12 nearest lanes by min centerline distance
+2. Build lane polygons from left/right boundary offsets, classify outer (road-edge) boundaries via midpoint nudge
+3. For each of 36 ego perimeter sample points, check polygon containment (GPU ray casting)
+4. Distance to outer boundary segments for near/wide/cont soft penalties
+5. Configurable thresholds: `lane_near_thresh` (default 0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m)
+6. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
 
 Enabled via `enable_lane_departure: true` in config. Can be used as:
 - **Soft penalty** via `lane_near_scale`, `lane_wide_scale`, `lane_cont_scale`

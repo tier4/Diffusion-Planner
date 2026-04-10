@@ -69,7 +69,7 @@ def check_scene_t0(npz_path: str, device: torch.device, threshold: float = 0.15,
     # Road border check
     rb_clearance = 1.0
     if check_road_border:
-        rb_gate, rb_near, rb_wide, _, _ = compute_road_border_penalty(
+        rb_gate, rb_near, rb_wide, _, _, _ = compute_road_border_penalty(
             traj_t0, ego_shape, data
         )
         if rb_gate.item() < 0.5:

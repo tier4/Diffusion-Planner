@@ -76,11 +76,19 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
 
 @torch.no_grad()
 def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
-                        batch_size=150):
-    """Evaluate model on scenes. Uses batched inference when batch_size > 1."""
+                        batch_size=150, baseline_cache=None):
+    """Evaluate model on scenes. Uses batched inference when batch_size > 1.
+
+    Args:
+        baseline_cache: dict mapping scene_path -> {"baseline_path": float, "gt_path": float}.
+            If provided, computes progress ratios vs GT and vs baseline.
+    """
     model.eval()
     totals, offroads, collisions, path_lengths = [], [], 0, []
-    rb_crossings, rb_nears = 0, []
+    rb_crossings, rb_nears, rb_wides = 0, [], []
+    rb_min_dists = []  # per-scene min distance to road border (metres)
+    gt_progress_ratios = []   # model_path / gt_path per scene
+    base_progress_ratios = [] # model_path / baseline_path per scene
     lane_departures, lane_nears, lane_wides = 0, [], []
 
     if batch_size > 1:
@@ -101,6 +109,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
         # Process in batches
         for chunk_start in range(0, len(all_data), batch_size):
             chunk_data = all_data[chunk_start:chunk_start + batch_size]
+            chunk_paths = all_paths[chunk_start:chunk_start + batch_size]
             B_chunk = len(chunk_data)
 
             # Stack into batch
@@ -136,7 +145,9 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                     collisions += 1
                 if reward.rb_crossing:
                     rb_crossings += 1
-                rb_nears.append(reward.rb_near_frac)
+                rb_nears.append(reward.rb_near_penalty)
+                rb_wides.append(reward.rb_wide_penalty)
+                rb_min_dists.append(reward.rb_min_dist)
                 if reward.lane_crossing:
                     lane_departures += 1
                 lane_nears.append(reward.lane_near_frac)
@@ -144,6 +155,11 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                 traj_np = det_trajs[local_i].cpu().numpy()
                 pl = np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
+                sp = chunk_paths[local_i]
+                if baseline_cache and sp in baseline_cache:
+                    bc = baseline_cache[sp]
+                    gt_progress_ratios.append(pl / max(bc["gt_path"], 1e-3))
+                    base_progress_ratios.append(pl / max(bc["baseline_path"], 1e-3))
     else:
         # Sequential evaluation (original)
         for path in scene_paths:
@@ -161,13 +177,19 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                     collisions += 1
                 if reward.rb_crossing:
                     rb_crossings += 1
-                rb_nears.append(reward.rb_near_frac)
+                rb_nears.append(reward.rb_near_penalty)
+                rb_wides.append(reward.rb_wide_penalty)
+                rb_min_dists.append(reward.rb_min_dist)
                 if reward.lane_crossing:
                     lane_departures += 1
                 lane_nears.append(reward.lane_near_frac)
                 lane_wides.append(reward.lane_wide_frac)
                 pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
+                if baseline_cache and path in baseline_cache:
+                    bc = baseline_cache[path]
+                    gt_progress_ratios.append(pl / max(bc["gt_path"], 1e-3))
+                    base_progress_ratios.append(pl / max(bc["baseline_path"], 1e-3))
             except Exception as e:
                 print(f"  [eval] skipping {Path(path).name}: {e}")
 
@@ -177,6 +199,9 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                 "path_length_mean": 0, "stopped_count": 0, "rb_crossings": 0, "rb_near_mean": 0}
 
     pl_arr = np.array(path_lengths)
+    rb_nears_arr = np.array(rb_nears) if rb_nears else np.zeros(1)
+    rb_wides_arr = np.array(rb_wides) if rb_wides else np.zeros(1)
+    rb_dists_arr = np.array(rb_min_dists) if rb_min_dists else np.full(1, 99.0)
     result = {
         "n_scenes": n,
         "reward_mean": float(np.mean(totals)),
@@ -185,15 +210,36 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
         "path_length_mean": float(pl_arr.mean()),
         "stopped_count": int((pl_arr < 1.0).sum()),
         "rb_crossings": rb_crossings,
-        "rb_near_mean": float(np.mean(rb_nears)),
+        "rb_near_mean": float(rb_nears_arr.mean()),
+        "rb_wide_mean": float(rb_wides_arr.mean()),
+        "rb_dist_min": float(rb_dists_arr.min()),
+        "rb_dist_p5": float(np.percentile(rb_dists_arr, 5)),
+        "rb_dist_p25": float(np.percentile(rb_dists_arr, 25)),
+        "rb_dist_median": float(np.median(rb_dists_arr)),
         "lane_departures": lane_departures,
         "lane_near_mean": float(np.mean(lane_nears)) if lane_nears else 0.0,
         "lane_wide_mean": float(np.mean(lane_wides)) if lane_wides else 0.0,
     }
+    # Progress ratios (only if baseline cache was provided)
+    gt_pr_arr = np.array(gt_progress_ratios) if gt_progress_ratios else None
+    base_pr_arr = np.array(base_progress_ratios) if base_progress_ratios else None
+    if gt_pr_arr is not None:
+        result["progress_vs_gt_p5"] = float(np.percentile(gt_pr_arr, 5))
+        result["progress_vs_gt_p25"] = float(np.percentile(gt_pr_arr, 25))
+        result["progress_vs_gt_median"] = float(np.median(gt_pr_arr))
+        result["progress_vs_base_p5"] = float(np.percentile(base_pr_arr, 5))
+        result["progress_vs_base_median"] = float(np.median(base_pr_arr))
+
     tag = f" [{label}]" if label else ""
+    progress_str = ""
+    if gt_pr_arr is not None:
+        progress_str = (f"prog_vs_gt=[p5={np.percentile(gt_pr_arr,5):.2f} med={np.median(gt_pr_arr):.2f}], "
+                        f"prog_vs_base=[p5={np.percentile(base_pr_arr,5):.2f} med={np.median(base_pr_arr):.2f}], ")
     print(f"  Eval{tag}: {n} scenes, reward={result['reward_mean']:+.2f}, "
           f"rb_cross={rb_crossings}/{n}, lane_dep={lane_departures}/{n}, "
-          f"rb_near={np.mean(rb_nears):.2f}, "
+          f"rb_near={rb_nears_arr.mean():.2f}, rb_wide={rb_wides_arr.mean():.2f}, "
+          f"rb_dist=[min={rb_dists_arr.min():.2f} p5={np.percentile(rb_dists_arr,5):.2f} p25={np.percentile(rb_dists_arr,25):.2f} med={np.median(rb_dists_arr):.2f}], "
+          f"{progress_str}"
           f"lane_near={result['lane_near_mean']:.2f}, lane_wide={result['lane_wide_mean']:.2f}, "
           f"collision={result['collision_rate']:.1%}, "
           f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
@@ -290,7 +336,14 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
     print(f"  Visualization saved to {out_path}")
 
 
-def run(config_path: Path, name: str, skip_baseline: bool = False):
+def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cache_path: Path | None = None):
+    # Load baseline cache (precomputed baseline/GT paths per scene)
+    baseline_cache = None
+    if baseline_cache_path and baseline_cache_path.exists():
+        with open(baseline_cache_path) as f:
+            baseline_cache = json.load(f)
+        print(f"Loaded baseline cache: {len(baseline_cache)} scenes from {baseline_cache_path}")
+
     # Fix seeds
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
@@ -386,9 +439,15 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         w_safety=grpo_config.w_safety, w_progress=grpo_config.w_progress,
         w_smooth=grpo_config.w_smooth, w_feasibility=grpo_config.w_feasibility,
         w_centerline=grpo_config.w_centerline,
-        near_edge_scale=grpo_config.near_edge_scale,
-        wide_edge_scale=grpo_config.wide_edge_scale,
-        cont_edge_scale=grpo_config.cont_edge_scale,
+        rb_near_scale=grpo_config.rb_near_scale,
+        rb_wide_scale=grpo_config.rb_wide_scale,
+        rb_cont_scale=grpo_config.rb_cont_scale,
+        rb_gate_enabled=grpo_config.rb_gate_enabled,
+        rb_penalty_mode=grpo_config.rb_penalty_mode,
+        rb_cross_thresh=grpo_config.rb_cross_thresh,
+        rb_near_thresh=grpo_config.rb_near_thresh,
+        rb_wide_thresh=grpo_config.rb_wide_thresh,
+        rb_cont_thresh=grpo_config.rb_cont_thresh,
         max_lat_accel=grpo_config.max_lat_accel,
         lat_accel_scale=grpo_config.lat_accel_scale,
         enable_overprogress=grpo_config.enable_overprogress,
@@ -403,6 +462,9 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         lane_near_scale=grpo_config.lane_near_scale,
         lane_wide_scale=grpo_config.lane_wide_scale,
         lane_cont_scale=grpo_config.lane_cont_scale,
+        lane_near_thresh=grpo_config.lane_near_thresh,
+        lane_wide_thresh=grpo_config.lane_wide_thresh,
+        lane_cont_thresh=grpo_config.lane_cont_thresh,
         reward_mode=grpo_config.reward_mode,
     )
     # Eval reward config: standard weights but always check lane departure for metrics
@@ -522,8 +584,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False):
         trainer.log_metrics(epoch, metrics)
         trainer.save_checkpoint(epoch, args_dict)
 
-        prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob")
-        val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val")
+        prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob", baseline_cache=baseline_cache)
+        val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val", baseline_cache=baseline_cache)
 
         # Track best: highest prob deterministic reward (with val sanity check > -5)
         is_better = (prob_result["reward_mean"] > best_prob_reward
@@ -577,6 +639,10 @@ def main():
     parser.add_argument("--val_scenes", type=Path, required=True, help="JSON list of validation scene NPZ paths")
     parser.add_argument("--output_dir", type=Path, required=True, help="Output directory for experiment results")
     parser.add_argument("--skip_baseline", action="store_true", help="Skip base model evaluation (reuse known baseline numbers)")
+    parser.add_argument("--baseline_cache", type=Path, default=None,
+                        help="JSON file with precomputed baseline/GT paths per scene. "
+                             "If not provided, progress ratios are not reported. "
+                             "Generate with: python -m rlvr.autoresearch.tools.compute_baseline_cache")
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -592,7 +658,8 @@ def main():
     OUTPUT_DIR = args.output_dir
 
     try:
-        run(args.config, args.name, skip_baseline=args.skip_baseline)
+        run(args.config, args.name, skip_baseline=args.skip_baseline,
+            baseline_cache_path=args.baseline_cache)
     except Exception as e:
         print(f"\n---")
         print(f"name:             {args.name}")

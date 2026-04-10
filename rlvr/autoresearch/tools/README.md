@@ -54,6 +54,32 @@ python -m rlvr.autoresearch.tools.viz_guidance_actual \
   --model_path <model.pth> --scenes <scenes.json> --output_dir <dir>
 ```
 
+### viz_lane_departure.py
+Visualizes lane departure and road border distance checks. Supports three modes:
+- `--mode lane`: lane departure polygon containment + outer boundary distance
+- `--mode rb`: road border point-to-segment distance (auto-picks closest-to-border timestep)
+- `--mode both`: side-by-side comparison
+```bash
+python -m rlvr.autoresearch.tools.viz_lane_departure \
+  --scenes <scenes.json> --indices 0 5 10 --output_dir <dir> \
+  --mode rb --zoom 12
+```
+
+### compute_baseline_cache.py
+Precomputes baseline model and GT path lengths per scene. Used by `run_experiment.py --baseline_cache` to report progress ratios (model_path/gt_path and model_path/baseline_path) during training.
+```bash
+python -m rlvr.autoresearch.tools.compute_baseline_cache \
+  --model_path <base_model.pth> --scenes <scenes.json> --output <cache.json>
+```
+
+### rb_campaign_launcher.py
+Auto-queues experiment batches (max 2 in parallel). Requires environment variables:
+```bash
+export RB_CAMPAIGN_EXP_DIR=/path/to/experiments
+export RB_CAMPAIGN_MODEL=/path/to/base_model.pth
+python -m rlvr.autoresearch.tools.rb_campaign_launcher
+```
+
 ## Data Preparation
 
 ### cleanse_lane_scenes.py
