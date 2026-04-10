@@ -565,6 +565,7 @@ def train_epoch_ranked_sft(
     best_ego_trajs = []  # [T, 4] numpy arrays
     best_rewards_list = []
     scene_train_mask = []  # True = train on this scene, False = skip
+    scene_improvements = []  # improvement value per scene for advantage weighting
 
     for i in tqdm(range(N), desc="Scoring"):
         traj_K = all_trajs[i]  # [K, T, 4]
@@ -580,6 +581,7 @@ def train_epoch_ranked_sft(
         improvement = best_reward - det_reward
         should_train = selective_thresh <= 0 or improvement >= selective_thresh
         scene_train_mask.append(should_train)
+        scene_improvements.append(max(0.0, improvement))
         if selective_thresh > 0 and epoch <= 2 and should_train:
             from pathlib import Path as _P
             print(f"    SEL [{_P(valid_paths[i]).stem[:30]}] det={det_reward:.1f} best={best_reward:.1f} imp={improvement:.1f}")
@@ -802,6 +804,12 @@ def train_epoch_ranked_sft(
         )
     accum_steps = config.grad_accum_groups // sft_bs
     scenes_per_step = sft_bs * accum_steps  # for proper loss/metric weighting
+    # Compute per-scene advantage weights for loss scaling
+    use_advantage = getattr(config, "selective_mode", "threshold") == "advantage"
+    improvements_arr = np.array(scene_improvements)
+    max_imp = improvements_arr.max() if improvements_arr.max() > 0 else 1.0
+    scene_weight_arr = improvements_arr / max_imp  # [N], in [0, 1]
+
     # Shuffle scene order, filter by selective training mask
     indices = [i for i in range(N) if scene_train_mask[i]]
     _random.shuffle(indices)
@@ -850,7 +858,12 @@ def train_epoch_ranked_sft(
         # loss is a batch-mean over bs scenes; we want the gradient contribution
         # proportional to bs/scenes_per_step so the optimizer step averages over
         # scenes_per_step scenes total.
-        scaled_loss = loss * (bs / scenes_per_step)
+        # In advantage mode, additionally weight by the scene's improvement ratio.
+        if use_advantage and bs == 1:
+            adv_weight = float(scene_weight_arr[batch_idx[0]])
+        else:
+            adv_weight = 1.0
+        scaled_loss = loss * (bs / scenes_per_step) * adv_weight
         scaled_loss.backward()
         accum_count += 1
 

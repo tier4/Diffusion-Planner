@@ -218,6 +218,10 @@ class GRPOConfig:
     # (where guidance-aided trajectories are much better) while preserving L2 on normal
     # scenes (where baseline is already good). 0 = train all scenes (default).
     selective_threshold: float = 0.0
+    # selective_mode: "threshold" (binary select/skip at threshold), "advantage" (scale
+    # ego loss by normalized improvement — smooth version of selective). In advantage mode,
+    # selective_threshold is the minimum improvement to include (scenes below get weight 0).
+    selective_mode: str = "threshold"
 
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
