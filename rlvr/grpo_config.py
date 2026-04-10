@@ -453,7 +453,7 @@ class GRPOConfig:
 
         stype = spec.get("type", "linear")
         start = float(spec["start"])
-        end = float(spec["end"])
+        end = float(spec.get("end", start))  # default to start for constant schedules
 
         if stype == "constant" or total_epochs <= 1:
             return start
