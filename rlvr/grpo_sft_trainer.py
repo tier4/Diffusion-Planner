@@ -795,15 +795,15 @@ def train_epoch_ranked_sft(
         )
     accum_steps = config.grad_accum_groups // sft_bs
     scenes_per_step = sft_bs * accum_steps  # for proper loss/metric weighting
-    print(f"  Training on {N_train}/{N} scenes (ranked SFT, mode={mode}, "
-          f"sft_batch_size={sft_bs}, accum_steps={accum_steps})...")
-    model.train()
-    optimizer.zero_grad()
-
     # Shuffle scene order, filter by selective training mask
     indices = [i for i in range(N) if scene_train_mask[i]]
     _random.shuffle(indices)
     N_train = len(indices)
+
+    print(f"  Training on {N_train}/{N} scenes (ranked SFT, mode={mode}, "
+          f"sft_batch_size={sft_bs}, accum_steps={accum_steps})...")
+    model.train()
+    optimizer.zero_grad()
 
     all_metrics = {}
     n_scenes = 0
