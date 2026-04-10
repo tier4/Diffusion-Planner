@@ -132,6 +132,8 @@ def _compute_sft_diffusion_loss(
     K: int = 8,
     neighbor_reg_weight: float = 0.0,
     neighbor_reg_only: bool = False,
+    ego_il_weight: float = 0.0,
+    ego_gt_real: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute standard SFT diffusion loss with ego + neighbor targets.
 
@@ -145,11 +147,15 @@ def _compute_sft_diffusion_loss(
     the LoRA model's neighbor predictions from diverging from the base model's
     neighbor predictions at the same (noise, timestep) inputs.
 
+    When ego_il_weight > 0, adds MSE(model_ego, real_GT_ego) to anchor the
+    model's ego predictions near ground truth while learning from ranked trajs.
+
     Args:
         model: Policy model (LoRA-wrapped).
         model_args: Config from load_model.
         data: Raw observation dict (NOT normalized). B=1.
         ego_gt: [B, T, 4] ego ground truth trajectory (x, y, cos, sin).
+            In ranked SFT, this is the best-of-K ranked trajectory.
         neighbor_gt: [B, Pn, T, 4] neighbor ground truth trajectories.
         neighbor_mask: [B, Pn, T] boolean mask (True = invalid/padded).
         device: Torch device.
@@ -158,6 +164,9 @@ def _compute_sft_diffusion_loss(
         neighbor_reg_only: If True, drop the neighbor SFT loss and only use the
             reg term. Only takes effect when neighbor reg is active (model has
             disable_adapter and neighbor_reg_weight > 0).
+        ego_il_weight: Weight for ego IL regularization (0=disabled).
+        ego_gt_real: [B, T, 4] real GT ego trajectory for IL regularization.
+            Required when ego_il_weight > 0.
 
     Returns:
         (loss, metrics_dict)
@@ -204,9 +213,15 @@ def _compute_sft_diffusion_loss(
         {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     )
 
+    # Normalize real GT ego for IL loss (if provided)
+    use_ego_il = ego_il_weight > 0.0 and ego_gt_real is not None
+    if use_ego_il:
+        ego_gt_real_norm = (ego_gt_real - ego_mean) / ego_std  # [B, T, 4]
+
     total_ego_loss = 0.0
     total_neighbor_loss = 0.0
     total_neighbor_reg_loss = 0.0
+    total_ego_il_loss = 0.0
     # Combine future padding mask with current-timestep validity:
     # a neighbor absent at the current timestep should not contribute to loss.
     neighbors_future_valid = ~neighbor_mask  # [B, Pn, T]
@@ -254,9 +269,14 @@ def _compute_sft_diffusion_loss(
 
         gt_target = all_gt[:, :, 1:, :]  # [B, P, T, 4]
 
-        # Ego loss: MSE over all timesteps
+        # Ego loss: MSE over all timesteps (against ranked trajectory)
         ego_loss = F.mse_loss(model_output[:, 0], gt_target[:, 0])
         total_ego_loss += ego_loss
+
+        # Ego IL loss: MSE against real GT ego trajectory
+        if use_ego_il:
+            ego_il_loss = F.mse_loss(model_output[:, 0], ego_gt_real_norm)
+            total_ego_il_loss += ego_il_loss
 
         # Neighbor loss: MSE over valid timesteps only.
         # Skipped when neighbor_reg_only=True AND reg is actually active.
@@ -284,17 +304,21 @@ def _compute_sft_diffusion_loss(
     ego_loss_avg = total_ego_loss / K
     neighbor_loss_avg = total_neighbor_loss / K if isinstance(total_neighbor_loss, torch.Tensor) else torch.tensor(0.0, device=device)
     neighbor_reg_avg = total_neighbor_reg_loss / K if isinstance(total_neighbor_reg_loss, torch.Tensor) else torch.tensor(0.0, device=device)
+    ego_il_avg = total_ego_il_loss / K if isinstance(total_ego_il_loss, torch.Tensor) else torch.tensor(0.0, device=device)
 
-    # Combined loss: ego + neighbor (neighbor weight = 1.0 to match SFT) + neighbor reg
+    # Combined loss: ego + neighbor (neighbor weight = 1.0 to match SFT) + neighbor reg + ego IL
     loss = ego_loss_avg + neighbor_loss_avg
     if use_neighbor_reg:
         loss = loss + neighbor_reg_weight * neighbor_reg_avg
+    if use_ego_il:
+        loss = loss + ego_il_weight * ego_il_avg
 
     metrics = {
         "sft_ego_loss": ego_loss_avg.item(),
         "sft_neighbor_loss": neighbor_loss_avg.item() if isinstance(neighbor_loss_avg, torch.Tensor) else 0.0,
         "sft_total_loss": loss.item(),
         "sft_neighbor_reg_loss": neighbor_reg_avg.item() if isinstance(neighbor_reg_avg, torch.Tensor) else 0.0,
+        "sft_ego_il_loss": ego_il_avg.item() if isinstance(ego_il_avg, torch.Tensor) else 0.0,
     }
     return loss, metrics
 
@@ -345,7 +369,8 @@ def train_epoch_ranked_sft(
     if epoch == 1:
         print(f"  [ranked-sft] mode={mode}, K={K}, "
               f"sg_window={config.sg_filter_window}, sg_order={config.sg_filter_order}, "
-              f"neighbor_reg={config.neighbor_reg_weight}, reg_only={config.neighbor_reg_only}")
+              f"neighbor_reg={config.neighbor_reg_weight}, reg_only={config.neighbor_reg_only}, "
+              f"ego_il={config.ego_il_weight}")
 
     # 1. Load all scenes
     print(f"  Loading {len(scene_paths)} scenes...")
@@ -626,8 +651,10 @@ def train_epoch_ranked_sft(
     Pn = model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
+    use_ego_il = config.ego_il_weight > 0.0
     print(f"  Preparing training targets for {N} scenes...")
     all_ego_gt = []       # list of [1, T, 4]
+    all_ego_gt_real = []  # list of [1, T, 4] — real GT for IL reg
     all_neighbor_gt = []  # list of [1, Pn, T, 4]
     all_neighbor_mask = []  # list of [1, Pn, T]
 
@@ -642,6 +669,34 @@ def train_epoch_ranked_sft(
             pad = torch.zeros(1, future_len - T_actual, 4, device=device)
             ego_gt = torch.cat([ego_gt, pad], dim=1)
         all_ego_gt.append(ego_gt)
+
+        # Real GT ego trajectory for IL regularization
+        if use_ego_il:
+            data_i = all_data[i]
+            real_gt = data_i.get("ego_agent_future")
+            if real_gt is not None:
+                if real_gt.dim() == 3:
+                    real_gt = real_gt[:1]  # [1, T, C]
+                elif real_gt.dim() == 2:
+                    real_gt = real_gt.unsqueeze(0)  # [1, T, C]
+                # Convert heading if needed (angle -> cos/sin)
+                if real_gt.shape[-1] == 3:
+                    real_gt = torch.cat([
+                        real_gt[..., :2],
+                        real_gt[..., 2:3].cos(),
+                        real_gt[..., 2:3].sin(),
+                    ], dim=-1)
+                real_gt = real_gt[..., :4]
+                T_r = real_gt.shape[1]
+                if T_r > future_len:
+                    real_gt = real_gt[:, :future_len, :]
+                elif T_r < future_len:
+                    pad_r = torch.zeros(1, future_len - T_r, 4, device=device)
+                    real_gt = torch.cat([real_gt, pad_r], dim=1)
+            else:
+                # Fallback: use ranked traj as IL target (no effect)
+                real_gt = ego_gt.clone()
+            all_ego_gt_real.append(real_gt)
 
         # Neighbor GT
         if mode == "gt_neighbor":
@@ -696,7 +751,8 @@ def train_epoch_ranked_sft(
     ego_gt_all = torch.cat(all_ego_gt, dim=0)
     neighbor_gt_all = torch.cat(all_neighbor_gt, dim=0)
     neighbor_mask_all = torch.cat(all_neighbor_mask, dim=0)
-    del all_ego_gt, all_neighbor_gt, all_neighbor_mask
+    ego_gt_real_all = torch.cat(all_ego_gt_real, dim=0) if use_ego_il else None
+    del all_ego_gt, all_neighbor_gt, all_neighbor_mask, all_ego_gt_real
 
     # 7. Batched training with SFT diffusion loss
     # sft_batch_size: scenes per forward pass (1 = sequential, same as original)
@@ -735,6 +791,7 @@ def train_epoch_ranked_sft(
         mini_ego_gt = ego_gt_all[batch_idx]           # [bs, T, 4]
         mini_neighbor_gt = neighbor_gt_all[batch_idx]  # [bs, Pn, T, 4]
         mini_neighbor_mask = neighbor_mask_all[batch_idx]  # [bs, Pn, T]
+        mini_ego_gt_real = ego_gt_real_all[batch_idx] if ego_gt_real_all is not None else None
 
         loss, metrics = _compute_sft_diffusion_loss(
             model=model,
@@ -747,6 +804,8 @@ def train_epoch_ranked_sft(
             K=config.diffusion_k_steps,
             neighbor_reg_weight=config.neighbor_reg_weight,
             neighbor_reg_only=config.neighbor_reg_only,
+            ego_il_weight=config.ego_il_weight,
+            ego_gt_real=mini_ego_gt_real,
         )
 
         # Scale loss to preserve per-scene gradient magnitude:
