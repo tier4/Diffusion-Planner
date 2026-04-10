@@ -464,7 +464,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                 LORA_TARGET_LAST_BLOCK_REGEX,
                 apply_lora,
             )
-            target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX}.get(grpo_config.lora_target)
+            from preference_optimization.lora_utils import LORA_TARGET_BLOCKS_02_REGEX
+            target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX, "blocks02": LORA_TARGET_BLOCKS_02_REGEX}.get(grpo_config.lora_target)
             kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
                          lora_dropout=grpo_config.lora_dropout)
             if target:
