@@ -553,9 +553,14 @@ def train_epoch_ranked_sft(
     gc.collect()
 
     # 4. Score and select best trajectory per scene
+    # Selective training: only SFT on scenes where best-of-K improves significantly
+    # over the deterministic (index 0) trajectory. Controlled by config.selective_threshold.
+    # 0 = train all scenes (default), >0 = skip scenes with best-det < threshold.
+    selective_thresh = getattr(config, "selective_threshold", 0.0)
     print(f"  Scoring and selecting best trajectories...")
     best_ego_trajs = []  # [T, 4] numpy arrays
     best_rewards_list = []
+    scene_train_mask = []  # True = train on this scene, False = skip
 
     for i in tqdm(range(N), desc="Scoring"):
         traj_K = all_trajs[i]  # [K, T, 4]
@@ -565,6 +570,12 @@ def train_epoch_ranked_sft(
         reward_vals = np.array([r.total for r in rewards])
         best_idx = int(np.argmax(reward_vals))
         best_reward = reward_vals[best_idx]
+        det_reward = reward_vals[0]  # deterministic trajectory is always index 0
+
+        # Selective: skip scene if improvement is below threshold
+        improvement = best_reward - det_reward
+        should_train = selective_thresh <= 0 or improvement >= selective_thresh
+        scene_train_mask.append(should_train)
 
         # Get best trajectory and smooth it
         best_traj = traj_K[best_idx].cpu().numpy()  # [T, 4]
@@ -576,7 +587,11 @@ def train_epoch_ranked_sft(
         best_rewards_list.append(best_reward)
 
     mean_best_reward = float(np.mean(best_rewards_list))
+    n_selected = sum(scene_train_mask)
     print(f"  Mean best-of-{K} reward: {mean_best_reward:.2f}")
+    if selective_thresh > 0:
+        print(f"  Selective training: {n_selected}/{N} scenes selected "
+              f"(threshold={selective_thresh:.1f}, skipped {N - n_selected})")
 
     # --- Train explorer on trajectory rewards (if optimizer provided) ---
     explorer_metrics = {}
@@ -780,14 +795,15 @@ def train_epoch_ranked_sft(
         )
     accum_steps = config.grad_accum_groups // sft_bs
     scenes_per_step = sft_bs * accum_steps  # for proper loss/metric weighting
-    print(f"  Training on {N} scenes (ranked SFT, mode={mode}, "
+    print(f"  Training on {N_train}/{N} scenes (ranked SFT, mode={mode}, "
           f"sft_batch_size={sft_bs}, accum_steps={accum_steps})...")
     model.train()
     optimizer.zero_grad()
 
-    # Shuffle scene order
-    indices = list(range(N))
+    # Shuffle scene order, filter by selective training mask
+    indices = [i for i in range(N) if scene_train_mask[i]]
     _random.shuffle(indices)
+    N_train = len(indices)
 
     all_metrics = {}
     n_scenes = 0

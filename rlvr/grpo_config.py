@@ -213,6 +213,12 @@ class GRPOConfig:
     # reuses the base model forward pass from neighbor_reg (free when neighbor_reg > 0).
     ego_il_mode: str = "gt"
 
+    # Selective training: skip SFT update for scenes where best-of-K reward barely
+    # improves over the deterministic trajectory. Focuses learning on problem scenes
+    # (where guidance-aided trajectories are much better) while preserving L2 on normal
+    # scenes (where baseline is already good). 0 = train all scenes (default).
+    selective_threshold: float = 0.0
+
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
     # steps = grad_accum_groups // sft_batch_size, so the effective batch per optimizer
