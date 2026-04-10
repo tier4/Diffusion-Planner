@@ -557,6 +557,10 @@ def train_epoch_ranked_sft(
     # over the deterministic (index 0) trajectory. Controlled by config.selective_threshold.
     # 0 = train all scenes (default), >0 = skip scenes with best-det < threshold.
     selective_thresh = getattr(config, "selective_threshold", 0.0)
+    # Allow scheduling of selective_threshold (e.g., 0 for first epochs, then 3.0)
+    sched_thresh = scheduled.get("selective_threshold")
+    if sched_thresh is not None:
+        selective_thresh = sched_thresh
     print(f"  Scoring and selecting best trajectories...")
     best_ego_trajs = []  # [T, 4] numpy arrays
     best_rewards_list = []
