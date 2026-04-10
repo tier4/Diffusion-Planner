@@ -222,6 +222,10 @@ class GRPOConfig:
     # ego loss by normalized improvement — smooth version of selective). In advantage mode,
     # selective_threshold is the minimum improvement to include (scenes below get weight 0).
     selective_mode: str = "threshold"
+    # selective_frozen: if True, scene selection is computed at epoch 1 and fixed for all
+    # subsequent epochs. Prevents oscillation where improved scenes drop from selection
+    # and regress. The frozen set is saved to disk in the experiment directory.
+    selective_frozen: bool = False
 
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation

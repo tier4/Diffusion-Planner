@@ -596,6 +596,21 @@ def train_epoch_ranked_sft(
         best_rewards_list.append(best_reward)
 
     mean_best_reward = float(np.mean(best_rewards_list))
+
+    # Frozen selection: use ep1 mask for all epochs
+    use_frozen = getattr(config, "selective_frozen", False) and selective_thresh > 0
+    if use_frozen:
+        import os as _os
+        # run_dir is not passed here, so derive from valid_paths
+        frozen_path = _os.path.join(_os.path.dirname(valid_paths[0]), "..", "..", "frozen_scene_mask.json") if False else None
+        # Simpler approach: store on the config object itself (persists across epochs in same run)
+        if not hasattr(config, "_frozen_mask"):
+            config._frozen_mask = list(scene_train_mask)
+            print(f"  [frozen] Saving scene selection from epoch {epoch} ({sum(scene_train_mask)}/{N} scenes)")
+        else:
+            scene_train_mask = list(config._frozen_mask)
+            print(f"  [frozen] Reusing epoch-1 selection ({sum(scene_train_mask)}/{N} scenes)")
+
     n_selected = sum(scene_train_mask)
     print(f"  Mean best-of-{K} reward: {mean_best_reward:.2f}")
     if selective_thresh > 0:
