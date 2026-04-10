@@ -79,7 +79,7 @@ def get_args():
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
     )
     parser.add_argument(
-        "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
+        "--num_refine", type=int, default=10, help="number of refinement steps for augmentation"
     )
     parser.add_argument("--ego_past_noise_std", type=float, default=0.1, help="std of noise applied to ego past trajectory during augmentation")
     parser.add_argument("--use_smoothing_future_trajectory", default=True, type=boolean, help="whether to apply smoothing to future trajectory")
