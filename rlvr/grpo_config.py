@@ -201,12 +201,17 @@ class GRPOConfig:
     #   Adding GT neighbor loss on top of reg causes overfitting at high LR (collapses by ep12).
     neighbor_reg_only: bool = True
 
-    # Ego IL (imitation learning) regularization: anchors ego output to GT trajectory.
-    # loss += ego_il_weight * MSE(model_ego_pred, GT_ego)
+    # Ego IL (imitation learning) regularization: anchors ego output to a reference.
+    # loss += ego_il_weight * MSE(model_ego_pred, reference_ego)
     # Active only in ranked SFT when ego_il_weight > 0. The ranked SFT ego loss trains
     # toward the best-of-K trajectory (lane keeping), while this term pulls back toward
-    # GT (L2 preservation). Intended for 500-scene training where L2 drifts too much.
+    # the reference (L2 preservation). Intended for 500-scene training where L2 drifts.
     ego_il_weight: float = 0.0
+    # ego_il_mode: "gt" uses real GT ego trajectory as reference.
+    # "baseline" uses base model (no-LoRA) ego prediction at the same (noise, timestep).
+    # "baseline" is conceptually analogous to neighbor_reg (anchor to base, not GT) and
+    # reuses the base model forward pass from neighbor_reg (free when neighbor_reg > 0).
+    ego_il_mode: str = "gt"
 
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation

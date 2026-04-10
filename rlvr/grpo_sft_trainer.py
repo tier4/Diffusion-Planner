@@ -133,6 +133,7 @@ def _compute_sft_diffusion_loss(
     neighbor_reg_weight: float = 0.0,
     neighbor_reg_only: bool = False,
     ego_il_weight: float = 0.0,
+    ego_il_mode: str = "gt",
     ego_gt_real: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute standard SFT diffusion loss with ego + neighbor targets.
@@ -214,8 +215,10 @@ def _compute_sft_diffusion_loss(
     )
 
     # Normalize real GT ego for IL loss (if provided)
-    use_ego_il = ego_il_weight > 0.0 and ego_gt_real is not None
-    if use_ego_il:
+    use_ego_il = ego_il_weight > 0.0
+    if use_ego_il and ego_il_mode == "gt" and ego_gt_real is None:
+        use_ego_il = False  # GT mode requires ego_gt_real
+    if use_ego_il and ego_il_mode == "gt":
         ego_gt_real_norm = (ego_gt_real - ego_mean) / ego_std  # [B, T, 4]
 
     total_ego_loss = 0.0
@@ -273,8 +276,8 @@ def _compute_sft_diffusion_loss(
         ego_loss = F.mse_loss(model_output[:, 0], gt_target[:, 0])
         total_ego_loss += ego_loss
 
-        # Ego IL loss: MSE against real GT ego trajectory
-        if use_ego_il:
+        # Ego IL loss (GT mode): MSE against real GT ego trajectory
+        if use_ego_il and ego_il_mode == "gt":
             ego_il_loss = F.mse_loss(model_output[:, 0], ego_gt_real_norm)
             total_ego_il_loss += ego_il_loss
 
@@ -290,16 +293,27 @@ def _compute_sft_diffusion_loss(
             if masked_loss.numel() > 0:
                 total_neighbor_loss += masked_loss.mean()
 
-        # Neighbor regularization: MSE(lora_neighbor, base_neighbor) at same inputs
-        if use_neighbor_reg and neighbors_future_valid.any():
+        # Neighbor regularization + ego IL (baseline mode): reuse base model forward pass
+        need_base_pass = use_neighbor_reg or (use_ego_il and ego_il_mode == "baseline")
+        if need_base_pass and hasattr(inner, "disable_adapter"):
             with inner.disable_adapter(), torch.no_grad():
                 _, base_outputs = model(merged_inputs)
-            base_neighbor = base_outputs["model_output"][:, 1:, 1:, :]  # [B, Pn, T, 4]
-            lora_neighbor = model_output[:, 1:]  # [B, Pn, T, 4]
-            reg_mse = ((lora_neighbor - base_neighbor.detach()) ** 2).mean(dim=-1)  # [B, Pn, T]
-            masked_reg = reg_mse[neighbors_future_valid]
-            if masked_reg.numel() > 0:
-                total_neighbor_reg_loss += masked_reg.mean()
+            base_output = base_outputs["model_output"][:, :, 1:, :]  # [B, P, T, 4]
+
+            # Neighbor reg
+            if use_neighbor_reg and neighbors_future_valid.any():
+                base_neighbor = base_output[:, 1:]  # [B, Pn, T, 4]
+                lora_neighbor = model_output[:, 1:]  # [B, Pn, T, 4]
+                reg_mse = ((lora_neighbor - base_neighbor.detach()) ** 2).mean(dim=-1)
+                masked_reg = reg_mse[neighbors_future_valid]
+                if masked_reg.numel() > 0:
+                    total_neighbor_reg_loss += masked_reg.mean()
+
+            # Ego IL (baseline mode): MSE(lora_ego, base_ego)
+            if use_ego_il and ego_il_mode == "baseline":
+                base_ego = base_output[:, 0]  # [B, T, 4]
+                ego_il_loss = F.mse_loss(model_output[:, 0], base_ego.detach())
+                total_ego_il_loss += ego_il_loss
 
     ego_loss_avg = total_ego_loss / K
     neighbor_loss_avg = total_neighbor_loss / K if isinstance(total_neighbor_loss, torch.Tensor) else torch.tensor(0.0, device=device)
@@ -651,7 +665,7 @@ def train_epoch_ranked_sft(
     Pn = model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
-    use_ego_il = config.ego_il_weight > 0.0
+    use_ego_il = config.ego_il_weight > 0.0 and config.ego_il_mode == "gt"
     print(f"  Preparing training targets for {N} scenes...")
     all_ego_gt = []       # list of [1, T, 4]
     all_ego_gt_real = []  # list of [1, T, 4] — real GT for IL reg
@@ -805,6 +819,7 @@ def train_epoch_ranked_sft(
             neighbor_reg_weight=config.neighbor_reg_weight,
             neighbor_reg_only=config.neighbor_reg_only,
             ego_il_weight=config.ego_il_weight,
+            ego_il_mode=config.ego_il_mode,
             ego_gt_real=mini_ego_gt_real,
         )
 
