@@ -576,6 +576,9 @@ def train_epoch_ranked_sft(
         improvement = best_reward - det_reward
         should_train = selective_thresh <= 0 or improvement >= selective_thresh
         scene_train_mask.append(should_train)
+        if selective_thresh > 0 and epoch <= 2 and should_train:
+            from pathlib import Path as _P
+            print(f"    SEL [{_P(valid_paths[i]).stem[:30]}] det={det_reward:.1f} best={best_reward:.1f} imp={improvement:.1f}")
 
         # Get best trajectory and smooth it
         best_traj = traj_K[best_idx].cpu().numpy()  # [T, 4]
@@ -590,13 +593,8 @@ def train_epoch_ranked_sft(
     n_selected = sum(scene_train_mask)
     print(f"  Mean best-of-{K} reward: {mean_best_reward:.2f}")
     if selective_thresh > 0:
-        # Count how many prob (miraikan) vs normal scenes were selected
-        from pathlib import Path as _P
-        selected_names = [_P(valid_paths[i]).stem for i in range(N) if scene_train_mask[i]]
         print(f"  Selective training: {n_selected}/{N} scenes selected "
               f"(threshold={selective_thresh:.1f}, skipped {N - n_selected})")
-        if epoch <= 3:  # only log scene names for first 3 epochs
-            print(f"  Selected scenes: {', '.join(selected_names[:10])}{'...' if n_selected > 10 else ''}")
 
     # --- Train explorer on trajectory rewards (if optimizer provided) ---
     explorer_metrics = {}
