@@ -809,7 +809,7 @@ def train_epoch_ranked_sft(
     n_scenes = 0
     accum_count = 0
 
-    for batch_start in range(0, N, sft_bs):
+    for batch_start in range(0, N_train, sft_bs):
         batch_idx = indices[batch_start:batch_start + sft_bs]
         bs = len(batch_idx)
 
