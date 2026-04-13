@@ -825,6 +825,11 @@ def train_epoch_ranked_sft(
     scenes_per_step = sft_bs * accum_steps  # for proper loss/metric weighting
     # Compute per-scene advantage weights for loss scaling
     use_advantage = getattr(config, "selective_mode", "threshold") == "advantage"
+    if use_advantage and sft_bs != 1:
+        raise ValueError(
+            f"selective_mode='advantage' requires sft_batch_size=1 for exact per-scene "
+            f"weighting, got sft_batch_size={sft_bs}."
+        )
     improvements_arr = np.array(scene_improvements)
     max_imp = improvements_arr.max() if improvements_arr.max() > 0 else 1.0
     scene_weight_arr = improvements_arr / max_imp  # [N], in [0, 1]
@@ -881,9 +886,9 @@ def train_epoch_ranked_sft(
         # loss is a batch-mean over bs scenes; we want the gradient contribution
         # proportional to bs/scenes_per_step so the optimizer step averages over
         # scenes_per_step scenes total.
-        # In advantage mode, additionally weight by the scene's improvement ratio.
+        # In advantage mode, weight by the scene's improvement ratio (exact for bs=1).
         if use_advantage:
-            adv_weight = float(np.mean([scene_weight_arr[i] for i in batch_idx]))
+            adv_weight = float(scene_weight_arr[batch_idx[0]])
         else:
             adv_weight = 1.0
         scaled_loss = loss * (bs / scenes_per_step) * adv_weight

@@ -219,10 +219,10 @@ class GRPOConfig:
     # scenes (where baseline is already good). 0 = train all scenes (default).
     selective_threshold: float = 0.0
     # selective_mode: "threshold" (binary select/skip at threshold), "advantage" (scale
-    # full SFT loss by normalized improvement — smooth version of selective). In advantage
-    # mode, all scenes are kept but weighted by improvement/max_improvement; scenes below
-    # selective_threshold get weight 0 via the scene_train_mask. Note: advantage mode
-    # applies a batch-level mean weight (not per-scene), so it's approximate.
+    # full SFT loss per scene by normalized improvement — smooth version of selective).
+    # In advantage mode, all scenes are kept but each scene's loss is multiplied by
+    # improvement/max_improvement. Scenes below selective_threshold get weight 0 via
+    # scene_train_mask. Requires sft_batch_size=1 for exact per-scene weighting.
     selective_mode: str = "threshold"
     # selective_frozen: if True, scene selection is computed once (first epoch) and reused
     # for all subsequent epochs in the same run. Prevents oscillation where improved scenes
