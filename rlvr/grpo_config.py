@@ -222,9 +222,9 @@ class GRPOConfig:
     # ego loss by normalized improvement — smooth version of selective). In advantage mode,
     # selective_threshold is the minimum improvement to include (scenes below get weight 0).
     selective_mode: str = "threshold"
-    # selective_frozen: if True, scene selection is computed at epoch 1 and fixed for all
-    # subsequent epochs. Prevents oscillation where improved scenes drop from selection
-    # and regress. The frozen set is saved to disk in the experiment directory.
+    # selective_frozen: if True, scene selection is computed once (first epoch) and reused
+    # for all subsequent epochs in the same run. Prevents oscillation where improved scenes
+    # drop from selection and regress. Stored in-memory on the config object (not persisted to disk).
     selective_frozen: bool = False
 
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
@@ -472,10 +472,16 @@ class GRPOConfig:
 
         stype = spec.get("type", "linear")
         start = float(spec["start"])
-        end = float(spec.get("end", start))  # default to start for constant schedules
 
         if stype == "constant" or total_epochs <= 1:
             return start
+
+        if "end" not in spec:
+            raise ValueError(
+                f"Schedule '{name}' with type='{stype}' requires 'end' field. "
+                f"Only type='constant' can omit 'end'."
+            )
+        end = float(spec["end"])
 
         progress = (epoch - 1) / (total_epochs - 1)
 
@@ -564,6 +570,11 @@ class GRPOConfig:
                 f"exploration_inner_epochs={self.exploration_inner_epochs} (PPO). "
                 "Use exploration_inner_epochs=1 or exploration_loss_type='advantage_logprob'."
             )
+        # Validate new string config fields
+        if self.ego_il_mode not in ("gt", "baseline"):
+            raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {self.ego_il_mode!r}")
+        if self.selective_mode not in ("threshold", "advantage"):
+            raise ValueError(f"selective_mode must be 'threshold' or 'advantage', got {self.selective_mode!r}")
 
     @property
     def uses_importance_sampling(self) -> bool:

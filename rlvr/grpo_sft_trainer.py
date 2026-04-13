@@ -216,8 +216,11 @@ def _compute_sft_diffusion_loss(
 
     # Normalize real GT ego for IL loss (if provided)
     use_ego_il = ego_il_weight > 0.0
-    if use_ego_il and ego_il_mode == "gt" and ego_gt_real is None:
-        use_ego_il = False  # GT mode requires ego_gt_real
+    if use_ego_il:
+        if ego_il_mode not in ("gt", "baseline"):
+            raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {ego_il_mode!r}")
+        if ego_il_mode == "gt" and ego_gt_real is None:
+            raise ValueError("ego_gt_real is required when ego_il_weight > 0 and ego_il_mode == 'gt'.")
     if use_ego_il and ego_il_mode == "gt":
         ego_gt_real_norm = (ego_gt_real - ego_mean) / ego_std  # [B, T, 4]
 
@@ -295,6 +298,11 @@ def _compute_sft_diffusion_loss(
 
         # Neighbor regularization + ego IL (baseline mode): reuse base model forward pass
         need_base_pass = use_neighbor_reg or (use_ego_il and ego_il_mode == "baseline")
+        if need_base_pass and not hasattr(inner, "disable_adapter"):
+            raise ValueError(
+                "neighbor_reg or baseline ego IL requires LoRA model with disable_adapter(). "
+                "Ensure the model is wrapped with PeftModel."
+            )
         if need_base_pass and hasattr(inner, "disable_adapter"):
             with inner.disable_adapter(), torch.no_grad():
                 _, base_outputs = model(merged_inputs)
@@ -600,16 +608,12 @@ def train_epoch_ranked_sft(
     # Frozen selection: use ep1 mask for all epochs
     use_frozen = getattr(config, "selective_frozen", False) and selective_thresh > 0
     if use_frozen:
-        import os as _os
-        # run_dir is not passed here, so derive from valid_paths
-        frozen_path = _os.path.join(_os.path.dirname(valid_paths[0]), "..", "..", "frozen_scene_mask.json") if False else None
-        # Simpler approach: store on the config object itself (persists across epochs in same run)
         if not hasattr(config, "_frozen_mask"):
             config._frozen_mask = list(scene_train_mask)
-            print(f"  [frozen] Saving scene selection from epoch {epoch} ({sum(scene_train_mask)}/{N} scenes)")
+            print(f"  [frozen] Saving first scene selection ({sum(scene_train_mask)}/{N} scenes)")
         else:
             scene_train_mask = list(config._frozen_mask)
-            print(f"  [frozen] Reusing epoch-1 selection ({sum(scene_train_mask)}/{N} scenes)")
+            print(f"  [frozen] Reusing frozen selection ({sum(scene_train_mask)}/{N} scenes)")
 
     n_selected = sum(scene_train_mask)
     print(f"  Mean best-of-{K} reward: {mean_best_reward:.2f}")
@@ -826,7 +830,11 @@ def train_epoch_ranked_sft(
     scene_weight_arr = improvements_arr / max_imp  # [N], in [0, 1]
 
     # Shuffle scene order, filter by selective training mask
-    indices = [i for i in range(N) if scene_train_mask[i]]
+    # In advantage mode, keep all scenes (zero-weight for non-selected) instead of skipping
+    if use_advantage:
+        indices = list(range(N))
+    else:
+        indices = [i for i in range(N) if scene_train_mask[i]]
     _random.shuffle(indices)
     N_train = len(indices)
 
@@ -874,8 +882,8 @@ def train_epoch_ranked_sft(
         # proportional to bs/scenes_per_step so the optimizer step averages over
         # scenes_per_step scenes total.
         # In advantage mode, additionally weight by the scene's improvement ratio.
-        if use_advantage and bs == 1:
-            adv_weight = float(scene_weight_arr[batch_idx[0]])
+        if use_advantage:
+            adv_weight = float(np.mean([scene_weight_arr[i] for i in batch_idx]))
         else:
             adv_weight = 1.0
         scaled_loss = loss * (bs / scenes_per_step) * adv_weight

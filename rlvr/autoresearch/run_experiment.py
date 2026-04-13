@@ -80,10 +80,11 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
         print(f"  [WARNING] Removed {n_removed} prob-scene duplicates from normal pool "
               f"({len(normal_pool)} -> {len(normal_pool_deduped)})")
     if len(normal_pool_deduped) == 0 and n_normal > 0:
-        print(f"  [ERROR] Normal pool is empty after deduplication! "
-              f"All {len(normal_pool)} normal scenes overlap with prob scenes. "
-              f"Set n_normal_scenes=0 in config or use a different normal_scenes file.")
-        normal_scenes = []
+        raise ValueError(
+            f"Normal pool is empty after deduplication! "
+            f"All {len(normal_pool)} normal scenes overlap with prob scenes. "
+            f"Set n_normal_scenes=0 in config or use a different normal_scenes file."
+        )
     else:
         n_actual = min(n_normal, len(normal_pool_deduped))
         norm_idx = rng_norm.choice(len(normal_pool_deduped), size=n_actual, replace=False)
