@@ -86,7 +86,9 @@ _NUMERIC_BREAKDOWN_FIELDS = (
     "centerline", "red_light", "total",
     "rb_near_penalty", "rb_wide_penalty",
 )
-_BOOL_BREAKDOWN_FIELDS = ("rb_crossing",)
+# Keep gate flags in sync with the fields consumed by mean_breakdown_dict() and
+# compute_dominant_component() — otherwise those helpers see False by default.
+_BOOL_BREAKDOWN_FIELDS = ("rb_crossing", "lane_crossing")
 
 
 def breakdown_to_dict(r: RewardBreakdown) -> dict:
@@ -176,7 +178,13 @@ def compute_dominant_component(
         "rb_wide": -config.rb_wide_scale * (winner.rb_wide_penalty - mean_bd["rb_wide_penalty"]),
     }
     best_comp = max(deltas, key=lambda c: deltas[c])
-    return best_comp, deltas[best_comp]
+    best_delta = deltas[best_comp]
+    # If no component had a positive advantage over the mean, the winner was
+    # selected on a tie or by a component we don't track. Return a sentinel so
+    # callers don't mis-attribute a negative delta to the labeled component.
+    if best_delta <= 0:
+        return "none", best_delta
+    return best_comp, best_delta
 
 
 # ---------------------------------------------------------------------------

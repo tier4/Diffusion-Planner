@@ -62,3 +62,40 @@ def test_total_slots_fit_in_K16():
         v = get_variant(name)
         used = 1 + len(v.cl_spd_configs) + len(v.noise_configs)
         assert used <= K, f"variant {name!r} uses {used} slots, exceeds K={K}"
+
+
+def test_dominant_component_returns_none_when_no_positive_delta():
+    """compute_dominant_component must not mis-attribute a non-positive max."""
+    from rlvr.rank_analytics import compute_dominant_component
+    from rlvr.reward import RewardBreakdown, RewardConfig
+    cfg = RewardConfig()
+    r = RewardBreakdown(
+        safety=0.0, progress=5.0, smoothness=-1.0, feasibility=0.0,
+        centerline=-0.5, red_light=0.0, total=10.0, collision_step=None,
+        off_road_fraction=0.0, rb_crossing=False, rb_near_penalty=0.1,
+        rb_wide_penalty=0.5, rb_min_dist=0.7,
+        lane_crossing=False, lane_near_frac=0.0, lane_wide_frac=0.0,
+    )
+    mean_bd = {
+        "safety": 0.0, "progress": 5.0, "smoothness": -1.0, "feasibility": 0.0,
+        "centerline": -0.5, "red_light": 0.0, "rb_near_penalty": 0.1,
+        "rb_wide_penalty": 0.5, "rb_crossing": 0.0, "lane_crossing": 0.0,
+    }
+    comp, _ = compute_dominant_component(r, mean_bd, cfg)
+    assert comp == "none"
+
+
+def test_breakdown_to_dict_preserves_lane_crossing_bool():
+    """Both rb_crossing and lane_crossing must round-trip as bools, not numbers."""
+    from rlvr.rank_analytics import breakdown_to_dict
+    from rlvr.reward import RewardBreakdown
+    r = RewardBreakdown(
+        safety=0.0, progress=5.0, smoothness=-1.0, feasibility=0.0,
+        centerline=-0.5, red_light=0.0, total=10.0, collision_step=None,
+        off_road_fraction=0.0, rb_crossing=True, rb_near_penalty=0.1,
+        rb_wide_penalty=0.5, rb_min_dist=0.7,
+        lane_crossing=True, lane_near_frac=0.0, lane_wide_frac=0.0,
+    )
+    d = breakdown_to_dict(r)
+    assert isinstance(d["rb_crossing"], bool) and d["rb_crossing"] is True
+    assert isinstance(d["lane_crossing"], bool) and d["lane_crossing"] is True

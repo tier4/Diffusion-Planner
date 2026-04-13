@@ -133,6 +133,18 @@ def generate_all_scenes_batched(
     # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
     # Variants can replace the 3 redundant slots with experimental configs.
     cl_spd_configs = _build_cl_spd_configs(generation_variant)
+    noise_configs = _build_noise_configs(generation_variant)
+
+    # Validate up-front that K accommodates all fixed slots (1 det + cl_spd + noise).
+    # Otherwise we'd generate them all, slice to [:K], and silently waste compute.
+    n_fixed_total = 1 + len(cl_spd_configs) + len(noise_configs)
+    if K < n_fixed_total:
+        raise ValueError(
+            f"K={K} is smaller than the number of fixed trajectory slots "
+            f"({n_fixed_total}) required by generation_variant={generation_variant!r} "
+            f"(1 det + {len(cl_spd_configs)} cl_spd + {len(noise_configs)} noise). "
+            f"Increase num_generations or pick a variant with fewer fixed slots."
+        )
 
     # Set reference_trajectory if ANY slot needs lat/lon guidance — including
     # per-slot lat_eta overrides. Without this, slots with per-slot lat_eta
@@ -192,7 +204,7 @@ def generate_all_scenes_batched(
     # --- Noise-only slots (no guidance, fixed noise ranges) ---
     # Functionally part of the noise/exploration pool but with deterministic
     # noise ranges rather than random sampling.
-    for noise_cfg in _build_noise_configs(generation_variant):
+    for noise_cfg in noise_configs:
         n_min_s, n_max_s = noise_cfg["noise"]
         trajs = _chunked_generate(model, model_args, norm_batch, n_min_s, n_max_s, None, device, gen_chunk_size)
         all_k_trajs.append(trajs)
