@@ -196,6 +196,25 @@ per-parameter changes, preventing destabilization.
 epoch 5-6 with rb_cross>20. Lower reg gives the ego loss more freedom but insufficient
 constraint on neighbor weights causes catastrophic drift through shared DiT parameters.
 
+**Generation variants** (`generation_variant` config field). The 16 generation slots are
+composed of: 1 deterministic + N guided cl_spd configs + N noise-only configs + remaining
+random pool. Defined in `_build_cl_spd_configs()` and `_build_noise_configs()` in
+`grpo_trainer_batched.py`. Current default: `rsft_v2` — 6 guided cl_spd (CL5/CL8/CL10 with
+optional stretch 1.1/1.3/1.4) + 9 pure-noise slots sweeping noise ranges 0.1→5.0. No
+random-CL pool. Empirically best for L2 preservation (ego +1.5%, neighbor -1.0% vs LoRA-less).
+Use `rsft_v2_legacy` for the previous default (2 fixed-noise + 7 random-CL slots).
+
+### Rank Analytics
+
+Per-epoch instrumentation that tracks **which generation slot wins rank #1** for each scene
+and **which reward component drives the win**. Implemented in `rlvr/rank_analytics.py`.
+Outputs `rank_analytics_epoch_NNN.json` per epoch and a final `rank_analytics_summary.json`
+in the run dir. Visualize with `python -m rlvr.autoresearch.tools.viz_rank_analytics --run_dir <dir>`.
+
+Use to identify redundant/dead generation slots that never produce winners — those can be
+swapped for new guidance variants. Adds ~no overhead (the reward breakdowns are already
+computed during scoring; analytics just retain and aggregate them).
+
 ### Random Guidance Mode
 
 The `random_guidance_mode` config replaces the learned exploration policy with direct η sampling:

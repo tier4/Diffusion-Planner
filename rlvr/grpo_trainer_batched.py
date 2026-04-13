@@ -67,6 +67,213 @@ def _chunked_generate(model, model_args, norm_batch, noise_min, noise_max, compo
     return torch.cat(all_out, dim=0)
 
 
+def _build_cl_spd_configs(variant: str) -> list[dict]:
+    """Return list of generation config dicts for the variant.
+
+    Each dict: {cl, spd, noise, label, [stretch], [lat_eta, lat_lambda, lat_scale]}
+    cl/spd = 0 disables that guidance. Slots 2/4/6 (1-indexed) of "default"
+    are the redundant ones identified by rank analytics — the experimental
+    variants replace those with new configs.
+    """
+    if variant == "default":
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 8.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL8_SPD5_det"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.0, 0.0), "label": "CL10_SPD8_det"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.0, 0.0), "label": "CL10_SPD10_det"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 8.0,  "spd": 8.0,  "noise": (0.3, 0.8), "label": "CL8_SPD8_noisy"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.3, 0.8), "label": "CL10_SPD8_noisy"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant == "noisy_stretched":
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.5, 1.5), "stretch": 1.2, "label": "CL5_SPD5_str12_n0515"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.0, 0.0), "label": "CL10_SPD8_det"},
+            {"cl": 8.0,  "spd": 8.0,  "noise": (0.8, 2.5), "stretch": 1.3, "label": "CL8_SPD8_str13_n0825"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 5.0,  "spd": 3.0,  "noise": (1.0, 3.0), "stretch": 1.4, "label": "CL5_SPD3_str14_n1030"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.3, 0.8), "label": "CL10_SPD8_noisy"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant == "lateral":
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "lat_eta":  0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latL04"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.0, 0.0), "label": "CL10_SPD8_det"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "lat_eta": -0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latR04"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.5, 1.5), "lat_eta":  0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "CL5_SPD5_latL06_n15"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.3, 0.8), "label": "CL10_SPD8_noisy"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant == "decoupled":
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 0.0,  "spd": 5.0,  "noise": (0.3, 1.5), "label": "SPD5_only_n0315"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.0, 0.0), "label": "CL10_SPD8_det"},
+            {"cl": 5.0,  "spd": 0.0,  "noise": (0.3, 1.5), "label": "CL5_only_n0315"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 10.0, "spd": 0.0,  "noise": (0.5, 2.0), "label": "CL10_only_n0520"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.3, 0.8), "label": "CL10_SPD8_noisy"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant == "combined_winners":
+        # Top winner from each previous variant — combined into 3 redundant slots
+        # (replaces CL8_SPD5_det, CL10_SPD10_det, CL8_SPD8_noisy)
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 8.0,  "spd": 8.0,  "noise": (0.8, 2.5), "stretch": 1.3, "label": "CL8_SPD8_str13_n0825"},  # stretched winner
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.0, 0.0), "label": "CL10_SPD8_det"},
+            {"cl": 5.0,  "spd": 0.0,  "noise": (0.3, 1.5), "label": "CL5_only_n0315"},  # decoupled winner
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.5, 1.5), "lat_eta": 0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "CL5_SPD5_latL06_n15"},  # lateral winner
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.3, 0.8), "label": "CL10_SPD8_noisy"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant == "stretched_intense":
+        # All 3 redundant slots filled with stretched configs at increasing intensity
+        # Tests if "more stretched is better"
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.5, 1.5), "stretch": 1.2, "label": "CL5_SPD5_str12_n0515"},  # mild
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.0, 0.0), "label": "CL10_SPD8_det"},
+            {"cl": 8.0,  "spd": 8.0,  "noise": (0.8, 2.5), "stretch": 1.3, "label": "CL8_SPD8_str13_n0825"},  # winner
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 10.0, "spd": 8.0,  "noise": (1.0, 3.0), "stretch": 1.5, "label": "CL10_SPD8_str15_n1030"},  # heavy
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.3, 0.8), "label": "CL10_SPD8_noisy"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant in ("rsft_v2", "rsft_v2_legacy", "noise_swap_2_no_lat", "rsft_v2_all_random", "rsft_v2_half_half"):
+        # Base RSFT config (v2). 6 guided CL+SPD slots:
+        # - 3 plain CL+SPD curriculum (CL5 det, CL5 noisy, CL10 noisy)
+        # - 3 stretched CL+SPD (CL6 str1.1, CL8 str1.3, CL7 str1.4) at varied noise
+        # Noise-only slots are handled separately via _build_noise_configs().
+        return [
+            {"cl": 5.0,  "spd": 5.0, "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 8.0,  "spd": 8.0, "noise": (0.8, 2.5), "stretch": 1.3, "label": "CL8_SPD8_str13_n0825"},
+            {"cl": 6.0,  "spd": 6.0, "noise": (0.5, 1.5), "stretch": 1.1, "label": "CL6_SPD6_str11_n0515"},
+            {"cl": 5.0,  "spd": 5.0, "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 7.0,  "spd": 7.0, "noise": (0.8, 2.0), "stretch": 1.4, "label": "CL7_SPD7_str14_n0820"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant == "noise_swap_2":
+        # Conservative version of more_noise: keeps the full stretched_lateral
+        # curriculum and only replaces slots 3 and 7 (the two CL10 configs that
+        # never won) with high-noise no-guidance variants.
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 8.0,  "spd": 8.0,  "noise": (0.8, 2.5), "stretch": 1.3, "label": "CL8_SPD8_str13_n0825"},
+            {"cl": 0.0,  "spd": 0.0,  "noise": (1.5, 3.0), "label": "noise_n1530"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "lat_eta": 0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latL04"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.5, 1.5), "lat_eta": 0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "CL5_SPD5_latL06_n15"},
+            {"cl": 0.0,  "spd": 0.0,  "noise": (2.0, 4.0), "label": "noise_n2040"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant == "collision_swap":
+        # Replaces slots 3 and 7 of stretched_lateral with collision-guided configs.
+        # Slot 3: deterministic CL+SPD+collision. Slot 7: noisy CL+SPD+collision.
+        # All other slots match stretched_lateral.
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 8.0,  "spd": 8.0,  "noise": (0.8, 2.5), "stretch": 1.3, "label": "CL8_SPD8_str13_n0825"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "col": 0.5, "label": "CL5_SPD5_col05_det"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "lat_eta": 0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latL04"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.5, 1.5), "lat_eta": 0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "CL5_SPD5_latL06_n15"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "col": 1.0, "label": "CL5_SPD5_col10_n0308"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    if variant == "more_noise":
+        # 5 noise-only slots at varied noise ranges (0.3-0.8, 0.8-2.0, 1.5-3.0, 2.0-4.0)
+        # plus a low-CL low-noise slot. Tests pure stochastic diversity vs constrained
+        # CL/SPD guidance. The retained guided slots are str13 (CL+SPD+stretch),
+        # CL5_SPD5_noisy (mild guided), and CL5_SPD5_latL06_n15 (lateral push).
+        return [
+            {"cl": 0.0, "spd": 0.0, "noise": (0.3, 0.8), "label": "noise_n0308"},
+            {"cl": 8.0, "spd": 8.0, "noise": (0.8, 2.5), "stretch": 1.3, "label": "CL8_SPD8_str13_n0825"},
+            {"cl": 0.0, "spd": 0.0, "noise": (0.8, 2.0), "label": "noise_n0820"},
+            {"cl": 3.0, "spd": 0.0, "noise": (0.5, 1.5), "label": "CL3_n0515"},
+            {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 5.0, "spd": 5.0, "noise": (0.5, 1.5), "lat_eta": 0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "CL5_SPD5_latL06_n15"},
+            {"cl": 0.0, "spd": 0.0, "noise": (1.5, 3.0), "label": "noise_n1530"},
+            {"cl": 0.0, "spd": 0.0, "noise": (2.0, 4.0), "label": "noise_n2040"},
+        ]
+    if variant == "stretched_lateral":
+        # Combine stretched (winner) + 2 lateral variants (left only, since right was redundant)
+        return [
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL5_SPD5_det"},
+            {"cl": 8.0,  "spd": 8.0,  "noise": (0.8, 2.5), "stretch": 1.3, "label": "CL8_SPD8_str13_n0825"},  # stretched winner
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.0, 0.0), "label": "CL10_SPD8_det"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "lat_eta": 0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latL04"},  # lateral mild
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.3, 0.8), "label": "CL5_SPD5_noisy"},
+            {"cl": 5.0,  "spd": 5.0,  "noise": (0.5, 1.5), "lat_eta": 0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "CL5_SPD5_latL06_n15"},  # lateral strong
+            {"cl": 10.0, "spd": 8.0,  "noise": (0.3, 0.8), "label": "CL10_SPD8_noisy"},
+            {"cl": 10.0, "spd": 10.0, "noise": (0.5, 1.0), "label": "CL10_SPD10_noisy"},
+        ]
+    raise ValueError(f"Unknown generation_variant: {variant}")
+
+
+def _build_noise_configs(variant: str) -> list[dict]:
+    """Return noise-only slots (no CL/SPD guidance, just fixed noise ranges).
+
+    These are functionally part of the noise/stochastic exploration pool but
+    use deterministic noise ranges rather than being randomly sampled.
+    Processed between cl_spd_configs and random_pool during generation.
+    """
+    if variant in ("rsft_v2_legacy", "noise_swap_2_no_lat"):
+        # Legacy rsft_v2 (kept for reproducing prior experiments): 2 fixed-noise
+        # slots + 7 random CL+noise slots in the random pool. Empirically
+        # decent (val_reward +25.63 ep9) but inferior L2 vs current rsft_v2.
+        return [
+            {"noise": (1.5, 3.0), "label": "noise_n1530"},
+            {"noise": (2.0, 4.0), "label": "noise_n2040"},
+        ]
+    if variant in ("rsft_v2", "rsft_v2_all_noise"):
+        # rsft_v2 (default RSFT base): 9 pure-noise slots sweeping the noise
+        # spectrum 0.1 → 5.0, plus 6 guided cl_spd slots and 1 det_pure.
+        # No random CL passes — pure-noise exploration won out on L2 + safety.
+        return [
+            {"noise": (0.1, 0.3), "label": "noise_n0103"},
+            {"noise": (0.3, 0.6), "label": "noise_n0306"},
+            {"noise": (0.5, 1.0), "label": "noise_n0510"},
+            {"noise": (0.5, 1.5), "label": "noise_n0515"},
+            {"noise": (0.8, 1.8), "label": "noise_n0818"},
+            {"noise": (1.0, 2.5), "label": "noise_n1025"},
+            {"noise": (1.5, 3.0), "label": "noise_n1530"},
+            {"noise": (2.0, 4.0), "label": "noise_n2040"},
+            {"noise": (3.0, 5.0), "label": "noise_n3050"},
+        ]
+    if variant == "rsft_v2_all_random":
+        # Drop the 2 fixed noise slots entirely. Random pool expands to 9 slots,
+        # all using the config's noise_scale_range (default 0.5-2.0).
+        return []
+    if variant == "rsft_v2_half_half":
+        # 5 deterministic noise slots covering low → very high, leaves 4 random
+        # slots (K - 1 det - 6 guided - 5 noise = 4 random). Tests mid-ground
+        # between all_noise (9 fixed) and rsft_v2 (2 fixed + 7 random).
+        return [
+            {"noise": (0.3, 0.8), "label": "noise_n0308"},
+            {"noise": (0.5, 1.5), "label": "noise_n0515"},
+            {"noise": (1.0, 2.0), "label": "noise_n1020"},
+            {"noise": (1.5, 3.0), "label": "noise_n1530"},
+            {"noise": (2.0, 4.0), "label": "noise_n2040"},
+        ]
+    return []
+
+
+def get_generation_config_labels_for_variant(variant: str, K: int = 16) -> list[str]:
+    """Full per-slot labels: det_pure + cl_spd configs + noise configs + random."""
+    cl_spd = _build_cl_spd_configs(variant)
+    noise = _build_noise_configs(variant)
+    labels = ["det_pure"] + [c["label"] for c in cl_spd] + [c["label"] for c in noise]
+    for i in range(len(labels), K):
+        labels.append(f"random_{i}")
+    return labels[:K]
+
+
 def generate_all_scenes_batched(
     model: nn.Module,
     model_args,
@@ -83,6 +290,7 @@ def generate_all_scenes_batched(
     lateral_lambda: float = 2.0,
     lateral_scale: float = 5.0,
     speed_stretch: float = 1.0,
+    generation_variant: str = "default",
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
 
@@ -116,44 +324,59 @@ def generate_all_scenes_batched(
 
     # --- Config 2-9: CL + SPD guidance sweep for lane keeping ---
     # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
-    cl_spd_configs = [
-        (5.0,  5.0,  0.0, 0.0),   # CL5+SPD5, deterministic
-        (8.0,  5.0,  0.0, 0.0),   # CL8+SPD5, deterministic
-        (10.0, 8.0,  0.0, 0.0),   # CL10+SPD8, deterministic
-        (10.0, 10.0, 0.0, 0.0),   # CL10+SPD10, deterministic
-        (5.0,  5.0,  0.3, 0.8),   # CL5+SPD5, noise
-        (8.0,  8.0,  0.3, 0.8),   # CL8+SPD8, noise
-        (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
-        (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
-    ]
-    use_stretch = abs(speed_stretch - 1.0) > 1e-6
-    for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
-        # Apply stretch only to noisy configs (last 4), keep deterministic configs normal
+    # Variants can replace the 3 redundant slots with experimental configs.
+    cl_spd_configs = _build_cl_spd_configs(generation_variant)
+    use_stretch_global = abs(speed_stretch - 1.0) > 1e-6
+    for cfg in cl_spd_configs:
+        cl_scale = cfg["cl"]
+        spd_scale = cfg["spd"]
+        n_min, n_max = cfg["noise"]
+        # Per-slot stretch overrides global, falls back to global if unset
+        cfg_stretch = cfg.get("stretch", speed_stretch)
         cfg_has_noise = n_max > 0
-        use_stretch_here = use_stretch and cfg_has_noise
-        spd_params = {"stretch": speed_stretch} if use_stretch_here else {"v_high": gt_max_speed, "v_low": 0.5}
-        fns = [
-            GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
-            GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params),
-        ]
+        use_stretch_here = abs(cfg_stretch - 1.0) > 1e-6 and cfg_has_noise
+        spd_params = {"stretch": cfg_stretch} if use_stretch_here else {"v_high": gt_max_speed, "v_low": 0.5}
+        # Per-slot lateral overrides global lateral_eta
+        cfg_lat_eta = cfg.get("lat_eta", lateral_eta)
+        cfg_lat_lambda = cfg.get("lat_lambda", lateral_lambda)
+        cfg_lat_scale = cfg.get("lat_scale", lateral_scale)
+        cfg_use_lat = abs(cfg_lat_eta) > 1e-6
+        # Optional per-slot collision guidance
+        cfg_col = cfg.get("col", 0.0)
+        # Build guidance functions
+        fns = []
+        if cl_scale > 0:
+            fns.append(GuidanceConfig("centerline_following", enabled=True, scale=cl_scale))
+        if spd_scale > 0:
+            fns.append(GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params))
         if use_lon:
             fns.append(GuidanceConfig(
                 "longitudinal", enabled=True, scale=longitudinal_scale,
                 params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},
             ))
-        if use_lat:
+        if cfg_use_lat:
             fns.append(GuidanceConfig(
-                "lateral", enabled=True, scale=lateral_scale,
-                params={"eta_lat": lateral_eta, "lambda_lat": lateral_lambda},
+                "lateral", enabled=True, scale=cfg_lat_scale,
+                params={"eta_lat": cfg_lat_eta, "lambda_lat": cfg_lat_lambda},
             ))
-        comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
+        if cfg_col > 0:
+            fns.append(GuidanceConfig("collision", enabled=True, scale=cfg_col))
+        comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0)) if fns else None
         trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
         all_k_trajs.append(trajs)
 
     # Clean up reference_trajectory before random passes (not needed, wastes VRAM on expand)
     norm_batch.pop("reference_trajectory", None)
 
-    # --- Config 5+: Random guidance (no road_border to avoid OOM) ---
+    # --- Noise-only slots (no guidance, fixed noise ranges) ---
+    # Functionally part of the noise/exploration pool but with deterministic
+    # noise ranges rather than random sampling.
+    for noise_cfg in _build_noise_configs(generation_variant):
+        n_min_s, n_max_s = noise_cfg["noise"]
+        trajs = _chunked_generate(model, model_args, norm_batch, n_min_s, n_max_s, None, device, gen_chunk_size)
+        all_k_trajs.append(trajs)
+
+    # --- Random guidance pool (no road_border to avoid OOM) ---
     n_fixed = len(all_k_trajs)
     n_random = K - n_fixed
 

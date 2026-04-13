@@ -613,6 +613,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                     reward_config=train_reward_config, device=DEVICE, epoch=epoch,
                     exploration_policy=_explorer,
                     exploration_optimizer=_explorer_opt,
+                    run_dir=run_dir,
                 )
             else:
                 # Fully batched training: all scenes in ~5 forward passes
@@ -658,6 +659,13 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
     # Generate trajectory visualization for the best checkpoint
     if best_checkpoint and Path(best_checkpoint).exists():
         _visualize_trajectories(policy_model, model_args, prob_100, eval_reward_config, run_dir, name)
+
+    # Cross-epoch rank analytics summary
+    try:
+        from rlvr.rank_analytics import save_cross_epoch_summary
+        save_cross_epoch_summary(run_dir)
+    except Exception as e:
+        print(f"  [rank_analytics] Cross-epoch summary failed: {e}")
 
     # Print final summary (machine-parseable)
     print("\n---")

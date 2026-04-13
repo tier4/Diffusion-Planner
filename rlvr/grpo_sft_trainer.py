@@ -358,6 +358,7 @@ def train_epoch_ranked_sft(
     epoch: int,
     exploration_policy=None,
     exploration_optimizer=None,
+    run_dir=None,
 ) -> dict[str, float]:
     """GRPO-ranked SFT epoch: generate, rank, filter, train with SFT loss.
 
@@ -557,6 +558,7 @@ def train_epoch_ranked_sft(
                 lateral_lambda=lat_lambda,
                 lateral_scale=lat_scale,
                 speed_stretch=spd_stretch,
+                generation_variant=getattr(config, "generation_variant", "default"),
             )  # [N, K, T, 4]
 
     torch.cuda.empty_cache()
@@ -576,6 +578,20 @@ def train_epoch_ranked_sft(
     best_rewards_list = []
     scene_train_mask = []  # True = train on this scene, False = skip
     scene_improvements = []  # improvement value per scene for advantage weighting
+
+    # Rank analytics: track which generation config wins per scene
+    from pathlib import Path
+    from rlvr.rank_analytics import (
+        EpochRankAnalytics, SceneRankRecord,
+        mean_breakdown_dict, compute_dominant_component, print_epoch_summary,
+        save_epoch_analytics, get_category, _breakdown_to_dict,
+    )
+    from rlvr.grpo_trainer_batched import get_generation_config_labels_for_variant
+    _ra_variant = getattr(config, "generation_variant", "default")
+    _ra_labels = get_generation_config_labels_for_variant(_ra_variant, K)
+    if exploration_policy is not None:
+        _ra_labels = [f"explorer_{i}" for i in range(K)]
+    _ra = EpochRankAnalytics(epoch=epoch, n_scenes=N)
 
     for i in tqdm(range(N), desc="Scoring"):
         traj_K = all_trajs[i]  # [K, T, 4]
@@ -600,6 +616,25 @@ def train_epoch_ranked_sft(
             from pathlib import Path as _P
             print(f"    SEL [{_P(valid_paths[i]).stem[:30]}] det={det_reward:.1f} best={best_reward:.1f} imp={improvement:.1f}")
 
+        # Rank analytics: record which config won and why
+        _ra_mean_bd = mean_breakdown_dict(rewards)
+        _ra_winner = rewards[best_idx]
+        _ra_dom_comp, _ra_dom_delta = compute_dominant_component(
+            _ra_winner, _ra_mean_bd, reward_config,
+        )
+        _ra.records.append(SceneRankRecord(
+            scene_path=Path(valid_paths[i]).stem,
+            winner_idx=best_idx,
+            winner_label=_ra_labels[best_idx],
+            winner_reward=float(reward_vals[best_idx]),
+            mean_reward=float(reward_vals.mean()),
+            det_reward=float(reward_vals[0]),
+            winner_breakdown=_breakdown_to_dict(_ra_winner),
+            mean_breakdown=_ra_mean_bd,
+            dominant_component=_ra_dom_comp,
+            dominant_delta=_ra_dom_delta,
+        ))
+
         # Get best trajectory and smooth it
         best_traj = traj_K[best_idx].cpu().numpy()  # [T, 4]
         best_traj_smooth = _smooth_trajectory(
@@ -610,6 +645,12 @@ def train_epoch_ranked_sft(
         best_rewards_list.append(best_reward)
 
     mean_best_reward = float(np.mean(best_rewards_list))
+
+    # Rank analytics: aggregate and print/save
+    _ra.finalize(_ra_labels)
+    print_epoch_summary(_ra)
+    if run_dir is not None:
+        save_epoch_analytics(_ra, Path(run_dir), epoch)
 
     # Frozen selection: use ep1 mask for all epochs
     use_frozen = getattr(config, "selective_frozen", False) and selective_thresh > 0

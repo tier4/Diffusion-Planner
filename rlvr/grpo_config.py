@@ -83,6 +83,12 @@ class GRPOConfig:
     guidance_prob: float = 0.5
     prototypes_path: str | None = None
 
+    # Generation variant — controls which cl_spd_configs slot list is used
+    # in generate_all_scenes_batched(). Variants replace the 3 redundant slots
+    # (CL8_SPD5_det, CL10_SPD10_det, CL8_SPD8_noisy) with experimental configs.
+    # Options: "default", "noisy_stretched", "lateral", "decoupled"
+    generation_variant: str = "default"
+
     # Reward weights
     w_safety: float = 5.0
     w_progress: float = 2.0
