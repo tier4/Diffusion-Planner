@@ -309,5 +309,165 @@ class TestBatchedTrajectoryLossesValidation:
         assert losses is not None
 
 
+# ---------------------------------------------------------------------------
+# Tests for ego IL regularization
+# ---------------------------------------------------------------------------
+class TestEgoIL:
+    """Tests for ego IL modes in _compute_sft_diffusion_loss."""
+
+    def test_gt_mode_produces_nonzero_il_loss(self):
+        """ego_il_weight > 0 with mode='gt' should produce a non-zero IL loss."""
+        from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        data = _make_scene_data(B=1, P=5, T=80)
+
+        ego_gt = torch.randn(1, 80, 4)
+        neighbor_gt = torch.randn(1, 4, 80, 4)
+        neighbor_mask = torch.zeros(1, 4, 80, dtype=torch.bool)
+        ego_gt_real = torch.randn(1, 80, 4)  # different from ego_gt
+
+        loss, metrics = _compute_sft_diffusion_loss(
+            model=model, model_args=model_args, data=data,
+            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"), K=1,
+            neighbor_reg_weight=0.0, neighbor_reg_only=False,
+            ego_il_weight=1.0, ego_il_mode="gt", ego_gt_real=ego_gt_real,
+        )
+        assert metrics["sft_ego_il_loss"] > 0, "GT ego IL loss should be non-zero"
+        assert loss.requires_grad
+
+    def test_baseline_mode_produces_nonzero_il_loss(self):
+        """ego_il_weight > 0 with mode='baseline' should produce a non-zero IL loss."""
+        from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        data = _make_scene_data(B=1, P=5, T=80)
+
+        ego_gt = torch.randn(1, 80, 4)
+        neighbor_gt = torch.randn(1, 4, 80, 4)
+        neighbor_mask = torch.zeros(1, 4, 80, dtype=torch.bool)
+
+        loss, metrics = _compute_sft_diffusion_loss(
+            model=model, model_args=model_args, data=data,
+            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"), K=1,
+            neighbor_reg_weight=0.0, neighbor_reg_only=False,
+            ego_il_weight=1.0, ego_il_mode="baseline",
+        )
+        assert metrics["sft_ego_il_loss"] > 0, "Baseline ego IL loss should be non-zero"
+
+    def test_gt_mode_raises_without_ego_gt_real(self):
+        """GT mode should raise ValueError when ego_gt_real is not provided."""
+        from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        data = _make_scene_data(B=1, P=5, T=80)
+
+        with pytest.raises(ValueError, match="ego_gt_real is required"):
+            _compute_sft_diffusion_loss(
+                model=model, model_args=model_args, data=data,
+                ego_gt=torch.randn(1, 80, 4),
+                neighbor_gt=torch.randn(1, 4, 80, 4),
+                neighbor_mask=torch.zeros(1, 4, 80, dtype=torch.bool),
+                device=torch.device("cpu"), K=1,
+                ego_il_weight=1.0, ego_il_mode="gt", ego_gt_real=None,
+            )
+
+    def test_invalid_mode_raises(self):
+        """Invalid ego_il_mode should raise ValueError."""
+        from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        data = _make_scene_data(B=1, P=5, T=80)
+
+        with pytest.raises(ValueError, match="ego_il_mode must be"):
+            _compute_sft_diffusion_loss(
+                model=model, model_args=model_args, data=data,
+                ego_gt=torch.randn(1, 80, 4),
+                neighbor_gt=torch.randn(1, 4, 80, 4),
+                neighbor_mask=torch.zeros(1, 4, 80, dtype=torch.bool),
+                device=torch.device("cpu"), K=1,
+                ego_il_weight=1.0, ego_il_mode="invalid",
+            )
+
+    def test_il_disabled_when_weight_zero(self):
+        """ego_il_weight=0 should produce zero IL loss."""
+        from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        data = _make_scene_data(B=1, P=5, T=80)
+
+        _, metrics = _compute_sft_diffusion_loss(
+            model=model, model_args=model_args, data=data,
+            ego_gt=torch.randn(1, 80, 4),
+            neighbor_gt=torch.randn(1, 4, 80, 4),
+            neighbor_mask=torch.zeros(1, 4, 80, dtype=torch.bool),
+            device=torch.device("cpu"), K=1,
+            ego_il_weight=0.0, ego_il_mode="gt",
+        )
+        assert metrics["sft_ego_il_loss"] == 0.0
+
+    def test_baseline_il_with_neighbor_reg_shares_forward_pass(self):
+        """Baseline IL + neighbor reg should both work (shared base forward pass)."""
+        from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
+
+        model = _StubDiT(P=5, T=80)
+        model_args = _make_model_args(P=5, T=80)
+        data = _make_scene_data(B=1, P=5, T=80)
+
+        loss, metrics = _compute_sft_diffusion_loss(
+            model=model, model_args=model_args, data=data,
+            ego_gt=torch.randn(1, 80, 4),
+            neighbor_gt=torch.randn(1, 4, 80, 4),
+            neighbor_mask=torch.zeros(1, 4, 80, dtype=torch.bool),
+            device=torch.device("cpu"), K=1,
+            neighbor_reg_weight=1.0, neighbor_reg_only=True,
+            ego_il_weight=0.5, ego_il_mode="baseline",
+        )
+        assert metrics["sft_ego_il_loss"] > 0, "Baseline IL should work alongside neighbor reg"
+        assert metrics["sft_neighbor_reg_loss"] > 0, "Neighbor reg should work alongside baseline IL"
+
+
+# ---------------------------------------------------------------------------
+# Tests for config validation
+# ---------------------------------------------------------------------------
+class TestConfigValidation:
+    """Tests for GRPOConfig field validation."""
+
+    def test_invalid_ego_il_mode(self):
+        from rlvr.grpo_config import GRPOConfig
+        with pytest.raises(ValueError, match="ego_il_mode"):
+            GRPOConfig(ego_il_mode="bad")
+
+    def test_invalid_selective_mode(self):
+        from rlvr.grpo_config import GRPOConfig
+        with pytest.raises(ValueError, match="selective_mode"):
+            GRPOConfig(selective_mode="bad")
+
+    def test_valid_modes_pass(self):
+        from rlvr.grpo_config import GRPOConfig
+        c = GRPOConfig(ego_il_mode="baseline", selective_mode="advantage")
+        assert c.ego_il_mode == "baseline"
+        assert c.selective_mode == "advantage"
+
+    def test_schedule_constant_no_end(self):
+        from rlvr.grpo_config import GRPOConfig
+        c = GRPOConfig(schedules={"speed_stretch": {"type": "constant", "start": 1.1}})
+        val = c.get_scheduled_value("speed_stretch", 5, 30)
+        assert val == 1.1
+
+    def test_schedule_linear_requires_end(self):
+        from rlvr.grpo_config import GRPOConfig
+        c = GRPOConfig(schedules={"w_progress": {"type": "linear", "start": 0.0}})
+        with pytest.raises(ValueError, match="requires 'end'"):
+            c.get_scheduled_value("w_progress", 5, 30)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

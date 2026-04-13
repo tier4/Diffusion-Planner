@@ -128,7 +128,10 @@ def generate_all_scenes_batched(
     ]
     use_stretch = abs(speed_stretch - 1.0) > 1e-6
     for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
-        spd_params = {"stretch": speed_stretch} if use_stretch else {"v_high": gt_max_speed, "v_low": 0.5}
+        # Apply stretch only to noisy configs (last 4), keep deterministic configs normal
+        cfg_has_noise = n_max > 0
+        use_stretch_here = use_stretch and cfg_has_noise
+        spd_params = {"stretch": speed_stretch} if use_stretch_here else {"v_high": gt_max_speed, "v_low": 0.5}
         fns = [
             GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
             GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params),

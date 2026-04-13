@@ -67,8 +67,29 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
     rng_norm = np.random.default_rng(seed + 1000)
     prob_idx = rng_prob.choice(len(prob_100), size=min(n_prob, len(prob_100)), replace=False)
     prob_scenes = [prob_100[i] for i in prob_idx]
-    norm_idx = rng_norm.choice(len(normal_pool), size=min(n_normal, len(normal_pool)), replace=False)
-    normal_scenes = [normal_pool[i] for i in norm_idx]
+
+    if n_normal == 0:
+        random.Random(seed).shuffle(prob_scenes)
+        return prob_scenes
+
+    # Deduplicate: remove prob scenes from normal pool to avoid training on duplicates
+    prob_set = set(prob_scenes)
+    normal_pool_deduped = [s for s in normal_pool if s not in prob_set]
+    if len(normal_pool_deduped) < len(normal_pool):
+        n_removed = len(normal_pool) - len(normal_pool_deduped)
+        print(f"  [WARNING] Removed {n_removed} prob-scene duplicates from normal pool "
+              f"({len(normal_pool)} -> {len(normal_pool_deduped)})")
+    if len(normal_pool_deduped) == 0 and n_normal > 0:
+        raise ValueError(
+            f"Normal pool is empty after deduplication! "
+            f"All {len(normal_pool)} normal scenes overlap with prob scenes. "
+            f"Set n_normal_scenes=0 in config or use a different normal_scenes file."
+        )
+    else:
+        n_actual = min(n_normal, len(normal_pool_deduped))
+        norm_idx = rng_norm.choice(len(normal_pool_deduped), size=n_actual, replace=False)
+        normal_scenes = [normal_pool_deduped[i] for i in norm_idx]
+
     combined = prob_scenes + normal_scenes
     random.Random(seed).shuffle(combined)
     return combined
@@ -338,11 +359,18 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
 
 def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cache_path: Path | None = None):
     # Load baseline cache (precomputed baseline/GT paths per scene)
+    # Auto-detect if not specified: look for baseline_cache_val50.json in output dir
     baseline_cache = None
     if baseline_cache_path and baseline_cache_path.exists():
         with open(baseline_cache_path) as f:
             baseline_cache = json.load(f)
         print(f"Loaded baseline cache: {len(baseline_cache)} scenes from {baseline_cache_path}")
+    elif not baseline_cache_path:
+        auto_cache = OUTPUT_DIR / "baseline_cache_val50.json"
+        if auto_cache.exists():
+            with open(auto_cache) as f:
+                baseline_cache = json.load(f)
+            print(f"Auto-loaded baseline cache: {len(baseline_cache)} scenes from {auto_cache}")
 
     # Fix seeds
     torch.manual_seed(42)
@@ -355,8 +383,15 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         config_data = json.load(f)
 
     config_data_raw = dict(config_data)  # save before popping
-    n_prob = config_data.pop("n_prob_scenes", 50)
-    n_normal = config_data.pop("n_normal_scenes", 100)
+    if "n_prob_scenes" not in config_data or "n_normal_scenes" not in config_data:
+        raise ValueError(
+            "Config MUST explicitly set 'n_prob_scenes' and 'n_normal_scenes'. "
+            "Omitting these leads to silent scene duplication bugs. "
+            "Use n_prob_scenes=50, n_normal_scenes=0 for prob-only, "
+            "or n_prob_scenes=50, n_normal_scenes=450 for 500-scene training."
+        )
+    n_prob = config_data.pop("n_prob_scenes")
+    n_normal = config_data.pop("n_normal_scenes")
     curated_normal_path = config_data.pop("curated_normal_path", None)
     prob_scenes_path = config_data.pop("prob_scenes_path", None)
     seed_lora_path = config_data.pop("seed_lora_path", None)
@@ -373,6 +408,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
     print(f"Config: lr={grpo_config.learning_rate}, kl={grpo_config.kl_coef}, "
           f"rank={grpo_config.lora_rank}, epochs={grpo_config.train_epochs}, "
           f"scenes={n_prob}p+{n_normal}n, N={grpo_config.num_generations}")
+    print(f"Scene files: prob={PROB_SCENES_PATH}, normal={NORMAL_POOL_PATH}")
 
     # Load scenes
     prob_100, normal_pool, val_50 = load_scene_lists()
@@ -394,7 +430,13 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         train_paths = create_training_set(prob_100, curated_pool, n_prob, n_normal)
     else:
         train_paths = create_training_set(prob_100, normal_pool, n_prob, n_normal)
-    print(f"Training set: {len(train_paths)} scenes")
+    n_unique = len(set(train_paths))
+    n_total = len(train_paths)
+    dup_msg = f" ({n_total - n_unique} DUPLICATES!)" if n_unique < n_total else ""
+    print(f"Training set: {n_total} scenes ({n_unique} unique){dup_msg}")
+    if n_unique < n_total:
+        print(f"  [WARNING] Duplicate scenes detected! Config: n_prob={n_prob}, n_normal={n_normal}. "
+              f"Check that --prob_scenes and --normal_scenes point to DIFFERENT files.")
 
     # Setup experiment dir
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -423,7 +465,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                 LORA_TARGET_LAST_BLOCK_REGEX,
                 apply_lora,
             )
-            target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX}.get(grpo_config.lora_target)
+            from preference_optimization.lora_utils import LORA_TARGET_BLOCKS_02_REGEX
+            target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX, "blocks02": LORA_TARGET_BLOCKS_02_REGEX}.get(grpo_config.lora_target)
             kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
                          lora_dropout=grpo_config.lora_dropout)
             if target:

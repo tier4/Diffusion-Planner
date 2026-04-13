@@ -132,6 +132,9 @@ def _compute_sft_diffusion_loss(
     K: int = 8,
     neighbor_reg_weight: float = 0.0,
     neighbor_reg_only: bool = False,
+    ego_il_weight: float = 0.0,
+    ego_il_mode: str = "gt",
+    ego_gt_real: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute standard SFT diffusion loss with ego + neighbor targets.
 
@@ -145,11 +148,15 @@ def _compute_sft_diffusion_loss(
     the LoRA model's neighbor predictions from diverging from the base model's
     neighbor predictions at the same (noise, timestep) inputs.
 
+    When ego_il_weight > 0, adds MSE(model_ego, real_GT_ego) to anchor the
+    model's ego predictions near ground truth while learning from ranked trajs.
+
     Args:
         model: Policy model (LoRA-wrapped).
         model_args: Config from load_model.
         data: Raw observation dict (NOT normalized). B=1.
         ego_gt: [B, T, 4] ego ground truth trajectory (x, y, cos, sin).
+            In ranked SFT, this is the best-of-K ranked trajectory.
         neighbor_gt: [B, Pn, T, 4] neighbor ground truth trajectories.
         neighbor_mask: [B, Pn, T] boolean mask (True = invalid/padded).
         device: Torch device.
@@ -158,6 +165,11 @@ def _compute_sft_diffusion_loss(
         neighbor_reg_only: If True, drop the neighbor SFT loss and only use the
             reg term. Only takes effect when neighbor reg is active (model has
             disable_adapter and neighbor_reg_weight > 0).
+        ego_il_weight: Weight for ego IL regularization (0=disabled).
+        ego_gt_real: [B, T, 4] real GT ego trajectory for IL regularization.
+            Required only when ego_il_weight > 0 and ego_il_mode == "gt".
+            Not needed for baseline mode (uses base model forward pass instead).
+            Required when ego_il_weight > 0.
 
     Returns:
         (loss, metrics_dict)
@@ -204,9 +216,20 @@ def _compute_sft_diffusion_loss(
         {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     )
 
+    # Normalize real GT ego for IL loss (if provided)
+    use_ego_il = ego_il_weight > 0.0
+    if use_ego_il:
+        if ego_il_mode not in ("gt", "baseline"):
+            raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {ego_il_mode!r}")
+        if ego_il_mode == "gt" and ego_gt_real is None:
+            raise ValueError("ego_gt_real is required when ego_il_weight > 0 and ego_il_mode == 'gt'.")
+    if use_ego_il and ego_il_mode == "gt":
+        ego_gt_real_norm = (ego_gt_real - ego_mean) / ego_std  # [B, T, 4]
+
     total_ego_loss = 0.0
     total_neighbor_loss = 0.0
     total_neighbor_reg_loss = 0.0
+    total_ego_il_loss = 0.0
     # Combine future padding mask with current-timestep validity:
     # a neighbor absent at the current timestep should not contribute to loss.
     neighbors_future_valid = ~neighbor_mask  # [B, Pn, T]
@@ -254,9 +277,14 @@ def _compute_sft_diffusion_loss(
 
         gt_target = all_gt[:, :, 1:, :]  # [B, P, T, 4]
 
-        # Ego loss: MSE over all timesteps
+        # Ego loss: MSE over all timesteps (against ranked trajectory)
         ego_loss = F.mse_loss(model_output[:, 0], gt_target[:, 0])
         total_ego_loss += ego_loss
+
+        # Ego IL loss (GT mode): MSE against real GT ego trajectory
+        if use_ego_il and ego_il_mode == "gt":
+            ego_il_loss = F.mse_loss(model_output[:, 0], ego_gt_real_norm)
+            total_ego_il_loss += ego_il_loss
 
         # Neighbor loss: MSE over valid timesteps only.
         # Skipped when neighbor_reg_only=True AND reg is actually active.
@@ -270,31 +298,51 @@ def _compute_sft_diffusion_loss(
             if masked_loss.numel() > 0:
                 total_neighbor_loss += masked_loss.mean()
 
-        # Neighbor regularization: MSE(lora_neighbor, base_neighbor) at same inputs
-        if use_neighbor_reg and neighbors_future_valid.any():
+        # Neighbor regularization + ego IL (baseline mode): reuse base model forward pass
+        need_base_pass = use_neighbor_reg or (use_ego_il and ego_il_mode == "baseline")
+        if need_base_pass and not hasattr(inner, "disable_adapter"):
+            raise ValueError(
+                "neighbor_reg or baseline ego IL requires LoRA model with disable_adapter(). "
+                "Ensure the model is wrapped with PeftModel."
+            )
+        if need_base_pass and hasattr(inner, "disable_adapter"):
             with inner.disable_adapter(), torch.no_grad():
                 _, base_outputs = model(merged_inputs)
-            base_neighbor = base_outputs["model_output"][:, 1:, 1:, :]  # [B, Pn, T, 4]
-            lora_neighbor = model_output[:, 1:]  # [B, Pn, T, 4]
-            reg_mse = ((lora_neighbor - base_neighbor.detach()) ** 2).mean(dim=-1)  # [B, Pn, T]
-            masked_reg = reg_mse[neighbors_future_valid]
-            if masked_reg.numel() > 0:
-                total_neighbor_reg_loss += masked_reg.mean()
+            base_output = base_outputs["model_output"][:, :, 1:, :]  # [B, P, T, 4]
+
+            # Neighbor reg
+            if use_neighbor_reg and neighbors_future_valid.any():
+                base_neighbor = base_output[:, 1:]  # [B, Pn, T, 4]
+                lora_neighbor = model_output[:, 1:]  # [B, Pn, T, 4]
+                reg_mse = ((lora_neighbor - base_neighbor.detach()) ** 2).mean(dim=-1)
+                masked_reg = reg_mse[neighbors_future_valid]
+                if masked_reg.numel() > 0:
+                    total_neighbor_reg_loss += masked_reg.mean()
+
+            # Ego IL (baseline mode): MSE(lora_ego, base_ego)
+            if use_ego_il and ego_il_mode == "baseline":
+                base_ego = base_output[:, 0]  # [B, T, 4]
+                ego_il_loss = F.mse_loss(model_output[:, 0], base_ego.detach())
+                total_ego_il_loss += ego_il_loss
 
     ego_loss_avg = total_ego_loss / K
     neighbor_loss_avg = total_neighbor_loss / K if isinstance(total_neighbor_loss, torch.Tensor) else torch.tensor(0.0, device=device)
     neighbor_reg_avg = total_neighbor_reg_loss / K if isinstance(total_neighbor_reg_loss, torch.Tensor) else torch.tensor(0.0, device=device)
+    ego_il_avg = total_ego_il_loss / K if isinstance(total_ego_il_loss, torch.Tensor) else torch.tensor(0.0, device=device)
 
-    # Combined loss: ego + neighbor (neighbor weight = 1.0 to match SFT) + neighbor reg
+    # Combined loss: ego + neighbor (neighbor weight = 1.0 to match SFT) + neighbor reg + ego IL
     loss = ego_loss_avg + neighbor_loss_avg
     if use_neighbor_reg:
         loss = loss + neighbor_reg_weight * neighbor_reg_avg
+    if use_ego_il:
+        loss = loss + ego_il_weight * ego_il_avg
 
     metrics = {
         "sft_ego_loss": ego_loss_avg.item(),
         "sft_neighbor_loss": neighbor_loss_avg.item() if isinstance(neighbor_loss_avg, torch.Tensor) else 0.0,
         "sft_total_loss": loss.item(),
         "sft_neighbor_reg_loss": neighbor_reg_avg.item() if isinstance(neighbor_reg_avg, torch.Tensor) else 0.0,
+        "sft_ego_il_loss": ego_il_avg.item() if isinstance(ego_il_avg, torch.Tensor) else 0.0,
     }
     return loss, metrics
 
@@ -345,7 +393,8 @@ def train_epoch_ranked_sft(
     if epoch == 1:
         print(f"  [ranked-sft] mode={mode}, K={K}, "
               f"sg_window={config.sg_filter_window}, sg_order={config.sg_filter_order}, "
-              f"neighbor_reg={config.neighbor_reg_weight}, reg_only={config.neighbor_reg_only}")
+              f"neighbor_reg={config.neighbor_reg_weight}, reg_only={config.neighbor_reg_only}, "
+              f"ego_il={config.ego_il_weight}")
 
     # 1. Load all scenes
     print(f"  Loading {len(scene_paths)} scenes...")
@@ -514,9 +563,19 @@ def train_epoch_ranked_sft(
     gc.collect()
 
     # 4. Score and select best trajectory per scene
+    # Selective training: only SFT on scenes where best-of-K improves significantly
+    # over the deterministic (index 0) trajectory. Controlled by config.selective_threshold.
+    # 0 = train all scenes (default), >0 = skip scenes with best-det < threshold.
+    selective_thresh = getattr(config, "selective_threshold", 0.0)
+    # Allow scheduling of selective_threshold (e.g., 0 for first epochs, then 3.0)
+    sched_thresh = scheduled.get("selective_threshold")
+    if sched_thresh is not None:
+        selective_thresh = sched_thresh
     print(f"  Scoring and selecting best trajectories...")
     best_ego_trajs = []  # [T, 4] numpy arrays
     best_rewards_list = []
+    scene_train_mask = []  # True = train on this scene, False = skip
+    scene_improvements = []  # improvement value per scene for advantage weighting
 
     for i in tqdm(range(N), desc="Scoring"):
         traj_K = all_trajs[i]  # [K, T, 4]
@@ -526,6 +585,20 @@ def train_epoch_ranked_sft(
         reward_vals = np.array([r.total for r in rewards])
         best_idx = int(np.argmax(reward_vals))
         best_reward = reward_vals[best_idx]
+        det_reward = reward_vals[0]  # deterministic trajectory is always index 0
+
+        # Selective: skip scene if improvement is below threshold
+        improvement = best_reward - det_reward
+        should_train = selective_thresh <= 0 or improvement >= selective_thresh
+        scene_train_mask.append(should_train)
+        # In advantage mode, respect selective_threshold: zero weight for scenes below it
+        if selective_thresh > 0 and improvement < selective_thresh:
+            scene_improvements.append(0.0)
+        else:
+            scene_improvements.append(max(0.0, improvement))
+        if selective_thresh > 0 and epoch <= 2 and should_train:
+            from pathlib import Path as _P
+            print(f"    SEL [{_P(valid_paths[i]).stem[:30]}] det={det_reward:.1f} best={best_reward:.1f} imp={improvement:.1f}")
 
         # Get best trajectory and smooth it
         best_traj = traj_K[best_idx].cpu().numpy()  # [T, 4]
@@ -537,7 +610,22 @@ def train_epoch_ranked_sft(
         best_rewards_list.append(best_reward)
 
     mean_best_reward = float(np.mean(best_rewards_list))
+
+    # Frozen selection: use ep1 mask for all epochs
+    use_frozen = getattr(config, "selective_frozen", False) and selective_thresh > 0
+    if use_frozen:
+        if not hasattr(config, "_frozen_mask"):
+            config._frozen_mask = list(scene_train_mask)
+            print(f"  [frozen] Saving first scene selection ({sum(scene_train_mask)}/{N} scenes)")
+        else:
+            scene_train_mask = list(config._frozen_mask)
+            print(f"  [frozen] Reusing frozen selection ({sum(scene_train_mask)}/{N} scenes)")
+
+    n_selected = sum(scene_train_mask)
     print(f"  Mean best-of-{K} reward: {mean_best_reward:.2f}")
+    if selective_thresh > 0:
+        print(f"  Selective training: {n_selected}/{N} scenes selected "
+              f"(threshold={selective_thresh:.1f}, skipped {N - n_selected})")
 
     # --- Train explorer on trajectory rewards (if optimizer provided) ---
     explorer_metrics = {}
@@ -626,8 +714,10 @@ def train_epoch_ranked_sft(
     Pn = model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
+    use_ego_il = config.ego_il_weight > 0.0 and config.ego_il_mode == "gt"
     print(f"  Preparing training targets for {N} scenes...")
     all_ego_gt = []       # list of [1, T, 4]
+    all_ego_gt_real = []  # list of [1, T, 4] — real GT for IL reg
     all_neighbor_gt = []  # list of [1, Pn, T, 4]
     all_neighbor_mask = []  # list of [1, Pn, T]
 
@@ -642,6 +732,36 @@ def train_epoch_ranked_sft(
             pad = torch.zeros(1, future_len - T_actual, 4, device=device)
             ego_gt = torch.cat([ego_gt, pad], dim=1)
         all_ego_gt.append(ego_gt)
+
+        # Real GT ego trajectory for IL regularization
+        if use_ego_il:
+            data_i = all_data[i]
+            real_gt = data_i.get("ego_agent_future")
+            if real_gt is not None:
+                if real_gt.dim() == 3:
+                    real_gt = real_gt[:1]  # [1, T, C]
+                elif real_gt.dim() == 2:
+                    real_gt = real_gt.unsqueeze(0)  # [1, T, C]
+                # Convert heading if needed (angle -> cos/sin)
+                if real_gt.shape[-1] == 3:
+                    real_gt = torch.cat([
+                        real_gt[..., :2],
+                        real_gt[..., 2:3].cos(),
+                        real_gt[..., 2:3].sin(),
+                    ], dim=-1)
+                real_gt = real_gt[..., :4]
+                T_r = real_gt.shape[1]
+                if T_r > future_len:
+                    real_gt = real_gt[:, :future_len, :]
+                elif T_r < future_len:
+                    pad_r = torch.zeros(1, future_len - T_r, 4, device=device)
+                    real_gt = torch.cat([real_gt, pad_r], dim=1)
+            else:
+                # No GT available: use ranked traj as fallback. This makes
+                # the IL term duplicate the ego SFT loss (doubling its weight).
+                # In practice, ego_agent_future is always present in NPZ data.
+                real_gt = ego_gt.clone()
+            all_ego_gt_real.append(real_gt)
 
         # Neighbor GT
         if mode == "gt_neighbor":
@@ -696,7 +816,8 @@ def train_epoch_ranked_sft(
     ego_gt_all = torch.cat(all_ego_gt, dim=0)
     neighbor_gt_all = torch.cat(all_neighbor_gt, dim=0)
     neighbor_mask_all = torch.cat(all_neighbor_mask, dim=0)
-    del all_ego_gt, all_neighbor_gt, all_neighbor_mask
+    ego_gt_real_all = torch.cat(all_ego_gt_real, dim=0) if use_ego_il else None
+    del all_ego_gt, all_neighbor_gt, all_neighbor_mask, all_ego_gt_real
 
     # 7. Batched training with SFT diffusion loss
     # sft_batch_size: scenes per forward pass (1 = sequential, same as original)
@@ -710,20 +831,36 @@ def train_epoch_ranked_sft(
         )
     accum_steps = config.grad_accum_groups // sft_bs
     scenes_per_step = sft_bs * accum_steps  # for proper loss/metric weighting
-    print(f"  Training on {N} scenes (ranked SFT, mode={mode}, "
+    # Compute per-scene advantage weights for loss scaling
+    use_advantage = getattr(config, "selective_mode", "threshold") == "advantage"
+    if use_advantage and sft_bs != 1:
+        raise ValueError(
+            f"selective_mode='advantage' requires sft_batch_size=1 for exact per-scene "
+            f"weighting, got sft_batch_size={sft_bs}."
+        )
+    improvements_arr = np.array(scene_improvements)
+    max_imp = improvements_arr.max() if improvements_arr.max() > 0 else 1.0
+    scene_weight_arr = improvements_arr / max_imp  # [N], in [0, 1]
+
+    # Shuffle scene order, filter by selective training mask
+    # In advantage mode, keep all scenes (zero-weight for non-selected) instead of skipping
+    if use_advantage:
+        indices = list(range(N))
+    else:
+        indices = [i for i in range(N) if scene_train_mask[i]]
+    _random.shuffle(indices)
+    N_train = len(indices)
+
+    print(f"  Training on {N_train}/{N} scenes (ranked SFT, mode={mode}, "
           f"sft_batch_size={sft_bs}, accum_steps={accum_steps})...")
     model.train()
     optimizer.zero_grad()
-
-    # Shuffle scene order
-    indices = list(range(N))
-    _random.shuffle(indices)
 
     all_metrics = {}
     n_scenes = 0
     accum_count = 0
 
-    for batch_start in range(0, N, sft_bs):
+    for batch_start in range(0, N_train, sft_bs):
         batch_idx = indices[batch_start:batch_start + sft_bs]
         bs = len(batch_idx)
 
@@ -735,6 +872,7 @@ def train_epoch_ranked_sft(
         mini_ego_gt = ego_gt_all[batch_idx]           # [bs, T, 4]
         mini_neighbor_gt = neighbor_gt_all[batch_idx]  # [bs, Pn, T, 4]
         mini_neighbor_mask = neighbor_mask_all[batch_idx]  # [bs, Pn, T]
+        mini_ego_gt_real = ego_gt_real_all[batch_idx] if ego_gt_real_all is not None else None
 
         loss, metrics = _compute_sft_diffusion_loss(
             model=model,
@@ -747,13 +885,21 @@ def train_epoch_ranked_sft(
             K=config.diffusion_k_steps,
             neighbor_reg_weight=config.neighbor_reg_weight,
             neighbor_reg_only=config.neighbor_reg_only,
+            ego_il_weight=config.ego_il_weight,
+            ego_il_mode=config.ego_il_mode,
+            ego_gt_real=mini_ego_gt_real,
         )
 
         # Scale loss to preserve per-scene gradient magnitude:
         # loss is a batch-mean over bs scenes; we want the gradient contribution
         # proportional to bs/scenes_per_step so the optimizer step averages over
         # scenes_per_step scenes total.
-        scaled_loss = loss * (bs / scenes_per_step)
+        # In advantage mode, weight by the scene's improvement ratio (exact for bs=1).
+        if use_advantage:
+            adv_weight = float(scene_weight_arr[batch_idx[0]])
+        else:
+            adv_weight = 1.0
+        scaled_loss = loss * (bs / scenes_per_step) * adv_weight
         scaled_loss.backward()
         accum_count += 1
 

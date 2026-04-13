@@ -201,6 +201,34 @@ class GRPOConfig:
     #   Adding GT neighbor loss on top of reg causes overfitting at high LR (collapses by ep12).
     neighbor_reg_only: bool = True
 
+    # Ego IL (imitation learning) regularization: anchors ego output to a reference.
+    # loss += ego_il_weight * MSE(model_ego_pred, reference_ego)
+    # Active only in ranked SFT when ego_il_weight > 0. The ranked SFT ego loss trains
+    # toward the best-of-K trajectory (lane keeping), while this term pulls back toward
+    # the reference (L2 preservation). Intended for 500-scene training where L2 drifts.
+    ego_il_weight: float = 0.0
+    # ego_il_mode: "gt" uses real GT ego trajectory as reference.
+    # "baseline" uses base model (no-LoRA) ego prediction at the same (noise, timestep).
+    # "baseline" is conceptually analogous to neighbor_reg (anchor to base, not GT) and
+    # reuses the base model forward pass from neighbor_reg (free when neighbor_reg > 0).
+    ego_il_mode: str = "gt"
+
+    # Selective training: skip SFT update for scenes where best-of-K reward barely
+    # improves over the deterministic trajectory. Focuses learning on problem scenes
+    # (where guidance-aided trajectories are much better) while preserving L2 on normal
+    # scenes (where baseline is already good). 0 = train all scenes (default).
+    selective_threshold: float = 0.0
+    # selective_mode: "threshold" (binary select/skip at threshold), "advantage" (scale
+    # full SFT loss per scene by normalized improvement — smooth version of selective).
+    # In advantage mode, all scenes are kept but each scene's loss is multiplied by
+    # improvement/max_improvement. Scenes below selective_threshold get weight 0 via
+    # scene_train_mask. Requires sft_batch_size=1 for exact per-scene weighting.
+    selective_mode: str = "threshold"
+    # selective_frozen: if True, scene selection is computed once (first epoch) and reused
+    # for all subsequent epochs in the same run. Prevents oscillation where improved scenes
+    # drop from selection and regress. Stored in-memory on the config object (not persisted to disk).
+    selective_frozen: bool = False
+
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
     # steps = grad_accum_groups // sft_batch_size, so the effective batch per optimizer
@@ -446,10 +474,16 @@ class GRPOConfig:
 
         stype = spec.get("type", "linear")
         start = float(spec["start"])
-        end = float(spec["end"])
 
         if stype == "constant" or total_epochs <= 1:
             return start
+
+        if "end" not in spec:
+            raise ValueError(
+                f"Schedule '{name}' with type='{stype}' requires 'end' field. "
+                f"Only type='constant' can omit 'end'."
+            )
+        end = float(spec["end"])
 
         progress = (epoch - 1) / (total_epochs - 1)
 
@@ -538,6 +572,11 @@ class GRPOConfig:
                 f"exploration_inner_epochs={self.exploration_inner_epochs} (PPO). "
                 "Use exploration_inner_epochs=1 or exploration_loss_type='advantage_logprob'."
             )
+        # Validate new string config fields
+        if self.ego_il_mode not in ("gt", "baseline"):
+            raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {self.ego_il_mode!r}")
+        if self.selective_mode not in ("threshold", "advantage"):
+            raise ValueError(f"selective_mode must be 'threshold' or 'advantage', got {self.selective_mode!r}")
 
     @property
     def uses_importance_sampling(self) -> bool:
