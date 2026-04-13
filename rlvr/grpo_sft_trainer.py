@@ -582,9 +582,9 @@ def train_epoch_ranked_sft(
     # Rank analytics: track which generation config wins per scene
     from pathlib import Path
     from rlvr.rank_analytics import (
-        EpochRankAnalytics, SceneRankRecord,
+        EpochRankAnalytics, SceneRankRecord, breakdown_to_dict,
         mean_breakdown_dict, compute_dominant_component, print_epoch_summary,
-        save_epoch_analytics, get_category, _breakdown_to_dict,
+        save_epoch_analytics,
     )
     from rlvr.grpo_trainer_batched import get_generation_config_labels_for_variant
     _ra_variant = getattr(config, "generation_variant", "default")
@@ -629,7 +629,7 @@ def train_epoch_ranked_sft(
             winner_reward=float(reward_vals[best_idx]),
             mean_reward=float(reward_vals.mean()),
             det_reward=float(reward_vals[0]),
-            winner_breakdown=_breakdown_to_dict(_ra_winner),
+            winner_breakdown=breakdown_to_dict(_ra_winner),
             mean_breakdown=_ra_mean_bd,
             dominant_component=_ra_dom_comp,
             dominant_delta=_ra_dom_delta,

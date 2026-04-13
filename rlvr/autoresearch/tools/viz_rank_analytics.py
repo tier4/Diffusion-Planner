@@ -18,15 +18,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-# Category colors
+# Category colors. Includes the experimental categories emitted by
+# rlvr.rank_analytics.get_category() so they don't get dropped from plots.
 _CAT_COLORS = {
     "det_pure": "#2196F3",
     "guided_det": "#FF9800",
     "guided_noisy": "#4CAF50",
     "random": "#9E9E9E",
+    "noise_only_exp": "#9C27B0",
+    "stretched_exp": "#E91E63",
+    "lateral_exp": "#00BCD4",
+    "decoupled_exp": "#795548",
+    "collision_exp": "#F44336",
 }
 
-_CAT_ORDER = ["det_pure", "guided_det", "guided_noisy", "random"]
+_CAT_ORDER = [
+    "det_pure", "guided_det", "guided_noisy",
+    "noise_only_exp", "stretched_exp", "lateral_exp", "decoupled_exp", "collision_exp",
+    "random",
+]
 
 
 def load_summary(run_dir: Path) -> dict:
@@ -172,22 +182,23 @@ def plot_scene_heatmap(summary: dict, output_dir: Path) -> None:
     if not scene_evo:
         return
 
-    cat_to_int = {"det_pure": 0, "guided_det": 1, "guided_noisy": 2, "random": 3}
+    cat_to_int = {cat: i for i, cat in enumerate(_CAT_ORDER)}
     scenes = sorted(scene_evo.keys())
     # Get epochs from first scene
     first_scene = scene_evo[scenes[0]]
     epochs = [entry["epoch"] for entry in first_scene]
 
     matrix = np.full((len(scenes), len(epochs)), np.nan)
+    unknown_idx = cat_to_int.get("random", len(_CAT_ORDER) - 1)
     for i, scene in enumerate(scenes):
         entries = scene_evo[scene]
         for j, entry in enumerate(entries):
             if j < len(epochs):
-                matrix[i, j] = cat_to_int.get(entry["category"], 3)
+                matrix[i, j] = cat_to_int.get(entry["category"], unknown_idx)
 
     from matplotlib.colors import ListedColormap, BoundaryNorm
     cmap = ListedColormap([_CAT_COLORS[c] for c in _CAT_ORDER])
-    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
+    bounds = [-0.5] + [i + 0.5 for i in range(len(_CAT_ORDER))]
     norm = BoundaryNorm(bounds, cmap.N)
 
     fig, ax = plt.subplots(figsize=(max(10, len(epochs) * 0.8), max(8, len(scenes) * 0.25)))

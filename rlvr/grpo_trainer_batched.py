@@ -129,18 +129,21 @@ def generate_all_scenes_batched(
     det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
     all_k_trajs.append(det_trajs)
 
-    # Use deterministic trajectory as reference for lon/lat guidance.
-    # det_trajs is already in (x, y, cos_yaw, sin_yaw) format — no conversion needed.
-    use_lon = abs(longitudinal_eta) > 1e-6
-    use_lat = abs(lateral_eta) > 1e-6
-    if use_lon or use_lat:
-        norm_batch["reference_trajectory"] = det_trajs  # no clone needed, not mutated
-
     # --- Config 2-9: CL + SPD guidance sweep for lane keeping ---
     # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
     # Variants can replace the 3 redundant slots with experimental configs.
     cl_spd_configs = _build_cl_spd_configs(generation_variant)
-    use_stretch_global = abs(speed_stretch - 1.0) > 1e-6
+
+    # Set reference_trajectory if ANY slot needs lat/lon guidance — including
+    # per-slot lat_eta overrides. Without this, slots with per-slot lat_eta
+    # would silently produce zero lateral guidance because LateralGuidance
+    # returns zeros when reference_trajectory is missing.
+    use_lon = abs(longitudinal_eta) > 1e-6
+    any_per_slot_lat = any(abs(cfg.get("lat_eta", 0.0)) > 1e-6 for cfg in cl_spd_configs)
+    use_lat = abs(lateral_eta) > 1e-6 or any_per_slot_lat
+    if use_lon or use_lat:
+        norm_batch["reference_trajectory"] = det_trajs  # no clone needed, not mutated
+
     for cfg in cl_spd_configs:
         cl_scale = cfg["cl"]
         spd_scale = cfg["spd"]
@@ -157,13 +160,17 @@ def generate_all_scenes_batched(
         cfg_use_lat = abs(cfg_lat_eta) > 1e-6
         # Optional per-slot collision guidance
         cfg_col = cfg.get("col", 0.0)
+        # A slot is "guided" if it has CL or SPD guidance. Pure-noise slots
+        # (cl=0, spd=0) skip lon guidance even when the global flag is on,
+        # to keep them as pure stochastic exploration.
+        is_guided_slot = cl_scale > 0 or spd_scale > 0
         # Build guidance functions
         fns = []
         if cl_scale > 0:
             fns.append(GuidanceConfig("centerline_following", enabled=True, scale=cl_scale))
         if spd_scale > 0:
             fns.append(GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params))
-        if use_lon:
+        if use_lon and is_guided_slot:
             fns.append(GuidanceConfig(
                 "longitudinal", enabled=True, scale=longitudinal_scale,
                 params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},

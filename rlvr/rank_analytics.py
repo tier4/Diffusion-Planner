@@ -81,19 +81,28 @@ def get_category(label: str) -> str:
 # Dominant component analysis
 # ---------------------------------------------------------------------------
 
-def _breakdown_to_dict(r: RewardBreakdown) -> dict[str, float]:
-    return {
-        "safety": r.safety,
-        "progress": r.progress,
-        "smoothness": r.smoothness,
-        "feasibility": r.feasibility,
-        "centerline": r.centerline,
-        "red_light": r.red_light,
-        "total": r.total,
-        "rb_near_penalty": r.rb_near_penalty,
-        "rb_wide_penalty": r.rb_wide_penalty,
-        "rb_crossing": bool(r.rb_crossing),
-    }
+_NUMERIC_BREAKDOWN_FIELDS = (
+    "safety", "progress", "smoothness", "feasibility",
+    "centerline", "red_light", "total",
+    "rb_near_penalty", "rb_wide_penalty",
+)
+_BOOL_BREAKDOWN_FIELDS = ("rb_crossing",)
+
+
+def breakdown_to_dict(r: RewardBreakdown) -> dict:
+    """Serialize a RewardBreakdown to a JSON-friendly dict.
+
+    Numeric fields are floats; boolean fields are kept as bools (so json.dump
+    emits true/false rather than coercing to numbers via downstream rounding).
+    """
+    out: dict = {f: float(getattr(r, f)) for f in _NUMERIC_BREAKDOWN_FIELDS}
+    for f in _BOOL_BREAKDOWN_FIELDS:
+        out[f] = bool(getattr(r, f))
+    return out
+
+
+# Back-compat alias for any external callers using the previous private name.
+_breakdown_to_dict = breakdown_to_dict
 
 
 def mean_breakdown_dict(rewards: list[RewardBreakdown]) -> dict[str, float]:
@@ -113,10 +122,20 @@ def compute_dominant_component(
     mean_bd: dict[str, float],
     config: RewardConfig,
 ) -> tuple[str, float]:
-    """Find which weighted component contributes most to the winner's advantage.
+    """Heuristic attribution of the winner's reward advantage to a single component.
 
-    Uses the quality_score formula from reward.py:2151-2158.
-    Returns (component_name, weighted_delta).
+    Returns (component_name, weighted_delta) where the chosen component has the
+    largest positive weighted delta versus the per-scene mean across the K
+    generated trajectories.
+
+    NOTE: This is an approximation, not an exact decomposition of `total`. It
+    only considers the subset of components exposed on RewardBreakdown:
+    progress, safety, smoothness, centerline, rb_near, rb_wide. It omits the
+    TTC bonus and lane departure penalties from `compute_reward_batch()` and
+    uses `RewardBreakdown.progress` (the post-on-road-factor `adjusted_progress`)
+    rather than the `clamped_progress` actually used inside `quality_score`. The
+    result is meant for ranking which family of rewards drove a win, not for
+    reconstructing the total reward exactly.
     """
     deltas = {
         "progress": config.w_progress * (winner.progress - mean_bd["progress"]),
@@ -149,6 +168,9 @@ class SceneRankRecord:
     dominant_delta: float
 
     def to_dict(self) -> dict:
+        def _round_breakdown(bd: dict) -> dict:
+            # Preserve booleans as bools; only round numeric values.
+            return {k: (v if isinstance(v, bool) else round(float(v), 4)) for k, v in bd.items()}
         return {
             "scene": self.scene_path,
             "winner_idx": self.winner_idx,
@@ -158,8 +180,8 @@ class SceneRankRecord:
             "det_reward": round(self.det_reward, 3),
             "dominant_component": self.dominant_component,
             "dominant_delta": round(self.dominant_delta, 3),
-            "winner_breakdown": {k: round(v, 4) for k, v in self.winner_breakdown.items()},
-            "mean_breakdown": {k: round(v, 4) for k, v in self.mean_breakdown.items()},
+            "winner_breakdown": _round_breakdown(self.winner_breakdown),
+            "mean_breakdown": _round_breakdown(self.mean_breakdown),
         }
 
 

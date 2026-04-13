@@ -196,13 +196,20 @@ per-parameter changes, preventing destabilization.
 epoch 5-6 with rb_cross>20. Lower reg gives the ego loss more freedom but insufficient
 constraint on neighbor weights causes catastrophic drift through shared DiT parameters.
 
-**Generation variants** (`generation_variant` config field). The 16 generation slots are
-composed of: 1 deterministic + N guided cl_spd configs + N noise-only configs + remaining
-random pool. Defined in `_build_cl_spd_configs()` and `_build_noise_configs()` in
-`grpo_trainer_batched.py`. Current default: `rsft_v2` — 6 guided cl_spd (CL5/CL8/CL10 with
-optional stretch 1.1/1.3/1.4) + 9 pure-noise slots sweeping noise ranges 0.1→5.0. No
-random-CL pool. Empirically best for L2 preservation (ego +1.5%, neighbor -1.0% vs LoRA-less).
-Use `rsft_v2_legacy` for the previous default (2 fixed-noise + 7 random-CL slots).
+**Generation variants** (`generation_variant` config field, default `"rsft_v2"`).
+Composition is 1 deterministic + N guided cl_spd configs + M noise-only configs +
+(15 - N - M) random-CL passes. Variants are defined in `rlvr/generation_variants.py`
+as `GenerationVariant(cl_spd_configs=..., noise_configs=...)` entries in the `_VARIANTS`
+registry. Use `rlvr.generation_variants.list_variants()` for the full list.
+
+The default `rsft_v2` has **6 guided cl_spd slots** — `CL5_SPD5_det`,
+`CL8_SPD8_str13_n0825` (stretch 1.3), `CL6_SPD6_str11_n0515` (stretch 1.1),
+`CL5_SPD5_noisy`, `CL7_SPD7_str14_n0820` (stretch 1.4), `CL10_SPD10_noisy` — plus
+**9 pure-noise slots** sweeping ranges 0.1→5.0 (`noise_n0103`, `n0306`, `n0510`,
+`n0515`, `n0818`, `n1025`, `n1530`, `n2040`, `n3050`). No random-CL pool.
+Empirically best for L2 preservation (ego +1.5%, neighbor -1.0% vs LoRA-less baseline,
+ep8 on miraikan val 50). Use `rsft_v2_legacy` for the previous slot composition
+(2 fixed-noise + 7 random-CL) or `default` for the pre-variant layout (8 cl_spd + 7 random).
 
 ### Rank Analytics
 

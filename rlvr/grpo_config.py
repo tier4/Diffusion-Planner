@@ -83,11 +83,11 @@ class GRPOConfig:
     guidance_prob: float = 0.5
     prototypes_path: str | None = None
 
-    # Generation variant — controls which cl_spd_configs slot list is used
-    # in generate_all_scenes_batched(). Variants replace the 3 redundant slots
-    # (CL8_SPD5_det, CL10_SPD10_det, CL8_SPD8_noisy) with experimental configs.
-    # Options: "default", "noisy_stretched", "lateral", "decoupled"
-    generation_variant: str = "default"
+    # Generation variant — selects the 16-slot composition for ranked SFT.
+    # Defined in rlvr/generation_variants.py. Use rlvr.generation_variants.list_variants()
+    # for the canonical list. Default is "rsft_v2" (best L2 preservation as of April 2026).
+    # "default" reproduces the pre-variant-system layout (8 cl_spd + 7 random).
+    generation_variant: str = "rsft_v2"
 
     # Reward weights
     w_safety: float = 5.0
