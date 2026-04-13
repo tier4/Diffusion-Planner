@@ -589,7 +589,11 @@ def train_epoch_ranked_sft(
         improvement = best_reward - det_reward
         should_train = selective_thresh <= 0 or improvement >= selective_thresh
         scene_train_mask.append(should_train)
-        scene_improvements.append(max(0.0, improvement))
+        # In advantage mode, respect selective_threshold: zero weight for scenes below it
+        if selective_thresh > 0 and improvement < selective_thresh:
+            scene_improvements.append(0.0)
+        else:
+            scene_improvements.append(max(0.0, improvement))
         if selective_thresh > 0 and epoch <= 2 and should_train:
             from pathlib import Path as _P
             print(f"    SEL [{_P(valid_paths[i]).stem[:30]}] det={det_reward:.1f} best={best_reward:.1f} imp={improvement:.1f}")
