@@ -7,6 +7,7 @@ Note: only maps commonly-used reward fields, not every RewardConfig attribute.
 
 import json
 from pathlib import Path
+
 from rlvr.reward import RewardConfig
 
 
@@ -27,15 +28,26 @@ def load_reward_config(config_path: str | Path) -> RewardConfig:
 
     # Use RewardConfig dataclass defaults for any missing fields
     defaults = RewardConfig()
+    # Legacy field name mapping (same as GRPOConfig.from_json)
+    _legacy = {"near_edge_scale": "rb_near_scale", "wide_edge_scale": "rb_wide_scale", "cont_edge_scale": "rb_cont_scale"}
+    for old, new in _legacy.items():
+        if old in cfg and new not in cfg:
+            cfg[new] = cfg[old]
     return RewardConfig(
         w_safety=cfg.get("w_safety", defaults.w_safety),
         w_progress=cfg.get("w_progress", defaults.w_progress),
         w_smooth=cfg.get("w_smooth", defaults.w_smooth),
         w_feasibility=cfg.get("w_feasibility", defaults.w_feasibility),
         w_centerline=cfg.get("w_centerline", defaults.w_centerline),
-        near_edge_scale=cfg.get("near_edge_scale", defaults.near_edge_scale),
-        wide_edge_scale=cfg.get("wide_edge_scale", defaults.wide_edge_scale),
-        cont_edge_scale=cfg.get("cont_edge_scale", defaults.cont_edge_scale),
+        rb_near_scale=cfg.get("rb_near_scale", defaults.rb_near_scale),
+        rb_wide_scale=cfg.get("rb_wide_scale", defaults.rb_wide_scale),
+        rb_cont_scale=cfg.get("rb_cont_scale", defaults.rb_cont_scale),
+        rb_gate_enabled=cfg.get("rb_gate_enabled", defaults.rb_gate_enabled),
+        rb_penalty_mode=cfg.get("rb_penalty_mode", defaults.rb_penalty_mode),
+        rb_cross_thresh=cfg.get("rb_cross_thresh", defaults.rb_cross_thresh),
+        rb_near_thresh=cfg.get("rb_near_thresh", defaults.rb_near_thresh),
+        rb_wide_thresh=cfg.get("rb_wide_thresh", defaults.rb_wide_thresh),
+        rb_cont_thresh=cfg.get("rb_cont_thresh", defaults.rb_cont_thresh),
         enable_lane_departure=cfg.get("enable_lane_departure", defaults.enable_lane_departure),
         lane_gate_enabled=cfg.get("lane_gate_enabled", defaults.lane_gate_enabled),
         lane_near_scale=cfg.get("lane_near_scale", defaults.lane_near_scale),

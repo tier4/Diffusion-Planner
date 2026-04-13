@@ -12,6 +12,7 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 
 @dataclass
@@ -65,7 +66,7 @@ class GRPOConfig:
 
     # Sampling
     sampling_randomization: bool = True
-    noise_scale_range: list[float] = field(default_factory=lambda: [0.5, 4.0])
+    noise_scale_range: list[float] = field(default_factory=lambda: [0.5, 2.0])
     guidance_scale_range: list[float] = field(default_factory=lambda: [0.1, 2.0])
     enable_guidance: bool = True
     enable_centerline: bool = True
@@ -90,14 +91,25 @@ class GRPOConfig:
     w_centerline: float = 5.0
 
     # Reward tuning (passed to RewardConfig for training)
-    near_edge_scale: float = 3.0
-    wide_edge_scale: float = 0.2
-    cont_edge_scale: float = 0.0
+    # Road border penalty scales and thresholds
+    rb_near_scale: float = 3.0
+    rb_wide_scale: float = 0.2
+    rb_cont_scale: float = 0.0
+    rb_gate_enabled: bool = True   # if True, rb crossing is a hard safety gate
+    rb_penalty_mode: str = "frac"  # "frac" = fraction of timesteps (original), "survival" = first-violation time-decay
+    rb_cross_thresh: float = 0.20  # metres — ego perimeter within this = crossing
+    rb_near_thresh: float = 0.45   # metres — near zone boundary (+20cm vs lane)
+    rb_wide_thresh: float = 0.60   # metres — wide zone boundary (+20cm vs lane)
+    rb_cont_thresh: float = 1.00   # metres — continuous penalty max distance (+20cm vs lane)
+    # Lane departure penalty scales and thresholds
     enable_lane_departure: bool = False
     lane_gate_enabled: bool = False
     lane_near_scale: float = 3.0
     lane_wide_scale: float = 0.2
     lane_cont_scale: float = 0.0
+    lane_near_thresh: float = 0.25  # metres — near zone boundary
+    lane_wide_thresh: float = 0.40  # metres — wide zone boundary
+    lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     enable_overprogress: bool = True
@@ -127,10 +139,12 @@ class GRPOConfig:
     diffusion_t_range: list[float] = field(default_factory=lambda: [0.001, 0.1])
     diffusion_k_steps: int = 8  # K (noise, t) samples averaged per GRPO loss (matches DPO K=8)
 
-    # Log-probability GRPO (DDV2-style). When grpo_loss_type="logprob", the loss
-    # uses actual Gaussian log-probabilities from a truncated denoising rollout
-    # instead of MSE. This enables proper policy gradient for trajectory shape.
-    grpo_loss_type: str = "mse"  # "mse" (current) or "logprob" (DDV2-style)
+    # DiT GRPO loss type:
+    #   "advantage_mse" (default): advantage-weighted MSE diffusion loss.
+    #   "advantage_logprob": advantage-weighted Gaussian log-probabilities from
+    #       a truncated denoising rollout (DDV2-style). Enables proper policy
+    #       gradient for trajectory shape.
+    grpo_loss_type: str = "advantage_mse"
     logprob_num_steps: int = 10  # denoising steps for rollout
     logprob_t_start: float = 0.01  # starting noise level (truncated)
     logprob_discount: float = 0.8  # per-step advantage discount (DDV2 uses 0.8)
@@ -173,6 +187,54 @@ class GRPOConfig:
     ranked_sft_mode: str = "none"
     sg_filter_window: int = 11  # Savitzky-Golay filter window length (must be odd)
     sg_filter_order: int = 3    # Savitzky-Golay filter polynomial order
+    # Neighbor regularization: penalize LoRA neighbor outputs diverging from base model.
+    # Computes MSE(lora_neighbor_pred, base_neighbor_pred) at the same (noise, timestep)
+    # by running a second forward pass with LoRA disabled. Adds ~2x training cost.
+    # loss += neighbor_reg_weight * MSE(neighbor_pred_lora, neighbor_pred_base)
+    # Active in both ranked SFT and GRPO paths. 0 = disabled.
+    neighbor_reg_weight: float = 0.0
+    # Controls whether to include the neighbor SFT loss (MSE vs GT neighbors).
+    # When True (recommended): loss = ego_sft + neighbor_reg (no GT neighbor loss).
+    #   The base model already learned good neighbor predictions; the reg term anchors
+    #   them while ego improves freely. Neighbor L2 degradation: +1.8% (vs +91% without).
+    # When False: loss = ego_sft + neighbor_sft + neighbor_reg (all 3 terms).
+    #   Adding GT neighbor loss on top of reg causes overfitting at high LR (collapses by ep12).
+    neighbor_reg_only: bool = True
+
+    # Ego IL (imitation learning) regularization: anchors ego output to a reference.
+    # loss += ego_il_weight * MSE(model_ego_pred, reference_ego)
+    # Active only in ranked SFT when ego_il_weight > 0. The ranked SFT ego loss trains
+    # toward the best-of-K trajectory (lane keeping), while this term pulls back toward
+    # the reference (L2 preservation). Intended for 500-scene training where L2 drifts.
+    ego_il_weight: float = 0.0
+    # ego_il_mode: "gt" uses real GT ego trajectory as reference.
+    # "baseline" uses base model (no-LoRA) ego prediction at the same (noise, timestep).
+    # "baseline" is conceptually analogous to neighbor_reg (anchor to base, not GT) and
+    # reuses the base model forward pass from neighbor_reg (free when neighbor_reg > 0).
+    ego_il_mode: str = "gt"
+
+    # Selective training: skip SFT update for scenes where best-of-K reward barely
+    # improves over the deterministic trajectory. Focuses learning on problem scenes
+    # (where guidance-aided trajectories are much better) while preserving L2 on normal
+    # scenes (where baseline is already good). 0 = train all scenes (default).
+    selective_threshold: float = 0.0
+    # selective_mode: "threshold" (binary select/skip at threshold), "advantage" (scale
+    # full SFT loss per scene by normalized improvement — smooth version of selective).
+    # In advantage mode, all scenes are kept but each scene's loss is multiplied by
+    # improvement/max_improvement. Scenes below selective_threshold get weight 0 via
+    # scene_train_mask. Requires sft_batch_size=1 for exact per-scene weighting.
+    selective_mode: str = "threshold"
+    # selective_frozen: if True, scene selection is computed once (first epoch) and reused
+    # for all subsequent epochs in the same run. Prevents oscillation where improved scenes
+    # drop from selection and regress. Stored in-memory on the config object (not persisted to disk).
+    selective_frozen: bool = False
+
+    # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
+    # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
+    # steps = grad_accum_groups // sft_batch_size, so the effective batch per optimizer
+    # step stays the same only when B evenly divides grad_accum_groups (enforced at
+    # runtime). Set to grad_accum_groups for maximum throughput.
+    sft_batch_size: int = 1
 
     # LoRA
     use_lora: bool = True
@@ -231,6 +293,22 @@ class GRPOConfig:
     # 1 = step every scene (original per-group), 4 = match DiT rhythm.
     exploration_grad_accum_groups: int = 1
 
+    # Explorer loss type:
+    #   "advantage_logprob" (default): advantage-weighted negative log_prob of sampled etas.
+    #       Pushes policy toward etas that got above-average reward.
+    #   "best_sample_mse": MSE regression of policy mean toward the best-reward eta.
+    #       Directly supervises policy to output the best eta per scene.
+    #       Same principle as ranked SFT for the DiT (best trajectory MSE).
+    exploration_loss_type: str = "advantage_logprob"
+
+    # Use a pre-trained exploration policy during ranked SFT generation.
+    # The explorer provides per-scene (eta_lat, eta_lon) guidance for trajectory generation.
+    # Set exploration_checkpoint_path to the .pth file.
+    ranked_sft_use_explorer: bool = False
+    # If True, explorer stays frozen during RSFT. If False, explorer trains jointly
+    # with DiT (explorer via REINFORCE/MSE on rewards, DiT via SFT loss).
+    ranked_sft_freeze_explorer: bool = True
+
     # Random guidance mode: replaces exploration policy with direct η sampling.
     # "explorer" (default): use learned exploration policy (Beta distributions).
     # "uniform": random η ~ U[-1, 1] (matches zero-init explorer output).
@@ -254,11 +332,43 @@ class GRPOConfig:
     closed_loop_online_interval: int = 0   # online explorer update every N steps (0=off, 10=PlannerRFT-style)
     closed_loop_explorer_mini_batch: int = 0  # step explorer optimizer every N scenes (0=all scenes at once)
 
+    # --- Per-epoch scheduling for arbitrary parameters ---
+    # Generic scheduling system for reward weights, guidance scales, etc.
+    # Each entry maps a parameter name to a schedule spec:
+    #   {"type": "constant"|"linear"|"cosine"|"step"|"peak", "start": float, "end": float,
+    #    "warmup_fraction": float (for "step" only, default 0.5),
+    #    "peak": float, "peak_fraction": float (for "peak" only, default 0.5)}
+    #
+    # Schedulable parameters:
+    #   Reward weights: w_progress, w_safety, w_smooth, w_feasibility, w_centerline,
+    #                   stopped_penalty, underprogress_penalty, progress_norm_scale
+    #   Guidance:       longitudinal_eta, longitudinal_lambda, longitudinal_scale
+    #
+    # Example config JSON:
+    #   "schedules": {
+    #     "w_progress": {"type": "linear", "start": 3.0, "end": 10.0},
+    #     "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 1.0}
+    #   }
+    schedules: dict = field(default_factory=dict)
+
+    # Backward compat: old field names → new field names
+    _FIELD_RENAMES: ClassVar[dict[str, str]] = {
+        "near_edge_scale": "rb_near_scale",
+        "wide_edge_scale": "rb_wide_scale",
+        "cont_edge_scale": "rb_cont_scale",
+    }
+
     @classmethod
     def from_json(cls, path: str | Path) -> GRPOConfig:
         """Load config from JSON file."""
         with open(path) as f:
             data = json.load(f)
+        # Rename legacy fields so old config JSONs keep working
+        for old, new in cls._FIELD_RENAMES.items():
+            if old in data and new not in data:
+                data[new] = data.pop(old)
+            elif old in data:
+                data.pop(old)  # new name takes precedence
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
     def to_json(self, path: str | Path) -> None:
@@ -344,6 +454,129 @@ class GRPOConfig:
             f"Unknown exploration_kl_schedule: {self.exploration_kl_schedule!r}. "
             f"Expected 'constant', 'linear', or 'cosine'."
         )
+
+    def get_scheduled_value(
+        self, name: str, epoch: int, total_epochs: int,
+    ) -> float | None:
+        """Get the scheduled value for a parameter at the given epoch.
+
+        Returns None if no schedule is defined for this parameter.
+        Looks up the schedule spec in self.schedules[name].
+
+        Args:
+            name: Parameter name (e.g. "w_progress", "longitudinal_eta").
+            epoch: Current epoch (1-indexed).
+            total_epochs: Total number of training epochs.
+        """
+        spec = self.schedules.get(name)
+        if spec is None:
+            return None
+
+        stype = spec.get("type", "linear")
+        start = float(spec["start"])
+
+        if stype == "constant" or total_epochs <= 1:
+            return start
+
+        if "end" not in spec:
+            raise ValueError(
+                f"Schedule '{name}' with type='{stype}' requires 'end' field. "
+                f"Only type='constant' can omit 'end'."
+            )
+        end = float(spec["end"])
+
+        progress = (epoch - 1) / (total_epochs - 1)
+
+        if stype == "linear":
+            # Optional end_epoch: ramp completes at this epoch, then holds end value.
+            # E.g. {"type": "linear", "start": 1.2, "end": 1.0, "end_epoch": 8}
+            end_ep = spec.get("end_epoch")
+            if end_ep is not None:
+                end_ep = int(end_ep)
+                if not 1 < end_ep <= total_epochs:
+                    raise ValueError(
+                        f"end_epoch for '{name}' must be in (1, {total_epochs}], "
+                        f"got {end_ep}"
+                    )
+                if epoch >= end_ep:
+                    return end
+                local_progress = (epoch - 1) / (end_ep - 1)
+                return start + (end - start) * local_progress
+            return start + (end - start) * progress
+
+        if stype == "cosine":
+            return end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        if stype == "step":
+            warmup = float(spec.get("warmup_fraction", 0.5))
+            if not 0.0 <= warmup <= 1.0:
+                raise ValueError(
+                    f"warmup_fraction for '{name}' must be in [0, 1], got {warmup}"
+                )
+            return start if progress < warmup else end
+
+        if stype == "peak":
+            # Ramp start → peak → end. Linear interpolation on each half.
+            #   {"type": "peak", "start": 0.0, "end": 0.0, "peak": 0.3, "peak_fraction": 0.5}
+            peak_val = float(spec["peak"])
+            peak_frac = float(spec.get("peak_fraction", 0.5))
+            if not 0.0 < peak_frac < 1.0:
+                raise ValueError(
+                    f"peak_fraction for '{name}' must be in (0, 1), got {peak_frac}"
+                )
+            if progress <= peak_frac:
+                t = progress / peak_frac
+                return start + (peak_val - start) * t
+            else:
+                t = (progress - peak_frac) / (1.0 - peak_frac)
+                return peak_val + (end - peak_val) * t
+
+        raise ValueError(
+            f"Unknown schedule type for '{name}': {stype!r}. "
+            f"Expected 'constant', 'linear', 'cosine', 'step', or 'peak'."
+        )
+
+    def get_all_scheduled_values(
+        self, epoch: int, total_epochs: int,
+    ) -> dict[str, float]:
+        """Get all scheduled values for the given epoch.
+
+        Returns dict of {name: value} for all parameters with schedules defined.
+        """
+        result: dict[str, float] = {}
+        for name in self.schedules:
+            value = self.get_scheduled_value(name, epoch, total_epochs)
+            if value is not None:
+                result[name] = value
+        return result
+
+    def __post_init__(self):
+        """Normalize legacy loss type names to current names."""
+        _loss_renames = {
+            "mse": "advantage_mse",
+            "logprob": "advantage_logprob",
+            "reinforce": "advantage_logprob",
+            "rsft": "best_sample_mse",
+            "best_eta_mse": "best_sample_mse",
+            "grpo": "advantage_logprob",
+        }
+        if self.grpo_loss_type in _loss_renames:
+            self.grpo_loss_type = _loss_renames[self.grpo_loss_type]
+        if self.exploration_loss_type in _loss_renames:
+            self.exploration_loss_type = _loss_renames[self.exploration_loss_type]
+        # Validate: best_sample_mse is not compatible with PPO (inner_epochs > 1)
+        if (self.exploration_loss_type == "best_sample_mse"
+                and self.exploration_inner_epochs > 1):
+            raise ValueError(
+                "exploration_loss_type='best_sample_mse' is not compatible with "
+                f"exploration_inner_epochs={self.exploration_inner_epochs} (PPO). "
+                "Use exploration_inner_epochs=1 or exploration_loss_type='advantage_logprob'."
+            )
+        # Validate new string config fields
+        if self.ego_il_mode not in ("gt", "baseline"):
+            raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {self.ego_il_mode!r}")
+        if self.selective_mode not in ("threshold", "advantage"):
+            raise ValueError(f"selective_mode must be 'threshold' or 'advantage', got {self.selective_mode!r}")
 
     @property
     def uses_importance_sampling(self) -> bool:

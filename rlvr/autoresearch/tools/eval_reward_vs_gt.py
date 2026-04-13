@@ -10,7 +10,7 @@ Usage:
         --scenes /path/to/scenes.json \
         [--lora_path /path/to/lora_epoch_NNN] \
         [--tag "rw_ep5"] \
-        [--reward_config w_progress=3.0 near_edge_scale=20.0 wide_edge_scale=5.0]
+        [--reward_config w_progress=3.0 rb_near_scale=20.0 rb_wide_scale=5.0]
 """
 
 import argparse
@@ -20,12 +20,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-from preference_optimization.utils import load_npz_data
-from preference_optimization.lora_utils import load_lora_checkpoint
-from diffusion_planner.utils.config import Config
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
+
 from guidance_gui.generate_samples import generate_samples
+from preference_optimization.lora_utils import load_lora_checkpoint
+from preference_optimization.utils import load_npz_data
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -44,8 +44,8 @@ def main():
                         help="Show only N worst scenes by reward gap")
     # Reward config overrides
     parser.add_argument("--w_progress", type=float, default=None)
-    parser.add_argument("--near_edge_scale", type=float, default=None)
-    parser.add_argument("--wide_edge_scale", type=float, default=None)
+    parser.add_argument("--rb_near_scale", type=float, default=None)
+    parser.add_argument("--rb_wide_scale", type=float, default=None)
     args = parser.parse_args()
 
     device = torch.device(DEVICE)
@@ -71,10 +71,10 @@ def main():
     rcfg = RewardConfig()
     if args.w_progress is not None:
         rcfg.w_progress = args.w_progress
-    if args.near_edge_scale is not None:
-        rcfg.near_edge_scale = args.near_edge_scale
-    if args.wide_edge_scale is not None:
-        rcfg.wide_edge_scale = args.wide_edge_scale
+    if args.rb_near_scale is not None:
+        rcfg.rb_near_scale = args.rb_near_scale
+    if args.rb_wide_scale is not None:
+        rcfg.rb_wide_scale = args.rb_wide_scale
 
     with open(args.scenes) as f:
         scenes = json.load(f)
@@ -116,8 +116,8 @@ def main():
             "gt_smoothness": r_gt.smoothness,
             "model_rb_cross": r_m.rb_crossing,
             "gt_rb_cross": r_gt.rb_crossing,
-            "model_rb_near": r_m.rb_near_frac,
-            "gt_rb_near": r_gt.rb_near_frac,
+            "model_rb_near": r_m.rb_near_penalty,
+            "gt_rb_near": r_gt.rb_near_penalty,
         })
 
     # Sort by gap (worst first)

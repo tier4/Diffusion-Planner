@@ -49,6 +49,13 @@ LORA_TARGET_BLOCKS_01_REGEX = (
     r"decoder\.dit\.blocks\.[01]\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
 )
 
+# Blocks 0+2 (skip block 1): block 1 LoRA was consistently harmful in 50sc experiments
+# (no_blk1 was always the best post-hoc ablation). Training only blocks 0+2 prevents
+# the harmful block 1 weights from forming, reducing L2 drift by 1/3 parameters.
+LORA_TARGET_BLOCKS_02_REGEX = (
+    r"decoder\.dit\.blocks\.[02]\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
+)
+
 
 class UnfusedMHA(nn.Module):
     """nn.MultiheadAttention equivalent with separate q/k/v/out projection Linear layers.

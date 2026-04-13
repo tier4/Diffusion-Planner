@@ -20,18 +20,19 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
+from diffusion_planner.loss import compute_ego_edge_points, point_to_segment_distance
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
 from matplotlib.patches import Rectangle
 
-from preference_optimization.utils import load_npz_data
-from diffusion_planner.utils.config import Config
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.loss import compute_ego_edge_points, point_to_segment_distance
 from guidance_gui.generate_samples import generate_samples
+from preference_optimization.utils import load_npz_data
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

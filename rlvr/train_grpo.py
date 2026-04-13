@@ -35,13 +35,8 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-import sys
 from datetime import datetime
 from pathlib import Path
-
-parent_dir = Path(__file__).resolve().parent.parent
-if str(parent_dir) not in sys.path:
-    sys.path.insert(0, str(parent_dir))
 
 import torch
 from torch import optim
@@ -241,10 +236,10 @@ def _run_gui_mode(
     config: GRPOConfig,
 ):
     from rlvr.trajectory_ranker_gui import (
+        _DEFAULT_PROTOTYPES_PATH,
         TrajectoryRanker,
         build_interface,
         ensure_prototypes,
-        _DEFAULT_PROTOTYPES_PATH,
     )
 
     prototypes_path = config.prototypes_path or _DEFAULT_PROTOTYPES_PATH

@@ -1,14 +1,22 @@
-"""Target speed maintenance guidance for the Diffusion Planner.
+"""Target speed maintenance and trajectory stretch guidance.
 
-Uses a surrogate gradient approach (same pattern as collision guidance) to
-produce stable gradients through DPM-Solver sampling. For each timestep where
-speed exceeds v_high, computes the target position that would achieve v_high
-and uses dot(target_correction.detach(), x) as the energy — making the
-gradient of energy w.r.t. x equal to the desired correction direction.
+Two modes (stretch takes precedence when != 1.0):
+
+1. **Stretch mode** (``stretch`` param != 1.0): scales every per-step
+   displacement by the stretch factor, pushing the trajectory to travel
+   faster (>1) or slower (<1) along its current direction.
+
+2. **Band mode** (default, ``stretch`` == 1.0): clamps speed to
+   [v_low, v_high] using a surrogate gradient that computes the explicit
+   position correction needed to cap/boost speed.
+
+Both modes use the surrogate gradient trick ``dot(correction.detach(), x)``
+so that ``grad_x(energy) = correction``, producing stable gradients
+through DPM-Solver sampling.
 
 Compatible with BaseGuidance interface:
     x:       [B, P, T+1, 4]  physical ego-centric metres
-    outputs: [B] reward (higher = speed within acceptable band)
+    outputs: [B] reward (higher = better speed compliance)
 """
 
 import torch
@@ -21,12 +29,9 @@ from .registry import register
 class SpeedGuidance(BaseGuidance):
     """Surrogate-gradient speed guidance for DPM-Solver.
 
-    Instead of autograd through relu(v-v_high)² (which produces unstable
-    gradients through multi-step denoising), compute the explicit position
-    correction needed to cap speed at v_high. The correction vector dotted
-    with x creates a surrogate energy whose gradient equals the correction.
-
-    _energy_scale = 0.05 similar to route/lane guidance.
+    Supports two modes controlled by the ``stretch`` param:
+    - stretch != 1.0: scale all displacements by stretch (speed up/slow down).
+    - stretch == 1.0 (default): clamp speed to [v_low, v_high] band.
     """
 
     name = "speed"
@@ -40,6 +45,7 @@ class SpeedGuidance(BaseGuidance):
         self._v_low = p.get("v_low", 0.0)
         self._v_high = p.get("v_high", 14.0)
         self._dt = p.get("dt", 0.1)
+        self._stretch = p.get("stretch", 1.0)  # >1 = speed up, <1 = slow down
 
     def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
         """
@@ -57,17 +63,22 @@ class SpeedGuidance(BaseGuidance):
         dist = disp.norm(dim=-1, keepdim=True).clamp_min(1e-6)  # [B, T-1, 1]
         v = dist.squeeze(-1) / self._dt  # [B, T-1]
 
-        # For timesteps where v > v_high, compute the target displacement
-        # that would achieve exactly v_high in the same direction.
+        # Stretch mode: scale all displacements by stretch factor.
+        # Each point gets pushed along its current travel direction to achieve
+        # v_desired = v_current * stretch.  Uses surrogate gradient approach
+        # (correction.detach() dotted with pos) for stable DPM-Solver gradients.
+        # Ref: "Safe and Stylized Trajectory Planning" (2026), Eq. speed energy.
+        if abs(self._stretch - 1.0) > 1e-6:
+            correction = disp * (self._stretch - 1.0)  # [B, T-1, 2]
+            reward = torch.sum(correction.detach() * pos[:, 1:, :2], dim=(1, 2))
+            return reward
+
+        # v_low / v_high mode: clamp speed to [v_low, v_high] band.
         direction = disp / dist  # [B, T-1, 2] unit direction
         target_dist = (self._v_high * self._dt)  # scalar
-        # Correction: pull pos[t+1] back toward pos[t] to match target_dist
-        # correction = target_pos - actual_pos = (direction * target_dist - disp)
-        # Only active when v > v_high
         overspeed = (v > self._v_high).float().unsqueeze(-1)  # [B, T-1, 1]
         correction = (direction * target_dist - disp) * overspeed  # [B, T-1, 2]
 
-        # Also handle v < v_low (push forward)
         if self._v_low > 0:
             target_dist_low = self._v_low * self._dt
             underspeed = (v < self._v_low).float().unsqueeze(-1)

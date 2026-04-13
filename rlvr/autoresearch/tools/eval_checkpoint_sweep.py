@@ -73,7 +73,7 @@ def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str]) -> dict:
             stopped += 1
         ln_nears.append(r.lane_near_frac)
         ln_wides.append(r.lane_wide_frac)
-        rb_nears.append(r.rb_near_frac)
+        rb_nears.append(r.rb_near_penalty)
 
     del model
     torch.cuda.empty_cache()

@@ -16,10 +16,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import torch
-from torch import nn
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+from torch import nn
+
 from exploration_policy.model import ExplorationPolicy
 from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.closed_loop.gae import compute_gae
@@ -63,6 +63,9 @@ def _batched_generate(
     Returns:
         [B, T, 4] ego trajectories (x, y, cos, sin).
     """
+    # NOTE: directly accessing decoder private attrs (_guidance_fn, _guidance_scale)
+    # because the decoder has no public API for temporary guidance override.
+    # The try/finally blocks below ensure restoration even on exceptions.
     _orig_fn = model.decoder._guidance_fn
     _orig_scale = model.decoder._guidance_scale
     model.decoder._guidance_fn = composer
@@ -140,6 +143,7 @@ def _batched_generate_varied_noise(
     Returns:
         [B, T, 4] ego trajectories.
     """
+    # NOTE: same private-attr pattern as _batched_generate above (see comment there).
     _orig_fn = model.decoder._guidance_fn
     _orig_scale = model.decoder._guidance_scale
     model.decoder._guidance_fn = composer

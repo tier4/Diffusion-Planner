@@ -23,7 +23,7 @@ from rlvr.grpo_sampler import SampledTrajectory, SamplerConfig, generate_diverse
 def test_sampler_config_defaults():
     cfg = SamplerConfig()
     assert cfg.n_trajectories == 8
-    assert cfg.noise_scale_range == (0.5, 4.0)
+    assert cfg.noise_scale_range == (0.5, 2.0)
     assert cfg.enable_guidance is True
     assert cfg.enable_centerline is True
     assert cfg.enable_anchor is True

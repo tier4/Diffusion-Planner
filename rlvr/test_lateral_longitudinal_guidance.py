@@ -19,16 +19,18 @@ Usage:
 """
 
 import argparse
-import sys
 import os
+import sys
+
+import matplotlib
 import numpy as np
 import torch
 
-import matplotlib
 matplotlib.use("Agg")
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
-from pathlib import Path
 
 _repo_root = os.path.join(os.path.dirname(__file__), "..")
 _dp_root = os.path.join(_repo_root, "diffusion_planner")

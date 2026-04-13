@@ -17,11 +17,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from diffusion_planner.model.guidance.composer import GuidanceComposer
+from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from torch import nn, optim
 from tqdm import tqdm
 
-from diffusion_planner.model.guidance.composer import GuidanceComposer
-from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
 from guidance_gui.generate_samples import generate_samples
@@ -68,9 +68,24 @@ class ClosedLoopExplorationTrainer:
             w_smooth=config.w_smooth,
             w_feasibility=config.w_feasibility,
             w_centerline=config.w_centerline,
-            near_edge_scale=config.near_edge_scale,
-            wide_edge_scale=config.wide_edge_scale,
+            rb_near_scale=config.rb_near_scale,
+            rb_wide_scale=config.rb_wide_scale,
+            rb_cont_scale=config.rb_cont_scale,
+            rb_gate_enabled=config.rb_gate_enabled,
+            rb_penalty_mode=config.rb_penalty_mode,
+            rb_cross_thresh=config.rb_cross_thresh,
+            rb_near_thresh=config.rb_near_thresh,
+            rb_wide_thresh=config.rb_wide_thresh,
+            rb_cont_thresh=config.rb_cont_thresh,
             stopped_penalty=config.stopped_penalty,
+            enable_lane_departure=config.enable_lane_departure,
+            lane_gate_enabled=config.lane_gate_enabled,
+            lane_near_scale=config.lane_near_scale,
+            lane_wide_scale=config.lane_wide_scale,
+            lane_cont_scale=config.lane_cont_scale,
+            lane_near_thresh=config.lane_near_thresh,
+            lane_wide_thresh=config.lane_wide_thresh,
+            lane_cont_thresh=config.lane_cont_thresh,
         )
 
         # --- Exploration policy ---
@@ -181,7 +196,9 @@ class ClosedLoopExplorationTrainer:
         ~6x faster than sequential. Use sequential only for zi reproduction.
         """
         from rlvr.closed_loop.batched_rollout import (
-            _batched_encoder, _batched_generate, _batched_generate_varied_noise,
+            _batched_encoder,
+            _batched_generate,
+            _batched_generate_varied_noise,
         )
 
         if self.exploration_policy is not None:
@@ -569,7 +586,8 @@ class ClosedLoopExplorationTrainer:
         # --- Free rollout data from GPU before GRPO to avoid OOM ---
         # (eta stats already collected above from rollout_buffers)
         del rollout_buffers
-        import gc; gc.collect()
+        import gc
+        gc.collect()
         torch.cuda.empty_cache()
 
         # --- Reset RNG before GRPO to match zi's random state ---

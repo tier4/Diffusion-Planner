@@ -42,20 +42,21 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from tqdm import tqdm
-
 from diffusion_planner.dimensions import OUTPUT_T
 from diffusion_planner.loss import compute_ego_edge_points, point_to_segment_distance
+from tqdm import tqdm
 
 
 def load_model_for_eval(args):
     """Load model — either base+LoRA or merged."""
-    from preference_optimization.model_utils import load_model
     from diffusion_planner.utils.config import Config
+
+    from preference_optimization.model_utils import load_model
 
     if args.merged_model_path:
         model, model_args = load_model(Path(args.merged_model_path), "cuda")
