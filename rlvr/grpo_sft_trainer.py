@@ -167,6 +167,8 @@ def _compute_sft_diffusion_loss(
             disable_adapter and neighbor_reg_weight > 0).
         ego_il_weight: Weight for ego IL regularization (0=disabled).
         ego_gt_real: [B, T, 4] real GT ego trajectory for IL regularization.
+            Required only when ego_il_weight > 0 and ego_il_mode == "gt".
+            Not needed for baseline mode (uses base model forward pass instead).
             Required when ego_il_weight > 0.
 
     Returns:
@@ -755,7 +757,9 @@ def train_epoch_ranked_sft(
                     pad_r = torch.zeros(1, future_len - T_r, 4, device=device)
                     real_gt = torch.cat([real_gt, pad_r], dim=1)
             else:
-                # Fallback: use ranked traj as IL target (no effect)
+                # No GT available: use ranked traj as fallback. This makes
+                # the IL term duplicate the ego SFT loss (doubling its weight).
+                # In practice, ego_agent_future is always present in NPZ data.
                 real_gt = ego_gt.clone()
             all_ego_gt_real.append(real_gt)
 
