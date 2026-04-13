@@ -97,8 +97,16 @@ def plot_config_heatmap(summary: dict, output_dir: Path) -> None:
     if not epochs:
         return
 
-    # Collect all config labels
-    all_labels = sorted(config_trends[str(epochs[0])].keys())
+    # Collect the union of config labels across all epochs (preserving first-seen
+    # order). Using only the first epoch silently drops slots that appear later
+    # if the variant or label set ever changes mid-run.
+    all_labels: list[str] = []
+    seen: set[str] = set()
+    for ep in epochs:
+        for lbl in config_trends[str(ep)].keys():
+            if lbl not in seen:
+                seen.add(lbl)
+                all_labels.append(lbl)
 
     # Build matrix [n_configs, n_epochs]
     matrix = np.zeros((len(all_labels), len(epochs)))
@@ -184,17 +192,33 @@ def plot_scene_heatmap(summary: dict, output_dir: Path) -> None:
 
     cat_to_int = {cat: i for i, cat in enumerate(_CAT_ORDER)}
     scenes = sorted(scene_evo.keys())
-    # Get epochs from first scene
-    first_scene = scene_evo[scenes[0]]
-    epochs = [entry["epoch"] for entry in first_scene]
+    # Derive epoch axis as the union of explicit epoch values across all scenes
+    # (and category_trends, which is the source of truth). Indexing by list
+    # position would silently drop scenes that skipped an epoch.
+    epoch_set: set[int] = set()
+    for ep_str in summary.get("category_trends", {}):
+        try:
+            epoch_set.add(int(ep_str))
+        except (TypeError, ValueError):
+            pass
+    for entries in scene_evo.values():
+        for entry in entries:
+            ep = entry.get("epoch")
+            if ep is not None:
+                epoch_set.add(int(ep))
+    epochs = sorted(epoch_set)
+    if not epochs:
+        return
+    epoch_to_col = {ep: j for j, ep in enumerate(epochs)}
 
     matrix = np.full((len(scenes), len(epochs)), np.nan)
     unknown_idx = cat_to_int.get("random", len(_CAT_ORDER) - 1)
     for i, scene in enumerate(scenes):
-        entries = scene_evo[scene]
-        for j, entry in enumerate(entries):
-            if j < len(epochs):
-                matrix[i, j] = cat_to_int.get(entry["category"], unknown_idx)
+        for entry in scene_evo[scene]:
+            ep = entry.get("epoch")
+            if ep is None or ep not in epoch_to_col:
+                continue
+            matrix[i, epoch_to_col[ep]] = cat_to_int.get(entry["category"], unknown_idx)
 
     from matplotlib.colors import ListedColormap, BoundaryNorm
     cmap = ListedColormap([_CAT_COLORS[c] for c in _CAT_ORDER])

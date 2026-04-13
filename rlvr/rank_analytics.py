@@ -106,15 +106,23 @@ _breakdown_to_dict = breakdown_to_dict
 
 
 def mean_breakdown_dict(rewards: list[RewardBreakdown]) -> dict[str, float]:
-    """Compute mean of each breakdown field across K trajectories."""
-    fields = [
+    """Compute mean of each breakdown field across K trajectories.
+
+    Numeric fields are averaged. Boolean gate flags (rb_crossing, lane_crossing)
+    are averaged as floats so callers can detect "most trajectories failed this
+    gate" via mean > some threshold.
+    """
+    numeric_fields = [
         "safety", "progress", "smoothness", "feasibility",
         "centerline", "red_light", "rb_near_penalty", "rb_wide_penalty",
     ]
+    gate_fields = ["rb_crossing", "lane_crossing"]
     K = len(rewards)
     if K == 0:
-        return {f: 0.0 for f in fields}
-    return {f: sum(getattr(r, f) for r in rewards) / K for f in fields}
+        return {f: 0.0 for f in (*numeric_fields, *gate_fields)}
+    out = {f: sum(getattr(r, f) for r in rewards) / K for f in numeric_fields}
+    out.update({f: sum(float(getattr(r, f)) for r in rewards) / K for f in gate_fields})
+    return out
 
 
 def compute_dominant_component(
@@ -128,15 +136,36 @@ def compute_dominant_component(
     largest positive weighted delta versus the per-scene mean across the K
     generated trajectories.
 
-    NOTE: This is an approximation, not an exact decomposition of `total`. It
-    only considers the subset of components exposed on RewardBreakdown:
-    progress, safety, smoothness, centerline, rb_near, rb_wide. It omits the
-    TTC bonus and lane departure penalties from `compute_reward_batch()` and
-    uses `RewardBreakdown.progress` (the post-on-road-factor `adjusted_progress`)
-    rather than the `clamped_progress` actually used inside `quality_score`. The
-    result is meant for ranking which family of rewards drove a win, not for
-    reconstructing the total reward exactly.
+    NOTE: This is an approximation, not an exact decomposition of `total`. The
+    weighted-delta heuristic only considers the subset of components exposed on
+    RewardBreakdown: progress, safety, smoothness, centerline, rb_near, rb_wide.
+    It omits the TTC bonus from `compute_reward_batch()` and uses
+    `RewardBreakdown.progress` (post-on-road-factor `adjusted_progress`) rather
+    than the `clamped_progress` actually used inside `quality_score`.
+
+    Hard-gate wins are handled separately and take precedence over the weighted
+    deltas: if the winner avoids a gate that most other trajectories failed,
+    we attribute the win to that gate (e.g. `"rb_crossing_gate"`) — otherwise
+    the weighted-delta heuristic dominates everything via its sign flip and
+    misleads readers about what actually drove ranking.
     """
+    # Gate-driven wins. If the winner passes a gate that >=50% of the other
+    # trajectories failed, the gate is the real driver — the magnitude of any
+    # quality_score delta is dwarfed by the survival-mode floor (-50.0).
+    GATE_THRESHOLD = 0.5
+
+    def _gate_win(winner_failed: bool, mean_failed_rate: float) -> bool:
+        return (not winner_failed) and (mean_failed_rate >= GATE_THRESHOLD)
+
+    if _gate_win(bool(winner.rb_crossing), float(mean_bd.get("rb_crossing", 0.0))):
+        return "rb_crossing_gate", float(mean_bd["rb_crossing"])
+    if _gate_win(bool(winner.lane_crossing), float(mean_bd.get("lane_crossing", 0.0))):
+        return "lane_crossing_gate", float(mean_bd["lane_crossing"])
+    # Collision is a hard gate too — any negative safety_score from collision
+    # would zero the safety_product, but RewardBreakdown.safety is the raw
+    # score not the gate flag. Use collision_step proxy via safety < -threshold.
+    # Skip if collision_step isn't available on either side.
+
     deltas = {
         "progress": config.w_progress * (winner.progress - mean_bd["progress"]),
         "safety": config.w_safety * (winner.safety - mean_bd["safety"]),
@@ -162,7 +191,10 @@ class SceneRankRecord:
     winner_reward: float
     mean_reward: float
     det_reward: float
-    winner_breakdown: dict[str, float]
+    # winner_breakdown holds RewardBreakdown fields: numeric (safety, progress,
+    # ...) plus boolean gate flags (rb_crossing). mean_breakdown holds numeric
+    # means for both — gate flags become floats in [0, 1] (failure rate).
+    winner_breakdown: dict[str, float | bool]
     mean_breakdown: dict[str, float]
     dominant_component: str
     dominant_delta: float
