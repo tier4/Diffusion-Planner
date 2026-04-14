@@ -376,15 +376,11 @@ class LaneletSceneBuilder:
         lanelet_id: int,
         n_steps: int = 31,
         dt: float = 0.1,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, set[int]]:
         """Generate past trajectory by tracing backward along the centerline.
 
-        Builds a dense backward polyline (current lanelet + predecessors),
-        computes cumulative arc lengths, then samples positions at evenly-spaced
-        backward distances. This avoids global nearest-neighbour searches that
-        can jump to wrong segments.
-
-        Returns (n_steps, 3) array of [x, y, heading_rad]. Index -1 is current.
+        Returns ((n_steps, 3) [x, y, heading_rad], set of traversed lanelet IDs).
+        Index -1 is current timestep.
         """
         history = np.zeros((n_steps, 3), dtype=np.float32)
         history[-1] = [position_xy[0], position_xy[1], heading]
@@ -393,10 +389,10 @@ class LaneletSceneBuilder:
             history[:, 0] = position_xy[0]
             history[:, 1] = position_xy[1]
             history[:, 2] = heading
-            return history
+            return history, {lanelet_id}
 
         # Build dense backward polyline ordered [current_pos, ..., far_behind]
-        bw_pts = self._build_backward_polyline(lanelet_id, position_xy, heading, n_steps, speed, dt)
+        bw_pts, traversed_ids = self._build_backward_polyline(lanelet_id, position_xy, heading, n_steps, speed, dt)
 
         # Compute cumulative arc lengths (index 0 = 0 distance from current pos)
         arc = np.zeros(len(bw_pts), dtype=np.float64)
@@ -433,19 +429,19 @@ class LaneletSceneBuilder:
             pos = pos + lateral * np.random.normal(0, 0.05)
             history[step] = [pos[0], pos[1], h]
 
-        return history
+        return history, traversed_ids
 
     def _build_backward_polyline(
         self, start_ll_id: int, start_pos: np.ndarray, heading: float,
         n_steps: int, speed: float, dt: float,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, set[int]]:
         """Build a polyline going backward from start position.
 
         Projects start_pos onto the centerline arc to find the exact parameter,
         then only includes points that are strictly behind the agent along the
         driving direction.
 
-        Returns an array ordered [current_pos, ..., far_behind].
+        Returns (polyline ordered [current_pos, ..., far_behind], set of traversed lanelet IDs).
         """
         needed_dist = speed * dt * (n_steps + 5)
         c = self._cache[start_ll_id]
@@ -512,11 +508,10 @@ class LaneletSceneBuilder:
             current_ll_id = prev_ll.id
 
         if len(points) < 2:
-            # Fallback: create a synthetic point behind the agent
             behind = start_pos[:2] - np.array([math.cos(heading), math.sin(heading)]) * 0.5
             points = [start_pos[:2].copy(), behind]
 
-        return np.array(points, dtype=np.float32)
+        return np.array(points, dtype=np.float32), visited
 
     # ── Agent placement ──────────────────────────────────────────────────
 
@@ -681,18 +676,21 @@ class LaneletSceneBuilder:
         if not placements:
             raise ValueError("Could not place any agents in the selected area")
 
-        # Build agents
+        # Build agents, collecting all traversed lanelet IDs for the map
+        all_lanelet_ids = set(ll_ids)
         agents: list[Agent] = []
         for i, p in enumerate(placements):
             agent_id = "ego" if p.is_ego else f"neighbor_{i - 1}"
 
-            # Route
+            # Route (extends beyond selection rect)
             route_ll_ids = self.find_route(p.lanelet_id, route_length_m)
+            all_lanelet_ids.update(route_ll_ids)
 
-            # History
-            history = self.generate_history(
+            # History (traces backward through predecessors)
+            history, history_ll_ids = self.generate_history(
                 p.position_xy, p.heading, p.speed, p.lanelet_id,
             )
+            all_lanelet_ids.update(history_ll_ids)
 
             # Past velocities from history
             velocities = np.zeros((31, 2), dtype=np.float32)
@@ -724,8 +722,8 @@ class LaneletSceneBuilder:
             )
             agents.append(agent)
 
-        # Map data: convert all lanelets in rect to 33-dim
-        map_data = self._build_map_data(ll_ids)
+        # Map data: all lanelets from selection + routes + history
+        map_data = self._build_map_data(list(all_lanelet_ids))
 
         return SceneContext(
             agents=agents,

@@ -327,48 +327,70 @@ RECTANGLE_TOOL = {
     "state": """
     let rectWorld = null;
     let isDrawingRect = false;
+    let rectStartPx = null, rectEndPx = null;
     """,
     "draw": """
-    if (rectWorld) {
-        const p1 = worldToCanvas(rectWorld.x1, rectWorld.y1);
-        const p2 = worldToCanvas(rectWorld.x2, rectWorld.y2);
-        const rx = Math.min(p1.x, p2.x), ry = Math.min(p1.y, p2.y);
-        const rw = Math.abs(p2.x - p1.x), rh = Math.abs(p2.y - p1.y);
+    if (rectStartPx && rectEndPx) {
+        // Draw in screen space so the rectangle matches what the user drew
+        const rx = Math.min(rectStartPx.x, rectEndPx.x);
+        const ry = Math.min(rectStartPx.y, rectEndPx.y);
+        const rw = Math.abs(rectEndPx.x - rectStartPx.x);
+        const rh = Math.abs(rectEndPx.y - rectStartPx.y);
         ctx.strokeStyle = 'rgba(51, 102, 204, 0.8)'; ctx.lineWidth = 2;
         ctx.setLineDash([6, 4]); ctx.strokeRect(rx, ry, rw, rh); ctx.setLineDash([]);
         ctx.fillStyle = 'rgba(51, 102, 204, 0.08)'; ctx.fillRect(rx, ry, rw, rh);
-        const wm = Math.abs(rectWorld.x2 - rectWorld.x1);
-        const hm = Math.abs(rectWorld.y2 - rectWorld.y1);
-        ctx.fillStyle = '#3366cc'; ctx.font = '11px monospace';
-        ctx.fillText(wm.toFixed(0) + 'm x ' + hm.toFixed(0) + 'm', rx + 4, ry + 14);
+        if (rectWorld) {
+            const wm = Math.abs(rectWorld.x2 - rectWorld.x1);
+            const hm = Math.abs(rectWorld.y2 - rectWorld.y1);
+            ctx.fillStyle = '#3366cc'; ctx.font = '11px monospace';
+            ctx.fillText(wm.toFixed(0) + 'm x ' + hm.toFixed(0) + 'm', rx + 4, ry + 14);
+        }
     }
     """,
     "mousedown": """
     if (e.ctrlKey || e.metaKey) {
         isDrawingRect = true;
-        const w = canvasToWorld(cx, cy);
-        rectWorld = {x1: w.x, y1: w.y, x2: w.x, y2: w.y};
+        rectStartPx = {x: cx, y: cy};
+        rectEndPx = {x: cx, y: cy};
         canvas.style.cursor = 'crosshair';
         toolHandled = true;
     }
     """,
     "mousemove": """
-    if (isDrawingRect && rectWorld) {
-        const w = canvasToWorld(cx, cy);
-        rectWorld.x2 = w.x; rectWorld.y2 = w.y;
+    if (isDrawingRect) {
+        rectEndPx = {x: cx, y: cy};
+        // Live-update world rect from all 4 screen corners for accurate size display
+        const c1 = canvasToWorld(rectStartPx.x, rectStartPx.y);
+        const c2 = canvasToWorld(rectEndPx.x, rectStartPx.y);
+        const c3 = canvasToWorld(rectEndPx.x, rectEndPx.y);
+        const c4 = canvasToWorld(rectStartPx.x, rectEndPx.y);
+        const xs = [c1.x, c2.x, c3.x, c4.x], ys = [c1.y, c2.y, c3.y, c4.y];
+        rectWorld = {
+            x1: Math.min(...xs), y1: Math.min(...ys),
+            x2: Math.max(...xs), y2: Math.max(...ys)
+        };
         redraw();
     }
     """,
     "mouseup": """
-    if (isDrawingRect && rectWorld) {
+    if (isDrawingRect && rectStartPx && rectEndPx) {
         isDrawingRect = false;
         canvas.style.cursor = 'grab';
-        const x1 = Math.min(rectWorld.x1, rectWorld.x2);
-        const y1 = Math.min(rectWorld.y1, rectWorld.y2);
-        const x2 = Math.max(rectWorld.x1, rectWorld.x2);
-        const y2 = Math.max(rectWorld.y1, rectWorld.y2);
-        rectWorld = {x1, y1, x2, y2};
-        trigger('click', {x1, y1, x2, y2});
+        // Convert all 4 screen corners to world coords, take AABB
+        const c1 = canvasToWorld(rectStartPx.x, rectStartPx.y);
+        const c2 = canvasToWorld(rectEndPx.x, rectStartPx.y);
+        const c3 = canvasToWorld(rectEndPx.x, rectEndPx.y);
+        const c4 = canvasToWorld(rectStartPx.x, rectEndPx.y);
+        const xs = [c1.x, c2.x, c3.x, c4.x], ys = [c1.y, c2.y, c3.y, c4.y];
+        rectWorld = {
+            x1: Math.min(...xs), y1: Math.min(...ys),
+            x2: Math.max(...xs), y2: Math.max(...ys)
+        };
+        trigger('click', {
+            x1: rectWorld.x1, y1: rectWorld.y1,
+            x2: rectWorld.x2, y2: rectWorld.y2,
+            rotation: viewRotation
+        });
         redraw();
     }
     """,

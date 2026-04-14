@@ -137,6 +137,8 @@ def _draw_lanes(ax, map_data, alpha=0.5):
 def render_scene_figure(
     scene: SceneContext,
     focus_agent_id: str | None = None,
+    rotation: float = 0.0,
+    zoom: float = 1.0,
     figsize: tuple[float, float] = (12, 10),
 ) -> Figure:
     """Render the full scene as a matplotlib Figure.
@@ -145,6 +147,7 @@ def render_scene_figure(
         scene: The generated SceneContext.
         focus_agent_id: If set, show full detail for this agent, minimal for others.
             None or "all" shows all agents with moderate detail.
+        rotation: View rotation in radians (matches the map canvas rotation).
         figsize: Figure size in inches.
 
     Returns:
@@ -213,7 +216,7 @@ def render_scene_figure(
                     color=_UNFOCUSED_COLOR, ms=6, zorder=8, mew=1.0,
                 )
 
-    # Auto-zoom to scene extent
+    # Auto-zoom to full extent (agents + goals + lane geometry)
     all_pts = []
     for agent in scene.agents:
         valid = np.abs(agent.past_trajectory[:, :2]).sum(axis=1) > 1e-6
@@ -221,17 +224,73 @@ def render_scene_figure(
             all_pts.append(agent.past_trajectory[valid, :2])
         if agent.goal_pose is not None:
             all_pts.append(agent.goal_pose[:2].reshape(1, 2))
+    # Include lane centerline extent
+    lanes = scene.map_data.lanes
+    for i in range(lanes.shape[0]):
+        pts_l = lanes[i, :, :2]
+        valid_l = np.abs(pts_l).sum(axis=1) > 0.1
+        if valid_l.sum() > 0:
+            all_pts.append(pts_l[valid_l])
     if all_pts:
         pts = np.vstack(all_pts)
-        cx, cy = float(pts[:, 0].mean()), float(pts[:, 1].mean())
-        half = max(float(np.ptp(pts[:, 0])), float(np.ptp(pts[:, 1]))) * 0.6 + 20
-        ax.set_xlim(cx - half, cx + half)
-        ax.set_ylim(cy - half, cy + half)
+        # Zoom center: focused agent if set, otherwise scene center
+        focus_center = None
+        if focus_agent_id and focus_agent_id != "all":
+            try:
+                fa = scene.get_agent(focus_agent_id)
+                focus_center = fa.current_position
+            except KeyError:
+                pass
+
+        if abs(rotation) > 0.01:
+            cos_r, sin_r = math.cos(-rotation), math.sin(-rotation)
+            cx_w, cy_w = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+            dx, dy = pts[:, 0] - cx_w, pts[:, 1] - cy_w
+            rx = dx * cos_r - dy * sin_r
+            ry = dx * sin_r + dy * cos_r
+            half = max(float(rx.max() - rx.min()), float(ry.max() - ry.min())) * 0.6 + 20
+        else:
+            cx_w, cy_w = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+            half = max(float(np.ptp(pts[:, 0])), float(np.ptp(pts[:, 1]))) * 0.6 + 20
+
+        # Apply zoom (>1 = zoom in = smaller half)
+        safe_zoom = max(0.1, float(zoom))
+        half = half / safe_zoom
+
+        if focus_center is not None:
+            cx_w, cy_w = float(focus_center[0]), float(focus_center[1])
+
+        ax.set_xlim(cx_w - half, cx_w + half)
+        ax.set_ylim(cy_w - half, cy_w + half)
 
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
+
+    # Apply rotation to the view
+    if abs(rotation) > 0.01:
+        ax.tick_params(labelbottom=False, labelleft=False)
+        # Rotate the entire axes view around its center
+        import matplotlib.transforms as mtrans
+        center_x = (ax.get_xlim()[0] + ax.get_xlim()[1]) / 2
+        center_y = (ax.get_ylim()[0] + ax.get_ylim()[1]) / 2
+        rot_transform = mtrans.Affine2D().rotate_around(center_x, center_y, -rotation)
+        for artist in ax.get_children():
+            if hasattr(artist, "set_transform"):
+                try:
+                    artist.set_transform(rot_transform + artist.get_transform())
+                except Exception:
+                    pass
+        # Expand limits to cover rotated content
+        margin = abs(math.sin(rotation)) + abs(math.cos(rotation))
+        xl, xr = ax.get_xlim()
+        yl, yr = ax.get_ylim()
+        hw = (xr - xl) / 2 * margin
+        hh = (yr - yl) / 2 * margin
+        ax.set_xlim(center_x - hw, center_x + hw)
+        ax.set_ylim(center_y - hh, center_y + hh)
+    else:
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
 
     # Legend
     from matplotlib.lines import Line2D

@@ -47,6 +47,7 @@ def build_interface(
 
         scene_state = gr.State(value=None)  # pickled SceneContext
         rect_state = gr.State(value=None)   # (x1, y1, x2, y2)
+        rotation_state = gr.State(value=0.0)  # map rotation angle (radians)
 
         gr.Markdown("# Scenario Generation")
 
@@ -76,6 +77,7 @@ def build_interface(
                     choices=["All Agents"], value="All Agents",
                     label="Focus agent", interactive=True,
                 )
+                zoom_slider = gr.Slider(0.1, 3.0, value=1.0, step=0.1, label="Scene zoom")
                 agent_info = gr.Markdown("Generate a scene to see agent info")
 
                 gr.Markdown("### Export")
@@ -106,23 +108,25 @@ def build_interface(
         def on_rect_placed(evt: gr.EventData):
             x1, y1 = evt.x1, evt.y1
             x2, y2 = evt.x2, evt.y2
+            rot = getattr(evt, "rotation", 0.0) or 0.0
             w = abs(x2 - x1)
             h = abs(y2 - y1)
-            info = f"Selected: {w:.0f}m x {h:.0f}m"
+            rot_deg = float(rot) * 180 / 3.14159
+            info = f"Selected: {w:.0f}m x {h:.0f}m (rot: {rot_deg:.0f} deg)"
             rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
             return (
                 round(rect[0], 1), round(rect[1], 1),
                 round(rect[2], 1), round(rect[3], 1),
-                info, rect,
+                info, rect, float(rot),
             )
 
         map_canvas.click(
             on_rect_placed,
-            outputs=[rect_x1, rect_y1, rect_x2, rect_y2, rect_info, rect_state],
+            outputs=[rect_x1, rect_y1, rect_x2, rect_y2, rect_info, rect_state, rotation_state],
         )
 
         # Generate scene
-        def on_generate(rect, nn, ms, mxs, sep, rlen):
+        def on_generate(rect, nn, ms, mxs, sep, rlen, rot, zoom):
             if rect is None:
                 return (
                     None,
@@ -158,7 +162,7 @@ def build_interface(
             rh = abs(rect[3] - rect[1])
             status = f"Generated ego + {n_placed} neighbors, {n_lanes} lanes ({rw:.0f}x{rh:.0f}m area)"
 
-            fig = render_scene_figure(scene, focus_agent_id=None)
+            fig = render_scene_figure(scene, focus_agent_id=None, rotation=rot, zoom=zoom)
             info = get_agent_info(scene, "ego")
 
             return (
@@ -171,17 +175,17 @@ def build_interface(
 
         gen_btn.click(
             on_generate,
-            inputs=[rect_state, n_neighbors, min_speed, max_speed, min_sep, route_len],
+            inputs=[rect_state, n_neighbors, min_speed, max_speed, min_sep, route_len, rotation_state, zoom_slider],
             outputs=[scene_state, gen_status, focus_dropdown, scene_plot, agent_info],
         )
 
         # Focus mode change
-        def on_focus_change(focus_id, scene_pkl):
+        def on_focus_change(focus_id, scene_pkl, rot, zoom):
             if scene_pkl is None:
                 return gr.update(), "No scene generated"
             scene = pickle.loads(scene_pkl)
             fid = None if focus_id == "All Agents" else focus_id
-            fig = render_scene_figure(scene, focus_agent_id=fid)
+            fig = render_scene_figure(scene, focus_agent_id=fid, rotation=rot, zoom=zoom)
             try:
                 info = get_agent_info(scene, fid or "ego")
             except KeyError:
@@ -190,7 +194,14 @@ def build_interface(
 
         focus_dropdown.change(
             on_focus_change,
-            inputs=[focus_dropdown, scene_state],
+            inputs=[focus_dropdown, scene_state, rotation_state, zoom_slider],
+            outputs=[scene_plot, agent_info],
+        )
+
+        # Re-render on zoom change
+        zoom_slider.release(
+            on_focus_change,
+            inputs=[focus_dropdown, scene_state, rotation_state, zoom_slider],
             outputs=[scene_plot, agent_info],
         )
 
