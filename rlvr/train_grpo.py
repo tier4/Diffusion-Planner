@@ -196,6 +196,15 @@ def _run_rule_mode(
     # Fix evaluation scenes from validation set (sampled once, reused every epoch)
     trainer.setup_eval_scenes(valid_npz_paths, n_scenes=50)
 
+    # Initialize wandb logging (no-op if disabled in config)
+    from rlvr.wandb_logger import WandbLogger
+    wandb_log = WandbLogger.from_config(
+        trainer.config,
+        run_dir=str(trainer.run_dir),
+        run_name=args.exp_name,
+        extra_tags=["standalone"],
+    )
+
     # Evaluate base model before any training (epoch 0)
     print("\nEvaluating base model (epoch 0)...")
     trainer.evaluate_rewards(epoch=0)
@@ -219,9 +228,14 @@ def _run_rule_mode(
         drift_info = trainer.compute_trajectory_drift()
         trainer.log_metrics(epoch, metrics)
         trainer.save_checkpoint(epoch, args_dict)
-        trainer.evaluate_rewards(epoch)
+        eval_result = trainer.evaluate_rewards(epoch)
+
+        wandb_log.log_training(epoch, metrics)
+        wandb_log.log_eval(epoch, val_result=eval_result)
 
         print("-" * 60)
+
+    wandb_log.finish()
 
     print("\n" + "=" * 60)
     print("Training complete!")

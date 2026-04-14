@@ -450,6 +450,20 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
     with open(run_dir / "train_scenes.json", "w") as f:
         json.dump(train_paths, f)
 
+    # Initialize wandb logging (no-op if disabled in config)
+    from rlvr.wandb_logger import WandbLogger
+    wandb_log = WandbLogger.from_config(
+        grpo_config,
+        run_dir=str(run_dir),
+        run_name=name,
+        extra_tags=["autoresearch"],
+        extra_config={
+            "n_prob_scenes": n_prob,
+            "n_normal_scenes": n_normal,
+            "n_train_scenes": len(train_paths),
+        },
+    )
+
     # Load model
     policy_model, model_args = load_model(checkpoint_path, DEVICE)
 
@@ -553,6 +567,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
     best_prob_rb_crossings = base_prob["rb_crossings"]
     best_val_reward = base_val["reward_mean"]
     best_val_collision = base_val["collision_rate"]
+    duration = 0.0
     best_checkpoint = ""
 
     args_dict = {"exp_name": name}
@@ -631,6 +646,14 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob", baseline_cache=baseline_cache)
         val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val", baseline_cache=baseline_cache)
 
+        # Log to wandb
+        wandb_log.log_training(epoch, metrics)
+        wandb_log.log_eval(epoch, prob_result=prob_result, val_result=val_eval)
+        _ra_path = run_dir / f"rank_analytics_epoch_{epoch:03d}.json"
+        if _ra_path.exists():
+            with open(_ra_path) as _f:
+                wandb_log.log_rank_analytics(epoch, json.load(_f))
+
         # Track best: highest prob deterministic reward (with val sanity check > -5)
         is_better = (prob_result["reward_mean"] > best_prob_reward
                      and val_eval["reward_mean"] > -5)
@@ -666,6 +689,15 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         save_cross_epoch_summary(run_dir)
     except Exception as e:
         print(f"  [rank_analytics] Cross-epoch summary failed: {e}")
+
+    # Finalize wandb run
+    wandb_log.finish({
+        "best_epoch": best_epoch,
+        "best_prob_reward": best_prob_reward,
+        "best_prob_rb_crossings": best_prob_rb_crossings,
+        "best_val_reward": best_val_reward,
+        "duration_min": duration,
+    })
 
     # Print final summary (machine-parseable)
     print("\n---")
