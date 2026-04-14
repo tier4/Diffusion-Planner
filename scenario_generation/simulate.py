@@ -170,7 +170,7 @@ def _draw_agent_view(
     heading = agent.current_heading
     color = (color_map or {}).get(agent_id, _EGO_COLOR)
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
 
     # Map elements
     draw_lanes(ax, scene.map_data)
@@ -251,7 +251,7 @@ def _draw_agent_view(
     ax.set_title(f"{agent_id}  step {step:03d}  t={step * 0.1:.1f}s", fontsize=11)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=100, bbox_inches="tight")
+    fig.savefig(output_path, dpi=100)
     plt.close(fig)
 
 
@@ -338,7 +338,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
               f"({n_simulated} re-planned, {n_agents} total)")
 
         # --- Visualize ---
-        fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
         draw_scene(ax, scene, ego_id)
 
         from scenario_generation.visualize import _agent_color
@@ -386,7 +386,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                      f"({n_agents} agents)", fontsize=11)
 
         fig.tight_layout()
-        fig.savefig(output_dir / f"step_{step:03d}.png", dpi=100, bbox_inches="tight")
+        fig.savefig(output_dir / f"step_{step:03d}.png", dpi=100)
         plt.close(fig)
 
         if per_agent:
