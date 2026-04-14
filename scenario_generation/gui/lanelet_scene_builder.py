@@ -709,34 +709,31 @@ class LaneletSceneBuilder:
 
     def build_scene_context(
         self,
-        rect: tuple[float, float, float, float],
-        n_neighbors: int,
+        rect: tuple[float, float, float, float] | None = None,
+        n_neighbors: int = 5,
         min_separation_m: float = 8.0,
         min_speed: float = 3.0,
         max_speed: float = 12.0,
         route_length_m: float = 120.0,
         ego_pose: tuple[float, float, float] | None = None,
+        lanelet_ids: list[int] | None = None,
     ) -> SceneContext:
-        """Generate a complete SceneContext within the given rectangle.
+        """Generate a complete SceneContext from a rectangle or lanelet ID list.
 
-        Args:
-            rect: (xmin, ymin, xmax, ymax) in MGRS world coords.
-            n_neighbors: Number of neighbor agents to generate.
-            min_separation_m: Minimum distance between agents.
-            min_speed: Minimum speed for agents (m/s).
-            max_speed: Maximum speed for agents (m/s).
-            route_length_m: Minimum route length in meters.
-            ego_pose: Optional (x, y, heading_rad) to place ego at a specific
-                position and heading. Snaps to the nearest lanelet.
-
-        Returns:
-            SceneContext with ego + neighbors, map data, routes, and history.
+        Provide either ``rect`` (extracts lanelets via AABB) or ``lanelet_ids``
+        (pre-saved set from the GUI). Routes and history that extend beyond the
+        initial set are retroactively added to the map data.
         """
-        xmin, ymin, xmax, ymax = rect
-        ll_ids = self.lanelets_in_rect(xmin, ymin, xmax, ymax)
+        if lanelet_ids is not None:
+            ll_ids = [lid for lid in lanelet_ids if lid in self._cache]
+        elif rect is not None:
+            xmin, ymin, xmax, ymax = rect
+            ll_ids = self.lanelets_in_rect(xmin, ymin, xmax, ymax)
+        else:
+            raise ValueError("Provide either rect or lanelet_ids")
+
         if not ll_ids:
-            raise ValueError(f"No lanelets found in rectangle ({xmin:.0f}, {ymin:.0f}) - "
-                             f"({xmax:.0f}, {ymax:.0f})")
+            raise ValueError("No valid lanelets in the selection")
 
         placements = self.place_agents(
             ll_ids, n_neighbors, min_separation_m, min_speed, max_speed,
