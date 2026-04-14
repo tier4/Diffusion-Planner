@@ -20,6 +20,10 @@ export NCCL_DEBUG=INFO
 
 rm -f /tmp/tmp_dist_init
 
+# Save git info
+git show -s > ${MODEL_DIR}/git_show.txt
+git diff > ${MODEL_DIR}/git_diff.txt
+
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
 --exp_name $EXP_NAME \
 --train_set_list $TRAIN_SET_LIST \
@@ -30,7 +34,7 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --use_wandb True \
 --diffusion_model_type "x_start" \
 --save_dir $MODEL_DIR \
-2>&1 | tee logs/result_$(date +%Y%m%d_%H%M%S).txt
+2>&1 | tee ${MODEL_DIR}/train_log.txt
 
 # Convert the trained PyTorch model to ONNX format
 python3 ../ros_scripts/torch2onnx.py $MODEL_DIR
