@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from diffusion_planner.dimensions import MAX_NUM_AGENTS, MAX_NUM_NEIGHBORS, OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
@@ -53,7 +54,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
         turn_indicator_seq = inputs["turn_indicators"]
 
-        inputs["sampled_trajectories"] = torch.zeros(B, 33, 81, 4, dtype=torch.float32)
+        inputs["sampled_trajectories"] = torch.zeros(
+            B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+        )
         inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
 
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
@@ -131,7 +134,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             total_result_dict[f"ego_{key}"].append(val[:, 0, :])  # (B, T)
 
         # Compute ego edge points for penalty metrics
-        ego_edge_points = compute_ego_edge_points(prediction[:, 0], inputs["ego_shape"], n_interp=args.road_border_n_interp)
+        ego_edge_points = compute_ego_edge_points(
+            prediction[:, 0], inputs["ego_shape"], n_interp=args.road_border_n_interp
+        )
 
         denorm_inputs = args.observation_normalizer.inverse(inputs)
         neighbor_penalty = compute_neighbor_collision_penalty(
@@ -201,7 +206,7 @@ def get_args():
     parser.add_argument("--valid_set_list", type=str, help="data list of train data", default=None)
 
     parser.add_argument("--future_len", type=int, help="number of time point", default=80)
-    parser.add_argument("--agent_num", type=int, help="number of agents", default=32)
+    parser.add_argument("--agent_num", type=int, help="number of agents", default=MAX_NUM_NEIGHBORS)
 
     # DataLoader parameters
     parser.add_argument("--num_workers", default=4, type=int)
@@ -227,7 +232,7 @@ def get_args():
         "--predicted_neighbor_num",
         type=int,
         help="number of neighbor agents to predict",
-        default=32,
+        default=MAX_NUM_NEIGHBORS,
     )
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", required=True)
     parser.add_argument("--args_json_path", type=str, help="path to resume model", required=True)
@@ -360,10 +365,7 @@ if __name__ == "__main__":
             f"{valid_dict['ego_neighbor_margin_loss'].mean().item():.4f}"
         )
     if "ego_road_border_loss" in valid_dict:
-        print(
-            "ego_road_border_loss_mean="
-            f"{valid_dict['ego_road_border_loss'].mean().item():.4f}"
-        )
+        print(f"ego_road_border_loss_mean={valid_dict['ego_road_border_loss'].mean().item():.4f}")
 
     valid_dict_to_save = {
         "avg_loss_ego": avg_loss_ego,
