@@ -58,6 +58,29 @@ tensors = to_model_tensors(scene, ego_agent_id="neighbor_0",
 _, outputs = model(tensors)
 ```
 
+### Generate synthetic scenes (GUI)
+
+Interactive GUI for generating driving scenes from a Lanelet2 map. Select a map region, choose the number of neighbors, and generate agents with feasible routes, realistic history, and collision-free placement.
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/autoware/install/setup.bash
+source .venv/bin/activate
+python -m scenario_generation.gui --map_path /path/to/lanelet2_map.osm [--port 7862]
+```
+
+The GUI provides:
+- Pan/zoom map canvas with Ctrl+drag rectangle selection for the scene area
+- Configurable number of neighbors, speed range, separation distance, and route length
+- Focus mode dropdown to inspect individual agents (full detail for the selected agent, minimal for others)
+- Heading arrows, footprint history, route highlighting, and goal markers for all agents
+- Export generated SceneContext as pickle for downstream use
+
+Key modules in `gui/`:
+- `lanelet_scene_builder.py` -- Loads Lanelet2 map, builds routing graph, generates agents with OBB collision-free placement, backward centerline history tracing, and route finding via the lanelet2 routing API.
+- `scene_renderer.py` -- Matplotlib rendering with all-agents and focus modes.
+- `app.py` -- Gradio web interface with interactive map canvas.
+
 ### Run tests
 
 ```bash
