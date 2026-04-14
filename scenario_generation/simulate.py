@@ -80,45 +80,37 @@ def _ego_to_world(pred_xy: np.ndarray, pred_cos_sin: np.ndarray,
 def _advance_agent(agent, new_world_pos: np.ndarray, dt: float = 0.1):
     """Advance a single agent in-place given its new world position.
 
-    Args:
-        agent: Agent to update.
-        new_world_pos: (3,) [x, y, heading_rad] in world frame.
-        dt: Timestep duration.
+    Uses in-place shift + overwrite instead of concatenation to avoid allocations.
     """
     old_vel = agent.current_velocity
+    old_heading = agent.current_heading
     new_vel = ((new_world_pos[:2] - agent.current_position) / dt).astype(np.float32)
     new_accel = ((new_vel - old_vel) / dt).astype(np.float32)
-    dh = float(new_world_pos[2] - agent.current_heading)
-    dh = (dh + math.pi) % (2 * math.pi) - math.pi  # wrap to [-pi, pi]
-    new_yaw_rate = dh / dt
+    dh = float(new_world_pos[2] - old_heading)
+    dh = (dh + math.pi) % (2 * math.pi) - math.pi
 
-    agent.past_trajectory = np.concatenate([
-        agent.past_trajectory[1:], new_world_pos.reshape(1, 3)
-    ], axis=0)
+    agent.past_trajectory[:-1] = agent.past_trajectory[1:]
+    agent.past_trajectory[-1] = new_world_pos
+
     if agent.past_velocities is not None:
-        agent.past_velocities = np.concatenate([
-            agent.past_velocities[1:], new_vel.reshape(1, 2)
-        ], axis=0)
+        agent.past_velocities[:-1] = agent.past_velocities[1:]
+        agent.past_velocities[-1] = new_vel
+
     agent.acceleration = new_accel
-    agent.yaw_rate = new_yaw_rate
+    agent.yaw_rate = dh / dt
 
 
 def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
-                  dt: float = 0.1) -> SceneContext:
-    """Advance the scene by one timestep using per-agent predictions.
+                  dt: float = 0.1) -> None:
+    """Advance the scene by one timestep using per-agent predictions (in-place).
 
     Args:
-        scene: Current scene state.
+        scene: SceneContext to modify in-place.
         agent_predictions: Maps agent_id -> (80, 4) ego-centric prediction
             [x, y, cos_h, sin_h] from running that agent as ego.
         dt: Timestep duration.
-
-    Returns:
-        New SceneContext with all agents advanced by one step.
     """
-    new_scene = deepcopy(scene)
-
-    for agent in new_scene.agents:
+    for agent in scene.agents:
         if agent.id not in agent_predictions:
             continue
 
@@ -134,8 +126,6 @@ def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
         )
         new_pos = np.array([new_xy[0, 0], new_xy[0, 1], new_h[0]], dtype=np.float32)
         _advance_agent(agent, new_pos, dt)
-
-    return new_scene
 
 
 def _build_color_map(scene: SceneContext) -> dict[str, str]:
@@ -385,7 +375,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                 )
 
         # Advance all agents
-        scene = advance_scene(scene, agent_predictions)
+        advance_scene(scene, agent_predictions)
         for agent in scene.agents:
             world_histories[agent.id].append(agent.current_position.copy())
 
