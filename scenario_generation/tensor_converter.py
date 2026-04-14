@@ -240,14 +240,18 @@ def _build_polygons(
     R: np.ndarray,
     ego_xy: np.ndarray,
 ) -> np.ndarray:
-    """Transform polygons to ego frame. Returns [1, N_poly, 40, D].
+    """Transform polygons to ego frame. Returns [1, N_poly, 40, 3].
 
-    D matches the input (typically 2 for [x,y] or 3 for [x,y,type]).
+    Always outputs D=3 [x, y, type] to match normalizer/model expectations.
+    Inputs with D=2 are zero-padded in the type channel.
     """
-    D = polygons.shape[-1] if polygons.ndim >= 3 else 2
-    out = np.zeros((1, _NUM_POLYGONS, _POINTS_PER_POLYGON, D), dtype=np.float32)
+    out = np.zeros((1, _NUM_POLYGONS, _POINTS_PER_POLYGON, 3), dtype=np.float32)
     N_src = min(polygons.shape[0], _NUM_POLYGONS)
-    src = polygons[:N_src].copy().astype(np.float32)
+    src_in = polygons[:N_src].copy().astype(np.float32)
+
+    src = np.zeros((N_src, _POINTS_PER_POLYGON, 3), dtype=np.float32)
+    D_in = min(src_in.shape[-1], 3) if src_in.ndim >= 3 else 2
+    src[:, :, :D_in] = src_in[:, :, :D_in]
 
     mask = np.sum(np.abs(src), axis=-1) == 0
     src[:, :, :2] = transform_positions(src[:, :, :2], R, ego_xy)
@@ -262,14 +266,18 @@ def _build_line_strings(
     R: np.ndarray,
     ego_xy: np.ndarray,
 ) -> np.ndarray:
-    """Transform line strings to ego frame. Returns [1, N_ls, 20, D].
+    """Transform line strings to ego frame. Returns [1, N_ls, 20, 4].
 
-    D matches the input (typically 2 for [x,y] or 4 for [x,y,t1,t2]).
+    Always outputs D=4 [x, y, stop_flag, border_flag] to match normalizer/model
+    expectations. Inputs with D=2 are zero-padded in the flag channels.
     """
-    D = line_strings.shape[-1] if line_strings.ndim >= 3 else 2
-    out = np.zeros((1, _NUM_LINE_STRINGS, _POINTS_PER_LINE_STRING, D), dtype=np.float32)
+    out = np.zeros((1, _NUM_LINE_STRINGS, _POINTS_PER_LINE_STRING, 4), dtype=np.float32)
     N_src = min(line_strings.shape[0], _NUM_LINE_STRINGS)
-    src = line_strings[:N_src].copy().astype(np.float32)
+    src_in = line_strings[:N_src].copy().astype(np.float32)
+
+    src = np.zeros((N_src, _POINTS_PER_LINE_STRING, 4), dtype=np.float32)
+    D_in = min(src_in.shape[-1], 4) if src_in.ndim >= 3 else 2
+    src[:, :, :D_in] = src_in[:, :, :D_in]
 
     mask = np.sum(np.abs(src), axis=-1) == 0
     src[:, :, :2] = transform_positions(src[:, :, :2], R, ego_xy)

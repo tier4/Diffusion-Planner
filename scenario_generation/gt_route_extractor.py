@@ -32,23 +32,25 @@ def _match_trajectory_to_lanes(
     """
     lane_centers = lanes[:, :, :2]  # (N_lanes, 20, 2)
 
-    # Identify valid lanes (non-zero geometry)
-    lane_norms = np.abs(lane_centers).sum(axis=(1, 2))
-    valid_mask = lane_norms > 1.0
+    # Per-point validity mask (exclude zero-padded points at [0,0])
+    lane_point_valid = np.abs(lane_centers).sum(axis=-1) > 1e-6  # (N_lanes, 20)
+    valid_mask = lane_point_valid.any(axis=1)  # lane has at least one real point
     if not valid_mask.any():
         return []
 
     valid_indices = np.where(valid_mask)[0]
     valid_centers = lane_centers[valid_mask]  # (N_valid, 20, 2)
+    valid_point_mask = lane_point_valid[valid_mask]  # (N_valid, 20)
 
     # Sample trajectory points
     sample_pts = trajectory_xy[::sample_interval]  # (N_samples, 2)
 
     matched: list[int] = []
     for pt in sample_pts:
-        # Distance from this point to all 20 points of each valid lane
         diffs = valid_centers - pt[np.newaxis, np.newaxis, :]  # (N_valid, 20, 2)
         dists_per_point = np.linalg.norm(diffs, axis=-1)  # (N_valid, 20)
+        # Mask out zero-padded points so they don't participate in matching
+        dists_per_point = np.where(valid_point_mask, dists_per_point, np.inf)
         min_dist_per_lane = dists_per_point.min(axis=1)  # (N_valid,)
 
         closest_valid_idx = int(np.argmin(min_dist_per_lane))
@@ -122,8 +124,10 @@ def assign_gt_goals_and_routes(
         if not needs_goal and not needs_route:
             continue
 
+        changed = False
         if needs_goal:
             agent.goal_pose = gt_trimmed[-1].copy().astype(np.float32)
+            changed = True
 
         if needs_route:
             matched = _match_trajectory_to_lanes(gt_trimmed[:, :2], lanes)
@@ -131,8 +135,10 @@ def assign_gt_goals_and_routes(
                 agent.route_lanes = lanes[matched].copy()
                 agent.route_speed_limit = lanes_sl[matched].copy()
                 agent.route_has_speed_limit = lanes_hsl[matched].copy()
+                changed = True
 
-        updated += 1
+        if changed:
+            updated += 1
 
     if remove_ids:
         import logging

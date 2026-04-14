@@ -285,17 +285,19 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         device: Torch device.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Work on a copy to avoid mutating the caller's scene
+    scene = deepcopy(scene)
     ego_id = scene.ego_agent_id
+
+    # Remove non-vehicle agents
+    scene.agents = [a for a in scene.agents if a.agent_type == AgentType.VEHICLE]
     n_agents = len(scene.agents)
 
     # Track world trajectories for all agents
     world_histories: dict[str, list[np.ndarray]] = {}
     for agent in scene.agents:
         world_histories[agent.id] = [agent.current_position.copy()]
-
-    # Remove non-vehicle agents entirely
-    scene.agents = [a for a in scene.agents if a.agent_type == AgentType.VEHICLE]
-    n_agents = len(scene.agents)
 
     # Identify static agents: low speed and goal within 1m
     static_ids: set[str] = set()
