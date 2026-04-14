@@ -1,21 +1,17 @@
 {
-    "selections": [
-        {
-            "name": "miraikan_intersection",
-            "path": "scenario_generation/configs/saved_selections/miraikan_intersection.pkl",
-            "n_scenes": 5
-        }
-    ],
+    "snippets_dir": ".map_snippets",
     "generation": {
         "n_neighbors": 5,
         "min_speed": 3.0,
         "max_speed": 12.0,
         "min_separation": 8.0,
-        "route_length": 120.0
+        "route_length": 120.0,
+        "n_scenes_per_snippet": 3
     },
     "simulation": {
         "enabled": true,
         "steps": 80,
-        "per_agent_views": false
+        "per_agent_views": false,
+        "modes": ["closed_loop", "semi_closed_loop"]
     }
 }

@@ -1,11 +1,8 @@
-"""Batch scene generation and closed-loop simulation from saved lanelet selections.
+"""Batch scene generation and closed-loop simulation from saved map snippets.
 
-The GUI saves lanelet selections (lanelet IDs + optional ego pose) as pickles.
-This script loads them, generates N random scenes per selection, and optionally
-runs closed-loop simulation with the Diffusion-Planner model.
-
-Routes and history that extend beyond the saved lanelet set are retroactively
-added to the map data (same behavior as the GUI).
+The GUI saves lanelet selections (map snippets) as pickles in a configurable
+directory. This script discovers all snippets, generates N random scenes per
+snippet, and runs both closed-loop and semi-closed-loop simulation.
 
 Usage:
     python -m scenario_generation.batch_generate \
@@ -40,16 +37,18 @@ def load_config(config_path: str | Path) -> dict:
         return json.load(f)
 
 
-def load_selection(sel_path: str | Path) -> dict:
-    with open(sel_path, "rb") as f:
-        return pickle.load(f)
+def discover_snippets(snippets_dir: str | Path) -> list[Path]:
+    d = Path(snippets_dir)
+    if not d.exists():
+        return []
+    return sorted(d.glob("*.pkl"))
 
 
 def generate_scenes(
     builder: LaneletSceneBuilder,
     lanelet_ids: list[int],
     gen_params: dict,
-    n_scenes: int = 1,
+    n_scenes: int,
     ego_pose: tuple[float, float, float] | None = None,
 ) -> list[SceneContext]:
     scenes = []
@@ -75,10 +74,17 @@ def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
     output_dir.mkdir(parents=True, exist_ok=True)
 
     gen_params = config.get("generation", {})
+    n_scenes_per = gen_params.get("n_scenes_per_snippet", 3)
     sim_config = config.get("simulation", {})
     sim_enabled = sim_config.get("enabled", False) and model_path is not None
     sim_steps = sim_config.get("steps", 80)
     per_agent = sim_config.get("per_agent_views", False)
+    sim_modes = sim_config.get("modes", ["closed_loop", "semi_closed_loop"])
+
+    snippets_dir = config.get("snippets_dir", ".map_snippets")
+    snippet_files = discover_snippets(snippets_dir)
+    if not snippet_files:
+        raise ValueError(f"No .pkl snippets found in {snippets_dir}")
 
     model, model_args = None, None
     if sim_enabled:
@@ -86,38 +92,38 @@ def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
         print(f"Loading model from {model_path}...")
         model, model_args = load_model(model_path, device=device)
 
-    selections = config.get("selections", [])
-    total_scenes = sum(s.get("n_scenes", 1) for s in selections)
-    print(f"Generating {total_scenes} scenes across {len(selections)} selections")
+    print(f"Found {len(snippet_files)} snippets, generating {n_scenes_per} scenes each")
+    if sim_enabled:
+        print(f"Simulation modes: {sim_modes}, {sim_steps} steps each")
 
     scene_idx = 0
-    for sel in selections:
-        name = sel.get("name", f"selection_{scene_idx}")
-        sel_path = sel["path"]
-        n_scenes = sel.get("n_scenes", 1)
-        sel_dir = output_dir / name
-        sel_dir.mkdir(parents=True, exist_ok=True)
+    for snip_path in snippet_files:
+        name = snip_path.stem
+        with open(snip_path, "rb") as f:
+            snip_data = pickle.load(f)
 
-        sel_data = load_selection(sel_path)
-        lanelet_ids = sel_data["lanelet_ids"]
-        ego_pose = sel_data.get("ego_pose")
+        lanelet_ids = snip_data["lanelet_ids"]
+        ego_pose = snip_data.get("ego_pose")
         if ego_pose is not None:
             ego_pose = tuple(ego_pose)
 
-        print(f"\n--- {name} ({len(lanelet_ids)} lanelets, {n_scenes} scenes) ---")
+        snip_dir = output_dir / name
+        snip_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n--- {name} ({len(lanelet_ids)} lanelets, {n_scenes_per} scenes) ---")
         t0 = time.time()
-        scenes = generate_scenes(builder, lanelet_ids, gen_params, n_scenes, ego_pose)
+        scenes = generate_scenes(builder, lanelet_ids, gen_params, n_scenes_per, ego_pose)
         print(f"  Generated {len(scenes)} scenes in {time.time() - t0:.1f}s")
 
         for i, scene in enumerate(scenes):
-            scene_dir = sel_dir / f"scene_{i:03d}"
+            scene_dir = snip_dir / f"scene_{i:03d}"
             scene_dir.mkdir(parents=True, exist_ok=True)
 
             with open(scene_dir / "scene.pkl", "wb") as f:
                 pickle.dump(scene, f)
 
             info = {
-                "selection": name,
+                "snippet": name,
                 "n_agents": len(scene.agents),
                 "n_lanes": int(scene.map_data.lanes.shape[0]),
                 "agents": [
@@ -136,14 +142,16 @@ def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
 
             if sim_enabled:
                 from scenario_generation.simulate import run_simulation
-                print(f"  Scene {i}: running {sim_steps}-step simulation...")
-                t1 = time.time()
-                run_simulation(
-                    model, model_args, scene, sim_steps,
-                    scene_dir / "simulation", device=device,
-                    per_agent=per_agent,
-                )
-                print(f"  Scene {i}: simulation done in {time.time() - t1:.1f}s")
+                for sim_mode in sim_modes:
+                    sim_out = scene_dir / sim_mode
+                    print(f"  Scene {i}: {sim_mode} ({sim_steps} steps)...")
+                    t1 = time.time()
+                    run_simulation(
+                        model, model_args, scene, sim_steps,
+                        sim_out, device=device,
+                        per_agent=per_agent, mode=sim_mode,
+                    )
+                    print(f"  Scene {i}: {sim_mode} done in {time.time() - t1:.1f}s")
 
             scene_idx += 1
 

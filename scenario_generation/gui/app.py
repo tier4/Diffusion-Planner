@@ -95,14 +95,13 @@ def build_interface(
                 save_btn = gr.Button("Save SceneContext", variant="secondary")
                 save_status = gr.Markdown("")
 
-                gr.Markdown("### Save Selection")
-                selection_name = gr.Textbox(label="Selection name", value="my_selection")
-                n_scenes_input = gr.Number(label="N scenes to generate", value=5, precision=0)
-                config_path = gr.Textbox(
-                    label="Config path",
-                    value=str(Path(__file__).resolve().parent.parent / "configs" / "selections.json"),
+                gr.Markdown("### Save Map Snippet")
+                selection_name = gr.Textbox(label="Snippet name", value="my_snippet")
+                snippets_dir = gr.Textbox(
+                    label="Snippets directory",
+                    value=str(Path.cwd() / ".map_snippets"),
                 )
-                save_sel_btn = gr.Button("Save Selection to Config", variant="secondary")
+                save_sel_btn = gr.Button("Save Lanelet Snippet", variant="secondary")
                 save_sel_status = gr.Markdown("")
 
             # ===================== MAIN CONTENT =====================
@@ -257,57 +256,31 @@ def build_interface(
 
         save_btn.click(on_save, inputs=[scene_state, save_path], outputs=[save_status])
 
-        # Save lanelet selection
-        def on_save_selection(rect, ego_pose, name, n_scenes, cfg_path,
-                              nn, ms, mxs, sep, rlen):
+        # Save map snippet
+        def on_save_snippet(rect, ego_pose, name, snip_dir):
             if rect is None:
                 return "Select an area first"
 
-            # Extract lanelet IDs from rectangle
             ll_ids = builder.lanelets_in_rect(*rect)
             if not ll_ids:
                 return "No lanelets in selection"
 
-            # Save the lanelet IDs as a pickle
-            cfg_dir = Path(cfg_path).parent
-            sel_dir = cfg_dir / "saved_selections"
-            sel_dir.mkdir(parents=True, exist_ok=True)
-            sel_file = sel_dir / f"{name}.pkl"
-            sel_data = {
+            out_dir = Path(snip_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            snippet = {
                 "lanelet_ids": ll_ids,
                 "rect": list(rect),
                 "ego_pose": list(ego_pose) if ego_pose else None,
             }
-            with open(sel_file, "wb") as f:
-                pickle.dump(sel_data, f)
+            out_file = out_dir / f"{name}.pkl"
+            with open(out_file, "wb") as f:
+                pickle.dump(snippet, f)
 
-            # Append to config
-            p = Path(cfg_path)
-            if p.exists():
-                with open(p) as f:
-                    config = json.load(f)
-            else:
-                config = {"selections": [], "generation": {}, "simulation": {"enabled": True, "steps": 80}}
-
-            config["selections"].append({
-                "name": name,
-                "path": str(sel_file),
-                "n_scenes": int(n_scenes),
-            })
-            config["generation"] = {
-                "n_neighbors": int(nn), "min_speed": ms, "max_speed": mxs,
-                "min_separation": sep, "route_length": rlen,
-            }
-            with open(p, "w") as f:
-                json.dump(config, f, indent=2)
-
-            n_sel = len(config["selections"])
-            return f"Saved '{name}' ({len(ll_ids)} lanelets, {n_sel} selections in {p.name})"
+            return f"Saved '{name}' ({len(ll_ids)} lanelets) to {out_file}"
 
         save_sel_btn.click(
-            on_save_selection,
-            inputs=[rect_state, ego_pose_state, selection_name, n_scenes_input, config_path,
-                    n_neighbors, min_speed, max_speed, min_sep, route_len],
+            on_save_snippet,
+            inputs=[rect_state, ego_pose_state, selection_name, snippets_dir],
             outputs=[save_sel_status],
         )
 
