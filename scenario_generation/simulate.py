@@ -331,7 +331,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         draw_scene(ax, scene, ego_id)
 
         # Draw planned trajectories for simulated agents (in world frame)
-        from scenario_generation.visualize import _agent_color, _EGO_COLOR, _NEIGHBOR_COLORS
+        from scenario_generation.visualize import _agent_color
         nb_idx = 0
         for agent in scene.agents:
             if agent.id not in agent_predictions:

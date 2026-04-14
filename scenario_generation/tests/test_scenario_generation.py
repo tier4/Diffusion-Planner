@@ -156,11 +156,8 @@ class TestTransforms:
         cs = np.array([[1.0, 0.0]], dtype=np.float32)  # heading=0
         R = _rotation_matrix(math.pi / 2)
         result = transform_cos_sin(cs, R)
-        # After rotating by -pi/2, heading=0 becomes heading=-pi/2: cos=-pi/2=0, sin=-pi/2=-1
-        # Wait: R rotates the vector [cos, sin] as a direction
-        # [1, 0] rotated by -pi/2 = [0, 1] -> wait that's wrong
-        # Actually R = [[cos, sin], [-sin, cos]] for heading pi/2
-        # R @ [1, 0] = [cos(pi/2), -sin(pi/2)] = [0, -1]
+        # R = [[cos, sin], [-sin, cos]] rotates direction vectors by -heading.
+        # With ego heading=pi/2: R @ [1, 0] = [0, -1]
         np.testing.assert_allclose(result, [[0.0, -1.0]], atol=1e-6)
 
     def test_transform_preserves_batch_shape(self):
@@ -312,7 +309,7 @@ class TestTensorConverter:
         R = _rotation_matrix(ego.current_heading)
         ego_xy = ego.current_position.astype(np.float64)
 
-        state = _build_ego_current_state(ego, R, ego_xy)
+        state = _build_ego_current_state(ego, R)
         assert state.shape == (1, 10)
         np.testing.assert_allclose(state[0, :4], [0.0, 0.0, 1.0, 0.0], atol=1e-5)
 
@@ -376,7 +373,7 @@ class TestTensorConverter:
         # Heading should be 0 (cos=1, sin=0)
         np.testing.assert_allclose(past[0, -1, 2:4], [1.0, 0.0], atol=1e-4)
 
-        state = _build_ego_current_state(nb0, R, ego_xy)
+        state = _build_ego_current_state(nb0, R)
         np.testing.assert_allclose(state[0, :4], [0.0, 0.0, 1.0, 0.0], atol=1e-4)
 
     def test_goal_pose_transform(self, tmp_path):

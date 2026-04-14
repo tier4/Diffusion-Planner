@@ -31,7 +31,6 @@ def _match_trajectory_to_lanes(
         Ordered list of lane indices (deduplicated, preserving traversal order).
     """
     lane_centers = lanes[:, :, :2]  # (N_lanes, 20, 2)
-    N_lanes = lanes.shape[0]
 
     # Identify valid lanes (non-zero geometry)
     lane_norms = np.abs(lane_centers).sum(axis=(1, 2))
@@ -136,7 +135,11 @@ def assign_gt_goals_and_routes(
         updated += 1
 
     if remove_ids:
-        print(f"Removing {len(remove_ids)} short-lived agents (<{min_gt_timesteps} GT steps): {remove_ids}")
+        import logging
+        logging.getLogger(__name__).info(
+            "Removing %d short-lived agents (<%d GT steps): %s",
+            len(remove_ids), min_gt_timesteps, remove_ids,
+        )
         scene.agents = [a for a in scene.agents if a.id not in remove_ids]
 
     return updated

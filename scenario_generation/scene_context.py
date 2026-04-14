@@ -109,8 +109,9 @@ class MapData:
         lanes: (N_lanes, 20, 33) lane segments.
         lanes_speed_limit: (N_lanes, 1) speed limits in m/s.
         lanes_has_speed_limit: (N_lanes, 1) boolean mask.
-        polygons: (N_poly, 40, 3) intersection areas [x, y, type].
-        line_strings: (N_ls, 20, 4) stop lines / boundaries [x, y, t1, t2].
+        polygons: (N_poly, 40, 2|3) intersection areas [x, y] or [x, y, type].
+        line_strings: (N_ls, 20, 2|4) stop lines / boundaries [x, y] or
+            [x, y, stop_flag, border_flag].
         static_objects: (N_static, 10) parked objects
             [x, y, cos_h, sin_h, width, length, type(4)].
     """

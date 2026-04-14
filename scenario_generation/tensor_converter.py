@@ -28,10 +28,8 @@ if TYPE_CHECKING:
 
 # Model dimension constants (from diffusion_planner.dimensions)
 _INPUT_T = 30
-_OUTPUT_T = 80
 _POSE_DIM = 4
 _MAX_NUM_NEIGHBORS = 32
-_MAX_NUM_AGENTS = _MAX_NUM_NEIGHBORS + 1
 _NUM_LANES = 140
 _NUM_ROUTE = 25
 _NUM_POLYGONS = 10
@@ -91,7 +89,6 @@ def _build_ego_agent_past(
 def _build_ego_current_state(
     ego: Agent,
     R: np.ndarray,
-    ego_xy: np.ndarray,
 ) -> np.ndarray:
     """Build ego_current_state: [1, 10] all zeros for position (at origin)."""
     vel = ego.current_velocity
@@ -381,7 +378,7 @@ def to_model_tensors(
     # Build all numpy arrays
     data_np: dict[str, np.ndarray] = {}
     data_np["ego_agent_past"] = _build_ego_agent_past(ego, R, ego_xy, ego_heading)
-    data_np["ego_current_state"] = _build_ego_current_state(ego, R, ego_xy)
+    data_np["ego_current_state"] = _build_ego_current_state(ego, R)
     data_np["neighbor_agents_past"] = _build_neighbor_agents_past(
         scene, ego_agent_id, R, ego_xy, ego_heading,
     )
