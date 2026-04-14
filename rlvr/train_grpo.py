@@ -205,14 +205,14 @@ def _run_rule_mode(
         extra_tags=["standalone"],
     )
 
-    # Evaluate base model before any training (epoch 0)
-    print("\nEvaluating base model (epoch 0)...")
-    trainer.evaluate_rewards(epoch=0)
-
-    print(f"\nStarting GRPO training for {trainer.config.train_epochs} epochs...")
-    print("=" * 60)
-
     try:
+        # Evaluate base model before any training (epoch 0)
+        print("\nEvaluating base model (epoch 0)...")
+        trainer.evaluate_rewards(epoch=0)
+
+        print(f"\nStarting GRPO training for {trainer.config.train_epochs} epochs...")
+        print("=" * 60)
+
         total_epochs = trainer.config.train_epochs
         for epoch in range(1, total_epochs + 1):
             print(f"\nEpoch {epoch}/{total_epochs}")

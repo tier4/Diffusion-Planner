@@ -134,13 +134,23 @@ class WandbLogger:
 
     def finish(self, summary: dict[str, Any] | None = None) -> None:
         """Finalize the wandb run with optional summary metrics."""
-        if not self._enabled:
+        if self._run is None:
+            self._enabled = False
             return
-        import wandb
 
-        if summary and self._run:
-            for k, v in summary.items():
-                self._run.summary[k] = v
-        wandb.finish()
-        self._run = None
-        self._enabled = False
+        try:
+            if summary:
+                for k, v in summary.items():
+                    self._run.summary[k] = v
+        except Exception as e:
+            print(f"[wandb] failed to update summary during finish: {e}")
+
+        try:
+            import wandb
+
+            wandb.finish()
+        except Exception as e:
+            print(f"[wandb] finish failed: {e}")
+        finally:
+            self._run = None
+            self._enabled = False
