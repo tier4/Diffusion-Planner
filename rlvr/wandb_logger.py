@@ -71,13 +71,21 @@ class WandbLogger:
 
         return instance
 
+    def _safe_log(self, payload: dict[str, Any], step: int) -> None:
+        """Log to wandb, disabling on failure so training continues."""
+        try:
+            import wandb
+
+            wandb.log(payload, step=step)
+        except Exception as e:
+            print(f"[wandb] log failed: {e}, disabling logging")
+            self._enabled = False
+
     def log_training(self, epoch: int, metrics: dict[str, float]) -> None:
         """Log per-epoch training metrics."""
         if not self._enabled:
             return
-        import wandb
-
-        wandb.log({f"train/{k}": v for k, v in metrics.items()}, step=epoch)
+        self._safe_log({f"train/{k}": v for k, v in metrics.items()}, step=epoch)
 
     def log_eval(
         self,
@@ -88,8 +96,6 @@ class WandbLogger:
         """Log per-epoch evaluation results."""
         if not self._enabled:
             return
-        import wandb
-
         payload: dict[str, Any] = {}
         if prob_result:
             for k, v in prob_result.items():
@@ -100,14 +106,12 @@ class WandbLogger:
                 if isinstance(v, (int, float)):
                     payload[f"eval_val/{k}"] = v
         if payload:
-            wandb.log(payload, step=epoch)
+            self._safe_log(payload, step=epoch)
 
     def log_rank_analytics(self, epoch: int, analytics: dict) -> None:
         """Log rank analytics (win rates, category rates, dominant components)."""
         if not self._enabled:
             return
-        import wandb
-
         payload: dict[str, Any] = {}
         summary = analytics.get("summary", analytics)
 
@@ -126,7 +130,7 @@ class WandbLogger:
                 payload[f"rank/{key}"] = summary[key]
 
         if payload:
-            wandb.log(payload, step=epoch)
+            self._safe_log(payload, step=epoch)
 
     def finish(self, summary: dict[str, Any] | None = None) -> None:
         """Finalize the wandb run with optional summary metrics."""
@@ -139,3 +143,4 @@ class WandbLogger:
                 self._run.summary[k] = v
         wandb.finish()
         self._run = None
+        self._enabled = False

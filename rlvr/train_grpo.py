@@ -212,30 +212,31 @@ def _run_rule_mode(
     print(f"\nStarting GRPO training for {trainer.config.train_epochs} epochs...")
     print("=" * 60)
 
-    total_epochs = trainer.config.train_epochs
-    for epoch in range(1, total_epochs + 1):
-        print(f"\nEpoch {epoch}/{total_epochs}")
-        print("-" * 60)
+    try:
+        total_epochs = trainer.config.train_epochs
+        for epoch in range(1, total_epochs + 1):
+            print(f"\nEpoch {epoch}/{total_epochs}")
+            print("-" * 60)
 
-        if drift_info:
-            print(f"  {drift_info}")
+            if drift_info:
+                print(f"  {drift_info}")
 
-        if epoch == 1:
-            trainer.save_epoch1_baselines(train_npz_paths)
+            if epoch == 1:
+                trainer.save_epoch1_baselines(train_npz_paths)
 
-        metrics = trainer.train_epoch(train_npz_paths, epoch)
+            metrics = trainer.train_epoch(train_npz_paths, epoch)
 
-        drift_info = trainer.compute_trajectory_drift()
-        trainer.log_metrics(epoch, metrics)
-        trainer.save_checkpoint(epoch, args_dict)
-        eval_result = trainer.evaluate_rewards(epoch)
+            drift_info = trainer.compute_trajectory_drift()
+            trainer.log_metrics(epoch, metrics)
+            trainer.save_checkpoint(epoch, args_dict)
+            eval_result = trainer.evaluate_rewards(epoch)
 
-        wandb_log.log_training(epoch, metrics)
-        wandb_log.log_eval(epoch, val_result=eval_result)
+            wandb_log.log_training(epoch, metrics)
+            wandb_log.log_eval(epoch, val_result=eval_result)
 
-        print("-" * 60)
-
-    wandb_log.finish()
+            print("-" * 60)
+    finally:
+        wandb_log.finish()
 
     print("\n" + "=" * 60)
     print("Training complete!")

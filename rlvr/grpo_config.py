@@ -360,7 +360,7 @@ class GRPOConfig:
     # Weights & Biases logging
     wandb_enabled: bool = False
     wandb_project: str = "rlvr-training"
-    wandb_entity: str = ""  # empty = default entity
+    wandb_entity: str = ""  # empty = resolved from WANDB_ENTITY env var
 
     # Backward compat: old field names → new field names
     _FIELD_RENAMES: ClassVar[dict[str, str]] = {
