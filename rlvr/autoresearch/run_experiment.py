@@ -464,6 +464,16 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         },
     )
 
+    # Initialize before try so finally block never hits UnboundLocalError
+    start_time = time.time()
+    best_epoch = 0
+    best_prob_reward = float("-inf")
+    best_prob_rb_crossings = 999
+    best_val_reward = float("-inf")
+    best_val_collision = 1.0
+    duration = 0.0
+    best_checkpoint = ""
+
     try:
         # Load model
         policy_model, model_args = load_model(checkpoint_path, DEVICE)
@@ -561,15 +571,11 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
 
         trainer._eval_scene_paths = val_50
 
-        # Training loop
-        start_time = time.time()
-        best_epoch = 0
+        # Update best trackers from baseline eval
         best_prob_reward = base_prob["reward_mean"]
         best_prob_rb_crossings = base_prob["rb_crossings"]
         best_val_reward = base_val["reward_mean"]
         best_val_collision = base_val["collision_rate"]
-        duration = 0.0
-        best_checkpoint = ""
 
         args_dict = {"exp_name": name}
 
