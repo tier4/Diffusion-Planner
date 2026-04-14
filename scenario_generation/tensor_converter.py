@@ -307,11 +307,15 @@ def _build_ego_shape(ego: Agent) -> np.ndarray:
 
 
 def _build_turn_indicators(ego: Agent) -> np.ndarray:
-    """Build turn_indicators: [1, INPUT_T] int. Default: all zeros (NONE)."""
-    out = np.zeros((1, _INPUT_T), dtype=np.int32)
+    """Build turn_indicators: [1, INPUT_T+1] int. Default: all zeros (NONE).
+
+    The encoder slices [:, :-1] internally, so we provide INPUT_T+1 entries.
+    """
+    T = _INPUT_T + 1
+    out = np.zeros((1, T), dtype=np.int32)
     if ego.turn_indicators is not None:
         ti = ego.turn_indicators
-        ti = _pad_or_truncate(ti, _INPUT_T, axis=0)
+        ti = _pad_or_truncate(ti, T, axis=0)
         out[0] = ti.astype(np.int32)
     return out
 
@@ -404,9 +408,13 @@ def to_model_tensors(
     data_np["turn_indicators"] = _build_turn_indicators(ego)
 
     # Convert to torch tensors
+    _bool_keys = {"lanes_has_speed_limit", "route_lanes_has_speed_limit"}
     data_torch: dict[str, torch.Tensor] = {}
     for key, arr in data_np.items():
-        data_torch[key] = torch.tensor(arr, dtype=torch.float32, device=device)
+        if key in _bool_keys:
+            data_torch[key] = torch.tensor(arr, dtype=torch.bool, device=device)
+        else:
+            data_torch[key] = torch.tensor(arr, dtype=torch.float32, device=device)
     data_torch["turn_indicators"] = torch.tensor(
         data_np["turn_indicators"], dtype=torch.long, device=device
     )

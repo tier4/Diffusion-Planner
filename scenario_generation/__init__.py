@@ -7,6 +7,7 @@ Provides a structured scene representation (SceneContext) that:
 - Converts to normalized model input tensors for any agent as ego
 """
 
+from scenario_generation.gt_route_extractor import assign_gt_goals_and_routes
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import Agent, AgentType, MapData, SceneContext
 from scenario_generation.tensor_converter import to_model_tensors
@@ -18,6 +19,7 @@ __all__ = [
     "AgentType",
     "MapData",
     "SceneContext",
+    "assign_gt_goals_and_routes",
     "draw_scene",
     "from_npz",
     "to_model_tensors",

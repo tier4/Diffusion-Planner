@@ -97,10 +97,11 @@ def draw_stop_lines(ax, map_data):
             ax.plot(line[valid, 0], line[valid, 1], color="#ddaa00", lw=2.0, alpha=0.8, zorder=4)
 
 
-def draw_route(ax, route_lanes):
+def draw_route(ax, route_lanes, color=None, alpha=0.4, lw=1.5):
     """Draw route lane centerlines."""
     if route_lanes is None:
         return
+    c = color or _ROUTE_COLOR
     for i in range(route_lanes.shape[0]):
         lane = route_lanes[i]
         if np.abs(lane[:, :2]).sum() < 1e-6:
@@ -109,7 +110,7 @@ def draw_route(ax, route_lanes):
         valid = np.abs(pts).sum(axis=1) > 0.1
         if valid.sum() < 2:
             continue
-        ax.plot(pts[valid, 0], pts[valid, 1], "-", color=_ROUTE_COLOR, alpha=0.4, lw=1.5)
+        ax.plot(pts[valid, 0], pts[valid, 1], "-", color=c, alpha=alpha, lw=lw)
 
 
 def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, zorder=10):
@@ -208,20 +209,34 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
                      arrowprops=dict(arrowstyle="->", color=color, lw=1.5),
                      zorder=zorder + 1)
 
-        # Future trajectory (GT)
-        if agent.future_trajectory is not None and is_ego:
-            draw_trajectory(ax, agent.future_trajectory, _GT_COLOR, label="GT future",
-                            lw=1.5, zorder=zorder - 1, show_footprints=True,
+        # Future trajectory (GT) and final GT pose
+        if agent.future_trajectory is not None:
+            gt = agent.future_trajectory
+            gt_label = "GT future" if is_ego else None
+            draw_trajectory(ax, gt, _GT_COLOR, label=gt_label,
+                            lw=1.5 if is_ego else 0.8, zorder=zorder - 1,
+                            show_footprints=is_ego,
                             length=agent.length, width=agent.width)
+            # Ghost box at final GT pose
+            draw_agent_box(ax, gt[-1, 0], gt[-1, 1], gt[-1, 2],
+                           agent.length, agent.width, color,
+                           alpha=0.25, lw=1.0, zorder=zorder - 1)
 
         # Route
-        if is_ego and agent.route_lanes is not None:
-            draw_route(ax, agent.route_lanes)
+        if agent.route_lanes is not None:
+            draw_route(ax, agent.route_lanes, color=color, alpha=0.3 if is_ego else 0.2)
 
         # Goal
-        if is_ego and agent.goal_pose is not None:
+        if agent.goal_pose is not None:
             gx, gy = agent.goal_pose[0], agent.goal_pose[1]
-            ax.plot(gx, gy, "*", color=_GOAL_COLOR, ms=15, zorder=25, label="Goal")
+            marker = "*" if is_ego else "D"
+            ms = 15 if is_ego else 10
+            ax.plot(gx, gy, marker, color=color, ms=ms, zorder=zorder + 3,
+                    markeredgecolor="black", markeredgewidth=0.8)
+            ax.annotate(f"{agent.id} goal", (gx, gy), fontsize=5, color=color,
+                        ha="center", va="bottom", zorder=zorder + 4,
+                        xytext=(0, 8), textcoords="offset points",
+                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.7, lw=0.5))
 
         # Label
         ax.annotate(agent.id, (pos[0], pos[1]), fontsize=6, color=color,
@@ -236,6 +251,8 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
             all_pts.append(agent.past_trajectory[valid, :2])
         if agent.future_trajectory is not None:
             all_pts.append(agent.future_trajectory[:, :2])
+        if agent.goal_pose is not None:
+            all_pts.append(agent.goal_pose[:2].reshape(1, 2))
     if all_pts:
         pts = np.vstack(all_pts)
         cx, cy = np.mean(pts[:, 0]), np.mean(pts[:, 1])

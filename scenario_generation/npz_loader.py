@@ -21,6 +21,73 @@ _DEFAULT_WIDTH = 1.70
 _WHEELBASE_LENGTH_RATIO = 0.65
 
 
+def _correct_heading_flip(
+    past_traj: np.ndarray,
+    past_vel: np.ndarray | None,
+    future_traj: np.ndarray | None = None,
+    speed_threshold: float = 0.3,
+) -> bool:
+    """Detect and correct 180-degree heading errors using velocity direction.
+
+    Checks the agent's heading against its movement direction. If they differ
+    by more than 90 degrees, flips all headings (past and future) by pi.
+
+    Args:
+        past_traj: (T, 3) [x, y, heading_rad] -- modified in-place.
+        past_vel: (T, 2) [vx, vy] or None.
+        future_traj: (T_future, 3) [x, y, heading_rad] or None -- modified in-place.
+        speed_threshold: Minimum speed (m/s) to trust velocity direction.
+
+    Returns:
+        True if headings were flipped.
+    """
+    # Try velocity-based check on recent timesteps
+    for t in range(past_traj.shape[0] - 1, max(past_traj.shape[0] - 10, -1), -1):
+        if past_vel is not None:
+            vx, vy = past_vel[t, 0], past_vel[t, 1]
+        elif t > 0:
+            dt = 0.1
+            vx = (past_traj[t, 0] - past_traj[t - 1, 0]) / dt
+            vy = (past_traj[t, 1] - past_traj[t - 1, 1]) / dt
+        else:
+            continue
+
+        speed = np.sqrt(vx ** 2 + vy ** 2)
+        if speed < speed_threshold:
+            continue
+
+        vel_heading = np.arctan2(vy, vx)
+        agent_heading = past_traj[t, 2]
+        diff = (agent_heading - vel_heading + np.pi) % (2 * np.pi) - np.pi
+
+        if abs(diff) > np.pi / 2:
+            past_traj[:, 2] += np.pi
+            past_traj[:, 2] = (past_traj[:, 2] + np.pi) % (2 * np.pi) - np.pi
+            if future_traj is not None:
+                future_traj[:, 2] += np.pi
+                future_traj[:, 2] = (future_traj[:, 2] + np.pi) % (2 * np.pi) - np.pi
+            return True
+        return False
+
+    # Fallback: try future trajectory direction if past had no speed
+    if future_traj is not None and future_traj.shape[0] >= 2:
+        dx = future_traj[1, 0] - future_traj[0, 0]
+        dy = future_traj[1, 1] - future_traj[0, 1]
+        speed = np.sqrt(dx ** 2 + dy ** 2) / 0.1
+        if speed >= speed_threshold:
+            move_heading = np.arctan2(dy, dx)
+            agent_heading = past_traj[-1, 2]
+            diff = (agent_heading - move_heading + np.pi) % (2 * np.pi) - np.pi
+            if abs(diff) > np.pi / 2:
+                past_traj[:, 2] += np.pi
+                past_traj[:, 2] = (past_traj[:, 2] + np.pi) % (2 * np.pi) - np.pi
+                future_traj[:, 2] += np.pi
+                future_traj[:, 2] = (future_traj[:, 2] + np.pi) % (2 * np.pi) - np.pi
+                return True
+
+    return False
+
+
 def _agent_type_from_onehot(is_vehicle: float, is_ped: float, is_bike: float) -> AgentType:
     """Map one-hot neighbor type flags to AgentType enum."""
     vals = [is_vehicle, is_ped, is_bike]
@@ -186,6 +253,8 @@ def _extract_neighbors(data: dict[str, np.ndarray]) -> list[Agent]:
                         _cos_sin_to_heading(future[:, 2], future[:, 3]),
                     ], axis=-1).astype(np.float32)
 
+        _correct_heading_flip(past_traj, past_vel, future)
+
         agents.append(Agent(
             id=f"neighbor_{i}",
             agent_type=atype,
@@ -195,7 +264,7 @@ def _extract_neighbors(data: dict[str, np.ndarray]) -> list[Agent]:
             past_trajectory=past_traj,
             past_velocities=past_vel,
             acceleration=accel,
-        future_trajectory=future,
+            future_trajectory=future,
         ))
 
     return agents
