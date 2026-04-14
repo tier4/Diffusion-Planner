@@ -25,7 +25,7 @@ from scenario_generation.gui.scene_renderer import get_agent_info, render_scene_
 from scene_search.map_canvas_js import build_map_canvas_js
 from scene_search.map_renderer import MapRenderer, Viewport
 
-MAP_CANVAS_JS = build_map_canvas_js(tool="rectangle")
+MAP_CANVAS_JS = build_map_canvas_js(tool="rectangle_and_arrow")
 
 def build_interface(
     renderer: MapRenderer,
@@ -48,6 +48,7 @@ def build_interface(
         scene_state = gr.State(value=None)  # pickled SceneContext
         rect_state = gr.State(value=None)   # (x1, y1, x2, y2)
         rotation_state = gr.State(value=0.0)  # map rotation angle (radians)
+        ego_pose_state = gr.State(value=None)  # (x, y, heading_rad) or None
 
         gr.Markdown("# Scenario Generation")
 
@@ -62,9 +63,15 @@ def build_interface(
                     rect_x2 = gr.Number(label="X2", value=0, interactive=False)
                     rect_y2 = gr.Number(label="Y2", value=0, interactive=False)
                 rect_info = gr.Markdown("Ctrl+drag on map to select area")
+                gr.Markdown("### Ego Pose")
+                with gr.Row():
+                    ego_x = gr.Number(label="X", value=0, interactive=False)
+                    ego_y = gr.Number(label="Y", value=0, interactive=False)
+                ego_heading = gr.Number(label="Heading (deg)", value=0, interactive=False)
+                ego_pose_info = gr.Markdown("Shift+drag to set ego pose (optional)")
 
                 gr.Markdown("### Generation Parameters")
-                n_neighbors = gr.Slider(0, 10, value=3, step=1, label="Neighbors")
+                n_neighbors = gr.Slider(0, 32, value=3, step=1, label="Neighbors")
                 min_speed = gr.Slider(0, 20, value=3, step=0.5, label="Min speed (m/s)")
                 max_speed = gr.Slider(1, 25, value=12, step=0.5, label="Max speed (m/s)")
                 min_sep = gr.Slider(3, 30, value=8, step=1, label="Min separation (m)")
@@ -105,28 +112,49 @@ def build_interface(
 
         # ===================== EVENT HANDLERS =====================
 
-        def on_rect_placed(evt: gr.EventData):
-            x1, y1 = evt.x1, evt.y1
-            x2, y2 = evt.x2, evt.y2
-            rot = getattr(evt, "rotation", 0.0) or 0.0
-            w = abs(x2 - x1)
-            h = abs(y2 - y1)
-            rot_deg = float(rot) * 180 / 3.14159
-            info = f"Selected: {w:.0f}m x {h:.0f}m (rot: {rot_deg:.0f} deg)"
-            rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-            return (
-                round(rect[0], 1), round(rect[1], 1),
-                round(rect[2], 1), round(rect[3], 1),
-                info, rect, float(rot),
-            )
+        def on_canvas_click(evt: gr.EventData):
+            evt_type = getattr(evt, "type", "rect")
+            # All outputs: rect coords (4) + rect_info + rect_state + rotation +
+            #              ego coords (3) + ego_pose_info + ego_pose_state
+            # Use gr.update() for fields we don't change
+            no_change = gr.update()
+
+            if evt_type == "ego_pose":
+                x, y = evt.x, evt.y
+                heading_deg = evt.heading
+                heading_rad = heading_deg * 3.14159 / 180
+                info = f"Ego: ({x:.0f}, {y:.0f}) heading={heading_deg:.0f} deg"
+                return (
+                    no_change, no_change, no_change, no_change, no_change, no_change, no_change,
+                    round(x, 1), round(y, 1), round(heading_deg, 1),
+                    info, (x, y, heading_rad),
+                )
+            else:
+                x1, y1 = evt.x1, evt.y1
+                x2, y2 = evt.x2, evt.y2
+                rot = getattr(evt, "rotation", 0.0) or 0.0
+                w = abs(x2 - x1)
+                h = abs(y2 - y1)
+                rot_deg = float(rot) * 180 / 3.14159
+                info = f"Selected: {w:.0f}m x {h:.0f}m (rot: {rot_deg:.0f} deg)"
+                rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+                return (
+                    round(rect[0], 1), round(rect[1], 1),
+                    round(rect[2], 1), round(rect[3], 1),
+                    info, rect, float(rot),
+                    no_change, no_change, no_change, no_change, no_change,
+                )
 
         map_canvas.click(
-            on_rect_placed,
-            outputs=[rect_x1, rect_y1, rect_x2, rect_y2, rect_info, rect_state, rotation_state],
+            on_canvas_click,
+            outputs=[
+                rect_x1, rect_y1, rect_x2, rect_y2, rect_info, rect_state, rotation_state,
+                ego_x, ego_y, ego_heading, ego_pose_info, ego_pose_state,
+            ],
         )
 
         # Generate scene
-        def on_generate(rect, nn, ms, mxs, sep, rlen, rot, zoom):
+        def on_generate(rect, nn, ms, mxs, sep, rlen, rot, zoom, ego_pose):
             if rect is None:
                 return (
                     None,
@@ -144,6 +172,7 @@ def build_interface(
                     min_speed=ms,
                     max_speed=mxs,
                     route_length_m=rlen,
+                    ego_pose=ego_pose,
                 )
             except ValueError as e:
                 return (
@@ -175,7 +204,8 @@ def build_interface(
 
         gen_btn.click(
             on_generate,
-            inputs=[rect_state, n_neighbors, min_speed, max_speed, min_sep, route_len, rotation_state, zoom_slider],
+            inputs=[rect_state, n_neighbors, min_speed, max_speed, min_sep, route_len,
+                    rotation_state, zoom_slider, ego_pose_state],
             outputs=[scene_state, gen_status, focus_dropdown, scene_plot, agent_info],
         )
 

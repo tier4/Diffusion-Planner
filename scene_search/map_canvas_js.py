@@ -331,7 +331,6 @@ RECTANGLE_TOOL = {
     """,
     "draw": """
     if (rectStartPx && rectEndPx) {
-        // Draw in screen space so the rectangle matches what the user drew
         const rx = Math.min(rectStartPx.x, rectEndPx.x);
         const ry = Math.min(rectStartPx.y, rectEndPx.y);
         const rw = Math.abs(rectEndPx.x - rectStartPx.x);
@@ -359,7 +358,6 @@ RECTANGLE_TOOL = {
     "mousemove": """
     if (isDrawingRect) {
         rectEndPx = {x: cx, y: cy};
-        // Live-update world rect from all 4 screen corners for accurate size display
         const c1 = canvasToWorld(rectStartPx.x, rectStartPx.y);
         const c2 = canvasToWorld(rectEndPx.x, rectStartPx.y);
         const c3 = canvasToWorld(rectEndPx.x, rectEndPx.y);
@@ -376,7 +374,6 @@ RECTANGLE_TOOL = {
     if (isDrawingRect && rectStartPx && rectEndPx) {
         isDrawingRect = false;
         canvas.style.cursor = 'grab';
-        // Convert all 4 screen corners to world coords, take AABB
         const c1 = canvasToWorld(rectStartPx.x, rectStartPx.y);
         const c2 = canvasToWorld(rectEndPx.x, rectStartPx.y);
         const c3 = canvasToWorld(rectEndPx.x, rectEndPx.y);
@@ -387,9 +384,132 @@ RECTANGLE_TOOL = {
             x2: Math.max(...xs), y2: Math.max(...ys)
         };
         trigger('click', {
+            type: 'rect',
             x1: rectWorld.x1, y1: rectWorld.y1,
             x2: rectWorld.x2, y2: rectWorld.y2,
             rotation: viewRotation
+        });
+        redraw();
+    }
+    """,
+}
+
+RECTANGLE_AND_ARROW_TOOL = {
+    "help": " | <b>Ctrl+drag=rectangle</b> | <b>Shift+drag=ego pose</b>",
+    "state": """
+    let rectWorld = null;
+    let isDrawingRect = false;
+    let rectStartPx = null, rectEndPx = null;
+    let egoArrowStartWorld = null, egoArrowEndWorld = null;
+    let isDrawingEgoArrow = false, egoArrowStartPx = null, egoArrowEndPx = null;
+    """,
+    "draw": """
+    // Rectangle
+    if (rectStartPx && rectEndPx) {
+        const rx = Math.min(rectStartPx.x, rectEndPx.x);
+        const ry = Math.min(rectStartPx.y, rectEndPx.y);
+        const rw = Math.abs(rectEndPx.x - rectStartPx.x);
+        const rh = Math.abs(rectEndPx.y - rectStartPx.y);
+        ctx.strokeStyle = 'rgba(51, 102, 204, 0.8)'; ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]); ctx.strokeRect(rx, ry, rw, rh); ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(51, 102, 204, 0.08)'; ctx.fillRect(rx, ry, rw, rh);
+        if (rectWorld) {
+            const wm = Math.abs(rectWorld.x2 - rectWorld.x1);
+            const hm = Math.abs(rectWorld.y2 - rectWorld.y1);
+            ctx.fillStyle = '#3366cc'; ctx.font = '11px monospace';
+            ctx.fillText(wm.toFixed(0) + 'm x ' + hm.toFixed(0) + 'm', rx + 4, ry + 14);
+        }
+    }
+    // Ego arrow
+    if (egoArrowStartWorld && egoArrowEndWorld && !isDrawingEgoArrow) {
+        egoArrowStartPx = worldToCanvas(egoArrowStartWorld.x, egoArrowStartWorld.y);
+        egoArrowEndPx = worldToCanvas(egoArrowEndWorld.x, egoArrowEndWorld.y);
+    }
+    if (egoArrowStartPx && egoArrowEndPx) {
+        const adx = egoArrowEndPx.x - egoArrowStartPx.x;
+        const ady = egoArrowEndPx.y - egoArrowStartPx.y;
+        const len = Math.sqrt(adx*adx + ady*ady);
+        if (len > 3) {
+            const ang = Math.atan2(ady, adx);
+            ctx.strokeStyle = '#3366cc'; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.moveTo(egoArrowStartPx.x, egoArrowStartPx.y);
+            ctx.lineTo(egoArrowEndPx.x, egoArrowEndPx.y); ctx.stroke();
+            const hl = Math.min(18, len*0.3);
+            ctx.fillStyle = '#3366cc'; ctx.beginPath();
+            ctx.moveTo(egoArrowEndPx.x, egoArrowEndPx.y);
+            ctx.lineTo(egoArrowEndPx.x - hl*Math.cos(ang-0.4), egoArrowEndPx.y - hl*Math.sin(ang-0.4));
+            ctx.lineTo(egoArrowEndPx.x - hl*Math.cos(ang+0.4), egoArrowEndPx.y - hl*Math.sin(ang+0.4));
+            ctx.closePath(); ctx.fill();
+        }
+        ctx.fillStyle = '#3366cc'; ctx.beginPath();
+        ctx.arc(egoArrowStartPx.x, egoArrowStartPx.y, 5, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#3366cc'; ctx.font = '11px monospace';
+        ctx.fillText('ego', egoArrowStartPx.x + 8, egoArrowStartPx.y - 8);
+    }
+    """,
+    "mousedown": """
+    if (e.ctrlKey || e.metaKey) {
+        isDrawingRect = true;
+        rectStartPx = {x: cx, y: cy};
+        rectEndPx = {x: cx, y: cy};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
+    } else if (e.shiftKey) {
+        isDrawingEgoArrow = true;
+        egoArrowStartPx = {x: cx, y: cy};
+        egoArrowEndPx = {x: cx, y: cy};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
+    }
+    """,
+    "mousemove": """
+    if (isDrawingRect) {
+        rectEndPx = {x: cx, y: cy};
+        const c1 = canvasToWorld(rectStartPx.x, rectStartPx.y);
+        const c2 = canvasToWorld(rectEndPx.x, rectStartPx.y);
+        const c3 = canvasToWorld(rectEndPx.x, rectEndPx.y);
+        const c4 = canvasToWorld(rectStartPx.x, rectEndPx.y);
+        const xs = [c1.x, c2.x, c3.x, c4.x], ys = [c1.y, c2.y, c3.y, c4.y];
+        rectWorld = {
+            x1: Math.min(...xs), y1: Math.min(...ys),
+            x2: Math.max(...xs), y2: Math.max(...ys)
+        };
+        redraw();
+    } else if (isDrawingEgoArrow) {
+        egoArrowEndPx = {x: cx, y: cy};
+        redraw();
+    }
+    """,
+    "mouseup": """
+    if (isDrawingRect && rectStartPx && rectEndPx) {
+        isDrawingRect = false;
+        canvas.style.cursor = 'grab';
+        const c1 = canvasToWorld(rectStartPx.x, rectStartPx.y);
+        const c2 = canvasToWorld(rectEndPx.x, rectStartPx.y);
+        const c3 = canvasToWorld(rectEndPx.x, rectEndPx.y);
+        const c4 = canvasToWorld(rectStartPx.x, rectEndPx.y);
+        const xs = [c1.x, c2.x, c3.x, c4.x], ys = [c1.y, c2.y, c3.y, c4.y];
+        rectWorld = {
+            x1: Math.min(...xs), y1: Math.min(...ys),
+            x2: Math.max(...xs), y2: Math.max(...ys)
+        };
+        trigger('click', {
+            type: 'rect',
+            x1: rectWorld.x1, y1: rectWorld.y1,
+            x2: rectWorld.x2, y2: rectWorld.y2,
+            rotation: viewRotation
+        });
+        redraw();
+    } else if (isDrawingEgoArrow && egoArrowStartPx && egoArrowEndPx) {
+        isDrawingEgoArrow = false;
+        canvas.style.cursor = 'grab';
+        egoArrowStartWorld = canvasToWorld(egoArrowStartPx.x, egoArrowStartPx.y);
+        egoArrowEndWorld = canvasToWorld(egoArrowEndPx.x, egoArrowEndPx.y);
+        const hdeg = Math.atan2(egoArrowEndWorld.y - egoArrowStartWorld.y,
+                                 egoArrowEndWorld.x - egoArrowStartWorld.x) * 180 / Math.PI;
+        trigger('click', {
+            type: 'ego_pose',
+            x: egoArrowStartWorld.x, y: egoArrowStartWorld.y, heading: hdeg
         });
         redraw();
     }
@@ -412,7 +532,11 @@ def build_map_canvas_js(
         Complete JS string for ``gr.HTML(js_on_load=...)``.
     """
     if isinstance(tool, str):
-        tool = {"arrow": ARROW_TOOL, "rectangle": RECTANGLE_TOOL}[tool]
+        tool = {
+            "arrow": ARROW_TOOL,
+            "rectangle": RECTANGLE_TOOL,
+            "rectangle_and_arrow": RECTANGLE_AND_ARROW_TOOL,
+        }[tool]
 
     if tool is None:
         tool = {k: "" for k in ("help", "state", "draw", "mousedown", "mousemove", "mouseup")}

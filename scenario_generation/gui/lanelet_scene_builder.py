@@ -522,12 +522,14 @@ class LaneletSceneBuilder:
         min_separation_m: float = 8.0,
         min_speed: float = 3.0,
         max_speed: float = 12.0,
+        ego_pose: tuple[float, float, float] | None = None,
     ) -> list[AgentPlacement]:
         """Place ego + n_neighbors on lanes, collision-free.
 
-        Prefers lanelets with successors (non-dead-end).
+        Args:
+            ego_pose: Optional (x, y, heading_rad) for manual ego placement.
+                Snaps to the nearest lanelet centerline.
         """
-        # Filter to lanelets with reasonable length
         candidates = [
             ll_id for ll_id in lanelet_ids
             if ll_id in self._cache and self._cache[ll_id].arc_length > 5.0
@@ -537,7 +539,6 @@ class LaneletSceneBuilder:
         if not candidates:
             raise ValueError("No valid lanelets in the selected rectangle")
 
-        # Prefer lanelets with successors
         with_successors = [
             ll_id for ll_id in candidates
             if ll_id in self._ll_by_id and
@@ -548,15 +549,27 @@ class LaneletSceneBuilder:
         placements: list[AgentPlacement] = []
         placed_corners: list[np.ndarray] = []
 
-        n_total = 1 + n_neighbors
-        for i in range(n_total):
-            is_ego = (i == 0)
+        # Ego placement: manual pose or random
+        if ego_pose is not None:
+            ego_placement = self._place_ego_at_pose(ego_pose, lanelet_ids, min_speed, max_speed)
+        else:
+            ego_placement = self._try_place_one(
+                preferred, placed_corners, min_separation_m,
+                min_speed, max_speed, is_ego=True,
+            )
+        if ego_placement is not None:
+            corners = _obb_corners(
+                ego_placement.position_xy[0], ego_placement.position_xy[1],
+                ego_placement.heading, ego_placement.length, ego_placement.width,
+            )
+            placed_corners.append(corners)
+            placements.append(ego_placement)
+
+        # Neighbor placements
+        for _ in range(n_neighbors):
             placement = self._try_place_one(
-                preferred if is_ego else candidates,
-                placed_corners,
-                min_separation_m,
-                min_speed, max_speed,
-                is_ego=is_ego,
+                candidates, placed_corners, min_separation_m,
+                min_speed, max_speed, is_ego=False,
             )
             if placement is not None:
                 corners = _obb_corners(
@@ -567,6 +580,58 @@ class LaneletSceneBuilder:
                 placements.append(placement)
 
         return placements
+
+    def _place_ego_at_pose(
+        self,
+        ego_pose: tuple[float, float, float],
+        lanelet_ids: list[int],
+        min_speed: float,
+        max_speed: float,
+    ) -> AgentPlacement | None:
+        """Place ego at a user-specified position, snapped to nearest lanelet."""
+        ex, ey, eheading = ego_pose
+        pos = np.array([ex, ey], dtype=np.float32)
+
+        # Find nearest lanelet centerline
+        best_ll_id = None
+        best_dist = float("inf")
+        for ll_id in lanelet_ids:
+            if ll_id not in self._cache:
+                continue
+            cl = self._cache[ll_id].raw_centerline
+            dists = np.linalg.norm(cl - pos, axis=1)
+            d = float(dists.min())
+            if d < best_dist:
+                best_dist = d
+                best_ll_id = ll_id
+
+        if best_ll_id is None:
+            return None
+
+        # Snap to centerline and use the lane heading at that point
+        cl = self._cache[best_ll_id].raw_centerline
+        dists = np.linalg.norm(cl - pos, axis=1)
+        closest_idx = int(np.argmin(dists))
+        snapped_pos = cl[closest_idx].copy()
+        lane_heading = _heading_at_point(cl, closest_idx)
+
+        # Use user heading if provided, otherwise lane heading
+        heading = eheading if abs(eheading) > 0.01 else lane_heading
+
+        speed = random.uniform(min_speed, max_speed)
+        length = random.uniform(4.0, 5.0)
+        width = random.uniform(1.7, 2.0)
+
+        return AgentPlacement(
+            lanelet_id=best_ll_id,
+            position_xy=snapped_pos.astype(np.float32),
+            heading=heading,
+            speed=speed,
+            length=length,
+            width=width,
+            wheelbase=length * 0.65,
+            is_ego=True,
+        )
 
     def _try_place_one(
         self,
@@ -650,6 +715,7 @@ class LaneletSceneBuilder:
         min_speed: float = 3.0,
         max_speed: float = 12.0,
         route_length_m: float = 120.0,
+        ego_pose: tuple[float, float, float] | None = None,
     ) -> SceneContext:
         """Generate a complete SceneContext within the given rectangle.
 
@@ -660,6 +726,8 @@ class LaneletSceneBuilder:
             min_speed: Minimum speed for agents (m/s).
             max_speed: Maximum speed for agents (m/s).
             route_length_m: Minimum route length in meters.
+            ego_pose: Optional (x, y, heading_rad) to place ego at a specific
+                position and heading. Snaps to the nearest lanelet.
 
         Returns:
             SceneContext with ego + neighbors, map data, routes, and history.
@@ -672,6 +740,7 @@ class LaneletSceneBuilder:
 
         placements = self.place_agents(
             ll_ids, n_neighbors, min_separation_m, min_speed, max_speed,
+            ego_pose=ego_pose,
         )
         if not placements:
             raise ValueError("Could not place any agents in the selected area")
