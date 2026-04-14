@@ -315,7 +315,11 @@ class LaneletSceneBuilder:
     def lanelets_in_rect(
         self, xmin: float, ymin: float, xmax: float, ymax: float,
     ) -> list[int]:
-        """Return lanelet IDs whose centerline intersects the rectangle.
+        """Return lanelet IDs that overlap the rectangle (even partially).
+
+        Uses AABB intersection: includes lanelets whose centerline bounding box
+        overlaps the selection rectangle. This catches lanelets that cross the
+        rectangle boundary even if no individual point falls inside.
 
         Only includes vehicle-drivable subtypes.
         """
@@ -324,12 +328,9 @@ class LaneletSceneBuilder:
             if c.subtype not in self._vehicle_subtypes:
                 continue
             cl = c.raw_centerline
-            # Check if any centerline point is inside the rect
-            inside = (
-                (cl[:, 0] >= xmin) & (cl[:, 0] <= xmax) &
-                (cl[:, 1] >= ymin) & (cl[:, 1] <= ymax)
-            )
-            if inside.any():
+            # AABB overlap test: lanelet bbox vs selection rect
+            if (cl[:, 0].max() >= xmin and cl[:, 0].min() <= xmax and
+                    cl[:, 1].max() >= ymin and cl[:, 1].min() <= ymax):
                 result.append(ll_id)
         return result
 
@@ -779,13 +780,17 @@ class LaneletSceneBuilder:
 
         return lanes, sl_arr, hsl_arr
 
-    def _build_map_data(self, ll_ids: list[int], max_lanes: int = 140) -> MapData:
-        """Build MapData from lanelet IDs."""
+    def _build_map_data(self, ll_ids: list[int]) -> MapData:
+        """Build MapData from lanelet IDs.
+
+        Includes ALL lanelets in the selection (no cap). At inference time the
+        tensor converter selects the N closest lanelets per ego agent.
+        """
         segments = []
         speed_limits = []
         has_speed = []
 
-        for ll_id in ll_ids[:max_lanes]:
+        for ll_id in ll_ids:
             if ll_id not in self._cache:
                 continue
             seg, sl, hsl = self.lanelet_to_33dim(ll_id)
@@ -794,11 +799,13 @@ class LaneletSceneBuilder:
             has_speed.append(hsl)
 
         n = len(segments)
-        lanes = np.zeros((max_lanes, POINTS_PER_LANELET, 33), dtype=np.float32)
-        sl_arr = np.zeros((max_lanes, 1), dtype=np.float32)
-        hsl_arr = np.zeros((max_lanes, 1), dtype=bool)
+        if n == 0:
+            n = 1  # at least one slot to avoid zero-size arrays
+        lanes = np.zeros((n, POINTS_PER_LANELET, 33), dtype=np.float32)
+        sl_arr = np.zeros((n, 1), dtype=np.float32)
+        hsl_arr = np.zeros((n, 1), dtype=bool)
 
-        for j in range(n):
+        for j in range(len(segments)):
             lanes[j] = segments[j]
             sl_arr[j, 0] = speed_limits[j]
             hsl_arr[j, 0] = has_speed[j]

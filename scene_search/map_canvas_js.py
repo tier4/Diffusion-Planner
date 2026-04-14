@@ -1,0 +1,406 @@
+"""Composable JS canvas for Gradio-based map GUIs.
+
+The base canvas provides pan (drag), zoom (scroll), and rotate (Alt+drag).
+Each GUI injects tool-specific JS for overlays and interactions.
+"""
+
+# ── Base canvas JS ───────────────────────────────────────────────────────────
+# Handles: pan, zoom, rotate, tile refresh, scale bar, coordinate transforms.
+# Extension points (injected per-GUI):
+#   __TOOL_STATE__     - tool-specific state variables
+#   __TOOL_DRAW__      - called in redraw() after map + before scale bar
+#   __TOOL_MOUSEDOWN__ - called when no base modifier is active
+#   __TOOL_MOUSEMOVE__ - called when tool is active
+#   __TOOL_MOUSEUP__   - called when tool finishes
+#   __TOOL_HELP__      - appended to help text
+#   __EXTRA_PROPS__    - additional props read from Gradio
+
+_BASE_JS = r"""
+(function() {
+    const W = 900, H = 700;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    canvas.style.cssText = 'display:block; margin:auto; border:1px solid #ccc; cursor:grab;';
+    element.innerHTML = '';
+    element.appendChild(canvas);
+    const help = document.createElement('div');
+    help.style.cssText = 'text-align:center; font-size:12px; color:#666; margin-top:4px;';
+    help.innerHTML = 'Drag=pan | Scroll=zoom | <b>Alt+drag=rotate</b>__TOOL_HELP__';
+    element.appendChild(help);
+    const ctx = canvas.getContext('2d');
+
+    const bounds = JSON.parse(props.map_bounds);
+    let vx0 = bounds.xmin, vy0 = bounds.ymin, vx1 = bounds.xmax, vy1 = bounds.ymax;
+    let viewRotation = 0;
+
+    let fullImg = null;
+    let tileImg = null, tileBounds = null;
+
+    let isPanning = false, panPrev = null;
+    let isRotating = false, rotateStartX = 0;
+    let tileTimer = null;
+
+    // Tool state
+    __TOOL_STATE__
+
+    // ── Coordinate transforms (with rotation) ──
+    function worldToCanvas(wx, wy) {
+        let px = (wx - vx0) / (vx1 - vx0) * W;
+        let py = (vy1 - wy) / (vy1 - vy0) * H;
+        if (Math.abs(viewRotation) > 0.001) {
+            const c = Math.cos(viewRotation), s = Math.sin(viewRotation);
+            const dx = px - W/2, dy = py - H/2;
+            px = W/2 + dx*c - dy*s;
+            py = H/2 + dx*s + dy*c;
+        }
+        return {x: px, y: py};
+    }
+    function canvasToWorld(cx, cy) {
+        let px = cx, py = cy;
+        if (Math.abs(viewRotation) > 0.001) {
+            const c = Math.cos(-viewRotation), s = Math.sin(-viewRotation);
+            const dx = px - W/2, dy = py - H/2;
+            px = W/2 + dx*c - dy*s;
+            py = H/2 + dx*s + dy*c;
+        }
+        return {
+            x: vx0 + (px / W) * (vx1 - vx0),
+            y: vy1 - (py / H) * (vy1 - vy0)
+        };
+    }
+    function m2px(m) { return m / (vx1 - vx0) * W; }
+
+    // Expansion factor for rotation (covers rotated corners)
+    function rotMargin() {
+        return Math.abs(Math.cos(viewRotation)) + Math.abs(Math.sin(viewRotation));
+    }
+
+    // ── Drawing ──
+    function drawMapImage() {
+        ctx.fillStyle = '#f0f0f0';
+        ctx.fillRect(0, 0, W, H);
+        let img = null, ib = null;
+        if (tileImg && tileImg.complete && tileBounds) { img = tileImg; ib = tileBounds; }
+        else if (fullImg && fullImg.complete) { img = fullImg; ib = bounds; }
+        if (!img || !ib) return;
+
+        ctx.save();
+        if (Math.abs(viewRotation) > 0.001) {
+            ctx.translate(W/2, H/2);
+            ctx.rotate(viewRotation);
+            ctx.translate(-W/2, -H/2);
+        }
+        // Draw expanded area to fill rotated canvas corners
+        const m = rotMargin();
+        const dw = W * m, dh = H * m;
+        const dx = (W - dw) / 2, dy = (H - dh) / 2;
+        const ecx = (vx0+vx1)/2, ecy = (vy0+vy1)/2;
+        const ehw = (vx1-vx0)/2*m, ehh = (vy1-vy0)/2*m;
+        const evx0 = ecx-ehw, evy0 = ecy-ehh, evx1 = ecx+ehw, evy1 = ecy+ehh;
+
+        const imgW = img.naturalWidth, imgH = img.naturalHeight;
+        const sx = (evx0 - ib.xmin) / (ib.xmax - ib.xmin) * imgW;
+        const sy = (ib.ymax - evy1) / (ib.ymax - ib.ymin) * imgH;
+        const sw = (evx1 - evx0) / (ib.xmax - ib.xmin) * imgW;
+        const sh = (evy1 - evy0) / (ib.ymax - ib.ymin) * imgH;
+        ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+        ctx.restore();
+    }
+
+    function redraw() {
+        drawMapImage();
+        // Tool overlay (uses rotated worldToCanvas)
+        __TOOL_DRAW__
+        // Scale bar (always screen-aligned)
+        const scaleM = Math.pow(10, Math.floor(Math.log10((vx1-vx0)*0.2)));
+        const scalePx = m2px(scaleM);
+        ctx.fillStyle = '#333'; ctx.font = '11px monospace';
+        ctx.fillText(scaleM >= 1000 ? (scaleM/1000)+'km' : scaleM+'m', 15, H-20);
+        ctx.strokeStyle = '#333'; ctx.lineWidth = 2; ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(15, H-12); ctx.lineTo(15+scalePx, H-12); ctx.stroke();
+        // Rotation indicator
+        if (Math.abs(viewRotation) > 0.01) {
+            const deg = (viewRotation * 180 / Math.PI).toFixed(0);
+            ctx.fillStyle = '#666'; ctx.font = '11px monospace';
+            ctx.fillText(deg + '\u00B0', W - 40, H - 20);
+        }
+    }
+
+    function scheduleTileRefresh() {
+        clearTimeout(tileTimer);
+        tileTimer = setTimeout(async () => {
+            const m = rotMargin() * 1.1;
+            const ecx = (vx0+vx1)/2, ecy = (vy0+vy1)/2;
+            const ehw = (vx1-vx0)/2*m, ehh = (vy1-vy0)/2*m;
+            const vpJson = JSON.stringify({
+                xmin: ecx-ehw, ymin: ecy-ehh, xmax: ecx+ehw, ymax: ecy+ehh,
+                canvas_w: 2000, canvas_h: 1600
+            });
+            try {
+                const b64 = await server.render_map(vpJson);
+                tileImg = new Image();
+                tileBounds = {xmin: ecx-ehw, ymin: ecy-ehh, xmax: ecx+ehw, ymax: ecy+ehh};
+                tileImg.onload = redraw;
+                tileImg.src = 'data:image/png;base64,' + b64;
+            } catch(e) { console.warn('tile render failed', e); }
+        }, 400);
+    }
+
+    // ── Mouse handlers ──
+    canvas.addEventListener('mousedown', (e) => {
+        const r = canvas.getBoundingClientRect();
+        const cx = e.clientX - r.left, cy = e.clientY - r.top;
+        if (e.altKey) {
+            isRotating = true;
+            rotateStartX = cx;
+            canvas.style.cursor = 'crosshair';
+        } else {
+            // Check tool first, then fall back to pan
+            let toolHandled = false;
+            __TOOL_MOUSEDOWN__
+            if (!toolHandled) {
+                isPanning = true;
+                panPrev = {x: cx, y: cy};
+                canvas.style.cursor = 'grabbing';
+            }
+        }
+    });
+    canvas.addEventListener('mousemove', (e) => {
+        const r = canvas.getBoundingClientRect();
+        const cx = e.clientX - r.left, cy = e.clientY - r.top;
+        if (isRotating) {
+            const dx = cx - rotateStartX;
+            viewRotation += dx * 0.005;
+            rotateStartX = cx;
+            redraw();
+            scheduleTileRefresh();
+        } else if (isPanning && panPrev) {
+            const dx = cx - panPrev.x, dy = cy - panPrev.y;
+            panPrev = {x: cx, y: cy};
+            const dwx = (dx / W) * (vx1 - vx0);
+            const dwy = (dy / H) * (vy1 - vy0);
+            vx0 -= dwx; vx1 -= dwx;
+            vy0 += dwy; vy1 += dwy;
+            redraw();
+            scheduleTileRefresh();
+        } else {
+            __TOOL_MOUSEMOVE__
+        }
+    });
+    canvas.addEventListener('mouseup', (e) => {
+        const r = canvas.getBoundingClientRect();
+        const cx = e.clientX - r.left, cy = e.clientY - r.top;
+        if (isRotating) {
+            isRotating = false;
+            canvas.style.cursor = 'grab';
+        } else if (isPanning) {
+            isPanning = false;
+            panPrev = null;
+            canvas.style.cursor = 'grab';
+        } else {
+            __TOOL_MOUSEUP__
+        }
+    });
+    canvas.addEventListener('mouseleave', () => {
+        isPanning = false; panPrev = null;
+        isRotating = false;
+        canvas.style.cursor = 'grab';
+    });
+    canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const r = canvas.getBoundingClientRect();
+        const cx = e.clientX - r.left, cy = e.clientY - r.top;
+        const factor = e.deltaY > 0 ? 1.25 : 0.8;
+        // Zoom centered on cursor (in world coords, accounting for rotation)
+        const cw = canvasToWorld(cx, cy);
+        const nw = (vx1 - vx0) * factor, nh = (vy1 - vy0) * factor;
+        const ecx = (vx0+vx1)/2, ecy = (vy0+vy1)/2;
+        // Keep cursor world point fixed
+        vx0 = cw.x - (cw.x - vx0) / (vx1 - vx0) * nw;
+        vx1 = vx0 + nw;
+        vy0 = cw.y - (cw.y - vy0) / (vy1 - vy0) * nh;
+        vy1 = vy0 + nh;
+        redraw();
+        scheduleTileRefresh();
+    }, {passive: false});
+
+    // Double-click to reset rotation
+    canvas.addEventListener('dblclick', () => {
+        viewRotation = 0;
+        redraw();
+        scheduleTileRefresh();
+    });
+
+    __EXTRA_PROPS__
+
+    // Load full map image
+    const b64 = props.map_b64;
+    if (b64) {
+        fullImg = new Image();
+        fullImg.onload = redraw;
+        fullImg.src = 'data:image/png;base64,' + b64;
+    }
+})();
+"""
+
+# ── Tool JS snippets ─────────────────────────────────────────────────────────
+
+ARROW_TOOL = {
+    "help": " | <b>Shift+drag=arrow</b>",
+    "state": """
+    let arrowStartWorld = null, arrowEndWorld = null;
+    let isDrawingArrow = false, arrowStartPx = null, arrowEndPx = null;
+    """,
+    "draw": """
+    // Recompute arrow pixels from world coords
+    if (arrowStartWorld && arrowEndWorld && !isDrawingArrow) {
+        arrowStartPx = worldToCanvas(arrowStartWorld.x, arrowStartWorld.y);
+        arrowEndPx = worldToCanvas(arrowEndWorld.x, arrowEndWorld.y);
+    }
+    const radius = parseFloat(props.radius) || 50;
+    if (arrowStartPx) {
+        const rPx = m2px(radius);
+        ctx.strokeStyle = 'rgba(255,68,0,0.5)'; ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.arc(arrowStartPx.x, arrowStartPx.y, rPx, 0, Math.PI*2); ctx.stroke();
+        ctx.setLineDash([]);
+        const htol = parseFloat(props.heading_tol) || 30;
+        if (arrowEndPx) {
+            const adx = arrowEndPx.x - arrowStartPx.x, ady = arrowEndPx.y - arrowStartPx.y;
+            const ang = Math.atan2(ady, adx), halfTol = htol * Math.PI / 180;
+            ctx.fillStyle = 'rgba(255,68,0,0.08)';
+            ctx.beginPath(); ctx.moveTo(arrowStartPx.x, arrowStartPx.y);
+            ctx.arc(arrowStartPx.x, arrowStartPx.y, rPx, ang-halfTol, ang+halfTol);
+            ctx.closePath(); ctx.fill();
+        }
+    }
+    if (arrowStartPx && arrowEndPx) {
+        const adx = arrowEndPx.x - arrowStartPx.x, ady = arrowEndPx.y - arrowStartPx.y;
+        const len = Math.sqrt(adx*adx + ady*ady);
+        if (len > 3) {
+            const ang = Math.atan2(ady, adx);
+            ctx.strokeStyle = '#ff4400'; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.moveTo(arrowStartPx.x, arrowStartPx.y);
+            ctx.lineTo(arrowEndPx.x, arrowEndPx.y); ctx.stroke();
+            const hl = Math.min(18, len*0.3);
+            ctx.fillStyle = '#ff4400'; ctx.beginPath();
+            ctx.moveTo(arrowEndPx.x, arrowEndPx.y);
+            ctx.lineTo(arrowEndPx.x - hl*Math.cos(ang-0.4), arrowEndPx.y - hl*Math.sin(ang-0.4));
+            ctx.lineTo(arrowEndPx.x - hl*Math.cos(ang+0.4), arrowEndPx.y - hl*Math.sin(ang+0.4));
+            ctx.closePath(); ctx.fill();
+        }
+        ctx.fillStyle = '#ff4400'; ctx.beginPath();
+        ctx.arc(arrowStartPx.x, arrowStartPx.y, 5, 0, Math.PI*2); ctx.fill();
+    }
+    """,
+    "mousedown": """
+    if (e.shiftKey) {
+        isDrawingArrow = true;
+        arrowStartPx = {x: cx, y: cy};
+        arrowEndPx = {x: cx, y: cy};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
+    }
+    """,
+    "mousemove": """
+    if (isDrawingArrow) {
+        arrowEndPx = {x: cx, y: cy};
+        redraw();
+    }
+    """,
+    "mouseup": """
+    if (isDrawingArrow && arrowStartPx && arrowEndPx) {
+        isDrawingArrow = false;
+        canvas.style.cursor = 'grab';
+        arrowStartWorld = canvasToWorld(arrowStartPx.x, arrowStartPx.y);
+        arrowEndWorld = canvasToWorld(arrowEndPx.x, arrowEndPx.y);
+        const hdeg = Math.atan2(arrowEndWorld.y - arrowStartWorld.y,
+                                 arrowEndWorld.x - arrowStartWorld.x) * 180 / Math.PI;
+        trigger('click', {x: arrowStartWorld.x, y: arrowStartWorld.y, heading: hdeg});
+        redraw();
+    }
+    """,
+}
+
+RECTANGLE_TOOL = {
+    "help": " | <b>Ctrl+drag=rectangle</b>",
+    "state": """
+    let rectWorld = null;
+    let isDrawingRect = false;
+    """,
+    "draw": """
+    if (rectWorld) {
+        const p1 = worldToCanvas(rectWorld.x1, rectWorld.y1);
+        const p2 = worldToCanvas(rectWorld.x2, rectWorld.y2);
+        const rx = Math.min(p1.x, p2.x), ry = Math.min(p1.y, p2.y);
+        const rw = Math.abs(p2.x - p1.x), rh = Math.abs(p2.y - p1.y);
+        ctx.strokeStyle = 'rgba(51, 102, 204, 0.8)'; ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]); ctx.strokeRect(rx, ry, rw, rh); ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(51, 102, 204, 0.08)'; ctx.fillRect(rx, ry, rw, rh);
+        const wm = Math.abs(rectWorld.x2 - rectWorld.x1);
+        const hm = Math.abs(rectWorld.y2 - rectWorld.y1);
+        ctx.fillStyle = '#3366cc'; ctx.font = '11px monospace';
+        ctx.fillText(wm.toFixed(0) + 'm x ' + hm.toFixed(0) + 'm', rx + 4, ry + 14);
+    }
+    """,
+    "mousedown": """
+    if (e.ctrlKey || e.metaKey) {
+        isDrawingRect = true;
+        const w = canvasToWorld(cx, cy);
+        rectWorld = {x1: w.x, y1: w.y, x2: w.x, y2: w.y};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
+    }
+    """,
+    "mousemove": """
+    if (isDrawingRect && rectWorld) {
+        const w = canvasToWorld(cx, cy);
+        rectWorld.x2 = w.x; rectWorld.y2 = w.y;
+        redraw();
+    }
+    """,
+    "mouseup": """
+    if (isDrawingRect && rectWorld) {
+        isDrawingRect = false;
+        canvas.style.cursor = 'grab';
+        const x1 = Math.min(rectWorld.x1, rectWorld.x2);
+        const y1 = Math.min(rectWorld.y1, rectWorld.y2);
+        const x2 = Math.max(rectWorld.x1, rectWorld.x2);
+        const y2 = Math.max(rectWorld.y1, rectWorld.y2);
+        rectWorld = {x1, y1, x2, y2};
+        trigger('click', {x1, y1, x2, y2});
+        redraw();
+    }
+    """,
+}
+
+
+def build_map_canvas_js(
+    tool: str | dict | None = None,
+    extra_props_js: str = "",
+) -> str:
+    """Build the complete JS for a map canvas with optional tool overlay.
+
+    Args:
+        tool: "arrow", "rectangle", a custom dict with keys
+              {help, state, draw, mousedown, mousemove, mouseup}, or None.
+        extra_props_js: Additional JS to run after canvas init (e.g., read extra props).
+
+    Returns:
+        Complete JS string for ``gr.HTML(js_on_load=...)``.
+    """
+    if isinstance(tool, str):
+        tool = {"arrow": ARROW_TOOL, "rectangle": RECTANGLE_TOOL}[tool]
+
+    if tool is None:
+        tool = {k: "" for k in ("help", "state", "draw", "mousedown", "mousemove", "mouseup")}
+
+    js = _BASE_JS
+    js = js.replace("__TOOL_HELP__", tool.get("help", ""))
+    js = js.replace("__TOOL_STATE__", tool.get("state", ""))
+    js = js.replace("__TOOL_DRAW__", tool.get("draw", ""))
+    js = js.replace("__TOOL_MOUSEDOWN__", tool.get("mousedown", ""))
+    js = js.replace("__TOOL_MOUSEMOVE__", tool.get("mousemove", ""))
+    js = js.replace("__TOOL_MOUSEUP__", tool.get("mouseup", ""))
+    js = js.replace("__EXTRA_PROPS__", extra_props_js)
+    return js
