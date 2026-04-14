@@ -19,17 +19,18 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from diffusion_planner.model.guidance.composer import GuidanceComposer
+from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from torch import nn
 from tqdm import tqdm
 
-from diffusion_planner.model.guidance.composer import GuidanceComposer
-from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.utils import load_npz_data
 from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+from rlvr.generation_variants import get_variant
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_loss import compute_batched_grpo_loss
-from rlvr.reward import RewardConfig, compute_reward_batch, compute_group_advantages
+from rlvr.reward import RewardConfig, compute_group_advantages, compute_reward_batch
 
 
 def _stack_scene_data(all_data: list[dict], device: torch.device) -> dict[str, torch.Tensor]:
@@ -67,6 +68,26 @@ def _chunked_generate(model, model_args, norm_batch, noise_min, noise_max, compo
     return torch.cat(all_out, dim=0)
 
 
+def _build_cl_spd_configs(variant: str) -> list[dict]:
+    """Return guided cl_spd slots for the variant (lookup in rlvr.generation_variants)."""
+    return get_variant(variant).cl_spd_configs
+
+
+def _build_noise_configs(variant: str) -> list[dict]:
+    """Return noise-only slots for the variant (lookup in rlvr.generation_variants)."""
+    return get_variant(variant).noise_configs
+
+
+def get_generation_config_labels_for_variant(variant: str, K: int = 16) -> list[str]:
+    """Full per-slot labels: det_pure + cl_spd configs + noise configs + random."""
+    cl_spd = _build_cl_spd_configs(variant)
+    noise = _build_noise_configs(variant)
+    labels = ["det_pure"] + [c["label"] for c in cl_spd] + [c["label"] for c in noise]
+    for i in range(len(labels), K):
+        labels.append(f"random_{i}")
+    return labels[:K]
+
+
 def generate_all_scenes_batched(
     model: nn.Module,
     model_args,
@@ -76,8 +97,26 @@ def generate_all_scenes_batched(
     device: torch.device,
     gen_chunk_size: int = 64,
     gt_max_speed: float = 3.0,
+    longitudinal_eta: float = 0.0,
+    longitudinal_lambda: float = 0.5,
+    longitudinal_scale: float = 10.0,
+    lateral_eta: float = 0.0,
+    lateral_lambda: float = 2.0,
+    lateral_scale: float = 5.0,
+    speed_stretch: float = 1.0,
+    generation_variant: str = "default",
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
+
+    Args:
+        longitudinal_eta: Longitudinal guidance eta (0=off, >0=faster than ref).
+            Applied to CL-guided trajectories when nonzero.
+        longitudinal_lambda: Speed scaling constant for longitudinal guidance.
+        longitudinal_scale: Guidance scale for longitudinal guidance.
+        lateral_eta: Lateral guidance eta (0=off, >0=push left, <0=push right).
+            Applied to CL-guided trajectories when nonzero.
+        lateral_lambda: Maximum lateral offset in metres for lateral guidance.
+        lateral_scale: Guidance scale for lateral guidance.
 
     Returns:
         [N, K, T, 4] tensor.
@@ -90,29 +129,87 @@ def generate_all_scenes_batched(
     det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
     all_k_trajs.append(det_trajs)
 
-    # --- Config 2-9: Strong CL + SPD guidance sweep for lane keeping ---
+    # --- Config 2-9: CL + SPD guidance sweep for lane keeping ---
     # 8 guided trajectories at CL5-10 to ensure ~8-10/16 stay in-lane on curves.
-    cl_spd_configs = [
-        (5.0,  5.0,  0.0, 0.0),   # CL5+SPD5, deterministic
-        (8.0,  5.0,  0.0, 0.0),   # CL8+SPD5, deterministic
-        (10.0, 8.0,  0.0, 0.0),   # CL10+SPD8, deterministic
-        (10.0, 10.0, 0.0, 0.0),   # CL10+SPD10, deterministic
-        (5.0,  5.0,  0.3, 0.8),   # CL5+SPD5, noise
-        (8.0,  8.0,  0.3, 0.8),   # CL8+SPD8, noise
-        (10.0, 8.0,  0.3, 0.8),   # CL10+SPD8, noise
-        (10.0, 10.0, 0.5, 1.0),   # CL10+SPD10, noise
-    ]
-    for cl_scale, spd_scale, n_min, n_max in cl_spd_configs:
-        fns = [
-            GuidanceConfig("centerline_following", enabled=True, scale=cl_scale),
-            GuidanceConfig("speed", enabled=True, scale=spd_scale,
-                           params={"v_high": gt_max_speed, "v_low": 0.5}),
-        ]
-        comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0))
+    # Variants can replace the 3 redundant slots with experimental configs.
+    cl_spd_configs = _build_cl_spd_configs(generation_variant)
+    noise_configs = _build_noise_configs(generation_variant)
+
+    # Validate up-front that K accommodates all fixed slots (1 det + cl_spd + noise).
+    # Otherwise we'd generate them all, slice to [:K], and silently waste compute.
+    n_fixed_total = 1 + len(cl_spd_configs) + len(noise_configs)
+    if K < n_fixed_total:
+        raise ValueError(
+            f"K={K} is smaller than the number of fixed trajectory slots "
+            f"({n_fixed_total}) required by generation_variant={generation_variant!r} "
+            f"(1 det + {len(cl_spd_configs)} cl_spd + {len(noise_configs)} noise). "
+            f"Increase num_generations or pick a variant with fewer fixed slots."
+        )
+
+    # Set reference_trajectory if ANY slot needs lat/lon guidance — including
+    # per-slot lat_eta overrides. Without this, slots with per-slot lat_eta
+    # would silently produce zero lateral guidance because LateralGuidance
+    # returns zeros when reference_trajectory is missing.
+    use_lon = abs(longitudinal_eta) > 1e-6
+    any_per_slot_lat = any(abs(cfg.get("lat_eta", 0.0)) > 1e-6 for cfg in cl_spd_configs)
+    use_lat = abs(lateral_eta) > 1e-6 or any_per_slot_lat
+    if use_lon or use_lat:
+        norm_batch["reference_trajectory"] = det_trajs  # no clone needed, not mutated
+
+    for cfg in cl_spd_configs:
+        cl_scale = cfg["cl"]
+        spd_scale = cfg["spd"]
+        n_min, n_max = cfg["noise"]
+        # Per-slot stretch overrides global, falls back to global if unset
+        cfg_stretch = cfg.get("stretch", speed_stretch)
+        cfg_has_noise = n_max > 0
+        use_stretch_here = abs(cfg_stretch - 1.0) > 1e-6 and cfg_has_noise
+        spd_params = {"stretch": cfg_stretch} if use_stretch_here else {"v_high": gt_max_speed, "v_low": 0.5}
+        # Per-slot lateral overrides global lateral_eta
+        cfg_lat_eta = cfg.get("lat_eta", lateral_eta)
+        cfg_lat_lambda = cfg.get("lat_lambda", lateral_lambda)
+        cfg_lat_scale = cfg.get("lat_scale", lateral_scale)
+        cfg_use_lat = abs(cfg_lat_eta) > 1e-6
+        # Optional per-slot collision guidance
+        cfg_col = cfg.get("col", 0.0)
+        # A slot is "guided" if it has CL or SPD guidance. Pure-noise slots
+        # (cl=0, spd=0) skip lon guidance even when the global flag is on,
+        # to keep them as pure stochastic exploration.
+        is_guided_slot = cl_scale > 0 or spd_scale > 0
+        # Build guidance functions
+        fns = []
+        if cl_scale > 0:
+            fns.append(GuidanceConfig("centerline_following", enabled=True, scale=cl_scale))
+        if spd_scale > 0:
+            fns.append(GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params))
+        if use_lon and is_guided_slot:
+            fns.append(GuidanceConfig(
+                "longitudinal", enabled=True, scale=longitudinal_scale,
+                params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},
+            ))
+        if cfg_use_lat:
+            fns.append(GuidanceConfig(
+                "lateral", enabled=True, scale=cfg_lat_scale,
+                params={"eta_lat": cfg_lat_eta, "lambda_lat": cfg_lat_lambda},
+            ))
+        if cfg_col > 0:
+            fns.append(GuidanceConfig("collision", enabled=True, scale=cfg_col))
+        comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0)) if fns else None
         trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
         all_k_trajs.append(trajs)
 
-    # --- Config 5+: Random guidance (no road_border to avoid OOM) ---
+    # Clean up reference_trajectory before random passes (not needed, wastes VRAM on expand)
+    norm_batch.pop("reference_trajectory", None)
+
+    # --- Noise-only slots (no guidance, fixed noise ranges) ---
+    # Functionally part of the noise/exploration pool but with deterministic
+    # noise ranges rather than random sampling.
+    for noise_cfg in noise_configs:
+        n_min_s, n_max_s = noise_cfg["noise"]
+        trajs = _chunked_generate(model, model_args, norm_batch, n_min_s, n_max_s, None, device, gen_chunk_size)
+        all_k_trajs.append(trajs)
+
+    # --- Random guidance pool (no road_border to avoid OOM) ---
     n_fixed = len(all_k_trajs)
     n_random = K - n_fixed
 
@@ -173,11 +270,6 @@ def train_epoch_batched(
 
     K = config.num_generations
     keep = config.rejection_keep
-    if epoch == 1:
-        print(f"  [DEBUG] reward_config.reward_mode = {reward_config.reward_mode}")
-        print(f"  [DEBUG] reward_config.enable_lane_departure = {reward_config.enable_lane_departure}")
-        print(f"  [DEBUG] reward_config.lane_gate_enabled = {reward_config.lane_gate_enabled}")
-        print(f"  [DEBUG] reward_config.lane_near_scale = {reward_config.lane_near_scale}")
 
     # 1. Load all scenes
     print(f"  Loading {len(scene_paths)} scenes...")
@@ -219,6 +311,27 @@ def train_epoch_batched(
     median_gt_speed = float(_np2.median(gt_speeds_list))
     print(f"  Median GT max speed: {median_gt_speed:.1f} m/s")
 
+    # 2b. Apply per-epoch schedules to reward weights and guidance params
+    scheduled = config.get_all_scheduled_values(epoch, config.train_epochs)
+    reward_weight_names = {
+        "w_progress", "w_safety", "w_smooth", "w_feasibility", "w_centerline",
+        "stopped_penalty", "underprogress_penalty", "progress_norm_scale",
+    }
+    for name, value in scheduled.items():
+        if name in reward_weight_names and hasattr(reward_config, name):
+            setattr(reward_config, name, value)
+    if scheduled:
+        sched_str = ", ".join(f"{k}={v:.3f}" for k, v in scheduled.items())
+        print(f"  [schedule] epoch {epoch}: {sched_str}")
+
+    lon_eta = scheduled.get("longitudinal_eta", 0.0)
+    lon_lambda = scheduled.get("longitudinal_lambda", config.lambda_lon)
+    lon_scale = scheduled.get("longitudinal_scale", 10.0)
+    lat_eta = scheduled.get("lateral_eta", 0.0)
+    lat_lambda = scheduled.get("lateral_lambda", config.lambda_lat)
+    lat_scale = scheduled.get("lateral_scale", 5.0)
+    spd_stretch = scheduled.get("speed_stretch", 1.0)
+
     # 3. Generate K trajectories for all scenes (batched)
     print(f"  Generating {K} trajectories × {N} scenes (batched)...")
     model.eval()
@@ -226,6 +339,13 @@ def train_epoch_batched(
         all_trajs = generate_all_scenes_batched(
             model, model_args, norm_batch, K, config.noise_scale_range, device,
             gt_max_speed=median_gt_speed,
+            longitudinal_eta=lon_eta,
+            longitudinal_lambda=lon_lambda,
+            longitudinal_scale=lon_scale,
+            lateral_eta=lat_eta,
+            lateral_lambda=lat_lambda,
+            lateral_scale=lat_scale,
+            speed_stretch=spd_stretch,
         )  # [N, K, T, 4]
 
     # Free generation memory before scoring + training
@@ -278,7 +398,7 @@ def train_epoch_batched(
                 norm_i[k] = v
         kept_norm_data.append(norm_i)
         # Also keep raw data for logprob path (needs unnormalized data)
-        if config.grpo_loss_type == "logprob":
+        if config.grpo_loss_type == "advantage_logprob":
             kept_raw_data.append(data_i)
 
     N_kept = len(kept_trajs)
@@ -300,7 +420,7 @@ def train_epoch_batched(
         kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
         kept_lane_dep_fracs = [kept_lane_dep_fracs[j] for j in keep_idx]
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
-        if config.grpo_loss_type == "logprob":
+        if config.grpo_loss_type == "advantage_logprob":
             kept_raw_data = [kept_raw_data[j] for j in keep_idx]
         print(f"  Lane-dep trim: dropped {n_dropped} worst scenes "
               f"(avg_dep={avg_dep_dropped:.0%}), keeping {len(kept_trajs)} "
@@ -318,7 +438,7 @@ def train_epoch_batched(
         kept_advantages = [kept_advantages[j] for j in keep_idx]
         kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
-        if config.grpo_loss_type == "logprob":
+        if config.grpo_loss_type == "advantage_logprob":
             kept_raw_data = [kept_raw_data[j] for j in keep_idx]
         print(f"  Trimmed {2*n_trim} scenes, keeping {len(kept_trajs)}/{N_kept}")
         N_kept = len(kept_trajs)
@@ -330,7 +450,7 @@ def train_epoch_batched(
         config.kl_coef = scheduled_kl
 
     # 6. Training
-    if config.grpo_loss_type == "logprob":
+    if config.grpo_loss_type == "advantage_logprob":
         return _train_logprob(
             model, model_args, optimizer, config,
             kept_trajs, kept_advantages, kept_raw_data,

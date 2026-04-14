@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
@@ -39,11 +40,12 @@ _repo = str(Path(__file__).resolve().parent.parent.parent)
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
-from preference_optimization.utils import load_npz_data
-from preference_optimization.lora_utils import load_lora_checkpoint
-from guidance_gui.generate_samples import generate_samples
-from diffusion_planner.utils.config import Config
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
+
+from guidance_gui.generate_samples import generate_samples
+from preference_optimization.lora_utils import load_lora_checkpoint
+from preference_optimization.utils import load_npz_data
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -157,7 +159,7 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
     ax.grid(True, alpha=0.15)
     ax.legend(fontsize=7, loc="upper left")
 
-    rb_tag = f"rb_x={'Y' if r.rb_crossing else 'N'} rb_n={r.rb_near_frac:.2f}"
+    rb_tag = f"rb_x={'Y' if r.rb_crossing else 'N'} rb_n={r.rb_near_penalty:.2f}"
     ax.set_title(f"{rb_tag} rw={r.total:.1f}", fontsize=8)
 
 
@@ -286,7 +288,7 @@ def main():
             traj, data, r = infer(model_base, model_args, scenes[si])
             draw_scene(ax, scenes[si], traj, "Det", "blue", r)
             ax.set_title(f"[{si}] rb_x={'Y' if r.rb_crossing else 'N'} "
-                         f"rb_n={r.rb_near_frac:.2f} rw={r.total:.1f}", fontsize=8)
+                         f"rb_n={r.rb_near_penalty:.2f} rw={r.total:.1f}", fontsize=8)
 
         for j in range(len(indices), len(axes_flat)):
             axes_flat[j].set_visible(False)

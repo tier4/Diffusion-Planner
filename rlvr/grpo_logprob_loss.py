@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.decoder import generate_prefix_mask
 
@@ -526,7 +525,3 @@ def compute_logprob_grpo_loss(
     }
 
     return total_loss, metrics
-
-
-    # (Old _compute_ref_log_probs helper removed — KL now uses analytical
-    # mean-divergence computed inline in compute_logprob_grpo_loss above.)

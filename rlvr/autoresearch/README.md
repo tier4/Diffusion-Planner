@@ -149,6 +149,59 @@ python -m rlvr.autoresearch.compare_models \
   --indices 48 47 49 1 3 --cols 2
 ```
 
+### `tools/experiment_watchdog.py` — Background Experiment Monitor
+
+Tracks named experiments in the background. Only outputs NEW eval lines as they appear.
+Fires alerts on `stopped>2` or `rb_cross>10`. Detects when experiment processes die.
+Supports adding experiments dynamically. Never exits on its own.
+
+```bash
+# Start after launching experiments:
+nohup python -m rlvr.autoresearch.tools.experiment_watchdog \
+  --exp_dir /path/to/experiments --names exp1 exp2 --interval 30 &
+
+# Add more experiments later:
+echo "exp3" >> /tmp/watchdog_add.txt
+
+# Check status:
+cat /tmp/experiment_status.log
+
+# Kill when done (avoid leaving a stray background process):
+pkill -f experiment_watchdog
+```
+
+### `tools/viz_explorer_per_scene.py` — Exploration Policy Per-Scene Analysis
+
+Loads a trained exploration policy checkpoint and runs deterministic inference
+on each scene to show the learned eta_lat/eta_lon guidance parameters.
+
+```bash
+python -m rlvr.autoresearch.tools.viz_explorer_per_scene \
+  --model_path /path/to/base_model.pth \
+  --exp_dir /path/to/experiment_dir \
+  --scenes /path/to/scenes.json \
+  --epoch 10
+```
+
+Prints per-scene eta values, scene-to-scene statistics, and extreme scenes.
+
+### `tools/viz_explorer_trajectories.py` — Explorer Trajectory Visualization
+
+Generates images showing reference trajectory (blue) vs explorer-guided
+trajectory (red) for each scene, with road borders and lane geometry.
+
+```bash
+python -m rlvr.autoresearch.tools.viz_explorer_trajectories \
+  --model_path /path/to/base_model.pth \
+  --exp_dir /path/to/experiment_dir \
+  --scenes /path/to/scenes.json \
+  --epoch 10 \
+  --output_dir /path/to/output \
+  --n_scenes 12
+```
+
+Outputs a grid image and individual per-scene images with eta annotations.
+
 ## Scene Lists
 
 Training requires three JSON files, each a list of NPZ paths:
@@ -179,7 +232,7 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `rejection_keep` | 8 | Keep top 8 of 16 trajectories |
 | `n_prob_scenes` | 0-50 | Problem scenes in training set. **Always set explicitly.** |
 | `n_normal_scenes` | 250-300 | Normal scenes. **Always set explicitly.** |
-| `lora_target` | `"first"` | Block 0 only. Other blocks degrade neighbor predictions. |
+| `lora_target` | `"first"` | Block 0 only for standard GRPO. For ranked SFT, use `"all"` + post-hoc block removal (`"last"` diverges by ep9). |
 | `advantage_mode` | `"normalized"` | `"normalized"`, `"vd_grpo"`, `"raw"`, `"positive_only"`, `"absolute"`, `"softmax"` |
 | `advantage_fixed_scale` | 10.0 | Denominator for vd_grpo/raw/absolute; temperature for softmax |
 | `diffusion_k_steps` | 8 | Number of (noise, t) samples averaged per GRPO loss (matches DPO K=8) |
@@ -192,7 +245,9 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `underprogress_threshold` | 0.5 | Penalize if model_path/gt_path < threshold |
 | `progress_norm_scale` | 20.0 | Max progress points at 100% GT match (when overprogress enabled) |
 | `lane_dep_trim_n` | 0 | Drop N scenes with worst lane departure fraction per epoch (0=disabled) |
-| `neighbor_loss_weight` | 0.0 | Neighbor prediction regularization weight (0=disabled) |
+| `neighbor_loss_weight` | 0.0 | Neighbor prediction regularization weight vs GT (0=disabled) |
+| `neighbor_reg_weight` | 0.0 | Neighbor reg: MSE(lora_neighbor, base_neighbor). 0 for standard GRPO. For ranked SFT, set to ≥1.0 (0.5/0.75 diverge at ep5-6). |
+| `neighbor_reg_only` | `true` | When true, drop neighbor SFT loss; only use reg term (loss = ego_sft + reg) |
 | `kl_schedule` | `"constant"` | `"constant"`, `"linear"`, `"cosine"`, or `"step"` (see below) |
 | `kl_coef_final` | 0.05 | Target KL coef at end of training (for non-constant schedules) |
 | `kl_warmup_fraction` | 0.5 | Fraction of epochs to hold initial `kl_coef` (for `"step"` schedule) |

@@ -4,7 +4,8 @@ Extends the standard GRPO training with a learned exploration policy that
 outputs (eta_lat, eta_lon) from Beta distributions. The policy and DiT
 planner are trained simultaneously:
 
-- Policy: REINFORCE with GRPO group-relative advantages + entropy + KL
+- Policy: advantage-weighted log_prob (advantage_logprob) or MSE regression
+  toward best eta (best_sample_mse). Controlled by exploration_loss_type.
 - DiT: Standard GRPO diffusion loss (unchanged)
 
 The exploration policy samples K eta values from one distribution per scene,
@@ -22,15 +23,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch import nn, optim
-from tqdm import tqdm
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
-from exploration_policy.loss import compute_exploration_loss, _get_init_distributions
+from torch import nn, optim
+from torch.distributions import kl_divergence as kl_div
+from tqdm import tqdm
+
+from exploration_policy.loss import _get_init_distributions, compute_exploration_loss
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
-from torch.distributions import kl_divergence as kl_div
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.utils import load_npz_data as _load_npz_data_raw
 from rlvr.grpo_config import GRPOConfig
@@ -47,16 +48,16 @@ def _load_npz(npz_path, device):
 
 
 class GRPOExplorationTrainer:
-    """Joint trainer for DiT planner (GRPO) + exploration policy (REINFORCE).
+    """Joint trainer for DiT planner (GRPO) + exploration policy.
 
     Per scene:
       1. Frozen encoder → scene_encoding
       2. LoRA-disabled DiT → x_ref (reference trajectory)
       3. Exploration policy(scene_encoding, x_ref) → Beta distributions
       4. Sample K η values → K trajectories (noise=0, lat+lon guidance)
-      5. Score → GRPO advantages
+      5. Score → group-relative advantages
       6. DiT loss: standard GRPO diffusion loss
-      7. Policy loss: REINFORCE + entropy + KL
+      7. Policy loss: advantage_logprob or best_sample_mse (see exploration_loss_type)
 
     Supports inverse KL scheduling: high DiT KL (stable planner) + low policy
     KL (free exploration) early, then swap as policy learns.
@@ -92,9 +93,15 @@ class GRPOExplorationTrainer:
             w_smooth=config.w_smooth,
             w_feasibility=config.w_feasibility,
             w_centerline=config.w_centerline,
-            near_edge_scale=config.near_edge_scale,
-            wide_edge_scale=config.wide_edge_scale,
-            cont_edge_scale=config.cont_edge_scale,
+            rb_near_scale=config.rb_near_scale,
+            rb_wide_scale=config.rb_wide_scale,
+            rb_cont_scale=config.rb_cont_scale,
+            rb_gate_enabled=config.rb_gate_enabled,
+            rb_penalty_mode=config.rb_penalty_mode,
+            rb_cross_thresh=config.rb_cross_thresh,
+            rb_near_thresh=config.rb_near_thresh,
+            rb_wide_thresh=config.rb_wide_thresh,
+            rb_cont_thresh=config.rb_cont_thresh,
             max_lat_accel=config.max_lat_accel,
             lat_accel_scale=config.lat_accel_scale,
             enable_overprogress=config.enable_overprogress,
@@ -102,6 +109,14 @@ class GRPOExplorationTrainer:
             overprogress_penalty=config.overprogress_penalty,
             stopped_penalty=config.stopped_penalty,
             reward_mode=config.reward_mode,
+            enable_lane_departure=config.enable_lane_departure,
+            lane_gate_enabled=config.lane_gate_enabled,
+            lane_near_scale=config.lane_near_scale,
+            lane_wide_scale=config.lane_wide_scale,
+            lane_cont_scale=config.lane_cont_scale,
+            lane_near_thresh=config.lane_near_thresh,
+            lane_wide_thresh=config.lane_wide_thresh,
+            lane_cont_thresh=config.lane_cont_thresh,
         )
 
         # Sampler config (only used for eval, not for policy-guided generation)
@@ -416,7 +431,7 @@ class GRPOExplorationTrainer:
                 self.dit_optimizer.zero_grad()
                 dit_accum = 0
 
-            # --- Exploration policy loss (REINFORCE or inner PPO) ---
+            # --- Exploration policy loss (advantage_logprob, best_sample_mse, or PPO) ---
             if self.use_explorer:
                 scene_encoding = group["scene_encoding"]
                 x_ref = group["x_ref"]
@@ -481,6 +496,33 @@ class GRPOExplorationTrainer:
                                 self.exploration_policy.parameters(), max_norm=1.0,
                             )
                             self.policy_optimizer.step()
+                    elif self.config.exploration_loss_type == "best_sample_mse":
+                        # Ranked SFT for explorer: MSE regression of policy mean toward best eta.
+                        # Unlike advantage_logprob which uses all K samples, this directly supervises
+                        # the policy to output the best-reward eta for each scene.
+                        best_idx = advantages_t.argmax()
+                        best_eta_lat_01 = eta_lat_01[best_idx].detach()  # target (0,1)
+                        best_eta_lon_01 = eta_lon_01[best_idx].detach()
+
+                        # MSE between policy's deterministic mean and the best eta
+                        pred_lat_mean = lat_dist.mean.squeeze()  # policy's predicted mean in (0,1)
+                        pred_lon_mean = lon_dist.mean.squeeze()
+                        rsft_loss = (
+                            (pred_lat_mean - best_eta_lat_01) ** 2
+                            + (pred_lon_mean - best_eta_lon_01) ** 2
+                        )
+
+                        policy_loss = rsft_loss
+                        policy_metrics = {
+                            "exploration_policy_loss": rsft_loss.item(),
+                            "exploration_entropy": (lat_dist.entropy() + lon_dist.entropy()).mean().item(),
+                            "exploration_kl": 0.0,
+                            "exploration_total_loss": rsft_loss.item(),
+                            "exploration_eta_lat_mean": lat_dist.mean.mean().item() * 2 - 1,
+                            "exploration_eta_lon_mean": lon_dist.mean.mean().item() * 2 - 1,
+                            "exploration_eta_lat_std": (lat_dist.variance.mean().item() * 4) ** 0.5,
+                            "exploration_eta_lon_std": (lon_dist.variance.mean().item() * 4) ** 0.5,
+                        }
                     else:
                         policy_loss, policy_metrics = compute_exploration_loss(
                             advantages=advantages_t,
@@ -490,17 +532,19 @@ class GRPOExplorationTrainer:
                             entropy_coef=self.config.exploration_entropy_coef,
                             kl_coef=self.config.exploration_kl_coef,
                         )
-                        if not policy_frozen:
-                            policy_loss.backward()
-                            if self.config.exploration_step_per_group:
-                                n_policy_accum += 1
-                                if n_policy_accum >= self.config.exploration_grad_accum_groups:
-                                    torch.nn.utils.clip_grad_norm_(
-                                        self.exploration_policy.parameters(), max_norm=1.0,
-                                    )
-                                    self.policy_optimizer.step()
-                                    self.policy_optimizer.zero_grad()
-                                    n_policy_accum = 0
+                    # Backward pass for advantage_logprob and best_sample_mse paths
+                    # (PPO path handles its own backward+step above)
+                    if not policy_frozen and inner_epochs <= 1:
+                        policy_loss.backward()
+                        if self.config.exploration_step_per_group:
+                            n_policy_accum += 1
+                            if n_policy_accum >= self.config.exploration_grad_accum_groups:
+                                torch.nn.utils.clip_grad_norm_(
+                                    self.exploration_policy.parameters(), max_norm=1.0,
+                                )
+                                self.policy_optimizer.step()
+                                self.policy_optimizer.zero_grad()
+                                n_policy_accum = 0
 
                 if not self.config.exploration_step_per_group:
                     n_policy_accum += 1
@@ -550,7 +594,7 @@ class GRPOExplorationTrainer:
             self.dit_optimizer.step()
             self.dit_optimizer.zero_grad()
 
-        # Policy optimizer step: only needed for REINFORCE (inner_epochs=1)
+        # Policy optimizer step: only needed for non-PPO (inner_epochs=1)
         # without per-group stepping. PPO and per-group both step above.
         if self.use_explorer and n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1 and not policy_frozen:
             for p in self.exploration_policy.parameters():

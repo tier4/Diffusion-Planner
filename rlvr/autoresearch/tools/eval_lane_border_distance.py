@@ -18,15 +18,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-from preference_optimization.utils import load_npz_data
-from preference_optimization.lora_utils import load_lora_checkpoint
-from diffusion_planner.utils.config import Config
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
+
 from guidance_gui.generate_samples import generate_samples
+from preference_optimization.lora_utils import load_lora_checkpoint
+from preference_optimization.utils import load_npz_data
 from rlvr.reward import (
-    compute_road_border_penalty,
     compute_lane_departure_penalty,
+    compute_road_border_penalty,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -84,7 +84,7 @@ def main():
         ego_shape = es[0] if es is not None and es.dim() > 1 else es
 
         # Road border
-        rb_gate, rb_near, rb_wide, rb_steps, rb_cont = compute_road_border_penalty(
+        rb_gate, rb_near, rb_wide, rb_steps, rb_cont, _ = compute_road_border_penalty(
             traj_t, ego_shape, data
         )
         if rb_gate.item() < 0.5:

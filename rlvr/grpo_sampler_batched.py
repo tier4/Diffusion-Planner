@@ -13,10 +13,10 @@ from __future__ import annotations
 import random
 
 import torch
-from torch import nn
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+from torch import nn
+
 from guidance_gui.generate_samples import generate_samples
 from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
 from rlvr.grpo_sampler import SamplerConfig

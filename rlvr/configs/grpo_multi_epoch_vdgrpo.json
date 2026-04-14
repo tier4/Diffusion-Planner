@@ -7,7 +7,7 @@
   "learning_rate": 1e-5,
   "grad_accum_groups": 8,
   "sampling_randomization": true,
-  "noise_scale_range": [0.5, 4.0],
+  "noise_scale_range": [0.5, 2.0],
   "guidance_scale_range": [0.1, 2.0],
   "enable_guidance": true,
   "enable_centerline": true,

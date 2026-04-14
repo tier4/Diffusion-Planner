@@ -32,11 +32,9 @@ import contextlib
 import numpy as np
 import torch
 import torch.nn as nn
-
 import torch.nn.functional as F
 
 from preference_optimization.dpo_loss import compute_trajectory_loss as _compute_trajectory_loss_raw
-
 from rlvr.grpo_config import GRPOConfig
 
 
@@ -47,6 +45,7 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
     per-timestep t modulation, and clean prefix injection.
     """
     import random as _random
+
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
     from diffusion_planner.model.module.decoder import generate_prefix_mask
 
@@ -247,7 +246,7 @@ def compute_batched_trajectory_losses(
 
     Args:
         model: Diffusion planner model (in train mode).
-        data: Scene observation dict with B=1.
+        data: Scene observation dict with B=1 or B=N.
         trajectories_tensor: [N, T, 4] tensor of trajectories.
         model_args: Config with state_normalizer, etc.
         noise: [1, P, T, 4] noise (will be expanded to [N, ...]).
@@ -258,6 +257,7 @@ def compute_batched_trajectory_losses(
         [N] tensor of per-trajectory MSE losses.
     """
     import random as _random
+
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
     from diffusion_planner.model.module.decoder import generate_prefix_mask
 
@@ -266,11 +266,21 @@ def compute_batched_trajectory_losses(
     future_len = model_args.future_len
     eps = 1e-3
 
-    # Expand data from B=1 to B=N
+    # Expand data to B=N. Supports B=1 (expand) and B=N (pass through).
+    # Only validate/expand tensors whose dim0 matches the scene batch size;
+    # non-batched metadata tensors (e.g. ego_shape [3], lane geometry) pass through.
+    B_scene = data["ego_current_state"].shape[0]
     batch_data = {}
     for k, v in data.items():
-        if isinstance(v, torch.Tensor) and v.shape[0] == 1:
-            batch_data[k] = v.expand(N, *v.shape[1:]).contiguous()
+        if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == B_scene:
+            if B_scene == 1:
+                batch_data[k] = v.expand(N, *v.shape[1:]).contiguous()
+            elif B_scene == N:
+                batch_data[k] = v
+            else:
+                raise ValueError(
+                    f"data['{k}'] has B={B_scene}, expected 1 or N={N}"
+                )
         else:
             batch_data[k] = v
 
@@ -493,6 +503,138 @@ def _compute_batched_losses_and_ref(
     return policy_losses, ref_losses
 
 
+def _compute_neighbor_reg_loss(
+    policy_model, data, model_args, device, K, P, future_len,
+):
+    """Compute MSE between LoRA and base model neighbor outputs.
+
+    Runs K forward passes with random (noise, t), compares neighbor predictions
+    from the LoRA model vs the base model (LoRA disabled). Returns a scalar loss
+    with gradients flowing only through the LoRA model.
+
+    When B>1 (batched trainers expand per-scene data), uses only the first
+    element since all B entries come from the same scene.
+    """
+    import random as _random
+
+    from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+    from diffusion_planner.model.module.decoder import generate_prefix_mask
+
+    B = data["ego_current_state"].shape[0]
+    if B > 1:
+        # All B entries must be the same scene (batched trainers expand per-scene
+        # data to B=keep_per). Bail out if different scenes are mixed in.
+        ego = data["ego_current_state"]
+        if not torch.allclose(ego[:1].expand_as(ego), ego):
+            raise ValueError(
+                f"_compute_neighbor_reg_loss: B={B} with mixed scenes. "
+                "Neighbor reg requires single-scene batches."
+            )
+        data = {k: v[:1] if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+
+    inner = policy_model.module if hasattr(policy_model, "module") else policy_model
+    if not hasattr(inner, "disable_adapter"):
+        return torch.tensor(0.0, device=device)
+
+    eps = 1e-3
+    Pn = P - 1
+
+    # Build normalized scene data (B=1)
+    ego_mean = model_args.state_normalizer.mean[0].to(device)
+    ego_std = model_args.state_normalizer.std[0].to(device)
+    ego_current = data["ego_current_state"][:, :4]
+    ego_current_norm = (ego_current - ego_mean) / ego_std
+
+    if Pn > 0:
+        neighbors_current = data["neighbor_agents_past"][:, :Pn, -1, :4]
+        neighbors_current_norm = (neighbors_current - ego_mean) / ego_std
+    else:
+        neighbors_current_norm = torch.zeros(1, 0, 4, device=device)
+
+    current_states = torch.cat([ego_current_norm[:, None], neighbors_current_norm], dim=1)
+
+    # Build neighbor GT for the all_gt tensor
+    gt_future = torch.zeros(1, P, future_len, 4, device=device)
+    nf_pn = 0
+    neighbor_future_valid = None
+    if Pn > 0 and "neighbor_agents_future" in data:
+        nf = data["neighbor_agents_future"]
+        nf_pn = min(nf.shape[1], Pn)
+        nf_4d = torch.zeros(1, nf_pn, future_len, 4, device=device)
+        nf_4d[..., :2] = nf[:, :nf_pn, :future_len, :2]
+        if nf.shape[-1] >= 3:
+            heading = nf[:, :nf_pn, :future_len, 2]
+            nf_4d[..., 2] = torch.cos(heading)
+            nf_4d[..., 3] = torch.sin(heading)
+        nf_4d_norm = (nf_4d - ego_mean) / ego_std
+        gt_future[:, 1:1 + nf_pn, :, :] = nf_4d_norm
+        neighbor_future_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)
+
+    # Also need ego GT for the noise target
+    if "ego_agent_future" in data:
+        ego_gt = data["ego_agent_future"]
+        if ego_gt.dim() == 3:
+            ego_gt = ego_gt[:, :future_len, :4]
+        ego_gt_norm = (ego_gt - ego_mean) / ego_std
+        gt_future[:, 0, :ego_gt_norm.shape[1], :] = ego_gt_norm
+
+    all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)
+
+    # Normalize observation data
+    data_normalized = model_args.observation_normalizer(
+        {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    )
+
+    if neighbor_future_valid is None or not neighbor_future_valid.any():
+        return torch.tensor(0.0, device=device)
+
+    # Also exclude neighbors absent at current timestep
+    neighbor_current_mask = (data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0)
+    neighbor_future_valid = neighbor_future_valid & (~neighbor_current_mask[:, :nf_pn].unsqueeze(-1))
+
+    total_reg = torch.tensor(0.0, device=device)
+    for _ in range(K):
+        t = torch.rand(1, device=device) * (1 - eps) + eps
+        t_4d = t.view(1, 1, 1, 1).expand(1, P, future_len + 1, 1).clone()
+
+        max_delay = 5
+        delay = torch.randint(0, max_delay + 1, (1,), device=device)
+        prefix_mask = generate_prefix_mask(delay, P, future_len + 1)
+        mask_coeff = _random.uniform(0.0, 1.0)
+        curr_mask_time = torch.maximum(t_4d * mask_coeff, torch.tensor(eps, device=device))
+        t_4d = torch.where(prefix_mask, curr_mask_time, t_4d)
+
+        z = torch.randn(1, P, future_len, 4, device=device)
+        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
+        xT = mean + std * z
+        xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+        xT_full = torch.where(prefix_mask, all_gt, xT_full)
+
+        merged = {**data_normalized}
+        merged["gt_trajectories"] = all_gt
+        merged["sampled_trajectories"] = xT_full
+        merged["diffusion_time"] = t_4d
+        merged["prefix_mask"] = prefix_mask
+        if "delay" not in merged:
+            merged["delay"] = delay
+
+        # LoRA forward (with grad)
+        _, lora_out = policy_model(merged)
+        lora_neighbor = lora_out["model_output"][:, 1:1 + nf_pn, 1:, :]  # [1, Pn', T, 4]
+
+        # Base forward (no grad)
+        with inner.disable_adapter(), torch.no_grad():
+            _, base_out = policy_model(merged)
+        base_neighbor = base_out["model_output"][:, 1:1 + nf_pn, 1:, :]
+
+        reg_mse = ((lora_neighbor - base_neighbor.detach()) ** 2).mean(dim=-1)  # [1, Pn', T]
+        masked_reg = reg_mse[:, :nf_pn][neighbor_future_valid[:, :nf_pn]]
+        if masked_reg.numel() > 0:
+            total_reg = total_reg + masked_reg.mean()
+
+    return total_reg / K
+
+
 def compute_batched_grpo_loss(
     policy_model: nn.Module,
     trajectories_tensor: torch.Tensor,
@@ -519,10 +661,8 @@ def compute_batched_grpo_loss(
         zero = torch.tensor(0.0, device=device, requires_grad=True)
         return zero, _empty_metrics()
 
-    B = data["ego_current_state"].shape[0]  # should be 1
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
-    eps = 1e-3
 
     # Average over K (noise, t) samples for stable gradients — matches DPO which
     # uses K=8. A single sample is dominated by noise at that specific timestep
@@ -557,12 +697,23 @@ def compute_batched_grpo_loss(
     weighted_loss = (advantages_t * policy_losses).sum() / max(N, 1)
     total_loss = weighted_loss + config.kl_coef * kl_loss
 
+    # Neighbor regularization: MSE(lora_neighbor, base_neighbor) at same inputs.
+    # Prevents LoRA from distorting neighbor predictions through shared attention.
+    neighbor_reg_w = getattr(config, 'neighbor_reg_weight', 0.0)
+    neighbor_reg_loss_val = 0.0
+    if neighbor_reg_w > 0 and P > 1:
+        neighbor_reg_loss_val = _compute_neighbor_reg_loss(
+            policy_model, data, model_args, device, K, P, future_len,
+        )
+        total_loss = total_loss + neighbor_reg_w * neighbor_reg_loss_val
+
     metrics = {
         "loss": total_loss.item(),
         "policy_loss_mean": policy_losses.mean().item(),
         "ref_loss_mean": ref_losses.mean().item(),
         "kl": kl_loss.item(),
         "weighted_loss": weighted_loss.item(),
+        "neighbor_reg_loss": neighbor_reg_loss_val.item() if isinstance(neighbor_reg_loss_val, torch.Tensor) else 0.0,
     }
 
     return total_loss, metrics

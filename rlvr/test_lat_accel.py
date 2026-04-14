@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
 from rlvr.reward import _build_sg_diff_kernel
 
 # Add project root to path

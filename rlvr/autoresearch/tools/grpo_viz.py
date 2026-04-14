@@ -21,20 +21,21 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
 from matplotlib.patches import Rectangle
 
-from preference_optimization.utils import load_npz_data
 from preference_optimization.lora_utils import load_lora_checkpoint
-from diffusion_planner.utils.config import Config
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from preference_optimization.utils import load_npz_data
 from rlvr.grpo_sampler import SamplerConfig
 from rlvr.grpo_sampler_batched import generate_diverse_group_batched
-from rlvr.reward import RewardConfig, compute_reward_batch, compute_lane_departure_penalty
+from rlvr.reward import RewardConfig, compute_lane_departure_penalty, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -80,7 +81,7 @@ def generate_and_score(model, model_args, npz_path, K, reward_config, sampler_co
             "lane_crossing": r.lane_crossing,
             "lane_near": r.lane_near_frac,
             "rb_crossing": r.rb_crossing,
-            "rb_near": r.rb_near_frac,
+            "rb_near": r.rb_near_penalty,
             "path_len": path_len,
         })
 
@@ -269,8 +270,8 @@ def main():
     parser.add_argument("--enable_lane", action="store_true")
     parser.add_argument("--lane_gate", action="store_true")
     parser.add_argument("--w_progress", type=float, default=3.0)
-    parser.add_argument("--near_edge_scale", type=float, default=5.0)
-    parser.add_argument("--wide_edge_scale", type=float, default=0.5)
+    parser.add_argument("--rb_near_scale", type=float, default=5.0)
+    parser.add_argument("--rb_wide_scale", type=float, default=0.5)
     parser.add_argument("--lane_near_scale", type=float, default=30.0)
     parser.add_argument("--lane_wide_scale", type=float, default=10.0)
     parser.add_argument("--lane_cont_scale", type=float, default=5.0)
@@ -302,8 +303,8 @@ def main():
         enable_lane_departure=args.enable_lane,
         lane_gate_enabled=args.lane_gate,
         w_progress=args.w_progress,
-        near_edge_scale=args.near_edge_scale,
-        wide_edge_scale=args.wide_edge_scale,
+        rb_near_scale=args.rb_near_scale,
+        rb_wide_scale=args.rb_wide_scale,
         lane_near_scale=args.lane_near_scale,
         lane_wide_scale=args.lane_wide_scale,
         lane_cont_scale=args.lane_cont_scale,
