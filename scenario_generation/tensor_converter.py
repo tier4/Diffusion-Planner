@@ -180,12 +180,9 @@ def _build_neighbor_agents_past(
         feats[:, 7] = agent.length
         feats[:, 8:11] = type_vec
 
-        # Zero out timesteps where position is (0,0) -- indicates missing data
-        invalid = (np.abs(feats[:, 0]) < 1e-8) & (np.abs(feats[:, 1]) < 1e-8)
-        # But don't zero out if the agent genuinely is at origin
-        if np.sum(np.abs(traj[:, :2])) > 1e-6:
-            orig_invalid = np.sum(np.abs(traj[:, :2]), axis=-1) == 0
-            feats[orig_invalid] = 0.0
+        # Zero out timesteps that were missing in the original (pre-transform) trajectory
+        orig_invalid = np.sum(np.abs(traj[:, :2]), axis=-1) == 0
+        feats[orig_invalid] = 0.0
 
         feats = _pad_or_truncate(feats, T_needed, axis=0)
         out[0, slot_idx] = feats

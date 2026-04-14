@@ -88,7 +88,9 @@ def _advance_agent(agent, new_world_pos: np.ndarray, dt: float = 0.1):
     old_vel = agent.current_velocity
     new_vel = ((new_world_pos[:2] - agent.current_position) / dt).astype(np.float32)
     new_accel = ((new_vel - old_vel) / dt).astype(np.float32)
-    new_yaw_rate = float(new_world_pos[2] - agent.current_heading) / dt
+    dh = float(new_world_pos[2] - agent.current_heading)
+    dh = (dh + math.pi) % (2 * math.pi) - math.pi  # wrap to [-pi, pi]
+    new_yaw_rate = dh / dt
 
     agent.past_trajectory = np.concatenate([
         agent.past_trajectory[1:], new_world_pos.reshape(1, 3)

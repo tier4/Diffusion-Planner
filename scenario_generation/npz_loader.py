@@ -132,14 +132,13 @@ def _extract_ego_agent(
         steering = 0.0
         yaw_rate = 0.0
 
-    # Ego velocity: only current state (per-timestep not stored in NPZ)
+    # Ego velocity: derive from trajectory, preserve ego_current_state for last entry
     T = past_traj.shape[0]
     past_vel = np.zeros((T, 2), dtype=np.float32)
-    past_vel[-1] = [vx, vy]
-    # Derive past velocities from trajectory differences
     if T >= 2:
         diffs = np.diff(past_traj[:, :2], axis=0) / 0.1
-        past_vel[1:] = diffs
+        past_vel[1:-1] = diffs[:-1]
+    past_vel[-1] = [vx, vy]
 
     # Ground truth future
     future = data.get("ego_agent_future")

@@ -24,7 +24,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import numpy as np
-from matplotlib.patches import FancyArrowPatch, Rectangle
+from matplotlib.patches import Rectangle
 
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
@@ -36,7 +36,6 @@ _PED_COLOR = "#ff6699"
 _BIKE_COLOR = "#66ccff"
 _LANE_COLOR = "#bbbbbb"
 _ROUTE_COLOR = "#4488ff"
-_GOAL_COLOR = "#ff3333"
 _GT_COLOR = "#22bb22"
 
 
@@ -262,7 +261,9 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
 
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.15)
-    ax.legend(fontsize=6, loc="upper left")
+    handles, labels = ax.get_legend_handles_labels()
+    if labels:
+        ax.legend(fontsize=6, loc="upper left")
 
 
 def visualize_scene(scene: SceneContext, ego_id: str | None = None,
