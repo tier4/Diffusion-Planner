@@ -205,7 +205,7 @@ def _draw_agent_view(
             pred[:, :2], pred[:, 2:4], float(pos[0]), float(pos[1]), heading,
         )
         plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
-        draw_trajectory(ax, plan_traj, "#ff4444", label="Plan", lw=2, zorder=25,
+        draw_trajectory(ax, plan_traj, "#3366cc", label="Plan", lw=2, zorder=25,
                         show_footprints=True, length=agent.length, width=agent.width)
 
     # Route
@@ -355,7 +355,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
             plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
 
             if agent.id == ego_id:
-                color = "#ff4444"
+                color = "#3366cc"
                 label = "Ego plan"
                 zorder = 25
             else:
@@ -372,7 +372,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         if ego_initial_plan is not None:
             remaining = ego_initial_plan[step:]
             if len(remaining) > 1:
-                draw_trajectory(ax, remaining, "#ff4444", label="Ego plan (fixed)",
+                draw_trajectory(ax, remaining, "#3366cc", label="Ego plan (fixed)",
                                 lw=1.5, zorder=25, show_footprints=True,
                                 length=scene.get_agent(ego_id).length,
                                 width=scene.get_agent(ego_id).width)
