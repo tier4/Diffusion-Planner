@@ -299,16 +299,19 @@ def _predict_batch(
     """
     if not agent_ids:
         return {}
-    if len(agent_ids) == 1:
-        return {agent_ids[0]: _predict_as_ego(model, model_args, scene, agent_ids[0], device)}
 
     cache = MapTensorCache(scene.map_data)
     tensor_dicts = [
         to_model_tensors(scene, aid, model_args, device, map_cache=cache)
         for aid in agent_ids
     ]
-    batched = _cat_tensor_dicts(tensor_dicts)
+
     model.decoder._guidance_fn = None
+    if len(agent_ids) == 1:
+        _, outputs = model(tensor_dicts[0])
+        return {agent_ids[0]: outputs["prediction"][0, 0].cpu().numpy()}
+
+    batched = _cat_tensor_dicts(tensor_dicts)
     _, outputs = model(batched)
     preds = outputs["prediction"][:, 0].cpu().numpy()
     return {aid: preds[i] for i, aid in enumerate(agent_ids)}

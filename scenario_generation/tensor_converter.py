@@ -9,7 +9,6 @@ Produces a dict of torch tensors ready for model.forward(), with:
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -22,9 +21,6 @@ from scenario_generation.transforms import (
     transform_headings,
     transform_positions,
 )
-
-if TYPE_CHECKING:
-    pass
 
 # Model dimension constants (from diffusion_planner.dimensions)
 _INPUT_T = 30
