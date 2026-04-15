@@ -139,7 +139,6 @@ def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
     # Pipeline: generate next snippet's scenes on CPU while simulating current on GPU
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="scene_gen") as gen_pool:
         pending_future = None
-        pending_meta = None  # (name, snip_dir)
 
         def _gen_for_snippet(snip_path):
             name, lanelet_ids, ego_pose = _load_snippet(snip_path)

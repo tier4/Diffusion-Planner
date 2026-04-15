@@ -89,7 +89,7 @@ class TestMapTensorCache:
         lanes = cache.get_lanes_ego(R, ego_xy)
 
         # The fixture only populates lanes 0-4; lanes 5+ should be all zeros
-        assert np.all(lanes[0, 10:] == 0.0)
+        assert np.all(lanes[0, 5:] == 0.0)
 
     def test_speed_limit_passthrough(self, synthetic_scene):
         """Speed limits are returned unchanged regardless of agent pose."""

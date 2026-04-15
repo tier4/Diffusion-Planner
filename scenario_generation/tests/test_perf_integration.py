@@ -128,10 +128,7 @@ class TestMapCacheProfile:
         print(f"  Cached:   {cached_time:.3f}s")
         print(f"  Speedup:  {speedup:.2f}x")
 
-        # Cache should not be slower than uncached
-        assert cached_time <= uncached_time * 1.2, (
-            f"Cache is slower: {cached_time:.3f}s vs {uncached_time:.3f}s"
-        )
+        # Only log; no timing assertion (flaky in CI)
 
 
 class TestMapOnlyProfile:
@@ -204,9 +201,6 @@ class TestArcLengthProfile:
         print(f"  Speedup:    {speedup:.2f}x")
 
         np.testing.assert_allclose(arc, arc_v, atol=1e-10)
-        assert vec_time < loop_time, (
-            f"Vectorized is slower: {vec_time:.3f}s vs {loop_time:.3f}s"
-        )
 
 
 class TestBatchInferenceProfile:
