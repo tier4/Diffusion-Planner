@@ -26,7 +26,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -386,7 +385,9 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                   f"({n_simulated} re-planned, {n_agents} total)")
 
             # --- Visualize ---
-            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+            from matplotlib.figure import Figure
+            fig = Figure(figsize=(10, 10))
+            ax = fig.add_subplot(1, 1, 1)
             draw_scene(ax, scene, ego_id)
 
             from scenario_generation.visualize import _agent_color
