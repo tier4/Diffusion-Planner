@@ -255,6 +255,14 @@ def _draw_agent_view(
     plt.close(fig)
 
 
+def _cat_tensor_dicts(
+    dicts: list[dict[str, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
+    """Concatenate single-sample tensor dicts along batch dim 0."""
+    keys = dicts[0].keys()
+    return {k: torch.cat([d[k] for d in dicts], dim=0) for k in keys}
+
+
 @torch.no_grad()
 def _predict_as_ego(model, model_args, scene: SceneContext,
                     agent_id: str, device: str) -> np.ndarray:
@@ -263,6 +271,34 @@ def _predict_as_ego(model, model_args, scene: SceneContext,
     model.decoder._guidance_fn = None
     _, outputs = model(data)
     return outputs["prediction"][0, 0].cpu().numpy()
+
+
+@torch.no_grad()
+def _predict_batch(
+    model, model_args, scene: SceneContext,
+    agent_ids: list[str], device: str,
+) -> dict[str, np.ndarray]:
+    """Run batched inference for multiple agents-as-ego.
+
+    Builds per-agent tensor dicts, concatenates along batch dim,
+    runs one forward pass, splits results back per agent.
+
+    Returns {agent_id: (80, 4) ego-centric prediction}.
+    """
+    if not agent_ids:
+        return {}
+    if len(agent_ids) == 1:
+        return {agent_ids[0]: _predict_as_ego(model, model_args, scene, agent_ids[0], device)}
+
+    tensor_dicts = [
+        to_model_tensors(scene, aid, model_args, device)
+        for aid in agent_ids
+    ]
+    batched = _cat_tensor_dicts(tensor_dicts)
+    model.decoder._guidance_fn = None
+    _, outputs = model(batched)
+    preds = outputs["prediction"][:, 0].cpu().numpy()
+    return {aid: preds[i] for i, aid in enumerate(agent_ids)}
 
 
 @torch.no_grad()
@@ -320,12 +356,10 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
     color_map = _build_color_map(scene)
 
     for step in range(n_steps):
-        agent_predictions: dict[str, np.ndarray] = {}
-        for agent in scene.agents:
-            if agent.id not in simulated_ids:
-                continue
-            pred = _predict_as_ego(model, model_args, scene, agent.id, device)
-            agent_predictions[agent.id] = pred
+        ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
+        agent_predictions = _predict_batch(
+            model, model_args, scene, ids_to_predict, device,
+        )
 
         mode_label = "CL" if mode == "closed_loop" else "semi-CL"
         print(f"[{mode_label}] Step {step:03d}/{n_steps}  "
