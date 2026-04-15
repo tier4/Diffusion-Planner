@@ -69,8 +69,46 @@ def generate_scenes(
     return scenes
 
 
+def _load_snippet(snip_path: Path) -> tuple[str, list[int], tuple[float, float, float] | None]:
+    """Load a snippet pickle and return (name, lanelet_ids, ego_pose)."""
+    with open(snip_path, "rb") as f:
+        snip_data = pickle.load(f)
+    ego_pose = snip_data.get("ego_pose")
+    if ego_pose is not None:
+        ego_pose = tuple(ego_pose)
+    return snip_path.stem, snip_data["lanelet_ids"], ego_pose
+
+
+def _save_scene(scene: SceneContext, scene_dir: Path, snippet_name: str) -> None:
+    """Save scene pickle, info JSON, and initial visualization."""
+    scene_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(scene_dir / "scene.pkl", "wb") as f:
+        pickle.dump(scene, f)
+
+    info = {
+        "snippet": snippet_name,
+        "n_agents": len(scene.agents),
+        "n_lanes": int(scene.map_data.lanes.shape[0]),
+        "agents": [
+            {"id": a.id, "pos": a.current_position.tolist(),
+             "heading_deg": float(np.degrees(a.current_heading)),
+             "speed": float(np.linalg.norm(a.current_velocity))}
+            for a in scene.agents
+        ],
+    }
+    with open(scene_dir / "info.json", "w") as f:
+        json.dump(info, f, indent=2)
+
+    fig = render_scene_figure(scene)
+    fig.savefig(scene_dir / "initial.png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
 def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
               model_path: str | None = None, device: str = "cuda"):
+    from concurrent.futures import ThreadPoolExecutor
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     gen_params = config.get("generation", {})
@@ -97,63 +135,58 @@ def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
         print(f"Simulation modes: {sim_modes}, {sim_steps} steps each")
 
     scene_idx = 0
-    for snip_path in snippet_files:
-        name = snip_path.stem
-        with open(snip_path, "rb") as f:
-            snip_data = pickle.load(f)
 
-        lanelet_ids = snip_data["lanelet_ids"]
-        ego_pose = snip_data.get("ego_pose")
-        if ego_pose is not None:
-            ego_pose = tuple(ego_pose)
+    # Pipeline: generate next snippet's scenes on CPU while simulating current on GPU
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="scene_gen") as gen_pool:
+        pending_future = None
+        pending_meta = None  # (name, snip_dir)
 
-        snip_dir = output_dir / name
-        snip_dir.mkdir(parents=True, exist_ok=True)
+        def _gen_for_snippet(snip_path):
+            name, lanelet_ids, ego_pose = _load_snippet(snip_path)
+            t0 = time.time()
+            scenes = generate_scenes(builder, lanelet_ids, gen_params, n_scenes_per, ego_pose)
+            elapsed = time.time() - t0
+            return name, lanelet_ids, scenes, elapsed
 
-        print(f"\n--- {name} ({len(lanelet_ids)} lanelets, {n_scenes_per} scenes) ---")
-        t0 = time.time()
-        scenes = generate_scenes(builder, lanelet_ids, gen_params, n_scenes_per, ego_pose)
-        print(f"  Generated {len(scenes)} scenes in {time.time() - t0:.1f}s")
+        def _process_snippet(name, scenes, snip_dir):
+            nonlocal scene_idx
+            for i, scene in enumerate(scenes):
+                scene_dir = snip_dir / f"scene_{i:03d}"
+                _save_scene(scene, scene_dir, name)
 
-        for i, scene in enumerate(scenes):
-            scene_dir = snip_dir / f"scene_{i:03d}"
-            scene_dir.mkdir(parents=True, exist_ok=True)
+                if sim_enabled:
+                    from scenario_generation.simulate import run_simulation
+                    for sim_mode in sim_modes:
+                        sim_out = scene_dir / sim_mode
+                        print(f"  Scene {i}: {sim_mode} ({sim_steps} steps)...")
+                        t1 = time.time()
+                        run_simulation(
+                            model, model_args, scene, sim_steps,
+                            sim_out, device=device,
+                            per_agent=per_agent, mode=sim_mode,
+                        )
+                        print(f"  Scene {i}: {sim_mode} done in {time.time() - t1:.1f}s")
 
-            with open(scene_dir / "scene.pkl", "wb") as f:
-                pickle.dump(scene, f)
+                scene_idx += 1
 
-            info = {
-                "snippet": name,
-                "n_agents": len(scene.agents),
-                "n_lanes": int(scene.map_data.lanes.shape[0]),
-                "agents": [
-                    {"id": a.id, "pos": a.current_position.tolist(),
-                     "heading_deg": float(np.degrees(a.current_heading)),
-                     "speed": float(np.linalg.norm(a.current_velocity))}
-                    for a in scene.agents
-                ],
-            }
-            with open(scene_dir / "info.json", "w") as f:
-                json.dump(info, f, indent=2)
+        # Submit first snippet generation
+        if snippet_files:
+            pending_future = gen_pool.submit(_gen_for_snippet, snippet_files[0])
 
-            fig = render_scene_figure(scene)
-            fig.savefig(scene_dir / "initial.png", dpi=100, bbox_inches="tight")
-            plt.close(fig)
+        for next_idx in range(1, len(snippet_files) + 1):
+            # Wait for current generation to finish
+            name, lanelet_ids, scenes, elapsed = pending_future.result()
+            snip_dir = output_dir / name
+            snip_dir.mkdir(parents=True, exist_ok=True)
+            print(f"\n--- {name} ({len(lanelet_ids)} lanelets, {n_scenes_per} scenes) ---")
+            print(f"  Generated {len(scenes)} scenes in {elapsed:.1f}s")
 
-            if sim_enabled:
-                from scenario_generation.simulate import run_simulation
-                for sim_mode in sim_modes:
-                    sim_out = scene_dir / sim_mode
-                    print(f"  Scene {i}: {sim_mode} ({sim_steps} steps)...")
-                    t1 = time.time()
-                    run_simulation(
-                        model, model_args, scene, sim_steps,
-                        sim_out, device=device,
-                        per_agent=per_agent, mode=sim_mode,
-                    )
-                    print(f"  Scene {i}: {sim_mode} done in {time.time() - t1:.1f}s")
+            # Submit next snippet generation (overlaps with current simulation)
+            if next_idx < len(snippet_files):
+                pending_future = gen_pool.submit(_gen_for_snippet, snippet_files[next_idx])
 
-            scene_idx += 1
+            # Process current snippet (save + simulate) on main thread
+            _process_snippet(name, scenes, snip_dir)
 
     print(f"\nBatch complete. {scene_idx} scenes saved to {output_dir}")
 
