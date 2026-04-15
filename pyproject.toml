@@ -2,7 +2,6 @@
 markers = [
     "benchmark: performance profiling tests (deselect with '-m \"not benchmark\"')",
 ]
-addopts = "-m 'not benchmark'"
 
 [tool.ruff]
 line-length = 100

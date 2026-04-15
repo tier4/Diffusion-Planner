@@ -387,9 +387,11 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
     # Build map cache once; map_data is static across simulation steps
     map_cache = MapTensorCache(scene.map_data)
 
+    # Precompute ordered list of agents to predict; simulated_ids is constant
+    ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
+
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
         for step in range(n_steps):
-            ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
             agent_predictions = _predict_batch(
                 model, model_args, scene, ids_to_predict, device,
                 map_cache=map_cache,

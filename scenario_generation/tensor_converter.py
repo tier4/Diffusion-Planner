@@ -430,11 +430,17 @@ class MapTensorCache:
 
     @property
     def lanes_speed_limit(self) -> np.ndarray:
-        return self._lanes_speed_limit.copy()
+        """Return the cached speed-limit array. Treated as immutable by callers."""
+        view = self._lanes_speed_limit.view()
+        view.flags.writeable = False
+        return view
 
     @property
     def lanes_has_speed_limit(self) -> np.ndarray:
-        return self._lanes_has_speed_limit.copy()
+        """Return the cached has-speed-limit mask. Treated as immutable by callers."""
+        view = self._lanes_has_speed_limit.view()
+        view.flags.writeable = False
+        return view
 
 
 def to_model_tensors(
@@ -490,10 +496,10 @@ def to_model_tensors(
         data_np["static_objects"] = _build_static_objects(scene.map_data.static_objects, R, ego_xy)
         data_np["lanes"] = _build_lanes(scene.map_data.lanes, R, ego_xy, _NUM_LANES)
         data_np["lanes_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
-        data_np["lanes_has_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        data_np["lanes_has_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=bool)
         n_sl = min(scene.map_data.lanes_speed_limit.shape[0], _NUM_LANES)
         data_np["lanes_speed_limit"][0, :n_sl] = scene.map_data.lanes_speed_limit[:n_sl].astype(np.float32)
-        data_np["lanes_has_speed_limit"][0, :n_sl] = scene.map_data.lanes_has_speed_limit[:n_sl].astype(np.float32)
+        data_np["lanes_has_speed_limit"][0, :n_sl] = scene.map_data.lanes_has_speed_limit[:n_sl].astype(bool)
         data_np["polygons"] = _build_polygons(scene.map_data.polygons, R, ego_xy)
         data_np["line_strings"] = _build_line_strings(scene.map_data.line_strings, R, ego_xy)
 
