@@ -398,15 +398,79 @@ RECTANGLE_TOOL = {
 }
 
 RECTANGLE_AND_ARROW_TOOL = {
-    "help": " | <b>Ctrl+drag=rectangle</b> | <b>Shift+drag=ego pose</b>",
+    "help": (
+        " | <b>Ctrl+drag=rectangle</b> | <b>Shift+drag=start</b> | "
+        "<b>Shift+Alt+drag=goal</b> | <b>Ctrl+Shift+drag=waypoint</b>"
+    ),
     "state": """
     let rectWorld = null;
     let isDrawingRect = false;
     let rectStartPx = null, rectEndPx = null;
+    // Start (blue) arrow — set via Shift+drag.
     let egoArrowStartWorld = null, egoArrowEndWorld = null;
     let isDrawingEgoArrow = false, egoArrowStartPx = null, egoArrowEndPx = null;
+    // Goal (red) arrow — set via Shift+Alt+drag.
+    let goalArrowStartWorld = null, goalArrowEndWorld = null;
+    let isDrawingGoalArrow = false, goalArrowStartPx = null, goalArrowEndPx = null;
+    // Waypoint (yellow) arrows — appended via Ctrl+Shift+drag.
+    let waypointArrows = [];  // array of {start: {x,y}, end: {x,y}}
+    let isDrawingWaypoint = false, waypointDragStartPx = null, waypointDragEndPx = null;
+    // Route polyline for visualization — set via window.__setRoute(json).
+    // Format: [[[x0,y0],[x1,y1],...], ...] one polyline per resolved lanelet.
+    let routePolylines = [];
+    // Expose setters so Python can push updates via Gradio's `.then(None, js=...)`.
+    window.__setRoute = function(json) {
+        try {
+            routePolylines = typeof json === 'string' ? JSON.parse(json) : (json || []);
+        } catch (e) { routePolylines = []; console.warn('bad route json', e); }
+        redraw();
+    };
+    window.__clearWaypoints = function() {
+        waypointArrows = [];
+        redraw();
+    };
     """,
     "draw": """
+    // Reusable arrow renderer: colour, start, end (all in canvas pixels), label.
+    function drawArrow(color, sx, sy, ex, ey, label) {
+        const adx = ex - sx, ady = ey - sy;
+        const len = Math.sqrt(adx*adx + ady*ady);
+        ctx.strokeStyle = color; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+        if (len > 3) {
+            const ang = Math.atan2(ady, adx);
+            const hl = Math.min(18, len*0.3);
+            ctx.fillStyle = color; ctx.beginPath();
+            ctx.moveTo(ex, ey);
+            ctx.lineTo(ex - hl*Math.cos(ang-0.4), ey - hl*Math.sin(ang-0.4));
+            ctx.lineTo(ex - hl*Math.cos(ang+0.4), ey - hl*Math.sin(ang+0.4));
+            ctx.closePath(); ctx.fill();
+        }
+        ctx.fillStyle = color; ctx.beginPath(); ctx.arc(sx, sy, 5, 0, Math.PI*2); ctx.fill();
+        if (label) {
+            ctx.fillStyle = color; ctx.font = 'bold 11px monospace';
+            ctx.fillText(label, sx + 8, sy - 8);
+        }
+    }
+
+    // Route polyline (drawn underneath arrows and rectangle so arrows stay visible)
+    if (routePolylines && routePolylines.length > 0) {
+        ctx.strokeStyle = 'rgba(0, 170, 68, 0.85)';  // green
+        ctx.lineWidth = 4;
+        ctx.setLineDash([]);
+        for (const line of routePolylines) {
+            if (!line || line.length < 2) continue;
+            ctx.beginPath();
+            const p0 = worldToCanvas(line[0][0], line[0][1]);
+            ctx.moveTo(p0.x, p0.y);
+            for (let i = 1; i < line.length; i++) {
+                const p = worldToCanvas(line[i][0], line[i][1]);
+                ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+        }
+    }
+
     // Rectangle
     if (rectStartPx && rectEndPx) {
         const rx = Math.min(rectStartPx.x, rectEndPx.x);
@@ -423,44 +487,66 @@ RECTANGLE_AND_ARROW_TOOL = {
             ctx.fillText(wm.toFixed(0) + 'm x ' + hm.toFixed(0) + 'm', rx + 4, ry + 14);
         }
     }
-    // Ego arrow
+
+    // Ego start arrow (blue)
     if (egoArrowStartWorld && egoArrowEndWorld && !isDrawingEgoArrow) {
         egoArrowStartPx = worldToCanvas(egoArrowStartWorld.x, egoArrowStartWorld.y);
         egoArrowEndPx = worldToCanvas(egoArrowEndWorld.x, egoArrowEndWorld.y);
     }
     if (egoArrowStartPx && egoArrowEndPx) {
-        const adx = egoArrowEndPx.x - egoArrowStartPx.x;
-        const ady = egoArrowEndPx.y - egoArrowStartPx.y;
-        const len = Math.sqrt(adx*adx + ady*ady);
-        if (len > 3) {
-            const ang = Math.atan2(ady, adx);
-            ctx.strokeStyle = '#3366cc'; ctx.lineWidth = 3;
-            ctx.beginPath(); ctx.moveTo(egoArrowStartPx.x, egoArrowStartPx.y);
-            ctx.lineTo(egoArrowEndPx.x, egoArrowEndPx.y); ctx.stroke();
-            const hl = Math.min(18, len*0.3);
-            ctx.fillStyle = '#3366cc'; ctx.beginPath();
-            ctx.moveTo(egoArrowEndPx.x, egoArrowEndPx.y);
-            ctx.lineTo(egoArrowEndPx.x - hl*Math.cos(ang-0.4), egoArrowEndPx.y - hl*Math.sin(ang-0.4));
-            ctx.lineTo(egoArrowEndPx.x - hl*Math.cos(ang+0.4), egoArrowEndPx.y - hl*Math.sin(ang+0.4));
-            ctx.closePath(); ctx.fill();
-        }
-        ctx.fillStyle = '#3366cc'; ctx.beginPath();
-        ctx.arc(egoArrowStartPx.x, egoArrowStartPx.y, 5, 0, Math.PI*2); ctx.fill();
-        ctx.fillStyle = '#3366cc'; ctx.font = '11px monospace';
-        ctx.fillText('ego', egoArrowStartPx.x + 8, egoArrowStartPx.y - 8);
+        drawArrow('#3366cc', egoArrowStartPx.x, egoArrowStartPx.y,
+                  egoArrowEndPx.x, egoArrowEndPx.y, 'start');
+    }
+
+    // Goal arrow (red)
+    if (goalArrowStartWorld && goalArrowEndWorld && !isDrawingGoalArrow) {
+        goalArrowStartPx = worldToCanvas(goalArrowStartWorld.x, goalArrowStartWorld.y);
+        goalArrowEndPx = worldToCanvas(goalArrowEndWorld.x, goalArrowEndWorld.y);
+    }
+    if (goalArrowStartPx && goalArrowEndPx) {
+        drawArrow('#cc3333', goalArrowStartPx.x, goalArrowStartPx.y,
+                  goalArrowEndPx.x, goalArrowEndPx.y, 'goal');
+    }
+
+    // Waypoint arrows (yellow, numbered)
+    for (let i = 0; i < waypointArrows.length; i++) {
+        const w = waypointArrows[i];
+        const sp = worldToCanvas(w.start.x, w.start.y);
+        const ep = worldToCanvas(w.end.x, w.end.y);
+        drawArrow('#e6a400', sp.x, sp.y, ep.x, ep.y, (i + 1).toString());
+    }
+    // Waypoint in-progress drag
+    if (isDrawingWaypoint && waypointDragStartPx && waypointDragEndPx) {
+        drawArrow('#e6a400', waypointDragStartPx.x, waypointDragStartPx.y,
+                  waypointDragEndPx.x, waypointDragEndPx.y,
+                  (waypointArrows.length + 1).toString());
     }
     """,
     "mousedown": """
-    if (e.ctrlKey || e.metaKey) {
-        isDrawingRect = true;
-        rectStartPx = {x: cx, y: cy};
-        rectEndPx = {x: cx, y: cy};
+    // Modifier priority: Ctrl+Shift (waypoint) > Alt+Shift (goal) > Shift (start)
+    //                    > Ctrl (rectangle). Alt alone = rotation, handled above.
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+        isDrawingWaypoint = true;
+        waypointDragStartPx = {x: cx, y: cy};
+        waypointDragEndPx = {x: cx, y: cy};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
+    } else if (e.altKey && e.shiftKey) {
+        isDrawingGoalArrow = true;
+        goalArrowStartPx = {x: cx, y: cy};
+        goalArrowEndPx = {x: cx, y: cy};
         canvas.style.cursor = 'crosshair';
         toolHandled = true;
     } else if (e.shiftKey) {
         isDrawingEgoArrow = true;
         egoArrowStartPx = {x: cx, y: cy};
         egoArrowEndPx = {x: cx, y: cy};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
+    } else if (e.ctrlKey || e.metaKey) {
+        isDrawingRect = true;
+        rectStartPx = {x: cx, y: cy};
+        rectEndPx = {x: cx, y: cy};
         canvas.style.cursor = 'crosshair';
         toolHandled = true;
     }
@@ -480,6 +566,12 @@ RECTANGLE_AND_ARROW_TOOL = {
         redraw();
     } else if (isDrawingEgoArrow) {
         egoArrowEndPx = {x: cx, y: cy};
+        redraw();
+    } else if (isDrawingGoalArrow) {
+        goalArrowEndPx = {x: cx, y: cy};
+        redraw();
+    } else if (isDrawingWaypoint) {
+        waypointDragEndPx = {x: cx, y: cy};
         redraw();
     }
     """,
@@ -513,6 +605,30 @@ RECTANGLE_AND_ARROW_TOOL = {
         trigger('click', {
             type: 'ego_pose',
             x: egoArrowStartWorld.x, y: egoArrowStartWorld.y, heading: hdeg
+        });
+        redraw();
+    } else if (isDrawingGoalArrow && goalArrowStartPx && goalArrowEndPx) {
+        isDrawingGoalArrow = false;
+        canvas.style.cursor = 'grab';
+        goalArrowStartWorld = canvasToWorld(goalArrowStartPx.x, goalArrowStartPx.y);
+        goalArrowEndWorld = canvasToWorld(goalArrowEndPx.x, goalArrowEndPx.y);
+        const hdeg = Math.atan2(goalArrowEndWorld.y - goalArrowStartWorld.y,
+                                 goalArrowEndWorld.x - goalArrowStartWorld.x) * 180 / Math.PI;
+        trigger('click', {
+            type: 'goal_pose',
+            x: goalArrowStartWorld.x, y: goalArrowStartWorld.y, heading: hdeg
+        });
+        redraw();
+    } else if (isDrawingWaypoint && waypointDragStartPx && waypointDragEndPx) {
+        isDrawingWaypoint = false;
+        canvas.style.cursor = 'grab';
+        const ws = canvasToWorld(waypointDragStartPx.x, waypointDragStartPx.y);
+        const we = canvasToWorld(waypointDragEndPx.x, waypointDragEndPx.y);
+        const hdeg = Math.atan2(we.y - ws.y, we.x - ws.x) * 180 / Math.PI;
+        waypointArrows.push({start: ws, end: we});
+        trigger('click', {
+            type: 'waypoint_append',
+            x: ws.x, y: ws.y, heading: hdeg
         });
         redraw();
     }

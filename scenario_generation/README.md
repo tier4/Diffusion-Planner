@@ -86,6 +86,108 @@ Key modules in `gui/`:
 - `scene_renderer.py` -- Matplotlib rendering with all-agents and focus modes, with rotation support.
 - `app.py` -- Gradio web interface with shared interactive map canvas (also used by scene_search).
 
+### Route-based replay
+
+Pick a start, goal, and zero or more waypoints in the GUI; save the result as
+a reusable `Route` pickle; then replay it in closed-loop with the diffusion
+planner. A background NPC manager spawns and despawns neighbors around the
+ego as the simulation progresses.
+
+**Save a Route in the GUI.** Launch `python -m scenario_generation.gui
+--map_path <lanelet2_map.osm>` and use:
+
+| Interaction | Modifier | Purpose | Visual |
+|---|---|---|---|
+| Pan / zoom / rotate | drag, scroll, Alt+drag | navigate the map | |
+| Rectangle select | Ctrl+drag | existing snippet workflow | blue dashed box |
+| **Ego start pose** | Shift+drag | singular, overwrites | blue arrow |
+| **Ego goal pose** | Shift+Alt+drag | singular, overwrites | red arrow |
+| **Waypoint** | Ctrl+Shift+drag | appends to ordered list | yellow arrow, numbered |
+
+The resolved route (`lanelet2.routing.RoutingGraph.shortestPathWithVia` under
+the hood) draws as a green polyline on the canvas every time start, goal, or
+waypoints change. Click **Save Route** to pickle the full spec (including
+`route_lanelet_ids`) to disk.
+
+Inspect a saved route:
+
+```bash
+python -m scenario_generation.tools.inspect_route my_route.pkl
+```
+
+**Run closed-loop replay.**
+
+```bash
+python -m scenario_generation.replay \
+    --route my_route.pkl \
+    --model_path /path/to/best_model.pth \
+    --output_dir ./replay_out \
+    [--map_path <override>] \
+    [--steps 6000] \
+    [--max_npcs 8] \
+    [--spawn_probability 0.3] \
+    [--config scenario_generation/configs/replay_default.json] \
+    [--seed 42]
+```
+
+Per-step PNG `step_NNNN.png` is written to `output_dir`. The simulation ends
+when either:
+
+- the ego reaches within `goal_tolerance_m` (default 2 m) of the goal, or
+- `max_steps` ticks have elapsed (default 6000 = 10 min of simulated data at
+  `dt = 0.1 s`).
+
+**NPC manager.** By default the manager holds the neighbor count in
+`[0, max_active_npcs]` (hard cap = 8), spawning with 30% per-tick probability
+only when the count is below the cap. Neighbors further than
+`despawn_distance` (default 120 m) are dropped every tick. 70% of newly
+spawned neighbors get a random forward route; 30% are biased to share at
+least one lanelet with the ego's route. See
+`scenario_generation/configs/replay_default.json` for the full knob list.
+
+**Live map tensor refresh.** Every `map_refresh_steps` (default 5) ticks,
+`scene.map_data.lanes` is rebuilt from the closest lanelets to the ego plus
+the ego route + each alive NPC's current lanelet. This mirrors the
+Diffusion-Planner ROS node's per-frame lane filter — the model never sees a
+stale lane tensor as the ego moves across the map. Knobs:
+
+- `map_mask_range_m` (default 200): half-side of the AABB around the ego; a
+  lanelet passes when any of (center, first, last) centerline point is in
+  the square. The ROS node uses 100 m, but that yields only ~22 lanelets on
+  the Shinagawa map — below the training distribution (median 61). 200 m
+  matches the training median.
+- `max_map_lanelets` (default 140): hard cap, matches
+  `tensor_converter._NUM_LANES`. Ego-closest fill first; pinned ids (ego
+  route, history, NPC lanelets) fill the remaining slots.
+- `map_refresh_steps` (default 5 = 0.5 s at `dt=0.1`): refresh period. A
+  vectorised spatial query keeps the cost around 0.2 ms/call even on a
+  6 000-lanelet map, so lowering this is cheap if you want a stricter match
+  to the ROS node's per-frame refresh.
+
+**Traffic lights.** Not wired today. The closed-loop loop accepts a
+`TrafficLightSource` protocol (`scenario_generation/traffic_light.py`) that
+defaults to "no traffic lights anywhere" (`AllNoneTLSource`). A follow-up
+session will ship a real source that mutates the 5-dim TL one-hot block at
+lane-dim indices `[8:13]` per step.
+
+**Known limitation (tracked as a future-session TODO).** The ego's
+`route_lanes` tensor is frozen at replay start. If the diffusion planner
+deviates far from `route.route_lanelet_ids`, the route context goes stale and
+the ego loses guidance. Future work: adaptive re-routing from the ego's
+current lanelet to the original goal once it drifts beyond a threshold.
+
+Relevant modules:
+
+| Path | Role |
+|---|---|
+| `scenario_generation/route.py` | `Route` dataclass + pickle save/load |
+| `scenario_generation/replay.py` | `run_route_replay`, `SceneNPCManager`, `SpawnConfig`, CLI |
+| `scenario_generation/traffic_light.py` | `TrafficLightSource` protocol + default "all none" |
+| `scenario_generation/configs/replay_default.json` | Default `SpawnConfig` values |
+| `scenario_generation/tools/inspect_route.py` | CLI to dump a saved route pickle |
+| `scenario_generation/gui/app.py` | GUI panels + live route overlay wiring |
+| `scene_search/map_canvas_js.py` | JS canvas: start / goal / waypoint arrows + route polyline |
+
 ### Batch scene generation
 
 Generate N scenes per saved map snippet and run closed-loop + semi-closed-loop simulation:

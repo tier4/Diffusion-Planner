@@ -1,0 +1,27 @@
+{
+  "_comment_1": "Default SpawnConfig for scenario_generation.replay.run_route_replay.",
+  "_comment_2": "Matches the dataclass defaults in scenario_generation/replay.py::SpawnConfig.",
+  "_comment_3": "Distances are metres; time is simulation steps (dt=0.1 s per step).",
+
+  "spawn_period_steps": 10,
+  "max_active_npcs": 8,
+  "spawn_probability": 0.3,
+  "min_spawn_distance": 15.0,
+  "max_spawn_distance": 60.0,
+  "despawn_distance": 120.0,
+  "forward_bias": 0.8,
+  "min_npc_separation": 8.0,
+  "goal_tolerance_m": 2.0,
+  "max_steps": 6000,
+  "seed": null,
+  "ego_overlap_ratio": 0.3,
+  "npc_min_speed": 3.0,
+  "npc_max_speed": 12.0,
+  "npc_route_length_m": 120.0,
+  "curvature_threshold": 0.3,
+
+  "_comment_map": "Live map-tensor refresh. Matches the ROS node's live lane filter.",
+  "map_refresh_steps": 5,
+  "max_map_lanelets": 140,
+  "map_mask_range_m": 200.0
+}

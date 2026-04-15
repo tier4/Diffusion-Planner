@@ -269,8 +269,26 @@ class LaneletSceneBuilder:
                 cum_arc_lengths=cum_arc,
             )
 
-        print(f"LaneletSceneBuilder: cached {len(self._cache)} lanelets, "
-              f"routing graph built")
+        # Pre-compute vectorised anchor arrays for fast spatial queries
+        # (used by closest_lanelets). Rows align with ``self._vehicle_ll_ids``.
+        self._vehicle_ll_ids: np.ndarray = np.array([
+            ll_id for ll_id, c in self._cache.items()
+            if c.subtype in self._vehicle_subtypes
+        ], dtype=np.int64)
+        n_v = len(self._vehicle_ll_ids)
+        self._vehicle_centers = np.zeros((n_v, 2), dtype=np.float32)
+        self._vehicle_firsts = np.zeros((n_v, 2), dtype=np.float32)
+        self._vehicle_lasts = np.zeros((n_v, 2), dtype=np.float32)
+        self._vehicle_backs = np.zeros((n_v, 2), dtype=np.float32)  # -2 index
+        for i, ll_id in enumerate(self._vehicle_ll_ids):
+            cl = self._cache[int(ll_id)].raw_centerline
+            self._vehicle_centers[i] = cl.mean(axis=0)
+            self._vehicle_firsts[i] = cl[0]
+            self._vehicle_lasts[i] = cl[-1]
+            self._vehicle_backs[i] = cl[-2] if len(cl) >= 2 else cl[-1]
+
+        print(f"LaneletSceneBuilder: cached {len(self._cache)} lanelets "
+              f"({n_v} drivable), routing graph built")
 
     # ── 33-dim conversion ────────────────────────────────────────────────
 
@@ -339,7 +357,204 @@ class LaneletSceneBuilder:
                 result.append(ll_id)
         return result
 
+    def closest_lanelets(
+        self, xy: np.ndarray, max_n: int, mask_range: float = 100.0,
+    ) -> list[int]:
+        """Return up to ``max_n`` drivable lanelet IDs around ``xy``, closest first.
+
+        Mirrors the lane-filter strategy used by the Autoware/Diffusion-Planner
+        ROS node (see ``diffusion_planner_ros/lanelet2_utils/lanelet_converter.py``):
+
+        1. **AABB pre-filter**: a lanelet passes when any of its center,
+           first centerline point, or last centerline point falls inside the
+           ``±mask_range`` square around ``xy``. The ROS node uses 100 m.
+        2. **Sort by min-endpoint-distance** to ``xy`` (the score used by
+           ``key_func`` in ``create_lane_tensor``: the smaller of the
+           distances from ``xy`` to the first and second-to-last centerline
+           points).
+        3. **Cap at ``max_n``**.
+
+        ``max_n`` should typically be ≤ ``tensor_converter._NUM_LANES``
+        (currently 140). The ROS node passes 70; training NPZs show ~65
+        non-zero slots per scene, so 70–140 is the sweet spot.
+
+        Args:
+            xy: 2-element world-frame query point ``[x, y]``.
+            max_n: Maximum number of lanelets to return.
+            mask_range: Half-side of the square AABB pre-filter in metres.
+
+        Returns:
+            Lanelet IDs sorted closest-first. Length ≤ ``max_n``.
+        """
+        pos = np.asarray(xy, dtype=np.float32)[:2]
+        if len(self._vehicle_ll_ids) == 0:
+            return []
+
+        # Vectorised AABB: accept when any of (center, first, last) is inside.
+        def _inside(points: np.ndarray) -> np.ndarray:
+            dx = np.abs(points[:, 0] - pos[0])
+            dy = np.abs(points[:, 1] - pos[1])
+            return (dx < mask_range) & (dy < mask_range)
+
+        mask = (
+            _inside(self._vehicle_centers)
+            | _inside(self._vehicle_firsts)
+            | _inside(self._vehicle_lasts)
+        )
+        if not mask.any():
+            return []
+
+        # Score by min-distance of first / second-to-last endpoint to xy
+        # (mirrors the ROS node's key_func in create_lane_tensor).
+        kept_ids = self._vehicle_ll_ids[mask]
+        d_first = np.sum((self._vehicle_firsts[mask] - pos) ** 2, axis=1)
+        d_back = np.sum((self._vehicle_backs[mask] - pos) ** 2, axis=1)
+        score = np.minimum(d_first, d_back)
+        if len(kept_ids) > max_n:
+            top_idx = np.argpartition(score, max_n)[:max_n]
+            top_idx = top_idx[np.argsort(score[top_idx])]
+        else:
+            top_idx = np.argsort(score)
+        return [int(kept_ids[i]) for i in top_idx]
+
+    def lanelets_near_point(
+        self, xy: np.ndarray, radius: float,
+    ) -> list[int]:
+        """Return drivable lanelet IDs whose centerline passes within ``radius``
+        metres of ``xy``.
+
+        Used by the NPC spawn manager to pick candidate lanelets near the ego.
+        First filters by an AABB of side ``2*radius`` (re-uses
+        :meth:`lanelets_in_rect`) then refines with exact centerline-point
+        distance so diagonal-corner false positives are rejected.
+        """
+        x, y = float(xy[0]), float(xy[1])
+        candidates = self.lanelets_in_rect(
+            x - radius, y - radius, x + radius, y + radius,
+        )
+        radius_sq = radius * radius
+        result = []
+        for ll_id in candidates:
+            cl = self._cache[ll_id].raw_centerline
+            dx = cl[:, 0] - x
+            dy = cl[:, 1] - y
+            if np.min(dx * dx + dy * dy) <= radius_sq:
+                result.append(ll_id)
+        return result
+
+    def snap_to_nearest_ll(
+        self, xy: np.ndarray, candidate_ids: list[int] | None = None,
+    ) -> int | None:
+        """Snap a world-frame ``(x, y)`` position to the nearest drivable lanelet.
+
+        Args:
+            xy: 2-element array-like ``[x, y]`` in MGRS world frame.
+            candidate_ids: Optional restriction to a subset of lanelets. When
+                ``None``, all cached drivable lanelets are considered.
+
+        Returns:
+            The lanelet id with the closest centerline point, or ``None`` when
+            no cached lanelet is available (e.g. empty ``candidate_ids``).
+        """
+        pos = np.asarray(xy, dtype=np.float32)[:2]
+        if candidate_ids is None:
+            candidate_ids = [
+                ll_id for ll_id, c in self._cache.items()
+                if c.subtype in self._vehicle_subtypes
+            ]
+
+        best_ll_id = None
+        best_dist = float("inf")
+        for ll_id in candidate_ids:
+            if ll_id not in self._cache:
+                continue
+            cl = self._cache[ll_id].raw_centerline
+            d = float(np.linalg.norm(cl - pos, axis=1).min())
+            if d < best_dist:
+                best_dist = d
+                best_ll_id = ll_id
+        return best_ll_id
+
+    def is_lanelet_straight(
+        self, ll_id: int, curvature_threshold: float = 0.3,
+    ) -> bool:
+        """Check if a lanelet is straight enough for NPC spawning.
+
+        Iterates consecutive centerline segments and returns False when the
+        maximum heading change between any two adjacent segments exceeds
+        ``curvature_threshold`` radians (default 0.3 rad ≈ 17°).
+
+        Ported from ``tier4_autoware_psim_scenarios.stopped_vehicle_utils.is_lanelet_straight``.
+        NPC history synthesis via :meth:`generate_history` can produce unnatural
+        trajectories on sharp curves, so the spawn manager rejects non-straight
+        candidates.
+        """
+        if ll_id not in self._cache:
+            return False
+        cl = self._cache[ll_id].raw_centerline
+        if len(cl) < 3:
+            return True  # too few points to measure curvature
+
+        diffs = np.diff(cl, axis=0)
+        seg_lens = np.linalg.norm(diffs, axis=1)
+        valid = seg_lens > 1e-6
+        if valid.sum() < 2:
+            return True
+        angles = np.arctan2(diffs[valid, 1], diffs[valid, 0])
+
+        delta = np.diff(angles)
+        # Wrap each delta into [-pi, pi].
+        delta = np.arctan2(np.sin(delta), np.cos(delta))
+        return bool(np.max(np.abs(delta)) <= curvature_threshold)
+
     # ── Routing ──────────────────────────────────────────────────────────
+
+    def route_between(
+        self, start_ll_id: int, goal_ll_id: int,
+    ) -> list[int] | None:
+        """Shortest path between two lanelet IDs using the lanelet2 routing graph.
+
+        Returns a list of lanelet IDs ``[start_ll_id, ..., goal_ll_id]`` or
+        ``None`` when start and goal are in disconnected components / reverse
+        directions. Wraps :class:`lanelet2.routing.RoutingGraph.shortestPath`.
+        """
+        if start_ll_id not in self._ll_by_id or goal_ll_id not in self._ll_by_id:
+            return None
+        start_ll = self._ll_by_id[start_ll_id]
+        goal_ll = self._ll_by_id[goal_ll_id]
+        path = self._routing_graph.shortestPath(start_ll, goal_ll)
+        if path is None:
+            return None
+        return [ll.id for ll in path]
+
+    def route_with_waypoints(
+        self,
+        start_ll_id: int,
+        via_ll_ids: list[int],
+        goal_ll_id: int,
+    ) -> list[int] | None:
+        """Shortest path forced through ``via_ll_ids`` in the given order.
+
+        Uses :class:`lanelet2.routing.RoutingGraph.shortestPathWithVia`. When
+        ``via_ll_ids`` is empty, delegates to :meth:`route_between`.
+
+        Returns the resolved lanelet id sequence or ``None`` when any
+        consecutive pair in ``[start, *via, goal]`` is unreachable.
+        """
+        if not via_ll_ids:
+            return self.route_between(start_ll_id, goal_ll_id)
+        if start_ll_id not in self._ll_by_id or goal_ll_id not in self._ll_by_id:
+            return None
+        for vid in via_ll_ids:
+            if vid not in self._ll_by_id:
+                return None
+        start_ll = self._ll_by_id[start_ll_id]
+        goal_ll = self._ll_by_id[goal_ll_id]
+        via_lls = [self._ll_by_id[i] for i in via_ll_ids]
+        path = self._routing_graph.shortestPathWithVia(start_ll, via_lls, goal_ll)
+        if path is None:
+            return None
+        return [ll.id for ll in path]
 
     def find_route(self, start_ll_id: int, min_length_m: float = 120.0) -> list[int]:
         """Find a forward route from start_lanelet of at least min_length_m.
@@ -591,19 +806,7 @@ class LaneletSceneBuilder:
         ex, ey, eheading = ego_pose
         pos = np.array([ex, ey], dtype=np.float32)
 
-        # Find nearest lanelet centerline
-        best_ll_id = None
-        best_dist = float("inf")
-        for ll_id in lanelet_ids:
-            if ll_id not in self._cache:
-                continue
-            cl = self._cache[ll_id].raw_centerline
-            dists = np.linalg.norm(cl - pos, axis=1)
-            d = float(dists.min())
-            if d < best_dist:
-                best_dist = d
-                best_ll_id = ll_id
-
+        best_ll_id = self.snap_to_nearest_ll(pos, candidate_ids=lanelet_ids)
         if best_ll_id is None:
             return None
 

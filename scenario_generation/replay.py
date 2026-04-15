@@ -1,0 +1,871 @@
+"""Closed-loop replay of a saved :class:`scenario_generation.route.Route`.
+
+High-level flow
+---------------
+
+1. Load the Route and rebuild a ``LaneletSceneBuilder`` from ``route.map_path``.
+2. Build an initial ``SceneContext`` containing just the ego (no neighbors),
+   placed at ``route.start_pose`` with its 31-step history synthesised
+   backwards along the lanelet centerlines (see
+   ``LaneletSceneBuilder.generate_history``).
+3. Enter the closed-loop: each simulation tick we
+
+   * Run batched inference on every currently-alive agent as ego (reusing
+     :func:`scenario_generation.simulate._predict_batch` — a single forward
+     pass with all agents concatenated along the batch dim, no sequential
+     per-agent calls).
+   * Advance every agent one physical step via
+     :func:`scenario_generation.simulate.advance_scene`.
+   * Periodically run the NPC spawn manager:
+
+     - **Despawn** any neighbor farther than ``despawn_distance`` m from ego.
+     - **Spawn** up to ``max_active_npcs`` (hard cap) neighbors near the ego
+       with a small per-tick probability, using a realistic synthesised
+       history and a route that is sometimes biased to overlap the ego's
+       own route (see ``SpawnConfig.ego_overlap_ratio``).
+   * Save an overview PNG per tick.
+
+4. Terminate when the ego arrives within ``goal_tolerance_m`` of
+   ``route.goal_pose`` or after ``n_steps`` ticks.
+
+Traffic lights are explicitly out of scope. ``traffic_light_source`` is
+accepted but ignored today; see :mod:`scenario_generation.traffic_light` for
+the intended seam.
+
+Batched inference note
+----------------------
+
+Each alive agent is a separate scene dict (different ego-centric coordinate
+frames) but ``_predict_batch`` concatenates them along ``batch_dim=0`` for a
+single ``model(data)`` call. This is the point the user emphasised: we never
+loop inference sequentially; even spawned neighbors enter the same batch on
+the very next tick.
+
+The ``MapTensorCache`` is rebuilt whenever a new lanelet is added to
+``scene.map_data`` during NPC spawning (there is no ``invalidate()`` method —
+see CLAUDE.md and the cache definition in ``tensor_converter.py``).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import numpy as np
+import torch
+
+from scenario_generation.gui.lanelet_scene_builder import (
+    LaneletSceneBuilder,
+    _obb_collides,
+    _obb_corners,
+)
+from scenario_generation.route import Route
+from scenario_generation.scene_context import Agent, AgentType, SceneContext
+from scenario_generation.simulate import (
+    _ego_to_world,
+    _predict_batch,
+    _save_and_close,
+    advance_scene,
+    load_model,
+)
+from scenario_generation.tensor_converter import MapTensorCache
+from scenario_generation.traffic_light import AllNoneTLSource, TrafficLightSource
+from scenario_generation.visualize import (
+    _agent_color,
+    draw_agent_box,
+    draw_trajectory,
+)
+
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class SpawnConfig:
+    """Controls the NPC spawn/despawn manager.
+
+    All distances in metres, all times in simulation steps (each step = 0.1 s).
+
+    Attributes:
+        spawn_period_steps: Run the spawn/despawn tick every N steps.
+            ``10`` ≈ once per simulated second.
+        max_active_npcs: Hard upper bound on the number of concurrent
+            neighbors. Neighbor count is not kept constant — it drifts in
+            ``[0, max_active_npcs]`` driven by ``spawn_probability`` and
+            despawn distance.
+        spawn_probability: Per-tick chance of attempting a spawn when the
+            active count is below the cap.
+        min_spawn_distance: A spawn candidate must sit at least this far
+            from ego.
+        max_spawn_distance: A spawn candidate must sit no further than this
+            from ego.
+        despawn_distance: Any neighbor farther than this from ego is dropped.
+            Default 120 m matches the user's spec.
+        forward_bias: Probability that a spawn candidate is restricted to
+            lanelets in front of the ego (vs. free directional choice).
+        min_npc_separation: Minimum centre-to-centre distance between a new
+            spawn and any existing agent's OBB. Matches tier4 npc_manager's
+            constant.
+        goal_tolerance_m: Ego-to-goal distance that triggers a
+            "goal reached" termination.
+        max_steps: Maximum simulation ticks before forced termination.
+            6000 ticks = 600 s = 10 minutes of simulated time.
+        seed: RNG seed used for spawn candidate selection, vehicle
+            dimensions, speeds, route choices. ``None`` for non-deterministic.
+        ego_overlap_ratio: Fraction of spawned NPCs that are routed to
+            overlap with the ego's route_lanelet_ids. Per user: 0.30 (30%
+            overlap, 70% random forward routes).
+        npc_min_speed: Floor for a spawned NPC's initial speed (m/s).
+        npc_max_speed: Ceiling for a spawned NPC's initial speed (m/s).
+        npc_route_length_m: Minimum arc-length fed to ``find_route`` for each
+            new NPC — drives how many lanelets of route_lanes it gets.
+        curvature_threshold: Max allowable |Δheading| between consecutive
+            centerline segments for a lanelet to be spawnable. Matches the
+            default used by ``is_lanelet_straight``.
+        map_refresh_steps: Rebuild ``scene.map_data`` with the closest
+            lanelets to the ego every this many steps. Matches the training
+            distribution where the ``(140, 20, 33)`` lane tensor is packed
+            with the closest lanelets to ego — not a fixed pre-baked subset.
+        max_map_lanelets: Upper bound on the number of lanelets packed into
+            ``map_data.lanes``. Must match / not exceed
+            ``tensor_converter._NUM_LANES`` (currently 140).
+        map_mask_range_m: Half-side of the AABB lane-filter around ego.
+            Matches the Diffusion-Planner ROS node's ``judge_inside``
+            (``mask_range = 100.0``). A lanelet passes the filter when its
+            center, first, or last centerline point is within this square.
+    """
+
+    spawn_period_steps: int = 10
+    max_active_npcs: int = 8
+    spawn_probability: float = 0.3
+    min_spawn_distance: float = 15.0
+    max_spawn_distance: float = 60.0
+    despawn_distance: float = 120.0
+    forward_bias: float = 0.8
+    min_npc_separation: float = 8.0
+    goal_tolerance_m: float = 2.0
+    max_steps: int = 6000
+    seed: int | None = None
+    ego_overlap_ratio: float = 0.3
+    npc_min_speed: float = 3.0
+    npc_max_speed: float = 12.0
+    npc_route_length_m: float = 120.0
+    curvature_threshold: float = 0.3
+    map_refresh_steps: int = 5
+    max_map_lanelets: int = 140
+    # ROS node uses 100 m; empirical survey of our training NPZs shows
+    # ~23 (min) – 89 (max) non-zero lanes per scene, median 61. 100 m on the
+    # Shinagawa map tops out at ~22 lanelets — at the bottom of training
+    # distribution. 200 m yields ~62, matching the median.
+    map_mask_range_m: float = 200.0
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "SpawnConfig":
+        """Load a SpawnConfig from a JSON file.
+
+        Unknown keys (including ``_comment_*`` keys used as inline JSON
+        comments) are silently dropped so configs can carry documentation
+        without tripping the dataclass constructor.
+        """
+        with open(path) as f:
+            data = json.load(f)
+        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered)
+
+    def to_json(self, path: str | Path) -> None:
+        with open(path, "w") as f:
+            json.dump(asdict(self), f, indent=2)
+
+
+# ── NPC spawn manager ────────────────────────────────────────────────────────
+
+
+class SceneNPCManager:
+    """Spawns and despawns ``Agent`` objects inside a running ``SceneContext``.
+
+    This class intentionally owns no state that outlives a single replay —
+    construct a fresh one per ``run_route_replay`` invocation.
+
+    The manager does **not** call the model. Inference for every agent
+    (including freshly spawned neighbors) happens in the main replay loop via
+    the shared ``_predict_batch`` one-forward-pass.
+    """
+
+    def __init__(
+        self,
+        builder: LaneletSceneBuilder,
+        ego_route_ll_ids: list[int],
+        spawn_config: SpawnConfig,
+    ) -> None:
+        self.builder = builder
+        self.ego_route_ll_ids = ego_route_ll_ids
+        self.cfg = spawn_config
+        self._rng = random.Random(spawn_config.seed)
+        self._np_rng = np.random.default_rng(spawn_config.seed)
+        self._next_id = 0
+        # Set of lanelet ids currently present in ``scene.map_data``. Tracked
+        # incrementally so we only rebuild the MapTensorCache when new
+        # lanelets actually appear.
+        self._known_lanelet_ids: set[int] = set()
+
+    def register_known_lanelets(self, lanelet_ids: list[int]) -> None:
+        self._known_lanelet_ids.update(lanelet_ids)
+
+    def tick(self, scene: SceneContext) -> None:
+        """Run one spawn/despawn cycle.
+
+        The map_data rebuild is owned by the main replay loop (it refreshes
+        periodically based on ego position + closest lanelets). This method
+        only mutates ``scene.agents``.
+        """
+        ego_agent = scene.ego_agent
+        if ego_agent is None:
+            return
+        ego_pos = ego_agent.current_position
+
+        # --- Despawn pass ---
+        kept_agents: list[Agent] = []
+        removed = 0
+        for agent in scene.agents:
+            if agent.id == scene.ego_agent_id:
+                kept_agents.append(agent)
+                continue
+            d = float(np.linalg.norm(agent.current_position - ego_pos))
+            if d > self.cfg.despawn_distance:
+                removed += 1
+                continue
+            kept_agents.append(agent)
+        scene.agents = kept_agents
+        if removed > 0:
+            print(f"  [NPCManager] despawned {removed} (beyond {self.cfg.despawn_distance:.0f} m)")
+
+        # --- Spawn pass ---
+        active_nb = sum(1 for a in scene.agents if a.id != scene.ego_agent_id)
+        if active_nb >= self.cfg.max_active_npcs:
+            return
+        if self._rng.random() >= self.cfg.spawn_probability:
+            return
+
+        new_agent, _added_ll_ids = self._try_spawn_one(scene)
+        if new_agent is None:
+            return
+        scene.agents.append(new_agent)
+        print(f"  [NPCManager] spawned {new_agent.id}")
+
+    # -- internals --------------------------------------------------------
+
+    def _try_spawn_one(self, scene: SceneContext) -> tuple[Agent | None, list[int]]:
+        """Attempt to synthesise one valid NPC near the ego. Returns
+        ``(agent_or_None, list_of_lanelet_ids_the_new_agent_touches)``."""
+        ego = scene.ego_agent
+        ego_pos = ego.current_position
+        ego_heading = ego.current_heading
+        ego_forward = np.array([math.cos(ego_heading), math.sin(ego_heading)], dtype=np.float32)
+
+        candidate_ids = self.builder.lanelets_near_point(
+            ego_pos, self.cfg.max_spawn_distance,
+        )
+        # Drop lanelets that are too curved for history synthesis.
+        candidate_ids = [
+            ll_id for ll_id in candidate_ids
+            if self.builder.is_lanelet_straight(ll_id, self.cfg.curvature_threshold)
+        ]
+        if not candidate_ids:
+            return None, []
+
+        forward_only = self._rng.random() < self.cfg.forward_bias
+        if forward_only:
+            filtered = []
+            for ll_id in candidate_ids:
+                cl = self.builder._cache[ll_id].raw_centerline
+                mid = cl[len(cl) // 2]
+                to_mid = mid - ego_pos
+                if np.dot(to_mid, ego_forward) > 0:
+                    filtered.append(ll_id)
+            candidate_ids = filtered or candidate_ids  # fall back if forward filter empties
+
+        # Existing agents' OBBs to collision-test against.
+        existing_corners = [
+            _obb_corners(
+                a.current_position[0], a.current_position[1],
+                a.current_heading, a.length, a.width,
+            )
+            for a in scene.agents
+        ]
+
+        for _ in range(20):  # up to 20 attempts
+            ll_id = self._rng.choice(candidate_ids)
+            c = self.builder._cache[ll_id]
+            cl = c.raw_centerline
+            # Pick an arc-length away from the lanelet endpoints.
+            total = float(c.arc_length)
+            if total < 1.0:
+                continue
+            margin = min(3.0, total * 0.1)
+            target_arc = self._rng.uniform(margin, total - margin)
+            arc_lengths = c.cum_arc_lengths
+            seg_idx = int(np.searchsorted(arc_lengths, target_arc)) - 1
+            seg_idx = max(0, min(seg_idx, len(cl) - 2))
+            seg_len = arc_lengths[seg_idx + 1] - arc_lengths[seg_idx]
+            if seg_len < 1e-6:
+                continue
+            t = (target_arc - arc_lengths[seg_idx]) / max(seg_len, 1e-6)
+            pos = cl[seg_idx] + t * (cl[seg_idx + 1] - cl[seg_idx])
+            pos = pos.astype(np.float32)
+
+            # Range check against ego.
+            d_ego = float(np.linalg.norm(pos - ego_pos))
+            if d_ego < self.cfg.min_spawn_distance or d_ego > self.cfg.max_spawn_distance:
+                continue
+
+            # Lane heading at this point.
+            if seg_idx < len(cl) - 1:
+                dxdy = cl[seg_idx + 1] - cl[seg_idx]
+            else:
+                dxdy = cl[seg_idx] - cl[seg_idx - 1]
+            heading = float(math.atan2(dxdy[1], dxdy[0]))
+
+            length = float(self._rng.uniform(4.0, 5.0))
+            width = float(self._rng.uniform(1.7, 2.0))
+            wheelbase = length * 0.65
+
+            corners = _obb_corners(pos[0], pos[1], heading, length, width)
+            collides = False
+            for ec in existing_corners:
+                ec_center = ec.mean(axis=0)
+                if np.linalg.norm(pos - ec_center) < self.cfg.min_npc_separation:
+                    collides = True
+                    break
+                if _obb_collides(corners, ec):
+                    collides = True
+                    break
+            if collides:
+                continue
+
+            speed = float(self._rng.uniform(self.cfg.npc_min_speed, self.cfg.npc_max_speed))
+
+            # Route for this neighbor. 30% of spawns are biased to share at
+            # least one lanelet with the ego's route (see user spec 70/30).
+            route_ll_ids = self._pick_route(ll_id)
+            goal = self.builder._route_goal(route_ll_ids)
+            route_lanes, route_sl, route_hsl = self.builder._route_to_33dim(route_ll_ids)
+
+            history, history_ll_ids = self.builder.generate_history(
+                pos, heading, speed, ll_id,
+            )
+            velocities = np.zeros((history.shape[0], 2), dtype=np.float32)
+            for k in range(1, history.shape[0]):
+                velocities[k] = (history[k, :2] - history[k - 1, :2]) / 0.1
+            velocities[0] = velocities[1]
+
+            agent_id = f"npc_{self._next_id}"
+            self._next_id += 1
+            agent = Agent(
+                id=agent_id,
+                agent_type=AgentType.VEHICLE,
+                length=length,
+                width=width,
+                wheelbase=wheelbase,
+                past_trajectory=history,
+                past_velocities=velocities,
+                acceleration=np.zeros(2, dtype=np.float32),
+                steering_angle=0.0,
+                yaw_rate=0.0,
+                goal_pose=goal,
+                route_lanes=route_lanes,
+                route_speed_limit=route_sl,
+                route_has_speed_limit=route_hsl,
+            )
+            touched = list(set(route_ll_ids) | set(history_ll_ids) | {ll_id})
+            return agent, touched
+
+        return None, []
+
+    def _pick_route(self, start_ll_id: int) -> list[int]:
+        """Select a forward route for a freshly-spawned NPC.
+
+        With probability ``ego_overlap_ratio`` we retry ``find_route`` a few
+        times searching for a candidate that shares at least one lanelet with
+        the ego's route — more interactions with ego, less natural traffic
+        diversity. Otherwise a single random forward route.
+        """
+        want_overlap = self._rng.random() < self.cfg.ego_overlap_ratio
+        ego_set = set(self.ego_route_ll_ids)
+        best = self.builder.find_route(start_ll_id, self.cfg.npc_route_length_m)
+        if want_overlap and not (set(best) & ego_set):
+            for _ in range(5):
+                candidate = self.builder.find_route(start_ll_id, self.cfg.npc_route_length_m)
+                if set(candidate) & ego_set:
+                    return candidate
+        return best
+
+
+# ── Replay loop ──────────────────────────────────────────────────────────────
+
+
+_LANE_COLOR = "#bbbbbb"
+_LANE_BORDER_COLOR = "#888888"
+_EGO_COLOR = "#3366cc"
+_ROUTE_COLOR = "#00aa44"
+_VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
+
+
+def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
+    """Draw lane centerlines **and** left/right borders from the 33-dim tensor.
+
+    Borders are reconstructed via ``centerline + lane[:, 4:6]`` (left) and
+    ``centerline + lane[:, 6:8]`` (right). ``map_data.line_strings`` stays
+    zero-filled in replay scenes so we can't rely on it; the borders we draw
+    here come from the lane tensor which is always populated.
+    """
+    from matplotlib.collections import LineCollection
+
+    lanes = map_data.lanes
+    centerlines, lefts, rights = [], [], []
+    for i in range(lanes.shape[0]):
+        lane = lanes[i]
+        if np.abs(lane[:, :2]).sum() < 1e-6:
+            continue
+        pts = lane[:, :2]
+        valid = np.abs(pts).sum(axis=1) > 0.1
+        if valid.sum() < 2:
+            continue
+        centerlines.append(pts[valid])
+        if lane.shape[1] > 7:
+            lefts.append((pts + lane[:, 4:6])[valid])
+            rights.append((pts + lane[:, 6:8])[valid])
+
+    if centerlines:
+        ax.add_collection(LineCollection(
+            centerlines, colors=_LANE_COLOR, linewidths=0.6,
+            alpha=alpha * 0.4, zorder=1,
+        ))
+    if lefts:
+        ax.add_collection(LineCollection(
+            lefts, colors=_LANE_BORDER_COLOR, linewidths=1.1,
+            alpha=alpha, zorder=2,
+        ))
+    if rights:
+        ax.add_collection(LineCollection(
+            rights, colors=_LANE_BORDER_COLOR, linewidths=1.1,
+            alpha=alpha, zorder=2,
+        ))
+
+
+def _save_step_figure(
+    scene: SceneContext,
+    agent_predictions: dict,
+    output_path: Path,
+    step: int,
+    n_steps: int,
+    route_polylines: list[np.ndarray] | None = None,
+    view_half_m: float = _VIEW_HALF_M,
+) -> None:
+    """Render + save the overview PNG for a single replay step.
+
+    Viewport is fixed to ``±view_half_m`` metres around the ego, so lane
+    borders stay visible and NPC detail remains readable at every step.
+    """
+    from matplotlib.figure import Figure
+
+    ego = scene.ego_agent
+    if ego is None:
+        return
+    ex, ey = ego.current_position
+
+    fig = Figure(figsize=(10, 10))
+    ax = fig.add_subplot(1, 1, 1)
+    fig.patch.set_facecolor("#f8f8f8")
+
+    # 1) Lane network (centerlines + left / right borders).
+    _draw_lane_network(ax, scene.map_data)
+
+    # 2) Ego route polyline (drawn below agents but above lanes).
+    if route_polylines:
+        for pl in route_polylines:
+            if pl.shape[0] >= 2:
+                ax.plot(
+                    pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR,
+                    lw=2.5, alpha=0.6, zorder=3,
+                )
+
+    # 3) Agents + per-agent predicted trajectories.
+    nb_idx = 0
+    for agent in scene.agents:
+        is_ego = agent.id == scene.ego_agent_id
+        if is_ego:
+            color = _EGO_COLOR
+        else:
+            color = _agent_color(agent.agent_type, nb_idx)
+            nb_idx += 1
+
+        pos = agent.current_position
+        heading = agent.current_heading
+
+        # Past trail (dashed, light).
+        past = agent.past_trajectory
+        valid = np.abs(past[:, :2]).sum(axis=1) > 1e-6
+        if valid.sum() > 1:
+            ax.plot(
+                past[valid, 0], past[valid, 1], "--", color=color,
+                lw=0.9, alpha=0.5, zorder=7,
+            )
+
+        # Bounding box + heading arrow.
+        draw_agent_box(
+            ax, pos[0], pos[1], heading, agent.length, agent.width,
+            color, alpha=0.85 if is_ego else 0.55, lw=2 if is_ego else 1,
+            zorder=20 if is_ego else 15,
+        )
+        arrow_len = max(agent.length, 2.5)
+        ax.annotate(
+            "",
+            xy=(pos[0] + arrow_len * math.cos(heading),
+                pos[1] + arrow_len * math.sin(heading)),
+            xytext=(pos[0], pos[1]),
+            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.5, mutation_scale=12),
+            zorder=21 if is_ego else 16,
+        )
+        ax.annotate(
+            agent.id, (pos[0], pos[1]), fontsize=7, color=color,
+            ha="center", va="bottom", xytext=(0, 6), textcoords="offset points",
+            zorder=22,
+        )
+
+        # Predicted trajectory from the model (in that agent's ego frame).
+        if agent.id in agent_predictions:
+            pred = agent_predictions[agent.id]
+            plan_xy, plan_h = _ego_to_world(
+                pred[:, :2], pred[:, 2:4],
+                float(pos[0]), float(pos[1]), heading,
+            )
+            plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
+            draw_trajectory(
+                ax, plan_traj, color,
+                lw=1.8 if is_ego else 1.0,
+                zorder=25 if is_ego else 18,
+                show_footprints=is_ego,
+                length=agent.length, width=agent.width,
+            )
+
+    # 4) Ego goal marker (if within viewport).
+    if ego.goal_pose is not None:
+        gx, gy = float(ego.goal_pose[0]), float(ego.goal_pose[1])
+        if abs(gx - ex) <= view_half_m and abs(gy - ey) <= view_half_m:
+            ax.plot(gx, gy, "*", color="#d62728", ms=18, zorder=30,
+                    markeredgecolor="black", markeredgewidth=0.8)
+
+    # 5) Viewport: fixed square around ego.
+    ax.set_xlim(ex - view_half_m, ex + view_half_m)
+    ax.set_ylim(ey - view_half_m, ey + view_half_m)
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.15)
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+
+    goal_d = float(np.linalg.norm(ego.current_position - ego.goal_pose[:2])) \
+        if ego.goal_pose is not None else float("nan")
+    ax.set_title(
+        f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  "
+        f"agents={len(scene.agents)}  goal_d={goal_d:.1f} m",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    _save_and_close(fig, output_path)
+
+
+@torch.no_grad()
+def run_route_replay(
+    model,
+    model_args,
+    builder: LaneletSceneBuilder,
+    route: Route,
+    output_dir: Path,
+    spawn_config: SpawnConfig | None = None,
+    device: str = "cuda",
+    traffic_light_source: TrafficLightSource | None = None,
+) -> dict:
+    """Run closed-loop replay of ``route`` with dynamic NPC spawning.
+
+    Args:
+        model: Loaded Diffusion-Planner (``eval()`` already called).
+        model_args: ``Config`` instance returned alongside ``model`` by
+            :func:`scenario_generation.simulate.load_model`.
+        builder: Lanelet scene builder for the map ``route.map_path`` points
+            at (rebuild one fresh per call — cheap vs. GPU inference).
+        route: Authored route spec. Must be resolved (``route_lanelet_ids``
+            non-empty); falls back to greedy ``find_route`` with a warning
+            when unresolved.
+        output_dir: Directory for per-step PNGs. Created if missing.
+        spawn_config: NPC manager tuning. Defaults to :class:`SpawnConfig()`.
+        device: Torch device.
+        traffic_light_source: Reserved seam for a future TL source. Ignored
+            today; see :mod:`scenario_generation.traffic_light`.
+
+    Returns:
+        Dict with ``final_step``, ``goal_reached`` (bool), ``reason`` (str),
+        and ``n_npc_spawned`` for downstream scripting.
+    """
+    if spawn_config is None:
+        spawn_config = SpawnConfig()
+    if traffic_light_source is None:
+        traffic_light_source = AllNoneTLSource()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Step 0: build the initial scene from the Route. ---
+    ego_route_ids = route.route_lanelet_ids
+    if not ego_route_ids:
+        if route.start_lanelet_id is None:
+            raise ValueError("Route has no start_lanelet_id and no resolved path")
+        print("  [WARN] Route.route_lanelet_ids is empty; falling back to find_route")
+        ego_route_ids = builder.find_route(
+            route.start_lanelet_id, spawn_config.npc_route_length_m,
+        )
+
+    # Snap the ego to a lanelet on the saved route (prevents the initial lane
+    # from drifting to a parallel lane that isn't part of the route).
+    start_pose = route.start_pose
+    start_ll_id = builder.snap_to_nearest_ll(
+        start_pose[:2], candidate_ids=ego_route_ids,
+    ) or route.start_lanelet_id
+    if start_ll_id is None:
+        raise ValueError("Could not determine start lanelet for the ego")
+
+    # Snap the ego's x,y onto the chosen lanelet's centerline for stability.
+    cl = builder._cache[start_ll_id].raw_centerline
+    dists = np.linalg.norm(cl - start_pose[:2], axis=1)
+    closest = int(np.argmin(dists))
+    snapped_xy = cl[closest].astype(np.float32)
+    heading = float(start_pose[2])
+    # Reasonable initial speed: midpoint of NPC speed band. The diffusion
+    # planner recovers from this quickly since it sees 31 steps of history.
+    init_speed = 0.5 * (spawn_config.npc_min_speed + spawn_config.npc_max_speed)
+
+    # Synthesise realistic history along the route's predecessor lanelets.
+    history, history_ll_ids = builder.generate_history(
+        snapped_xy, heading, init_speed, start_ll_id,
+    )
+    # Override history[-1] with the user-specified heading so the ego faces
+    # the right way at t=0 even when the lane heading differs slightly.
+    history[-1, 2] = heading
+    velocities = np.zeros((history.shape[0], 2), dtype=np.float32)
+    for k in range(1, history.shape[0]):
+        velocities[k] = (history[k, :2] - history[k - 1, :2]) / 0.1
+    velocities[0] = velocities[1]
+
+    # Build map_data to mirror the Diffusion-Planner ROS node:
+    # - closest lanelets to ego via a ±100 m AABB pre-filter + distance sort
+    # - ego route + history pinned (route context never drops, even when the
+    #   ego approaches a dense junction where the closest-N would saturate)
+    # - each alive NPC's current lanelet pinned so neighbors always have
+    #   lane context even when outside the ego bbox (NPCs can live up to
+    #   despawn_distance = 120 m > bbox = 100 m from ego)
+    # - final hard cap at ``max_map_lanelets`` (140 = tensor_converter._NUM_LANES).
+    def _compute_map_lanelet_ids(
+        ego_xy: np.ndarray,
+        neighbor_positions: list[np.ndarray],
+    ) -> list[int]:
+        closest = builder.closest_lanelets(
+            ego_xy, spawn_config.max_map_lanelets,
+            mask_range=spawn_config.map_mask_range_m,
+        )
+        pinned: list[int] = list(ego_route_ids) + list(history_ll_ids)
+        for nb_xy in neighbor_positions:
+            ll = builder.snap_to_nearest_ll(nb_xy)
+            if ll is not None:
+                pinned.append(ll)
+
+        # Deduplicate while preserving priority: closest-first, then pins.
+        seen: set[int] = set()
+        ordered: list[int] = []
+        for ll_id in list(closest) + pinned:
+            if ll_id in seen:
+                continue
+            seen.add(ll_id)
+            ordered.append(ll_id)
+            if len(ordered) >= spawn_config.max_map_lanelets:
+                break
+        return ordered
+
+    all_lanelet_ids = _compute_map_lanelet_ids(snapped_xy, [])
+    map_data = builder._build_map_data(all_lanelet_ids)
+
+    route_lanes, route_sl, route_hsl = builder._route_to_33dim(ego_route_ids)
+    ego = Agent(
+        id="ego",
+        agent_type=AgentType.VEHICLE,
+        length=4.5, width=1.9, wheelbase=4.5 * 0.65,
+        past_trajectory=history,
+        past_velocities=velocities,
+        acceleration=np.zeros(2, dtype=np.float32),
+        steering_angle=0.0,
+        yaw_rate=0.0,
+        goal_pose=route.goal_pose.astype(np.float32),
+        route_lanes=route_lanes,
+        route_speed_limit=route_sl,
+        route_has_speed_limit=route_hsl,
+    )
+    scene = SceneContext(agents=[ego], map_data=map_data, ego_agent_id="ego", dt=0.1)
+
+    # Route polyline (world frame) for per-step visualisation.
+    route_polylines = [
+        builder._cache[ll_id].raw_centerline[:, :2]
+        for ll_id in ego_route_ids if ll_id in builder._cache
+    ]
+
+    # --- NPC manager. ---
+    npc_manager = SceneNPCManager(builder, ego_route_ids, spawn_config)
+    npc_manager.register_known_lanelets(all_lanelet_ids)
+
+    map_cache = MapTensorCache(scene.map_data)
+    n_npc_spawned = 0
+    goal_reached = False
+    reason = "max_steps"
+
+    # --- Main loop. ---
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
+        pending_saves: list = []
+        for step in range(spawn_config.max_steps):
+            # Run the NPC manager (after step 0 so the ego has a meaningful
+            # ``current_position`` — always true by construction here).
+            if step > 0 and step % spawn_config.spawn_period_steps == 0:
+                before = sum(1 for a in scene.agents if a.id != scene.ego_agent_id)
+                npc_manager.tick(scene)
+                after = sum(1 for a in scene.agents if a.id != scene.ego_agent_id)
+                if after > before:
+                    n_npc_spawned += (after - before)
+
+            # Refresh map_data to include the closest lanelets to ego + NPC
+            # anchors. Mirrors the Diffusion-Planner ROS node, which rebuilds
+            # the lane tensor every inference frame. We throttle to
+            # ``map_refresh_steps`` (default 5 = 0.5 s at dt=0.1) since the
+            # cost (~few ms on a 6k-lanelet map) adds up over 6000 steps.
+            if step == 0 or step % spawn_config.map_refresh_steps == 0:
+                ego_xy = scene.ego_agent.current_position
+                neighbor_xys = [
+                    a.current_position for a in scene.agents
+                    if a.id != scene.ego_agent_id
+                ]
+                new_ids = _compute_map_lanelet_ids(ego_xy, neighbor_xys)
+                scene.map_data = builder._build_map_data(new_ids)
+                npc_manager._known_lanelet_ids = set(new_ids)
+                map_cache = MapTensorCache(scene.map_data)
+
+            # Inference for every alive agent, in one batched forward pass.
+            ids_to_predict = [a.id for a in scene.agents if a.agent_type == AgentType.VEHICLE]
+            agent_predictions = _predict_batch(
+                model, model_args, scene, ids_to_predict, device,
+                map_cache=map_cache,
+            )
+
+            # Save PNG (concurrent with next step's compute).
+            out_path = output_dir / f"step_{step:04d}.png"
+            pending_saves.append(save_pool.submit(
+                _save_step_figure,
+                deepcopy(scene), agent_predictions, out_path,
+                step, spawn_config.max_steps, route_polylines,
+            ))
+
+            # Drain any finished saves so memory doesn't balloon.
+            if step % 50 == 0:
+                pending_saves = [f for f in pending_saves if not f.done()]
+
+            # Goal check (BEFORE advancing — measures arrival accurately).
+            ego_pos = scene.ego_agent.current_position
+            goal_xy = route.goal_pose[:2]
+            if float(np.linalg.norm(ego_pos - goal_xy)) <= spawn_config.goal_tolerance_m:
+                goal_reached = True
+                reason = "goal_reached"
+                print(f"  Goal reached at step {step} (distance {np.linalg.norm(ego_pos - goal_xy):.2f} m)")
+                break
+
+            advance_scene(scene, agent_predictions)
+
+            if step % 50 == 0:
+                print(
+                    f"  step {step:04d}/{spawn_config.max_steps}  "
+                    f"agents={len(scene.agents)}  "
+                    f"ego=({ego_pos[0]:.1f}, {ego_pos[1]:.1f})  "
+                    f"goal_d={np.linalg.norm(ego_pos - goal_xy):.1f} m"
+                )
+
+        for f in pending_saves:
+            f.result()
+
+    final_step = step
+    print(f"Done. {final_step + 1} frames saved to {output_dir}; reason={reason}")
+    return {
+        "final_step": final_step,
+        "goal_reached": goal_reached,
+        "reason": reason,
+        "n_npc_spawned": n_npc_spawned,
+    }
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Closed-loop replay of a saved scenario_generation Route "
+                    "with dynamic NPC spawning.",
+    )
+    parser.add_argument("--map_path", type=str, default=None,
+                        help="Override the map path stored in the Route pickle")
+    parser.add_argument("--route", type=Path, required=True, help="Path to route.pkl")
+    parser.add_argument("--model_path", type=Path, required=True, help="Path to best_model.pth")
+    parser.add_argument("--output_dir", type=Path, required=True,
+                        help="Directory for per-step PNGs")
+    parser.add_argument("--steps", type=int, default=None,
+                        help="Max simulation steps (overrides config.max_steps; "
+                             "default from config = 6000 = 10 min at dt=0.1)")
+    parser.add_argument("--max_npcs", type=int, default=None,
+                        help="Override hard cap on concurrent neighbors")
+    parser.add_argument("--spawn_probability", type=float, default=None,
+                        help="Override spawn probability per spawn tick")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="JSON SpawnConfig overrides")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--seed", type=int, default=None)
+    args = parser.parse_args()
+
+    route = Route.load(args.route)
+    map_path = args.map_path or route.map_path
+    print(f"Loading builder from {map_path}")
+    builder = LaneletSceneBuilder(map_path)
+
+    if args.config is not None:
+        cfg = SpawnConfig.from_json(args.config)
+    else:
+        cfg = SpawnConfig()
+    if args.steps is not None:
+        cfg.max_steps = args.steps
+    if args.max_npcs is not None:
+        cfg.max_active_npcs = args.max_npcs
+    if args.spawn_probability is not None:
+        cfg.spawn_probability = args.spawn_probability
+    if args.seed is not None:
+        cfg.seed = args.seed
+
+    device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
+    print(f"Loading model from {args.model_path}")
+    model, model_args = load_model(args.model_path, device)
+
+    run_route_replay(
+        model=model, model_args=model_args, builder=builder, route=route,
+        output_dir=args.output_dir, spawn_config=cfg, device=device,
+    )
+
+
+if __name__ == "__main__":
+    main()
