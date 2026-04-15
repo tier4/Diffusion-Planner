@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 
@@ -25,14 +26,13 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from scenario_generation.gt_route_extractor import assign_gt_goals_and_routes
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
-from scenario_generation.tensor_converter import to_model_tensors
+from scenario_generation.tensor_converter import MapTensorCache, to_model_tensors
 from scenario_generation.visualize import draw_scene, draw_trajectory
 
 
@@ -170,7 +170,9 @@ def _draw_agent_view(
     heading = agent.current_heading
     color = (color_map or {}).get(agent_id, _EGO_COLOR)
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(10, 10))
+    ax = fig.add_subplot(1, 1, 1)
 
     # Map elements
     draw_lanes(ax, scene.map_data)
@@ -252,7 +254,25 @@ def _draw_agent_view(
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=100)
-    plt.close(fig)
+    fig.clf()
+
+
+def _save_and_close(fig, path: Path, dpi: int = 100) -> None:
+    """Save a matplotlib figure and release resources.
+
+    Avoids plt.close() which touches the global pyplot figure manager
+    and is not thread-safe under concurrent saves.
+    """
+    fig.savefig(path, dpi=dpi)
+    fig.clf()
+
+
+def _cat_tensor_dicts(
+    dicts: list[dict[str, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
+    """Concatenate single-sample tensor dicts along batch dim 0."""
+    keys = dicts[0].keys()
+    return {k: torch.cat([d[k] for d in dicts], dim=0) for k in keys}
 
 
 @torch.no_grad()
@@ -263,6 +283,46 @@ def _predict_as_ego(model, model_args, scene: SceneContext,
     model.decoder._guidance_fn = None
     _, outputs = model(data)
     return outputs["prediction"][0, 0].cpu().numpy()
+
+
+@torch.no_grad()
+def _predict_batch(
+    model, model_args, scene: SceneContext,
+    agent_ids: list[str], device: str,
+    map_cache: MapTensorCache | None = None,
+) -> dict[str, np.ndarray]:
+    """Run batched inference for multiple agents-as-ego.
+
+    Builds per-agent tensor dicts, concatenates along batch dim,
+    runs one forward pass, splits results back per agent.
+
+    Args:
+        map_cache: Optional pre-built MapTensorCache. When the scene's
+            map_data is static across steps, pass a single cache built
+            once to avoid rebuilding every call. Built internally when
+            not provided.
+
+    Returns {agent_id: (80, 4) ego-centric prediction}.
+    """
+    if not agent_ids:
+        return {}
+
+    if map_cache is None:
+        map_cache = MapTensorCache(scene.map_data)
+    tensor_dicts = [
+        to_model_tensors(scene, aid, model_args, device, map_cache=map_cache)
+        for aid in agent_ids
+    ]
+
+    model.decoder._guidance_fn = None
+    if len(agent_ids) == 1:
+        _, outputs = model(tensor_dicts[0])
+        return {agent_ids[0]: outputs["prediction"][0, 0].cpu().numpy()}
+
+    batched = _cat_tensor_dicts(tensor_dicts)
+    _, outputs = model(batched)
+    preds = outputs["prediction"][:, 0].cpu().numpy()
+    return {aid: preds[i] for i, aid in enumerate(agent_ids)}
 
 
 @torch.no_grad()
@@ -319,89 +379,110 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
     n_simulated = len(simulated_ids)
     color_map = _build_color_map(scene)
 
-    for step in range(n_steps):
-        agent_predictions: dict[str, np.ndarray] = {}
+    # Pre-create per-agent output dirs
+    if per_agent:
         for agent in scene.agents:
-            if agent.id not in simulated_ids:
-                continue
-            pred = _predict_as_ego(model, model_args, scene, agent.id, device)
-            agent_predictions[agent.id] = pred
+            (output_dir / agent.id).mkdir(parents=True, exist_ok=True)
 
-        mode_label = "CL" if mode == "closed_loop" else "semi-CL"
-        print(f"[{mode_label}] Step {step:03d}/{n_steps}  "
-              f"({n_simulated} re-planned, {n_agents} total)")
+    # Build map cache once; map_data is static across simulation steps
+    map_cache = MapTensorCache(scene.map_data)
 
-        # --- Visualize ---
-        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-        draw_scene(ax, scene, ego_id)
+    # Precompute ordered list of agents to predict; simulated_ids is constant
+    ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
 
-        from scenario_generation.visualize import _agent_color
-        nb_idx = 0
-        for agent in scene.agents:
-            if agent.id not in agent_predictions:
-                continue
-            pred = agent_predictions[agent.id]
-            ax_pos, ay_pos = agent.current_position
-            ah = agent.current_heading
-            plan_xy, plan_h = _ego_to_world(
-                pred[:, :2], pred[:, 2:4], float(ax_pos), float(ay_pos), ah,
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
+        for step in range(n_steps):
+            agent_predictions = _predict_batch(
+                model, model_args, scene, ids_to_predict, device,
+                map_cache=map_cache,
             )
-            plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
 
-            if agent.id == ego_id:
-                color = "#3366cc"
-                label = "Ego plan"
-                zorder = 25
-            else:
-                color = _agent_color(agent.agent_type, nb_idx)
-                label = None
-                zorder = 18
-                nb_idx += 1
+            mode_label = "CL" if mode == "closed_loop" else "semi-CL"
+            print(f"[{mode_label}] Step {step:03d}/{n_steps}  "
+                  f"({n_simulated} re-planned, {n_agents} total)")
 
-            draw_trajectory(ax, plan_traj, color, label=label, lw=1.0, zorder=zorder,
-                            show_footprints=(agent.id == ego_id),
-                            length=agent.length, width=agent.width)
+            # --- Visualize ---
+            from matplotlib.figure import Figure
+            fig = Figure(figsize=(10, 10))
+            ax = fig.add_subplot(1, 1, 1)
+            draw_scene(ax, scene, ego_id)
 
-        # Draw ego initial plan in semi-closed-loop
-        if ego_initial_plan is not None:
-            remaining = ego_initial_plan[step:]
-            if len(remaining) > 1:
-                draw_trajectory(ax, remaining, "#3366cc", label="Ego plan (fixed)",
-                                lw=1.5, zorder=25, show_footprints=True,
-                                length=scene.get_agent(ego_id).length,
-                                width=scene.get_agent(ego_id).width)
-
-        hist = world_histories.get(ego_id, [])
-        if len(hist) > 1:
-            h = np.array(hist)
-            ax.plot(h[:, 0], h[:, 1], "-", color="#3366cc", lw=2, alpha=0.8, zorder=22)
-
-        ax.set_title(f"[{mode_label}] Step {step:03d}/{n_steps}  t={step*0.1:.1f}s  "
-                     f"({n_agents} agents)", fontsize=11)
-
-        fig.tight_layout()
-        fig.savefig(output_dir / f"step_{step:03d}.png", dpi=100)
-        plt.close(fig)
-
-        if per_agent:
+            from scenario_generation.visualize import _agent_color
+            nb_idx = 0
             for agent in scene.agents:
-                agent_dir = output_dir / agent.id
-                agent_dir.mkdir(parents=True, exist_ok=True)
-                _draw_agent_view(
-                    scene, agent.id, agent_predictions,
-                    world_histories.get(agent.id, []),
-                    step, n_steps, agent_dir / f"step_{step:03d}.png",
-                    color_map=color_map,
+                if agent.id not in agent_predictions:
+                    continue
+                pred = agent_predictions[agent.id]
+                ax_pos, ay_pos = agent.current_position
+                ah = agent.current_heading
+                plan_xy, plan_h = _ego_to_world(
+                    pred[:, :2], pred[:, 2:4], float(ax_pos), float(ay_pos), ah,
                 )
+                plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
 
-        # Advance all agents
-        if mode == "semi_closed_loop" and ego_initial_plan is not None and step < len(ego_initial_plan):
-            wp = ego_initial_plan[step]
-            _advance_agent(scene.get_agent(ego_id),
-                           np.array([wp[0], wp[1], wp[2]], dtype=np.float32))
-        advance_scene(scene, agent_predictions)
-        for agent in scene.agents:
-            world_histories[agent.id].append(agent.current_position.copy())
+                if agent.id == ego_id:
+                    color = "#3366cc"
+                    label = "Ego plan"
+                    zorder = 25
+                else:
+                    color = _agent_color(agent.agent_type, nb_idx)
+                    label = None
+                    zorder = 18
+                    nb_idx += 1
+
+                draw_trajectory(ax, plan_traj, color, label=label, lw=1.0, zorder=zorder,
+                                show_footprints=(agent.id == ego_id),
+                                length=agent.length, width=agent.width)
+
+            # Draw ego initial plan in semi-closed-loop
+            if ego_initial_plan is not None:
+                remaining = ego_initial_plan[step:]
+                if len(remaining) > 1:
+                    draw_trajectory(ax, remaining, "#3366cc", label="Ego plan (fixed)",
+                                    lw=1.5, zorder=25, show_footprints=True,
+                                    length=scene.get_agent(ego_id).length,
+                                    width=scene.get_agent(ego_id).width)
+
+            hist = world_histories.get(ego_id, [])
+            if len(hist) > 1:
+                h = np.array(hist)
+                ax.plot(h[:, 0], h[:, 1], "-", color="#3366cc", lw=2, alpha=0.8, zorder=22)
+
+            ax.set_title(f"[{mode_label}] Step {step:03d}/{n_steps}  t={step*0.1:.1f}s  "
+                         f"({n_agents} agents)", fontsize=11)
+
+            fig.tight_layout()
+
+            # Submit overview save to thread pool
+            step_futures = [
+                save_pool.submit(_save_and_close, fig, output_dir / f"step_{step:03d}.png"),
+            ]
+
+            # Submit per-agent views to thread pool
+            if per_agent:
+                for agent in scene.agents:
+                    step_futures.append(
+                        save_pool.submit(
+                            _draw_agent_view,
+                            scene, agent.id, agent_predictions,
+                            world_histories.get(agent.id, []),
+                            step, n_steps, output_dir / agent.id / f"step_{step:03d}.png",
+                            color_map,
+                        )
+                    )
+
+            # Drain all saves for this step before advancing scene state
+            for f in step_futures:
+                f.result()
+
+            # Advance all agents
+            if mode == "semi_closed_loop" and ego_initial_plan is not None and step < len(ego_initial_plan):
+                wp = ego_initial_plan[step]
+                _advance_agent(scene.get_agent(ego_id),
+                               np.array([wp[0], wp[1], wp[2]], dtype=np.float32))
+            advance_scene(scene, agent_predictions)
+            for agent in scene.agents:
+                world_histories[agent.id].append(agent.current_position.copy())
 
     print(f"Done. {n_steps} frames saved to {output_dir}")
 

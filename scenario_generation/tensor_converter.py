@@ -9,12 +9,11 @@ Produces a dict of torch tensors ready for model.forward(), with:
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
-from scenario_generation.scene_context import Agent, AgentType, SceneContext
+from scenario_generation.scene_context import Agent, AgentType, MapData, SceneContext
 from scenario_generation.transforms import (
     _rotation_matrix,
     transform_cos_sin,
@@ -22,9 +21,6 @@ from scenario_generation.transforms import (
     transform_headings,
     transform_positions,
 )
-
-if TYPE_CHECKING:
-    pass
 
 # Model dimension constants (from diffusion_planner.dimensions)
 _INPUT_T = 30
@@ -352,11 +348,107 @@ def _build_route_lanes(
     return lanes, sl, hsl
 
 
+class MapTensorCache:
+    """Pre-computes padded, masked world-frame map arrays once per scene.
+
+    Avoids repeated .copy().astype() and mask computation when converting
+    the same scene for multiple agents (each with a different ego frame).
+    """
+
+    def __init__(self, map_data: MapData) -> None:
+        # -- lanes: (n, 20, 33) --
+        n_lanes = min(map_data.lanes.shape[0], _NUM_LANES)
+        self._lanes = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
+        self._lanes[:n_lanes] = map_data.lanes[:n_lanes].astype(np.float32)
+        self._lanes_mask = np.sum(np.abs(self._lanes[:, :, :8]), axis=-1) == 0
+
+        # speed limits (no per-agent transform needed)
+        self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+        n_sl = min(map_data.lanes_speed_limit.shape[0], _NUM_LANES)
+        self._lanes_speed_limit[0, :n_sl] = map_data.lanes_speed_limit[:n_sl].astype(np.float32)
+        self._lanes_has_speed_limit[0, :n_sl] = map_data.lanes_has_speed_limit[:n_sl].astype(bool)
+
+        # -- static objects: (n, 10) --
+        n_static = min(map_data.static_objects.shape[0], _NUM_STATIC)
+        self._static = np.zeros((_NUM_STATIC, 10), dtype=np.float32)
+        self._static[:n_static] = map_data.static_objects[:n_static].astype(np.float32)
+        self._static_mask = np.sum(np.abs(self._static[:, :10]), axis=-1) == 0
+        self._n_static = n_static
+
+        # -- polygons: (n, 40, 3) --
+        n_poly = min(map_data.polygons.shape[0], _NUM_POLYGONS)
+        self._polygons = np.zeros((_NUM_POLYGONS, _POINTS_PER_POLYGON, 3), dtype=np.float32)
+        if n_poly > 0:
+            src_in = map_data.polygons[:n_poly].astype(np.float32)
+            D_in = min(src_in.shape[-1], 3) if src_in.ndim >= 3 else 2
+            self._polygons[:n_poly, :, :D_in] = src_in[:, :, :D_in]
+        self._polygons_mask = np.sum(np.abs(self._polygons), axis=-1) == 0
+        self._n_poly = n_poly
+
+        # -- line strings: (n, 20, 4) --
+        n_ls = min(map_data.line_strings.shape[0], _NUM_LINE_STRINGS)
+        self._line_strings = np.zeros((_NUM_LINE_STRINGS, _POINTS_PER_LINE_STRING, 4), dtype=np.float32)
+        if n_ls > 0:
+            src_in = map_data.line_strings[:n_ls].astype(np.float32)
+            D_in = min(src_in.shape[-1], 4) if src_in.ndim >= 3 else 2
+            self._line_strings[:n_ls, :, :D_in] = src_in[:, :, :D_in]
+        self._line_strings_mask = np.sum(np.abs(self._line_strings), axis=-1) == 0
+        self._n_ls = n_ls
+
+    def get_lanes_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
+        """Return lanes in ego frame: [1, NUM_LANES, 20, 33]."""
+        src = self._lanes.copy()
+        src[:, :, :2] = transform_positions(src[:, :, :2], R, ego_xy)
+        src[:, :, 2:4] = transform_directions(src[:, :, 2:4], R)
+        src[:, :, 4:6] = transform_directions(src[:, :, 4:6], R)
+        src[:, :, 6:8] = transform_directions(src[:, :, 6:8], R)
+        src[self._lanes_mask] = 0.0
+        return src[np.newaxis]
+
+    def get_static_objects_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
+        """Return static objects in ego frame: [1, 5, 10]."""
+        src = self._static.copy()
+        src[:, :2] = transform_positions(src[:, :2], R, ego_xy)
+        src[:, 2:4] = transform_cos_sin(src[:, 2:4], R)
+        src[self._static_mask] = 0.0
+        return src[np.newaxis]
+
+    def get_polygons_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
+        """Return polygons in ego frame: [1, NUM_POLYGONS, 40, 3]."""
+        src = self._polygons.copy()
+        src[:, :, :2] = transform_positions(src[:, :, :2], R, ego_xy)
+        src[self._polygons_mask] = 0.0
+        return src[np.newaxis]
+
+    def get_line_strings_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
+        """Return line strings in ego frame: [1, NUM_LINE_STRINGS, 20, 4]."""
+        src = self._line_strings.copy()
+        src[:, :, :2] = transform_positions(src[:, :, :2], R, ego_xy)
+        src[self._line_strings_mask] = 0.0
+        return src[np.newaxis]
+
+    @property
+    def lanes_speed_limit(self) -> np.ndarray:
+        """Return the cached speed-limit array. Treated as immutable by callers."""
+        view = self._lanes_speed_limit.view()
+        view.flags.writeable = False
+        return view
+
+    @property
+    def lanes_has_speed_limit(self) -> np.ndarray:
+        """Return the cached has-speed-limit mask. Treated as immutable by callers."""
+        view = self._lanes_has_speed_limit.view()
+        view.flags.writeable = False
+        return view
+
+
 def to_model_tensors(
     scene: SceneContext,
     ego_agent_id: str,
     model_args,
     device: str | torch.device = "cpu",
+    map_cache: MapTensorCache | None = None,
 ) -> dict[str, torch.Tensor]:
     """Convert SceneContext to normalized model input tensors.
 
@@ -372,6 +464,9 @@ def to_model_tensors(
             - predicted_neighbor_num: int
             - future_len: int (typically 80)
         device: Target device for tensors.
+        map_cache: Optional pre-computed map tensor cache. When provided,
+            avoids repeated copy/pad/mask of static map arrays across
+            multiple agent conversions within the same scene.
 
     Returns:
         Dict of normalized torch tensors ready for model.forward().
@@ -390,21 +485,28 @@ def to_model_tensors(
     data_np["neighbor_agents_past"] = _build_neighbor_agents_past(
         scene, ego_agent_id, R, ego_xy, ego_heading,
     )
-    data_np["static_objects"] = _build_static_objects(scene.map_data.static_objects, R, ego_xy)
-    data_np["lanes"] = _build_lanes(scene.map_data.lanes, R, ego_xy, _NUM_LANES)
-    data_np["lanes_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
-    data_np["lanes_has_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
-    n_sl = min(scene.map_data.lanes_speed_limit.shape[0], _NUM_LANES)
-    data_np["lanes_speed_limit"][0, :n_sl] = scene.map_data.lanes_speed_limit[:n_sl].astype(np.float32)
-    data_np["lanes_has_speed_limit"][0, :n_sl] = scene.map_data.lanes_has_speed_limit[:n_sl].astype(np.float32)
+    if map_cache is not None:
+        data_np["static_objects"] = map_cache.get_static_objects_ego(R, ego_xy)
+        data_np["lanes"] = map_cache.get_lanes_ego(R, ego_xy)
+        data_np["lanes_speed_limit"] = map_cache.lanes_speed_limit
+        data_np["lanes_has_speed_limit"] = map_cache.lanes_has_speed_limit
+        data_np["polygons"] = map_cache.get_polygons_ego(R, ego_xy)
+        data_np["line_strings"] = map_cache.get_line_strings_ego(R, ego_xy)
+    else:
+        data_np["static_objects"] = _build_static_objects(scene.map_data.static_objects, R, ego_xy)
+        data_np["lanes"] = _build_lanes(scene.map_data.lanes, R, ego_xy, _NUM_LANES)
+        data_np["lanes_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        data_np["lanes_has_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+        n_sl = min(scene.map_data.lanes_speed_limit.shape[0], _NUM_LANES)
+        data_np["lanes_speed_limit"][0, :n_sl] = scene.map_data.lanes_speed_limit[:n_sl].astype(np.float32)
+        data_np["lanes_has_speed_limit"][0, :n_sl] = scene.map_data.lanes_has_speed_limit[:n_sl].astype(bool)
+        data_np["polygons"] = _build_polygons(scene.map_data.polygons, R, ego_xy)
+        data_np["line_strings"] = _build_line_strings(scene.map_data.line_strings, R, ego_xy)
 
     route_lanes, route_sl, route_hsl = _build_route_lanes(ego, R, ego_xy)
     data_np["route_lanes"] = route_lanes
     data_np["route_lanes_speed_limit"] = route_sl
     data_np["route_lanes_has_speed_limit"] = route_hsl
-
-    data_np["polygons"] = _build_polygons(scene.map_data.polygons, R, ego_xy)
-    data_np["line_strings"] = _build_line_strings(scene.map_data.line_strings, R, ego_xy)
     data_np["goal_pose"] = _build_goal_pose(ego, R, ego_xy, ego_heading)
     data_np["ego_shape"] = _build_ego_shape(ego)
     data_np["turn_indicators"] = _build_turn_indicators(ego)

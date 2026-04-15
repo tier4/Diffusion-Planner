@@ -10,7 +10,7 @@ import math
 import os
 import random
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 
 import numpy as np
@@ -192,6 +192,7 @@ class _CachedLanelet:
     has_speed_limit: bool
     subtype: str
     arc_length: float = 0.0
+    cum_arc_lengths: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
 
 
 # ── Main builder class ───────────────────────────────────────────────────────
@@ -248,6 +249,9 @@ class LaneletSceneBuilder:
             interp_lb = _interpolate_lane(raw_lb, POINTS_PER_LANELET)
             interp_rb = _interpolate_lane(raw_rb, POINTS_PER_LANELET)
 
+            diffs = np.linalg.norm(np.diff(raw_cl[:, :2], axis=0), axis=1)
+            cum_arc = np.concatenate([[0.0], np.cumsum(diffs)]).astype(np.float64)
+
             self._cache[ll.id] = _CachedLanelet(
                 ll_id=ll.id,
                 raw_centerline=raw_cl,
@@ -261,7 +265,8 @@ class LaneletSceneBuilder:
                 speed_limit_mps=speed_mps,
                 has_speed_limit=has_sl,
                 subtype=subtype,
-                arc_length=_polyline_arc_length(raw_cl),
+                arc_length=float(cum_arc[-1]),
+                cum_arc_lengths=cum_arc,
             )
 
         print(f"LaneletSceneBuilder: cached {len(self._cache)} lanelets, "
@@ -395,10 +400,8 @@ class LaneletSceneBuilder:
         # Build dense backward polyline ordered [current_pos, ..., far_behind]
         bw_pts, traversed_ids = self._build_backward_polyline(lanelet_id, position_xy, heading, n_steps, speed, dt)
 
-        # Compute cumulative arc lengths (index 0 = 0 distance from current pos)
-        arc = np.zeros(len(bw_pts), dtype=np.float64)
-        for i in range(1, len(bw_pts)):
-            arc[i] = arc[i - 1] + np.linalg.norm(bw_pts[i] - bw_pts[i - 1])
+        diffs = np.linalg.norm(np.diff(bw_pts, axis=0), axis=1)
+        arc = np.concatenate([[0.0], np.cumsum(diffs)])
 
         # Sample history positions at evenly-spaced backward distances
         seg_idx = 0
@@ -448,10 +451,7 @@ class LaneletSceneBuilder:
         c = self._cache[start_ll_id]
         cl = c.raw_centerline
 
-        # Compute cumulative arc length along centerline
-        arc = np.zeros(len(cl))
-        for i in range(1, len(cl)):
-            arc[i] = arc[i - 1] + np.linalg.norm(cl[i] - cl[i - 1])
+        arc = c.cum_arc_lengths
 
         # Project start_pos onto the centerline: find the segment and parameter
         best_param = 0.0
@@ -474,14 +474,13 @@ class LaneletSceneBuilder:
 
         # Start from the snapped projection point on the centerline
         points = [best_proj.copy()]
+        total_dist = 0.0
         for i in range(len(cl) - 1, -1, -1):
             if arc[i] < best_param - 0.1:
-                if np.linalg.norm(cl[i] - points[-1]) > 0.01:
+                d = float(np.linalg.norm(cl[i] - points[-1]))
+                if d > 0.01:
+                    total_dist += d
                     points.append(cl[i].copy())
-
-        total_dist = sum(
-            np.linalg.norm(points[j] - points[j - 1]) for j in range(1, len(points))
-        )
 
         # Trace through predecessors
         current_ll_id = start_ll_id
@@ -500,11 +499,11 @@ class LaneletSceneBuilder:
                 break
             visited.add(prev_ll.id)
             prev_cl = self._cache[prev_ll.id].raw_centerline
-            # Predecessor exit connects to current entrance: add from exit to entrance
             for pt in prev_cl[::-1]:
-                if np.linalg.norm(pt - points[-1]) > 0.01:
+                d = float(np.linalg.norm(pt - points[-1]))
+                if d > 0.01:
+                    total_dist += d
                     points.append(pt.copy())
-            total_dist += self._cache[prev_ll.id].arc_length
             current_ll_id = prev_ll.id
 
         if len(points) < 2:
@@ -649,10 +648,7 @@ class LaneletSceneBuilder:
             c = self._cache[ll_id]
             cl = c.raw_centerline
 
-            # Random position along centerline via arc-length sampling
-            arc_lengths = np.zeros(len(cl))
-            for j in range(1, len(cl)):
-                arc_lengths[j] = arc_lengths[j - 1] + np.linalg.norm(cl[j] - cl[j - 1])
+            arc_lengths = c.cum_arc_lengths
             total = arc_lengths[-1]
             if total < 1.0:
                 continue
