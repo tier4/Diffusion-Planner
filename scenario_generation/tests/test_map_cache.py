@@ -5,11 +5,6 @@ from __future__ import annotations
 import numpy as np
 
 from scenario_generation.tensor_converter import (
-    MapTensorCache,
-    _build_lanes,
-    _build_line_strings,
-    _build_polygons,
-    _build_static_objects,
     _NUM_LANES,
     _NUM_LINE_STRINGS,
     _NUM_POLYGONS,
@@ -18,6 +13,11 @@ from scenario_generation.tensor_converter import (
     _POINTS_PER_LINE_STRING,
     _POINTS_PER_POLYGON,
     _SEGMENT_POINT_DIM,
+    MapTensorCache,
+    _build_lanes,
+    _build_line_strings,
+    _build_polygons,
+    _build_static_objects,
     to_model_tensors,
 )
 from scenario_generation.transforms import _rotation_matrix

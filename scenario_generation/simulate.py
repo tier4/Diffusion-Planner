@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import argparse
 import math
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
-
-from concurrent.futures import ThreadPoolExecutor
 
 import matplotlib
 
