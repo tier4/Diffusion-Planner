@@ -21,6 +21,8 @@ import math
 from copy import deepcopy
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -255,6 +257,12 @@ def _draw_agent_view(
     plt.close(fig)
 
 
+def _save_and_close(fig, path: Path, dpi: int = 100) -> None:
+    """Save a matplotlib figure and close it. Thread-safe per-figure."""
+    fig.savefig(path, dpi=dpi)
+    plt.close(fig)
+
+
 def _cat_tensor_dicts(
     dicts: list[dict[str, torch.Tensor]],
 ) -> dict[str, torch.Tensor]:
@@ -356,7 +364,13 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
     n_simulated = len(simulated_ids)
     color_map = _build_color_map(scene)
 
-    for step in range(n_steps):
+    # Pre-create per-agent output dirs
+    if per_agent:
+        for agent in scene.agents:
+            (output_dir / agent.id).mkdir(parents=True, exist_ok=True)
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
+      for step in range(n_steps):
         ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
         agent_predictions = _predict_batch(
             model, model_args, scene, ids_to_predict, device,
@@ -415,19 +429,28 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                      f"({n_agents} agents)", fontsize=11)
 
         fig.tight_layout()
-        fig.savefig(output_dir / f"step_{step:03d}.png", dpi=100)
-        plt.close(fig)
 
+        # Submit overview save to thread pool
+        step_futures = [
+            save_pool.submit(_save_and_close, fig, output_dir / f"step_{step:03d}.png"),
+        ]
+
+        # Submit per-agent views to thread pool
         if per_agent:
             for agent in scene.agents:
-                agent_dir = output_dir / agent.id
-                agent_dir.mkdir(parents=True, exist_ok=True)
-                _draw_agent_view(
-                    scene, agent.id, agent_predictions,
-                    world_histories.get(agent.id, []),
-                    step, n_steps, agent_dir / f"step_{step:03d}.png",
-                    color_map=color_map,
+                step_futures.append(
+                    save_pool.submit(
+                        _draw_agent_view,
+                        scene, agent.id, agent_predictions,
+                        world_histories.get(agent.id, []),
+                        step, n_steps, output_dir / agent.id / f"step_{step:03d}.png",
+                        color_map,
+                    )
                 )
+
+        # Drain all saves for this step before advancing scene state
+        for f in step_futures:
+            f.result()
 
         # Advance all agents
         if mode == "semi_closed_loop" and ego_initial_plan is not None and step < len(ego_initial_plan):
