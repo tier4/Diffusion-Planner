@@ -177,8 +177,11 @@ _BASE_JS = r"""
         } else if (isPanning && panPrev) {
             const dx = cx - panPrev.x, dy = cy - panPrev.y;
             panPrev = {x: cx, y: cy};
-            const dwx = (dx / W) * (vx1 - vx0);
-            const dwy = (dy / H) * (vy1 - vy0);
+            // Rotate screen delta by -viewRotation so pan follows cursor when rotated
+            const c = Math.cos(-viewRotation), s = Math.sin(-viewRotation);
+            const rdx = dx * c - dy * s, rdy = dx * s + dy * c;
+            const dwx = (rdx / W) * (vx1 - vx0);
+            const dwy = (rdy / H) * (vy1 - vy0);
             vx0 -= dwx; vx1 -= dwx;
             vy0 += dwy; vy1 += dwy;
             redraw();
