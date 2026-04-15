@@ -10,7 +10,7 @@ import math
 import os
 import random
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 
 import numpy as np
@@ -339,7 +339,8 @@ class LaneletSceneBuilder:
     def find_route(self, start_ll_id: int, min_length_m: float = 120.0) -> list[int]:
         """Find a forward route from start_lanelet of at least min_length_m.
 
-        Uses BFS over routing graph successors with random branch selection.
+        Follows one randomly selected successor at each step until the
+        accumulated arc length reaches min_length_m or a dead end.
         """
         if start_ll_id not in self._ll_by_id:
             return [start_ll_id]
@@ -471,9 +472,8 @@ class LaneletSceneBuilder:
                 best_proj = proj
                 best_param = arc[i] + t
 
-        # Collect points: start_pos, then centerline points with arc < best_param
-        # (these are behind the agent), reversed to go backward
-        points = [start_pos[:2].copy()]
+        # Start from the snapped projection point on the centerline
+        points = [best_proj.copy()]
         for i in range(len(cl) - 1, -1, -1):
             if arc[i] < best_param - 0.1:
                 if np.linalg.norm(cl[i] - points[-1]) > 0.01:
@@ -742,11 +742,19 @@ class LaneletSceneBuilder:
         if not placements:
             raise ValueError("Could not place any agents in the selected area")
 
+        if not any(p.is_ego for p in placements):
+            raise ValueError("Ego placement failed")
+
         # Build agents, collecting all traversed lanelet IDs for the map
         all_lanelet_ids = set(ll_ids)
         agents: list[Agent] = []
-        for i, p in enumerate(placements):
-            agent_id = "ego" if p.is_ego else f"neighbor_{i - 1}"
+        nb_idx = 0
+        for p in placements:
+            if p.is_ego:
+                agent_id = "ego"
+            else:
+                agent_id = f"neighbor_{nb_idx}"
+                nb_idx += 1
 
             # Route (extends beyond selection rect)
             route_ll_ids = self.find_route(p.lanelet_id, route_length_m)

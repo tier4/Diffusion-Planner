@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pickle
 from pathlib import Path
 
 import gradio as gr
-import matplotlib.pyplot as plt
 import numpy as np
 
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
@@ -131,7 +131,7 @@ def build_interface(
             if evt_type == "ego_pose":
                 x, y = evt.x, evt.y
                 heading_deg = evt.heading
-                heading_rad = heading_deg * 3.14159 / 180
+                heading_rad = heading_deg * math.pi / 180
                 info = f"Ego: ({x:.0f}, {y:.0f}) heading={heading_deg:.0f} deg"
                 return (
                     no_change, no_change, no_change, no_change, no_change, no_change, no_change,
@@ -144,7 +144,7 @@ def build_interface(
                 rot = getattr(evt, "rotation", 0.0) or 0.0
                 w = abs(x2 - x1)
                 h = abs(y2 - y1)
-                rot_deg = float(rot) * 180 / 3.14159
+                rot_deg = float(rot) * 180 / math.pi
                 info = f"Selected: {w:.0f}m x {h:.0f}m (rot: {rot_deg:.0f} deg)"
                 rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
                 return (
