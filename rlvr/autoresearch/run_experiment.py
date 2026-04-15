@@ -450,214 +450,259 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
     with open(run_dir / "train_scenes.json", "w") as f:
         json.dump(train_paths, f)
 
-    # Load model
-    policy_model, model_args = load_model(checkpoint_path, DEVICE)
-
-    if grpo_config.use_lora:
-        if seed_lora_path and Path(seed_lora_path).exists():
-            from preference_optimization.lora_utils import load_lora_checkpoint
-            policy_model = load_lora_checkpoint(policy_model, seed_lora_path, is_trainable=True)
-            print(f"Seeded from LoRA: {seed_lora_path}")
-        else:
-            from preference_optimization.lora_utils import (
-                LORA_TARGET_BLOCKS_01_REGEX,
-                LORA_TARGET_FIRST_BLOCK_REGEX,
-                LORA_TARGET_LAST_BLOCK_REGEX,
-                apply_lora,
-            )
-            from preference_optimization.lora_utils import LORA_TARGET_BLOCKS_02_REGEX
-            target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX, "blocks02": LORA_TARGET_BLOCKS_02_REGEX}.get(grpo_config.lora_target)
-            kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
-                         lora_dropout=grpo_config.lora_dropout)
-            if target:
-                kwargs["target_modules"] = target
-            policy_model = apply_lora(policy_model, **kwargs)
-
-    trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
-
-    # Training reward config uses the configured weights (may boost w_progress
-    # to prevent reward hacking where the model learns to stop instead of drive)
-    train_reward_config = RewardConfig(
-        w_safety=grpo_config.w_safety, w_progress=grpo_config.w_progress,
-        w_smooth=grpo_config.w_smooth, w_feasibility=grpo_config.w_feasibility,
-        w_centerline=grpo_config.w_centerline,
-        rb_near_scale=grpo_config.rb_near_scale,
-        rb_wide_scale=grpo_config.rb_wide_scale,
-        rb_cont_scale=grpo_config.rb_cont_scale,
-        rb_gate_enabled=grpo_config.rb_gate_enabled,
-        rb_penalty_mode=grpo_config.rb_penalty_mode,
-        rb_cross_thresh=grpo_config.rb_cross_thresh,
-        rb_near_thresh=grpo_config.rb_near_thresh,
-        rb_wide_thresh=grpo_config.rb_wide_thresh,
-        rb_cont_thresh=grpo_config.rb_cont_thresh,
-        max_lat_accel=grpo_config.max_lat_accel,
-        lat_accel_scale=grpo_config.lat_accel_scale,
-        enable_overprogress=grpo_config.enable_overprogress,
-        overprogress_margin=grpo_config.overprogress_margin,
-        overprogress_penalty=grpo_config.overprogress_penalty,
-        stopped_penalty=grpo_config.stopped_penalty,
-        underprogress_penalty=grpo_config.underprogress_penalty,
-        underprogress_threshold=grpo_config.underprogress_threshold,
-        progress_norm_scale=grpo_config.progress_norm_scale,
-        enable_lane_departure=grpo_config.enable_lane_departure,
-        lane_gate_enabled=grpo_config.lane_gate_enabled,
-        lane_near_scale=grpo_config.lane_near_scale,
-        lane_wide_scale=grpo_config.lane_wide_scale,
-        lane_cont_scale=grpo_config.lane_cont_scale,
-        lane_near_thresh=grpo_config.lane_near_thresh,
-        lane_wide_thresh=grpo_config.lane_wide_thresh,
-        lane_cont_thresh=grpo_config.lane_cont_thresh,
-        reward_mode=grpo_config.reward_mode,
+    # Initialize wandb logging (no-op if disabled in config)
+    from rlvr.wandb_logger import WandbLogger
+    wandb_log = WandbLogger.from_config(
+        grpo_config,
+        run_dir=str(run_dir),
+        run_name=name,
+        extra_tags=["autoresearch"],
+        extra_config={
+            "n_prob_scenes": n_prob,
+            "n_normal_scenes": n_normal,
+            "n_train_scenes": len(train_paths),
+        },
     )
-    # Eval reward config: standard weights but always check lane departure for metrics
-    eval_reward_config = RewardConfig(enable_lane_departure=True)
 
-    if grpo_config.use_closed_loop:
-        from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer
-        trainer = ClosedLoopExplorationTrainer(
-            policy_model=policy_model, model_args=model_args,
-            dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
-            config=grpo_config, use_lora=grpo_config.use_lora,
-        )
-    elif grpo_config.use_exploration_policy:
-        from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
-        trainer = GRPOExplorationTrainer(
-            policy_model=policy_model, model_args=model_args,
-            dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
-            config=grpo_config, use_lora=grpo_config.use_lora,
-        )
-    else:
-        trainer = GRPOTrainer(
-            policy_model=policy_model, model_args=model_args,
-            optimizer=optimizer, device=DEVICE, run_dir=run_dir,
-            config=grpo_config, use_lora=grpo_config.use_lora,
-        )
-
-    # Evaluate base model (can skip if baseline numbers are already known)
-    if skip_baseline:
-        print("\nSkipping base model evaluation (--skip_baseline)")
-        base_prob = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
-        base_val = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
-    else:
-        print("\nBase model evaluation:")
-        base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")
-        base_val = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, "base-val")
-
-    trainer._eval_scene_paths = val_50
-
-    # Training loop
+    # Initialize before try so finally block never hits UnboundLocalError
     start_time = time.time()
     best_epoch = 0
-    best_prob_reward = base_prob["reward_mean"]
-    best_prob_rb_crossings = base_prob["rb_crossings"]
-    best_val_reward = base_val["reward_mean"]
-    best_val_collision = base_val["collision_rate"]
+    best_prob_reward = float("-inf")
+    best_prob_rb_crossings = 999
+    best_val_reward = float("-inf")
+    best_val_collision = 1.0
+    duration = 0.0
     best_checkpoint = ""
 
-    args_dict = {"exp_name": name}
+    try:
+        # Load model
+        policy_model, model_args = load_model(checkpoint_path, DEVICE)
 
-    for epoch in range(1, grpo_config.train_epochs + 1):
-        print(f"\n--- Epoch {epoch}/{grpo_config.train_epochs} ---")
-
-        if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
-            trainer.save_epoch1_baselines(train_paths)
-
-        if not grpo_config.use_exploration_policy and not grpo_config.use_closed_loop:
-            if grpo_config.ranked_sft_mode != "none":
-                # Ranked SFT: generate N trajs, pick best, SFT on it
-                from rlvr.grpo_sft_trainer import train_epoch_ranked_sft
-
-                # Optionally load a pre-trained exploration policy for guided generation
-                _explorer = None
-                if grpo_config.ranked_sft_use_explorer and grpo_config.exploration_checkpoint_path:
-                    from pathlib import Path as _P
-
-                    from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
-                    _ckpt = _P(grpo_config.exploration_checkpoint_path)
-                    if not _ckpt.exists():
-                        print(f"  WARNING: exploration_checkpoint_path not found: {_ckpt}")
-                        print(f"  Falling back to standard generation (no explorer)")
-                    elif not hasattr(run, '_cached_explorer') or getattr(run, '_cached_explorer_path', None) != str(_ckpt):
-                        _ep_cfg = ExplorationPolicyConfig(
-                            hidden_dim=grpo_config.exploration_hidden_dim,
-                            n_mixer_layers=grpo_config.exploration_n_mixer_layers,
-                            n_attn_heads=grpo_config.exploration_n_attn_heads,
-                            dropout=grpo_config.exploration_dropout,
-                            encoder_hidden_dim=model_args.hidden_dim,
-                            head_init=grpo_config.exploration_head_init,
-                            head_raw_scale=grpo_config.exploration_head_raw_scale,
-                        )
-                        run._cached_explorer = ExplorationPolicy(
-                            _ep_cfg, ref_seq_len=model_args.future_len,
-                        ).to(DEVICE)
-                        _state = torch.load(_ckpt, map_location=DEVICE, weights_only=False)
-                        run._cached_explorer.load_state_dict(_state, strict=False)
-                        run._cached_explorer.eval()
-                        run._cached_explorer_path = str(_ckpt)
-                        print(f"  Loaded frozen explorer from {_ckpt}")
-                    _explorer = getattr(run, '_cached_explorer', None)
-
-                # Create explorer optimizer if training jointly
-                _explorer_opt = None
-                if _explorer is not None and not grpo_config.ranked_sft_freeze_explorer:
-                    if not hasattr(run, '_cached_explorer_opt'):
-                        run._cached_explorer_opt = torch.optim.AdamW(
-                            _explorer.parameters(), lr=grpo_config.exploration_lr,
-                        )
-                    _explorer_opt = run._cached_explorer_opt
-
-                metrics = train_epoch_ranked_sft(
-                    model=policy_model, model_args=model_args, optimizer=optimizer,
-                    scene_paths=train_paths, config=grpo_config,
-                    reward_config=train_reward_config, device=DEVICE, epoch=epoch,
-                    exploration_policy=_explorer,
-                    exploration_optimizer=_explorer_opt,
-                )
+        if grpo_config.use_lora:
+            if seed_lora_path and Path(seed_lora_path).exists():
+                from preference_optimization.lora_utils import load_lora_checkpoint
+                policy_model = load_lora_checkpoint(policy_model, seed_lora_path, is_trainable=True)
+                print(f"Seeded from LoRA: {seed_lora_path}")
             else:
-                # Fully batched training: all scenes in ~5 forward passes
-                from rlvr.grpo_trainer_batched import train_epoch_batched
-                metrics = train_epoch_batched(
-                    model=policy_model, model_args=model_args, optimizer=optimizer,
-                    scene_paths=train_paths, config=grpo_config,
-                    reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                from preference_optimization.lora_utils import (
+                    LORA_TARGET_BLOCKS_01_REGEX,
+                    LORA_TARGET_FIRST_BLOCK_REGEX,
+                    LORA_TARGET_LAST_BLOCK_REGEX,
+                    apply_lora,
                 )
+                from preference_optimization.lora_utils import LORA_TARGET_BLOCKS_02_REGEX
+                target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX, "blocks02": LORA_TARGET_BLOCKS_02_REGEX}.get(grpo_config.lora_target)
+                kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
+                             lora_dropout=grpo_config.lora_dropout)
+                if target:
+                    kwargs["target_modules"] = target
+                policy_model = apply_lora(policy_model, **kwargs)
+
+        trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
+
+        # Training reward config uses the configured weights (may boost w_progress
+        # to prevent reward hacking where the model learns to stop instead of drive)
+        train_reward_config = RewardConfig(
+            w_safety=grpo_config.w_safety, w_progress=grpo_config.w_progress,
+            w_smooth=grpo_config.w_smooth, w_feasibility=grpo_config.w_feasibility,
+            w_centerline=grpo_config.w_centerline,
+            rb_near_scale=grpo_config.rb_near_scale,
+            rb_wide_scale=grpo_config.rb_wide_scale,
+            rb_cont_scale=grpo_config.rb_cont_scale,
+            rb_gate_enabled=grpo_config.rb_gate_enabled,
+            rb_penalty_mode=grpo_config.rb_penalty_mode,
+            rb_cross_thresh=grpo_config.rb_cross_thresh,
+            rb_near_thresh=grpo_config.rb_near_thresh,
+            rb_wide_thresh=grpo_config.rb_wide_thresh,
+            rb_cont_thresh=grpo_config.rb_cont_thresh,
+            max_lat_accel=grpo_config.max_lat_accel,
+            lat_accel_scale=grpo_config.lat_accel_scale,
+            enable_overprogress=grpo_config.enable_overprogress,
+            overprogress_margin=grpo_config.overprogress_margin,
+            overprogress_penalty=grpo_config.overprogress_penalty,
+            stopped_penalty=grpo_config.stopped_penalty,
+            underprogress_penalty=grpo_config.underprogress_penalty,
+            underprogress_threshold=grpo_config.underprogress_threshold,
+            progress_norm_scale=grpo_config.progress_norm_scale,
+            enable_lane_departure=grpo_config.enable_lane_departure,
+            lane_gate_enabled=grpo_config.lane_gate_enabled,
+            lane_near_scale=grpo_config.lane_near_scale,
+            lane_wide_scale=grpo_config.lane_wide_scale,
+            lane_cont_scale=grpo_config.lane_cont_scale,
+            lane_near_thresh=grpo_config.lane_near_thresh,
+            lane_wide_thresh=grpo_config.lane_wide_thresh,
+            lane_cont_thresh=grpo_config.lane_cont_thresh,
+            reward_mode=grpo_config.reward_mode,
+        )
+        # Eval reward config: standard weights but always check lane departure for metrics
+        eval_reward_config = RewardConfig(enable_lane_departure=True)
+
+        if grpo_config.use_closed_loop:
+            from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer
+            trainer = ClosedLoopExplorationTrainer(
+                policy_model=policy_model, model_args=model_args,
+                dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+                config=grpo_config, use_lora=grpo_config.use_lora,
+            )
+        elif grpo_config.use_exploration_policy:
+            from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
+            trainer = GRPOExplorationTrainer(
+                policy_model=policy_model, model_args=model_args,
+                dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+                config=grpo_config, use_lora=grpo_config.use_lora,
+            )
         else:
-            metrics = trainer.train_epoch(train_paths, epoch)
-        trainer.log_metrics(epoch, metrics)
-        trainer.save_checkpoint(epoch, args_dict)
+            trainer = GRPOTrainer(
+                policy_model=policy_model, model_args=model_args,
+                optimizer=optimizer, device=DEVICE, run_dir=run_dir,
+                config=grpo_config, use_lora=grpo_config.use_lora,
+            )
 
-        prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob", baseline_cache=baseline_cache)
-        val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val", baseline_cache=baseline_cache)
+        # Evaluate base model (can skip if baseline numbers are already known)
+        if skip_baseline:
+            print("\nSkipping base model evaluation (--skip_baseline)")
+            base_prob = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
+            base_val = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
+        else:
+            print("\nBase model evaluation:")
+            base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")
+            base_val = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, "base-val")
 
-        # Track best: highest prob deterministic reward (with val sanity check > -5)
-        is_better = (prob_result["reward_mean"] > best_prob_reward
-                     and val_eval["reward_mean"] > -5)
+        trainer._eval_scene_paths = val_50
 
-        if is_better:
-            best_prob_reward = prob_result["reward_mean"]
-            best_prob_rb_crossings = prob_result["rb_crossings"]
-            best_val_reward = val_eval["reward_mean"]
-            best_val_collision = val_eval["collision_rate"]
-            best_epoch = epoch
-            if grpo_config.use_lora:
-                best_checkpoint = str(run_dir / f"lora_epoch_{epoch:03d}")
+        # Update best trackers from baseline eval
+        best_prob_reward = base_prob["reward_mean"]
+        best_prob_rb_crossings = base_prob["rb_crossings"]
+        best_val_reward = base_val["reward_mean"]
+        best_val_collision = base_val["collision_rate"]
+
+        args_dict = {"exp_name": name}
+
+        for epoch in range(1, grpo_config.train_epochs + 1):
+            print(f"\n--- Epoch {epoch}/{grpo_config.train_epochs} ---")
+
+            if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
+                trainer.save_epoch1_baselines(train_paths)
+
+            if not grpo_config.use_exploration_policy and not grpo_config.use_closed_loop:
+                if grpo_config.ranked_sft_mode != "none":
+                    # Ranked SFT: generate N trajs, pick best, SFT on it
+                    from rlvr.grpo_sft_trainer import train_epoch_ranked_sft
+
+                    # Optionally load a pre-trained exploration policy for guided generation
+                    _explorer = None
+                    if grpo_config.ranked_sft_use_explorer and grpo_config.exploration_checkpoint_path:
+                        from pathlib import Path as _P
+
+                        from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
+                        _ckpt = _P(grpo_config.exploration_checkpoint_path)
+                        if not _ckpt.exists():
+                            print(f"  WARNING: exploration_checkpoint_path not found: {_ckpt}")
+                            print(f"  Falling back to standard generation (no explorer)")
+                        elif not hasattr(run, '_cached_explorer') or getattr(run, '_cached_explorer_path', None) != str(_ckpt):
+                            _ep_cfg = ExplorationPolicyConfig(
+                                hidden_dim=grpo_config.exploration_hidden_dim,
+                                n_mixer_layers=grpo_config.exploration_n_mixer_layers,
+                                n_attn_heads=grpo_config.exploration_n_attn_heads,
+                                dropout=grpo_config.exploration_dropout,
+                                encoder_hidden_dim=model_args.hidden_dim,
+                                head_init=grpo_config.exploration_head_init,
+                                head_raw_scale=grpo_config.exploration_head_raw_scale,
+                            )
+                            run._cached_explorer = ExplorationPolicy(
+                                _ep_cfg, ref_seq_len=model_args.future_len,
+                            ).to(DEVICE)
+                            _state = torch.load(_ckpt, map_location=DEVICE, weights_only=False)
+                            run._cached_explorer.load_state_dict(_state, strict=False)
+                            run._cached_explorer.eval()
+                            run._cached_explorer_path = str(_ckpt)
+                            print(f"  Loaded frozen explorer from {_ckpt}")
+                        _explorer = getattr(run, '_cached_explorer', None)
+
+                    # Create explorer optimizer if training jointly
+                    _explorer_opt = None
+                    if _explorer is not None and not grpo_config.ranked_sft_freeze_explorer:
+                        if not hasattr(run, '_cached_explorer_opt'):
+                            run._cached_explorer_opt = torch.optim.AdamW(
+                                _explorer.parameters(), lr=grpo_config.exploration_lr,
+                            )
+                        _explorer_opt = run._cached_explorer_opt
+
+                    metrics = train_epoch_ranked_sft(
+                        model=policy_model, model_args=model_args, optimizer=optimizer,
+                        scene_paths=train_paths, config=grpo_config,
+                        reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                        exploration_policy=_explorer,
+                        exploration_optimizer=_explorer_opt,
+                        run_dir=run_dir,
+                    )
+                else:
+                    # Fully batched training: all scenes in ~5 forward passes
+                    from rlvr.grpo_trainer_batched import train_epoch_batched
+                    metrics = train_epoch_batched(
+                        model=policy_model, model_args=model_args, optimizer=optimizer,
+                        scene_paths=train_paths, config=grpo_config,
+                        reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                    )
             else:
-                best_checkpoint = str(run_dir / "latest.pth")
+                metrics = trainer.train_epoch(train_paths, epoch)
+            trainer.log_metrics(epoch, metrics)
+            trainer.save_checkpoint(epoch, args_dict)
 
-        # Early stopping: val collapsed
-        if val_eval["reward_mean"] < -20:
-            print(f"  Val collapsed ({val_eval['reward_mean']:.1f}), stopping early")
-            break
+            prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob", baseline_cache=baseline_cache)
+            val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val", baseline_cache=baseline_cache)
 
-    duration = (time.time() - start_time) / 60
+            # Log to wandb
+            wandb_log.log_training(epoch, metrics)
+            wandb_log.log_eval(epoch, prob_result=prob_result, val_result=val_eval)
+            _ra_path = run_dir / f"rank_analytics_epoch_{epoch:03d}.json"
+            if _ra_path.exists():
+                with open(_ra_path) as _f:
+                    wandb_log.log_rank_analytics(epoch, json.load(_f))
 
-    # Keep ALL checkpoints — don't delete anything. Disk space is cheap,
-    # losing the best checkpoint is not.
+            # Track best: highest prob deterministic reward (with val sanity check > -5)
+            is_better = (prob_result["reward_mean"] > best_prob_reward
+                         and val_eval["reward_mean"] > -5)
 
-    # Generate trajectory visualization for the best checkpoint
-    if best_checkpoint and Path(best_checkpoint).exists():
-        _visualize_trajectories(policy_model, model_args, prob_100, eval_reward_config, run_dir, name)
+            if is_better:
+                best_prob_reward = prob_result["reward_mean"]
+                best_prob_rb_crossings = prob_result["rb_crossings"]
+                best_val_reward = val_eval["reward_mean"]
+                best_val_collision = val_eval["collision_rate"]
+                best_epoch = epoch
+                if grpo_config.use_lora:
+                    best_checkpoint = str(run_dir / f"lora_epoch_{epoch:03d}")
+                else:
+                    best_checkpoint = str(run_dir / "latest.pth")
+
+            # Early stopping: val collapsed
+            if val_eval["reward_mean"] < -20:
+                print(f"  Val collapsed ({val_eval['reward_mean']:.1f}), stopping early")
+                break
+
+        # Keep ALL checkpoints — don't delete anything. Disk space is cheap,
+        # losing the best checkpoint is not.
+
+        # Generate trajectory visualization for the best checkpoint
+        if best_checkpoint and Path(best_checkpoint).exists():
+            _visualize_trajectories(policy_model, model_args, prob_100, eval_reward_config, run_dir, name)
+
+        # Cross-epoch rank analytics summary
+        try:
+            from rlvr.rank_analytics import save_cross_epoch_summary
+            save_cross_epoch_summary(run_dir)
+        except Exception as e:
+            print(f"  [rank_analytics] Cross-epoch summary failed: {e}")
+    finally:
+        duration = (time.time() - start_time) / 60
+        wandb_log.finish({
+            "best_epoch": best_epoch,
+            "best_prob_reward": best_prob_reward,
+            "best_prob_rb_crossings": best_prob_rb_crossings,
+            "best_val_reward": best_val_reward,
+            "duration_min": duration,
+        })
 
     # Print final summary (machine-parseable)
     print("\n---")

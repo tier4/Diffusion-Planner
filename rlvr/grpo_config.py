@@ -83,6 +83,12 @@ class GRPOConfig:
     guidance_prob: float = 0.5
     prototypes_path: str | None = None
 
+    # Generation variant — selects the 16-slot composition for ranked SFT.
+    # Defined in rlvr/generation_variants.py. Use rlvr.generation_variants.list_variants()
+    # for the canonical list. Default is "rsft_v2" (best L2 preservation as of April 2026).
+    # "default" reproduces the pre-variant-system layout (8 cl_spd + 7 random).
+    generation_variant: str = "rsft_v2"
+
     # Reward weights
     w_safety: float = 5.0
     w_progress: float = 2.0
@@ -350,6 +356,11 @@ class GRPOConfig:
     #     "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 1.0}
     #   }
     schedules: dict = field(default_factory=dict)
+
+    # Weights & Biases logging
+    wandb_enabled: bool = False
+    wandb_project: str = "rlvr-training"
+    wandb_entity: str = ""  # empty = resolved from WANDB_ENTITY env var
 
     # Backward compat: old field names → new field names
     _FIELD_RENAMES: ClassVar[dict[str, str]] = {

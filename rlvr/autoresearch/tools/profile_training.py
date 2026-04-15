@@ -256,6 +256,7 @@ def profile_rsft(model, model_args, scene_paths, config_path: str | None, profil
         model=model, model_args=model_args, optimizer=optimizer,
         scene_paths=scene_paths, config=config,
         reward_config=reward_config, device=DEVICE, epoch=epoch,
+        run_dir=None,
     )
 
     total_wall = time.perf_counter() - wall_start

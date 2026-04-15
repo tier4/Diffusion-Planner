@@ -196,32 +196,47 @@ def _run_rule_mode(
     # Fix evaluation scenes from validation set (sampled once, reused every epoch)
     trainer.setup_eval_scenes(valid_npz_paths, n_scenes=50)
 
-    # Evaluate base model before any training (epoch 0)
-    print("\nEvaluating base model (epoch 0)...")
-    trainer.evaluate_rewards(epoch=0)
+    # Initialize wandb logging (no-op if disabled in config)
+    from rlvr.wandb_logger import WandbLogger
+    wandb_log = WandbLogger.from_config(
+        trainer.config,
+        run_dir=str(trainer.run_dir),
+        run_name=args.exp_name,
+        extra_tags=["standalone"],
+    )
 
-    print(f"\nStarting GRPO training for {trainer.config.train_epochs} epochs...")
-    print("=" * 60)
+    try:
+        # Evaluate base model before any training (epoch 0)
+        print("\nEvaluating base model (epoch 0)...")
+        trainer.evaluate_rewards(epoch=0)
 
-    total_epochs = trainer.config.train_epochs
-    for epoch in range(1, total_epochs + 1):
-        print(f"\nEpoch {epoch}/{total_epochs}")
-        print("-" * 60)
+        print(f"\nStarting GRPO training for {trainer.config.train_epochs} epochs...")
+        print("=" * 60)
 
-        if drift_info:
-            print(f"  {drift_info}")
+        total_epochs = trainer.config.train_epochs
+        for epoch in range(1, total_epochs + 1):
+            print(f"\nEpoch {epoch}/{total_epochs}")
+            print("-" * 60)
 
-        if epoch == 1:
-            trainer.save_epoch1_baselines(train_npz_paths)
+            if drift_info:
+                print(f"  {drift_info}")
 
-        metrics = trainer.train_epoch(train_npz_paths, epoch)
+            if epoch == 1:
+                trainer.save_epoch1_baselines(train_npz_paths)
 
-        drift_info = trainer.compute_trajectory_drift()
-        trainer.log_metrics(epoch, metrics)
-        trainer.save_checkpoint(epoch, args_dict)
-        trainer.evaluate_rewards(epoch)
+            metrics = trainer.train_epoch(train_npz_paths, epoch)
 
-        print("-" * 60)
+            drift_info = trainer.compute_trajectory_drift()
+            trainer.log_metrics(epoch, metrics)
+            trainer.save_checkpoint(epoch, args_dict)
+            eval_result = trainer.evaluate_rewards(epoch)
+
+            wandb_log.log_training(epoch, metrics)
+            wandb_log.log_eval(epoch, val_result=eval_result)
+
+            print("-" * 60)
+    finally:
+        wandb_log.finish()
 
     print("\n" + "=" * 60)
     print("Training complete!")
