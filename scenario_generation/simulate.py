@@ -22,6 +22,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -154,8 +155,14 @@ def _draw_agent_view(
 ):
     """Render a zoomed view centered on a single agent."""
     from scenario_generation.visualize import (
-        draw_agent_box, draw_lanes, draw_road_borders, draw_route,
-        draw_stop_lines, draw_trajectory, _EGO_COLOR, _agent_color,
+        _EGO_COLOR,
+        _agent_color,
+        draw_agent_box,
+        draw_lanes,
+        draw_road_borders,
+        draw_route,
+        draw_stop_lines,
+        draw_trajectory,
     )
 
     agent = scene.get_agent(agent_id)
@@ -163,7 +170,7 @@ def _draw_agent_view(
     heading = agent.current_heading
     color = (color_map or {}).get(agent_id, _EGO_COLOR)
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
 
     # Map elements
     draw_lanes(ax, scene.map_data)
@@ -198,7 +205,7 @@ def _draw_agent_view(
             pred[:, :2], pred[:, 2:4], float(pos[0]), float(pos[1]), heading,
         )
         plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
-        draw_trajectory(ax, plan_traj, "#ff4444", label="Plan", lw=2, zorder=25,
+        draw_trajectory(ax, plan_traj, "#3366cc", label="Plan", lw=2, zorder=25,
                         show_footprints=True, length=agent.length, width=agent.width)
 
     # Route
@@ -244,7 +251,7 @@ def _draw_agent_view(
     ax.set_title(f"{agent_id}  step {step:03d}  t={step * 0.1:.1f}s", fontsize=11)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=100, bbox_inches="tight")
+    fig.savefig(output_path, dpi=100)
     plt.close(fig)
 
 
@@ -260,36 +267,28 @@ def _predict_as_ego(model, model_args, scene: SceneContext,
 
 @torch.no_grad()
 def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
-                   output_dir: Path, device: str = "cuda", per_agent: bool = False):
-    """Run closed-loop simulation with every agent planned as ego.
+                   output_dir: Path, device: str = "cuda", per_agent: bool = False,
+                   mode: str = "closed_loop"):
+    """Run simulation with configurable ego behavior.
 
-    At each step, every agent gets its own forward pass as ego. Each agent
-    is advanced using step 0 of its own ego prediction.
-
-    Args:
-        model: Loaded Diffusion-Planner model.
-        model_args: Model configuration.
-        scene: Initial scene state.
-        n_steps: Number of simulation steps.
-        output_dir: Directory to save images.
-        device: Torch device.
+    Modes:
+        closed_loop: All agents (ego + neighbors) re-planned every step.
+        semi_closed_loop: Ego follows its initial full trajectory prediction.
+            Only neighbors get per-step re-planning.
     """
+    if mode not in ("closed_loop", "semi_closed_loop"):
+        raise ValueError(f"Unknown mode {mode!r}. Use 'closed_loop' or 'semi_closed_loop'.")
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Work on a copy to avoid mutating the caller's scene
     scene = deepcopy(scene)
     ego_id = scene.ego_agent_id
 
-    # Remove non-vehicle agents
     scene.agents = [a for a in scene.agents if a.agent_type == AgentType.VEHICLE]
     n_agents = len(scene.agents)
 
-    # Track world trajectories for all agents
     world_histories: dict[str, list[np.ndarray]] = {}
     for agent in scene.agents:
         world_histories[agent.id] = [agent.current_position.copy()]
 
-    # Identify static agents: low speed and goal within 1m
     static_ids: set[str] = set()
     for agent in scene.agents:
         if agent.id == ego_id:
@@ -302,13 +301,25 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         print(f"Static agents (speed<0.5, goal<1m): {static_ids}")
 
     simulated_ids = {a.id for a in scene.agents} - static_ids
-    n_simulated = len(simulated_ids)
 
-    # Stable color assignment for all agents
+    # In semi-closed-loop, ego prediction is computed once at step 0
+    ego_initial_plan = None
+    if mode == "semi_closed_loop":
+        ego_agent = scene.get_agent(ego_id)
+        ego_pred = _predict_as_ego(model, model_args, scene, ego_id, device)
+        ax0, ay0 = ego_agent.current_position
+        ah0 = ego_agent.current_heading
+        plan_xy, plan_h = _ego_to_world(
+            ego_pred[:, :2], ego_pred[:, 2:4], float(ax0), float(ay0), ah0,
+        )
+        ego_initial_plan = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
+        simulated_ids.discard(ego_id)
+        print(f"Semi-closed-loop: ego follows initial {len(ego_initial_plan)}-step plan")
+
+    n_simulated = len(simulated_ids)
     color_map = _build_color_map(scene)
 
     for step in range(n_steps):
-        # Run model for every simulated agent as ego
         agent_predictions: dict[str, np.ndarray] = {}
         for agent in scene.agents:
             if agent.id not in simulated_ids:
@@ -316,13 +327,14 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
             pred = _predict_as_ego(model, model_args, scene, agent.id, device)
             agent_predictions[agent.id] = pred
 
-        print(f"Step {step:03d}/{n_steps}  ({n_simulated} vehicles simulated, {n_agents} total)")
+        mode_label = "CL" if mode == "closed_loop" else "semi-CL"
+        print(f"[{mode_label}] Step {step:03d}/{n_steps}  "
+              f"({n_simulated} re-planned, {n_agents} total)")
 
         # --- Visualize ---
-        fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
         draw_scene(ax, scene, ego_id)
 
-        # Draw planned trajectories for simulated agents (in world frame)
         from scenario_generation.visualize import _agent_color
         nb_idx = 0
         for agent in scene.agents:
@@ -337,7 +349,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
             plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
 
             if agent.id == ego_id:
-                color = "#ff4444"
+                color = "#3366cc"
                 label = "Ego plan"
                 zorder = 25
             else:
@@ -350,19 +362,27 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                             show_footprints=(agent.id == ego_id),
                             length=agent.length, width=agent.width)
 
-        # Draw world path history for ego
-        hist = world_histories[ego_id]
+        # Draw ego initial plan in semi-closed-loop
+        if ego_initial_plan is not None:
+            remaining = ego_initial_plan[step:]
+            if len(remaining) > 1:
+                draw_trajectory(ax, remaining, "#3366cc", label="Ego plan (fixed)",
+                                lw=1.5, zorder=25, show_footprints=True,
+                                length=scene.get_agent(ego_id).length,
+                                width=scene.get_agent(ego_id).width)
+
+        hist = world_histories.get(ego_id, [])
         if len(hist) > 1:
             h = np.array(hist)
             ax.plot(h[:, 0], h[:, 1], "-", color="#3366cc", lw=2, alpha=0.8, zorder=22)
 
-        ax.set_title(f"Step {step:03d} / {n_steps}  t={step * 0.1:.1f}s  ({n_agents} agents)", fontsize=11)
+        ax.set_title(f"[{mode_label}] Step {step:03d}/{n_steps}  t={step*0.1:.1f}s  "
+                     f"({n_agents} agents)", fontsize=11)
 
         fig.tight_layout()
-        fig.savefig(output_dir / f"step_{step:03d}.png", dpi=100, bbox_inches="tight")
+        fig.savefig(output_dir / f"step_{step:03d}.png", dpi=100)
         plt.close(fig)
 
-        # Per-agent zoomed views
         if per_agent:
             for agent in scene.agents:
                 agent_dir = output_dir / agent.id
@@ -375,6 +395,10 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                 )
 
         # Advance all agents
+        if mode == "semi_closed_loop" and ego_initial_plan is not None and step < len(ego_initial_plan):
+            wp = ego_initial_plan[step]
+            _advance_agent(scene.get_agent(ego_id),
+                           np.array([wp[0], wp[1], wp[2]], dtype=np.float32))
         advance_scene(scene, agent_predictions)
         for agent in scene.agents:
             world_histories[agent.id].append(agent.current_position.copy())
@@ -393,6 +417,11 @@ def main():
                         help="Set neighbor goals and routes from their GT future trajectories")
     parser.add_argument("--per_agent", action="store_true",
                         help="Save per-agent zoomed images in addition to the overview")
+    parser.add_argument("--mode", choices=["closed_loop", "semi_closed_loop"],
+                        default="closed_loop",
+                        help="closed_loop: all agents re-planned each step. "
+                             "semi_closed_loop: ego follows initial trajectory, "
+                             "neighbors re-planned.")
     args = parser.parse_args()
 
     device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
@@ -408,7 +437,7 @@ def main():
         print(f"Assigned GT goals and routes to {n} agents")
 
     run_simulation(model, model_args, scene, args.steps, args.output_dir, device,
-                   per_agent=args.per_agent)
+                   per_agent=args.per_agent, mode=args.mode)
 
 
 if __name__ == "__main__":
