@@ -364,10 +364,10 @@ class MapTensorCache:
 
         # speed limits (no per-agent transform needed)
         self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
-        self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
         n_sl = min(map_data.lanes_speed_limit.shape[0], _NUM_LANES)
         self._lanes_speed_limit[0, :n_sl] = map_data.lanes_speed_limit[:n_sl].astype(np.float32)
-        self._lanes_has_speed_limit[0, :n_sl] = map_data.lanes_has_speed_limit[:n_sl].astype(np.float32)
+        self._lanes_has_speed_limit[0, :n_sl] = map_data.lanes_has_speed_limit[:n_sl].astype(bool)
 
         # -- static objects: (n, 10) --
         n_static = min(map_data.static_objects.shape[0], _NUM_STATIC)

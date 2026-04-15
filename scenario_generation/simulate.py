@@ -289,20 +289,28 @@ def _predict_as_ego(model, model_args, scene: SceneContext,
 def _predict_batch(
     model, model_args, scene: SceneContext,
     agent_ids: list[str], device: str,
+    map_cache: MapTensorCache | None = None,
 ) -> dict[str, np.ndarray]:
     """Run batched inference for multiple agents-as-ego.
 
     Builds per-agent tensor dicts, concatenates along batch dim,
     runs one forward pass, splits results back per agent.
 
+    Args:
+        map_cache: Optional pre-built MapTensorCache. When the scene's
+            map_data is static across steps, pass a single cache built
+            once to avoid rebuilding every call. Built internally when
+            not provided.
+
     Returns {agent_id: (80, 4) ego-centric prediction}.
     """
     if not agent_ids:
         return {}
 
-    cache = MapTensorCache(scene.map_data)
+    if map_cache is None:
+        map_cache = MapTensorCache(scene.map_data)
     tensor_dicts = [
-        to_model_tensors(scene, aid, model_args, device, map_cache=cache)
+        to_model_tensors(scene, aid, model_args, device, map_cache=map_cache)
         for aid in agent_ids
     ]
 
@@ -376,11 +384,15 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         for agent in scene.agents:
             (output_dir / agent.id).mkdir(parents=True, exist_ok=True)
 
+    # Build map cache once; map_data is static across simulation steps
+    map_cache = MapTensorCache(scene.map_data)
+
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
         for step in range(n_steps):
             ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
             agent_predictions = _predict_batch(
                 model, model_args, scene, ids_to_predict, device,
+                map_cache=map_cache,
             )
 
             mode_label = "CL" if mode == "closed_loop" else "semi-CL"

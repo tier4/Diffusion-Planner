@@ -83,6 +83,7 @@ def _make_large_scene(n_agents: int = 8) -> SceneContext:
     )
 
 
+@pytest.mark.benchmark
 class TestMapCacheProfile:
     """Profile MapTensorCache vs uncached conversion."""
 
@@ -131,6 +132,7 @@ class TestMapCacheProfile:
         # Only log; no timing assertion (flaky in CI)
 
 
+@pytest.mark.benchmark
 class TestMapOnlyProfile:
     """Profile just the map tensor transforms (isolated from agent tensors)."""
 
@@ -170,6 +172,7 @@ class TestMapOnlyProfile:
         print(f"  Speedup:  {speedup:.2f}x")
 
 
+@pytest.mark.benchmark
 class TestArcLengthProfile:
     """Profile vectorized vs loop arc-length computation."""
 
@@ -203,6 +206,7 @@ class TestArcLengthProfile:
         np.testing.assert_allclose(arc, arc_v, atol=1e-10)
 
 
+@pytest.mark.benchmark
 class TestBatchInferenceProfile:
     """Profile batched vs sequential tensor dict concatenation."""
 

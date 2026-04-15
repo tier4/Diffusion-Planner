@@ -1,6 +1,11 @@
 """Shared pytest fixtures for scenario_generation tests."""
+# ruff: noqa: I001, E402
 
 from __future__ import annotations
+
+# Select Agg backend before any pyplot import in the test session (headless CI).
+import matplotlib
+matplotlib.use("Agg")
 
 from pathlib import Path
 
