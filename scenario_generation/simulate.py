@@ -276,6 +276,8 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         semi_closed_loop: Ego follows its initial full trajectory prediction.
             Only neighbors get per-step re-planning.
     """
+    if mode not in ("closed_loop", "semi_closed_loop"):
+        raise ValueError(f"Unknown mode {mode!r}. Use 'closed_loop' or 'semi_closed_loop'.")
     output_dir.mkdir(parents=True, exist_ok=True)
     scene = deepcopy(scene)
     ego_id = scene.ego_agent_id
@@ -324,14 +326,6 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                 continue
             pred = _predict_as_ego(model, model_args, scene, agent.id, device)
             agent_predictions[agent.id] = pred
-
-        # Ego: use initial plan in semi-closed-loop, or the fresh prediction
-        if mode == "semi_closed_loop" and ego_initial_plan is not None:
-            if step < len(ego_initial_plan):
-                wp = ego_initial_plan[step]
-                _advance_agent(scene.get_agent(ego_id),
-                               np.array([wp[0], wp[1], wp[2]], dtype=np.float32))
-            world_histories[ego_id].append(scene.get_agent(ego_id).current_position.copy())
 
         mode_label = "CL" if mode == "closed_loop" else "semi-CL"
         print(f"[{mode_label}] Step {step:03d}/{n_steps}  "
@@ -400,16 +394,14 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                     color_map=color_map,
                 )
 
-        # Advance neighbors (ego already advanced above in semi-CL)
-        if mode == "closed_loop":
-            advance_scene(scene, agent_predictions)
-            for agent in scene.agents:
-                world_histories[agent.id].append(agent.current_position.copy())
-        else:
-            advance_scene(scene, agent_predictions)
-            for agent in scene.agents:
-                if agent.id != ego_id:
-                    world_histories[agent.id].append(agent.current_position.copy())
+        # Advance all agents
+        if mode == "semi_closed_loop" and ego_initial_plan is not None and step < len(ego_initial_plan):
+            wp = ego_initial_plan[step]
+            _advance_agent(scene.get_agent(ego_id),
+                           np.array([wp[0], wp[1], wp[2]], dtype=np.float32))
+        advance_scene(scene, agent_predictions)
+        for agent in scene.agents:
+            world_histories[agent.id].append(agent.current_position.copy())
 
     print(f"Done. {n_steps} frames saved to {output_dir}")
 
