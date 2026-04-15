@@ -32,7 +32,7 @@ import torch
 from scenario_generation.gt_route_extractor import assign_gt_goals_and_routes
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
-from scenario_generation.tensor_converter import to_model_tensors
+from scenario_generation.tensor_converter import MapTensorCache, to_model_tensors
 from scenario_generation.visualize import draw_scene, draw_trajectory
 
 
@@ -290,8 +290,9 @@ def _predict_batch(
     if len(agent_ids) == 1:
         return {agent_ids[0]: _predict_as_ego(model, model_args, scene, agent_ids[0], device)}
 
+    cache = MapTensorCache(scene.map_data)
     tensor_dicts = [
-        to_model_tensors(scene, aid, model_args, device)
+        to_model_tensors(scene, aid, model_args, device, map_cache=cache)
         for aid in agent_ids
     ]
     batched = _cat_tensor_dicts(tensor_dicts)
