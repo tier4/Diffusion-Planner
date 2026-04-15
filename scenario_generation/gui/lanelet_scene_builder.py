@@ -474,14 +474,13 @@ class LaneletSceneBuilder:
 
         # Start from the snapped projection point on the centerline
         points = [best_proj.copy()]
+        total_dist = 0.0
         for i in range(len(cl) - 1, -1, -1):
             if arc[i] < best_param - 0.1:
-                if np.linalg.norm(cl[i] - points[-1]) > 0.01:
+                d = float(np.linalg.norm(cl[i] - points[-1]))
+                if d > 0.01:
+                    total_dist += d
                     points.append(cl[i].copy())
-
-        total_dist = sum(
-            np.linalg.norm(points[j] - points[j - 1]) for j in range(1, len(points))
-        )
 
         # Trace through predecessors
         current_ll_id = start_ll_id
@@ -500,11 +499,11 @@ class LaneletSceneBuilder:
                 break
             visited.add(prev_ll.id)
             prev_cl = self._cache[prev_ll.id].raw_centerline
-            # Predecessor exit connects to current entrance: add from exit to entrance
             for pt in prev_cl[::-1]:
-                if np.linalg.norm(pt - points[-1]) > 0.01:
+                d = float(np.linalg.norm(pt - points[-1]))
+                if d > 0.01:
+                    total_dist += d
                     points.append(pt.copy())
-            total_dist += self._cache[prev_ll.id].arc_length
             current_ll_id = prev_ll.id
 
         if len(points) < 2:
