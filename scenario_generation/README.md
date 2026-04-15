@@ -34,12 +34,14 @@ python -m scenario_generation.simulate \
     --output_dir /path/to/output \
     --steps 80 \
     --use_gt_goals \
-    --per_agent
+    --per_agent \
+    --mode closed_loop
 ```
 
 Flags:
 - `--use_gt_goals` -- Set neighbor goals and routes from GT future trajectories. Removes agents with <10 valid GT timesteps (misdetections).
 - `--per_agent` -- Save per-agent zoomed images in `<output_dir>/<agent_id>/`.
+- `--mode` -- `closed_loop` (all agents re-planned each step) or `semi_closed_loop` (ego follows its initial trajectory, only neighbors re-planned).
 
 ### Python API
 
@@ -74,12 +76,34 @@ The GUI provides:
 - Configurable number of neighbors, speed range, separation distance, and route length
 - Focus mode dropdown to inspect individual agents (full detail for the selected agent, minimal for others)
 - Heading arrows, footprint history, route highlighting, and goal markers for all agents
+- Alt+drag to rotate the map view, Shift+drag to set ego pose and heading
+- Zoom slider for the scene preview, rotation carried over to the rendered view
+- Save lanelet selections as map snippets (.map_snippets/) for batch processing
 - Export generated SceneContext as pickle for downstream use
 
 Key modules in `gui/`:
-- `lanelet_scene_builder.py` -- Loads Lanelet2 map, builds routing graph, generates agents with OBB collision-free placement, backward centerline history tracing, and route finding via the lanelet2 routing API.
-- `scene_renderer.py` -- Matplotlib rendering with all-agents and focus modes.
-- `app.py` -- Gradio web interface with interactive map canvas.
+- `lanelet_scene_builder.py` -- Loads Lanelet2 map, builds routing graph, generates agents with OBB collision-free placement, backward centerline history tracing, and route finding via the lanelet2 routing API. Accepts either a rectangle or pre-saved lanelet IDs.
+- `scene_renderer.py` -- Matplotlib rendering with all-agents and focus modes, with rotation support.
+- `app.py` -- Gradio web interface with shared interactive map canvas (also used by scene_search).
+
+### Batch scene generation
+
+Generate N scenes per saved map snippet and run closed-loop + semi-closed-loop simulation:
+
+```bash
+python -m scenario_generation.batch_generate \
+    --config scenario_generation/configs/example.json \
+    --map_path /path/to/lanelet2_map.osm \
+    --output_dir /path/to/output \
+    --model_path /path/to/best_model.pth
+```
+
+The config JSON (`configs/example.json`) controls:
+- `snippets_dir` -- directory containing .pkl map snippets saved from the GUI (default `.map_snippets/`)
+- `generation` -- n_neighbors, speed range, separation, route length, n_scenes_per_snippet
+- `simulation` -- steps, modes (`closed_loop`, `semi_closed_loop`), per_agent_views
+
+Output structure: `<output_dir>/<snippet_name>/scene_NNN/{initial.png, scene.pkl, closed_loop/, semi_closed_loop/}`
 
 ### Run tests
 
