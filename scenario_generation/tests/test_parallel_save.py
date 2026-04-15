@@ -24,13 +24,12 @@ class TestSaveAndClose:
         assert out.exists()
         assert out.stat().st_size > 0
 
-    def test_figure_closed(self, tmp_path):
+    def test_figure_cleared(self, tmp_path):
         fig, ax = plt.subplots(1, 1, figsize=(4, 4))
         ax.plot([0, 1], [0, 1])
-        fig_num = fig.number
         _save_and_close(fig, tmp_path / "test.png")
 
-        assert fig_num not in plt.get_fignums()
+        assert len(fig.get_axes()) == 0
 
 
 class TestParallelSaves:

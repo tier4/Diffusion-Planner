@@ -171,7 +171,9 @@ def _draw_agent_view(
     heading = agent.current_heading
     color = (color_map or {}).get(agent_id, _EGO_COLOR)
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(10, 10))
+    ax = fig.add_subplot(1, 1, 1)
 
     # Map elements
     draw_lanes(ax, scene.map_data)
@@ -253,13 +255,17 @@ def _draw_agent_view(
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=100)
-    plt.close(fig)
+    fig.clf()
 
 
 def _save_and_close(fig, path: Path, dpi: int = 100) -> None:
-    """Save a matplotlib figure and close it. Thread-safe per-figure."""
+    """Save a matplotlib figure and release resources.
+
+    Avoids plt.close() which touches the global pyplot figure manager
+    and is not thread-safe under concurrent saves.
+    """
     fig.savefig(path, dpi=dpi)
-    plt.close(fig)
+    fig.clf()
 
 
 def _cat_tensor_dicts(
@@ -369,96 +375,96 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
             (output_dir / agent.id).mkdir(parents=True, exist_ok=True)
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
-      for step in range(n_steps):
-        ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
-        agent_predictions = _predict_batch(
-            model, model_args, scene, ids_to_predict, device,
-        )
-
-        mode_label = "CL" if mode == "closed_loop" else "semi-CL"
-        print(f"[{mode_label}] Step {step:03d}/{n_steps}  "
-              f"({n_simulated} re-planned, {n_agents} total)")
-
-        # --- Visualize ---
-        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-        draw_scene(ax, scene, ego_id)
-
-        from scenario_generation.visualize import _agent_color
-        nb_idx = 0
-        for agent in scene.agents:
-            if agent.id not in agent_predictions:
-                continue
-            pred = agent_predictions[agent.id]
-            ax_pos, ay_pos = agent.current_position
-            ah = agent.current_heading
-            plan_xy, plan_h = _ego_to_world(
-                pred[:, :2], pred[:, 2:4], float(ax_pos), float(ay_pos), ah,
+        for step in range(n_steps):
+            ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
+            agent_predictions = _predict_batch(
+                model, model_args, scene, ids_to_predict, device,
             )
-            plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
 
-            if agent.id == ego_id:
-                color = "#3366cc"
-                label = "Ego plan"
-                zorder = 25
-            else:
-                color = _agent_color(agent.agent_type, nb_idx)
-                label = None
-                zorder = 18
-                nb_idx += 1
+            mode_label = "CL" if mode == "closed_loop" else "semi-CL"
+            print(f"[{mode_label}] Step {step:03d}/{n_steps}  "
+                  f"({n_simulated} re-planned, {n_agents} total)")
 
-            draw_trajectory(ax, plan_traj, color, label=label, lw=1.0, zorder=zorder,
-                            show_footprints=(agent.id == ego_id),
-                            length=agent.length, width=agent.width)
+            # --- Visualize ---
+            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+            draw_scene(ax, scene, ego_id)
 
-        # Draw ego initial plan in semi-closed-loop
-        if ego_initial_plan is not None:
-            remaining = ego_initial_plan[step:]
-            if len(remaining) > 1:
-                draw_trajectory(ax, remaining, "#3366cc", label="Ego plan (fixed)",
-                                lw=1.5, zorder=25, show_footprints=True,
-                                length=scene.get_agent(ego_id).length,
-                                width=scene.get_agent(ego_id).width)
-
-        hist = world_histories.get(ego_id, [])
-        if len(hist) > 1:
-            h = np.array(hist)
-            ax.plot(h[:, 0], h[:, 1], "-", color="#3366cc", lw=2, alpha=0.8, zorder=22)
-
-        ax.set_title(f"[{mode_label}] Step {step:03d}/{n_steps}  t={step*0.1:.1f}s  "
-                     f"({n_agents} agents)", fontsize=11)
-
-        fig.tight_layout()
-
-        # Submit overview save to thread pool
-        step_futures = [
-            save_pool.submit(_save_and_close, fig, output_dir / f"step_{step:03d}.png"),
-        ]
-
-        # Submit per-agent views to thread pool
-        if per_agent:
+            from scenario_generation.visualize import _agent_color
+            nb_idx = 0
             for agent in scene.agents:
-                step_futures.append(
-                    save_pool.submit(
-                        _draw_agent_view,
-                        scene, agent.id, agent_predictions,
-                        world_histories.get(agent.id, []),
-                        step, n_steps, output_dir / agent.id / f"step_{step:03d}.png",
-                        color_map,
-                    )
+                if agent.id not in agent_predictions:
+                    continue
+                pred = agent_predictions[agent.id]
+                ax_pos, ay_pos = agent.current_position
+                ah = agent.current_heading
+                plan_xy, plan_h = _ego_to_world(
+                    pred[:, :2], pred[:, 2:4], float(ax_pos), float(ay_pos), ah,
                 )
+                plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
 
-        # Drain all saves for this step before advancing scene state
-        for f in step_futures:
-            f.result()
+                if agent.id == ego_id:
+                    color = "#3366cc"
+                    label = "Ego plan"
+                    zorder = 25
+                else:
+                    color = _agent_color(agent.agent_type, nb_idx)
+                    label = None
+                    zorder = 18
+                    nb_idx += 1
 
-        # Advance all agents
-        if mode == "semi_closed_loop" and ego_initial_plan is not None and step < len(ego_initial_plan):
-            wp = ego_initial_plan[step]
-            _advance_agent(scene.get_agent(ego_id),
-                           np.array([wp[0], wp[1], wp[2]], dtype=np.float32))
-        advance_scene(scene, agent_predictions)
-        for agent in scene.agents:
-            world_histories[agent.id].append(agent.current_position.copy())
+                draw_trajectory(ax, plan_traj, color, label=label, lw=1.0, zorder=zorder,
+                                show_footprints=(agent.id == ego_id),
+                                length=agent.length, width=agent.width)
+
+            # Draw ego initial plan in semi-closed-loop
+            if ego_initial_plan is not None:
+                remaining = ego_initial_plan[step:]
+                if len(remaining) > 1:
+                    draw_trajectory(ax, remaining, "#3366cc", label="Ego plan (fixed)",
+                                    lw=1.5, zorder=25, show_footprints=True,
+                                    length=scene.get_agent(ego_id).length,
+                                    width=scene.get_agent(ego_id).width)
+
+            hist = world_histories.get(ego_id, [])
+            if len(hist) > 1:
+                h = np.array(hist)
+                ax.plot(h[:, 0], h[:, 1], "-", color="#3366cc", lw=2, alpha=0.8, zorder=22)
+
+            ax.set_title(f"[{mode_label}] Step {step:03d}/{n_steps}  t={step*0.1:.1f}s  "
+                         f"({n_agents} agents)", fontsize=11)
+
+            fig.tight_layout()
+
+            # Submit overview save to thread pool
+            step_futures = [
+                save_pool.submit(_save_and_close, fig, output_dir / f"step_{step:03d}.png"),
+            ]
+
+            # Submit per-agent views to thread pool
+            if per_agent:
+                for agent in scene.agents:
+                    step_futures.append(
+                        save_pool.submit(
+                            _draw_agent_view,
+                            scene, agent.id, agent_predictions,
+                            world_histories.get(agent.id, []),
+                            step, n_steps, output_dir / agent.id / f"step_{step:03d}.png",
+                            color_map,
+                        )
+                    )
+
+            # Drain all saves for this step before advancing scene state
+            for f in step_futures:
+                f.result()
+
+            # Advance all agents
+            if mode == "semi_closed_loop" and ego_initial_plan is not None and step < len(ego_initial_plan):
+                wp = ego_initial_plan[step]
+                _advance_agent(scene.get_agent(ego_id),
+                               np.array([wp[0], wp[1], wp[2]], dtype=np.float32))
+            advance_scene(scene, agent_predictions)
+            for agent in scene.agents:
+                world_histories[agent.id].append(agent.current_position.copy())
 
     print(f"Done. {n_steps} frames saved to {output_dir}")
 

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from scenario_generation.scene_context import Agent, AgentType, SceneContext
+from scenario_generation.scene_context import Agent, AgentType, MapData, SceneContext
 from scenario_generation.transforms import (
     _rotation_matrix,
     transform_cos_sin,
