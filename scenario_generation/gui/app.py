@@ -194,7 +194,7 @@ def _waypoint_arrows_json(
 def _format_waypoints_md(waypoints: list, builder: LaneletSceneBuilder) -> str:
     """Render the waypoints list as a compact markdown block with snapped IDs."""
     if not waypoints:
-        return "*No waypoints. Ctrl+Shift+drag on the map to add one.*"
+        return "*No waypoints. Set Mode = **Add Waypoint** and drag on the map to add one.*"
     lines = ["| # | lanelet | x | y | heading |", "|---|---|---|---|---|"]
     for i, wp in enumerate(waypoints, 1):
         x, y, h = wp
@@ -380,9 +380,9 @@ def build_interface(
             * ``goal_pose``            → Set-Goal mode
             * ``waypoint_append``      → Add-Waypoint mode
 
-            After placing a start / goal / waypoint the mode is reset to
-            ``pan`` so the next drag doesn't accidentally re-place the same
-            thing. For rect events the mode is left untouched.
+            After placing a start or goal the mode is reset to ``pan``.
+            Waypoint mode stays active so multiple waypoints can be placed
+            in sequence. For rect events the mode is left untouched.
             """
             evt_type = getattr(evt, "type", "rect")
             no_change = gr.update()
@@ -429,7 +429,7 @@ def build_interface(
                     no_change, no_change, no_change, no_change, no_change,
                     no_change, no_change, no_change, no_change, no_change,
                     new_waypoints, _format_waypoints_md(new_waypoints, builder),
-                    reset_mode,
+                    no_change,
                 )
             else:  # rect
                 x1, y1 = evt.x1, evt.y1
@@ -570,7 +570,7 @@ def build_interface(
             at replay time.
             """
             if ego_pose is None or goal_pose is None:
-                return "Both start (Shift+drag) and goal (Shift+Alt+drag) required"
+                return "Both start and goal are required"
 
             start_pose = np.array(ego_pose, dtype=np.float32)
             goal_pose_arr = np.array(goal_pose, dtype=np.float32)

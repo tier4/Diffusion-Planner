@@ -76,14 +76,11 @@ from scenario_generation.simulate import (
     _predict_batch,
     _save_and_close,
     advance_scene,
+    advance_scene_mpc,
     load_model,
 )
 from scenario_generation.tensor_converter import MapTensorCache
-from scenario_generation.traffic_light import (
-    AllNoneTLSource,
-    TrafficLightController,
-    TrafficLightSource,
-)
+from scenario_generation.traffic_light import TrafficLightController
 
 # Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
 # ranked-SFT to smooth diffusion-planner outputs before the SFT loss; same
@@ -194,6 +191,18 @@ class SpawnConfig:
     sg_smooth_enabled: bool = True
     sg_filter_window: int = 11
     sg_filter_order: int = 3
+    # Advance mode: how the vehicle moves each step.
+    #   "teleport"  — original behaviour, snap to pred[0] (default)
+    #   "mpc"       — bicycle-model MPC tracking with 2 s lookahead
+    #   "perfect"   — Euler integration with velocity from reference
+    #                  (matches Autoware autoware_perfect_tracker)
+    advance_mode: str = "teleport"
+    mpc_horizon_steps: int = 20
+    mpc_n_knots: int = 5
+    # Run model inference one agent at a time instead of batching all
+    # agents into a single forward pass. Slower but useful for diagnosing
+    # whether batched inference affects trajectory quality.
+    sequential_inference: bool = False
 
     @classmethod
     def from_json(cls, path: str | Path) -> "SpawnConfig":
@@ -247,9 +256,25 @@ class SceneNPCManager:
         # incrementally so we only rebuild the MapTensorCache when new
         # lanelets actually appear.
         self._known_lanelet_ids: set[int] = set()
+        # Ego route lanelets the ego has already driven through.
+        # Updated every tick so NPC goals avoid untransited ego lanelets.
+        self._ego_transited: set[int] = set()
+        self._ego_untransited: set[int] = set(ego_route_ll_ids)
 
     def register_known_lanelets(self, lanelet_ids: list[int]) -> None:
         self._known_lanelet_ids.update(lanelet_ids)
+
+    def update_ego_progress(self, ego_xy: np.ndarray) -> None:
+        """Mark the ego's current lanelet (and all prior) as transited."""
+        ll = self.builder.snap_to_nearest_ll(ego_xy)
+        if ll is None or ll not in self._ego_untransited:
+            return
+        # Mark everything up to and including this lanelet as transited.
+        for rid in self.ego_route_ll_ids:
+            self._ego_transited.add(rid)
+            self._ego_untransited.discard(rid)
+            if rid == ll:
+                break
 
     def tick(self, scene: SceneContext) -> None:
         """Run one spawn/despawn cycle.
@@ -392,10 +417,16 @@ class SceneNPCManager:
             if collides:
                 continue
 
-            speed = float(self._rng.uniform(self.cfg.npc_min_speed, self.cfg.npc_max_speed))
+            # Speed from lane speed limit (±20%), falling back to config range.
+            cache_entry = self.builder._cache[ll_id]
+            if cache_entry.has_speed_limit and cache_entry.speed_limit_mps > 0:
+                sl = cache_entry.speed_limit_mps
+                speed = float(self._rng.uniform(sl * 0.8, sl * 1.2))
+                speed = max(speed, 0.5)  # floor to avoid near-zero spawns
+            else:
+                speed = float(self._rng.uniform(self.cfg.npc_min_speed, self.cfg.npc_max_speed))
 
-            # Route for this neighbor. 30% of spawns are biased to share at
-            # least one lanelet with the ego's route (see user spec 70/30).
+            # Route for this neighbor.
             route_ll_ids = self._pick_route(ll_id)
             goal = self.builder._route_goal(route_ll_ids)
             route_lanes, route_sl, route_hsl = self.builder._route_to_33dim(route_ll_ids)
@@ -477,17 +508,32 @@ class SceneNPCManager:
             gid = tl.get_group_for_lanelet(rid)
             if gid is None:
                 continue
-            color = tl._color_for_group(gid, self._sim_time)
+            color = tl.color_for_group(gid, self._sim_time)
             if color not in (TL_RED, TL_YELLOW):
-                return False  # first TL is green, fine to spawn
-            # First TL is red/yellow — check distance to its start.
+                continue  # green TL, check remaining
+            # Red/yellow TL — check distance to its start.
             if rid not in self.builder._cache:
                 return True
             tl_start = self.builder._cache[rid].raw_centerline[0]
             dist = float(np.linalg.norm(spawn_pos - tl_start))
-            return dist < min_dist
+            if dist < min_dist:
+                return True
 
         return False
+
+    def _trim_route_off_ego(self, route: list[int]) -> list[int]:
+        """Trim route so its goal lanelet is not on an untransited ego lanelet.
+
+        Walks backward from the end of the route, dropping lanelets that
+        belong to the ego's future path, until a safe goal is found.
+        Returns at least the first lanelet (the spawn lanelet).
+        """
+        if not self._ego_untransited:
+            return route
+        end = len(route)
+        while end > 1 and route[end - 1] in self._ego_untransited:
+            end -= 1
+        return route[:end]
 
     def _pick_route(self, start_ll_id: int) -> list[int]:
         """Select a forward route for a freshly-spawned NPC.
@@ -496,6 +542,9 @@ class SceneNPCManager:
         times searching for a candidate that shares at least one lanelet with
         the ego's route — more interactions with ego, less natural traffic
         diversity. Otherwise a single random forward route.
+
+        The route is trimmed so its goal does not land on an ego route
+        lanelet that the ego has not yet transited.
         """
         want_overlap = self._rng.random() < self.cfg.ego_overlap_ratio
         ego_set = set(self.ego_route_ll_ids)
@@ -504,8 +553,9 @@ class SceneNPCManager:
             for _ in range(5):
                 candidate = self.builder.find_route(start_ll_id, self.cfg.npc_route_length_m)
                 if set(candidate) & ego_set:
-                    return candidate
-        return best
+                    best = candidate
+                    break
+        return self._trim_route_off_ego(best)
 
 
 # ── Replay loop ──────────────────────────────────────────────────────────────
@@ -757,7 +807,6 @@ def run_route_replay(
     output_dir: Path,
     spawn_config: SpawnConfig | None = None,
     device: str = "cuda",
-    traffic_light_source: TrafficLightSource | None = None,
 ) -> dict:
     """Run closed-loop replay of ``route`` with dynamic NPC spawning.
 
@@ -773,8 +822,6 @@ def run_route_replay(
         output_dir: Directory for per-step PNGs. Created if missing.
         spawn_config: NPC manager tuning. Defaults to :class:`SpawnConfig()`.
         device: Torch device.
-        traffic_light_source: Legacy parameter (unused). Traffic lights are
-            now managed by :class:`TrafficLightController` internally.
 
     Returns:
         Dict with ``final_step``, ``goal_reached`` (bool), ``reason`` (str),
@@ -782,8 +829,6 @@ def run_route_replay(
     """
     if spawn_config is None:
         spawn_config = SpawnConfig()
-    if traffic_light_source is None:
-        traffic_light_source = AllNoneTLSource()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Seed ALL random sources for full reproducibility across runs.
@@ -856,10 +901,10 @@ def run_route_replay(
             if ll is not None:
                 pinned.append(ll)
 
-        # Deduplicate while preserving priority: closest-first, then pins.
+        # Deduplicate: pinned IDs first (always included), then closest.
         seen: set[int] = set()
         ordered: list[int] = []
-        for ll_id in list(closest) + pinned:
+        for ll_id in pinned + list(closest):
             if ll_id in seen:
                 continue
             seen.add(ll_id)
@@ -940,12 +985,25 @@ def run_route_replay(
     reason = "max_steps"
     min_goal_d = float("inf")  # closest approach to goal seen so far
 
+    # Tracker state (lazy-init per agent inside advance_scene_mpc).
+    _use_tracker = spawn_config.advance_mode in ("mpc", "perfect")
+    mpc_trackers: dict = {}
+    if _use_tracker:
+        print(f"  Advance mode: {spawn_config.advance_mode}"
+              + (f" (horizon={spawn_config.mpc_horizon_steps}, "
+                 f"knots={spawn_config.mpc_n_knots})"
+                 if spawn_config.advance_mode == "mpc" else ""))
+
     # --- Main loop. ---
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
         pending_saves: list = []
         for step in range(spawn_config.max_steps):
             # Keep NPC manager's sim time in sync for TL writes on spawn.
             npc_manager._sim_time = step * 0.1
+
+            # Track which ego route lanelets have been transited so NPC
+            # goals avoid landing on the ego's future path.
+            npc_manager.update_ego_progress(scene.ego_agent.current_position)
 
             # Run the NPC manager (after step 0 so the ego has a meaningful
             # ``current_position`` — always true by construction here).
@@ -955,6 +1013,11 @@ def run_route_replay(
                 after = sum(1 for a in scene.agents if a.id != scene.ego_agent_id)
                 if after > before:
                     n_npc_spawned += (after - before)
+                # Prune trackers for despawned agents.
+                if _use_tracker:
+                    alive_ids = {a.id for a in scene.agents}
+                    for stale_id in list(mpc_trackers.keys() - alive_ids):
+                        del mpc_trackers[stale_id]
 
             # Refresh map_data + ego.route_lanes. Mirrors the C++ Autoware
             # planner, which rebuilds these every inference frame. We
@@ -975,14 +1038,16 @@ def run_route_replay(
                 new_ids = _compute_map_lanelet_ids(ego_xy, neighbor_xys)
                 scene.map_data = builder._build_map_data(new_ids, center_xy=ego_xy)
                 npc_manager._known_lanelet_ids = set(new_ids)
+                map_cache = MapTensorCache(scene.map_data)
 
             # TL state + route_lanes refresh EVERY step so the model
-            # always sees the current signal phase.
+            # always sees the current signal phase. The TL one-hot is
+            # written directly into scene.map_data.lanes which the
+            # map_cache references (shared underlying array).
             tl_controller.tick(
                 scene, step * 0.1, builder._last_map_data_ids,
                 ego_xy=ego_xy,
             )
-            map_cache = MapTensorCache(scene.map_data)
 
             # Refresh route_lanes for ALL agents (ego + NPCs) so the
             # sliding window stays centered on each agent's current
@@ -1008,10 +1073,22 @@ def run_route_replay(
             # turn_indicators history on the next frame — mirrors the C++
             # ``TurnIndicatorManager`` control loop.
             ids_to_predict = [a.id for a in scene.agents if a.agent_type == AgentType.VEHICLE]
-            agent_predictions, agent_turn_indicators = _predict_batch(
-                model, model_args, scene, ids_to_predict, device,
-                map_cache=map_cache, return_turn_indicators=True,
-            )
+            if spawn_config.sequential_inference:
+                # One forward pass per agent (batch_size=1 each).
+                agent_predictions: dict[str, np.ndarray] = {}
+                agent_turn_indicators: dict[str, int] = {}
+                for aid in ids_to_predict:
+                    p, ti = _predict_batch(
+                        model, model_args, scene, [aid], device,
+                        map_cache=map_cache, return_turn_indicators=True,
+                    )
+                    agent_predictions.update(p)
+                    agent_turn_indicators.update(ti)
+            else:
+                agent_predictions, agent_turn_indicators = _predict_batch(
+                    model, model_args, scene, ids_to_predict, device,
+                    map_cache=map_cache, return_turn_indicators=True,
+                )
 
             # Optional Savitzky-Golay smoothing on each agent's predicted
             # trajectory. Reuses the same smoother the RL ranked-SFT
@@ -1037,9 +1114,16 @@ def run_route_replay(
                 step * 0.1,
             ))
 
-            # Drain any finished saves so memory doesn't balloon.
+            # Drain finished saves so memory doesn't balloon. Call
+            # .result() to surface any exceptions from background saves.
             if step % 50 == 0:
-                pending_saves = [f for f in pending_saves if not f.done()]
+                still_pending = []
+                for f in pending_saves:
+                    if f.done():
+                        f.result()  # raises if save thread failed
+                    else:
+                        still_pending.append(f)
+                pending_saves = still_pending
 
             # Goal check (BEFORE advancing — measures arrival accurately).
             # Two termination conditions:
@@ -1073,7 +1157,15 @@ def run_route_replay(
                 )
                 break
 
-            advance_scene(scene, agent_predictions)
+            if spawn_config.advance_mode in ("mpc", "perfect"):
+                advance_scene_mpc(
+                    scene, agent_predictions, mpc_trackers,
+                    tracker_type=spawn_config.advance_mode,
+                    mpc_horizon_steps=spawn_config.mpc_horizon_steps,
+                    mpc_n_knots=spawn_config.mpc_n_knots,
+                )
+            else:
+                advance_scene(scene, agent_predictions)
 
             # Increment age for all agents so the tensor converter knows
             # how many history frames are "real" vs pre-spawn fabrication.

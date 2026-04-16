@@ -78,7 +78,7 @@ class Agent:
     # Ordered lanelet IDs for this agent's route. Stored at spawn time
     # so the replay loop can refresh route_lanes as the agent advances
     # (same sliding-window logic as the ego's route refresh).
-    route_lanelet_ids: list | None = None
+    route_lanelet_ids: list[int] | None = None
 
     @property
     def current_position(self) -> np.ndarray:

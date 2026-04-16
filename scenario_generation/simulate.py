@@ -118,7 +118,7 @@ def _advance_agent(agent, new_world_pos: np.ndarray, dt: float = 0.1):
     # far cleaner than `(new_vel_raw - old_vel_raw) / dt` which compounded
     # jitter from both steps.
     if agent.past_velocities is not None and agent.past_velocities.shape[0] >= W + 1:
-        vel_window = agent.past_velocities[-W - 1: -1]
+        vel_window = agent.past_velocities[-W - 1:]
         if vel_window.shape[0] >= 2:
             accel_diffs = np.diff(vel_window, axis=0) / dt
             agent.acceleration = accel_diffs.mean(axis=0).astype(np.float32)
@@ -180,6 +180,84 @@ def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
             float(ax), float(ay), ah,
         )
         new_pos = np.array([new_xy[0, 0], new_xy[0, 1], new_h[0]], dtype=np.float32)
+        _advance_agent(agent, new_pos, dt)
+
+
+def advance_scene_mpc(
+    scene: SceneContext,
+    agent_predictions: dict[str, np.ndarray],
+    trackers: dict,
+    dt: float = 0.1,
+    apply_postprocessing: bool = True,
+    tracker_type: str = "mpc",
+    mpc_horizon_steps: int = 20,
+    mpc_n_knots: int = 5,
+) -> None:
+    """Advance the scene using trajectory tracking (in-place).
+
+    Instead of teleporting each agent to ``pred[0]``, transforms the
+    full 80-step reference trajectory to world frame and feeds it to a
+    per-agent tracker which produces physically plausible steps.
+
+    Args:
+        scene: SceneContext to modify in-place.
+        agent_predictions: Maps agent_id -> (80, 4) ego-centric prediction
+            [x, y, cos_h, sin_h].
+        trackers: Maps agent_id -> tracker instance.  Missing entries are
+            created lazily.
+        dt: Timestep duration.
+        apply_postprocessing: When True, apply velocity smoothing and
+            force-stop to the reference before tracking (see
+            ``mpc_tracker.postprocess_reference``).
+        tracker_type: ``"mpc"`` for bicycle-model MPC, ``"perfect"``
+            for Euler velocity-limited follower.
+    """
+    from scenario_generation.mpc_tracker import (
+        MPCTracker,
+        PerfectTracker,
+        postprocess_reference,
+    )
+
+    for agent in scene.agents:
+        if agent.id not in agent_predictions:
+            continue
+
+        pred = agent_predictions[agent.id]  # (80, 4) ego-centric
+
+        # Transform full trajectory to world frame
+        ax, ay = agent.current_position
+        ah = agent.current_heading
+        world_xy, world_h = _ego_to_world(
+            pred[:, :2], pred[:, 2:4], float(ax), float(ay), ah,
+        )
+
+        # Build world-frame reference (N, 3) [x, y, yaw]
+        ref_world = np.column_stack([world_xy, world_h])
+
+        if apply_postprocessing:
+            ref_world = postprocess_reference(world_xy, world_h, dt=dt)
+
+        # Lazy-init tracker for this agent
+        if agent.id not in trackers:
+            if tracker_type == "mpc":
+                trackers[agent.id] = MPCTracker(
+                    wheelbase=agent.wheelbase, dt=dt,
+                    horizon_steps=mpc_horizon_steps, n_knots=mpc_n_knots,
+                )
+            elif tracker_type == "perfect":
+                trackers[agent.id] = PerfectTracker(dt=dt)
+            else:
+                raise ValueError(f"Unknown tracker_type {tracker_type!r}")
+
+        tracker = trackers[agent.id]
+
+        # Current state: [x, y, yaw, speed]
+        vel = agent.current_velocity
+        speed = float(vel[0] * math.cos(ah) + vel[1] * math.sin(ah))
+        speed = max(speed, 0.0)
+        x0 = np.array([float(ax), float(ay), ah, speed], dtype=np.float64)
+
+        new_pos, _new_speed = tracker.track(x0, ref_world)
         _advance_agent(agent, new_pos, dt)
 
 

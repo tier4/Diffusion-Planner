@@ -138,6 +138,32 @@ python -m scenario_generation.replay \
     [--seed 42]
 ```
 
+**Advance modes.** The `advance_mode` field in `SpawnConfig` (or the JSON
+config) controls how the vehicle moves each step:
+
+| Mode | Description | Per-agent cost |
+|---|---|---|
+| `teleport` (default) | Snap to `pred[0]` each step. Original behaviour — fast but can produce aggressive driving (lane invasion, red-light running) because there are no kinematic constraints. | ~0 ms |
+| `perfect` | Euler integration with velocity from the reference trajectory and heading snap. Inspired by Autoware's `autoware_perfect_tracker`. Velocity limits how far the vehicle can move per step, preventing unphysical jumps. | ~0.01 ms |
+| `mpc` | Bicycle-model MPC via scipy L-BFGS-B. Optimises acceleration and steering over a 2 s lookahead horizon (20 steps, 5 control knots). Enforces kinematic constraints (max accel, steering limits, speed bounds). | ~13 ms |
+
+Both `perfect` and `mpc` modes apply C++-style post-processing to the
+reference trajectory before tracking: velocity moving average (window=8) and
+force-stop logic (ported from the C++ `postprocessing_utils.cpp`).
+
+Example config enabling MPC:
+
+```json
+{"advance_mode": "mpc", "seed": 42, "max_steps": 6000, "mpc_horizon_steps": 20, "mpc_n_knots": 5}
+```
+
+Key files for trajectory tracking:
+
+| File | Role |
+|---|---|
+| `mpc_tracker.py` | `MPCTracker` (bicycle MPC), `PerfectTracker` (Euler follower), `postprocess_reference` |
+| `simulate.py` | `advance_scene` (teleport), `advance_scene_mpc` (MPC/perfect tracked advance) |
+
 Per-step PNG `step_NNNN.png` is written to `output_dir`. The simulation ends
 when one of:
 
@@ -178,17 +204,11 @@ stale lane tensor as the ego moves across the map. Knobs:
   6 000-lanelet map, so lowering this is cheap if you want a stricter match
   to the ROS node's per-frame refresh.
 
-**Traffic lights.** Not wired today. The closed-loop loop accepts a
-`TrafficLightSource` protocol (`scenario_generation/traffic_light.py`) that
-defaults to "no traffic lights anywhere" (`AllNoneTLSource`). A follow-up
-session will ship a real source that mutates the 5-dim TL one-hot block at
-lane-dim indices `[8:13]` per step.
-
-**Known limitation (tracked as a future-session TODO).** The ego's
-`route_lanes` tensor is frozen at replay start. If the diffusion planner
-deviates far from `route.route_lanelet_ids`, the route context goes stale and
-the ego loses guidance. Future work: adaptive re-routing from the ego's
-current lanelet to the original goal once it drifts beyond a threshold.
+**Traffic lights.** A `TrafficLightController` manages signal group state
+machines per step. Route-facing groups cycle through green/yellow/red phases;
+perpendicular signals run in phase opposition. TL state is written into the
+5-dim one-hot block at lane-dim indices `[8:13]` of `scene.map_data.lanes`
+and into each agent's `route_lanes` tensor every step.
 
 Relevant modules:
 
@@ -196,7 +216,9 @@ Relevant modules:
 |---|---|
 | `scenario_generation/route.py` | `Route` dataclass + pickle save/load |
 | `scenario_generation/replay.py` | `run_route_replay`, `SceneNPCManager`, `SpawnConfig`, CLI |
-| `scenario_generation/traffic_light.py` | `TrafficLightSource` protocol + default "all none" |
+| `scenario_generation/simulate.py` | `advance_scene`, `advance_scene_mpc`, model inference helpers |
+| `scenario_generation/mpc_tracker.py` | `MPCTracker`, `PerfectTracker`, `postprocess_reference` |
+| `scenario_generation/traffic_light.py` | `TrafficLightController` + signal group state machines |
 | `scenario_generation/configs/replay_default.json` | Default `SpawnConfig` values |
 | `scenario_generation/tools/inspect_route.py` | CLI to dump a saved route pickle |
 | `scenario_generation/gui/app.py` | GUI panels + live route overlay wiring |

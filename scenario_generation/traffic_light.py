@@ -136,20 +136,19 @@ class TrafficLightController:
         for reg_id, bulbs in bulb_map.items():
             if not bulbs:
                 continue
-            # Find or create the signal group for these bulbs
-            merged = False
-            for existing_bulbs, existing_regs in list(self._signal_groups.items()):
-                if bulbs & existing_bulbs:  # any shared bulb
-                    # Merge: union the bulbs and reg_ids
-                    new_bulbs = existing_bulbs | bulbs
-                    existing_regs.add(reg_id)
-                    if new_bulbs != existing_bulbs:
-                        del self._signal_groups[existing_bulbs]
-                        self._signal_groups[new_bulbs] = existing_regs
-                    merged = True
-                    break
-            if not merged:
-                self._signal_groups[bulbs] = {reg_id}
+            # Collect ALL existing groups that share any bulb with this
+            # reg (transitive: A∩C and B∩C means A, B, C all merge).
+            overlapping_bulbs = bulbs
+            overlapping_regs: set[int] = {reg_id}
+            keys_to_remove: list[frozenset] = []
+            for existing_bulbs, existing_regs in self._signal_groups.items():
+                if overlapping_bulbs & existing_bulbs:
+                    overlapping_bulbs = overlapping_bulbs | existing_bulbs
+                    overlapping_regs |= existing_regs
+                    keys_to_remove.append(existing_bulbs)
+            for k in keys_to_remove:
+                del self._signal_groups[k]
+            self._signal_groups[overlapping_bulbs] = overlapping_regs
 
         # reg_element_id → canonical signal_id (use min reg_id in the group)
         self._group_to_signal: dict[int, int] = {}
@@ -323,6 +322,10 @@ class TrafficLightController:
             self._advance_group(rgid, sim_time_s)
 
         self._write_to_lanes(scene.map_data, map_data_ll_ids, sim_time_s)
+
+    def color_for_group(self, gid: int, t: float) -> int:
+        """Public accessor for the current colour of a signal group."""
+        return self._color_for_group(gid, t)
 
     def _color_for_group(self, gid: int, t: float) -> int:
         """Return the current colour for a group.

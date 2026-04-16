@@ -600,7 +600,7 @@ class LaneletSceneBuilder:
         d_back = np.sum((self._vehicle_backs[mask] - pos) ** 2, axis=1)
         score = np.minimum(d_first, d_back)
         if len(kept_ids) > max_n:
-            top_idx = np.argpartition(score, max_n)[:max_n]
+            top_idx = np.argpartition(score, max_n - 1)[:max_n]
             top_idx = top_idx[np.argsort(score[top_idx])]
         else:
             top_idx = np.argsort(score)

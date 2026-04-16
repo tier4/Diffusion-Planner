@@ -443,7 +443,15 @@ RECTANGLE_AND_ARROW_TOOL = {
     window.__setWaypointArrows = function(json) {
         try {
             const parsed = typeof json === 'string' ? JSON.parse(json) : (json || []);
-            waypointArrows = Array.isArray(parsed) ? parsed : [];
+            const normalizePoint = function(pt) {
+                if (Array.isArray(pt) && pt.length >= 2) return {x: pt[0], y: pt[1]};
+                if (pt && typeof pt.x !== 'undefined' && typeof pt.y !== 'undefined') return pt;
+                return null;
+            };
+            waypointArrows = Array.isArray(parsed) ? parsed.map(function(w) {
+                const s = normalizePoint(w && w.start), e = normalizePoint(w && w.end);
+                return (s && e) ? {start: s, end: e} : null;
+            }).filter(function(w) { return w !== null; }) : [];
         } catch (e) { waypointArrows = []; console.warn('bad waypoints json', e); }
         redraw();
     };
@@ -673,7 +681,7 @@ RECTANGLE_AND_ARROW_TOOL = {
         redraw();
     } else if (isDrawingWaypoint && waypointDragStartPx && waypointDragEndPx) {
         isDrawingWaypoint = false;
-        canvas.style.cursor = 'grab';
+        canvas.style.cursor = (currentMode === 'waypoint') ? 'crosshair' : 'grab';
         const ws = canvasToWorld(waypointDragStartPx.x, waypointDragStartPx.y);
         const we = canvasToWorld(waypointDragEndPx.x, waypointDragEndPx.y);
         const hdeg = Math.atan2(we.y - ws.y, we.x - ws.x) * 180 / Math.PI;

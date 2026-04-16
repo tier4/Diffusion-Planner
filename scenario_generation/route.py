@@ -2,11 +2,11 @@
 
 A ``Route`` captures an ego vehicle's driving intent on a Lanelet2 map:
 
-* A start pose (picked in the GUI via Shift+drag)
-* A goal pose (Shift+Alt+drag)
-* Zero or more intermediate waypoints (Ctrl+Shift+drag), each forcing the
-  route to pass through a specific lanelet even when it is off the shortest
-  path from start to goal.
+* A start pose (picked in the GUI by selecting Start mode and dragging)
+* A goal pose (picked by selecting Goal mode and dragging)
+* Zero or more intermediate waypoints (picked by selecting Waypoint mode and
+  dragging), each forcing the route to pass through a specific lanelet even
+  when it is off the shortest path from start to goal.
 * The resolved lanelet sequence connecting start → waypoints → goal, computed
   via ``lanelet2.routing.RoutingGraph.shortestPathWithVia``.
 
