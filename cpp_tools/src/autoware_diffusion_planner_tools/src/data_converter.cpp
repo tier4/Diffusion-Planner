@@ -1,3 +1,4 @@
+#define OUTPUT_JSON_ONLY 1 // 1: JSONのみ出力, 0: バイナリ+JSON両方出力
 // Copyright 2025 TIER IV, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,7 +42,9 @@
 #include <lanelet2_routing/RoutingGraph.h>
 #include <lanelet2_traffic_rules/TrafficRulesFactory.h>
 
+
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -51,6 +54,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include "nlohmann/json.hpp"
 
 using namespace autoware::diffusion_planner;
 using namespace autoware_perception_msgs::msg;
@@ -84,6 +88,11 @@ struct TrainingDataBinary
 {
   // Header information
   uint32_t version;  // Data format version
+  int32_t has_skipping_info;
+  int32_t skipping_label;
+  int32_t missing_topic_type;
+  int32_t incomplete_data_type;
+  char skipping_details[128];
 
   // Fixed size data arrays
   float ego_agent_past[EGO_HISTORY_SHAPE[1] * EGO_HISTORY_SHAPE[2]];
@@ -105,8 +114,14 @@ struct TrainingDataBinary
   float ego_shape[EGO_SHAPE_SHAPE[1]];
 
   // Constructor with zero initialization
-  TrainingDataBinary() : version(2)
+  TrainingDataBinary()
+  : version(3),
+    has_skipping_info(0),
+    skipping_label(-1),
+    missing_topic_type(-1),
+    incomplete_data_type(-1)
   {
+    std::fill(std::begin(skipping_details), std::end(skipping_details), '\0');
     std::fill(std::begin(ego_agent_past), std::end(ego_agent_past), 0.0f);
     std::fill(std::begin(ego_current_state), std::end(ego_current_state), 0.0f);
     std::fill(std::begin(ego_agent_future), std::end(ego_agent_future), 0.0f);
@@ -126,6 +141,110 @@ struct TrainingDataBinary
     std::fill(std::begin(ego_shape), std::end(ego_shape), 0.0f);
   }
 };
+
+// Detailed categorization of missing topics
+enum class MissingTopicType
+{
+  KinematicState,       // /localization/kinematic_state
+  Acceleration,         // /localization/acceleration
+  TrackedObjects,       // /perception/object_recognition/tracking/objects
+  Route,                // /planning/mission_planning/route
+  TurnIndicators,       // /vehicle/status/turn_indicators_status
+  TrafficSignals,       // /perception/traffic_light_recognition/traffic_signals
+};
+
+// Detailed categorization of incomplete data at frame level
+enum class IncompleteDataType
+{
+  KinematicState,       // Kinematic state message missing
+  Acceleration,         // Acceleration message missing
+  TrackedObjects,       // Tracked objects message missing
+  TrafficSignals,       // Traffic signals message missing
+  TurnIndicators,       // Turn indicators message missing
+};
+
+// Top-level skipping reason with detailed categorization
+enum class SkippingLabel
+{
+  // Rosbag-level skipping reasons (missing topics)
+  MissingRequiredTopic,      // Required ROS topic is missing from rosbag
+  
+  // Frame-level skipping reasons (incomplete data)
+  IncompleteData,            // Some messages are missing at the beginning of recording
+  
+  // Sequence-level skipping reasons
+  InsufficientFrames,        // Sequence has fewer frames than minimum required
+  InsufficientDistance,      // Traveled distance of sequence is too short
+  
+  // Frame processing skipping reasons
+  VehicleStopped,            // Ego vehicle is stopped
+  RedOrYellowLight,          // At red or yellow light with forward future trajectory
+};
+
+// Structure to hold detailed skipping information
+struct SkippingInfo
+{
+  SkippingLabel label;
+  std::string details;  // Human-readable details (e.g., topic name, message type)
+  std::optional<MissingTopicType> missing_topic_type;
+  std::optional<IncompleteDataType> incomplete_data_type;
+  
+  // Specialized constructors for convenience
+  static SkippingInfo missing_topic(MissingTopicType topic_type)
+  {
+    const std::string topic_map[] = {
+      "KinematicState", "Acceleration", "TrackedObjects", "Route", "TurnIndicators",
+      "TrafficSignals"};
+    return {SkippingLabel::MissingRequiredTopic,
+            "Missing topic: " + topic_map[static_cast<int>(topic_type)], topic_type,
+            std::nullopt};
+  }
+  
+  static SkippingInfo incomplete_data(IncompleteDataType data_type)
+  {
+    const std::string data_map[] = {
+      "KinematicState", "Acceleration", "TrackedObjects", "TrafficSignals", "TurnIndicators"};
+    return {SkippingLabel::IncompleteData,
+            "Incomplete data: " + data_map[static_cast<int>(data_type)], std::nullopt,
+            data_type};
+  }
+  
+  static SkippingInfo insufficient_frames(int64_t actual, int64_t minimum)
+  {
+    return {SkippingLabel::InsufficientFrames,
+            "Only " + std::to_string(actual) + " frames (minimum: " + std::to_string(minimum) +
+              ")",
+            std::nullopt, std::nullopt};
+  }
+  
+  static SkippingInfo insufficient_distance(double traveled, double minimum)
+  {
+    return {SkippingLabel::InsufficientDistance,
+            "Traveled distance " + std::to_string(traveled) + "m (minimum: " +
+              std::to_string(minimum) + "m)",
+            std::nullopt, std::nullopt};
+  }
+  
+  static SkippingInfo vehicle_stopped()
+  {
+    return {SkippingLabel::VehicleStopped, "Ego vehicle is stopped", std::nullopt,
+            std::nullopt};
+  }
+  
+  static SkippingInfo red_or_yellow_light()
+  {
+    return {SkippingLabel::RedOrYellowLight,
+            "At red/yellow light with forward moving future trajectory", std::nullopt,
+            std::nullopt};
+  }
+};
+
+std::string create_token(const int64_t seq_id, const int64_t frame_id)
+{
+  std::ostringstream token_stream;
+  token_stream << std::setfill('0') << std::setw(8) << seq_id << std::setw(8) << frame_id;
+  return token_stream.str();
+}
 
 int64_t parse_timestamp(const builtin_interfaces::msg::Time & stamp)
 {
@@ -303,11 +422,13 @@ void save_binary_data(
   const std::vector<bool> & route_lanes_has_speed_limit, const std::vector<float> & polygons,
   const std::vector<float> & line_strings, const std::vector<float> & goal_pose,
   const std::vector<int32_t> & turn_indicators, const std::vector<float> & ego_shape,
-  const Odometry & kinematic_state, const int64_t timestamp)
+  const Odometry & kinematic_state, const int64_t timestamp,
+  const std::optional<SkippingInfo> & skipping_info = std::nullopt)
 {
   namespace fs = std::filesystem;
 
   fs::create_directories(output_path);
+  fs::create_directories(output_path + "/skipped");
 
   // Copy data to struct
   TrainingDataBinary data;
@@ -339,40 +460,82 @@ void save_binary_data(
   std::copy(turn_indicators.begin(), turn_indicators.end(), data.turn_indicators);
   std::copy(ego_shape.begin(), ego_shape.end(), data.ego_shape);
 
+  // Skipping info is now saved in JSON, not binary
+
+  const std::string output_directory_path = skipping_info.has_value() ? output_path + "/skipped" : output_path;
+
+#if OUTPUT_JSON_ONLY == 0
   // Save to binary file with rosbag directory name prefix (same format as Python version)
-  const std::string binary_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".bin";
+  const std::string binary_filename = output_directory_path + "/" + rosbag_dir_name + "_" + token + ".bin";
   std::ofstream file(binary_filename, std::ios::binary);
   if (!file.is_open()) {
     std::cerr << "Failed to open file for writing: " << binary_filename << std::endl;
     return;
   }
-
   file.write(reinterpret_cast<const char *>(&data), sizeof(TrainingDataBinary));
-
   if (file.fail()) {
     std::cerr << "Failed to write data to file: " << binary_filename << std::endl;
     return;
   }
-
   file.close();
+#endif
 
-  // Save JSON file with pose information (same as Python version)
-  const std::string json_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".json";
+  // Save JSON file with pose and skipping info
+  const std::string json_filename = output_directory_path + "/" + rosbag_dir_name + "_" + token + ".json";
+  nlohmann::json j;
+  j["timestamp"] = timestamp;
+  j["x"] = kinematic_state.pose.pose.position.x;
+  j["y"] = kinematic_state.pose.pose.position.y;
+  j["z"] = kinematic_state.pose.pose.position.z;
+  j["qx"] = kinematic_state.pose.pose.orientation.x;
+  j["qy"] = kinematic_state.pose.pose.orientation.y;
+  j["qz"] = kinematic_state.pose.pose.orientation.z;
+  j["qw"] = kinematic_state.pose.pose.orientation.w;
+  if (skipping_info.has_value()) {
+    j["skipping_info"] = {
+      {"label", static_cast<int>(skipping_info->label)},
+      {"details", skipping_info->details},
+      {"missing_topic_type", skipping_info->missing_topic_type ? static_cast<int>(*skipping_info->missing_topic_type) : -1},
+      {"incomplete_data_type", skipping_info->incomplete_data_type ? static_cast<int>(*skipping_info->incomplete_data_type) : -1}
+    };
+  }
   std::ofstream json_file(json_filename);
   if (json_file.is_open()) {
-    json_file << std::fixed << std::setprecision(15);
-    json_file << "{\n";
-    json_file << "  \"timestamp\": " << timestamp << ",\n";
-    json_file << "  \"x\": " << kinematic_state.pose.pose.position.x << ",\n";
-    json_file << "  \"y\": " << kinematic_state.pose.pose.position.y << ",\n";
-    json_file << "  \"z\": " << kinematic_state.pose.pose.position.z << ",\n";
-    json_file << "  \"qx\": " << kinematic_state.pose.pose.orientation.x << ",\n";
-    json_file << "  \"qy\": " << kinematic_state.pose.pose.orientation.y << ",\n";
-    json_file << "  \"qz\": " << kinematic_state.pose.pose.orientation.z << ",\n";
-    json_file << "  \"qw\": " << kinematic_state.pose.pose.orientation.w << "\n";
-    json_file << "}\n";
+    json_file << std::setw(2) << j << std::endl;
     json_file.close();
   }
+}
+
+void save_skipping_binary_data(
+  const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
+  const std::vector<float> & ego_shape, const Odometry & kinematic_state, const int64_t timestamp,
+  const SkippingInfo & skipping_info)
+{
+  const std::vector<float> ego_past(EGO_HISTORY_SHAPE[1] * EGO_HISTORY_SHAPE[2], 0.0f);
+  const std::vector<float> ego_current(EGO_CURRENT_STATE_SHAPE[1], 0.0f);
+  const std::vector<float> ego_future(OUTPUT_T * EGO_HISTORY_SHAPE[2], 0.0f);
+  const std::vector<float> neighbor_past(
+    MAX_NUM_NEIGHBORS * INPUT_T_WITH_CURRENT * NEIGHBOR_PAST_DIM, 0.0f);
+  const std::vector<float> neighbor_future(MAX_NUM_NEIGHBORS * OUTPUT_T * NEIGHBOR_FUTURE_DIM, 0.0f);
+  const std::vector<float> static_objects(STATIC_OBJECTS_SHAPE[1] * STATIC_OBJECTS_SHAPE[2], 0.0f);
+  const std::vector<float> lanes(NUM_SEGMENTS_IN_LANE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM, 0.0f);
+  const std::vector<float> lanes_speed_limit(NUM_SEGMENTS_IN_LANE, 0.0f);
+  const std::vector<bool> lanes_has_speed_limit(NUM_SEGMENTS_IN_LANE, false);
+  const std::vector<float> route_lanes(
+    NUM_SEGMENTS_IN_ROUTE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM, 0.0f);
+  const std::vector<float> route_lanes_speed_limit(NUM_SEGMENTS_IN_ROUTE, 0.0f);
+  const std::vector<bool> route_lanes_has_speed_limit(NUM_SEGMENTS_IN_ROUTE, false);
+  const std::vector<float> polygons(NUM_POLYGONS * POINTS_PER_POLYGON * (2 + POLYGON_TYPE_NUM), 0.0f);
+  const std::vector<float> line_strings(
+    NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * (2 + LINE_STRING_TYPE_NUM), 0.0f);
+  const std::vector<float> goal_pose(NEIGHBOR_FUTURE_DIM, 0.0f);
+  const std::vector<int32_t> turn_indicators(INPUT_T_WITH_CURRENT, 0);
+
+  save_binary_data(
+    output_path, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
+    neighbor_future, static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit,
+    route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit, polygons, line_strings,
+    goal_pose, turn_indicators, ego_shape, kinematic_state, timestamp, skipping_info);
 }
 
 int main(int argc, char ** argv)
@@ -392,6 +555,7 @@ int main(int argc, char ** argv)
   const std::string rosbag_path = argv[1];
   const std::string vector_map_path = argv[2];
   const std::string save_dir = argv[3];
+  const std::string rosbag_dir_name = std::filesystem::path(rosbag_path).filename();
 
   int64_t step = 1;
   int64_t limit = -1;
@@ -546,6 +710,24 @@ int main(int argc, char ** argv)
       std::cout << "  - " << topic << std::endl;
     }
     std::cout << "No training samples will be generated from this rosbag." << std::endl;
+
+    // Output skipping_info as JSON for each missing topic
+    for (size_t i = 0; i < missing_topics.size(); ++i) {
+      nlohmann::json j;
+      j["skipping_info"] = {
+        {"label", static_cast<int>(SkippingLabel::MissingRequiredTopic)},
+        {"details", "Missing topic: " + missing_topics[i]},
+        {"missing_topic_type", static_cast<int>(i)},
+        {"incomplete_data_type", -1}
+      };
+      // Output file name: <rosbag_dir>_missing_topic_<i>.json
+      std::string json_filename = save_dir + "/skipped/" + rosbag_dir_name + "_missing_topic_" + std::to_string(i) + ".json";
+      std::ofstream json_file(json_filename);
+      if (json_file.is_open()) {
+        json_file << std::setw(2) << j << std::endl;
+        json_file.close();
+      }
+    }
     rclcpp::shutdown();
     return 0;
   }
@@ -569,6 +751,7 @@ int main(int argc, char ** argv)
     AccelWithCovarianceStamped accel;
     std::vector<TrafficLightGroupArray> traffic_signal;
     TurnIndicatorsReport turn_ind;
+    std::vector<std::string> incomplete_details;
 
     bool ok = true;
 
@@ -578,6 +761,7 @@ int main(int argc, char ** argv)
       kinematic = kinematic_vec.back();
     } else {
       ok = false;
+      incomplete_details.emplace_back("KinematicState");
       std::cout << "No matching kinematic_state for tracked_objects at " << i << std::endl;
     }
 
@@ -586,6 +770,7 @@ int main(int argc, char ** argv)
       accel = accel_vec.back();
     } else {
       ok = false;
+      incomplete_details.emplace_back("Acceleration");
       std::cout << "No matching acceleration for tracked_objects at " << i << std::endl;
     }
 
@@ -594,6 +779,7 @@ int main(int argc, char ** argv)
       traffic_signal = traffic_signal_vec;
     } else {
       ok = false;
+      incomplete_details.emplace_back("TrafficSignals");
       std::cout << "No matching traffic_signal for tracked_objects at " << i << std::endl;
     }
 
@@ -602,6 +788,7 @@ int main(int argc, char ** argv)
       turn_ind = turn_ind_vec.back();
     } else {
       ok = false;
+      incomplete_details.emplace_back("TurnIndicators");
       std::cout << "No matching turn_indicators for tracked_objects at " << i << std::endl;
     }
 
@@ -637,6 +824,7 @@ int main(int argc, char ** argv)
         std::cout << "Invalid kinematic_state covariance_xx=" << covariance_xx
                   << ", covariance_yy=" << covariance_yy << std::endl;
         ok = false;
+        incomplete_details.emplace_back("InvalidKinematicCovariance");
       }
     }
 
@@ -646,6 +834,21 @@ int main(int argc, char ** argv)
     if (!ok) {
       if (sequence.data_list.empty()) {
         // At the beginning of recording, some msgs may be missing - Skip this frame
+        std::ostringstream detail_stream;
+        detail_stream << "Incomplete data: ";
+        for (size_t idx = 0; idx < incomplete_details.size(); ++idx) {
+          if (idx > 0) {
+            detail_stream << ",";
+          }
+          detail_stream << incomplete_details[idx];
+        }
+        const SkippingInfo skipping_info{
+          SkippingLabel::IncompleteData, detail_stream.str(), std::nullopt, std::nullopt};
+        Odometry fallback_kinematic = kinematic;
+        fallback_kinematic.header.stamp = tracking.header.stamp;
+        save_skipping_binary_data(
+          save_dir, rosbag_dir_name, create_token(max_route_index >= 0 ? max_route_index : 0, i),
+          ego_shape, fallback_kinematic, timestamp, skipping_info);
         std::cout << "Skip this frame i=" << i << "/n=" << n << std::endl;
         continue;
       } else {
@@ -694,7 +897,6 @@ int main(int argc, char ** argv)
       [](const FrameData & a, const FrameData & b) { return a.timestamp < b.timestamp; });
   }
 
-  const std::string rosbag_dir_name = std::filesystem::path(rosbag_path).filename();
   const int64_t sequence_num = static_cast<int64_t>(sequences.size());
   std::cout << "Total " << sequence_num << " sequences" << std::endl;
 
@@ -709,6 +911,12 @@ int main(int argc, char ** argv)
     if (n < min_frames) {
       std::cout << "Skipping sequence with only " << n << " frames (min: " << min_frames << ")"
                 << std::endl;
+      if (!seq.data_list.empty()) {
+        save_skipping_binary_data(
+          save_dir, rosbag_dir_name, create_token(seq_id, 0), ego_shape,
+          seq.data_list.front().kinematic_state, seq.data_list.front().timestamp,
+          SkippingInfo::insufficient_frames(n, min_frames));
+      }
       continue;
     }
 
@@ -725,6 +933,10 @@ int main(int argc, char ** argv)
     if (traveled_distance < min_distance) {
       std::cout << "Skipping sequence with traveled distance " << traveled_distance
                 << " meters (min: " << min_distance << " meters)" << std::endl;
+      save_skipping_binary_data(
+        save_dir, rosbag_dir_name, create_token(seq_id, 0), ego_shape,
+        seq.data_list.front().kinematic_state, seq.data_list.front().timestamp,
+        SkippingInfo::insufficient_distance(traveled_distance, min_distance));
       continue;
     }
 
@@ -735,9 +947,7 @@ int main(int argc, char ** argv)
     int64_t stopping_count = 0;
     for (int64_t i = INPUT_T_WITH_CURRENT; i < n; i += step) {
       // Create token in same format as Python version: seq_id(8digits) + i(8digits)
-      std::ostringstream token_stream;
-      token_stream << std::setfill('0') << std::setw(8) << seq_id << std::setw(8) << i;
-      const std::string token = token_stream.str();
+      const std::string token = create_token(seq_id, i);
 
       // Get transformation matrix
       const Eigen::Matrix4d bl2map =
@@ -882,18 +1092,6 @@ int main(int argc, char ** argv)
       }
       const bool is_future_forward = sum_mileage > 1.0;
 
-      if (is_stop && is_red_or_yellow && is_future_forward) {
-        std::cout << "Skip this frame " << i
-                  << " because it is stop at red or yellow light and future trajectory is forward"
-                  << std::endl;
-        continue;
-      }
-      if (stopping_count > (INPUT_T + 5) && is_red_or_yellow) {
-        std::cout << "Skip this frame " << i << " because stopping_count=" << stopping_count
-                  << " and red or yellow light" << std::endl;
-        continue;
-      }
-
       // Create placeholder data for static objects
       const std::vector<float> static_objects(
         STATIC_OBJECTS_SHAPE[1] * STATIC_OBJECTS_SHAPE[2], 0.0f);
@@ -903,6 +1101,30 @@ int main(int argc, char ** argv)
       for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
         turn_indicators[t] = seq.data_list[std::max(int64_t(0), i - INPUT_T_WITH_CURRENT + 1 + t)]
                                .turn_indicator.report;
+      }
+
+      if (is_stop && is_red_or_yellow && is_future_forward) {
+        std::cout << "Skip this frame " << i
+                  << " because it is stop at red or yellow light and future trajectory is forward"
+                  << std::endl;
+        save_binary_data(
+          save_dir, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
+          neighbor_future, static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit,
+          route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit, polygons,
+          line_strings, goal_pose_vec, turn_indicators, ego_shape, seq.data_list[i].kinematic_state,
+          seq.data_list[i].timestamp, SkippingInfo::red_or_yellow_light());
+        continue;
+      }
+      if (stopping_count > (INPUT_T + 5) && is_red_or_yellow) {
+        std::cout << "Skip this frame " << i << " because stopping_count=" << stopping_count
+                  << " and red or yellow light" << std::endl;
+        save_binary_data(
+          save_dir, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
+          neighbor_future, static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit,
+          route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit, polygons,
+          line_strings, goal_pose_vec, turn_indicators, ego_shape, seq.data_list[i].kinematic_state,
+          seq.data_list[i].timestamp, SkippingInfo::vehicle_stopped());
+        continue;
       }
 
       // Save data
