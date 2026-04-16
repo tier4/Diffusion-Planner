@@ -94,15 +94,23 @@ planner. A background NPC manager spawns and despawns neighbors around the
 ego as the simulation progresses.
 
 **Save a Route in the GUI.** Launch `python -m scenario_generation.gui
---map_path <lanelet2_map.osm>` and use:
+--map_path <lanelet2_map.osm>`. The left sidebar has a **Mode** radio
+(`Pan` / `Set Start` / `Set Goal` / `Add Waypoint`) that controls what a
+plain drag on the map places. Pan is the default. `Add Waypoint` stays
+active until you switch modes, so you can chain multiple waypoints.
 
-| Interaction | Modifier | Purpose | Visual |
+| Interaction | How to trigger | Purpose | Visual |
 |---|---|---|---|
-| Pan / zoom / rotate | drag, scroll, Alt+drag | navigate the map | |
-| Rectangle select | Ctrl+drag | existing snippet workflow | blue dashed box |
-| **Ego start pose** | Shift+drag | singular, overwrites | blue arrow |
-| **Ego goal pose** | Shift+Alt+drag | singular, overwrites | red arrow |
-| **Waypoint** | Ctrl+Shift+drag | appends to ordered list | yellow arrow, numbered |
+| Pan | drag (Mode = Pan) | navigate the map | grab cursor |
+| Zoom / rotate | scroll / Alt+drag | view controls | — |
+| Rectangle select | Ctrl+drag | existing snippet workflow (works in any mode) | blue dashed box |
+| **Ego start pose** | drag (Mode = Set Start) *or* Shift+drag | singular, overwrites | blue arrow |
+| **Ego goal pose** | drag (Mode = Set Goal) | singular, overwrites | red arrow |
+| **Waypoint** | drag (Mode = Add Waypoint) | appends to ordered list | yellow arrow, numbered |
+
+Shift+drag stays as a power-user shortcut for the start pose so the existing
+snippet workflow continues to work unchanged. Sidebar **Clear Start**,
+**Clear Goal** and **Clear Waypoints** buttons reset each part independently.
 
 The resolved route (`lanelet2.routing.RoutingGraph.shortestPathWithVia` under
 the hood) draws as a green polyline on the canvas every time start, goal, or
@@ -131,11 +139,17 @@ python -m scenario_generation.replay \
 ```
 
 Per-step PNG `step_NNNN.png` is written to `output_dir`. The simulation ends
-when either:
+when one of:
 
-- the ego reaches within `goal_tolerance_m` (default 2 m) of the goal, or
-- `max_steps` ticks have elapsed (default 6000 = 10 min of simulated data at
-  `dt = 0.1 s`).
+- The ego reaches within `goal_tolerance_m` (default 2 m) of the goal —
+  reason `goal_reached`.
+- The ego *passes* the goal (vector ego→goal points behind ego) AND its
+  closest-approach to the goal seen so far is within `goal_pass_window_m`
+  (default 25 m) — reason `goal_passed`. Catches the common case where the
+  diffusion planner doesn't perfectly stop at the goal but visibly drives
+  past it.
+- `max_steps` ticks have elapsed (default 6000 = 10 min of simulated data
+  at `dt = 0.1 s`) — reason `max_steps`.
 
 **NPC manager.** By default the manager holds the neighbor count in
 `[0, max_active_npcs]` (hard cap = 8), spawning with 30% per-tick probability

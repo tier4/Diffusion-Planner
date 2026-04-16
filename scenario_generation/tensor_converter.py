@@ -86,22 +86,36 @@ def _build_ego_current_state(
     ego: Agent,
     R: np.ndarray,
 ) -> np.ndarray:
-    """Build ego_current_state: [1, 10] all zeros for position (at origin)."""
-    vel = ego.current_velocity
-    vel_ego = transform_directions(vel.reshape(1, 2), R).flatten()
+    """Build ego_current_state: ``[1, 10]`` in ego frame.
 
-    accel = ego.acceleration
+    Convention matches the training data / C++ Autoware:
+    - position (x, y) is (0, 0) — self-frame
+    - heading (cos, sin) is (1, 0) — self-frame
+    - **vx carries the full global speed magnitude**, vy is exactly 0
+    - ax is the longitudinal projection of world-frame acceleration onto
+      ego forward, ay is exactly 0
+    - steering_angle and yaw_rate are scalars set by the physics updater
+
+    Forcing vy=ay=0 matches the training NPZ convention — the car's motion
+    is canonicalized to its own heading axis so the lateral dimension is
+    only a kinematics cue (rate of heading change), never a velocity.
+    """
+    vel = ego.current_velocity  # world frame [Vx_w, Vy_w]
+    speed = float(np.sqrt(vel[0] ** 2 + vel[1] ** 2))
+
+    # Longitudinal acceleration = projection onto ego forward. Lateral = 0.
+    accel = ego.acceleration  # world frame
     accel_ego = transform_directions(accel.reshape(1, 2), R).flatten()
 
     state = np.zeros(10, dtype=np.float32)
-    state[0] = 0.0  # x (at origin)
-    state[1] = 0.0  # y (at origin)
-    state[2] = 1.0  # cos(0)
-    state[3] = 0.0  # sin(0)
-    state[4] = vel_ego[0]
-    state[5] = vel_ego[1]
-    state[6] = accel_ego[0]
-    state[7] = accel_ego[1]
+    state[0] = 0.0           # x
+    state[1] = 0.0           # y
+    state[2] = 1.0           # cos(0)
+    state[3] = 0.0           # sin(0)
+    state[4] = speed         # vx = |V| (full magnitude in ego frame)
+    state[5] = 0.0           # vy = 0 (canonicalized to forward axis)
+    state[6] = accel_ego[0]  # ax = longitudinal accel
+    state[7] = 0.0           # ay = 0
     state[8] = ego.steering_angle
     state[9] = ego.yaw_rate
     return state[np.newaxis]  # [1, 10]
@@ -143,14 +157,30 @@ def _build_neighbor_agents_past(
         cos_h = np.cos(h_ego).astype(np.float32)
         sin_h = np.sin(h_ego).astype(np.float32)
 
-        # Transform velocities
+        # Velocity, canonicalized to each neighbor's own heading axis — this
+        # matches the C++ Autoware convention in
+        # ``autoware_diffusion_planner/src/conversion/agent.cpp::as_array``
+        # (lines 73-76): velocity_norm = hypot(vx_world, vy_world); then
+        # (velocity_x, velocity_y) = velocity_norm * (cos(θ), sin(θ)) with θ
+        # being the neighbor's own yaw. This zeros any lateral drift
+        # (skid) and only encodes forward speed. We then rotate into ego
+        # frame via R.
         if agent.past_velocities is not None:
-            vel = transform_directions(agent.past_velocities, R)
+            raw_vel = agent.past_velocities
+        elif T_agent >= 2:
+            raw_vel = np.zeros((T_agent, 2), dtype=np.float32)
+            raw_vel[1:] = np.diff(traj[:, :2], axis=0) / scene.dt
         else:
-            vel = np.zeros((T_agent, 2), dtype=np.float32)
-            if T_agent >= 2:
-                diffs = np.diff(traj[:, :2], axis=0) / scene.dt
-                vel[1:] = transform_directions(diffs, R)
+            raw_vel = np.zeros((T_agent, 2), dtype=np.float32)
+        speed = np.linalg.norm(raw_vel, axis=1).astype(np.float32)  # (T,)
+        # Canonical world-frame velocity pointing along the neighbor's own
+        # heading. traj[:, 2] is heading_rad.
+        cos_hw = np.cos(traj[:, 2]).astype(np.float32)
+        sin_hw = np.sin(traj[:, 2]).astype(np.float32)
+        vel_world_canonical = np.stack(
+            [speed * cos_hw, speed * sin_hw], axis=1,
+        )
+        vel = transform_directions(vel_world_canonical, R)
 
         # Agent type one-hot
         type_vec = np.zeros(3, dtype=np.float32)

@@ -52,22 +52,48 @@ def _recompute_route(
 ) -> tuple[str, list[int] | None, str]:
     """Resolve the route for the current start / goal / waypoints.
 
+    Goal and waypoints are snapped with ``reachable_from=start_id`` so the
+    click never lands on a geometrically-close but topologically-disconnected
+    sub-network (common at overpass crossings on Shinagawa where two road
+    grids overlap but don't connect).
+
     Returns ``(polyline_json, route_ll_ids, status_message)``. Returns an empty
     polyline and ``None`` for ``route_ll_ids`` whenever the route cannot be
     computed (missing start/goal, unreachable, off-map).
     """
     if ego_pose is None or goal_pose is None:
         return "[]", None, ""
-    start_id = builder.snap_to_nearest_ll(np.asarray(ego_pose[:2], dtype=np.float32))
-    goal_id = builder.snap_to_nearest_ll(np.asarray(goal_pose[:2], dtype=np.float32))
-    if start_id is None or goal_id is None:
-        return "[]", None, "Could not snap start/goal to a drivable lanelet"
+    start_id = builder.snap_to_nearest_ll(
+        np.asarray(ego_pose[:2], dtype=np.float32),
+        heading_rad=float(ego_pose[2]),
+    )
+    if start_id is None:
+        return "[]", None, "Could not snap start to a routable lanelet"
+    goal_id = builder.snap_to_nearest_ll(
+        np.asarray(goal_pose[:2], dtype=np.float32),
+        reachable_from=start_id,
+        heading_rad=float(goal_pose[2]),
+    )
+    if goal_id is None:
+        return "[]", None, (
+            f"No routable lanelet near the goal is reachable from start "
+            f"({start_id}). Try clicking somewhere else or add a waypoint."
+        )
     via_ids: list[int] = []
-    for wp in waypoints or []:
-        vid = builder.snap_to_nearest_ll(np.asarray(wp[:2], dtype=np.float32))
+    prev_id = start_id
+    for i, wp in enumerate(waypoints or []):
+        vid = builder.snap_to_nearest_ll(
+            np.asarray(wp[:2], dtype=np.float32),
+            reachable_from=prev_id,
+            heading_rad=float(wp[2]),
+        )
         if vid is None:
-            return "[]", None, "Could not snap a waypoint to a drivable lanelet"
+            return "[]", None, (
+                f"Waypoint #{i + 1} has no routable lanelet reachable from "
+                f"the previous point."
+            )
         via_ids.append(vid)
+        prev_id = vid
     route_ids = builder.route_with_waypoints(start_id, via_ids, goal_id)
     if route_ids is None:
         return "[]", None, (
@@ -75,7 +101,94 @@ def _recompute_route(
             f"through {via_ids} to goal ({goal_id})"
         )
     poly_json = _build_route_polyline_json(builder, route_ids)
-    return poly_json, route_ids, f"Route: {len(route_ids)} lanelets"
+
+    # Diagnostic: how far did each click move to reach its snapped lanelet?
+    # Large snap distances indicate the click landed on an orphan / wrong-
+    # direction / non-routable lanelet and the snap had to walk away.
+    def _snap_dist(xy, ll_id):
+        cl = builder._cache[ll_id].raw_centerline
+        return float(np.linalg.norm(cl - np.asarray(xy, dtype=np.float32), axis=1).min())
+    ds = _snap_dist(ego_pose[:2], start_id)
+    dg = _snap_dist(goal_pose[:2], goal_id)
+    snap_note = ""
+    if ds > 10.0 or dg > 10.0:
+        snap_note = (
+            f" (snap: start {ds:.0f} m, goal {dg:.0f} m — click may be on "
+            f"an orphan / wrong-direction lanelet)"
+        )
+    return poly_json, route_ids, f"Route: {len(route_ids)} lanelets{snap_note}"
+
+
+_ARROW_LEN_M = 6.0
+
+
+def _snapped_arrow_json(
+    builder: LaneletSceneBuilder,
+    pose: tuple | None,
+    reachable_from: int | None = None,
+) -> tuple[str, int | None]:
+    """Snap a pose to a lanelet and return ``(arrow_json, snapped_ll_id)``.
+
+    The returned JSON matches the JS ``window.__setStartArrow`` /
+    ``__setGoalArrow`` format: ``{"start": [x, y], "end": [x + L*cos(h),
+    y + L*sin(h)]}`` with the start placed at the closest point on the
+    snapped lanelet's centerline (not the raw click xy) and the tip offset
+    ``_ARROW_LEN_M`` metres along the provided heading. This closes the
+    visual gap between the click position and where the route polyline
+    actually starts / ends.
+
+    Returns ``("null", None)`` when ``pose`` is ``None`` or no routable
+    lanelet is available. The JS setters interpret ``"null"`` as "erase".
+    """
+    if pose is None:
+        return "null", None
+    x, y, h = float(pose[0]), float(pose[1]), float(pose[2])
+    ll_id = builder.snap_to_nearest_ll(
+        np.asarray([x, y], dtype=np.float32),
+        reachable_from=reachable_from,
+        heading_rad=h,
+    )
+    if ll_id is None:
+        return "null", None
+    cl = builder._cache[ll_id].raw_centerline
+    dists = np.linalg.norm(cl - np.array([x, y], dtype=np.float32), axis=1)
+    closest = int(np.argmin(dists))
+    sx, sy = float(cl[closest, 0]), float(cl[closest, 1])
+    ex = sx + _ARROW_LEN_M * math.cos(h)
+    ey = sy + _ARROW_LEN_M * math.sin(h)
+    return json.dumps({"start": [sx, sy], "end": [ex, ey]}), ll_id
+
+
+def _waypoint_arrows_json(
+    builder: LaneletSceneBuilder,
+    waypoints: list,
+    start_id: int | None,
+) -> str:
+    """Return the ``window.__setWaypointArrows`` JSON for the current
+    waypoints list, each snapped to its reachable lanelet (sequentially
+    reachable from the previous point, starting with ``start_id``)."""
+    arrows = []
+    prev = start_id
+    for wp in waypoints or []:
+        x, y, h = float(wp[0]), float(wp[1]), float(wp[2])
+        ll_id = builder.snap_to_nearest_ll(
+            np.asarray([x, y], dtype=np.float32),
+            reachable_from=prev,
+            heading_rad=h,
+        )
+        if ll_id is None:
+            # Fall back to the raw click pose so the user still sees something.
+            sx, sy = x, y
+        else:
+            cl = builder._cache[ll_id].raw_centerline
+            dists = np.linalg.norm(cl - np.array([x, y], dtype=np.float32), axis=1)
+            closest = int(np.argmin(dists))
+            sx, sy = float(cl[closest, 0]), float(cl[closest, 1])
+            prev = ll_id
+        ex = sx + _ARROW_LEN_M * math.cos(h)
+        ey = sy + _ARROW_LEN_M * math.sin(h)
+        arrows.append({"start": [sx, sy], "end": [ex, ey]})
+    return json.dumps(arrows)
 
 
 def _format_waypoints_md(waypoints: list, builder: LaneletSceneBuilder) -> str:
@@ -85,7 +198,9 @@ def _format_waypoints_md(waypoints: list, builder: LaneletSceneBuilder) -> str:
     lines = ["| # | lanelet | x | y | heading |", "|---|---|---|---|---|"]
     for i, wp in enumerate(waypoints, 1):
         x, y, h = wp
-        ll = builder.snap_to_nearest_ll(np.asarray([x, y], dtype=np.float32))
+        ll = builder.snap_to_nearest_ll(
+            np.asarray([x, y], dtype=np.float32), heading_rad=float(h),
+        )
         ll_s = str(ll) if ll is not None else "?"
         lines.append(f"| {i} | {ll_s} | {x:.1f} | {y:.1f} | {math.degrees(h):.0f}° |")
     return "\n".join(lines)
@@ -139,34 +254,64 @@ def build_interface(
                     rect_x2 = gr.Number(label="X2", value=0, interactive=False)
                     rect_y2 = gr.Number(label="Y2", value=0, interactive=False)
                 rect_info = gr.Markdown("Ctrl+drag on map to select area")
+                gr.Markdown("### Mode")
+                mode_radio = gr.Radio(
+                    choices=[
+                        ("Pan", "pan"),
+                        ("Set Start", "start"),
+                        ("Set Goal", "goal"),
+                        ("Add Waypoint", "waypoint"),
+                    ],
+                    value="pan",
+                    label="Click mode",
+                    info=(
+                        "Pan = drag scrolls the map. Pick a mode, then plain "
+                        "drag on the map to place it. Ctrl+drag always = "
+                        "rectangle select (for map snippets). Shift+drag is "
+                        "a shortcut for Set Start. 'Add Waypoint' keeps "
+                        "appending waypoints until you switch mode."
+                    ),
+                )
+
                 gr.Markdown("### Ego Start Pose")
                 with gr.Row():
                     ego_x = gr.Number(label="X", value=0, interactive=False)
                     ego_y = gr.Number(label="Y", value=0, interactive=False)
                 ego_heading = gr.Number(label="Heading (deg)", value=0, interactive=False)
-                ego_pose_info = gr.Markdown("Shift+drag to set start pose")
+                ego_pose_info = gr.Markdown(
+                    "Select mode **Set Start** (or Shift+drag), then drag on the map."
+                )
+                clear_start_btn = gr.Button("Clear Start", variant="secondary", size="sm")
 
                 gr.Markdown("### Ego Goal Pose")
                 with gr.Row():
                     goal_x = gr.Number(label="X", value=0, interactive=False)
                     goal_y = gr.Number(label="Y", value=0, interactive=False)
                 goal_heading = gr.Number(label="Heading (deg)", value=0, interactive=False)
-                goal_pose_info = gr.Markdown("Shift+Alt+drag to set goal pose")
+                goal_pose_info = gr.Markdown(
+                    "Select mode **Set Goal**, then drag on the map."
+                )
+                clear_goal_btn = gr.Button("Clear Goal", variant="secondary", size="sm")
 
                 gr.Markdown("### Waypoints")
                 gr.Markdown(
-                    "Ctrl+Shift+drag on the map to add a waypoint. "
-                    "The resolved route is forced through them in order."
+                    "Select mode **Add Waypoint**, then drag on the map to "
+                    "append one. The resolved route is forced through them "
+                    "in drop order. Stays in waypoint mode until you switch."
                 )
                 waypoints_display = gr.Markdown(
-                    "*No waypoints. Ctrl+Shift+drag on the map to add one.*"
+                    "*No waypoints. Pick 'Add Waypoint' mode and drag on the map.*"
                 )
                 clear_waypoints_btn = gr.Button("Clear Waypoints", variant="secondary", size="sm")
 
                 gr.Markdown("### Route")
                 route_status = gr.Markdown("*Set start + goal to resolve a route.*")
-                # Hidden textbox carrying the JSON polyline for the JS canvas.
+                # Hidden textboxes carrying JSON state for the JS canvas
+                # (route polyline + arrow positions after snapping).
                 route_polyline_json = gr.Textbox(value="[]", visible=False)
+                start_arrow_json = gr.Textbox(value="null", visible=False)
+                goal_arrow_json = gr.Textbox(value="null", visible=False)
+                waypoint_arrows_json = gr.Textbox(value="[]", visible=False)
 
                 gr.Markdown("### Save Route")
                 route_save_path = gr.Textbox(
@@ -231,17 +376,23 @@ def build_interface(
             """Handle a canvas click. Dispatches on evt.type:
 
             * ``rect``                 → Ctrl+drag rectangle selection
-            * ``ego_pose``             → Shift+drag start pose (singular)
-            * ``goal_pose``            → Shift+Alt+drag goal pose (singular)
-            * ``waypoint_append``      → Ctrl+Shift+drag waypoint (appends)
+            * ``ego_pose``             → Set-Start mode or Shift+drag
+            * ``goal_pose``            → Set-Goal mode
+            * ``waypoint_append``      → Add-Waypoint mode
+
+            After placing a start / goal / waypoint the mode is reset to
+            ``pan`` so the next drag doesn't accidentally re-place the same
+            thing. For rect events the mode is left untouched.
             """
             evt_type = getattr(evt, "type", "rect")
             no_change = gr.update()
+            reset_mode = gr.update(value="pan")
             # Output order:
             #   rect_x1, rect_y1, rect_x2, rect_y2, rect_info, rect_state, rotation_state,
             #   ego_x, ego_y, ego_heading, ego_pose_info, ego_pose_state,
             #   goal_x, goal_y, goal_heading, goal_pose_info, goal_pose_state,
-            #   waypoints_state, waypoints_display
+            #   waypoints_state, waypoints_display,
+            #   mode_radio
 
             if evt_type == "ego_pose":
                 x, y = evt.x, evt.y
@@ -254,6 +405,7 @@ def build_interface(
                     info, (x, y, heading_rad),
                     no_change, no_change, no_change, no_change, no_change,
                     no_change, no_change,
+                    reset_mode,
                 )
             elif evt_type == "goal_pose":
                 x, y = evt.x, evt.y
@@ -266,6 +418,7 @@ def build_interface(
                     round(x, 1), round(y, 1), round(heading_deg, 1),
                     info, (x, y, heading_rad),
                     no_change, no_change,
+                    reset_mode,
                 )
             elif evt_type == "waypoint_append":
                 x, y = evt.x, evt.y
@@ -276,6 +429,7 @@ def build_interface(
                     no_change, no_change, no_change, no_change, no_change,
                     no_change, no_change, no_change, no_change, no_change,
                     new_waypoints, _format_waypoints_md(new_waypoints, builder),
+                    reset_mode,
                 )
             else:  # rect
                 x1, y1 = evt.x1, evt.y1
@@ -293,20 +447,44 @@ def build_interface(
                     no_change, no_change, no_change, no_change, no_change,
                     no_change, no_change, no_change, no_change, no_change,
                     no_change, no_change,
+                    no_change,
                 )
 
-        def refresh_route(ego_pose, goal_pose, waypoints):
-            """Recompute the route polyline + status string for the current
-            start/goal/waypoints triple. Updates the hidden textbox so the
-            downstream ``.then(None, js=...)`` can push it to the canvas."""
+        def refresh_route_and_arrows(ego_pose, goal_pose, waypoints):
+            """Recompute the route polyline + snapped arrow JSONs for the
+            current start / goal / waypoints triple.
+
+            Returns ``(route_polyline_json, start_arrow_json, goal_arrow_json,
+            waypoint_arrows_json, route_ids, status_message)``. The arrow
+            JSONs carry the *snapped* positions so the canvas viz sits on
+            the routable lanelet centerline, matching where the green route
+            polyline begins and ends — no visual gap to the raw click xy.
+            """
             poly_json, route_ids, msg = _recompute_route(
                 builder, ego_pose, goal_pose, waypoints,
             )
-            return poly_json, route_ids, msg or "*Set start + goal to resolve a route.*"
+            # Snap the three arrow sets. Start has no reachability constraint;
+            # goal and waypoints use reachable_from for consistency with the
+            # same snap logic used inside _recompute_route.
+            start_json, start_id = _snapped_arrow_json(builder, ego_pose)
+            goal_json, _ = _snapped_arrow_json(
+                builder, goal_pose, reachable_from=start_id,
+            )
+            wp_json = _waypoint_arrows_json(builder, waypoints, start_id)
+            return (
+                poly_json, start_json, goal_json, wp_json,
+                route_ids, msg or "*Set start + goal to resolve a route.*",
+            )
 
-        # JS that reads the polyline textbox and calls the canvas setter.
+        # JS hooks that read the hidden textboxes and call the canvas setters.
         PUSH_ROUTE_JS = "(j) => { if (window.__setRoute) { window.__setRoute(j); } return []; }"
-        CLEAR_WAYPOINTS_JS = "() => { if (window.__clearWaypoints) { window.__clearWaypoints(); } return []; }"
+        PUSH_START_JS = "(j) => { if (window.__setStartArrow) { window.__setStartArrow(j); } return []; }"
+        PUSH_GOAL_JS = "(j) => { if (window.__setGoalArrow) { window.__setGoalArrow(j); } return []; }"
+        PUSH_WAYPOINTS_JS = "(j) => { if (window.__setWaypointArrows) { window.__setWaypointArrows(j); } return []; }"
+        PUSH_MODE_JS = "(m) => { if (window.__setMode) { window.__setMode(m); } return []; }"
+
+        # Push the mode to the canvas JS whenever the radio changes.
+        mode_radio.change(None, inputs=[mode_radio], outputs=[], js=PUSH_MODE_JS)
 
         map_canvas.click(
             on_canvas_click,
@@ -316,14 +494,19 @@ def build_interface(
                 ego_x, ego_y, ego_heading, ego_pose_info, ego_pose_state,
                 goal_x, goal_y, goal_heading, goal_pose_info, goal_pose_state,
                 waypoints_state, waypoints_display,
+                mode_radio,
             ],
         ).then(
-            refresh_route,
+            refresh_route_and_arrows,
             inputs=[ego_pose_state, goal_pose_state, waypoints_state],
-            outputs=[route_polyline_json, route_ids_state, route_status],
-        ).then(
-            None, inputs=[route_polyline_json], outputs=[], js=PUSH_ROUTE_JS,
-        )
+            outputs=[
+                route_polyline_json, start_arrow_json, goal_arrow_json,
+                waypoint_arrows_json, route_ids_state, route_status,
+            ],
+        ).then(None, inputs=[route_polyline_json], outputs=[], js=PUSH_ROUTE_JS) \
+         .then(None, inputs=[start_arrow_json], outputs=[], js=PUSH_START_JS) \
+         .then(None, inputs=[goal_arrow_json], outputs=[], js=PUSH_GOAL_JS) \
+         .then(None, inputs=[waypoint_arrows_json], outputs=[], js=PUSH_WAYPOINTS_JS)
 
         def on_clear_waypoints():
             return [], _format_waypoints_md([], builder)
@@ -332,14 +515,52 @@ def build_interface(
             on_clear_waypoints,
             outputs=[waypoints_state, waypoints_display],
         ).then(
-            refresh_route,
+            refresh_route_and_arrows,
             inputs=[ego_pose_state, goal_pose_state, waypoints_state],
-            outputs=[route_polyline_json, route_ids_state, route_status],
+            outputs=[
+                route_polyline_json, start_arrow_json, goal_arrow_json,
+                waypoint_arrows_json, route_ids_state, route_status,
+            ],
+        ).then(None, inputs=[route_polyline_json], outputs=[], js=PUSH_ROUTE_JS) \
+         .then(None, inputs=[start_arrow_json], outputs=[], js=PUSH_START_JS) \
+         .then(None, inputs=[goal_arrow_json], outputs=[], js=PUSH_GOAL_JS) \
+         .then(None, inputs=[waypoint_arrows_json], outputs=[], js=PUSH_WAYPOINTS_JS)
+
+        def on_clear_start():
+            return None, 0, 0, 0, "Select mode **Set Start** (or Shift+drag), then drag on the map."
+
+        clear_start_btn.click(
+            on_clear_start,
+            outputs=[ego_pose_state, ego_x, ego_y, ego_heading, ego_pose_info],
         ).then(
-            None, inputs=[route_polyline_json], outputs=[], js=PUSH_ROUTE_JS,
+            refresh_route_and_arrows,
+            inputs=[ego_pose_state, goal_pose_state, waypoints_state],
+            outputs=[
+                route_polyline_json, start_arrow_json, goal_arrow_json,
+                waypoint_arrows_json, route_ids_state, route_status,
+            ],
+        ).then(None, inputs=[route_polyline_json], outputs=[], js=PUSH_ROUTE_JS) \
+         .then(None, inputs=[start_arrow_json], outputs=[], js=PUSH_START_JS) \
+         .then(None, inputs=[goal_arrow_json], outputs=[], js=PUSH_GOAL_JS) \
+         .then(None, inputs=[waypoint_arrows_json], outputs=[], js=PUSH_WAYPOINTS_JS)
+
+        def on_clear_goal():
+            return None, 0, 0, 0, "Select mode **Set Goal**, then drag on the map."
+
+        clear_goal_btn.click(
+            on_clear_goal,
+            outputs=[goal_pose_state, goal_x, goal_y, goal_heading, goal_pose_info],
         ).then(
-            None, inputs=[], outputs=[], js=CLEAR_WAYPOINTS_JS,
-        )
+            refresh_route_and_arrows,
+            inputs=[ego_pose_state, goal_pose_state, waypoints_state],
+            outputs=[
+                route_polyline_json, start_arrow_json, goal_arrow_json,
+                waypoint_arrows_json, route_ids_state, route_status,
+            ],
+        ).then(None, inputs=[route_polyline_json], outputs=[], js=PUSH_ROUTE_JS) \
+         .then(None, inputs=[start_arrow_json], outputs=[], js=PUSH_START_JS) \
+         .then(None, inputs=[goal_arrow_json], outputs=[], js=PUSH_GOAL_JS) \
+         .then(None, inputs=[waypoint_arrows_json], outputs=[], js=PUSH_WAYPOINTS_JS)
 
         def on_save_route(ego_pose, goal_pose, waypoints, path):
             """Persist the current route spec to ``path`` as a pickled ``Route``.
@@ -354,17 +575,38 @@ def build_interface(
             start_pose = np.array(ego_pose, dtype=np.float32)
             goal_pose_arr = np.array(goal_pose, dtype=np.float32)
 
-            start_id = builder.snap_to_nearest_ll(start_pose[:2])
-            goal_id = builder.snap_to_nearest_ll(goal_pose_arr[:2])
-            if start_id is None or goal_id is None:
-                return "Could not snap start/goal to a drivable lanelet"
+            start_id = builder.snap_to_nearest_ll(
+                start_pose[:2], heading_rad=float(start_pose[2]),
+            )
+            if start_id is None:
+                return "Could not snap start to a routable lanelet"
+            goal_id = builder.snap_to_nearest_ll(
+                goal_pose_arr[:2],
+                reachable_from=start_id,
+                heading_rad=float(goal_pose_arr[2]),
+            )
+            if goal_id is None:
+                return (
+                    f"No routable lanelet near the goal is reachable from "
+                    f"start ({start_id}). Try a different goal or add a waypoint."
+                )
 
             waypoint_poses = [np.array(w, dtype=np.float32) for w in (waypoints or [])]
-            waypoint_ids = [
-                builder.snap_to_nearest_ll(wp[:2]) for wp in waypoint_poses
-            ]
-            if any(wid is None for wid in waypoint_ids):
-                return "One or more waypoints did not snap to a drivable lanelet"
+            waypoint_ids: list[int] = []
+            prev_id = start_id
+            for i, wp in enumerate(waypoint_poses):
+                wid = builder.snap_to_nearest_ll(
+                    wp[:2],
+                    reachable_from=prev_id,
+                    heading_rad=float(wp[2]),
+                )
+                if wid is None:
+                    return (
+                        f"Waypoint #{i + 1} has no routable lanelet "
+                        f"reachable from the previous point."
+                    )
+                waypoint_ids.append(wid)
+                prev_id = wid
 
             route_ids = builder.route_with_waypoints(start_id, waypoint_ids, goal_id)
             if route_ids is None:

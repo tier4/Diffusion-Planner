@@ -399,36 +399,86 @@ RECTANGLE_TOOL = {
 
 RECTANGLE_AND_ARROW_TOOL = {
     "help": (
-        " | <b>Ctrl+drag=rectangle</b> | <b>Shift+drag=start</b> | "
-        "<b>Shift+Alt+drag=goal</b> | <b>Ctrl+Shift+drag=waypoint</b>"
+        " | <b>Ctrl+drag=rectangle</b> | Use the <b>Mode</b> buttons "
+        "to pick what a plain drag places (Pan / Start / Goal / Waypoint)"
     ),
     "state": """
     let rectWorld = null;
     let isDrawingRect = false;
     let rectStartPx = null, rectEndPx = null;
-    // Start (blue) arrow — set via Shift+drag.
+    // Start (blue) arrow — placed by mode="start" or Shift+drag (legacy).
     let egoArrowStartWorld = null, egoArrowEndWorld = null;
     let isDrawingEgoArrow = false, egoArrowStartPx = null, egoArrowEndPx = null;
-    // Goal (red) arrow — set via Shift+Alt+drag.
+    // Goal (red) arrow — placed by mode="goal".
     let goalArrowStartWorld = null, goalArrowEndWorld = null;
     let isDrawingGoalArrow = false, goalArrowStartPx = null, goalArrowEndPx = null;
-    // Waypoint (yellow) arrows — appended via Ctrl+Shift+drag.
+    // Waypoint (yellow) arrows — appended by mode="waypoint".
     let waypointArrows = [];  // array of {start: {x,y}, end: {x,y}}
     let isDrawingWaypoint = false, waypointDragStartPx = null, waypointDragEndPx = null;
     // Route polyline for visualization — set via window.__setRoute(json).
     // Format: [[[x0,y0],[x1,y1],...], ...] one polyline per resolved lanelet.
     let routePolylines = [];
-    // Expose setters so Python can push updates via Gradio's `.then(None, js=...)`.
+    // Mode-selector state. Valid values: "pan" (default) | "start" | "goal" |
+    // "waypoint". Python pushes updates via window.__setMode(mode).
+    let currentMode = "pan";
+    window.__setMode = function(mode) {
+        currentMode = mode || "pan";
+        // Cursor hint so the user sees the mode is active.
+        if (currentMode === "pan") {
+            canvas.style.cursor = 'grab';
+        } else {
+            canvas.style.cursor = 'crosshair';
+        }
+    };
     window.__setRoute = function(json) {
         try {
             routePolylines = typeof json === 'string' ? JSON.parse(json) : (json || []);
         } catch (e) { routePolylines = []; console.warn('bad route json', e); }
         redraw();
     };
-    window.__clearWaypoints = function() {
-        waypointArrows = [];
+    // Python is the source of truth for all arrow positions — these setters
+    // overwrite the JS-local state after every change so the viz is always
+    // consistent with the Gradio state (fixes the stale-arrow bug where
+    // clearing waypoints didn't wipe their viz).
+    window.__setWaypointArrows = function(json) {
+        try {
+            const parsed = typeof json === 'string' ? JSON.parse(json) : (json || []);
+            waypointArrows = Array.isArray(parsed) ? parsed : [];
+        } catch (e) { waypointArrows = []; console.warn('bad waypoints json', e); }
         redraw();
     };
+    window.__setStartArrow = function(json) {
+        try {
+            const d = typeof json === 'string' ? JSON.parse(json) : json;
+            if (d && d.start && d.end) {
+                egoArrowStartWorld = {x: d.start[0], y: d.start[1]};
+                egoArrowEndWorld = {x: d.end[0], y: d.end[1]};
+                egoArrowStartPx = null; egoArrowEndPx = null; // force recompute from world
+            } else {
+                egoArrowStartWorld = null; egoArrowEndWorld = null;
+                egoArrowStartPx = null; egoArrowEndPx = null;
+            }
+        } catch (e) { console.warn('bad start-arrow json', e); }
+        redraw();
+    };
+    window.__setGoalArrow = function(json) {
+        try {
+            const d = typeof json === 'string' ? JSON.parse(json) : json;
+            if (d && d.start && d.end) {
+                goalArrowStartWorld = {x: d.start[0], y: d.start[1]};
+                goalArrowEndWorld = {x: d.end[0], y: d.end[1]};
+                goalArrowStartPx = null; goalArrowEndPx = null;
+            } else {
+                goalArrowStartWorld = null; goalArrowEndWorld = null;
+                goalArrowStartPx = null; goalArrowEndPx = null;
+            }
+        } catch (e) { console.warn('bad goal-arrow json', e); }
+        redraw();
+    };
+    // Back-compat aliases — kept so old handlers still work.
+    window.__clearWaypoints = function() { window.__setWaypointArrows('[]'); };
+    window.__clearStart = function() { window.__setStartArrow('null'); };
+    window.__clearGoal = function() { window.__setGoalArrow('null'); };
     """,
     "draw": """
     // Reusable arrow renderer: colour, start, end (all in canvas pixels), label.
@@ -523,33 +573,35 @@ RECTANGLE_AND_ARROW_TOOL = {
     }
     """,
     "mousedown": """
-    // Modifier priority: Ctrl+Shift (waypoint) > Alt+Shift (goal) > Shift (start)
-    //                    > Ctrl (rectangle). Alt alone = rotation, handled above.
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
-        isDrawingWaypoint = true;
-        waypointDragStartPx = {x: cx, y: cy};
-        waypointDragEndPx = {x: cx, y: cy};
-        canvas.style.cursor = 'crosshair';
-        toolHandled = true;
-    } else if (e.altKey && e.shiftKey) {
-        isDrawingGoalArrow = true;
-        goalArrowStartPx = {x: cx, y: cy};
-        goalArrowEndPx = {x: cx, y: cy};
-        canvas.style.cursor = 'crosshair';
-        toolHandled = true;
-    } else if (e.shiftKey) {
-        isDrawingEgoArrow = true;
-        egoArrowStartPx = {x: cx, y: cy};
-        egoArrowEndPx = {x: cx, y: cy};
-        canvas.style.cursor = 'crosshair';
-        toolHandled = true;
-    } else if (e.ctrlKey || e.metaKey) {
+    // Ctrl+drag always = rectangle (legacy snippet flow). Everything else
+    // routes through the Mode radio (Pan / Start / Goal / Waypoint).
+    // Shift+drag stays as a power-user shortcut for start, regardless of mode.
+    if (e.ctrlKey || e.metaKey) {
         isDrawingRect = true;
         rectStartPx = {x: cx, y: cy};
         rectEndPx = {x: cx, y: cy};
         canvas.style.cursor = 'crosshair';
         toolHandled = true;
+    } else if (e.shiftKey || currentMode === "start") {
+        isDrawingEgoArrow = true;
+        egoArrowStartPx = {x: cx, y: cy};
+        egoArrowEndPx = {x: cx, y: cy};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
+    } else if (currentMode === "goal") {
+        isDrawingGoalArrow = true;
+        goalArrowStartPx = {x: cx, y: cy};
+        goalArrowEndPx = {x: cx, y: cy};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
+    } else if (currentMode === "waypoint") {
+        isDrawingWaypoint = true;
+        waypointDragStartPx = {x: cx, y: cy};
+        waypointDragEndPx = {x: cx, y: cy};
+        canvas.style.cursor = 'crosshair';
+        toolHandled = true;
     }
+    // Else (currentMode === "pan"): fall through to base pan handler.
     """,
     "mousemove": """
     if (isDrawingRect) {

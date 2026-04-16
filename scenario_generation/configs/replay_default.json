@@ -12,6 +12,7 @@
   "forward_bias": 0.8,
   "min_npc_separation": 8.0,
   "goal_tolerance_m": 2.0,
+  "goal_pass_window_m": 25.0,
   "max_steps": 6000,
   "seed": null,
   "ego_overlap_ratio": 0.3,

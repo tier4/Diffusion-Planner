@@ -81,24 +81,78 @@ def _ego_to_world(pred_xy: np.ndarray, pred_cos_sin: np.ndarray,
 def _advance_agent(agent, new_world_pos: np.ndarray, dt: float = 0.1):
     """Advance a single agent in-place given its new world position.
 
-    Uses in-place shift + overwrite instead of concatenation to avoid allocations.
+    Uses in-place shift + overwrite instead of concatenation to avoid
+    allocations. Derivatives (velocity, acceleration, yaw_rate) are
+    computed from *smoothed* windows of the shifted past buffers instead
+    of raw one-step finite differences — at 10 Hz the one-step numerical
+    diff amplifies high-freq jitter from the diffusion sampler by ~10×
+    on velocity and ~100× on acceleration. A short 5-step central
+    average over the most recent window (past 0.4 s) suppresses that
+    without lag. Steering angle is derived from the bicycle model:
+    ``δ = atan2(wheelbase * yaw_rate, speed)``.
     """
-    old_vel = agent.current_velocity
-    old_heading = agent.current_heading
-    new_vel = ((new_world_pos[:2] - agent.current_position) / dt).astype(np.float32)
-    new_accel = ((new_vel - old_vel) / dt).astype(np.float32)
-    dh = float(new_world_pos[2] - old_heading)
-    dh = (dh + math.pi) % (2 * math.pi) - math.pi
-
     agent.past_trajectory[:-1] = agent.past_trajectory[1:]
     agent.past_trajectory[-1] = new_world_pos
 
-    if agent.past_velocities is not None:
-        agent.past_velocities[:-1] = agent.past_velocities[1:]
-        agent.past_velocities[-1] = new_vel
+    # Velocity window: use the last 5 position differences to average out
+    # per-step noise. 5 steps = 0.4 s, short enough to react, long enough
+    # to denoise.
+    traj = agent.past_trajectory
+    T = traj.shape[0]
+    W = min(5, T - 1) if T >= 2 else 0
+    if W >= 2:
+        diffs = np.diff(traj[T - 1 - W: T, :2], axis=0) / dt
+        smoothed_vel = diffs.mean(axis=0).astype(np.float32)
+    else:
+        smoothed_vel = ((new_world_pos[:2] - traj[-2, :2]) / dt).astype(np.float32) \
+            if T >= 2 else np.zeros(2, dtype=np.float32)
 
-    agent.acceleration = new_accel
-    agent.yaw_rate = dh / dt
+    if agent.past_velocities is not None:
+        old_smoothed_vel = agent.past_velocities[-1].copy()
+        agent.past_velocities[:-1] = agent.past_velocities[1:]
+        agent.past_velocities[-1] = smoothed_vel
+    else:
+        old_smoothed_vel = smoothed_vel
+
+    # Acceleration: finite diff of the smoothed velocity series — this is
+    # far cleaner than `(new_vel_raw - old_vel_raw) / dt` which compounded
+    # jitter from both steps.
+    if agent.past_velocities is not None and agent.past_velocities.shape[0] >= W + 1:
+        vel_window = agent.past_velocities[-W - 1: -1]
+        if vel_window.shape[0] >= 2:
+            accel_diffs = np.diff(vel_window, axis=0) / dt
+            agent.acceleration = accel_diffs.mean(axis=0).astype(np.float32)
+        else:
+            agent.acceleration = ((smoothed_vel - old_smoothed_vel) / dt).astype(np.float32)
+    else:
+        agent.acceleration = ((smoothed_vel - old_smoothed_vel) / dt).astype(np.float32)
+
+    # Heading rate via circular difference over the same window.
+    if T >= W + 1:
+        head_window = traj[T - 1 - W: T, 2]
+        dh_window = np.diff(head_window)
+        dh_window = np.arctan2(np.sin(dh_window), np.cos(dh_window))
+        agent.yaw_rate = float(dh_window.mean() / dt)
+    else:
+        dh = float(new_world_pos[2] - traj[-2, 2]) if T >= 2 else 0.0
+        dh = (dh + math.pi) % (2 * math.pi) - math.pi
+        agent.yaw_rate = dh / dt
+
+    # Steering angle from the bicycle model.
+    speed = float(np.hypot(smoothed_vel[0], smoothed_vel[1]))
+    if speed > 0.2:
+        agent.steering_angle = float(math.atan2(agent.wheelbase * agent.yaw_rate, speed))
+    else:
+        agent.steering_angle = 0.0
+
+    # Roll the per-step turn-indicator history forward by one slot. The
+    # newest slot (index -1) is filled in by the replay loop after
+    # reading the model's turn_indicator_logit output for this agent —
+    # we just leave index -1 at 0 (NONE) here so callers that don't have
+    # the model output still get a valid-shaped buffer.
+    if agent.turn_indicators is not None:
+        agent.turn_indicators[:-1] = agent.turn_indicators[1:]
+        agent.turn_indicators[-1] = 0
 
 
 def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
@@ -290,7 +344,8 @@ def _predict_batch(
     model, model_args, scene: SceneContext,
     agent_ids: list[str], device: str,
     map_cache: MapTensorCache | None = None,
-) -> dict[str, np.ndarray]:
+    return_turn_indicators: bool = False,
+) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], dict[str, int]]:
     """Run batched inference for multiple agents-as-ego.
 
     Builds per-agent tensor dicts, concatenates along batch dim,
@@ -301,11 +356,19 @@ def _predict_batch(
             map_data is static across steps, pass a single cache built
             once to avoid rebuilding every call. Built internally when
             not provided.
+        return_turn_indicators: When True, also returns a per-agent
+            ``{id: class_idx}`` dict with the argmax of each agent's
+            ``turn_indicator_logit`` output (class index in
+            {0=NONE, 1=DISABLE, 2=LEFT, 3=RIGHT, 4=KEEP}). Used by the
+            closed-loop replay to feed model-predicted turn signals back
+            into the next frame's ``turn_indicators`` history, matching
+            the C++ ``TurnIndicatorManager`` control flow.
 
-    Returns {agent_id: (80, 4) ego-centric prediction}.
+    Returns ``{agent_id: (80, 4) ego-centric prediction}``, or a tuple
+    ``(preds, turn_idx)`` when ``return_turn_indicators=True``.
     """
     if not agent_ids:
-        return {}
+        return ({}, {}) if return_turn_indicators else {}
 
     if map_cache is None:
         map_cache = MapTensorCache(scene.map_data)
@@ -317,12 +380,28 @@ def _predict_batch(
     model.decoder._guidance_fn = None
     if len(agent_ids) == 1:
         _, outputs = model(tensor_dicts[0])
-        return {agent_ids[0]: outputs["prediction"][0, 0].cpu().numpy()}
+        preds = {agent_ids[0]: outputs["prediction"][0, 0].cpu().numpy()}
+        if not return_turn_indicators:
+            return preds
+        ti_logit = outputs.get("turn_indicator_logit")
+        ti = {}
+        if ti_logit is not None:
+            ti[agent_ids[0]] = int(ti_logit[0].argmax(dim=-1).cpu().item())
+        return preds, ti
 
     batched = _cat_tensor_dicts(tensor_dicts)
     _, outputs = model(batched)
-    preds = outputs["prediction"][:, 0].cpu().numpy()
-    return {aid: preds[i] for i, aid in enumerate(agent_ids)}
+    preds_arr = outputs["prediction"][:, 0].cpu().numpy()
+    preds = {aid: preds_arr[i] for i, aid in enumerate(agent_ids)}
+    if not return_turn_indicators:
+        return preds
+    ti_logit = outputs.get("turn_indicator_logit")
+    ti: dict[str, int] = {}
+    if ti_logit is not None:
+        ti_cls = ti_logit.argmax(dim=-1).cpu().numpy()
+        for i, aid in enumerate(agent_ids):
+            ti[aid] = int(ti_cls[i])
+    return preds, ti
 
 
 @torch.no_grad()

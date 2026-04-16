@@ -79,6 +79,13 @@ from scenario_generation.simulate import (
 )
 from scenario_generation.tensor_converter import MapTensorCache
 from scenario_generation.traffic_light import AllNoneTLSource, TrafficLightSource
+
+# Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
+# ranked-SFT to smooth diffusion-planner outputs before the SFT loss; same
+# defaults (window=11, order=3) and cos/sin-renormalisation logic apply at
+# replay time to suppress diffusion-sampler jitter. Importing rather than
+# duplicating so the two pipelines stay in sync.
+from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
 from scenario_generation.visualize import (
     _agent_color,
     draw_agent_box,
@@ -160,6 +167,12 @@ class SpawnConfig:
     npc_max_speed: float = 12.0
     npc_route_length_m: float = 120.0
     curvature_threshold: float = 0.3
+    # Closest-approach window: when the ego has been within this radius of
+    # the goal AND now has the goal *behind* it (negative dot product
+    # against ego-forward), terminate as "goal_passed". The diffusion
+    # planner doesn't stop at the goal, so without this it can pass within
+    # 5-15 m of the goal then drive off into the horizon.
+    goal_pass_window_m: float = 25.0
     map_refresh_steps: int = 5
     max_map_lanelets: int = 140
     # ROS node uses 100 m; empirical survey of our training NPZs shows
@@ -167,6 +180,15 @@ class SpawnConfig:
     # Shinagawa map tops out at ~22 lanelets — at the bottom of training
     # distribution. 200 m yields ~62, matching the median.
     map_mask_range_m: float = 200.0
+    # Savitzky-Golay smoothing applied to each agent's predicted
+    # trajectory before ``advance_scene`` uses its first step. Matches the
+    # defaults from ``rlvr.grpo_sft_trainer._smooth_trajectory`` (ranked
+    # SFT uses the same smoother on generated trajectories before the SFT
+    # loss). Set ``sg_smooth_enabled=False`` to disable (e.g. for A/B
+    # comparison).
+    sg_smooth_enabled: bool = True
+    sg_filter_window: int = 11
+    sg_filter_order: int = 3
 
     @classmethod
     def from_json(cls, path: str | Path) -> "SpawnConfig":
@@ -368,6 +390,21 @@ class SceneNPCManager:
                 velocities[k] = (history[k, :2] - history[k - 1, :2]) / 0.1
             velocities[0] = velocities[1]
 
+            # Realistic kinematic initialisation from the synthesised
+            # history — lanelet centerline tracing already gives curvature,
+            # so yaw_rate / steering / acceleration are computable rather
+            # than the zero placeholders we had before.
+            dh_spawn = np.arctan2(
+                np.sin(np.diff(history[-5:, 2])),
+                np.cos(np.diff(history[-5:, 2])),
+            )
+            yaw_rate_spawn = float(dh_spawn.mean() / 0.1) if len(dh_spawn) > 0 else 0.0
+            speed_spawn = float(np.linalg.norm(velocities[-1]))
+            accel_spawn = (velocities[-1] - velocities[-3]) / (2 * 0.1) \
+                if len(velocities) >= 3 else np.zeros(2, dtype=np.float32)
+            steering_spawn = float(math.atan2(wheelbase * yaw_rate_spawn, max(speed_spawn, 0.2))) \
+                if speed_spawn > 0.2 else 0.0
+
             agent_id = f"npc_{self._next_id}"
             self._next_id += 1
             agent = Agent(
@@ -378,13 +415,14 @@ class SceneNPCManager:
                 wheelbase=wheelbase,
                 past_trajectory=history,
                 past_velocities=velocities,
-                acceleration=np.zeros(2, dtype=np.float32),
-                steering_angle=0.0,
-                yaw_rate=0.0,
+                acceleration=accel_spawn.astype(np.float32),
+                steering_angle=steering_spawn,
+                yaw_rate=yaw_rate_spawn,
                 goal_pose=goal,
                 route_lanes=route_lanes,
                 route_speed_limit=route_sl,
                 route_has_speed_limit=route_hsl,
+                turn_indicators=np.zeros(history.shape[0], dtype=np.int32),
             )
             touched = list(set(route_ll_ids) | set(history_ll_ids) | {ll_id})
             return agent, touched
@@ -500,14 +538,28 @@ def _save_step_figure(
                 )
 
     # 3) Agents + per-agent predicted trajectories.
-    nb_idx = 0
+    # Assign colors by hashing the agent id (or extracting a stable numeric
+    # suffix from ``npc_N``) so a given neighbor keeps the same color even
+    # when other NPCs spawn / despawn and reshuffle the iteration order.
+    # Previously we indexed the palette by iteration rank, which made
+    # colors jump on every spawn / despawn tick.
+    def _stable_color(agent) -> str:
+        if agent.id == scene.ego_agent_id:
+            return _EGO_COLOR
+        # npc_5 → 5; falls back to Python hash otherwise.
+        sid = agent.id
+        idx = None
+        if "_" in sid:
+            suffix = sid.rsplit("_", 1)[-1]
+            if suffix.isdigit():
+                idx = int(suffix)
+        if idx is None:
+            idx = abs(hash(sid))
+        return _agent_color(agent.agent_type, idx)
+
     for agent in scene.agents:
         is_ego = agent.id == scene.ego_agent_id
-        if is_ego:
-            color = _EGO_COLOR
-        else:
-            color = _agent_color(agent.agent_type, nb_idx)
-            nb_idx += 1
+        color = _stable_color(agent)
 
         pos = agent.current_position
         heading = agent.current_heading
@@ -575,10 +627,21 @@ def _save_step_figure(
 
     goal_d = float(np.linalg.norm(ego.current_position - ego.goal_pose[:2])) \
         if ego.goal_pose is not None else float("nan")
+
+    # Ego state readout: speed, steering, current turn-signal class.
+    ego_speed = float(np.hypot(ego.current_velocity[0], ego.current_velocity[1]))
+    ego_speed_kph = ego_speed * 3.6
+    _TI_NAMES = {0: "NONE", 1: "DISABLE", 2: "LEFT", 3: "RIGHT", 4: "KEEP"}
+    ti_cls = (
+        int(ego.turn_indicators[-1]) if ego.turn_indicators is not None else 0
+    )
+    ti_label = _TI_NAMES.get(ti_cls, f"?{ti_cls}")
+    steer_deg = math.degrees(ego.steering_angle)
     ax.set_title(
-        f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  "
-        f"agents={len(scene.agents)}  goal_d={goal_d:.1f} m",
-        fontsize=11,
+        f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  agents={len(scene.agents)}"
+        f"\nego  v={ego_speed:.1f} m/s ({ego_speed_kph:.0f} km/h)  "
+        f"steer={steer_deg:+.0f}°  turn={ti_label}  goal_d={goal_d:.1f} m",
+        fontsize=10,
     )
     fig.tight_layout()
     _save_and_close(fig, output_path)
@@ -698,22 +761,43 @@ def run_route_replay(
         return ordered
 
     all_lanelet_ids = _compute_map_lanelet_ids(snapped_xy, [])
-    map_data = builder._build_map_data(all_lanelet_ids)
+    map_data = builder._build_map_data(all_lanelet_ids, center_xy=snapped_xy)
 
-    route_lanes, route_sl, route_hsl = builder._route_to_33dim(ego_route_ids)
+    # Initial route_lanes uses the C++-style forward window (not the full
+    # saved route — training data has median 4 non-zero route slots, so
+    # packing all 25 over-provides context). Refreshed every
+    # ``map_refresh_steps`` in the main loop as the ego advances.
+    initial_route_window = builder.select_route_segment_indices(
+        ego_route_ids, snapped_xy, max_segments=25,
+    ) or ego_route_ids[:25]
+    route_lanes, route_sl, route_hsl = builder._route_to_33dim(initial_route_window)
+    # Initial kinematic derivatives from the synthesized history so the
+    # first inference call sees realistic non-zero yaw_rate + steering +
+    # acceleration (otherwise the model's first ~1-2 steps behave as if
+    # the ego just teleported in with zero state).
+    dh_init = np.arctan2(
+        np.sin(np.diff(history[-5:, 2])),
+        np.cos(np.diff(history[-5:, 2])),
+    )
+    yaw_rate_init = float(dh_init.mean() / 0.1) if len(dh_init) > 0 else 0.0
+    speed_init = float(np.linalg.norm(velocities[-1]))
+    accel_init = (velocities[-1] - velocities[-3]) / (2 * 0.1) if len(velocities) >= 3 else np.zeros(2, dtype=np.float32)
+    steering_init = float(math.atan2(4.5 * 0.65 * yaw_rate_init, max(speed_init, 0.2))) if speed_init > 0.2 else 0.0
+
     ego = Agent(
         id="ego",
         agent_type=AgentType.VEHICLE,
         length=4.5, width=1.9, wheelbase=4.5 * 0.65,
         past_trajectory=history,
         past_velocities=velocities,
-        acceleration=np.zeros(2, dtype=np.float32),
-        steering_angle=0.0,
-        yaw_rate=0.0,
+        acceleration=accel_init.astype(np.float32),
+        steering_angle=steering_init,
+        yaw_rate=yaw_rate_init,
         goal_pose=route.goal_pose.astype(np.float32),
         route_lanes=route_lanes,
         route_speed_limit=route_sl,
         route_has_speed_limit=route_hsl,
+        turn_indicators=np.zeros(history.shape[0], dtype=np.int32),
     )
     scene = SceneContext(agents=[ego], map_data=map_data, ego_agent_id="ego", dt=0.1)
 
@@ -731,6 +815,7 @@ def run_route_replay(
     n_npc_spawned = 0
     goal_reached = False
     reason = "max_steps"
+    min_goal_d = float("inf")  # closest approach to goal seen so far
 
     # --- Main loop. ---
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
@@ -745,11 +830,13 @@ def run_route_replay(
                 if after > before:
                     n_npc_spawned += (after - before)
 
-            # Refresh map_data to include the closest lanelets to ego + NPC
-            # anchors. Mirrors the Diffusion-Planner ROS node, which rebuilds
-            # the lane tensor every inference frame. We throttle to
-            # ``map_refresh_steps`` (default 5 = 0.5 s at dt=0.1) since the
-            # cost (~few ms on a 6k-lanelet map) adds up over 6000 steps.
+            # Refresh map_data + ego.route_lanes. Mirrors the C++ Autoware
+            # planner, which rebuilds these every inference frame. We
+            # throttle to ``map_refresh_steps`` (default 5 = 0.5 s at
+            # dt=0.1). The refresh now also populates polygons +
+            # line_strings (intersection areas + road borders + stop lines)
+            # via center_xy, and slides the route window forward via
+            # select_route_segment_indices.
             if step == 0 or step % spawn_config.map_refresh_steps == 0:
                 ego_xy = scene.ego_agent.current_position
                 neighbor_xys = [
@@ -757,16 +844,47 @@ def run_route_replay(
                     if a.id != scene.ego_agent_id
                 ]
                 new_ids = _compute_map_lanelet_ids(ego_xy, neighbor_xys)
-                scene.map_data = builder._build_map_data(new_ids)
+                scene.map_data = builder._build_map_data(new_ids, center_xy=ego_xy)
                 npc_manager._known_lanelet_ids = set(new_ids)
                 map_cache = MapTensorCache(scene.map_data)
 
+                # Slide the ego's route window forward — drop already-passed
+                # lanelets, keep the next ~25 ahead. Matches training
+                # distribution (median 4 non-zero) and keeps the model's
+                # route context fresh as ego advances.
+                fwd_route_ids = builder.select_route_segment_indices(
+                    ego_route_ids, ego_xy, max_segments=25,
+                )
+                if fwd_route_ids:
+                    rl, rsl, rhsl = builder._route_to_33dim(fwd_route_ids)
+                    scene.ego_agent.route_lanes = rl
+                    scene.ego_agent.route_speed_limit = rsl
+                    scene.ego_agent.route_has_speed_limit = rhsl
+
             # Inference for every alive agent, in one batched forward pass.
+            # Also returns per-agent argmax of the model's turn-indicator
+            # logit head so we can feed it back into each agent's
+            # turn_indicators history on the next frame — mirrors the C++
+            # ``TurnIndicatorManager`` control loop.
             ids_to_predict = [a.id for a in scene.agents if a.agent_type == AgentType.VEHICLE]
-            agent_predictions = _predict_batch(
+            agent_predictions, agent_turn_indicators = _predict_batch(
                 model, model_args, scene, ids_to_predict, device,
-                map_cache=map_cache,
+                map_cache=map_cache, return_turn_indicators=True,
             )
+
+            # Optional Savitzky-Golay smoothing on each agent's predicted
+            # trajectory. Reuses the same smoother the RL ranked-SFT
+            # pipeline applies before its SFT loss (rlvr/grpo_sft_trainer.
+            # _smooth_trajectory). Helps when the diffusion sampler emits
+            # jitter at the first step; benign at worst when the output is
+            # already clean.
+            if spawn_config.sg_smooth_enabled:
+                for aid, traj in agent_predictions.items():
+                    agent_predictions[aid] = _sg_smooth_trajectory(
+                        traj,
+                        spawn_config.sg_filter_window,
+                        spawn_config.sg_filter_order,
+                    )
 
             # Save PNG (concurrent with next step's compute).
             out_path = output_dir / f"step_{step:04d}.png"
@@ -781,15 +899,50 @@ def run_route_replay(
                 pending_saves = [f for f in pending_saves if not f.done()]
 
             # Goal check (BEFORE advancing — measures arrival accurately).
+            # Two termination conditions:
+            #   (a) within ``goal_tolerance_m`` of the goal — clean arrival
+            #   (b) ego *passed* the goal: goal is behind ego AND was within
+            #       ``goal_pass_window_m`` recently. The diffusion planner
+            #       isn't a goal-stop controller, so a perfect-arrival check
+            #       at small radius (e.g. 2 m) often misses by a few metres
+            #       and the ego then drives away. (b) catches that case.
             ego_pos = scene.ego_agent.current_position
+            ego_heading = scene.ego_agent.current_heading
             goal_xy = route.goal_pose[:2]
-            if float(np.linalg.norm(ego_pos - goal_xy)) <= spawn_config.goal_tolerance_m:
+            d_goal = float(np.linalg.norm(ego_pos - goal_xy))
+            min_goal_d = min(min_goal_d, d_goal)
+            if d_goal <= spawn_config.goal_tolerance_m:
                 goal_reached = True
                 reason = "goal_reached"
-                print(f"  Goal reached at step {step} (distance {np.linalg.norm(ego_pos - goal_xy):.2f} m)")
+                print(f"  Goal reached at step {step} (distance {d_goal:.2f} m)")
+                break
+            # Has the ego passed the goal? Vector ego→goal vs ego forward.
+            ego_forward = np.array([math.cos(ego_heading), math.sin(ego_heading)], dtype=np.float32)
+            to_goal = goal_xy - ego_pos
+            dot = float(np.dot(to_goal, ego_forward))
+            if dot < 0 and min_goal_d <= spawn_config.goal_pass_window_m:
+                goal_reached = True
+                reason = "goal_passed"
+                print(
+                    f"  Ego passed the goal at step {step} (current d={d_goal:.1f} m, "
+                    f"closest approach was {min_goal_d:.1f} m within "
+                    f"{spawn_config.goal_pass_window_m:.0f} m of goal)"
+                )
                 break
 
             advance_scene(scene, agent_predictions)
+
+            # Closed-loop turn-indicator feedback: overwrite the freshly-
+            # rolled last slot of each agent's turn_indicators history
+            # with the argmax of the model's turn_indicator_logit. Matches
+            # the C++ TurnIndicatorManager (minus the hold-duration
+            # filter, which we skip for now — can be added later).
+            for a in scene.agents:
+                if a.turn_indicators is None:
+                    continue
+                ti_cls = agent_turn_indicators.get(a.id)
+                if ti_cls is not None:
+                    a.turn_indicators[-1] = int(ti_cls)
 
             if step % 50 == 0:
                 print(

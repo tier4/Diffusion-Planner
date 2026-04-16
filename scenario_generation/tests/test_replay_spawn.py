@@ -56,6 +56,7 @@ def test_spawn_config_defaults_match_user_spec() -> None:
     assert c.goal_tolerance_m == 2.0       # user: "within 2 meters"
     assert c.max_steps == 6000             # user: "more than 6000 timesteps"
     assert c.ego_overlap_ratio == 0.3      # user: "mixed 70/30"
+    assert c.goal_pass_window_m == 25.0    # added when v3 showed ego passing goal at d=16.5m
 
 
 # ── SceneNPCManager with a real map ──────────────────────────────────────────
