@@ -122,16 +122,16 @@ def main():
                 "name": Path(sp).stem,
                 "bag": Path(sp).parent.name,
                 "total_reward": float(r.total),
-                "rb_crossing": bool(r.rb_crossing),
+                "rb_crossing": True if r.rb_crossing else False,
                 "rb_min_dist": float(r.rb_min_dist),
-                "lane_crossing": bool(r.lane_crossing),
+                "lane_crossing": True if r.lane_crossing else False,
                 "lane_near_frac": float(r.lane_near_frac),
                 "collision_step": int(r.collision_step) if r.collision_step is not None else None,
                 "off_road_frac": float(r.off_road_fraction),
                 "centerline_score": float(r.centerline_score) if hasattr(r, 'centerline_score') else 0.0,
                 "path_length": float(pl),
                 "heading_change": heading_chg,
-                "stopped": pl < 1.0,
+                "stopped": True if pl < 1.0 else False,
             })
 
         print(f"  Processed {chunk_start + len(chunk_paths)}/{len(scene_paths)} scenes...")
