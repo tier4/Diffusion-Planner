@@ -28,9 +28,10 @@ High-level flow
 4. Terminate when the ego arrives within ``goal_tolerance_m`` of
    ``route.goal_pose`` or after ``n_steps`` ticks.
 
-Traffic lights are explicitly out of scope. ``traffic_light_source`` is
-accepted but ignored today; see :mod:`scenario_generation.traffic_light` for
-the intended seam.
+Traffic lights are managed by :class:`TrafficLightController`
+(``scenario_generation.traffic_light``), which discovers TL regulatory
+elements from the lanelet2 map, builds cycle groups, and writes the 5-dim
+one-hot into ``scene.map_data.lanes[:, :, 8:13]`` every map refresh.
 
 Batched inference note
 ----------------------
@@ -78,7 +79,11 @@ from scenario_generation.simulate import (
     load_model,
 )
 from scenario_generation.tensor_converter import MapTensorCache
-from scenario_generation.traffic_light import AllNoneTLSource, TrafficLightSource
+from scenario_generation.traffic_light import (
+    AllNoneTLSource,
+    TrafficLightController,
+    TrafficLightSource,
+)
 
 # Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
 # ranked-SFT to smooth diffusion-planner outputs before the SFT loss; same
@@ -228,10 +233,13 @@ class SceneNPCManager:
         builder: LaneletSceneBuilder,
         ego_route_ll_ids: list[int],
         spawn_config: SpawnConfig,
+        tl_controller: TrafficLightController | None = None,
     ) -> None:
         self.builder = builder
         self.ego_route_ll_ids = ego_route_ll_ids
         self.cfg = spawn_config
+        self.tl_controller = tl_controller
+        self._sim_time: float = 0.0
         self._rng = random.Random(spawn_config.seed)
         self._np_rng = np.random.default_rng(spawn_config.seed)
         self._next_id = 0
@@ -327,6 +335,12 @@ class SceneNPCManager:
 
         for _ in range(20):  # up to 20 attempts
             ll_id = self._rng.choice(candidate_ids)
+            # Skip lanelets that ARE traffic-light-controlled (inside the
+            # intersection). Spawning is allowed on lanelets *before* the
+            # intersection; speed is adjusted below based on TL state.
+            if self.tl_controller is not None and \
+               self.tl_controller.get_group_for_lanelet(ll_id) is not None:
+                continue
             c = self.builder._cache[ll_id]
             cl = c.raw_centerline
             # Pick an arc-length away from the lanelet endpoints.
@@ -345,9 +359,13 @@ class SceneNPCManager:
             pos = cl[seg_idx] + t * (cl[seg_idx + 1] - cl[seg_idx])
             pos = pos.astype(np.float32)
 
-            # Range check against ego.
+            # Range check against ego. Dynamic minimum: at higher ego
+            # speeds, push the min distance out to ego_speed * 3 s to
+            # prevent NPCs from popping in dangerously close.
             d_ego = float(np.linalg.norm(pos - ego_pos))
-            if d_ego < self.cfg.min_spawn_distance or d_ego > self.cfg.max_spawn_distance:
+            ego_speed = float(np.linalg.norm(ego.current_velocity))
+            dynamic_min = max(self.cfg.min_spawn_distance, ego_speed * 3.0)
+            if d_ego < dynamic_min or d_ego > self.cfg.max_spawn_distance:
                 continue
 
             # Lane heading at this point.
@@ -381,6 +399,14 @@ class SceneNPCManager:
             route_ll_ids = self._pick_route(ll_id)
             goal = self.builder._route_goal(route_ll_ids)
             route_lanes, route_sl, route_hsl = self.builder._route_to_33dim(route_ll_ids)
+            if self.tl_controller is not None:
+                self.tl_controller.write_to_route_lanes(
+                    route_lanes, route_ll_ids, self._sim_time,
+                )
+
+            # Reject spawn if too close to a red light on its route.
+            if self._too_close_to_red_tl(pos, route_ll_ids):
+                continue
 
             history, history_ll_ids = self.builder.generate_history(
                 pos, heading, speed, ll_id,
@@ -423,11 +449,45 @@ class SceneNPCManager:
                 route_speed_limit=route_sl,
                 route_has_speed_limit=route_hsl,
                 turn_indicators=np.zeros(history.shape[0], dtype=np.int32),
+                age_steps=0,
+                route_lanelet_ids=route_ll_ids,
             )
             touched = list(set(route_ll_ids) | set(history_ll_ids) | {ll_id})
             return agent, touched
 
         return None, []
+
+    def _too_close_to_red_tl(
+        self,
+        spawn_pos: np.ndarray,
+        route_ll_ids: list[int],
+        min_dist: float = 30.0,
+    ) -> bool:
+        """Return True if the spawn is within ``min_dist`` of a RED/YELLOW TL
+        on the NPC's route. Such spawns are rejected outright — a vehicle
+        appearing 10 m before a red light with full speed is unrealistic
+        and confuses the ego.
+        """
+        from scenario_generation.traffic_light import TL_RED, TL_YELLOW
+        tl = self.tl_controller
+        if tl is None:
+            return False
+
+        for rid in route_ll_ids:
+            gid = tl.get_group_for_lanelet(rid)
+            if gid is None:
+                continue
+            color = tl._color_for_group(gid, self._sim_time)
+            if color not in (TL_RED, TL_YELLOW):
+                return False  # first TL is green, fine to spawn
+            # First TL is red/yellow — check distance to its start.
+            if rid not in self.builder._cache:
+                return True
+            tl_start = self.builder._cache[rid].raw_centerline[0]
+            dist = float(np.linalg.norm(spawn_pos - tl_start))
+            return dist < min_dist
+
+        return False
 
     def _pick_route(self, start_ll_id: int) -> list[int]:
         """Select a forward route for a freshly-spawned NPC.
@@ -454,7 +514,7 @@ class SceneNPCManager:
 _LANE_COLOR = "#bbbbbb"
 _LANE_BORDER_COLOR = "#888888"
 _EGO_COLOR = "#3366cc"
-_ROUTE_COLOR = "#00aa44"
+_ROUTE_COLOR = "#3366cc"
 _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
 
 
@@ -508,6 +568,9 @@ def _save_step_figure(
     n_steps: int,
     route_polylines: list[np.ndarray] | None = None,
     view_half_m: float = _VIEW_HALF_M,
+    tl_controller: TrafficLightController | None = None,
+    route_lanelet_ids: list[int] | None = None,
+    sim_time: float = 0.0,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
@@ -536,6 +599,44 @@ def _save_step_figure(
                     pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR,
                     lw=2.5, alpha=0.6, zorder=3,
                 )
+
+    # 2b) Traffic-light coloured overlay on ALL lanes in map_data that have
+    #     active TL state (route, parallel, and perpendicular). Read
+    #     centerline XY directly from the lane tensor [0:2].
+    if tl_controller is not None:
+        from matplotlib.collections import LineCollection
+        tl_segments: dict[str, list[np.ndarray]] = {}  # hex → list of polylines
+        lanes = scene.map_data.lanes
+        # Use the map_data_ll_ids that were stored when building map_data.
+        # They are passed via route_lanelet_ids for the route overlay, but
+        # for ALL lanes we need the builder's _last_map_data_ids — which
+        # we can't access here. Instead, read the TL one-hot directly from
+        # the lane tensor channels [8:13].
+        for i in range(lanes.shape[0]):
+            lane = lanes[i]
+            pts = lane[:, :2]
+            if np.abs(pts).sum() < 1e-6:
+                continue
+            tl_onehot = lane[0, 8:13]
+            if tl_onehot.sum() < 0.5:
+                continue
+            ch = int(np.argmax(tl_onehot))
+            from scenario_generation.traffic_light import TL_HEX, TL_NONE
+            if ch == TL_NONE:
+                continue
+            hex_color = TL_HEX.get(ch)
+            if hex_color is None:
+                continue
+            valid = np.abs(pts).sum(axis=1) > 0.1
+            if valid.sum() < 2:
+                continue
+            tl_segments.setdefault(hex_color, []).append(pts[valid])
+
+        for hex_color, segs in tl_segments.items():
+            ax.add_collection(LineCollection(
+                segs, colors=hex_color, linewidths=2.5,
+                alpha=0.85, zorder=4,
+            ))
 
     # 3) Agents + per-agent predicted trajectories.
     # Assign colors by hashing the agent id (or extracting a stable numeric
@@ -672,8 +773,8 @@ def run_route_replay(
         output_dir: Directory for per-step PNGs. Created if missing.
         spawn_config: NPC manager tuning. Defaults to :class:`SpawnConfig()`.
         device: Torch device.
-        traffic_light_source: Reserved seam for a future TL source. Ignored
-            today; see :mod:`scenario_generation.traffic_light`.
+        traffic_light_source: Legacy parameter (unused). Traffic lights are
+            now managed by :class:`TrafficLightController` internally.
 
     Returns:
         Dict with ``final_step``, ``goal_reached`` (bool), ``reason`` (str),
@@ -684,6 +785,13 @@ def run_route_replay(
     if traffic_light_source is None:
         traffic_light_source = AllNoneTLSource()
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed ALL random sources for full reproducibility across runs.
+    if spawn_config.seed is not None:
+        torch.manual_seed(spawn_config.seed)
+        torch.cuda.manual_seed_all(spawn_config.seed)
+        np.random.seed(spawn_config.seed)
+        random.seed(spawn_config.seed)
 
     # --- Step 0: build the initial scene from the Route. ---
     ego_route_ids = route.route_lanelet_ids
@@ -798,17 +906,32 @@ def run_route_replay(
         route_speed_limit=route_sl,
         route_has_speed_limit=route_hsl,
         turn_indicators=np.zeros(history.shape[0], dtype=np.int32),
+        route_lanelet_ids=list(ego_route_ids),
     )
     scene = SceneContext(agents=[ego], map_data=map_data, ego_agent_id="ego", dt=0.1)
 
-    # Route polyline (world frame) for per-step visualisation.
+    # Route polyline (world frame) for per-step visualisation. Keep the
+    # lanelet ID list in sync so the TL overlay can colour each segment.
+    _route_vis_ll_ids: list[int] = [
+        ll_id for ll_id in ego_route_ids if ll_id in builder._cache
+    ]
     route_polylines = [
         builder._cache[ll_id].raw_centerline[:, :2]
-        for ll_id in ego_route_ids if ll_id in builder._cache
+        for ll_id in _route_vis_ll_ids
     ]
 
+    # --- Traffic light controller. ---
+    tl_controller = TrafficLightController(
+        builder, ego_route_ids, seed=spawn_config.seed,
+    )
+    # Apply initial TL state to the freshly-built map_data AND ego route_lanes.
+    tl_controller.tick(scene, 0.0, builder._last_map_data_ids, ego_xy=snapped_xy)
+    tl_controller.write_to_route_lanes(
+        scene.ego_agent.route_lanes, initial_route_window, 0.0,
+    )
+
     # --- NPC manager. ---
-    npc_manager = SceneNPCManager(builder, ego_route_ids, spawn_config)
+    npc_manager = SceneNPCManager(builder, ego_route_ids, spawn_config, tl_controller)
     npc_manager.register_known_lanelets(all_lanelet_ids)
 
     map_cache = MapTensorCache(scene.map_data)
@@ -821,6 +944,9 @@ def run_route_replay(
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
         pending_saves: list = []
         for step in range(spawn_config.max_steps):
+            # Keep NPC manager's sim time in sync for TL writes on spawn.
+            npc_manager._sim_time = step * 0.1
+
             # Run the NPC manager (after step 0 so the ego has a meaningful
             # ``current_position`` — always true by construction here).
             if step > 0 and step % spawn_config.spawn_period_steps == 0:
@@ -837,8 +963,11 @@ def run_route_replay(
             # line_strings (intersection areas + road borders + stop lines)
             # via center_xy, and slides the route window forward via
             # select_route_segment_indices.
+            ego_xy = scene.ego_agent.current_position
+
+            # Rebuild map_data periodically (expensive: closest-lanelet
+            # query + polygon/line_string tensors).
             if step == 0 or step % spawn_config.map_refresh_steps == 0:
-                ego_xy = scene.ego_agent.current_position
                 neighbor_xys = [
                     a.current_position for a in scene.agents
                     if a.id != scene.ego_agent_id
@@ -846,20 +975,32 @@ def run_route_replay(
                 new_ids = _compute_map_lanelet_ids(ego_xy, neighbor_xys)
                 scene.map_data = builder._build_map_data(new_ids, center_xy=ego_xy)
                 npc_manager._known_lanelet_ids = set(new_ids)
-                map_cache = MapTensorCache(scene.map_data)
 
-                # Slide the ego's route window forward — drop already-passed
-                # lanelets, keep the next ~25 ahead. Matches training
-                # distribution (median 4 non-zero) and keeps the model's
-                # route context fresh as ego advances.
-                fwd_route_ids = builder.select_route_segment_indices(
-                    ego_route_ids, ego_xy, max_segments=25,
+            # TL state + route_lanes refresh EVERY step so the model
+            # always sees the current signal phase.
+            tl_controller.tick(
+                scene, step * 0.1, builder._last_map_data_ids,
+                ego_xy=ego_xy,
+            )
+            map_cache = MapTensorCache(scene.map_data)
+
+            # Refresh route_lanes for ALL agents (ego + NPCs) so the
+            # sliding window stays centered on each agent's current
+            # position. Without this, NPC route context goes stale and
+            # the model plans trajectories in the wrong direction.
+            for a in scene.agents:
+                if a.route_lanelet_ids is None:
+                    continue
+                a_xy = a.current_position
+                fwd = builder.select_route_segment_indices(
+                    a.route_lanelet_ids, a_xy, max_segments=25,
                 )
-                if fwd_route_ids:
-                    rl, rsl, rhsl = builder._route_to_33dim(fwd_route_ids)
-                    scene.ego_agent.route_lanes = rl
-                    scene.ego_agent.route_speed_limit = rsl
-                    scene.ego_agent.route_has_speed_limit = rhsl
+                if fwd:
+                    rl, rsl, rhsl = builder._route_to_33dim(fwd)
+                    tl_controller.write_to_route_lanes(rl, fwd, step * 0.1)
+                    a.route_lanes = rl
+                    a.route_speed_limit = rsl
+                    a.route_has_speed_limit = rhsl
 
             # Inference for every alive agent, in one batched forward pass.
             # Also returns per-agent argmax of the model's turn-indicator
@@ -892,6 +1033,8 @@ def run_route_replay(
                 _save_step_figure,
                 deepcopy(scene), agent_predictions, out_path,
                 step, spawn_config.max_steps, route_polylines,
+                _VIEW_HALF_M, tl_controller, _route_vis_ll_ids,
+                step * 0.1,
             ))
 
             # Drain any finished saves so memory doesn't balloon.
@@ -931,6 +1074,11 @@ def run_route_replay(
                 break
 
             advance_scene(scene, agent_predictions)
+
+            # Increment age for all agents so the tensor converter knows
+            # how many history frames are "real" vs pre-spawn fabrication.
+            for a in scene.agents:
+                a.age_steps += 1
 
             # Closed-loop turn-indicator feedback: overwrite the freshly-
             # rolled last slot of each agent's turn_indicators history

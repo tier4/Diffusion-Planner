@@ -299,6 +299,10 @@ class LaneletSceneBuilder:
         # Cache per-lanelet geometry
         self._cache: dict[int, _CachedLanelet] = {}
         self._ll_by_id = {}  # lanelet2 objects by id
+        # Ordered lanelet IDs from the most recent _build_map_data call.
+        # The TrafficLightController reads this to map row indices in
+        # map_data.lanes back to lanelet IDs.
+        self._last_map_data_ids: list[int] = []
         self._vehicle_subtypes = {"road", "highway", "road_shoulder"}
         # Subset of ``_vehicle_subtypes`` that actually has routing
         # connections under Germany/Vehicle traffic rules. Used when snapping
@@ -468,6 +472,55 @@ class LaneletSceneBuilder:
 
         assert segment.shape == (POINTS_PER_LANELET, 33), f"Bad shape: {segment.shape}"
         return segment, c.speed_limit_mps, c.has_speed_limit
+
+    # ── Traffic light discovery ─────────────────────────────────────────
+
+    def get_traffic_light_groups(self) -> dict[int, int]:
+        """Return ``{lanelet_id: traffic_light_group_id}`` for all lanelets
+        with ``trafficLights()`` regulatory elements.
+
+        The group_id is the ``.id`` of the first traffic-light regulatory
+        element on each lanelet (mirrors the C++ planner's per-LaneSegment
+        traffic_light_id and ``route_traffic_light_publisher.py:172``).
+        """
+        result: dict[int, int] = {}
+        for ll_id, ll in self._ll_by_id.items():
+            try:
+                tl_list = ll.trafficLights()
+            except Exception:
+                continue
+            if tl_list:
+                result[ll_id] = tl_list[0].id
+        return result
+
+    def get_traffic_light_bulb_groups(self) -> dict[int, frozenset]:
+        """Return ``{reg_element_id: frozenset(light_bulb_linestring_ids)}``.
+
+        Two regulatory elements that share the same ``light_bulbs``
+        LineStrings are controlled by the same physical traffic light and
+        MUST show the same colour.
+        """
+        result: dict[int, frozenset] = {}
+        seen_regs: set[int] = set()
+        for ll in self._ll_by_id.values():
+            try:
+                tl_list = ll.trafficLights()
+            except Exception:
+                continue
+            for tl_reg in tl_list:
+                if tl_reg.id in seen_regs:
+                    continue
+                seen_regs.add(tl_reg.id)
+                bulb_ids: set[int] = set()
+                try:
+                    params = tl_reg.parameters
+                    if "light_bulbs" in params:
+                        for bulb_ls in params["light_bulbs"]:
+                            bulb_ids.add(bulb_ls.id)
+                except Exception:
+                    pass
+                result[tl_reg.id] = frozenset(bulb_ids)
+        return result
 
     # ── Spatial query ────────────────────────────────────────────────────
 
@@ -1438,6 +1491,7 @@ class LaneletSceneBuilder:
         segments = []
         speed_limits = []
         has_speed = []
+        used_ids: list[int] = []
 
         for ll_id in ll_ids:
             if ll_id not in self._cache:
@@ -1446,6 +1500,12 @@ class LaneletSceneBuilder:
             segments.append(seg)
             speed_limits.append(sl)
             has_speed.append(hsl)
+            used_ids.append(ll_id)
+
+        # Store the ordered lanelet IDs for external consumers (e.g.
+        # TrafficLightController) that need to map row indices back to
+        # lanelet IDs.
+        self._last_map_data_ids = used_ids
 
         n = len(segments)
         if n == 0:

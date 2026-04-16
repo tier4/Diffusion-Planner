@@ -69,6 +69,16 @@ class Agent:
     route_speed_limit: np.ndarray | None = None
     route_has_speed_limit: np.ndarray | None = None
     turn_indicators: np.ndarray | None = None
+    # Number of simulation steps this agent has been alive. Used by the
+    # tensor converter to zero-out history frames that predate the spawn
+    # so other agents see the NPC as "just appeared" rather than having
+    # a fabricated past. The agent's OWN inference still uses its full
+    # synthesised history (age is ignored for the ego-as-self path).
+    age_steps: int = 999
+    # Ordered lanelet IDs for this agent's route. Stored at spawn time
+    # so the replay loop can refresh route_lanes as the agent advances
+    # (same sliding-window logic as the ego's route refresh).
+    route_lanelet_ids: list | None = None
 
     @property
     def current_position(self) -> np.ndarray:

@@ -207,6 +207,13 @@ def _build_neighbor_agents_past(
         orig_invalid = np.sum(np.abs(traj[:, :2]), axis=-1) == 0
         feats[orig_invalid] = 0.0
 
+        # Zero out pre-spawn history so other agents see the neighbor as
+        # "just appeared". age_steps=0 means only the current frame (last
+        # row) is real; age_steps>=T_agent means the full history is valid.
+        if hasattr(agent, "age_steps") and agent.age_steps < T_agent:
+            n_valid = max(1, agent.age_steps + 1)  # at least current frame
+            feats[:T_agent - n_valid] = 0.0
+
         feats = _pad_or_truncate(feats, T_needed, axis=0)
         out[0, slot_idx] = feats
 
