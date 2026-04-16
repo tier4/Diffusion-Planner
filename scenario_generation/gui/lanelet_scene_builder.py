@@ -29,6 +29,17 @@ for _p in _ROS_FALLBACK_PATHS:
 
 POINTS_PER_LANELET = 20
 
+# Polygon / LineString tensor constants — matched to the C++ Autoware planner
+# (~/pilot-auto.xx1/.../autoware_diffusion_planner/include/autoware/
+#  diffusion_planner/dimensions.hpp + conversion/lanelet.hpp).
+POINTS_PER_POLYGON = 40
+POINTS_PER_LINE_STRING = 20
+POLYGON_TYPE_INTERSECTION_AREA = 0
+POLYGON_TYPE_NUM = 1
+LINE_STRING_TYPE_STOP_LINE = 0
+LINE_STRING_TYPE_ROAD_BORDER = 1
+LINE_STRING_TYPE_NUM = 2
+
 
 # ── LineType enum (local copy to avoid ROS runtime dep) ──────────────────────
 
@@ -81,6 +92,61 @@ class AgentPlacement:
 
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
+
+def _resample_linestring_to_tiles(
+    pts: np.ndarray, num_points: int, max_step_m: float,
+) -> list[np.ndarray]:
+    """Mirror the C++ ``resample_line_string`` at
+    ``autoware_diffusion_planner/src/conversion/lanelet.cpp:109``.
+
+    A single polyline is split into N segments so that no sampled-point
+    step exceeds ``max_step_m``. Each segment becomes a ``(num_points, 2)``
+    tile interpolated uniformly along its arc length.
+
+    For a 500 m border with ``num_points=20`` and ``max_step_m=5.0``, the
+    unsplit step would be ``500 / 19 ≈ 26`` m — six times over. So we
+    split into ``ceil(26 / 5) = 6`` tiles of ~83 m each, each internally
+    spaced at ~4.4 m per sample. The output then carries six separate
+    tile entries in the line_strings tensor, each passing the AABB filter
+    independently, giving the model the same spatial resolution it saw
+    during training.
+    """
+    if len(pts) < 2 or num_points < 2:
+        return [pts.astype(np.float32)]
+
+    # Cumulative arc length along the polyline.
+    diffs = np.diff(pts, axis=0)
+    seg_lens = np.linalg.norm(diffs, axis=1)
+    arc = np.concatenate([[0.0], np.cumsum(seg_lens)])
+    total = float(arc[-1])
+    if total < 1e-6:
+        tile = np.tile(pts[:1].astype(np.float32), (num_points, 1))
+        return [tile]
+
+    step_m = total / (num_points - 1)
+    safe_max = max(max_step_m, 1e-6)
+    n_tiles = max(1, int(np.ceil(step_m / safe_max)))
+    tile_len = total / n_tiles
+
+    # Pre-build a linear interpolator over arc length.
+    def _point_at(s: float) -> np.ndarray:
+        s = max(0.0, min(total, s))
+        idx = int(np.searchsorted(arc, s) - 1)
+        idx = max(0, min(idx, len(arc) - 2))
+        seg = arc[idx + 1] - arc[idx]
+        t = 0.0 if seg < 1e-9 else (s - arc[idx]) / seg
+        return pts[idx] + t * (pts[idx + 1] - pts[idx])
+
+    tiles: list[np.ndarray] = []
+    for i in range(n_tiles):
+        s_start = i * tile_len
+        inner_step = tile_len / (num_points - 1)
+        tile = np.zeros((num_points, 2), dtype=np.float32)
+        for j in range(num_points):
+            tile[j] = _point_at(s_start + j * inner_step)
+        tiles.append(tile)
+    return tiles
+
 
 def _interpolate_lane(waypoints: np.ndarray, num_points: int = POINTS_PER_LANELET) -> np.ndarray:
     """Arc-length interpolation of a polyline to exactly num_points.
@@ -207,6 +273,23 @@ class LaneletSceneBuilder:
         projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
         self._lanelet_map = lanelet2.io.load(str(lanelet_path), projection)
 
+        # Japanese Autoware maps (e.g. Shinagawa-Odaiba) tag main driving
+        # lanes as ``subtype=road_shoulder`` — but the stock Germany/Vehicle
+        # traffic rules treat that subtype as non-drivable for vehicles,
+        # disconnecting them from the routing graph (0 successors / 0
+        # predecessors). Rewrite the subtype in-memory to ``road`` so the
+        # routing graph includes them. Geometry and all other attributes
+        # stay untouched.
+        n_promoted = 0
+        for ll in self._lanelet_map.laneletLayer:
+            if ("subtype" in ll.attributes
+                    and ll.attributes["subtype"] == "road_shoulder"):
+                ll.attributes["subtype"] = "road"
+                n_promoted += 1
+        if n_promoted:
+            print(f"LaneletSceneBuilder: promoted {n_promoted} "
+                  f"road_shoulder→road lanelets for routing")
+
         traffic_rules = lanelet2.traffic_rules.create(
             lanelet2.traffic_rules.Locations.Germany,
             lanelet2.traffic_rules.Participants.Vehicle,
@@ -216,7 +299,18 @@ class LaneletSceneBuilder:
         # Cache per-lanelet geometry
         self._cache: dict[int, _CachedLanelet] = {}
         self._ll_by_id = {}  # lanelet2 objects by id
+        # Ordered lanelet IDs from the most recent _build_map_data call.
+        # The TrafficLightController reads this to map row indices in
+        # map_data.lanes back to lanelet IDs.
+        self._last_map_data_ids: list[int] = []
         self._vehicle_subtypes = {"road", "highway", "road_shoulder"}
+        # Subset of ``_vehicle_subtypes`` that actually has routing
+        # connections under Germany/Vehicle traffic rules. Used when snapping
+        # a user click to a lanelet the routing graph can plan through —
+        # ``road_shoulder`` is a vehicle-drivable geometry but has 0
+        # successors / predecessors so snapping a start or goal to it makes
+        # routing return None.
+        self._routable_subtypes = {"road", "highway"}
 
         for ll in self._lanelet_map.laneletLayer:
             subtype = ll.attributes["subtype"] if "subtype" in ll.attributes else ""
@@ -269,8 +363,72 @@ class LaneletSceneBuilder:
                 cum_arc_lengths=cum_arc,
             )
 
-        print(f"LaneletSceneBuilder: cached {len(self._cache)} lanelets, "
-              f"routing graph built")
+        # ── Polygon + LineString cache (matches the C++ Autoware planner's
+        #    convert_to_internal_lanelet_map at ../diffusion_planner/src/
+        #    conversion/lanelet.cpp:294-317). Polygons are filtered to
+        #    ``intersection_area`` only; LineStrings to ``stop_line`` and
+        #    ``road_border`` (both populate channels 2/3 of the line_strings
+        #    tensor as one-hot LINE_STRING_TYPE_STOP_LINE=0 / _ROAD_BORDER=1).
+        self._polygons_cache: list[tuple[np.ndarray, int]] = []  # [(points (N,2), type)]
+        self._line_strings_cache: list[tuple[np.ndarray, int]] = []  # same shape
+
+        for poly in self._lanelet_map.polygonLayer:
+            ptype = poly.attributes["type"] if "type" in poly.attributes else ""
+            if ptype != "intersection_area":
+                continue
+            pts = np.array([(p.x, p.y) for p in poly], dtype=np.float32)
+            if len(pts) < 2:
+                continue
+            interp = _interpolate_lane(pts, POINTS_PER_POLYGON)
+            self._polygons_cache.append((interp, POLYGON_TYPE_INTERSECTION_AREA))
+
+        # Matches C++ resample_line_string (max_step_m = 5 m). A long border
+        # (e.g. 500 m) gets split into multiple 20-point tiles so no tile
+        # step exceeds 5 m. Without this, a 500 m border becomes a single
+        # 20-point coarse tile (26 m per step) — way below the model's
+        # training-time resolution and a likely cause of poor performance.
+        line_string_max_step_m = 5.0
+        for ls in self._lanelet_map.lineStringLayer:
+            lstype = ls.attributes["type"] if "type" in ls.attributes else ""
+            if lstype not in ("stop_line", "road_border"):
+                continue
+            pts = np.array([(p.x, p.y) for p in ls], dtype=np.float32)
+            if len(pts) < 2:
+                continue
+            type_idx = (
+                LINE_STRING_TYPE_STOP_LINE if lstype == "stop_line"
+                else LINE_STRING_TYPE_ROAD_BORDER
+            )
+            tiles = _resample_linestring_to_tiles(
+                pts, POINTS_PER_LINE_STRING, line_string_max_step_m,
+            )
+            for tile in tiles:
+                self._line_strings_cache.append((tile, type_idx))
+
+        print(f"LaneletSceneBuilder: cached {len(self._polygons_cache)} "
+              f"intersection polygons, {len(self._line_strings_cache)} line "
+              f"strings (stop_line + road_border)")
+
+        # Pre-compute vectorised anchor arrays for fast spatial queries
+        # (used by closest_lanelets). Rows align with ``self._vehicle_ll_ids``.
+        self._vehicle_ll_ids: np.ndarray = np.array([
+            ll_id for ll_id, c in self._cache.items()
+            if c.subtype in self._vehicle_subtypes
+        ], dtype=np.int64)
+        n_v = len(self._vehicle_ll_ids)
+        self._vehicle_centers = np.zeros((n_v, 2), dtype=np.float32)
+        self._vehicle_firsts = np.zeros((n_v, 2), dtype=np.float32)
+        self._vehicle_lasts = np.zeros((n_v, 2), dtype=np.float32)
+        self._vehicle_backs = np.zeros((n_v, 2), dtype=np.float32)  # -2 index
+        for i, ll_id in enumerate(self._vehicle_ll_ids):
+            cl = self._cache[int(ll_id)].raw_centerline
+            self._vehicle_centers[i] = cl.mean(axis=0)
+            self._vehicle_firsts[i] = cl[0]
+            self._vehicle_lasts[i] = cl[-1]
+            self._vehicle_backs[i] = cl[-2] if len(cl) >= 2 else cl[-1]
+
+        print(f"LaneletSceneBuilder: cached {len(self._cache)} lanelets "
+              f"({n_v} drivable), routing graph built")
 
     # ── 33-dim conversion ────────────────────────────────────────────────
 
@@ -315,6 +473,55 @@ class LaneletSceneBuilder:
         assert segment.shape == (POINTS_PER_LANELET, 33), f"Bad shape: {segment.shape}"
         return segment, c.speed_limit_mps, c.has_speed_limit
 
+    # ── Traffic light discovery ─────────────────────────────────────────
+
+    def get_traffic_light_groups(self) -> dict[int, int]:
+        """Return ``{lanelet_id: traffic_light_group_id}`` for all lanelets
+        with ``trafficLights()`` regulatory elements.
+
+        The group_id is the ``.id`` of the first traffic-light regulatory
+        element on each lanelet (mirrors the C++ planner's per-LaneSegment
+        traffic_light_id and ``route_traffic_light_publisher.py:172``).
+        """
+        result: dict[int, int] = {}
+        for ll_id, ll in self._ll_by_id.items():
+            try:
+                tl_list = ll.trafficLights()
+            except Exception:
+                continue
+            if tl_list:
+                result[ll_id] = tl_list[0].id
+        return result
+
+    def get_traffic_light_bulb_groups(self) -> dict[int, frozenset]:
+        """Return ``{reg_element_id: frozenset(light_bulb_linestring_ids)}``.
+
+        Two regulatory elements that share the same ``light_bulbs``
+        LineStrings are controlled by the same physical traffic light and
+        MUST show the same colour.
+        """
+        result: dict[int, frozenset] = {}
+        seen_regs: set[int] = set()
+        for ll in self._ll_by_id.values():
+            try:
+                tl_list = ll.trafficLights()
+            except Exception:
+                continue
+            for tl_reg in tl_list:
+                if tl_reg.id in seen_regs:
+                    continue
+                seen_regs.add(tl_reg.id)
+                bulb_ids: set[int] = set()
+                try:
+                    params = tl_reg.parameters
+                    if "light_bulbs" in params:
+                        for bulb_ls in params["light_bulbs"]:
+                            bulb_ids.add(bulb_ls.id)
+                except Exception:
+                    pass
+                result[tl_reg.id] = frozenset(bulb_ids)
+        return result
+
     # ── Spatial query ────────────────────────────────────────────────────
 
     def lanelets_in_rect(
@@ -339,7 +546,273 @@ class LaneletSceneBuilder:
                 result.append(ll_id)
         return result
 
+    def closest_lanelets(
+        self, xy: np.ndarray, max_n: int, mask_range: float = 100.0,
+    ) -> list[int]:
+        """Return up to ``max_n`` drivable lanelet IDs around ``xy``, closest first.
+
+        Mirrors the lane-filter strategy used by the Autoware/Diffusion-Planner
+        ROS node (see ``diffusion_planner_ros/lanelet2_utils/lanelet_converter.py``):
+
+        1. **AABB pre-filter**: a lanelet passes when any of its center,
+           first centerline point, or last centerline point falls inside the
+           ``±mask_range`` square around ``xy``. The ROS node uses 100 m.
+        2. **Sort by min-endpoint-distance** to ``xy`` (the score used by
+           ``key_func`` in ``create_lane_tensor``: the smaller of the
+           distances from ``xy`` to the first and second-to-last centerline
+           points).
+        3. **Cap at ``max_n``**.
+
+        ``max_n`` should typically be ≤ ``tensor_converter._NUM_LANES``
+        (currently 140). The ROS node passes 70; training NPZs show ~65
+        non-zero slots per scene, so 70–140 is the sweet spot.
+
+        Args:
+            xy: 2-element world-frame query point ``[x, y]``.
+            max_n: Maximum number of lanelets to return.
+            mask_range: Half-side of the square AABB pre-filter in metres.
+
+        Returns:
+            Lanelet IDs sorted closest-first. Length ≤ ``max_n``.
+        """
+        pos = np.asarray(xy, dtype=np.float32)[:2]
+        if len(self._vehicle_ll_ids) == 0:
+            return []
+
+        # Vectorised AABB: accept when any of (center, first, last) is inside.
+        def _inside(points: np.ndarray) -> np.ndarray:
+            dx = np.abs(points[:, 0] - pos[0])
+            dy = np.abs(points[:, 1] - pos[1])
+            return (dx < mask_range) & (dy < mask_range)
+
+        mask = (
+            _inside(self._vehicle_centers)
+            | _inside(self._vehicle_firsts)
+            | _inside(self._vehicle_lasts)
+        )
+        if not mask.any():
+            return []
+
+        # Score by min-distance of first / second-to-last endpoint to xy
+        # (mirrors the ROS node's key_func in create_lane_tensor).
+        kept_ids = self._vehicle_ll_ids[mask]
+        d_first = np.sum((self._vehicle_firsts[mask] - pos) ** 2, axis=1)
+        d_back = np.sum((self._vehicle_backs[mask] - pos) ** 2, axis=1)
+        score = np.minimum(d_first, d_back)
+        if len(kept_ids) > max_n:
+            top_idx = np.argpartition(score, max_n - 1)[:max_n]
+            top_idx = top_idx[np.argsort(score[top_idx])]
+        else:
+            top_idx = np.argsort(score)
+        return [int(kept_ids[i]) for i in top_idx]
+
+    def lanelets_near_point(
+        self, xy: np.ndarray, radius: float,
+    ) -> list[int]:
+        """Return drivable lanelet IDs whose centerline passes within ``radius``
+        metres of ``xy``.
+
+        Used by the NPC spawn manager to pick candidate lanelets near the ego.
+        First filters by an AABB of side ``2*radius`` (re-uses
+        :meth:`lanelets_in_rect`) then refines with exact centerline-point
+        distance so diagonal-corner false positives are rejected.
+        """
+        x, y = float(xy[0]), float(xy[1])
+        candidates = self.lanelets_in_rect(
+            x - radius, y - radius, x + radius, y + radius,
+        )
+        radius_sq = radius * radius
+        result = []
+        for ll_id in candidates:
+            cl = self._cache[ll_id].raw_centerline
+            dx = cl[:, 0] - x
+            dy = cl[:, 1] - y
+            if np.min(dx * dx + dy * dy) <= radius_sq:
+                result.append(ll_id)
+        return result
+
+    def snap_to_nearest_ll(
+        self,
+        xy: np.ndarray,
+        candidate_ids: list[int] | None = None,
+        routable_only: bool = True,
+        reachable_from: int | None = None,
+        reachable_range_m: float = 10000.0,
+        heading_rad: float | None = None,
+        heading_weight_m_per_deg: float = 0.5,
+    ) -> int | None:
+        """Snap a world-frame ``(x, y)`` position to the nearest drivable lanelet.
+
+        Scoring: when ``heading_rad`` is provided, the candidate score is
+        ``distance_m + heading_weight_m_per_deg * |delta_heading_deg|``. At
+        the default weight (0.5), a 180° mismatch adds 90 m to the distance —
+        so a slightly-farther lane pointing the right way wins over a
+        slightly-closer lane pointing the wrong way. This is critical for
+        dense maps (e.g. Shinagawa) where parallel opposite-direction roads
+        often lie within a few metres of each other.
+
+        Args:
+            xy: 2-element array-like ``[x, y]`` in MGRS world frame.
+            candidate_ids: Optional restriction to a subset of lanelets. When
+                ``None``, all cached drivable lanelets are considered.
+            routable_only: When ``True`` (default), only lanelets with subtype
+                in ``self._routable_subtypes`` (``road`` / ``highway``) are
+                considered. This avoids snapping start/goal clicks onto
+                ``road_shoulder`` lanelets — those are drivable geometrically
+                but have no routing connections under Germany/Vehicle rules,
+                so ``route_between`` would return ``None``.
+            reachable_from: When set to a lanelet id, only candidates in
+                ``RoutingGraph.reachableSet(that_lanelet, reachable_range_m)``
+                are considered. Use this for snapping a goal / waypoint so
+                the click doesn't land on a geometrically-close but
+                topologically-disconnected sub-network.
+            reachable_range_m: Distance horizon for the reachable-set
+                computation (ignored when ``reachable_from`` is None).
+            heading_rad: Desired travel direction at the query point. When
+                provided, candidates with lane direction far from this are
+                penalised (see scoring formula above). ``None`` falls back
+                to pure nearest-distance snapping.
+            heading_weight_m_per_deg: Penalty weight applied to the heading
+                delta. 0.5 m/deg is a good default; raise it to snap more
+                aggressively along the click direction.
+
+        Returns:
+            The lanelet id with the best combined score, or ``None`` when no
+            candidate passes the filters.
+        """
+        pos = np.asarray(xy, dtype=np.float32)[:2]
+        allowed_subtypes = (
+            self._routable_subtypes if routable_only else self._vehicle_subtypes
+        )
+        if candidate_ids is None:
+            candidate_ids = [
+                ll_id for ll_id, c in self._cache.items()
+                if c.subtype in allowed_subtypes
+            ]
+        else:
+            candidate_ids = [
+                ll_id for ll_id in candidate_ids
+                if ll_id in self._cache
+                and self._cache[ll_id].subtype in allowed_subtypes
+            ]
+
+        if reachable_from is not None and reachable_from in self._ll_by_id:
+            source_ll = self._ll_by_id[reachable_from]
+            reachable_ids = {
+                ll.id for ll in self._routing_graph.reachableSet(
+                    source_ll, reachable_range_m,
+                )
+            }
+            candidate_ids = [ll for ll in candidate_ids if ll in reachable_ids]
+
+        best_ll_id = None
+        best_score = float("inf")
+        for ll_id in candidate_ids:
+            cl = self._cache[ll_id].raw_centerline
+            diff = cl - pos
+            dist2 = diff[:, 0] ** 2 + diff[:, 1] ** 2
+            idx = int(np.argmin(dist2))
+            dist = float(np.sqrt(dist2[idx]))
+
+            score = dist
+            if heading_rad is not None and len(cl) >= 2:
+                # Lane direction at the closest centerline point.
+                if idx < len(cl) - 1:
+                    dxdy = cl[idx + 1] - cl[idx]
+                else:
+                    dxdy = cl[idx] - cl[idx - 1]
+                lane_hdg = math.atan2(float(dxdy[1]), float(dxdy[0]))
+                delta = lane_hdg - heading_rad
+                # Wrap into [-pi, pi] and take absolute value (degrees).
+                delta = math.atan2(math.sin(delta), math.cos(delta))
+                delta_deg = abs(math.degrees(delta))
+                score += heading_weight_m_per_deg * delta_deg
+
+            if score < best_score:
+                best_score = score
+                best_ll_id = ll_id
+        return best_ll_id
+
+    def is_lanelet_straight(
+        self, ll_id: int, curvature_threshold: float = 0.3,
+    ) -> bool:
+        """Check if a lanelet is straight enough for NPC spawning.
+
+        Iterates consecutive centerline segments and returns False when the
+        maximum heading change between any two adjacent segments exceeds
+        ``curvature_threshold`` radians (default 0.3 rad ≈ 17°).
+
+        Ported from ``tier4_autoware_psim_scenarios.stopped_vehicle_utils.is_lanelet_straight``.
+        NPC history synthesis via :meth:`generate_history` can produce unnatural
+        trajectories on sharp curves, so the spawn manager rejects non-straight
+        candidates.
+        """
+        if ll_id not in self._cache:
+            return False
+        cl = self._cache[ll_id].raw_centerline
+        if len(cl) < 3:
+            return True  # too few points to measure curvature
+
+        diffs = np.diff(cl, axis=0)
+        seg_lens = np.linalg.norm(diffs, axis=1)
+        valid = seg_lens > 1e-6
+        if valid.sum() < 2:
+            return True
+        angles = np.arctan2(diffs[valid, 1], diffs[valid, 0])
+
+        delta = np.diff(angles)
+        # Wrap each delta into [-pi, pi].
+        delta = np.arctan2(np.sin(delta), np.cos(delta))
+        return bool(np.max(np.abs(delta)) <= curvature_threshold)
+
     # ── Routing ──────────────────────────────────────────────────────────
+
+    def route_between(
+        self, start_ll_id: int, goal_ll_id: int,
+    ) -> list[int] | None:
+        """Shortest path between two lanelet IDs using the lanelet2 routing graph.
+
+        Returns a list of lanelet IDs ``[start_ll_id, ..., goal_ll_id]`` or
+        ``None`` when start and goal are in disconnected components / reverse
+        directions. Wraps :class:`lanelet2.routing.RoutingGraph.shortestPath`.
+        """
+        if start_ll_id not in self._ll_by_id or goal_ll_id not in self._ll_by_id:
+            return None
+        start_ll = self._ll_by_id[start_ll_id]
+        goal_ll = self._ll_by_id[goal_ll_id]
+        path = self._routing_graph.shortestPath(start_ll, goal_ll)
+        if path is None:
+            return None
+        return [ll.id for ll in path]
+
+    def route_with_waypoints(
+        self,
+        start_ll_id: int,
+        via_ll_ids: list[int],
+        goal_ll_id: int,
+    ) -> list[int] | None:
+        """Shortest path forced through ``via_ll_ids`` in the given order.
+
+        Uses :class:`lanelet2.routing.RoutingGraph.shortestPathWithVia`. When
+        ``via_ll_ids`` is empty, delegates to :meth:`route_between`.
+
+        Returns the resolved lanelet id sequence or ``None`` when any
+        consecutive pair in ``[start, *via, goal]`` is unreachable.
+        """
+        if not via_ll_ids:
+            return self.route_between(start_ll_id, goal_ll_id)
+        if start_ll_id not in self._ll_by_id or goal_ll_id not in self._ll_by_id:
+            return None
+        for vid in via_ll_ids:
+            if vid not in self._ll_by_id:
+                return None
+        start_ll = self._ll_by_id[start_ll_id]
+        goal_ll = self._ll_by_id[goal_ll_id]
+        via_lls = [self._ll_by_id[i] for i in via_ll_ids]
+        path = self._routing_graph.shortestPathWithVia(start_ll, via_lls, goal_ll)
+        if path is None:
+            return None
+        return [ll.id for ll in path]
 
     def find_route(self, start_ll_id: int, min_length_m: float = 120.0) -> list[int]:
         """Find a forward route from start_lanelet of at least min_length_m.
@@ -591,19 +1064,7 @@ class LaneletSceneBuilder:
         ex, ey, eheading = ego_pose
         pos = np.array([ex, ey], dtype=np.float32)
 
-        # Find nearest lanelet centerline
-        best_ll_id = None
-        best_dist = float("inf")
-        for ll_id in lanelet_ids:
-            if ll_id not in self._cache:
-                continue
-            cl = self._cache[ll_id].raw_centerline
-            dists = np.linalg.norm(cl - pos, axis=1)
-            d = float(dists.min())
-            if d < best_dist:
-                best_dist = d
-                best_ll_id = ll_id
-
+        best_ll_id = self.snap_to_nearest_ll(pos, candidate_ids=lanelet_ids)
         if best_ll_id is None:
             return None
 
@@ -848,15 +1309,189 @@ class LaneletSceneBuilder:
 
         return lanes, sl_arr, hsl_arr
 
-    def _build_map_data(self, ll_ids: list[int]) -> MapData:
+    # ── Polygon / LineString tensors (match C++ Autoware) ────────────────
+
+    def build_polygons_tensor(
+        self,
+        center_xy: np.ndarray,
+        max_n: int = 10,
+        mask_range: float = 100.0,
+    ) -> np.ndarray:
+        """Return a ``(max_n, POINTS_PER_POLYGON, 2 + POLYGON_TYPE_NUM)`` array
+        of intersection-area polygon points in **world frame** (not ego),
+        sorted by min-distance-to-``center_xy``.
+
+        The world-frame coordinates are written to channels [0:2]; channel
+        ``2 + type`` is set to 1.0 for the polygon's type. The
+        ``MapData.polygons`` field consumed by ``MapTensorCache`` carries the
+        world frame; the cache transforms to ego frame at inference time.
+
+        Mirrors C++
+        ``LaneSegmentContext::create_line_tensor<Polygon>(...)`` filter +
+        sort logic at
+        ``~/pilot-auto.xx1/.../autoware_diffusion_planner/src/preprocessing/
+        lane_segments.cpp:347``.
+        """
+        return self._build_line_or_polygon_tensor(
+            self._polygons_cache, center_xy, max_n,
+            POINTS_PER_POLYGON, POLYGON_TYPE_NUM, mask_range,
+        )
+
+    def build_line_strings_tensor(
+        self,
+        center_xy: np.ndarray,
+        max_n: int = 60,
+        mask_range: float = 100.0,
+    ) -> np.ndarray:
+        """Return a ``(max_n, POINTS_PER_LINE_STRING, 2 + LINE_STRING_TYPE_NUM)``
+        array of stop_line + road_border line-string points in **world frame**,
+        sorted by min-distance-to-``center_xy``. Channel layout matches
+        training NPZs:
+
+            [0]: x (world)
+            [1]: y (world)
+            [2]: one-hot stop_line
+            [3]: one-hot road_border
+        """
+        return self._build_line_or_polygon_tensor(
+            self._line_strings_cache, center_xy, max_n,
+            POINTS_PER_LINE_STRING, LINE_STRING_TYPE_NUM, mask_range,
+        )
+
+    def _build_line_or_polygon_tensor(
+        self,
+        cache: list[tuple[np.ndarray, int]],
+        center_xy: np.ndarray,
+        max_n: int,
+        num_points: int,
+        num_types: int,
+        mask_range: float,
+    ) -> np.ndarray:
+        """Shared implementation for ``build_polygons_tensor`` and
+        ``build_line_strings_tensor``. AABB pre-filter + min-distance sort +
+        top-N truncate, matching the C++ ``create_line_tensor`` template."""
+        cx, cy = float(center_xy[0]), float(center_xy[1])
+        x_min, x_max = cx - mask_range, cx + mask_range
+        y_min, y_max = cy - mask_range, cy + mask_range
+
+        scored: list[tuple[float, np.ndarray, int]] = []
+        for pts, type_idx in cache:
+            inside = (
+                ((pts[:, 0] > x_min) & (pts[:, 0] < x_max)
+                 & (pts[:, 1] > y_min) & (pts[:, 1] < y_max)).any()
+            )
+            if not inside:
+                continue
+            dx = pts[:, 0] - cx
+            dy = pts[:, 1] - cy
+            min_d = float(np.sqrt(dx * dx + dy * dy).min())
+            scored.append((min_d, pts, type_idx))
+        scored.sort(key=lambda t: t[0])
+
+        out = np.zeros((max_n, num_points, 2 + num_types), dtype=np.float32)
+        for i, (_, pts, type_idx) in enumerate(scored[:max_n]):
+            n = min(len(pts), num_points)
+            out[i, :n, 0] = pts[:n, 0]
+            out[i, :n, 1] = pts[:n, 1]
+            out[i, :n, 2 + type_idx] = 1.0
+        return out
+
+    # ── Route segment selection (match C++ Autoware) ─────────────────────
+
+    def select_route_segment_indices(
+        self,
+        route_lanelet_ids: list[int],
+        center_xy: np.ndarray,
+        max_segments: int = 25,
+        mask_range: float = 100.0,
+    ) -> list[int]:
+        """Return the forward-near-ego subset of a saved route, in the order
+        the ego will encounter them.
+
+        Algorithm matches the C++ Autoware planner
+        (``LaneSegmentContext::select_route_segment_indices`` at
+        ``~/pilot-auto.xx1/.../preprocessing/lane_segments.cpp:64``):
+
+        1. Find the route lanelet *closest* to ``center_xy`` by min
+           centerline-point distance — that's the ego's current "spot" on
+           the route.
+        2. Starting from that index, walk **forward** through the saved
+           route. For each next lanelet, check if any centerline point is
+           inside the AABB ``±mask_range`` around ``center_xy``.
+
+           - Lanelets outside the AABB *before* ego enters the valid region
+             are skipped (route hasn't started near ego yet).
+           - The first lanelet inside the AABB marks "entered valid region".
+           - Once entered, the first lanelet *outside* the AABB triggers a
+             break (we've gone past the relevant portion).
+        3. Cap at ``max_segments`` (default 25 = ``_NUM_ROUTE``).
+
+        This is what makes ``route_lanes`` a sliding window of forward
+        context that matches training distribution (median 4 non-zero
+        slots) instead of a frozen-at-init full route.
+        """
+        if not route_lanelet_ids:
+            return []
+        cx, cy = float(center_xy[0]), float(center_xy[1])
+
+        # Step 1: closest route lanelet to ego.
+        closest_idx = 0
+        closest_dist = float("inf")
+        for i, ll_id in enumerate(route_lanelet_ids):
+            if ll_id not in self._cache:
+                continue
+            cl = self._cache[ll_id].raw_centerline
+            dx = cl[:, 0] - cx
+            dy = cl[:, 1] - cy
+            d = float(np.sqrt(dx * dx + dy * dy).min())
+            if d < closest_dist:
+                closest_dist = d
+                closest_idx = i
+
+        # Step 2: walk forward from closest_idx with AABB gating.
+        selected: list[int] = []
+        has_entered = False
+        for i in range(closest_idx, len(route_lanelet_ids)):
+            ll_id = route_lanelet_ids[i]
+            if ll_id not in self._cache:
+                continue
+            cl = self._cache[ll_id].raw_centerline
+            inside = (
+                ((cl[:, 0] > cx - mask_range) & (cl[:, 0] < cx + mask_range)
+                 & (cl[:, 1] > cy - mask_range) & (cl[:, 1] < cy + mask_range)).any()
+            )
+            if not inside:
+                if has_entered:
+                    break
+                continue
+            has_entered = True
+            selected.append(ll_id)
+            if len(selected) >= max_segments:
+                break
+        return selected
+
+    def _build_map_data(
+        self,
+        ll_ids: list[int],
+        center_xy: np.ndarray | None = None,
+    ) -> MapData:
         """Build MapData from lanelet IDs.
 
         Includes ALL lanelets in the selection (no cap). At inference time the
         tensor converter selects the N closest lanelets per ego agent.
+
+        When ``center_xy`` is provided, ``polygons`` and ``line_strings`` are
+        populated with the closest 10 / 60 elements (intersection areas /
+        stop_line + road_border) within ±100 m of the center, sorted by
+        distance — matching the C++ Autoware planner's preprocessing. This
+        gives the model the road-border + intersection context it was
+        trained with. Without ``center_xy`` (legacy callers), they remain
+        zero-filled.
         """
         segments = []
         speed_limits = []
         has_speed = []
+        used_ids: list[int] = []
 
         for ll_id in ll_ids:
             if ll_id not in self._cache:
@@ -865,6 +1500,12 @@ class LaneletSceneBuilder:
             segments.append(seg)
             speed_limits.append(sl)
             has_speed.append(hsl)
+            used_ids.append(ll_id)
+
+        # Store the ordered lanelet IDs for external consumers (e.g.
+        # TrafficLightController) that need to map row indices back to
+        # lanelet IDs.
+        self._last_map_data_ids = used_ids
 
         n = len(segments)
         if n == 0:
@@ -878,11 +1519,18 @@ class LaneletSceneBuilder:
             sl_arr[j, 0] = speed_limits[j]
             hsl_arr[j, 0] = has_speed[j]
 
+        if center_xy is not None:
+            polygons = self.build_polygons_tensor(center_xy)
+            line_strings = self.build_line_strings_tensor(center_xy)
+        else:
+            polygons = np.zeros((10, POINTS_PER_POLYGON, 2 + POLYGON_TYPE_NUM), dtype=np.float32)
+            line_strings = np.zeros((60, POINTS_PER_LINE_STRING, 2 + LINE_STRING_TYPE_NUM), dtype=np.float32)
+
         return MapData(
             lanes=lanes,
             lanes_speed_limit=sl_arr,
             lanes_has_speed_limit=hsl_arr,
-            polygons=np.zeros((10, 40, 3), dtype=np.float32),
-            line_strings=np.zeros((60, 20, 4), dtype=np.float32),
+            polygons=polygons,
+            line_strings=line_strings,
             static_objects=np.zeros((5, 10), dtype=np.float32),
         )
