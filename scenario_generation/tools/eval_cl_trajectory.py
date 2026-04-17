@@ -145,17 +145,16 @@ def evaluate_trajectory(
 def load_border_segments(map_path: str) -> list[np.ndarray]:
     """Load road border polylines from a lanelet2 map."""
     import lanelet2
-    from lanelet2.io import Origin, load
-    from lanelet2.projection import MGRSProjector
+    from autoware_lanelet2_extension_python.projection import MGRSProjector
 
-    projector = MGRSProjector(Origin(0.0, 0.0))
-    ll_map = load(map_path, projector)
+    projector = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
+    ll_map = lanelet2.io.load(map_path, projector)
 
     segments = []
     for ls in ll_map.lineStringLayer:
         attrs = ls.attributes
-        ls_type = attrs.get("type", "")
-        ls_subtype = attrs.get("subtype", "")
+        ls_type = attrs["type"] if "type" in attrs else ""
+        ls_subtype = attrs["subtype"] if "subtype" in attrs else ""
         if ls_type == "road_border" or ls_subtype == "road_border":
             pts = np.array([[p.x, p.y] for p in ls], dtype=np.float64)
             if len(pts) >= 2:
