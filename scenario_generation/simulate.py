@@ -192,6 +192,7 @@ def advance_scene_mpc(
     tracker_type: str = "mpc",
     mpc_horizon_steps: int = 20,
     mpc_n_knots: int = 5,
+    ego_max_steer: float = 0.6,
 ) -> None:
     """Advance the scene using trajectory tracking (in-place).
 
@@ -240,9 +241,11 @@ def advance_scene_mpc(
         # Lazy-init tracker for this agent
         if agent.id not in trackers:
             if tracker_type == "mpc":
+                max_steer = ego_max_steer if agent.id == "ego" else 0.6
                 trackers[agent.id] = MPCTracker(
                     wheelbase=agent.wheelbase, dt=dt,
                     horizon_steps=mpc_horizon_steps, n_knots=mpc_n_knots,
+                    max_steer=max_steer,
                 )
             elif tracker_type == "perfect":
                 trackers[agent.id] = PerfectTracker(dt=dt)
@@ -423,6 +426,7 @@ def _predict_batch(
     agent_ids: list[str], device: str,
     map_cache: MapTensorCache | None = None,
     return_turn_indicators: bool = False,
+    inference_delay: int = 0,
 ) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], dict[str, int]]:
     """Run batched inference for multiple agents-as-ego.
 
@@ -451,7 +455,8 @@ def _predict_batch(
     if map_cache is None:
         map_cache = MapTensorCache(scene.map_data)
     tensor_dicts = [
-        to_model_tensors(scene, aid, model_args, device, map_cache=map_cache)
+        to_model_tensors(scene, aid, model_args, device, map_cache=map_cache,
+                         inference_delay=inference_delay)
         for aid in agent_ids
     ]
 

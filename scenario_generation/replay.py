@@ -199,6 +199,18 @@ class SpawnConfig:
     advance_mode: str = "teleport"
     mpc_horizon_steps: int = 20
     mpc_n_knots: int = 5
+    # Ego vehicle dimensions. Override for non-default vehicles (e.g. J6 bus).
+    ego_length: float = 4.5
+    ego_width: float = 1.9
+    ego_wheelbase: float = 2.925  # 4.5 * 0.65
+    ego_max_steer: float = 0.6
+    # Model inference delay: number of initial timesteps kept fixed as prefix.
+    # Matches the "delay" input tensor to the diffusion decoder.
+    inference_delay: int = 0
+    # Initial ego speed for history synthesis (m/s). Default uses midpoint
+    # of NPC speed band (7.5), but real data may be much slower (e.g. 1.75
+    # at miraikan exit). Set to match the scenario being replayed.
+    ego_init_speed: float | None = None
     # Run model inference one agent at a time instead of batching all
     # agents into a single forward pass. Slower but useful for diagnosing
     # whether batched inference affects trajectory quality.
@@ -863,9 +875,11 @@ def run_route_replay(
     closest = int(np.argmin(dists))
     snapped_xy = cl[closest].astype(np.float32)
     heading = float(start_pose[2])
-    # Reasonable initial speed: midpoint of NPC speed band. The diffusion
-    # planner recovers from this quickly since it sees 31 steps of history.
-    init_speed = 0.5 * (spawn_config.npc_min_speed + spawn_config.npc_max_speed)
+    # Initial ego speed for history synthesis.
+    if spawn_config.ego_init_speed is not None:
+        init_speed = spawn_config.ego_init_speed
+    else:
+        init_speed = 0.5 * (spawn_config.npc_min_speed + spawn_config.npc_max_speed)
 
     # Synthesise realistic history along the route's predecessor lanelets.
     history, history_ll_ids = builder.generate_history(
@@ -935,12 +949,12 @@ def run_route_replay(
     yaw_rate_init = float(dh_init.mean() / 0.1) if len(dh_init) > 0 else 0.0
     speed_init = float(np.linalg.norm(velocities[-1]))
     accel_init = (velocities[-1] - velocities[-3]) / (2 * 0.1) if len(velocities) >= 3 else np.zeros(2, dtype=np.float32)
-    steering_init = float(math.atan2(4.5 * 0.65 * yaw_rate_init, max(speed_init, 0.2))) if speed_init > 0.2 else 0.0
+    steering_init = float(math.atan2(spawn_config.ego_wheelbase * yaw_rate_init, max(speed_init, 0.2))) if speed_init > 0.2 else 0.0
 
     ego = Agent(
         id="ego",
         agent_type=AgentType.VEHICLE,
-        length=4.5, width=1.9, wheelbase=4.5 * 0.65,
+        length=spawn_config.ego_length, width=spawn_config.ego_width, wheelbase=spawn_config.ego_wheelbase,
         past_trajectory=history,
         past_velocities=velocities,
         acceleration=accel_init.astype(np.float32),
@@ -984,6 +998,9 @@ def run_route_replay(
     goal_reached = False
     reason = "max_steps"
     min_goal_d = float("inf")  # closest approach to goal seen so far
+
+    # Per-step trajectory log for post-hoc evaluation.
+    trajectory_log: list[dict] = []
 
     # Tracker state (lazy-init per agent inside advance_scene_mpc).
     _use_tracker = spawn_config.advance_mode in ("mpc", "perfect")
@@ -1081,6 +1098,7 @@ def run_route_replay(
                     p, ti = _predict_batch(
                         model, model_args, scene, [aid], device,
                         map_cache=map_cache, return_turn_indicators=True,
+                        inference_delay=spawn_config.inference_delay,
                     )
                     agent_predictions.update(p)
                     agent_turn_indicators.update(ti)
@@ -1088,6 +1106,7 @@ def run_route_replay(
                 agent_predictions, agent_turn_indicators = _predict_batch(
                     model, model_args, scene, ids_to_predict, device,
                     map_cache=map_cache, return_turn_indicators=True,
+                    inference_delay=spawn_config.inference_delay,
                 )
 
             # Optional Savitzky-Golay smoothing on each agent's predicted
@@ -1157,12 +1176,26 @@ def run_route_replay(
                 )
                 break
 
+            # Log ego state for post-hoc evaluation.
+            ego_agent = scene.ego_agent
+            ego_speed = float(np.linalg.norm(ego_agent.past_velocities[-1])) \
+                if ego_agent.past_velocities is not None else 0.0
+            trajectory_log.append({
+                "step": step,
+                "x": float(ego_pos[0]),
+                "y": float(ego_pos[1]),
+                "heading": float(ego_heading),
+                "speed": ego_speed,
+                "goal_d": d_goal,
+            })
+
             if spawn_config.advance_mode in ("mpc", "perfect"):
                 advance_scene_mpc(
                     scene, agent_predictions, mpc_trackers,
                     tracker_type=spawn_config.advance_mode,
                     mpc_horizon_steps=spawn_config.mpc_horizon_steps,
                     mpc_n_knots=spawn_config.mpc_n_knots,
+                    ego_max_steer=spawn_config.ego_max_steer,
                 )
             else:
                 advance_scene(scene, agent_predictions)
@@ -1197,11 +1230,19 @@ def run_route_replay(
 
     final_step = step
     print(f"Done. {final_step + 1} frames saved to {output_dir}; reason={reason}")
+
+    # Save trajectory log for post-hoc evaluation.
+    import json as _json
+    traj_log_path = output_dir / "trajectory_log.json"
+    with open(traj_log_path, "w") as _f:
+        _json.dump(trajectory_log, _f)
+
     return {
         "final_step": final_step,
         "goal_reached": goal_reached,
         "reason": reason,
         "n_npc_spawned": n_npc_spawned,
+        "trajectory_log": trajectory_log,
     }
 
 
