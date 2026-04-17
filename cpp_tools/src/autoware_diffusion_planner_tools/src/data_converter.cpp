@@ -186,56 +186,58 @@ struct SkippingInfo
 {
   SkippingLabel label;
   std::string details;  // Human-readable details (e.g., topic name, message type)
-  std::optional<MissingTopicType> missing_topic_type;
-  std::optional<IncompleteDataType> incomplete_data_type;
-  
+  std::vector<MissingTopicType> missing_topic_types;
+  std::vector<IncompleteDataType> incomplete_data_types;
+
   // Specialized constructors for convenience
-  static SkippingInfo missing_topic(MissingTopicType topic_type)
+  static SkippingInfo missing_topics(const std::vector<MissingTopicType>& types)
   {
-    const std::string topic_map[] = {
+    static const std::string topic_map[] = {
       "KinematicState", "Acceleration", "TrackedObjects", "Route", "TurnIndicators",
       "TrafficSignals"};
-    return {SkippingLabel::MissingRequiredTopic,
-            "Missing topic: " + topic_map[static_cast<int>(topic_type)], topic_type,
-            std::nullopt};
+    std::string details = "Missing topics: ";
+    for (size_t i = 0; i < types.size(); ++i) {
+      if (i > 0) details += ", ";
+      details += topic_map[static_cast<int>(types[i])];
+    }
+    return {SkippingLabel::MissingRequiredTopic, details, types, {}};
   }
-  
-  static SkippingInfo incomplete_data(IncompleteDataType data_type)
+
+  static SkippingInfo incomplete_data(const std::vector<IncompleteDataType>& types)
   {
-    const std::string data_map[] = {
+    static const std::string data_map[] = {
       "KinematicState", "Acceleration", "TrackedObjects", "TrafficSignals", "TurnIndicators"};
-    return {SkippingLabel::IncompleteData,
-            "Incomplete data: " + data_map[static_cast<int>(data_type)], std::nullopt,
-            data_type};
+    std::string details = "Incomplete data: ";
+    for (size_t i = 0; i < types.size(); ++i) {
+      if (i > 0) details += ", ";
+      details += data_map[static_cast<int>(types[i])];
+    }
+    return {SkippingLabel::IncompleteData, details, {}, types};
   }
-  
+
   static SkippingInfo insufficient_frames(int64_t actual, int64_t minimum)
   {
     return {SkippingLabel::InsufficientFrames,
-            "Only " + std::to_string(actual) + " frames (minimum: " + std::to_string(minimum) +
-              ")",
-            std::nullopt, std::nullopt};
+            "Only " + std::to_string(actual) + " frames (minimum: " + std::to_string(minimum) + ")",
+            {}, {}};
   }
-  
+
   static SkippingInfo insufficient_distance(double traveled, double minimum)
   {
     return {SkippingLabel::InsufficientDistance,
-            "Traveled distance " + std::to_string(traveled) + "m (minimum: " +
-              std::to_string(minimum) + "m)",
-            std::nullopt, std::nullopt};
+            "Traveled distance " + std::to_string(traveled) + "m (minimum: " + std::to_string(minimum) + "m)",
+            {}, {}};
   }
-  
+
   static SkippingInfo vehicle_stopped()
   {
-    return {SkippingLabel::VehicleStopped, "Ego vehicle is stopped", std::nullopt,
-            std::nullopt};
+    return {SkippingLabel::VehicleStopped, "Ego vehicle is stopped", {}, {}};
   }
-  
+
   static SkippingInfo red_or_yellow_light()
   {
     return {SkippingLabel::RedOrYellowLight,
-            "At red/yellow light with forward moving future trajectory", std::nullopt,
-            std::nullopt};
+            "At red/yellow light with forward moving future trajectory", {}, {}};
   }
 };
 
@@ -492,11 +494,15 @@ void save_binary_data(
   j["qz"] = kinematic_state.pose.pose.orientation.z;
   j["qw"] = kinematic_state.pose.pose.orientation.w;
   if (skipping_info.has_value()) {
+    std::vector<int> missing_types;
+    for (const auto& t : skipping_info->missing_topic_types) missing_types.push_back(static_cast<int>(t));
+    std::vector<int> incomplete_types;
+    for (const auto& t : skipping_info->incomplete_data_types) incomplete_types.push_back(static_cast<int>(t));
     j["skipping_info"] = {
       {"label", static_cast<int>(skipping_info->label)},
       {"details", skipping_info->details},
-      {"missing_topic_type", skipping_info->missing_topic_type ? static_cast<int>(*skipping_info->missing_topic_type) : -1},
-      {"incomplete_data_type", skipping_info->incomplete_data_type ? static_cast<int>(*skipping_info->incomplete_data_type) : -1}
+      {"missing_topic_types", missing_types},
+      {"incomplete_data_types", incomplete_types}
     };
   }
   std::ofstream json_file(json_filename);
@@ -712,21 +718,23 @@ int main(int argc, char ** argv)
     std::cout << "No training samples will be generated from this rosbag." << std::endl;
 
     // Output skipping_info as JSON for each missing topic
+    // Output skipping_info as JSON for all missing topics at once
+    nlohmann::json j;
+    std::vector<int> missing_types;
     for (size_t i = 0; i < missing_topics.size(); ++i) {
-      nlohmann::json j;
-      j["skipping_info"] = {
-        {"label", static_cast<int>(SkippingLabel::MissingRequiredTopic)},
-        {"details", "Missing topic: " + missing_topics[i]},
-        {"missing_topic_type", static_cast<int>(i)},
-        {"incomplete_data_type", -1}
-      };
-      // Output file name: <rosbag_dir>_missing_topic_<i>.json
-      std::string json_filename = save_dir + "/skipped/" + rosbag_dir_name + "_missing_topic_" + std::to_string(i) + ".json";
-      std::ofstream json_file(json_filename);
-      if (json_file.is_open()) {
-        json_file << std::setw(2) << j << std::endl;
-        json_file.close();
-      }
+      missing_types.push_back(static_cast<int>(i));
+    }
+    j["skipping_info"] = {
+      {"label", static_cast<int>(SkippingLabel::MissingRequiredTopic)},
+      {"details", "Missing topics: " + std::to_string(missing_topics.size())},
+      {"missing_topic_types", missing_types},
+      {"incomplete_data_types", std::vector<int>{}}
+    };
+    std::string json_filename = save_dir + "/skipped/" + rosbag_dir_name + "_missing_topics.json";
+    std::ofstream json_file(json_filename);
+    if (json_file.is_open()) {
+      json_file << std::setw(2) << j << std::endl;
+      json_file.close();
     }
     rclcpp::shutdown();
     return 0;
@@ -834,16 +842,16 @@ int main(int argc, char ** argv)
     if (!ok) {
       if (sequence.data_list.empty()) {
         // At the beginning of recording, some msgs may be missing - Skip this frame
-        std::ostringstream detail_stream;
-        detail_stream << "Incomplete data: ";
-        for (size_t idx = 0; idx < incomplete_details.size(); ++idx) {
-          if (idx > 0) {
-            detail_stream << ",";
-          }
-          detail_stream << incomplete_details[idx];
+        // Convert incomplete_details (vector<string>) to vector<IncompleteDataType>
+        std::vector<IncompleteDataType> incomplete_types;
+        for (const auto& s : incomplete_details) {
+          if (s == "KinematicState") incomplete_types.push_back(IncompleteDataType::KinematicState);
+          else if (s == "Acceleration") incomplete_types.push_back(IncompleteDataType::Acceleration);
+          else if (s == "TrackedObjects") incomplete_types.push_back(IncompleteDataType::TrackedObjects);
+          else if (s == "TrafficSignals") incomplete_types.push_back(IncompleteDataType::TrafficSignals);
+          else if (s == "TurnIndicators") incomplete_types.push_back(IncompleteDataType::TurnIndicators);
         }
-        const SkippingInfo skipping_info{
-          SkippingLabel::IncompleteData, detail_stream.str(), std::nullopt, std::nullopt};
+        const SkippingInfo skipping_info = SkippingInfo::incomplete_data(incomplete_types);
         Odometry fallback_kinematic = kinematic;
         fallback_kinematic.header.stamp = tracking.header.stamp;
         save_skipping_binary_data(
