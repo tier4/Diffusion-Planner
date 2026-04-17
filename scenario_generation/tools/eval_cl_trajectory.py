@@ -53,7 +53,11 @@ def _min_dist_to_border_segments(
     corners: list[tuple[float, float]],
     border_segments: list[np.ndarray],
 ) -> float:
-    """Minimum distance from any ego corner to any border line segment."""
+    """Minimum distance from any ego corner to any border line segment.
+
+    Original reference implementation (nested loop). Kept for parity
+    verification with the fast path.
+    """
     min_d = float("inf")
     for cx, cy in corners:
         p = np.array([cx, cy])
@@ -73,6 +77,48 @@ def _min_dist_to_border_segments(
     return min_d
 
 
+def _flatten_segments(border_segments: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Flatten list of polylines into (M, 2) segment start + (M, 2) segment end arrays."""
+    starts = []
+    ends = []
+    for seg in border_segments:
+        if len(seg) < 2:
+            continue
+        starts.append(seg[:-1])
+        ends.append(seg[1:])
+    if not starts:
+        return np.zeros((0, 2)), np.zeros((0, 2))
+    return np.concatenate(starts, axis=0), np.concatenate(ends, axis=0)
+
+
+def _min_dist_vectorized(
+    corners: np.ndarray,  # (4, 2)
+    seg_starts: np.ndarray,  # (M, 2)
+    seg_ends: np.ndarray,  # (M, 2)
+) -> float:
+    """Vectorized min distance from any corner to any line segment."""
+    # ab: (M, 2), ab_len2: (M,)
+    ab = seg_ends - seg_starts
+    ab_len2 = (ab * ab).sum(axis=1)
+    ab_len2_safe = np.where(ab_len2 < 1e-12, 1.0, ab_len2)
+
+    # For each corner, compute distance to all segments in one pass.
+    # ap: (4, M, 2)
+    ap = corners[:, None, :] - seg_starts[None, :, :]
+    # dot: (4, M)
+    dot = (ap * ab[None, :, :]).sum(axis=2)
+    t = np.clip(dot / ab_len2_safe[None, :], 0.0, 1.0)
+    # proj: (4, M, 2)
+    proj = seg_starts[None, :, :] + t[:, :, None] * ab[None, :, :]
+    # dist: (4, M)
+    delta = corners[:, None, :] - proj
+    dist = np.sqrt((delta * delta).sum(axis=2))
+    # Handle degenerate (zero-length) segments
+    dist_deg = np.linalg.norm(corners[:, None, :] - seg_starts[None, :, :], axis=2)
+    dist = np.where(ab_len2[None, :] < 1e-12, dist_deg, dist)
+    return float(dist.min())
+
+
 def evaluate_trajectory(
     traj: list[dict],
     border_segments: list[np.ndarray],
@@ -85,6 +131,8 @@ def evaluate_trajectory(
     half_l = ego_length / 2
     half_w = ego_width / 2
 
+    seg_starts, seg_ends = _flatten_segments(border_segments)
+
     rb_dists = []
     speeds = []
     positions = []
@@ -95,8 +143,11 @@ def evaluate_trajectory(
         positions.append((x, y))
         speeds.append(speed)
 
-        corners = _compute_ego_corners(x, y, h, half_l, half_w, ego_wheelbase)
-        rb_d = _min_dist_to_border_segments(corners, border_segments)
+        corners = np.array(
+            _compute_ego_corners(x, y, h, half_l, half_w, ego_wheelbase),
+            dtype=np.float64,
+        )
+        rb_d = _min_dist_vectorized(corners, seg_starts, seg_ends)
         rb_dists.append(rb_d)
 
     rb_dists = np.array(rb_dists)
