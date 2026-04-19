@@ -1,14 +1,14 @@
-"""Evaluate closed-loop replay trajectories against road borders and lanes.
+"""Evaluate closed-loop replay trajectories against road borders.
 
 Reads ``trajectory_log.json`` from a replay output directory and computes
-per-step and aggregate metrics: road border distance, lane departure,
-speed profile, path length, and progress toward goal.
+per-step and aggregate metrics: road-border distance/crossing, speed
+profile, path length, stopped fraction, and progress toward goal.
 
 Usage:
     python -m scenario_generation.tools.eval_cl_trajectory \
         --run_dirs cl_baseline cl_ep5 cl_ep9 \
         --map_path /path/to/lanelet2_map.osm \
-        --ego_length 7.2369 --ego_width 2.29156
+        --ego_length 4.5 --ego_width 1.9 --ego_wheelbase 2.925
 """
 
 from __future__ import annotations
@@ -47,34 +47,6 @@ def _compute_ego_corners(
         cy = y + dx * sin_h + dy * cos_h
         corners.append((cx, cy))
     return corners
-
-
-def _min_dist_to_border_segments(
-    corners: list[tuple[float, float]],
-    border_segments: list[np.ndarray],
-) -> float:
-    """Minimum distance from any ego corner to any border line segment.
-
-    Original reference implementation (nested loop). Kept for parity
-    verification with the fast path.
-    """
-    min_d = float("inf")
-    for cx, cy in corners:
-        p = np.array([cx, cy])
-        for seg in border_segments:
-            # seg: (N, 2) polyline
-            for i in range(len(seg) - 1):
-                a, b = seg[i], seg[i + 1]
-                ab = b - a
-                ab_len2 = float(np.dot(ab, ab))
-                if ab_len2 < 1e-12:
-                    d = float(np.linalg.norm(p - a))
-                else:
-                    t = max(0.0, min(1.0, float(np.dot(p - a, ab)) / ab_len2))
-                    proj = a + t * ab
-                    d = float(np.linalg.norm(p - proj))
-                min_d = min(min_d, d)
-    return min_d
 
 
 def _flatten_segments(border_segments: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
@@ -132,6 +104,7 @@ def evaluate_trajectory(
     half_w = ego_width / 2
 
     seg_starts, seg_ends = _flatten_segments(border_segments)
+    has_borders = seg_starts.shape[0] > 0
 
     rb_dists = []
     speeds = []
@@ -143,12 +116,12 @@ def evaluate_trajectory(
         positions.append((x, y))
         speeds.append(speed)
 
-        corners = np.array(
-            _compute_ego_corners(x, y, h, half_l, half_w, ego_wheelbase),
-            dtype=np.float64,
-        )
-        rb_d = _min_dist_vectorized(corners, seg_starts, seg_ends)
-        rb_dists.append(rb_d)
+        if has_borders:
+            corners = np.array(
+                _compute_ego_corners(x, y, h, half_l, half_w, ego_wheelbase),
+                dtype=np.float64,
+            )
+            rb_dists.append(_min_dist_vectorized(corners, seg_starts, seg_ends))
 
     rb_dists = np.array(rb_dists)
     speeds = np.array(speeds)
@@ -160,9 +133,13 @@ def evaluate_trajectory(
     else:
         path_length = 0.0
 
-    # RB metrics
-    rb_crossings = int((rb_dists < rb_cross_thresh).sum())
-    first_rb_cross = int(np.argmax(rb_dists < rb_cross_thresh)) if rb_crossings > 0 else -1
+    # RB metrics (skipped if the map has no road-border polylines).
+    if len(rb_dists) > 0:
+        rb_crossings = int((rb_dists < rb_cross_thresh).sum())
+        first_rb_cross = int(np.argmax(rb_dists < rb_cross_thresh)) if rb_crossings > 0 else -1
+    else:
+        rb_crossings = 0
+        first_rb_cross = -1
 
     # Progress
     start_goal_d = traj[0]["goal_d"] if traj else 0
@@ -219,9 +196,12 @@ def main():
     parser.add_argument("--run_dirs", nargs="+", required=True,
                         help="Replay output directories (each must contain trajectory_log.json)")
     parser.add_argument("--map_path", required=True, help="Lanelet2 map OSM file")
-    parser.add_argument("--ego_length", type=float, default=7.2369)
-    parser.add_argument("--ego_width", type=float, default=2.29156)
-    parser.add_argument("--ego_wheelbase", type=float, default=4.76012)
+    parser.add_argument("--ego_length", type=float, required=True,
+                        help="Ego length (m) — must match the vehicle used for replay")
+    parser.add_argument("--ego_width", type=float, required=True,
+                        help="Ego width (m) — must match the vehicle used for replay")
+    parser.add_argument("--ego_wheelbase", type=float, required=True,
+                        help="Ego wheelbase (m) — must match the vehicle used for replay")
     parser.add_argument("--rb_cross_thresh", type=float, default=0.20)
     parser.add_argument("--output", type=str, default=None, help="Save results JSON")
     args = parser.parse_args()

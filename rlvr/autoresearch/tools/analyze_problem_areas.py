@@ -18,7 +18,6 @@ import argparse
 import copy
 import json
 import os
-import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -27,8 +26,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from preference_optimization.model_utils import load_model
 from rlvr.autoresearch.run_experiment import DEVICE, load_npz_data
@@ -122,24 +119,28 @@ def main():
                 "name": Path(sp).stem,
                 "bag": Path(sp).parent.name,
                 "total_reward": float(r.total),
-                "rb_crossing": True if r.rb_crossing else False,
+                "rb_crossing": bool(r.rb_crossing),
                 "rb_min_dist": float(r.rb_min_dist),
-                "lane_crossing": True if r.lane_crossing else False,
+                "lane_crossing": bool(r.lane_crossing),
                 "lane_near_frac": float(r.lane_near_frac),
                 "collision_step": int(r.collision_step) if r.collision_step is not None else None,
                 "off_road_frac": float(r.off_road_fraction),
-                "centerline_score": float(r.centerline_score) if hasattr(r, 'centerline_score') else 0.0,
+                "centerline_score": float(r.centerline),
                 "path_length": float(pl),
                 "heading_change": heading_chg,
-                "stopped": True if pl < 1.0 else False,
+                "stopped": bool(pl < 1.0),
             })
 
         print(f"  Processed {chunk_start + len(chunk_paths)}/{len(scene_paths)} scenes...")
 
     print(f"\nTotal scored: {len(results)} scenes")
 
-    # Compute statistics
     n = len(results)
+    if n == 0:
+        print("No scenes scored — nothing to summarize.")
+        return
+
+    # Compute statistics
     rb_cross = sum(1 for r in results if r["rb_crossing"])
     lane_dep = sum(1 for r in results if r["lane_crossing"])
     collisions = sum(1 for r in results if r["collision_step"] is not None)
@@ -230,9 +231,7 @@ def main():
     axes[1, 1].set_title("Heading vs Border Distance")
     axes[1, 1].axhline(0.45, color="orange", linestyle="--", alpha=0.5)
 
-    # 6. Cumulative problem distribution
-    sorted_rewards = sorted(rewards)
-    cum_rb = np.cumsum([1 for r in results if r["rb_crossing"]])
+    # 6. Problem scene reward distribution
     reward_at_rb = [r["total_reward"] for r in results if r["rb_crossing"]]
     if reward_at_rb:
         axes[1, 2].hist(reward_at_rb, bins=30, color="red", alpha=0.5, label="RB cross")

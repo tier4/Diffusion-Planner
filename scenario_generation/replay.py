@@ -216,6 +216,22 @@ class SpawnConfig:
     # whether batched inference affects trajectory quality.
     sequential_inference: bool = False
 
+    def __post_init__(self) -> None:
+        if self.ego_length <= 0 or self.ego_width <= 0 or self.ego_wheelbase <= 0:
+            raise ValueError(
+                f"ego dimensions must be positive "
+                f"(length={self.ego_length}, width={self.ego_width}, "
+                f"wheelbase={self.ego_wheelbase})"
+            )
+        if not 0 < self.ego_max_steer < math.pi / 2:
+            raise ValueError(
+                f"ego_max_steer must be in (0, pi/2); got {self.ego_max_steer}"
+            )
+        if self.inference_delay < 0:
+            raise ValueError(
+                f"inference_delay must be non-negative; got {self.inference_delay}"
+            )
+
     @classmethod
     def from_json(cls, path: str | Path) -> "SpawnConfig":
         """Load a SpawnConfig from a JSON file.
@@ -1157,6 +1173,21 @@ def run_route_replay(
             goal_xy = route.goal_pose[:2]
             d_goal = float(np.linalg.norm(ego_pos - goal_xy))
             min_goal_d = min(min_goal_d, d_goal)
+
+            # Log ego state before termination checks so the terminal frame
+            # (at goal_reached/goal_passed) is preserved for post-hoc metrics.
+            ego_agent = scene.ego_agent
+            ego_speed = float(np.linalg.norm(ego_agent.past_velocities[-1])) \
+                if ego_agent.past_velocities is not None else 0.0
+            trajectory_log.append({
+                "step": step,
+                "x": float(ego_pos[0]),
+                "y": float(ego_pos[1]),
+                "heading": float(ego_heading),
+                "speed": ego_speed,
+                "goal_d": d_goal,
+            })
+
             if d_goal <= spawn_config.goal_tolerance_m:
                 goal_reached = True
                 reason = "goal_reached"
@@ -1175,19 +1206,6 @@ def run_route_replay(
                     f"{spawn_config.goal_pass_window_m:.0f} m of goal)"
                 )
                 break
-
-            # Log ego state for post-hoc evaluation.
-            ego_agent = scene.ego_agent
-            ego_speed = float(np.linalg.norm(ego_agent.past_velocities[-1])) \
-                if ego_agent.past_velocities is not None else 0.0
-            trajectory_log.append({
-                "step": step,
-                "x": float(ego_pos[0]),
-                "y": float(ego_pos[1]),
-                "heading": float(ego_heading),
-                "speed": ego_speed,
-                "goal_d": d_goal,
-            })
 
             if spawn_config.advance_mode in ("mpc", "perfect"):
                 advance_scene_mpc(
@@ -1232,17 +1250,16 @@ def run_route_replay(
     print(f"Done. {final_step + 1} frames saved to {output_dir}; reason={reason}")
 
     # Save trajectory log for post-hoc evaluation.
-    import json as _json
     traj_log_path = output_dir / "trajectory_log.json"
-    with open(traj_log_path, "w") as _f:
-        _json.dump(trajectory_log, _f)
+    with open(traj_log_path, "w") as f:
+        json.dump(trajectory_log, f)
 
     return {
         "final_step": final_step,
         "goal_reached": goal_reached,
         "reason": reason,
         "n_npc_spawned": n_npc_spawned,
-        "trajectory_log": trajectory_log,
+        "trajectory_log_path": str(traj_log_path),
     }
 
 
