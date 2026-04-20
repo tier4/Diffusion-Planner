@@ -26,6 +26,7 @@ from diffusion_planner.utils.config import Config
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -42,6 +43,10 @@ def main():
                         help="Scene indices (default: all)")
     parser.add_argument("--worst_n", type=int, default=None,
                         help="Show only N worst scenes by reward gap")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="GRPO training config JSON. When given, reward "
+                             "thresholds and weights start from here; the "
+                             "per-field overrides below still win on top.")
     # Reward config overrides
     parser.add_argument("--w_progress", type=float, default=None)
     parser.add_argument("--rb_near_scale", type=float, default=None)
@@ -67,8 +72,8 @@ def main():
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
 
-    # Reward config
-    rcfg = RewardConfig()
+    # Reward config: optional baseline from training config, then per-field overrides.
+    rcfg = load_reward_config(args.config) if args.config is not None else RewardConfig()
     if args.w_progress is not None:
         rcfg.w_progress = args.w_progress
     if args.rb_near_scale is not None:
