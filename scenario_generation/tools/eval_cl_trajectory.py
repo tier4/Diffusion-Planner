@@ -69,10 +69,14 @@ def _compute_ego_perimeter(
 
     Corner-only distance misses the case where a road-border segment
     intersects the footprint near the middle of an edge but stays far from
-    every corner. Sampling ``samples_per_side`` points per edge (inclusive
-    of endpoints, shared across adjacent edges) catches those crossings.
+    every corner. We walk each of the 4 OBB edges with
+    ``np.linspace(0, 1, samples_per_side, endpoint=False)`` — i.e. each
+    edge contributes ``samples_per_side`` points, including its starting
+    corner but excluding its end corner (which is the next edge's start).
+    That means every corner appears exactly once globally and no point is
+    duplicated.
 
-    Returns (K, 2) with K == 4 * (samples_per_side - 1).
+    Returns (K, 2) with ``K == 4 * samples_per_side``.
     """
     length = 2 * half_length
     rear_overhang = (length - wheelbase) / 2
@@ -113,27 +117,48 @@ def _flatten_segments(border_segments: list[np.ndarray]) -> tuple[np.ndarray, np
     return np.concatenate(starts, axis=0), np.concatenate(ends, axis=0)
 
 
+_SEGMENT_BLOCK_SIZE = 4096
+
+
 def _min_dist_vectorized(
     points: np.ndarray,  # (K, 2) any set of query points (corners or perimeter samples)
     seg_starts: np.ndarray,  # (M, 2)
     seg_ends: np.ndarray,  # (M, 2)
 ) -> float:
-    """Vectorized min distance from any query point to any line segment."""
-    ab = seg_ends - seg_starts
-    ab_len2 = (ab * ab).sum(axis=1)
-    ab_len2_safe = np.where(ab_len2 < 1e-12, 1.0, ab_len2)
+    """Vectorized min distance from any query point to any line segment.
 
-    # For each point, compute distance to all segments in one pass.
-    ap = points[:, None, :] - seg_starts[None, :, :]                      # (K, M, 2)
-    dot = (ap * ab[None, :, :]).sum(axis=2)                               # (K, M)
-    t = np.clip(dot / ab_len2_safe[None, :], 0.0, 1.0)
-    proj = seg_starts[None, :, :] + t[:, :, None] * ab[None, :, :]        # (K, M, 2)
-    delta = points[:, None, :] - proj
-    dist = np.sqrt((delta * delta).sum(axis=2))                           # (K, M)
-    # Degenerate (zero-length) segments fall back to point distance.
-    dist_deg = np.linalg.norm(points[:, None, :] - seg_starts[None, :, :], axis=2)
-    dist = np.where(ab_len2[None, :] < 1e-12, dist_deg, dist)
-    return float(dist.min())
+    Processes segments in blocks of ``_SEGMENT_BLOCK_SIZE`` so the
+    intermediate ``(K, M, …)`` arrays don't materialize over the entire
+    map at once. Running min across blocks preserves the global minimum.
+    """
+    if len(points) == 0 or len(seg_starts) == 0:
+        return float("inf")
+
+    min_dist = float("inf")
+    for start in range(0, len(seg_starts), _SEGMENT_BLOCK_SIZE):
+        end = start + _SEGMENT_BLOCK_SIZE
+        s_starts = seg_starts[start:end]
+        s_ends = seg_ends[start:end]
+
+        ab = s_ends - s_starts
+        ab_len2 = (ab * ab).sum(axis=1)
+        ab_len2_safe = np.where(ab_len2 < 1e-12, 1.0, ab_len2)
+
+        ap = points[:, None, :] - s_starts[None, :, :]                    # (K, B, 2)
+        dot = (ap * ab[None, :, :]).sum(axis=2)                           # (K, B)
+        t = np.clip(dot / ab_len2_safe[None, :], 0.0, 1.0)
+        proj = s_starts[None, :, :] + t[:, :, None] * ab[None, :, :]      # (K, B, 2)
+        delta = points[:, None, :] - proj
+        dist = np.sqrt((delta * delta).sum(axis=2))                       # (K, B)
+        # Degenerate (zero-length) segments fall back to point distance.
+        dist_deg = np.linalg.norm(points[:, None, :] - s_starts[None, :, :], axis=2)
+        dist = np.where(ab_len2[None, :] < 1e-12, dist_deg, dist)
+
+        block_min = float(dist.min())
+        if block_min < min_dist:
+            min_dist = block_min
+
+    return min_dist
 
 
 def evaluate_trajectory(
