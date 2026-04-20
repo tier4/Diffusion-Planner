@@ -29,6 +29,9 @@ def _load_trajectory(run_dir: Path) -> list[dict]:
         return json.load(f)
 
 
+_EDGE_SAMPLES_PER_SIDE = 8
+
+
 def _compute_ego_corners(
     x: float, y: float, heading: float,
     half_length: float, half_width: float, wheelbase: float,
@@ -57,6 +60,45 @@ def _compute_ego_corners(
     return corners
 
 
+def _compute_ego_perimeter(
+    x: float, y: float, heading: float,
+    half_length: float, half_width: float, wheelbase: float,
+    samples_per_side: int = _EDGE_SAMPLES_PER_SIDE,
+) -> np.ndarray:
+    """Sample points along the 4 OBB edges in world frame.
+
+    Corner-only distance misses the case where a road-border segment
+    intersects the footprint near the middle of an edge but stays far from
+    every corner. Sampling ``samples_per_side`` points per edge (inclusive
+    of endpoints, shared across adjacent edges) catches those crossings.
+
+    Returns (K, 2) with K == 4 * (samples_per_side - 1).
+    """
+    length = 2 * half_length
+    rear_overhang = (length - wheelbase) / 2
+    front = wheelbase + rear_overhang
+    rear = -rear_overhang
+    # Local-frame corners in rectangle order (front-right, front-left, rear-left, rear-right).
+    corners_local = np.array([
+        [front, -half_width],
+        [front,  half_width],
+        [rear,   half_width],
+        [rear,  -half_width],
+    ], dtype=np.float64)
+
+    ts = np.linspace(0.0, 1.0, samples_per_side, endpoint=False)  # drop duplicate end
+    edge_pts = []
+    for i in range(4):
+        a = corners_local[i]
+        b = corners_local[(i + 1) % 4]
+        edge_pts.append(a[None, :] + ts[:, None] * (b - a)[None, :])
+    local = np.concatenate(edge_pts, axis=0)  # (4 * samples_per_side, 2)
+
+    cos_h, sin_h = math.cos(heading), math.sin(heading)
+    rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
+    return (local @ rot.T) + np.array([x, y])
+
+
 def _flatten_segments(border_segments: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
     """Flatten list of polylines into (M, 2) segment start + (M, 2) segment end arrays."""
     starts = []
@@ -72,29 +114,24 @@ def _flatten_segments(border_segments: list[np.ndarray]) -> tuple[np.ndarray, np
 
 
 def _min_dist_vectorized(
-    corners: np.ndarray,  # (4, 2)
+    points: np.ndarray,  # (K, 2) any set of query points (corners or perimeter samples)
     seg_starts: np.ndarray,  # (M, 2)
     seg_ends: np.ndarray,  # (M, 2)
 ) -> float:
-    """Vectorized min distance from any corner to any line segment."""
-    # ab: (M, 2), ab_len2: (M,)
+    """Vectorized min distance from any query point to any line segment."""
     ab = seg_ends - seg_starts
     ab_len2 = (ab * ab).sum(axis=1)
     ab_len2_safe = np.where(ab_len2 < 1e-12, 1.0, ab_len2)
 
-    # For each corner, compute distance to all segments in one pass.
-    # ap: (4, M, 2)
-    ap = corners[:, None, :] - seg_starts[None, :, :]
-    # dot: (4, M)
-    dot = (ap * ab[None, :, :]).sum(axis=2)
+    # For each point, compute distance to all segments in one pass.
+    ap = points[:, None, :] - seg_starts[None, :, :]                      # (K, M, 2)
+    dot = (ap * ab[None, :, :]).sum(axis=2)                               # (K, M)
     t = np.clip(dot / ab_len2_safe[None, :], 0.0, 1.0)
-    # proj: (4, M, 2)
-    proj = seg_starts[None, :, :] + t[:, :, None] * ab[None, :, :]
-    # dist: (4, M)
-    delta = corners[:, None, :] - proj
-    dist = np.sqrt((delta * delta).sum(axis=2))
-    # Handle degenerate (zero-length) segments
-    dist_deg = np.linalg.norm(corners[:, None, :] - seg_starts[None, :, :], axis=2)
+    proj = seg_starts[None, :, :] + t[:, :, None] * ab[None, :, :]        # (K, M, 2)
+    delta = points[:, None, :] - proj
+    dist = np.sqrt((delta * delta).sum(axis=2))                           # (K, M)
+    # Degenerate (zero-length) segments fall back to point distance.
+    dist_deg = np.linalg.norm(points[:, None, :] - seg_starts[None, :, :], axis=2)
     dist = np.where(ab_len2[None, :] < 1e-12, dist_deg, dist)
     return float(dist.min())
 
@@ -125,11 +162,13 @@ def evaluate_trajectory(
         speeds.append(speed)
 
         if has_borders:
-            corners = np.array(
-                _compute_ego_corners(x, y, h, half_l, half_w, ego_wheelbase),
-                dtype=np.float64,
+            # Sample the full OBB perimeter, not just corners: a border that
+            # pierces the middle of a vehicle edge can leave every corner
+            # outside rb_cross_thresh but still be a true crossing.
+            perimeter = _compute_ego_perimeter(
+                x, y, h, half_l, half_w, ego_wheelbase,
             )
-            rb_dists.append(_min_dist_vectorized(corners, seg_starts, seg_ends))
+            rb_dists.append(_min_dist_vectorized(perimeter, seg_starts, seg_ends))
 
     rb_dists = np.array(rb_dists)
     speeds = np.array(speeds)

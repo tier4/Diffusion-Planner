@@ -251,7 +251,7 @@ def main():
     axes[1, 1].set_xlabel("Heading Change (rad)")
     axes[1, 1].set_ylabel("RB Min Dist (m)")
     axes[1, 1].set_title("Heading vs Border Distance")
-    axes[1, 1].axhline(0.45, color="orange", linestyle="--", alpha=0.5)
+    axes[1, 1].axhline(eval_config.rb_near_thresh, color="orange", linestyle="--", alpha=0.5)
 
     # 6. Problem scene reward distribution
     reward_at_rb = [r["total_reward"] for r in results if r["rb_crossing"]]

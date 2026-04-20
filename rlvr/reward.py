@@ -1740,8 +1740,12 @@ def compute_lane_departure_penalty(
     Returns:
         Tuple of (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty):
         - crossing_gate: (N,) 1.0 if fully inside lane, 0.0 if any timestep exits
-        - near_frac: (N,) fraction of in-lane timesteps within lane_near_thresh of outer boundary
-        - wide_frac: (N,) fraction of in-lane timesteps between lane_near_thresh-lane_wide_thresh (exclusive)
+        - near_frac: (N,) fraction of evaluated timesteps (excluding t=0) where
+          the traj is in-lane AND min distance to outer boundary < lane_near_thresh.
+          Crossing (out-of-lane) timesteps contribute 0.
+        - wide_frac: (N,) fraction of evaluated timesteps (excluding t=0) where
+          the traj is in-lane AND distance ∈ [lane_near_thresh, lane_wide_thresh).
+          Crossing timesteps contribute 0.
         - lane_crossing_steps: list of N (int | None) — first timestep of lane exit
         - cont_penalty: (N,) continuous proximity penalty (linear decay from lane_cont_thresh)
     """

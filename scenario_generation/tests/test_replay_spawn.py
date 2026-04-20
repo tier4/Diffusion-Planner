@@ -48,6 +48,39 @@ def test_spawn_config_ignores_unknown_keys(tmp_path: Path) -> None:
     assert c.max_active_npcs == 4
 
 
+@pytest.mark.parametrize("kwargs,needle", [
+    ({"ego_length": -1.0}, "ego dimensions must be positive"),
+    ({"ego_width": 0.0}, "ego dimensions must be positive"),
+    ({"ego_wheelbase": -0.1}, "ego dimensions must be positive"),
+    ({"ego_length": 3.0, "ego_wheelbase": 4.0}, "ego_wheelbase must be <= ego_length"),
+    ({"ego_max_steer": 0.0}, "ego_max_steer must be in"),
+    ({"ego_max_steer": 1.6}, "ego_max_steer must be in"),
+    ({"inference_delay": -1}, "inference_delay must be non-negative"),
+    ({"max_steps": 0}, "max_steps must be >= 1"),
+    ({"ego_init_speed": -0.5}, "ego_init_speed must be >= 0"),
+])
+def test_spawn_config_validate_rejects_invalid_values(kwargs: dict, needle: str) -> None:
+    """__post_init__ should fail fast on out-of-range fields."""
+    with pytest.raises(ValueError, match=needle):
+        SpawnConfig(**kwargs)
+
+
+def test_spawn_config_validate_catches_post_construction_mutation() -> None:
+    """validate() must be re-callable after direct field mutation (the
+    CLI-override path in replay.main bypasses __post_init__)."""
+    c = SpawnConfig()
+    c.max_steps = 0
+    with pytest.raises(ValueError, match="max_steps must be >= 1"):
+        c.validate()
+
+
+def test_spawn_config_validate_accepts_valid_ego_init_speed() -> None:
+    # None, 0.0, and positive speeds all pass.
+    SpawnConfig(ego_init_speed=None)
+    SpawnConfig(ego_init_speed=0.0)
+    SpawnConfig(ego_init_speed=1.75)
+
+
 def test_spawn_config_defaults_match_user_spec() -> None:
     """User-required values from the April 2026 planning session."""
     c = SpawnConfig()
