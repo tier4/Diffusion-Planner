@@ -113,17 +113,24 @@ class GRPOConfig:
     lane_near_scale: float = 3.0
     lane_wide_scale: float = 0.2
     lane_cont_scale: float = 0.0
+    lane_cross_thresh: float = 0.20  # metres — signed distance threshold for lane crossing
     lane_near_thresh: float = 0.25  # metres — near zone boundary
     lane_wide_thresh: float = 0.40  # metres — wide zone boundary
     lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
+    max_yaw_rate: float = 1.0  # rad/s — kinematic feasibility absolute yaw cap
+    yaw_rate_scale: float = 3.0
+    max_steer: float = 0.64  # rad — bicycle-model steering range (J6 default; xx1≈0.45)
+    kinematic_margin: float = 2.5  # safety margin over physical κ_max
+    kinematic_scale: float = 3.0
     enable_overprogress: bool = True
     overprogress_margin: float = 1.1
     overprogress_penalty: float = 0.3
     stopped_penalty: float = 5.0
-    underprogress_penalty: float = 0.0  # penalize model driving << GT (0=disabled)
-    underprogress_threshold: float = 0.5  # penalize if model_path/gt_path < threshold
+    underprogress_penalty: float = 0.0  # penalize model driving << reference (0=disabled)
+    underprogress_threshold: float = 0.5  # penalize if model_path/reference < threshold
+    underprogress_reference: str = "det"  # "det" = deterministic (adaptive); "baseline" = frozen LoRA-less baseline
     progress_norm_scale: float = 20.0  # max progress points at 100% GT match
 
     # Reward aggregation mode (passed to RewardConfig):

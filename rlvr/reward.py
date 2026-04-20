@@ -46,6 +46,7 @@ class RewardConfig:
     lane_near_scale: float = 3.0
     lane_wide_scale: float = 0.2
     lane_cont_scale: float = 0.0
+    lane_cross_thresh: float = 0.20  # metres — signed distance threshold for crossing (matches rb_cross_thresh)
     lane_near_thresh: float = 0.25  # metres — near zone boundary
     lane_wide_thresh: float = 0.40  # metres — wide zone boundary
     lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
@@ -54,15 +55,36 @@ class RewardConfig:
     max_lat_accel: float = 2.0  # m/s^2
     lat_accel_scale: float = 3.0
 
+    # Yaw-rate feasibility gate (absolute cap). Thresholds chosen so GT
+    # trajectories pass (GT peaks ≈0.5 rad/s on tight human turns) and only
+    # clearly unphysical predictions (e.g. pivot-in-place) fail.
+    max_yaw_rate: float = 1.0  # rad/s  (2× GT peak)
+    yaw_rate_scale: float = 3.0
+
+    # Bicycle-model kinematic feasibility gate. κ_max = tan(max_steer)/wheelbase.
+    # Wheelbase is read from ego_shape[0] per scene; max_steer is configured below.
+    # Effective curvature bound: kinematic_margin × tan(max_steer) / wheelbase.
+    # Margin absorbs SG finite-differencing noise and tight human driving.
+    max_steer: float = 0.64  # rad (J6 ≈0.64, xx1 ≈0.45)
+    kinematic_margin: float = 2.5  # multiplier over physical bicycle-model bound
+    kinematic_scale: float = 3.0
+
     # Overprogress: cap progress at GT path × margin, penalize excess
     enable_overprogress: bool = False
     overprogress_margin: float = 1.1
     overprogress_penalty: float = 0.3
     stopped_penalty: float = 50.0  # applied in compute_reward_batch progress section
 
-    # Underprogress: penalize trajectories that drive much less than GT
+    # Underprogress: penalize trajectories that drive much less than a reference.
     underprogress_penalty: float = 0.0   # scale (0=disabled). Penalty = scale * max(0, threshold - ratio)
-    underprogress_threshold: float = 0.5  # penalize if model_path / gt_path < threshold
+    underprogress_threshold: float = 0.5  # fire when ratio < threshold
+    # Reference for underprogress:
+    #   "det"      — deterministic traj (traj[0]) path length. Adaptive but can
+    #                collapse when model output itself collapses.
+    #   "baseline" — frozen LoRA-less baseline det path, passed via
+    #                data["baseline_path_len"]. Anchors ratio regardless of
+    #                training drift.
+    underprogress_reference: str = "det"
 
     # Progress normalization scale: when enable_overprogress=True, progress is
     # normalized to [0, 1] as fraction of GT, then multiplied by this scale.
@@ -764,10 +786,118 @@ def compute_feasibility_score_batch(
             lat_violations = torch.relu(lat_accel_trimmed - _MAX_LAT_ACCEL)
             scores = scores - _LAT_ACCEL_SCALE * lat_violations.mean(dim=-1)
 
+    # (Yaw-rate + kinematic-curvature hard gate is applied separately via
+    # compute_kinematic_gate, not as a soft penalty here.)
+
     # Lane-boundary off-road check DISABLED — compute_road_border_penalty handles
     # offroad detection. Feasibility score returns only the base score above.
     off_road_fractions = torch.zeros(N, device=device)
     return scores, off_road_fractions
+
+
+_SG_SMOOTH_KERNEL = None
+_SG_SMOOTH_CACHE_KEY = None
+
+
+@torch.no_grad()
+def compute_kinematic_gate(
+    ego_trajs: torch.Tensor,
+    config: RewardConfig,
+    ego_shape: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Hard feasibility gate: 1.0 if trajectory is kinematically feasible, 0.0 if not.
+
+    Two checks on a SG-smoothed trajectory:
+      1. |yaw_rate| ≤ max_yaw_rate (absolute rate cap)
+      2. |yaw_rate| ≤ κ_max * speed where κ_max = kinematic_margin *
+         tan(max_steer) / wheelbase — bicycle-model curvature bound.
+
+    Either violated at ANY timestep → 0.0 gate.
+    SG filtering removes diffusion noise so noise doesn't fire the gate.
+
+    Args:
+        ego_trajs: (N, T, 4) x, y, cos_h, sin_h.
+        config: RewardConfig with max_yaw_rate, max_steer, kinematic_margin, dt.
+        ego_shape: (3,) wheel_base, length, width. Required for bicycle-model
+            curvature bound. If None, skip the curvature check (absolute yaw
+            cap still applied).
+
+    Returns:
+        (N,) float tensor: 1.0 = feasible, 0.0 = infeasible.
+    """
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+    if T < 5:
+        return torch.ones(N, device=device)
+
+    # SG smoothing kernel (poly=3, deriv=0): same SG family as existing lat-accel check.
+    global _SG_SMOOTH_KERNEL, _SG_SMOOTH_CACHE_KEY
+    _sg_window = min(11, T - (1 if T % 2 == 0 else 0))
+    if _sg_window < 5:
+        return torch.ones(N, device=device)
+    key = (device, _sg_window)
+    if _SG_SMOOTH_KERNEL is None or _SG_SMOOTH_CACHE_KEY != key:
+        _SG_SMOOTH_KERNEL = _build_sg_diff_kernel(
+            window=_sg_window, poly=3, deriv=0, delta=config.dt
+        ).to(device)
+        _SG_SMOOTH_CACHE_KEY = key
+    pad = _sg_window // 2
+
+    # Smooth (cos_h, sin_h) via SG → recover filtered heading without wrap issues
+    cos_h = ego_trajs[..., 2]
+    sin_h = ego_trajs[..., 3]
+    nh = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+    cos_h = cos_h / nh
+    sin_h = sin_h / nh
+    heading_2d = torch.stack([cos_h, sin_h], dim=1)  # (N, 2, T)
+    heading_padded = torch.nn.functional.pad(heading_2d, (pad, pad), mode="replicate")
+    heading_sg = torch.nn.functional.conv1d(
+        heading_padded, _SG_SMOOTH_KERNEL.view(1, 1, -1).expand(2, 1, -1), groups=2
+    )  # (N, 2, T)
+    cos_sg = heading_sg[:, 0]
+    sin_sg = heading_sg[:, 1]
+    theta_sg = torch.atan2(sin_sg, cos_sg)  # (N, T)
+    dtheta = theta_sg[:, 1:] - theta_sg[:, :-1]
+    dtheta = torch.atan2(dtheta.sin(), dtheta.cos())  # wrap to (-π, π)
+    yaw_rate = dtheta.abs() / config.dt  # (N, T-1)
+
+    # SG-smoothed speed from positions
+    pos = ego_trajs[..., :2].detach().permute(0, 2, 1)  # (N, 2, T)
+    pos_padded = torch.nn.functional.pad(pos, (pad, pad), mode="replicate")
+    global _SG_VEL_KERNEL, _SG_ACCEL_KERNEL, _SG_LAT_CACHE_KEY
+    _lat_key = (device, config.dt, _sg_window)
+    if _SG_VEL_KERNEL is None or _SG_LAT_CACHE_KEY != _lat_key:
+        _SG_VEL_KERNEL = _build_sg_diff_kernel(
+            window=_sg_window, poly=3, deriv=1, delta=config.dt
+        ).to(device)
+        _SG_ACCEL_KERNEL = _build_sg_diff_kernel(
+            window=_sg_window, poly=3, deriv=2, delta=config.dt
+        ).to(device)
+        _SG_LAT_CACHE_KEY = _lat_key
+    vel_sg = torch.nn.functional.conv1d(
+        pos_padded, _SG_VEL_KERNEL.view(1, 1, -1).expand(2, 1, -1), groups=2
+    )
+    speed_sg = (vel_sg[:, 0] ** 2 + vel_sg[:, 1] ** 2).sqrt()  # (N, T)
+    speed_align = speed_sg[:, :-1]  # align with yaw_rate (N, T-1)
+
+    # Check 1: absolute yaw rate cap
+    abs_violated = yaw_rate > config.max_yaw_rate
+
+    # Check 2: bicycle-model curvature cap. κ_max = margin * tan(max_steer) / wheelbase.
+    if ego_shape is not None:
+        wheelbase = float(ego_shape[0])
+        kappa_max = config.kinematic_margin * float(
+            torch.tan(torch.tensor(config.max_steer))
+        ) / max(wheelbase, 1e-3)
+        curv_violated = yaw_rate > kappa_max * speed_align
+    else:
+        curv_violated = torch.zeros_like(abs_violated)
+
+    violated_per_t = abs_violated | curv_violated
+    any_violation = violated_per_t.any(dim=1)  # (N,) bool
+
+    gate = (~any_violation).float()
+    return gate
 
 
 # ---------------------------------------------------------------------------
@@ -1638,6 +1768,131 @@ def _point_to_segments_min_dist(
     return torch.cat(results)
 
 
+def _points_inside_intersection_areas(
+    points: torch.Tensor,
+    polygons_tensor: torch.Tensor,
+) -> torch.Tensor:
+    """Test whether each point lies inside ANY intersection_area polygon.
+
+    Uses horizontal-ray casting, fully batched.
+
+    Args:
+        points: (Q, 2).
+        polygons_tensor: (Np, P, 2+K) per-scene polygons (from NPZ `polygons`).
+            Per-point validity is derived from ||xy|| > 1e-3. Polygons with
+            fewer than 3 valid points are ignored.
+
+    Returns:
+        (Q,) bool — True if the point is inside at least one polygon.
+    """
+    Q = points.shape[0]
+    device = points.device
+    inside_any = torch.zeros(Q, dtype=torch.bool, device=device)
+    if polygons_tensor.shape[-1] < 2:
+        return inside_any
+    pg_xy = polygons_tensor[..., :2]  # (Np, P, 2)
+    pg_valid = pg_xy.norm(dim=-1) > 1e-3  # (Np, P)
+    Np = pg_xy.shape[0]
+    for p_idx in range(Np):
+        mask = pg_valid[p_idx]
+        if mask.sum() < 3:
+            continue
+        verts = pg_xy[p_idx][mask]  # (Pv, 2)
+        v1 = verts
+        v2 = torch.roll(verts, -1, dims=0)
+        px = points[:, 0:1]
+        py = points[:, 1:2]
+        y1 = v1[:, 1][None, :]
+        y2 = v2[:, 1][None, :]
+        x1 = v1[:, 0][None, :]
+        x2 = v2[:, 0][None, :]
+        cond_y = (y1 > py) != (y2 > py)
+        denom = y2 - y1
+        safe_denom = torch.where(denom.abs() < 1e-12,
+                                  torch.full_like(denom, 1e-12), denom)
+        x_intersect = x1 + (py - y1) * (x2 - x1) / safe_denom
+        cond = cond_y & (x_intersect > px)
+        crossings = cond.sum(dim=-1)
+        inside_p = (crossings % 2) == 1
+        inside_any = inside_any | inside_p
+    return inside_any
+
+
+def _point_to_segments_signed_min_dist(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+    seg_outward: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """For each point, find nearest segment and return unsigned + signed distance.
+
+    Signed distance: positive if point is on the outward side of its nearest
+    segment, negative if inside. Magnitude equals unsigned distance.
+
+    Fully batched on GPU, chunked to stay under ~10M Q×E elements.
+
+    Args:
+        points: (Q, 2).
+        seg_p1, seg_p2: (E, 2) segment endpoints.
+        seg_outward: (E, 2) outward unit vector per segment (perpendicular
+            to segment direction, pointing away from the lane interior).
+
+    Returns:
+        unsigned_dist: (Q,) min distance per point.
+        signed_dist: (Q,) (query - closest_on_segment) · seg_outward[argmin_seg].
+    """
+    Q = points.shape[0]
+    E = seg_p1.shape[0]
+    if E == 0:
+        return (
+            torch.full((Q,), 100.0, device=points.device, dtype=points.dtype),
+            torch.full((Q,), -100.0, device=points.device, dtype=points.dtype),
+        )
+
+    seg = seg_p2 - seg_p1  # (E, 2)
+    seg_len2 = (seg ** 2).sum(-1).clamp(min=1e-10)  # (E,)
+
+    _MAX_QE = 10_000_000
+    chunk_size = max(1, _MAX_QE // E)
+
+    unsigned_all = []
+    signed_all = []
+
+    for start in range(0, Q, chunk_size):
+        end = min(start + chunk_size, Q)
+        chunk = points[start:end]
+        diff = chunk[:, None, :] - seg_p1[None, :, :]
+        t_raw = (diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]
+        is_unclamped = (t_raw > 0.0) & (t_raw < 1.0)
+        t = t_raw.clamp(0, 1)
+        closest = seg_p1[None, :, :] + t[:, :, None] * seg[None, :, :]
+        to_query = chunk[:, None, :] - closest
+        dist = to_query.norm(dim=-1)
+
+        # Find the actually-nearest segment per query (clamped or not).
+        min_dist, min_idx = dist.min(dim=1)
+
+        # If the nearest segment's projection is CLAMPED (foot lies at an
+        # endpoint), the query is past the segment's endpoint — don't flag as
+        # crossing. Falling back to some other distant unclamped segment would
+        # produce a spurious outward-projection reading because "outward" is
+        # only meaningful perpendicular to the segment.
+        nearest_unclamped = is_unclamped.gather(1, min_idx[:, None]).squeeze(-1)
+
+        gathered_to_query = to_query.gather(
+            1, min_idx[:, None, None].expand(-1, 1, 2)
+        ).squeeze(1)
+        outward_for_min = seg_outward[min_idx]
+        signed_raw = (gathered_to_query * outward_for_min).sum(-1)
+        signed = torch.where(nearest_unclamped, signed_raw,
+                             torch.full_like(signed_raw, -100.0))
+
+        unsigned_all.append(min_dist)
+        signed_all.append(signed)
+
+    return torch.cat(unsigned_all), torch.cat(signed_all)
+
+
 def _classify_outer_boundaries(
     seg_p1: torch.Tensor,
     seg_p2: torch.Tensor,
@@ -1649,7 +1904,7 @@ def _classify_outer_boundaries(
     n_polys: int,
     nudge: float = 0.05,
     gap_threshold: float = 0.5,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Classify boundary segments as outer (road edge) via midpoint nudge + containment.
 
     For each segment, nudge its midpoint outward (perpendicular to lane direction).
@@ -1671,6 +1926,7 @@ def _classify_outer_boundaries(
 
     Returns:
         is_outer: (M,) bool.
+        outward: (M, 2) outward unit vector per segment (away from lane interior).
     """
     M = seg_p1.shape[0]
     device = seg_p1.device
@@ -1685,6 +1941,7 @@ def _classify_outer_boundaries(
     # Odd indices = right boundary → outward = -left normal (right normal)
     is_left = torch.arange(M, device=device) % 2 == 0
     outward = torch.where(is_left[:, None], left_normal, -left_normal)
+    outward = outward / outward.norm(dim=-1, keepdim=True).clamp(min=1e-6)
 
     nudged = mid + nudge * outward
 
@@ -1709,7 +1966,7 @@ def _classify_outer_boundaries(
         outer_indices = torch.where(candidate_outer)[0]
         candidate_outer[outer_indices[is_junction_gap]] = False
 
-    return candidate_outer
+    return candidate_outer, outward
 
 
 _LANE_K_NEAREST = 12  # number of nearest lanes to consider (0 = all)
@@ -1847,12 +2104,48 @@ def compute_lane_departure_penalty(
     seg_dir = torch.stack([md_f, md_f], dim=1).reshape(2 * M, 2)
     seg_lane = torch.stack([lid_f, lid_f], dim=1).reshape(2 * M)
 
-    is_outer = _classify_outer_boundaries(
+    is_outer, outward_all = _classify_outer_boundaries(
         seg_p1, seg_p2, seg_dir, seg_lane,
         edge_v1, edge_v2, edge_poly_id, n_polys,
     )
+
+    # Authoritative intersection filter: drop any "outer" segment that is
+    # fully covered by a map-authored intersection_area polygon. Test 5 points
+    # along the segment (t=0, 0.25, 0.5, 0.75, 1.0). If ALL are inside the same
+    # polygon (or any polygon), the segment lies inside an intersection and is
+    # NOT a road edge — drop it from the outer set entirely. These segments
+    # must not contribute to either the crossing gate or the near/wide/cont
+    # distance penalties, since the ego is legally allowed to traverse them.
+    inter_polys = None
+    if "polygons" in data:
+        pg = data["polygons"]
+        if pg.dim() == 4:
+            pg = pg[0]
+        if pg.shape[-1] >= 2:
+            inter_polys = pg
+    if is_outer.any() and inter_polys is not None:
+        outer_indices = torch.where(is_outer)[0]
+        outer_p1_cand = seg_p1[outer_indices]
+        outer_p2_cand = seg_p2[outer_indices]
+        Nout = outer_p1_cand.shape[0]
+        sample_ts = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], device=device,
+                                  dtype=outer_p1_cand.dtype)
+        # (Nout, 5, 2)
+        samples = (outer_p1_cand[:, None, :] +
+                   sample_ts[None, :, None] * (outer_p2_cand - outer_p1_cand)[:, None, :])
+        inside_flat = _points_inside_intersection_areas(
+            samples.reshape(-1, 2), inter_polys
+        ).reshape(Nout, -1)
+        # Segment drops only if ALL sampled points are inside SOME polygon
+        fully_covered = inside_flat.all(dim=-1)
+        if fully_covered.any():
+            is_outer_new = is_outer.clone()
+            is_outer_new[outer_indices[fully_covered]] = False
+            is_outer = is_outer_new
+
     outer_p1 = seg_p1[is_outer]
     outer_p2 = seg_p2[is_outer]
+    outer_outward = outward_all[is_outer]
 
     # --- Step 4: Sample ego perimeter points at each timestep ---
     wb = ego_shape[0].item()
@@ -1880,37 +2173,53 @@ def compute_lane_departure_penalty(
     Q = N * T * K_pts
     query = world_pts.reshape(Q, 2)
 
-    # --- Step 5: Containment check (crossing gate) ---
-    inside = _point_in_polygons(query, edge_v1, edge_v2, edge_poly_id, n_polys)
-    inside_2d = inside.reshape(N, T, K_pts)
-    all_inside_ts = inside_2d.all(dim=2)
-    all_inside_ts[:, 0] = True
+    # --- Step 5: Signed-distance gate via nearest outer-boundary segment ---
+    # For each ego perimeter point, find nearest outer segment and compute signed
+    # distance (positive = outside lane, negative = inside). Gate mirrors RB:
+    # (signed_dist > -lane_cross_thresh) → crossed.
+    #
+    # Intersection-area override: an ego perimeter point that lies inside a
+    # map-authored intersection_area polygon is legally inside an intersection
+    # and CANNOT be crossed. Its signed distance is forced to -100 so it never
+    # fires the gate. Perimeter points OUTSIDE the polygon are evaluated
+    # normally — the polygon is NOT a safe zone for points outside it.
+    # Unsigned near/wide/cont penalties still use all perimeter points.
+    lane_cross_thresh = config.lane_cross_thresh
+    if outer_p1.shape[0] > 0:
+        unsigned_q, signed_q = _point_to_segments_signed_min_dist(
+            query, outer_p1, outer_p2, outer_outward
+        )
+        if inter_polys is not None:
+            peri_in_inter = _points_inside_intersection_areas(query, inter_polys)
+            if peri_in_inter.any():
+                signed_q = torch.where(
+                    peri_in_inter,
+                    torch.full_like(signed_q, -100.0),
+                    signed_q,
+                )
+        unsigned_2d = unsigned_q.reshape(N, T, K_pts)
+        signed_2d = signed_q.reshape(N, T, K_pts)
+        per_ts_max_signed = signed_2d.max(dim=2).values  # (N, T)
+        per_ts_max_signed[:, 0] = -100.0  # ignore t=0
+        per_ts_min = unsigned_2d.min(dim=2).values  # (N, T)
+    else:
+        per_ts_max_signed = torch.full((N, T), -100.0, device=device)
+        per_ts_min = torch.full((N, T), 100.0, device=device)
 
-    has_crossing = ~all_inside_ts.all(dim=1)
+    per_ts_min[:, 0] = 10.0
+
+    is_crossing_ts = per_ts_max_signed > -lane_cross_thresh  # (N, T)
+    has_crossing = is_crossing_ts.any(dim=1)
     crossing_gate = (~has_crossing).float()
-
-    is_crossing_ts = ~all_inside_ts; is_crossing_ts[:, 0] = False
     first_idx = is_crossing_ts.float().argmax(dim=1)
     lane_crossing_steps: list[int | None] = [
         int(first_idx[i].item()) if has_crossing[i] else None for i in range(N)
     ]
 
-    # --- Step 6: Distance to outer (road-edge) boundary segments ---
-    # Only measure distance for points INSIDE the lane — outside points get distance 0
-    # (they are already penalized by the crossing gate)
-    if outer_p1.shape[0] > 0:
-        raw_dist = _point_to_segments_min_dist(query, outer_p1, outer_p2)  # (Q,)
-        raw_dist = torch.where(inside, raw_dist, torch.zeros_like(raw_dist))
-        per_ts_min = raw_dist.reshape(N, T, K_pts).min(dim=2).values
-    else:
-        per_ts_min = torch.full((N, T), 100.0, device=device)
-
-    per_ts_min[:, 0] = 10.0
-
-    # --- Step 7: Exclusive zone categories (skip t=0) ---
-    # Each timestep belongs to exactly one: OUT > NEAR > WIDE > SAFE.
-    # Timesteps where ego is outside lane are OUT — not counted as near/wide.
-    is_out_ts = ~all_inside_ts[:, 1:]  # (N, T-1)
+    # --- Step 6: Exclusive zone categories (skip t=0) ---
+    # OUT > NEAR > WIDE > SAFE. "In-lane" = signed distance below -cross_thresh
+    # (strictly inside by more than crossing margin).
+    is_out_ts = is_crossing_ts[:, 1:]  # (N, T-1)
     is_in_ts = ~is_out_ts
 
     lane_near_thresh = config.lane_near_thresh
@@ -2137,9 +2446,19 @@ def compute_reward_batch(
             # reference would penalize even good trajectories because GT may be much
             # longer (e.g., perfect curve navigation that the model can't yet match).
             if config.underprogress_penalty > 0 and N > 1:
-                det_path_len = model_path_lens[0].clamp(min=1e-3)
-                det_ratio = model_path_lens / det_path_len
-                underprogress = torch.relu(config.underprogress_threshold - det_ratio.clamp(max=1.0))
+                # Reference selection:
+                #   "det"      — path of the deterministic traj (traj[0]). Adapts to
+                #                current model, but can collapse to short when model
+                #                starts producing short det trajs.
+                #   "baseline" — baseline LoRA-less det path length, passed via
+                #                `data["baseline_path_len"]` (a scalar tensor). Frozen
+                #                anchor that doesn't collapse with training.
+                if config.underprogress_reference == "baseline" and "baseline_path_len" in data:
+                    ref_path_len = data["baseline_path_len"].to(device).clamp(min=1e-3)
+                else:
+                    ref_path_len = model_path_lens[0].clamp(min=1e-3)
+                ratio = model_path_lens / ref_path_len
+                underprogress = torch.relu(config.underprogress_threshold - ratio.clamp(max=1.0))
                 clamped_progress = clamped_progress - config.underprogress_penalty * underprogress
 
     # TTC as quality bonus
@@ -2191,6 +2510,12 @@ def compute_reward_batch(
         # Default "gate" mode: binary safety gates × quality.
         # Any terminal event → full floor penalty regardless of when it happens.
         totals = safety_product * quality_score + (1.0 - safety_product) * _OFFROAD_FLOOR
+
+    # Kinematic feasibility hard gate: trajectories violating yaw-rate or
+    # bicycle-model curvature bounds get floored. Applied after survival/gate
+    # aggregation so it overrides any otherwise-positive reward.
+    kinematic_gate = compute_kinematic_gate(ego_trajs, config, ego_shape)
+    totals = totals * kinematic_gate + (1.0 - kinematic_gate) * _OFFROAD_FLOOR
 
     # Also compute additive total for backward compat in breakdown
     on_road_factor = (1.0 - off_road_fractions)

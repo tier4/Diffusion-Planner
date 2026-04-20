@@ -414,6 +414,24 @@ def train_epoch_ranked_sft(
     if N == 0:
         return {}
 
+    # Optional: load per-scene baseline path lengths from epoch1_baselines.npz
+    # for use as the underprogress reference. Only loaded if the config asks
+    # for "baseline" reference; otherwise skipped (det reference is adaptive).
+    from pathlib import Path as _PathCls
+    baseline_path_lens: dict[str, float] = {}
+    if getattr(config, "underprogress_reference", "det") == "baseline" and run_dir is not None:
+        bpath = _PathCls(run_dir) / "epoch1_baselines.npz"
+        if bpath.exists():
+            saved = np.load(bpath, allow_pickle=True)
+            saved_paths = saved["paths"].tolist()
+            saved_trajs = saved["trajectories"]  # (M, T, 4)
+            for i, p in enumerate(saved_paths):
+                xy = saved_trajs[i, :, :2]
+                plen = float(np.linalg.norm(np.diff(xy, axis=0), axis=-1).sum())
+                baseline_path_lens[str(p)] = plen
+            if epoch == 1:
+                print(f"  [underprogress] loaded {len(baseline_path_lens)} baseline path lens from {bpath.name}")
+
     # 2. Stack and normalize for batched generation
     print(f"  Stacking {N} scenes into batch...")
     batch_data = _stack_scene_data(all_data, device)
@@ -596,6 +614,14 @@ def train_epoch_ranked_sft(
     for i in tqdm(range(N), desc="Scoring"):
         traj_K = all_trajs[i]  # [K, T, 4]
         data_i = all_data[i]
+
+        # Inject baseline path length for this scene if using baseline underprogress ref
+        if baseline_path_lens:
+            key = str(valid_paths[i])
+            if key in baseline_path_lens:
+                data_i["baseline_path_len"] = torch.tensor(
+                    baseline_path_lens[key], device=device, dtype=torch.float32,
+                )
 
         rewards = compute_reward_batch(traj_K, data_i, reward_config)
         reward_vals = np.array([r.total for r in rewards])
