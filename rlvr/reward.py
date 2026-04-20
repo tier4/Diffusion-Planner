@@ -46,6 +46,7 @@ class RewardConfig:
     lane_near_scale: float = 3.0
     lane_wide_scale: float = 0.2
     lane_cont_scale: float = 0.0
+    lane_cross_thresh: float = 0.10  # metres — crossing zone (distance to outer ≤ this = LD)
     lane_near_thresh: float = 0.25  # metres — near zone boundary
     lane_wide_thresh: float = 0.40  # metres — wide zone boundary
     lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
@@ -1399,25 +1400,23 @@ def compute_road_border_penalty(
 #      36 points around the ego rectangle (10 per side, corners not duplicated),
 #      rotated and translated to world coordinates at each timestep.
 #
-#   5. **Containment check** (_point_in_polygons):
-#      GPU ray casting (+x direction) against all polygon edges. A point is
-#      inside if it has an odd number of edge crossings for any polygon.
-#      Pre-filters edges by Y-range and X-min to reduce the Q×E matrix.
-#      Chunks query points when Q×E > 10M to prevent OOM.
+#   5. **Distance-based crossing gate**:
+#      Per-timestep min distance from any ego perimeter point to any classified
+#      outer segment. A timestep is CROSSING when this distance is ≤
+#      lane_cross_thresh (default 10cm). Polygon containment was dropped in
+#      favour of this distance threshold after confirming the old gate fired
+#      50/50 on the J6 miraikan val set with median 2.5cm / max 18cm grazes
+#      of *shared* intra-road boundaries — i.e. it was mostly measuring
+#      numerical noise, not actual lane departures.
 #
-#   6. **Distance to road edge**:
-#      For perimeter points that ARE inside a lane, compute min distance to
-#      the nearest outer boundary segment. Points outside a lane get distance=0
-#      (they are already penalized by the crossing gate, not by proximity).
-#
-#   7. **Exclusive zone categories** (per timestep, skipping t=0):
-#      - OUT:  any perimeter point outside all lane polygons → crossing_gate=0
-#      - NEAR: all points inside, but min distance to road edge < 0.25m
-#      - WIDE: all points inside, min distance between 0.25m and 0.40m
-#      - SAFE: all points inside, min distance >= 0.40m
-#      Each timestep belongs to exactly one category (no double counting).
-#      near_frac and wide_frac report the fraction of in-lane timesteps in
-#      each band. cont_penalty is a continuous linear decay from 0.80m.
+#   6. **Exclusive zone categories** (per timestep, skipping t=0):
+#      - CROSS: distance ≤ lane_cross_thresh  → crossing_gate=0
+#      - NEAR:  cross_thresh < distance < lane_near_thresh
+#      - WIDE:  lane_near_thresh ≤ distance < lane_wide_thresh
+#      - SAFE:  distance ≥ lane_wide_thresh
+#      Each timestep belongs to exactly one category. near_frac / wide_frac
+#      report fractions. cont_penalty is continuous linear decay from
+#      lane_cont_thresh (only for non-crossing timesteps).
 #
 # ---------------------------------------------------------------------------
 
@@ -1638,6 +1637,74 @@ def _point_to_segments_min_dist(
     return torch.cat(results)
 
 
+_OUTER_INFLUENCE_RADIUS = 3.0  # metres — outer segments farther than this don't constrain
+
+
+def _point_to_outer_clearance(
+    points: torch.Tensor,
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+    seg_outward: torch.Tensor,
+    influence_radius: float = _OUTER_INFLUENCE_RADIUS,
+) -> torch.Tensor:
+    """Signed on-road clearance w.r.t. nearby outer (road-edge) segments.
+
+    A segment "constrains" a query point only if:
+      (a) the perpendicular foot onto the segment falls within [p1, p2], AND
+      (b) the perpendicular distance is ≤ influence_radius (local to the point).
+    Far-away outer segments whose infinite line happens to project in-bounds onto
+    a distant point are ignored — their outward normal describes their own lane,
+    not the road structure surrounding an unrelated point 10m+ away.
+
+    Among constraining segments, we take the one placing the point most
+    outward (max signed), and return:
+        clearance > 0  : point inside road, value = margin to nearest constraint
+        clearance ≤ 0  : point has crossed the nearest edge (by |clearance|)
+        100            : no constraining segment nearby (unconstrained — safe)
+
+    Fully vectorized; chunks over points when Q×E > 10M.
+    """
+    Q = points.shape[0]
+    E = seg_p1.shape[0]
+    device = points.device
+    dtype = points.dtype
+
+    if E == 0:
+        return torch.full((Q,), 100.0, device=device, dtype=dtype)
+
+    seg = seg_p2 - seg_p1
+    seg_len2 = (seg ** 2).sum(-1).clamp(min=1e-10)  # (E,)
+
+    _MAX_QE = 10_000_000
+    chunk_size = max(1, _MAX_QE // E) if E > 0 else Q
+    neg_inf = torch.tensor(float("-inf"), device=device, dtype=dtype)
+
+    def _core(q_chunk: torch.Tensor) -> torch.Tensor:
+        diff = q_chunk[:, None, :] - seg_p1[None, :, :]                       # (Qc, E, 2)
+        t = (diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]              # (Qc, E)
+        in_bounds = (t >= 0) & (t <= 1)                                       # (Qc, E)
+        # Perpendicular signed distance along outward normal (valid when in bounds)
+        signed = (diff * seg_outward[None, :, :]).sum(-1)                     # (Qc, E)
+        nearby = in_bounds & (signed.abs() <= influence_radius)               # (Qc, E)
+        signed_masked = torch.where(nearby, signed, neg_inf)
+        max_signed = signed_masked.max(dim=-1).values                         # (Qc,)
+        unconstrained = torch.isinf(max_signed) & (max_signed < 0)
+        clearance = -max_signed
+        clearance = torch.where(unconstrained,
+                                torch.full_like(clearance, 100.0),
+                                clearance)
+        return clearance
+
+    if chunk_size >= Q:
+        return _core(points)
+
+    out = torch.empty(Q, device=device, dtype=dtype)
+    for start in range(0, Q, chunk_size):
+        end = min(start + chunk_size, Q)
+        out[start:end] = _core(points[start:end])
+    return out
+
+
 def _classify_outer_boundaries(
     seg_p1: torch.Tensor,
     seg_p2: torch.Tensor,
@@ -1723,10 +1790,11 @@ def compute_lane_departure_penalty(
     k_nearest_lanes: int = _LANE_K_NEAREST,
     config: RewardConfig | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor]:
-    """Compute lane departure using polygon containment + distance to road edge. Pure torch.
+    """Compute lane departure from distance to classified road-edge segments.
 
-    1. Polygon containment (GPU ray casting) for crossing gate.
-    2. Distance to outer boundary segments for near/wide/cont soft penalties.
+    1. Outer-boundary classification via midpoint nudge (shared vs road edge).
+    2. Per-timestep min distance from ego perimeter to any outer segment.
+    3. CROSS / NEAR / WIDE / SAFE zones defined by distance thresholds.
     Lane boundaries use SFT interpretation: boundary = center + offset.
 
     Args:
@@ -1739,10 +1807,10 @@ def compute_lane_departure_penalty(
 
     Returns:
         Tuple of (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty):
-        - crossing_gate: (N,) 1.0 if fully inside lane, 0.0 if any timestep exits
-        - near_frac: (N,) fraction of in-lane timesteps within lane_near_thresh of outer boundary
-        - wide_frac: (N,) fraction of in-lane timesteps between lane_near_thresh-lane_wide_thresh (exclusive)
-        - lane_crossing_steps: list of N (int | None) — first timestep of lane exit
+        - crossing_gate: (N,) 1.0 if min dist to outer > lane_cross_thresh everywhere, else 0.0
+        - near_frac: (N,) fraction of non-crossing timesteps in [cross_thresh, near_thresh)
+        - wide_frac: (N,) fraction of non-crossing timesteps in [near_thresh, wide_thresh)
+        - lane_crossing_steps: list of N (int | None) — first timestep crossing_gate trips
         - cont_penalty: (N,) continuous proximity penalty (linear decay from lane_cont_thresh)
     """
     if config is None:
@@ -1828,8 +1896,12 @@ def compute_lane_departure_penalty(
     if len(idx) == 0:
         return safe
 
-    # Interleave left/right segments: [left_seg_0, right_seg_0, left_seg_1, right_seg_1, ...]
-    # This ordering is required by _classify_outer_boundaries (even=left, odd=right)
+    # Build boundary segments. For each valid centerline pair we have one left
+    # boundary segment and one right boundary segment. Outward normals are
+    # computed explicitly from seg_dir at construction time (not reconstructed
+    # from an even/odd interleaving convention later on):
+    #   left boundary  → outward = left-perp of seg_dir  (points away from lane, to the left)
+    #   right boundary → outward = right-perp            (points away from lane, to the right)
     M = len(idx)
     l_p1 = left_pts[:, :-1].reshape(-1, 2)[idx]
     l_p2 = left_pts[:, 1:].reshape(-1, 2)[idx]
@@ -1838,17 +1910,33 @@ def compute_lane_departure_penalty(
     md_f = mid_dirs.reshape(-1, 2)[idx]
     lid_f = lane_ids.reshape(-1)[idx]
 
-    seg_p1 = torch.stack([l_p1, r_p1], dim=1).reshape(2 * M, 2)
-    seg_p2 = torch.stack([l_p2, r_p2], dim=1).reshape(2 * M, 2)
-    seg_dir = torch.stack([md_f, md_f], dim=1).reshape(2 * M, 2)
-    seg_lane = torch.stack([lid_f, lid_f], dim=1).reshape(2 * M)
+    left_perp = torch.stack([-md_f[:, 1], md_f[:, 0]], dim=-1)   # 90° CCW
+    right_perp = -left_perp                                      # 90° CW
 
-    is_outer = _classify_outer_boundaries(
-        seg_p1, seg_p2, seg_dir, seg_lane,
+    # Concatenate (not interleave). Left segments first, then right. The
+    # classifier only needs the segments + dirs + lane ids; its even/odd
+    # assumption is preserved by interleaving _inside_ the classifier call.
+    seg_p1 = torch.cat([l_p1, r_p1], dim=0)
+    seg_p2 = torch.cat([l_p2, r_p2], dim=0)
+    seg_dir = torch.cat([md_f, md_f], dim=0)
+    seg_lane = torch.cat([lid_f, lid_f], dim=0)
+    seg_outward = torch.cat([left_perp, right_perp], dim=0)
+
+    # _classify_outer_boundaries expects the even=left / odd=right interleaving.
+    # Permute into that order just for the classifier call, then permute back.
+    interleave = torch.stack([torch.arange(M, device=device),
+                              torch.arange(M, 2 * M, device=device)], dim=1).reshape(-1)
+    is_outer_inter = _classify_outer_boundaries(
+        seg_p1[interleave], seg_p2[interleave], seg_dir[interleave], seg_lane[interleave],
         edge_v1, edge_v2, edge_poly_id, n_polys,
     )
+    # Undo the permutation to get is_outer in the concat (left-then-right) order
+    is_outer = torch.empty_like(is_outer_inter)
+    is_outer[interleave] = is_outer_inter
+
     outer_p1 = seg_p1[is_outer]
     outer_p2 = seg_p2[is_outer]
+    outer_normal = seg_outward[is_outer]
 
     # --- Step 4: Sample ego perimeter points at each timestep ---
     wb = ego_shape[0].item()
@@ -1876,53 +1964,67 @@ def compute_lane_departure_penalty(
     Q = N * T * K_pts
     query = world_pts.reshape(Q, 2)
 
-    # --- Step 5: Containment check (crossing gate) ---
-    inside = _point_in_polygons(query, edge_v1, edge_v2, edge_poly_id, n_polys)
-    inside_2d = inside.reshape(N, T, K_pts)
-    all_inside_ts = inside_2d.all(dim=2)
-    all_inside_ts[:, 0] = True
+    # --- Step 5: Signed distance to classified outer (road-edge) segments ---
+    # For each outer segment, the outward normal points off-road. Signed
+    # distance along that normal is positive when the point is beyond the
+    # road edge and negative when it is still on-road. A segment only
+    # constrains a point if the perpendicular projection lands within
+    # [p1, p2]; otherwise it is ignored (prevents finite segments from
+    # over-reaching past their endpoints).
+    #
+    # We keep the max signed distance (over in-bounds outer segments) per
+    # point, then reduce to max over the ego perimeter per timestep.
+    # `depth = -max_signed`: positive = inside-road clearance, negative =
+    # past the edge. This cleanly replaces the old polygon-containment
+    # gate, which over-flagged 50/50 on the J6 miraikan val set by ~2-17cm
+    # grazes of shared intra-road boundaries that are not road edges
+    # (investigated 2026-04-20).
+    lane_cross_thresh = config.lane_cross_thresh
+    lane_near_thresh = config.lane_near_thresh
+    lane_wide_thresh = config.lane_wide_thresh
+    lane_cont_thresh = config.lane_cont_thresh
 
-    has_crossing = ~all_inside_ts.all(dim=1)
+    if outer_p1.shape[0] > 0:
+        depth = _point_to_outer_clearance(query, outer_p1, outer_p2, outer_normal)
+        # per_ts_min = min clearance across the ego perimeter at each timestep
+        per_ts_min = depth.reshape(N, T, K_pts).min(dim=2).values
+    else:
+        per_ts_min = torch.full((N, T), 100.0, device=device)
+
+    per_ts_min[:, 0] = 10.0  # skip t=0 (always deep-inside)
+
+    # --- Step 6: Crossing gate (clearance ≤ threshold) ---
+    # A timestep is CROSSING when any perimeter point has clearance ≤ threshold.
+    # clearance ≤ 0 means the point is past the road edge; the threshold adds
+    # a tolerance band so "within 10cm of the edge" is also treated as crossing.
+    is_crossing_ts = per_ts_min <= lane_cross_thresh
+    is_crossing_ts[:, 0] = False
+
+    has_crossing = is_crossing_ts.any(dim=1)
     crossing_gate = (~has_crossing).float()
 
-    is_crossing_ts = ~all_inside_ts; is_crossing_ts[:, 0] = False
     first_idx = is_crossing_ts.float().argmax(dim=1)
     lane_crossing_steps: list[int | None] = [
         int(first_idx[i].item()) if has_crossing[i] else None for i in range(N)
     ]
 
-    # --- Step 6: Distance to outer (road-edge) boundary segments ---
-    # Only measure distance for points INSIDE the lane — outside points get distance 0
-    # (they are already penalized by the crossing gate)
-    if outer_p1.shape[0] > 0:
-        raw_dist = _point_to_segments_min_dist(query, outer_p1, outer_p2)  # (Q,)
-        raw_dist = torch.where(inside, raw_dist, torch.zeros_like(raw_dist))
-        per_ts_min = raw_dist.reshape(N, T, K_pts).min(dim=2).values
-    else:
-        per_ts_min = torch.full((N, T), 100.0, device=device)
-
-    per_ts_min[:, 0] = 10.0
-
     # --- Step 7: Exclusive zone categories (skip t=0) ---
-    # Each timestep belongs to exactly one: OUT > NEAR > WIDE > SAFE.
-    # Timesteps where ego is outside lane are OUT — not counted as near/wide.
-    is_out_ts = ~all_inside_ts[:, 1:]  # (N, T-1)
-    is_in_ts = ~is_out_ts
+    # CROSS > NEAR > WIDE > SAFE based on clearance. NEAR/WIDE counted only
+    # when the timestep is not CROSSING (otherwise exclusive buckets leak).
+    is_crossing_ns = is_crossing_ts[:, 1:]
+    is_not_crossing = ~is_crossing_ns
+    dist_ns = per_ts_min[:, 1:]
 
-    lane_near_thresh = config.lane_near_thresh
-    lane_wide_thresh = config.lane_wide_thresh
-    lane_cont_thresh = config.lane_cont_thresh
-
-    near_frac = (is_in_ts & (per_ts_min[:, 1:] < lane_near_thresh)).float().mean(dim=1)
-    wide_frac = (is_in_ts & (per_ts_min[:, 1:] >= lane_near_thresh)
-                 & (per_ts_min[:, 1:] < lane_wide_thresh)).float().mean(dim=1)
+    near_frac = (is_not_crossing & (dist_ns < lane_near_thresh)).float().mean(dim=1)
+    wide_frac = (is_not_crossing & (dist_ns >= lane_near_thresh)
+                 & (dist_ns < lane_wide_thresh)).float().mean(dim=1)
     if lane_cont_thresh <= 0:
         cont_penalty = torch.zeros(N, device=device)
     else:
         cont_penalty = torch.where(
-            is_in_ts,
-            (1.0 - per_ts_min[:, 1:] / lane_cont_thresh).clamp(min=0, max=1),
-            torch.zeros_like(per_ts_min[:, 1:]),
+            is_not_crossing,
+            (1.0 - dist_ns / lane_cont_thresh).clamp(min=0, max=1),
+            torch.zeros_like(dist_ns),
         ).mean(dim=1)
 
     return crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty
