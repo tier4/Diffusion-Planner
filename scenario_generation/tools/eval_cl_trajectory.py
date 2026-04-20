@@ -33,15 +33,23 @@ def _compute_ego_corners(
     x: float, y: float, heading: float,
     half_length: float, half_width: float, wheelbase: float,
 ) -> list[tuple[float, float]]:
-    """Compute 4 corners of the ego bounding box in world frame."""
-    rear_offset = (2 * half_length - wheelbase) / 2
+    """Compute 4 corners of the ego bounding box in world frame.
+
+    Matches the repo-wide convention (e.g. ``gui.lanelet_scene_builder._obb_corners``
+    and ``visualize.draw_agent_box``) where ``(x, y)`` is the rear-axle
+    position. The longitudinal footprint spans from ``-rear_overhang`` behind
+    the rear axle to ``wheelbase + rear_overhang`` in front of it.
+    """
+    length = 2 * half_length
+    rear_overhang = (length - wheelbase) / 2
+    front_offset = wheelbase + rear_overhang
     cos_h, sin_h = math.cos(heading), math.sin(heading)
     corners = []
     for dx, dy in [
-        (wheelbase / 2 + rear_offset, half_width),
-        (wheelbase / 2 + rear_offset, -half_width),
-        (-rear_offset, half_width),
-        (-rear_offset, -half_width),
+        (front_offset, half_width),
+        (front_offset, -half_width),
+        (-rear_overhang, half_width),
+        (-rear_overhang, -half_width),
     ]:
         cx = x + dx * cos_h - dy * sin_h
         cy = y + dx * sin_h + dy * cos_h
@@ -149,6 +157,10 @@ def evaluate_trajectory(
     # Duration
     duration_s = len(traj) * 0.1
 
+    # When the map has no road-border polylines we return NaN for
+    # distance-valued metrics so they are distinguishable from a real
+    # zero-distance crossing in downstream summaries/plots.
+    rb_has_data = len(rb_dists) > 0
     return {
         "n_steps": len(traj),
         "duration_s": duration_s,
@@ -158,12 +170,13 @@ def evaluate_trajectory(
         "end_goal_d": end_goal_d,
         "mean_speed_mps": float(speeds.mean()) if len(speeds) > 0 else 0,
         "max_speed_mps": float(speeds.max()) if len(speeds) > 0 else 0,
-        "rb_dist_min": float(rb_dists.min()) if len(rb_dists) > 0 else 0,
-        "rb_dist_p5": float(np.percentile(rb_dists, 5)) if len(rb_dists) > 0 else 0,
-        "rb_dist_p25": float(np.percentile(rb_dists, 25)) if len(rb_dists) > 0 else 0,
-        "rb_dist_med": float(np.median(rb_dists)) if len(rb_dists) > 0 else 0,
+        "rb_has_data": rb_has_data,
+        "rb_dist_min": float(rb_dists.min()) if rb_has_data else float("nan"),
+        "rb_dist_p5": float(np.percentile(rb_dists, 5)) if rb_has_data else float("nan"),
+        "rb_dist_p25": float(np.percentile(rb_dists, 25)) if rb_has_data else float("nan"),
+        "rb_dist_med": float(np.median(rb_dists)) if rb_has_data else float("nan"),
         "rb_cross_steps": rb_crossings,
-        "rb_cross_frac": rb_crossings / max(len(traj), 1),
+        "rb_cross_frac": rb_crossings / max(len(traj), 1) if rb_has_data else float("nan"),
         "first_rb_cross_step": first_rb_cross,
         "stopped_steps": int((speeds < 0.1).sum()),
         "stopped_frac": float((speeds < 0.1).mean()) if len(speeds) > 0 else 0,

@@ -111,8 +111,13 @@ def main():
             traj_np = det_trajs[local_i].cpu().numpy()
             pl = np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum()
 
-            # Get ego heading change from trajectory
-            heading_chg = float(traj_np[-1, 2] - traj_np[0, 2])
+            # traj_np is [T, 4] = (x, y, cos_yaw, sin_yaw). Recover yaws via
+            # atan2 and take a wrapped angle difference so the result is in
+            # radians (not a difference of cosines).
+            start_yaw = np.arctan2(traj_np[0, 3], traj_np[0, 2])
+            end_yaw = np.arctan2(traj_np[-1, 3], traj_np[-1, 2])
+            dh = end_yaw - start_yaw
+            heading_chg = float(np.arctan2(np.sin(dh), np.cos(dh)))
 
             results.append({
                 "path": sp,

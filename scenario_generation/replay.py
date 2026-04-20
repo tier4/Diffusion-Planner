@@ -231,6 +231,10 @@ class SpawnConfig:
             raise ValueError(
                 f"inference_delay must be non-negative; got {self.inference_delay}"
             )
+        if self.max_steps < 1:
+            raise ValueError(
+                f"max_steps must be >= 1; got {self.max_steps}"
+            )
 
     @classmethod
     def from_json(cls, path: str | Path) -> "SpawnConfig":

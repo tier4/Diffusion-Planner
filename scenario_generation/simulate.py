@@ -241,7 +241,7 @@ def advance_scene_mpc(
         # Lazy-init tracker for this agent
         if agent.id not in trackers:
             if tracker_type == "mpc":
-                max_steer = ego_max_steer if agent.id == "ego" else 0.6
+                max_steer = ego_max_steer if agent.id == scene.ego_agent_id else 0.6
                 trackers[agent.id] = MPCTracker(
                     wheelbase=agent.wheelbase, dt=dt,
                     horizon_steps=mpc_horizon_steps, n_knots=mpc_n_knots,
