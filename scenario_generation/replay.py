@@ -122,8 +122,8 @@ class SpawnConfig:
         forward_bias: Probability that a spawn candidate is restricted to
             lanelets in front of the ego (vs. free directional choice).
         min_npc_separation: Minimum centre-to-centre distance between a new
-            spawn and any existing agent's OBB. Matches tier4 npc_manager's
-            constant.
+            spawn and any existing agent's OBB. Matches the upstream
+            npc_manager constant.
         goal_tolerance_m: Ego-to-goal distance that triggers a
             "goal reached" termination.
         max_steps: Maximum simulation ticks before forced termination.
@@ -199,7 +199,8 @@ class SpawnConfig:
     advance_mode: str = "teleport"
     mpc_horizon_steps: int = 20
     mpc_n_knots: int = 5
-    # Ego vehicle dimensions. Override for non-default vehicles (e.g. J6 bus).
+    # Ego vehicle dimensions. Override for non-default vehicles (e.g. larger
+    # buses with longer wheelbase and wider footprint).
     ego_length: float = 4.5
     ego_width: float = 1.9
     ego_wheelbase: float = 2.925  # 4.5 * 0.65
@@ -209,7 +210,7 @@ class SpawnConfig:
     inference_delay: int = 0
     # Initial ego speed for history synthesis (m/s). Default uses midpoint
     # of NPC speed band (7.5), but real data may be much slower (e.g. 1.75
-    # at miraikan exit). Set to match the scenario being replayed.
+    # on low-speed exit curves). Set to match the scenario being replayed.
     ego_init_speed: float | None = None
     # Run model inference one agent at a time instead of batching all
     # agents into a single forward pass. Slower but useful for diagnosing

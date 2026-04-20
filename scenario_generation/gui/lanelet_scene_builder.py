@@ -30,8 +30,8 @@ for _p in _ROS_FALLBACK_PATHS:
 POINTS_PER_LANELET = 20
 
 # Polygon / LineString tensor constants — matched to the C++ Autoware planner
-# (~/pilot-auto.xx1/.../autoware_diffusion_planner/include/autoware/
-#  diffusion_planner/dimensions.hpp + conversion/lanelet.hpp).
+# (``autoware_diffusion_planner/include/autoware/diffusion_planner/dimensions.hpp``
+# + ``conversion/lanelet.hpp``).
 POINTS_PER_POLYGON = 40
 POINTS_PER_LINE_STRING = 20
 POLYGON_TYPE_INTERSECTION_AREA = 0
@@ -742,7 +742,7 @@ class LaneletSceneBuilder:
         maximum heading change between any two adjacent segments exceeds
         ``curvature_threshold`` radians (default 0.3 rad ≈ 17°).
 
-        Ported from ``tier4_autoware_psim_scenarios.stopped_vehicle_utils.is_lanelet_straight``.
+        Ported from the Autoware planning-simulator ``stopped_vehicle_utils.is_lanelet_straight`` helper.
         NPC history synthesis via :meth:`generate_history` can produce unnatural
         trajectories on sharp curves, so the spawn manager rejects non-straight
         candidates.
@@ -1329,8 +1329,7 @@ class LaneletSceneBuilder:
         Mirrors C++
         ``LaneSegmentContext::create_line_tensor<Polygon>(...)`` filter +
         sort logic at
-        ``~/pilot-auto.xx1/.../autoware_diffusion_planner/src/preprocessing/
-        lane_segments.cpp:347``.
+        ``autoware_diffusion_planner/src/preprocessing/lane_segments.cpp:347``.
         """
         return self._build_line_or_polygon_tensor(
             self._polygons_cache, center_xy, max_n,
@@ -1410,7 +1409,7 @@ class LaneletSceneBuilder:
 
         Algorithm matches the C++ Autoware planner
         (``LaneSegmentContext::select_route_segment_indices`` at
-        ``~/pilot-auto.xx1/.../preprocessing/lane_segments.cpp:64``):
+        ``autoware_diffusion_planner/src/preprocessing/lane_segments.cpp:64``):
 
         1. Find the route lanelet *closest* to ``center_xy`` by min
            centerline-point distance — that's the ego's current "spot" on

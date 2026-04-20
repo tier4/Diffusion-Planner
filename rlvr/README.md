@@ -62,8 +62,8 @@ rlvr/
   configs/
     grpo_onpolicy.json       Recommended on-policy config (best for v4)
     grpo_zi_300sc.json       Zero-init exploration + Block 0 LoRA (best baseline)
-    logprob_curve20_norm.json    Logprob GRPO on 20 miraikan curves (0/20 lane_dep at ep9)
-    logprob_balanced_40sc.json   Logprob GRPO balanced 50/50 prob/normal (val stable)
+    logprob_curve20_norm.json    Logprob GRPO on 20 exit-curve scenes
+    logprob_balanced_40sc.json   Logprob GRPO balanced 50/50 prob/normal
   tests/
     test_vpsde_logprob.py    9 unit tests for log-prob math
     test_logprob_loss.py     7 unit tests for loss computation
@@ -184,17 +184,15 @@ adapted for diffusion planners with reward-based selection and Savitzky-Golay tr
 - noise_scale_range [0.5, 2.0] recommended
 
 **Block ablation trick:** After training with `lora_target="all"` (3 DiT blocks), zero out
-one block's LoRA weights post-hoc. With neighbor reg, **no_blk1 is best**. Without reg,
-**no_blk0 is best**. **NEVER zero block 2** — it's critical for lane keeping (22/50 LD).
+one block's LoRA weights post-hoc as a quick way to probe how the blocks divide up the
+learned behaviour — useful for debugging regressions introduced by a particular block.
 
-Training all blocks then removing one post-hoc is strictly better than training only a
-subset of blocks — tested `lora_target="last"` (block 2 only), which converges fast (1/50 LD
-by ep3) but diverges by ep9. Distributing gradients across all blocks produces smaller
-per-parameter changes, preventing destabilization.
+Training all blocks then removing one post-hoc is generally more stable than training only
+a subset of blocks: distributing gradients across all blocks produces smaller per-parameter
+changes and avoids the destabilisation seen when a single block carries all the update.
 
-**neighbor_reg_weight must be ≥ 1.0** at lr=5e-4. Tested 0.5 and 0.75 — both diverge at
-epoch 5-6 with rb_cross>20. Lower reg gives the ego loss more freedom but insufficient
-constraint on neighbor weights causes catastrophic drift through shared DiT parameters.
+**neighbor_reg_weight must be ≥ 1.0** at lr=5e-4. Lower values tend to diverge because the
+ego loss has too much freedom while neighbor weights drift through shared DiT parameters.
 
 **Generation variants** (`generation_variant` config field, default `"rsft_v2"`).
 Composition is 1 deterministic + N guided cl_spd configs + M noise-only configs +
@@ -207,9 +205,8 @@ The default `rsft_v2` has **6 guided cl_spd slots** — `CL5_SPD5_det`,
 `CL5_SPD5_noisy`, `CL7_SPD7_str14_n0820` (stretch 1.4), `CL10_SPD10_noisy` — plus
 **9 pure-noise slots** sweeping ranges 0.1→5.0 (`noise_n0103`, `n0306`, `n0510`,
 `n0515`, `n0818`, `n1025`, `n1530`, `n2040`, `n3050`). No random-CL pool.
-Empirically best for L2 preservation (ego +1.5%, neighbor -1.0% vs LoRA-less baseline,
-ep8 on miraikan val 50). Use `rsft_v2_legacy` for the previous slot composition
-(2 fixed-noise + 7 random-CL) or `default` for the pre-variant layout (8 cl_spd + 7 random).
+Use `rsft_v2_legacy` for the previous slot composition (2 fixed-noise + 7 random-CL)
+or `default` for the pre-variant layout (8 cl_spd + 7 random).
 
 ### Rank Analytics
 

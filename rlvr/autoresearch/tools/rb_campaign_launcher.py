@@ -17,9 +17,10 @@ MODEL = os.environ.get("RB_CAMPAIGN_MODEL", "")
 if not EXP_DIR or not MODEL:
     print("Set RB_CAMPAIGN_EXP_DIR and RB_CAMPAIGN_MODEL environment variables")
     sys.exit(1)
-VAL = os.path.join(EXP_DIR, "miraikan_val_50_gtclean.json")
-TRAIN_50 = os.path.join(EXP_DIR, "miraikan_train_50_gtclean.json")
-TRAIN_300 = os.path.join(EXP_DIR, "miraikan_train_300_clean.json")
+# Dataset filenames (override via env vars if your files are named differently).
+VAL = os.environ.get("RB_CAMPAIGN_VAL", os.path.join(EXP_DIR, "val_50_gtclean.json"))
+TRAIN_50 = os.environ.get("RB_CAMPAIGN_TRAIN_50", os.path.join(EXP_DIR, "train_50_gtclean.json"))
+TRAIN_300 = os.environ.get("RB_CAMPAIGN_TRAIN_300", os.path.join(EXP_DIR, "train_300_clean.json"))
 
 # Experiment queue: (name, config_suffix, train_file)
 QUEUE = [
