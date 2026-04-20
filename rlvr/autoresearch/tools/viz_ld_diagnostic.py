@@ -23,7 +23,11 @@ Usage:
         --lora_path <lora_dir> \
         --scenes <ld_scenes.json> \
         --output_dir <dir> \
+        [--config <grpo_config.json>] \
         [--limit N]
+
+Pass ``--config`` to align the diagnostic thresholds / weights with the
+training run; without it, RewardConfig defaults are used.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ from matplotlib.patches import Patch, Polygon as MplPolygon
 
 from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.closed_loop.batched_rollout import _batched_generate
 from rlvr.reward import (
     _LANE_K_NEAREST,
@@ -304,9 +309,11 @@ def _build_border_polylines(data: dict[str, torch.Tensor]) -> list[np.ndarray]:
 
 @torch.no_grad()
 def diagnose_scenes(model, model_args, scene_paths: list[str],
-                    batch_size: int = 16) -> list[SceneDiag]:
+                    batch_size: int = 16,
+                    eval_config: RewardConfig | None = None) -> list[SceneDiag]:
     results: list[SceneDiag] = []
-    eval_config = RewardConfig(enable_lane_departure=True)
+    if eval_config is None:
+        eval_config = RewardConfig(enable_lane_departure=True)
     normalizer = copy.deepcopy(model_args.observation_normalizer)
 
     for chunk_start in range(0, len(scene_paths), batch_size):
@@ -722,6 +729,10 @@ def main():
     p.add_argument("--lora_path", type=Path, default=None)
     p.add_argument("--scenes", type=str, required=True)
     p.add_argument("--output_dir", type=str, required=True)
+    p.add_argument("--config", type=Path, default=None,
+                   help="GRPO training config JSON. When given, reward thresholds "
+                        "and weights come from here so the diagnostic matches the "
+                        "live run (enable_lane_departure is always forced on).")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--batch_size", type=int, default=16)
     args = p.parse_args()
@@ -743,7 +754,24 @@ def main():
         model = load_lora_checkpoint(model, args.lora_path)
     model.eval()
 
-    results = diagnose_scenes(model, model_args, scene_paths, batch_size=args.batch_size)
+    if args.config is not None:
+        eval_config = load_reward_config(args.config)
+        eval_config.enable_lane_departure = True  # always on for this diagnostic
+        source = f"from {args.config}"
+    else:
+        eval_config = RewardConfig(enable_lane_departure=True)
+        source = "RewardConfig defaults"
+    print(
+        f"Reward thresholds ({source}): "
+        f"lane_cross={eval_config.lane_cross_thresh:.2f}m, "
+        f"lane_near={eval_config.lane_near_thresh:.2f}m, "
+        f"lane_wide={eval_config.lane_wide_thresh:.2f}m"
+    )
+
+    results = diagnose_scenes(
+        model, model_args, scene_paths,
+        batch_size=args.batch_size, eval_config=eval_config,
+    )
 
     # Per-scene PNGs + JSON
     summary_rows = []

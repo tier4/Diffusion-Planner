@@ -29,6 +29,7 @@ import torch
 
 from preference_optimization.model_utils import load_model
 from rlvr.autoresearch.run_experiment import DEVICE, load_npz_data
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.closed_loop.batched_rollout import _batched_generate
 from rlvr.reward import RewardConfig, compute_reward_batch
 
@@ -39,6 +40,10 @@ def parse_args():
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--lora_path", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=None,
+                        help="GRPO training config JSON. When given, reward thresholds "
+                             "and weights match the live run (enable_lane_departure "
+                             "is always forced on).")
     parser.add_argument("--tag", type=str, default="analysis")
     parser.add_argument("--top_k", type=int, default=50, help="Number of problem scenes to output")
     parser.add_argument("--batch_size", type=int, default=100)
@@ -61,7 +66,12 @@ def main():
         model = load_lora_checkpoint(model, args.lora_path)
     model.eval()
 
-    eval_config = RewardConfig(enable_lane_departure=True)
+    if args.config is not None:
+        eval_config = load_reward_config(args.config)
+        eval_config.enable_lane_departure = True
+        print(f"Using reward thresholds from {args.config}")
+    else:
+        eval_config = RewardConfig(enable_lane_departure=True)
 
     # Evaluate all scenes in batches
     results = []
