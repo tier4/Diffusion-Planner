@@ -1,17 +1,21 @@
 """Diagnose lane-departure detections: recreate model trajectories on flagged scenes
-and visualize per-step distance to nearest lane boundary + where ego exits the lane.
+and visualize per-step outer-boundary clearance + where ego first reaches
+lane-departure status.
 
 For each flagged scene, we:
   1. Run deterministic inference (same recipe as analyze_problem_areas).
-  2. Replicate compute_lane_departure_penalty internals per timestep to classify
-     each perimeter point as inside/outside the lane polygons.
-  3. Compute unmasked min distance from the ego footprint to the nearest outer
-     boundary segment at every timestep (for the "how close did we get?" plot).
-  4. Identify the first LD timestep + the perimeter point that crossed.
+  2. Replicate ``compute_lane_departure_penalty`` internals per timestep using
+     the ego footprint perimeter, classified outer boundary segments, and
+     signed clearance to those segments.
+  3. Compute the per-step min-over-perimeter clearance (what the gate uses) and
+     label each timestep against the configured thresholds
+     (CROSS / NEAR / WIDE / SAFE).
+  4. Identify the first CROSS timestep + the perimeter point responsible.
   5. Produce a per-scene PNG with an overview + zoomed-in view at the crossing
-     step + a per-step min-distance timeline.
-  6. Produce a per-scene JSON with crossing step, worst distance, crossed side,
-     predicted vs GT path length, GT LD status (to catch ghost LDs).
+     step + a per-step clearance timeline annotated with the configured
+     cross/near/wide thresholds.
+  6. Produce a per-scene JSON with crossing step, worst clearance, crossed
+     side, predicted vs GT path length, GT LD status (to catch ghost LDs).
 
 Usage:
     python -m rlvr.autoresearch.tools.viz_ld_diagnostic \
@@ -50,8 +54,6 @@ from rlvr.reward import (
     _build_lane_polygons,
     _classify_outer_boundaries,
     _point_to_outer_clearance,
-    _point_to_segments_dist,
-    compute_lane_departure_penalty,
     compute_reward_batch,
 )
 
@@ -86,6 +88,8 @@ class SceneDiag:
     pred_path_length: float
     gt_path_length: float
     lane_cross_thresh: float
+    lane_near_thresh: float
+    lane_wide_thresh: float
     reward_lane_crossing: bool       # as reported by compute_reward_batch
 
 
@@ -432,6 +436,8 @@ def diagnose_scenes(model, model_args, scene_paths: list[str],
                 pred_path_length=path_pred,
                 gt_path_length=path_gt,
                 lane_cross_thresh=lane_cross_thresh,
+                lane_near_thresh=eval_config.lane_near_thresh,
+                lane_wide_thresh=eval_config.lane_wide_thresh,
                 reward_lane_crossing=bool(r.lane_crossing),
             ))
 
@@ -494,20 +500,24 @@ def _draw_ego_box(ax, d: SceneDiag, step: int, color="darkred", lw=2.0):
 
 
 def _draw_perimeter_points(ax, d: SceneDiag, step: int, size: int = 30):
-    """Color each perimeter point by signed on-road clearance.
+    """Color each perimeter point by its configured on-road clearance band.
 
-    clearance <= lane_cross_thresh → red X (crossing / near edge)
-    clearance in (thresh, 0.25]     → orange circle (getting close)
-    clearance > 0.25                → green circle (safe)
+    Thresholds come from SceneDiag (populated from RewardConfig) so the
+    diagnostic stays aligned with the live lane-departure gate:
+
+    clearance <= lane_cross_thresh → red X (within the lane-cross gate)
+    clearance <= lane_near_thresh  → orange circle (near outer edge)
+    clearance >  lane_near_thresh  → green circle (clear)
     """
     wp = d.pred_world_pts[step]            # (K, 2)
     clr = d.pred_pt_clearance[step]        # (K,)
-    thresh = d.lane_cross_thresh
+    cross_thresh = d.lane_cross_thresh
+    near_thresh = d.lane_near_thresh
     for k in range(wp.shape[0]):
         c = float(clr[k])
-        if c <= thresh:
+        if c <= cross_thresh:
             col, mk, sz = "red", "X", size * 2
-        elif c < 0.25:
+        elif c <= near_thresh:
             col, mk, sz = "orange", "o", size
         else:
             col, mk, sz = "green", "o", size
@@ -608,10 +618,10 @@ def draw_scene(d: SceneDiag, out_path: str):
     ax_time.axhline(0.0, color="black", linewidth=0.8, label="road edge (clearance=0)")
     ax_time.axhline(d.lane_cross_thresh, color="red", linestyle=":", linewidth=1.2,
                     label=f"lane_cross_thresh {d.lane_cross_thresh:.2f}m")
-    ax_time.axhline(0.25, color="orange", linestyle="--", linewidth=1,
-                    label="lane_near_thresh 0.25m")
-    ax_time.axhline(0.40, color="gold", linestyle="--", linewidth=1,
-                    label="lane_wide_thresh 0.40m")
+    ax_time.axhline(d.lane_near_thresh, color="orange", linestyle="--", linewidth=1,
+                    label=f"lane_near_thresh {d.lane_near_thresh:.2f}m")
+    ax_time.axhline(d.lane_wide_thresh, color="gold", linestyle="--", linewidth=1,
+                    label=f"lane_wide_thresh {d.lane_wide_thresh:.2f}m")
     if cross_step is not None:
         ax_time.axvline(cross_step, color="red", linewidth=1, alpha=0.6,
                         label=f"first LD @ step {cross_step}")

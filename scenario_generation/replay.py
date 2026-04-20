@@ -223,6 +223,11 @@ class SpawnConfig:
                 f"(length={self.ego_length}, width={self.ego_width}, "
                 f"wheelbase={self.ego_wheelbase})"
             )
+        if self.ego_wheelbase > self.ego_length:
+            raise ValueError(
+                f"ego_wheelbase must be <= ego_length "
+                f"(wheelbase={self.ego_wheelbase}, length={self.ego_length})"
+            )
         if not 0 < self.ego_max_steer < math.pi / 2:
             raise ValueError(
                 f"ego_max_steer must be in (0, pi/2); got {self.ego_max_steer}"
