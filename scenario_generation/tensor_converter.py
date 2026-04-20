@@ -486,6 +486,7 @@ def to_model_tensors(
     model_args,
     device: str | torch.device = "cpu",
     map_cache: MapTensorCache | None = None,
+    inference_delay: int = 0,
 ) -> dict[str, torch.Tensor]:
     """Convert SceneContext to normalized model input tensors.
 
@@ -560,8 +561,8 @@ def to_model_tensors(
         data_np["turn_indicators"], dtype=torch.long, device=device
     )
 
-    # Delay: always 0 for inference
-    data_torch["delay"] = torch.zeros(1, dtype=torch.long, device=device)
+    # Delay: number of prefix timesteps to keep fixed during diffusion.
+    data_torch["delay"] = torch.tensor([inference_delay], dtype=torch.long, device=device)
 
     # Sampled trajectories: zeros = deterministic (caller can override for stochastic)
     P = 1 + model_args.predicted_neighbor_num

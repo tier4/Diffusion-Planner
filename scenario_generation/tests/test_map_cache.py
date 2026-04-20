@@ -121,3 +121,46 @@ class TestMapTensorCache:
                 cached[key].numpy(), uncached[key].numpy(), atol=1e-6,
                 err_msg=f"Mismatch for {key}",
             )
+
+
+class TestInferenceDelay:
+    """``to_model_tensors`` threads ``inference_delay`` into the ``delay`` tensor."""
+
+    def _args(self):
+        from unittest.mock import MagicMock
+        args = MagicMock()
+        args.predicted_neighbor_num = 5
+        args.future_len = 80
+        args.observation_normalizer = lambda x: x
+        return args
+
+    def test_delay_defaults_to_zero(self, synthetic_scene):
+        import torch
+        out = to_model_tensors(synthetic_scene, "ego", self._args(), "cpu")
+        assert "delay" in out
+        assert out["delay"].dtype == torch.long
+        assert out["delay"].shape == (1,)
+        assert int(out["delay"].item()) == 0
+
+    def test_delay_matches_inference_delay(self, synthetic_scene):
+        import torch
+        out = to_model_tensors(
+            synthetic_scene, "ego", self._args(), "cpu", inference_delay=7,
+        )
+        assert out["delay"].dtype == torch.long
+        assert out["delay"].shape == (1,)
+        assert int(out["delay"].item()) == 7
+
+    def test_delay_unaffected_by_map_cache(self, synthetic_scene):
+        """Cache path shouldn't mutate delay — it must match the configured value."""
+        cache = MapTensorCache(synthetic_scene.map_data)
+        cached = to_model_tensors(
+            synthetic_scene, "ego", self._args(), "cpu",
+            map_cache=cache, inference_delay=3,
+        )
+        uncached = to_model_tensors(
+            synthetic_scene, "ego", self._args(), "cpu",
+            map_cache=None, inference_delay=3,
+        )
+        assert int(cached["delay"].item()) == 3
+        assert int(uncached["delay"].item()) == 3
