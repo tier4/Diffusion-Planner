@@ -249,6 +249,10 @@ class SpawnConfig:
             raise ValueError(
                 f"max_steps must be >= 1; got {self.max_steps}"
             )
+        if self.ego_init_speed is not None and self.ego_init_speed < 0:
+            raise ValueError(
+                f"ego_init_speed must be >= 0 when set; got {self.ego_init_speed}"
+            )
 
     @classmethod
     def from_json(cls, path: str | Path) -> "SpawnConfig":

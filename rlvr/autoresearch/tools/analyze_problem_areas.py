@@ -212,8 +212,10 @@ def main():
 
     # 2. RB min distance distribution
     axes[0, 1].hist(rb_dists, bins=50, color="coral", edgecolor="black")
-    axes[0, 1].axvline(0.45, color="orange", linestyle="--", label="near (0.45m)")
-    axes[0, 1].axvline(0.20, color="red", linestyle="--", label="cross (0.20m)")
+    axes[0, 1].axvline(eval_config.rb_near_thresh, color="orange", linestyle="--",
+                       label=f"near ({eval_config.rb_near_thresh:.2f}m)")
+    axes[0, 1].axvline(eval_config.rb_cross_thresh, color="red", linestyle="--",
+                       label=f"cross ({eval_config.rb_cross_thresh:.2f}m)")
     axes[0, 1].set_title("Road Border Min Distance")
     axes[0, 1].set_xlabel("Distance (m)")
     axes[0, 1].legend()

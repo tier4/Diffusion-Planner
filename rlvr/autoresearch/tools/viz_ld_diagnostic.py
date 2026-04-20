@@ -654,18 +654,21 @@ def draw_scene(d: SceneDiag, out_path: str):
         plt.Line2D([0], [0], marker="s", lw=0, markerfacecolor="none",
                    markeredgecolor="dimgray", markersize=12, label="ego box @ step 0 (start)"),
         plt.Line2D([0], [0], marker="o", lw=0, markerfacecolor="green",
-                   markeredgecolor="black", markersize=8, label="perimeter pt clear of lane edge"),
+                   markeredgecolor="black", markersize=8,
+                   label="perimeter pt clearance > lane_near_thresh"),
         plt.Line2D([0], [0], marker="o", lw=0, markerfacecolor="orange",
-                   markeredgecolor="black", markersize=8, label="perimeter pt within lane_near_thresh"),
+                   markeredgecolor="black", markersize=8,
+                   label="perimeter pt lane_cross_thresh < clearance <= lane_near_thresh"),
         plt.Line2D([0], [0], marker="X", lw=0, markerfacecolor="red",
-                   markeredgecolor="black", markersize=10, label="perimeter pt within lane_cross_thresh"),
+                   markeredgecolor="black", markersize=10,
+                   label="perimeter pt clearance <= lane_cross_thresh"),
     ]
     ax_leg.legend(handles=legend_handles, ncol=2, fontsize=10, loc="center")
 
     scene_name = Path(d.scene_path).stem
     bag = Path(d.scene_path).parent.name
     fig.suptitle(
-        f"{bag}/{scene_name} — J6 ep5 no_blk2 | ego={d.ego_shape[1]:.2f}×{d.ego_shape[2]:.2f}m | "
+        f"{bag}/{scene_name} | ego={d.ego_shape[1]:.2f}×{d.ego_shape[2]:.2f}m | "
         f"reward says LD={d.reward_lane_crossing}",
         fontsize=13, fontweight="bold",
     )
