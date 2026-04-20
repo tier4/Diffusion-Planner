@@ -4,6 +4,11 @@ Runs deterministic inference on all scenes, computes per-scene reward metrics,
 and identifies clusters of problem scenes (high centerline loss, collisions,
 road border crossings, lane departures).
 
+Produces a single multi-panel summary PNG (reward distribution, RB-distance
+distribution, path-length distribution, per-bag problem-count bar chart,
+heading-vs-border scatter, problem-scene reward overlay) plus a top-K
+problem-scene JSON and a full per-scene results JSON.
+
 Usage:
     python -m rlvr.autoresearch.tools.analyze_problem_areas \
         --model_path <base_model.pth> \
@@ -193,7 +198,7 @@ def main():
         print(f"  {bag}: {n_bag} scenes, rb_cross={rb_bag}, ld={ld_bag}, "
               f"collision={col_bag}, reward={avg_reward:.1f}, rb_dist={avg_rb_dist:.2f}")
 
-    # Generate histograms
+    # Generate summary figure (distributions + per-bag counts + scatter)
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle(f"Problem Area Analysis — {args.tag} ({n} scenes)", fontsize=14)
 
@@ -264,7 +269,7 @@ def main():
     fig_path = os.path.join(args.output_dir, f"{args.tag}_histograms.png")
     plt.savefig(fig_path, dpi=150)
     plt.close()
-    print(f"\nSaved histograms: {fig_path}")
+    print(f"\nSaved summary figure: {fig_path}")
 
     # Save top-K problem scenes
     problem_scenes = [r["path"] for r in results[:args.top_k]]

@@ -1808,7 +1808,7 @@ def compute_lane_departure_penalty(
     Returns:
         Tuple of (crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty):
         - crossing_gate: (N,) 1.0 if min dist to outer > lane_cross_thresh everywhere, else 0.0
-        - near_frac: (N,) fraction of non-crossing timesteps in [cross_thresh, near_thresh)
+        - near_frac: (N,) fraction of non-crossing timesteps in (cross_thresh, near_thresh)
         - wide_frac: (N,) fraction of non-crossing timesteps in [near_thresh, wide_thresh)
         - lane_crossing_steps: list of N (int | None) — first timestep crossing_gate trips
         - cont_penalty: (N,) continuous proximity penalty (linear decay from lane_cont_thresh)

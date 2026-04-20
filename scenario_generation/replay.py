@@ -217,6 +217,15 @@ class SpawnConfig:
     sequential_inference: bool = False
 
     def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Re-check field invariants.
+
+        Call after CLI overrides or any direct field mutation so late-bound
+        changes (e.g. ``cfg.max_steps = args.steps``) still fail fast instead
+        of silently carrying bad values into ``run_route_replay``.
+        """
         if self.ego_length <= 0 or self.ego_width <= 0 or self.ego_wheelbase <= 0:
             raise ValueError(
                 f"ego dimensions must be positive "
@@ -1316,6 +1325,9 @@ def main() -> None:
         cfg.spawn_probability = args.spawn_probability
     if args.seed is not None:
         cfg.seed = args.seed
+    # Re-run validation after CLI overrides so bad values (e.g. --steps 0)
+    # are rejected at startup instead of much later.
+    cfg.validate()
 
     device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
     print(f"Loading model from {args.model_path}")

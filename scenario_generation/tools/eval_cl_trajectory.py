@@ -204,20 +204,36 @@ def load_border_segments(map_path: str) -> list[np.ndarray]:
     return segments
 
 
+def _positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"invalid float value: {value!r}") from e
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError(f"value must be > 0, got {parsed}")
+    return parsed
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate CL replay trajectories")
     parser.add_argument("--run_dirs", nargs="+", required=True,
                         help="Replay output directories (each must contain trajectory_log.json)")
     parser.add_argument("--map_path", required=True, help="Lanelet2 map OSM file")
-    parser.add_argument("--ego_length", type=float, required=True,
+    parser.add_argument("--ego_length", type=_positive_float, required=True,
                         help="Ego length (m) — must match the vehicle used for replay")
-    parser.add_argument("--ego_width", type=float, required=True,
+    parser.add_argument("--ego_width", type=_positive_float, required=True,
                         help="Ego width (m) — must match the vehicle used for replay")
-    parser.add_argument("--ego_wheelbase", type=float, required=True,
+    parser.add_argument("--ego_wheelbase", type=_positive_float, required=True,
                         help="Ego wheelbase (m) — must match the vehicle used for replay")
     parser.add_argument("--rb_cross_thresh", type=float, default=0.20)
     parser.add_argument("--output", type=str, default=None, help="Save results JSON")
     args = parser.parse_args()
+
+    if args.ego_wheelbase > args.ego_length:
+        parser.error(
+            f"--ego_wheelbase ({args.ego_wheelbase}) must be <= "
+            f"--ego_length ({args.ego_length})"
+        )
 
     border_segments = load_border_segments(args.map_path)
 

@@ -643,7 +643,7 @@ def draw_scene(d: SceneDiag, out_path: str):
 
     # Legend in bottom left
     legend_handles = [
-        Patch(facecolor="lightgreen", alpha=0.3, label="lane polygons (containment region)"),
+        Patch(facecolor="lightgreen", alpha=0.3, label="lane polygons (on-road reference shading)"),
         plt.Line2D([0], [0], color="blue", lw=0.8, alpha=0.5, label="lane centerline boundaries"),
         plt.Line2D([0], [0], color="darkorange", lw=1.2, alpha=0.8, label="outer boundary segments (classified)"),
         plt.Line2D([0], [0], color="red", lw=2, label="road border polyline"),
@@ -654,9 +654,11 @@ def draw_scene(d: SceneDiag, out_path: str):
         plt.Line2D([0], [0], marker="s", lw=0, markerfacecolor="none",
                    markeredgecolor="dimgray", markersize=12, label="ego box @ step 0 (start)"),
         plt.Line2D([0], [0], marker="o", lw=0, markerfacecolor="green",
-                   markeredgecolor="black", markersize=8, label="perimeter pt inside any lane"),
+                   markeredgecolor="black", markersize=8, label="perimeter pt clear of lane edge"),
+        plt.Line2D([0], [0], marker="o", lw=0, markerfacecolor="orange",
+                   markeredgecolor="black", markersize=8, label="perimeter pt within lane_near_thresh"),
         plt.Line2D([0], [0], marker="X", lw=0, markerfacecolor="red",
-                   markeredgecolor="black", markersize=10, label="perimeter pt outside lane polygons"),
+                   markeredgecolor="black", markersize=10, label="perimeter pt within lane_cross_thresh"),
     ]
     ax_leg.legend(handles=legend_handles, ncol=2, fontsize=10, loc="center")
 
