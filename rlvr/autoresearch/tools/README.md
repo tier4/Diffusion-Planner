@@ -65,6 +65,65 @@ python -m rlvr.autoresearch.tools.viz_lane_departure \
   --mode rb --zoom 12
 ```
 
+### viz_lane_gate_rank_flip.py
+Visualizes the `_classify_outer_boundaries` classifier per lane-boundary segment:
+outer (road-edge, black) vs shared-between-lanes (blue) vs junction-gap (orange dashed,
+reclassified as shared to suppress false road-edge detections). Useful for debugging LD-gate
+decisions on new scenes.
+```bash
+python -m rlvr.autoresearch.tools.viz_lane_gate_rank_flip \
+  --scenes <scenes.json> --n_scenes 10 --output_dir <dir>
+```
+
+### viz_intersection_polygons.py
+Overlays `POLYGON_TYPE_INTERSECTION_AREA` polygons from the NPZ `polygons` field on lane
+segments. Use when tuning the intersection-polygon filter in the signed-distance lane gate.
+```bash
+python -m rlvr.autoresearch.tools.viz_intersection_polygons \
+  --scenes <scenes.json> --output_dir <dir>
+```
+
+### viz_kinematic_floored.py
+Visualizes trajectories flagged as kinematically infeasible by `compute_kinematic_gate`
+(absolute yaw rate + bicycle-model curvature). Colors perimeter points by which gate fired
+and at which timestep.
+```bash
+python -m rlvr.autoresearch.tools.viz_kinematic_floored \
+  --model_path <model.pth> --scenes <scenes.json> --output_dir <dir>
+```
+
+### viz_t1_crossing_debug.py
+Per-timestep signed-distance debug for a single scene: plots ego perimeter points colored by
+signed distance to the nearest outer boundary. Useful when the gate flags a scene but the
+trajectory looks fine visually (or vice versa).
+```bash
+python -m rlvr.autoresearch.tools.viz_t1_crossing_debug \
+  --model_path <model.pth> --scenes <scenes.json> \
+  --reference_config <config.json> \
+  --scene_substr <scene_name_substring> --traj_idx <0..K-1> \
+  --target_t <timestep> --lane_cross_thresh <threshold> \
+  --output <fig.png>
+```
+
+### calibrate_rb_vs_lane.py
+Measures lane vs RB reward-component contribution on a set of generated trajectories, and
+sweeps RB scale vs top-1-agreement with the reference config. Use when picking
+`rb_near_scale` / `rb_wide_scale` / `rb_cont_scale` for a new dataset.
+```bash
+python -m rlvr.autoresearch.tools.calibrate_rb_vs_lane \
+  --model_path <model.pth> --scenes <scenes.json> \
+  --reference_config <config.json> --output <calibration.json>
+```
+
+### det_path_drift.py
+Tracks how the deterministic (no-noise) path length drifts across epochs vs a frozen
+LoRA-less baseline. Useful for diagnosing progress collapse during ranked-SFT training.
+```bash
+python -m rlvr.autoresearch.tools.det_path_drift \
+  --run_dir <experiment_run_dir> --model_path <base.pth> \
+  --scenes <scenes.json> --epochs 1 3 5 7 9
+```
+
 ### compute_baseline_cache.py
 Precomputes baseline model and GT path lengths per scene. Used by `run_experiment.py --baseline_cache` to report progress ratios (model_path/gt_path and model_path/baseline_path) during training.
 ```bash

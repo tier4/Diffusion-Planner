@@ -172,7 +172,7 @@ def check_scene_lane(scene_path, step=None):
         seg_dir = torch.stack(sd_l)
         seg_lane = torch.tensor(sl_l, device=device, dtype=torch.int64)
 
-        is_outer = _classify_outer_boundaries(
+        is_outer, _ = _classify_outer_boundaries(
             seg_p1, seg_p2, seg_dir, seg_lane,
             edge_v1, edge_v2, edge_poly_id, n_polys,
         )
