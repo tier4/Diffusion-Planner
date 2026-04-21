@@ -120,10 +120,8 @@ class GRPOConfig:
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     max_yaw_rate: float = 1.0  # rad/s — kinematic feasibility absolute yaw cap
-    yaw_rate_scale: float = 3.0
-    max_steer: float = 0.64  # rad — bicycle-model steering range (J6 default; xx1≈0.45)
+    max_steer: float = 0.64  # rad — bicycle-model steering range
     kinematic_margin: float = 2.5  # safety margin over physical κ_max
-    kinematic_scale: float = 3.0
     enable_overprogress: bool = True
     overprogress_margin: float = 1.1
     overprogress_penalty: float = 0.3

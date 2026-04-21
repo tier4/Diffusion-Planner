@@ -7,6 +7,7 @@ functions from diffusion_planner.loss for proper vehicle-footprint-aware checks.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -59,15 +60,13 @@ class RewardConfig:
     # trajectories pass (GT peaks ≈0.5 rad/s on tight human turns) and only
     # clearly unphysical predictions (e.g. pivot-in-place) fail.
     max_yaw_rate: float = 1.0  # rad/s  (2× GT peak)
-    yaw_rate_scale: float = 3.0
 
     # Bicycle-model kinematic feasibility gate. κ_max = tan(max_steer)/wheelbase.
     # Wheelbase is read from ego_shape[0] per scene; max_steer is configured below.
     # Effective curvature bound: kinematic_margin × tan(max_steer) / wheelbase.
     # Margin absorbs SG finite-differencing noise and tight human driving.
-    max_steer: float = 0.64  # rad (J6 ≈0.64, xx1 ≈0.45)
+    max_steer: float = 0.64  # rad — bicycle-model steering range
     kinematic_margin: float = 2.5  # multiplier over physical bicycle-model bound
-    kinematic_scale: float = 3.0
 
     # Overprogress: cap progress at GT path × margin, penalize excess
     enable_overprogress: bool = False
@@ -886,9 +885,7 @@ def compute_kinematic_gate(
     # Check 2: bicycle-model curvature cap. κ_max = margin * tan(max_steer) / wheelbase.
     if ego_shape is not None:
         wheelbase = float(ego_shape[0])
-        kappa_max = config.kinematic_margin * float(
-            torch.tan(torch.tensor(config.max_steer))
-        ) / max(wheelbase, 1e-3)
+        kappa_max = config.kinematic_margin * math.tan(config.max_steer) / max(wheelbase, 1e-3)
         curv_violated = yaw_rate > kappa_max * speed_align
     else:
         curv_violated = torch.zeros_like(abs_violated)

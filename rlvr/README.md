@@ -342,8 +342,8 @@ weighted values (column * weight) so that columns add up to the total.
    `POLYGON_TYPE_INTERSECTION_AREA`) are forced to signed = -100 (safe). This suppresses
    false crossings at intersection mouths where lane polygons don't tile cleanly
 5. A trajectory **crosses** if its most-negative signed distance ever drops below
-   `lane_cross_thresh` (default 0.0m, i.e., the gate fires the instant any perimeter point
-   pokes past the outer boundary)
+   `-lane_cross_thresh` (default 0.20m — matches `rb_cross_thresh`; the gate fires when any
+   perimeter point pokes 20cm past the outer boundary)
 6. Soft penalties use positive signed distances through near/wide/cont thresholds:
    `lane_near_thresh` (0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m)
 7. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
@@ -364,8 +364,9 @@ vehicle's bicycle-model constraints:
   (defaults: `max_steer=0.64` rad, `kinematic_margin=2.5`). Yaw and speed are
   Savitzky-Golay smoothed before curvature estimation
 
-In `reward_mode=survival`, a trajectory that fails the kinematic gate has its survival_frac
-floored at the first violating timestep — same treatment as a lane/RB crossing.
+Returns a per-trajectory **binary** gate (0 = any timestep violated, 1 = all clean).
+Applied as a hard flooring multiplier on `totals` **after** survival/gate aggregation, so a
+single kinematic violation floors the entire trajectory reward regardless of `reward_mode`.
 
 ### Baseline-anchored Underprogress
 

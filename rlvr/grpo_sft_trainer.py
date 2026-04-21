@@ -422,13 +422,13 @@ def train_epoch_ranked_sft(
     if getattr(config, "underprogress_reference", "det") == "baseline" and run_dir is not None:
         bpath = _PathCls(run_dir) / "epoch1_baselines.npz"
         if bpath.exists():
-            saved = np.load(bpath, allow_pickle=True)
-            saved_paths = saved["paths"].tolist()
-            saved_trajs = saved["trajectories"]  # (M, T, 4)
-            for i, p in enumerate(saved_paths):
-                xy = saved_trajs[i, :, :2]
-                plen = float(np.linalg.norm(np.diff(xy, axis=0), axis=-1).sum())
-                baseline_path_lens[str(p)] = plen
+            with np.load(bpath, allow_pickle=True) as saved:
+                saved_paths = saved["paths"].tolist()
+                saved_trajs = saved["trajectories"]  # (M, T, 4)
+                for i, p in enumerate(saved_paths):
+                    xy = saved_trajs[i, :, :2]
+                    plen = float(np.linalg.norm(np.diff(xy, axis=0), axis=-1).sum())
+                    baseline_path_lens[str(p)] = plen
             if epoch == 1:
                 print(f"  [underprogress] loaded {len(baseline_path_lens)} baseline path lens from {bpath.name}")
 

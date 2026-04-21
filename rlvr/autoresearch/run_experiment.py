@@ -536,10 +536,8 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             lane_wide_thresh=grpo_config.lane_wide_thresh,
             lane_cont_thresh=grpo_config.lane_cont_thresh,
             max_yaw_rate=grpo_config.max_yaw_rate,
-            yaw_rate_scale=grpo_config.yaw_rate_scale,
             max_steer=grpo_config.max_steer,
             kinematic_margin=grpo_config.kinematic_margin,
-            kinematic_scale=grpo_config.kinematic_scale,
             reward_mode=grpo_config.reward_mode,
         )
         # Eval reward config: standard weights but always check lane departure for metrics
