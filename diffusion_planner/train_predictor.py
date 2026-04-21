@@ -74,6 +74,11 @@ def get_args():
     parser.add_argument(
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
     )
+    parser.add_argument(
+        "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
+    )
+    parser.add_argument("--ego_past_noise_std", type=float, default=0.1, help="std of noise applied to ego past trajectory during augmentation")
+    parser.add_argument("--use_smoothing_future_trajectory", default=True, type=boolean, help="whether to apply smoothing to future trajectory")
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
@@ -223,7 +228,13 @@ def model_training(args):
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
         else:
-            aug = StatePerturbation(augment_prob=args.augment_prob, device=args.device)
+            aug = StatePerturbation(
+                augment_prob=args.augment_prob,
+                num_refine=args.num_refine,
+                device=args.device,
+                ego_past_noise_std=args.ego_past_noise_std,
+                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
+            )
     else:
         aug = None
 
