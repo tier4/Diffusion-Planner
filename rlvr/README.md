@@ -336,14 +336,17 @@ weighted values (column * weight) so that columns add up to the total.
    outer (road-edge) vs shared (between lanes) via a midpoint nudge classifier, and compute an
    outward normal for each outer segment
 3. For each of 36 ego perimeter sample points at each timestep, compute the **signed**
-   point-to-segment distance against outer segments (negative = outside the lane, positive =
-   inside). Uses only unclamped projections to avoid endpoint artifacts at junction gaps
+   point-to-segment distance against outer segments. Convention: **positive = outside the
+   lane (along the outward normal), negative = inside**. Uses only unclamped projections to
+   avoid endpoint artifacts at junction gaps
 4. Points that fall inside an intersection-area polygon (from the NPZ `polygons` field, type
-   `POLYGON_TYPE_INTERSECTION_AREA`) are forced to signed = -100 (safe). This suppresses
-   false crossings at intersection mouths where lane polygons don't tile cleanly
-5. A trajectory **crosses** if its most-negative signed distance ever drops below
-   `-lane_cross_thresh` (default 0.20m — matches `rb_cross_thresh`; the gate fires when any
-   perimeter point pokes 20cm past the outer boundary)
+   `POLYGON_TYPE_INTERSECTION_AREA`) are forced to signed = -100 (deep inside). This
+   suppresses false crossings at intersection mouths where lane polygons don't tile cleanly
+5. A trajectory **crosses** if the per-timestep maximum signed distance (the most-outside
+   perimeter point) ever exceeds `-lane_cross_thresh`. Default 0.20m matches
+   `rb_cross_thresh`. **Buffer-from-inside semantics**: a higher threshold = stricter gate
+   (wider buffer); the default fires when any perimeter point comes within 20cm of the
+   boundary or beyond it
 6. Soft penalties use positive signed distances through near/wide/cont thresholds:
    `lane_near_thresh` (0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m)
 7. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`

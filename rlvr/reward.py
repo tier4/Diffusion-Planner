@@ -2205,6 +2205,13 @@ def compute_lane_departure_penalty(
 
     per_ts_min[:, 0] = 10.0
 
+    # Crossing rule (buffer-from-inside semantics, matches `rb_cross_thresh`):
+    # `per_ts_max_signed` is the max signed distance across perimeter points per
+    # timestep — i.e., the most-outside (highest signed) point. With sign convention
+    # +outside / -inside, the gate fires when this point is less than `lane_cross_thresh`
+    # METRES INSIDE the boundary, OR already past it. Larger threshold = stricter gate
+    # (wider safety buffer), not looser. e.g., default 0.20m → fires when any perimeter
+    # point comes within 20cm of the lane edge or beyond.
     is_crossing_ts = per_ts_max_signed > -lane_cross_thresh  # (N, T)
     has_crossing = is_crossing_ts.any(dim=1)
     crossing_gate = (~has_crossing).float()
@@ -2451,7 +2458,17 @@ def compute_reward_batch(
                 #                `data["baseline_path_len"]` (a scalar tensor). Frozen
                 #                anchor that doesn't collapse with training.
                 if config.underprogress_reference == "baseline" and "baseline_path_len" in data:
-                    ref_path_len = data["baseline_path_len"].to(device).clamp(min=1e-3)
+                    # Accept tensor / numpy scalar / Python float — callers may inject metadata
+                    # in any of these forms when wiring custom data dicts.
+                    ref_path_len = torch.as_tensor(
+                        data["baseline_path_len"], device=device, dtype=torch.float32,
+                    )
+                    if ref_path_len.numel() != 1:
+                        raise ValueError(
+                            "data['baseline_path_len'] must be a scalar value, got shape "
+                            f"{tuple(ref_path_len.shape)}"
+                        )
+                    ref_path_len = ref_path_len.reshape(()).clamp(min=1e-3)
                 else:
                     ref_path_len = model_path_lens[0].clamp(min=1e-3)
                 ratio = model_path_lens / ref_path_len

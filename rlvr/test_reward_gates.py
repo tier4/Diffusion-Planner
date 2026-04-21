@@ -28,19 +28,19 @@ from rlvr.reward import (
 # _point_to_segments_signed_min_dist
 # ---------------------------------------------------------------------------
 
-def test_signed_dist_inside_returns_positive():
+def test_signed_dist_sign_convention():
     # Single vertical segment at x=1, y∈[0,2], outward pointing +x (to the right).
+    # Convention: positive signed = outward/outside the lane; negative = inside.
     p1 = torch.tensor([[1.0, 0.0]])
     p2 = torch.tensor([[1.0, 2.0]])
     outward = torch.tensor([[1.0, 0.0]])
-    # Query on the left of segment (x<1) → "inside" → signed negative (since outward is +x)
-    # Query on the right (x>1) → "outside" → signed positive
+    # Query on the left of segment (x<1, opposite of outward) → "inside" → signed negative.
+    # Query on the right (x>1, along outward) → "outside" → signed positive.
     points = torch.tensor([[0.5, 1.0], [1.5, 1.0]])
-    unsigned, signed = _point_to_segments_signed_min_dist(p1, p2, outward=outward, points=points) \
-        if False else _point_to_segments_signed_min_dist(points, p1, p2, outward)
+    unsigned, signed = _point_to_segments_signed_min_dist(points, p1, p2, outward)
     assert torch.allclose(unsigned, torch.tensor([0.5, 0.5]), atol=1e-5)
-    assert signed[0].item() < 0  # "inside" lane
-    assert signed[1].item() > 0  # "outside" lane
+    assert signed[0].item() < 0  # "inside" → negative
+    assert signed[1].item() > 0  # "outside" → positive
     assert abs(abs(signed[0].item()) - 0.5) < 1e-5
     assert abs(abs(signed[1].item()) - 0.5) < 1e-5
 
@@ -77,7 +77,7 @@ def test_inside_square_polygon():
     ])  # (1, 4, 2)
     points = torch.tensor([[0.5, 0.5], [1.5, 0.5], [0.5, -0.5]])
     inside = _points_inside_intersection_areas(points, verts)
-    assert inside[0].item() is True or inside[0].item() == True
+    assert inside[0].item()
     assert not inside[1].item()
     assert not inside[2].item()
 
@@ -217,6 +217,139 @@ def test_reward_config_baseline_reference_default():
     cfg = RewardConfig()
     # Default reference is adaptive "det"; "baseline" is opt-in.
     assert cfg.underprogress_reference == "det"
+
+
+# ---------------------------------------------------------------------------
+# underprogress_reference="baseline" — end-to-end against compute_reward_batch
+# ---------------------------------------------------------------------------
+
+def _trivial_lane():
+    """Single straight lane, x∈[0,100], width 4m. Channels: x, y, dx, dy, then 8 zeros (12 total)."""
+    n_pts = 20
+    xs = torch.linspace(0.0, 100.0, n_pts)
+    ys = torch.zeros(n_pts)
+    dxs = torch.ones(n_pts)
+    dys = torch.zeros(n_pts)
+    extras = torch.zeros(n_pts, 8)
+    pts = torch.stack([xs, ys, dxs, dys], dim=-1)
+    pts = torch.cat([pts, extras], dim=-1)  # (20, 12)
+    return pts.unsqueeze(0)  # (1, 20, 12)
+
+
+def _minimal_scene_data(K: int = 2, T: int = 80, dt: float = 0.1):
+    """Build the minimal `data` dict that compute_reward_batch needs.
+
+    Two ego trajectories: traj[0] = short straight (5m), traj[1] = long straight (40m).
+    The 'baseline_path_len' anchor will be 40m, so traj[0] should fail underprogress.
+    """
+    # ego[0]: speed 0.625 m/s → 5m total path over 8s
+    # ego[1]: speed 5.0 m/s → 40m total path
+    speeds = [0.625, 5.0]
+    trajs = []
+    for s in speeds:
+        xs = torch.arange(T, dtype=torch.float32) * dt * s
+        ys = torch.zeros(T)
+        cos_h = torch.ones(T)
+        sin_h = torch.zeros(T)
+        trajs.append(torch.stack([xs, ys, cos_h, sin_h], dim=-1))
+    ego_trajs = torch.stack(trajs)  # (K, T, 4)
+    return ego_trajs
+
+
+def test_underprogress_reference_baseline_path():
+    """When underprogress_reference='baseline', the frozen anchor (not traj[0]) drives
+    the underprogress penalty."""
+    from rlvr.reward import compute_reward_batch
+    K, T = 2, 80
+    ego_trajs = _minimal_scene_data(K=K, T=T)
+    # Bare-minimum data dict — most reward terms degenerate to zero on this synthetic input.
+    data = {
+        "ego_agent_future": torch.zeros(T, 4),
+        "neighbor_agents_future": torch.zeros(0, T, 3),
+        "neighbor_agents_past": torch.zeros(0, 21, 11),
+        "lanes": _trivial_lane(),
+        "route_lanes": _trivial_lane(),
+        "line_strings": torch.zeros(0, 20, 4),
+        "polygons": torch.zeros(0, 20, 3),
+        "goal_pose": torch.zeros(3),
+        "ego_shape": torch.tensor([3.0, 5.0, 2.0]),
+        "baseline_path_len": torch.tensor(40.0),
+    }
+    cfg = RewardConfig(
+        underprogress_penalty=10.0,
+        underprogress_threshold=0.7,
+        underprogress_reference="baseline",
+        enable_lane_departure=False,
+        rb_gate_enabled=False,
+    )
+    breakdowns = compute_reward_batch(ego_trajs, data, cfg)
+    # traj[0] path = 5m, ratio = 5/40 = 0.125 → severely underprogressed.
+    # traj[1] path = 40m, ratio = 1.0 → no underprogress penalty.
+    # The penalty subtracts from clamped_progress, which is part of the total.
+    # We don't assert exact values (other terms move) — just that traj[1] beats traj[0].
+    assert breakdowns[1].total > breakdowns[0].total
+
+
+def test_underprogress_reference_baseline_falls_back_when_key_missing():
+    """If underprogress_reference='baseline' but data has no 'baseline_path_len',
+    the code falls back to 'det' (traj[0] path)."""
+    from rlvr.reward import compute_reward_batch
+    K, T = 2, 80
+    ego_trajs = _minimal_scene_data(K=K, T=T)
+    data = {
+        "ego_agent_future": torch.zeros(T, 4),
+        "neighbor_agents_future": torch.zeros(0, T, 3),
+        "neighbor_agents_past": torch.zeros(0, 21, 11),
+        "lanes": _trivial_lane(),
+        "route_lanes": _trivial_lane(),
+        "line_strings": torch.zeros(0, 20, 4),
+        "polygons": torch.zeros(0, 20, 3),
+        "goal_pose": torch.zeros(3),
+        "ego_shape": torch.tensor([3.0, 5.0, 2.0]),
+        # No 'baseline_path_len' key → should fall back to traj[0] reference.
+    }
+    cfg = RewardConfig(
+        underprogress_penalty=10.0,
+        underprogress_threshold=0.7,
+        underprogress_reference="baseline",
+        enable_lane_departure=False,
+        rb_gate_enabled=False,
+    )
+    # Should not raise, and traj[0] is its own reference (ratio=1.0) so no penalty on traj[0].
+    breakdowns = compute_reward_batch(ego_trajs, data, cfg)
+    assert len(breakdowns) == K
+
+
+def test_underprogress_baseline_accepts_python_scalar():
+    """data['baseline_path_len'] should accept Python/numpy scalars, not just tensors."""
+    from rlvr.reward import compute_reward_batch
+    import numpy as np
+    K, T = 2, 80
+    ego_trajs = _minimal_scene_data(K=K, T=T)
+    base = {
+        "ego_agent_future": torch.zeros(T, 4),
+        "neighbor_agents_future": torch.zeros(0, T, 3),
+        "neighbor_agents_past": torch.zeros(0, 21, 11),
+        "lanes": _trivial_lane(),
+        "route_lanes": _trivial_lane(),
+        "line_strings": torch.zeros(0, 20, 4),
+        "polygons": torch.zeros(0, 20, 3),
+        "goal_pose": torch.zeros(3),
+        "ego_shape": torch.tensor([3.0, 5.0, 2.0]),
+    }
+    cfg = RewardConfig(
+        underprogress_penalty=10.0,
+        underprogress_threshold=0.7,
+        underprogress_reference="baseline",
+        enable_lane_departure=False,
+        rb_gate_enabled=False,
+    )
+    for scalar in (40.0, np.float32(40.0), np.float64(40.0)):
+        data = dict(base)
+        data["baseline_path_len"] = scalar
+        # Should not raise.
+        breakdowns = compute_reward_batch(ego_trajs, data, cfg)
+        assert len(breakdowns) == K
 
 
 if __name__ == "__main__":

@@ -98,7 +98,11 @@ signed distance to the nearest outer boundary. Useful when the gate flags a scen
 trajectory looks fine visually (or vice versa).
 ```bash
 python -m rlvr.autoresearch.tools.viz_t1_crossing_debug \
-  --model_path <model.pth> --scene <scene.npz> --output <fig.png>
+  --model_path <model.pth> --scenes <scenes.json> \
+  --reference_config <config.json> \
+  --scene_substr <scene_name_substring> --traj_idx <0..K-1> \
+  --target_t <timestep> --lane_cross_thresh <threshold> \
+  --output <fig.png>
 ```
 
 ### calibrate_rb_vs_lane.py
@@ -107,7 +111,8 @@ sweeps RB scale vs top-1-agreement with the reference config. Use when picking
 `rb_near_scale` / `rb_wide_scale` / `rb_cont_scale` for a new dataset.
 ```bash
 python -m rlvr.autoresearch.tools.calibrate_rb_vs_lane \
-  --model_path <model.pth> --scenes <scenes.json> --output_dir <dir>
+  --model_path <model.pth> --scenes <scenes.json> \
+  --reference_config <config.json> --output <calibration.json>
 ```
 
 ### det_path_drift.py
@@ -115,7 +120,8 @@ Tracks how the deterministic (no-noise) path length drifts across epochs vs a fr
 LoRA-less baseline. Useful for diagnosing progress collapse during ranked-SFT training.
 ```bash
 python -m rlvr.autoresearch.tools.det_path_drift \
-  --base_model <base.pth> --exp_dir <run_dir> --scenes <scenes.json>
+  --run_dir <experiment_run_dir> --model_path <base.pth> \
+  --scenes <scenes.json> --epochs 1 3 5 7 9
 ```
 
 ### compute_baseline_cache.py
