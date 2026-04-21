@@ -79,10 +79,20 @@ def get_args():
         "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
     )
     parser.add_argument(
-        "--num_refine", type=int, default=10, help="number of refinement steps for augmentation"
+        "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
-    parser.add_argument("--ego_past_noise_std", type=float, default=0.1, help="std of noise applied to ego past trajectory during augmentation")
-    parser.add_argument("--use_smoothing_future_trajectory", default=True, type=boolean, help="whether to apply smoothing to future trajectory")
+    parser.add_argument(
+        "--ego_past_noise_std",
+        type=float,
+        default=0.1,
+        help="std of noise applied to ego past trajectory during augmentation",
+    )
+    parser.add_argument(
+        "--use_smoothing_future_trajectory",
+        default=True,
+        type=boolean,
+        help="whether to apply smoothing to future trajectory",
+    )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
@@ -99,7 +109,7 @@ def get_args():
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
-    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.6)
+    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.4)
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
 
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
@@ -290,7 +300,9 @@ def model_training(args):
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
         else:
             aug = StatePerturbation(
-                augment_prob=args.augment_prob, num_refine=args.num_refine, device=args.device,
+                augment_prob=args.augment_prob,
+                num_refine=args.num_refine,
+                device=args.device,
                 ego_past_noise_std=args.ego_past_noise_std,
                 use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
             )

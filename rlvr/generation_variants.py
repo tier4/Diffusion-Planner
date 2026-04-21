@@ -105,34 +105,31 @@ _VARIANTS: dict[str, GenerationVariant] = {
 
     # ====== Production / current default ======
     "rsft_v2": GenerationVariant(
-        description="Default RSFT base (April 2026): 6 guided + 9 noise sweep (0.1->5.0). "
-                    "Best L2 preservation. ep8: ego +1.5%, neighbor -1.0%, LD 0/50 on miraikan val 50.",
+        description="Default RSFT base: 6 guided + 9 noise sweep (0.1->5.0).",
         cl_spd_configs=_GUIDED_RSFT_V2,
         noise_configs=_NOISE_SWEEP_FULL,
     ),
 
     # ====== Runner-up / honorable mentions (kept for comparison) ======
     "rsft_v2_legacy": GenerationVariant(
-        description="Previous default (was noise_swap_2_no_lat): 6 guided + 2 fixed-noise + 7 random-CL. "
-                    "Higher reward & progress but worse L2 (+2.3%). ep9: val=+25.63, LD 1/50.",
+        description="Previous default: 6 guided + 2 fixed-noise + 7 random-CL.",
         cl_spd_configs=_GUIDED_RSFT_V2,
         noise_configs=_NOISE_SWEEP_HIGH,
     ),
     "rsft_v2_half_half": GenerationVariant(
-        description="5 noise + 4 random. Highest val_reward (+26.59) and pgt med (0.90), but LD 11/50 — too aggressive.",
+        description="5 noise + 4 random. Aggressive — high reward/progress at the cost of lane keeping.",
         cl_spd_configs=_GUIDED_RSFT_V2,
         noise_configs=_NOISE_SWEEP_MID,
     ),
     "rsft_v2_all_random": GenerationVariant(
-        description="Same guided as rsft_v2, no fixed noise, 9 random-CL slots. Conservative; lower reward.",
+        description="Same guided as rsft_v2, no fixed noise, 9 random-CL slots. Conservative.",
         cl_spd_configs=_GUIDED_RSFT_V2,
         noise_configs=[],
     ),
 
     # ====== Original baseline (pre-rsft_v2 system) ======
     "default": GenerationVariant(
-        description="Original 8 cl_spd configs (CL5/CL8/CL10 det + noisy variants), no fixed noise. "
-                    "rank-analytics revealed CL10_*_det and CL10_SPD8_noisy were redundant.",
+        description="Original 8 cl_spd configs (CL5/CL8/CL10 det + noisy variants), no fixed noise.",
         cl_spd_configs=[
             _CL5_SPD5_DET,
             {"cl": 8.0,  "spd": 5.0,  "noise": (0.0, 0.0), "label": "CL8_SPD5_det"},
@@ -147,7 +144,7 @@ _VARIANTS: dict[str, GenerationVariant] = {
 
     # ====== Historical exploratory variants (kept for reproducibility) ======
     "stretched_lateral": GenerationVariant(
-        description="Pre-rsft_v2 winner: stretched + lateral push variants. ep9: val=+26.26, LD 0/50, ego +3.6%.",
+        description="Pre-rsft_v2 variant: stretched + lateral push slots.",
         cl_spd_configs=[
             _CL5_SPD5_DET, _CL8_SPD8_STR13, _CL10_SPD8_DET, _LATL04,
             _CL5_SPD5_NOISY, _LATL06, _CL10_SPD8_NOISY, _CL10_SPD10_NOISY,
@@ -186,7 +183,7 @@ _VARIANTS: dict[str, GenerationVariant] = {
         ],
     ),
     "lateral": GenerationVariant(
-        description="3 lateral push variants. Showed latR04 (right-push) is dead weight on miraikan.",
+        description="3 lateral push variants (latL04, latR04, latL06).",
         cl_spd_configs=[
             _CL5_SPD5_DET, _LATL04, _CL10_SPD8_DET, _LATR04,
             _CL5_SPD5_NOISY, _LATL06, _CL10_SPD8_NOISY, _CL10_SPD10_NOISY,

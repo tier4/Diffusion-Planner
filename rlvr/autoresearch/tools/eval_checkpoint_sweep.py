@@ -41,7 +41,8 @@ def create_block_ablation(lora_dir: Path, block: int) -> Path:
     return out
 
 
-def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str]) -> dict:
+def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str],
+                    config=None) -> dict:
     """Evaluate a single checkpoint. Returns metrics dict."""
     from rlvr.autoresearch.tools.eval_lane_border_distance import load_model
     from rlvr.grpo_sampler import generate_samples
@@ -49,7 +50,8 @@ def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str]) -> dict:
     from rlvr.reward import RewardConfig, compute_reward_batch
 
     model, args = load_model(model_path, lora_path)
-    config = RewardConfig(enable_lane_departure=True)
+    if config is None:
+        config = RewardConfig(enable_lane_departure=True)
 
     ld, stopped = 0, 0
     paths, ln_nears, ln_wides, rb_nears = [], [], [], []
@@ -103,10 +105,21 @@ def main():
     parser.add_argument("--epochs", type=int, nargs="+", required=True, help="Epochs to evaluate")
     parser.add_argument("--block_ablations", type=int, nargs="*", default=[], help="Block indices to ablate (e.g. 0 1)")
     parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--config", type=Path, default=None,
+                        help="GRPO training config JSON. When given, reward thresholds "
+                             "and weights match the live run (enable_lane_departure "
+                             "is always forced on).")
     args = parser.parse_args()
 
     with open(args.scenes) as f:
         scenes = json.load(f)
+
+    eval_config = None
+    if args.config is not None:
+        from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+        eval_config = load_reward_config(args.config)
+        eval_config.enable_lane_departure = True
+        print(f"Using reward thresholds from {args.config}")
 
     lora_base = Path(args.lora_dir)
     results = []
@@ -118,7 +131,7 @@ def main():
             continue
 
         # Full model
-        m = eval_checkpoint(args.model_path, str(lora_ep), scenes)
+        m = eval_checkpoint(args.model_path, str(lora_ep), scenes, config=eval_config)
         m["epoch"] = ep
         m["variant"] = "full"
         results.append(m)
@@ -132,7 +145,7 @@ def main():
         # Block ablations
         for block in args.block_ablations:
             abl_dir = create_block_ablation(lora_ep, block)
-            m = eval_checkpoint(args.model_path, str(abl_dir), scenes)
+            m = eval_checkpoint(args.model_path, str(abl_dir), scenes, config=eval_config)
             m["epoch"] = ep
             m["variant"] = f"no_block{block}"
             results.append(m)
