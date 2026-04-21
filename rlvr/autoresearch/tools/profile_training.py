@@ -217,7 +217,7 @@ def profile_rsft(model, model_args, scene_paths, config_path: str | None, profil
         config.sft_batch_size = 1
         config.train_epochs = n_epochs
 
-    reward_config = RewardConfig()
+    reward_config = RewardConfig(enable_overprogress=True)
     reward_config.enable_lane_departure = True
     reward_config.stopped_penalty = 100.0
 
@@ -450,7 +450,7 @@ def profile_eval(model, model_args, scene_paths, profiler: Profiler):
     profiler.wrap_module_function(br_mod, "_batched_generate", "eval.batched_generate")
     profiler.wrap_module_function(reward_mod, "compute_reward_batch", "eval.reward_compute_batch")
 
-    reward_config = RewardConfig()
+    reward_config = RewardConfig(enable_overprogress=True)
     reward_config.enable_lane_departure = True
 
     torch.cuda.reset_peak_memory_stats()

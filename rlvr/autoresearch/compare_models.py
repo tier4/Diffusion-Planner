@@ -62,7 +62,7 @@ def load_merged_model(model_path, args_json=None):
 def infer_deterministic(model, args, npz_path, reward_config=None):
     """Generate deterministic trajectory and compute reward."""
     if reward_config is None:
-        reward_config = RewardConfig()
+        reward_config = RewardConfig(enable_overprogress=True)
     data = load_npz_data(npz_path, DEVICE)
     norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm = args.observation_normalizer(norm)
@@ -224,7 +224,7 @@ def main():
                              "run's rb_cross_thresh and gate settings.")
     args = parser.parse_args()
 
-    reward_config = load_reward_config(args.config) if args.config is not None else RewardConfig()
+    reward_config = load_reward_config(args.config) if args.config is not None else RewardConfig(enable_overprogress=True)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

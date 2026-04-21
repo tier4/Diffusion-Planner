@@ -69,7 +69,7 @@ def load_model(model_path, lora_path=None):
 
 def infer(model, args, npz_path, reward_config=None):
     if reward_config is None:
-        reward_config = RewardConfig()
+        reward_config = RewardConfig(enable_overprogress=True)
     data = load_npz_data(npz_path, DEVICE)
     norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm = args.observation_normalizer(norm)
@@ -180,7 +180,7 @@ def main():
                              "the training run's thresholds/gate settings.")
     args = parser.parse_args()
 
-    reward_config = load_reward_config(args.config) if args.config is not None else RewardConfig()
+    reward_config = load_reward_config(args.config) if args.config is not None else RewardConfig(enable_overprogress=True)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 

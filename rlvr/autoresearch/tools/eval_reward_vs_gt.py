@@ -43,6 +43,11 @@ def main():
                         help="Scene indices (default: all)")
     parser.add_argument("--worst_n", type=int, default=None,
                         help="Show only N worst scenes by reward gap")
+    parser.add_argument("--sort_by", type=str, default="gap",
+                        choices=["gap", "centerline", "lane_dep", "model_total"],
+                        help="Sort order for results (worst first)")
+    parser.add_argument("--dump_json", type=str, default=None,
+                        help="Write per-scene results (sorted) to JSON file")
     parser.add_argument("--config", type=Path, default=None,
                         help="GRPO training config JSON. When given, reward "
                              "thresholds and weights start from here; the "
@@ -73,7 +78,7 @@ def main():
         model.eval()
 
     # Reward config: optional baseline from training config, then per-field overrides.
-    rcfg = load_reward_config(args.config) if args.config is not None else RewardConfig()
+    rcfg = load_reward_config(args.config) if args.config is not None else RewardConfig(enable_overprogress=True)
     if args.w_progress is not None:
         rcfg.w_progress = args.w_progress
     if args.rb_near_scale is not None:
@@ -123,10 +128,19 @@ def main():
             "gt_rb_cross": r_gt.rb_crossing,
             "model_rb_near": r_m.rb_near_penalty,
             "gt_rb_near": r_gt.rb_near_penalty,
+            "model_centerline": r_m.centerline,
+            "gt_centerline": r_gt.centerline,
+            "model_lane_dep": bool(r_m.lane_crossing),
+            "model_lane_near_frac": r_m.lane_near_frac,
         })
 
-    # Sort by gap (worst first)
-    results.sort(key=lambda x: x["gap"])
+    sort_keys = {
+        "gap": lambda x: x["gap"],
+        "model_total": lambda x: x["model_total"],
+        "centerline": lambda x: x["model_centerline"],
+        "lane_dep": lambda x: (not x["model_lane_dep"], x["model_centerline"]),
+    }
+    results.sort(key=sort_keys[args.sort_by])
 
     if args.worst_n:
         results = results[:args.worst_n]
@@ -134,10 +148,10 @@ def main():
     print(f"\n{'='*100}")
     print(f"Reward vs GT — {args.tag} ({len(scene_indices)} scenes)")
     print(f"{'='*100}")
-    print(f"{'Sc':>4} | {'M_rwd':>7} | {'GT_rwd':>7} | {'Gap':>7} | {'M_rb':>4} | {'GT_rb':>5} | {'M_near':>6} | {'GT_near':>7} | {'M_prog':>7} | {'GT_prog':>8}")
+    print(f"{'Sc':>4} | {'M_rwd':>7} | {'GT_rwd':>7} | {'Gap':>7} | {'M_rb':>4} | {'M_cl':>6} | {'GT_cl':>6} | {'LD':>3} | {'M_prog':>7} | {'GT_prog':>8}")
     print("-" * 100)
     for r in results:
-        print(f"{r['scene_idx']:>4} | {r['model_total']:>+7.1f} | {r['gt_total']:>+7.1f} | {r['gap']:>+7.1f} | {r['model_rb_cross']:>4} | {r['gt_rb_cross']:>5} | {r['model_rb_near']:>6.3f} | {r['gt_rb_near']:>7.3f} | {r['model_progress']:>7.1f} | {r['gt_progress']:>8.1f}")
+        print(f"{r['scene_idx']:>4} | {r['model_total']:>+7.1f} | {r['gt_total']:>+7.1f} | {r['gap']:>+7.1f} | {r['model_rb_cross']:>4} | {r['model_centerline']:>+6.2f} | {r['gt_centerline']:>+6.2f} | {'Y' if r['model_lane_dep'] else ' ':>3} | {r['model_progress']:>7.1f} | {r['gt_progress']:>8.1f}")
 
     # Aggregates
     m_totals = [r["model_total"] for r in results]
@@ -151,6 +165,17 @@ def main():
     print(f"  Mean gap:          {np.mean(gaps):+.2f}")
     print(f"  Model rb_cross:    {m_rb}/{len(results)}")
     print(f"  GT rb_cross:       {gt_rb}/{len(results)}")
+    m_cl = [r["model_centerline"] for r in results]
+    gt_cl = [r["gt_centerline"] for r in results]
+    m_ld = sum(r["model_lane_dep"] for r in results)
+    print(f"  Model centerline:  mean={np.mean(m_cl):+.3f}  min={np.min(m_cl):+.3f}")
+    print(f"  GT centerline:     mean={np.mean(gt_cl):+.3f}  min={np.min(gt_cl):+.3f}")
+    print(f"  Model lane_dep:    {m_ld}/{len(results)}")
+
+    if args.dump_json:
+        with open(args.dump_json, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nDumped per-scene results to {args.dump_json}")
 
 
 if __name__ == "__main__":

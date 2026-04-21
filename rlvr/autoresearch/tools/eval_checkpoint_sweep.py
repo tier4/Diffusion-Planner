@@ -51,7 +51,10 @@ def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str],
 
     model, args = load_model(model_path, lora_path)
     if config is None:
-        config = RewardConfig(enable_lane_departure=True)
+        # Use normalized progress by default so the printed reward matches
+        # what training saw (without it, progress scales with raw metres
+        # and reward inflates with path length).
+        config = RewardConfig(enable_lane_departure=True, enable_overprogress=True)
 
     ld, stopped = 0, 0
     paths, ln_nears, ln_wides, rb_nears = [], [], [], []

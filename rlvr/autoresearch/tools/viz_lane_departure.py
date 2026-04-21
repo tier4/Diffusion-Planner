@@ -230,7 +230,7 @@ def check_scene_rb(scene_path, step=None, config=None):
     road border (or first enters the near/wide zone), rather than the curve apex.
     """
     if config is None:
-        config = RewardConfig()
+        config = RewardConfig(enable_overprogress=True)
 
     # First pass: load scene and compute per-timestep min distance to find best step
     base_init = _load_scene_base(scene_path, step=1)  # dummy step
@@ -422,7 +422,7 @@ def _draw_common(ax, r, zoom=None):
 
 def _draw_perimeter_points(ax, r, cmap, norm_v, mark_outside_lane=False, point_size=20):
     """Draw ego perimeter points colored by distance."""
-    config = r.get("config") or RewardConfig()
+    config = r.get("config") or RewardConfig(enable_overprogress=True)
     for p in range(len(r["pt_dists"])):
         col = cmap(norm_v(r["pt_dists"][p]))
         sz = point_size; mk = 'o'
@@ -507,7 +507,7 @@ def _rb_zone(min_dist, config):
 
 def _draw_rb_panel(ax, r, zoom=None, is_zoomed=False):
     """Draw a single RB panel (used for both overview and zoomed views)."""
-    config = r.get("config", RewardConfig())
+    config = r.get("config", RewardConfig(enable_overprogress=True))
     _draw_common(ax, r, zoom)
 
     # Border segments (thin orange)
@@ -556,7 +556,7 @@ def _draw_rb_panel(ax, r, zoom=None, is_zoomed=False):
 def draw_scene_rb(result, output_path, zoom=None):
     """Draw road border visualization: overview + zoomed ROI side by side."""
     r = result
-    config = r.get("config", RewardConfig())
+    config = r.get("config", RewardConfig(enable_overprogress=True))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(28, 13))
 
@@ -618,7 +618,7 @@ def draw_scene_both(lane_result, rb_result, output_path, zoom=None):
 
     # Right: road border
     r = rb_result
-    config = r.get("config", RewardConfig())
+    config = r.get("config", RewardConfig(enable_overprogress=True))
     _draw_common(ax2, r, zoom)
     for i in range(r["seg_p1"].shape[0]):
         ax2.plot([r["seg_p1"][i, 0], r["seg_p2"][i, 0]],
@@ -708,7 +708,7 @@ def main():
                 fname = os.path.join(out_dir, f"scene{idx:03d}_rb.png")
                 draw_scene_rb(result, fname, zoom=args.zoom)
                 min_d = result['pt_dists'][result['worst']]
-                config = result.get("config", RewardConfig())
+                config = result.get("config", RewardConfig(enable_overprogress=True))
                 if min_d < config.rb_cross_thresh:
                     zone = "CROSSING"
                 elif min_d < config.rb_near_thresh:

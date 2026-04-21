@@ -76,7 +76,7 @@ def main():
         eval_config.enable_lane_departure = True
         print(f"Using reward thresholds from {args.config}")
     else:
-        eval_config = RewardConfig(enable_lane_departure=True)
+        eval_config = RewardConfig(enable_lane_departure=True, enable_overprogress=True)
 
     # Evaluate all scenes in batches
     results = []
