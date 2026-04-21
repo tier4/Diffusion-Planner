@@ -83,9 +83,22 @@ class ClosedLoopExplorationTrainer:
             lane_near_scale=config.lane_near_scale,
             lane_wide_scale=config.lane_wide_scale,
             lane_cont_scale=config.lane_cont_scale,
+            lane_cross_thresh=config.lane_cross_thresh,
             lane_near_thresh=config.lane_near_thresh,
             lane_wide_thresh=config.lane_wide_thresh,
             lane_cont_thresh=config.lane_cont_thresh,
+            max_lat_accel=config.max_lat_accel,
+            lat_accel_scale=config.lat_accel_scale,
+            max_yaw_rate=config.max_yaw_rate,
+            max_steer=config.max_steer,
+            kinematic_margin=config.kinematic_margin,
+            enable_overprogress=config.enable_overprogress,
+            overprogress_margin=config.overprogress_margin,
+            overprogress_penalty=config.overprogress_penalty,
+            underprogress_penalty=config.underprogress_penalty,
+            underprogress_threshold=config.underprogress_threshold,
+            underprogress_reference=config.underprogress_reference,
+            reward_mode=config.reward_mode,
         )
 
         # --- Exploration policy ---

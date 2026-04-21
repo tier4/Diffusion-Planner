@@ -46,6 +46,7 @@ from diffusion_planner.utils.config import Config
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -66,14 +67,15 @@ def load_model(model_path, lora_path=None):
     return model, args
 
 
-def infer(model, args, npz_path):
+def infer(model, args, npz_path, reward_config=None):
+    if reward_config is None:
+        reward_config = RewardConfig()
     data = load_npz_data(npz_path, DEVICE)
     norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm = args.observation_normalizer(norm)
     traj = generate_samples(model, args, norm, 0.0, 1, None, DEVICE)[0]
     traj_t = torch.tensor(traj[None], device=DEVICE, dtype=torch.float32)
-    rc = RewardConfig()
-    r = compute_reward_batch(traj_t, data, rc)[0]
+    r = compute_reward_batch(traj_t, data, reward_config)[0]
     return traj, data, r
 
 
@@ -172,7 +174,13 @@ def main():
     parser.add_argument("--indices", type=int, nargs="*", default=None, help="Scene indices to visualize")
     parser.add_argument("--n_scenes", type=int, default=12, help="Number of scenes if --indices not given")
     parser.add_argument("--cols", type=int, default=3, help="Columns in grid")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="GRPO training config JSON. When given, the reward "
+                             "flags in titles (rb_crossing, lane_crossing) use "
+                             "the training run's thresholds/gate settings.")
     args = parser.parse_args()
+
+    reward_config = load_reward_config(args.config) if args.config is not None else RewardConfig()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -210,8 +218,8 @@ def main():
             if plot_idx >= len(axes_flat):
                 break
             ax = axes_flat[plot_idx]
-            traj_b, data_b, r_b = infer(model_base, model_args, scenes[si])
-            traj_l, data_l, r_l = infer(model_lora, model_args, scenes[si])
+            traj_b, data_b, r_b = infer(model_base, model_args, scenes[si], reward_config)
+            traj_l, data_l, r_l = infer(model_lora, model_args, scenes[si], reward_config)
 
             # Draw baseline with borders, GT, and footprints
             draw_scene(ax, scenes[si], traj_b, "Baseline", "blue", r_b, show_gt=True)
@@ -285,7 +293,7 @@ def main():
             if plot_idx >= len(axes_flat):
                 break
             ax = axes_flat[plot_idx]
-            traj, data, r = infer(model_base, model_args, scenes[si])
+            traj, data, r = infer(model_base, model_args, scenes[si], reward_config)
             draw_scene(ax, scenes[si], traj, "Det", "blue", r)
             ax.set_title(f"[{si}] rb_x={'Y' if r.rb_crossing else 'N'} "
                          f"rb_n={r.rb_near_penalty:.2f} rw={r.total:.1f}", fontsize=8)

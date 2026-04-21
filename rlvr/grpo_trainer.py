@@ -123,9 +123,16 @@ class GRPOTrainer:
             lane_near_scale=config.lane_near_scale,
             lane_wide_scale=config.lane_wide_scale,
             lane_cont_scale=config.lane_cont_scale,
+            lane_cross_thresh=config.lane_cross_thresh,
             lane_near_thresh=config.lane_near_thresh,
             lane_wide_thresh=config.lane_wide_thresh,
             lane_cont_thresh=config.lane_cont_thresh,
+            max_yaw_rate=config.max_yaw_rate,
+            max_steer=config.max_steer,
+            kinematic_margin=config.kinematic_margin,
+            underprogress_penalty=config.underprogress_penalty,
+            underprogress_threshold=config.underprogress_threshold,
+            underprogress_reference=config.underprogress_reference,
         )
 
         # Evaluation: fixed scene subset from validation set, sampled once

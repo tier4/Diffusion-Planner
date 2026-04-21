@@ -33,6 +33,7 @@ from matplotlib.patches import Rectangle
 
 from guidance_gui.generate_samples import generate_samples
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -58,14 +59,16 @@ def load_merged_model(model_path, args_json=None):
     return model, args
 
 
-def infer_deterministic(model, args, npz_path):
+def infer_deterministic(model, args, npz_path, reward_config=None):
     """Generate deterministic trajectory and compute reward."""
+    if reward_config is None:
+        reward_config = RewardConfig()
     data = load_npz_data(npz_path, DEVICE)
     norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm = args.observation_normalizer(norm)
     traj = generate_samples(model, args, norm, 0.0, 1, None, DEVICE)[0]
     traj_t = torch.tensor(traj[None], device=DEVICE, dtype=torch.float32)
-    r = compute_reward_batch(traj_t, data, RewardConfig())[0]
+    r = compute_reward_batch(traj_t, data, reward_config)[0]
     return traj, data, r
 
 
@@ -215,7 +218,13 @@ def main():
     parser.add_argument("--indices", type=int, nargs="*", default=None)
     parser.add_argument("--n_scenes", type=int, default=8)
     parser.add_argument("--cols", type=int, default=2)
+    parser.add_argument("--config", type=Path, default=None,
+                        help="GRPO training config JSON. When given, the "
+                             "CROSS / rb_crossing labels match the training "
+                             "run's rb_cross_thresh and gate settings.")
     args = parser.parse_args()
+
+    reward_config = load_reward_config(args.config) if args.config is not None else RewardConfig()
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -272,7 +281,7 @@ def main():
         npz = draw_map(ax, npz_path)
 
         # Baseline trajectory
-        traj_b, data_b, r_b = infer_deterministic(base_model, base_args, npz_path)
+        traj_b, data_b, r_b = infer_deterministic(base_model, base_args, npz_path, reward_config)
         min_d_b = compute_min_border_dist(traj_b, data_b)
         draw_trajectory(ax, traj_b, f"Base (d={min_d_b:.2f}m)", BASELINE_COLOR, npz,
                        show_footprints=False)
@@ -283,7 +292,7 @@ def main():
 
         for mi, (name, _) in enumerate([(n, p) for n, p, _ in model_specs]):
             m, a = models[name]
-            traj, data, r = infer_deterministic(m, a, npz_path)
+            traj, data, r = infer_deterministic(m, a, npz_path, reward_config)
             min_d = compute_min_border_dist(traj, data)
             color = MODEL_COLORS[mi % len(MODEL_COLORS)]
             draw_trajectory(ax, traj, f"{name} (d={min_d:.2f}m)", color, npz)

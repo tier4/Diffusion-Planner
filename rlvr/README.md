@@ -62,8 +62,8 @@ rlvr/
   configs/
     grpo_onpolicy.json       Recommended on-policy config (best for v4)
     grpo_zi_300sc.json       Zero-init exploration + Block 0 LoRA (best baseline)
-    logprob_curve20_norm.json    Logprob GRPO on 20 miraikan curves (0/20 lane_dep at ep9)
-    logprob_balanced_40sc.json   Logprob GRPO balanced 50/50 prob/normal (val stable)
+    logprob_curve20_norm.json    Logprob GRPO on 20 exit-curve scenes
+    logprob_balanced_40sc.json   Logprob GRPO balanced 50/50 prob/normal
   tests/
     test_vpsde_logprob.py    9 unit tests for log-prob math
     test_logprob_loss.py     7 unit tests for loss computation
@@ -184,17 +184,15 @@ adapted for diffusion planners with reward-based selection and Savitzky-Golay tr
 - noise_scale_range [0.5, 2.0] recommended
 
 **Block ablation trick:** After training with `lora_target="all"` (3 DiT blocks), zero out
-one block's LoRA weights post-hoc. With neighbor reg, **no_blk1 is best**. Without reg,
-**no_blk0 is best**. **NEVER zero block 2** — it's critical for lane keeping (22/50 LD).
+one block's LoRA weights post-hoc as a quick way to probe how the blocks divide up the
+learned behaviour — useful for debugging regressions introduced by a particular block.
 
-Training all blocks then removing one post-hoc is strictly better than training only a
-subset of blocks — tested `lora_target="last"` (block 2 only), which converges fast (1/50 LD
-by ep3) but diverges by ep9. Distributing gradients across all blocks produces smaller
-per-parameter changes, preventing destabilization.
+Training all blocks then removing one post-hoc is generally more stable than training only
+a subset of blocks: distributing gradients across all blocks produces smaller per-parameter
+changes and avoids the destabilisation seen when a single block carries all the update.
 
-**neighbor_reg_weight must be ≥ 1.0** at lr=5e-4. Tested 0.5 and 0.75 — both diverge at
-epoch 5-6 with rb_cross>20. Lower reg gives the ego loss more freedom but insufficient
-constraint on neighbor weights causes catastrophic drift through shared DiT parameters.
+**neighbor_reg_weight must be ≥ 1.0** at lr=5e-4. Lower values tend to diverge because the
+ego loss has too much freedom while neighbor weights drift through shared DiT parameters.
 
 **Generation variants** (`generation_variant` config field, default `"rsft_v2"`).
 Composition is 1 deterministic + N guided cl_spd configs + M noise-only configs +
@@ -207,9 +205,8 @@ The default `rsft_v2` has **6 guided cl_spd slots** — `CL5_SPD5_det`,
 `CL5_SPD5_noisy`, `CL7_SPD7_str14_n0820` (stretch 1.4), `CL10_SPD10_noisy` — plus
 **9 pure-noise slots** sweeping ranges 0.1→5.0 (`noise_n0103`, `n0306`, `n0510`,
 `n0515`, `n0818`, `n1025`, `n1530`, `n2040`, `n3050`). No random-CL pool.
-Empirically best for L2 preservation (ego +1.5%, neighbor -1.0% vs LoRA-less baseline,
-ep8 on miraikan val 50). Use `rsft_v2_legacy` for the previous slot composition
-(2 fixed-noise + 7 random-CL) or `default` for the pre-variant layout (8 cl_spd + 7 random).
+Use `rsft_v2_legacy` for the previous slot composition (2 fixed-noise + 7 random-CL)
+or `default` for the pre-variant layout (8 cl_spd + 7 random).
 
 ### Rank Analytics
 
@@ -331,20 +328,59 @@ weighted values (column * weight) so that columns add up to the total.
 
 ### Lane Departure Detection
 
-`compute_lane_departure_penalty()` detects when the ego vehicle leaves its lane:
+`compute_lane_departure_penalty()` detects when the ego vehicle leaves its lane using a
+**signed-distance gate** (polygon containment is no longer used):
 
 1. Find K=12 nearest lanes by min centerline distance
-2. Build lane polygons from left/right boundary offsets, classify outer (road-edge) boundaries via midpoint nudge
-3. For each of 36 ego perimeter sample points, check polygon containment (GPU ray casting)
-4. Distance to outer boundary segments for near/wide/cont soft penalties
-5. Configurable thresholds: `lane_near_thresh` (default 0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m)
-6. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
+2. Build lane polygons from left/right boundary offsets, classify each boundary segment as
+   outer (road-edge) vs shared (between lanes) via a midpoint nudge classifier, and compute an
+   outward normal for each outer segment
+3. For each of 36 ego perimeter sample points at each timestep, compute the **signed**
+   point-to-segment distance against outer segments. Convention: **positive = outside the
+   lane (along the outward normal), negative = inside**. Uses only unclamped projections to
+   avoid endpoint artifacts at junction gaps
+4. Points that fall inside an intersection-area polygon (from the NPZ `polygons` field, type
+   `POLYGON_TYPE_INTERSECTION_AREA`) are forced to signed = -100 (deep inside). This
+   suppresses false crossings at intersection mouths where lane polygons don't tile cleanly
+5. A trajectory **crosses** if the per-timestep maximum signed distance (the most-outside
+   perimeter point) ever exceeds `-lane_cross_thresh`. Default 0.20m matches
+   `rb_cross_thresh`. **Buffer-from-inside semantics**: a higher threshold = stricter gate
+   (wider buffer); the default fires when any perimeter point comes within 20cm of the
+   boundary or beyond it
+6. Soft near/wide/cont penalties (when their `*_scale` weights are non-zero) use the
+   per-timestep minimum **unsigned** point-to-segment distance through these thresholds:
+   `lane_near_thresh` (0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m).
+   These fire only on timesteps where the trajectory is still inside the lane (not on
+   crossing timesteps)
+7. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
 
 Enabled via `enable_lane_departure: true` in config. Can be used as:
 - **Soft penalty** via `lane_near_scale`, `lane_wide_scale`, `lane_cont_scale`
 - **Hard gate** via `lane_gate_enabled: true` (lane crossing zeros the reward in gate mode)
 - **Survival terminal event** when `reward_mode: "survival"` + `enable_lane_departure: true`,
   lane departure reduces `survival_frac` proportionally to when it occurs
+
+### Kinematic Feasibility Gate
+
+`compute_kinematic_gate()` filters trajectories whose commanded motion violates the
+vehicle's bicycle-model constraints:
+
+- **Absolute yaw rate** must stay below `max_yaw_rate` (default 1.0 rad/s)
+- **Bicycle-model curvature** must stay below `κ_max = kinematic_margin · tan(max_steer) / wheelbase`
+  (defaults: `max_steer=0.64` rad, `kinematic_margin=2.5`). Yaw and speed are
+  Savitzky-Golay smoothed before curvature estimation
+
+Returns a per-trajectory **binary** gate (0 = any timestep violated, 1 = all clean).
+Applied as a hard flooring multiplier on `totals` **after** survival/gate aggregation, so a
+single kinematic violation floors the entire trajectory reward regardless of `reward_mode`.
+
+### Baseline-anchored Underprogress
+
+When `underprogress_reference = "baseline"` (vs the default `"det"`), the underprogress
+penalty compares the trajectory's path length to a **frozen** LoRA-less deterministic path
+(injected as `baseline_path_len` per scene by the trainer). Unlike the `"det"` reference,
+which adapts as the model collapses to shorter paths, the baseline anchor keeps firing and
+prevents progress collapse during training. Used by the J6 overnight-sweep champion recipe.
 
 ### Group Advantages
 

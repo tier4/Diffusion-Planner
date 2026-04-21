@@ -17,4 +17,5 @@ program.md
 ros_scripts/convert_all_v4.sh
 .claude/
 CLAUDE.md
+memory/
 wandb/
