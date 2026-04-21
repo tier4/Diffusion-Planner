@@ -328,20 +328,52 @@ weighted values (column * weight) so that columns add up to the total.
 
 ### Lane Departure Detection
 
-`compute_lane_departure_penalty()` detects when the ego vehicle leaves its lane:
+`compute_lane_departure_penalty()` detects when the ego vehicle leaves its lane using a
+**signed-distance gate** (polygon containment is no longer used):
 
 1. Find K=12 nearest lanes by min centerline distance
-2. Build lane polygons from left/right boundary offsets, classify outer (road-edge) boundaries via midpoint nudge
-3. For each of 36 ego perimeter sample points, check polygon containment (GPU ray casting)
-4. Distance to outer boundary segments for near/wide/cont soft penalties
-5. Configurable thresholds: `lane_near_thresh` (default 0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m)
-6. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
+2. Build lane polygons from left/right boundary offsets, classify each boundary segment as
+   outer (road-edge) vs shared (between lanes) via a midpoint nudge classifier, and compute an
+   outward normal for each outer segment
+3. For each of 36 ego perimeter sample points at each timestep, compute the **signed**
+   point-to-segment distance against outer segments (negative = outside the lane, positive =
+   inside). Uses only unclamped projections to avoid endpoint artifacts at junction gaps
+4. Points that fall inside an intersection-area polygon (from the NPZ `polygons` field, type
+   `POLYGON_TYPE_INTERSECTION_AREA`) are forced to signed = -100 (safe). This suppresses
+   false crossings at intersection mouths where lane polygons don't tile cleanly
+5. A trajectory **crosses** if its most-negative signed distance ever drops below
+   `lane_cross_thresh` (default 0.0m, i.e., the gate fires the instant any perimeter point
+   pokes past the outer boundary)
+6. Soft penalties use positive signed distances through near/wide/cont thresholds:
+   `lane_near_thresh` (0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m)
+7. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
 
 Enabled via `enable_lane_departure: true` in config. Can be used as:
 - **Soft penalty** via `lane_near_scale`, `lane_wide_scale`, `lane_cont_scale`
 - **Hard gate** via `lane_gate_enabled: true` (lane crossing zeros the reward in gate mode)
 - **Survival terminal event** when `reward_mode: "survival"` + `enable_lane_departure: true`,
   lane departure reduces `survival_frac` proportionally to when it occurs
+
+### Kinematic Feasibility Gate
+
+`compute_kinematic_gate()` filters trajectories whose commanded motion violates the
+vehicle's bicycle-model constraints:
+
+- **Absolute yaw rate** must stay below `max_yaw_rate` (default 1.0 rad/s)
+- **Bicycle-model curvature** must stay below `κ_max = kinematic_margin · tan(max_steer) / wheelbase`
+  (defaults: `max_steer=0.64` rad, `kinematic_margin=2.5`). Yaw and speed are
+  Savitzky-Golay smoothed before curvature estimation
+
+In `reward_mode=survival`, a trajectory that fails the kinematic gate has its survival_frac
+floored at the first violating timestep — same treatment as a lane/RB crossing.
+
+### Baseline-anchored Underprogress
+
+When `underprogress_reference = "baseline"` (vs the default `"det"`), the underprogress
+penalty compares the trajectory's path length to a **frozen** LoRA-less deterministic path
+(injected as `baseline_path_len` per scene by the trainer). Unlike the `"det"` reference,
+which adapts as the model collapses to shorter paths, the baseline anchor keeps firing and
+prevents progress collapse during training. Used by the J6 overnight-sweep champion recipe.
 
 ### Group Advantages
 
