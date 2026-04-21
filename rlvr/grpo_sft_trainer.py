@@ -422,14 +422,36 @@ def train_epoch_ranked_sft(
     if getattr(config, "underprogress_reference", "det") == "baseline" and run_dir is not None:
         bpath = _PathCls(run_dir) / "epoch1_baselines.npz"
         if bpath.exists():
-            with np.load(bpath, allow_pickle=True) as saved:
-                saved_paths = saved["paths"].tolist()
-                saved_trajs = saved["trajectories"]  # (M, T, 4)
-                for i, p in enumerate(saved_paths):
-                    xy = saved_trajs[i, :, :2]
-                    plen = float(np.linalg.norm(np.diff(xy, axis=0), axis=-1).sum())
-                    baseline_path_lens[str(p)] = plen
-            if epoch == 1:
+            try:
+                with np.load(bpath, allow_pickle=False) as saved:
+                    if "paths" not in saved or "trajectories" not in saved:
+                        raise ValueError(
+                            "missing required arrays: 'paths' and/or 'trajectories'"
+                        )
+                    saved_paths = saved["paths"]
+                    saved_trajs = saved["trajectories"]  # (M, T, 4)
+                    if saved_paths.dtype == np.dtype("O"):
+                        raise ValueError(
+                            "unsafe object-dtype 'paths' array; "
+                            "re-save with a fixed unicode dtype"
+                        )
+                    if saved_trajs.ndim < 3 or saved_trajs.shape[-1] < 2:
+                        raise ValueError(
+                            f"invalid 'trajectories' shape {saved_trajs.shape}; "
+                            "expected (M, T, >=2)"
+                        )
+                    if len(saved_paths) != len(saved_trajs):
+                        raise ValueError(
+                            f"mismatched lengths: {len(saved_paths)} paths vs "
+                            f"{len(saved_trajs)} trajectories"
+                        )
+                    for i, p in enumerate(saved_paths):
+                        xy = saved_trajs[i, :, :2]
+                        plen = float(np.linalg.norm(np.diff(xy, axis=0), axis=-1).sum())
+                        baseline_path_lens[str(p)] = plen
+            except (OSError, ValueError, KeyError) as e:
+                print(f"  [underprogress] skipping {bpath.name}: {e}")
+            if epoch == 1 and baseline_path_lens:
                 print(f"  [underprogress] loaded {len(baseline_path_lens)} baseline path lens from {bpath.name}")
 
     # 2. Stack and normalize for batched generation

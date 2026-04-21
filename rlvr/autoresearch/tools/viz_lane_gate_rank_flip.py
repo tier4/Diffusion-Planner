@@ -182,7 +182,7 @@ def plot_scene(data, out_path, scene_name):
         if outer_mask[i]:
             color, ls, lw, alpha = "black", "-", 2.5, 0.95
         elif junction_mask[i]:
-            color, ls, lw, alpha = "darkorange", "-", 3.0, 0.95
+            color, ls, lw, alpha = "darkorange", "--", 3.0, 0.95
         elif shared_mask[i]:
             color, ls, lw, alpha = "steelblue", "-", 0.8, 0.5
         else:

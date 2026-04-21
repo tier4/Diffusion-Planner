@@ -347,8 +347,11 @@ weighted values (column * weight) so that columns add up to the total.
    `rb_cross_thresh`. **Buffer-from-inside semantics**: a higher threshold = stricter gate
    (wider buffer); the default fires when any perimeter point comes within 20cm of the
    boundary or beyond it
-6. Soft penalties use positive signed distances through near/wide/cont thresholds:
-   `lane_near_thresh` (0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m)
+6. Soft near/wide/cont penalties (when their `*_scale` weights are non-zero) use the
+   per-timestep minimum **unsigned** point-to-segment distance through these thresholds:
+   `lane_near_thresh` (0.25m), `lane_wide_thresh` (0.40m), `lane_cont_thresh` (0.80m).
+   These fire only on timesteps where the trajectory is still inside the lane (not on
+   crossing timesteps)
 7. Returns `(crossing_gate, near_frac, wide_frac, lane_crossing_steps, cont_penalty)`
 
 Enabled via `enable_lane_departure: true` in config. Can be used as:

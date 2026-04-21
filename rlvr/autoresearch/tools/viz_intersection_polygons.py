@@ -74,9 +74,10 @@ def plot_scene(data, out_path, scene_name):
             valid = np.abs(pts[:, :2]).sum(axis=-1) > 1e-3
             if valid.sum() < 3:
                 continue
-            # Check type flag
+            # Check type flag — skip non-intersection polygons
             type_col = pts[:, 2] if pts.shape[-1] > 2 else np.ones(pts.shape[0])
-            is_intersection = type_col[valid].max() > 0.5
+            if not (type_col[valid].max() > 0.5):
+                continue
             poly_pts = pts[valid, :2]
             ax.fill(poly_pts[:, 0], poly_pts[:, 1],
                     color="purple", alpha=0.25, zorder=2,

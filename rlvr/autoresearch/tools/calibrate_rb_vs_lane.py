@@ -228,8 +228,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load reference GRPOConfig
-    with open(args.reference_config) as f:
-        cfg_dict = json.load(f)
     cfg = GRPOConfig.from_json(args.reference_config)
     print(f"Reference config: variant={cfg.generation_variant}, K={cfg.num_generations}")
     print(f"  lane: enable={cfg.enable_lane_departure}, near_scale={cfg.lane_near_scale}, "
