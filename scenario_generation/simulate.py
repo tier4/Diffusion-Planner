@@ -83,28 +83,26 @@ def _advance_agent(
     new_world_pos: np.ndarray,
     dt: float = 0.1,
     new_speed: float | None = None,
+    new_accel: float | None = None,
+    new_yaw_rate: float | None = None,
+    new_steering: float | None = None,
 ):
     """Advance a single agent in-place given its new world position.
 
     Uses in-place shift + overwrite instead of concatenation to avoid
     allocations.
 
-    Velocity source:
-    - When ``new_speed`` is given (MPC / perfect tracker modes), use it
-      directly: ``v_world = new_speed * (cos(new_heading), sin(new_heading))``.
-      The tracker integrates the bicycle model and already produces the
-      physically correct instantaneous speed; applying a MA of position
-      diffs on top of that just introduces a 0.4 s lag visible both in
-      the PNG title speed AND in ``ego_current_state[4]`` fed back to the
-      model, which self-reinforces "slow down" plans that the lagged
-      speed never acknowledges.
-    - When ``new_speed`` is None (teleport mode, ``advance_scene``), fall
-      back to the 5-step MA of position diffs. At 10 Hz the one-step
-      numerical diff amplifies high-freq jitter from the diffusion
-      sampler ~10× on velocity, and the teleport path has no physics
-      filter to soften that, so the MA is still justified there.
-    Steering angle is derived from the bicycle model
-    (``δ = atan2(wheelbase * yaw_rate, speed)``).
+    The optional ``new_*`` kwargs carry the tracker's own physically-
+    correct telemetry (see ``MPCTracker.last_*`` / ``PerfectTracker.
+    last_*``). When given, they replace the corresponding 5-step MA
+    derivatives — those MAs were meant to denoise the jittery pred[0]
+    teleport output, but in MPC / perfect mode the tracker's bicycle
+    model already produces physically smooth signals, so the MA just
+    adds ~0.4 s of spurious lag. The lagged values end up in
+    ``ego_current_state`` and get fed back to the model, creating a
+    closed-loop feedback lag where "slow down" plans never settle.
+    Teleport-mode callers pass None for all of them and get the MA
+    fallback that's still justified there.
     """
     agent.past_trajectory[:-1] = agent.past_trajectory[1:]
     agent.past_trajectory[-1] = new_world_pos
@@ -133,10 +131,17 @@ def _advance_agent(
     else:
         old_smoothed_vel = smoothed_vel
 
-    # Acceleration: finite diff of the smoothed velocity series — this is
-    # far cleaner than `(new_vel_raw - old_vel_raw) / dt` which compounded
-    # jitter from both steps.
-    if agent.past_velocities is not None and agent.past_velocities.shape[0] >= W + 1:
+    # Acceleration: use the tracker's commanded accel when given (MPC /
+    # perfect); otherwise fall back to the 5-step MA of velocity diffs,
+    # which is what teleport mode needs to denoise the jittery pred[0]
+    # finite differences.
+    if new_accel is not None:
+        new_yaw = float(new_world_pos[2])
+        agent.acceleration = np.array(
+            [new_accel * math.cos(new_yaw), new_accel * math.sin(new_yaw)],
+            dtype=np.float32,
+        )
+    elif agent.past_velocities is not None and agent.past_velocities.shape[0] >= W + 1:
         vel_window = agent.past_velocities[-W - 1:]
         if vel_window.shape[0] >= 2:
             accel_diffs = np.diff(vel_window, axis=0) / dt
@@ -146,8 +151,10 @@ def _advance_agent(
     else:
         agent.acceleration = ((smoothed_vel - old_smoothed_vel) / dt).astype(np.float32)
 
-    # Heading rate via circular difference over the same window.
-    if T >= W + 1:
+    # Yaw rate: tracker's kinematic value when given, else MA over heading diffs.
+    if new_yaw_rate is not None:
+        agent.yaw_rate = float(new_yaw_rate)
+    elif T >= W + 1:
         head_window = traj[T - 1 - W: T, 2]
         dh_window = np.diff(head_window)
         dh_window = np.arctan2(np.sin(dh_window), np.cos(dh_window))
@@ -157,9 +164,14 @@ def _advance_agent(
         dh = (dh + math.pi) % (2 * math.pi) - math.pi
         agent.yaw_rate = dh / dt
 
-    # Steering angle from the bicycle model.
+    # Steering angle: MPC supplies the actual commanded δ; perfect tracker
+    # has no δ control (heading snaps to reference) so we derive it via
+    # the bicycle model from (yaw_rate, speed, wheelbase), same fallback
+    # teleport mode uses.
     speed = float(np.hypot(smoothed_vel[0], smoothed_vel[1]))
-    if speed > 0.2:
+    if new_steering is not None and abs(new_steering) > 1e-9:
+        agent.steering_angle = float(new_steering)
+    elif speed > 0.2:
         agent.steering_angle = float(math.atan2(agent.wheelbase * agent.yaw_rate, speed))
     else:
         agent.steering_angle = 0.0
@@ -280,7 +292,13 @@ def advance_scene_mpc(
         x0 = np.array([float(ax), float(ay), ah, speed], dtype=np.float64)
 
         new_pos, new_speed = tracker.track(x0, ref_world)
-        _advance_agent(agent, new_pos, dt, new_speed=float(new_speed))
+        _advance_agent(
+            agent, new_pos, dt,
+            new_speed=float(new_speed),
+            new_accel=float(getattr(tracker, "last_accel", 0.0)),
+            new_yaw_rate=float(getattr(tracker, "last_yaw_rate", 0.0)),
+            new_steering=float(getattr(tracker, "last_steering", 0.0)),
+        )
 
 
 def _build_color_map(scene: SceneContext) -> dict[str, str]:

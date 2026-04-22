@@ -100,6 +100,14 @@ class MPCTracker:
         # Warm-start buffer (n_knots, 2)
         self._prev_knots: np.ndarray | None = None
 
+        # Last-step telemetry — populated by track(). Callers that want
+        # physically-correct accel / yaw_rate / steering (instead of the
+        # 5-step MA that _advance_agent derives from position history)
+        # read these after the track() call.
+        self.last_accel: float = 0.0
+        self.last_yaw_rate: float = 0.0
+        self.last_steering: float = 0.0
+
     # ------------------------------------------------------------------
     # Kinematic rollout
     # ------------------------------------------------------------------
@@ -236,6 +244,13 @@ class MPCTracker:
         yaw_new = yaw + v * math.tan(delta) / self.wheelbase * self.dt
         v_new = max(0.0, min(v + a * self.dt, self.max_speed))
 
+        # Stash the commanded control + kinematic yaw rate so callers can
+        # read the tracker's true physical state instead of MA-lagged
+        # estimates from position history.
+        self.last_accel = a
+        self.last_steering = delta
+        self.last_yaw_rate = v * math.tan(delta) / self.wheelbase
+
         new_pos = np.array([x_new, y_new, yaw_new], dtype=np.float32)
         return new_pos, v_new
 
@@ -325,6 +340,14 @@ class PerfectTracker:
     def __init__(self, dt: float = 0.1, max_speed: float = 20.0):
         self.dt = dt
         self.max_speed = max_speed
+        # Parallel to MPCTracker.last_*: perfect-tracker telemetry set by
+        # track(). PerfectTracker has no steering control — it snaps to
+        # the reference heading — so last_steering stays 0.0 and
+        # last_yaw_rate is derived from the heading change per step.
+        self.last_accel: float = 0.0
+        self.last_yaw_rate: float = 0.0
+        self.last_steering: float = 0.0
+        self._prev_speed: float = 0.0
 
     def track(
         self,
@@ -356,6 +379,23 @@ class PerfectTracker:
 
         # Snap heading directly to the reference orientation
         yaw_new = float(ref_world[0, 2])
+
+        # Telemetry for realistic agent-state propagation (same contract
+        # as MPCTracker.last_*).
+        dh = (yaw_new - yaw + math.pi) % (2 * math.pi) - math.pi
+        self.last_yaw_rate = dh / self.dt
+        v_prev = float(x0[3]) if len(x0) > 3 else self._prev_speed
+        self.last_accel = (v_target - v_prev) / self.dt
+        self._prev_speed = v_target
+        # PerfectTracker doesn't model a steering wheel; recover an
+        # equivalent bicycle-model δ from the observed yaw rate if speed
+        # is nontrivial (matches how _advance_agent used to derive it).
+        if v_target > 0.2:
+            # Wheelbase isn't on this class; leave last_steering at 0 and
+            # let _advance_agent compute it from (yaw_rate, speed, wheelbase).
+            self.last_steering = 0.0
+        else:
+            self.last_steering = 0.0
 
         new_pos = np.array([x_new, y_new, yaw_new], dtype=np.float32)
         return new_pos, v_target
