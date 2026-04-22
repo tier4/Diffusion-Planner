@@ -29,6 +29,7 @@ python -m rlvr.autoresearch.check_lora_training \
 python -m rlvr.autoresearch.visualize_scenes \
   --model_path /path/to/best_model.pth \
   --scenes /path/to/scenes.json \
+  --config /path/to/grpo_config.json \
   --output_dir /path/to/output_images/ \
   --n_scenes 12
 
@@ -36,10 +37,19 @@ python -m rlvr.autoresearch.visualize_scenes \
 python -m rlvr.autoresearch.visualize_scenes \
   --model_path /path/to/best_model.pth \
   --scenes /path/to/scenes.json \
+  --config /path/to/grpo_config.json \
   --lora_path /path/to/lora_epoch_004 \
   --output_dir /path/to/output_images/ \
   --indices 87 89 91 93 95
 ```
+
+> **Note — `--config` is required on all reward-dependent tools.**
+> Every tool that computes rb / lane / centerline metrics takes a GRPO
+> training config JSON and uses the thresholds/weights from it. The
+> fallback to `RewardConfig` defaults was removed because it silently
+> diverged from training values. If a field is missing from the JSON,
+> `load_reward_config` raises. Serialised configs from
+> `GRPOConfig.to_json` always have all required fields.
 
 ## Tools
 
@@ -105,6 +115,8 @@ Generates publication-quality trajectory visualizations with:
 **Args:**
 - `--model_path`: Base model `.pth` (required)
 - `--scenes`: JSON list of NPZ paths (required)
+- `--config`: GRPO training config JSON (required) — reward thresholds
+  used for the `rb_crossing` / `lane_crossing` flags in titles come from here
 - `--lora_path`: LoRA checkpoint dir for comparison (optional)
 - `--output_dir`: Save images here (required)
 - `--indices`: Specific scene indices to show (optional)
@@ -145,8 +157,57 @@ python -m rlvr.autoresearch.compare_models \
   --models name1:/path/to/merged1.pth name2:/path/to/merged2.pth \
   --args_jsons /path/to/args1.json /path/to/args2.json \
   --scenes /path/to/scenes.json \
+  --config /path/to/grpo_config.json \
   --output_dir /path/to/output/ \
   --indices 48 47 49 1 3 --cols 2
+```
+
+### `tools/cleanse_lane_scenes.py` — Scene-list cleanse
+
+Filters a JSON list of NPZ paths and drops scenes that would corrupt the
+training signal: ego footprint out-of-lane at t=0, GT trajectory leaving
+the lane within the first N timesteps, or (new) the GT ego passing within
+a minimum margin of any road border in the opening window.
+
+```bash
+python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
+  --scenes /path/to/scenes.json \
+  --output /path/to/scenes_clean.json \
+  --threshold 0.15 \
+  --also_check_road_border \
+  --check_gt_lane --gt_max_t 20 --min_gt_path 5.0 \
+  --check_rb_future --rb_thresh 0.4 --rb_max_t 10
+```
+
+Flags:
+- `--threshold` — min lane clearance at t=0 (m). Strict `> 0` also applied,
+  so `--threshold 0` still rejects zero-clearance crossings (previously
+  a no-op).
+- `--also_check_road_border` — reject t=0 ego within the configured
+  `rb_*_thresh` of any road border.
+- `--check_gt_lane --gt_max_t 20` — reject if GT exits the lane in first 20
+  steps. `--min_gt_path` drops scenes with degenerate GT paths.
+- `--check_rb_future --rb_thresh 0.4 --rb_max_t 10` — reject if GT ego
+  footprint comes within `rb_thresh` m of any road border at any of the
+  first `rb_max_t` timesteps. Uses `compute_road_border_penalty` directly
+  so perimeter sampling matches training exactly.
+
+### `tools/eval_detailed_metrics.py` — Per-scene distribution eval
+
+Multi-LoRA side-by-side evaluation with per-scene arrays. `--dump_json`
+writes a `per_scene` dict (cl_mean, rb_dist_min, rb_near_frac,
+rb_wide_frac, lane_near_frac, lane_wide_frac, path, rb_crossing,
+lane_crossing) so downstream tools can rank scenes by worst cl / tightest
+rb without re-running the eval.
+
+```bash
+python -m rlvr.autoresearch.tools.eval_detailed_metrics \
+  --model_path /path/to/base.pth \
+  --scenes /path/to/val.json \
+  --config /path/to/grpo_config.json \
+  --loras run1/lora_epoch_009 run2/lora_epoch_005 \
+  --labels run1_ep9 run2_ep5 \
+  --dump_json /path/to/per_scene.json
 ```
 
 ### `tools/experiment_watchdog.py` — Background Experiment Monitor

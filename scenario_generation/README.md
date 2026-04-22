@@ -215,7 +215,8 @@ Relevant modules:
 | Path | Role |
 |---|---|
 | `scenario_generation/route.py` | `Route` dataclass + pickle save/load |
-| `scenario_generation/replay.py` | `run_route_replay`, `SceneNPCManager`, `SpawnConfig`, CLI |
+| `scenario_generation/replay.py` | `run_route_replay`, `SceneNPCManager`, `SpawnConfig`, CLI. `SpawnConfig.dump_npz_dir` writes per-step observation NPZs via `tensor_converter.dump_step_npz`; the replay viz draws road borders (red) as a separate layer on top of lane markings. |
+| `scenario_generation/tensor_converter.py` | `to_model_tensors` (normalised for inference) and `dump_step_npz` (un-normalised, training-NPZ shape) |
 | `scenario_generation/simulate.py` | `advance_scene`, `advance_scene_mpc`, model inference helpers |
 | `scenario_generation/mpc_tracker.py` | `MPCTracker`, `PerfectTracker`, `postprocess_reference` |
 | `scenario_generation/traffic_light.py` | `TrafficLightController` + signal group state machines |
