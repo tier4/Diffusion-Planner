@@ -55,7 +55,7 @@ _CL8_SPD8_STR13 = {"cl": 8.0, "spd": 8.0, "noise": (0.8, 2.5), "stretch": 1.3, "
 _CL6_SPD6_STR11 = {"cl": 6.0, "spd": 6.0, "noise": (0.5, 1.5), "stretch": 1.1, "label": "CL6_SPD6_str11_n0515"}
 _CL7_SPD7_STR14 = {"cl": 7.0, "spd": 7.0, "noise": (0.8, 2.0), "stretch": 1.4, "label": "CL7_SPD7_str14_n0820"}
 
-# Very strong CL + stretch slots (April 2026 — psim curve recovery exploration)
+# Very strong CL + stretch slots for curve-recovery exploration.
 _CL20_SPD10_STR13 = {"cl": 20.0, "spd": 10.0, "noise": (0.8, 2.0), "stretch": 1.3, "label": "CL20_SPD10_str13_n0820"}
 _CL30_SPD15_STR15 = {"cl": 30.0, "spd": 15.0, "noise": (1.0, 2.5), "stretch": 1.5, "label": "CL30_SPD15_str15_n1025"}
 
