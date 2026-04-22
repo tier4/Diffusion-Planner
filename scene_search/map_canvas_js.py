@@ -253,8 +253,85 @@ ARROW_TOOL = {
     "state": """
     let arrowStartWorld = null, arrowEndWorld = null;
     let isDrawingArrow = false, arrowStartPx = null, arrowEndPx = null;
+
+    // Heatmap overlay (scored points from replay runs). Parsed once per
+    // prop update. Each point: {x, y, rb_min_dist, cl_score, lane_gate,
+    // lane_near_frac, lane_wide_frac}. Values may be null when absent.
+    let heatmapPoints = [];
+    let heatmapMetric = 'off';
+    let heatmapJsonCache = null;
+    function _parseHeatmap() {
+        const raw = props.heatmap_json || '[]';
+        if (raw === heatmapJsonCache) return;
+        heatmapJsonCache = raw;
+        try { heatmapPoints = JSON.parse(raw) || []; }
+        catch (e) { heatmapPoints = []; console.warn('bad heatmap_json', e); }
+    }
+    // Map a [0..1] score to a red→yellow→green→blue ramp (good at 0 = red,
+    // safe at 1 = blue). For metrics where LOW is bad (rb_min_dist), the
+    // caller first inverts via a range cutoff.
+    function _scoreColor(t) {
+        t = Math.max(0, Math.min(1, t));
+        // Red (1,0,0) → yellow (1,1,0) → green (0,1,0) → blue (0,0,1)
+        if (t < 0.33) {
+            const u = t / 0.33;
+            return 'rgba(' + Math.round(255) + ',' + Math.round(255*u) + ',0,0.85)';
+        } else if (t < 0.66) {
+            const u = (t - 0.33) / 0.33;
+            return 'rgba(' + Math.round(255*(1-u)) + ',255,0,0.85)';
+        } else {
+            const u = (t - 0.66) / 0.34;
+            return 'rgba(0,' + Math.round(255*(1-u)) + ',' + Math.round(255*u) + ',0.85)';
+        }
+    }
+    // Metric-specific normalisation to [0..1] where 1 = safe, 0 = bad.
+    function _heatmapT(point, metric) {
+        if (metric === 'rb_min_dist') {
+            const v = point.rb_min_dist;
+            if (v === null || v === undefined) return null;
+            // 0m = bad (red), >=3m = safe (blue). Clipped.
+            return Math.max(0, Math.min(1, v / 3.0));
+        }
+        if (metric === 'abs_cl_score') {
+            const v = point.cl_score;
+            if (v === null || v === undefined) return null;
+            // |cl|=0 = safe, |cl|>=2 = bad. Invert so 1=safe.
+            return 1.0 - Math.max(0, Math.min(1, Math.abs(v) / 2.0));
+        }
+        if (metric === 'lane_gate') {
+            const v = point.lane_gate;
+            if (v === null || v === undefined) return null;
+            return v >= 0.5 ? 1.0 : 0.0;
+        }
+        if (metric === 'lane_near_frac') {
+            const v = point.lane_near_frac;
+            if (v === null || v === undefined) return null;
+            return 1.0 - Math.max(0, Math.min(1, v));
+        }
+        if (metric === 'lane_wide_frac') {
+            const v = point.lane_wide_frac;
+            if (v === null || v === undefined) return null;
+            return 1.0 - Math.max(0, Math.min(1, v));
+        }
+        return null;
+    }
     """,
     "draw": """
+    // Heatmap dots — drawn below the arrow so the arrow always shows on top.
+    heatmapMetric = props.heatmap_metric || 'off';
+    if (heatmapMetric !== 'off') {
+        _parseHeatmap();
+        for (let i = 0; i < heatmapPoints.length; i++) {
+            const p = heatmapPoints[i];
+            const t = _heatmapT(p, heatmapMetric);
+            if (t === null) continue;
+            const pc = worldToCanvas(p.x, p.y);
+            if (pc.x < -10 || pc.x > W+10 || pc.y < -10 || pc.y > H+10) continue;
+            ctx.fillStyle = _scoreColor(t);
+            ctx.beginPath(); ctx.arc(pc.x, pc.y, 3, 0, Math.PI*2); ctx.fill();
+        }
+    }
+
     // Recompute arrow pixels from world coords
     if (arrowStartWorld && arrowEndWorld && !isDrawingArrow) {
         arrowStartPx = worldToCanvas(arrowStartWorld.x, arrowStartWorld.y);

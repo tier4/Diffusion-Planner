@@ -31,15 +31,47 @@ from scene_search.constraints import list_available as list_constraints
 from scene_search.constraints.registry import build as build_constraint
 from scene_search.map_canvas_js import build_map_canvas_js
 from scene_search.map_renderer import MapRenderer, Viewport
+from scene_search.replay_index import load_replay_runs
 from scene_search.scene_previewer import (
     render_batch_thumbnails,
     render_single_thumbnail,
     thumbnails_to_pil_images,
 )
 
+_HEATMAP_METRIC_CHOICES = [
+    "off",
+    "rb_min_dist",
+    "abs_cl_score",
+    "lane_gate",
+    "lane_near_frac",
+    "lane_wide_frac",
+]
+
 MAX_VISIBLE_BATCHES = 10
 
 MAP_CANVAS_JS = build_map_canvas_js(tool="arrow")
+
+def _heatmap_points(index: list[dict]) -> list[dict]:
+    """Pick entries that carry per-step metrics (replay runs) and project to
+    the compact form the JS canvas consumes: x, y, and the subset of metric
+    fields driving the heatmap dropdown. Sidecar-backed entries have no
+    "metrics" key and are silently skipped."""
+    out = []
+    for e in index:
+        m = e.get("metrics") or {}
+        if not m:
+            continue
+        out.append({
+            "x": e["x"],
+            "y": e["y"],
+            "rb_min_dist": m.get("rb_min_dist"),
+            "cl_score": m.get("cl_score"),
+            "lane_gate": m.get("lane_gate"),
+            "lane_near_frac": m.get("lane_near_frac"),
+            "lane_wide_frac": m.get("lane_wide_frac"),
+        })
+    return out
+
 
 def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | None = None):
     """Build the complete Gradio interface."""
@@ -50,6 +82,12 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
     full_map_b64 = renderer.render_viewport_base64(full_vp, dpi=100)
     full_bounds = full_vp.to_json()
     print(f"  Map image: {len(full_map_b64)//1024}KB base64")
+
+    heatmap_points = _heatmap_points(index)
+    heatmap_json = json.dumps(heatmap_points)
+    if heatmap_points:
+        print(f"  Heatmap: {len(heatmap_points)} scored points "
+              f"({len(heatmap_json)//1024}KB JSON)")
 
     def render_map(viewport_json: str) -> str:
         """Server function for hi-res tile at current zoom. Called from JS (debounced)."""
@@ -77,6 +115,17 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 n_before_slider = gr.Slider(0, 100, value=30, step=5, label="Frames before")
                 n_after_slider = gr.Slider(0, 200, value=80, step=5, label="Frames after")
                 search_btn = gr.Button("Search", variant="primary")
+
+                if heatmap_points:
+                    gr.Markdown("### Heatmap")
+                    heatmap_metric_dd = gr.Dropdown(
+                        choices=_HEATMAP_METRIC_CHOICES,
+                        value="off",
+                        label="Overlay metric",
+                        interactive=True,
+                    )
+                else:
+                    heatmap_metric_dd = None
 
                 gr.Markdown("### Constraints")
                 # Build toggle panels for each registered constraint
@@ -123,6 +172,8 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                     map_bounds=json.dumps(full_bounds),
                     radius=50,
                     heading_tol=30,
+                    heatmap_json=heatmap_json,
+                    heatmap_metric="off",
                 )
 
                 gr.Markdown("### Search Results")
@@ -166,6 +217,13 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         def on_heading_tol_change(val):
             return gr.update(heading_tol=val)
         heading_tol_slider.release(on_heading_tol_change, inputs=[heading_tol_slider], outputs=[map_canvas])
+
+        if heatmap_metric_dd is not None:
+            def on_heatmap_metric_change(val):
+                return gr.update(heatmap_metric=val)
+            heatmap_metric_dd.change(on_heatmap_metric_change,
+                                     inputs=[heatmap_metric_dd],
+                                     outputs=[map_canvas])
 
         # --- Build constraint input list for search ---
         # Order: [enable_1, param_1a, param_1b, ..., enable_2, param_2a, ...]
@@ -374,31 +432,49 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
 def main():
     parser = argparse.ArgumentParser(description="Scene Search GUI")
     parser.add_argument("--map_path", type=Path, required=True, help="Path to lanelet2 map (.osm)")
-    parser.add_argument("--npz_list", type=str, required=True, help="path_list.json or NPZ directory")
+    parser.add_argument("--npz_list", type=str, default=None,
+                        help="path_list.json or NPZ directory (sidecar-backed scenes)")
+    parser.add_argument("--replay_runs", type=str, nargs="+", default=None,
+                        help="One or more scenario_generation.replay output "
+                             "directories. Uses trajectory_log.json + "
+                             "metrics_log.json instead of per-NPZ sidecars; "
+                             "enables the drift heatmap overlay.")
     parser.add_argument("--index", type=str, default=None, help="Cached parquet index (requires pyarrow)")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     args = parser.parse_args()
 
+    if not args.npz_list and not args.replay_runs:
+        parser.error("supply --npz_list and/or --replay_runs")
+
     print("Loading lanelet2 map...")
     renderer = MapRenderer(str(args.map_path))
 
-    if args.index and Path(args.index).exists():
-        print(f"Loading cached index from {args.index}")
-        index = load_index_parquet(args.index)
-    else:
-        print("Building spatial index from NPZ sidecars...")
-        p = Path(args.npz_list)
-        if p.is_file() and p.suffix == ".json":
-            with open(p) as f: npz_paths = json.load(f)
-        elif p.is_dir():
-            npz_paths = sorted(str(f) for f in p.rglob("*.npz"))
+    index: list[dict] = []
+    if args.npz_list:
+        if args.index and Path(args.index).exists():
+            print(f"Loading cached index from {args.index}")
+            index.extend(load_index_parquet(args.index))
         else:
-            raise ValueError(f"--npz_list must be .json or directory: {args.npz_list}")
-        index = build_index(npz_paths, workers=8)
-        if args.index:
-            save_index_parquet(index, args.index)
-            print(f"Saved index to {args.index}")
+            print("Building spatial index from NPZ sidecars...")
+            p = Path(args.npz_list)
+            if p.is_file() and p.suffix == ".json":
+                with open(p) as f: npz_paths = json.load(f)
+            elif p.is_dir():
+                npz_paths = sorted(str(f) for f in p.rglob("*.npz"))
+            else:
+                raise ValueError(f"--npz_list must be .json or directory: {args.npz_list}")
+            sidecar_index = build_index(npz_paths, workers=8)
+            index.extend(sidecar_index)
+            if args.index:
+                save_index_parquet(sidecar_index, args.index)
+                print(f"Saved sidecar index to {args.index}")
+
+    if args.replay_runs:
+        print(f"Loading {len(args.replay_runs)} replay run(s)...")
+        replay_entries = load_replay_runs(args.replay_runs)
+        index.extend(replay_entries)
+        print(f"  Replay entries: {len(replay_entries)}")
 
     print(f"Index: {len(index)} scenes")
     demo = build_interface(renderer, index, args.index)

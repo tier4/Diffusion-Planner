@@ -135,14 +135,18 @@ def find_batches(
     if not filtered:
         return []
 
-    # 3. Apply constraint filters (load NPZ as needed)
+    # 3. Apply constraint filters. Pass the index entry through so
+    #    metric-based constraints (reward_threshold) can read precomputed
+    #    fields without re-reading the NPZ; legacy NPZ-backed constraints
+    #    just ignore the entry kwarg.
     if constraint_filters:
         passing = []
         for entry in filtered:
             with np.load(entry["npz_path"]) as npz_data:
                 passes_all = True
                 for constraint, params in constraint_filters:
-                    if not constraint.filter(entry["npz_path"], npz_data, params):
+                    if not constraint.filter(entry["npz_path"], npz_data,
+                                             params, entry=entry):
                         passes_all = False
                         break
             if passes_all:
