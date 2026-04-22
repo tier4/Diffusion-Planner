@@ -581,7 +581,7 @@ def dump_step_npz(
     scene: SceneContext,
     map_cache: MapTensorCache,
     future_len: int,
-    predicted_neighbor_num: int,
+    predicted_neighbor_num: int = _MAX_NUM_NEIGHBORS,
 ) -> dict[str, np.ndarray]:
     """Build un-normalized per-step observation arrays in training-NPZ format.
 
@@ -596,7 +596,11 @@ def dump_step_npz(
         scene: Current scene at this replay step.
         map_cache: Pre-computed map tensor cache for the scene's map.
         future_len: Number of future timesteps (typically 80 — from model_args).
-        predicted_neighbor_num: Neighbor slot count (typically 32 — from model_args).
+        predicted_neighbor_num: Neighbor slot count for the future placeholder.
+            Must equal ``_MAX_NUM_NEIGHBORS`` (32) — the past array is built at
+            that fixed shape, so a mismatch would produce NPZs where past and
+            future disagree on the neighbor dimension and break the training
+            NPZ loader.
 
     Returns:
         Dict with the standard NPZ keys (ego_agent_past, ego_current_state,
@@ -606,6 +610,14 @@ def dump_step_npz(
         stripped of batch dim and have dtypes compatible with the training
         NPZ loader.
     """
+    if predicted_neighbor_num != _MAX_NUM_NEIGHBORS:
+        raise ValueError(
+            f"predicted_neighbor_num={predicted_neighbor_num} disagrees with "
+            f"the fixed past-neighbor shape {_MAX_NUM_NEIGHBORS}. Pass "
+            f"{_MAX_NUM_NEIGHBORS} or omit (default). Threading a per-call "
+            f"neighbor count through _build_neighbor_agents_past is a "
+            f"follow-up if you need non-default future slots."
+        )
     ego = scene.get_agent(scene.ego_agent_id)
     ego_xy = ego.current_position.astype(np.float64)
     ego_h = ego.current_heading

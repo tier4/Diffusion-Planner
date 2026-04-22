@@ -32,8 +32,17 @@ _LEGACY_KEYS = {
 # ``RewardConfig`` default that almost certainly disagrees with the training
 # run. Serialised configs from ``GRPOConfig.to_json`` always have all of them.
 _REQUIRED_REWARD_FIELDS = (
+    # Reward composition + weights
     "reward_mode",
+    "w_progress",
+    "w_centerline",
+    "w_safety",
+    "w_smooth",
+    "w_feasibility",
+    "stopped_penalty",
+    # Road-border gate + zones + penalty mode
     "rb_gate_enabled",
+    "rb_penalty_mode",
     "rb_cross_thresh",
     "rb_near_thresh",
     "rb_wide_thresh",
@@ -41,13 +50,27 @@ _REQUIRED_REWARD_FIELDS = (
     "rb_near_scale",
     "rb_wide_scale",
     "rb_cont_scale",
-    "w_progress",
-    "w_centerline",
-    "w_safety",
-    "w_smooth",
-    "w_feasibility",
-    "stopped_penalty",
+    # Lane gate + zones
     "enable_lane_departure",
+    "lane_gate_enabled",
+    "lane_cross_thresh",
+    "lane_near_thresh",
+    "lane_wide_thresh",
+    "lane_cont_thresh",
+    "lane_near_scale",
+    "lane_wide_scale",
+    "lane_cont_scale",
+    # Centerline (added 2026-04-22)
+    "centerline_usage_cap",
+    "centerline_usage_mode",
+    # Progress / over-progress / under-progress
+    "enable_overprogress",
+    "overprogress_margin",
+    "overprogress_penalty",
+    "progress_norm_scale",
+    "underprogress_penalty",
+    "underprogress_threshold",
+    "underprogress_reference",
 )
 
 

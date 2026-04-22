@@ -225,8 +225,20 @@ class TestDumpStepNPZ:
         assert data["goal_pose"].dtype == np.float32
         assert abs(float(data["goal_pose"][2])) <= np.pi + 1e-5
 
-    def test_custom_future_len_and_neighbor_count(self, synthetic_scene):
-        """Caller-provided future_len / predicted_neighbor_num flow through."""
-        data = self._dump(synthetic_scene, future_len=40, predicted_neighbor_num=16)
+    def test_custom_future_len_propagates(self, synthetic_scene):
+        """Caller-provided future_len flows through to both ego and neighbor futures."""
+        data = self._dump(synthetic_scene, future_len=40)
         assert data["ego_agent_future"].shape == (40, 3)
-        assert data["neighbor_agents_future"].shape == (16, 40, 3)
+        # Neighbor count is locked at _MAX_NUM_NEIGHBORS (past and future must match)
+        from scenario_generation.tensor_converter import _MAX_NUM_NEIGHBORS
+        assert data["neighbor_agents_future"].shape == (_MAX_NUM_NEIGHBORS, 40, 3)
+
+    def test_mismatched_neighbor_count_raises(self, synthetic_scene):
+        """predicted_neighbor_num must equal _MAX_NUM_NEIGHBORS (past is fixed)."""
+        import pytest
+        cache = MapTensorCache(synthetic_scene.map_data)
+        with pytest.raises(ValueError, match="predicted_neighbor_num"):
+            dump_step_npz(
+                synthetic_scene, cache,
+                future_len=80, predicted_neighbor_num=16,
+            )
