@@ -1347,13 +1347,19 @@ def run_route_replay(
 
             # TL state + route_lanes refresh EVERY step so the model
             # always sees the current signal phase. The TL one-hot is
-            # written directly into scene.map_data.lanes which the
-            # map_cache references (shared underlying array).
+            # written into scene.map_data.lanes AND synced into
+            # map_cache — the cache snapshots lanes at build time (via
+            # ``.astype(np.float32)`` which forces a copy), so without
+            # the sync the ``lanes`` channel the model reads from the
+            # cache stays at TL_NONE forever even while route_lanes
+            # carries the live TL colour. Missing this sync makes the
+            # ego ignore red lights at intersections.
             if tl_controller is not None:
                 tl_controller.tick(
                     scene, step * 0.1, builder._last_map_data_ids,
                     ego_xy=ego_xy,
                 )
+                map_cache.sync_tl_state(scene.map_data)
 
             # Refresh route_lanes for ALL agents (ego + NPCs) so the
             # sliding window stays centered on each agent's current

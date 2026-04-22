@@ -433,6 +433,26 @@ class MapTensorCache:
         self._line_strings_mask = np.sum(np.abs(self._line_strings), axis=-1) == 0
         self._n_ls = n_ls
 
+    def sync_tl_state(self, map_data: "MapData") -> None:
+        """Refresh the TL one-hot channels (``[:, :, 8:13]``) from ``map_data``.
+
+        ``MapTensorCache.__init__`` snapshots ``map_data.lanes`` (the
+        ``.astype(np.float32)`` forces a fresh allocation, so the cache
+        does NOT share storage with ``scene.map_data.lanes`` as earlier
+        replay comments implied). Callers that mutate the live lanes
+        tensor post-build — notably ``TrafficLightController.tick`` —
+        must call this after every mutation, or the model will keep
+        reading the snapshotted state (TL_NONE on every lanelet right
+        after a lanelet-set refresh, since ``lanelet_to_33dim`` defaults
+        to TL_NONE before the controller's first tick).
+
+        Only the 5-dim TL one-hot is synced; geometry (``[0:8]``) and
+        line-type channels (``[13:33]``) never change post-build.
+        """
+        n = min(map_data.lanes.shape[0], self._lanes.shape[0])
+        if n > 0:
+            self._lanes[:n, :, 8:13] = map_data.lanes[:n, :, 8:13].astype(np.float32)
+
     def get_lanes_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
         """Return lanes in ego frame: [1, NUM_LANES, 20, 33]."""
         src = self._lanes.copy()
