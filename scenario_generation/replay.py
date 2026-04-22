@@ -88,6 +88,18 @@ from scenario_generation.traffic_light import TrafficLightController
 # replay time to suppress diffusion-sampler jitter. Importing rather than
 # duplicating so the two pipelines stay in sync.
 from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
+
+# Live per-step lane / border / centerline scoring (only loaded when
+# dump_npz_dir + reward_config_path are set). Matches the exact same
+# primitives ranked-SFT uses for its reward, so the metrics log here and
+# the training run speak the same thresholds.
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+from rlvr.reward import (
+    RewardConfig,
+    compute_centerline_score_batch,
+    compute_lane_departure_penalty,
+    compute_road_border_penalty,
+)
 from scenario_generation.visualize import (
     _agent_color,
     draw_agent_box,
@@ -211,6 +223,11 @@ class SpawnConfig:
     # When set, per-step observations are dumped as training-style NPZs to
     # this directory. GT future is zeroed out (ranked-SFT generates its own).
     dump_npz_dir: str | None = None
+    # Path to a training-style (GRPO) config JSON. Required when dump_npz_dir
+    # is set: per-step lane / border / centerline metrics are logged using
+    # the same thresholds the training run will use, so downstream scene
+    # selection can re-threshold without re-running the sim.
+    reward_config_path: str | None = None
     # Initial ego speed for history synthesis (m/s). Default uses midpoint
     # of NPC speed band (7.5), but real data may be much slower (e.g. 1.75
     # on low-speed exit curves). Set to match the scenario being replayed.
@@ -256,6 +273,12 @@ class SpawnConfig:
         if self.ego_init_speed is not None and self.ego_init_speed < 0:
             raise ValueError(
                 f"ego_init_speed must be >= 0 when set; got {self.ego_init_speed}"
+            )
+        if self.dump_npz_dir and not self.reward_config_path:
+            raise ValueError(
+                "reward_config_path is required when dump_npz_dir is set; "
+                "per-step metrics need thresholds that match the training "
+                "reward function (no silent defaults)."
             )
 
     @classmethod
@@ -892,6 +915,70 @@ def _save_step_figure(
 
 
 @torch.no_grad()
+@torch.no_grad()
+def _score_step(
+    npz_data: dict[str, np.ndarray],
+    step: int,
+    device: str,
+    reward_cfg: RewardConfig,
+    spawn_config: SpawnConfig,
+) -> dict:
+    """Score the current ego pose against the dumped map tensors.
+
+    The dumped NPZ has ``ego_agent_future`` zeroed, so the "trajectory" here
+    is a 1-step origin placeholder (t=0 + t=1 both at origin); this makes the
+    penalty primitives — which skip t=0 for near/wide fractions — evaluate
+    at least one timestep, and that one timestep is the current ego pose
+    (already centered in ego-frame by ``dump_step_npz``).
+
+    Metrics are logged raw where possible (``rb_min_dist``, ``cl_score``) so
+    the downstream selector can re-threshold without re-running the sim;
+    ``lane_gate`` and ``lane_near_frac`` use the training config's
+    thresholds directly.
+    """
+    def _to_t(arr: np.ndarray) -> torch.Tensor:
+        t = torch.from_numpy(np.asarray(arr)).float().to(device)
+        # Primitives accept either (S, P, D) or (1, S, P, D) — add batch dim
+        # for 3D map tensors so the broadcast path is unambiguous.
+        return t.unsqueeze(0) if t.dim() == 3 else t
+
+    d: dict[str, torch.Tensor] = {}
+    for k in ("lanes", "route_lanes", "line_strings"):
+        if k in npz_data:
+            d[k] = _to_t(npz_data[k])
+
+    ego_shape = torch.tensor(
+        [spawn_config.ego_wheelbase, spawn_config.ego_length, spawn_config.ego_width],
+        device=device, dtype=torch.float32,
+    )
+
+    # (1, 2, 4) origin traj — cos(0)=1 at both slots.
+    traj = torch.zeros(1, 2, 4, device=device)
+    traj[0, :, 2] = 1.0
+
+    lane_gate, lane_near, lane_wide, _, lane_cont = compute_lane_departure_penalty(
+        traj, ego_shape, d, config=reward_cfg,
+    )
+    _, _, _, _, _, rb_per_ts_min = compute_road_border_penalty(
+        traj, ego_shape, d, config=reward_cfg,
+    )
+    cl = compute_centerline_score_batch(
+        traj, ego_shape, d,
+        usage_cap=reward_cfg.centerline_usage_cap,
+        usage_mode=reward_cfg.centerline_usage_mode,
+    )
+
+    return {
+        "step": step,
+        "lane_gate": float(lane_gate[0].item()),
+        "lane_near_frac": float(lane_near[0].item()),
+        "lane_wide_frac": float(lane_wide[0].item()),
+        "lane_cont": float(lane_cont[0].item()),
+        "rb_min_dist": float(rb_per_ts_min[0].min().item()),
+        "cl_score": float(cl[0].item()),
+    }
+
+
 def run_route_replay(
     model,
     model_args,
@@ -1087,6 +1174,14 @@ def run_route_replay(
     # Per-step trajectory log for post-hoc evaluation.
     trajectory_log: list[dict] = []
 
+    # Live lane / border / centerline scoring, logged per step when NPZ dump
+    # + reward_config_path are both set. The downstream scene selector reads
+    # this log; no offline NPZ re-scoring needed.
+    metrics_log: list[dict] = []
+    reward_cfg: RewardConfig | None = None
+    if spawn_config.dump_npz_dir and spawn_config.reward_config_path:
+        reward_cfg = load_reward_config(spawn_config.reward_config_path)
+
     # Tracker state (lazy-init per agent inside advance_scene_mpc).
     _use_tracker = spawn_config.advance_mode in ("mpc", "perfect")
     mpc_trackers: dict = {}
@@ -1225,6 +1320,11 @@ def run_route_replay(
                 )
                 np.savez(npz_dir / f"replay_step_{step:04d}.npz", **data)
 
+                if reward_cfg is not None:
+                    metrics_log.append(_score_step(
+                        data, step, device, reward_cfg, spawn_config,
+                    ))
+
             # Save PNG (concurrent with next step's compute).
             out_path = output_dir / f"step_{step:04d}.png"
             pending_saves.append(save_pool.submit(
@@ -1340,13 +1440,34 @@ def run_route_replay(
     with open(traj_log_path, "w") as f:
         json.dump(trajectory_log, f)
 
-    return {
+    metrics_log_path: Path | None = None
+    if metrics_log:
+        metrics_log_path = output_dir / "metrics_log.json"
+        # Record the config source so the downstream selector knows which
+        # thresholds the stored lane_near_frac etc. were computed against.
+        payload = {
+            "reward_config_path": spawn_config.reward_config_path,
+            "dump_npz_dir": spawn_config.dump_npz_dir,
+            "ego_shape": [
+                spawn_config.ego_wheelbase,
+                spawn_config.ego_length,
+                spawn_config.ego_width,
+            ],
+            "steps": metrics_log,
+        }
+        with open(metrics_log_path, "w") as f:
+            json.dump(payload, f)
+
+    out = {
         "final_step": final_step,
         "goal_reached": goal_reached,
         "reason": reason,
         "n_npc_spawned": n_npc_spawned,
         "trajectory_log_path": str(traj_log_path),
     }
+    if metrics_log_path is not None:
+        out["metrics_log_path"] = str(metrics_log_path)
+    return out
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
