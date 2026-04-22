@@ -224,6 +224,10 @@ class SpawnConfig:
     # data runs where TL-driven speed drops would bias the replay ego
     # toward stop-and-go behaviour we don't want in training.
     enable_traffic_lights: bool = True
+    # Overlay the live metric values + closest road-border line on each
+    # per-step PNG. Requires dump_npz_dir + reward_config_path (so the
+    # metrics have actually been computed). Adds ~1 ms per frame.
+    overlay_metrics_on_png: bool = False
     # When set, per-step observations are dumped as training-style NPZs to
     # this directory. GT future is zeroed out (ranked-SFT generates its own).
     dump_npz_dir: str | None = None
@@ -725,6 +729,42 @@ def _draw_road_borders(ax, road_border_polylines, view_center=None, view_half_m=
     ))
 
 
+def _closest_border_point(
+    ego_xy: np.ndarray,
+    border_polylines: list[np.ndarray] | None,
+) -> tuple[np.ndarray, float] | None:
+    """Closest point on any road-border polyline to ``ego_xy`` (world frame).
+
+    Scans consecutive segments; returns (closest_xy, distance_m) or None if
+    no border segments are available.
+    """
+    if not border_polylines:
+        return None
+    best_pt: np.ndarray | None = None
+    best_d = float("inf")
+    ex, ey = float(ego_xy[0]), float(ego_xy[1])
+    for pl in border_polylines:
+        if pl is None or pl.shape[0] < 2:
+            continue
+        p1 = pl[:-1].astype(np.float64)  # (S, 2)
+        p2 = pl[1:].astype(np.float64)   # (S, 2)
+        seg = p2 - p1
+        seg_len2 = (seg * seg).sum(axis=1)
+        seg_len2[seg_len2 < 1e-9] = 1e-9
+        t = (((ex - p1[:, 0]) * seg[:, 0] + (ey - p1[:, 1]) * seg[:, 1])
+             / seg_len2)
+        t = np.clip(t, 0.0, 1.0)
+        closest = p1 + t[:, None] * seg  # (S, 2)
+        dists = np.hypot(closest[:, 0] - ex, closest[:, 1] - ey)
+        idx = int(dists.argmin())
+        if dists[idx] < best_d:
+            best_d = float(dists[idx])
+            best_pt = closest[idx]
+    if best_pt is None:
+        return None
+    return best_pt, best_d
+
+
 def _save_step_figure(
     scene: SceneContext,
     agent_predictions: dict,
@@ -737,6 +777,7 @@ def _save_step_figure(
     route_lanelet_ids: list[int] | None = None,
     sim_time: float = 0.0,
     road_border_polylines: list[np.ndarray] | None = None,
+    metrics: dict | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
@@ -908,12 +949,36 @@ def _save_step_figure(
     )
     ti_label = _TI_NAMES.get(ti_cls, f"?{ti_cls}")
     steer_deg = math.degrees(ego.steering_angle)
-    ax.set_title(
+    title = (
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  agents={len(scene.agents)}"
         f"\nego  v={ego_speed:.1f} m/s ({ego_speed_kph:.0f} km/h)  "
-        f"steer={steer_deg:+.0f}°  turn={ti_label}  goal_d={goal_d:.1f} m",
-        fontsize=10,
+        f"steer={steer_deg:+.0f}°  turn={ti_label}  goal_d={goal_d:.1f} m"
     )
+
+    if metrics is not None:
+        gate_s = "IN" if metrics.get("lane_gate", 1.0) >= 0.5 else "CROSS"
+        title += (
+            f"\nrb_min={metrics.get('rb_min_dist', float('nan')):.2f} m  "
+            f"cl={metrics.get('cl_score', float('nan')):+.3f}  "
+            f"lane={gate_s}  "
+            f"lane_near={metrics.get('lane_near_frac', 0.0):.2f}"
+        )
+        closest = _closest_border_point(ego.current_position, road_border_polylines)
+        if closest is not None:
+            cb, cb_d = closest
+            ax.plot([ex, cb[0]], [ey, cb[1]], "k--", linewidth=1.3, alpha=0.7, zorder=29)
+            ax.plot(cb[0], cb[1], "ko", markersize=6, zorder=30,
+                    markeredgecolor="white", markeredgewidth=0.8)
+            mx, my = (ex + cb[0]) / 2, (ey + cb[1]) / 2
+            ax.annotate(f"{cb_d:.2f} m",
+                        xy=(mx, my), fontsize=8, color="black",
+                        ha="center", va="center",
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  facecolor="white", edgecolor="black",
+                                  alpha=0.7),
+                        zorder=31)
+
+    ax.set_title(title, fontsize=10)
     fig.tight_layout()
     _save_and_close(fig, output_path)
 
@@ -1335,12 +1400,18 @@ def run_route_replay(
 
             # Save PNG (concurrent with next step's compute).
             out_path = output_dir / f"step_{step:04d}.png"
+            overlay_metrics = (
+                metrics_log[-1]
+                if spawn_config.overlay_metrics_on_png and metrics_log
+                else None
+            )
             pending_saves.append(save_pool.submit(
                 _save_step_figure,
                 deepcopy(scene), agent_predictions, out_path,
                 step, spawn_config.max_steps, route_polylines,
                 _VIEW_HALF_M, tl_controller, _route_vis_ll_ids,
                 step * 0.1, road_border_polylines,
+                overlay_metrics,
             ))
 
             # Drain finished saves so memory doesn't balloon. Call
