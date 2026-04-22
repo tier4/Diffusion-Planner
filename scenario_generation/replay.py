@@ -79,7 +79,7 @@ from scenario_generation.simulate import (
     advance_scene_mpc,
     load_model,
 )
-from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz, to_model_tensors
+from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 from scenario_generation.traffic_light import TrafficLightController
 
 # Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
@@ -1050,14 +1050,9 @@ def run_route_replay(
     )
     scene = SceneContext(agents=[ego], map_data=map_data, ego_agent_id="ego", dt=0.1)
 
-    # Extract road-border polylines once (world frame) from the builder's
-    # line_strings_cache. Only type_idx == LINE_STRING_TYPE_ROAD_BORDER (1);
-    # stop_line entries are skipped.
-    from scenario_generation.gui.lanelet_scene_builder import LINE_STRING_TYPE_ROAD_BORDER
-    road_border_polylines = [
-        pts for pts, type_idx in builder._line_strings_cache
-        if type_idx == LINE_STRING_TYPE_ROAD_BORDER
-    ]
+    # Road-border polylines (world frame) via the public accessor; this
+    # filters to only road_border entries (stop_line skipped).
+    road_border_polylines = builder.road_border_polylines()
 
     # Route polyline (world frame) for per-step visualisation. Keep the
     # lanelet ID list in sync so the TL overlay can colour each segment.

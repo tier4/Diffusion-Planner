@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Build a scenario_generation Route.pkl from an NPZ training/val scene.
 
-Takes the ego's current position as start and the GT future endpoint as goal,
-snaps both to drivable lanelets, resolves the full lanelet path, and saves a
-pickled ``Route`` usable by ``scenario_generation.replay``.
+Takes the ego's current position as start and the NPZ's ``goal_pose`` (the
+scene's recorded planning goal) as end, snaps both to drivable lanelets,
+resolves the full lanelet path, and saves a pickled ``Route`` usable by
+``scenario_generation.replay``.
 
 Usage:
     python -m scenario_generation.tools.make_route_from_npz \
@@ -34,15 +35,14 @@ def main():
     parser.add_argument("--npz", type=Path, required=True)
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--use_gt_endpoint", action="store_true", default=True,
-                        help="Use the GT final position as goal (default: True).")
     args = parser.parse_args()
 
     # NPZ is ego-centric; the sidecar JSON next to it carries the world MGRS pose.
     sidecar = args.npz.with_suffix(".json")
     if not sidecar.exists():
         raise SystemExit(f"Sidecar JSON with world pose missing: {sidecar}")
-    pose = json.load(open(sidecar))
+    with open(sidecar) as f:
+        pose = json.load(f)
     start_xy = np.array([pose["x"], pose["y"]], dtype=np.float32)
     start_h = _quat_to_heading(pose["qx"], pose["qy"], pose["qz"], pose["qw"])
 

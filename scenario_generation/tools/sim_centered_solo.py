@@ -23,7 +23,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +30,7 @@ import torch
 
 from scenario_generation.gt_route_extractor import assign_gt_goals_and_routes
 from scenario_generation.npz_loader import from_npz
-from scenario_generation.scene_context import AgentType, SceneContext
+from scenario_generation.scene_context import SceneContext
 from scenario_generation.simulate import load_model, run_simulation
 
 
@@ -115,10 +114,11 @@ def main():
     print(f"Assigned GT routes/goals to {n_assigned} agents")
 
     orig_pos, orig_heading, offset = recenter_ego_to_route(scene)
+    ego = scene.get_agent(scene.ego_agent_id)
     print(f"Ego recentered: original pos=({orig_pos[0]:.2f}, {orig_pos[1]:.2f}) "
           f"heading={np.degrees(orig_heading):.1f}° -> centered pos=("
-          f"{scene.agents[0].current_position[0]:.2f}, {scene.agents[0].current_position[1]:.2f}) "
-          f"new heading={np.degrees(scene.agents[0].current_heading):.1f}° "
+          f"{ego.current_position[0]:.2f}, {ego.current_position[1]:.2f}) "
+          f"new heading={np.degrees(ego.current_heading):.1f}° "
           f"offset=({offset[0]:+.2f}, {offset[1]:+.2f}) dist={np.linalg.norm(offset):.2f}m")
 
     if not args.keep_neighbors:
