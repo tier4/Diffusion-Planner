@@ -13,6 +13,13 @@ caps ∈ {1.0, 1.5, ...} to see whether a higher cap:
 Uses a self-contained copy of the centerline computation — reward.py is NOT
 modified.
 
+DIAGNOSTIC-ONLY SIMPLIFICATION: this tool collapses the per-scene
+``gt_max_speed`` array to a single scalar (mean) before calling
+``generate_all_scenes_batched``. That is deliberately simpler than the
+trainer, which feeds the full per-scene speed vector. Do NOT copy that
+pattern into production / training code — it will misrank scenes with
+heterogeneous speed profiles.
+
 Usage:
     python -m rlvr.autoresearch.tools.rank_centerline_cap_sweep \
         --model_path /path/to/base.pth --lora_path /path/to/lora \
@@ -40,11 +47,6 @@ from rlvr.grpo_trainer_batched import (
 from rlvr.reward import RewardConfig, compute_centerline_score_batch, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-
-def compute_centerline_with_cap(ego_trajs, ego_shape, data, usage_cap=1.0):
-    """Compatibility wrapper; reward.compute_centerline_score_batch now accepts usage_cap."""
-    return compute_centerline_score_batch(ego_trajs, ego_shape, data, usage_cap=usage_cap)
 
 
 @torch.no_grad()
@@ -145,12 +147,12 @@ def main():
             base_breakdowns.append(r)
 
         traj0 = torch.zeros(1, 1, 4, device=device); traj0[0, 0, 2] = 1.0
-        t0_cl = float(compute_centerline_with_cap(traj0, ego_shape, data, usage_cap=1.0)[0].item())
+        t0_cl = float(compute_centerline_score_batch(traj0, ego_shape, data, usage_cap=1.0)[0].item())
 
         scene_record = {"scene_idx": si, "scene_name": Path(path).stem[-30:], "t0_cl": t0_cl, "per_cap": {}}
         base_top1_k = None
         for cap in args.caps:
-            cl_scores = compute_centerline_with_cap(trajs, ego_shape, data, usage_cap=cap).cpu().tolist()
+            cl_scores = compute_centerline_score_batch(trajs, ego_shape, data, usage_cap=cap).cpu().tolist()
             per_k_totals = []
             for k_i, r in enumerate(base_breakdowns):
                 total_no_cl = r.total - rcfg.w_centerline * r.centerline

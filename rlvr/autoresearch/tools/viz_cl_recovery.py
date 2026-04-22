@@ -44,7 +44,6 @@ from rlvr.grpo_trainer_batched import (
     generate_all_scenes_batched,
     get_generation_config_labels_for_variant,
 )
-from rlvr.autoresearch.tools.rank_centerline_cap_sweep import compute_centerline_with_cap
 from rlvr.reward import RewardConfig, compute_centerline_score_batch, compute_reward_batch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -208,7 +207,9 @@ def main():
         )[0]  # [K, T, 4]
 
         # Score all K trajs — use cap-aware centerline for ranking at args.usage_cap
-        cl_capped = compute_centerline_with_cap(trajs, ego_shape, data, usage_cap=args.usage_cap).cpu().tolist()
+        cl_capped = compute_centerline_score_batch(
+            trajs, ego_shape, data, usage_cap=args.usage_cap
+        ).cpu().tolist()
         per_k = []
         for k_i in range(trajs.shape[0]):
             tr = trajs[k_i:k_i+1]

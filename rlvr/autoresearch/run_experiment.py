@@ -17,6 +17,7 @@ import shutil
 import sys
 import time
 import traceback
+from dataclasses import replace as dc_replace
 from datetime import datetime
 from pathlib import Path
 
@@ -552,8 +553,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         # is directly comparable to training. Turns on lane-departure check
         # so metrics (lane_dep count, lane_near/wide fracs) are populated
         # regardless of whether training has the lane gate enabled.
-        from dataclasses import replace as _replace
-        eval_reward_config = _replace(train_reward_config, enable_lane_departure=True)
+        eval_reward_config = dc_replace(train_reward_config, enable_lane_departure=True)
 
         if grpo_config.use_closed_loop:
             from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer

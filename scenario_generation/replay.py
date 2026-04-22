@@ -79,7 +79,7 @@ from scenario_generation.simulate import (
     advance_scene_mpc,
     load_model,
 )
-from scenario_generation.tensor_converter import MapTensorCache, to_model_tensors
+from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz, to_model_tensors
 from scenario_generation.traffic_light import TrafficLightController
 
 # Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
@@ -1220,72 +1220,13 @@ def run_route_replay(
             if getattr(spawn_config, "dump_npz_dir", None):
                 npz_dir = Path(spawn_config.dump_npz_dir)
                 npz_dir.mkdir(parents=True, exist_ok=True)
-                # Build UN-normalized tensors (to_model_tensors applies the
-                # observation_normalizer which would collapse world-scale lane
-                # widths to 0.16m in the NPZ).
-                from scenario_generation.tensor_converter import (
-                    _build_ego_agent_past, _build_ego_current_state,
-                    _build_neighbor_agents_past, _build_route_lanes,
-                    _build_goal_pose, _build_ego_shape, _build_turn_indicators,
-                    _rotation_matrix,
+                data = dump_step_npz(
+                    scene,
+                    map_cache,
+                    future_len=getattr(model_args, "future_len", 80),
+                    predicted_neighbor_num=getattr(model_args, "predicted_neighbor_num", 32),
                 )
-                import numpy as _np
-                _ego = scene.get_agent(scene.ego_agent_id)
-                _ego_xy = _ego.current_position.astype(_np.float64)
-                _ego_h = _ego.current_heading
-                _R = _rotation_matrix(_ego_h)
-                data = {}
-                data["ego_agent_past"] = _build_ego_agent_past(_ego, _R, _ego_xy, _ego_h)
-                data["ego_current_state"] = _build_ego_current_state(_ego, _R)
-                data["neighbor_agents_past"] = _build_neighbor_agents_past(
-                    scene, scene.ego_agent_id, _R, _ego_xy, _ego_h,
-                )
-                data["static_objects"] = map_cache.get_static_objects_ego(_R, _ego_xy)
-                data["lanes"] = map_cache.get_lanes_ego(_R, _ego_xy)
-                data["lanes_speed_limit"] = map_cache.lanes_speed_limit
-                data["lanes_has_speed_limit"] = map_cache.lanes_has_speed_limit
-                data["polygons"] = map_cache.get_polygons_ego(_R, _ego_xy)
-                data["line_strings"] = map_cache.get_line_strings_ego(_R, _ego_xy)
-                _rl, _rsl, _rhsl = _build_route_lanes(_ego, _R, _ego_xy)
-                data["route_lanes"] = _rl
-                data["route_lanes_speed_limit"] = _rsl
-                data["route_lanes_has_speed_limit"] = _rhsl
-                data["goal_pose"] = _build_goal_pose(_ego, _R, _ego_xy, _ego_h)
-                data["ego_shape"] = _build_ego_shape(_ego)
-                data["turn_indicators"] = _build_turn_indicators(_ego)
-                # Strip batch dim for NPZ storage (B=1 → [...])
-                for k, v in list(data.items()):
-                    if isinstance(v, _np.ndarray) and v.ndim >= 1 and v.shape[0] == 1:
-                        data[k] = v[0]
-                # Training NPZ format uses bool for has_speed_limit fields.
-                for _bk in ("lanes_has_speed_limit", "route_lanes_has_speed_limit"):
-                    if _bk in data:
-                        data[_bk] = data[_bk].astype(bool)
-                # Convert cos/sin back to heading-rad for keys the training NPZ
-                # loader re-expands via heading_to_cos_sin at load time.
-                if data["ego_agent_past"].shape[-1] == 4:
-                    ap = data["ego_agent_past"]
-                    data["ego_agent_past"] = _np.stack(
-                        [ap[..., 0], ap[..., 1], _np.arctan2(ap[..., 3], ap[..., 2])], axis=-1
-                    ).astype(_np.float32)
-                if data["goal_pose"].shape[-1] == 4:
-                    gp = data["goal_pose"]
-                    data["goal_pose"] = _np.array(
-                        [gp[0], gp[1], float(_np.arctan2(gp[3], gp[2]))], dtype=_np.float32
-                    )
-                # Drop keys the training loader ignores / rebuilds (avoid shape mismatches)
-                for _k in ("delay", "sampled_trajectories"):
-                    data.pop(_k, None)
-                # Add GT-future placeholders (ranked-SFT generates its own).
-                future_len = getattr(model_args, "future_len", 80)
-                data["ego_agent_future"] = _np.zeros((future_len, 3), dtype=_np.float32)
-                data["neighbor_agents_future"] = _np.zeros(
-                    (getattr(model_args, "predicted_neighbor_num", 32), future_len, 3),
-                    dtype=_np.float32,
-                )
-                data["version"] = _np.array(1, dtype=_np.int64)
-                out_npz = npz_dir / f"replay_step_{step:04d}.npz"
-                _np.savez(out_npz, **data)
+                np.savez(npz_dir / f"replay_step_{step:04d}.npz", **data)
 
             # Save PNG (concurrent with next step's compute).
             out_path = output_dir / f"step_{step:04d}.png"
