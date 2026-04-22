@@ -48,10 +48,10 @@ def main():
                         help="Sort order for results (worst first)")
     parser.add_argument("--dump_json", type=str, default=None,
                         help="Write per-scene results (sorted) to JSON file")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="GRPO training config JSON. When given, reward "
-                             "thresholds and weights start from here; the "
-                             "per-field overrides below still win on top.")
+    parser.add_argument("--config", type=Path, required=True,
+                        help="GRPO training config JSON. Reward thresholds and "
+                             "weights start from here; the per-field overrides "
+                             "below still win on top.")
     # Reward config overrides
     parser.add_argument("--w_progress", type=float, default=None)
     parser.add_argument("--rb_near_scale", type=float, default=None)
@@ -77,8 +77,8 @@ def main():
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
 
-    # Reward config: optional baseline from training config, then per-field overrides.
-    rcfg = load_reward_config(args.config) if args.config is not None else RewardConfig(enable_overprogress=True)
+    # Reward config: baseline from training config, then per-field overrides.
+    rcfg = load_reward_config(args.config)
     if args.w_progress is not None:
         rcfg.w_progress = args.w_progress
     if args.rb_near_scale is not None:

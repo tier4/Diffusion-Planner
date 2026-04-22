@@ -476,7 +476,8 @@ def main():
     parser.add_argument("--scenes", required=True, help="Scene list JSON")
     parser.add_argument("--mode", required=True, choices=["rsft", "explorer", "closed_loop", "eval"],
                         help="Training mode to profile")
-    parser.add_argument("--config", default=None, help="Optional config JSON")
+    parser.add_argument("--config", required=True,
+                        help="GRPO training config JSON (required)")
     parser.add_argument("--n_scenes", type=int, default=50, help="Number of scenes (default: 50)")
     parser.add_argument("--n_epochs", type=int, default=1, help="Number of epochs to profile (default: 1)")
     args = parser.parse_args()

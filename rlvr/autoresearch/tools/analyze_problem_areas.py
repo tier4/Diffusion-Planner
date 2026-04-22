@@ -45,8 +45,8 @@ def parse_args():
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--lora_path", type=Path, default=None)
-    parser.add_argument("--config", type=Path, default=None,
-                        help="GRPO training config JSON. When given, reward thresholds "
+    parser.add_argument("--config", type=Path, required=True,
+                        help="GRPO training config JSON. Reward thresholds "
                              "and weights match the live run (enable_lane_departure "
                              "is always forced on).")
     parser.add_argument("--tag", type=str, default="analysis")
@@ -71,12 +71,9 @@ def main():
         model = load_lora_checkpoint(model, args.lora_path)
     model.eval()
 
-    if args.config is not None:
-        eval_config = load_reward_config(args.config)
-        eval_config.enable_lane_departure = True
-        print(f"Using reward thresholds from {args.config}")
-    else:
-        eval_config = RewardConfig(enable_lane_departure=True, enable_overprogress=True)
+    eval_config = load_reward_config(args.config)
+    eval_config.enable_lane_departure = True
+    print(f"Using reward thresholds from {args.config}")
 
     # Evaluate all scenes in batches
     results = []

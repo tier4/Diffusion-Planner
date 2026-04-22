@@ -53,7 +53,8 @@ def main():
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--lora_path", type=str, default=None)
-    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--config", type=str, required=True,
+                        help="GRPO training config JSON (reward weights + generation_variant)")
     parser.add_argument("--K", type=int, default=16)
     parser.add_argument("--generation_variant", type=str, default=None)
     parser.add_argument("--noise_min", type=float, default=0.5)
@@ -79,13 +80,11 @@ def main():
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
 
-    rcfg = load_reward_config(args.config) if args.config else RewardConfig(enable_overprogress=True)
+    rcfg = load_reward_config(args.config)
     variant = args.generation_variant
-    if variant is None and args.config is not None:
+    if variant is None:
         with open(args.config) as f:
             variant = json.load(f).get("generation_variant", "default")
-    if variant is None:
-        variant = "default"
 
     with open(args.scenes) as f:
         scene_paths = json.load(f)

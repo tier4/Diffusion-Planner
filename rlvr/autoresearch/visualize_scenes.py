@@ -174,13 +174,13 @@ def main():
     parser.add_argument("--indices", type=int, nargs="*", default=None, help="Scene indices to visualize")
     parser.add_argument("--n_scenes", type=int, default=12, help="Number of scenes if --indices not given")
     parser.add_argument("--cols", type=int, default=3, help="Columns in grid")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="GRPO training config JSON. When given, the reward "
-                             "flags in titles (rb_crossing, lane_crossing) use "
-                             "the training run's thresholds/gate settings.")
+    parser.add_argument("--config", type=Path, required=True,
+                        help="GRPO training config JSON. Reward flags in titles "
+                             "(rb_crossing, lane_crossing) use the training run's "
+                             "thresholds/gate settings.")
     args = parser.parse_args()
 
-    reward_config = load_reward_config(args.config) if args.config is not None else RewardConfig(enable_overprogress=True)
+    reward_config = load_reward_config(args.config)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
