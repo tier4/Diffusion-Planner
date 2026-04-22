@@ -729,40 +729,58 @@ def _draw_road_borders(ax, road_border_polylines, view_center=None, view_half_m=
     ))
 
 
-def _closest_border_point(
-    ego_xy: np.ndarray,
+def _nearest_border_point(
+    probe_xy: np.ndarray,
     border_polylines: list[np.ndarray] | None,
-) -> tuple[np.ndarray, float] | None:
-    """Closest point on any road-border polyline to ``ego_xy`` (world frame).
+) -> np.ndarray | None:
+    """Nearest point on any road-border polyline to ``probe_xy`` (world frame).
 
-    Scans consecutive segments; returns (closest_xy, distance_m) or None if
-    no border segments are available.
+    Pure geometry used only to position the viz pointer — the authoritative
+    body-to-border distance comes from ``rlvr.reward.compute_road_border_penalty``
+    via the per-step metrics log. Do not read the returned point's distance
+    as a metric.
     """
     if not border_polylines:
         return None
     best_pt: np.ndarray | None = None
     best_d = float("inf")
-    ex, ey = float(ego_xy[0]), float(ego_xy[1])
+    px, py = float(probe_xy[0]), float(probe_xy[1])
     for pl in border_polylines:
         if pl is None or pl.shape[0] < 2:
             continue
-        p1 = pl[:-1].astype(np.float64)  # (S, 2)
-        p2 = pl[1:].astype(np.float64)   # (S, 2)
+        p1 = pl[:-1].astype(np.float64)
+        p2 = pl[1:].astype(np.float64)
         seg = p2 - p1
         seg_len2 = (seg * seg).sum(axis=1)
         seg_len2[seg_len2 < 1e-9] = 1e-9
-        t = (((ex - p1[:, 0]) * seg[:, 0] + (ey - p1[:, 1]) * seg[:, 1])
+        t = (((px - p1[:, 0]) * seg[:, 0] + (py - p1[:, 1]) * seg[:, 1])
              / seg_len2)
         t = np.clip(t, 0.0, 1.0)
-        closest = p1 + t[:, None] * seg  # (S, 2)
-        dists = np.hypot(closest[:, 0] - ex, closest[:, 1] - ey)
+        closest = p1 + t[:, None] * seg
+        dists = np.hypot(closest[:, 0] - px, closest[:, 1] - py)
         idx = int(dists.argmin())
         if dists[idx] < best_d:
             best_d = float(dists[idx])
             best_pt = closest[idx]
-    if best_pt is None:
-        return None
-    return best_pt, best_d
+    return best_pt
+
+
+def _ego_obb_corners(
+    ex: float, ey: float, heading: float, length: float, width: float,
+) -> np.ndarray:
+    """Four OBB corners of the ego footprint in world frame (pure geometry).
+
+    Matches the rear-axle convention used by ``scenario_generation.visualize
+    .draw_agent_box``: baselink (ego x, y) sits rear_overhang behind the
+    back of the box.
+    """
+    rear_overhang = (length - length * 0.65) / 2
+    x0, x1 = -rear_overhang, length - rear_overhang
+    y0, y1 = -width / 2, width / 2
+    local = np.array([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=np.float64)
+    c, s = math.cos(heading), math.sin(heading)
+    R = np.array([[c, -s], [s, c]], dtype=np.float64)
+    return (R @ local.T).T + np.array([ex, ey], dtype=np.float64)
 
 
 def _save_step_figure(
@@ -963,14 +981,26 @@ def _save_step_figure(
             f"lane={gate_s}  "
             f"lane_near={metrics.get('lane_near_frac', 0.0):.2f}"
         )
-        closest = _closest_border_point(ego.current_position, road_border_polylines)
-        if closest is not None:
-            cb, cb_d = closest
-            ax.plot([ex, cb[0]], [ey, cb[1]], "k--", linewidth=1.3, alpha=0.7, zorder=29)
-            ax.plot(cb[0], cb[1], "ko", markersize=6, zorder=30,
+        # Position the viz pointer using the nearest border point to the
+        # ego rear axle, then anchor the line on the nearest OBB corner
+        # (body edge, not baselink) so the visual length roughly tracks
+        # the body-to-border distance shown in the label.
+        border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
+        if border_pt is not None:
+            corners = _ego_obb_corners(
+                ex, ey, ego.current_heading,
+                float(ego.length), float(ego.width),
+            )
+            d_corner = np.hypot(corners[:, 0] - border_pt[0],
+                                corners[:, 1] - border_pt[1])
+            start = corners[int(d_corner.argmin())]
+            body_d = metrics.get("rb_min_dist", float("nan"))
+            ax.plot([start[0], border_pt[0]], [start[1], border_pt[1]],
+                    "k--", linewidth=1.3, alpha=0.7, zorder=29)
+            ax.plot(border_pt[0], border_pt[1], "ko", markersize=6, zorder=30,
                     markeredgecolor="white", markeredgewidth=0.8)
-            mx, my = (ex + cb[0]) / 2, (ey + cb[1]) / 2
-            ax.annotate(f"{cb_d:.2f} m",
+            mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
+            ax.annotate(f"{body_d:.2f} m",
                         xy=(mx, my), fontsize=8, color="black",
                         ha="center", va="center",
                         bbox=dict(boxstyle="round,pad=0.2",
@@ -1031,10 +1061,17 @@ def _score_step(
     _, _, _, _, _, rb_per_ts_min = compute_road_border_penalty(
         traj, ego_shape, d, config=reward_cfg,
     )
+    # Centerline uses "baselink" regardless of what the training reward
+    # config specifies: the selection pipeline's drift signal is about
+    # where the rear-axle sits relative to the lane centerline, not about
+    # the full-body footprint — body-mode would inflate cl_score
+    # proportional to vehicle width and conflate width with drift.
+    # Road-border scoring above uses the body (perimeter), which is the
+    # physically-meaningful quantity for safety gating.
     cl = compute_centerline_score_batch(
         traj, ego_shape, d,
         usage_cap=reward_cfg.centerline_usage_cap,
-        usage_mode=reward_cfg.centerline_usage_mode,
+        usage_mode="baselink",
     )
 
     return {
