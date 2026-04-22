@@ -129,14 +129,18 @@ python -m scenario_generation.tools.inspect_route my_route.pkl
 python -m scenario_generation.replay \
     --route my_route.pkl \
     --model_path /path/to/best_model.pth \
+    --config /path/to/spawn_config.json \
     --output_dir ./replay_out \
     [--map_path <override>] \
     [--steps 6000] \
     [--max_npcs 8] \
     [--spawn_probability 0.3] \
-    [--config scenario_generation/configs/replay_default.json] \
     [--seed 42]
 ```
+
+`--config` is required — replay refuses to run with `SpawnConfig` dataclass
+defaults because they don't match any production recipe. Author a JSON per
+run. `configs/replay_default.json` is a starting template, not a fallback.
 
 **Advance modes.** The `advance_mode` field in `SpawnConfig` (or the JSON
 config) controls how the vehicle moves each step:
@@ -210,6 +214,27 @@ perpendicular signals run in phase opposition. TL state is written into the
 5-dim one-hot block at lane-dim indices `[8:13]` of `scene.map_data.lanes`
 and into each agent's `route_lanes` tensor every step.
 
+Set `SpawnConfig.enable_traffic_lights = false` to skip TL construction and
+ticking entirely. Useful for MPC-gen data runs where TL-driven stops would
+bias the replay trajectory away from the steady-state driving the training
+set represents.
+
+**Live per-step metric logging.** When both `dump_npz_dir` and
+`reward_config_path` are set on the `SpawnConfig`, the replay loop scores
+the current ego pose against the dumped map tensors at every step it dumps
+an NPZ and writes `metrics_log.json` alongside `trajectory_log.json`. Each
+record carries `{step, lane_gate, lane_near_frac, lane_wide_frac, lane_cont,
+rb_min_dist, cl_score}`. Thresholds come from the training reward config, so
+the logged values speak the same semantics ranked-SFT uses.
+
+Downstream: `rlvr/autoresearch/tools/select_from_metrics_log.py` reads that
+log + the NPZ directory, flags drift-trigger steps (lane cross / lane-near /
+border-close / centerline-far), and keeps the N pre-trigger NPZs as training
+data — those are the frames where the model could still have recovered.
+Lookback does not cross NPZ-directory boundaries, so concatenating logs from
+multiple replay runs is safe. Reward thresholds for rb / cl are CLI flags on
+the selector so a single sim run can feed many threshold sweeps.
+
 Relevant modules:
 
 | Path | Role |
@@ -220,7 +245,8 @@ Relevant modules:
 | `scenario_generation/simulate.py` | `advance_scene`, `advance_scene_mpc`, model inference helpers |
 | `scenario_generation/mpc_tracker.py` | `MPCTracker`, `PerfectTracker`, `postprocess_reference` |
 | `scenario_generation/traffic_light.py` | `TrafficLightController` + signal group state machines |
-| `scenario_generation/configs/replay_default.json` | Default `SpawnConfig` values |
+| `scenario_generation/configs/replay_default.json` | Reference `SpawnConfig` template — not loaded automatically, `--config` is required |
+| `rlvr/autoresearch/tools/select_from_metrics_log.py` | Reads `metrics_log.json` + NPZ dir, emits pre-trigger scene list for training |
 | `scenario_generation/tools/inspect_route.py` | CLI to dump a saved route pickle |
 | `scenario_generation/gui/app.py` | GUI panels + live route overlay wiring |
 | `scene_search/map_canvas_js.py` | JS canvas: start / goal / waypoint arrows + route polyline |
