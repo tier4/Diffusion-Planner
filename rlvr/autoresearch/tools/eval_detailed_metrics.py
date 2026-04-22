@@ -9,13 +9,19 @@ directly comparable to per-epoch training logs.
 This complements eval_checkpoint_sweep.py, which sweeps multiple epochs of
 one run; this tool compares multiple runs side-by-side with richer stats.
 
+With --dump_json, the output JSON includes a `per_scene` dict of parallel
+arrays (cl_mean, rb_dist_min, rb_near_frac, rb_wide_frac, lane_near_frac,
+lane_wide_frac, path, rb_crossing, lane_crossing) so downstream tools can
+rank scenes by worst cl / tightest rb without re-running the eval.
+
 Usage:
     python -m rlvr.autoresearch.tools.eval_detailed_metrics \
         --model_path /path/to/base.pth \
         --scenes /path/to/val.json \
         --config /path/to/grpo_config.json \
         --loras run1/lora_epoch_009 run2/lora_epoch_005 \
-        --labels run1_ep9 run2_ep5
+        --labels run1_ep9 run2_ep5 \
+        --dump_json /path/to/out.json
 """
 
 from __future__ import annotations
@@ -134,6 +140,17 @@ def eval_one(lora_path, scenes, model_args, reward_cfg, base_model, batch_size=1
         "cl_mean": float(np.mean(cl_arr)),
         "rb_dist_min_min": float(rb_min_arr.min()),
         "rb_dist_min_p5": float(np.percentile(rb_min_arr, 5)),
+        "per_scene": {
+            "cl_mean": [float(x) for x in cl_per_scene],
+            "rb_dist_min": [float(x) for x in rb_min_per_scene],
+            "rb_near_frac": [float(x) for x in rb_near_per_scene],
+            "rb_wide_frac": [float(x) for x in rb_wide_per_scene],
+            "lane_near_frac": [float(x) for x in lane_near_per_scene],
+            "lane_wide_frac": [float(x) for x in lane_wide_per_scene],
+            "path": [float(x) for x in path_per_scene],
+            "rb_crossing": list(rb_cross_per_scene),
+            "lane_crossing": list(lane_cross_per_scene),
+        },
     }
 
 

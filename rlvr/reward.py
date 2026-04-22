@@ -1437,11 +1437,12 @@ def compute_road_border_penalty(
     min_dists = _point_to_segments_min_dist(world_flat, seg_p1, seg_p2)
     min_dists = min_dists.reshape(N, T, K_pts)  # (N, T, 80)
 
-    # Per-timestep: min distance across all perimeter points
+    # Per-timestep: min distance across all perimeter points (true values,
+    # including t=0). The gate and near/wide penalties below still exclude t=0
+    # because the ego's starting pose is not model-controllable — but the
+    # returned `per_timestep_min[:, 0]` carries the real distance for any
+    # downstream diagnostic (cleanse, viz, eval scripts).
     per_timestep_min = min_dists.min(dim=2).values  # (N, T)
-
-    # Skip t=0 (can't control starting position)
-    per_timestep_min[:, 0] = 10.0
 
     # Thresholds from config
     cross_thresh = config.rb_cross_thresh
@@ -1449,16 +1450,19 @@ def compute_road_border_penalty(
     wide_thresh = config.rb_wide_thresh
     cont_thresh = config.rb_cont_thresh
 
-    # Crossing gate: any timestep with min dist < cross_thresh = crossing
-    is_crossing = per_timestep_min < cross_thresh  # (N, T)
-    has_crossing = is_crossing.any(dim=1)  # (N,)
+    # Crossing gate: any t>=1 timestep with min dist < cross_thresh = crossing.
+    # t=0 is excluded from the gate (can't control starting position).
+    is_crossing = per_timestep_min < cross_thresh  # (N, T), full tensor for diag
+    has_crossing = is_crossing[:, 1:].any(dim=1)  # (N,), t=0 excluded
     crossing_gate = (~has_crossing).float()  # (N,) 1.0=safe, 0.0=crossing
 
-    # First crossing timestep per trajectory
+    # First crossing timestep per trajectory (among t>=1).
     first_crossing_steps: list[int | None] = []
     for i in range(N):
         if has_crossing[i]:
-            first_crossing_steps.append(int(is_crossing[i].nonzero(as_tuple=True)[0][0].item()))
+            first_crossing_steps.append(
+                int(is_crossing[i, 1:].nonzero(as_tuple=True)[0][0].item()) + 1
+            )
         else:
             first_crossing_steps.append(None)
 
@@ -2221,13 +2225,15 @@ def compute_lane_departure_penalty(
         unsigned_2d = unsigned_q.reshape(N, T, K_pts)
         signed_2d = signed_q.reshape(N, T, K_pts)
         per_ts_max_signed = signed_2d.max(dim=2).values  # (N, T)
-        per_ts_max_signed[:, 0] = -100.0  # ignore t=0
         per_ts_min = unsigned_2d.min(dim=2).values  # (N, T)
     else:
         per_ts_max_signed = torch.full((N, T), -100.0, device=device)
         per_ts_min = torch.full((N, T), 100.0, device=device)
 
-    per_ts_min[:, 0] = 10.0
+    # `per_ts_min[:, 0]` and `per_ts_max_signed[:, 0]` now carry the TRUE t=0
+    # values so downstream diagnostics (cleanse, viz) see the real starting
+    # distance. The gate and near/wide penalties below still exclude t=0 from
+    # their aggregation because the starting pose is not model-controllable.
 
     # Crossing rule (buffer-from-inside semantics, matches `rb_cross_thresh`):
     # `per_ts_max_signed` is the max signed distance across perimeter points per
@@ -2236,12 +2242,12 @@ def compute_lane_departure_penalty(
     # METRES INSIDE the boundary, OR already past it. Larger threshold = stricter gate
     # (wider safety buffer), not looser. e.g., default 0.20m → fires when any perimeter
     # point comes within 20cm of the lane edge or beyond.
-    is_crossing_ts = per_ts_max_signed > -lane_cross_thresh  # (N, T)
-    has_crossing = is_crossing_ts.any(dim=1)
+    is_crossing_ts = per_ts_max_signed > -lane_cross_thresh  # (N, T), full for diag
+    has_crossing = is_crossing_ts[:, 1:].any(dim=1)  # t=0 excluded from gate
     crossing_gate = (~has_crossing).float()
-    first_idx = is_crossing_ts.float().argmax(dim=1)
+    first_idx = is_crossing_ts[:, 1:].float().argmax(dim=1)
     lane_crossing_steps: list[int | None] = [
-        int(first_idx[i].item()) if has_crossing[i] else None for i in range(N)
+        int(first_idx[i].item()) + 1 if has_crossing[i] else None for i in range(N)
     ]
 
     # --- Step 6: Exclusive zone categories (skip t=0) ---
