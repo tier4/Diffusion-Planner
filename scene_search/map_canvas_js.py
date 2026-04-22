@@ -285,33 +285,50 @@ ARROW_TOOL = {
         }
     }
     // Metric-specific normalisation to [0..1] where 1 = safe, 0 = bad.
+    // Each case: read the field, map to [0..1], return null when missing.
     function _heatmapT(point, metric) {
+        const v = point[metric === 'abs_cl_score' ? 'cl_score' : metric];
+        if (v === null || v === undefined) return null;
+
+        // Distance / magnitude metrics with custom ranges
         if (metric === 'rb_min_dist') {
-            const v = point.rb_min_dist;
-            if (v === null || v === undefined) return null;
-            // 0m = bad (red), >=3m = safe (blue). Clipped.
+            // 0m = bad (red), >=3m = safe (blue).
             return Math.max(0, Math.min(1, v / 3.0));
         }
         if (metric === 'abs_cl_score') {
-            const v = point.cl_score;
-            if (v === null || v === undefined) return null;
-            // |cl|=0 = safe, |cl|>=2 = bad. Invert so 1=safe.
+            // |cl|>=2 = bad (red), 0 = safe.
             return 1.0 - Math.max(0, Math.min(1, Math.abs(v) / 2.0));
         }
+        if (metric === 'centerline_penalty') {
+            // Penalty is negative in baselink mode; more negative = worse.
+            // Clamp to [-2, 0] and invert so 0 = bad, -2 → 0, 0 → 1.
+            return 1.0 + Math.max(-1, Math.min(0, v / 2.0));
+        }
+        if (metric === 'total') {
+            // Total reward range is config-dependent; use a wide default
+            // [-30..+10] → t=[0..1] so typical runs span the whole ramp.
+            return Math.max(0, Math.min(1, (v + 30.0) / 40.0));
+        }
+        if (metric === 'progress' || metric === 'smoothness' || metric === 'feasibility') {
+            // Higher = better. Clamp to [0..1] with a soft cap.
+            return Math.max(0, Math.min(1, v));
+        }
+
+        // Inverted-penalty metrics: 0 = good, 1 = bad → flip so 1 = safe.
+        if (metric === 'collision' || metric === 'rb_crossing' || metric === 'lane_crossing') {
+            return v ? 0.0 : 1.0;  // bool or 0/1
+        }
         if (metric === 'lane_gate') {
-            const v = point.lane_gate;
-            if (v === null || v === undefined) return null;
             return v >= 0.5 ? 1.0 : 0.0;
         }
-        if (metric === 'lane_near_frac') {
-            const v = point.lane_near_frac;
-            if (v === null || v === undefined) return null;
+        if (metric === 'lane_near_frac' || metric === 'lane_wide_frac' ||
+            metric === 'off_road_fraction' ||
+            metric === 'rb_near_penalty' || metric === 'rb_wide_penalty') {
             return 1.0 - Math.max(0, Math.min(1, v));
         }
-        if (metric === 'lane_wide_frac') {
-            const v = point.lane_wide_frac;
-            if (v === null || v === undefined) return null;
-            return 1.0 - Math.max(0, Math.min(1, v));
+        if (metric === 'red_light') {
+            // 0 = no violation, >0 = violating. Treat >0.01 as bad.
+            return v > 0.01 ? 0.0 : 1.0;
         }
         return null;
     }

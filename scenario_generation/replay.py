@@ -97,8 +97,7 @@ from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import (
     RewardConfig,
     compute_centerline_score_batch,
-    compute_lane_departure_penalty,
-    compute_road_border_penalty,
+    compute_reward_batch,
 )
 from scenario_generation.visualize import (
     _agent_color,
@@ -1025,28 +1024,33 @@ def _score_step(
     """Score the current ego pose against the dumped map tensors.
 
     The dumped NPZ has ``ego_agent_future`` zeroed, so the "trajectory" here
-    is a 1-step origin placeholder (t=0 + t=1 both at origin); this makes the
-    penalty primitives — which skip t=0 for near/wide fractions — evaluate
-    at least one timestep, and that one timestep is the current ego pose
-    (already centered in ego-frame by ``dump_step_npz``).
+    is a 1-step origin placeholder (t=0 + t=1 both at origin). The penalty
+    primitives skip t=0 for near/wide fractions; the duplicate t=1 slot
+    gives them one timestep to evaluate, representing the current pose.
 
-    Metrics are logged raw where possible (``rb_min_dist``, ``cl_score``) so
-    the downstream selector can re-threshold without re-running the sim;
-    ``lane_gate`` and ``lane_near_frac`` use the training config's
-    thresholds directly.
+    Dispatches to the full ``compute_reward_batch`` so every component the
+    training reward tracks (total, safety/collision, progress, smoothness,
+    feasibility, centerline-penalty, red_light, off_road, rb + lane sub-
+    fields) lands in the log. A separate ``compute_centerline_score_batch``
+    call with ``usage_mode="baselink"`` keeps a raw rear-axle cl magnitude
+    for the selection heatmap (independent of the training config's
+    usage_mode, which may be "body").
     """
     def _to_t(arr: np.ndarray) -> torch.Tensor:
         t = torch.from_numpy(np.asarray(arr)).float().to(device)
-        # Primitives accept either (S, P, D) or (1, S, P, D) — add batch dim
-        # for 3D map tensors so the broadcast path is unambiguous.
+        # compute_reward_batch handles either batched or unbatched tensors
+        # for lane / line_string / route_lanes; normalise to batched form
+        # so neighbor-future reshapes further down don't misinterpret the
+        # single ego dim.
         return t.unsqueeze(0) if t.dim() == 3 else t
 
     d: dict[str, torch.Tensor] = {}
-    for k in ("lanes", "route_lanes", "line_strings"):
+    for k in ("lanes", "route_lanes", "line_strings", "ego_shape",
+              "neighbor_agents_future", "neighbor_agents_past", "goal_pose"):
         if k in npz_data:
             d[k] = _to_t(npz_data[k])
 
-    ego_shape = torch.tensor(
+    ego_shape_cl = torch.tensor(
         [spawn_config.ego_wheelbase, spawn_config.ego_length, spawn_config.ego_width],
         device=device, dtype=torch.float32,
     )
@@ -1055,32 +1059,40 @@ def _score_step(
     traj = torch.zeros(1, 2, 4, device=device)
     traj[0, :, 2] = 1.0
 
-    lane_gate, lane_near, lane_wide, _, lane_cont = compute_lane_departure_penalty(
-        traj, ego_shape, d, config=reward_cfg,
-    )
-    _, _, _, _, _, rb_per_ts_min = compute_road_border_penalty(
-        traj, ego_shape, d, config=reward_cfg,
-    )
-    # Centerline uses "baselink" regardless of what the training reward
-    # config specifies: the selection pipeline's drift signal is about
-    # where the rear-axle sits relative to the lane centerline, not about
-    # the full-body footprint — body-mode would inflate cl_score
-    # proportional to vehicle width and conflate width with drift.
-    # Road-border scoring above uses the body (perimeter), which is the
-    # physically-meaningful quantity for safety gating.
+    breakdowns = compute_reward_batch(traj, d, reward_cfg)
+    br = breakdowns[0]
+
     cl = compute_centerline_score_batch(
-        traj, ego_shape, d,
+        traj, ego_shape_cl, d,
         usage_cap=reward_cfg.centerline_usage_cap,
         usage_mode="baselink",
     )
 
     return {
         "step": step,
-        "lane_gate": float(lane_gate[0].item()),
-        "lane_near_frac": float(lane_near[0].item()),
-        "lane_wide_frac": float(lane_wide[0].item()),
-        "lane_cont": float(lane_cont[0].item()),
-        "rb_min_dist": float(rb_per_ts_min[0].min().item()),
+        # Full RewardBreakdown — aggregate + per-component penalties /
+        # scores the selection heatmap can colour by.
+        "total": float(br.total),
+        "safety": float(br.safety),
+        "progress": float(br.progress),
+        "smoothness": float(br.smoothness),
+        "feasibility": float(br.feasibility),
+        "centerline_penalty": float(br.centerline),
+        "red_light": float(br.red_light),
+        "off_road_fraction": float(br.off_road_fraction),
+        "collision": br.collision_step is not None,
+        "collision_step": br.collision_step,
+        "rb_crossing": bool(br.rb_crossing),
+        "rb_near_penalty": float(br.rb_near_penalty),
+        "rb_wide_penalty": float(br.rb_wide_penalty),
+        "rb_min_dist": float(br.rb_min_dist),
+        "lane_crossing": bool(br.lane_crossing),
+        "lane_near_frac": float(br.lane_near_frac),
+        "lane_wide_frac": float(br.lane_wide_frac),
+        # Back-compat alias: downstream (selector, heatmap) reads lane_gate
+        # as a 0/1 rather than a bool crossing flag.
+        "lane_gate": 0.0 if br.lane_crossing else 1.0,
+        # Raw baselink centerline magnitude — independent of reward config.
         "cl_score": float(cl[0].item()),
     }
 

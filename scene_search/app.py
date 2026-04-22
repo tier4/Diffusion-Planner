@@ -40,36 +40,61 @@ from scene_search.scene_previewer import (
 
 _HEATMAP_METRIC_CHOICES = [
     "off",
+    # Aggregate
+    "total",
+    # Safety
+    "collision",
     "rb_min_dist",
-    "abs_cl_score",
+    "rb_crossing",
+    "rb_near_penalty",
+    "rb_wide_penalty",
+    # Lane
     "lane_gate",
+    "lane_crossing",
     "lane_near_frac",
     "lane_wide_frac",
+    # Centerline
+    "abs_cl_score",
+    "centerline_penalty",
+    # Progress / dynamics
+    "progress",
+    "smoothness",
+    "feasibility",
+    "off_road_fraction",
+    "red_light",
 ]
 
 MAX_VISIBLE_BATCHES = 10
 
 MAP_CANVAS_JS = build_map_canvas_js(tool="arrow")
 
+_HEATMAP_METRIC_FIELDS = (
+    # Per-point fields the JS canvas may read for colour normalisation.
+    # Keep this list in sync with _heatmapT() in map_canvas_js.py so the
+    # dropdown only offers metrics that actually get transmitted.
+    "total", "collision", "rb_min_dist", "rb_crossing",
+    "rb_near_penalty", "rb_wide_penalty",
+    "lane_gate", "lane_crossing", "lane_near_frac", "lane_wide_frac",
+    "cl_score", "centerline_penalty",
+    "progress", "smoothness", "feasibility",
+    "off_road_fraction", "red_light",
+)
+
+
 def _heatmap_points(index: list[dict]) -> list[dict]:
     """Pick entries that carry per-step metrics (replay runs) and project to
-    the compact form the JS canvas consumes: x, y, and the subset of metric
-    fields driving the heatmap dropdown. Sidecar-backed entries have no
-    "metrics" key and are silently skipped."""
+    the compact form the JS canvas consumes. Sidecar-backed entries have
+    no "metrics" key and are silently skipped."""
     out = []
     for e in index:
         m = e.get("metrics") or {}
         if not m:
             continue
-        out.append({
-            "x": e["x"],
-            "y": e["y"],
-            "rb_min_dist": m.get("rb_min_dist"),
-            "cl_score": m.get("cl_score"),
-            "lane_gate": m.get("lane_gate"),
-            "lane_near_frac": m.get("lane_near_frac"),
-            "lane_wide_frac": m.get("lane_wide_frac"),
-        })
+        point = {"x": e["x"], "y": e["y"]}
+        for k in _HEATMAP_METRIC_FIELDS:
+            if k in m:
+                point[k] = m[k]
+        out.append(point)
     return out
 
 

@@ -59,12 +59,10 @@ def load_replay_run(run_dir: str | Path) -> list[dict]:
         steps = payload["steps"] if isinstance(payload, dict) else payload
         for rec in steps:
             s = int(rec["step"])
-            metrics_by_step[s] = {
-                k: rec[k] for k in (
-                    "lane_gate", "lane_near_frac", "lane_wide_frac",
-                    "lane_cont", "rb_min_dist", "cl_score",
-                ) if k in rec
-            }
+            # Copy every metric field the replay emits. Missing fields in
+            # older logs are simply absent from the dict; downstream code
+            # reads with .get() and treats None/missing as "no data".
+            metrics_by_step[s] = {k: v for k, v in rec.items() if k != "step"}
 
     npz_dir = run / "npz"
     entries: list[dict] = []
