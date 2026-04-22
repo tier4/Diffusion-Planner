@@ -255,27 +255,40 @@ ARROW_TOOL = {
     let isDrawingArrow = false, arrowStartPx = null, arrowEndPx = null;
 
     // Heatmap overlay (scored points from replay runs). Parsed once per
-    // prop update. Each point: {x, y, rb_min_dist, cl_score, lane_gate,
-    // lane_near_frac, lane_wide_frac}. Values may be null when absent.
+    // prop update. Each point: {x, y, ...metrics}. Metric set is auto-
+    // discovered from the data — no JS-side list to maintain.
     let heatmapPoints = [];
+    let heatmapRanges = {};    // {metric: [min, max]}
+    let heatmapPolarity = {};  // {metric: +1 (higher=safe) | -1 (higher=drift)}
     let heatmapMetric = 'off';
-    let heatmapJsonCache = null;
+    let heatmapJsonCache = null, heatmapMetaCache = null;
     function _parseHeatmap() {
         const raw = props.heatmap_json || '[]';
-        if (raw === heatmapJsonCache) return;
-        heatmapJsonCache = raw;
-        try { heatmapPoints = JSON.parse(raw) || []; }
-        catch (e) { heatmapPoints = []; console.warn('bad heatmap_json', e); }
+        if (raw !== heatmapJsonCache) {
+            heatmapJsonCache = raw;
+            try { heatmapPoints = JSON.parse(raw) || []; }
+            catch (e) { heatmapPoints = []; console.warn('bad heatmap_json', e); }
+        }
+        const metaRaw = props.heatmap_meta_json || '{}';
+        if (metaRaw !== heatmapMetaCache) {
+            heatmapMetaCache = metaRaw;
+            try {
+                const meta = JSON.parse(metaRaw) || {};
+                heatmapRanges = meta.ranges || {};
+                heatmapPolarity = meta.polarity || {};
+            } catch (e) {
+                heatmapRanges = {}; heatmapPolarity = {};
+                console.warn('bad heatmap_meta_json', e);
+            }
+        }
     }
-    // Map a [0..1] score to a red→yellow→green→blue ramp (good at 0 = red,
-    // safe at 1 = blue). For metrics where LOW is bad (rb_min_dist), the
-    // caller first inverts via a range cutoff.
+    // Red (1,0,0) → yellow (1,1,0) → green (0,1,0) → blue (0,0,1) ramp.
+    // t in [0..1] with 1 = safe (blue), 0 = drift (red).
     function _scoreColor(t) {
         t = Math.max(0, Math.min(1, t));
-        // Red (1,0,0) → yellow (1,1,0) → green (0,1,0) → blue (0,0,1)
         if (t < 0.33) {
             const u = t / 0.33;
-            return 'rgba(' + Math.round(255) + ',' + Math.round(255*u) + ',0,0.85)';
+            return 'rgba(255,' + Math.round(255*u) + ',0,0.85)';
         } else if (t < 0.66) {
             const u = (t - 0.33) / 0.33;
             return 'rgba(' + Math.round(255*(1-u)) + ',255,0,0.85)';
@@ -284,53 +297,32 @@ ARROW_TOOL = {
             return 'rgba(0,' + Math.round(255*(1-u)) + ',' + Math.round(255*u) + ',0.85)';
         }
     }
-    // Metric-specific normalisation to [0..1] where 1 = safe, 0 = bad.
-    // Each case: read the field, map to [0..1], return null when missing.
+    // Generic normalisation: auto-scale by the metric's observed [min, max]
+    // and apply the polarity from _metric_polarity (Python side).
+    // Adding a new reward component auto-appears here with no JS changes.
+    // 'abs_cl_score' is the sole exception — it reads |cl_score| rather
+    // than a separate field; if absent from ranges, fall back to cl_score
+    // and invert its polarity (low|cl|=safe, high|cl|=drift).
     function _heatmapT(point, metric) {
-        const v = point[metric === 'abs_cl_score' ? 'cl_score' : metric];
-        if (v === null || v === undefined) return null;
-
-        // Distance / magnitude metrics with custom ranges
-        if (metric === 'rb_min_dist') {
-            // 0m = bad (red), >=3m = safe (blue).
-            return Math.max(0, Math.min(1, v / 3.0));
-        }
+        let v, range, polarity;
         if (metric === 'abs_cl_score') {
-            // |cl|>=2 = bad (red), 0 = safe.
-            return 1.0 - Math.max(0, Math.min(1, Math.abs(v) / 2.0));
+            const raw = point.cl_score;
+            if (raw === null || raw === undefined) return null;
+            v = Math.abs(raw);
+            range = heatmapRanges.cl_score;
+            if (range) range = [0, Math.max(Math.abs(range[0]), Math.abs(range[1]))];
+            polarity = -1;  // higher |cl| = drift
+        } else {
+            v = point[metric];
+            if (v === null || v === undefined) return null;
+            range = heatmapRanges[metric];
+            polarity = heatmapPolarity[metric] || 1;
         }
-        if (metric === 'centerline_penalty') {
-            // Penalty is negative in baselink mode; more negative = worse.
-            // Clamp to [-2, 0] and invert so 0 = bad, -2 → 0, 0 → 1.
-            return 1.0 + Math.max(-1, Math.min(0, v / 2.0));
-        }
-        if (metric === 'total') {
-            // Total reward range is config-dependent; use a wide default
-            // [-30..+10] → t=[0..1] so typical runs span the whole ramp.
-            return Math.max(0, Math.min(1, (v + 30.0) / 40.0));
-        }
-        if (metric === 'progress' || metric === 'smoothness' || metric === 'feasibility') {
-            // Higher = better. Clamp to [0..1] with a soft cap.
-            return Math.max(0, Math.min(1, v));
-        }
-
-        // Inverted-penalty metrics: 0 = good, 1 = bad → flip so 1 = safe.
-        if (metric === 'collision' || metric === 'rb_crossing' || metric === 'lane_crossing') {
-            return v ? 0.0 : 1.0;  // bool or 0/1
-        }
-        if (metric === 'lane_gate') {
-            return v >= 0.5 ? 1.0 : 0.0;
-        }
-        if (metric === 'lane_near_frac' || metric === 'lane_wide_frac' ||
-            metric === 'off_road_fraction' ||
-            metric === 'rb_near_penalty' || metric === 'rb_wide_penalty') {
-            return 1.0 - Math.max(0, Math.min(1, v));
-        }
-        if (metric === 'red_light') {
-            // 0 = no violation, >0 = violating. Treat >0.01 as bad.
-            return v > 0.01 ? 0.0 : 1.0;
-        }
-        return null;
+        if (!range || range[1] <= range[0]) return 0.5;  // flat metric → neutral
+        let norm = (v - range[0]) / (range[1] - range[0]);  // [0..1]
+        norm = Math.max(0, Math.min(1, norm));
+        // Flip for drift-high metrics so red = bad regardless of polarity.
+        return polarity > 0 ? norm : 1.0 - norm;
     }
     """,
     "draw": """

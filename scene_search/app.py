@@ -38,64 +38,98 @@ from scene_search.scene_previewer import (
     thumbnails_to_pil_images,
 )
 
-_HEATMAP_METRIC_CHOICES = [
-    "off",
-    # Aggregate
-    "total",
-    # Safety
-    "collision",
-    "rb_min_dist",
-    "rb_crossing",
-    "rb_near_penalty",
-    "rb_wide_penalty",
-    # Lane
-    "lane_gate",
-    "lane_crossing",
-    "lane_near_frac",
-    "lane_wide_frac",
-    # Centerline
-    "abs_cl_score",
-    "centerline_penalty",
-    # Progress / dynamics
-    "progress",
-    "smoothness",
-    "feasibility",
-    "off_road_fraction",
-    "red_light",
-]
+## Heatmap metric auto-discovery
+#
+# The replay writes whatever the RewardBreakdown dataclass exposes — adding
+# a new reward component on the training side should "just work" here.
+# We derive the dropdown choices from the union of numeric fields across
+# loaded heatmap points, and transmit each metric's observed min/max range
+# to the canvas so the JS colour ramp can auto-scale.
+#
+# Polarity (is higher = good or bad?) can't be inferred from data alone,
+# so we fall back to a naming heuristic: metric names containing any of
+# these substrings are treated as "higher = worse". Everything else is
+# assumed "higher = better" (distance-, reward-, and score-style fields).
+_HIGHER_IS_WORSE_SUBSTRINGS = (
+    "penalty", "crossing", "collision", "off_road", "red_light",
+    "near_frac", "wide_frac",
+)
+
+
+def _metric_polarity(name: str) -> int:
+    """Return +1 if higher is better (safe), -1 if higher is worse (drift)."""
+    lo = name.lower()
+    for s in _HIGHER_IS_WORSE_SUBSTRINGS:
+        if s in lo:
+            return -1
+    return +1
 
 MAX_VISIBLE_BATCHES = 10
 
 MAP_CANVAS_JS = build_map_canvas_js(tool="arrow")
 
-_HEATMAP_METRIC_FIELDS = (
-    # Per-point fields the JS canvas may read for colour normalisation.
-    # Keep this list in sync with _heatmapT() in map_canvas_js.py so the
-    # dropdown only offers metrics that actually get transmitted.
-    "total", "collision", "rb_min_dist", "rb_crossing",
-    "rb_near_penalty", "rb_wide_penalty",
-    "lane_gate", "lane_crossing", "lane_near_frac", "lane_wide_frac",
-    "cl_score", "centerline_penalty",
-    "progress", "smoothness", "feasibility",
-    "off_road_fraction", "red_light",
-)
-
-
 def _heatmap_points(index: list[dict]) -> list[dict]:
     """Pick entries that carry per-step metrics (replay runs) and project to
-    the compact form the JS canvas consumes. Sidecar-backed entries have
-    no "metrics" key and are silently skipped."""
+    the compact form the JS canvas consumes. Every numeric/bool field from
+    ``metrics`` is copied verbatim — no per-field allowlist. Sidecar-backed
+    entries have no "metrics" key and are silently skipped."""
     out = []
     for e in index:
         m = e.get("metrics") or {}
         if not m:
             continue
         point = {"x": e["x"], "y": e["y"]}
-        for k in _HEATMAP_METRIC_FIELDS:
-            if k in m:
-                point[k] = m[k]
+        for k, v in m.items():
+            if isinstance(v, bool):
+                point[k] = 1.0 if v else 0.0
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                point[k] = float(v)
+            # Drop None / str / list — not colourable.
         out.append(point)
     return out
+
+
+def _heatmap_metadata(points: list[dict]) -> dict:
+    """Derive per-metric display metadata from the loaded heatmap points.
+
+    Returns::
+
+        {
+            "metrics": ["total", "rb_min_dist", ...],   # sorted field names
+            "ranges":  {"total": [min, max], ...},       # observed range
+            "polarity": {"total": 1, "rb_near_penalty": -1, ...},
+        }
+
+    The canvas uses this to auto-scale a colour ramp without any metric-
+    specific JS. Polarity comes from ``_metric_polarity`` (naming heuristic).
+    """
+    if not points:
+        return {"metrics": [], "ranges": {}, "polarity": {}}
+    field_names: set[str] = set()
+    for p in points:
+        for k in p.keys():
+            if k in ("x", "y"):
+                continue
+            field_names.add(k)
+    ranges: dict[str, list[float]] = {}
+    for k in field_names:
+        vals = [p[k] for p in points if k in p and p[k] is not None]
+        if not vals:
+            continue
+        ranges[k] = [float(min(vals)), float(max(vals))]
+    polarity = {k: _metric_polarity(k) for k in ranges}
+    # cl_score is a signed rear-axle offset; the magnitude reading is what
+    # users usually want, so offer a synthetic "abs_cl_score" entry on the
+    # dropdown whenever cl_score is present. The canvas handles the |·|
+    # and polarity flip for this one derived field.
+    metrics = sorted(ranges.keys())
+    if "cl_score" in ranges:
+        metrics.insert(metrics.index("cl_score") + 1, "abs_cl_score")
+    return {
+        "metrics": metrics,
+        "ranges": ranges,
+        "polarity": polarity,
+    }
 
 
 def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | None = None):
@@ -109,10 +143,13 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
     print(f"  Map image: {len(full_map_b64)//1024}KB base64")
 
     heatmap_points = _heatmap_points(index)
+    heatmap_meta = _heatmap_metadata(heatmap_points)
     heatmap_json = json.dumps(heatmap_points)
+    heatmap_meta_json = json.dumps(heatmap_meta)
     if heatmap_points:
-        print(f"  Heatmap: {len(heatmap_points)} scored points "
-              f"({len(heatmap_json)//1024}KB JSON)")
+        print(f"  Heatmap: {len(heatmap_points)} scored points across "
+              f"{len(heatmap_meta['metrics'])} metric(s) "
+              f"({len(heatmap_json)//1024}KB + {len(heatmap_meta_json)//1024}KB JSON)")
 
     def render_map(viewport_json: str) -> str:
         """Server function for hi-res tile at current zoom. Called from JS (debounced)."""
@@ -144,7 +181,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 if heatmap_points:
                     gr.Markdown("### Heatmap")
                     heatmap_metric_dd = gr.Dropdown(
-                        choices=_HEATMAP_METRIC_CHOICES,
+                        choices=["off"] + heatmap_meta["metrics"],
                         value="off",
                         label="Overlay metric",
                         interactive=True,
@@ -198,6 +235,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                     radius=50,
                     heading_tol=30,
                     heatmap_json=heatmap_json,
+                    heatmap_meta_json=heatmap_meta_json,
                     heatmap_metric="off",
                 )
 

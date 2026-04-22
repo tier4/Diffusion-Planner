@@ -1028,20 +1028,16 @@ def _score_step(
     primitives skip t=0 for near/wide fractions; the duplicate t=1 slot
     gives them one timestep to evaluate, representing the current pose.
 
-    Dispatches to the full ``compute_reward_batch`` so every component the
-    training reward tracks (total, safety/collision, progress, smoothness,
-    feasibility, centerline-penalty, red_light, off_road, rb + lane sub-
-    fields) lands in the log. A separate ``compute_centerline_score_batch``
-    call with ``usage_mode="baselink"`` keeps a raw rear-axle cl magnitude
-    for the selection heatmap (independent of the training config's
-    usage_mode, which may be "body").
+    Everything dispatches to ``compute_reward_batch`` so that adding a new
+    field to ``rlvr.reward.RewardBreakdown`` automatically flows into the
+    log — no per-field mapping here to maintain. The one extra is an
+    explicit baselink-mode centerline score (the ``RewardBreakdown``
+    already holds a centerline term, but whether it used body or baselink
+    depends on the training config; the heatmap wants the rear-axle
+    version).
     """
     def _to_t(arr: np.ndarray) -> torch.Tensor:
         t = torch.from_numpy(np.asarray(arr)).float().to(device)
-        # compute_reward_batch handles either batched or unbatched tensors
-        # for lane / line_string / route_lanes; normalise to batched form
-        # so neighbor-future reshapes further down don't misinterpret the
-        # single ego dim.
         return t.unsqueeze(0) if t.dim() == 3 else t
 
     d: dict[str, torch.Tensor] = {}
@@ -1055,46 +1051,38 @@ def _score_step(
         device=device, dtype=torch.float32,
     )
 
-    # (1, 2, 4) origin traj — cos(0)=1 at both slots.
     traj = torch.zeros(1, 2, 4, device=device)
     traj[0, :, 2] = 1.0
 
     breakdowns = compute_reward_batch(traj, d, reward_cfg)
     br = breakdowns[0]
 
-    cl = compute_centerline_score_batch(
+    cl_baselink = compute_centerline_score_batch(
         traj, ego_shape_cl, d,
         usage_cap=reward_cfg.centerline_usage_cap,
         usage_mode="baselink",
     )
 
-    return {
-        "step": step,
-        # Full RewardBreakdown — aggregate + per-component penalties /
-        # scores the selection heatmap can colour by.
-        "total": float(br.total),
-        "safety": float(br.safety),
-        "progress": float(br.progress),
-        "smoothness": float(br.smoothness),
-        "feasibility": float(br.feasibility),
-        "centerline_penalty": float(br.centerline),
-        "red_light": float(br.red_light),
-        "off_road_fraction": float(br.off_road_fraction),
-        "collision": br.collision_step is not None,
-        "collision_step": br.collision_step,
-        "rb_crossing": bool(br.rb_crossing),
-        "rb_near_penalty": float(br.rb_near_penalty),
-        "rb_wide_penalty": float(br.rb_wide_penalty),
-        "rb_min_dist": float(br.rb_min_dist),
-        "lane_crossing": bool(br.lane_crossing),
-        "lane_near_frac": float(br.lane_near_frac),
-        "lane_wide_frac": float(br.lane_wide_frac),
-        # Back-compat alias: downstream (selector, heatmap) reads lane_gate
-        # as a 0/1 rather than a bool crossing flag.
-        "lane_gate": 0.0 if br.lane_crossing else 1.0,
-        # Raw baselink centerline magnitude — independent of reward config.
-        "cl_score": float(cl[0].item()),
-    }
+    # Dump every RewardBreakdown field by iterating the dataclass, so
+    # adding a new component only requires touching rlvr.reward — this
+    # function stays untouched.
+    out: dict = {"step": step}
+    for k, v in asdict(br).items():
+        if isinstance(v, (bool, int, float)) or v is None:
+            out[k] = v
+        elif isinstance(v, torch.Tensor):
+            out[k] = float(v.item())
+        # Anything else (should not happen for RewardBreakdown) gets dropped
+        # rather than breaking JSON serialization.
+
+    # Derived convenience fields not in RewardBreakdown:
+    #   collision: bool from collision_step
+    #   lane_gate: 0/1 alias of (not lane_crossing) — selector reads it
+    #   cl_score:  raw rear-axle centerline magnitude
+    out["collision"] = out.get("collision_step") is not None
+    out["lane_gate"] = 0.0 if out.get("lane_crossing") else 1.0
+    out["cl_score"] = float(cl_baselink[0].item())
+    return out
 
 
 def run_route_replay(
