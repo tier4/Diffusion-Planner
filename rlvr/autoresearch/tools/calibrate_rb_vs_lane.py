@@ -41,7 +41,7 @@ from rlvr.reward import RewardConfig, compute_reward_batch
 
 def build_reward_config_from_grpo(cfg: GRPOConfig) -> RewardConfig:
     """Build a RewardConfig from a GRPOConfig (copies fields by name)."""
-    rcfg = RewardConfig()
+    rcfg = RewardConfig(enable_overprogress=True)
     for field in rcfg.__dataclass_fields__:
         if hasattr(cfg, field):
             setattr(rcfg, field, getattr(cfg, field))

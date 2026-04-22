@@ -917,6 +917,112 @@ def test_advantage_softmax():
     print("  PASS  test_advantage_softmax")
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# centerline usage_cap + usage_mode (added 2026-04-22)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_straight_lane_route_data(
+    half_width: float, T: int = 20, lane_len: int = 20,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Build a straight lane at y=0, half-width `half_width`, T-step trajectory
+    template (caller fills ego y)."""
+    lanes = torch.zeros(1, 10, lane_len, 33)
+    for pt in range(lane_len):
+        lanes[0, 0, pt, 0] = pt * 0.5                # center X
+        lanes[0, 0, pt, 1] = 1e-3                    # slight y offset to pass validity filter
+        lanes[0, 0, pt, 2] = 1.0                     # dir cos
+        lanes[0, 0, pt, 5] = half_width              # left boundary dY
+        lanes[0, 0, pt, 7] = -half_width             # right boundary dY
+    return lanes, {"route_lanes": lanes}
+
+
+def test_centerline_baselink_zero_when_centered():
+    """usage_mode='baselink' with ego riding the centerline → per-step usage 0
+    regardless of ego width (cap has no effect)."""
+    from rlvr.reward import compute_centerline_score_batch
+    T = 20
+    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
+    # Ego on centerline (y=0), wide and narrow vehicles
+    ego = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 2] = 1.0
+    for width in (1.70, 2.29):
+        shape = torch.tensor([2.75, 4.34, width])
+        score_baselink = compute_centerline_score_batch(ego, shape, data, usage_mode="baselink")
+        # baselink with ego on centerline: lane_usage ≈ 0 → score ≈ 0
+        assert abs(float(score_baselink[0])) < 1e-3, (
+            f"width={width}: baselink-centered score should be ~0, got {float(score_baselink[0])}"
+        )
+    print("  PASS  test_centerline_baselink_zero_when_centered")
+
+
+def test_centerline_body_penalizes_width_even_when_centered():
+    """usage_mode='body' (default) includes ego half-width in lane_usage → a wider
+    vehicle perfectly centered has higher usage than a narrower one."""
+    from rlvr.reward import compute_centerline_score_batch
+    T = 20
+    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
+    ego = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 2] = 1.0
+    shape_narrow = torch.tensor([2.75, 4.34, 1.70])
+    shape_wide = torch.tensor([2.75, 4.34, 2.29])
+    narrow = compute_centerline_score_batch(ego, shape_narrow, data, usage_mode="body")
+    wide = compute_centerline_score_batch(ego, shape_wide, data, usage_mode="body")
+    # Both centered — body mode still penalizes more for wider ego (larger usage).
+    assert float(wide[0]) < float(narrow[0]), (
+        f"body-mode wider ego should score lower (more usage): narrow={float(narrow[0])} wide={float(wide[0])}"
+    )
+    print("  PASS  test_centerline_body_penalizes_width_even_when_centered")
+
+
+def test_centerline_usage_cap_rejects_nonpositive():
+    """usage_cap must be > 0 and finite; bad configs should fail fast."""
+    from rlvr.reward import compute_centerline_score_batch
+    T = 20
+    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
+    ego = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 2] = 1.0
+    shape = torch.tensor([2.75, 4.34, 1.70])
+    for bad in (0.0, -0.5, float("inf"), float("nan")):
+        try:
+            compute_centerline_score_batch(ego, shape, data, usage_cap=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"usage_cap={bad} should have raised ValueError")
+    print("  PASS  test_centerline_usage_cap_rejects_nonpositive")
+
+
+def test_centerline_usage_cap_changes_past_boundary_scoring():
+    """usage_cap > 1.0 lets past-boundary trajectories accrue bigger penalties
+    than the default cap=1.0 (which clamps at the boundary)."""
+    from rlvr.reward import compute_centerline_score_batch
+    T = 20
+    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
+    shape = torch.tensor([2.75, 4.34, 1.70])
+    # Ego drifted 2.0 m off-centerline — past the 1.75 m boundary.
+    ego = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 1] = 2.0
+        ego[0, t, 2] = 1.0
+    cap_1 = compute_centerline_score_batch(ego, shape, data, usage_cap=1.0)
+    cap_2 = compute_centerline_score_batch(ego, shape, data, usage_cap=2.0)
+    # Larger cap lets the penalty grow, so score (negative) should be *more negative*.
+    assert float(cap_2[0]) < float(cap_1[0]), (
+        f"usage_cap=2.0 should produce a more-negative score than cap=1.0 for a past-boundary traj: "
+        f"cap=1.0→{float(cap_1[0])}  cap=2.0→{float(cap_2[0])}"
+    )
+    # And the cap=1.0 result is itself negative (penalty is accruing).
+    assert float(cap_1[0]) < 0, f"Off-lane traj should have negative score: {float(cap_1[0])}"
+    print("  PASS  test_centerline_usage_cap_changes_past_boundary_scoring")
+
+
 if __name__ == "__main__":
     tests = [
         test_no_collision_straight_line,
@@ -964,6 +1070,10 @@ if __name__ == "__main__":
         test_overprogress_underprogress_penalties,
         test_advantage_absolute,
         test_advantage_softmax,
+        test_centerline_baselink_zero_when_centered,
+        test_centerline_body_penalizes_width_even_when_centered,
+        test_centerline_usage_cap_rejects_nonpositive,
+        test_centerline_usage_cap_changes_past_boundary_scoring,
     ]
 
     print("=" * 60)

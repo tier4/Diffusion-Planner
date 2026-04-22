@@ -217,7 +217,7 @@ def profile_rsft(model, model_args, scene_paths, config_path: str | None, profil
         config.sft_batch_size = 1
         config.train_epochs = n_epochs
 
-    reward_config = RewardConfig()
+    reward_config = RewardConfig(enable_overprogress=True)
     reward_config.enable_lane_departure = True
     reward_config.stopped_penalty = 100.0
 
@@ -450,7 +450,7 @@ def profile_eval(model, model_args, scene_paths, profiler: Profiler):
     profiler.wrap_module_function(br_mod, "_batched_generate", "eval.batched_generate")
     profiler.wrap_module_function(reward_mod, "compute_reward_batch", "eval.reward_compute_batch")
 
-    reward_config = RewardConfig()
+    reward_config = RewardConfig(enable_overprogress=True)
     reward_config.enable_lane_departure = True
 
     torch.cuda.reset_peak_memory_stats()
@@ -476,7 +476,8 @@ def main():
     parser.add_argument("--scenes", required=True, help="Scene list JSON")
     parser.add_argument("--mode", required=True, choices=["rsft", "explorer", "closed_loop", "eval"],
                         help="Training mode to profile")
-    parser.add_argument("--config", default=None, help="Optional config JSON")
+    parser.add_argument("--config", required=True,
+                        help="GRPO training config JSON (required)")
     parser.add_argument("--n_scenes", type=int, default=50, help="Number of scenes (default: 50)")
     parser.add_argument("--n_epochs", type=int, default=1, help="Number of epochs to profile (default: 1)")
     args = parser.parse_args()

@@ -95,6 +95,15 @@ class GRPOConfig:
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
+    # Centerline usage cap (passed to RewardConfig). Per-step lane_usage is
+    # clamped to this before squaring. 1.0 = current default (saturates at the
+    # lane boundary); raise to 1.5-2.0 to let past-boundary trajectories be
+    # penalized more and widen the ranking signal.
+    centerline_usage_cap: float = 1.0
+    # Centerline usage mode (passed to RewardConfig):
+    #   "body" (default): lane_usage = (|baselink_lat| + ego_half_w) / side_hw
+    #   "baselink": lane_usage = |baselink_lat| / side_hw (ignores ego width)
+    centerline_usage_mode: str = "body"
 
     # Reward tuning (passed to RewardConfig for training)
     # Road border penalty scales and thresholds

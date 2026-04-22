@@ -1279,7 +1279,8 @@ def main():
     parser.add_argument("--no-training", action="store_true",
                         help="Disable GRPO training controls (visualization-only mode)")
     parser.add_argument("--config", type=Path, default=None,
-                        help="Path to GRPO config JSON (default: on-policy M=1)")
+                        help="Path to GRPO config JSON. Required unless "
+                             "--no-training is set (viz-only mode).")
     parser.add_argument("--use_lora", action="store_true", default=False,
                         help="Apply LoRA adapters for training")
     parser.add_argument("--exp_name", type=str, default="grpo_gui",
@@ -1312,12 +1313,14 @@ def main():
     if not args.no_training:
         from rlvr.grpo_config import GRPOConfig
 
-        if args.config and args.config.exists():
-            grpo_cfg = GRPOConfig.from_json(args.config)
-            print(f"Loaded GRPO config from {args.config}")
-        else:
-            grpo_cfg = GRPOConfig()
-            print("Using default GRPOConfig (on-policy: M=1)")
+        if args.config is None:
+            raise SystemExit(
+                "--config is required unless --no-training is set."
+            )
+        if not args.config.exists():
+            raise FileNotFoundError(f"GRPO config not found: {args.config}")
+        grpo_cfg = GRPOConfig.from_json(args.config)
+        print(f"Loaded GRPO config from {args.config}")
 
         if args.use_lora:
             grpo_cfg.use_lora = True

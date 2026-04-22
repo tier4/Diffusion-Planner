@@ -1,9 +1,10 @@
 """Tests for :class:`scenario_generation.route.Route` and the routing
 helpers on :class:`~scenario_generation.gui.lanelet_scene_builder.LaneletSceneBuilder`.
 
-Tests that require the lanelet2 map are skipped when the expected
-shinagawa_odaiba_stable map is not available on disk, so CI can still run
-the pure-Python Route round-trip coverage.
+The lanelet2-backed tests need a real ``lanelet2_map.osm`` on disk. Set the
+``LANELET2_MAP_PATH`` env var to that file, or place it at
+``~/autoware_map/lanelet2_map.osm``. If neither is available the tests skip
+so CI can still run the pure-Python Route round-trip coverage.
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ import pytest
 
 from scenario_generation.route import Route
 
-MAP_PATH = Path("/home/danielsanchez/autoware_map/shinagawa_odaiba_stable/lanelet2_map.osm")
+MAP_PATH = Path(
+    os.environ.get("LANELET2_MAP_PATH")
+    or (Path.home() / "autoware_map" / "lanelet2_map.osm")
+)
 
 
 # ── Pure Route round-trip ────────────────────────────────────────────────────
@@ -85,12 +89,14 @@ def test_route_unresolved_is_flagged() -> None:
 
 @pytest.fixture(scope="module")
 def builder():
-    """Cached LaneletSceneBuilder for the shinagawa map.
+    """Cached LaneletSceneBuilder for the configured lanelet2 map.
 
-    Scoped to the module so we pay the ~6000-lanelet load cost once.
+    Scoped to the module so we pay the lanelet load cost once.
     """
     if not MAP_PATH.exists():
-        pytest.skip(f"Lanelet2 map not found at {MAP_PATH}")
+        pytest.skip(
+            f"Lanelet2 map not found at {MAP_PATH} — set LANELET2_MAP_PATH"
+        )
     if os.environ.get("SKIP_LANELET_TESTS"):
         pytest.skip("SKIP_LANELET_TESTS set")
     from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder

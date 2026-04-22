@@ -79,7 +79,7 @@ from scenario_generation.simulate import (
     advance_scene_mpc,
     load_model,
 )
-from scenario_generation.tensor_converter import MapTensorCache
+from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 from scenario_generation.traffic_light import TrafficLightController
 
 # Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
@@ -208,6 +208,9 @@ class SpawnConfig:
     # Model inference delay: number of initial timesteps kept fixed as prefix.
     # Matches the "delay" input tensor to the diffusion decoder.
     inference_delay: int = 0
+    # When set, per-step observations are dumped as training-style NPZs to
+    # this directory. GT future is zeroed out (ranked-SFT generates its own).
+    dump_npz_dir: str | None = None
     # Initial ego speed for history synthesis (m/s). Default uses midpoint
     # of NPC speed band (7.5), but real data may be much slower (e.g. 1.75
     # on low-speed exit curves). Set to match the scenario being replayed.
@@ -614,6 +617,7 @@ class SceneNPCManager:
 
 _LANE_COLOR = "#bbbbbb"
 _LANE_BORDER_COLOR = "#888888"
+_ROAD_BORDER_COLOR = "#dd2222"
 _EGO_COLOR = "#3366cc"
 _ROUTE_COLOR = "#3366cc"
 _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
@@ -661,6 +665,39 @@ def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
         ))
 
 
+def _draw_road_borders(ax, road_border_polylines, view_center=None, view_half_m=None) -> None:
+    """Draw actual road-border polylines (curbs/walls) in red. Separate from
+    lane markings; these come from the builder's line_strings_cache (type
+    ``road_border``), not from the lane tensor.
+    """
+    if not road_border_polylines:
+        return
+    from matplotlib.collections import LineCollection
+    # AABB filter to avoid drawing the whole map each tick
+    if view_center is not None and view_half_m is not None:
+        cx, cy = view_center
+        half = view_half_m * 1.5  # keep a bit of margin
+        filtered = []
+        for pl in road_border_polylines:
+            if pl.shape[0] < 2:
+                continue
+            in_view = (
+                (pl[:, 0] >= cx - half) & (pl[:, 0] <= cx + half)
+                & (pl[:, 1] >= cy - half) & (pl[:, 1] <= cy + half)
+            )
+            if in_view.any():
+                filtered.append(pl)
+        polylines = filtered
+    else:
+        polylines = [pl for pl in road_border_polylines if pl.shape[0] >= 2]
+    if not polylines:
+        return
+    ax.add_collection(LineCollection(
+        polylines, colors=_ROAD_BORDER_COLOR, linewidths=2.0,
+        alpha=0.9, zorder=5,  # above lanes, below agents
+    ))
+
+
 def _save_step_figure(
     scene: SceneContext,
     agent_predictions: dict,
@@ -672,6 +709,7 @@ def _save_step_figure(
     tl_controller: TrafficLightController | None = None,
     route_lanelet_ids: list[int] | None = None,
     sim_time: float = 0.0,
+    road_border_polylines: list[np.ndarray] | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
@@ -689,8 +727,12 @@ def _save_step_figure(
     ax = fig.add_subplot(1, 1, 1)
     fig.patch.set_facecolor("#f8f8f8")
 
-    # 1) Lane network (centerlines + left / right borders).
+    # 1) Lane network (centerlines + left / right lane markings, gray).
     _draw_lane_network(ax, scene.map_data)
+
+    # 1b) Road borders (curbs/walls) from the lanelet map, drawn in red.
+    _draw_road_borders(ax, road_border_polylines, view_center=(ex, ey),
+                       view_half_m=view_half_m)
 
     # 2) Ego route polyline (drawn below agents but above lanes).
     if route_polylines:
@@ -1008,6 +1050,10 @@ def run_route_replay(
     )
     scene = SceneContext(agents=[ego], map_data=map_data, ego_agent_id="ego", dt=0.1)
 
+    # Road-border polylines (world frame) via the public accessor; this
+    # filters to only road_border entries (stop_line skipped).
+    road_border_polylines = builder.road_border_polylines()
+
     # Route polyline (world frame) for per-step visualisation. Keep the
     # lanelet ID list in sync so the TL overlay can colour each segment.
     _route_vis_ll_ids: list[int] = [
@@ -1162,6 +1208,23 @@ def run_route_replay(
                         spawn_config.sg_filter_order,
                     )
 
+            # Optional: dump per-step observation NPZ (training-scene format).
+            # Captures the scene as the model sees it just before this step's
+            # prediction. Future trajectories are filled with zeros (ranked-
+            # SFT generates its own, doesn't use GT).
+            if getattr(spawn_config, "dump_npz_dir", None):
+                npz_dir = Path(spawn_config.dump_npz_dir)
+                npz_dir.mkdir(parents=True, exist_ok=True)
+                # NPZ neighbor count is locked by the past array's fixed shape
+                # (_MAX_NUM_NEIGHBORS=32), not by model_args.predicted_neighbor_num
+                # (which counts predicted future trajectories, not past slots).
+                data = dump_step_npz(
+                    scene,
+                    map_cache,
+                    future_len=getattr(model_args, "future_len", 80),
+                )
+                np.savez(npz_dir / f"replay_step_{step:04d}.npz", **data)
+
             # Save PNG (concurrent with next step's compute).
             out_path = output_dir / f"step_{step:04d}.png"
             pending_saves.append(save_pool.submit(
@@ -1169,7 +1232,7 @@ def run_route_replay(
                 deepcopy(scene), agent_predictions, out_path,
                 step, spawn_config.max_steps, route_polylines,
                 _VIEW_HALF_M, tl_controller, _route_vis_ll_ids,
-                step * 0.1,
+                step * 0.1, road_border_polylines,
             ))
 
             # Drain finished saves so memory doesn't balloon. Call

@@ -189,7 +189,7 @@ def main():
         scene_paths = json.load(f)
     trajs, all_data, valid = generate_for_all_scenes(model, model_args, scene_paths, cfg, device)
 
-    rcfg = RewardConfig()
+    rcfg = RewardConfig(enable_overprogress=True)
     es = all_data[0].get("ego_shape")
     ego_shape = es[0] if es is not None and es.dim() > 1 else es
     plot_floored._wb = float(ego_shape[0]) if ego_shape is not None else 4.76
