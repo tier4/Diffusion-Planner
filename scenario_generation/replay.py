@@ -220,6 +220,10 @@ class SpawnConfig:
     # Model inference delay: number of initial timesteps kept fixed as prefix.
     # Matches the "delay" input tensor to the diffusion decoder.
     inference_delay: int = 0
+    # Skip traffic-light state propagation entirely. Useful for MPC-gen
+    # data runs where TL-driven speed drops would bias the replay ego
+    # toward stop-and-go behaviour we don't want in training.
+    enable_traffic_lights: bool = True
     # When set, per-step observations are dumped as training-style NPZs to
     # this directory. GT future is zeroed out (ranked-SFT generates its own).
     dump_npz_dir: str | None = None
@@ -1152,14 +1156,16 @@ def run_route_replay(
     ]
 
     # --- Traffic light controller. ---
-    tl_controller = TrafficLightController(
-        builder, ego_route_ids, seed=spawn_config.seed,
-    )
-    # Apply initial TL state to the freshly-built map_data AND ego route_lanes.
-    tl_controller.tick(scene, 0.0, builder._last_map_data_ids, ego_xy=snapped_xy)
-    tl_controller.write_to_route_lanes(
-        scene.ego_agent.route_lanes, initial_route_window, 0.0,
-    )
+    tl_controller: TrafficLightController | None = None
+    if spawn_config.enable_traffic_lights:
+        tl_controller = TrafficLightController(
+            builder, ego_route_ids, seed=spawn_config.seed,
+        )
+        # Apply initial TL state to the freshly-built map_data AND ego route_lanes.
+        tl_controller.tick(scene, 0.0, builder._last_map_data_ids, ego_xy=snapped_xy)
+        tl_controller.write_to_route_lanes(
+            scene.ego_agent.route_lanes, initial_route_window, 0.0,
+        )
 
     # --- NPC manager. ---
     npc_manager = SceneNPCManager(builder, ego_route_ids, spawn_config, tl_controller)
@@ -1241,10 +1247,11 @@ def run_route_replay(
             # always sees the current signal phase. The TL one-hot is
             # written directly into scene.map_data.lanes which the
             # map_cache references (shared underlying array).
-            tl_controller.tick(
-                scene, step * 0.1, builder._last_map_data_ids,
-                ego_xy=ego_xy,
-            )
+            if tl_controller is not None:
+                tl_controller.tick(
+                    scene, step * 0.1, builder._last_map_data_ids,
+                    ego_xy=ego_xy,
+                )
 
             # Refresh route_lanes for ALL agents (ego + NPCs) so the
             # sliding window stays centered on each agent's current
@@ -1259,7 +1266,8 @@ def run_route_replay(
                 )
                 if fwd:
                     rl, rsl, rhsl = builder._route_to_33dim(fwd)
-                    tl_controller.write_to_route_lanes(rl, fwd, step * 0.1)
+                    if tl_controller is not None:
+                        tl_controller.write_to_route_lanes(rl, fwd, step * 0.1)
                     a.route_lanes = rl
                     a.route_speed_limit = rsl
                     a.route_has_speed_limit = rhsl
@@ -1491,8 +1499,11 @@ def main() -> None:
                         help="Override hard cap on concurrent neighbors")
     parser.add_argument("--spawn_probability", type=float, default=None,
                         help="Override spawn probability per spawn tick")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="JSON SpawnConfig overrides")
+    parser.add_argument("--config", type=Path, required=True,
+                        help="Path to a SpawnConfig JSON. Required — replay "
+                             "refuses to run with dataclass defaults because "
+                             "they don't match any production recipe. Author "
+                             "a config per run.")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
@@ -1502,10 +1513,7 @@ def main() -> None:
     print(f"Loading builder from {map_path}")
     builder = LaneletSceneBuilder(map_path)
 
-    if args.config is not None:
-        cfg = SpawnConfig.from_json(args.config)
-    else:
-        cfg = SpawnConfig()
+    cfg = SpawnConfig.from_json(args.config)
     if args.steps is not None:
         cfg.max_steps = args.steps
     if args.max_npcs is not None:
