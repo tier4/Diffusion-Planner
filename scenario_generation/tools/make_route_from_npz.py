@@ -46,10 +46,10 @@ def main():
     start_xy = np.array([pose["x"], pose["y"]], dtype=np.float32)
     start_h = _quat_to_heading(pose["qx"], pose["qy"], pose["qz"], pose["qw"])
 
-    raw = np.load(args.npz, allow_pickle=True)
     # Use the NPZ's route goal_pose (the scene's actual planning goal), NOT
     # the 8-second GT endpoint. goal_pose is [x, y, heading] ego-centric.
-    gp = raw["goal_pose"]
+    with np.load(args.npz, allow_pickle=True) as raw:
+        gp = raw["goal_pose"].copy()
     if np.linalg.norm(gp[:2]) < 1e-3:
         raise ValueError("goal_pose in NPZ is zero — scene has no route goal.")
     gx, gy, gh = float(gp[0]), float(gp[1]), float(gp[2])

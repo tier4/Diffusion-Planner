@@ -1215,11 +1215,13 @@ def run_route_replay(
             if getattr(spawn_config, "dump_npz_dir", None):
                 npz_dir = Path(spawn_config.dump_npz_dir)
                 npz_dir.mkdir(parents=True, exist_ok=True)
+                # NPZ neighbor count is locked by the past array's fixed shape
+                # (_MAX_NUM_NEIGHBORS=32), not by model_args.predicted_neighbor_num
+                # (which counts predicted future trajectories, not past slots).
                 data = dump_step_npz(
                     scene,
                     map_cache,
                     future_len=getattr(model_args, "future_len", 80),
-                    predicted_neighbor_num=getattr(model_args, "predicted_neighbor_num", 32),
                 )
                 np.savez(npz_dir / f"replay_step_{step:04d}.npz", **data)
 

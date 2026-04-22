@@ -1029,6 +1029,10 @@ def compute_centerline_score_batch(
     # treated as off-route (handled by route_deviation). Raising the cap
     # lets past-boundary trajectories be penalized more before hitting the
     # route_deviation branch.
+    if not math.isfinite(usage_cap) or usage_cap <= 0:
+        raise ValueError(
+            f"usage_cap must be finite and > 0, got {usage_cap!r}"
+        )
     capped_usage = lane_usage.clamp(max=usage_cap)
 
     per_step_penalty = torch.where(

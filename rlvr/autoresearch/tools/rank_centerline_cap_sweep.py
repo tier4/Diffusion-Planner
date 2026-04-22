@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Sweep the centerline usage cap and see how ranking changes.
 
-Current reward.py caps `lane_usage` at 1.0 in `compute_centerline_score_batch`
-(line 1008), so per-step penalty cannot exceed 1.0 even for trajs that cross
-the lane boundary. This tool re-scores K=16 GRPO samples under configurable
-caps ∈ {1.0, 1.5, ...} to see whether a higher cap:
+By default ``rlvr.reward.compute_centerline_score_batch`` clamps ``lane_usage``
+at 1.0, so per-step penalty cannot exceed 1.0 even for trajectories that
+cross the lane boundary. This tool re-scores K=16 GRPO samples by calling
+that reward function directly with different ``usage_cap`` values (1.0, 1.5,
+2.0, …) to see whether a higher cap:
   a) changes the top-1 pick (better differentiation of at-edge vs past-edge?)
   b) improves agreement between reward-top1 and CL-top1
   c) flags trajectories that go beyond the boundary differently from those
      that merely ride it.
 
-Uses a self-contained copy of the centerline computation — reward.py is NOT
-modified.
+Diagnostic script only — reuses ``rlvr.reward`` directly rather than
+maintaining a separate centerline implementation.
 
 DIAGNOSTIC-ONLY SIMPLIFICATION: this tool collapses the per-scene
 ``gt_max_speed`` array to a single scalar (mean) before calling

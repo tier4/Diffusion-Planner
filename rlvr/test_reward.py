@@ -979,6 +979,25 @@ def test_centerline_body_penalizes_width_even_when_centered():
     print("  PASS  test_centerline_body_penalizes_width_even_when_centered")
 
 
+def test_centerline_usage_cap_rejects_nonpositive():
+    """usage_cap must be > 0 and finite; bad configs should fail fast."""
+    from rlvr.reward import compute_centerline_score_batch
+    T = 20
+    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
+    ego = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 2] = 1.0
+    shape = torch.tensor([2.75, 4.34, 1.70])
+    for bad in (0.0, -0.5, float("inf"), float("nan")):
+        try:
+            compute_centerline_score_batch(ego, shape, data, usage_cap=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"usage_cap={bad} should have raised ValueError")
+    print("  PASS  test_centerline_usage_cap_rejects_nonpositive")
+
+
 def test_centerline_usage_cap_changes_past_boundary_scoring():
     """usage_cap > 1.0 lets past-boundary trajectories accrue bigger penalties
     than the default cap=1.0 (which clamps at the boundary)."""
@@ -1053,6 +1072,7 @@ if __name__ == "__main__":
         test_advantage_softmax,
         test_centerline_baselink_zero_when_centered,
         test_centerline_body_penalizes_width_even_when_centered,
+        test_centerline_usage_cap_rejects_nonpositive,
         test_centerline_usage_cap_changes_past_boundary_scoring,
     ]
 
