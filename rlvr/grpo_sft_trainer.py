@@ -618,6 +618,8 @@ def train_epoch_ranked_sft(
     best_rewards_list = []
     scene_train_mask = []  # True = train on this scene, False = skip
     scene_improvements = []  # improvement value per scene for advantage weighting
+    _gt_fallback_count = 0  # scenes where best-of-K < GT reward by margin
+    _gt_scored_count = 0   # scenes where GT was scored
 
     # Rank analytics: track which generation config wins per scene
     from pathlib import Path
@@ -651,9 +653,52 @@ def train_epoch_ranked_sft(
         best_reward = reward_vals[best_idx]
         det_reward = reward_vals[0]  # deterministic trajectory is always index 0
 
+        # GT fallback: compare best-of-K against the GT trajectory's reward.
+        # If GT is significantly better, either swap the SFT target to GT or
+        # skip the scene (per gt_fallback_mode).
+        _gt_mode = getattr(config, "gt_fallback_mode", "none")
+        _gt_margin = float(getattr(config, "gt_fallback_margin", 0.0))
+        _used_gt_fallback = False
+        gt_reward = float("nan")
+        gt_traj_4col = None
+        if _gt_mode != "none":
+            _real_gt = data_i.get("ego_agent_future")
+            if _real_gt is not None:
+                _g = _real_gt
+                if _g.dim() == 3:
+                    _g = _g[0]
+                # Map (T,3) -> (T,4) as (x, y, cos h, sin h). Align columns
+                # with traj_K (which is also x, y, cos, sin).
+                if _g.shape[-1] == 3:
+                    _g = torch.cat([
+                        _g[..., :2],
+                        _g[..., 2:3].cos(),
+                        _g[..., 2:3].sin(),
+                    ], dim=-1)
+                _g = _g[..., :4]
+                T_gen = traj_K.shape[1]
+                T_g = _g.shape[0]
+                if T_g > T_gen:
+                    _g = _g[:T_gen]
+                elif T_g < T_gen:
+                    _pad = torch.zeros(T_gen - T_g, 4, device=_g.device, dtype=_g.dtype)
+                    _g = torch.cat([_g, _pad], dim=0)
+                gt_traj_4col = _g.to(traj_K.device, dtype=traj_K.dtype)
+                _gt_rewards = compute_reward_batch(
+                    gt_traj_4col.unsqueeze(0), data_i, reward_config,
+                )
+                gt_reward = float(_gt_rewards[0].total)
+                _gt_scored_count += 1
+                if best_reward < gt_reward - _gt_margin:
+                    _used_gt_fallback = True
+                    _gt_fallback_count += 1
+
         # Selective: skip scene if improvement is below threshold
         improvement = best_reward - det_reward
         should_train = selective_thresh <= 0 or improvement >= selective_thresh
+        # GT-skip overrides selective
+        if _gt_mode == "skip" and _used_gt_fallback:
+            should_train = False
         scene_train_mask.append(should_train)
         # In advantage mode, respect selective_threshold: zero weight for scenes below it
         if selective_thresh > 0 and improvement < selective_thresh:
@@ -684,7 +729,11 @@ def train_epoch_ranked_sft(
         ))
 
         # Get best trajectory and smooth it
-        best_traj = traj_K[best_idx].cpu().numpy()  # [T, 4]
+        if _gt_mode == "il" and _used_gt_fallback and gt_traj_4col is not None:
+            # Swap SFT target with GT when best-of-K is worse than GT.
+            best_traj = gt_traj_4col.detach().cpu().numpy()
+        else:
+            best_traj = traj_K[best_idx].cpu().numpy()  # [T, 4]
         best_traj_smooth = _smooth_trajectory(
             best_traj, config.sg_filter_window, config.sg_filter_order
         )
@@ -715,6 +764,10 @@ def train_epoch_ranked_sft(
     if selective_thresh > 0:
         print(f"  Selective training: {n_selected}/{N} scenes selected "
               f"(threshold={selective_thresh:.1f}, skipped {N - n_selected})")
+    if _gt_scored_count > 0:
+        _gt_mode_str = getattr(config, "gt_fallback_mode", "none")
+        print(f"  GT fallback ({_gt_mode_str}): {_gt_fallback_count}/{_gt_scored_count} scenes "
+              f"had best-of-{K} < GT reward (margin={getattr(config, 'gt_fallback_margin', 0.0):.2f})")
 
     # --- Train explorer on trajectory rewards (if optimizer provided) ---
     explorer_metrics = {}

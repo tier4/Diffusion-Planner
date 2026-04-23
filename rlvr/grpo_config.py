@@ -264,6 +264,16 @@ class GRPOConfig:
     # drop from selection and regress. Stored in-memory on the config object (not persisted to disk).
     selective_frozen: bool = False
 
+    # GT fallback: when best-of-K trajectory reward is worse than the GT trajectory's reward
+    # by at least gt_fallback_margin, either skip the scene or swap the SFT target with GT.
+    # Rationale: if all K generations are gated down (rb/lane/kinematic/collision) but GT is
+    # feasible, the best-of-K signal is unreliable (noise). Either remove it or anchor on GT.
+    # "none" (default): current behavior, always use best-of-K.
+    # "skip":           if best_reward < gt_reward - margin, scene_train_mask=False.
+    # "il":             if best_reward < gt_reward - margin, replace best_traj with GT.
+    gt_fallback_mode: str = "none"
+    gt_fallback_margin: float = 0.0  # reward units. 0 = any GT advantage triggers fallback.
+
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
     # steps = grad_accum_groups // sft_batch_size, so the effective batch per optimizer
