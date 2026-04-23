@@ -21,11 +21,15 @@ replay runs into one log is safe.
 
 Usage:
     python -m rlvr.autoresearch.tools.select_from_metrics_log \\
-        --metrics_log /path/to/metrics_log.json \\
-        --npz_dir     /path/to/replay_dump/ \\
+        --metrics_log /path/to/replay_run/metrics_log.json \\
+        --npz_dir     /path/to/replay_run/npz/ \\
         --output      /path/to/kept_scenes.json \\
         --diagnostics /path/to/diag.json \\
         --cl_min_abs 0.35 --rb_min_dist 0.45 --lookback 20
+
+``--npz_dir`` must point at the ``npz/`` subdirectory of a replay run,
+not the run directory itself — the tool resolves each step's NPZ as
+``<npz_dir>/replay_step_NNNN.npz``.
 """
 
 from __future__ import annotations

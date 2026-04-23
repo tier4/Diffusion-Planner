@@ -118,13 +118,20 @@ def _heatmap_metadata(points: list[dict]) -> dict:
             continue
         ranges[k] = [float(min(vals)), float(max(vals))]
     polarity = {k: _metric_polarity(k) for k in ranges}
-    # cl_score is a signed rear-axle offset; the magnitude reading is what
-    # users usually want, so offer a synthetic "abs_cl_score" entry on the
-    # dropdown whenever cl_score is present. The canvas handles the |·|
-    # and polarity flip for this one derived field.
-    metrics = sorted(ranges.keys())
+    # cl_score is a signed rear-axle offset with "safe" values near zero:
+    # both large-positive and large-negative magnitudes indicate drift.
+    # The generic min/max + monotonic polarity used by every other metric
+    # would colour the two tails differently (one as drift, one as safe),
+    # which is misleading. Hide the raw field from the dropdown and
+    # expose only the derived absolute-magnitude view — the canvas's
+    # abs_cl_score branch already does the |·| + polarity flip. Same
+    # pattern applies to pred_cl_score when it's present.
+    hidden_signed = {"cl_score", "pred_cl_score"}
+    metrics = sorted(k for k in ranges.keys() if k not in hidden_signed)
     if "cl_score" in ranges:
-        metrics.insert(metrics.index("cl_score") + 1, "abs_cl_score")
+        metrics.append("abs_cl_score")
+    if "pred_cl_score" in ranges:
+        metrics.append("abs_pred_cl_score")
     return {
         "metrics": metrics,
         "ranges": ranges,
@@ -502,19 +509,31 @@ def main():
                              "directories. Uses trajectory_log.json + "
                              "metrics_log.json instead of per-NPZ sidecars; "
                              "enables the drift heatmap overlay.")
-    parser.add_argument("--index", type=str, default=None, help="Cached parquet index (requires pyarrow)")
+    parser.add_argument("--index", type=str, default=None,
+                        help="Cached parquet index (requires pyarrow). Standalone "
+                             "when the parquet already contains every scene you "
+                             "want to browse; combine with --npz_list to also "
+                             "build / update the cache.")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     args = parser.parse_args()
 
-    if not args.npz_list and not args.replay_runs:
-        parser.error("supply --npz_list and/or --replay_runs")
+    if not args.npz_list and not args.replay_runs and not (args.index and Path(args.index).exists()):
+        parser.error("supply at least one scene source: --npz_list, --replay_runs, "
+                     "or an existing --index parquet.")
 
     print("Loading lanelet2 map...")
     renderer = MapRenderer(str(args.map_path))
 
     index: list[dict] = []
-    if args.npz_list:
+    # --index alone is a valid scene source when the parquet already holds
+    # the scenes we want to browse. With --npz_list we either load the
+    # parquet if it exists or build + save one; without --npz_list we
+    # load the parquet read-only.
+    if args.index and Path(args.index).exists() and not args.npz_list:
+        print(f"Loading cached index from {args.index}")
+        index.extend(load_index_parquet(args.index))
+    elif args.npz_list:
         if args.index and Path(args.index).exists():
             print(f"Loading cached index from {args.index}")
             index.extend(load_index_parquet(args.index))

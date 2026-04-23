@@ -300,18 +300,21 @@ ARROW_TOOL = {
     // Generic normalisation: auto-scale by the metric's observed [min, max]
     // and apply the polarity from _metric_polarity (Python side).
     // Adding a new reward component auto-appears here with no JS changes.
-    // 'abs_cl_score' is the sole exception — it reads |cl_score| rather
-    // than a separate field; if absent from ranges, fall back to cl_score
-    // and invert its polarity (low|cl|=safe, high|cl|=drift).
+    // 'abs_cl_score' / 'abs_pred_cl_score' are synthetic options — they
+    // read |cl_score| (or |pred_cl_score|) rather than a separate field
+    // since the signed cl_score has "safe" at 0 with both tails meaning
+    // drift. Magnitude view uses the auto-scaled range [0, max|·|] and
+    // inverts polarity (low |cl| = safe, high |cl| = drift).
     function _heatmapT(point, metric) {
         let v, range, polarity;
-        if (metric === 'abs_cl_score') {
-            const raw = point.cl_score;
+        if (metric === 'abs_cl_score' || metric === 'abs_pred_cl_score') {
+            const srcKey = metric === 'abs_cl_score' ? 'cl_score' : 'pred_cl_score';
+            const raw = point[srcKey];
             if (raw === null || raw === undefined) return null;
             v = Math.abs(raw);
-            range = heatmapRanges.cl_score;
+            range = heatmapRanges[srcKey];
             if (range) range = [0, Math.max(Math.abs(range[0]), Math.abs(range[1]))];
-            polarity = -1;  // higher |cl| = drift
+            polarity = -1;
         } else {
             v = point[metric];
             if (v === null || v === undefined) return null;

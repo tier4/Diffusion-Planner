@@ -1083,8 +1083,23 @@ def _score_step(
     d: dict[str, torch.Tensor] = {}
     for k in ("lanes", "route_lanes", "line_strings", "ego_shape",
               "neighbor_agents_future", "neighbor_agents_past", "goal_pose"):
-        if k in npz_data:
-            d[k] = _to_t(npz_data[k])
+        if k not in npz_data:
+            continue
+        arr = npz_data[k]
+        # dump_step_npz stores goal_pose as (x, y, yaw_rad) length 3, but
+        # compute_reward_batch's progress term only reads goal_pose when
+        # it has >= 4 elements (expects x, y, cos, sin) and silently
+        # falls back to zeros otherwise. That made `progress` and `total`
+        # in the metrics log misleading. Convert to cos/sin on the fly.
+        if k == "goal_pose":
+            arr_np = np.asarray(arr)
+            if arr_np.shape[-1] == 3:
+                yaw = arr_np[..., 2]
+                arr = np.stack(
+                    (arr_np[..., 0], arr_np[..., 1], np.cos(yaw), np.sin(yaw)),
+                    axis=-1,
+                )
+        d[k] = _to_t(arr)
 
     ego_shape_cl = torch.tensor(
         [spawn_config.ego_wheelbase, spawn_config.ego_length, spawn_config.ego_width],

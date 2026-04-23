@@ -292,12 +292,20 @@ def advance_scene_mpc(
         x0 = np.array([float(ax), float(ay), ah, speed], dtype=np.float64)
 
         new_pos, new_speed = tracker.track(x0, ref_world)
+        # Use None — not 0.0 — when a tracker lacks the telemetry
+        # attribute. _advance_agent treats None as "fall back to MA
+        # estimate"; 0.0 would be treated as a valid zero command and
+        # silently force accel/yaw_rate/steering to zero every step,
+        # defeating the whole point of the tracker-telemetry path.
+        last_accel = getattr(tracker, "last_accel", None)
+        last_yaw_rate = getattr(tracker, "last_yaw_rate", None)
+        last_steering = getattr(tracker, "last_steering", None)
         _advance_agent(
             agent, new_pos, dt,
             new_speed=float(new_speed),
-            new_accel=float(getattr(tracker, "last_accel", 0.0)),
-            new_yaw_rate=float(getattr(tracker, "last_yaw_rate", 0.0)),
-            new_steering=float(getattr(tracker, "last_steering", 0.0)),
+            new_accel=None if last_accel is None else float(last_accel),
+            new_yaw_rate=None if last_yaw_rate is None else float(last_yaw_rate),
+            new_steering=None if last_steering is None else float(last_steering),
         )
 
 
