@@ -544,6 +544,24 @@ class PerfectTracker:
         dy = ref_world[0, 1] - x0[1]
         v_target = min(math.hypot(dx, dy) / self.dt, self.max_speed)
 
+        # Resume-from-rest push (mirrors the MPCTracker branch). After a
+        # red-light stop the reference's first step sits right on top of
+        # the current ego pose, so v_target ≈ 0 and PerfectTracker would
+        # creep out of the intersection over many ticks. When the tail
+        # of the reference is meaningfully forward of x0, override
+        # v_target with the average speed needed to cover that reach
+        # over the available horizon, so the ego actually launches.
+        cur_speed = float(x0[3]) if len(x0) > 3 else 0.0
+        tail_idx = min(len(ref_world) - 1, 20)  # ~2 s horizon on dt=0.1
+        tail_reach = math.hypot(
+            ref_world[tail_idx, 0] - x0[0],
+            ref_world[tail_idx, 1] - x0[1],
+        )
+        if cur_speed < 0.1 and tail_reach > 0.5:
+            horizon_time = (tail_idx + 1) * self.dt
+            push_speed = tail_reach / horizon_time
+            v_target = max(v_target, min(self.max_speed, push_speed))
+
         # Euler integration using current heading and target velocity
         x, y, yaw = float(x0[0]), float(x0[1]), float(x0[2])
         x_new = x + v_target * math.cos(yaw) * self.dt

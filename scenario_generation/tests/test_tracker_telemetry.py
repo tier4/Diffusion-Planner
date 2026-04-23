@@ -169,6 +169,28 @@ class TestWarmStartReset:
 # ── PerfectTracker.last_* telemetry ────────────────────────────────────────
 
 
+class TestPerfectTrackerPush:
+    def test_perfect_tracker_push_on_resume_from_rest(self):
+        """When the ego is at v≈0 and the reference's horizon tail is
+        meaningfully forward, PerfectTracker should boost v_target past
+        the first-step displacement so the ego launches instead of
+        creeping."""
+        pt = PerfectTracker(dt=0.1, max_speed=20.0)
+        # Reference has a near-zero first step but meaningful tail reach.
+        ref = np.zeros((20, 3), dtype=np.float64)
+        ref[0, 0] = 0.01  # almost co-located with x0
+        for i in range(1, 20):
+            ref[i, 0] = (i + 1) * 0.5  # tail ends at 10 m
+        x0 = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        _, v_new = pt.track(x0, ref)
+        # Without push: v_target = 0.01 / 0.1 = 0.1 m/s → ego creeps.
+        # With push: v_target = tail_reach / horizon_time ≈ 10/2 = 5 m/s.
+        assert v_new > 1.0, (
+            f"expected push to override trivial first-step v_target, "
+            f"got v_new={v_new}"
+        )
+
+
 class TestPerfectTrackerTelemetry:
     def test_perfect_tracker_accel_from_delta(self):
         pt = PerfectTracker(dt=0.1)
