@@ -1020,6 +1020,7 @@ def _score_step(
     device: str,
     reward_cfg: RewardConfig,
     spawn_config: SpawnConfig,
+    prediction: np.ndarray | None = None,
 ) -> dict:
     """Score the current ego pose against the dumped map tensors.
 
@@ -1082,6 +1083,29 @@ def _score_step(
     out["collision"] = out.get("collision_step") is not None
     out["lane_gate"] = 0.0 if out.get("lane_crossing") else 1.0
     out["cl_score"] = float(cl_baselink[0].item())
+
+    # Prediction-trajectory scores. The model's 80-step output is already
+    # in ego frame (same frame as the dumped map tensors) so we can score
+    # it directly with no extra inference. Keys get prefixed with "pred_"
+    # so the heatmap / selector can toggle "here-and-now" vs
+    # "what-the-model-plans". Zero extra cost on the sim hot path.
+    if prediction is not None and prediction.shape[0] >= 2:
+        pred = torch.from_numpy(np.ascontiguousarray(prediction)).float().to(device)
+        pred = pred.unsqueeze(0)  # (1, T, 4)
+        br_p = compute_reward_batch(pred, d, reward_cfg)[0]
+        cl_p = compute_centerline_score_batch(
+            pred, ego_shape_cl, d,
+            usage_cap=reward_cfg.centerline_usage_cap,
+            usage_mode="baselink",
+        )
+        for k, v in asdict(br_p).items():
+            if isinstance(v, (bool, int, float)) or v is None:
+                out[f"pred_{k}"] = v
+            elif isinstance(v, torch.Tensor):
+                out[f"pred_{k}"] = float(v.item())
+        out["pred_collision"] = out.get("pred_collision_step") is not None
+        out["pred_lane_gate"] = 0.0 if out.get("pred_lane_crossing") else 1.0
+        out["pred_cl_score"] = float(cl_p[0].item())
     return out
 
 
@@ -1437,8 +1461,10 @@ def run_route_replay(
                 np.savez(npz_dir / f"replay_step_{step:04d}.npz", **data)
 
                 if reward_cfg is not None:
+                    ego_pred = agent_predictions.get(scene.ego_agent_id)
                     metrics_log.append(_score_step(
                         data, step, device, reward_cfg, spawn_config,
+                        prediction=ego_pred,
                     ))
 
             # Save PNG (concurrent with next step's compute).
