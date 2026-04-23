@@ -564,7 +564,17 @@ class SceneNPCManager:
                 route_speed_limit=route_sl,
                 route_has_speed_limit=route_hsl,
                 turn_indicators=np.zeros(history.shape[0], dtype=np.int32),
-                age_steps=0,
+                # Expose the full synthesized history to the tensor
+                # converter. generate_history() backward-traces the
+                # lanelet centerline at the spawn speed and produces a
+                # physically coherent 31-step past; masking it to 1 real
+                # frame (age_steps=0) made the model see "appeared from
+                # nothing" and emit erratic first predictions that MPC
+                # then tracked into out-of-lane swerves. Setting
+                # age_steps to the buffer length lets the synthesized
+                # history pass through so the model gets a plausible
+                # past to condition on.
+                age_steps=history.shape[0],
                 route_lanelet_ids=route_ll_ids,
             )
             touched = list(set(route_ll_ids) | set(history_ll_ids) | {ll_id})
