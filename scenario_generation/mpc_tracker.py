@@ -216,8 +216,21 @@ class MPCTracker:
         if n < self.horizon:
             ref[n:] = ref[n - 1]
 
-        # Initial guess — warm-start from shifted previous solution
-        if self._prev_knots is not None:
+        # Drop the warm start when we're idle at a stop but the reference
+        # wants meaningful forward motion. During a long decel the knots
+        # converge to all-zero controls; once the planner flips back to a
+        # forward prediction, the reference asks for a gentle
+        # "start-from-rest" ramp whose early-horizon position error is
+        # tiny. From the all-zero warm start the smoothness terms
+        # (w_jerk, w_steer_rate) dominate the gradient and L-BFGS-B can't
+        # escape the zero-knot basin — the ego ends up parked forever.
+        # Resetting the init lets the optimiser freely explore positive
+        # accelerations again, matching what a cold-started tracker does.
+        cur_speed = float(x0[3]) if len(x0) > 3 else 0.0
+        ref_reach = float(np.hypot(ref[-1, 0] - x0[0], ref[-1, 1] - x0[1]))
+        idle_but_ref_moves = cur_speed < 0.1 and ref_reach > 0.5
+
+        if self._prev_knots is not None and not idle_but_ref_moves:
             init = np.roll(self._prev_knots, -1, axis=0).copy()
             init[-1] = init[-2]
         else:
