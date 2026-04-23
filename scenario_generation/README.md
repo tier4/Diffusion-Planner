@@ -147,15 +147,15 @@ config) controls how the vehicle moves each step:
 
 | Mode | Description | Per-agent cost |
 |---|---|---|
-| `teleport` (default) | Snap to `pred[0]` each step. Original behaviour — fast but can produce aggressive driving (lane invasion, red-light running) because there are no kinematic constraints. | ~0 ms |
-| `perfect` | Euler integration with velocity from the reference trajectory and heading snap. Inspired by Autoware's `autoware_perfect_tracker`. Velocity limits how far the vehicle can move per step, preventing unphysical jumps. | ~0.01 ms |
-| `mpc` | Bicycle-model MPC via scipy L-BFGS-B. Optimises acceleration and steering over a 2 s lookahead horizon (20 steps, 5 control knots). Enforces kinematic constraints (max accel, steering limits, speed bounds). | ~13 ms |
+| `mpc` (**default**) | Bicycle-model MPC. numpy bicycle rollout + analytic reverse-mode gradient fed to scipy L-BFGS-B. Optimises acceleration and steering over a 2 s lookahead horizon (20 steps, 5 control knots). Enforces kinematic constraints (max accel, steering limits, speed bounds). When the ego is idle and the model's 8 s plan has meaningful forward intent, MPC time-compresses the full plan into its 2 s horizon and seeds the warm start with a resume-from-rest accel so the ego launches instead of staying parked. | ~5 ms |
+| `perfect` | Euler integration with velocity from the reference trajectory and heading snap. Inspired by Autoware's `autoware_perfect_tracker`. Velocity limits how far the vehicle can move per step, preventing unphysical jumps. Same full-plan avg speed resume-from-rest push as MPC. | ~0.01 ms |
+| `teleport` | Snap to `pred[0]` each step. Original behaviour — fast but can produce aggressive driving (lane invasion, red-light running) because there are no kinematic constraints. Useful only for bit-identical comparison with legacy `pred[0]` runs. | ~0 ms |
 
 Both `perfect` and `mpc` modes apply C++-style post-processing to the
 reference trajectory before tracking: velocity moving average (window=8) and
 force-stop logic (ported from the C++ `postprocessing_utils.cpp`).
 
-Example config enabling MPC:
+Example config pinning MPC explicitly (already the default):
 
 ```json
 {"advance_mode": "mpc", "seed": 42, "max_steps": 6000, "mpc_horizon_steps": 20, "mpc_n_knots": 5}

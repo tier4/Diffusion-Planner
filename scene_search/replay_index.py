@@ -75,7 +75,11 @@ def load_replay_run(run_dir: str | Path) -> list[dict]:
             "npz_path": str(npz_path),
             "x": float(rec["x"]),
             "y": float(rec["y"]),
-            "heading_deg": math.degrees(float(rec["heading"])),
+            # Normalise to [-180, 180) to match the convention in
+            # diffusion_planner/util_scripts/search_scenes.py — otherwise
+            # heading-range filters silently miss entries with raw
+            # headings outside that range.
+            "heading_deg": (math.degrees(float(rec["heading"])) + 180.0) % 360.0 - 180.0,
             "timestamp": float(step) * 0.1,  # dt=0.1 s per step
             "metrics": metrics_by_step.get(step, {}),
             "replay_run": str(run),

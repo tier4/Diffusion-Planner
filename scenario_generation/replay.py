@@ -209,11 +209,16 @@ class SpawnConfig:
     sg_filter_window: int = 11
     sg_filter_order: int = 3
     # Advance mode: how the vehicle moves each step.
-    #   "teleport"  — original behaviour, snap to pred[0] (default)
     #   "mpc"       — bicycle-model MPC tracking with 2 s lookahead
+    #                 (default; numpy bicycle rollout + analytic gradient
+    #                 via scipy L-BFGS-B; respects kinematic bounds on
+    #                 accel / steering / speed)
     #   "perfect"   — Euler integration with velocity from reference
-    #                  (matches Autoware autoware_perfect_tracker)
-    advance_mode: str = "teleport"
+    #                 (matches Autoware autoware_perfect_tracker)
+    #   "teleport"  — original behaviour, snap to pred[0] each step
+    #                 (no physics; use only when comparing against
+    #                 legacy pred[0]-based runs)
+    advance_mode: str = "mpc"
     mpc_horizon_steps: int = 20
     mpc_n_knots: int = 5
     # Ego vehicle dimensions. Override for non-default vehicles (e.g. larger
@@ -1038,11 +1043,15 @@ def _save_step_figure(
         int(ego.turn_indicators[-1]) if ego.turn_indicators is not None else 0
     )
     ti_label = _TI_NAMES.get(ti_cls, f"?{ti_cls}")
+    # Display steering in degrees with 1-decimal precision. Under 0.5°
+    # the old :+.0f° rounded to "+0°" and was mistakable for radians.
     steer_deg = math.degrees(ego.steering_angle)
+    yaw_rate_deg = math.degrees(ego.yaw_rate)
     title = (
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  agents={len(scene.agents)}"
         f"\nego  v={ego_speed:.1f} m/s ({ego_speed_kph:.0f} km/h)  "
-        f"steer={steer_deg:+.0f}°  turn={ti_label}  goal_d={goal_d:.1f} m"
+        f"steer={steer_deg:+.1f}°  yawrate={yaw_rate_deg:+.1f}°/s  "
+        f"turn={ti_label}  goal_d={goal_d:.1f} m"
     )
 
     if metrics is not None:

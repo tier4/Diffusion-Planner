@@ -510,10 +510,12 @@ def main():
                              "metrics_log.json instead of per-NPZ sidecars; "
                              "enables the drift heatmap overlay.")
     parser.add_argument("--index", type=str, default=None,
-                        help="Cached parquet index (requires pyarrow). Standalone "
-                             "when the parquet already contains every scene you "
-                             "want to browse; combine with --npz_list to also "
-                             "build / update the cache.")
+                        help="Cached parquet index (requires pyarrow). Valid as "
+                             "a standalone scene source when the parquet already "
+                             "contains every scene you want to browse. If the "
+                             "parquet exists it is loaded verbatim — passing "
+                             "--npz_list alongside an existing parquet does NOT "
+                             "refresh it; delete the parquet to force rebuild.")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     args = parser.parse_args()

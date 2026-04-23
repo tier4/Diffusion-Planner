@@ -12,8 +12,6 @@ is enabled.
 
 from __future__ import annotations
 
-import numpy as np
-
 from scene_search.constraints.base import BaseConstraint
 from scene_search.constraints.registry import register
 
@@ -41,8 +39,10 @@ class RewardThresholdConstraint(BaseConstraint):
                                    "min": 0.0, "max": 1.0, "step": 0.05},
         }
 
-    def filter(self, npz_path: str, npz_data: np.lib.npyio.NpzFile,
-               params: dict, entry: dict | None = None) -> bool:
+    def filter(self, npz_path: str, npz_data, params: dict,
+               entry: dict | None = None) -> bool:
+        # npz_data kept for BaseConstraint signature compatibility but
+        # unused here — reward_threshold reads from entry["metrics"] only.
         if entry is None:
             return False  # not a replay entry; drop
         metrics = entry.get("metrics") or {}
