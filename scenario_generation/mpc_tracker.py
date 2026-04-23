@@ -189,6 +189,133 @@ class MPCTracker:
 
         return float(J)
 
+    def _cost_and_grad(
+        self,
+        knot_flat: np.ndarray,
+        x0: np.ndarray,
+        ref: np.ndarray,
+    ) -> tuple[float, np.ndarray]:
+        """Scalar cost + analytic gradient w.r.t. knot_flat.
+
+        Reverse-mode through the bicycle rollout. The previous
+        ``_cost``-only path left scipy to compute a numerical Jacobian,
+        which on the profile was ~47 ``_cost`` evaluations per L-BFGS-B
+        step (one cold eval + one per control dim via forward
+        perturbation). With the exact gradient returned alongside the
+        cost the optimiser needs ~3-5 calls per step instead.
+
+        Verified against scipy's numerical gradient in the unit tests —
+        see ``test_mpc_tracker.py::TestMPCGradient``.
+        """
+        H = self.horizon
+        dt = self.dt
+        wb = self.wheelbase
+        v_max = self.max_speed
+        sk = self.steps_per_knot
+
+        knots = knot_flat.reshape(self.n_knots, 2)
+        controls = self._expand_knots(knots)
+
+        # ---- Forward rollout (same as _rollout, inlined so we can also
+        # cache per-step trig values used later in the backward sweep) ----
+        states = np.empty((H + 1, 4), dtype=np.float64)
+        states[0] = x0
+        clamped = np.zeros(H, dtype=bool)
+        for t in range(H):
+            x, y, yaw, v = states[t]
+            a = controls[t, 0]
+            delta = controls[t, 1]
+            states[t + 1, 0] = x + v * math.cos(yaw) * dt
+            states[t + 1, 1] = y + v * math.sin(yaw) * dt
+            states[t + 1, 2] = yaw + v * math.tan(delta) / wb * dt
+            v_new = v + a * dt
+            if v_new < 0.0:
+                clamped[t] = True
+                states[t + 1, 3] = 0.0
+            elif v_new > v_max:
+                clamped[t] = True
+                states[t + 1, 3] = v_max
+            else:
+                states[t + 1, 3] = v_new
+
+        pred = states[1:]
+        pos_err = pred[:, :2] - ref[:, :2]
+        dyaw = pred[:, 2] - ref[:, 2]
+
+        # Forward cost
+        J = self.w_pos * np.dot(pos_err.ravel(), pos_err.ravel())
+        J += self.w_head * np.sum(1.0 - np.cos(dyaw))
+        J += self.w_accel * np.dot(controls[:, 0], controls[:, 0])
+        J += self.w_steer * np.dot(controls[:, 1], controls[:, 1])
+        if self.n_knots > 1:
+            dk = np.diff(knots, axis=0)
+            J += self.w_jerk * np.dot(dk[:, 0], dk[:, 0])
+            J += self.w_steer_rate * np.dot(dk[:, 1], dk[:, 1])
+
+        # ---- Reverse sweep ----
+        # Direct contributions of the tracking cost to dJ/dstate[t] for t=1..H.
+        # (State[0] = x0 is a constant; tracking cost doesn't touch it.)
+        dJ_dstate_direct = np.zeros((H + 1, 4), dtype=np.float64)
+        dJ_dstate_direct[1:, 0] = 2.0 * self.w_pos * pos_err[:, 0]
+        dJ_dstate_direct[1:, 1] = 2.0 * self.w_pos * pos_err[:, 1]
+        dJ_dstate_direct[1:, 2] = self.w_head * np.sin(dyaw)
+
+        dJ_dctrl = np.zeros((H, 2), dtype=np.float64)
+        adj = dJ_dstate_direct[H].copy()  # adjoint at state[H]
+        for t in range(H - 1, -1, -1):
+            x, y, yaw, v = states[t]
+            a = controls[t, 0]
+            delta = controls[t, 1]
+            sin_yaw = math.sin(yaw)
+            cos_yaw = math.cos(yaw)
+            tan_d = math.tan(delta)
+            cos_d = math.cos(delta)
+            cos_d2 = cos_d * cos_d
+
+            ax, ay, ayaw, av = adj
+            dv_dv = 0.0 if clamped[t] else 1.0
+            dv_da = 0.0 if clamped[t] else dt
+
+            # df/dstate[t]^T @ adj
+            adj_x = ax
+            adj_y = ay
+            adj_yaw = (-v * sin_yaw * dt) * ax \
+                    + (v * cos_yaw * dt) * ay \
+                    + ayaw
+            adj_v = (cos_yaw * dt) * ax \
+                  + (sin_yaw * dt) * ay \
+                  + (tan_d / wb * dt) * ayaw \
+                  + dv_dv * av
+
+            # df/dctrl[t]^T @ adj — only a affects v, only delta affects yaw.
+            dJ_dctrl[t, 0] = dv_da * av
+            if cos_d2 > 1e-12:
+                dJ_dctrl[t, 1] = (v / (wb * cos_d2) * dt) * ayaw
+            # else leave 0 (delta at ±π/2 is excluded by bounds anyway).
+
+            adj = dJ_dstate_direct[t] + np.array([adj_x, adj_y, adj_yaw, adj_v])
+
+        # Direct control-cost contribution:
+        dJ_dctrl[:, 0] += 2.0 * self.w_accel * controls[:, 0]
+        dJ_dctrl[:, 1] += 2.0 * self.w_steer * controls[:, 1]
+
+        # Aggregate per-step control grads into per-knot grads. Each knot
+        # is held for ``sk`` steps of the rollout (_expand_knots uses
+        # ``np.repeat``), so dJ/dknot[i] is the sum of dJ/dctrl over that
+        # knot's span.
+        dJ_dknot = dJ_dctrl[: self.n_knots * sk].reshape(self.n_knots, sk, 2).sum(axis=1)
+
+        # Smoothness terms (closed-form on knot diffs).
+        if self.n_knots > 1:
+            dk0 = knots[1:, 0] - knots[:-1, 0]
+            dk1 = knots[1:, 1] - knots[:-1, 1]
+            dJ_dknot[:-1, 0] -= 2.0 * self.w_jerk * dk0
+            dJ_dknot[1:, 0] += 2.0 * self.w_jerk * dk0
+            dJ_dknot[:-1, 1] -= 2.0 * self.w_steer_rate * dk1
+            dJ_dknot[1:, 1] += 2.0 * self.w_steer_rate * dk1
+
+        return float(J), dJ_dknot.ravel()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -251,11 +378,12 @@ class MPCTracker:
         # trims cost evaluations without measurable trajectory drift
         # (see A/B on 300-step TL+NPCs run — trajectory_log identical).
         result = minimize(
-            self._cost,
+            self._cost_and_grad,
             init.ravel(),
             args=(np.asarray(x0, dtype=np.float64), ref),
             method="L-BFGS-B",
             bounds=self._bounds,
+            jac=True,  # analytic gradient returned alongside the cost
             options={"maxiter": 20, "ftol": 1e-4, "gtol": 1e-4},
         )
         optimal_knots = result.x.reshape(self.n_knots, 2)

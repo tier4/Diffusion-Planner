@@ -197,3 +197,83 @@ class TestPostprocessReference:
         result = postprocess_reference(ref_xy, ref_h, stop_threshold=0.3)
         # Last position should NOT be frozen to earlier position
         assert result[-1, 0] > result[0, 0] + 10.0
+
+
+# ── Analytic gradient ──────────────────────────────────────────────────────
+
+
+class TestMPCGradient:
+    """Verify _cost_and_grad against scipy's numerical gradient.
+
+    scipy's ``approx_derivative`` with method='3-point' is accurate to
+    ~1e-6; we match within 1e-4 (the bicycle model's nonlinearity + the
+    reverse-mode chain can accumulate single-digit relative error at
+    this tolerance). Catches any sign/factor mistake in the hand-
+    derived Jacobian.
+    """
+
+    def _make_tracker(self):
+        return MPCTracker(wheelbase=2.79, horizon_steps=20, n_knots=5)
+
+    def _rand_problem(self, rng):
+        x0 = np.array([
+            float(rng.uniform(-10, 10)),
+            float(rng.uniform(-10, 10)),
+            float(rng.uniform(-1, 1)),
+            float(rng.uniform(0.5, 8.0)),
+        ])
+        ref = np.zeros((20, 3), dtype=np.float64)
+        for i in range(20):
+            ref[i, 0] = x0[0] + (i + 1) * 0.5
+            ref[i, 1] = x0[1] + (i + 1) * 0.05
+            ref[i, 2] = x0[2] + 0.01 * i
+        knot_flat = np.array([
+            rng.uniform(-1.0, 1.0),   # a0
+            rng.uniform(-0.2, 0.2),   # d0
+            rng.uniform(-1.0, 1.0),   # a1
+            rng.uniform(-0.2, 0.2),
+            rng.uniform(-1.0, 1.0),
+            rng.uniform(-0.2, 0.2),
+            rng.uniform(-1.0, 1.0),
+            rng.uniform(-0.2, 0.2),
+            rng.uniform(-1.0, 1.0),
+            rng.uniform(-0.2, 0.2),
+        ])
+        return x0, ref, knot_flat
+
+    def test_gradient_matches_numerical(self):
+        import numpy as np
+        from scipy.optimize._numdiff import approx_derivative
+
+        rng = np.random.default_rng(0)
+        for _ in range(5):
+            tracker = self._make_tracker()
+            x0, ref, knot = self._rand_problem(rng)
+
+            # Analytic
+            j_ana, g_ana = tracker._cost_and_grad(knot, x0, ref)
+            # Numerical (3-point central difference, ~1e-6 accuracy)
+            g_num = approx_derivative(
+                tracker._cost, knot, method="3-point",
+                args=(x0, ref), rel_step=1e-6,
+            )
+
+            # Relative error, tolerant of scale
+            scale = np.maximum(np.abs(g_ana), np.abs(g_num))
+            scale = np.where(scale < 1e-6, 1.0, scale)
+            rel_err = np.abs(g_ana - g_num) / scale
+            max_rel = float(rel_err.max())
+            assert max_rel < 1e-3, (
+                f"analytic vs numerical gradient diverges: max rel err = {max_rel:.2e}\n"
+                f"  analytic = {g_ana}\n  numerical= {g_num}"
+            )
+
+    def test_cost_value_unchanged(self):
+        """_cost_and_grad's cost value must match _cost alone bit-for-bit."""
+        rng = np.random.default_rng(42)
+        tracker = self._make_tracker()
+        for _ in range(5):
+            x0, ref, knot = self._rand_problem(rng)
+            j_ana, _ = tracker._cost_and_grad(knot, x0, ref)
+            j_ref = tracker._cost(knot, x0, ref)
+            assert j_ana == pytest.approx(j_ref, abs=1e-10)

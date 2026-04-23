@@ -179,6 +179,12 @@ class SpawnConfig:
     npc_min_speed: float = 3.0
     npc_max_speed: float = 12.0
     npc_route_length_m: float = 120.0
+    # Reject an NPC spawn if the chosen route's goal lands within this
+    # distance (metres) of any lanelet centerline on the ego route. Keeps
+    # NPCs from being born with goals on points the ego will pass
+    # through, which can cause them to swerve across the ego's path at
+    # the last moment. Set to 0 to disable.
+    npc_goal_min_dist_from_ego_route: float = 50.0
     curvature_threshold: float = 0.3
     # Closest-approach window: when the ego has been within this radius of
     # the goal AND now has the goal *behind* it (negative dot product
@@ -350,6 +356,22 @@ class SceneNPCManager:
         # profile the full-map scan was 10 s of 114 s, and route progress
         # only ever advances through adjacent entries in the fixed route.
         self._last_ego_route_idx: int = 0
+        # Flat (N, 2) world-frame stack of every valid centerline point
+        # across the ego route. Used to reject NPC spawns whose goal
+        # lands within ``cfg.npc_goal_min_dist_from_ego_route`` metres of
+        # the ego's path, so spawned NPCs can't plan toward a point the
+        # ego will pass through. Empty when the route has no cached
+        # lanelets (which makes the distance check a no-op).
+        ego_route_pts: list[np.ndarray] = []
+        for ll_id in ego_route_ll_ids:
+            if ll_id in builder._cache:
+                cl = builder._cache[ll_id].raw_centerline
+                if cl.shape[0] > 0:
+                    ego_route_pts.append(cl.astype(np.float32))
+        if ego_route_pts:
+            self._ego_route_pts: np.ndarray = np.concatenate(ego_route_pts, axis=0)
+        else:
+            self._ego_route_pts = np.zeros((0, 2), dtype=np.float32)
 
     def register_known_lanelets(self, lanelet_ids: list[int]) -> None:
         self._known_lanelet_ids.update(lanelet_ids)
@@ -543,6 +565,17 @@ class SceneNPCManager:
             # Route for this neighbor.
             route_ll_ids = self._pick_route(ll_id)
             goal = self.builder._route_goal(route_ll_ids)
+
+            # Reject if the goal lands too close to the ego's path. A
+            # close goal biases the NPC's plan toward the ego's route,
+            # which in turn produces the late-moment cross-through
+            # swerves we saw around step 1700 of the TL+NPC replay.
+            min_dist = self.cfg.npc_goal_min_dist_from_ego_route
+            if min_dist > 0 and self._ego_route_pts.shape[0] > 0 and goal is not None:
+                dxy = self._ego_route_pts - goal[:2]
+                if float(np.hypot(dxy[:, 0], dxy[:, 1]).min()) < min_dist:
+                    continue
+
             route_lanes, route_sl, route_hsl = self.builder._route_to_33dim(route_ll_ids)
             if self.tl_controller is not None:
                 self.tl_controller.write_to_route_lanes(
