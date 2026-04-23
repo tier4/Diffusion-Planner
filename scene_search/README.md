@@ -14,6 +14,10 @@ source .venv/bin/activate
 
 ## Launch
 
+Two scene sources, freely combinable. At least one must be supplied.
+
+**Rosbag-extracted NPZs (sidecar-backed):**
+
 ```bash
 python -m scene_search.app \
   --map_path /path/to/lanelet2_map.osm \
@@ -21,12 +25,23 @@ python -m scene_search.app \
   [--port 7860]
 ```
 
-Example with shinagawa_odaiba map:
+**`scenario_generation.replay` output dirs (drift-metric heatmap enabled):**
+
 ```bash
 python -m scene_search.app \
-  --map_path ~/autoware_map/shinagawa_odaiba_stable/lanelet2_map.osm \
-  --npz_list /media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/xx1_grpo_v4_data/npz/
+  --map_path /path/to/lanelet2_map.osm \
+  --replay_runs /path/to/mpc_gen_run1/ /path/to/mpc_gen_run2/ \
+  [--port 7860]
 ```
+
+Replay mode reads `trajectory_log.json` + `metrics_log.json` from each run
+directory (no per-NPZ JSON sidecars are written by `dump_step_npz`). Every
+step becomes an index entry carrying the ego world pose **and** the live
+reward metrics — which light up the heatmap overlay and the
+`reward_threshold` constraint.
+
+`--npz_list` and `--replay_runs` can be combined in one session; replay
+scenes appear on the heatmap, sidecar scenes don't.
 
 ## Usage
 
@@ -44,6 +59,23 @@ python -m scene_search.app \
 6. Click **Keep Batch N** or **Keep All Batches** to add to kept collection
 7. Draw a new arrow elsewhere, search again, keep more batches
 8. Click **Save All Kept → JSON** to export
+
+### Heatmap (replay runs only)
+
+When the session was launched with `--replay_runs`, a **Heatmap** panel
+appears in the sidebar with an **Overlay metric** dropdown:
+
+| Option | What's coloured red (bad) vs blue (safe) |
+|---|---|
+| `off` | no overlay |
+| `rb_min_dist` | < ~0.5m ego-to-border = red, > 3m = blue |
+| `abs_cl_score` | `|cl|` ≥ 2 = red, ≈ 0 = blue |
+| `lane_gate` | gate=0 (cross) = red, gate=1 (in-lane) = blue |
+| `lane_near_frac` | near=1 = red, near=0 = blue |
+| `lane_wide_frac` | same idiom as near |
+
+Use it to spot hotspots, then Shift+drag over them to search, same as any
+other scene.
 
 ### Constraints
 Collapsible panels in the sidebar for filtering scenes:

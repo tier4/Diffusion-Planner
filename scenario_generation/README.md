@@ -129,29 +129,33 @@ python -m scenario_generation.tools.inspect_route my_route.pkl
 python -m scenario_generation.replay \
     --route my_route.pkl \
     --model_path /path/to/best_model.pth \
+    --config /path/to/spawn_config.json \
     --output_dir ./replay_out \
     [--map_path <override>] \
     [--steps 6000] \
     [--max_npcs 8] \
     [--spawn_probability 0.3] \
-    [--config scenario_generation/configs/replay_default.json] \
     [--seed 42]
 ```
+
+`--config` is required — replay refuses to run with `SpawnConfig` dataclass
+defaults because they don't match any production recipe. Author a JSON per
+run. `configs/replay_default.json` is a starting template, not a fallback.
 
 **Advance modes.** The `advance_mode` field in `SpawnConfig` (or the JSON
 config) controls how the vehicle moves each step:
 
 | Mode | Description | Per-agent cost |
 |---|---|---|
-| `teleport` (default) | Snap to `pred[0]` each step. Original behaviour — fast but can produce aggressive driving (lane invasion, red-light running) because there are no kinematic constraints. | ~0 ms |
-| `perfect` | Euler integration with velocity from the reference trajectory and heading snap. Inspired by Autoware's `autoware_perfect_tracker`. Velocity limits how far the vehicle can move per step, preventing unphysical jumps. | ~0.01 ms |
-| `mpc` | Bicycle-model MPC via scipy L-BFGS-B. Optimises acceleration and steering over a 2 s lookahead horizon (20 steps, 5 control knots). Enforces kinematic constraints (max accel, steering limits, speed bounds). | ~13 ms |
+| `mpc` (**default**) | Bicycle-model MPC. numpy bicycle rollout + analytic reverse-mode gradient fed to scipy L-BFGS-B. Optimises acceleration and steering over a 2 s lookahead horizon (20 steps, 5 control knots). Enforces kinematic constraints (max accel, steering limits, speed bounds). When the ego is idle and the model's 8 s plan has meaningful forward intent, MPC time-compresses the full plan into its 2 s horizon and seeds the warm start with a resume-from-rest accel so the ego launches instead of staying parked. | ~5 ms |
+| `perfect` | Euler integration with velocity from the reference trajectory and heading snap. Inspired by Autoware's `autoware_perfect_tracker`. Velocity limits how far the vehicle can move per step, preventing unphysical jumps. Same full-plan avg speed resume-from-rest push as MPC. | ~0.01 ms |
+| `teleport` | Snap to `pred[0]` each step. Original behaviour — fast but can produce aggressive driving (lane invasion, red-light running) because there are no kinematic constraints. Useful only for bit-identical comparison with legacy `pred[0]` runs. | ~0 ms |
 
 Both `perfect` and `mpc` modes apply C++-style post-processing to the
 reference trajectory before tracking: velocity moving average (window=8) and
 force-stop logic (ported from the C++ `postprocessing_utils.cpp`).
 
-Example config enabling MPC:
+Example config pinning MPC explicitly (already the default):
 
 ```json
 {"advance_mode": "mpc", "seed": 42, "max_steps": 6000, "mpc_horizon_steps": 20, "mpc_n_knots": 5}
@@ -210,6 +214,32 @@ perpendicular signals run in phase opposition. TL state is written into the
 5-dim one-hot block at lane-dim indices `[8:13]` of `scene.map_data.lanes`
 and into each agent's `route_lanes` tensor every step.
 
+Set `SpawnConfig.enable_traffic_lights = false` to skip TL construction and
+ticking entirely. Useful for MPC-gen data runs where TL-driven stops would
+bias the replay trajectory away from the steady-state driving the training
+set represents.
+
+**Live per-step metric logging.** When both `dump_npz_dir` and
+`reward_config_path` are set on the `SpawnConfig`, the replay loop scores
+the current ego pose against the dumped map tensors at every step it dumps
+an NPZ and writes `metrics_log.json` alongside `trajectory_log.json`. Each
+record carries `{step, lane_gate, lane_near_frac, lane_wide_frac, lane_cont,
+rb_min_dist, cl_score}`. Thresholds come from the training reward config, so
+the logged values speak the same semantics ranked-SFT uses.
+
+Each metrics record carries two blocks: the **instantaneous** fields
+(ego-at-current-pose scores) and a `pred_*` block scoring the model's
+80-step prediction against the same reward primitives — produced with
+zero extra inference cost because replay already computed the
+prediction to hand it to the tracker.
+
+Downstream tools:
+
+| Tool | Purpose |
+|---|---|
+| `rlvr/autoresearch/tools/select_from_metrics_log.py` | Flags drift-trigger steps (lane cross / lane-near / border-close / centerline-far) and keeps the N pre-trigger NPZs as training data — the frames where the model could still have recovered. Lookback stays within one NPZ directory so concatenating logs from multiple replay runs is safe. Reward thresholds for rb / cl are CLI flags, so one sim run can feed many threshold sweeps. |
+| `rlvr/autoresearch/tools/rescore_replay_run.py` | Regenerate `metrics_log.json` from an existing replay dump without re-running MPC. Two explicit modes: `--mode instant` scores only the current pose (no model needed, use when a reward component or threshold changed); `--mode full` also scores the model's prediction (`--model_path REQUIRED` — no silent fallback). Swap `--model_path` to a different checkpoint to evaluate how that model would have planned at the same observations — the instantaneous block stays identical, only `pred_*` differs, so loading two metrics logs into scene_search gives a side-by-side plan-quality comparison at matching world positions. Caveat: post-hoc eval is single-step open-loop; it does NOT reproduce what the alternative model would have done if rolled out closed-loop from the same seed — that still requires a fresh `scenario_generation.replay` run. |
+
 Relevant modules:
 
 | Path | Role |
@@ -220,7 +250,9 @@ Relevant modules:
 | `scenario_generation/simulate.py` | `advance_scene`, `advance_scene_mpc`, model inference helpers |
 | `scenario_generation/mpc_tracker.py` | `MPCTracker`, `PerfectTracker`, `postprocess_reference` |
 | `scenario_generation/traffic_light.py` | `TrafficLightController` + signal group state machines |
-| `scenario_generation/configs/replay_default.json` | Default `SpawnConfig` values |
+| `scenario_generation/configs/replay_default.json` | Reference `SpawnConfig` template — not loaded automatically, `--config` is required |
+| `rlvr/autoresearch/tools/select_from_metrics_log.py` | Reads `metrics_log.json` + NPZ dir, emits pre-trigger scene list for training |
+| `rlvr/autoresearch/tools/rescore_replay_run.py` | Regenerate `metrics_log.json` from an existing run (no re-sim); `--mode instant` (no model) or `--mode full` (with model) — swap models to compare plans at the same observations |
 | `scenario_generation/tools/inspect_route.py` | CLI to dump a saved route pickle |
 | `scenario_generation/gui/app.py` | GUI panels + live route overlay wiring |
 | `scene_search/map_canvas_js.py` | JS canvas: start / goal / waypoint arrows + route polyline |

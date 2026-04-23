@@ -88,6 +88,18 @@ from scenario_generation.traffic_light import TrafficLightController
 # replay time to suppress diffusion-sampler jitter. Importing rather than
 # duplicating so the two pipelines stay in sync.
 from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
+
+# Live per-step lane / border / centerline scoring. Imports are module-
+# level (unconditional); the scoring path itself only runs when both
+# dump_npz_dir and reward_config_path are set in SpawnConfig. Matches
+# the exact same primitives ranked-SFT uses for its reward, so the
+# metrics log here and the training run speak the same thresholds.
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+from rlvr.reward import (
+    RewardConfig,
+    compute_centerline_score_batch,
+    compute_reward_batch,
+)
 from scenario_generation.visualize import (
     _agent_color,
     draw_agent_box,
@@ -168,6 +180,12 @@ class SpawnConfig:
     npc_min_speed: float = 3.0
     npc_max_speed: float = 12.0
     npc_route_length_m: float = 120.0
+    # Reject an NPC spawn if the chosen route's goal lands within this
+    # distance (metres) of any lanelet centerline on the ego route. Keeps
+    # NPCs from being born with goals on points the ego will pass
+    # through, which can cause them to swerve across the ego's path at
+    # the last moment. Set to 0 to disable.
+    npc_goal_min_dist_from_ego_route: float = 50.0
     curvature_threshold: float = 0.3
     # Closest-approach window: when the ego has been within this radius of
     # the goal AND now has the goal *behind* it (negative dot product
@@ -192,11 +210,16 @@ class SpawnConfig:
     sg_filter_window: int = 11
     sg_filter_order: int = 3
     # Advance mode: how the vehicle moves each step.
-    #   "teleport"  — original behaviour, snap to pred[0] (default)
     #   "mpc"       — bicycle-model MPC tracking with 2 s lookahead
+    #                 (default; numpy bicycle rollout + analytic gradient
+    #                 via scipy L-BFGS-B; respects kinematic bounds on
+    #                 accel / steering / speed)
     #   "perfect"   — Euler integration with velocity from reference
-    #                  (matches Autoware autoware_perfect_tracker)
-    advance_mode: str = "teleport"
+    #                 (matches Autoware autoware_perfect_tracker)
+    #   "teleport"  — original behaviour, snap to pred[0] each step
+    #                 (no physics; use only when comparing against
+    #                 legacy pred[0]-based runs)
+    advance_mode: str = "mpc"
     mpc_horizon_steps: int = 20
     mpc_n_knots: int = 5
     # Ego vehicle dimensions. Override for non-default vehicles (e.g. larger
@@ -208,9 +231,22 @@ class SpawnConfig:
     # Model inference delay: number of initial timesteps kept fixed as prefix.
     # Matches the "delay" input tensor to the diffusion decoder.
     inference_delay: int = 0
+    # Skip traffic-light state propagation entirely. Useful for MPC-gen
+    # data runs where TL-driven speed drops would bias the replay ego
+    # toward stop-and-go behaviour we don't want in training.
+    enable_traffic_lights: bool = True
+    # Overlay the live metric values + closest road-border line on each
+    # per-step PNG. Requires dump_npz_dir + reward_config_path (so the
+    # metrics have actually been computed). Adds ~1 ms per frame.
+    overlay_metrics_on_png: bool = False
     # When set, per-step observations are dumped as training-style NPZs to
     # this directory. GT future is zeroed out (ranked-SFT generates its own).
     dump_npz_dir: str | None = None
+    # Path to a training-style (GRPO) config JSON. Required when dump_npz_dir
+    # is set: per-step lane / border / centerline metrics are logged using
+    # the same thresholds the training run will use, so downstream scene
+    # selection can re-threshold without re-running the sim.
+    reward_config_path: str | None = None
     # Initial ego speed for history synthesis (m/s). Default uses midpoint
     # of NPC speed band (7.5), but real data may be much slower (e.g. 1.75
     # on low-speed exit curves). Set to match the scenario being replayed.
@@ -256,6 +292,22 @@ class SpawnConfig:
         if self.ego_init_speed is not None and self.ego_init_speed < 0:
             raise ValueError(
                 f"ego_init_speed must be >= 0 when set; got {self.ego_init_speed}"
+            )
+        if self.dump_npz_dir and not self.reward_config_path:
+            raise ValueError(
+                "reward_config_path is required when dump_npz_dir is set; "
+                "per-step metrics need thresholds that match the training "
+                "reward function (no silent defaults)."
+            )
+        if self.overlay_metrics_on_png and (
+            not self.dump_npz_dir or not self.reward_config_path
+        ):
+            raise ValueError(
+                "overlay_metrics_on_png requires both dump_npz_dir and "
+                "reward_config_path; the overlay renders the live rb / cl "
+                "/ lane_gate values that only exist when the per-step "
+                "metrics log is being produced. Set both, or disable the "
+                "overlay."
             )
 
     @classmethod
@@ -314,20 +366,66 @@ class SceneNPCManager:
         # Updated every tick so NPC goals avoid untransited ego lanelets.
         self._ego_transited: set[int] = set()
         self._ego_untransited: set[int] = set(ego_route_ll_ids)
+        # Index into ``ego_route_ll_ids`` of the lanelet the ego snapped
+        # to last call. Used to restrict the ``snap_to_nearest_ll`` search
+        # to a tiny local window around the last known position — on the
+        # profile the full-map scan was 10 s of 114 s, and route progress
+        # only ever advances through adjacent entries in the fixed route.
+        self._last_ego_route_idx: int = 0
+        # Flat (N, 2) world-frame stack of every valid centerline point
+        # across the ego route. Used to reject NPC spawns whose goal
+        # lands within ``cfg.npc_goal_min_dist_from_ego_route`` metres of
+        # the ego's path, so spawned NPCs can't plan toward a point the
+        # ego will pass through. Empty when the route has no cached
+        # lanelets (which makes the distance check a no-op).
+        ego_route_pts: list[np.ndarray] = []
+        for ll_id in ego_route_ll_ids:
+            if ll_id in builder._cache:
+                cl = builder._cache[ll_id].raw_centerline
+                if cl.shape[0] > 0:
+                    ego_route_pts.append(cl.astype(np.float32))
+        if ego_route_pts:
+            self._ego_route_pts: np.ndarray = np.concatenate(ego_route_pts, axis=0)
+        else:
+            self._ego_route_pts = np.zeros((0, 2), dtype=np.float32)
 
     def register_known_lanelets(self, lanelet_ids: list[int]) -> None:
         self._known_lanelet_ids.update(lanelet_ids)
 
     def update_ego_progress(self, ego_xy: np.ndarray) -> None:
-        """Mark the ego's current lanelet (and all prior) as transited."""
-        ll = self.builder.snap_to_nearest_ll(ego_xy)
+        """Mark the ego's current lanelet (and all prior) as transited.
+
+        Previously called ``snap_to_nearest_ll(ego_xy)`` with no filter,
+        which scanned every drivable lanelet on the map (O(N), ~40 ms
+        per call on dense Shinagawa). The ego only transits through its
+        own route, so we restrict the snap to ego route lanelets within a
+        sliding window around the last known index. Full-route fallback
+        is preserved for the (rare) case the ego strays outside the
+        window — we accept a miss as a no-op, not a silent wrong snap.
+        """
+        route = self.ego_route_ll_ids
+        if not route:
+            return
+
+        # Local window: current index ± a few slots covers the typical
+        # "advance at most a handful of lanelets per update" regime.
+        lo = max(0, self._last_ego_route_idx - 2)
+        hi = min(len(route), self._last_ego_route_idx + 8)
+        local_ids = route[lo:hi]
+        ll = self.builder.snap_to_nearest_ll(ego_xy, candidate_ids=local_ids)
+        if ll is None:
+            # Window missed — fall back to the full route list.
+            ll = self.builder.snap_to_nearest_ll(ego_xy, candidate_ids=route)
         if ll is None or ll not in self._ego_untransited:
             return
-        # Mark everything up to and including this lanelet as transited.
-        for rid in self.ego_route_ll_ids:
+
+        # Mark everything up to and including this lanelet as transited;
+        # cache the new window index so the next call stays local.
+        for i, rid in enumerate(route):
             self._ego_transited.add(rid)
             self._ego_untransited.discard(rid)
             if rid == ll:
+                self._last_ego_route_idx = i
                 break
 
     def tick(self, scene: SceneContext) -> None:
@@ -483,6 +581,17 @@ class SceneNPCManager:
             # Route for this neighbor.
             route_ll_ids = self._pick_route(ll_id)
             goal = self.builder._route_goal(route_ll_ids)
+
+            # Reject if the goal lands too close to the ego's path. A
+            # close goal biases the NPC's plan toward the ego's route,
+            # which in turn produces the late-moment cross-through
+            # swerves we saw around step 1700 of the TL+NPC replay.
+            min_dist = self.cfg.npc_goal_min_dist_from_ego_route
+            if min_dist > 0 and self._ego_route_pts.shape[0] > 0 and goal is not None:
+                dxy = self._ego_route_pts - goal[:2]
+                if float(np.hypot(dxy[:, 0], dxy[:, 1]).min()) < min_dist:
+                    continue
+
             route_lanes, route_sl, route_hsl = self.builder._route_to_33dim(route_ll_ids)
             if self.tl_controller is not None:
                 self.tl_controller.write_to_route_lanes(
@@ -534,7 +643,17 @@ class SceneNPCManager:
                 route_speed_limit=route_sl,
                 route_has_speed_limit=route_hsl,
                 turn_indicators=np.zeros(history.shape[0], dtype=np.int32),
-                age_steps=0,
+                # Expose the full synthesized history to the tensor
+                # converter. generate_history() backward-traces the
+                # lanelet centerline at the spawn speed and produces a
+                # physically coherent 31-step past; masking it to 1 real
+                # frame (age_steps=0) made the model see "appeared from
+                # nothing" and emit erratic first predictions that MPC
+                # then tracked into out-of-lane swerves. Setting
+                # age_steps to the buffer length lets the synthesized
+                # history pass through so the model gets a plausible
+                # past to condition on.
+                age_steps=history.shape[0],
                 route_lanelet_ids=route_ll_ids,
             )
             touched = list(set(route_ll_ids) | set(history_ll_ids) | {ll_id})
@@ -698,6 +817,60 @@ def _draw_road_borders(ax, road_border_polylines, view_center=None, view_half_m=
     ))
 
 
+def _nearest_border_point(
+    probe_xy: np.ndarray,
+    border_polylines: list[np.ndarray] | None,
+) -> np.ndarray | None:
+    """Nearest point on any road-border polyline to ``probe_xy`` (world frame).
+
+    Pure geometry used only to position the viz pointer — the authoritative
+    body-to-border distance comes from ``rlvr.reward.compute_road_border_penalty``
+    via the per-step metrics log. Do not read the returned point's distance
+    as a metric.
+    """
+    if not border_polylines:
+        return None
+    best_pt: np.ndarray | None = None
+    best_d = float("inf")
+    px, py = float(probe_xy[0]), float(probe_xy[1])
+    for pl in border_polylines:
+        if pl is None or pl.shape[0] < 2:
+            continue
+        p1 = pl[:-1].astype(np.float64)
+        p2 = pl[1:].astype(np.float64)
+        seg = p2 - p1
+        seg_len2 = (seg * seg).sum(axis=1)
+        seg_len2[seg_len2 < 1e-9] = 1e-9
+        t = (((px - p1[:, 0]) * seg[:, 0] + (py - p1[:, 1]) * seg[:, 1])
+             / seg_len2)
+        t = np.clip(t, 0.0, 1.0)
+        closest = p1 + t[:, None] * seg
+        dists = np.hypot(closest[:, 0] - px, closest[:, 1] - py)
+        idx = int(dists.argmin())
+        if dists[idx] < best_d:
+            best_d = float(dists[idx])
+            best_pt = closest[idx]
+    return best_pt
+
+
+def _ego_obb_corners(
+    ex: float, ey: float, heading: float, length: float, width: float,
+) -> np.ndarray:
+    """Four OBB corners of the ego footprint in world frame (pure geometry).
+
+    Matches the rear-axle convention used by ``scenario_generation.visualize
+    .draw_agent_box``: baselink (ego x, y) sits rear_overhang behind the
+    back of the box.
+    """
+    rear_overhang = (length - length * 0.65) / 2
+    x0, x1 = -rear_overhang, length - rear_overhang
+    y0, y1 = -width / 2, width / 2
+    local = np.array([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=np.float64)
+    c, s = math.cos(heading), math.sin(heading)
+    R = np.array([[c, -s], [s, c]], dtype=np.float64)
+    return (R @ local.T).T + np.array([ex, ey], dtype=np.float64)
+
+
 def _save_step_figure(
     scene: SceneContext,
     agent_predictions: dict,
@@ -710,6 +883,7 @@ def _save_step_figure(
     route_lanelet_ids: list[int] | None = None,
     sim_time: float = 0.0,
     road_border_polylines: list[np.ndarray] | None = None,
+    metrics: dict | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
@@ -880,18 +1054,168 @@ def _save_step_figure(
         int(ego.turn_indicators[-1]) if ego.turn_indicators is not None else 0
     )
     ti_label = _TI_NAMES.get(ti_cls, f"?{ti_cls}")
+    # Display steering in degrees with 1-decimal precision. Under 0.5°
+    # the old :+.0f° rounded to "+0°" and was mistakable for radians.
     steer_deg = math.degrees(ego.steering_angle)
-    ax.set_title(
+    yaw_rate_deg = math.degrees(ego.yaw_rate)
+    title = (
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  agents={len(scene.agents)}"
         f"\nego  v={ego_speed:.1f} m/s ({ego_speed_kph:.0f} km/h)  "
-        f"steer={steer_deg:+.0f}°  turn={ti_label}  goal_d={goal_d:.1f} m",
-        fontsize=10,
+        f"steer={steer_deg:+.1f}°  yawrate={yaw_rate_deg:+.1f}°/s  "
+        f"turn={ti_label}  goal_d={goal_d:.1f} m"
     )
+
+    if metrics is not None:
+        gate_s = "IN" if metrics.get("lane_gate", 1.0) >= 0.5 else "CROSS"
+        title += (
+            f"\nrb_min={metrics.get('rb_min_dist', float('nan')):.2f} m  "
+            f"cl={metrics.get('cl_score', float('nan')):+.3f}  "
+            f"lane={gate_s}  "
+            f"lane_near={metrics.get('lane_near_frac', 0.0):.2f}"
+        )
+        # Position the viz pointer using the nearest border point to the
+        # ego rear axle, then anchor the line on the nearest OBB corner
+        # (body edge, not baselink) so the visual length roughly tracks
+        # the body-to-border distance shown in the label.
+        border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
+        if border_pt is not None:
+            corners = _ego_obb_corners(
+                ex, ey, ego.current_heading,
+                float(ego.length), float(ego.width),
+            )
+            d_corner = np.hypot(corners[:, 0] - border_pt[0],
+                                corners[:, 1] - border_pt[1])
+            start = corners[int(d_corner.argmin())]
+            body_d = metrics.get("rb_min_dist", float("nan"))
+            ax.plot([start[0], border_pt[0]], [start[1], border_pt[1]],
+                    "k--", linewidth=1.3, alpha=0.7, zorder=29)
+            ax.plot(border_pt[0], border_pt[1], "ko", markersize=6, zorder=30,
+                    markeredgecolor="white", markeredgewidth=0.8)
+            mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
+            ax.annotate(f"{body_d:.2f} m",
+                        xy=(mx, my), fontsize=8, color="black",
+                        ha="center", va="center",
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  facecolor="white", edgecolor="black",
+                                  alpha=0.7),
+                        zorder=31)
+
+    ax.set_title(title, fontsize=10)
     fig.tight_layout()
     _save_and_close(fig, output_path)
 
 
 @torch.no_grad()
+def _score_step(
+    npz_data: dict[str, np.ndarray],
+    step: int,
+    device: str,
+    reward_cfg: RewardConfig,
+    spawn_config: SpawnConfig,
+    prediction: np.ndarray | None = None,
+) -> dict:
+    """Score the current ego pose against the dumped map tensors.
+
+    The dumped NPZ has ``ego_agent_future`` zeroed, so the "trajectory" here
+    is a 1-step origin placeholder (t=0 + t=1 both at origin). The penalty
+    primitives skip t=0 for near/wide fractions; the duplicate t=1 slot
+    gives them one timestep to evaluate, representing the current pose.
+
+    Everything dispatches to ``compute_reward_batch`` so that adding a new
+    field to ``rlvr.reward.RewardBreakdown`` automatically flows into the
+    log — no per-field mapping here to maintain. The one extra is an
+    explicit baselink-mode centerline score (the ``RewardBreakdown``
+    already holds a centerline term, but whether it used body or baselink
+    depends on the training config; the heatmap wants the rear-axle
+    version).
+    """
+    def _to_t(arr: np.ndarray) -> torch.Tensor:
+        t = torch.from_numpy(np.asarray(arr)).float().to(device)
+        return t.unsqueeze(0) if t.dim() == 3 else t
+
+    d: dict[str, torch.Tensor] = {}
+    for k in ("lanes", "route_lanes", "line_strings", "ego_shape",
+              "neighbor_agents_future", "neighbor_agents_past", "goal_pose"):
+        if k not in npz_data:
+            continue
+        arr = npz_data[k]
+        # dump_step_npz stores goal_pose as (x, y, yaw_rad) length 3, but
+        # compute_reward_batch's progress term only reads goal_pose when
+        # it has >= 4 elements (expects x, y, cos, sin) and silently
+        # falls back to zeros otherwise. That made `progress` and `total`
+        # in the metrics log misleading. Convert to cos/sin on the fly.
+        if k == "goal_pose":
+            arr_np = np.asarray(arr)
+            if arr_np.shape[-1] == 3:
+                yaw = arr_np[..., 2]
+                arr = np.stack(
+                    (arr_np[..., 0], arr_np[..., 1], np.cos(yaw), np.sin(yaw)),
+                    axis=-1,
+                )
+        d[k] = _to_t(arr)
+
+    ego_shape_cl = torch.tensor(
+        [spawn_config.ego_wheelbase, spawn_config.ego_length, spawn_config.ego_width],
+        device=device, dtype=torch.float32,
+    )
+
+    traj = torch.zeros(1, 2, 4, device=device)
+    traj[0, :, 2] = 1.0
+
+    breakdowns = compute_reward_batch(traj, d, reward_cfg)
+    br = breakdowns[0]
+
+    cl_baselink = compute_centerline_score_batch(
+        traj, ego_shape_cl, d,
+        usage_cap=reward_cfg.centerline_usage_cap,
+        usage_mode="baselink",
+    )
+
+    # Dump every RewardBreakdown field by iterating the dataclass, so
+    # adding a new component only requires touching rlvr.reward — this
+    # function stays untouched.
+    out: dict = {"step": step}
+    for k, v in asdict(br).items():
+        if isinstance(v, (bool, int, float)) or v is None:
+            out[k] = v
+        elif isinstance(v, torch.Tensor):
+            out[k] = float(v.item())
+        # Anything else (should not happen for RewardBreakdown) gets dropped
+        # rather than breaking JSON serialization.
+
+    # Derived convenience fields not in RewardBreakdown:
+    #   collision: bool from collision_step
+    #   lane_gate: 0/1 alias of (not lane_crossing) — selector reads it
+    #   cl_score:  raw rear-axle centerline magnitude
+    out["collision"] = out.get("collision_step") is not None
+    out["lane_gate"] = 0.0 if out.get("lane_crossing") else 1.0
+    out["cl_score"] = float(cl_baselink[0].item())
+
+    # Prediction-trajectory scores. The model's 80-step output is already
+    # in ego frame (same frame as the dumped map tensors) so we can score
+    # it directly with no extra inference. Keys get prefixed with "pred_"
+    # so the heatmap / selector can toggle "here-and-now" vs
+    # "what-the-model-plans". Zero extra cost on the sim hot path.
+    if prediction is not None and prediction.shape[0] >= 2:
+        pred = torch.from_numpy(np.ascontiguousarray(prediction)).float().to(device)
+        pred = pred.unsqueeze(0)  # (1, T, 4)
+        br_p = compute_reward_batch(pred, d, reward_cfg)[0]
+        cl_p = compute_centerline_score_batch(
+            pred, ego_shape_cl, d,
+            usage_cap=reward_cfg.centerline_usage_cap,
+            usage_mode="baselink",
+        )
+        for k, v in asdict(br_p).items():
+            if isinstance(v, (bool, int, float)) or v is None:
+                out[f"pred_{k}"] = v
+            elif isinstance(v, torch.Tensor):
+                out[f"pred_{k}"] = float(v.item())
+        out["pred_collision"] = out.get("pred_collision_step") is not None
+        out["pred_lane_gate"] = 0.0 if out.get("pred_lane_crossing") else 1.0
+        out["pred_cl_score"] = float(cl_p[0].item())
+    return out
+
+
 def run_route_replay(
     model,
     model_args,
@@ -1065,14 +1389,16 @@ def run_route_replay(
     ]
 
     # --- Traffic light controller. ---
-    tl_controller = TrafficLightController(
-        builder, ego_route_ids, seed=spawn_config.seed,
-    )
-    # Apply initial TL state to the freshly-built map_data AND ego route_lanes.
-    tl_controller.tick(scene, 0.0, builder._last_map_data_ids, ego_xy=snapped_xy)
-    tl_controller.write_to_route_lanes(
-        scene.ego_agent.route_lanes, initial_route_window, 0.0,
-    )
+    tl_controller: TrafficLightController | None = None
+    if spawn_config.enable_traffic_lights:
+        tl_controller = TrafficLightController(
+            builder, ego_route_ids, seed=spawn_config.seed,
+        )
+        # Apply initial TL state to the freshly-built map_data AND ego route_lanes.
+        tl_controller.tick(scene, 0.0, builder._last_map_data_ids, ego_xy=snapped_xy)
+        tl_controller.write_to_route_lanes(
+            scene.ego_agent.route_lanes, initial_route_window, 0.0,
+        )
 
     # --- NPC manager. ---
     npc_manager = SceneNPCManager(builder, ego_route_ids, spawn_config, tl_controller)
@@ -1086,6 +1412,14 @@ def run_route_replay(
 
     # Per-step trajectory log for post-hoc evaluation.
     trajectory_log: list[dict] = []
+
+    # Live lane / border / centerline scoring, logged per step when NPZ dump
+    # + reward_config_path are both set. The downstream scene selector reads
+    # this log; no offline NPZ re-scoring needed.
+    metrics_log: list[dict] = []
+    reward_cfg: RewardConfig | None = None
+    if spawn_config.dump_npz_dir and spawn_config.reward_config_path:
+        reward_cfg = load_reward_config(spawn_config.reward_config_path)
 
     # Tracker state (lazy-init per agent inside advance_scene_mpc).
     _use_tracker = spawn_config.advance_mode in ("mpc", "perfect")
@@ -1144,12 +1478,19 @@ def run_route_replay(
 
             # TL state + route_lanes refresh EVERY step so the model
             # always sees the current signal phase. The TL one-hot is
-            # written directly into scene.map_data.lanes which the
-            # map_cache references (shared underlying array).
-            tl_controller.tick(
-                scene, step * 0.1, builder._last_map_data_ids,
-                ego_xy=ego_xy,
-            )
+            # written into scene.map_data.lanes AND synced into
+            # map_cache — the cache snapshots lanes at build time (via
+            # ``.astype(np.float32)`` which forces a copy), so without
+            # the sync the ``lanes`` channel the model reads from the
+            # cache stays at TL_NONE forever even while route_lanes
+            # carries the live TL colour. Missing this sync makes the
+            # ego ignore red lights at intersections.
+            if tl_controller is not None:
+                tl_controller.tick(
+                    scene, step * 0.1, builder._last_map_data_ids,
+                    ego_xy=ego_xy,
+                )
+                map_cache.sync_tl_state(scene.map_data)
 
             # Refresh route_lanes for ALL agents (ego + NPCs) so the
             # sliding window stays centered on each agent's current
@@ -1164,7 +1505,8 @@ def run_route_replay(
                 )
                 if fwd:
                     rl, rsl, rhsl = builder._route_to_33dim(fwd)
-                    tl_controller.write_to_route_lanes(rl, fwd, step * 0.1)
+                    if tl_controller is not None:
+                        tl_controller.write_to_route_lanes(rl, fwd, step * 0.1)
                     a.route_lanes = rl
                     a.route_speed_limit = rsl
                     a.route_has_speed_limit = rhsl
@@ -1225,14 +1567,27 @@ def run_route_replay(
                 )
                 np.savez(npz_dir / f"replay_step_{step:04d}.npz", **data)
 
+                if reward_cfg is not None:
+                    ego_pred = agent_predictions.get(scene.ego_agent_id)
+                    metrics_log.append(_score_step(
+                        data, step, device, reward_cfg, spawn_config,
+                        prediction=ego_pred,
+                    ))
+
             # Save PNG (concurrent with next step's compute).
             out_path = output_dir / f"step_{step:04d}.png"
+            overlay_metrics = (
+                metrics_log[-1]
+                if spawn_config.overlay_metrics_on_png and metrics_log
+                else None
+            )
             pending_saves.append(save_pool.submit(
                 _save_step_figure,
                 deepcopy(scene), agent_predictions, out_path,
                 step, spawn_config.max_steps, route_polylines,
                 _VIEW_HALF_M, tl_controller, _route_vis_ll_ids,
                 step * 0.1, road_border_polylines,
+                overlay_metrics,
             ))
 
             # Drain finished saves so memory doesn't balloon. Call
@@ -1340,13 +1695,41 @@ def run_route_replay(
     with open(traj_log_path, "w") as f:
         json.dump(trajectory_log, f)
 
-    return {
+    # Persist the effective SpawnConfig alongside the dumps so downstream
+    # tools (notably rlvr.autoresearch.tools.rescore_replay_run) can reload
+    # ego dimensions / inference_delay / reward_config_path without the
+    # user having to track the original JSON separately.
+    spawn_cfg_path = output_dir / "spawn_config.json"
+    spawn_config.to_json(spawn_cfg_path)
+
+    metrics_log_path: Path | None = None
+    if metrics_log:
+        metrics_log_path = output_dir / "metrics_log.json"
+        # Record the config source so the downstream selector knows which
+        # thresholds the stored lane_near_frac etc. were computed against.
+        payload = {
+            "reward_config_path": spawn_config.reward_config_path,
+            "dump_npz_dir": spawn_config.dump_npz_dir,
+            "ego_shape": [
+                spawn_config.ego_wheelbase,
+                spawn_config.ego_length,
+                spawn_config.ego_width,
+            ],
+            "steps": metrics_log,
+        }
+        with open(metrics_log_path, "w") as f:
+            json.dump(payload, f)
+
+    out = {
         "final_step": final_step,
         "goal_reached": goal_reached,
         "reason": reason,
         "n_npc_spawned": n_npc_spawned,
         "trajectory_log_path": str(traj_log_path),
     }
+    if metrics_log_path is not None:
+        out["metrics_log_path"] = str(metrics_log_path)
+    return out
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -1370,8 +1753,11 @@ def main() -> None:
                         help="Override hard cap on concurrent neighbors")
     parser.add_argument("--spawn_probability", type=float, default=None,
                         help="Override spawn probability per spawn tick")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="JSON SpawnConfig overrides")
+    parser.add_argument("--config", type=Path, required=True,
+                        help="Path to a SpawnConfig JSON. Required — replay "
+                             "refuses to run with dataclass defaults because "
+                             "they don't match any production recipe. Author "
+                             "a config per run.")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
@@ -1381,10 +1767,7 @@ def main() -> None:
     print(f"Loading builder from {map_path}")
     builder = LaneletSceneBuilder(map_path)
 
-    if args.config is not None:
-        cfg = SpawnConfig.from_json(args.config)
-    else:
-        cfg = SpawnConfig()
+    cfg = SpawnConfig.from_json(args.config)
     if args.steps is not None:
         cfg.max_steps = args.steps
     if args.max_npcs is not None:
