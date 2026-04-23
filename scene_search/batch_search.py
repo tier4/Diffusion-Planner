@@ -135,10 +135,13 @@ def find_batches(
     if not filtered:
         return []
 
-    # 3. Apply constraint filters. Pass the index entry through so
-    #    metric-based constraints (reward_threshold) can read precomputed
-    #    fields without re-reading the NPZ; legacy NPZ-backed constraints
-    #    just ignore the entry kwarg.
+    # 3. Apply constraint filters. Every entry still triggers an NPZ load
+    #    because legacy constraints (neighbor_count, speed_range,
+    #    travel_distance) read npz_data; the entry dict is passed through
+    #    for metric-based constraints (reward_threshold) that read
+    #    precomputed fields instead of deriving them from the NPZ.
+    #    Skipping the NPZ load when only entry-only constraints are active
+    #    is a follow-up (would need a capability flag on the constraint).
     if constraint_filters:
         passing = []
         for entry in filtered:

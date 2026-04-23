@@ -1013,7 +1013,6 @@ def _save_step_figure(
 
 
 @torch.no_grad()
-@torch.no_grad()
 def _score_step(
     npz_data: dict[str, np.ndarray],
     step: int,
@@ -1587,6 +1586,13 @@ def run_route_replay(
     traj_log_path = output_dir / "trajectory_log.json"
     with open(traj_log_path, "w") as f:
         json.dump(trajectory_log, f)
+
+    # Persist the effective SpawnConfig alongside the dumps so downstream
+    # tools (notably rlvr.autoresearch.tools.rescore_replay_run) can reload
+    # ego dimensions / inference_delay / reward_config_path without the
+    # user having to track the original JSON separately.
+    spawn_cfg_path = output_dir / "spawn_config.json"
+    spawn_config.to_json(spawn_cfg_path)
 
     metrics_log_path: Path | None = None
     if metrics_log:

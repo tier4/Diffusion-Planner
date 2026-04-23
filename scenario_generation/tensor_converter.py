@@ -451,7 +451,14 @@ class MapTensorCache:
         """
         n = min(map_data.lanes.shape[0], self._lanes.shape[0])
         if n > 0:
-            self._lanes[:n, :, 8:13] = map_data.lanes[:n, :, 8:13].astype(np.float32)
+            # ``np.copyto`` with ``same_kind`` avoids the fresh allocation that
+            # ``.astype(np.float32)`` forces every tick — map_data.lanes is
+            # already float32 in the production path, so this is a pure memcpy.
+            np.copyto(
+                self._lanes[:n, :, 8:13],
+                map_data.lanes[:n, :, 8:13],
+                casting="same_kind",
+            )
 
     def get_lanes_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
         """Return lanes in ego frame: [1, NUM_LANES, 20, 33]."""

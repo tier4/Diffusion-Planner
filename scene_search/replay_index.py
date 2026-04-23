@@ -36,7 +36,7 @@ def load_replay_run(run_dir: str | Path) -> list[dict]:
         run_dir: Output directory of ``scenario_generation.replay``. Must
             contain ``trajectory_log.json``; ``metrics_log.json`` and
             ``npz/replay_step_NNNN.npz`` are optional (steps with missing
-            NPZs are dropped, missing metrics default to None).
+            NPZs are dropped, missing metrics default to an empty dict).
 
     Returns:
         List of per-step index entries.
