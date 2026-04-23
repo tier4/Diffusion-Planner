@@ -344,20 +344,50 @@ class SceneNPCManager:
         # Updated every tick so NPC goals avoid untransited ego lanelets.
         self._ego_transited: set[int] = set()
         self._ego_untransited: set[int] = set(ego_route_ll_ids)
+        # Index into ``ego_route_ll_ids`` of the lanelet the ego snapped
+        # to last call. Used to restrict the ``snap_to_nearest_ll`` search
+        # to a tiny local window around the last known position — on the
+        # profile the full-map scan was 10 s of 114 s, and route progress
+        # only ever advances through adjacent entries in the fixed route.
+        self._last_ego_route_idx: int = 0
 
     def register_known_lanelets(self, lanelet_ids: list[int]) -> None:
         self._known_lanelet_ids.update(lanelet_ids)
 
     def update_ego_progress(self, ego_xy: np.ndarray) -> None:
-        """Mark the ego's current lanelet (and all prior) as transited."""
-        ll = self.builder.snap_to_nearest_ll(ego_xy)
+        """Mark the ego's current lanelet (and all prior) as transited.
+
+        Previously called ``snap_to_nearest_ll(ego_xy)`` with no filter,
+        which scanned every drivable lanelet on the map (O(N), ~40 ms
+        per call on dense Shinagawa). The ego only transits through its
+        own route, so we restrict the snap to ego route lanelets within a
+        sliding window around the last known index. Full-route fallback
+        is preserved for the (rare) case the ego strays outside the
+        window — we accept a miss as a no-op, not a silent wrong snap.
+        """
+        route = self.ego_route_ll_ids
+        if not route:
+            return
+
+        # Local window: current index ± a few slots covers the typical
+        # "advance at most a handful of lanelets per update" regime.
+        lo = max(0, self._last_ego_route_idx - 2)
+        hi = min(len(route), self._last_ego_route_idx + 8)
+        local_ids = route[lo:hi]
+        ll = self.builder.snap_to_nearest_ll(ego_xy, candidate_ids=local_ids)
+        if ll is None:
+            # Window missed — fall back to the full route list.
+            ll = self.builder.snap_to_nearest_ll(ego_xy, candidate_ids=route)
         if ll is None or ll not in self._ego_untransited:
             return
-        # Mark everything up to and including this lanelet as transited.
-        for rid in self.ego_route_ll_ids:
+
+        # Mark everything up to and including this lanelet as transited;
+        # cache the new window index so the next call stays local.
+        for i, rid in enumerate(route):
             self._ego_transited.add(rid)
             self._ego_untransited.discard(rid)
             if rid == ll:
+                self._last_ego_route_idx = i
                 break
 
     def tick(self, scene: SceneContext) -> None:
