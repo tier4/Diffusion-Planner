@@ -367,6 +367,23 @@ class MPCTracker:
             init = np.empty_like(self._prev_knots)
             init[:-1] = self._prev_knots[1:]
             init[-1] = self._prev_knots[-1]
+        elif idle_but_ref_moves:
+            # Seed the warm start with an accel guess derived from the
+            # reference's desired terminal speed instead of all-zeros.
+            # Resetting alone lets the optimiser escape the zero-knot
+            # basin, but from init=0 it still has to discover positive
+            # accel via gradient descent over several L-BFGS-B steps —
+            # in closed loop that shows up as the ego taking a few sim
+            # ticks to actually start moving after a red.
+            # Give it a direct "push":
+            #   a_guess = (ref_reach / horizon_time) / horizon_time
+            # = avg accel needed to cover ref_reach from rest over the
+            # horizon. Clipped to the tracker's accel bounds.
+            horizon_time = self.horizon * self.dt
+            a_guess = ref_reach / (horizon_time * horizon_time)
+            a_guess = max(self.min_accel, min(self.max_accel, a_guess))
+            init = np.zeros((self.n_knots, 2), dtype=np.float64)
+            init[:, 0] = a_guess
         else:
             init = np.zeros((self.n_knots, 2), dtype=np.float64)
 

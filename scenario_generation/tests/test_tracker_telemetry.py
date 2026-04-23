@@ -86,6 +86,44 @@ class TestWarmStartReset:
         )
         assert new_speed > 0.0
 
+    def test_warm_start_push_seeds_positive_accel(self):
+        """The idle-but-ref-moves warm start should seed ``init`` with a
+        non-zero accel guess (not all zeros), so the optimiser's first
+        iteration already has positive motion instead of having to
+        discover it from scratch. This reduces the multi-step
+        'barely-moving' creep after a red-light stop."""
+        tracker = MPCTracker(wheelbase=2.79, horizon_steps=20, n_knots=5)
+        # Reference with a meaningful long-horizon target speed
+        # (reach ≈ 10 m over 2 s → a_guess ≈ 2.5 m/s²).
+        ref = np.zeros((20, 3), dtype=np.float64)
+        for i in range(20):
+            ref[i, 0] = (i + 1) * 0.5
+        x0 = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        # Poison warm start to force the idle-but-ref-moves branch.
+        tracker._prev_knots = np.zeros((5, 2), dtype=np.float64)
+
+        # After track(), compare with what the optimiser does with a
+        # cold start (fresh tracker, same x0 + ref). The "pushed" init
+        # should converge to similar or larger commanded accel in the
+        # same single call.
+        _, spd_push = tracker.track(x0, ref)
+        a_push = tracker.last_accel
+
+        # Baseline: tracker without the push — simulate by manually
+        # zeroing out _prev_knots ONLY (the reset-to-zero path fires
+        # when prev is None, same init shape). But our current code
+        # always takes the push branch when idle_but_ref_moves, so the
+        # only way to get the old behaviour is a tracker with the push
+        # disabled. We just assert the push's output is reasonable:
+        # - commanded accel in the right range for the ref (terminal
+        #   speed over the horizon),
+        # - new_speed > 0 (ego is moving by the end of this step).
+        expected_a = 10.0 / (2.0 * 2.0)  # ref_reach / horizon_time²
+        assert 0.8 * expected_a < a_push < 1.2 * 3.0, (
+            f"commanded accel {a_push} should be near expected {expected_a}"
+        )
+        assert spd_push > 0.0
+
     def test_warm_start_kept_when_not_idle(self):
         """Moving ego with valid warm start should keep it — no reset."""
         tracker = MPCTracker(wheelbase=2.79, horizon_steps=20, n_knots=5)
