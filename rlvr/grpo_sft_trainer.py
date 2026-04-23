@@ -620,6 +620,9 @@ def train_epoch_ranked_sft(
     scene_improvements = []  # improvement value per scene for advantage weighting
     _gt_fallback_count = 0  # scenes where best-of-K < GT reward by margin
     _gt_scored_count = 0   # scenes where GT was scored
+    # Per-scene record of GT vs best-of-K — let us inspect which scenes are
+    # "hard" (GT clean but all K fail) and tune gt_fallback_margin.
+    _gt_scene_log: list[dict] = []
 
     # Rank analytics: track which generation config wins per scene
     from pathlib import Path
@@ -692,6 +695,21 @@ def train_epoch_ranked_sft(
                 if best_reward < gt_reward - _gt_margin:
                     _used_gt_fallback = True
                     _gt_fallback_count += 1
+                # Always record per-scene comparison so we can analyze hard scenes
+                from pathlib import Path as _P
+                _gt_scene_log.append({
+                    "scene": _P(valid_paths[i]).stem,
+                    "gt_reward": gt_reward,
+                    "best_reward": float(best_reward),
+                    "det_reward": float(det_reward),
+                    "gap_best_minus_gt": float(best_reward - gt_reward),
+                    "best_idx": int(best_idx),
+                    "fallback": bool(_used_gt_fallback),
+                    # Gate / crossing flags from the GT-trajectory reward breakdown
+                    "gt_rb_crossing": bool(_gt_rewards[0].rb_crossing),
+                    "gt_lane_crossing": bool(_gt_rewards[0].lane_crossing),
+                    "gt_collision_step": _gt_rewards[0].collision_step,
+                })
 
         # Selective: skip scene if improvement is below threshold
         improvement = best_reward - det_reward
@@ -768,6 +786,27 @@ def train_epoch_ranked_sft(
         _gt_mode_str = getattr(config, "gt_fallback_mode", "none")
         print(f"  GT fallback ({_gt_mode_str}): {_gt_fallback_count}/{_gt_scored_count} scenes "
               f"had best-of-{K} < GT reward (margin={getattr(config, 'gt_fallback_margin', 0.0):.2f})")
+        # Print gap histogram — useful for picking a margin
+        if _gt_scene_log:
+            import numpy as _np
+            gaps = _np.array([r["gap_best_minus_gt"] for r in _gt_scene_log])
+            print(f"  best-GT gap: min={gaps.min():.1f} p10={_np.percentile(gaps, 10):.1f} "
+                  f"p50={_np.percentile(gaps, 50):.1f} p90={_np.percentile(gaps, 90):.1f} "
+                  f"max={gaps.max():.1f}")
+            for thr in (0.0, 2.0, 5.0, 10.0, 20.0):
+                n_below = int((gaps < -thr).sum())
+                print(f"    scenes with best < GT - {thr:>5.1f} : {n_below}/{len(gaps)} "
+                      f"({100*n_below/len(gaps):.1f}%)")
+            # Save per-scene log (sorted worst-gap-first) for offline analysis
+            if run_dir is not None:
+                import json as _json
+                log_path = Path(run_dir) / f"gt_fallback_epoch_{epoch:03d}.json"
+                sorted_log = sorted(_gt_scene_log, key=lambda r: r["gap_best_minus_gt"])
+                with open(log_path, "w") as _lf:
+                    _json.dump({"epoch": epoch, "margin": _gt_margin,
+                                "mode": _gt_mode_str, "scenes": sorted_log}, _lf, indent=2)
+                print(f"  [gt_log] saved per-scene comparison to {log_path.name} "
+                      f"(sorted worst-gap-first; N={len(sorted_log)})")
 
     # --- Train explorer on trajectory rewards (if optimizer provided) ---
     explorer_metrics = {}
