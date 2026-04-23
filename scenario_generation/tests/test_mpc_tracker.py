@@ -205,7 +205,7 @@ class TestPostprocessReference:
 class TestMPCGradient:
     """Verify _cost_and_grad against scipy's numerical gradient.
 
-    scipy's ``approx_derivative`` with method='3-point' is accurate to
+    Central-difference gradient (step h=1e-6) is accurate to
     ~1e-6; we match within 1e-4 (the bicycle model's nonlinearity + the
     reverse-mode chain can accumulate single-digit relative error at
     this tolerance). Catches any sign/factor mistake in the hand-
@@ -241,22 +241,27 @@ class TestMPCGradient:
         ])
         return x0, ref, knot_flat
 
-    def test_gradient_matches_numerical(self):
-        import numpy as np
-        from scipy.optimize._numdiff import approx_derivative
+    @staticmethod
+    def _numerical_gradient(tracker, knot, x0, ref, h=1e-6):
+        """Central-difference gradient using only public numpy; avoids
+        scipy's private ``_numdiff.approx_derivative`` whose API isn't
+        stable across scipy versions."""
+        g = np.zeros_like(knot)
+        for i in range(len(knot)):
+            k_plus = knot.copy(); k_plus[i] += h
+            k_minus = knot.copy(); k_minus[i] -= h
+            g[i] = (tracker._cost(k_plus, x0, ref)
+                    - tracker._cost(k_minus, x0, ref)) / (2 * h)
+        return g
 
+    def test_gradient_matches_numerical(self):
         rng = np.random.default_rng(0)
         for _ in range(5):
             tracker = self._make_tracker()
             x0, ref, knot = self._rand_problem(rng)
 
-            # Analytic
             j_ana, g_ana = tracker._cost_and_grad(knot, x0, ref)
-            # Numerical (3-point central difference, ~1e-6 accuracy)
-            g_num = approx_derivative(
-                tracker._cost, knot, method="3-point",
-                args=(x0, ref), rel_step=1e-6,
-            )
+            g_num = self._numerical_gradient(tracker, knot, x0, ref)
 
             # Relative error, tolerant of scale
             scale = np.maximum(np.abs(g_ana), np.abs(g_num))

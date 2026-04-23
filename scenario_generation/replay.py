@@ -89,10 +89,11 @@ from scenario_generation.traffic_light import TrafficLightController
 # duplicating so the two pipelines stay in sync.
 from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
 
-# Live per-step lane / border / centerline scoring (only loaded when
-# dump_npz_dir + reward_config_path are set). Matches the exact same
-# primitives ranked-SFT uses for its reward, so the metrics log here and
-# the training run speak the same thresholds.
+# Live per-step lane / border / centerline scoring. Imports are module-
+# level (unconditional); the scoring path itself only runs when both
+# dump_npz_dir and reward_config_path are set in SpawnConfig. Matches
+# the exact same primitives ranked-SFT uses for its reward, so the
+# metrics log here and the training run speak the same thresholds.
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import (
     RewardConfig,

@@ -54,18 +54,18 @@ class RewardThresholdConstraint(BaseConstraint):
         gate = metrics.get("lane_gate")
         near = metrics.get("lane_near_frac")
 
-        # A scene passes when it satisfies EVERY enabled (non-trivial) test.
-        # "Enabled" = the param is tighter than its no-op default:
-        #   rb_min_dist_max < 10.0   → rb must be ≤ max
-        #   abs_cl_score_min > 0.0   → |cl| must be ≥ min
-        #   require_lane_cross ≥ 0.5 → gate must be 0
-        #   lane_near_frac_min > 0.0 → near must be ≥ min
-        if params["rb_min_dist_max"] < 10.0:
-            if rb is None or rb > params["rb_min_dist_max"]:
-                return False
-        if params["abs_cl_score_min"] > 0.0:
-            if cl is None or abs(cl) < params["abs_cl_score_min"]:
-                return False
+        # A scene passes when it satisfies EVERY test below. The UI
+        # defaults for ``rb_min_dist_max`` (0.6) and ``abs_cl_score_min``
+        # (0.5) are already meaningful drift thresholds — treating the
+        # "default = no-op" pattern here would require the user to dial
+        # them to 10.0 / 0.0 to see the intended drift-only filter, which
+        # is surprising. The two fraction-style fields still use a >0
+        # gate because their no-op (0.0) IS the "don't filter on this"
+        # setting a user would naturally pick.
+        if rb is None or rb > params["rb_min_dist_max"]:
+            return False
+        if cl is None or abs(cl) < params["abs_cl_score_min"]:
+            return False
         if params["require_lane_cross"] >= 0.5:
             if gate is None or gate >= 0.5:
                 return False
