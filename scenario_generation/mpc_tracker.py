@@ -336,26 +336,58 @@ class MPCTracker:
             new_pos: (3,) [x, y, yaw] after one dt step.
             new_speed: scalar speed after one dt step.
         """
-        # Pad or truncate reference to exactly *horizon* steps
-        ref = np.zeros((self.horizon, 3), dtype=np.float64)
-        n = min(len(ref_world), self.horizon)
-        ref[:n] = ref_world[:n, :3]
-        if n < self.horizon:
-            ref[n:] = ref[n - 1]
-
-        # Drop the warm start when we're idle at a stop but the reference
-        # wants meaningful forward motion. During a long decel the knots
-        # converge to all-zero controls; once the planner flips back to a
-        # forward prediction, the reference asks for a gentle
-        # "start-from-rest" ramp whose early-horizon position error is
-        # tiny. From the all-zero warm start the smoothness terms
-        # (w_jerk, w_steer_rate) dominate the gradient and L-BFGS-B can't
-        # escape the zero-knot basin — the ego ends up parked forever.
-        # Resetting the init lets the optimiser freely explore positive
-        # accelerations again, matching what a cold-started tracker does.
+        # Idle-recovery check uses the model's FULL prediction horizon,
+        # not the MPC's truncated window. Post-stop the model typically
+        # emits a back-loaded plan: near-zero motion in the first ~2 s
+        # (gentle start-from-rest) then real acceleration through 8 s.
+        # MPC's 2 s window would only see the flat start and command
+        # zero accel, leaving the ego parked indefinitely even though
+        # the planner has committed to 20+ m of forward motion over the
+        # full 8 s.
         cur_speed = float(x0[3]) if len(x0) > 3 else 0.0
-        ref_reach = float(np.hypot(ref[-1, 0] - x0[0], ref[-1, 1] - x0[1]))
-        idle_but_ref_moves = cur_speed < 0.1 and ref_reach > 0.5
+        full_n = len(ref_world)
+        full_tail_reach = float(
+            np.hypot(ref_world[-1, 0] - x0[0], ref_world[-1, 1] - x0[1])
+        ) if full_n > 0 else 0.0
+        full_horizon_time = full_n * self.dt
+        avg_plan_speed = (
+            full_tail_reach / full_horizon_time if full_horizon_time > 0 else 0.0
+        )
+        # Stay in recovery mode until the ego reaches a reasonable fraction
+        # of the plan's average speed — without this the push fires for one
+        # step (ego bumps from 0 → 0.3 m/s), then next step cur_speed > 0.1
+        # drops recovery off, MPC sees the flat near-horizon ref again,
+        # commands -accel, ego decelerates back to 0. Hysteresis via
+        # half-target gate keeps the launch continuous.
+        idle_but_plan_moves = (
+            cur_speed < max(0.1, 0.5 * avg_plan_speed)
+            and avg_plan_speed > 0.5
+        )
+
+        # Build the reference fed to MPC. Two modes:
+        # - normal: first `horizon` steps of the model's plan (truncate/pad).
+        # - idle-recovery: time-compress the full plan into the horizon
+        #   so MPC sees where the model wants the ego to be in 2 s if
+        #   it were following the plan's average pace. Once the ego
+        #   starts moving (cur_speed >= 0.1), we drop back to the normal
+        #   truncated view so the model's intended timing is respected.
+        ref = np.zeros((self.horizon, 3), dtype=np.float64)
+        if idle_but_plan_moves and full_n > self.horizon:
+            stride = full_n / self.horizon
+            indices = np.clip(
+                (np.arange(self.horizon) * stride).astype(int),
+                0, full_n - 1,
+            )
+            ref[:] = ref_world[indices, :3]
+        else:
+            n = min(full_n, self.horizon)
+            ref[:n] = ref_world[:n, :3]
+            if n < self.horizon:
+                ref[n:] = ref[n - 1]
+
+        # Keep the old flag name for the warm-start branch below — its
+        # semantics are the same: "ego idle AND we want motion".
+        idle_but_ref_moves = idle_but_plan_moves
 
         if self._prev_knots is not None and not idle_but_ref_moves:
             # Roll: the just-applied knot[0] is consumed, knots[1..n-1]
@@ -369,18 +401,12 @@ class MPCTracker:
             init[-1] = self._prev_knots[-1]
         elif idle_but_ref_moves:
             # Seed the warm start with an accel guess derived from the
-            # reference's desired terminal speed instead of all-zeros.
-            # Resetting alone lets the optimiser escape the zero-knot
-            # basin, but from init=0 it still has to discover positive
-            # accel via gradient descent over several L-BFGS-B steps —
-            # in closed loop that shows up as the ego taking a few sim
-            # ticks to actually start moving after a red.
-            # Give it a direct "push":
-            #   a_guess = (ref_reach / horizon_time) / horizon_time
-            # = avg accel needed to cover ref_reach from rest over the
-            # horizon. Clipped to the tracker's accel bounds.
+            # model's avg plan speed (not the tail-reach/horizon² formula
+            # used before — that blew up on back-loaded plans because it
+            # assumed the ref tail was close, when really the ref we NOW
+            # give MPC is the stretched full plan with a real far tail).
             horizon_time = self.horizon * self.dt
-            a_guess = ref_reach / (horizon_time * horizon_time)
+            a_guess = avg_plan_speed / horizon_time
             a_guess = max(self.min_accel, min(self.max_accel, a_guess))
             init = np.zeros((self.n_knots, 2), dtype=np.float64)
             init[:, 0] = a_guess
@@ -544,23 +570,23 @@ class PerfectTracker:
         dy = ref_world[0, 1] - x0[1]
         v_target = min(math.hypot(dx, dy) / self.dt, self.max_speed)
 
-        # Resume-from-rest push (mirrors the MPCTracker branch). After a
-        # red-light stop the reference's first step sits right on top of
-        # the current ego pose, so v_target ≈ 0 and PerfectTracker would
-        # creep out of the intersection over many ticks. When the tail
-        # of the reference is meaningfully forward of x0, override
-        # v_target with the average speed needed to cover that reach
-        # over the available horizon, so the ego actually launches.
+        # Resume-from-rest push (mirrors the MPCTracker branch). Use the
+        # model's FULL horizon (not the first 2 s) to decide whether to
+        # push — post-stop plans are back-loaded, so a short-horizon
+        # reach is near-zero while the 8 s reach is 20+ m. Push speed
+        # = avg over the full plan.
         cur_speed = float(x0[3]) if len(x0) > 3 else 0.0
-        tail_idx = min(len(ref_world) - 1, 20)  # ~2 s horizon on dt=0.1
-        tail_reach = math.hypot(
-            ref_world[tail_idx, 0] - x0[0],
-            ref_world[tail_idx, 1] - x0[1],
+        full_n = len(ref_world)
+        full_tail_reach = math.hypot(
+            ref_world[-1, 0] - x0[0],
+            ref_world[-1, 1] - x0[1],
+        ) if full_n > 0 else 0.0
+        full_horizon_time = full_n * self.dt
+        avg_plan_speed = (
+            full_tail_reach / full_horizon_time if full_horizon_time > 0 else 0.0
         )
-        if cur_speed < 0.1 and tail_reach > 0.5:
-            horizon_time = (tail_idx + 1) * self.dt
-            push_speed = tail_reach / horizon_time
-            v_target = max(v_target, min(self.max_speed, push_speed))
+        if cur_speed < 0.1 and avg_plan_speed > 0.5:
+            v_target = max(v_target, min(self.max_speed, avg_plan_speed))
 
         # Euler integration using current heading and target velocity
         x, y, yaw = float(x0[0]), float(x0[1]), float(x0[2])
