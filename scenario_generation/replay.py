@@ -299,6 +299,16 @@ class SpawnConfig:
                 "per-step metrics need thresholds that match the training "
                 "reward function (no silent defaults)."
             )
+        if self.overlay_metrics_on_png and (
+            not self.dump_npz_dir or not self.reward_config_path
+        ):
+            raise ValueError(
+                "overlay_metrics_on_png requires both dump_npz_dir and "
+                "reward_config_path; the overlay renders the live rb / cl "
+                "/ lane_gate values that only exist when the per-step "
+                "metrics log is being produced. Set both, or disable the "
+                "overlay."
+            )
 
     @classmethod
     def from_json(cls, path: str | Path) -> "SpawnConfig":
