@@ -219,6 +219,36 @@ ticking entirely. Useful for MPC-gen data runs where TL-driven stops would
 bias the replay trajectory away from the steady-state driving the training
 set represents.
 
+**Static-NPC prepopulation (stationary obstacles).** Used to audit the
+model's reaction to stopped cars (parked / broken-down vehicles) along
+the route without relying on closed-loop neighbor simulation — moving
+NPCs are governed by separate `_try_spawn_one` logic; static ones get
+a one-shot seed at sim init. Off by default.
+
+Config keys (all on `SpawnConfig`):
+
+- `static_npc_count` (default `0` — feature off)
+- `static_npc_spacing_m` (default `50.0`) — one stationary NPC every N metres of ego route centerline
+- `static_npc_shoulder_margin_m` (default `0.3`) — extra clearance past the lane edge; NPC centre lands at `|lane_half_width| + npc_half_width + margin` from the centerline on the random side
+- `static_npc_seed` (default `None` → reuses `cfg.seed`) — independent RNG for reproducibility
+
+Static NPCs are placed once (before the main loop), never despawned,
+and skipped from `ids_to_predict` so the diffusion model never tries to
+predict for them. Their Agent id carries the `static_npc_` prefix —
+`SceneNPCManager.is_static_npc(agent_id)` is the single check used
+across despawn, inference, and viz gates. Combine with
+`max_active_npcs=0, spawn_probability=0.0, enable_traffic_lights=false`
+to produce a static-only audit scene.
+
+**Live ego ↔ stopped-NPC proximity line.** When the ego's OBB gets
+within `_STATIC_NPC_VIZ_THRESH_M` (= 2.0 m) of any static NPC's OBB,
+`_save_step_figure` draws a red line between the two closest-pair points
+and labels it with the distance (the offender NPC's id is already
+drawn as the agent label next to its OBB). Mirrors the existing
+road-border distance viz. The closest-pair primitive is shared with
+`rlvr.reward._closest_points_between_rects` (single source — the number
+on the live PNG IS the number the downstream audit scoring uses).
+
 **Live per-step metric logging.** When both `dump_npz_dir` and
 `reward_config_path` are set on the `SpawnConfig`, the replay loop scores
 the current ego pose against the dumped map tensors at every step it dumps

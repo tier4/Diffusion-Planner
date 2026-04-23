@@ -126,6 +126,21 @@ class GRPOConfig:
     lane_near_thresh: float = 0.25  # metres — near zone boundary
     lane_wide_thresh: float = 0.40  # metres — wide zone boundary
     lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
+    # Static-collision penalty (stopped-neighbor OBB clearance). Off by default —
+    # enabling changes reward math. See reward.compute_static_collision_penalty.
+    static_collision_enabled: bool = False
+    sc_gate_enabled: bool = False
+    sc_penalty_mode: str = "frac"
+    sc_near_scale: float = 0.0
+    sc_wide_scale: float = 0.0
+    sc_cont_scale: float = 0.0
+    sc_cross_thresh: float = 0.2    # clearance below this = crossing (matches reward.RewardConfig default; 20 cm treats visually-touching boxes as collisions)
+    sc_near_thresh: float = 0.4
+    sc_wide_thresh: float = 0.7
+    sc_cont_thresh: float = 1.0
+    sc_neighbor_vel_thresh: float = 0.1
+    sc_neighbor_disp_thresh: float = 0.5
+    sc_ego_min_speed: float = 1.0
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     max_yaw_rate: float = 1.0  # rad/s — kinematic feasibility absolute yaw cap

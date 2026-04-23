@@ -239,6 +239,26 @@ _VARIANTS: dict[str, GenerationVariant] = {
             _CL10_SPD10_NOISY,
         ],
     ),
+    "rsft_v2_col4": GenerationVariant(
+        description=(
+            "Four collision-guided slots for the static-collision audit: "
+            "collision scale 0.5 (det noise), 1.0, 2.0, 1.5 with varied "
+            "noise. Rest of the 16 slots: 1 pure det (slot 0) + 2 non-"
+            "collision CL+SPD guided (str13, noisy) + 9 noise sweep. "
+            "Total 16. Used to mine / probe J6 scenes where the base "
+            "model drives through parked cars and see whether any of the "
+            "4 collision slots rescue the scene."
+        ),
+        cl_spd_configs=[
+            {"cl": 5.0, "spd": 5.0, "noise": (0.0, 0.0), "col": 0.5, "label": "CL5_SPD5_col05_det"},
+            {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "col": 1.0, "label": "CL5_SPD5_col10_n0308"},
+            {"cl": 5.0, "spd": 5.0, "noise": (0.5, 1.5), "col": 2.0, "label": "CL5_SPD5_col20_n0515"},
+            {"cl": 10.0, "spd": 8.0, "noise": (0.5, 1.5), "col": 1.5, "label": "CL10_SPD8_col15_n0515"},
+            _CL8_SPD8_STR13,
+            _CL10_SPD10_NOISY,
+        ],
+        noise_configs=_NOISE_SWEEP_FULL,
+    ),
 }
 
 

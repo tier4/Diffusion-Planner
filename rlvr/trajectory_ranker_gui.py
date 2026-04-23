@@ -638,26 +638,59 @@ class TrajectoryRanker:
         rows.sort(key=lambda r: r[1].total, reverse=True)
 
         cfg = self.reward_config
+        # UI design: the user needs to see (a) what the reward weighting
+        # adds up to per component, and (b) which hard gates fired / how
+        # close we are to firing them. Cramming 20 columns into markdown
+        # is unreadable, so:
+        #   * Keep the component-breakdown columns (Safety..CL) compact.
+        #   * Collapse all gate-fire flags into ONE "Gates" column that
+        #     is empty when everything passes and otherwise shows just
+        #     the firing tag(s): RB✗, Lane✗, Coll@t, Kin✗, SC✗.
+        #   * Add rb_d (road-border) and sc_d (stopped-neighbor) as two
+        #     dedicated numeric columns; hide values >= 10 m as "—" so
+        #     irrelevant scenes don't pollute the view.
+        # Result: 11 columns instead of 21.
+        def _gates_tag(rb) -> str:
+            tags = []
+            if getattr(rb, "rb_crossing", False):
+                tags.append("RB✗")
+            if getattr(rb, "lane_crossing", False):
+                tags.append("Lane✗")
+            cs = getattr(rb, "collision_step", None)
+            if cs is not None:
+                tags.append(f"Coll@{int(cs)}")
+            if not getattr(rb, "kinematic_gate", True):
+                tags.append("Kin✗")
+            if getattr(rb, "static_crossing", False):
+                tags.append("SC✗")
+            return " ".join(tags) if tags else "—"
+
+        def _fmt_d(d: float, cutoff: float = 10.0) -> str:
+            return f"{d:.2f}" if d < cutoff else "—"
+
         lines = [
-            "| # | Rank | Safety | Progress | Smooth | Feasible | CL | RedLight | Total | Adv | Config |",
-            "|---|------|--------|----------|--------|----------|------|----------|-------|-----|--------|",
+            "| # | Rank | Saf | Prog | Smo | Feas | CL | Total | Adv | Gates | rb_d | sc_d | Config |",
+            "|---|------|-----|------|-----|------|----|-------|-----|-------|------|------|--------|",
         ]
         for rank, (idx, rb, adv, st) in enumerate(rows, 1):
             is_sel = (idx == selected_idx)
-            config_col = f"**[DET]**" if st.is_deterministic and st.label == "DET" else st.label
+            config_col = "**[DET]**" if st.is_deterministic and st.label == "DET" else st.label
             b = "**" if is_sel else ""
             ws = cfg.w_safety * rb.safety
             wp = cfg.w_progress * rb.progress
             wm = cfg.w_smooth * rb.smoothness
             wf = cfg.w_feasibility * rb.feasibility
             wc = cfg.w_centerline * rb.centerline
-            wr = rb.red_light
+            gates = _gates_tag(rb)
+            rb_d = _fmt_d(getattr(rb, "rb_min_dist", 99.0))
+            sc_d = _fmt_d(getattr(rb, "sc_min_dist", 99.0))
             sel_marker = ">>" if is_sel else ""
             lines.append(
-                f"| {b}{sel_marker}#{idx+1}{b} | {b}{rank}{b} | {b}{ws:.1f}{b} | {b}{wp:.1f}{b} | "
-                f"{b}{wm:.1f}{b} | {b}{wf:.1f}{b} | "
-                f"{b}{wc:.1f}{b} | {b}{wr:.1f}{b} | "
-                f"{b}{rb.total:.1f}{b} | {b}{adv:+.2f}{b} | {config_col} |"
+                f"| {b}{sel_marker}#{idx+1}{b} | {b}{rank}{b} | "
+                f"{b}{ws:.1f}{b} | {b}{wp:.1f}{b} | {b}{wm:.1f}{b} | "
+                f"{b}{wf:.1f}{b} | {b}{wc:.1f}{b} | "
+                f"{b}{rb.total:.1f}{b} | {b}{adv:+.2f}{b} | "
+                f"{b}{gates}{b} | {b}{rb_d}{b} | {b}{sc_d}{b} | {config_col} |"
             )
         return "\n".join(lines)
 

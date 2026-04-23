@@ -256,6 +256,25 @@ class SpawnConfig:
     # whether batched inference affects trajectory quality.
     sequential_inference: bool = False
 
+    # Static NPC prepopulation (stopped vehicles on the shoulder along the
+    # ego route — used for static-collision audit). Default off so existing
+    # sim behaviour is unchanged.
+    #
+    # These NPCs:
+    #   * are placed once at sim init at lateral offset past the lane edge;
+    #   * are never inferred on (skipped from ``ids_to_predict``);
+    #   * never despawn;
+    #   * carry zero-velocity past + zero future — the reward's stopped
+    #     mask (``|v0| < sc_neighbor_vel_thresh`` AND total future
+    #     displacement < ``sc_neighbor_disp_thresh``) flags them.
+    #
+    # Their id carries the prefix ``static_npc_`` — the main replay loop
+    # filters on this prefix (no new AgentType needed).
+    static_npc_count: int = 0
+    static_npc_spacing_m: float = 50.0
+    static_npc_shoulder_margin_m: float = 0.3
+    static_npc_seed: int | None = None
+
     def __post_init__(self) -> None:
         self.validate()
 
@@ -445,6 +464,12 @@ class SceneNPCManager:
         removed = 0
         for agent in scene.agents:
             if agent.id == scene.ego_agent_id:
+                kept_agents.append(agent)
+                continue
+            # Static NPCs are never despawned — they define the obstacle
+            # field for the static-collision audit and must persist for
+            # the whole sim.
+            if self.is_static_npc(agent.id):
                 kept_agents.append(agent)
                 continue
             d = float(np.linalg.norm(agent.current_position - ego_pos))
@@ -694,6 +719,217 @@ class SceneNPCManager:
 
         return False
 
+    # -- Static NPC prepopulation -----------------------------------------
+
+    STATIC_NPC_PREFIX = "static_npc_"
+
+    @classmethod
+    def is_static_npc(cls, agent_id: str) -> bool:
+        return agent_id.startswith(cls.STATIC_NPC_PREFIX)
+
+    def prepopulate_static_npcs(self, scene: "SceneContext") -> int:
+        """Drop stationary NPCs on the shoulder along the ego route.
+
+        Used to audit the model's reaction to stopped obstacles (parked cars,
+        broken-down vehicles) without relying on closed-loop neighbor
+        simulation. The NPC is placed past the lane boundary with heading
+        aligned to the lane, zero velocity, and a 31-step past of the same
+        pose so the tensor converter sees it as stationary.
+
+        Gated by ``cfg.static_npc_count``. No-op when that's 0 (default).
+
+        Returns the number of static NPCs actually added (may be less than
+        the configured count if collision rejection or route-length limits
+        apply).
+        """
+        n = int(self.cfg.static_npc_count)
+        if n <= 0:
+            return 0
+
+        spacing = float(self.cfg.static_npc_spacing_m)
+        if spacing <= 0:
+            raise ValueError(
+                f"static_npc_spacing_m must be > 0; got {spacing}"
+            )
+
+        seed = self.cfg.static_npc_seed
+        if seed is None:
+            seed = self.cfg.seed
+        rng = random.Random(seed)
+
+        # Flatten the ego route into an arc-length-parameterised centerline
+        # so we can sample evenly along the full route (not per-lanelet).
+        route_pts: list[np.ndarray] = []
+        for ll_id in self.ego_route_ll_ids:
+            if ll_id not in self.builder._cache:
+                continue
+            cl = self.builder._cache[ll_id].raw_centerline
+            if cl.shape[0] < 2:
+                continue
+            # Avoid duplicating the shared endpoint between consecutive lanelets.
+            if route_pts and np.allclose(route_pts[-1][-1], cl[0], atol=1e-3):
+                route_pts.append(cl[1:].astype(np.float32))
+            else:
+                route_pts.append(cl.astype(np.float32))
+
+        if not route_pts:
+            return 0
+
+        polyline = np.concatenate(route_pts, axis=0)
+        diffs = np.linalg.norm(np.diff(polyline, axis=0), axis=1)
+        arc = np.concatenate([[0.0], np.cumsum(diffs)])
+        total_arc = float(arc[-1])
+        if total_arc < spacing:
+            return 0
+
+        # Sample at every spacing metres, starting at spacing (skip the
+        # ego's starting pose) and keeping a small margin before the goal.
+        margin = max(5.0, spacing * 0.5)
+        start_arc = spacing
+        end_arc = max(start_arc, total_arc - margin)
+
+        target_arcs = np.arange(start_arc, end_arc, spacing)
+        if len(target_arcs) == 0:
+            return 0
+        if len(target_arcs) > n:
+            # Downsample evenly to respect the configured count.
+            idx = np.linspace(0, len(target_arcs) - 1, n).round().astype(int)
+            target_arcs = target_arcs[idx]
+
+        # Re-walk the route so we can look up each lanelet's centerline +
+        # left/right boundaries at a given route-wide arc length. Each
+        # entry carries (lanelet_id, per-lanelet arc lengths offset to the
+        # route frame, centerline xy, (left_boundary xy, right_boundary xy)).
+        lanelet_cl_arcs: list[tuple[
+            int, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray],
+        ]] = []
+        offset = 0.0
+        for ll_id in self.ego_route_ll_ids:
+            if ll_id not in self.builder._cache:
+                continue
+            c = self.builder._cache[ll_id]
+            cl = c.raw_centerline
+            lb = c.raw_left
+            rb = c.raw_right
+            if cl.shape[0] < 2:
+                continue
+            ll_diffs = np.linalg.norm(np.diff(cl, axis=0), axis=1)
+            ll_arc = np.concatenate([[0.0], np.cumsum(ll_diffs)]) + offset
+            lanelet_cl_arcs.append((ll_id, ll_arc, cl, (lb, rb)))
+            offset = float(ll_arc[-1])
+
+        def _lookup(target: float):
+            """Find (ll_id, centerline_pt, left_pt, right_pt, heading) at `target` arc."""
+            for ll_id, ll_arc, cl, (lb, rb) in lanelet_cl_arcs:
+                if target < ll_arc[0] or target > ll_arc[-1]:
+                    continue
+                # Linear interp within the lanelet.
+                seg = int(np.searchsorted(ll_arc, target)) - 1
+                seg = max(0, min(seg, len(cl) - 2))
+                seg_len = ll_arc[seg + 1] - ll_arc[seg]
+                t = (target - ll_arc[seg]) / max(seg_len, 1e-6)
+                t = float(np.clip(t, 0.0, 1.0))
+                cl_pt = cl[seg] + t * (cl[seg + 1] - cl[seg])
+                # Boundaries may have a different vertex count than
+                # centerline. Clamp the seg/t for them too.
+                lb_seg = min(seg, len(lb) - 2) if len(lb) >= 2 else 0
+                rb_seg = min(seg, len(rb) - 2) if len(rb) >= 2 else 0
+                lb_pt = lb[lb_seg] + t * (lb[lb_seg + 1] - lb[lb_seg]) if len(lb) >= 2 else cl_pt
+                rb_pt = rb[rb_seg] + t * (rb[rb_seg + 1] - rb[rb_seg]) if len(rb) >= 2 else cl_pt
+                dxdy = cl[seg + 1] - cl[seg]
+                heading = float(math.atan2(dxdy[1], dxdy[0]))
+                return ll_id, cl_pt, lb_pt, rb_pt, heading
+            return None
+
+        added = 0
+        existing_corners = [
+            _obb_corners(
+                a.current_position[0], a.current_position[1],
+                a.current_heading, a.length, a.width,
+            )
+            for a in scene.agents
+        ]
+
+        for i, tgt in enumerate(target_arcs):
+            look = _lookup(float(tgt))
+            if look is None:
+                continue
+            ll_id, cl_pt, lb_pt, rb_pt, heading = look
+
+            # Random L/R side.
+            side = rng.choice(["L", "R"])
+            boundary_pt = lb_pt if side == "L" else rb_pt
+
+            # NPC dimensions (match the live spawner for visual consistency).
+            length = float(rng.uniform(4.0, 5.0))
+            width = float(rng.uniform(1.7, 2.0))
+            wheelbase = length * 0.65
+
+            # Lateral direction = (boundary - centerline) normalised.
+            lat_vec = boundary_pt - cl_pt
+            lat_norm = float(np.linalg.norm(lat_vec))
+            if lat_norm < 1e-3:
+                # Degenerate lanelet (no width at this arc); skip.
+                continue
+            lat_hat = lat_vec / lat_norm
+
+            # Place NPC centre past the boundary by (npc_half_width + margin).
+            offset_m = lat_norm + width * 0.5 + float(self.cfg.static_npc_shoulder_margin_m)
+            npc_pos = cl_pt + lat_hat * offset_m
+            npc_pos = npc_pos.astype(np.float32)
+
+            # Collision-reject against existing agents.
+            corners = _obb_corners(npc_pos[0], npc_pos[1], heading, length, width)
+            collides = False
+            for ec in existing_corners:
+                ec_center = ec.mean(axis=0)
+                if np.linalg.norm(npc_pos - ec_center) < self.cfg.min_npc_separation:
+                    collides = True
+                    break
+                if _obb_collides(corners, ec):
+                    collides = True
+                    break
+            if collides:
+                continue
+
+            # Build the static agent. 31-step past at the same pose, zero
+            # velocities / acceleration / yaw_rate / steering.
+            T_past = 31
+            history = np.zeros((T_past, 3), dtype=np.float32)
+            history[:, 0] = npc_pos[0]
+            history[:, 1] = npc_pos[1]
+            history[:, 2] = heading
+            velocities = np.zeros((T_past, 2), dtype=np.float32)
+
+            agent_id = f"{self.STATIC_NPC_PREFIX}{i}"
+            agent = Agent(
+                id=agent_id,
+                agent_type=AgentType.VEHICLE,
+                length=length,
+                width=width,
+                wheelbase=wheelbase,
+                past_trajectory=history,
+                past_velocities=velocities,
+                acceleration=np.zeros(2, dtype=np.float32),
+                steering_angle=0.0,
+                yaw_rate=0.0,
+                goal_pose=None,
+                route_lanes=None,
+                route_speed_limit=None,
+                route_has_speed_limit=None,
+                turn_indicators=np.zeros(T_past, dtype=np.int32),
+                age_steps=T_past,
+                route_lanelet_ids=None,
+            )
+            scene.agents.append(agent)
+            existing_corners.append(corners)
+            added += 1
+
+        if added > 0:
+            print(f"  [NPCManager] prepopulated {added} static NPC(s) "
+                  f"(spacing≈{spacing:.0f} m, margin={self.cfg.static_npc_shoulder_margin_m:.2f} m)")
+        return added
+
     def _trim_route_off_ego(self, route: list[int]) -> list[int]:
         """Trim route so its goal lanelet is not on an untransited ego lanelet.
 
@@ -740,6 +976,12 @@ _ROAD_BORDER_COLOR = "#dd2222"
 _EGO_COLOR = "#3366cc"
 _ROUTE_COLOR = "#3366cc"
 _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
+
+# Draw an ego ↔ stopped-NPC closest-pair line on each PNG when clearance
+# drops below this (mirrors the road-border distance viz). 2 m matches the
+# ``viz_threshold`` used by the static-collision audit tool so the live
+# PNGs and post-hoc audit agree on when the line appears.
+_STATIC_NPC_VIZ_THRESH_M = 2.0
 
 
 def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
@@ -869,6 +1111,66 @@ def _ego_obb_corners(
     c, s = math.cos(heading), math.sin(heading)
     R = np.array([[c, -s], [s, c]], dtype=np.float64)
     return (R @ local.T).T + np.array([ex, ey], dtype=np.float64)
+
+
+def _ego_nearest_static_npc(
+    scene: SceneContext,
+    threshold_m: float = _STATIC_NPC_VIZ_THRESH_M,
+) -> tuple[np.ndarray, np.ndarray, float, str] | None:
+    """Return the ego↔static-NPC closest-pair when min clearance < threshold.
+
+    Walks every ``static_npc_*`` agent, batches OBB-OBB closest-pair distance
+    against the ego's current OBB via :func:`rlvr.reward._closest_points_between_rects`
+    (single canonical impl — do not duplicate the SAT / vertex-to-edge
+    logic here), and returns the best pair if it falls under ``threshold_m``.
+    ``None`` when no static NPC is within range.
+
+    Result: ``(ego_pt, npc_pt, distance_m, npc_id)``.
+    """
+    ego = scene.ego_agent
+    if ego is None:
+        return None
+    static_agents = [a for a in scene.agents if SceneNPCManager.is_static_npc(a.id)]
+    if not static_agents:
+        return None
+
+    # Quick centre-distance reject before the torch call.
+    ego_pos = ego.current_position
+    reach = threshold_m + float(ego.length)
+    candidates = [
+        a for a in static_agents
+        if float(np.linalg.norm(a.current_position - ego_pos)) <= reach + float(a.length)
+    ]
+    if not candidates:
+        return None
+
+    # torch is imported at module scope — just need the reward helper.
+    from rlvr.reward import _closest_points_between_rects
+
+    ego_corners = _obb_corners(
+        float(ego_pos[0]), float(ego_pos[1]),
+        float(ego.current_heading), float(ego.length), float(ego.width),
+    )
+    npc_corners_list = [
+        _obb_corners(
+            float(a.current_position[0]), float(a.current_position[1]),
+            float(a.current_heading), float(a.length), float(a.width),
+        )
+        for a in candidates
+    ]
+    n = len(candidates)
+    r1 = torch.from_numpy(np.broadcast_to(ego_corners, (n, 4, 2)).copy().astype(np.float32))
+    r2 = torch.from_numpy(np.stack(npc_corners_list).astype(np.float32))
+    pt_e, pt_n = _closest_points_between_rects(r1, r2)
+    dists = (pt_e - pt_n).norm(dim=-1)
+    i_best = int(dists.argmin().item())
+    d_best = float(dists[i_best].item())
+    if d_best >= threshold_m:
+        return None
+    return (
+        pt_e[i_best].numpy(), pt_n[i_best].numpy(), d_best,
+        candidates[i_best].id,
+    )
 
 
 def _save_step_figure(
@@ -1099,6 +1401,40 @@ def _save_step_figure(
                                   facecolor="white", edgecolor="black",
                                   alpha=0.7),
                         zorder=31)
+
+    # Ego ↔ nearest stopped-NPC closest-pair line. Drawn regardless of
+    # whether metrics are enabled — only gate is proximity < threshold so
+    # PNGs without any static NPC nearby aren't cluttered. The distance
+    # primitive is shared with the reward (rlvr.reward._closest_points_between_rects)
+    # so the line the user sees IS the same distance the audit scoring uses.
+    sc_pair = _ego_nearest_static_npc(scene, threshold_m=_STATIC_NPC_VIZ_THRESH_M)
+    if sc_pair is not None:
+        pt_e, pt_n, sc_d, sc_id = sc_pair
+        ax.plot([pt_e[0], pt_n[0]], [pt_e[1], pt_n[1]],
+                "-", color="#cc0000", lw=1.8, alpha=0.85, zorder=29)
+        ax.plot([pt_e[0], pt_n[0]], [pt_e[1], pt_n[1]],
+                "o", color="#cc0000", ms=5, zorder=30,
+                markeredgecolor="white", markeredgewidth=0.7)
+        # Offset the label perpendicular to the line so it doesn't sit on
+        # top of it. 1.2 m displacement is enough to clear even a 2 m
+        # separation. Compact format (just the distance) keeps the badge
+        # small — the offender id is visible in the neighbor label already.
+        mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
+        dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
+        seg_len = math.hypot(dx, dy)
+        if seg_len > 1e-6:
+            nx, ny = -dy / seg_len, dx / seg_len
+        else:
+            nx, ny = 0.0, 1.0
+        label_off = 1.2  # metres, in world units
+        ax.annotate(f"{sc_d:.2f} m",
+                    xy=(mx + nx * label_off, my + ny * label_off),
+                    fontsize=7, color="#cc0000",
+                    ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.1",
+                              facecolor="white", edgecolor="#cc0000",
+                              alpha=0.85),
+                    zorder=31)
 
     ax.set_title(title, fontsize=10)
     fig.tight_layout()
@@ -1404,6 +1740,12 @@ def run_route_replay(
     npc_manager = SceneNPCManager(builder, ego_route_ids, spawn_config, tl_controller)
     npc_manager.register_known_lanelets(all_lanelet_ids)
 
+    # One-shot stopped-NPC prepopulation (static-collision audit). No-op
+    # when spawn_config.static_npc_count == 0 (default). These NPCs never
+    # move and never despawn — see SceneNPCManager.prepopulate_static_npcs.
+    if spawn_config.static_npc_count > 0:
+        npc_manager.prepopulate_static_npcs(scene)
+
     map_cache = MapTensorCache(scene.map_data)
     n_npc_spawned = 0
     goal_reached = False
@@ -1516,7 +1858,15 @@ def run_route_replay(
             # logit head so we can feed it back into each agent's
             # turn_indicators history on the next frame — mirrors the C++
             # ``TurnIndicatorManager`` control loop.
-            ids_to_predict = [a.id for a in scene.agents if a.agent_type == AgentType.VEHICLE]
+            # Static NPCs (prepopulated stopped vehicles) are excluded from
+            # inference — they never move and should carry the same zero-
+            # velocity pose through the whole sim. Missing from
+            # agent_predictions → advance_scene skips them.
+            ids_to_predict = [
+                a.id for a in scene.agents
+                if a.agent_type == AgentType.VEHICLE
+                and not SceneNPCManager.is_static_npc(a.id)
+            ]
             if spawn_config.sequential_inference:
                 # One forward pass per agent (batch_size=1 each).
                 agent_predictions: dict[str, np.ndarray] = {}
