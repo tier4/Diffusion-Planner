@@ -210,6 +210,55 @@ _ZONE_COLORS = {
     "safe":  "#3366cc",   # >=1.0 m
 }
 
+_LANE_CL_COLOR = "#bbbbbb"
+_LANE_BORDER_COLOR = "#888888"
+_ROAD_BORDER_COLOR = "#dd2222"
+_EGO_NOW_COLOR = "#3366cc"
+
+
+def _draw_lane_network_from_tensor(ax, lanes: np.ndarray, alpha: float = 0.7) -> None:
+    """Draw lane centerlines + left/right boundaries from the 33-dim lane tensor.
+
+    Mirrors :func:`scenario_generation.replay._draw_lane_network` but takes the
+    raw ndarray straight from an NPZ (``data_np["lanes"]``). Borders come from
+    ``centerline + lane[:, 4:6]`` (left) and ``+ lane[:, 6:8]`` (right).
+    """
+    from matplotlib.collections import LineCollection
+
+    if lanes is None:
+        return
+    if lanes.ndim == 4:
+        lanes = lanes[0]
+    centerlines, lefts, rights = [], [], []
+    for i in range(lanes.shape[0]):
+        lane = lanes[i]
+        pts = lane[:, :2]
+        if np.abs(pts).sum() < 1e-6:
+            continue
+        valid = np.abs(pts).sum(axis=1) > 0.1
+        if valid.sum() < 2:
+            continue
+        centerlines.append(pts[valid])
+        if lane.shape[1] > 7:
+            lefts.append((pts + lane[:, 4:6])[valid])
+            rights.append((pts + lane[:, 6:8])[valid])
+
+    if centerlines:
+        ax.add_collection(LineCollection(
+            centerlines, colors=_LANE_CL_COLOR, linewidths=0.6,
+            alpha=alpha * 0.4, zorder=1,
+        ))
+    if lefts:
+        ax.add_collection(LineCollection(
+            lefts, colors=_LANE_BORDER_COLOR, linewidths=1.0,
+            alpha=alpha, zorder=2,
+        ))
+    if rights:
+        ax.add_collection(LineCollection(
+            rights, colors=_LANE_BORDER_COLOR, linewidths=1.0,
+            alpha=alpha, zorder=2,
+        ))
+
 
 def _zone_for(d: float, cross_t: float = 0.2, near_t: float = 0.5, wide_t: float = 1.0) -> str:
     if d < cross_t:
@@ -257,37 +306,57 @@ def _draw_audit_figure(
 
     # --- Top: spatial view ---
 
-    # Road borders (line_strings channel 3).
-    ls = np.asarray(data_np["line_strings"])
-    if ls.ndim == 4:
-        ls = ls[0]
-    if ls.shape[-1] >= 4:
-        for i in range(ls.shape[0]):
-            line = ls[i]
-            valid = (line[:, 3] > 0.5) & (np.abs(line[:, :2]).sum(axis=-1) > 0.01)
-            if valid.sum() > 1:
-                ax.plot(line[valid, 0], line[valid, 1],
-                        color="red", lw=2.0, alpha=0.45, zorder=2)
+    # Lane network (centerlines + left/right markings) from the map tensor —
+    # needed for real-data NPZs where the lanelet context is the only way
+    # to read the scene ("is this a highway / intersection / shoulder?").
+    lanes = np.asarray(data_np["lanes"]) if "lanes" in data_np else None
+    _draw_lane_network_from_tensor(ax, lanes, alpha=0.7)
+
+    # Road borders (line_strings channel 3). May be sparse in real data.
+    ls = np.asarray(data_np["line_strings"]) if "line_strings" in data_np else None
+    if ls is not None:
+        if ls.ndim == 4:
+            ls = ls[0]
+        if ls.shape[-1] >= 4:
+            for i in range(ls.shape[0]):
+                line = ls[i]
+                valid = (line[:, 3] > 0.5) & (np.abs(line[:, :2]).sum(axis=-1) > 0.01)
+                if valid.sum() > 1:
+                    ax.plot(line[valid, 0], line[valid, 1],
+                            color=_ROAD_BORDER_COLOR, lw=2.0, alpha=0.5, zorder=3)
 
     # Predicted ego trajectory polyline (thin, grey).
     ego_xy = arrays["ego_traj"][:, :2]
     T = arrays["ego_traj"].shape[0]
     per_ts_min = arrays["per_ts_min"]  # (T,)
-    ax.plot(ego_xy[:, 0], ego_xy[:, 1], "-", color="#888",
-            lw=1.2, alpha=0.7, zorder=10, label="predicted path (0..7.9 s)")
-    # Mark start + argmin on the path.
-    ax.plot(ego_xy[0, 0], ego_xy[0, 1], "o", color="#3366cc", ms=7,
-            zorder=12, markeredgecolor="white", markeredgewidth=0.7,
-            label="t=0 (now)")
+    ax.plot(ego_xy[:, 0], ego_xy[:, 1], "-", color="#555",
+            lw=1.2, alpha=0.8, zorder=10, label="predicted path (0..7.9 s)")
 
     es = np.asarray(data_np["ego_shape"])
     if es.ndim == 2:
         es = es[0]
     ego_wb, ego_L, ego_W = float(es[0]), float(es[1]), float(es[2])
 
-    # The ego's footprint at argmin_t — the timestep where the predicted
-    # trajectory comes closest to a stopped NPC. This is THE footprint
-    # the user wants to see.
+    # Ego OBB at t=0 (the CURRENT pose) drawn in blue. Note ego_trajs are
+    # stored at the rear-axle origin (x, y); the box centre-of-geometry is
+    # at +wb/2 along the heading. Same convention as _build_ego_bbox_corners.
+    cos0, sin0 = arrays["ego_traj"][0, 2], arrays["ego_traj"][0, 3]
+    h0 = math.atan2(sin0 / max(math.hypot(cos0, sin0), 1e-6),
+                    cos0 / max(math.hypot(cos0, sin0), 1e-6))
+    cx0, cy0 = ego_xy[0]
+    cog0 = (cx0 + math.cos(h0) * ego_wb / 2.0,
+            cy0 + math.sin(h0) * ego_wb / 2.0)
+    t_rot0 = mtransforms.Affine2D().rotate(h0).translate(cog0[0], cog0[1]) + ax.transData
+    ax.add_patch(Rectangle(
+        (-ego_L / 2, -ego_W / 2), ego_L, ego_W,
+        lw=2.0, ec=_EGO_NOW_COLOR, fc=_EGO_NOW_COLOR, alpha=0.30,
+        zorder=18, transform=t_rot0,
+        label="ego @ t=0 (now)",
+    ))
+
+    # Ego footprint at argmin_t (or first-crossing, whichever the caller
+    # passed in). This is the predicted pose where the plan comes closest
+    # to the offending stopped NPC — the actionable failure point.
     cos_h = arrays["ego_traj"][argmin_t, 2]
     sin_h = arrays["ego_traj"][argmin_t, 3]
     hn = math.hypot(cos_h, sin_h)
