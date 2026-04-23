@@ -13,6 +13,7 @@ repo_root = Path(__file__).resolve().parent.parent
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
+import pytest
 import torch
 
 from rlvr.reward import (
@@ -96,7 +97,7 @@ def test_closest_points_non_overlapping():
     # Closest points should be at some y in [0,1], x=1 on r1 and x=4 on r2.
     assert abs(float(p1[0, 0]) - 1.0) < 1e-4
     assert abs(float(p2[0, 0]) - 4.0) < 1e-4
-    assert (p2 - p1).norm().item() == torch.tensor(3.0)
+    assert (p2 - p1).norm().item() == pytest.approx(3.0, abs=1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +228,62 @@ def test_disabled_flag_no_effect_on_reward_totals():
     assert out_on[0].sc_near_penalty > 0.0
     assert out_on[0].sc_n_stopped == 1
     assert out_on[0].total < out_off[0].total
+
+
+# ---------------------------------------------------------------------------
+# Integration: survival-mode first-terminal + kinematic_gate exposure
+# ---------------------------------------------------------------------------
+
+
+def test_survival_mode_sc_crossing_contributes_to_first_terminal():
+    """In reward_mode='survival', an sc crossing at timestep N must cap
+    survival_frac to N/T — same mechanism as rb_crossing / lane_crossing."""
+    # Ego drives straight into a stopped car centered on its path. The
+    # overlap will fire sometime in the first 1-2 seconds (steps ~10-40
+    # depending on approach geometry) since ego is at 5 m/s and the NPC
+    # is at (8m, 0).
+    ego = _straight_ego(speed=5.0)
+    nf, ns, nv = _stopped_neighbor(center=(8.0, 0.0))
+    data = {
+        "neighbor_agents_future": nf,
+        "neighbor_agents_past": torch.zeros(1, 1, 21, 11),
+        "ego_shape": _ego_shape().unsqueeze(0),
+    }
+    data["neighbor_agents_past"][0, 0, -1, 6] = ns[0, 0]  # width
+    data["neighbor_agents_past"][0, 0, -1, 7] = ns[0, 1]  # length
+
+    cfg = RewardConfig(
+        static_collision_enabled=True,
+        sc_gate_enabled=True,
+        sc_near_scale=1.0,
+        reward_mode="survival",
+    )
+    out = compute_reward_batch(ego, data, cfg)
+
+    # Survival-mode should floor the total because the prediction crashes
+    # early — can't be the full quality score.
+    _OFFROAD_FLOOR = -50.0
+    assert out[0].static_crossing is True
+    assert out[0].total < 0  # pulled toward the floor by survival_frac blend
+    # And it should be strictly above the offroad floor (some survival frac).
+    assert out[0].total > _OFFROAD_FLOOR - 1e-3
+
+
+def test_kinematic_gate_field_exposed():
+    """Adding kinematic_gate to RewardBreakdown should never break default paths."""
+    ego = _straight_ego(speed=5.0)
+    nf, ns, nv = _stopped_neighbor(center=(40.0, 10.0))  # far away, no interaction
+    data = {
+        "neighbor_agents_future": nf,
+        "neighbor_agents_past": torch.zeros(1, 1, 21, 11),
+        "ego_shape": _ego_shape().unsqueeze(0),
+    }
+    data["neighbor_agents_past"][0, 0, -1, 6] = ns[0, 0]
+    data["neighbor_agents_past"][0, 0, -1, 7] = ns[0, 1]
+
+    out = compute_reward_batch(ego, data, RewardConfig())
+    # Straight-line ego at constant speed is kinematically feasible.
+    assert out[0].kinematic_gate is True
 
 
 if __name__ == "__main__":

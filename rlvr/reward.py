@@ -1582,11 +1582,11 @@ def _closest_points_between_rects(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Closest-point pair between two rectangles, vectorised, pure PyTorch.
 
-    For each pair checks all 8 vertex-to-edge configurations (rect1 corner to
-    each of rect2's 4 edges, then vice versa) and returns the vertex + its
-    foot on the nearest edge. This is exact for non-overlapping rectangles
-    and approximate (points on the nearest edges) for overlapping ones —
-    fine for visualisation.
+    For each pair checks all 32 vertex-to-edge queries (16 rect1 corners →
+    rect2 edges + 16 rect2 corners → rect1 edges) and returns the vertex +
+    its foot on the nearest edge. Exact for non-overlapping rectangles,
+    approximate (points on the nearest edges) for overlapping ones — fine
+    for visualisation.
 
     Args:
         rect1: (B, 4, 2) corners in CCW or CW order.
@@ -1600,9 +1600,10 @@ def _closest_points_between_rects(
     device = rect1.device
     dtype = rect1.dtype
 
-    # Build both (vertex, edge) configurations in a single (B, 8, query_pt, seg_a, seg_b) tensor.
-    # Config A: rect1 vertices (4) vs rect2 edges (4). Queries = rect1[:, i]. Segments = rect2 edges.
-    # Config B: rect2 vertices (4) vs rect1 edges (4). Queries = rect2[:, j]. Segments = rect1 edges.
+    # Build two vertex-to-edge configurations:
+    #   Config A (rect1 vertices → rect2 edges): 4 verts × 4 edges = 16 queries per pair.
+    #   Config B (rect2 vertices → rect1 edges): 4 verts × 4 edges = 16 queries per pair.
+    # Concatenated → 32 queries per pair, shaped (B, 32, 2) for q/sa/sb.
     r1_edges_a = rect1                              # (B, 4, 2)
     r1_edges_b = torch.roll(rect1, -1, dims=1)      # (B, 4, 2)
     r2_edges_a = rect2
@@ -1657,6 +1658,14 @@ def compute_static_collision_penalty(
       (a) |v0| < sc_neighbor_vel_thresh  (approx from first two valid future points)
       (b) max displacement from t=0 across the valid future < sc_neighbor_disp_thresh
 
+    Gotcha: the v0 estimate requires BOTH t=0 and t=1 valid in
+    ``neighbor_valid``. Neighbors with sparse GT futures (e.g. a tracker
+    that dropped the agent after the first frame) therefore fail the
+    mask and are silently ignored, even if the agent was visibly parked
+    at t=0. This is by design — ``v0`` isn't meaningful without t=1 —
+    but callers that work off real-data NPZs with spotty perception
+    should be aware.
+
     Returns a dict with:
       crossing_gate:        (N,) 1.0 if no crossing, 0.0 if any predicted timestep
                             (t>=1, ego moving) has clearance < sc_cross_thresh
@@ -1707,7 +1716,6 @@ def compute_static_collision_penalty(
     if both_valid_01.any():
         v0[both_valid_01] = (nb_xy[both_valid_01, 1] - nb_xy[both_valid_01, 0]).norm(dim=-1) / config.dt
     # max displacement from t=0 over valid timesteps
-    valid_f = neighbor_valid.float()
     disp_all = (nb_xy - nb_xy[:, 0:1]).norm(dim=-1)  # (N_nb, T)
     disp_masked = disp_all.masked_fill(~neighbor_valid, 0.0)
     max_disp = disp_masked.max(dim=1).values  # (N_nb,)
@@ -1761,10 +1769,15 @@ def compute_static_collision_penalty(
     npc_flat = npc_exp.reshape(-1, 4, 2)
 
     sat_dist_flat = batch_signed_distance_rect(ego_flat, npc_flat)  # (N*S*T,)
-    pt_e_all, pt_n_all = _closest_points_between_rects(ego_flat, npc_flat)  # (N*S*T, 2) each
-    euclid_dist_flat = (pt_e_all - pt_n_all).norm(dim=-1)  # (N*S*T,)
+    pt_e_all, pt_n_all = _closest_points_between_rects(ego_flat, npc_flat)
+    euclid_dist_flat = (pt_e_all - pt_n_all).norm(dim=-1)
 
-    # Overlap → use SAT (negative). Separated → use Euclidean.
+    # Overlap → use SAT penetration (negative). Separated → use true
+    # Euclidean closest-pair distance. SAT alone under-reports clearance
+    # in corner-to-corner separated cases (e.g. 0.2 m axis-gap with 3 m
+    # true distance), which would shift zone classifications and change
+    # absolute reward magnitudes — we need the Euclidean branch for both
+    # the training signal AND viz.
     is_overlap = sat_dist_flat < 0
     signed_dist_flat = torch.where(is_overlap, sat_dist_flat, euclid_dist_flat)
 

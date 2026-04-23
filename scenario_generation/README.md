@@ -243,7 +243,8 @@ to produce a static-only audit scene.
 **Live ego ↔ stopped-NPC proximity line.** When the ego's OBB gets
 within `_STATIC_NPC_VIZ_THRESH_M` (= 2.0 m) of any static NPC's OBB,
 `_save_step_figure` draws a red line between the two closest-pair points
-and labels it with the distance + offender id. Mirrors the existing
+and labels it with the distance (the offender NPC's id is already
+drawn as the agent label next to its OBB). Mirrors the existing
 road-border distance viz. The closest-pair primitive is shared with
 `rlvr.reward._closest_points_between_rects` (single source — the number
 on the live PNG IS the number the downstream audit scoring uses).

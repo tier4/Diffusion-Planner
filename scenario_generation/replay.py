@@ -796,12 +796,13 @@ class SceneNPCManager:
             idx = np.linspace(0, len(target_arcs) - 1, n).round().astype(int)
             target_arcs = target_arcs[idx]
 
-        # Pull boundary look-ups from per-lanelet caches via nearest-arc
-        # sampling of raw_left / raw_right (same resolution as the
-        # centerline).
-        lanelet_cl_arcs: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]] = []
-        # Re-walk the route building (ll_id, centerline, left_boundary,
-        # right_boundary) with consistent per-route arc offsets.
+        # Re-walk the route so we can look up each lanelet's centerline +
+        # left/right boundaries at a given route-wide arc length. Each
+        # entry carries (lanelet_id, per-lanelet arc lengths offset to the
+        # route frame, centerline xy, (left_boundary xy, right_boundary xy)).
+        lanelet_cl_arcs: list[tuple[
+            int, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray],
+        ]] = []
         offset = 0.0
         for ll_id in self.ego_route_ll_ids:
             if ll_id not in self.builder._cache:
@@ -814,11 +815,7 @@ class SceneNPCManager:
                 continue
             ll_diffs = np.linalg.norm(np.diff(cl, axis=0), axis=1)
             ll_arc = np.concatenate([[0.0], np.cumsum(ll_diffs)]) + offset
-            lanelet_cl_arcs.append((ll_id, ll_arc, cl, lb))
-            lanelet_cl_arcs.append((ll_id, ll_arc, cl, rb))  # dummy — replaced
-            # Replace the last entry with a single bundled tuple.
-            lanelet_cl_arcs[-2] = (ll_id, ll_arc, cl, (lb, rb))
-            lanelet_cl_arcs.pop()
+            lanelet_cl_arcs.append((ll_id, ll_arc, cl, (lb, rb)))
             offset = float(ll_arc[-1])
 
         def _lookup(target: float):
@@ -1147,7 +1144,7 @@ def _ego_nearest_static_npc(
     if not candidates:
         return None
 
-    import torch
+    # torch is imported at module scope — just need the reward helper.
     from rlvr.reward import _closest_points_between_rects
 
     ego_corners = _obb_corners(
