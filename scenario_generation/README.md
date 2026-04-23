@@ -227,13 +227,18 @@ record carries `{step, lane_gate, lane_near_frac, lane_wide_frac, lane_cont,
 rb_min_dist, cl_score}`. Thresholds come from the training reward config, so
 the logged values speak the same semantics ranked-SFT uses.
 
-Downstream: `rlvr/autoresearch/tools/select_from_metrics_log.py` reads that
-log + the NPZ directory, flags drift-trigger steps (lane cross / lane-near /
-border-close / centerline-far), and keeps the N pre-trigger NPZs as training
-data — those are the frames where the model could still have recovered.
-Lookback does not cross NPZ-directory boundaries, so concatenating logs from
-multiple replay runs is safe. Reward thresholds for rb / cl are CLI flags on
-the selector so a single sim run can feed many threshold sweeps.
+Each metrics record carries two blocks: the **instantaneous** fields
+(ego-at-current-pose scores) and a `pred_*` block scoring the model's
+80-step prediction against the same reward primitives — produced with
+zero extra inference cost because replay already computed the
+prediction to hand it to the tracker.
+
+Downstream tools:
+
+| Tool | Purpose |
+|---|---|
+| `rlvr/autoresearch/tools/select_from_metrics_log.py` | Flags drift-trigger steps (lane cross / lane-near / border-close / centerline-far) and keeps the N pre-trigger NPZs as training data — the frames where the model could still have recovered. Lookback stays within one NPZ directory so concatenating logs from multiple replay runs is safe. Reward thresholds for rb / cl are CLI flags, so one sim run can feed many threshold sweeps. |
+| `rlvr/autoresearch/tools/rescore_replay_run.py` | Regenerate `metrics_log.json` from an existing replay dump without re-running MPC. Two explicit modes: `--mode instant` scores only the current pose (no model needed, use when a reward component or threshold changed); `--mode full` also scores the model's prediction (`--model_path REQUIRED` — no silent fallback). Swap `--model_path` to a different checkpoint to evaluate how that model would have planned at the same observations — the instantaneous block stays identical, only `pred_*` differs, so loading two metrics logs into scene_search gives a side-by-side plan-quality comparison at matching world positions. Caveat: post-hoc eval is single-step open-loop; it does NOT reproduce what the alternative model would have done if rolled out closed-loop from the same seed — that still requires a fresh `scenario_generation.replay` run. |
 
 Relevant modules:
 
@@ -247,6 +252,7 @@ Relevant modules:
 | `scenario_generation/traffic_light.py` | `TrafficLightController` + signal group state machines |
 | `scenario_generation/configs/replay_default.json` | Reference `SpawnConfig` template — not loaded automatically, `--config` is required |
 | `rlvr/autoresearch/tools/select_from_metrics_log.py` | Reads `metrics_log.json` + NPZ dir, emits pre-trigger scene list for training |
+| `rlvr/autoresearch/tools/rescore_replay_run.py` | Regenerate `metrics_log.json` from an existing run (no re-sim); `--mode instant` (no model) or `--mode full` (with model) — swap models to compare plans at the same observations |
 | `scenario_generation/tools/inspect_route.py` | CLI to dump a saved route pickle |
 | `scenario_generation/gui/app.py` | GUI panels + live route overlay wiring |
 | `scene_search/map_canvas_js.py` | JS canvas: start / goal / waypoint arrows + route polyline |
