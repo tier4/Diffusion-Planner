@@ -865,7 +865,7 @@ def build_interface(
                     op_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.overprogress_penalty, step=1.0, label="overprogress_penalty")
                     op_mar_sl = gr.Slider(1.0, 1.5, value=_rc0.overprogress_margin, step=0.01, label="overprogress_margin")
                     stop_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.stopped_penalty, step=1.0, label="stopped_penalty")
-                    cl_cap_sl = gr.Slider(0.1, 5.0, value=_rc0.centerline_usage_cap, step=0.1, label="centerline_usage_cap (m)")
+                    cl_cap_sl = gr.Slider(0.1, 5.0, value=_rc0.centerline_usage_cap, step=0.1, label="centerline_usage_cap (dimensionless lane_usage ratio)")
                     rb_near_sl = gr.Slider(0.0, 20.0, value=_rc0.rb_near_scale, step=0.5, label="rb_near_scale")
                     rb_wide_sl = gr.Slider(0.0, 5.0, value=_rc0.rb_wide_scale, step=0.1, label="rb_wide_scale")
 
@@ -931,7 +931,8 @@ def build_interface(
                 det_cb = gr.Checkbox(value=True, label="Deterministic (noise=0)")
 
                 gr.Markdown("#### Guidance Functions")
-                # 9 guidance types: each gets a checkbox + scale slider
+                # Guidance toggles — order here must match ALL_GUIDANCE_NAMES
+                # and the inputs list in editor_guidance_components below.
                 cb_cl = gr.Checkbox(value=False, label="Centerline following (nearest lane)")
                 sl_cl = gr.Slider(0.1, 15.0, value=5.0, step=0.1, label="CL scale")
 

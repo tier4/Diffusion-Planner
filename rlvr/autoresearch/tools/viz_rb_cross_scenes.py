@@ -166,7 +166,7 @@ def main():
         # OR: evaluate per-step using direct call.
         try:
             from rlvr.reward import compute_road_border_penalty
-            gate, _, _, _, per_ts_min, _ = compute_road_border_penalty(
+            _, _, _, _, _, per_ts_min = compute_road_border_penalty(
                 det_t, ego_shape.to(device), data,
             )
             worst_t = int(per_ts_min[0].argmin().item())

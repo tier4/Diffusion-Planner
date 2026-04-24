@@ -63,7 +63,9 @@ def _cfg_cl_only(**overrides) -> RewardConfig:
         lane_gate_enabled=False,
         enable_lane_departure=False,
         static_collision_enabled=False,
-        reward_mode="direct",  # skip survival so totals = quality_score
+        # reward_mode: stick to default "gate" branch (collision_gate + red_light_gate
+        # both pass with neutral data → totals = quality_score, same as survival w/o
+        # failures). Avoids relying on any unsupported mode value.
         # penalty settings under test
         enable_overprogress=True,
         underprogress_penalty=50.0,

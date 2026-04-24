@@ -184,12 +184,11 @@ _VARIANTS: dict[str, GenerationVariant] = {
         ],
     ),
     "rl_cl_soft_sweep": GenerationVariant(
-        description="Soft route-lanes-centerline (rl_cl) sweep — all scale ≤ 3.0, "
-                    "no pure-noise slots. GUI tuning found scale=2.4 as the sweet "
-                    "spot; this variant sweeps ∈ {1.5, 2.0, 2.5, 3.0} so training "
-                    "picks the winning strength per scene via rank analytics. "
-                    "Always uses route_centerline_following (rl_cl). K=8: "
-                    "1 det + 4 det-sweep + 3 low-noise-sweep, no pure noise.",
+        description="Low-scale CL sweep (scale ∈ {1.5, 2.0, 2.5, 3.0}) with no "
+                    "pure-noise slots. K=8: 1 det + 4 det-sweep + 3 low-noise-sweep. "
+                    "Targets route_lanes centerline when the caller passes "
+                    "use_route_cl_guidance=True (otherwise these slots emit the "
+                    "legacy nearest-lane centerline_following guidance).",
         cl_spd_configs=[
             _RL_CL_1_5_SPD1_5_DET,       # rl_cl=1.5, no noise
             _RL_CL_2_0_SPD2_0_DET,       # rl_cl=2.0, no noise
