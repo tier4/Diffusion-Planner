@@ -90,6 +90,10 @@ _RL_CL_2_0_SPD2_0_STR12 = {"cl": 2.0, "spd": 2.0, "noise": (0.0, 0.0), "stretch"
 _RL_CL_2_5_SPD2_5_STR13 = {"cl": 2.5, "spd": 2.5, "noise": (0.0, 0.0), "stretch": 1.3, "label": "RL_CL2.5_SPD2.5_str13"}
 _RL_CL_3_0_SPD3_0_STR14 = {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "stretch": 1.4, "label": "RL_CL3.0_SPD3.0_str14_n0308"}
 _RL_CL_3_0_SPD3_0_STR12 = {"cl": 3.0, "spd": 3.0, "noise": (0.0, 0.0), "stretch": 1.2, "label": "RL_CL3.0_SPD3.0_str12"}
+# Nonzero-noise low-scale rl_cl slots (replaces the dead str12/str13 slots
+# that never won on the sim-from-route campaign).
+_RL_CL_1_5_SPD1_5_N0308 = {"cl": 1.5, "spd": 1.5, "noise": (0.3, 0.8), "label": "RL_CL1.5_SPD1.5_n0308"}
+_RL_CL_2_0_SPD2_0_STR12_N = {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "stretch": 1.2, "label": "RL_CL2.0_SPD2.0_str12_n0308"}
 
 # Lateral push slots
 _LATL04 = {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "lat_eta":  0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latL04"}
@@ -190,6 +194,23 @@ _VARIANTS: dict[str, GenerationVariant] = {
         noise_configs=[
             {"noise": (0.5, 1.0), "label": "noise_n0510"},  # only low-noise exploration slot
         ],
+    ),
+    "rl_cl_stretch_v2": GenerationVariant(
+        description="Refined rl_cl_soft_sweep_stretch — drops the 2 dead slots "
+                    "(RL_CL2.0_SPD2.0_str12, RL_CL2.5_SPD2.5_str13 — never won "
+                    "in epoch-8 analytics) and adds nonzero-noise variants of "
+                    "the winning low-scale slots. Keeps the str14_n0308 top "
+                    "slot that dominated the last run.",
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,            # winner 22-24%
+            _RL_CL_1_5_SPD1_5_N0308,          # NEW — noisy low-scale
+            _RL_CL_2_0_SPD2_0_DET,            # low win rate but kept as anchor
+            _RL_CL_3_0_SPD3_0_STR12,          # winner 12-13%
+            _RL_CL_3_0_SPD3_0_STR14,          # top slot 33-37%
+            _RL_CL_2_0_SPD2_0_STR12_N,        # NEW — stretch + noise, new low-scale
+            _RL_CL_2_5_SPD2_5_NOISY,          # noisy mid-scale from base variant
+        ],
+        noise_configs=[],
     ),
     "rl_cl_soft_sweep_stretch": GenerationVariant(
         description="rl_cl sweep + path-length preservation via speed stretch. "
