@@ -1,0 +1,32 @@
+{
+  "_comment_1": "Default classification bands for scenario_generation.tools.classify_replay_steps.",
+  "_comment_2": "Values are inclusive-low, exclusive-high on reward.py cl_score (negative; 0 = on centerline, saturates at ~-2.25 with usage_cap=1.0).",
+  "_comment_3": "These MUST match the reward_config used at replay time (cl_score is already logged in metrics_log.json per step). If you change usage_cap or usage_mode in training, rebuild bands.",
+  "bands": {
+    "clean":    [-0.10,   0.01],
+    "warm":     [-0.50,  -0.10],
+    "hot":      [-1.00,  -0.50],
+    "very_hot": [-20.00, -1.00]
+  },
+  "stopped_filter": {
+    "min_speed_m_s": 0.5,
+    "_why": "TL runs contain many frames at rest; training on them would reward-hack to always-stop."
+  },
+  "lane_change_detection": {
+    "saturated_thresh": -2.00,
+    "min_consecutive_steps": 20,
+    "_why": "An actual lane change saturates cl_score to the floor for ~2 s+ (20 sim steps). These are bucketed separately — not all lane changes are real, and they inflate the very_hot band."
+  },
+  "decluster_window": 10,
+  "_comment_decluster": "Min step gap between kept scenes in the same band. 10 steps = 1 s.",
+
+  "gate_filters": {
+    "_why": "Drop scenes where the ego is already in a gate-terminated state at t=0 (no amount of training can recover from an off-road start), or where the model's own 80-step prediction collides / crosses a border in the first N steps (first-N check proxies 'the scene's near-future is already broken without any guidance').",
+    "rb_crossing_excludes": true,
+    "rb_min_dist_threshold_m": 0.25,
+    "lane_crossing_excludes": false,
+    "_lane_comment": "User flagged that LD may hurt — keep it false by default, train configs that disable enable_lane_departure are the ones that want this filter. Flip to true to exclude LD-violating scenes.",
+    "pred_collision_first_n_steps": 15,
+    "_coll_comment": "reward.py stores collision_step over the model's 80-step pred; if it fires in the first 15 (=1.5s) the scene is effectively unrecoverable from this start."
+  }
+}
