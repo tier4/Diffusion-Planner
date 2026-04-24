@@ -80,7 +80,7 @@ def get_args():
     parser.add_argument("--ego_past_noise_std", type=float, default=0.1, help="std of noise applied to ego past trajectory during augmentation")
     parser.add_argument("--use_smoothing_future_trajectory", default=True, type=boolean, help="whether to apply smoothing to future trajectory")
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
-    parser.add_argument("--num_workers", default=4, type=int)
+    parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
