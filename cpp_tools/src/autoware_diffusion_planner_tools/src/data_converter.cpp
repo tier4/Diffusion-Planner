@@ -29,7 +29,6 @@
 #include <autoware_lanelet2_extension/projection/transverse_mercator_projector.hpp>
 #include <autoware_lanelet2_extension/utility/message_conversion.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <yaml-cpp/yaml.h>
 
 #include <autoware_map_msgs/msg/lanelet_map_bin.hpp>
 #include <autoware_perception_msgs/msg/tracked_objects.hpp>
@@ -43,6 +42,7 @@
 #include <lanelet2_io/Io.h>
 #include <lanelet2_routing/RoutingGraph.h>
 #include <lanelet2_traffic_rules/TrafficRulesFactory.h>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -245,8 +245,7 @@ std::string create_token(const int64_t seq_id, const int64_t frame_id)
   return token_stream.str();
 }
 
-std::unique_ptr<lanelet::Projector> create_projector_from_yaml(
-  const std::string & vector_map_path)
+std::unique_ptr<lanelet::Projector> create_projector_from_yaml(const std::string & vector_map_path)
 {
   const std::filesystem::path map_path_fs(vector_map_path);
   const std::filesystem::path projector_info_yaml =
@@ -668,8 +667,7 @@ int main(int argc, char ** argv)
 
   // Load Lanelet2 map using projector chosen by map_projector_info.yaml.
   lanelet::ErrorMessages errors{};
-  const std::unique_ptr<lanelet::Projector> projector =
-    create_projector_from_yaml(vector_map_path);
+  const std::unique_ptr<lanelet::Projector> projector = create_projector_from_yaml(vector_map_path);
   const std::shared_ptr<lanelet::LaneletMap> lanelet_map_ptr =
     lanelet::load(vector_map_path, *projector, &errors);
 
