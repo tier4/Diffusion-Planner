@@ -162,8 +162,8 @@ enum class SkippingLabel {
   InsufficientDistance,  // Traveled distance of sequence is too short
 
   // Frame processing skipping reasons
-  VehicleStopped,    // Ego vehicle is stopped
   RedOrYellowLight,  // At red or yellow light with forward future trajectory
+  VehicleStopped,    // Ego vehicle is stopped
 };
 
 // Structure to hold detailed skipping information
