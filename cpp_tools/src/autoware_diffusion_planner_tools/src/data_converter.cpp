@@ -952,7 +952,7 @@ int main(int argc, char ** argv)
     // Process frames with stopping count tracking
     int64_t stopping_count = 0;
     for (int64_t i = INPUT_T_WITH_CURRENT; i < n; i += step) {
-      // Create token in same format as Python version: seq_id(8digits) + i(8digits)
+      // Create token in canonical format: seq_id(8digits) + "_" + i(8digits)
       const std::string token = create_token(seq_id, i);
 
       // Get transformation matrix
