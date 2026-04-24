@@ -657,8 +657,8 @@ def train_epoch_ranked_sft(
         det_reward = reward_vals[0]  # deterministic trajectory is always index 0
 
         # GT fallback: compare best-of-K against the GT trajectory's reward.
-        # If GT is significantly better, either swap the SFT target to GT or
-        # skip the scene (per gt_fallback_mode).
+        # If GT is better by more than gt_fallback_margin, either swap the SFT
+        # target to GT or skip the scene (per gt_fallback_mode).
         _gt_mode = getattr(config, "gt_fallback_mode", "none")
         _gt_margin = float(getattr(config, "gt_fallback_margin", 0.0))
         _used_gt_fallback = False
@@ -671,13 +671,15 @@ def train_epoch_ranked_sft(
                 if _g.dim() == 3:
                     _g = _g[0]
                 # Map (T,3) -> (T,4) as (x, y, cos h, sin h). Align columns
-                # with traj_K (which is also x, y, cos, sin).
+                # with traj_K (which is also x, y, cos, sin). Mask zero-
+                # padded trailing rows BEFORE cos/sin conversion so we don't
+                # inject a phantom "pointing-east" pose (cos=1, sin=0) on
+                # invalid timesteps — that would skew progress / RB on GT.
                 if _g.shape[-1] == 3:
-                    _g = torch.cat([
-                        _g[..., :2],
-                        _g[..., 2:3].cos(),
-                        _g[..., 2:3].sin(),
-                    ], dim=-1)
+                    _valid = _g[..., :2].abs().sum(dim=-1) > 0.1
+                    _cos = torch.where(_valid, _g[..., 2].cos(), torch.zeros_like(_g[..., 2]))
+                    _sin = torch.where(_valid, _g[..., 2].sin(), torch.zeros_like(_g[..., 2]))
+                    _g = torch.stack([_g[..., 0], _g[..., 1], _cos, _sin], dim=-1)
                 _g = _g[..., :4]
                 T_gen = traj_K.shape[1]
                 T_g = _g.shape[0]
@@ -696,9 +698,8 @@ def train_epoch_ranked_sft(
                     _used_gt_fallback = True
                     _gt_fallback_count += 1
                 # Always record per-scene comparison so we can analyze hard scenes
-                from pathlib import Path as _P
                 _gt_scene_log.append({
-                    "scene": _P(valid_paths[i]).stem,
+                    "scene": Path(valid_paths[i]).stem,
                     "gt_reward": gt_reward,
                     "best_reward": float(best_reward),
                     "det_reward": float(det_reward),
@@ -711,8 +712,15 @@ def train_epoch_ranked_sft(
                     "gt_collision_step": _gt_rewards[0].collision_step,
                 })
 
-        # Selective: skip scene if improvement is below threshold
-        improvement = best_reward - det_reward
+        # "effective" reward captures what we actually train on:
+        # best-of-K by default, GT when the il fallback fires. Downstream
+        # selective / advantage logic keys off this so IL-fallback scenes
+        # can't be accidentally filtered out by a high selective_threshold
+        # (the noisy best-of-K "improvement" isn't what we're training on).
+        effective_reward = (
+            gt_reward if (_gt_mode == "il" and _used_gt_fallback) else best_reward
+        )
+        improvement = effective_reward - det_reward
         should_train = selective_thresh <= 0 or improvement >= selective_thresh
         # GT-skip overrides selective
         if _gt_mode == "skip" and _used_gt_fallback:
@@ -724,8 +732,9 @@ def train_epoch_ranked_sft(
         else:
             scene_improvements.append(max(0.0, improvement))
         if selective_thresh > 0 and epoch <= 2 and should_train:
-            from pathlib import Path as _P
-            print(f"    SEL [{_P(valid_paths[i]).stem[:30]}] det={det_reward:.1f} best={best_reward:.1f} imp={improvement:.1f}")
+            print(f"    SEL [{Path(valid_paths[i]).stem[:30]}] "
+                  f"det={det_reward:.1f} best={best_reward:.1f} "
+                  f"eff={effective_reward:.1f} imp={improvement:.1f}")
 
         # Rank analytics: record which config won and why
         _ra_mean_bd = mean_breakdown_dict(rewards)
@@ -757,7 +766,9 @@ def train_epoch_ranked_sft(
         )
 
         best_ego_trajs.append(best_traj_smooth)
-        best_rewards_list.append(best_reward)
+        # Track the reward of the target we're actually training on
+        # (GT reward when il-fallback fires, else best-of-K).
+        best_rewards_list.append(effective_reward)
 
     mean_best_reward = float(np.mean(best_rewards_list))
 

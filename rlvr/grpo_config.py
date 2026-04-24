@@ -265,14 +265,18 @@ class GRPOConfig:
     selective_frozen: bool = False
 
     # GT fallback: when best-of-K trajectory reward is worse than the GT trajectory's reward
-    # by at least gt_fallback_margin, either skip the scene or swap the SFT target with GT.
-    # Rationale: if all K generations are gated down (rb/lane/kinematic/collision) but GT is
-    # feasible, the best-of-K signal is unreliable (noise). Either remove it or anchor on GT.
+    # by MORE THAN gt_fallback_margin (strict `<`), either skip the scene or swap the SFT
+    # target with GT. Rationale: if all K generations are gated down (rb/lane/kinematic/
+    # collision) but GT is feasible, the best-of-K signal is unreliable (noise). Either
+    # remove it or anchor on GT.
     # "none" (default): current behavior, always use best-of-K.
     # "skip":           if best_reward < gt_reward - margin, scene_train_mask=False.
     # "il":             if best_reward < gt_reward - margin, replace best_traj with GT.
+    #                   The effective_reward (GT, not best-of-K) is then used for selective
+    #                   threshold / advantage weighting so IL-fallback scenes aren't
+    #                   accidentally filtered out by selective_threshold.
     gt_fallback_mode: str = "none"
-    gt_fallback_margin: float = 0.0  # reward units. 0 = any GT advantage triggers fallback.
+    gt_fallback_margin: float = 0.0  # reward units. 0 = any GT advantage > 0 triggers fallback.
 
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
@@ -627,6 +631,10 @@ class GRPOConfig:
             raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {self.ego_il_mode!r}")
         if self.selective_mode not in ("threshold", "advantage"):
             raise ValueError(f"selective_mode must be 'threshold' or 'advantage', got {self.selective_mode!r}")
+        if self.gt_fallback_mode not in ("none", "skip", "il"):
+            raise ValueError(
+                f"gt_fallback_mode must be 'none', 'skip', or 'il', got {self.gt_fallback_mode!r}"
+            )
 
     @property
     def uses_importance_sampling(self) -> bool:
