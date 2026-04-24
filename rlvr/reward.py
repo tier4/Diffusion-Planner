@@ -2944,6 +2944,12 @@ def compute_reward_batch(
         + config.sc_cont_scale * sc_cont_pen
     )
 
+    # Penalty magnitude preserves legacy behavior for configs with w_progress >= 1
+    # (historical default range: w_progress ∈ {2.0, 7.0}), where the old code
+    # effectively multiplied the penalty by w_progress via the clamped_progress
+    # sum. For w_progress < 1 we floor at 1.0 so penalties still fire on
+    # CL-only / reward-sculpted configs (w_progress=0 was the original bug).
+    penalty_mult = max(float(config.w_progress), 1.0)
     quality_score = (
         config.w_progress * clamped_progress
         + config.w_safety * safety_scores
@@ -2953,7 +2959,7 @@ def compute_reward_batch(
         - rb_penalty
         - lane_penalty
         - sc_penalty
-        - progress_penalty
+        - penalty_mult * progress_penalty
     )
 
     _OFFROAD_FLOOR = -50.0

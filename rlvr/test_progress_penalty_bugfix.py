@@ -140,7 +140,8 @@ def test_penalties_still_apply_with_nonzero_w_progress():
     totals_one = _totals(cfg_one, trajs, data)
 
     # w_progress=1 adds positive progress (progress_frac*20=20 for det, 0.5*20=10 for short)
-    # so absolute totals shift up; but the relative gap from underprogress is identical.
+    # so absolute totals shift up; but the relative gap from underprogress is identical
+    # (both at the floor penalty_mult = max(w_progress, 1.0) = 1.0).
     gap_zero = totals_zero[1] - totals_zero[0]
     gap_one = totals_one[1] - totals_one[0]
 
@@ -148,6 +149,43 @@ def test_penalties_still_apply_with_nonzero_w_progress():
     assert gap_one == pytest.approx(gap_zero - 10.0, abs=0.5), (
         f"relative underprogress magnitude changed with w_progress. "
         f"gap_zero={gap_zero}, gap_one={gap_one}"
+    )
+
+
+def test_penalty_magnitude_scales_with_w_progress_above_one():
+    """With w_progress=2 the underprogress penalty should fire at 2x magnitude
+    (matching legacy behavior where penalties lived inside the w_progress sum).
+    With w_progress=7 it should fire at 7x. This guards the penalty_mult floor
+    that preserves backward compat for configs with w_progress in {2, 7}."""
+    trajs, data = _make_scene([60.0, 30.0], gt_len=60.0)
+    cfg_base = _cfg_cl_only(w_progress=1.0)
+    cfg_2 = _cfg_cl_only(w_progress=2.0)
+    cfg_7 = _cfg_cl_only(w_progress=7.0)
+
+    totals_1 = _totals(cfg_base, trajs, data)
+    totals_2 = _totals(cfg_2, trajs, data)
+    totals_7 = _totals(cfg_7, trajs, data)
+
+    # Underprogress: ratio = 30/60 = 0.5, thresh 0.85 → underprogress = 0.35.
+    # penalty_at_w1 = 50 * 0.35 = 17.5 on traj[1].
+    # penalty_at_w2 = 2 * 17.5 = 35.0 on traj[1] → extra 17.5 swing vs w=1.
+    # Positive progress contribution also scales: det gets 1*20→2*20 (+20),
+    # short gets 1*10→2*10 (+10), so gap-from-progress changes by -10.
+    # Net gap change (w=2 vs w=1): -17.5 (penalty) + -10 (progress) = -27.5.
+    gap_1 = totals_1[1] - totals_1[0]
+    gap_2 = totals_2[1] - totals_2[0]
+    gap_7 = totals_7[1] - totals_7[0]
+
+    # At w=2: expect gap shift of −27.5 vs w=1.
+    assert (gap_2 - gap_1) == pytest.approx(-27.5, abs=1.0), (
+        f"penalty did not scale to 2x at w_progress=2. "
+        f"gap_1={gap_1:.2f} gap_2={gap_2:.2f} delta={gap_2 - gap_1:.2f} (expected -27.5)"
+    )
+    # At w=7: penalty 7*17.5=122.5 (extra 105 vs w=1), progress 7*(10)=70 (extra 60 vs w=1).
+    # Net gap shift: -105 + -60 = -165.
+    assert (gap_7 - gap_1) == pytest.approx(-165.0, abs=2.0), (
+        f"penalty did not scale to 7x at w_progress=7. "
+        f"gap_1={gap_1:.2f} gap_7={gap_7:.2f} delta={gap_7 - gap_1:.2f} (expected -165)"
     )
 
 

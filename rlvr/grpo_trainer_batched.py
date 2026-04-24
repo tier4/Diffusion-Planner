@@ -349,6 +349,8 @@ def train_epoch_batched(
             lateral_lambda=lat_lambda,
             lateral_scale=lat_scale,
             speed_stretch=spd_stretch,
+            generation_variant=config.generation_variant,
+            use_route_cl_guidance=getattr(config, "use_route_cl_guidance", False),
         )  # [N, K, T, 4]
 
     # Free generation memory before scoring + training
