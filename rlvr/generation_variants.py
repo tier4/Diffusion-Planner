@@ -83,6 +83,13 @@ _RL_CL_2_0_SPD2_0_NOISY = {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "label": 
 _RL_CL_2_5_SPD2_5_NOISY = {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "label": "RL_CL2.5_SPD2.5_n0308"}
 _RL_CL_3_0_SPD3_0_NOISY = {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "label": "RL_CL3.0_SPD3.0_n0308"}
 
+# Very gentle rl_cl slots (cl ≤ 2.0) for the zones where stronger scales
+# caused north-return breakage in closed-loop MPC sim.
+_RL_CL_1_0_SPD1_0_DET   = {"cl": 1.0, "spd": 1.0, "noise": (0.0, 0.0), "label": "RL_CL1.0_SPD1.0_det"}
+_RL_CL_1_0_SPD1_0_NOISY = {"cl": 1.0, "spd": 1.0, "noise": (0.3, 0.8), "label": "RL_CL1.0_SPD1.0_n0308"}
+_RL_CL_1_5_SPD1_5_NOISY = {"cl": 1.5, "spd": 1.5, "noise": (0.3, 0.8), "label": "RL_CL1.5_SPD1.5_n0308"}
+_RL_CL_0_5_SPD0_5_DET   = {"cl": 0.5, "spd": 0.5, "noise": (0.0, 0.0), "label": "RL_CL0.5_SPD0.5_det"}
+
 # Stretched rl_cl slots: same rl_cl pull + speed stretch so path length is
 # preserved or lengthened. Used when base rl_cl_soft_sweep trajectories
 # collapse path on sim-from-route training because rl_cl pulls laterally.
@@ -194,6 +201,28 @@ _VARIANTS: dict[str, GenerationVariant] = {
         noise_configs=[
             {"noise": (0.5, 1.0), "label": "noise_n0510"},  # only low-noise exploration slot
         ],
+    ),
+    "rl_cl_gentle": GenerationVariant(
+        description="Gentler rl_cl sweep: cl scales in {0.5, 1.0, 1.5, 2.0} "
+                    "ONLY — no 2.5 or 3.0 slots, and no stretch. Addresses "
+                    "the 2026-04-24 north-return MPC breakage observed with "
+                    "rl_cl_soft_sweep_stretch at scale 3.0 (baseline 0.08 m → "
+                    "trained 3.80 m mean |lat| in arc 1100-1500 m). The "
+                    "hypothesis is that scale ≥ 2.5 pulls hard enough that "
+                    "MPC tracker can't follow the resulting trajectories in "
+                    "low-drift zones, breaking places the baseline handled "
+                    "well. K=8 = 1 det + 3 det-sweep (0.5/1.0/1.5/2.0) + 4 "
+                    "low-noise variants.",
+        cl_spd_configs=[
+            _RL_CL_0_5_SPD0_5_DET,      # very gentle
+            _RL_CL_1_0_SPD1_0_DET,
+            _RL_CL_1_5_SPD1_5_DET,
+            _RL_CL_2_0_SPD2_0_DET,
+            _RL_CL_1_0_SPD1_0_NOISY,
+            _RL_CL_1_5_SPD1_5_NOISY,
+            _RL_CL_2_0_SPD2_0_NOISY,
+        ],
+        noise_configs=[],
     ),
     "rl_cl_stretch_v2": GenerationVariant(
         description="Refined rl_cl_soft_sweep_stretch — drops the 2 dead slots "
