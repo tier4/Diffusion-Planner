@@ -83,6 +83,14 @@ _RL_CL_2_0_SPD2_0_NOISY = {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "label": 
 _RL_CL_2_5_SPD2_5_NOISY = {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "label": "RL_CL2.5_SPD2.5_n0308"}
 _RL_CL_3_0_SPD3_0_NOISY = {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "label": "RL_CL3.0_SPD3.0_n0308"}
 
+# Stretched rl_cl slots: same rl_cl pull + speed stretch so path length is
+# preserved or lengthened. Used when base rl_cl_soft_sweep trajectories
+# collapse path on sim-from-route training because rl_cl pulls laterally.
+_RL_CL_2_0_SPD2_0_STR12 = {"cl": 2.0, "spd": 2.0, "noise": (0.0, 0.0), "stretch": 1.2, "label": "RL_CL2.0_SPD2.0_str12"}
+_RL_CL_2_5_SPD2_5_STR13 = {"cl": 2.5, "spd": 2.5, "noise": (0.0, 0.0), "stretch": 1.3, "label": "RL_CL2.5_SPD2.5_str13"}
+_RL_CL_3_0_SPD3_0_STR14 = {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "stretch": 1.4, "label": "RL_CL3.0_SPD3.0_str14_n0308"}
+_RL_CL_3_0_SPD3_0_STR12 = {"cl": 3.0, "spd": 3.0, "noise": (0.0, 0.0), "stretch": 1.2, "label": "RL_CL3.0_SPD3.0_str12"}
+
 # Lateral push slots
 _LATL04 = {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "lat_eta":  0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latL04"}
 _LATR04 = {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "lat_eta": -0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latR04"}
@@ -182,6 +190,24 @@ _VARIANTS: dict[str, GenerationVariant] = {
         noise_configs=[
             {"noise": (0.5, 1.0), "label": "noise_n0510"},  # only low-noise exploration slot
         ],
+    ),
+    "rl_cl_soft_sweep_stretch": GenerationVariant(
+        description="rl_cl sweep + path-length preservation via speed stretch. "
+                    "K=8: 1 det + 3 det-sweep + 4 stretch-augmented. Targets "
+                    "route_lanes centerline (use_route_cl_guidance=True) while "
+                    "the stretch factor keeps trajectories from collapsing laterally. "
+                    "Use when plain rl_cl_soft_sweep shortens path on sim-from-route "
+                    "training.",
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,       # baseline rl_cl=1.5
+            _RL_CL_2_0_SPD2_0_DET,       # baseline rl_cl=2.0
+            _RL_CL_2_5_SPD2_5_DET,       # baseline rl_cl=2.5
+            _RL_CL_2_0_SPD2_0_STR12,     # rl_cl=2.0 + stretch 1.2
+            _RL_CL_2_5_SPD2_5_STR13,     # rl_cl=2.5 + stretch 1.3
+            _RL_CL_3_0_SPD3_0_STR12,     # rl_cl=3.0 + stretch 1.2
+            _RL_CL_3_0_SPD3_0_STR14,     # rl_cl=3.0 + stretch 1.4 + noise
+        ],
+        noise_configs=[],
     ),
     "rl_cl_soft_sweep": GenerationVariant(
         description="Low-scale CL sweep (scale ∈ {1.5, 2.0, 2.5, 3.0}) with no "
