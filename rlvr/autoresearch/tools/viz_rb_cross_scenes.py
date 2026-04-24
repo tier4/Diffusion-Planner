@@ -5,7 +5,8 @@ For a given base model + LoRA checkpoint, runs deterministic inference on every
 scene in the val list, scores it with the training reward config, filters the
 scenes where `r.rb_crossing=True`, and draws the worst N (by `rb_min_dist`) on
 a grid with: lane boundaries / road borders / route centerline / GT / DET
-trajectory + ego OBB rendered at the FIRST crossing step.
+trajectory + ego OBB rendered at the WORST (min-distance) step, computed as
+argmin of the per-timestep ego-to-border distance.
 
 Usage:
     python -m rlvr.autoresearch.tools.viz_rb_cross_scenes \
@@ -104,7 +105,7 @@ def main():
         scenes = json.load(f)
     print(f"Loaded {len(scenes)} val scenes. Scanning for rb_crossing=True...")
 
-    offenders = []  # (scene_idx, rb_min_dist, first_cross_step, det_traj, path)
+    offenders = []  # (scene_idx, rb_min_dist, det_traj, path)
     for si, path in enumerate(scenes):
         data = load_npz_data(path, device)
         det_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
@@ -113,8 +114,9 @@ def main():
         det_t = torch.tensor(det_traj[None], device=device, dtype=torch.float32)
         r = compute_reward_batch(det_t, data, rcfg)[0]
         if r.rb_crossing:
-            # Find first crossing step — traj pose with min rb distance across t
-            # r.rb_min_dist is the scalar min across t>=1
+            # Keep the scalar min distance (r.rb_min_dist = min across t>=1) for
+            # sorting offenders worst-first below; the exact worst-step index is
+            # recomputed later via compute_road_border_penalty when plotting.
             offenders.append((si, float(r.rb_min_dist), det_traj, path))
         if (si + 1) % 50 == 0:
             print(f"  ... scanned {si+1}/{len(scenes)}, offenders so far: {len(offenders)}")

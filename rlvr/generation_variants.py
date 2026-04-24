@@ -377,7 +377,9 @@ def clean_slot_mask(variant: str, K: int, noise_max_threshold: float = 1.0) -> l
       * pure-noise slots: NOT clean (noise dominates the signal)
       * random filler slots: NOT clean
 
-    Used by grpo_sft_trainer when `sft_target_clean_slots_only=True` in config.
+    Utility helper for callers that want to restrict ranked-SFT's winner
+    selection to slots whose winning trajectory will transfer cleanly to
+    deterministic inference. Not currently wired into any trainer.
     """
     v = get_variant(variant)
     n_cl = len(v.cl_spd_configs)
