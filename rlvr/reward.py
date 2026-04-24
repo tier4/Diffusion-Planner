@@ -39,6 +39,13 @@ class RewardConfig:
     #       Use when you want the reward to track centering distance directly
     #       rather than body-to-edge clearance.
     centerline_usage_mode: str = "body"
+    # Centerline time-weight floor. The per-step centerline penalty is averaged
+    # with weights torch.linspace(1.0, centerline_time_weight_min, T). The default
+    # 0.3 matches the historical behavior (late timesteps count 30% of early).
+    # Set to 1.0 for a flat (uniform) time-average — recommended when late-curve
+    # lane-following matters as much as early, and the training signal is being
+    # compressed by the decay.
+    centerline_time_weight_min: float = 0.3
     collision_penalty: float = -10.0
     red_light_penalty: float = -10.0
     max_accel: float = 8.0  # m/s^2
@@ -110,12 +117,13 @@ class RewardConfig:
     underprogress_penalty: float = 0.0   # scale (0=disabled). Penalty = scale * max(0, threshold - ratio)
     underprogress_threshold: float = 0.5  # fire when ratio < threshold
     # Reference for underprogress:
-    #   "det"      — deterministic traj (traj[0]) path length. Adaptive but can
-    #                collapse when model output itself collapses.
-    #   "baseline" — frozen LoRA-less baseline det path, passed via
+    #   "baseline" — (default) frozen LoRA-less baseline det path, passed via
     #                data["baseline_path_len"]. Anchors ratio regardless of
-    #                training drift.
-    underprogress_reference: str = "det"
+    #                training drift — recommended.
+    #   "det"      — deterministic traj (traj[0]) path length. Adaptive but can
+    #                collapse when model output itself collapses (path shrinks
+    #                while threshold follows it → penalty never fires).
+    underprogress_reference: str = "baseline"
 
     # Progress normalization scale: when enable_overprogress=True, progress is
     # normalized to [0, 1] as fraction of GT, then multiplied by this scale.
@@ -958,6 +966,7 @@ def compute_centerline_score_batch(
     data: dict[str, torch.Tensor],
     usage_cap: float = 1.0,
     usage_mode: str = "body",
+    time_weight_min: float = 0.3,
 ) -> torch.Tensor:
     """Batched normalized lane-usage penalty from nearest route lane centerline.
 
@@ -1077,8 +1086,9 @@ def compute_centerline_score_batch(
         ),
     )  # (N, T)
 
-    # Time-weighted mean: early deviations penalized more
-    time_weights = torch.linspace(1.0, 0.3, T, device=device).unsqueeze(0)
+    # Time-weighted mean: early deviations penalized more by default (min=0.3).
+    # Raise time_weight_min to 1.0 for flat uniform averaging.
+    time_weights = torch.linspace(1.0, time_weight_min, T, device=device).unsqueeze(0)
     penalty = per_step_penalty * time_weights
     return -(penalty.sum(dim=-1) / time_weights.sum())  # (N,)
 
@@ -2749,6 +2759,7 @@ def compute_reward_batch(
         ego_trajs, ego_shape, data,
         usage_cap=config.centerline_usage_cap,
         usage_mode=config.centerline_usage_mode,
+        time_weight_min=config.centerline_time_weight_min,
     )
     red_light_scores = compute_red_light_score_batch(ego_trajs, data, config)
     ttc_scores = compute_ttc_score_batch(
@@ -2841,6 +2852,12 @@ def compute_reward_batch(
     # Safety score includes proximity penalty to NPCs (closer = more negative).
     clamped_progress = progress_scores.clamp(min=0)
 
+    # Progress-related penalties (overprogress, stopped, underprogress) are floors,
+    # not progress rewards — they must apply even when w_progress=0. Accumulate
+    # them into `progress_penalty` and subtract from quality_score directly,
+    # bypassing the w_progress multiplier.
+    progress_penalty = torch.zeros(N, device=device)
+
     # Normalize progress as percentage of GT path length, then apply
     # overprogress/underprogress/stopped penalties.
     # This ensures a 10m path on a 12m GT scene and a 10m path on a 22m GT scene
@@ -2870,13 +2887,13 @@ def compute_reward_batch(
             # Configs must use ratio-scale penalties (e.g. 100.0), not meter-scale (e.g. 0.3).
             # E.g., margin=1.0, penalty=100: at 1.5x GT → 100*(1.5-1.0)=50 penalty.
             overprogress = torch.relu(path_ratio - config.overprogress_margin)
-            clamped_progress = clamped_progress - config.overprogress_penalty * overprogress
+            progress_penalty = progress_penalty + config.overprogress_penalty * overprogress
 
             # Stopped penalty: if GT drives (>5m) but model barely moves (<1m),
             # apply extra negative progress to discourage stopping.
             if gt_path_len > 5.0:
                 is_stopped = (model_path_lens < 1.0).float()
-                clamped_progress = clamped_progress - config.stopped_penalty * is_stopped
+                progress_penalty = progress_penalty + config.stopped_penalty * is_stopped
 
             # Underprogress: penalize trajectories shorter than deterministic traj.
             # Reference = deterministic trajectory (traj[0]) path length, NOT GT.
@@ -2908,7 +2925,7 @@ def compute_reward_batch(
                     ref_path_len = model_path_lens[0].clamp(min=1e-3)
                 ratio = model_path_lens / ref_path_len
                 underprogress = torch.relu(config.underprogress_threshold - ratio.clamp(max=1.0))
-                clamped_progress = clamped_progress - config.underprogress_penalty * underprogress
+                progress_penalty = progress_penalty + config.underprogress_penalty * underprogress
 
     # TTC as quality bonus
     ttc_bonus = config.w_safety * (ttc_scores - 0.5) * 2
@@ -2936,6 +2953,7 @@ def compute_reward_batch(
         - rb_penalty
         - lane_penalty
         - sc_penalty
+        - progress_penalty
     )
 
     _OFFROAD_FLOOR = -50.0

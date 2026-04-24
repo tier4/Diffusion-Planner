@@ -104,6 +104,16 @@ class GRPOConfig:
     #   "body" (default): lane_usage = (|baselink_lat| + ego_half_w) / side_hw
     #   "baselink": lane_usage = |baselink_lat| / side_hw (ignores ego width)
     centerline_usage_mode: str = "body"
+    # Centerline time-weight floor (passed to RewardConfig). Per-step penalty is
+    # averaged with linspace(1.0, centerline_time_weight_min, T). Default 0.3 matches
+    # historical behavior; 1.0 = flat uniform average. Raise when late-curve lane
+    # following matters as much as early and the decay is compressing the signal.
+    centerline_time_weight_min: float = 0.3
+    # Use `route_centerline_following` guidance (reads `route_lanes`) instead of
+    # `centerline_following` (reads all `lanes`). Aligns generation-time pull
+    # with the reward function — both score against route_lanes. Default False
+    # preserves old behavior.
+    use_route_cl_guidance: bool = False
 
     # Reward tuning (passed to RewardConfig for training)
     # Road border penalty scales and thresholds
@@ -152,7 +162,7 @@ class GRPOConfig:
     stopped_penalty: float = 5.0
     underprogress_penalty: float = 0.0  # penalize model driving << reference (0=disabled)
     underprogress_threshold: float = 0.5  # penalize if model_path/reference < threshold
-    underprogress_reference: str = "det"  # "det" = deterministic (adaptive); "baseline" = frozen LoRA-less baseline
+    underprogress_reference: str = "baseline"  # "baseline" = frozen LoRA-less baseline (default; anchors threshold); "det" = deterministic (adaptive, moves with training — can miss collapse)
     progress_norm_scale: float = 20.0  # max progress points at 100% GT match
 
     # Reward aggregation mode (passed to RewardConfig):

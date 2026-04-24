@@ -30,7 +30,7 @@ import json
 import random
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dc_fields, replace as dc_replace
 from pathlib import Path
 
 import gradio as gr
@@ -66,6 +66,7 @@ _GENERATE_SCRIPT = Path(__file__).parent.parent / "guidance_gui" / "scripts" / "
 
 ALL_GUIDANCE_NAMES = [
     "centerline_following",
+    "route_centerline_following",
     "speed",
     "lane_keeping",
     "road_border",
@@ -76,9 +77,13 @@ ALL_GUIDANCE_NAMES = [
     "longitudinal",
 ]
 
-# Short display names for labels
+# Short display names for labels.
+# Note: `rl_cl` = route_lanes centerline (our curve-training default).
+#       `cl` = nearest-lane centerline (legacy, kept for back-compat).
+#       `rb` = road_border guidance (distinct from rl_cl — borders vs centerline).
 _SHORT_NAMES = {
     "centerline_following": "cl",
+    "route_centerline_following": "rl_cl",
     "speed": "spd",
     "lane_keeping": "lk",
     "road_border": "rb",
@@ -304,6 +309,10 @@ class TrajectoryRanker:
         self.saved_scenes: list[dict] = []
 
         self.reward_config = RewardConfig()
+        # Base template preserved so _apply_reward_config can override only the
+        # slider-controlled fields without resetting penalty / threshold settings
+        # that the training config carries.
+        self.reward_config_base = RewardConfig()
         self.accepted_groups: list[dict] = []
 
     def _compute_gt_speed_bounds(self) -> None:
@@ -424,6 +433,34 @@ class TrajectoryRanker:
 
         data_cpu = {k: v.cpu() for k, v in self.current_data.items()}
         visualize_inputs(data_cpu, save_path=None, ax=ax, view_ranges=[120])
+
+        # Overlay route_lanes centerline in bold orange — this is what
+        # compute_centerline_score_batch scores against when route_lanes exist,
+        # and what route_centerline_following guidance pulls toward. Drawn on
+        # top of visualize_inputs which only shows nearest-lane centerlines.
+        if "route_lanes" in data_cpu:
+            rl = data_cpu["route_lanes"]
+            if hasattr(rl, "numpy"):
+                rl = rl.numpy()
+            rl = np.asarray(rl)
+            if rl.ndim == 4:
+                rl = rl[0]
+            route_label_done = False
+            for i in range(rl.shape[0]):
+                lane = rl[i]
+                if np.abs(lane[:, :2]).sum() < 1e-6:
+                    continue
+                pts = lane[:, :2]
+                valid = np.linalg.norm(pts, axis=-1) > 1e-3
+                if valid.sum() < 2:
+                    continue
+                ax.plot(
+                    pts[valid, 0], pts[valid, 1],
+                    "-", color="#ff7f0e", lw=2.2, alpha=0.9,
+                    label="ROUTE centerline" if not route_label_done else None,
+                    zorder=8,
+                )
+                route_label_done = True
 
         if not self.sampled_trajectories:
             return fig
@@ -811,15 +848,26 @@ def build_interface(
                     label="Jump to index", value=0, minimum=0, precision=0,
                 )
                 n_traj_sl = gr.Slider(
-                    4, 32, value=ranker.n_trajectories, step=1, label="N trajectories",
+                    1, 32, value=ranker.n_trajectories, step=1, label="N trajectories",
                 )
 
+                _rc0 = ranker.reward_config_base  # initial defaults from loaded config (or RewardConfig())
                 gr.Markdown("### Reward Weights")
-                w_safety = gr.Slider(0.0, 20.0, value=5.0, step=0.5, label="w_safety")
-                w_progress = gr.Slider(0.0, 10.0, value=2.0, step=0.1, label="w_progress")
-                w_smooth = gr.Slider(0.0, 10.0, value=0.5, step=0.1, label="w_smooth")
-                w_feasibility = gr.Slider(0.0, 10.0, value=5.0, step=0.1, label="w_feasibility")
-                w_centerline = gr.Slider(0.0, 10.0, value=5.0, step=0.1, label="w_centerline")
+                w_safety = gr.Slider(0.0, 20.0, value=_rc0.w_safety, step=0.5, label="w_safety")
+                w_progress = gr.Slider(0.0, 10.0, value=_rc0.w_progress, step=0.1, label="w_progress")
+                w_smooth = gr.Slider(0.0, 10.0, value=_rc0.w_smooth, step=0.1, label="w_smooth")
+                w_feasibility = gr.Slider(0.0, 10.0, value=_rc0.w_feasibility, step=0.1, label="w_feasibility")
+                w_centerline = gr.Slider(0.0, 15.0, value=_rc0.w_centerline, step=0.1, label="w_centerline")
+
+                with gr.Accordion("Reward Penalties & Options", open=False):
+                    up_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.underprogress_penalty, step=1.0, label="underprogress_penalty")
+                    up_thr_sl = gr.Slider(0.0, 1.0, value=_rc0.underprogress_threshold, step=0.05, label="underprogress_threshold")
+                    op_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.overprogress_penalty, step=1.0, label="overprogress_penalty")
+                    op_mar_sl = gr.Slider(1.0, 1.5, value=_rc0.overprogress_margin, step=0.01, label="overprogress_margin")
+                    stop_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.stopped_penalty, step=1.0, label="stopped_penalty")
+                    cl_cap_sl = gr.Slider(0.1, 5.0, value=_rc0.centerline_usage_cap, step=0.1, label="centerline_usage_cap (m)")
+                    rb_near_sl = gr.Slider(0.0, 20.0, value=_rc0.rb_near_scale, step=0.5, label="rb_near_scale")
+                    rb_wide_sl = gr.Slider(0.0, 5.0, value=_rc0.rb_wide_scale, step=0.1, label="rb_wide_scale")
 
                 gr.Markdown("### Display")
                 zoom_sl = gr.Slider(1, 10, value=5, step=1, label="Zoom")
@@ -884,8 +932,11 @@ def build_interface(
 
                 gr.Markdown("#### Guidance Functions")
                 # 9 guidance types: each gets a checkbox + scale slider
-                cb_cl = gr.Checkbox(value=False, label="Centerline following")
+                cb_cl = gr.Checkbox(value=False, label="Centerline following (nearest lane)")
                 sl_cl = gr.Slider(0.1, 15.0, value=5.0, step=0.1, label="CL scale")
+
+                cb_rcl = gr.Checkbox(value=False, label="Route-Lanes Centerline (rl_cl)")
+                sl_rcl = gr.Slider(0.1, 15.0, value=2.5, step=0.1, label="rl_cl scale")
 
                 cb_spd = gr.Checkbox(value=False, label="Speed")
                 sl_spd = gr.Slider(0.1, 15.0, value=5.0, step=0.1, label="SPD scale")
@@ -921,12 +972,16 @@ def build_interface(
 
         # --- Component lists for callbacks ---
         editor_guidance_components = [
-            cb_cl, sl_cl, cb_spd, sl_spd, spd_stretch, cb_lk, sl_lk,
+            cb_cl, sl_cl, cb_rcl, sl_rcl, cb_spd, sl_spd, spd_stretch, cb_lk, sl_lk,
             cb_rb, sl_rb, cb_rf, sl_rf, cb_col, sl_col,
             cb_anc, sl_anc, cb_lat, sl_lat, eta_lat, cb_lon, sl_lon, eta_lon,
         ]
         editor_components = [noise_sl, global_g_sl, det_cb] + editor_guidance_components
-        reward_inputs = [w_safety, w_progress, w_smooth, w_feasibility, w_centerline]
+        reward_inputs = [
+            w_safety, w_progress, w_smooth, w_feasibility, w_centerline,
+            up_pen_sl, up_thr_sl, op_pen_sl, op_mar_sl, stop_pen_sl,
+            cl_cap_sl, rb_near_sl, rb_wide_sl,
+        ]
         display_inputs = [zoom_sl, time_sl]
         main_outputs = [traj_plot, reward_table, speed_curv_plot, sample_info]
 
@@ -948,6 +1003,8 @@ def build_interface(
                 slot.is_deterministic,
                 g.get("centerline_following", (False, 1.0, {}))[0],
                 g.get("centerline_following", (False, 5.0, {}))[1],
+                g.get("route_centerline_following", (False, 1.0, {}))[0],
+                g.get("route_centerline_following", (False, 5.0, {}))[1],
                 g.get("speed", (False, 1.0, {}))[0],
                 g.get("speed", (False, 5.0, {}))[1],
                 g.get("speed", (False, 1.0, {}))[2].get("stretch", 1.0),
@@ -972,7 +1029,7 @@ def build_interface(
         # --- Helper: read editor into slot config ---
         def _read_editor_into_slot(
             noise_val, global_g_val, is_det,
-            cl_on, cl_s, spd_on, spd_s, spd_stretch_val, lk_on, lk_s,
+            cl_on, cl_s, rcl_on, rcl_s, spd_on, spd_s, spd_stretch_val, lk_on, lk_s,
             rb_on, rb_s, rf_on, rf_s, col_on, col_s,
             anc_on, anc_s, lat_on, lat_s, eta_lat_val, lon_on, lon_s, eta_lon_val,
         ) -> TrajectorySlotConfig:
@@ -982,6 +1039,7 @@ def build_interface(
                 is_deterministic=bool(is_det),
             )
             slot.guidance["centerline_following"] = (bool(cl_on), float(cl_s), {})
+            slot.guidance["route_centerline_following"] = (bool(rcl_on), float(rcl_s), {})
             slot.guidance["speed"] = (bool(spd_on), float(spd_s), {
                 "stretch": float(spd_stretch_val),
             })
@@ -1020,13 +1078,27 @@ def build_interface(
             return "\n".join(lines)
 
         # --- Render helpers ---
-        def _apply_reward_config(ws, wp, wm, wf, wc):
-            ranker.reward_config = RewardConfig(
+        def _apply_reward_config(
+            ws, wp, wm, wf, wc,
+            up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide,
+        ):
+            # Preserve all non-slider fields from the loaded base config
+            # (gt_*, thresholds, modes, etc.) — only override slider-controlled ones.
+            ranker.reward_config = dc_replace(
+                ranker.reward_config_base,
                 w_safety=float(ws),
                 w_progress=float(wp),
                 w_smooth=float(wm),
                 w_feasibility=float(wf),
                 w_centerline=float(wc),
+                underprogress_penalty=float(up_pen),
+                underprogress_threshold=float(up_thr),
+                overprogress_penalty=float(op_pen),
+                overprogress_margin=float(op_mar),
+                stopped_penalty=float(stop_pen),
+                centerline_usage_cap=float(cl_cap),
+                rb_near_scale=float(rb_near),
+                rb_wide_scale=float(rb_wide),
             )
 
         def _render(sel_idx, zoom, ts):
@@ -1043,9 +1115,14 @@ def build_interface(
             return _format_dropdown_choices(ranker.slot_configs, ranker.reward_breakdowns)
 
         # --- Full run: load scene, generate all, render ---
-        def _full_run(n_traj, ws, wp, wm, wf, wc, zoom, ts):
+        def _full_run(
+            n_traj,
+            ws, wp, wm, wf, wc,
+            up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide,
+            zoom, ts,
+        ):
             ranker.n_trajectories = int(n_traj)
-            _apply_reward_config(ws, wp, wm, wf, wc)
+            _apply_reward_config(ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide)
             ranker.load_sample()
             sel_idx = 0
             renders = _render(sel_idx, zoom, ts)
@@ -1148,8 +1225,13 @@ def build_interface(
         )
 
         # --- Reward weight changes -> rescore only ---
-        def _rescore_and_render(sel_idx, ws, wp, wm, wf, wc, zoom, ts):
-            _apply_reward_config(ws, wp, wm, wf, wc)
+        def _rescore_and_render(
+            sel_idx,
+            ws, wp, wm, wf, wc,
+            up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide,
+            zoom, ts,
+        ):
+            _apply_reward_config(ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide)
             ranker._score_trajectories()
             renders = _render(int(sel_idx), zoom, ts)
             choices = _dropdown_choices()
@@ -1342,18 +1424,24 @@ def main():
     )
     print(f"Prototypes: {prototypes_path}")
 
-    grpo_trainer = None
-    if not args.no_training:
+    # Load GRPO/reward config if provided — applies in both training and
+    # viz-only mode. In viz-only mode this seeds the reward sliders from the
+    # training config so the GUI reward breakdown matches training (not GUI
+    # defaults).
+    grpo_cfg = None
+    if args.config is not None:
         from rlvr.grpo_config import GRPOConfig
-
-        if args.config is None:
-            raise SystemExit(
-                "--config is required unless --no-training is set."
-            )
         if not args.config.exists():
             raise FileNotFoundError(f"GRPO config not found: {args.config}")
         grpo_cfg = GRPOConfig.from_json(args.config)
         print(f"Loaded GRPO config from {args.config}")
+
+    grpo_trainer = None
+    if not args.no_training:
+        if grpo_cfg is None:
+            raise SystemExit(
+                "--config is required unless --no-training is set."
+            )
 
         if args.use_lora:
             grpo_cfg.use_lora = True
@@ -1409,6 +1497,18 @@ def main():
         prototypes_path=prototypes_path,
         n_trajectories=args.n_trajectories,
     )
+
+    # Seed reward config from the loaded training config so slider defaults
+    # and the initial reward breakdown match training, not GUI defaults.
+    if grpo_cfg is not None:
+        shared_fields = {f.name for f in dc_fields(RewardConfig)} & {f.name for f in dc_fields(type(grpo_cfg))}
+        loaded_rc = RewardConfig(**{name: getattr(grpo_cfg, name) for name in shared_fields})
+        ranker.reward_config_base = loaded_rc
+        ranker.reward_config = loaded_rc
+        print(f"Seeded reward config from training config: w_progress={loaded_rc.w_progress}, "
+              f"w_centerline={loaded_rc.w_centerline}, "
+              f"underprogress_penalty={loaded_rc.underprogress_penalty}, "
+              f"overprogress_penalty={loaded_rc.overprogress_penalty}")
 
     demo = build_interface(ranker, trainer=grpo_trainer)
     demo.launch(server_port=args.port, share=args.share, inbrowser=True)

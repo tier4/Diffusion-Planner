@@ -599,6 +599,7 @@ def train_epoch_ranked_sft(
                 lateral_scale=lat_scale,
                 speed_stretch=spd_stretch,
                 generation_variant=getattr(config, "generation_variant", "default"),
+                use_route_cl_guidance=getattr(config, "use_route_cl_guidance", False),
             )  # [N, K, T, 4]
 
     torch.cuda.empty_cache()

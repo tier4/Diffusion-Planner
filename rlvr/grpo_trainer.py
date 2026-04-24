@@ -799,7 +799,14 @@ class GRPOTrainer:
         )
 
     def save_epoch1_baselines(self, npz_paths: list[str]) -> None:
-        """Save deterministic trajectories as epoch-1 reference for drift tracking."""
+        """Save deterministic trajectories as epoch-1 reference for drift tracking.
+
+        Saves ALL scenes — downstream consumers include
+        `underprogress_reference="baseline"` path-length lookup
+        (rlvr/grpo_sft_trainer.py), which needs every training scene to have
+        an anchor; subsampling causes unfixed scenes to fall back to the "det"
+        reference and mask path-collapse behavior.
+        """
         baseline_path = self.run_dir / "epoch1_baselines.npz"
         if baseline_path.exists():
             return
@@ -808,7 +815,7 @@ class GRPOTrainer:
         paths_list: list[str] = []
         trajs_list: list[np.ndarray] = []
 
-        for npz_path in npz_paths[:100]:
+        for npz_path in npz_paths:
             try:
                 obs = load_npz_data(npz_path, self.device)
                 traj = generate_deterministic_trajectory(

@@ -105,6 +105,7 @@ def generate_all_scenes_batched(
     lateral_scale: float = 5.0,
     speed_stretch: float = 1.0,
     generation_variant: str = "default",
+    use_route_cl_guidance: bool = False,
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
 
@@ -179,7 +180,8 @@ def generate_all_scenes_batched(
         # Build guidance functions
         fns = []
         if cl_scale > 0:
-            fns.append(GuidanceConfig("centerline_following", enabled=True, scale=cl_scale))
+            cl_name = "route_centerline_following" if use_route_cl_guidance else "centerline_following"
+            fns.append(GuidanceConfig(cl_name, enabled=True, scale=cl_scale))
         if spd_scale > 0:
             fns.append(GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params))
         if use_lon and is_guided_slot:
@@ -223,7 +225,8 @@ def generate_all_scenes_batched(
     for n_pass in n_per_pass:
         fns = []
         if random.random() < 0.7:
-            fns.append(GuidanceConfig("centerline_following", enabled=True,
+            cl_name = "route_centerline_following" if use_route_cl_guidance else "centerline_following"
+            fns.append(GuidanceConfig(cl_name, enabled=True,
                                        scale=random.uniform(2.0, 8.0)))
         # Skip road_border guidance in generation (causes OOM with large batches)
         # Road border avoidance is handled by the reward function instead
