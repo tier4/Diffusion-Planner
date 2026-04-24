@@ -726,8 +726,13 @@ def train_epoch_ranked_sft(
         if _gt_mode == "skip" and _used_gt_fallback:
             should_train = False
         scene_train_mask.append(should_train)
-        # In advantage mode, respect selective_threshold: zero weight for scenes below it
-        if selective_thresh > 0 and improvement < selective_thresh:
+        # In advantage mode, respect selective_threshold: zero weight for scenes below it.
+        # Also zero out GT-skip scenes so they don't contribute gradient when
+        # selective_mode="advantage" (which ignores scene_train_mask and keys off
+        # scene_improvements instead).
+        if (selective_thresh > 0 and improvement < selective_thresh) or (
+            _gt_mode == "skip" and _used_gt_fallback
+        ):
             scene_improvements.append(0.0)
         else:
             scene_improvements.append(max(0.0, improvement))
@@ -789,7 +794,15 @@ def train_epoch_ranked_sft(
             print(f"  [frozen] Reusing frozen selection ({sum(scene_train_mask)}/{N} scenes)")
 
     n_selected = sum(scene_train_mask)
-    print(f"  Mean best-of-{K} reward: {mean_best_reward:.2f}")
+    # Effective target reward — best-of-K by default; GT when gt_fallback_mode="il"
+    # fires. Kept under the same metric name (mean_best_reward) for
+    # TSV backwards-compat.
+    _reward_label = (
+        "Mean training-target reward"
+        if getattr(config, "gt_fallback_mode", "none") == "il"
+        else f"Mean best-of-{K} reward"
+    )
+    print(f"  {_reward_label}: {mean_best_reward:.2f}")
     if selective_thresh > 0:
         print(f"  Selective training: {n_selected}/{N} scenes selected "
               f"(threshold={selective_thresh:.1f}, skipped {N - n_selected})")
