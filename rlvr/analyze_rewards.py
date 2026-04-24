@@ -53,7 +53,7 @@ def analyze(
     sample_paths = rng.choice(npz_paths, size=min(n_scenes, len(npz_paths)), replace=False)
 
     config = SamplerConfig(n_trajectories=n_trajectories)
-    reward_config = RewardConfig()
+    reward_config = RewardConfig(enable_overprogress=True)
 
     all_totals = []
     all_collisions = 0

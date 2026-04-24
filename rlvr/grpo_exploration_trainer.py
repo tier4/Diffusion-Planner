@@ -93,6 +93,8 @@ class GRPOExplorationTrainer:
             w_smooth=config.w_smooth,
             w_feasibility=config.w_feasibility,
             w_centerline=config.w_centerline,
+            centerline_usage_cap=config.centerline_usage_cap,
+            centerline_usage_mode=config.centerline_usage_mode,
             rb_near_scale=config.rb_near_scale,
             rb_wide_scale=config.rb_wide_scale,
             rb_cont_scale=config.rb_cont_scale,

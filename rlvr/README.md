@@ -81,7 +81,7 @@ rlvr/
     eval_border_distance.py  Road border distance metrics
     README.md                Full autoresearch documentation
   autoresearch/tools/         Evaluation and diagnostic tools (see tools/README.md)
-    cleanse_lane_scenes.py   Filter scenes by t=0 lane/border clearance
+    cleanse_lane_scenes.py   Filter scenes by t=0 lane/border clearance + GT-lane + GT rb-future margin
     diagnose_grpo_signal.py  Diagnose per-scene GRPO reward signal (batched)
     eval_lane_border_distance.py  Combined lane departure + border distance eval
     eval_reward_vs_gt.py     Per-scene reward breakdown vs ground truth

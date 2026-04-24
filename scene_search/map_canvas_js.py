@@ -253,8 +253,97 @@ ARROW_TOOL = {
     "state": """
     let arrowStartWorld = null, arrowEndWorld = null;
     let isDrawingArrow = false, arrowStartPx = null, arrowEndPx = null;
+
+    // Heatmap overlay (scored points from replay runs). Parsed once per
+    // prop update. Each point: {x, y, ...metrics}. Metric set is auto-
+    // discovered from the data — no JS-side list to maintain.
+    let heatmapPoints = [];
+    let heatmapRanges = {};    // {metric: [min, max]}
+    let heatmapPolarity = {};  // {metric: +1 (higher=safe) | -1 (higher=drift)}
+    let heatmapMetric = 'off';
+    let heatmapJsonCache = null, heatmapMetaCache = null;
+    function _parseHeatmap() {
+        const raw = props.heatmap_json || '[]';
+        if (raw !== heatmapJsonCache) {
+            heatmapJsonCache = raw;
+            try { heatmapPoints = JSON.parse(raw) || []; }
+            catch (e) { heatmapPoints = []; console.warn('bad heatmap_json', e); }
+        }
+        const metaRaw = props.heatmap_meta_json || '{}';
+        if (metaRaw !== heatmapMetaCache) {
+            heatmapMetaCache = metaRaw;
+            try {
+                const meta = JSON.parse(metaRaw) || {};
+                heatmapRanges = meta.ranges || {};
+                heatmapPolarity = meta.polarity || {};
+            } catch (e) {
+                heatmapRanges = {}; heatmapPolarity = {};
+                console.warn('bad heatmap_meta_json', e);
+            }
+        }
+    }
+    // Red (1,0,0) → yellow (1,1,0) → green (0,1,0) → blue (0,0,1) ramp.
+    // t in [0..1] with 1 = safe (blue), 0 = drift (red).
+    function _scoreColor(t) {
+        t = Math.max(0, Math.min(1, t));
+        if (t < 0.33) {
+            const u = t / 0.33;
+            return 'rgba(255,' + Math.round(255*u) + ',0,0.85)';
+        } else if (t < 0.66) {
+            const u = (t - 0.33) / 0.33;
+            return 'rgba(' + Math.round(255*(1-u)) + ',255,0,0.85)';
+        } else {
+            const u = (t - 0.66) / 0.34;
+            return 'rgba(0,' + Math.round(255*(1-u)) + ',' + Math.round(255*u) + ',0.85)';
+        }
+    }
+    // Generic normalisation: auto-scale by the metric's observed [min, max]
+    // and apply the polarity from _metric_polarity (Python side).
+    // Adding a new reward component auto-appears here with no JS changes.
+    // 'abs_cl_score' / 'abs_pred_cl_score' are synthetic options — they
+    // read |cl_score| (or |pred_cl_score|) rather than a separate field
+    // since the signed cl_score has "safe" at 0 with both tails meaning
+    // drift. Magnitude view uses the auto-scaled range [0, max|·|] and
+    // inverts polarity (low |cl| = safe, high |cl| = drift).
+    function _heatmapT(point, metric) {
+        let v, range, polarity;
+        if (metric === 'abs_cl_score' || metric === 'abs_pred_cl_score') {
+            const srcKey = metric === 'abs_cl_score' ? 'cl_score' : 'pred_cl_score';
+            const raw = point[srcKey];
+            if (raw === null || raw === undefined) return null;
+            v = Math.abs(raw);
+            range = heatmapRanges[srcKey];
+            if (range) range = [0, Math.max(Math.abs(range[0]), Math.abs(range[1]))];
+            polarity = -1;
+        } else {
+            v = point[metric];
+            if (v === null || v === undefined) return null;
+            range = heatmapRanges[metric];
+            polarity = heatmapPolarity[metric] || 1;
+        }
+        if (!range || range[1] <= range[0]) return 0.5;  // flat metric → neutral
+        let norm = (v - range[0]) / (range[1] - range[0]);  // [0..1]
+        norm = Math.max(0, Math.min(1, norm));
+        // Flip for drift-high metrics so red = bad regardless of polarity.
+        return polarity > 0 ? norm : 1.0 - norm;
+    }
     """,
     "draw": """
+    // Heatmap dots — drawn below the arrow so the arrow always shows on top.
+    heatmapMetric = props.heatmap_metric || 'off';
+    if (heatmapMetric !== 'off') {
+        _parseHeatmap();
+        for (let i = 0; i < heatmapPoints.length; i++) {
+            const p = heatmapPoints[i];
+            const t = _heatmapT(p, heatmapMetric);
+            if (t === null) continue;
+            const pc = worldToCanvas(p.x, p.y);
+            if (pc.x < -10 || pc.x > W+10 || pc.y < -10 || pc.y > H+10) continue;
+            ctx.fillStyle = _scoreColor(t);
+            ctx.beginPath(); ctx.arc(pc.x, pc.y, 3, 0, Math.PI*2); ctx.fill();
+        }
+    }
+
     // Recompute arrow pixels from world coords
     if (arrowStartWorld && arrowEndWorld && !isDrawingArrow) {
         arrowStartPx = worldToCanvas(arrowStartWorld.x, arrowStartWorld.y);

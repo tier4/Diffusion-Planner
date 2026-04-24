@@ -25,6 +25,20 @@ class RewardConfig:
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
+    # Centerline usage cap: per-step lane_usage is clamped to this before squaring.
+    # 1.0 = current default (saturates at the lane boundary). Raising to 1.5-2.0
+    # lets past-boundary trajectories be penalized more and widens the signal
+    # between "riding the edge" and "crossing the edge".
+    centerline_usage_cap: float = 1.0
+    # Centerline usage mode:
+    #   "body" (default): lane_usage = (|baselink_lat| + ego_half_w) / side_hw —
+    #       penalizes how close the EGO BODY is to the lane edge. Wide vehicles
+    #       get a baseline non-zero penalty even when perfectly centered.
+    #   "baselink": lane_usage = |baselink_lat| / side_hw — penalizes only the
+    #       baselink (origin) offset from centerline. Perfectly centered = 0.
+    #       Use when you want the reward to track centering distance directly
+    #       rather than body-to-edge clearance.
+    centerline_usage_mode: str = "body"
     collision_penalty: float = -10.0
     red_light_penalty: float = -10.0
     max_accel: float = 8.0  # m/s^2
@@ -51,6 +65,24 @@ class RewardConfig:
     lane_near_thresh: float = 0.25  # metres — near zone boundary
     lane_wide_thresh: float = 0.40  # metres — wide zone boundary
     lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
+
+    # Static-collision (stopped-neighbor clearance) penalty. Same staged
+    # pattern as rb_*: gate + near/wide/cont zones. Off by default — enabling
+    # changes training reward math, so set `static_collision_enabled=True` and
+    # non-zero scales explicitly.
+    static_collision_enabled: bool = False
+    sc_gate_enabled: bool = False           # hard terminator if any predicted step overlaps a stopped neighbor
+    sc_penalty_mode: str = "frac"           # "frac" or "survival" (matches rb_penalty_mode semantics)
+    sc_near_scale: float = 0.0
+    sc_wide_scale: float = 0.0
+    sc_cont_scale: float = 0.0
+    sc_cross_thresh: float = 0.2            # clearance below this (metres) = crossing. 0.2 m matches the "visually touching" threshold observed on the bigcurve resim — below that, SAT signed distance is slightly positive but the boxes are in practice a collision.
+    sc_near_thresh: float = 0.4
+    sc_wide_thresh: float = 0.7
+    sc_cont_thresh: float = 1.0
+    sc_neighbor_vel_thresh: float = 0.1     # m/s — |v0| below this counts as stationary
+    sc_neighbor_disp_thresh: float = 0.5    # m — max displacement across GT future below this counts as stationary
+    sc_ego_min_speed: float = 1.0           # m/s — timesteps below this are not scored (matches collision suppression)
 
     # Lateral acceleration penalty
     max_lat_accel: float = 2.0  # m/s^2
@@ -116,6 +148,20 @@ class RewardBreakdown:
     lane_crossing: bool = False
     lane_near_frac: float = 0.0
     lane_wide_frac: float = 0.0
+    # Static-collision (stopped-neighbor clearance) diagnostics. Zero/False
+    # when static_collision_enabled=False.
+    static_crossing: bool = False
+    sc_near_penalty: float = 0.0
+    sc_wide_penalty: float = 0.0
+    sc_cont_penalty: float = 0.0
+    sc_min_dist: float = 99.0     # min OBB clearance to any stopped neighbor (t>=1, ego moving)
+    sc_n_stopped: int = 0         # how many stopped neighbors were found in the scene
+    # Kinematic feasibility gate (yaw rate + bicycle-model curvature). When
+    # False, compute_reward_batch floors ``total`` to the offroad floor.
+    # Before this field existed the gate was applied silently — you could
+    # not tell from a RewardBreakdown whether the floor came from safety,
+    # lane, or kinematics.
+    kinematic_gate: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -910,6 +956,8 @@ def compute_centerline_score_batch(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
+    usage_cap: float = 1.0,
+    usage_mode: str = "body",
 ) -> torch.Tensor:
     """Batched normalized lane-usage penalty from nearest route lane centerline.
 
@@ -979,9 +1027,15 @@ def compute_centerline_score_batch(
         (-rhw_gathered).clamp(min=0.5),
     )  # (N, T)
 
-    # Normalized lane usage: how close the vehicle edge is to the boundary
-    # 0 = centered, 1 = edge touching boundary, >1 = over boundary
-    lane_usage = (ego_lat.abs() + half_w) / side_hw  # (N, T)
+    # Normalized lane usage: how close the vehicle is to the boundary.
+    # "body" mode (default): 0 = centered, 1 = ego edge touching boundary.
+    #   Includes ego_half_w → even a centered wide vehicle has non-zero usage.
+    # "baselink" mode: 0 = baselink on centerline, 1 = baselink at half-lane.
+    #   Pure baselink offset; ego width doesn't matter.
+    if usage_mode == "baselink":
+        lane_usage = ego_lat.abs() / side_hw  # (N, T)
+    else:
+        lane_usage = (ego_lat.abs() + half_w) / side_hw  # (N, T)
 
     # When near a route lane (<5m): penalize by lane usage (lateral position)
     # When far from route (>5m): penalize by distance to route (off-route deviation)
@@ -1002,10 +1056,16 @@ def compute_centerline_score_batch(
     _ROUTE_DEVIATION_SCALE = 0.5
     route_deviation = (min_dist * _ROUTE_DEVIATION_SCALE).clamp(max=5.0)  # cap to avoid explosion
 
-    # Cap lane_usage at 1.0 for centerline scoring -- being at the boundary
-    # is the max lateral penalty. Being beyond it (usage>1) means off-route,
-    # handled by route_deviation.
-    capped_usage = lane_usage.clamp(max=1.0)
+    # Cap lane_usage at usage_cap for centerline scoring. Default 1.0 means
+    # being at the boundary is the max lateral penalty; values beyond are
+    # treated as off-route (handled by route_deviation). Raising the cap
+    # lets past-boundary trajectories be penalized more before hitting the
+    # route_deviation branch.
+    if not math.isfinite(usage_cap) or usage_cap <= 0:
+        raise ValueError(
+            f"usage_cap must be finite and > 0, got {usage_cap!r}"
+        )
+    capped_usage = lane_usage.clamp(max=usage_cap)
 
     per_step_penalty = torch.where(
         near_route,
@@ -1413,11 +1473,12 @@ def compute_road_border_penalty(
     min_dists = _point_to_segments_min_dist(world_flat, seg_p1, seg_p2)
     min_dists = min_dists.reshape(N, T, K_pts)  # (N, T, 80)
 
-    # Per-timestep: min distance across all perimeter points
+    # Per-timestep: min distance across all perimeter points (true values,
+    # including t=0). The gate and near/wide penalties below still exclude t=0
+    # because the ego's starting pose is not model-controllable — but the
+    # returned `per_timestep_min[:, 0]` carries the real distance for any
+    # downstream diagnostic (cleanse, viz, eval scripts).
     per_timestep_min = min_dists.min(dim=2).values  # (N, T)
-
-    # Skip t=0 (can't control starting position)
-    per_timestep_min[:, 0] = 10.0
 
     # Thresholds from config
     cross_thresh = config.rb_cross_thresh
@@ -1425,16 +1486,19 @@ def compute_road_border_penalty(
     wide_thresh = config.rb_wide_thresh
     cont_thresh = config.rb_cont_thresh
 
-    # Crossing gate: any timestep with min dist < cross_thresh = crossing
-    is_crossing = per_timestep_min < cross_thresh  # (N, T)
-    has_crossing = is_crossing.any(dim=1)  # (N,)
+    # Crossing gate: any t>=1 timestep with min dist < cross_thresh = crossing.
+    # t=0 is excluded from the gate (can't control starting position).
+    is_crossing = per_timestep_min < cross_thresh  # (N, T), full tensor for diag
+    has_crossing = is_crossing[:, 1:].any(dim=1)  # (N,), t=0 excluded
     crossing_gate = (~has_crossing).float()  # (N,) 1.0=safe, 0.0=crossing
 
-    # First crossing timestep per trajectory
+    # First crossing timestep per trajectory (among t>=1).
     first_crossing_steps: list[int | None] = []
     for i in range(N):
         if has_crossing[i]:
-            first_crossing_steps.append(int(is_crossing[i].nonzero(as_tuple=True)[0][0].item()))
+            first_crossing_steps.append(
+                int(is_crossing[i, 1:].nonzero(as_tuple=True)[0][0].item()) + 1
+            )
         else:
             first_crossing_steps.append(None)
 
@@ -1489,6 +1553,347 @@ def compute_road_border_penalty(
             ).mean(dim=1)
 
         return crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty, per_timestep_min
+
+
+# ---------------------------------------------------------------------------
+# Static-collision penalty (stopped-neighbor OBB clearance)
+# ---------------------------------------------------------------------------
+#
+# Mirrors the road-border staged-threshold pattern but against stopped
+# neighbors instead of road-border segments. A neighbor is counted as
+# "stopped" when both (a) |v0| < sc_neighbor_vel_thresh and (b) total
+# displacement across the GT future < sc_neighbor_disp_thresh.
+#
+# Distance primitive: OBB-OBB SAT signed distance via
+# batch_signed_distance_rect (reused from compute_safety_score_batch).
+# Positive = clearance in metres, negative = penetration depth.
+#
+# Timesteps where ego is moving < sc_ego_min_speed are not scored (matches
+# the bumper-to-bumper suppression in compute_safety_score_batch).
+#
+# Returns a closest-pair (ego_pt, npc_pt) per timestep for visualization,
+# mirroring the road-border distance viz.
+# ---------------------------------------------------------------------------
+
+
+def _closest_points_between_rects(
+    rect1: torch.Tensor,
+    rect2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Closest-point pair between two rectangles, vectorised, pure PyTorch.
+
+    For each pair checks all 32 vertex-to-edge queries (16 rect1 corners →
+    rect2 edges + 16 rect2 corners → rect1 edges) and returns the vertex +
+    its foot on the nearest edge. Exact for non-overlapping rectangles,
+    approximate (points on the nearest edges) for overlapping ones — fine
+    for visualisation.
+
+    Args:
+        rect1: (B, 4, 2) corners in CCW or CW order.
+        rect2: (B, 4, 2) corners.
+
+    Returns:
+        pt1: (B, 2) closest point on rect1.
+        pt2: (B, 2) closest point on rect2.
+    """
+    B = rect1.shape[0]
+    device = rect1.device
+    dtype = rect1.dtype
+
+    # Build two vertex-to-edge configurations:
+    #   Config A (rect1 vertices → rect2 edges): 4 verts × 4 edges = 16 queries per pair.
+    #   Config B (rect2 vertices → rect1 edges): 4 verts × 4 edges = 16 queries per pair.
+    # Concatenated → 32 queries per pair, shaped (B, 32, 2) for q/sa/sb.
+    r1_edges_a = rect1                              # (B, 4, 2)
+    r1_edges_b = torch.roll(rect1, -1, dims=1)      # (B, 4, 2)
+    r2_edges_a = rect2
+    r2_edges_b = torch.roll(rect2, -1, dims=1)
+
+    # Config A flat: 4 verts × 4 edges = 16 (B, 16, 2/2/2)
+    vA_q = rect1.unsqueeze(2).expand(-1, -1, 4, -1).reshape(B, 16, 2)          # query pt
+    vA_sa = r2_edges_a.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)    # seg start
+    vA_sb = r2_edges_b.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)
+    # Config B flat
+    vB_q = rect2.unsqueeze(2).expand(-1, -1, 4, -1).reshape(B, 16, 2)
+    vB_sa = r1_edges_a.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)
+    vB_sb = r1_edges_b.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)
+
+    q = torch.cat([vA_q, vB_q], dim=1)        # (B, 32, 2)
+    sa = torch.cat([vA_sa, vB_sa], dim=1)
+    sb = torch.cat([vA_sb, vB_sb], dim=1)
+
+    # Foot of perpendicular from q onto segment (sa, sb), clamped to [0, 1].
+    seg = sb - sa                              # (B, 32, 2)
+    seg_len2 = (seg * seg).sum(dim=-1).clamp_min(1e-12)
+    t = ((q - sa) * seg).sum(dim=-1) / seg_len2
+    t = t.clamp(0.0, 1.0)
+    foot = sa + t.unsqueeze(-1) * seg          # (B, 32, 2)
+    d = (q - foot).norm(dim=-1)                # (B, 32)
+
+    # Best index per pair; in first 16 q is on rect1, in last 16 q is on rect2.
+    best = d.argmin(dim=-1)                    # (B,)
+    arange = torch.arange(B, device=device)
+    q_best = q[arange, best]                   # (B, 2)
+    foot_best = foot[arange, best]             # (B, 2)
+
+    # If best < 16, q is on rect1, foot is on rect2. Else swap.
+    is_on_r1 = best < 16
+    pt1 = torch.where(is_on_r1.unsqueeze(-1), q_best, foot_best)
+    pt2 = torch.where(is_on_r1.unsqueeze(-1), foot_best, q_best)
+    return pt1.to(dtype), pt2.to(dtype)
+
+
+@torch.no_grad()
+def compute_static_collision_penalty(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    neighbor_futures: torch.Tensor,
+    neighbor_shapes: torch.Tensor,
+    neighbor_valid: torch.Tensor,
+    config: RewardConfig | None = None,
+) -> dict:
+    """Penalise ego trajectories that approach/overlap STOPPED neighbors.
+
+    Stopped mask per neighbor:
+      (a) |v0| < sc_neighbor_vel_thresh  (approx from first two valid future points)
+      (b) max displacement from t=0 across the valid future < sc_neighbor_disp_thresh
+
+    Gotcha: the v0 estimate requires BOTH t=0 and t=1 valid in
+    ``neighbor_valid``. Neighbors with sparse GT futures (e.g. a tracker
+    that dropped the agent after the first frame) therefore fail the
+    mask and are silently ignored, even if the agent was visibly parked
+    at t=0. This is by design — ``v0`` isn't meaningful without t=1 —
+    but callers that work off real-data NPZs with spotty perception
+    should be aware.
+
+    Returns a dict with:
+      crossing_gate:        (N,) 1.0 if no crossing, 0.0 if any predicted timestep
+                            (t>=1, ego moving) has clearance < sc_cross_thresh
+      near_penalty:         (N,) staged near-zone penalty (frac or survival)
+      wide_penalty:         (N,) staged wide-zone penalty (frac or survival)
+      cont_penalty:         (N,) continuous decay penalty
+      first_crossing_steps: list[N] first timestep of crossing per trajectory
+      per_timestep_min:     (N, T) min OBB clearance to any stopped neighbor at t
+                            (unmasked — contains true values even for t=0 and for
+                            ego-stopped steps; the gate/penalty excludes them)
+      argmin_neighbor:      (N, T) int — index into the stopped-neighbor subset for the
+                            min at each timestep (-1 if no stopped neighbors at all)
+      stopped_mask:         (N_nb,) bool — which input neighbors were classified as stopped
+      ego_closest_pt:       (N, T, 2) world-frame ego point at the min-clearance pair
+      npc_closest_pt:       (N, T, 2) world-frame neighbor point at the min-clearance pair
+    """
+    if config is None:
+        config = RewardConfig()
+
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+    dtype = ego_trajs.dtype
+    N_nb = neighbor_futures.shape[0]
+
+    def _safe_empty(_stopped_mask: torch.Tensor | None = None) -> dict:
+        return {
+            "crossing_gate": torch.ones(N, device=device),
+            "near_penalty": torch.zeros(N, device=device),
+            "wide_penalty": torch.zeros(N, device=device),
+            "cont_penalty": torch.zeros(N, device=device),
+            "first_crossing_steps": [None] * N,
+            "per_timestep_min": torch.full((N, T), 99.0, device=device),
+            "argmin_neighbor": torch.full((N, T), -1, dtype=torch.long, device=device),
+            "stopped_mask": _stopped_mask if _stopped_mask is not None
+                            else torch.zeros(N_nb, dtype=torch.bool, device=device),
+            "ego_closest_pt": torch.zeros(N, T, 2, device=device),
+            "npc_closest_pt": torch.zeros(N, T, 2, device=device),
+        }
+
+    if N_nb == 0:
+        return _safe_empty()
+
+    # --- Stopped-neighbor mask ---
+    nb_xy = neighbor_futures[:, :, :2]  # (N_nb, T, 2)
+    # v0: norm of (xy[:,1] - xy[:,0]) / dt, only valid if both steps valid.
+    both_valid_01 = neighbor_valid[:, 0] & neighbor_valid[:, 1]
+    v0 = torch.zeros(N_nb, device=device)
+    if both_valid_01.any():
+        v0[both_valid_01] = (nb_xy[both_valid_01, 1] - nb_xy[both_valid_01, 0]).norm(dim=-1) / config.dt
+    # max displacement from t=0 over valid timesteps
+    disp_all = (nb_xy - nb_xy[:, 0:1]).norm(dim=-1)  # (N_nb, T)
+    disp_masked = disp_all.masked_fill(~neighbor_valid, 0.0)
+    max_disp = disp_masked.max(dim=1).values  # (N_nb,)
+    has_any_valid = neighbor_valid.any(dim=1)  # (N_nb,)
+
+    stopped_mask = (
+        has_any_valid
+        & both_valid_01  # need v0 to be meaningful
+        & (v0 < config.sc_neighbor_vel_thresh)
+        & (max_disp < config.sc_neighbor_disp_thresh)
+    )
+
+    if not stopped_mask.any():
+        return _safe_empty(_stopped_mask=stopped_mask)
+
+    # --- Ego + stopped-neighbor corners ---
+    nb_f_s = neighbor_futures[stopped_mask]       # (S, T, 4)
+    nb_shapes_s = neighbor_shapes[stopped_mask]   # (S, 2) [width, length]
+    nb_valid_s = neighbor_valid[stopped_mask]     # (S, T)
+    S = nb_f_s.shape[0]
+
+    ego_corners = _build_ego_bbox_corners(ego_trajs, ego_shape)  # (N, T, 4, 2)
+
+    npc_cos = nb_f_s[:, :, 2]
+    npc_sin = nb_f_s[:, :, 3]
+    npc_norm = (npc_cos ** 2 + npc_sin ** 2).sqrt().clamp_min(1e-6)
+    npc_cos = npc_cos / npc_norm
+    npc_sin = npc_sin / npc_norm
+    npc_width = nb_shapes_s[:, 0].unsqueeze(1).expand(-1, T)   # (S, T)
+    npc_length = nb_shapes_s[:, 1].unsqueeze(1).expand(-1, T)
+
+    npc_rect = torch.stack([
+        nb_f_s[..., 0], nb_f_s[..., 1],
+        npc_cos, npc_sin,
+        npc_length, npc_width,
+    ], dim=-1)  # (S, T, 6)
+    npc_corners = center_rect_to_points(npc_rect.reshape(-1, 6)).reshape(S, T, 4, 2)
+
+    # --- Signed distance over all ego × stopped-nb × T pairs ---
+    # Two-step: SAT gives a reliable overlap sign (negative = penetration depth),
+    # but for separated rectangles SAT only returns the MIN axis gap, which
+    # under-reports true Euclidean clearance in the corner-to-corner case
+    # (e.g. x-gap 0.2m but y-gap 3m → true dist ≈ 3m, not 0.2m). So:
+    #   * overlapping pairs  → use SAT penetration depth (signed negative).
+    #   * separated pairs    → use true Euclidean closest-pair distance.
+    ego_exp = ego_corners.unsqueeze(1).expand(-1, S, -1, -1, -1)  # (N, S, T, 4, 2)
+    npc_exp = npc_corners.unsqueeze(0).expand(N, -1, -1, -1, -1)  # (N, S, T, 4, 2)
+    nv_exp = nb_valid_s.unsqueeze(0).expand(N, -1, -1)             # (N, S, T)
+
+    ego_flat = ego_exp.reshape(-1, 4, 2)
+    npc_flat = npc_exp.reshape(-1, 4, 2)
+
+    sat_dist_flat = batch_signed_distance_rect(ego_flat, npc_flat)  # (N*S*T,)
+    pt_e_all, pt_n_all = _closest_points_between_rects(ego_flat, npc_flat)
+    euclid_dist_flat = (pt_e_all - pt_n_all).norm(dim=-1)
+
+    # Overlap → use SAT penetration (negative). Separated → use true
+    # Euclidean closest-pair distance. SAT alone under-reports clearance
+    # in corner-to-corner separated cases (e.g. 0.2 m axis-gap with 3 m
+    # true distance), which would shift zone classifications and change
+    # absolute reward magnitudes — we need the Euclidean branch for both
+    # the training signal AND viz.
+    is_overlap = sat_dist_flat < 0
+    signed_dist_flat = torch.where(is_overlap, sat_dist_flat, euclid_dist_flat)
+
+    distances = signed_dist_flat.reshape(N, S, T)
+    pt_e_nst = pt_e_all.reshape(N, S, T, 2)
+    pt_n_nst = pt_n_all.reshape(N, S, T, 2)
+
+    distances = distances.masked_fill(~nv_exp, 1e6)
+
+    # Per-timestep min across stopped neighbors, remember which offender
+    per_ts_min, argmin_s = distances.min(dim=1)  # (N, T), (N, T)
+
+    # --- Gather closest-point pair for the per-timestep winning neighbor ---
+    arange_t = torch.arange(T, device=device)
+    arange_n = torch.arange(N, device=device).unsqueeze(-1).expand(-1, T)  # (N, T)
+    t_idx = arange_t.unsqueeze(0).expand(N, -1)                            # (N, T)
+    ego_closest_pt = pt_e_nst[arange_n, argmin_s, t_idx]  # (N, T, 2)
+    npc_closest_pt = pt_n_nst[arange_n, argmin_s, t_idx]  # (N, T, 2)
+
+    # --- Ego-speed mask: only score timesteps where ego is moving ---
+    ego_xy = ego_trajs[:, :, :2]
+    ego_vel = torch.diff(ego_xy, dim=1) / config.dt   # (N, T-1, 2)
+    ego_speed = ego_vel.norm(dim=-1)                  # (N, T-1)
+    ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)  # (N, T)
+    ego_moving = ego_speed > config.sc_ego_min_speed  # (N, T)
+
+    # Thresholds
+    cross_thresh = float(config.sc_cross_thresh)
+    near_thresh = float(config.sc_near_thresh)
+    wide_thresh = float(config.sc_wide_thresh)
+    cont_thresh = float(config.sc_cont_thresh)
+
+    # Crossing: clearance below cross_thresh at any t>=1 with ego moving.
+    # Use per_ts_min for the raw signal; masking for gate/penalty decisions.
+    is_crossing_full = per_ts_min < cross_thresh  # (N, T), raw
+    # For gate: exclude t=0 and ego-stopped steps
+    gate_steps = ego_moving.clone()
+    gate_steps[:, 0] = False
+    is_crossing_gated = is_crossing_full & gate_steps  # (N, T)
+    has_crossing = is_crossing_gated.any(dim=1)
+    crossing_gate = (~has_crossing).float()
+
+    first_crossing_steps: list[int | None] = []
+    for i in range(N):
+        if has_crossing[i]:
+            idx = is_crossing_gated[i].nonzero(as_tuple=True)[0][0]
+            first_crossing_steps.append(int(idx.item()))
+        else:
+            first_crossing_steps.append(None)
+
+    # Staged categories (among t>=1, ego moving, not crossing).
+    valid_steps = gate_steps & ~is_crossing_full  # (N, T) — non-crossing scoreable
+    pm_1 = per_ts_min[:, 1:]
+    valid_1 = valid_steps[:, 1:]
+    T_valid = T - 1
+
+    if config.sc_penalty_mode == "survival":
+        # Survival-mode first-violation time-decay over t=1..T-1.
+        is_near = valid_1 & (pm_1 < near_thresh)
+        is_wide = valid_1 & (pm_1 >= near_thresh) & (pm_1 < wide_thresh)
+
+        near_penalty = torch.zeros(N, device=device)
+        near_has = is_near.any(dim=1)
+        near_first_t = is_near.to(torch.int64).argmax(dim=1)
+        near_penalty[near_has] = (T_valid - near_first_t[near_has].float()) / T_valid
+
+        wide_penalty = torch.zeros(N, device=device)
+        wide_has = is_wide.any(dim=1)
+        wide_first_t = is_wide.to(torch.int64).argmax(dim=1)
+        wide_penalty[wide_has] = (T_valid - wide_first_t[wide_has].float()) / T_valid
+
+        cont_penalty = torch.zeros(N, device=device)
+        if cont_thresh > 0:
+            in_range = valid_1 & (pm_1 < cont_thresh)
+            cont_has = in_range.any(dim=1)
+            cont_first_t = in_range.to(torch.int64).argmax(dim=1)
+            worst_dist = pm_1.masked_fill(~in_range, float("inf")).min(dim=1).values
+            cont_penalty[cont_has] = (
+                (1.0 - worst_dist[cont_has] / cont_thresh).clamp(0, 1)
+                * (T_valid - cont_first_t[cont_has].float()) / T_valid
+            )
+    else:
+        # "frac" mode: fraction of scoreable timesteps in each band.
+        denom = float(T_valid) if T_valid > 0 else 1.0
+        near_penalty = (valid_1 & (pm_1 < near_thresh)).float().sum(dim=1) / denom
+        wide_penalty = (
+            valid_1 & (pm_1 >= near_thresh) & (pm_1 < wide_thresh)
+        ).float().sum(dim=1) / denom
+        if cont_thresh <= 0:
+            cont_penalty = torch.zeros(N, device=device)
+        else:
+            cont_terms = torch.where(
+                valid_1,
+                (1.0 - pm_1 / cont_thresh).clamp(min=0, max=1),
+                torch.zeros_like(pm_1),
+            )
+            cont_penalty = cont_terms.sum(dim=1) / denom
+
+    # Global stopped-neighbor index map: map argmin_s (into stopped subset)
+    # back to the original neighbor index (so callers can cross-reference the
+    # raw neighbor_agents_future tensor).
+    stopped_global_idx = stopped_mask.nonzero(as_tuple=True)[0]  # (S,)
+    argmin_global = stopped_global_idx[argmin_s]  # (N, T)
+
+    return {
+        "crossing_gate": crossing_gate,
+        "near_penalty": near_penalty,
+        "wide_penalty": wide_penalty,
+        "cont_penalty": cont_penalty,
+        "first_crossing_steps": first_crossing_steps,
+        "per_timestep_min": per_ts_min,
+        "argmin_neighbor": argmin_global,
+        "stopped_mask": stopped_mask,
+        "ego_closest_pt": ego_closest_pt,
+        "npc_closest_pt": npc_closest_pt,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2197,13 +2602,15 @@ def compute_lane_departure_penalty(
         unsigned_2d = unsigned_q.reshape(N, T, K_pts)
         signed_2d = signed_q.reshape(N, T, K_pts)
         per_ts_max_signed = signed_2d.max(dim=2).values  # (N, T)
-        per_ts_max_signed[:, 0] = -100.0  # ignore t=0
         per_ts_min = unsigned_2d.min(dim=2).values  # (N, T)
     else:
         per_ts_max_signed = torch.full((N, T), -100.0, device=device)
         per_ts_min = torch.full((N, T), 100.0, device=device)
 
-    per_ts_min[:, 0] = 10.0
+    # `per_ts_min[:, 0]` and `per_ts_max_signed[:, 0]` now carry the TRUE t=0
+    # values so downstream diagnostics (cleanse, viz) see the real starting
+    # distance. The gate and near/wide penalties below still exclude t=0 from
+    # their aggregation because the starting pose is not model-controllable.
 
     # Crossing rule (buffer-from-inside semantics, matches `rb_cross_thresh`):
     # `per_ts_max_signed` is the max signed distance across perimeter points per
@@ -2212,12 +2619,12 @@ def compute_lane_departure_penalty(
     # METRES INSIDE the boundary, OR already past it. Larger threshold = stricter gate
     # (wider safety buffer), not looser. e.g., default 0.20m → fires when any perimeter
     # point comes within 20cm of the lane edge or beyond.
-    is_crossing_ts = per_ts_max_signed > -lane_cross_thresh  # (N, T)
-    has_crossing = is_crossing_ts.any(dim=1)
+    is_crossing_ts = per_ts_max_signed > -lane_cross_thresh  # (N, T), full for diag
+    has_crossing = is_crossing_ts[:, 1:].any(dim=1)  # t=0 excluded from gate
     crossing_gate = (~has_crossing).float()
-    first_idx = is_crossing_ts.float().argmax(dim=1)
+    first_idx = is_crossing_ts[:, 1:].float().argmax(dim=1)
     lane_crossing_steps: list[int | None] = [
-        int(first_idx[i].item()) if has_crossing[i] else None for i in range(N)
+        int(first_idx[i].item()) + 1 if has_crossing[i] else None for i in range(N)
     ]
 
     # --- Step 6: Exclusive zone categories (skip t=0) ---
@@ -2338,7 +2745,11 @@ def compute_reward_batch(
     feasibility_scores, off_road_fractions = compute_feasibility_score_batch(
         ego_trajs, ego_shape, data, config
     )
-    centerline_scores = compute_centerline_score_batch(ego_trajs, ego_shape, data)
+    centerline_scores = compute_centerline_score_batch(
+        ego_trajs, ego_shape, data,
+        usage_cap=config.centerline_usage_cap,
+        usage_mode=config.centerline_usage_mode,
+    )
     red_light_scores = compute_red_light_score_batch(ego_trajs, data, config)
     ttc_scores = compute_ttc_score_batch(
         ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
@@ -2361,6 +2772,28 @@ def compute_reward_batch(
         lane_wide_frac = torch.zeros(N, device=device)
         lane_crossing_steps: list[int | None] = [None] * N
         lane_cont_penalty = torch.zeros(N, device=device)
+
+    # Static-collision penalty (stopped-neighbor OBB clearance).
+    # Default-off: when disabled, returns safe zeros + no gate effect.
+    if config.static_collision_enabled:
+        sc_result = compute_static_collision_penalty(
+            ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid, config,
+        )
+        sc_crossing_gate = sc_result["crossing_gate"]
+        sc_near_pen = sc_result["near_penalty"]
+        sc_wide_pen = sc_result["wide_penalty"]
+        sc_cont_pen = sc_result["cont_penalty"]
+        sc_crossing_steps = sc_result["first_crossing_steps"]
+        sc_per_ts_min = sc_result["per_timestep_min"]
+        sc_n_stopped_scene = int(sc_result["stopped_mask"].sum().item())
+    else:
+        sc_crossing_gate = torch.ones(N, device=device)
+        sc_near_pen = torch.zeros(N, device=device)
+        sc_wide_pen = torch.zeros(N, device=device)
+        sc_cont_pen = torch.zeros(N, device=device)
+        sc_crossing_steps: list[int | None] = [None] * N
+        sc_per_ts_min = torch.full((N, T), 99.0, device=device)
+        sc_n_stopped_scene = 0
 
     # NAVSIM PDMS-style multiplicative reward aggregation.
     # Safety gates: binary 0/1 multipliers. If any gate is 0, total is 0.
@@ -2400,6 +2833,8 @@ def compute_reward_batch(
         safety_product = safety_product * rb_crossing_gate
     if config.lane_gate_enabled:
         safety_product = safety_product * lane_crossing_gate
+    if config.static_collision_enabled and config.sc_gate_enabled:
+        safety_product = safety_product * sc_crossing_gate
 
     # Weighted quality metrics (only matter when safety gates pass)
     # Progress is the primary positive signal. Smoothness/centerline are penalties.
@@ -2485,6 +2920,13 @@ def compute_reward_batch(
     # Lane departure proximity penalties
     lane_penalty = config.lane_near_scale * lane_near_frac + config.lane_wide_scale * lane_wide_frac + config.lane_cont_scale * lane_cont_penalty
 
+    # Static-collision proximity penalties (stopped neighbors).
+    sc_penalty = (
+        config.sc_near_scale * sc_near_pen
+        + config.sc_wide_scale * sc_wide_pen
+        + config.sc_cont_scale * sc_cont_pen
+    )
+
     quality_score = (
         config.w_progress * clamped_progress
         + config.w_safety * safety_scores
@@ -2493,6 +2935,7 @@ def compute_reward_batch(
         + ttc_bonus
         - rb_penalty
         - lane_penalty
+        - sc_penalty
     )
 
     _OFFROAD_FLOOR = -50.0
@@ -2512,6 +2955,8 @@ def compute_reward_batch(
                 first_terminal = min(first_terminal, rb_crossing_steps[i])
             if config.enable_lane_departure and lane_crossing_steps[i] is not None:
                 first_terminal = min(first_terminal, lane_crossing_steps[i])
+            if config.static_collision_enabled and config.sc_gate_enabled and sc_crossing_steps[i] is not None:
+                first_terminal = min(first_terminal, sc_crossing_steps[i])
             survival_frac[i] = max(first_terminal, 1) / T  # at least 1/T to avoid 0
 
         # Blend: survived portion gets quality, failed portion gets floor.
@@ -2535,6 +2980,14 @@ def compute_reward_batch(
     on_road_factor = (1.0 - off_road_fractions)
     adjusted_progress = progress_scores * on_road_factor
 
+    # Breakdown-friendly static-collision min-distance: min across t>=1 only.
+    # (Full per-step values live in sc_per_ts_min; the scalar breakdown
+    # field excludes t=0 since it's not model-controllable, same as rb_min_dist.)
+    if T > 1:
+        sc_min_dist_scalar = sc_per_ts_min[:, 1:].min(dim=1).values
+    else:
+        sc_min_dist_scalar = torch.full((N,), 99.0, device=device)
+
     results: list[RewardBreakdown] = []
     for i in range(N):
         results.append(RewardBreakdown(
@@ -2554,6 +3007,13 @@ def compute_reward_batch(
             lane_crossing=bool(lane_crossing_gate[i] < 0.5),
             lane_near_frac=float(lane_near_frac[i]),
             lane_wide_frac=float(lane_wide_frac[i]),
+            static_crossing=bool(sc_crossing_gate[i] < 0.5),
+            sc_near_penalty=float(sc_near_pen[i]),
+            sc_wide_penalty=float(sc_wide_pen[i]),
+            sc_cont_penalty=float(sc_cont_pen[i]),
+            sc_min_dist=float(sc_min_dist_scalar[i].item()),
+            sc_n_stopped=sc_n_stopped_scene,
+            kinematic_gate=bool(kinematic_gate[i] >= 0.5),
         ))
 
     return results

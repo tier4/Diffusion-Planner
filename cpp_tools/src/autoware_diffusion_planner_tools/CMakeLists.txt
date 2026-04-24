@@ -22,6 +22,7 @@ endif()
 ament_auto_add_executable(data_converter
   src/data_converter.cpp
 )
+target_include_directories(data_converter PRIVATE include)
 
 ament_auto_add_executable(inference_tool
   src/inference_tool.cpp
