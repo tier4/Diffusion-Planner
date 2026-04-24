@@ -154,13 +154,24 @@ def main():
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     json.dump(kept, open(args.output, "w"), indent=2)
+    # Also save the "rejected-by-no-gain" list — these scenes aren't
+    # poison, they're just currently unrecoverable. After the next
+    # warm-start training makes the model better, re-run this tool on
+    # them — some will now pass the threshold and can be added to
+    # the follow-up training round. Gate-failed scenes DO get logged
+    # but should not be retried: they're structurally broken (ego
+    # already over a border at t=0), no amount of training helps.
+    rejected_path = args.output.with_name(args.output.stem + ".rejected_no_gain.json")
+    rejected = [p for p, imp in zip(scenes, improvements) if imp < args.improvement_threshold]
+    json.dump(rejected, open(rejected_path, "w"), indent=2)
     imp_arr = np.array(improvements) if improvements else np.array([0.0])
     print(f"\nKept {len(kept)} / {len(scenes)} scenes ({100*len(kept)/max(len(scenes),1):.1f}%)")
-    print(f"  dropped by gate:    {dropped_gate}")
-    print(f"  dropped by no gain: {dropped_no_gain}")
+    print(f"  dropped by gate:    {dropped_gate}  (unrecoverable, don't retry)")
+    print(f"  dropped by no gain: {dropped_no_gain}  (re-check after next warm-start)")
     print(f"  improvement dist: mean={imp_arr.mean():+.3f} p50={np.median(imp_arr):+.3f} "
           f"p75={np.percentile(imp_arr, 75):+.3f} p95={np.percentile(imp_arr, 95):+.3f}")
     print(f"saved {args.output}")
+    print(f"saved rejected-no-gain list (for later warm-start retest): {rejected_path}")
 
 
 if __name__ == "__main__":
