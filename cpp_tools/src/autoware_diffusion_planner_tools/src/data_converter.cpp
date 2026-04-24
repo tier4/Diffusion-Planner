@@ -498,6 +498,8 @@ void save_frame_json(
   if (json_file.is_open()) {
     json_file << std::setw(2) << j << std::endl;
     json_file.close();
+  } else {
+    std::cerr << "Failed to open JSON file for writing: " << json_filename << std::endl;
   }
 }
 
@@ -534,25 +536,19 @@ void save_route_json(
   const std::string json_filename = routes_dir + "/" + rosbag_dir_name + "_" + identifier + ".json";
   std::ofstream json_file(json_filename);
   if (!json_file.is_open()) {
-    RCLCPP_ERROR(
-      rclcpp::get_logger("data_converter"), "Failed to open route JSON file for writing: %s",
-      json_filename.c_str());
+    std::cerr << "Failed to open route JSON file for writing: " << json_filename << std::endl;
     return;
   }
 
   json_file << std::setw(2) << j << std::endl;
   if (!json_file) {
-    RCLCPP_ERROR(
-      rclcpp::get_logger("data_converter"), "Failed to write route JSON file: %s",
-      json_filename.c_str());
+    std::cerr << "Failed to write route JSON file: " << json_filename << std::endl;
     return;
   }
 
   json_file.close();
   if (!json_file) {
-    RCLCPP_ERROR(
-      rclcpp::get_logger("data_converter"), "Failed to close route JSON file: %s",
-      json_filename.c_str());
+    std::cerr << "Failed to close route JSON file: " << json_filename << std::endl;
   }
 }
 
