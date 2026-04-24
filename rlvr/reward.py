@@ -2868,9 +2868,20 @@ def compute_reward_batch(
             gt_future = gt_future[0]  # (T_gt, 3)
         gt_xy = gt_future[:, :2]
         gt_valid = gt_xy.abs().sum(dim=-1) > 0.1
+        # ALWAYS compute model path lengths — they are used for stopped and
+        # underprogress penalties which must fire whether or not GT is
+        # present (synthetic-data RSFT passes zero GT; without this the
+        # penalties silently no-op and the model collapses path).
+        model_path_lens = torch.diff(ego_trajs[:, :, :2], dim=1).norm(dim=-1).sum(dim=-1)  # (N,)
+        baseline_path_len_scalar = None
+        if "baseline_path_len" in data:
+            bpl_t = torch.as_tensor(
+                data["baseline_path_len"], device=device, dtype=torch.float32,
+            ).reshape(())
+            baseline_path_len_scalar = float(bpl_t.clamp(min=1e-3).item())
+
         if gt_valid.sum() >= 10:
             gt_path_len = torch.diff(gt_xy[gt_valid], dim=0).norm(dim=-1).sum()
-            model_path_lens = torch.diff(ego_trajs[:, :, :2], dim=1).norm(dim=-1).sum(dim=-1)  # (N,)
 
             # Normalize progress to [0, 1] as fraction of GT, capped at margin.
             # 100% GT = 1.0 (max), >margin% GT = capped + penalized.
@@ -2889,43 +2900,55 @@ def compute_reward_batch(
             overprogress = torch.relu(path_ratio - config.overprogress_margin)
             progress_penalty = progress_penalty + config.overprogress_penalty * overprogress
 
-            # Stopped penalty: if GT drives (>5m) but model barely moves (<1m),
-            # apply extra negative progress to discourage stopping.
-            if gt_path_len > 5.0:
-                is_stopped = (model_path_lens < 1.0).float()
-                progress_penalty = progress_penalty + config.stopped_penalty * is_stopped
+        # Stopped penalty: fires on any trajectory that barely moves,
+        # whenever an anchor scene "should have moved" — GT is the
+        # canonical anchor when present, else baseline_path_len
+        # (underprogress_reference). Without either, we can't distinguish
+        # a legitimate stop (red light) from reward-hacking collapse.
+        anchor_len: float | None = None
+        if gt_valid.sum() >= 10:
+            anchor_len = float(torch.diff(gt_xy[gt_valid], dim=0).norm(dim=-1).sum().item())
+        elif baseline_path_len_scalar is not None:
+            anchor_len = baseline_path_len_scalar
+        if config.stopped_penalty > 0 and anchor_len is not None and anchor_len > 5.0:
+            is_stopped = (model_path_lens < 1.0).float()
+            progress_penalty = progress_penalty + config.stopped_penalty * is_stopped
 
-            # Underprogress: penalize trajectories shorter than deterministic traj.
-            # Reference = deterministic trajectory (traj[0]) path length, NOT GT.
-            # This is intentional: the det traj represents what the model currently
-            # produces without noise — a realistic achievable baseline. Using GT as
-            # reference would penalize even good trajectories because GT may be much
-            # longer (e.g., perfect curve navigation that the model can't yet match).
-            if config.underprogress_penalty > 0 and N > 1:
-                # Reference selection:
-                #   "det"      — path of the deterministic traj (traj[0]). Adapts to
-                #                current model, but can collapse to short when model
-                #                starts producing short det trajs.
-                #   "baseline" — baseline LoRA-less det path length, passed via
-                #                `data["baseline_path_len"]` (a scalar tensor). Frozen
-                #                anchor that doesn't collapse with training.
-                if config.underprogress_reference == "baseline" and "baseline_path_len" in data:
-                    # Accept tensor / numpy scalar / Python float — callers may inject metadata
-                    # in any of these forms when wiring custom data dicts.
-                    ref_path_len = torch.as_tensor(
-                        data["baseline_path_len"], device=device, dtype=torch.float32,
+        # Underprogress: penalize trajectories shorter than the reference path.
+        # When ``underprogress_reference="baseline"`` AND ``data["baseline_path_len"]``
+        # is present, ALWAYS fire (even at N=1, and even when GT is absent —
+        # the whole point of the baseline anchor is it doesn't depend on the
+        # current rollout). The N>1 guard only makes sense for the legacy
+        # "det" reference where traj[0] is the reference and ratio ≡ 1.0.
+        _have_baseline_ref = (
+            config.underprogress_reference == "baseline"
+            and baseline_path_len_scalar is not None
+        )
+        if config.underprogress_penalty > 0 and (N > 1 or _have_baseline_ref):
+            # Reference selection:
+            #   "det"      — path of the deterministic traj (traj[0]). Adapts to
+            #                current model, but can collapse to short when model
+            #                starts producing short det trajs.
+            #   "baseline" — baseline LoRA-less det path length, passed via
+            #                `data["baseline_path_len"]` (a scalar tensor). Frozen
+            #                anchor that doesn't collapse with training.
+            if config.underprogress_reference == "baseline" and "baseline_path_len" in data:
+                # Accept tensor / numpy scalar / Python float — callers may inject metadata
+                # in any of these forms when wiring custom data dicts.
+                ref_path_len = torch.as_tensor(
+                    data["baseline_path_len"], device=device, dtype=torch.float32,
+                )
+                if ref_path_len.numel() != 1:
+                    raise ValueError(
+                        "data['baseline_path_len'] must be a scalar value, got shape "
+                        f"{tuple(ref_path_len.shape)}"
                     )
-                    if ref_path_len.numel() != 1:
-                        raise ValueError(
-                            "data['baseline_path_len'] must be a scalar value, got shape "
-                            f"{tuple(ref_path_len.shape)}"
-                        )
-                    ref_path_len = ref_path_len.reshape(()).clamp(min=1e-3)
-                else:
-                    ref_path_len = model_path_lens[0].clamp(min=1e-3)
-                ratio = model_path_lens / ref_path_len
-                underprogress = torch.relu(config.underprogress_threshold - ratio.clamp(max=1.0))
-                progress_penalty = progress_penalty + config.underprogress_penalty * underprogress
+                ref_path_len = ref_path_len.reshape(()).clamp(min=1e-3)
+            else:
+                ref_path_len = model_path_lens[0].clamp(min=1e-3)
+            ratio = model_path_lens / ref_path_len
+            underprogress = torch.relu(config.underprogress_threshold - ratio.clamp(max=1.0))
+            progress_penalty = progress_penalty + config.underprogress_penalty * underprogress
 
     # TTC as quality bonus
     ttc_bonus = config.w_safety * (ttc_scores - 0.5) * 2

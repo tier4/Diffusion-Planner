@@ -247,6 +247,26 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
         "centerline_mean": float(np.mean(centerlines)) if centerlines else 0.0,
         "centerline_min": float(np.min(centerlines)) if centerlines else 0.0,
     }
+    if centerlines:
+        cl_arr = np.array(centerlines)
+        for p in (5, 25, 50, 75, 95):
+            result[f"centerline_p{p}"] = float(np.percentile(cl_arr, p))
+        # "lane-keep" cohort = scenes whose det traj CL score is NOT saturated
+        # (proxy: > -2.0). Lane-change scenes saturate CL; separating them out
+        # prevents a few lane-change penalties from hiding mean-CL improvements
+        # on lane-keeping scenes. Uses the reward.py cl value, no re-derivation.
+        lk_mask = cl_arr > -2.0
+        if lk_mask.any():
+            lk = cl_arr[lk_mask]
+            result["centerline_lk_n"] = int(lk_mask.sum())
+            result["centerline_lk_mean"] = float(lk.mean())
+            for p in (5, 25, 50, 75, 95):
+                result[f"centerline_lk_p{p}"] = float(np.percentile(lk, p))
+        else:
+            result["centerline_lk_n"] = 0
+        # Flip-side: "likely lane-change / saturated" cohort.
+        lc_mask = ~lk_mask
+        result["centerline_lc_n"] = int(lc_mask.sum())
     # Progress ratios (only if baseline cache was provided)
     gt_pr_arr = np.array(gt_progress_ratios) if gt_progress_ratios else None
     base_pr_arr = np.array(base_progress_ratios) if base_progress_ratios else None
@@ -262,13 +282,38 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
     if gt_pr_arr is not None:
         progress_str = (f"prog_vs_gt=[p5={np.percentile(gt_pr_arr,5):.2f} med={np.median(gt_pr_arr):.2f}], "
                         f"prog_vs_base=[p5={np.percentile(base_pr_arr,5):.2f} med={np.median(base_pr_arr):.2f}], ")
+    cl_pct_str = ""
+    cl_lk_str = ""
+    if centerlines:
+        cl_pct_str = (f"cl_all=[mean={result['centerline_mean']:+.3f} "
+                      f"p5={result['centerline_p5']:+.3f} "
+                      f"p25={result['centerline_p25']:+.3f} "
+                      f"p50={result['centerline_p50']:+.3f} "
+                      f"p75={result['centerline_p75']:+.3f} "
+                      f"p95={result['centerline_p95']:+.3f} "
+                      f"min={result['centerline_min']:+.3f}]")
+        lk_n = result.get("centerline_lk_n", 0)
+        lc_n = result.get("centerline_lc_n", 0)
+        if lk_n > 0:
+            cl_lk_str = (f", cl_lanekeep[n={lk_n}]=[mean={result['centerline_lk_mean']:+.3f} "
+                         f"p5={result['centerline_lk_p5']:+.3f} "
+                         f"p25={result['centerline_lk_p25']:+.3f} "
+                         f"p50={result['centerline_lk_p50']:+.3f} "
+                         f"p75={result['centerline_lk_p75']:+.3f} "
+                         f"p95={result['centerline_lk_p95']:+.3f}]"
+                         f", cl_sat_n={lc_n}")
+    rb_dist_str = (f"rb_dist=[min={rb_dists_arr.min():.2f} "
+                   f"p5={np.percentile(rb_dists_arr,5):.2f} "
+                   f"p25={np.percentile(rb_dists_arr,25):.2f} "
+                   f"p50={np.median(rb_dists_arr):.2f} "
+                   f"p75={np.percentile(rb_dists_arr,75):.2f}]")
     print(f"  Eval{tag}: {n} scenes, reward={result['reward_mean']:+.2f}, "
           f"rb_cross={rb_crossings}/{n}, lane_dep={lane_departures}/{n}, "
           f"rb_near={rb_nears_arr.mean():.2f}, rb_wide={rb_wides_arr.mean():.2f}, "
-          f"rb_dist=[min={rb_dists_arr.min():.2f} p5={np.percentile(rb_dists_arr,5):.2f} p25={np.percentile(rb_dists_arr,25):.2f} med={np.median(rb_dists_arr):.2f}], "
+          f"{rb_dist_str}, "
           f"{progress_str}"
           f"lane_near={result['lane_near_mean']:.2f}, lane_wide={result['lane_wide_mean']:.2f}, "
-          f"cl=[mean={result['centerline_mean']:+.3f} min={result['centerline_min']:+.3f}], "
+          f"{cl_pct_str}{cl_lk_str}, "
           f"collision={result['collision_rate']:.1%}, "
           f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
     return result
