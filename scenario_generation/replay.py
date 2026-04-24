@@ -275,6 +275,17 @@ class SpawnConfig:
     static_npc_shoulder_margin_m: float = 0.3
     static_npc_seed: int | None = None
 
+    # Turn-indicator argmax: bias subtracted from the KEEP (class 4) logit
+    # before argmax to imitate the C++ TurnIndicatorManager. Default 0.25
+    # (the cpp planner's value); set to 0.0 to reproduce the raw argmax.
+    turn_indicator_keep_bias: float = 0.25
+    # Once the argmax-after-bias lands on a non-KEEP/non-NONE class
+    # (DISABLE, LEFT, or RIGHT), latch that class for this many simulation
+    # steps, ignoring subsequent model outputs. Matches the cpp node's
+    # "hold for N seconds" filter. 0 disables the hold (default — opt-in).
+    # At dt=0.1s, set to 10 for a 1s hold.
+    turn_indicator_hold_steps: int = 0
+
     def __post_init__(self) -> None:
         self.validate()
 
@@ -1766,6 +1777,12 @@ def run_route_replay(
     # Tracker state (lazy-init per agent inside advance_scene_mpc).
     _use_tracker = spawn_config.advance_mode in ("mpc", "perfect")
     mpc_trackers: dict = {}
+    # Per-agent turn-indicator hold state: {agent_id: (held_cls, steps_remaining)}.
+    # When ``turn_indicator_hold_steps > 0``, a non-KEEP / non-NONE class
+    # (DISABLE, LEFT, RIGHT) gets latched for that many steps; subsequent
+    # model outputs are ignored during the hold window. Empty when hold
+    # is disabled (turn_indicator_hold_steps == 0).
+    turn_hold_state: dict[str, tuple[int, int]] = {}
     if _use_tracker:
         print(f"  Advance mode: {spawn_config.advance_mode}"
               + (f" (horizon={spawn_config.mpc_horizon_steps}, "
@@ -1876,6 +1893,7 @@ def run_route_replay(
                         model, model_args, scene, [aid], device,
                         map_cache=map_cache, return_turn_indicators=True,
                         inference_delay=spawn_config.inference_delay,
+                        turn_indicator_keep_bias=spawn_config.turn_indicator_keep_bias,
                     )
                     agent_predictions.update(p)
                     agent_turn_indicators.update(ti)
@@ -1884,6 +1902,7 @@ def run_route_replay(
                     model, model_args, scene, ids_to_predict, device,
                     map_cache=map_cache, return_turn_indicators=True,
                     inference_delay=spawn_config.inference_delay,
+                    turn_indicator_keep_bias=spawn_config.turn_indicator_keep_bias,
                 )
 
             # Optional Savitzky-Golay smoothing on each agent's predicted
@@ -2016,15 +2035,35 @@ def run_route_replay(
 
             # Closed-loop turn-indicator feedback: overwrite the freshly-
             # rolled last slot of each agent's turn_indicators history
-            # with the argmax of the model's turn_indicator_logit. Matches
-            # the C++ TurnIndicatorManager (minus the hold-duration
-            # filter, which we skip for now — can be added later).
+            # with the argmax of the model's turn_indicator_logit (after
+            # the C++-style KEEP-class bias applied inside _predict_batch).
+            #
+            # When ``turn_indicator_hold_steps > 0``, latch DISABLE/LEFT/
+            # RIGHT for that many steps to mimic the cpp node's hold. NONE
+            # (0) and KEEP (4) pass through — they don't start a hold.
+            hold_steps = int(spawn_config.turn_indicator_hold_steps)
             for a in scene.agents:
                 if a.turn_indicators is None:
                     continue
                 ti_cls = agent_turn_indicators.get(a.id)
-                if ti_cls is not None:
-                    a.turn_indicators[-1] = int(ti_cls)
+                if ti_cls is None:
+                    continue
+                ti_cls = int(ti_cls)
+                if hold_steps > 0:
+                    held = turn_hold_state.get(a.id)
+                    if held is not None and held[1] > 0:
+                        ti_cls = held[0]
+                        turn_hold_state[a.id] = (held[0], held[1] - 1)
+                    elif ti_cls in (1, 2, 3):
+                        # DISABLE=1, LEFT=2, RIGHT=3 trigger a new hold.
+                        # -1 because this step already consumes one slot.
+                        turn_hold_state[a.id] = (ti_cls, hold_steps - 1)
+                a.turn_indicators[-1] = ti_cls
+            # Drop hold state for despawned agents so the dict doesn't grow.
+            if hold_steps > 0 and turn_hold_state:
+                alive = {a.id for a in scene.agents}
+                for stale in [k for k in turn_hold_state if k not in alive]:
+                    del turn_hold_state[stale]
 
             if step % 50 == 0:
                 print(
