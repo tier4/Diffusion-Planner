@@ -59,6 +59,30 @@ _CL7_SPD7_STR14 = {"cl": 7.0, "spd": 7.0, "noise": (0.8, 2.0), "stretch": 1.4, "
 _CL20_SPD10_STR13 = {"cl": 20.0, "spd": 10.0, "noise": (0.8, 2.0), "stretch": 1.3, "label": "CL20_SPD10_str13_n0820"}
 _CL30_SPD15_STR15 = {"cl": 30.0, "spd": 15.0, "noise": (1.0, 2.5), "stretch": 1.5, "label": "CL30_SPD15_str15_n1025"}
 
+_CL12_SPD8_STR12 = {"cl": 12.0, "spd": 8.0, "noise": (0.5, 1.5), "stretch": 1.2, "label": "CL12_SPD8_str12_n0515"}
+_CL15_SPD10_STR13 = {"cl": 15.0, "spd": 10.0, "noise": (0.8, 2.0), "stretch": 1.3, "label": "CL15_SPD10_str13_n0820"}
+
+# Low-noise clean variants — SFT targets that transfer cleanly to deterministic val.
+# Same CL strengths but noise_max <= 1.0 so the winner trajectory isn't noise-contaminated.
+_CL10_SPD8_DET = {"cl": 10.0, "spd": 8.0, "noise": (0.0, 0.0), "label": "CL10_SPD8_det"}
+_CL12_SPD8_STR12_CLEAN = {"cl": 12.0, "spd": 8.0, "noise": (0.3, 0.8), "stretch": 1.2, "label": "CL12_SPD8_str12_n0308"}
+_CL15_SPD10_STR13_CLEAN = {"cl": 15.0, "spd": 10.0, "noise": (0.3, 0.8), "stretch": 1.3, "label": "CL15_SPD10_str13_n0308"}
+
+# Clean low-noise slots for route-guidance variant (cl ≤ 10, noise max ≤ 1.0).
+_CL7_SPD7_LOWNOISE = {"cl": 7.0, "spd": 7.0, "noise": (0.3, 0.8), "label": "CL7_SPD7_n0308"}
+_CL8_SPD8_LOWNOISE = {"cl": 8.0, "spd": 8.0, "noise": (0.5, 1.0), "label": "CL8_SPD8_n0510"}
+
+# Low-scale route-lanes-centerline (rl_cl) sweep slots. scale ≤ 3.0 with
+# matching spd, no stretch. Paired with use_route_cl_guidance=True to target
+# route_lanes centerline instead of the nearest-lane centerline.
+_RL_CL_1_5_SPD1_5_DET   = {"cl": 1.5, "spd": 1.5, "noise": (0.0, 0.0), "label": "RL_CL1.5_SPD1.5_det"}
+_RL_CL_2_0_SPD2_0_DET   = {"cl": 2.0, "spd": 2.0, "noise": (0.0, 0.0), "label": "RL_CL2.0_SPD2.0_det"}
+_RL_CL_2_5_SPD2_5_DET   = {"cl": 2.5, "spd": 2.5, "noise": (0.0, 0.0), "label": "RL_CL2.5_SPD2.5_det"}
+_RL_CL_3_0_SPD3_0_DET   = {"cl": 3.0, "spd": 3.0, "noise": (0.0, 0.0), "label": "RL_CL3.0_SPD3.0_det"}
+_RL_CL_2_0_SPD2_0_NOISY = {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "label": "RL_CL2.0_SPD2.0_n0308"}
+_RL_CL_2_5_SPD2_5_NOISY = {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "label": "RL_CL2.5_SPD2.5_n0308"}
+_RL_CL_3_0_SPD3_0_NOISY = {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "label": "RL_CL3.0_SPD3.0_n0308"}
+
 # Lateral push slots
 _LATL04 = {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "lat_eta":  0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latL04"}
 _LATR04 = {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "lat_eta": -0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latR04"}
@@ -135,6 +159,62 @@ _VARIANTS: dict[str, GenerationVariant] = {
                     "Replaces 2 low-noise slots to keep K=16.",
         cl_spd_configs=_GUIDED_RSFT_V2 + [_CL20_SPD10_STR13, _CL30_SPD15_STR15],
         noise_configs=_NOISE_SWEEP_FULL[2:],  # drop n0103 and n0306 to keep K=16 (6+2 guided + 7 noise + det = 16)
+    ),
+    "strong_cl_stretch_v2": GenerationVariant(
+        description="rsft_v2 guided + 2 mid-strong CL+stretch slots (cl=12 / cl=15).",
+        cl_spd_configs=_GUIDED_RSFT_V2 + [_CL12_SPD8_STR12, _CL15_SPD10_STR13],
+        noise_configs=_NOISE_SWEEP_FULL[2:],
+    ),
+    "route_cl_low_noise": GenerationVariant(
+        description="Route-centerline guidance (uses route_lanes matching reward) + "
+                    "ALL slots have noise_max <= 1.0 + cl values capped at 10. "
+                    "Requires use_route_cl_guidance=True in config to swap "
+                    "centerline_following → route_centerline_following. K=8: "
+                    "1 det + 6 route-guided + 1 noise-only-low-noise.",
+        cl_spd_configs=[
+            _CL5_SPD5_DET,           # cl=5, no noise
+            _CL5_SPD5_NOISY,         # cl=5, noise (0.3, 0.8)
+            _CL7_SPD7_LOWNOISE,      # cl=7, noise (0.3, 0.8)
+            _CL8_SPD8_LOWNOISE,      # cl=8, noise (0.5, 1.0)
+            _CL10_SPD8_DET,          # cl=10, no noise
+            _CL10_SPD10_NOISY,       # cl=10, noise (0.5, 1.0)
+        ],
+        noise_configs=[
+            {"noise": (0.5, 1.0), "label": "noise_n0510"},  # only low-noise exploration slot
+        ],
+    ),
+    "rl_cl_soft_sweep": GenerationVariant(
+        description="Low-scale CL sweep (scale ∈ {1.5, 2.0, 2.5, 3.0}) with no "
+                    "pure-noise slots. K=8: 1 det + 4 det-sweep + 3 low-noise-sweep. "
+                    "Targets route_lanes centerline when the caller passes "
+                    "use_route_cl_guidance=True (otherwise these slots emit the "
+                    "legacy nearest-lane centerline_following guidance).",
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,       # rl_cl=1.5, no noise
+            _RL_CL_2_0_SPD2_0_DET,       # rl_cl=2.0, no noise
+            _RL_CL_2_5_SPD2_5_DET,       # rl_cl=2.5, no noise
+            _RL_CL_3_0_SPD3_0_DET,       # rl_cl=3.0, no noise
+            _RL_CL_2_0_SPD2_0_NOISY,     # rl_cl=2.0, noise (0.3, 0.8)
+            _RL_CL_2_5_SPD2_5_NOISY,     # rl_cl=2.5, noise (0.3, 0.8)
+            _RL_CL_3_0_SPD3_0_NOISY,     # rl_cl=3.0, noise (0.3, 0.8)
+        ],
+        noise_configs=[],
+    ),
+    "clean_cl_only": GenerationVariant(
+        description="Only clean CL-guided slots — no pure-noise, no high-noise variants. "
+                    "All cl_spd slots have noise_max <= 1.0 so SFT-to-winner produces "
+                    "trajectories that transfer cleanly to deterministic val. "
+                    "K = 1 det + 7 clean guided = 8. CL range 5-15.",
+        cl_spd_configs=[
+            _CL5_SPD5_DET,              # cl=5, noise=(0,0)          — pure CL det
+            _CL5_SPD5_NOISY,            # cl=5, noise=(0.3,0.8)      — low noise
+            _CL10_SPD8_DET,             # cl=10, noise=(0,0)          — mid CL det
+            _CL10_SPD10_NOISY,          # cl=10, noise=(0.5,1.0)      — mid CL low-noise
+            _CL6_SPD6_STR11,            # cl=6, stretch=1.1, noise=(0.5,1.5)  <-- kept at 1.5 max (borderline)
+            _CL12_SPD8_STR12_CLEAN,     # cl=12, stretch=1.2, noise=(0.3,0.8)
+            _CL15_SPD10_STR13_CLEAN,    # cl=15, stretch=1.3, noise=(0.3,0.8)
+        ],
+        noise_configs=[],
     ),
 
     # ====== Original baseline (pre-rsft_v2 system) ======
@@ -266,6 +346,7 @@ _VARIANTS: dict[str, GenerationVariant] = {
 _ALIASES: dict[str, str] = {
     "noise_swap_2_no_lat": "rsft_v2_legacy",  # original name during exploration
     "rsft_v2_all_noise": "rsft_v2",            # equivalent to current default
+    "route_cl_soft_sweep": "rl_cl_soft_sweep", # renamed 2026-04-24 → rl_cl naming
 }
 
 
@@ -283,3 +364,35 @@ def get_variant(name: str) -> GenerationVariant:
 def list_variants() -> list[str]:
     """Return canonical variant names (excludes aliases)."""
     return sorted(_VARIANTS.keys())
+
+
+def clean_slot_mask(variant: str, K: int, noise_max_threshold: float = 1.0) -> list[bool]:
+    """Return a K-length bool mask of slots suitable as clean SFT targets.
+
+    A slot is "clean" when it carries useful CL signal without heavy noise
+    contamination — so that MSE SFT against the winner trajectory actually
+    transfers to a deterministic val-time output. Criteria:
+      * slot 0 (det_pure): always clean
+      * cl_spd slots with cl>0 AND noise_max <= threshold: clean
+      * pure-noise slots: NOT clean (noise dominates the signal)
+      * random filler slots: NOT clean
+
+    Utility helper for callers that want to restrict ranked-SFT's winner
+    selection to slots whose winning trajectory will transfer cleanly to
+    deterministic inference. Not currently wired into any trainer.
+    """
+    v = get_variant(variant)
+    n_cl = len(v.cl_spd_configs)
+    n_noise = len(v.noise_configs)
+    mask = [False] * K
+    mask[0] = True  # det_pure is always clean
+    for i, c in enumerate(v.cl_spd_configs, start=1):
+        if i >= K:
+            break
+        noise = c.get("noise", (0.0, 0.0))
+        noise_max = float(noise[1]) if len(noise) >= 2 else 0.0
+        cl_val = float(c.get("cl", 0.0))
+        if cl_val > 0 and noise_max <= noise_max_threshold:
+            mask[i] = True
+    # cl_spd_configs slice ends at 1+n_cl; noise slots and randoms are NOT clean
+    return mask

@@ -282,9 +282,10 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
 
     model.eval()
 
-    # Find scenes where base model goes offroad
+    # Find scenes where base model goes offroad (scan all scenes — don't
+    # subsample, that would hide worst-offroad scenes past index 100).
     offroad_indices = []
-    for i, path in enumerate(prob_scenes[:100]):
+    for i, path in enumerate(prob_scenes):
         try:
             data = load_npz_data(path, DEVICE)
             norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
@@ -516,6 +517,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             w_centerline=grpo_config.w_centerline,
             centerline_usage_cap=grpo_config.centerline_usage_cap,
             centerline_usage_mode=grpo_config.centerline_usage_mode,
+            centerline_time_weight_min=grpo_config.centerline_time_weight_min,
             rb_near_scale=grpo_config.rb_near_scale,
             rb_wide_scale=grpo_config.rb_wide_scale,
             rb_cont_scale=grpo_config.rb_cont_scale,
