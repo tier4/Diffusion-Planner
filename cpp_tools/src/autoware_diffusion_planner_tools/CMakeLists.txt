@@ -23,6 +23,7 @@ ament_auto_add_executable(data_converter
   src/data_converter.cpp
 )
 target_include_directories(data_converter PRIVATE include)
+target_link_libraries(data_converter yaml-cpp)
 
 ament_auto_add_executable(inference_tool
   src/inference_tool.cpp

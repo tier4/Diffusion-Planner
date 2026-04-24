@@ -26,8 +26,10 @@
 #include <autoware/diffusion_planner/preprocessing/traffic_signals.hpp>
 #include <autoware/diffusion_planner/utils/utils.hpp>
 #include <autoware_lanelet2_extension/projection/mgrs_projector.hpp>
+#include <autoware_lanelet2_extension/projection/transverse_mercator_projector.hpp>
 #include <autoware_lanelet2_extension/utility/message_conversion.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include <autoware_map_msgs/msg/lanelet_map_bin.hpp>
 #include <autoware_perception_msgs/msg/tracked_objects.hpp>
@@ -48,6 +50,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -240,6 +243,39 @@ std::string create_token(const int64_t seq_id, const int64_t frame_id)
   std::ostringstream token_stream;
   token_stream << std::setfill('0') << std::setw(8) << seq_id << "_" << std::setw(8) << frame_id;
   return token_stream.str();
+}
+
+std::unique_ptr<lanelet::Projector> create_projector_from_yaml(
+  const std::string & vector_map_path)
+{
+  const std::filesystem::path map_path_fs(vector_map_path);
+  const std::filesystem::path projector_info_yaml =
+    map_path_fs.parent_path() / "map_projector_info.yaml";
+  if (!std::filesystem::exists(projector_info_yaml)) {
+    std::cerr << "WARNING: map_projector_info.yaml not found at " << projector_info_yaml
+              << ". Falling back to MGRSProjector (previous default)." << std::endl;
+    return std::make_unique<lanelet::projection::MGRSProjector>();
+  }
+
+  const YAML::Node data = YAML::LoadFile(projector_info_yaml.string());
+  const std::string projector_type = data["projector_type"].as<std::string>();
+
+  if (projector_type == "MGRS") {
+    auto mgrs_projector = std::make_unique<lanelet::projection::MGRSProjector>();
+    mgrs_projector->setMGRSCode(data["mgrs_grid"].as<std::string>());
+    return mgrs_projector;
+  }
+  if (projector_type == "TransverseMercator") {
+    const double lat = data["map_origin"]["latitude"].as<double>();
+    const double lon = data["map_origin"]["longitude"].as<double>();
+    const double scale_factor = data["scale_factor"].as<double>();
+    const lanelet::GPSPoint position{lat, lon, 0.0};
+    const lanelet::Origin origin{position};
+    return std::make_unique<lanelet::projection::TransverseMercatorProjector>(origin, scale_factor);
+  }
+  throw std::runtime_error(
+    "Unsupported projector_type in map_projector_info.yaml: " + projector_type +
+    " (supported: MGRS, TransverseMercator)");
 }
 
 int64_t parse_timestamp(const builtin_interfaces::msg::Time & stamp)
@@ -630,11 +666,12 @@ int main(int argc, char ** argv)
             << ", Convert yellow: " << convert_yellow << ", Convert red: " << convert_red
             << ", Interpolation: " << use_interpolation << std::endl;
 
-  // Load Lanelet2 map and create context like in diffusion_planner_node
+  // Load Lanelet2 map using projector chosen by map_projector_info.yaml.
   lanelet::ErrorMessages errors{};
-  lanelet::projection::MGRSProjector projector{};
+  const std::unique_ptr<lanelet::Projector> projector =
+    create_projector_from_yaml(vector_map_path);
   const std::shared_ptr<lanelet::LaneletMap> lanelet_map_ptr =
-    lanelet::load(vector_map_path, projector, &errors);
+    lanelet::load(vector_map_path, *projector, &errors);
 
   std::cout << "Loaded lanelet2 map with " << lanelet_map_ptr->laneletLayer.size() << " lanelets"
             << std::endl;
