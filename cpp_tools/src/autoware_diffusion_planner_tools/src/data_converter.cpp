@@ -831,7 +831,7 @@ int main(int argc, char ** argv)
         // Convert incomplete_details (vector<string>) to vector<IncompleteDataType>
         std::vector<IncompleteDataType> incomplete_types;
         for (const auto & s : incomplete_details) {
-          if (s == "KinematicState")
+          if (s == "KinematicState" || s == "InvalidKinematicCovariance")
             incomplete_types.push_back(IncompleteDataType::KinematicState);
           else if (s == "Acceleration")
             incomplete_types.push_back(IncompleteDataType::Acceleration);
