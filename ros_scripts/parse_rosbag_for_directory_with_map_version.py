@@ -116,13 +116,16 @@ def process_single_bag(args_tuple):
 
     logging.info(f"Processing bag: {bag_path}")
 
+    project_name = bag_path.parents[3].name
+    map_name = bag_path.parents[2].name
+    train_or_val = bag_path.parents[1].name
     date = bag_path.parent.name
-    bag_time = bag_path.name
+    time = bag_path.name
 
     vector_map_path = _resolve_vector_map_path(bag_path)
 
-    (save_root / date).mkdir(parents=True, exist_ok=True)
-    save_dir = (save_root / date / bag_time).resolve()
+    save_dir = (save_root / project_name / map_name / train_or_val / date / time).resolve()
+    save_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if save_dir.is_dir():
         logging.info(f"Already exists: {save_dir}")

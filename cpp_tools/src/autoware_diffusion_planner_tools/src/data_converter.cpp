@@ -43,6 +43,7 @@
 #include <lanelet2_io/Io.h>
 #include <lanelet2_routing/RoutingGraph.h>
 #include <lanelet2_traffic_rules/TrafficRulesFactory.h>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -822,9 +823,11 @@ int main(int argc, char ** argv)
     if (!traffic_signal_vec.empty()) {
       traffic_signal = traffic_signal_vec;
     } else {
-      ok = false;
-      incomplete_details.emplace_back("TrafficSignals");
-      std::cout << "No matching traffic_signal for tracked_objects at " << i << std::endl;
+      // Tolerate drops: traffic_signal publisher is known to drop messages even in
+      // healthy recordings (measured 23 gaps >150ms, up to 393ms, in this bag).
+      // Keep the frame with an empty signal vector instead of failing it.
+      std::cout << "No matching traffic_signal for tracked_objects at " << i << " (drop tolerated)"
+                << std::endl;
     }
 
     const auto turn_ind_vec = check_and_update_msg(turn_indicators, tracking.header.stamp);
