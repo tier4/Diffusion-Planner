@@ -99,7 +99,11 @@ _RL_CL_3_0_SPD3_0_STR14 = {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "stretch"
 _RL_CL_3_0_SPD3_0_STR12 = {"cl": 3.0, "spd": 3.0, "noise": (0.0, 0.0), "stretch": 1.2, "label": "RL_CL3.0_SPD3.0_str12"}
 # Nonzero-noise low-scale rl_cl slots (replaces the dead str12/str13 slots
 # that never won on the sim-from-route campaign).
-_RL_CL_1_5_SPD1_5_N0308 = {"cl": 1.5, "spd": 1.5, "noise": (0.3, 0.8), "label": "RL_CL1.5_SPD1.5_n0308"}
+# _RL_CL_1_5_SPD1_5_N0308 is an alias for _RL_CL_1_5_SPD1_5_NOISY (same cl/spd/
+# noise and label). Kept as a name to match the documented "n0308" naming on
+# this sweep but referencing the same dict so any future edit lands in one
+# place.
+_RL_CL_1_5_SPD1_5_N0308 = _RL_CL_1_5_SPD1_5_NOISY
 _RL_CL_2_0_SPD2_0_STR12_N = {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "stretch": 1.2, "label": "RL_CL2.0_SPD2.0_str12_n0308"}
 
 # Lateral push slots
@@ -211,7 +215,7 @@ _VARIANTS: dict[str, GenerationVariant] = {
                     "hypothesis is that scale ≥ 2.5 pulls hard enough that "
                     "MPC tracker can't follow the resulting trajectories in "
                     "low-drift zones, breaking places the baseline handled "
-                    "well. K=8 = 1 det + 3 det-sweep (0.5/1.0/1.5/2.0) + 4 "
+                    "well. K=8 = 1 det + 4 det-sweep (0.5/1.0/1.5/2.0) + 3 "
                     "low-noise variants.",
         cl_spd_configs=[
             _RL_CL_0_5_SPD0_5_DET,      # very gentle
@@ -273,6 +277,24 @@ _VARIANTS: dict[str, GenerationVariant] = {
             _RL_CL_2_0_SPD2_0_NOISY,     # rl_cl=2.0, noise (0.3, 0.8)
             _RL_CL_2_5_SPD2_5_NOISY,     # rl_cl=2.5, noise (0.3, 0.8)
             _RL_CL_3_0_SPD3_0_NOISY,     # rl_cl=3.0, noise (0.3, 0.8)
+        ],
+        noise_configs=[],
+    ),
+    "rl_cl_lat_combo": GenerationVariant(
+        description="Phase 3: route-CL pull + lateral push combined. K=8 = 1 det "
+                    "+ 3 rl_cl-only sweep + 4 rl_cl+lat slots (lat_eta=+/-0.4 "
+                    "and +/-0.6). Tests whether lateral-disturbed slots produce "
+                    "diverse off-CL trajectories that broaden the ranker's "
+                    "pickable set vs pure rl_cl_soft_sweep.",
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,
+            _RL_CL_2_0_SPD2_0_DET,
+            _RL_CL_2_5_SPD2_5_DET,
+            _RL_CL_3_0_SPD3_0_DET,
+            {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "lat_eta":  0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "RL_CL2.0_latL04"},
+            {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "lat_eta": -0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "RL_CL2.0_latR04"},
+            {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "lat_eta":  0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "RL_CL2.5_latL06"},
+            {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "lat_eta": -0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "RL_CL2.5_latR06"},
         ],
         noise_configs=[],
     ),

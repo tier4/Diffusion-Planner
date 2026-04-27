@@ -116,7 +116,10 @@ def _recover_ego_world_series(run_dir: Path, route) -> np.ndarray:
     for k, fp in enumerate(files):
         with np.load(fp, allow_pickle=True) as d:
             gp = d["goal_pose"]
-        dx, dy, dyaw = float(gp[0]), float(gp[1]), float(gp[2])
+        # tensor_converter._build_goal_pose stores [x, y, cos_h, sin_h] in
+        # ego frame; gp[2] is cos(dyaw), not dyaw.
+        dx, dy = float(gp[0]), float(gp[1])
+        dyaw = math.atan2(float(gp[3]), float(gp[2]))
         eyaw = gyaw_w - dyaw
         # wrap to [-pi, pi]
         eyaw = math.atan2(math.sin(eyaw), math.cos(eyaw))
@@ -191,14 +194,11 @@ def _plot_heatmap(ax, pts, bin_segments, bin_values, title, vmin, vmax, cmap):
     ax.plot(pts[:, 0], pts[:, 1], color="#cccccc", lw=1.0, zorder=1)
 
     # per-bin coloured overlay
-    colors = plt.get_cmap(cmap)
     valid_segs = []
     valid_vals = []
     for segs, v in zip(bin_segments, bin_values):
         if segs is None or np.isnan(v):
             continue
-        pairs = segs.reshape(-1, 2, 2) if segs.ndim == 2 and segs.shape[0] % 2 == 0 else None
-        # Just draw as a polyline; sequential segments already stitched.
         valid_segs.append(segs)
         valid_vals.append(v)
     if valid_vals:

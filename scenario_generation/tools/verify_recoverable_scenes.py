@@ -2,16 +2,18 @@
 """Filter candidate training scenes by whether rl_cl guidance can actually
 recover the ego's centerline on them.
 
-For each scene NPZ, runs K trajectories with the configured generation
-variant (matches training), scores each with reward.py, and keeps only
-scenes where:
+For each scene NPZ, evaluates the deterministic sample plus the guided
+sample slots from the configured generation variant's ``cl_spd_configs``
+list (the ``noise_configs`` slots are intentionally skipped — they do
+not encode the centerline-recovery guidance we are filtering on),
+scores each with reward.py, and keeps only scenes where:
 
-    max(best_of_K cl_score) - det_cl_score >= improvement_threshold
+    max(guided_cl_score) - det_cl_score >= improvement_threshold
 
-Drops scenes where even the guidance can't beat the deterministic output
-by the selective threshold. Per ``feedback_no_poison_scenes.md``: if the
-guidance can't meaningfully recover, training on the scene teaches the
-model the WRONG thing.
+Drops scenes where none of the guided samples beat the deterministic
+output by the selective threshold. Per ``feedback_no_poison_scenes.md``:
+if the guidance can't meaningfully recover, training on the scene
+teaches the model the WRONG thing.
 
 Usage:
     python -m scenario_generation.tools.verify_recoverable_scenes \\
@@ -47,23 +49,21 @@ def main():
     p.add_argument("--max_scenes", type=int, default=None,
                    help="Cap on # scenes to test (randomly sub-sampled if set)")
     p.add_argument("--device", default="cuda")
+    p.add_argument("--args_json", type=Path, default=None,
+                   help="Override path to the model's args.json. Defaults to "
+                        "<model_path>/../args.json (or its parent's args.json).")
     args = p.parse_args()
 
-    import sys
-    sys.path.insert(0, "/home/danielsanchez/Diffusion-Planner")
     from rlvr.grpo_config import GRPOConfig
     from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
     from rlvr.reward import compute_reward_batch
     from preference_optimization.utils import load_npz_data
-    from preference_optimization.lora_utils import load_lora_checkpoint
     from diffusion_planner.utils.config import Config
     from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-    from rlvr.grpo_trainer_batched import build_cl_spd_configs, build_noise_configs
+    from rlvr.grpo_trainer_batched import _build_cl_spd_configs, _build_noise_configs
     from rlvr.generation_variants import get_variant
     from guidance_gui.generate_samples import generate_samples
 
-    with open(args.config) as f:
-        cfg = json.load(f)
     grpo = GRPOConfig.from_json(str(args.config))
     reward_cfg = load_reward_config(str(args.config))
 
@@ -71,12 +71,18 @@ def main():
     # see whether the guidance alone can recover on each scene, so we
     # run against the BASE model. This prevents filtering by already-
     # partially-trained LoRA.).
-    args_json = args.model_path.parent / "args.json"
+    if args.args_json is not None:
+        args_json = args.args_json
+    else:
+        args_json = args.model_path.parent / "args.json"
+        if not args_json.exists():
+            # Assume sibling dir has it
+            args_json = args.model_path.parent.parent / "args.json"
     if not args_json.exists():
-        # Assume sibling dir has it
-        args_json = args.model_path.parent.parent / "args.json"
-    if not args_json.exists():
-        args_json = Path("/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/v4.0/args.json")
+        raise SystemExit(
+            f"args.json not found next to model ({args.model_path.parent}) or "
+            f"its parent. Pass --args_json to override."
+        )
     model_args = Config(str(args_json))
     model = Diffusion_Planner(model_args).to(args.device)
     ckpt = torch.load(str(args.model_path), map_location=args.device, weights_only=False)
@@ -90,9 +96,8 @@ def main():
         scenes = random.sample(scenes, args.max_scenes)
     print(f"Verifying {len(scenes)} scenes  threshold >= {args.improvement_threshold}")
 
-    variant = get_variant(grpo.generation_variant)
-    cl_spd_configs = build_cl_spd_configs(variant, grpo)
-    noise_configs = build_noise_configs(variant)
+    cl_spd_configs = _build_cl_spd_configs(grpo.generation_variant)
+    noise_configs = _build_noise_configs(grpo.generation_variant)
     K = 1 + len(cl_spd_configs) + len(noise_configs)
     print(f"  K={K}  variant={grpo.generation_variant}  use_route_cl={grpo.use_route_cl_guidance}")
 
