@@ -647,9 +647,12 @@ def main(argv: Iterable[str] | None = None) -> None:
     )
     parser.add_argument(
         "--base_model",
-        required=True,
-        help="Path to the LoRA-less base model checkpoint (.pth) used to "
-             "generate the recovery future for every kept variant.",
+        default=None,
+        help="(Optional, BUGGY) baseline model. When provided, runs forward "
+             "inference and overwrites ego_agent_future — ranked-SFT IGNORES "
+             "ego_agent_future, so this codepath is dead weight (per handoff). "
+             "Leave unset to dump perturbed NPZs as-is for K=8 winner-recovery "
+             "filtering downstream.",
     )
     parser.add_argument("--n_per_scene", type=int, default=5)
     parser.add_argument(
@@ -702,9 +705,17 @@ def main(argv: Iterable[str] | None = None) -> None:
     rng = np.random.default_rng(args.seed)
 
     print(f"[disturb_and_replay] device={device} base_model={args.base_model}")
-    base_model, base_args = _load_base_model(Path(args.base_model), device)
+    if args.base_model is not None:
+        base_model, base_args = _load_base_model(Path(args.base_model), device)
+    else:
+        base_model, base_args = None, None
+        print(
+            "[disturb_and_replay] --base_model not provided — skipping baseline "
+            "inference; ego_agent_future left as in source NPZ."
+        )
 
     written: list[str] = []
+    manifest: list[dict] = []  # per-output {npz, source_scene, variant_name, dx, dy, dtheta_deg, dv, kind}
     n_attempted = 0
     n_rejected = 0
     n_inference_failed = 0
@@ -773,40 +784,62 @@ def main(argv: Iterable[str] | None = None) -> None:
                     out_path.unlink(missing_ok=True)
                     continue
 
-            # Run baseline inference -> overwrite ego_agent_future
-            try:
-                fut = _baseline_predict_future(base_model, base_args, out_path, device)
-            except Exception as e:  # noqa: BLE001
-                print(
-                    f"[infer-fail] {scene_idx} {variant.name}: {e}; "
-                    f"dropping variant."
-                )
-                n_inference_failed += 1
-                by_kind[kind]["rejected"] += 1
-                out_path.unlink(missing_ok=True)
-                continue
+            if base_model is not None:
+                # Legacy baseline-inference codepath. KNOWN-BAD: ranked-SFT
+                # ignores ego_agent_future, so the rewrite is wasted and can
+                # encode the wrong recovery target. Kept gated for backward
+                # compat only.
+                try:
+                    fut = _baseline_predict_future(base_model, base_args, out_path, device)
+                except Exception as e:  # noqa: BLE001
+                    print(
+                        f"[infer-fail] {scene_idx} {variant.name}: {e}; "
+                        f"dropping variant."
+                    )
+                    n_inference_failed += 1
+                    by_kind[kind]["rejected"] += 1
+                    out_path.unlink(missing_ok=True)
+                    continue
 
-            # Sanity: lateral distance to centerline at t=0 (perturbed pose) vs t=79 (end of recovery).
-            try:
-                # t=0 = perturbed origin in ego frame
-                pt0 = np.array([[variant.dx, variant.dy]], dtype=np.float64)
-                d0 = float(_point_to_segments_dist(pt0, scene_segs)[0])
-                pt79 = np.array([fut[-1, :2]], dtype=np.float64)
-                d79 = float(_point_to_segments_dist(pt79, scene_segs)[0])
-                recovery_diag.append({
-                    "scene": Path(scene_path).stem,
-                    "variant": variant.name,
-                    "lat_t0": d0,
-                    "lat_t79": d79,
-                    "delta": d0 - d79,
-                })
-            except Exception:
-                pass
+                # Sanity: lateral distance to centerline at t=0 (perturbed pose) vs t=79 (end of recovery).
+                try:
+                    pt0 = np.array([[variant.dx, variant.dy]], dtype=np.float64)
+                    d0 = float(_point_to_segments_dist(pt0, scene_segs)[0])
+                    pt79 = np.array([fut[-1, :2]], dtype=np.float64)
+                    d79 = float(_point_to_segments_dist(pt79, scene_segs)[0])
+                    recovery_diag.append({
+                        "scene": Path(scene_path).stem,
+                        "variant": variant.name,
+                        "lat_t0": d0,
+                        "lat_t79": d79,
+                        "delta": d0 - d79,
+                    })
+                except Exception:
+                    pass
 
-            perturbed["ego_agent_future"] = fut.astype(np.float32)
-            np.savez(out_path, **perturbed)
+                perturbed["ego_agent_future"] = fut.astype(np.float32)
+                np.savez(out_path, **perturbed)
+            else:
+                # Skip baseline inference. Source NPZ's ego_agent_future
+                # carries through unchanged (zeros for sim-source scenes).
+                np.savez(out_path, **perturbed)
 
             written.append(str(out_path))
+            manifest.append({
+                "npz": str(out_path),
+                "source_scene": scene_path,
+                "variant_name": variant.name,
+                "kind": kind,
+                "dx": float(variant.dx),
+                "dy": float(variant.dy),
+                "dtheta_deg": float(variant.dtheta_deg),
+                "dv": float(variant.dv),
+                # Lateral offset magnitude (signed, m). Positive = left of tangent
+                # (perp = (-ty, tx)), negative = right. Computed by projecting
+                # (dx, dy) onto the centerline normal at the source pose.
+                "lateral_offset_m": float(variant.dx * (-tangent[1]) + variant.dy * tangent[0]),
+                "longitudinal_offset_m": float(variant.dx * tangent[0] + variant.dy * tangent[1]),
+            })
             by_kind[kind]["kept"] += 1
 
         if (scene_idx + 1) % 10 == 0:
@@ -818,6 +851,10 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     with open(out_list_path, "w") as f:
         json.dump(written, f, indent=2)
+    manifest_path = output_dir / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"Wrote manifest: {manifest_path}  ({len(manifest)} entries)")
 
     # Recovery diagnostic summary
     if recovery_diag:
