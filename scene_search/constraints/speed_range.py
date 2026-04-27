@@ -17,7 +17,8 @@ class SpeedRangeConstraint(BaseConstraint):
             "max_speed_kmh": {"type": "float", "default": 100.0, "label": "Max speed (km/h)", "min": 0.0, "max": 100.0, "step": 1.0},
         }
 
-    def filter(self, npz_path: str, npz_data: np.lib.npyio.NpzFile, params: dict) -> bool:
+    def filter(self, npz_path: str, npz_data: np.lib.npyio.NpzFile,
+               params: dict, entry: dict | None = None) -> bool:
         # ego_current_state: [x, y, cos, sin, vx, vy, ax, ay, steer, yaw_rate]
         state = npz_data["ego_current_state"]  # (10,)
         vx, vy = state[4], state[5]

@@ -17,6 +17,7 @@ import shutil
 import sys
 import time
 import traceback
+from dataclasses import replace as dc_replace
 from datetime import datetime
 from pathlib import Path
 
@@ -111,6 +112,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
     gt_progress_ratios = []   # model_path / gt_path per scene
     base_progress_ratios = [] # model_path / baseline_path per scene
     lane_departures, lane_nears, lane_wides = 0, [], []
+    centerlines = []  # per-scene raw centerline score (see compute_centerline_score_batch)
 
     if batch_size > 1:
         # Batched evaluation
@@ -173,6 +175,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                     lane_departures += 1
                 lane_nears.append(reward.lane_near_frac)
                 lane_wides.append(reward.lane_wide_frac)
+                centerlines.append(reward.centerline)
                 traj_np = det_trajs[local_i].cpu().numpy()
                 pl = np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
@@ -205,6 +208,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                     lane_departures += 1
                 lane_nears.append(reward.lane_near_frac)
                 lane_wides.append(reward.lane_wide_frac)
+                centerlines.append(reward.centerline)
                 pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
                 if baseline_cache and path in baseline_cache:
@@ -240,6 +244,8 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
         "lane_departures": lane_departures,
         "lane_near_mean": float(np.mean(lane_nears)) if lane_nears else 0.0,
         "lane_wide_mean": float(np.mean(lane_wides)) if lane_wides else 0.0,
+        "centerline_mean": float(np.mean(centerlines)) if centerlines else 0.0,
+        "centerline_min": float(np.min(centerlines)) if centerlines else 0.0,
     }
     # Progress ratios (only if baseline cache was provided)
     gt_pr_arr = np.array(gt_progress_ratios) if gt_progress_ratios else None
@@ -262,6 +268,7 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
           f"rb_dist=[min={rb_dists_arr.min():.2f} p5={np.percentile(rb_dists_arr,5):.2f} p25={np.percentile(rb_dists_arr,25):.2f} med={np.median(rb_dists_arr):.2f}], "
           f"{progress_str}"
           f"lane_near={result['lane_near_mean']:.2f}, lane_wide={result['lane_wide_mean']:.2f}, "
+          f"cl=[mean={result['centerline_mean']:+.3f} min={result['centerline_min']:+.3f}], "
           f"collision={result['collision_rate']:.1%}, "
           f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
     return result
@@ -275,9 +282,10 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
 
     model.eval()
 
-    # Find scenes where base model goes offroad
+    # Find scenes where base model goes offroad (scan all scenes — don't
+    # subsample, that would hide worst-offroad scenes past index 100).
     offroad_indices = []
-    for i, path in enumerate(prob_scenes[:100]):
+    for i, path in enumerate(prob_scenes):
         try:
             data = load_npz_data(path, DEVICE)
             norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
@@ -507,6 +515,9 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             w_safety=grpo_config.w_safety, w_progress=grpo_config.w_progress,
             w_smooth=grpo_config.w_smooth, w_feasibility=grpo_config.w_feasibility,
             w_centerline=grpo_config.w_centerline,
+            centerline_usage_cap=grpo_config.centerline_usage_cap,
+            centerline_usage_mode=grpo_config.centerline_usage_mode,
+            centerline_time_weight_min=grpo_config.centerline_time_weight_min,
             rb_near_scale=grpo_config.rb_near_scale,
             rb_wide_scale=grpo_config.rb_wide_scale,
             rb_cont_scale=grpo_config.rb_cont_scale,
@@ -535,13 +546,29 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             lane_near_thresh=grpo_config.lane_near_thresh,
             lane_wide_thresh=grpo_config.lane_wide_thresh,
             lane_cont_thresh=grpo_config.lane_cont_thresh,
+            static_collision_enabled=grpo_config.static_collision_enabled,
+            sc_gate_enabled=grpo_config.sc_gate_enabled,
+            sc_penalty_mode=grpo_config.sc_penalty_mode,
+            sc_near_scale=grpo_config.sc_near_scale,
+            sc_wide_scale=grpo_config.sc_wide_scale,
+            sc_cont_scale=grpo_config.sc_cont_scale,
+            sc_cross_thresh=grpo_config.sc_cross_thresh,
+            sc_near_thresh=grpo_config.sc_near_thresh,
+            sc_wide_thresh=grpo_config.sc_wide_thresh,
+            sc_cont_thresh=grpo_config.sc_cont_thresh,
+            sc_neighbor_vel_thresh=grpo_config.sc_neighbor_vel_thresh,
+            sc_neighbor_disp_thresh=grpo_config.sc_neighbor_disp_thresh,
+            sc_ego_min_speed=grpo_config.sc_ego_min_speed,
             max_yaw_rate=grpo_config.max_yaw_rate,
             max_steer=grpo_config.max_steer,
             kinematic_margin=grpo_config.kinematic_margin,
             reward_mode=grpo_config.reward_mode,
         )
-        # Eval reward config: standard weights but always check lane departure for metrics
-        eval_reward_config = RewardConfig(enable_lane_departure=True)
+        # Eval reward config: mirrors the training reward so printed reward
+        # is directly comparable to training. Turns on lane-departure check
+        # so metrics (lane_dep count, lane_near/wide fracs) are populated
+        # regardless of whether training has the lane gate enabled.
+        eval_reward_config = dc_replace(train_reward_config, enable_lane_departure=True)
 
         if grpo_config.use_closed_loop:
             from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer
@@ -681,9 +708,17 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                 else:
                     best_checkpoint = str(run_dir / "latest.pth")
 
-            # Early stopping: val collapsed
-            if val_eval["reward_mean"] < -20:
-                print(f"  Val collapsed ({val_eval['reward_mean']:.1f}), stopping early")
+            # Early stopping on genuine safety collapse. Uses per-scene safety
+            # rates rather than total reward, so it is invariant to reward
+            # weight choices (e.g. raising w_centerline can push total reward
+            # deeply negative without the model actually becoming unsafe, which
+            # the old total-reward threshold would false-trigger on).
+            _n_val = max(val_eval["n_scenes"], 1)
+            _rb_cross_rate = val_eval["rb_crossings"] / _n_val
+            _collision_rate = val_eval["collision_rate"]
+            if _rb_cross_rate > 0.3 or _collision_rate > 0.1:
+                print(f"  Val collapsed (rb_cross={_rb_cross_rate:.1%}, "
+                      f"collision={_collision_rate:.1%}), stopping early")
                 break
 
         # Keep ALL checkpoints — don't delete anything. Disk space is cheap,

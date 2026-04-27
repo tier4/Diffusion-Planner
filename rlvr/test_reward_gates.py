@@ -215,8 +215,8 @@ def test_reward_config_no_dead_fields():
 
 def test_reward_config_baseline_reference_default():
     cfg = RewardConfig()
-    # Default reference is adaptive "det"; "baseline" is opt-in.
-    assert cfg.underprogress_reference == "det"
+    # Default reference is "baseline" (frozen anchor, doesn't collapse with training).
+    assert cfg.underprogress_reference == "baseline"
 
 
 # ---------------------------------------------------------------------------

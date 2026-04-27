@@ -18,6 +18,7 @@ from scenario_generation.tensor_converter import (
     _build_line_strings,
     _build_polygons,
     _build_static_objects,
+    dump_step_npz,
     to_model_tensors,
 )
 from scenario_generation.transforms import _rotation_matrix
@@ -164,3 +165,80 @@ class TestInferenceDelay:
         )
         assert int(cached["delay"].item()) == 3
         assert int(uncached["delay"].item()) == 3
+
+
+class TestDumpStepNPZ:
+    """dump_step_npz produces un-normalised per-step arrays in the shape the
+    training NPZ loader expects."""
+
+    def _dump(self, scene, future_len=80, predicted_neighbor_num=32):
+        cache = MapTensorCache(scene.map_data)
+        return dump_step_npz(
+            scene, cache,
+            future_len=future_len,
+            predicted_neighbor_num=predicted_neighbor_num,
+        )
+
+    def test_has_all_expected_keys(self, synthetic_scene):
+        data = self._dump(synthetic_scene)
+        expected = {
+            "ego_agent_past", "ego_current_state", "neighbor_agents_past",
+            "static_objects", "lanes", "lanes_speed_limit",
+            "lanes_has_speed_limit", "polygons", "line_strings",
+            "route_lanes", "route_lanes_speed_limit", "route_lanes_has_speed_limit",
+            "goal_pose", "ego_shape", "turn_indicators",
+            "ego_agent_future", "neighbor_agents_future", "version",
+        }
+        missing = expected - set(data.keys())
+        assert not missing, f"dump missing keys: {missing}"
+
+    def test_shapes_and_dtypes_match_loader(self, synthetic_scene):
+        data = self._dump(synthetic_scene, future_len=80, predicted_neighbor_num=32)
+        assert data["ego_agent_future"].shape == (80, 3)
+        assert data["neighbor_agents_future"].shape == (32, 80, 3)
+        assert data["ego_agent_future"].dtype == np.float32
+        assert data["neighbor_agents_future"].dtype == np.float32
+        # has_speed_limit fields must be bool (training loader expects it).
+        assert data["lanes_has_speed_limit"].dtype == bool
+        assert data["route_lanes_has_speed_limit"].dtype == bool
+        assert data["version"].dtype == np.int64
+        assert int(data["version"]) == 1
+
+    def test_future_placeholders_are_zero(self, synthetic_scene):
+        data = self._dump(synthetic_scene)
+        # GT-future is always zero-filled — ranked-SFT generates its own.
+        assert np.all(data["ego_agent_future"] == 0)
+        assert np.all(data["neighbor_agents_future"] == 0)
+
+    def test_ego_past_has_heading_rad_not_cos_sin(self, synthetic_scene):
+        """ego_agent_past ends up as (x, y, heading_rad) so the training NPZ
+        loader's heading_to_cos_sin expansion does the right thing at load."""
+        data = self._dump(synthetic_scene)
+        assert data["ego_agent_past"].shape[-1] == 3
+        h = data["ego_agent_past"][..., 2]
+        assert np.all(np.isfinite(h))
+        assert np.all(np.abs(h) <= np.pi + 1e-5)
+
+    def test_goal_pose_has_heading_rad(self, synthetic_scene):
+        data = self._dump(synthetic_scene)
+        assert data["goal_pose"].shape == (3,)
+        assert data["goal_pose"].dtype == np.float32
+        assert abs(float(data["goal_pose"][2])) <= np.pi + 1e-5
+
+    def test_custom_future_len_propagates(self, synthetic_scene):
+        """Caller-provided future_len flows through to both ego and neighbor futures."""
+        data = self._dump(synthetic_scene, future_len=40)
+        assert data["ego_agent_future"].shape == (40, 3)
+        # Neighbor count is locked at _MAX_NUM_NEIGHBORS (past and future must match)
+        from scenario_generation.tensor_converter import _MAX_NUM_NEIGHBORS
+        assert data["neighbor_agents_future"].shape == (_MAX_NUM_NEIGHBORS, 40, 3)
+
+    def test_mismatched_neighbor_count_raises(self, synthetic_scene):
+        """predicted_neighbor_num must equal _MAX_NUM_NEIGHBORS (past is fixed)."""
+        import pytest
+        cache = MapTensorCache(synthetic_scene.map_data)
+        with pytest.raises(ValueError, match="predicted_neighbor_num"):
+            dump_step_npz(
+                synthetic_scene, cache,
+                future_len=80, predicted_neighbor_num=16,
+            )

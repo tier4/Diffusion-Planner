@@ -9,6 +9,7 @@ manual end-to-end run (task #13); unit tests stay lightweight.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +21,12 @@ from scenario_generation.replay import (
 )
 from scenario_generation.scene_context import Agent, AgentType, SceneContext
 
-MAP_PATH = Path("/home/danielsanchez/autoware_map/shinagawa_odaiba_stable/lanelet2_map.osm")
+# Set LANELET2_MAP_PATH to override; otherwise fall back to a conventional
+# per-user location. Tests that need the map skip when it's absent.
+MAP_PATH = Path(
+    os.environ.get("LANELET2_MAP_PATH")
+    or (Path.home() / "autoware_map" / "lanelet2_map.osm")
+)
 
 
 # ── SpawnConfig ──────────────────────────────────────────────────────────────

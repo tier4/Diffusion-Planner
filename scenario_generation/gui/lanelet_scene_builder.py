@@ -1336,6 +1336,19 @@ class LaneletSceneBuilder:
             POINTS_PER_POLYGON, POLYGON_TYPE_NUM, mask_range,
         )
 
+    def road_border_polylines(self) -> list[np.ndarray]:
+        """Return raw road-border polylines (world frame, ``(K, 2)`` arrays).
+
+        Filters the internal line-string cache to only ``road_border`` entries
+        (``stop_line`` entries are skipped). Use for overlaying road borders
+        on visualizations — call sites should not reach into
+        ``_line_strings_cache`` directly.
+        """
+        return [
+            pts for pts, type_idx in self._line_strings_cache
+            if type_idx == LINE_STRING_TYPE_ROAD_BORDER
+        ]
+
     def build_line_strings_tensor(
         self,
         center_xy: np.ndarray,

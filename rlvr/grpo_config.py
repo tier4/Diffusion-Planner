@@ -95,6 +95,25 @@ class GRPOConfig:
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
+    # Centerline usage cap (passed to RewardConfig). Per-step lane_usage is
+    # clamped to this before squaring. 1.0 = current default (saturates at the
+    # lane boundary); raise to 1.5-2.0 to let past-boundary trajectories be
+    # penalized more and widen the ranking signal.
+    centerline_usage_cap: float = 1.0
+    # Centerline usage mode (passed to RewardConfig):
+    #   "body" (default): lane_usage = (|baselink_lat| + ego_half_w) / side_hw
+    #   "baselink": lane_usage = |baselink_lat| / side_hw (ignores ego width)
+    centerline_usage_mode: str = "body"
+    # Centerline time-weight floor (passed to RewardConfig). Per-step penalty is
+    # averaged with linspace(1.0, centerline_time_weight_min, T). Default 0.3 matches
+    # historical behavior; 1.0 = flat uniform average. Raise when late-curve lane
+    # following matters as much as early and the decay is compressing the signal.
+    centerline_time_weight_min: float = 0.3
+    # Use `route_centerline_following` guidance (reads `route_lanes`) instead of
+    # `centerline_following` (reads all `lanes`). Aligns generation-time pull
+    # with the reward function — both score against route_lanes. Default False
+    # preserves old behavior.
+    use_route_cl_guidance: bool = False
 
     # Reward tuning (passed to RewardConfig for training)
     # Road border penalty scales and thresholds
@@ -117,6 +136,21 @@ class GRPOConfig:
     lane_near_thresh: float = 0.25  # metres — near zone boundary
     lane_wide_thresh: float = 0.40  # metres — wide zone boundary
     lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
+    # Static-collision penalty (stopped-neighbor OBB clearance). Off by default —
+    # enabling changes reward math. See reward.compute_static_collision_penalty.
+    static_collision_enabled: bool = False
+    sc_gate_enabled: bool = False
+    sc_penalty_mode: str = "frac"
+    sc_near_scale: float = 0.0
+    sc_wide_scale: float = 0.0
+    sc_cont_scale: float = 0.0
+    sc_cross_thresh: float = 0.2    # clearance below this = crossing (matches reward.RewardConfig default; 20 cm treats visually-touching boxes as collisions)
+    sc_near_thresh: float = 0.4
+    sc_wide_thresh: float = 0.7
+    sc_cont_thresh: float = 1.0
+    sc_neighbor_vel_thresh: float = 0.1
+    sc_neighbor_disp_thresh: float = 0.5
+    sc_ego_min_speed: float = 1.0
     max_lat_accel: float = 2.0
     lat_accel_scale: float = 3.0
     max_yaw_rate: float = 1.0  # rad/s — kinematic feasibility absolute yaw cap
@@ -128,7 +162,7 @@ class GRPOConfig:
     stopped_penalty: float = 5.0
     underprogress_penalty: float = 0.0  # penalize model driving << reference (0=disabled)
     underprogress_threshold: float = 0.5  # penalize if model_path/reference < threshold
-    underprogress_reference: str = "det"  # "det" = deterministic (adaptive); "baseline" = frozen LoRA-less baseline
+    underprogress_reference: str = "baseline"  # "baseline" = frozen LoRA-less baseline (default; anchors threshold); "det" = deterministic (adaptive, moves with training — can miss collapse)
     progress_norm_scale: float = 20.0  # max progress points at 100% GT match
 
     # Reward aggregation mode (passed to RewardConfig):
@@ -239,6 +273,20 @@ class GRPOConfig:
     # for all subsequent epochs in the same run. Prevents oscillation where improved scenes
     # drop from selection and regress. Stored in-memory on the config object (not persisted to disk).
     selective_frozen: bool = False
+
+    # GT fallback: when best-of-K trajectory reward is worse than the GT trajectory's reward
+    # by MORE THAN gt_fallback_margin (strict `<`), either skip the scene or swap the SFT
+    # target with GT. Rationale: if all K generations are gated down (rb/lane/kinematic/
+    # collision) but GT is feasible, the best-of-K signal is unreliable (noise). Either
+    # remove it or anchor on GT.
+    # "none" (default): current behavior, always use best-of-K.
+    # "skip":           if best_reward < gt_reward - margin, scene_train_mask=False.
+    # "il":             if best_reward < gt_reward - margin, replace best_traj with GT.
+    #                   The effective_reward (GT, not best-of-K) is then used for selective
+    #                   threshold / advantage weighting so IL-fallback scenes aren't
+    #                   accidentally filtered out by selective_threshold.
+    gt_fallback_mode: str = "none"
+    gt_fallback_margin: float = 0.0  # reward units. 0 = any GT advantage > 0 triggers fallback.
 
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
@@ -593,6 +641,10 @@ class GRPOConfig:
             raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {self.ego_il_mode!r}")
         if self.selective_mode not in ("threshold", "advantage"):
             raise ValueError(f"selective_mode must be 'threshold' or 'advantage', got {self.selective_mode!r}")
+        if self.gt_fallback_mode not in ("none", "skip", "il"):
+            raise ValueError(
+                f"gt_fallback_mode must be 'none', 'skip', or 'il', got {self.gt_fallback_mode!r}"
+            )
 
     @property
     def uses_importance_sampling(self) -> bool:

@@ -135,14 +135,21 @@ def find_batches(
     if not filtered:
         return []
 
-    # 3. Apply constraint filters (load NPZ as needed)
+    # 3. Apply constraint filters. Every entry still triggers an NPZ load
+    #    because legacy constraints (neighbor_count, speed_range,
+    #    travel_distance) read npz_data; the entry dict is passed through
+    #    for metric-based constraints (reward_threshold) that read
+    #    precomputed fields instead of deriving them from the NPZ.
+    #    Skipping the NPZ load when only entry-only constraints are active
+    #    is a follow-up (would need a capability flag on the constraint).
     if constraint_filters:
         passing = []
         for entry in filtered:
             with np.load(entry["npz_path"]) as npz_data:
                 passes_all = True
                 for constraint, params in constraint_filters:
-                    if not constraint.filter(entry["npz_path"], npz_data, params):
+                    if not constraint.filter(entry["npz_path"], npz_data,
+                                             params, entry=entry):
                         passes_all = False
                         break
             if passes_all:

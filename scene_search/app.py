@@ -31,15 +31,113 @@ from scene_search.constraints import list_available as list_constraints
 from scene_search.constraints.registry import build as build_constraint
 from scene_search.map_canvas_js import build_map_canvas_js
 from scene_search.map_renderer import MapRenderer, Viewport
+from scene_search.replay_index import load_replay_runs
 from scene_search.scene_previewer import (
     render_batch_thumbnails,
     render_single_thumbnail,
     thumbnails_to_pil_images,
 )
 
+## Heatmap metric auto-discovery
+#
+# The replay writes whatever the RewardBreakdown dataclass exposes — adding
+# a new reward component on the training side should "just work" here.
+# We derive the dropdown choices from the union of numeric fields across
+# loaded heatmap points, and transmit each metric's observed min/max range
+# to the canvas so the JS colour ramp can auto-scale.
+#
+# Polarity (is higher = good or bad?) can't be inferred from data alone,
+# so we fall back to a naming heuristic: metric names containing any of
+# these substrings are treated as "higher = worse". Everything else is
+# assumed "higher = better" (distance-, reward-, and score-style fields).
+_HIGHER_IS_WORSE_SUBSTRINGS = (
+    "penalty", "crossing", "collision", "off_road", "red_light",
+    "near_frac", "wide_frac",
+)
+
+
+def _metric_polarity(name: str) -> int:
+    """Return +1 if higher is better (safe), -1 if higher is worse (drift)."""
+    lo = name.lower()
+    for s in _HIGHER_IS_WORSE_SUBSTRINGS:
+        if s in lo:
+            return -1
+    return +1
+
 MAX_VISIBLE_BATCHES = 10
 
 MAP_CANVAS_JS = build_map_canvas_js(tool="arrow")
+
+def _heatmap_points(index: list[dict]) -> list[dict]:
+    """Pick entries that carry per-step metrics (replay runs) and project to
+    the compact form the JS canvas consumes. Every numeric/bool field from
+    ``metrics`` is copied verbatim — no per-field allowlist. Sidecar-backed
+    entries have no "metrics" key and are silently skipped."""
+    out = []
+    for e in index:
+        m = e.get("metrics") or {}
+        if not m:
+            continue
+        point = {"x": e["x"], "y": e["y"]}
+        for k, v in m.items():
+            if isinstance(v, bool):
+                point[k] = 1.0 if v else 0.0
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                point[k] = float(v)
+            # Drop None / str / list — not colourable.
+        out.append(point)
+    return out
+
+
+def _heatmap_metadata(points: list[dict]) -> dict:
+    """Derive per-metric display metadata from the loaded heatmap points.
+
+    Returns::
+
+        {
+            "metrics": ["total", "rb_min_dist", ...],   # sorted field names
+            "ranges":  {"total": [min, max], ...},       # observed range
+            "polarity": {"total": 1, "rb_near_penalty": -1, ...},
+        }
+
+    The canvas uses this to auto-scale a colour ramp without any metric-
+    specific JS. Polarity comes from ``_metric_polarity`` (naming heuristic).
+    """
+    if not points:
+        return {"metrics": [], "ranges": {}, "polarity": {}}
+    field_names: set[str] = set()
+    for p in points:
+        for k in p.keys():
+            if k in ("x", "y"):
+                continue
+            field_names.add(k)
+    ranges: dict[str, list[float]] = {}
+    for k in field_names:
+        vals = [p[k] for p in points if k in p and p[k] is not None]
+        if not vals:
+            continue
+        ranges[k] = [float(min(vals)), float(max(vals))]
+    polarity = {k: _metric_polarity(k) for k in ranges}
+    # cl_score is a signed rear-axle offset with "safe" values near zero:
+    # both large-positive and large-negative magnitudes indicate drift.
+    # The generic min/max + monotonic polarity used by every other metric
+    # would colour the two tails differently (one as drift, one as safe),
+    # which is misleading. Hide the raw field from the dropdown and
+    # expose only the derived absolute-magnitude view — the canvas's
+    # abs_cl_score branch already does the |·| + polarity flip. Same
+    # pattern applies to pred_cl_score when it's present.
+    hidden_signed = {"cl_score", "pred_cl_score"}
+    metrics = sorted(k for k in ranges.keys() if k not in hidden_signed)
+    if "cl_score" in ranges:
+        metrics.append("abs_cl_score")
+    if "pred_cl_score" in ranges:
+        metrics.append("abs_pred_cl_score")
+    return {
+        "metrics": metrics,
+        "ranges": ranges,
+        "polarity": polarity,
+    }
+
 
 def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | None = None):
     """Build the complete Gradio interface."""
@@ -50,6 +148,15 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
     full_map_b64 = renderer.render_viewport_base64(full_vp, dpi=100)
     full_bounds = full_vp.to_json()
     print(f"  Map image: {len(full_map_b64)//1024}KB base64")
+
+    heatmap_points = _heatmap_points(index)
+    heatmap_meta = _heatmap_metadata(heatmap_points)
+    heatmap_json = json.dumps(heatmap_points)
+    heatmap_meta_json = json.dumps(heatmap_meta)
+    if heatmap_points:
+        print(f"  Heatmap: {len(heatmap_points)} scored points across "
+              f"{len(heatmap_meta['metrics'])} metric(s) "
+              f"({len(heatmap_json)//1024}KB + {len(heatmap_meta_json)//1024}KB JSON)")
 
     def render_map(viewport_json: str) -> str:
         """Server function for hi-res tile at current zoom. Called from JS (debounced)."""
@@ -77,6 +184,17 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 n_before_slider = gr.Slider(0, 100, value=30, step=5, label="Frames before")
                 n_after_slider = gr.Slider(0, 200, value=80, step=5, label="Frames after")
                 search_btn = gr.Button("Search", variant="primary")
+
+                if heatmap_points:
+                    gr.Markdown("### Heatmap")
+                    heatmap_metric_dd = gr.Dropdown(
+                        choices=["off"] + heatmap_meta["metrics"],
+                        value="off",
+                        label="Overlay metric",
+                        interactive=True,
+                    )
+                else:
+                    heatmap_metric_dd = None
 
                 gr.Markdown("### Constraints")
                 # Build toggle panels for each registered constraint
@@ -123,6 +241,9 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                     map_bounds=json.dumps(full_bounds),
                     radius=50,
                     heading_tol=30,
+                    heatmap_json=heatmap_json,
+                    heatmap_meta_json=heatmap_meta_json,
+                    heatmap_metric="off",
                 )
 
                 gr.Markdown("### Search Results")
@@ -166,6 +287,13 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         def on_heading_tol_change(val):
             return gr.update(heading_tol=val)
         heading_tol_slider.release(on_heading_tol_change, inputs=[heading_tol_slider], outputs=[map_canvas])
+
+        if heatmap_metric_dd is not None:
+            def on_heatmap_metric_change(val):
+                return gr.update(heatmap_metric=val)
+            heatmap_metric_dd.change(on_heatmap_metric_change,
+                                     inputs=[heatmap_metric_dd],
+                                     outputs=[map_canvas])
 
         # --- Build constraint input list for search ---
         # Order: [enable_1, param_1a, param_1b, ..., enable_2, param_2a, ...]
@@ -374,31 +502,63 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
 def main():
     parser = argparse.ArgumentParser(description="Scene Search GUI")
     parser.add_argument("--map_path", type=Path, required=True, help="Path to lanelet2 map (.osm)")
-    parser.add_argument("--npz_list", type=str, required=True, help="path_list.json or NPZ directory")
-    parser.add_argument("--index", type=str, default=None, help="Cached parquet index (requires pyarrow)")
+    parser.add_argument("--npz_list", type=str, default=None,
+                        help="path_list.json or NPZ directory (sidecar-backed scenes)")
+    parser.add_argument("--replay_runs", type=str, nargs="+", default=None,
+                        help="One or more scenario_generation.replay output "
+                             "directories. Uses trajectory_log.json + "
+                             "metrics_log.json instead of per-NPZ sidecars; "
+                             "enables the drift heatmap overlay.")
+    parser.add_argument("--index", type=str, default=None,
+                        help="Cached parquet index (requires pyarrow). Valid as "
+                             "a standalone scene source when the parquet already "
+                             "contains every scene you want to browse. If the "
+                             "parquet exists it is loaded verbatim — passing "
+                             "--npz_list alongside an existing parquet does NOT "
+                             "refresh it; delete the parquet to force rebuild.")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     args = parser.parse_args()
 
+    if not args.npz_list and not args.replay_runs and not (args.index and Path(args.index).exists()):
+        parser.error("supply at least one scene source: --npz_list, --replay_runs, "
+                     "or an existing --index parquet.")
+
     print("Loading lanelet2 map...")
     renderer = MapRenderer(str(args.map_path))
 
-    if args.index and Path(args.index).exists():
+    index: list[dict] = []
+    # --index alone is a valid scene source when the parquet already holds
+    # the scenes we want to browse. With --npz_list we either load the
+    # parquet if it exists or build + save one; without --npz_list we
+    # load the parquet read-only.
+    if args.index and Path(args.index).exists() and not args.npz_list:
         print(f"Loading cached index from {args.index}")
-        index = load_index_parquet(args.index)
-    else:
-        print("Building spatial index from NPZ sidecars...")
-        p = Path(args.npz_list)
-        if p.is_file() and p.suffix == ".json":
-            with open(p) as f: npz_paths = json.load(f)
-        elif p.is_dir():
-            npz_paths = sorted(str(f) for f in p.rglob("*.npz"))
+        index.extend(load_index_parquet(args.index))
+    elif args.npz_list:
+        if args.index and Path(args.index).exists():
+            print(f"Loading cached index from {args.index}")
+            index.extend(load_index_parquet(args.index))
         else:
-            raise ValueError(f"--npz_list must be .json or directory: {args.npz_list}")
-        index = build_index(npz_paths, workers=8)
-        if args.index:
-            save_index_parquet(index, args.index)
-            print(f"Saved index to {args.index}")
+            print("Building spatial index from NPZ sidecars...")
+            p = Path(args.npz_list)
+            if p.is_file() and p.suffix == ".json":
+                with open(p) as f: npz_paths = json.load(f)
+            elif p.is_dir():
+                npz_paths = sorted(str(f) for f in p.rglob("*.npz"))
+            else:
+                raise ValueError(f"--npz_list must be .json or directory: {args.npz_list}")
+            sidecar_index = build_index(npz_paths, workers=8)
+            index.extend(sidecar_index)
+            if args.index:
+                save_index_parquet(sidecar_index, args.index)
+                print(f"Saved sidecar index to {args.index}")
+
+    if args.replay_runs:
+        print(f"Loading {len(args.replay_runs)} replay run(s)...")
+        replay_entries = load_replay_runs(args.replay_runs)
+        index.extend(replay_entries)
+        print(f"  Replay entries: {len(replay_entries)}")
 
     print(f"Index: {len(index)} scenes")
     demo = build_interface(renderer, index, args.index)

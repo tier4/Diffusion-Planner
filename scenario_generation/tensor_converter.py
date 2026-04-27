@@ -433,6 +433,33 @@ class MapTensorCache:
         self._line_strings_mask = np.sum(np.abs(self._line_strings), axis=-1) == 0
         self._n_ls = n_ls
 
+    def sync_tl_state(self, map_data: "MapData") -> None:
+        """Refresh the TL one-hot channels (``[:, :, 8:13]``) from ``map_data``.
+
+        ``MapTensorCache.__init__`` snapshots ``map_data.lanes`` (the
+        ``.astype(np.float32)`` forces a fresh allocation, so the cache
+        does NOT share storage with ``scene.map_data.lanes`` as earlier
+        replay comments implied). Callers that mutate the live lanes
+        tensor post-build — notably ``TrafficLightController.tick`` —
+        must call this after every mutation, or the model will keep
+        reading the snapshotted state (TL_NONE on every lanelet right
+        after a lanelet-set refresh, since ``lanelet_to_33dim`` defaults
+        to TL_NONE before the controller's first tick).
+
+        Only the 5-dim TL one-hot is synced; geometry (``[0:8]``) and
+        line-type channels (``[13:33]``) never change post-build.
+        """
+        n = min(map_data.lanes.shape[0], self._lanes.shape[0])
+        if n > 0:
+            # ``np.copyto`` with ``same_kind`` avoids the fresh allocation that
+            # ``.astype(np.float32)`` forces every tick — map_data.lanes is
+            # already float32 in the production path, so this is a pure memcpy.
+            np.copyto(
+                self._lanes[:n, :, 8:13],
+                map_data.lanes[:n, :, 8:13],
+                casting="same_kind",
+            )
+
     def get_lanes_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
         """Return lanes in ego frame: [1, NUM_LANES, 20, 33]."""
         src = self._lanes.copy()
@@ -575,3 +602,102 @@ def to_model_tensors(
     data_torch = model_args.observation_normalizer(data_torch)
 
     return data_torch
+
+
+def dump_step_npz(
+    scene: SceneContext,
+    map_cache: MapTensorCache,
+    future_len: int,
+    predicted_neighbor_num: int = _MAX_NUM_NEIGHBORS,
+) -> dict[str, np.ndarray]:
+    """Build un-normalized per-step observation arrays in training-NPZ format.
+
+    Captures the scene as the model sees it for one replay step, but WITHOUT
+    applying ``observation_normalizer`` (so world-scale lane widths etc. are
+    preserved). GT-future arrays are zero-filled; downstream training/ranked-
+    SFT generates its own futures.
+
+    Call sites (e.g. replay.py dump_npz_dir) then np.savez the returned dict.
+
+    Args:
+        scene: Current scene at this replay step.
+        map_cache: Pre-computed map tensor cache for the scene's map.
+        future_len: Number of future timesteps (typically 80 — from model_args).
+        predicted_neighbor_num: Neighbor slot count for the future placeholder.
+            Must equal ``_MAX_NUM_NEIGHBORS`` (32) — the past array is built at
+            that fixed shape, so a mismatch would produce NPZs where past and
+            future disagree on the neighbor dimension and break the training
+            NPZ loader.
+
+    Returns:
+        Dict with the standard NPZ keys (ego_agent_past, ego_current_state,
+        neighbor_agents_past, lanes, line_strings, polygons, route_lanes,
+        goal_pose, ego_shape, turn_indicators, ego_agent_future,
+        neighbor_agents_future, version, plus speed_limit fields). Arrays are
+        stripped of batch dim and have dtypes compatible with the training
+        NPZ loader.
+    """
+    if predicted_neighbor_num != _MAX_NUM_NEIGHBORS:
+        raise ValueError(
+            f"predicted_neighbor_num={predicted_neighbor_num} disagrees with "
+            f"the fixed past-neighbor shape {_MAX_NUM_NEIGHBORS}. Pass "
+            f"{_MAX_NUM_NEIGHBORS} or omit (default). Threading a per-call "
+            f"neighbor count through _build_neighbor_agents_past is a "
+            f"follow-up if you need non-default future slots."
+        )
+    ego = scene.get_agent(scene.ego_agent_id)
+    ego_xy = ego.current_position.astype(np.float64)
+    ego_h = ego.current_heading
+    R = _rotation_matrix(ego_h)
+
+    data: dict[str, np.ndarray] = {}
+    data["ego_agent_past"] = _build_ego_agent_past(ego, R, ego_xy, ego_h)
+    data["ego_current_state"] = _build_ego_current_state(ego, R)
+    data["neighbor_agents_past"] = _build_neighbor_agents_past(
+        scene, scene.ego_agent_id, R, ego_xy, ego_h,
+    )
+    data["static_objects"] = map_cache.get_static_objects_ego(R, ego_xy)
+    data["lanes"] = map_cache.get_lanes_ego(R, ego_xy)
+    data["lanes_speed_limit"] = map_cache.lanes_speed_limit
+    data["lanes_has_speed_limit"] = map_cache.lanes_has_speed_limit
+    data["polygons"] = map_cache.get_polygons_ego(R, ego_xy)
+    data["line_strings"] = map_cache.get_line_strings_ego(R, ego_xy)
+    rl, rsl, rhsl = _build_route_lanes(ego, R, ego_xy)
+    data["route_lanes"] = rl
+    data["route_lanes_speed_limit"] = rsl
+    data["route_lanes_has_speed_limit"] = rhsl
+    data["goal_pose"] = _build_goal_pose(ego, R, ego_xy, ego_h)
+    data["ego_shape"] = _build_ego_shape(ego)
+    data["turn_indicators"] = _build_turn_indicators(ego)
+
+    # Strip batch dim for NPZ storage (B=1 → [...]).
+    for k, v in list(data.items()):
+        if isinstance(v, np.ndarray) and v.ndim >= 1 and v.shape[0] == 1:
+            data[k] = v[0]
+
+    # Training NPZ format uses bool for has_speed_limit fields.
+    for bk in ("lanes_has_speed_limit", "route_lanes_has_speed_limit"):
+        if bk in data:
+            data[bk] = data[bk].astype(bool)
+
+    # Convert cos/sin back to heading-rad for keys the training loader re-
+    # expands via heading_to_cos_sin at load time.
+    if data["ego_agent_past"].shape[-1] == 4:
+        ap = data["ego_agent_past"]
+        data["ego_agent_past"] = np.stack(
+            [ap[..., 0], ap[..., 1], np.arctan2(ap[..., 3], ap[..., 2])], axis=-1
+        ).astype(np.float32)
+    if data["goal_pose"].shape[-1] == 4:
+        gp = data["goal_pose"]
+        data["goal_pose"] = np.array(
+            [gp[0], gp[1], float(np.arctan2(gp[3], gp[2]))], dtype=np.float32,
+        )
+
+    # GT-future placeholders (caller fills if desired; ranked-SFT ignores).
+    data["ego_agent_future"] = np.zeros((future_len, 3), dtype=np.float32)
+    data["neighbor_agents_future"] = np.zeros(
+        (predicted_neighbor_num, future_len, 3), dtype=np.float32,
+    )
+    data["version"] = np.array(1, dtype=np.int64)
+
+    return data

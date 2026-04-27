@@ -51,7 +51,10 @@ def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str],
 
     model, args = load_model(model_path, lora_path)
     if config is None:
-        config = RewardConfig(enable_lane_departure=True)
+        # Use normalized progress by default so the printed reward matches
+        # what training saw (without it, progress scales with raw metres
+        # and reward inflates with path length).
+        config = RewardConfig(enable_lane_departure=True, enable_overprogress=True)
 
     ld, stopped = 0, 0
     paths, ln_nears, ln_wides, rb_nears = [], [], [], []
@@ -105,8 +108,8 @@ def main():
     parser.add_argument("--epochs", type=int, nargs="+", required=True, help="Epochs to evaluate")
     parser.add_argument("--block_ablations", type=int, nargs="*", default=[], help="Block indices to ablate (e.g. 0 1)")
     parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--config", type=Path, default=None,
-                        help="GRPO training config JSON. When given, reward thresholds "
+    parser.add_argument("--config", type=Path, required=True,
+                        help="GRPO training config JSON. Reward thresholds "
                              "and weights match the live run (enable_lane_departure "
                              "is always forced on).")
     args = parser.parse_args()
@@ -114,12 +117,10 @@ def main():
     with open(args.scenes) as f:
         scenes = json.load(f)
 
-    eval_config = None
-    if args.config is not None:
-        from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
-        eval_config = load_reward_config(args.config)
-        eval_config.enable_lane_departure = True
-        print(f"Using reward thresholds from {args.config}")
+    from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+    eval_config = load_reward_config(args.config)
+    eval_config.enable_lane_departure = True
+    print(f"Using reward thresholds from {args.config}")
 
     lora_base = Path(args.lora_dir)
     results = []

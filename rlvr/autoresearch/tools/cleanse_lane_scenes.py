@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Cleanse scene lists by removing scenes where ego starts outside lane at t=0.
 
-Optionally checks that GT trajectory stays in lane for the first N timesteps
-(--check_gt_lane --gt_max_t 20) and that GT path is at least --min_gt_path meters.
+Optional checks:
+  --check_gt_lane  --gt_max_t 20   reject if GT trajectory leaves lane within
+                                    the first N timesteps (default 20).
+  --min_gt_path 5.0                reject if GT path length < N metres.
+  --check_rb_future --rb_thresh 0.4 --rb_max_t 10
+                                    reject if the GT ego footprint comes within
+                                    `--rb_thresh` metres of any road border over
+                                    the first `--rb_max_t` timesteps (t=0..N).
+                                    Catches midcurve apex frames where the
+                                    recorded driver threads a curb.
 
-Uses compute_lane_departure_penalty on a single-timestep trajectory at the
-ego starting position to check if the ego perimeter is inside a lane.
+Uses compute_lane_departure_penalty and compute_road_border_penalty directly,
+so the thresholds and ego-footprint sampling match training exactly.
 
 Usage:
     python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
@@ -13,7 +21,8 @@ Usage:
         --output /path/to/clean_scenes.json \
         [--threshold 0.15] \
         [--also_check_road_border] \
-        [--check_gt_lane] [--gt_max_t 20] [--min_gt_path 5.0]
+        [--check_gt_lane] [--gt_max_t 20] [--min_gt_path 5.0] \
+        [--check_rb_future] [--rb_thresh 0.4] [--rb_max_t 10]
 """
 
 import argparse
@@ -81,9 +90,11 @@ def check_scene_t0(npz_path: str, device: torch.device, threshold: float = 0.15,
         else:
             rb_clearance = 0.50
 
-    is_clean = lane_clearance >= threshold
+    # Zero clearance = gate fired = crossing. Always reject — even with
+    # threshold=0, where `>= threshold` would otherwise let crossings through.
+    is_clean = lane_clearance > 0.0 and lane_clearance >= threshold
     if check_road_border:
-        is_clean = is_clean and rb_clearance >= threshold
+        is_clean = is_clean and rb_clearance > 0.0 and rb_clearance >= threshold
 
     return is_clean, lane_clearance, rb_clearance
 
@@ -131,6 +142,44 @@ def check_gt_lane_departure(npz_path: str, device: torch.device,
     return gt_in_lane, gt_path, gt_path_ok
 
 
+@torch.no_grad()
+def check_rb_future_margin(npz_path: str, device: torch.device,
+                            rb_thresh: float = 0.4, rb_max_t: int = 10
+                            ) -> tuple[bool, float]:
+    """Check min ego-to-road-border distance across [t=0 .. t=rb_max_t] of GT.
+
+    Builds a (rb_max_t + 1)-step trajectory from GT positions and calls
+    compute_road_border_penalty, then takes the min over all checked timesteps
+    (including t=0 — reward.py no longer sentinels the first slot).
+
+    Returns (is_safe, min_dist_m). is_safe = min_dist >= rb_thresh.
+    """
+    with np.load(npz_path, allow_pickle=True) as raw:
+        gt = raw["ego_agent_future"].copy()  # [T, 3] = x, y, heading
+
+    data = load_npz_data(npz_path, device)
+    es = data.get("ego_shape")
+    ego_shape = es[0] if es is not None and es.dim() > 1 else es
+    if ego_shape is None:
+        ego_shape = torch.tensor([2.75, 4.34, 1.70], device=device)
+
+    # Build (rb_max_t + 1)-step trajectory: t=0 at origin + first rb_max_t GT steps
+    T_full = rb_max_t + 1
+    traj = np.zeros((T_full, 4), dtype=np.float32)
+    traj[0, 2] = 1.0  # cos_yaw = 1 (heading = 0) at origin
+    n_gt = min(rb_max_t, gt.shape[0])
+    traj[1:1 + n_gt, :2] = gt[:n_gt, :2]
+    traj[1:1 + n_gt, 2] = np.cos(gt[:n_gt, 2])
+    traj[1:1 + n_gt, 3] = np.sin(gt[:n_gt, 2])
+    if n_gt < rb_max_t:
+        traj[1 + n_gt:, 2] = 1.0
+
+    traj_t = torch.tensor(traj[None], device=device)
+    _, _, _, _, _, per_ts_min = compute_road_border_penalty(traj_t, ego_shape, data)
+    min_dist = float(per_ts_min[0, :].min().item())
+    return min_dist >= rb_thresh, min_dist
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenes", type=str, required=True)
@@ -144,6 +193,14 @@ def main():
                         help="Number of GT timesteps to check for lane departure (default: 20)")
     parser.add_argument("--min_gt_path", type=float, default=5.0,
                         help="Minimum GT path length in meters (default: 5.0)")
+    parser.add_argument("--check_rb_future", action="store_true",
+                        help="Also drop scenes where ego is within --rb_thresh of a road "
+                             "border at any of the first --rb_max_t GT timesteps.")
+    parser.add_argument("--rb_thresh", type=float, default=0.4,
+                        help="Min ego-to-border distance required at every checked "
+                             "timestep (default: 0.4 m)")
+    parser.add_argument("--rb_max_t", type=int, default=10,
+                        help="Number of timesteps to check (default: 10, i.e. t=0..10)")
     args = parser.parse_args()
 
     device = torch.device(DEVICE)
@@ -155,6 +212,7 @@ def main():
     bad = []
     gt_bad = []
     gt_short_path = []
+    rb_future_bad = []
 
     for i, path in enumerate(scenes):
         is_clean, lane_cl, rb_cl = check_scene_t0(
@@ -176,10 +234,20 @@ def main():
                 gt_bad.append((i, gt_path, path))
                 continue
 
+        # Optional rb-future margin check
+        if args.check_rb_future:
+            is_safe, min_dist = check_rb_future_margin(
+                path, device, args.rb_thresh, args.rb_max_t
+            )
+            if not is_safe:
+                rb_future_bad.append((i, min_dist, path))
+                continue
+
         good.append(path)
 
         if (i + 1) % 20 == 0:
-            print(f"  Processed {i+1}/{len(scenes)} ({len(bad)+len(gt_bad)+len(gt_short_path)} removed)")
+            n_removed = len(bad) + len(gt_bad) + len(gt_short_path) + len(rb_future_bad)
+            print(f"  Processed {i+1}/{len(scenes)} ({n_removed} removed)")
 
     print(f"\nTotal: {len(scenes)} scenes")
     print(f"Clean: {len(good)}")
@@ -187,6 +255,8 @@ def main():
     if args.check_gt_lane:
         print(f"Bad GT lane (first {args.gt_max_t} steps): {len(gt_bad)}")
         print(f"Bad GT path (<{args.min_gt_path}m): {len(gt_short_path)}")
+    if args.check_rb_future:
+        print(f"Bad rb-future margin (<{args.rb_thresh}m within t=0..{args.rb_max_t}): {len(rb_future_bad)}")
 
     if bad:
         print(f"\nBad t=0 scenes (first 10):")
@@ -196,6 +266,10 @@ def main():
         print(f"\nBad GT lane scenes (first 10):")
         for i, gt_path, path in gt_bad[:10]:
             print(f"  scene {i}: gt_path={gt_path:.1f}m — {Path(path).stem[-30:]}")
+    if rb_future_bad:
+        print(f"\nBad rb-future scenes (first 10):")
+        for i, min_dist, path in rb_future_bad[:10]:
+            print(f"  scene {i}: rb_min={min_dist:.3f}m — {Path(path).stem[-30:]}")
 
     with open(args.output, 'w') as f:
         json.dump(good, f, indent=2)

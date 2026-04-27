@@ -69,7 +69,7 @@ def load_model(model_path, lora_path=None):
 
 def infer(model, args, npz_path, reward_config=None):
     if reward_config is None:
-        reward_config = RewardConfig()
+        reward_config = RewardConfig(enable_overprogress=True)
     data = load_npz_data(npz_path, DEVICE)
     norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm = args.observation_normalizer(norm)
@@ -174,13 +174,13 @@ def main():
     parser.add_argument("--indices", type=int, nargs="*", default=None, help="Scene indices to visualize")
     parser.add_argument("--n_scenes", type=int, default=12, help="Number of scenes if --indices not given")
     parser.add_argument("--cols", type=int, default=3, help="Columns in grid")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="GRPO training config JSON. When given, the reward "
-                             "flags in titles (rb_crossing, lane_crossing) use "
-                             "the training run's thresholds/gate settings.")
+    parser.add_argument("--config", type=Path, required=True,
+                        help="GRPO training config JSON. Reward flags in titles "
+                             "(rb_crossing, lane_crossing) use the training run's "
+                             "thresholds/gate settings.")
     args = parser.parse_args()
 
-    reward_config = load_reward_config(args.config) if args.config is not None else RewardConfig()
+    reward_config = load_reward_config(args.config)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 

@@ -66,11 +66,16 @@ def main():
     parser.add_argument("--below_threshold", type=float, default=0.7,
                         help="Count of scenes where ratio < this")
     parser.add_argument("--config", type=Path, default=None,
-                        help="GRPOConfig JSON (defaults to run_dir/grpo_config.json)")
+                        help="GRPOConfig JSON. If omitted, loads run_dir/grpo_config.json. "
+                             "One of --config or a run_dir with grpo_config.json must resolve.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg_path = args.config or (args.run_dir / "grpo_config.json")
+    if not Path(cfg_path).exists():
+        raise FileNotFoundError(
+            f"No GRPO config found: pass --config or place grpo_config.json in {args.run_dir}"
+        )
     cfg = GRPOConfig.from_json(str(cfg_path))
 
     # Load baseline map once
