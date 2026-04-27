@@ -259,7 +259,8 @@ def main() -> None:
         # We draw it as a thick black-edged footprint with high alpha so the
         # "starting state" is unambiguous. The K-trajectory and det/rank-1
         # footprints at t=0 (which sit at the same spot) are drawn under it.
-        _es_np = np.load(npz_path, allow_pickle=True).get("ego_shape", None)
+        with np.load(npz_path, allow_pickle=True) as _d:
+            _es_np = _d["ego_shape"] if "ego_shape" in _d.files else None
         wb = float(_es_np[0]) if _es_np is not None and len(_es_np) >= 1 else 4.76
         elen = float(_es_np[1]) if _es_np is not None and len(_es_np) >= 2 else 7.24
         ewid = float(_es_np[2]) if _es_np is not None and len(_es_np) >= 3 else 2.29

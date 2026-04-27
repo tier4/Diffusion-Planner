@@ -39,7 +39,7 @@ Usage::
         --scenes /path/to/warm.json \
         --output_dir /path/to/aug_dir \
         --output_scene_list /path/to/aug_list.json \
-        --base_model /path/to/x2_model_base/best_model.pth \
+        --base_model /path/to/<base_model_dir>/best_model.pth \
         [--n_per_scene 5] [--offsets 0.3,0.5,0.8] \
         [--reject_out_of_lane] [--seed 0]
 """

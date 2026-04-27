@@ -101,13 +101,18 @@ def main():
     K = 1 + len(cl_spd_configs) + len(noise_configs)
     print(f"  K={K}  variant={grpo.generation_variant}  use_route_cl={grpo.use_route_cl_guidance}")
 
-    kept, dropped_gate, dropped_no_gain = [], 0, 0
-    improvements = []
+    kept = []
+    rejected_no_gain: list[str] = []  # evaluated but improvement < threshold
+    dropped_load = 0
+    dropped_gate = 0
+    improvements: list[float] = []  # only for evaluated (non-skipped, non-gated) scenes
     for i, path in enumerate(scenes):
         try:
             data = load_npz_data(path, args.device)
         except Exception as e:
-            print(f"  [skip] {Path(path).name}: {e}"); continue
+            print(f"  [skip] {Path(path).name}: {e}")
+            dropped_load += 1
+            continue
 
         # Gate prefilter — reward on det alone to check existing safety
         normalizer = model_args.observation_normalizer
@@ -118,7 +123,8 @@ def main():
         det_t = torch.tensor(det, device=args.device, dtype=torch.float32)
         det_reward = compute_reward_batch(det_t, data, reward_cfg)[0]
         if det_reward.rb_crossing or det_reward.collision_step is not None:
-            dropped_gate += 1; continue
+            dropped_gate += 1
+            continue
 
         # K generations with guidance (same routine training uses)
         # Minimal path: generate_samples with composer for each slot; then best-of-K
@@ -151,11 +157,11 @@ def main():
         if improvement >= args.improvement_threshold:
             kept.append(path)
         else:
-            dropped_no_gain += 1
+            rejected_no_gain.append(path)
         if (i + 1) % 25 == 0:
             print(f"  [{i+1}/{len(scenes)}] kept={len(kept)}  "
-                  f"dropped_gate={dropped_gate}  dropped_no_gain={dropped_no_gain}  "
-                  f"mean_imp={np.mean(improvements):.3f}")
+                  f"dropped_gate={dropped_gate}  dropped_no_gain={len(rejected_no_gain)}  "
+                  f"dropped_load={dropped_load}  mean_imp={np.mean(improvements):.3f}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     json.dump(kept, open(args.output, "w"), indent=2)
@@ -163,12 +169,12 @@ def main():
     # poison, they're just currently unrecoverable. After the next
     # warm-start training makes the model better, re-run this tool on
     # them — some will now pass the threshold and can be added to
-    # the follow-up training round. Gate-failed scenes DO get logged
-    # but should not be retried: they're structurally broken (ego
-    # already over a border at t=0), no amount of training helps.
+    # the follow-up training round. Gate-failed and load-failed scenes
+    # are NOT in rejected_no_gain: they're structurally broken (ego
+    # already over a border at t=0, or NPZ unreadable) and won't be
+    # rescued by retraining.
     rejected_path = args.output.with_name(args.output.stem + ".rejected_no_gain.json")
-    rejected = [p for p, imp in zip(scenes, improvements) if imp < args.improvement_threshold]
-    json.dump(rejected, open(rejected_path, "w"), indent=2)
+    json.dump(rejected_no_gain, open(rejected_path, "w"), indent=2)
     imp_arr = np.array(improvements) if improvements else np.array([0.0])
     print(f"\nKept {len(kept)} / {len(scenes)} scenes ({100*len(kept)/max(len(scenes),1):.1f}%)")
     print(f"  dropped by gate:    {dropped_gate}  (unrecoverable, don't retry)")

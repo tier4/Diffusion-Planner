@@ -224,7 +224,8 @@ def main() -> None:
 
         # Perturbed ego at (dx, dy) in lanelet frame — yellow translucent
         # rectangle anchored on the actual perturbed pose.
-        es_np = np.load(npz_path, allow_pickle=True).get("ego_shape", None)
+        with np.load(npz_path, allow_pickle=True) as _d:
+            es_np = _d["ego_shape"] if "ego_shape" in _d.files else None
         wb = float(es_np[0]) if es_np is not None and len(es_np) >= 1 else 4.76
         elen = float(es_np[1]) if es_np is not None and len(es_np) >= 2 else 7.24
         ewid = float(es_np[2]) if es_np is not None and len(es_np) >= 3 else 2.29

@@ -48,7 +48,7 @@ Usage
 -----
 
     python -m rlvr.autoresearch.tools.detect_lane_change \\
-        --scenes path/to/j6_train_all.json \\
+        --scenes path/to/scene_list.json \\
         --n_random 100 \\
         --output predictions.json
 """

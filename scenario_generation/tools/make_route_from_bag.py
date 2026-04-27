@@ -46,17 +46,22 @@ def _read_route_msg(db_path: Path):
         raise SystemExit(f"/planning/route topic not found in {db_path}")
     tid, typ = row
     msg_cls = get_message(typ)
-    raw = cur.execute(
-        "SELECT timestamp, data FROM messages WHERE topic_id=? ORDER BY timestamp",
+    n_msgs = cur.execute(
+        "SELECT COUNT(*) FROM messages WHERE topic_id=?",
         (tid,),
-    ).fetchall()
+    ).fetchone()[0]
+    last = cur.execute(
+        "SELECT timestamp, data FROM messages "
+        "WHERE topic_id=? ORDER BY timestamp DESC LIMIT 1",
+        (tid,),
+    ).fetchone()
     con.close()
-    if not raw:
+    if last is None:
         raise SystemExit(f"No /planning/route messages in {db_path}")
     # The route is published once per mission; take the last one (in case
     # the mission was re-sent mid-recording).
-    _, data = raw[-1]
-    return deserialize_message(data, msg_cls), len(raw)
+    _, data = last
+    return deserialize_message(data, msg_cls), n_msgs
 
 
 def _resolve_db3(bag_arg: Path) -> Path:
