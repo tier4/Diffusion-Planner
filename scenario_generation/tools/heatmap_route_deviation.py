@@ -55,11 +55,10 @@ def _build_route_polyline(route) -> tuple[np.ndarray, np.ndarray]:
     builder = LaneletSceneBuilder(str(route.map_path))
     pts_list = []
     for i, ll_id in enumerate(route.route_lanelet_ids):
-        cache = builder._cache.get(int(ll_id))
-        if cache is None:
+        if not builder.has_lanelet_id(int(ll_id)):
             print(f"  [WARN] lanelet {ll_id} missing from map; skipping")
             continue
-        cl = cache.raw_centerline.astype(np.float32)
+        cl = builder.raw_centerline(int(ll_id)).astype(np.float32)
         if len(cl) == 0:
             continue
         if pts_list:

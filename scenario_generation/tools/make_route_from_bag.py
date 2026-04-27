@@ -85,8 +85,7 @@ def _assert_ids_in_map(lanelet_ids, map_path: Path) -> None:
 
     print(f"Loading map {map_path} to validate segment ids")
     builder = LaneletSceneBuilder(str(map_path))
-    known = set(builder._ll_by_id.keys())
-    missing = [i for i in lanelet_ids if i not in known]
+    missing = [i for i in lanelet_ids if not builder.has_lanelet_id(i)]
     if missing:
         raise SystemExit(
             f"{len(missing)}/{len(lanelet_ids)} bag lanelet ids not present in "

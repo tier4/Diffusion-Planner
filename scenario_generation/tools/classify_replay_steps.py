@@ -15,11 +15,12 @@ Design notes:
   translation between training signal and data mining.
 * Stopped scenes are filtered out — ranked SFT on a stopped ego reward-
   hacks trivially.
-* Lane-change scenes are heuristically flagged: any run of N
-  consecutive steps where ``cl_score`` is saturated (≤ -cap * 0.95)
-  for at least ``lane_change_min_steps`` is bucketed separately so it
-  doesn't inflate the lane-keeping training set. The same steps are
-  ALSO removed from the banded lists.
+* Lane-change scenes are heuristically flagged: any run of
+  ``lane_change_min_steps`` or more consecutive steps where
+  ``cl_score <= saturated_thresh`` (configured in the bands JSON,
+  default -2.0) is bucketed separately so it doesn't inflate the
+  lane-keeping training set. The same steps are ALSO removed from the
+  banded lists.
 * Declustering drops scenes that fall within ``decluster_window`` of a
   higher-band scene — so one long drift event contributes a few
   representative NPZs, not 30 near-duplicates.

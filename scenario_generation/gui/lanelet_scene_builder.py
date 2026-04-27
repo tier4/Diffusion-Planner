@@ -432,6 +432,22 @@ class LaneletSceneBuilder:
 
     # ── 33-dim conversion ────────────────────────────────────────────────
 
+    def lanelet_ids(self) -> list[int]:
+        """Public accessor for cached lanelet ids (sorted, deterministic)."""
+        return sorted(self._cache.keys())
+
+    def has_lanelet_id(self, ll_id: int) -> bool:
+        """True iff the lanelet with this id was loaded into the cache."""
+        return int(ll_id) in self._cache
+
+    def raw_centerline(self, ll_id: int) -> np.ndarray:
+        """Public accessor for a lanelet's raw centerline (N, 2 or 3) array.
+
+        Returns a copy so callers can't accidentally mutate the cache.
+        Raises KeyError if the id is not loaded.
+        """
+        return self._cache[int(ll_id)].raw_centerline.copy()
+
     def lanelet_to_33dim(self, ll_id: int) -> tuple[np.ndarray, float, bool]:
         """Convert a lanelet to (20, 33) tensor + speed limit info.
 

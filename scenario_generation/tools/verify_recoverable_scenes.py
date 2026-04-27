@@ -60,8 +60,7 @@ def main():
     from preference_optimization.utils import load_npz_data
     from diffusion_planner.utils.config import Config
     from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-    from rlvr.grpo_trainer_batched import _build_cl_spd_configs, _build_noise_configs
-    from rlvr.generation_variants import get_variant
+    from rlvr.grpo_trainer_batched import _build_cl_spd_configs
     from guidance_gui.generate_samples import generate_samples
 
     grpo = GRPOConfig.from_json(str(args.config))
@@ -97,9 +96,11 @@ def main():
     print(f"Verifying {len(scenes)} scenes  threshold >= {args.improvement_threshold}")
 
     cl_spd_configs = _build_cl_spd_configs(grpo.generation_variant)
-    noise_configs = _build_noise_configs(grpo.generation_variant)
-    K = 1 + len(cl_spd_configs) + len(noise_configs)
-    print(f"  K={K}  variant={grpo.generation_variant}  use_route_cl={grpo.use_route_cl_guidance}")
+    # Noise-only slots are intentionally skipped here (no centerline guidance
+    # to score against). Filter is det + min(4, len(cl_spd_configs)).
+    n_eval_slots = 1 + min(4, len(cl_spd_configs))
+    print(f"  evaluating det + {n_eval_slots - 1} cl_spd guided slots  "
+          f"variant={grpo.generation_variant}  use_route_cl={grpo.use_route_cl_guidance}")
 
     kept = []
     rejected_no_gain: list[str] = []  # evaluated but improvement < threshold
@@ -130,6 +131,7 @@ def main():
         # Minimal path: generate_samples with composer for each slot; then best-of-K
         # This is slower than batched but sufficient for pre-filtering
         best_cl = det_reward.centerline
+        slot_skipped = 0
         for slot in cl_spd_configs[:min(4, len(cl_spd_configs))]:  # top 4 slots suffice for recoverability test
             try:
                 from guidance_gui.compose import compose_guidance
@@ -150,7 +152,17 @@ def main():
                 if greward.centerline > best_cl:
                     best_cl = greward.centerline
             except Exception as e:
+                # Real breakages in compose_guidance / generate_samples / reward
+                # would otherwise hide as silent skips. Log them and count.
+                slot_skipped += 1
+                print(f"  [slot-skip] {Path(path).name} slot={slot.get('label', '?')}: "
+                      f"{type(e).__name__}: {e}")
                 continue
+        if slot_skipped > 0 and slot_skipped == min(4, len(cl_spd_configs)):
+            # Every guided slot crashed — improvement is meaningless; drop scene
+            # by treating the det-only score as best_cl.
+            print(f"  [warn] {Path(path).name}: all {slot_skipped} guided slots crashed; "
+                  f"falling back to det-only best_cl")
 
         improvement = best_cl - det_reward.centerline
         improvements.append(improvement)
@@ -178,7 +190,8 @@ def main():
     imp_arr = np.array(improvements) if improvements else np.array([0.0])
     print(f"\nKept {len(kept)} / {len(scenes)} scenes ({100*len(kept)/max(len(scenes),1):.1f}%)")
     print(f"  dropped by gate:    {dropped_gate}  (unrecoverable, don't retry)")
-    print(f"  dropped by no gain: {dropped_no_gain}  (re-check after next warm-start)")
+    print(f"  dropped by load:    {dropped_load}  (NPZ unreadable)")
+    print(f"  dropped by no gain: {len(rejected_no_gain)}  (re-check after next warm-start)")
     print(f"  improvement dist: mean={imp_arr.mean():+.3f} p50={np.median(imp_arr):+.3f} "
           f"p75={np.percentile(imp_arr, 75):+.3f} p95={np.percentile(imp_arr, 95):+.3f}")
     print(f"saved {args.output}")
