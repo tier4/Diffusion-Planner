@@ -171,13 +171,13 @@ def get_args():
     parser.add_argument(
         "--control_traj_loss_horizon",
         type=int,
-        default=20,
+        default=80,
         help="Sliding-window horizon for control-to-trajectory loss (0 = disabled)",
     )
     parser.add_argument(
         "--coeff_control_traj_loss",
         type=float,
-        default=1.0,
+        default=0.1,
         help="Weight for control-to-trajectory sliding-window loss",
     )
 
