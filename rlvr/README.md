@@ -19,6 +19,29 @@ The GRPO pipeline differs from the existing DPO pipeline in two key ways:
 1. **Group size**: DPO generates 2 trajectories per scene (pairwise preference). GRPO generates N (default 32 for training, 8 for GUI debugging).
 2. **Automatic scoring**: DPO can use human annotation or simple heuristics. GRPO uses a multi-component reward function that evaluates safety, progress, smoothness, feasibility, and centerline adherence -- all automatically.
 
+## PRiSM — Perturbation-Recovery iterative Self-Mining
+
+Self-improvement loop built on top of Ranked SFT. The model trains on its own failure modes by deliberately constructing them:
+
+1. **Source**: take a closed-loop sim NPZ pool produced by the current best model.
+2. **Mine warm scenes**: use `scenario_generation/tools/classify_replay_steps.py` to band per-step replay NPZs by reward.py `cl_score` and select the `warm` band (ego near centerline).
+3. **Perturb**: apply parallel offsets / yaw / velocity / jitter to the warm scenes via `rlvr/autoresearch/tools/disturb_and_replay.py`. The tool emits a `manifest.json` with per-NPZ perturbation metadata (`dx, dy, dtheta_deg, dv, lateral_offset_m, longitudinal_offset_m, source_scene, kind`).
+4. **Score under the same model**: `rlvr/autoresearch/tools/viz_p4_recovery.py` runs K=N generation under the configured `generation_variant`, ranks the K trajectories with `compute_reward_batch` (real reward.py), and records per-scene `top1_cl`, `delta_cl = top1_cl - t0_cl`, slot label, and rank-1 safety flags (`top1_rb_cross`, `top1_lane_cross`, `top1_kin_gate`).
+5. **Filter** to scenes where `delta_cl >= 1*sigma_train` (sigma frozen per lineage at round-1's std).
+6. **Train** ranked-SFT on the filtered set, warmstarted from the same model. Iterate.
+
+Round-N protocol: re-evaluate the previous round's training scenes under the new winner (drop those that no longer pass the filter — they're "solved"), promote previously-rejected scenes that now pass (warm-start retry), and add fresh-mined random warm sources. Each round builds its own held-out perturbed val set (no Δ filter on val) and the round's winner is evaluated on every previous round's frozen val + the new round's val + the union to detect cross-distribution regressions.
+
+### Visualization tools
+
+- `rlvr/autoresearch/tools/viz_p4_recovery.py` — per-scene K=N + rank-1 viz on perturbed scenes. Renders the lanelet/road-border base, all K trajectories in faint grey, the deterministic prediction in blue, the rank-1 winner in red, with a yellow translucent ego footprint anchored at the perturbed pose `(dx, dy)` in the world frame. Used both as the per-round filter (writes `summary.json` and `improve_scenes.json`) and as a per-scene PNG generator.
+- `rlvr/autoresearch/tools/viz_prism_compare.py` — multi-model overlay on the same perturbed scene. Up to three trajectories on one panel (baseline / warmstart / PRiSM), all in the lanelet frame so the perturbation magnitude and the per-model recovery are visually obvious. Optional summary-JSON-driven ranking by `Δ_PRiSM-vs-reference` for "show me the biggest gain scenes" workflows.
+- `rlvr/autoresearch/tools/recovery_sim_ghost.py` — ghost-overlay 8-second closed-loop rollout. Runs the rollout under two models on the same perturbed scene and writes per-step PNGs with both egos overlaid + plans, plus an optional WebM via ffmpeg.
+
+### Frame-transform note
+
+`disturb_and_replay` shifts `ego_current_state` and `ego_agent_past` by `(dx, dy)` but leaves `lanes` / `route_lanes` in the original world frame. The model output is in an "ego-current-pose-relative" frame: `pred[0]` is always near `(1, 0)` for a 10 m/s ego, regardless of perturbation magnitude. To draw the trajectory in the world frame, add `(dx, dy)` to every step before plotting. `viz_prism_compare._to_lanelet_frame` is the canonical helper. Skip this and the perturbation will look invisible in your viz.
+
 ## Architecture
 
 ```

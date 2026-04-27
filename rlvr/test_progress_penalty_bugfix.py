@@ -217,5 +217,98 @@ def test_underprogress_uses_baseline_ref_when_configured():
     assert shift_1 == pytest.approx(17.5, abs=0.5), f"traj[1] shift: {shift_1}"
 
 
+def _make_scene_no_gt(path_lens, T=80, dt=0.1):
+    """Build N ego trajectories with ZERO GT (simulating sim-dump NPZs
+    where ego_agent_future is zero)."""
+    N = len(path_lens)
+    trajs = torch.zeros(N, T, 4)
+    for i, L in enumerate(path_lens):
+        v = L / ((T - 1) * dt)
+        xs = torch.arange(T, dtype=torch.float32) * v * dt
+        trajs[i, :, 0] = xs
+        trajs[i, :, 2] = 1.0
+    # Zero GT — matches synthetic NPZ dumps from scenario_generation.replay.
+    gt_future = torch.zeros(T, 3)
+    data = {
+        "ego_agent_future": gt_future.unsqueeze(0),
+        "ego_shape": torch.tensor([[2.79, 4.34, 1.70]]),
+    }
+    return trajs, data
+
+
+def test_underprogress_fires_without_gt_when_baseline_ref_set():
+    """Regression for the 2026-04-24 synthetic-data collapse: when the
+    scene has no GT (common for scenario_generation.replay NPZs), an
+    underprogress_reference='baseline' config must still anchor on
+    ``data['baseline_path_len']`` and fire the penalty. Previously the
+    whole progress block was gated on ``gt_valid.sum() >= 10``, so no-GT
+    scenes silently dropped every path penalty."""
+    trajs, data = _make_scene_no_gt([30.0, 30.0])  # short path
+    data["baseline_path_len"] = torch.tensor(60.0)  # frozen anchor says we should do 60 m
+
+    cfg = _cfg_cl_only(
+        underprogress_reference="baseline",
+        underprogress_penalty=50.0,
+        underprogress_threshold=0.85,
+        stopped_penalty=0.0,  # isolate underprogress
+    )
+    totals = _totals(cfg, trajs, data)
+
+    # underprogress = relu(0.85 - 30/60) = 0.35 → penalty = 50*0.35 = 17.5 on both.
+    # Relative comparison vs a matching-baseline case: same trajs with baseline=30
+    # should fire no penalty. We verify the penalty exists by comparing.
+    data_match = dict(data)
+    data_match["baseline_path_len"] = torch.tensor(30.0)
+    totals_match = _totals(cfg, trajs, data_match)
+
+    shift = totals_match[0] - totals[0]
+    assert shift == pytest.approx(17.5, abs=0.5), (
+        f"underprogress did not fire without GT. "
+        f"totals_short_baseline={totals_match}, totals_long_baseline={totals}, "
+        f"shift={shift} (expected ~17.5)"
+    )
+
+
+def test_stopped_penalty_fires_without_gt_when_baseline_moves():
+    """stopped_penalty must fire on a nearly-frozen ego when there is no
+    GT but baseline_path_len says the scene is one where movement was
+    possible. Previously the penalty was gated by ``if gt_path_len > 5.0``,
+    so sim-dumped no-GT scenes never got a stopped-penalty signal and
+    the model could reward-hack by collapsing path."""
+    trajs, data = _make_scene_no_gt([60.0, 0.5])  # second is stopped
+    data["baseline_path_len"] = torch.tensor(60.0)
+
+    cfg = _cfg_cl_only(
+        underprogress_penalty=0.0,  # isolate stopped
+        underprogress_reference="baseline",
+        stopped_penalty=100.0,
+    )
+    totals = _totals(cfg, trajs, data)
+    gap = totals[1] - totals[0]
+    assert gap == pytest.approx(-100.0, abs=1.0), (
+        f"stopped_penalty did not fire on stopped ego without GT. "
+        f"totals={totals}, gap={gap}, expected ~-100"
+    )
+
+
+def test_stopped_does_not_fire_without_gt_or_baseline_anchor():
+    """With no GT AND no baseline_path_len in data, we can't tell a
+    collapse from a legitimate red-light stop — stopped_penalty must
+    NOT fire. Underprogress still fires via the det-fallback (ratio
+    vs traj[0]), which is the long-standing existing behaviour."""
+    trajs, data = _make_scene_no_gt([60.0, 0.5])
+    # no baseline_path_len in data.
+    cfg = _cfg_cl_only(
+        stopped_penalty=100.0,
+        underprogress_penalty=0.0,  # isolate stopped
+        underprogress_reference="baseline",
+    )
+    totals = _totals(cfg, trajs, data)
+    gap = totals[1] - totals[0]
+    assert abs(gap) < 1.0, (
+        f"stopped leaked without an anchor. totals={totals}, gap={gap}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

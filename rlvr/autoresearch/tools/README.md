@@ -148,6 +148,67 @@ python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
   --scenes <input.json> --output <cleaned.json> --min_clearance 0.2
 ```
 
+## PRiSM — Perturbation-Recovery iterative Self-Mining
+
+Tools for the self-improvement loop described in `rlvr/README.md` (see "PRiSM" section). Per round: sim NPZ pool → mine warm scenes → perturb → K=N + reward.py rank → filter → ranked-SFT warmstarted → iterate.
+
+### disturb_and_replay.py
+Generates perturbed NPZ training inputs from warm source scenes. Applies parallel offsets / yaw / velocity / jitter / combined perturbations to `ego_current_state` and `ego_agent_past`; lanes / route_lanes / line_strings stay in the original world frame. Emits `manifest.json` with per-NPZ `dx, dy, dtheta_deg, dv, lateral_offset_m, longitudinal_offset_m, source_scene, kind, variant_name`.
+```bash
+python -m rlvr.autoresearch.tools.disturb_and_replay \
+  --scenes <warm_scenes.json> \
+  --output_dir <out_dir> \
+  --output_scene_list <out_list.json> \
+  --kind combined --offsets 0.3,0.5,0.8 --yaw_degs 5,10 \
+  --n_per_scene 9 --reject_threshold 0.15
+```
+Pass `--kind parallel_only` for offset-only perturbations. The legacy `--base_model` flag (overwrites `ego_agent_future` with a baseline forward pass) is optional and **not recommended**: ranked-SFT ignores `ego_agent_future`, so the rewrite is wasted compute.
+
+### viz_p4_recovery.py
+Per-scene K=N + reward.py rank-1 visualization on perturbed scenes. Loads a model (with optional `--lora_path`), runs K=N under the configured `generation_variant`, ranks trajectories by `compute_reward_batch` total reward (ties on cl), and renders one PNG per scene with the lanelet/road-border base, all K trajectories in faint grey, the deterministic prediction in blue, the rank-1 winner in red. Yellow translucent ego footprint anchored at the perturbed pose `(dx, dy)` in the world frame; trajectories translated by `(dx, dy)` so footprints visually start at that anchor. Records rank-1 safety flags per scene for downstream filtering.
+```bash
+python -m rlvr.autoresearch.tools.viz_p4_recovery \
+  --model_path <base.pth> --lora_path <lora_dir> \
+  --scenes <perturbed_list.json> \
+  --manifest <perturbed_dir>/manifest.json \
+  --config <reward_config.json> \
+  --output_dir <out_dir> --K 8
+```
+Outputs per-scene PNGs into `improve/` and `no_improve/` subdirs based on whether rank-1's CL beats the perturbed t=0, plus `summary.json` and `improve_scenes.json`.
+
+### viz_prism_compare.py
+Multi-model overlay on the same perturbed scene. Up to three trajectories on one panel (baseline / warmstart / PRiSM) — model output translated to the lanelet frame so the perturbation magnitude is visible. Optional summary-JSON-driven scene ranking by `Δ_PRiSM-vs-reference` for "show me the biggest gain scenes" workflows. Per-deployment labels passed via `--baseline_label`, `--warmstart_label`, `--prism_label`.
+```bash
+python -m rlvr.autoresearch.tools.viz_prism_compare \
+  --baseline_model <pth> \
+  --warmstart_model <pth> \
+  --prism_model <pth> --prism_lora <lora_dir> \
+  --scenes <perturbed_list.json> \
+  --manifest <manifest.json> --config <reward_config.json> \
+  --output_dir <out_dir> \
+  [--top_delta --rank_by baseline] [--hide_warmstart]
+```
+
+### recovery_sim_ghost.py
+Ghost-overlay 8-second closed-loop rollout. Runs the rollout under two models on the same perturbed scene and writes per-step PNGs with both ego footprints + plans overlaid (blue / red), plus an optional WebM via ffmpeg. Reuses the scene-rendering primitives from `recovery_sim.py`.
+```bash
+python -m rlvr.autoresearch.tools.recovery_sim_ghost \
+  --scene <source_npz> \
+  --kind parallel --magnitude 1.0 --side - \
+  --baseline_model <pth> --prism_model <pth> [--prism_lora <dir>] \
+  --output_dir <out_dir> --steps 80 --make_webm
+```
+
+### recovery_test.py
+One-shot K=N + closed-loop rollout recovery diagnostic. Applies parallel / yaw / velocity / combined perturbations in-memory (no NPZ dump) and reports recovery rates per kind / magnitude. Quick diagnostic before committing to a full disturb_and_replay → viz_p4_recovery pipeline.
+
+### recovery_sim.py
+Sim-style closed-loop rollout PNG renderer for a single perturbed scene. Used both standalone and as the rollout primitive for `recovery_sim_ghost`.
+
+## Frame-transform note
+
+`disturb_and_replay` shifts `ego_current_state[0:4]` and `ego_agent_past` by `(dx, dy, dtheta)` but leaves `lanes` / `route_lanes` / `line_strings` in the original world frame. The model output is in an "ego-current-pose-relative" frame: `pred[0]` is always near `(1, 0)` for a 10 m/s ego, regardless of perturbation magnitude. To draw the trajectory in the world/lanelet frame, **add `(dx, dy)` to every step** and place the perturbed-ego footprint at `(dx, dy)`. Skip this and the perturbation will look invisible. `viz_p4_recovery` and `viz_prism_compare` both apply the translation; the canonical helper is `viz_prism_compare._to_lanelet_frame`.
+
 ## Tests
 
 Tests for closed-loop components are in `rlvr/autoresearch/tests/`:

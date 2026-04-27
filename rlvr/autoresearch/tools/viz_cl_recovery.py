@@ -142,9 +142,6 @@ def main():
     parser.add_argument("--noise_min", type=float, default=0.5)
     parser.add_argument("--noise_max", type=float, default=2.0)
     parser.add_argument("--cols", type=int, default=3)
-    parser.add_argument("--usage_cap", type=float, default=1.0,
-                        help="Centerline usage cap for reward ranking (>1.0 makes "
-                             "past-boundary trajs more penalized).")
     parser.add_argument("--seed", type=int, default=0,
                         help="Set torch RNG seed for reproducible generation.")
     args = parser.parse_args()
@@ -227,17 +224,16 @@ def main():
             gt_max_speed=gt_v_high, generation_variant=variant,
         )[0]  # [K, T, 4]
 
-        # Score all K trajs — use cap-aware centerline for ranking at args.usage_cap
-        cl_capped = compute_centerline_score_batch(
-            trajs, ego_shape, data, usage_cap=args.usage_cap
+        # Score all K trajs — centerline reward is uncapped.
+        cl_scores_k = compute_centerline_score_batch(
+            trajs, ego_shape, data,
         ).cpu().tolist()
         per_k = []
         for k_i in range(trajs.shape[0]):
             tr = trajs[k_i:k_i+1]
             r = compute_reward_batch(tr, data, rcfg)[0]
-            # Replace default-cap centerline with cap-aware one in total
-            total_no_cl = r.total - rcfg.w_centerline * r.centerline
-            new_total = total_no_cl + rcfg.w_centerline * cl_capped[k_i]
+            # r.centerline already comes from the same uncapped function — keep it.
+            new_total = r.total
             # Mark trajectory as valid (no gate violation) for BestCL filtering
             valid = (
                 not r.rb_crossing
@@ -245,11 +241,11 @@ def main():
                 and r.kinematic_gate  # True = pass
                 and (r.collision_step is None or r.collision_step < 0)
             )
-            per_k.append({"k": k_i, "total": new_total, "cl": cl_capped[k_i], "valid": valid})
+            per_k.append({"k": k_i, "total": new_total, "cl": cl_scores_k[k_i], "valid": valid})
         # Also include DET as a candidate for BestCL (not just among K generated)
         det_traj_tensor = torch.tensor(det_traj[None], device=device, dtype=torch.float32)
-        det_cl_capped = compute_centerline_score_batch(
-            det_traj_tensor, ego_shape, data, usage_cap=args.usage_cap
+        det_cl = compute_centerline_score_batch(
+            det_traj_tensor, ego_shape, data,
         )[0].item()
         det_valid = (
             not r_det.rb_crossing
@@ -257,7 +253,7 @@ def main():
             and r_det.kinematic_gate
             and (r_det.collision_step is None or r_det.collision_step < 0)
         )
-        per_k_with_det = per_k + [{"k": -1, "total": None, "cl": det_cl_capped,
+        per_k_with_det = per_k + [{"k": -1, "total": None, "cl": det_cl,
                                     "is_det": True, "valid": det_valid}]
         top1 = max(per_k, key=lambda x: x["total"])
         # BestCL: only consider valid trajectories (no gate violations)
