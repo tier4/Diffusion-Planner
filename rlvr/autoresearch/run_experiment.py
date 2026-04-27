@@ -560,7 +560,6 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             w_safety=grpo_config.w_safety, w_progress=grpo_config.w_progress,
             w_smooth=grpo_config.w_smooth, w_feasibility=grpo_config.w_feasibility,
             w_centerline=grpo_config.w_centerline,
-            centerline_usage_cap=grpo_config.centerline_usage_cap,
             centerline_usage_mode=grpo_config.centerline_usage_mode,
             centerline_time_weight_min=grpo_config.centerline_time_weight_min,
             rb_near_scale=grpo_config.rb_near_scale,

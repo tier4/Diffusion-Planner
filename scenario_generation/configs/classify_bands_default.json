@@ -1,7 +1,7 @@
 {
   "_comment_1": "Default classification bands for scenario_generation.tools.classify_replay_steps.",
-  "_comment_2": "Values are inclusive-low, exclusive-high on reward.py cl_score (negative; 0 = on centerline, saturates at ~-2.25 with usage_cap=1.0).",
-  "_comment_3": "These MUST match the reward_config used at replay time (cl_score is already logged in metrics_log.json per step). If you change usage_cap or usage_mode in training, rebuild bands.",
+  "_comment_2": "Values are inclusive-low, exclusive-high on reward.py cl_score (negative; 0 = on centerline; lane_usage is now uncapped so cl_score is unbounded negative for past-boundary trajectories).",
+  "_comment_3": "cap removed; cl_score is unbounded negative, bands match historical cap=1 ranges only by accident. These MUST match the reward_config used at replay time (cl_score is already logged in metrics_log.json per step). If you change usage_mode in training, rebuild bands.",
   "bands": {
     "clean":    [-0.10,   0.01],
     "warm":     [-0.50,  -0.10],

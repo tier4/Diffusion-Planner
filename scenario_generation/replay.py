@@ -1514,7 +1514,6 @@ def _score_step(
 
     cl_baselink = compute_centerline_score_batch(
         traj, ego_shape_cl, d,
-        usage_cap=reward_cfg.centerline_usage_cap,
         usage_mode="baselink",
     )
 
@@ -1549,7 +1548,6 @@ def _score_step(
         br_p = compute_reward_batch(pred, d, reward_cfg)[0]
         cl_p = compute_centerline_score_batch(
             pred, ego_shape_cl, d,
-            usage_cap=reward_cfg.centerline_usage_cap,
             usage_mode="baselink",
         )
         for k, v in asdict(br_p).items():

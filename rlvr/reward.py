@@ -25,20 +25,16 @@ class RewardConfig:
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
-    # Centerline usage cap: per-step lane_usage is clamped to this before squaring.
-    # 1.0 = current default (saturates at the lane boundary). Raising to 1.5-2.0
-    # lets past-boundary trajectories be penalized more and widens the signal
-    # between "riding the edge" and "crossing the edge".
-    centerline_usage_cap: float = 1.0
     # Centerline usage mode:
-    #   "body" (default): lane_usage = (|baselink_lat| + ego_half_w) / side_hw —
-    #       penalizes how close the EGO BODY is to the lane edge. Wide vehicles
-    #       get a baseline non-zero penalty even when perfectly centered.
-    #   "baselink": lane_usage = |baselink_lat| / side_hw — penalizes only the
-    #       baselink (origin) offset from centerline. Perfectly centered = 0.
-    #       Use when you want the reward to track centering distance directly
-    #       rather than body-to-edge clearance.
-    centerline_usage_mode: str = "body"
+    #   "baselink" (default): lane_usage = |baselink_lat| / side_hw —
+    #       perfectly centered = 0; readings are directly interpretable as
+    #       "rear axle is X fraction of the way to the lane edge".
+    #   "body" (DEPRECATED): lane_usage = (|baselink_lat| + ego_half_w) /
+    #       side_hw. Adds half-vehicle-width to the offset so a centered
+    #       wide ego already reads non-zero. Easy to misread as lateral
+    #       metres when it is not. Kept for backward compatibility with
+    #       configs from before 2026-04-27 — emits a DeprecationWarning.
+    centerline_usage_mode: str = "baselink"
     # Centerline time-weight floor. The per-step centerline penalty is averaged
     # with weights torch.linspace(1.0, centerline_time_weight_min, T). The default
     # 0.3 matches the historical behavior (late timesteps count 30% of early).
@@ -964,8 +960,7 @@ def compute_centerline_score_batch(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
-    usage_cap: float = 1.0,
-    usage_mode: str = "body",
+    usage_mode: str = "baselink",
     time_weight_min: float = 0.3,
 ) -> torch.Tensor:
     """Batched normalized lane-usage penalty from nearest route lane centerline.
@@ -1037,14 +1032,29 @@ def compute_centerline_score_batch(
     )  # (N, T)
 
     # Normalized lane usage: how close the vehicle is to the boundary.
-    # "body" mode (default): 0 = centered, 1 = ego edge touching boundary.
+    # "baselink" (default): 0 = baselink on centerline, 1 = baselink at half-lane.
+    #   Pure baselink offset; ego width doesn't matter. Directly interpretable.
+    # "body" (DEPRECATED): 0 = centered, 1 = ego edge touching boundary.
     #   Includes ego_half_w → even a centered wide vehicle has non-zero usage.
-    # "baselink" mode: 0 = baselink on centerline, 1 = baselink at half-lane.
-    #   Pure baselink offset; ego width doesn't matter.
+    #   Emits DeprecationWarning. Kept only for loading pre-2026-04-27 configs.
     if usage_mode == "baselink":
         lane_usage = ego_lat.abs() / side_hw  # (N, T)
-    else:
+    elif usage_mode == "body":
+        import warnings
+        warnings.warn(
+            "centerline_usage_mode='body' is deprecated as of 2026-04-27. "
+            "Use 'baselink' for new configs. Body adds half-vehicle-width to "
+            "offset, which produces unitless values that are easy to misread "
+            "as lateral metres.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         lane_usage = (ego_lat.abs() + half_w) / side_hw  # (N, T)
+    else:
+        raise ValueError(
+            f"Unknown centerline_usage_mode={usage_mode!r}. "
+            f"Use 'baselink' (default) or 'body' (deprecated)."
+        )
 
     # When near a route lane (<5m): penalize by lane usage (lateral position)
     # When far from route (>5m): penalize by distance to route (off-route deviation)
@@ -1065,20 +1075,11 @@ def compute_centerline_score_batch(
     _ROUTE_DEVIATION_SCALE = 0.5
     route_deviation = (min_dist * _ROUTE_DEVIATION_SCALE).clamp(max=5.0)  # cap to avoid explosion
 
-    # Cap lane_usage at usage_cap for centerline scoring. Default 1.0 means
-    # being at the boundary is the max lateral penalty; values beyond are
-    # treated as off-route (handled by route_deviation). Raising the cap
-    # lets past-boundary trajectories be penalized more before hitting the
-    # route_deviation branch.
-    if not math.isfinite(usage_cap) or usage_cap <= 0:
-        raise ValueError(
-            f"usage_cap must be finite and > 0, got {usage_cap!r}"
-        )
-    capped_usage = lane_usage.clamp(max=usage_cap)
-
+    # lane_usage is unbounded — squared directly. Trajectories past the lane
+    # boundary accrue penalty proportional to (lane_usage)² with no clip.
     per_step_penalty = torch.where(
         near_route,
-        capped_usage ** 2,
+        lane_usage ** 2,
         torch.where(
             left_route,
             route_deviation ** 2,
@@ -2757,7 +2758,6 @@ def compute_reward_batch(
     )
     centerline_scores = compute_centerline_score_batch(
         ego_trajs, ego_shape, data,
-        usage_cap=config.centerline_usage_cap,
         usage_mode=config.centerline_usage_mode,
         time_weight_min=config.centerline_time_weight_min,
     )

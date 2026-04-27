@@ -865,7 +865,6 @@ def build_interface(
                     op_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.overprogress_penalty, step=1.0, label="overprogress_penalty")
                     op_mar_sl = gr.Slider(1.0, 1.5, value=_rc0.overprogress_margin, step=0.01, label="overprogress_margin")
                     stop_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.stopped_penalty, step=1.0, label="stopped_penalty")
-                    cl_cap_sl = gr.Slider(0.1, 5.0, value=_rc0.centerline_usage_cap, step=0.1, label="centerline_usage_cap (dimensionless lane_usage ratio)")
                     rb_near_sl = gr.Slider(0.0, 20.0, value=_rc0.rb_near_scale, step=0.5, label="rb_near_scale")
                     rb_wide_sl = gr.Slider(0.0, 5.0, value=_rc0.rb_wide_scale, step=0.1, label="rb_wide_scale")
 
@@ -981,7 +980,7 @@ def build_interface(
         reward_inputs = [
             w_safety, w_progress, w_smooth, w_feasibility, w_centerline,
             up_pen_sl, up_thr_sl, op_pen_sl, op_mar_sl, stop_pen_sl,
-            cl_cap_sl, rb_near_sl, rb_wide_sl,
+            rb_near_sl, rb_wide_sl,
         ]
         display_inputs = [zoom_sl, time_sl]
         main_outputs = [traj_plot, reward_table, speed_curv_plot, sample_info]
@@ -1081,7 +1080,7 @@ def build_interface(
         # --- Render helpers ---
         def _apply_reward_config(
             ws, wp, wm, wf, wc,
-            up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide,
+            up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide,
         ):
             # Preserve all non-slider fields from the loaded base config
             # (gt_*, thresholds, modes, etc.) — only override slider-controlled ones.
@@ -1097,7 +1096,6 @@ def build_interface(
                 overprogress_penalty=float(op_pen),
                 overprogress_margin=float(op_mar),
                 stopped_penalty=float(stop_pen),
-                centerline_usage_cap=float(cl_cap),
                 rb_near_scale=float(rb_near),
                 rb_wide_scale=float(rb_wide),
             )
@@ -1119,11 +1117,11 @@ def build_interface(
         def _full_run(
             n_traj,
             ws, wp, wm, wf, wc,
-            up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide,
+            up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide,
             zoom, ts,
         ):
             ranker.n_trajectories = int(n_traj)
-            _apply_reward_config(ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide)
+            _apply_reward_config(ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide)
             ranker.load_sample()
             sel_idx = 0
             renders = _render(sel_idx, zoom, ts)
@@ -1229,10 +1227,10 @@ def build_interface(
         def _rescore_and_render(
             sel_idx,
             ws, wp, wm, wf, wc,
-            up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide,
+            up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide,
             zoom, ts,
         ):
-            _apply_reward_config(ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, cl_cap, rb_near, rb_wide)
+            _apply_reward_config(ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide)
             ranker._score_trajectories()
             renders = _render(int(sel_idx), zoom, ts)
             choices = _dropdown_choices()
