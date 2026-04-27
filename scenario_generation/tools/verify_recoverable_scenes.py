@@ -48,11 +48,16 @@ def main():
                    help="Min best_of_K-det reward improvement to keep a scene")
     p.add_argument("--max_scenes", type=int, default=None,
                    help="Cap on # scenes to test (randomly sub-sampled if set)")
-    p.add_argument("--device", default="cuda")
+    p.add_argument("--device",
+                   default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--args_json", type=Path, default=None,
                    help="Override path to the model's args.json. Defaults to "
                         "<model_path>/../args.json (or its parent's args.json).")
     args = p.parse_args()
+    if str(args.device).startswith("cuda") and not torch.cuda.is_available():
+        print("Requested CUDA device, but CUDA is not available; "
+              "falling back to CPU.")
+        args.device = "cpu"
 
     from rlvr.grpo_config import GRPOConfig
     from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config

@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Manufacture training scenes by perturbing existing warm scenes, then replay
-the BASELINE MODEL's predicted future from the perturbed pose to act as the
-new ``ego_agent_future`` GT.
+"""Manufacture training-input NPZs by perturbing existing warm scenes.
 
 Three perturbation kinds are applied per scene:
 
-  (1) Subtle pose perturbation (Friday rule, |x|,|y| <= 1.5m, |yaw| <= 10 deg).
+  (1) Subtle pose perturbation (|x|,|y| <= 1.5m, |yaw| <= 10 deg).
       Implemented as: shift ``ego_current_state[0:4]`` to encode a non-zero
       pose. ``ego_agent_past`` is also rigid-shifted by the same transform so
       the past traces lead consistently into the perturbed current pose.
@@ -19,19 +17,33 @@ Three perturbation kinds are applied per scene:
   (3) Random pose+history jitter combo. Same as (1) plus per-step noise on
       ``ego_agent_past`` to simulate noisy history estimates.
 
-Per scene we produce 1 baseline (no perturbation) + 2 kind-1 + 2 kind-2
-variants (matching the apply order in
-``project_disturb_replay_perturbation_specs.md``).
+Outputs:
 
-For every kept variant (including ``base``), the BASELINE MODEL is run in
-deterministic inference mode on the perturbed observation. The 80-step
-prediction (in ego frame, ``(x, y, cos, sin)``) is converted to
-``(x, y, heading_rad)`` and stored as the new ``ego_agent_future``. This
-gives a recovery-style target that closes the perturbation gap via the
-baseline's learned policy — exactly what we want RSFT to imitate.
+  * ``<output_dir>/<source_stem>_var<NN>.npz`` — perturbed NPZs ready to
+    feed into ranked-SFT (or any tool that accepts a list of NPZ paths).
+    Lanes / route_lanes / line_strings are NOT shifted; only
+    ``ego_current_state`` and ``ego_agent_past`` carry the perturbation.
+    ``ego_agent_future`` is **inherited from the source NPZ unchanged**
+    by default — ranked-SFT ignores ``ego_agent_future`` and synthesizes
+    its own SFT target from the K-best ranked trajectory at training
+    time, so writing into it is unnecessary.
+
+  * ``<output_dir>/manifest.json`` — per-output metadata including
+    ``dx, dy, dtheta_deg, dv, lateral_offset_m, longitudinal_offset_m,
+    source_scene, kind, variant_name``. Downstream visualization /
+    filtering tools key off this.
+
+  * ``<output_scene_list>`` — flat JSON list of kept perturbed NPZ paths.
 
 Variants are rejected when the perturbed pose is out-of-lane at t=0 (we use
 ``compute_lane_departure_penalty`` so the geometry exactly matches training).
+
+Optional / legacy: passing ``--base_model`` enables a deprecated codepath
+that runs the named model in deterministic inference and overwrites
+``ego_agent_future`` with its 80-step prediction. This is kept for
+backward compat only — the rewrite is wasted compute since ranked-SFT
+ignores ``ego_agent_future``, and using a stale baseline's prediction
+risks encoding the wrong recovery target. Skip this flag for normal use.
 
 Usage::
 

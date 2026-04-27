@@ -80,14 +80,25 @@ def _gt_max_speed(data: dict) -> float:
 
 
 def _t0_centerline(data: dict, ego_shape, device) -> float:
-    """Compute the centerline reward at the ego's current pose (t=0).
+    """Compute the centerline reward at the ego's CURRENT (post-perturbation)
+    pose.
 
-    Build a 1-step trajectory at the origin and feed it through
-    compute_centerline_score_batch — uses whatever usage_mode/cap the reward
-    function defaults to (baselink, no cap once the global removal lands).
+    The perturbed NPZ dumps from ``disturb_and_replay`` shift
+    ``ego_current_state[0:4]`` by ``(dx, dy, dtheta)`` but leave
+    ``route_lanes`` in the original world frame. To score "where the ego
+    is right now" against the centerline, the 1-step trajectory must be
+    placed at ``ego_current_state``'s position/heading, not at the origin.
+    The earlier version hardcoded ``(0, 0, cos=1, sin=0)`` which silently
+    returned the SOURCE pose's CL for perturbed inputs.
     """
+    ecs = data["ego_current_state"]
+    if ecs.dim() == 2:
+        ecs = ecs[0]
     traj0 = torch.zeros(1, 1, 4, device=device)
-    traj0[0, 0, 2] = 1.0  # cos(0)=1
+    traj0[0, 0, 0] = ecs[0]
+    traj0[0, 0, 1] = ecs[1]
+    traj0[0, 0, 2] = ecs[2]
+    traj0[0, 0, 3] = ecs[3]
     return float(compute_centerline_score_batch(traj0, ego_shape, data)[0].item())
 
 
@@ -241,44 +252,57 @@ def main() -> None:
             data, rcfg,
         )[0]
 
-        # Prepend the perturbed ego pose (origin in ego frame) as a shared
-        # t=0 anchor. The model's first predicted step is t=0.1s, so without
-        # this both det and rank-1 trajs visually "start" at different points
-        # (their first-step predictions). With the origin prepended both
-        # trajs share the t=0 footprint at the actual perturbed ego pose.
-        origin_step = np.array([[0.0, 0.0, 1.0, 0.0]], dtype=det_traj.dtype)
-        det_full = np.concatenate([origin_step, det_traj], axis=0)
-        top1_full = np.concatenate([origin_step, top1_traj], axis=0)
+        # Lanelets in the perturbed NPZ stay in the ORIGINAL world frame
+        # (where the source pre-perturbation ego was at origin); only
+        # ego_current_state and ego_agent_past were shifted by (dx, dy).
+        # Model output is "ego-current-pose-relative" — pred[0] is always
+        # near (1, 0) for a 10 m/s ego regardless of perturbation. To draw
+        # the trajectory in the lanelet/world frame so it visually starts
+        # from the perturbed ego pose, translate every step by (dx, dy).
+        # When no manifest entry is present (no perturbation), dx_pert =
+        # dy_pert = 0 and behavior reduces to the unperturbed case.
+        meta = manifest_by_npz.get(str(npz_path)) or manifest_by_npz.get(npz_path)
+        dx_pert = float(meta["dx"]) if meta is not None else 0.0
+        dy_pert = float(meta["dy"]) if meta is not None else 0.0
+        anchor = np.array([[dx_pert, dy_pert, 1.0, 0.0]], dtype=det_traj.dtype)
+        def _to_lf(t):
+            t2 = t.copy()
+            t2[:, 0] = t2[:, 0] + dx_pert
+            t2[:, 1] = t2[:, 1] + dy_pert
+            return t2
+        det_full = np.concatenate([anchor, _to_lf(det_traj)], axis=0)
+        top1_full = np.concatenate([anchor, _to_lf(top1_traj)], axis=0)
 
         # Plot
         fig, ax = plt.subplots(figsize=(11, 11))
         draw_scene_base(ax, npz_path)
 
-        # ------ Draw the PERTURBED ego at t=0 explicitly. ------
-        # In ego frame the perturbed ego is at (0, 0) facing +x by definition.
-        # We draw it as a thick black-edged footprint with high alpha so the
-        # "starting state" is unambiguous. The K-trajectory and det/rank-1
-        # footprints at t=0 (which sit at the same spot) are drawn under it.
+        # ------ Draw the PERTURBED ego at (dx, dy) in lanelet frame. ------
         with np.load(npz_path, allow_pickle=True) as _d:
             _es_np = _d["ego_shape"] if "ego_shape" in _d.files else None
         wb = float(_es_np[0]) if _es_np is not None and len(_es_np) >= 1 else 4.76
         elen = float(_es_np[1]) if _es_np is not None and len(_es_np) >= 2 else 7.24
         ewid = float(_es_np[2]) if _es_np is not None and len(_es_np) >= 3 else 2.29
         ro = elen - wb
-        t_rot0 = mtransforms.Affine2D().rotate(0.0).translate(0.0, 0.0) + ax.transData
+        t_rot_pert = (mtransforms.Affine2D()
+                      .rotate(0.0)
+                      .translate(dx_pert, dy_pert)
+                      + ax.transData)
         ax.add_patch(Rectangle(
-            (-ro, -ewid / 2), elen, ewid, lw=2.0,
-            ec="black", fc="#ffe066", alpha=0.85, zorder=20, transform=t_rot0,
+            (-ro, -ewid / 2), elen, ewid, lw=1.6,
+            ec="#7a6500", fc="#ffe066", alpha=0.35, zorder=20,
+            transform=t_rot_pert,
         ))
-        ax.plot([0], [0], "x", color="black", ms=10, mew=2.5, zorder=21)
+        ax.plot([dx_pert], [dy_pert], "x", color="#7a6500",
+                ms=9, mew=2.2, zorder=21)
 
-        # Faint K=N background — also prepended so all start at the same anchor
+        # Faint K=N background — also translated to lanelet frame
         for ki in range(trajs.shape[0]):
             tr = trajs[ki].cpu().numpy()
-            tr_full = np.concatenate([origin_step, tr], axis=0)
+            tr_full = np.concatenate([anchor, _to_lf(tr)], axis=0)
             ax.plot(tr_full[:, 0], tr_full[:, 1], "-", color="#888888", lw=0.7,
                     alpha=0.45, zorder=6)
-        # Det in blue (full = origin + 80 predicted steps)
+        # Det in blue
         draw_traj(ax, det_full,
                   f"Det (cl={det_r.centerline:+.2f}  total={det_r.total:+.1f})",
                   "#1f77b4", npz_path, with_footprints=True)
@@ -291,7 +315,8 @@ def main() -> None:
                   with_footprints=True)
 
         # ------ Perturbation annotation from manifest ------
-        meta = manifest_by_npz.get(str(npz_path)) or manifest_by_npz.get(npz_path)
+        # In the lanelet frame: source pose = (0, 0), perturbed pose = (dx, dy).
+        # Arrow points source -> perturbed.
         perturb_str = ""
         if meta is not None:
             lat = meta["lateral_offset_m"]
@@ -302,24 +327,18 @@ def main() -> None:
                 f"lon={lon:+.2f}m  yaw={meta['dtheta_deg']:+.1f}°  "
                 f"dv={meta['dv']:+.2f}m/s"
             )
-            # Visualize the lateral offset as an arrow from where the ego
-            # "would have been" (centerline) to the perturbed pose. In ego
-            # frame the centerline is along +x; the lateral perp is +y left.
-            # Source pose was at (-dx, -dy) relative to current (perturbed)
-            # ego frame. Draw a green arrow showing the displacement.
-            sx = -float(meta["dx"])
-            sy = -float(meta["dy"])
             ax.annotate(
-                "", xy=(0, 0), xytext=(sx, sy),
+                "", xy=(dx_pert, dy_pert), xytext=(0.0, 0.0),
                 arrowprops=dict(arrowstyle="->", color="#2ca02c", lw=2.2),
                 zorder=22,
             )
-            ax.plot([sx], [sy], "o", color="#2ca02c", ms=8, mew=0, zorder=22)
-            ax.text(sx, sy + 0.4, "source pose", color="#2ca02c",
+            ax.plot([0.0], [0.0], "o", color="#2ca02c", ms=8, mew=0, zorder=22)
+            ax.text(0.0, -0.4, "source pose", color="#2ca02c",
                     fontsize=9, ha="center", zorder=22)
 
         all_pts = np.vstack([
-            top1_full[:, :2], det_full[:, :2], np.array([[0.0, 0.0]])
+            top1_full[:, :2], det_full[:, :2],
+            np.array([[dx_pert, dy_pert]]),
         ])
         cx, cy = float(np.mean(all_pts[:, 0])), float(np.mean(all_pts[:, 1]))
         half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8.0

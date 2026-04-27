@@ -50,12 +50,19 @@ def generate_trajectory(model, model_args, data, device):
 
 
 @torch.no_grad()
-def lat_offset_and_naive_score(traj: torch.Tensor, data: dict, ego_half_w: float):
+def lat_offset_and_naive_score(
+    traj: torch.Tensor, data: dict, ego_half_w: float,
+    usage_mode: str = "baselink",
+):
     """Per-scene per-timestep quantities used for sanity-compare + lat_offset stats.
 
     Mirrors compute_centerline_score_batch lines 985-1017 to get |lat_offset|
     (m) from nearest route-lane centerline point, plus a NAIVE score:
     -mean(lane_usage²) with no time-weight, no route-deviation branch.
+
+    ``usage_mode`` must match the reward config's ``centerline_usage_mode``
+    so the printed naive_score is comparable to compute_centerline_score_batch.
+    Defaults to ``baselink`` (the new default since 2026-04-27).
     """
     device = traj.device
     lanes = data.get("route_lanes", data.get("lanes"))
@@ -87,7 +94,14 @@ def lat_offset_and_naive_score(traj: torch.Tensor, data: dict, ego_half_w: float
     lhw = left_hw[nearest]
     rhw = right_hw[nearest]
     side_hw = torch.where(ego_lat >= 0, lhw.clamp(min=0.5), (-rhw).clamp(min=0.5))
-    lane_usage = (ego_lat.abs() + ego_half_w) / side_hw  # body mode
+    if usage_mode == "baselink":
+        lane_usage = ego_lat.abs() / side_hw
+    elif usage_mode == "body":
+        lane_usage = (ego_lat.abs() + ego_half_w) / side_hw
+    else:
+        raise ValueError(
+            f"Unknown usage_mode={usage_mode!r}; expected 'baselink' or 'body'."
+        )
 
     naive_score = -(lane_usage ** 2).mean().item()  # uniform-weight, no route-dev
     any_off_route = bool(((min_dist > 5.0).cummax(dim=0).values & (min_dist > 5.0)).any().item())
@@ -206,7 +220,9 @@ def main():
         cl_scores.append(score)
 
         # SIDE-CHANNEL: lat_offset_m distribution + naive score for sanity_compare.
-        aux = lat_offset_and_naive_score(traj, data, ego_half_w)
+        aux = lat_offset_and_naive_score(
+            traj, data, ego_half_w, usage_mode=cfg.centerline_usage_mode
+        )
         if aux is not None:
             lat_off_means.append(float(aux["lat_offset_m"].mean()))
             lat_off_maxes.append(float(aux["lat_offset_m"].max()))
