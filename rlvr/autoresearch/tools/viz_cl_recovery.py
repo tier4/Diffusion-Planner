@@ -50,7 +50,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def draw_scene_base(ax, npz_path):
-    """Lane centerlines (grey) + lane boundaries (blue) + road borders (black)."""
+    """Lane centerlines (grey dashed) + lane boundaries (blue) + road borders (black)
+    + route_lanes centerline (bold orange — the scene's planned path, what CL reward scores against)."""
     npz = np.load(npz_path, allow_pickle=True)
     lanes = npz["lanes"]
     for i in range(lanes.shape[0]):
@@ -63,6 +64,19 @@ def draw_scene_base(ax, npz_path):
             ax.plot(pts[:, 0] + lb[:, 0], pts[:, 1] + lb[:, 1], "-", color="#6a9ec9", lw=0.6, alpha=0.6)
             ax.plot(pts[:, 0] + rb[:, 0], pts[:, 1] + rb[:, 1], "-", color="#6a9ec9", lw=0.6, alpha=0.6)
         ax.plot(pts[:, 0], pts[:, 1], "--", color="grey", lw=0.4, alpha=0.5)
+
+    # Route_lanes: the scene's planned path — this is what `compute_centerline_score_batch` scores against
+    if "route_lanes" in npz.files:
+        rl = npz["route_lanes"]
+        for i in range(rl.shape[0]):
+            lane = rl[i]
+            if np.abs(lane[:, :2]).sum() < 1e-6:
+                continue
+            pts = lane[:, :2]
+            valid = np.linalg.norm(pts, axis=-1) > 1e-3
+            if valid.sum() >= 2:
+                ax.plot(pts[valid, 0], pts[valid, 1], "-", color="#ff7f0e", lw=2.0, alpha=0.85,
+                        label="ROUTE centerline" if i == 0 else None, zorder=8)
 
     if "line_strings" in npz.files:
         ls = npz["line_strings"]
@@ -131,8 +145,15 @@ def main():
     parser.add_argument("--usage_cap", type=float, default=1.0,
                         help="Centerline usage cap for reward ranking (>1.0 makes "
                              "past-boundary trajs more penalized).")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Set torch RNG seed for reproducible generation.")
     args = parser.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     device = torch.device(DEVICE)
     model_dir = Path(args.model_path).parent
@@ -217,11 +238,39 @@ def main():
             # Replace default-cap centerline with cap-aware one in total
             total_no_cl = r.total - rcfg.w_centerline * r.centerline
             new_total = total_no_cl + rcfg.w_centerline * cl_capped[k_i]
-            per_k.append({"k": k_i, "total": new_total, "cl": cl_capped[k_i]})
+            # Mark trajectory as valid (no gate violation) for BestCL filtering
+            valid = (
+                not r.rb_crossing
+                and not r.lane_crossing
+                and r.kinematic_gate  # True = pass
+                and (r.collision_step is None or r.collision_step < 0)
+            )
+            per_k.append({"k": k_i, "total": new_total, "cl": cl_capped[k_i], "valid": valid})
+        # Also include DET as a candidate for BestCL (not just among K generated)
+        det_traj_tensor = torch.tensor(det_traj[None], device=device, dtype=torch.float32)
+        det_cl_capped = compute_centerline_score_batch(
+            det_traj_tensor, ego_shape, data, usage_cap=args.usage_cap
+        )[0].item()
+        det_valid = (
+            not r_det.rb_crossing
+            and not r_det.lane_crossing
+            and r_det.kinematic_gate
+            and (r_det.collision_step is None or r_det.collision_step < 0)
+        )
+        per_k_with_det = per_k + [{"k": -1, "total": None, "cl": det_cl_capped,
+                                    "is_det": True, "valid": det_valid}]
         top1 = max(per_k, key=lambda x: x["total"])
-        best_cl_e = max(per_k, key=lambda x: x["cl"])
+        # BestCL: only consider valid trajectories (no gate violations)
+        valid_candidates = [p for p in per_k_with_det if p["valid"]]
+        if valid_candidates:
+            best_cl_e = max(valid_candidates, key=lambda x: x["cl"])
+            best_cl_label_prefix = ""
+        else:
+            best_cl_e = max(per_k_with_det, key=lambda x: x["cl"])
+            best_cl_label_prefix = "[NO VALID] "
         top1_traj = trajs[top1["k"]].cpu().numpy()
-        best_traj = trajs[best_cl_e["k"]].cpu().numpy()
+        best_traj = det_traj if best_cl_e.get("is_det") else trajs[best_cl_e["k"]].cpu().numpy()
+        best_cl_label = "DET" if best_cl_e.get("is_det") else slot_labels[best_cl_e["k"]][:14]
 
         # Draw
         draw_scene_base(ax, path)
@@ -231,7 +280,7 @@ def main():
                   f"Top1 k={top1['k']} {slot_labels[top1['k']][:14]} (tot={top1['total']:+.1f} cl={top1['cl']:+.2f})",
                   "#d62728", path)
         draw_traj(ax, best_traj,
-                  f"BestCL k={best_cl_e['k']} {slot_labels[best_cl_e['k']][:14]} (cl={best_cl_e['cl']:+.2f})",
+                  f"{best_cl_label_prefix}BestCL[valid] {best_cl_label} (cl={best_cl_e['cl']:+.2f})",
                   "#2ca02c", path)
 
         # Frame on trajectory area
