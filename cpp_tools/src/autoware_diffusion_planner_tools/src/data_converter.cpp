@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "nlohmann/json.hpp"
+#include "timestamp_stats.hpp"
 #include "rosbag_parser.hpp"
 
 #include <Eigen/Core>
@@ -284,6 +285,11 @@ int64_t parse_timestamp(const builtin_interfaces::msg::Time & stamp)
   return static_cast<int64_t>(stamp.sec) * 1000000000LL + static_cast<int64_t>(stamp.nanosec);
 }
 
+inline double to_millisecond(const int64_t timestamp_ns)
+{
+  return static_cast<double>(timestamp_ns) / 1e6;
+}
+
 template <typename T>
 std::vector<T> check_and_update_msg(
   std::deque<T> & msgs, const builtin_interfaces::msg::Time & target_stamp)
@@ -547,7 +553,7 @@ void save_frame_json(
 void save_route_json(
   const std::string & output_path, const std::string & rosbag_dir_name,
   const std::string & identifier, const int64_t num_frames, const double traveled_distance_m,
-  const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info)
+  const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info, const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
 {
   namespace fs = std::filesystem;
 
@@ -569,6 +575,35 @@ void save_route_json(
     {"label", static_cast<int>(skipping_info.label)},
     {"details", skipping_info.details},
     {"missing_topic_types", missing_types}};
+  nlohmann::json timestamp_stats_json;
+  for (const auto & [topic, stats] : timestamp_stats_map.stats_map) {
+    nlohmann::json diff_stats_json = {
+      {"mean_ms", to_millisecond(stats.diff_mean())},
+      {"std_dev_ms", to_millisecond(stats.diff_std_dev())},
+      {"min_ms", to_millisecond(stats.diff_min())},
+      {"max_ms", to_millisecond(stats.diff_max())}
+    };
+    nlohmann::json header_diff_stats_json = {
+      {"mean_ms", to_millisecond(stats.header_diff_mean())},
+      {"std_dev_ms", to_millisecond(stats.header_diff_std_dev())},
+      {"min_ms", to_millisecond(stats.header_diff_min())},
+      {"max_ms", to_millisecond(stats.header_diff_max())}
+    };
+    nlohmann::json rosbag_diff_stats_json = {
+      {"mean_ms", to_millisecond(stats.rosbag_diff_mean())},
+      {"std_dev_ms", to_millisecond(stats.rosbag_diff_std_dev())},
+      {"min_ms", to_millisecond(stats.rosbag_diff_min())},
+      {"max_ms", to_millisecond(stats.rosbag_diff_max())}
+    };
+    timestamp_stats_json[topic] = {
+      {"monotonic_header", stats.is_monotonic_header()},
+      {"monotonic_rosbag", stats.is_monotonic_rosbag()},
+      {"diff_stats", diff_stats_json},
+      {"header_diff_stats", header_diff_stats_json},
+      {"rosbag_diff_stats", rosbag_diff_stats_json}
+    };
+  }
+  j["timestamp_stats"] = timestamp_stats_json;
 
   const std::string json_filename = routes_dir + "/" + rosbag_dir_name + "_" + identifier + ".json";
   std::ofstream json_file(json_filename);
@@ -698,6 +733,8 @@ int main(int argc, char ** argv)
     "/vehicle/status/turn_indicators_status",
     "/perception/traffic_light_recognition/traffic_signals"};
 
+  timestamp_stats::TimestampStatsMap timestamp_stats_map(target_topics);
+
   int64_t parse_count = 0;
   while (rosbag_parser.has_next() && (limit < 0 || parse_count < limit)) {
     const rosbag2_storage::SerializedBagMessageSharedPtr msg = rosbag_parser.read_next();
@@ -705,28 +742,36 @@ int main(int argc, char ** argv)
     if (msg->topic_name == "/localization/kinematic_state") {
       const Odometry odometry = rosbag_parser.deserialize_message<Odometry>(msg);
       kinematic_states.push_back(odometry);
+      timestamp_stats_map.add_timestamp("/localization/kinematic_state", parse_timestamp(odometry.header.stamp), static_cast<int64_t>(msg->time_stamp));
     } else if (msg->topic_name == "/localization/acceleration") {
       const AccelWithCovarianceStamped accel =
         rosbag_parser.deserialize_message<AccelWithCovarianceStamped>(msg);
       accelerations.push_back(accel);
+      timestamp_stats_map.add_timestamp("/localization/acceleration", parse_timestamp(accel.header.stamp), static_cast<int64_t>(msg->time_stamp));
     } else if (msg->topic_name == "/perception/object_recognition/tracking/objects") {
       const TrackedObjects objects = rosbag_parser.deserialize_message<TrackedObjects>(msg);
       tracked_objects_msgs.push_back(objects);
+      timestamp_stats_map.add_timestamp("/perception/object_recognition/tracking/objects", parse_timestamp(objects.header.stamp), static_cast<int64_t>(msg->time_stamp));
     } else if (msg->topic_name == "/planning/mission_planning/route") {
       const LaneletRoute route = rosbag_parser.deserialize_message<LaneletRoute>(msg);
       route_msgs.push_back(route);
+      timestamp_stats_map.add_timestamp("/planning/mission_planning/route", parse_timestamp(route.header.stamp), static_cast<int64_t>(msg->time_stamp));
     } else if (msg->topic_name == "/vehicle/status/turn_indicators_status") {
       const TurnIndicatorsReport turn_ind =
         rosbag_parser.deserialize_message<TurnIndicatorsReport>(msg);
       turn_indicators.push_back(turn_ind);
+      timestamp_stats_map.add_timestamp("/vehicle/status/turn_indicators_status", parse_timestamp(turn_ind.stamp), static_cast<int64_t>(msg->time_stamp));
     } else if (msg->topic_name == "/perception/traffic_light_recognition/traffic_signals") {
       const TrafficLightGroupArray traffic_signal =
         rosbag_parser.deserialize_message<TrafficLightGroupArray>(msg);
       traffic_signals.push_back(traffic_signal);
+      timestamp_stats_map.add_timestamp("/perception/traffic_light_recognition/traffic_signals", parse_timestamp(traffic_signal.stamp), static_cast<int64_t>(msg->time_stamp));
     }
 
     parse_count++;
   }
+
+  timestamp_stats_map.analyze_all();
 
   std::cout << "Parsed " << kinematic_states.size() << " kinematic states" << std::endl;
   std::cout << "Parsed " << accelerations.size() << " acceleration messages" << std::endl;
@@ -772,7 +817,7 @@ int main(int argc, char ** argv)
 
     save_route_json(
       save_dir, rosbag_dir_name, "missing_topics", 0, 0.0, 0, 0,
-      SkippingInfo::missing_topics(missing_topic_types));
+      SkippingInfo::missing_topics(missing_topic_types), timestamp_stats_map);
     rclcpp::shutdown();
     return 0;
   }
@@ -981,7 +1026,7 @@ int main(int argc, char ** argv)
                 << std::endl;
       save_route_json(
         save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-        SkippingInfo::insufficient_frames(n, min_frames));
+        SkippingInfo::insufficient_frames(n, min_frames), timestamp_stats_map);
       continue;
     }
 
@@ -991,13 +1036,13 @@ int main(int argc, char ** argv)
                 << " meters (min: " << min_distance << " meters)" << std::endl;
       save_route_json(
         save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-        SkippingInfo::insufficient_distance(traveled_distance, min_distance));
+        SkippingInfo::insufficient_distance(traveled_distance, min_distance), timestamp_stats_map);
       continue;
     }
 
     save_route_json(
       save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-      SkippingInfo::accepted());
+      SkippingInfo::accepted(), timestamp_stats_map);
 
     // Replace the goal pose with the last frame's pose
     seq.route.goal_pose = seq.data_list.back().kinematic_state.pose.pose;

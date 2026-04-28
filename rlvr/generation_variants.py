@@ -83,6 +83,29 @@ _RL_CL_2_0_SPD2_0_NOISY = {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "label": 
 _RL_CL_2_5_SPD2_5_NOISY = {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "label": "RL_CL2.5_SPD2.5_n0308"}
 _RL_CL_3_0_SPD3_0_NOISY = {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "label": "RL_CL3.0_SPD3.0_n0308"}
 
+# Very gentle rl_cl slots (cl ≤ 2.0) for the zones where stronger scales
+# caused north-return breakage in closed-loop MPC sim.
+_RL_CL_1_0_SPD1_0_DET   = {"cl": 1.0, "spd": 1.0, "noise": (0.0, 0.0), "label": "RL_CL1.0_SPD1.0_det"}
+_RL_CL_1_0_SPD1_0_NOISY = {"cl": 1.0, "spd": 1.0, "noise": (0.3, 0.8), "label": "RL_CL1.0_SPD1.0_n0308"}
+_RL_CL_1_5_SPD1_5_NOISY = {"cl": 1.5, "spd": 1.5, "noise": (0.3, 0.8), "label": "RL_CL1.5_SPD1.5_n0308"}
+_RL_CL_0_5_SPD0_5_DET   = {"cl": 0.5, "spd": 0.5, "noise": (0.0, 0.0), "label": "RL_CL0.5_SPD0.5_det"}
+
+# Stretched rl_cl slots: same rl_cl pull + speed stretch so path length is
+# preserved or lengthened. Used when base rl_cl_soft_sweep trajectories
+# collapse path on sim-from-route training because rl_cl pulls laterally.
+_RL_CL_2_0_SPD2_0_STR12 = {"cl": 2.0, "spd": 2.0, "noise": (0.0, 0.0), "stretch": 1.2, "label": "RL_CL2.0_SPD2.0_str12"}
+_RL_CL_2_5_SPD2_5_STR13 = {"cl": 2.5, "spd": 2.5, "noise": (0.0, 0.0), "stretch": 1.3, "label": "RL_CL2.5_SPD2.5_str13"}
+_RL_CL_3_0_SPD3_0_STR14 = {"cl": 3.0, "spd": 3.0, "noise": (0.3, 0.8), "stretch": 1.4, "label": "RL_CL3.0_SPD3.0_str14_n0308"}
+_RL_CL_3_0_SPD3_0_STR12 = {"cl": 3.0, "spd": 3.0, "noise": (0.0, 0.0), "stretch": 1.2, "label": "RL_CL3.0_SPD3.0_str12"}
+# Nonzero-noise low-scale rl_cl slots (replaces the dead str12/str13 slots
+# that never won on the sim-from-route campaign).
+# _RL_CL_1_5_SPD1_5_N0308 is an alias for _RL_CL_1_5_SPD1_5_NOISY (same cl/spd/
+# noise and label). Kept as a name to match the documented "n0308" naming on
+# this sweep but referencing the same dict so any future edit lands in one
+# place.
+_RL_CL_1_5_SPD1_5_N0308 = _RL_CL_1_5_SPD1_5_NOISY
+_RL_CL_2_0_SPD2_0_STR12_N = {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "stretch": 1.2, "label": "RL_CL2.0_SPD2.0_str12_n0308"}
+
 # Lateral push slots
 _LATL04 = {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "lat_eta":  0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latL04"}
 _LATR04 = {"cl": 5.0, "spd": 5.0, "noise": (0.3, 0.8), "lat_eta": -0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "CL5_SPD5_latR04"}
@@ -183,6 +206,63 @@ _VARIANTS: dict[str, GenerationVariant] = {
             {"noise": (0.5, 1.0), "label": "noise_n0510"},  # only low-noise exploration slot
         ],
     ),
+    "rl_cl_gentle": GenerationVariant(
+        description="Gentler rl_cl sweep: cl scales in {0.5, 1.0, 1.5, 2.0} "
+                    "ONLY — no 2.5 or 3.0 slots, and no stretch. Addresses "
+                    "the 2026-04-24 north-return MPC breakage observed with "
+                    "rl_cl_soft_sweep_stretch at scale 3.0 (baseline 0.08 m → "
+                    "trained 3.80 m mean |lat| in arc 1100-1500 m). The "
+                    "hypothesis is that scale ≥ 2.5 pulls hard enough that "
+                    "MPC tracker can't follow the resulting trajectories in "
+                    "low-drift zones, breaking places the baseline handled "
+                    "well. K=8 = 1 det + 4 det-sweep (0.5/1.0/1.5/2.0) + 3 "
+                    "low-noise variants.",
+        cl_spd_configs=[
+            _RL_CL_0_5_SPD0_5_DET,      # very gentle
+            _RL_CL_1_0_SPD1_0_DET,
+            _RL_CL_1_5_SPD1_5_DET,
+            _RL_CL_2_0_SPD2_0_DET,
+            _RL_CL_1_0_SPD1_0_NOISY,
+            _RL_CL_1_5_SPD1_5_NOISY,
+            _RL_CL_2_0_SPD2_0_NOISY,
+        ],
+        noise_configs=[],
+    ),
+    "rl_cl_stretch_v2": GenerationVariant(
+        description="Refined rl_cl_soft_sweep_stretch — drops the 2 dead slots "
+                    "(RL_CL2.0_SPD2.0_str12, RL_CL2.5_SPD2.5_str13 — never won "
+                    "in epoch-8 analytics) and adds nonzero-noise variants of "
+                    "the winning low-scale slots. Keeps the str14_n0308 top "
+                    "slot that dominated the last run.",
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,            # winner 22-24%
+            _RL_CL_1_5_SPD1_5_N0308,          # NEW — noisy low-scale
+            _RL_CL_2_0_SPD2_0_DET,            # low win rate but kept as anchor
+            _RL_CL_3_0_SPD3_0_STR12,          # winner 12-13%
+            _RL_CL_3_0_SPD3_0_STR14,          # top slot 33-37%
+            _RL_CL_2_0_SPD2_0_STR12_N,        # NEW — stretch + noise, new low-scale
+            _RL_CL_2_5_SPD2_5_NOISY,          # noisy mid-scale from base variant
+        ],
+        noise_configs=[],
+    ),
+    "rl_cl_soft_sweep_stretch": GenerationVariant(
+        description="rl_cl sweep + path-length preservation via speed stretch. "
+                    "K=8: 1 det + 3 det-sweep + 4 stretch-augmented. Targets "
+                    "route_lanes centerline (use_route_cl_guidance=True) while "
+                    "the stretch factor keeps trajectories from collapsing laterally. "
+                    "Use when plain rl_cl_soft_sweep shortens path on sim-from-route "
+                    "training.",
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,       # baseline rl_cl=1.5
+            _RL_CL_2_0_SPD2_0_DET,       # baseline rl_cl=2.0
+            _RL_CL_2_5_SPD2_5_DET,       # baseline rl_cl=2.5
+            _RL_CL_2_0_SPD2_0_STR12,     # rl_cl=2.0 + stretch 1.2
+            _RL_CL_2_5_SPD2_5_STR13,     # rl_cl=2.5 + stretch 1.3
+            _RL_CL_3_0_SPD3_0_STR12,     # rl_cl=3.0 + stretch 1.2
+            _RL_CL_3_0_SPD3_0_STR14,     # rl_cl=3.0 + stretch 1.4 + noise
+        ],
+        noise_configs=[],
+    ),
     "rl_cl_soft_sweep": GenerationVariant(
         description="Low-scale CL sweep (scale ∈ {1.5, 2.0, 2.5, 3.0}) with no "
                     "pure-noise slots. K=8: 1 det + 4 det-sweep + 3 low-noise-sweep. "
@@ -197,6 +277,24 @@ _VARIANTS: dict[str, GenerationVariant] = {
             _RL_CL_2_0_SPD2_0_NOISY,     # rl_cl=2.0, noise (0.3, 0.8)
             _RL_CL_2_5_SPD2_5_NOISY,     # rl_cl=2.5, noise (0.3, 0.8)
             _RL_CL_3_0_SPD3_0_NOISY,     # rl_cl=3.0, noise (0.3, 0.8)
+        ],
+        noise_configs=[],
+    ),
+    "rl_cl_lat_combo": GenerationVariant(
+        description="Phase 3: route-CL pull + lateral push combined. K=8 = 1 det "
+                    "+ 3 rl_cl-only sweep + 4 rl_cl+lat slots (lat_eta=+/-0.4 "
+                    "and +/-0.6). Tests whether lateral-disturbed slots produce "
+                    "diverse off-CL trajectories that broaden the ranker's "
+                    "pickable set vs pure rl_cl_soft_sweep.",
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,
+            _RL_CL_2_0_SPD2_0_DET,
+            _RL_CL_2_5_SPD2_5_DET,
+            _RL_CL_3_0_SPD3_0_DET,
+            {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "lat_eta":  0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "RL_CL2.0_latL04"},
+            {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "lat_eta": -0.4, "lat_lambda": 2.0, "lat_scale": 5.0, "label": "RL_CL2.0_latR04"},
+            {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "lat_eta":  0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "RL_CL2.5_latL06"},
+            {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "lat_eta": -0.6, "lat_lambda": 2.5, "lat_scale": 5.0, "label": "RL_CL2.5_latR06"},
         ],
         noise_configs=[],
     ),
