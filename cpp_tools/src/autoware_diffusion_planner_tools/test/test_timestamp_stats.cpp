@@ -71,3 +71,14 @@ TEST(TimestampStatsMapTest, AddAndAnalyze)
   EXPECT_DOUBLE_EQ(stats_map.stats_map["/a"].diff_mean(), 10.0);
   EXPECT_DOUBLE_EQ(stats_map.stats_map["/b"].diff_mean(), 10.0);
 }
+
+TEST(TimestampStatsMapTest, EmptyTopics)
+{
+  std::vector<std::string> topics;
+  TimestampStatsMap stats_map(topics);
+  EXPECT_TRUE(stats_map.stats_map.empty());
+  // add timestamp to a new topic not in the initial list
+  stats_map.add_timestamp("/new_topic", 100, 200);
+  EXPECT_EQ(stats_map.stats_map.size(), 1);
+  EXPECT_TRUE(stats_map.stats_map.find("/new_topic") != stats_map.stats_map.end());
+}
