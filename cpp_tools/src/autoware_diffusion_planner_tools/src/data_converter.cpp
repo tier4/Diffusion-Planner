@@ -569,37 +569,35 @@ void save_route_json(
     {"label", static_cast<int>(skipping_info.label)},
     {"details", skipping_info.details},
     {"missing_topic_types", missing_types}};
-  if (!timestamp_stats_map.stats_map.empty()) {
-    nlohmann::json timestamp_stats_json;
-    for (const auto & [topic, stats] : timestamp_stats_map.stats_map) {
-      nlohmann::json diff_stats_json = {
-        {"mean", stats.diff_mean()},
-        {"std_dev", stats.diff_std_dev()},
-        {"min", stats.diff_min()},
-        {"max", stats.diff_max()}
-      };
-      nlohmann::json header_diff_stats_json = {
-        {"mean", stats.header_diff_mean()},
-        {"std_dev", stats.header_diff_std_dev()},
-        {"min", stats.header_diff_min()},
-        {"max", stats.header_diff_max()}
-      };
-      nlohmann::json rosbag_diff_stats_json = {
-        {"mean", stats.rosbag_diff_mean()},
-        {"std_dev", stats.rosbag_diff_std_dev()},
-        {"min", stats.rosbag_diff_min()},
-        {"max", stats.rosbag_diff_max()}
-      };
-      timestamp_stats_json[topic] = {
-        {"monotonic_header", stats.is_monotonic_header()},
-        {"monotonic_rosbag", stats.is_monotonic_rosbag()},
-        {"diff_stats", diff_stats_json},
-        {"header_diff_stats", header_diff_stats_json},
-        {"rosbag_diff_stats", rosbag_diff_stats_json}
-      };
-    }
-    j["timestamp_stats"] = timestamp_stats_json;
+  nlohmann::json timestamp_stats_json;
+  for (const auto & [topic, stats] : timestamp_stats_map.stats_map) {
+    nlohmann::json diff_stats_json = {
+      {"mean", stats.diff_mean()},
+      {"std_dev", stats.diff_std_dev()},
+      {"min", stats.diff_min()},
+      {"max", stats.diff_max()}
+    };
+    nlohmann::json header_diff_stats_json = {
+      {"mean", stats.header_diff_mean()},
+      {"std_dev", stats.header_diff_std_dev()},
+      {"min", stats.header_diff_min()},
+      {"max", stats.header_diff_max()}
+    };
+    nlohmann::json rosbag_diff_stats_json = {
+      {"mean", stats.rosbag_diff_mean()},
+      {"std_dev", stats.rosbag_diff_std_dev()},
+      {"min", stats.rosbag_diff_min()},
+      {"max", stats.rosbag_diff_max()}
+    };
+    timestamp_stats_json[topic] = {
+      {"monotonic_header", stats.is_monotonic_header()},
+      {"monotonic_rosbag", stats.is_monotonic_rosbag()},
+      {"diff_stats", diff_stats_json},
+      {"header_diff_stats", header_diff_stats_json},
+      {"rosbag_diff_stats", rosbag_diff_stats_json}
+    };
   }
+  j["timestamp_stats"] = timestamp_stats_json;
 
   const std::string json_filename = routes_dir + "/" + rosbag_dir_name + "_" + identifier + ".json";
   std::ofstream json_file(json_filename);
