@@ -2,7 +2,7 @@
 """Render a directory of training-style NPZ files as per-step PNGs that look
 exactly like ``scenario_generation.replay`` output.
 
-Reuses ``scenario_generation.replay._save_step_figure`` (the same function
+Reuses ``scenario_generation.replay.save_step_figure`` (the same function
 the replay calls every step) so the viewport, agent boxes, route overlay,
 lane network, road borders, etc. all match closed-loop sim renders.
 
@@ -25,7 +25,7 @@ matplotlib.use("Agg")
 import numpy as np
 
 from scenario_generation.npz_loader import from_npz
-from scenario_generation.replay import _save_step_figure
+from scenario_generation.replay import save_step_figure
 from scenario_generation.transforms import yaw_from_quat
 
 
@@ -178,7 +178,7 @@ def _render_one(args):
             _WORKER_ROAD_BORDER_POLYLINES, ego_xy_yaw, crop_radius_m=80.0,
         )
         agent_predictions = _ego_future_to_predictions(scene)
-        _save_step_figure(
+        save_step_figure(
             scene=scene,
             agent_predictions=agent_predictions,
             output_path=out_path,

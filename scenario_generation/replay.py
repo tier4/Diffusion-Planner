@@ -1184,7 +1184,7 @@ def _ego_nearest_static_npc(
     )
 
 
-def _save_step_figure(
+def save_step_figure(
     scene: SceneContext,
     agent_predictions: dict,
     output_path: Path,
@@ -1949,7 +1949,7 @@ def run_route_replay(
                 else None
             )
             pending_saves.append(save_pool.submit(
-                _save_step_figure,
+                save_step_figure,
                 deepcopy(scene), agent_predictions, out_path,
                 step, spawn_config.max_steps, route_polylines,
                 _VIEW_HALF_M, tl_controller, _route_vis_ll_ids,
