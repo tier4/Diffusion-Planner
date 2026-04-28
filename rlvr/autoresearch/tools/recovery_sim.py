@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Recovery sim: render sim-style PNGs of a closed-loop lateral-recovery rollout.
 
-Mirrors the rendering of ``scenario_generation.replay`` (`_save_step_figure`):
+Mirrors the rendering of ``scenario_generation.replay`` (`save_step_figure`):
 lane network, road borders, ego oriented box, predicted trajectory ahead,
 and a body-to-border distance overlay. Operates in the **initial ego frame**
 (the frame stored in the NPZ) so we don't need an OSM / lanelet2 lookup —
@@ -294,7 +294,7 @@ def closed_loop_rollout_with_plans(
 
 
 # ---------------------------------------------------------------------------
-# Per-step rendering (mirrors scenario_generation.replay._save_step_figure)
+# Per-step rendering (mirrors scenario_generation.replay.save_step_figure)
 # ---------------------------------------------------------------------------
 
 

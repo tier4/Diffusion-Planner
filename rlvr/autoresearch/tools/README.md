@@ -20,6 +20,91 @@ python -m rlvr.autoresearch.tools.eval_lane_border_distance \
   --model_path <model.pth> --scenes <scenes.json> --tag <name>
 ```
 
+### eval_psim_centerline.py
+Closed-loop psim-rosbag centerline-tracking comparison between two runs (e.g. baseline
+vs a PRiSM-trained checkpoint). Reuses the official lateral metric:
+`compute_centerline_score_batch` from `rlvr.reward` via the helper
+`lat_offset_and_naive_score` (same code the GRPO training reward sees), so reported
+numbers are directly comparable to training metrics.
+
+Why it's separate from `eval_centerline_metrics.py`: that tool generates trajectories
+from a model and scores them on each npz's own `route_lanes` field. This tool consumes
+*already-rolled-out* psim ego poses across an entire run and projects them onto a
+reference centerline built from the rosbag's `LaneletRoute` + the lanelet2 map. The npz
+`route_lanes` field is unreliable in psim teleport bags (40–75% of frames have empty
+route segments — the route is published once before teleport and the converter cannot
+re-anchor it), so the reference must be reconstructed from `route.json` and the map.
+
+The signed lateral metric is exposed as `signed_lat_offset_m` in
+`lat_offset_and_naive_score`'s output dict — `+` = ego left of route direction, `−` =
+right (same sign convention `compute_centerline_score_batch` uses internally to pick
+between `left_hw` and `−right_hw`).
+
+```bash
+# 1. Convert rosbags to npz. psim bags lack /perception/traffic_light_recognition/
+#    traffic_signals; inject empty TL msgs first (see the helper script paired with
+#    your dataset), then run:
+python ros_scripts/parse_rosbag_by_cpp.py \
+    cpp_tools/build/autoware_diffusion_planner_tools/data_converter \
+    <bag_with_tl> <lanelet2_map.osm> <out>/npz/<run_name> \
+    --step 2 --min_frames 100 --interpolation 1
+
+# 2. Export the route message as JSON (one-time, from the route rosbag):
+#    python extract_route.py <route_bag> --output route.json
+
+# 3. Heatmap comparison:
+python -m rlvr.autoresearch.tools.eval_psim_centerline \
+    --baseline_dir <out>/npz/baseline \
+    --prism_dir <out>/npz/<prism_run> \
+    --osm <lanelet2_map.osm> \
+    --route_json <route.json> \
+    --out_dir <out>/analysis
+```
+Outputs: `summary.txt`, `{baseline,prism}_offsets.npz`, `route_polyline.npy`,
+`heatmap_combined.png` (3-panel: baseline | prism | Δ), `heatmap_centerline_xy.png`
+(2-panel scatter), `heatmap_centerline_diff.png` (Δ binned along route arc-length and
+re-projected onto the polyline so it remains visible at any zoom),
+`histogram_offsets.png`, `timeseries.png`, `progress_vs_offset.png`.
+
+### eval_psim_centerline_nway.py
+N-way generalisation of `eval_psim_centerline`. Compare any number of runs (≥2)
+side-by-side. Each run is a `--run name=<label>,kind=<npz|trajlog>,path=<...>` triple,
+mixing rosbag-derived npz directories and `scenario_generation.replay`
+`trajectory_log.json` outputs in the same comparison. Reuses the same lateral metric
+helper, so all per-run numbers stay comparable across rosbag-converted and
+closed-loop replay runs.
+```bash
+python -m rlvr.autoresearch.tools.eval_psim_centerline_nway \
+    --run name=baseline,kind=npz,path=<dir>/npz \
+    --run name=run_a,kind=trajlog,path=<dir>/trajectory_log.json \
+    --run name=run_b,kind=trajlog,path=<dir>/trajectory_log.json \
+    --osm <map>.osm --route_json <route>.json --out_dir <out>
+```
+Outputs: `summary.txt`, `route_polyline.npy`, per-run `<name>_offsets.npz`,
+`heatmap_nway_xy.png` (N-panel scatter), `heatmap_nway_diff.png` (Δ panels for each
+non-baseline run, projected onto the polyline), `histogram_offsets.png`,
+`progress_vs_offset.png`.
+
+### scenario_generation.render_npz_dir
+Render a directory of training-style npz files as `step_NNNN.png` PNGs that look like
+`scenario_generation.replay` output. Reuses the replay's per-step renderer
+(`_save_step_figure`), so the viewport, ego box, route overlay, road borders, agent
+predictions and HUD line all match closed-loop sim renders exactly. Useful for
+qualitative side-by-side video comparisons of a recorded rosbag and a closed-loop
+replay.
+```bash
+python -m scenario_generation.render_npz_dir \
+    --npz_dir <path>/npz --output_dir <path>/render \
+    [--route_pkl <route>.pkl] \
+    [--ego_length 7.24 --ego_width 2.29 --ego_wheelbase 4.76] \
+    [--workers 8] [--limit 100] [--stride 1]
+```
+The route pickle is optional; without it the route polyline isn't drawn but everything
+else (lane network, road borders, agents, predicted trajectory, HUD) still appears.
+Ego dimensions can be overridden when the npz was converted with the data_converter's
+default ego_length / ego_width but the rosbag was recorded on a vehicle with different
+dimensions.
+
 ### eval_reward_vs_gt.py
 Per-scene reward breakdown comparing model output vs ground truth. Useful for diagnosing which reward components are driving training.
 ```bash

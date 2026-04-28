@@ -63,6 +63,16 @@ def lat_offset_and_naive_score(
     ``usage_mode`` must match the reward config's ``centerline_usage_mode``
     so the printed naive_score is comparable to compute_centerline_score_batch.
     Defaults to ``baselink`` (the new default since 2026-04-27).
+
+    Returns a dict with:
+      * ``lat_offset_m``: [T] absolute distance from base_link to the nearest
+        route-lane centerline point (m).
+      * ``signed_lat_offset_m``: [T] signed distance — ``+`` = ego is left of
+        the route direction, ``−`` = right. Same sign convention
+        ``compute_centerline_score_batch`` uses internally to pick between
+        ``left_hw`` and ``−right_hw``.
+      * ``lane_usage_uncapped``: [T] same metric divided by lane half-width.
+      * ``naive_score``, ``any_off_route``: see above.
     """
     device = traj.device
     lanes = data.get("route_lanes", data.get("lanes"))
@@ -107,6 +117,7 @@ def lat_offset_and_naive_score(
     any_off_route = bool(((min_dist > 5.0).cummax(dim=0).values & (min_dist > 5.0)).any().item())
     return {
         "lat_offset_m": ego_lat.abs().cpu().numpy(),  # [T]
+        "signed_lat_offset_m": ego_lat.cpu().numpy(),  # [T] (+ left of route, − right)
         "lane_usage_uncapped": lane_usage.cpu().numpy(),  # [T]
         "naive_score": naive_score,
         "any_off_route": any_off_route,
