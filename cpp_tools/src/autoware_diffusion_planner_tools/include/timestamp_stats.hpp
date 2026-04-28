@@ -63,11 +63,11 @@ inline int64_t max(const std::vector<int64_t> & values)
   return *std::max_element(values.begin(), values.end());
 }
 
-class TimeStampStats
+class TimestampStats
 {
 public:
-  TimeStampStats(const std::string & topic) : topic_name_(topic) {}
-  TimeStampStats() : topic_name_("") {}
+  TimestampStats(const std::string & topic) : topic_name_(topic) {}
+  TimestampStats() : topic_name_("") {}
 
   void add_header_timestamp(const int64_t timestamp) { header_timestamps_.push_back(timestamp); }
   void add_rosbag_timestamp(const int64_t timestamp) { rosbag_timestamps_.push_back(timestamp); }
@@ -213,14 +213,14 @@ struct TimestampStatsMap
   TimestampStatsMap(const std::vector<std::string> & topics)
   {
     for (const auto & topic : topics) {
-      stats_map.emplace(topic, TimeStampStats(topic));
+      stats_map.emplace(topic, TimestampStats(topic));
     }
   }
 
   void add_timestamp(const std::string & topic, int64_t header_ts, int64_t rosbag_ts)
   {
     if (stats_map.find(topic) == stats_map.end()) {
-      stats_map.emplace(topic, TimeStampStats(topic));
+      stats_map.emplace(topic, TimestampStats(topic));
     }
     stats_map[topic].add_header_timestamp(header_ts);
     stats_map[topic].add_rosbag_timestamp(rosbag_ts);
@@ -233,7 +233,7 @@ struct TimestampStatsMap
     }
   }
 
-  std::unordered_map<std::string, TimeStampStats> stats_map;
+  std::unordered_map<std::string, TimestampStats> stats_map;
 };
 } // namespace timestamp_stats
 

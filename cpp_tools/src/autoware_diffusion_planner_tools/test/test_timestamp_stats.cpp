@@ -19,9 +19,9 @@
 
 using namespace timestamp_stats;
 
-TEST(TimeStampStatsTest, BasicStats)
+TEST(TimestampStatsTest, BasicStats)
 {
-  TimeStampStats stats("/test/topic");
+  TimestampStats stats("/test/topic");
   std::vector<int64_t> header_ts = {100, 200, 300, 400, 500};
   std::vector<int64_t> rosbag_ts = {110, 210, 310, 410, 510};
   for (size_t i = 0; i < header_ts.size(); ++i) {
@@ -43,9 +43,9 @@ TEST(TimeStampStatsTest, BasicStats)
   EXPECT_EQ(stats.rosbag_diff_max(), 100);
 }
 
-TEST(TimeStampStatsTest, NonMonotonic)
+TEST(TimestampStatsTest, NonMonotonic)
 {
-  TimeStampStats stats("/test/topic");
+  TimestampStats stats("/test/topic");
   std::vector<int64_t> header_ts = {100, 300, 200, 400};
   std::vector<int64_t> rosbag_ts = {110, 310, 210, 410};
   for (size_t i = 0; i < header_ts.size(); ++i) {
