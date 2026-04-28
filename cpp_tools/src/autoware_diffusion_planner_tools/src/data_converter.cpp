@@ -284,6 +284,11 @@ int64_t parse_timestamp(const builtin_interfaces::msg::Time & stamp)
   return static_cast<int64_t>(stamp.sec) * 1000000000LL + static_cast<int64_t>(stamp.nanosec);
 }
 
+inline double to_millisecond(const int64_t timestamp_ns)
+{
+  return static_cast<double>(timestamp_ns) / 1e6;
+}
+
 template <typename T>
 std::vector<T> check_and_update_msg(
   std::deque<T> & msgs, const builtin_interfaces::msg::Time & target_stamp)
@@ -572,22 +577,22 @@ void save_route_json(
   nlohmann::json timestamp_stats_json;
   for (const auto & [topic, stats] : timestamp_stats_map.stats_map) {
     nlohmann::json diff_stats_json = {
-      {"mean", stats.diff_mean()},
-      {"std_dev", stats.diff_std_dev()},
-      {"min", stats.diff_min()},
-      {"max", stats.diff_max()}
+      {"mean_ms", to_millisecond(stats.diff_mean())},
+      {"std_dev_ms", to_millisecond(stats.diff_std_dev())},
+      {"min_ms", to_millisecond(stats.diff_min())},
+      {"max_ms", to_millisecond(stats.diff_max())}
     };
     nlohmann::json header_diff_stats_json = {
-      {"mean", stats.header_diff_mean()},
-      {"std_dev", stats.header_diff_std_dev()},
-      {"min", stats.header_diff_min()},
-      {"max", stats.header_diff_max()}
+      {"mean_ms", to_millisecond(stats.header_diff_mean())},
+      {"std_dev_ms", to_millisecond(stats.header_diff_std_dev())},
+      {"min_ms", to_millisecond(stats.header_diff_min())},
+      {"max_ms", to_millisecond(stats.header_diff_max())}
     };
     nlohmann::json rosbag_diff_stats_json = {
-      {"mean", stats.rosbag_diff_mean()},
-      {"std_dev", stats.rosbag_diff_std_dev()},
-      {"min", stats.rosbag_diff_min()},
-      {"max", stats.rosbag_diff_max()}
+      {"mean_ms", to_millisecond(stats.rosbag_diff_mean())},
+      {"std_dev_ms", to_millisecond(stats.rosbag_diff_std_dev())},
+      {"min_ms", to_millisecond(stats.rosbag_diff_min())},
+      {"max_ms", to_millisecond(stats.rosbag_diff_max())}
     };
     timestamp_stats_json[topic] = {
       {"monotonic_header", stats.is_monotonic_header()},

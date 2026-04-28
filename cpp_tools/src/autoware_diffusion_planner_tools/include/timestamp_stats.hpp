@@ -24,7 +24,7 @@
 
 namespace timestamp_stats
 {
-double mean(const std::vector<int64_t> & values)
+inline double mean(const std::vector<int64_t> & values)
 {
   if (values.empty()) {
     return 0.0;
@@ -33,7 +33,7 @@ double mean(const std::vector<int64_t> & values)
   return static_cast<double>(sum) / values.size();
 }
 
-double std_dev(const std::vector<int64_t> & values, double mean)
+inline double std_dev(const std::vector<int64_t> & values, double mean)
 {
   if (values.size() < 2) {
     return 0.0;
@@ -46,7 +46,7 @@ double std_dev(const std::vector<int64_t> & values, double mean)
   return std::sqrt(variance);
 }
 
-int64_t min(const std::vector<int64_t> & values)
+inline int64_t min(const std::vector<int64_t> & values)
 {
   if (values.empty()) {
     return 0;
@@ -54,7 +54,7 @@ int64_t min(const std::vector<int64_t> & values)
   return *std::min_element(values.begin(), values.end());
 }
 
-int64_t max(const std::vector<int64_t> & values)
+inline int64_t max(const std::vector<int64_t> & values)
 {
   if (values.empty()) {
     return 0;
