@@ -43,10 +43,11 @@ ament_auto_package(
 )
 
 # --- GoogleTest for unit tests ---
-find_package(GTest REQUIRED)
-enable_testing()
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
 
-add_executable(test_timestamp_stats test/test_timestamp_stats.cpp)
-target_include_directories(test_timestamp_stats PRIVATE include)
-target_link_libraries(test_timestamp_stats GTest::gtest GTest::gtest_main pthread)
-add_test(NAME test_timestamp_stats COMMAND test_timestamp_stats)
+  ament_add_gtest(test_timestamp_stats test/test_timestamp_stats.cpp)
+  if(TARGET test_timestamp_stats)
+    target_include_directories(test_timestamp_stats PRIVATE include)
+  endif()
+endif()
