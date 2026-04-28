@@ -7,7 +7,22 @@ This rotates by -heading, making the heading direction become [1, 0].
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
+
+
+def yaw_from_quat(qx: float, qy: float, qz: float, qw: float) -> float:
+    """Extract yaw (heading about +Z) from a quaternion using the standard
+    ZYX-Euler reduction.
+
+    For a unit quaternion this matches ``tf2::getYaw`` (ROS) and
+    ``Rotation.from_quat([qx, qy, qz, qw]).as_euler('xyz')[2]``. Returned
+    angle is in radians, range ``(-pi, pi]``.
+    """
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 
 def _rotation_matrix(heading: float) -> np.ndarray:

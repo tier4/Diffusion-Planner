@@ -61,7 +61,6 @@ _REQUIRED_REWARD_FIELDS = (
     "lane_wide_scale",
     "lane_cont_scale",
     # Centerline (added 2026-04-22)
-    "centerline_usage_cap",
     "centerline_usage_mode",
     # Progress / over-progress / under-progress
     "enable_overprogress",

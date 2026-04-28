@@ -256,8 +256,6 @@ def convert_model(
     dynamic_axes = {}
     # Add dynamic batch dimension for inputs
     for name in input_names:
-        if name == "delay":
-            continue
         dynamic_axes[name] = {0: "batch"}
     # Add dynamic batch dimension for outputs
     dynamic_axes["prediction"] = {0: "batch"}
