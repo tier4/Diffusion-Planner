@@ -95,6 +95,10 @@ def collect_run_trajectory_log(
     lon = np.full(n, np.nan, dtype=np.float64)
     speed = np.full(n, np.nan, dtype=np.float64)
 
+    # Precompute the polyline cumulative-arclength once and reuse it across
+    # frames; otherwise project_point_to_polyline_arclength would recompute
+    # an O(N_polyline) cumsum per frame.
+    poly_cum, _ = polyline_cumulative_arclength(polyline)
     traj = torch.tensor([[0.0, 0.0, 1.0, 0.0]], device=device)
 
     for i, entry in enumerate(log):
@@ -119,7 +123,7 @@ def collect_run_trajectory_log(
             continue
         lat[i] = float(out["lat_offset_m"][0])
         lat_signed[i] = float(out["signed_lat_offset_m"][0])
-        lon[i] = project_point_to_polyline_arclength(polyline, x, y)
+        lon[i] = project_point_to_polyline_arclength(polyline, x, y, cum=poly_cum)
 
     order = np.argsort(ts)
     return {
@@ -145,6 +149,9 @@ def collect_run(
     lon = np.full(n, np.nan, dtype=np.float64)
     speed = np.full(n, np.nan, dtype=np.float64)
 
+    # Precompute the polyline cumulative-arclength once and reuse it across
+    # frames (see collect_run_trajectory_log for rationale).
+    poly_cum, _ = polyline_cumulative_arclength(polyline)
     traj = torch.tensor([[0.0, 0.0, 1.0, 0.0]], device=device)  # (T=1, 4)
 
     for i, fp in enumerate(files):
@@ -175,7 +182,7 @@ def collect_run(
             continue
         lat[i] = float(out["lat_offset_m"][0])
         lat_signed[i] = float(out["signed_lat_offset_m"][0])
-        lon[i] = project_point_to_polyline_arclength(polyline, x, y)
+        lon[i] = project_point_to_polyline_arclength(polyline, x, y, cum=poly_cum)
 
     order = np.argsort(ts)
     return {

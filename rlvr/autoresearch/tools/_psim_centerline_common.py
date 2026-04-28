@@ -82,12 +82,20 @@ def parse_lanelet_centerlines(
 
 def build_route_polyline(osm_path: Path, route_json_path: Path) -> np.ndarray:
     """Concatenate per-lanelet centerlines from ``route.json``'s preferred
-    primitives into a single ``(M, 2)`` world-frame polyline."""
+    primitives into a single ``(M, 2)`` world-frame polyline.
+
+    Raises ``SystemExit`` if fewer than two centerline points were assembled
+    (e.g. all referenced lanelet ids missing from the map, or the map and
+    the route reference different worlds). Without this guard, downstream
+    point-to-polyline projection silently produces near-zero offsets — much
+    worse than failing loudly.
+    """
     import json
 
     route = json.loads(route_json_path.read_text())
     ids = [seg["preferred_primitive"]["id"] for seg in route["segments"]]
     cls = parse_lanelet_centerlines(osm_path, ids)
+    missing = [lid for lid in ids if lid not in cls]
     poly: list[list[float]] = []
     for lid in ids:
         if lid not in cls:
@@ -98,7 +106,18 @@ def build_route_polyline(osm_path: Path, route_json_path: Path) -> np.ndarray:
         else:
             poly.extend(seg.tolist())
     arr = np.array(poly, dtype=np.float64)
-    print(f"Route polyline: {len(ids)} lanelets -> {len(arr)} centerline points")
+    print(
+        f"Route polyline: {len(ids)} lanelets requested, "
+        f"{len(ids) - len(missing)} resolved -> {len(arr)} centerline points"
+        + (f" ({len(missing)} missing: e.g. {missing[:5]})" if missing else "")
+    )
+    if len(arr) < 2:
+        raise SystemExit(
+            f"build_route_polyline: only {len(arr)} centerline point(s) were "
+            f"resolved from {len(ids)} requested lanelets. The route.json and "
+            f"the lanelet2 map likely reference different worlds. "
+            f"First few missing lanelet ids: {missing[:10]}"
+        )
     return arr
 
 
@@ -183,13 +202,18 @@ def polyline_cumulative_arclength(
 
 
 def project_point_to_polyline_arclength(
-    polyline: np.ndarray, x: float, y: float
+    polyline: np.ndarray, x: float, y: float,
+    cum: np.ndarray | None = None,
 ) -> float:
     """Return the arc-length on ``polyline`` of the point closest to ``(x, y)``.
 
     Standard point-to-segment projection across all segments; picks the segment
     with the smallest perpendicular distance and adds the partial arc-length
-    along that segment."""
+    along that segment.
+
+    Pass a precomputed ``cum`` array (from ``polyline_cumulative_arclength``)
+    to skip per-call cumsum recomputation. This is O(N_polyline) extra work
+    per frame otherwise, which adds up in long runs."""
     a = polyline[:-1]
     b = polyline[1:]
     ab = b - a
@@ -199,7 +223,8 @@ def project_point_to_polyline_arclength(
     proj = a + t[:, None] * ab
     d2 = np.sum((proj - np.array([x, y])[None, :]) ** 2, axis=1)
     idx = int(np.argmin(d2))
-    cum, _ = polyline_cumulative_arclength(polyline)
+    if cum is None:
+        cum, _ = polyline_cumulative_arclength(polyline)
     return float(cum[idx] + t[idx] * np.sqrt(sl2[idx]))
 
 

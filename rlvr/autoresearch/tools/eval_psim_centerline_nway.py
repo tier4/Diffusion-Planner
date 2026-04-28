@@ -49,12 +49,21 @@ from rlvr.autoresearch.tools.eval_psim_centerline import (
 
 
 def _parse_run(spec: str) -> dict:
+    """Parse a single ``--run name=<>,kind=<>,path=<>`` spec.
+
+    Validates: all three keys present, all three values non-empty, kind in
+    {npz, trajlog}. Caller (``main``) further enforces that ``name`` is
+    unique across runs — duplicate names would silently overwrite the
+    same ``<name>_offsets.npz`` output and confuse downstream plots."""
     out = {}
     for part in spec.split(","):
         k, _, v = part.partition("=")
         out[k.strip()] = v.strip()
-    if "name" not in out or "kind" not in out or "path" not in out:
-        raise SystemExit(f"--run must include name=, kind=, path= (got {spec!r})")
+    for key in ("name", "kind", "path"):
+        if key not in out or not out[key]:
+            raise SystemExit(
+                f"--run must include non-empty name=, kind=, path= (got {spec!r})"
+            )
     if out["kind"] not in ("npz", "trajlog"):
         raise SystemExit(f"--run kind must be 'npz' or 'trajlog' (got {out['kind']})")
     return out
@@ -88,6 +97,16 @@ def main():
     runs = [_parse_run(s) for s in args.run]
     if len(runs) < 2:
         raise SystemExit("Need at least 2 runs.")
+    seen: set[str] = set()
+    for r in runs:
+        if r["name"] in seen:
+            raise SystemExit(
+                f"Duplicate run name {r['name']!r}. Run names must be unique — "
+                "they appear in plot legends and the output "
+                "<name>_offsets.npz filename, so duplicates would silently "
+                "overwrite each other."
+            )
+        seen.add(r["name"])
 
     polyline = build_route_polyline(args.osm, args.route_json)
     np.save(args.out_dir / "route_polyline.npy", polyline)
