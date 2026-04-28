@@ -81,6 +81,10 @@ public:
     // check size
     if (header_timestamps_.size() < 1 || rosbag_timestamps_.size() < 1) {
       std::cerr << "Warning: Not enough timestamps to calculate stats for topic " << topic_name_ << std::endl;
+      const std::vector<int64_t> empty_diffs;
+      diff_stats_.calc_stats(empty_diffs);
+      header_diff_stats_.calc_stats(empty_diffs);
+      rosbag_diff_stats_.calc_stats(empty_diffs);
       return;
     }
 
