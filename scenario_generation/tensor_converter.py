@@ -127,13 +127,17 @@ def _build_neighbor_agents_past(
     R: np.ndarray,
     ego_xy: np.ndarray,
     ego_heading: float,
+    max_num_neighbors: int = _MAX_NUM_NEIGHBORS,
 ) -> np.ndarray:
-    """Build neighbor_agents_past: [1, 32, INPUT_T+1, 11].
+    """Build neighbor_agents_past: [1, max_num_neighbors, INPUT_T+1, 11].
 
-    Neighbors sorted by distance from ego (closest first).
+    Neighbors sorted by distance from ego (closest first). Slots beyond the
+    actual neighbor count are zero-padded. ``max_num_neighbors`` defaults to
+    32 for back-compat; pass the model's ``predicted_neighbor_num`` (e.g. 320)
+    when running with a non-default-capacity baseline.
     """
     T_needed = _INPUT_T + 1
-    out = np.zeros((1, _MAX_NUM_NEIGHBORS, T_needed, 11), dtype=np.float32)
+    out = np.zeros((1, max_num_neighbors, T_needed, 11), dtype=np.float32)
 
     # Collect non-ego agents with their distance to ego
     neighbors_with_dist: list[tuple[float, Agent]] = []
@@ -147,7 +151,7 @@ def _build_neighbor_agents_past(
     # Sort by distance
     neighbors_with_dist.sort(key=lambda x: x[0])
 
-    for slot_idx, (_, agent) in enumerate(neighbors_with_dist[:_MAX_NUM_NEIGHBORS]):
+    for slot_idx, (_, agent) in enumerate(neighbors_with_dist[:max_num_neighbors]):
         traj = agent.past_trajectory  # (T, 3) [x, y, heading_rad]
         T_agent = traj.shape[0]
 
@@ -549,6 +553,7 @@ def to_model_tensors(
     data_np["ego_current_state"] = _build_ego_current_state(ego, R)
     data_np["neighbor_agents_past"] = _build_neighbor_agents_past(
         scene, ego_agent_id, R, ego_xy, ego_heading,
+        max_num_neighbors=model_args.predicted_neighbor_num,
     )
     if map_cache is not None:
         data_np["static_objects"] = map_cache.get_static_objects_ego(R, ego_xy)
@@ -623,11 +628,12 @@ def dump_step_npz(
         scene: Current scene at this replay step.
         map_cache: Pre-computed map tensor cache for the scene's map.
         future_len: Number of future timesteps (typically 80 — from model_args).
-        predicted_neighbor_num: Neighbor slot count for the future placeholder.
-            Must equal ``_MAX_NUM_NEIGHBORS`` (32) — the past array is built at
-            that fixed shape, so a mismatch would produce NPZs where past and
-            future disagree on the neighbor dimension and break the training
-            NPZ loader.
+        predicted_neighbor_num: Neighbor slot count for both past and future
+            tensors. The past array is built at the same shape via
+            ``max_num_neighbors=predicted_neighbor_num``, so past and future
+            agree on the neighbor dimension. Defaults to 32 for back-compat;
+            pass 320 (or whatever ``model_args.predicted_neighbor_num``) for
+            larger-capacity baselines.
 
     Returns:
         Dict with the standard NPZ keys (ego_agent_past, ego_current_state,
@@ -637,14 +643,6 @@ def dump_step_npz(
         stripped of batch dim and have dtypes compatible with the training
         NPZ loader.
     """
-    if predicted_neighbor_num != _MAX_NUM_NEIGHBORS:
-        raise ValueError(
-            f"predicted_neighbor_num={predicted_neighbor_num} disagrees with "
-            f"the fixed past-neighbor shape {_MAX_NUM_NEIGHBORS}. Pass "
-            f"{_MAX_NUM_NEIGHBORS} or omit (default). Threading a per-call "
-            f"neighbor count through _build_neighbor_agents_past is a "
-            f"follow-up if you need non-default future slots."
-        )
     ego = scene.get_agent(scene.ego_agent_id)
     ego_xy = ego.current_position.astype(np.float64)
     ego_h = ego.current_heading
@@ -655,6 +653,7 @@ def dump_step_npz(
     data["ego_current_state"] = _build_ego_current_state(ego, R)
     data["neighbor_agents_past"] = _build_neighbor_agents_past(
         scene, scene.ego_agent_id, R, ego_xy, ego_h,
+        max_num_neighbors=predicted_neighbor_num,
     )
     data["static_objects"] = map_cache.get_static_objects_ego(R, ego_xy)
     data["lanes"] = map_cache.get_lanes_ego(R, ego_xy)

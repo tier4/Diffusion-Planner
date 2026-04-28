@@ -229,16 +229,26 @@ class TestDumpStepNPZ:
         """Caller-provided future_len flows through to both ego and neighbor futures."""
         data = self._dump(synthetic_scene, future_len=40)
         assert data["ego_agent_future"].shape == (40, 3)
-        # Neighbor count is locked at _MAX_NUM_NEIGHBORS (past and future must match)
+        # Default neighbor count is _MAX_NUM_NEIGHBORS; both past and future agree.
         from scenario_generation.tensor_converter import _MAX_NUM_NEIGHBORS
         assert data["neighbor_agents_future"].shape == (_MAX_NUM_NEIGHBORS, 40, 3)
 
-    def test_mismatched_neighbor_count_raises(self, synthetic_scene):
-        """predicted_neighbor_num must equal _MAX_NUM_NEIGHBORS (past is fixed)."""
-        import pytest
+    def test_custom_predicted_neighbor_num_propagates(self, synthetic_scene):
+        """predicted_neighbor_num resizes BOTH past and future neighbor tensors.
+
+        The past array is built via ``max_num_neighbors=predicted_neighbor_num``,
+        so past and future agree on the neighbor dimension. Used by the
+        320-neighbor baseline (predicted_neighbor_num=320).
+        """
         cache = MapTensorCache(synthetic_scene.map_data)
-        with pytest.raises(ValueError, match="predicted_neighbor_num"):
-            dump_step_npz(
+        for n in (16, 320):
+            data = dump_step_npz(
                 synthetic_scene, cache,
-                future_len=80, predicted_neighbor_num=16,
+                future_len=80, predicted_neighbor_num=n,
+            )
+            assert data["neighbor_agents_past"].shape == (n, 31, 11), (
+                f"past shape {data['neighbor_agents_past'].shape} for n={n}"
+            )
+            assert data["neighbor_agents_future"].shape == (n, 80, 3), (
+                f"future shape {data['neighbor_agents_future'].shape} for n={n}"
             )
