@@ -232,17 +232,14 @@ class GRPOExplorationTrainer:
             print(f"  [exploration] skipping {npz_path}: {e}")
             return None
 
-        # Skip scenes where GT barely moves. Sim-replay NPZs have all-zero
-        # ego_agent_future (no GT recorded); skip the path filter for those —
-        # the classifier already filtered stopped frames by ego_current_state speed.
+        # Skip scenes where GT barely moves
         if "ego_agent_future" in data:
             gt = data["ego_agent_future"]
             if gt.dim() == 3:
                 gt = gt[0]
-            if not torch.allclose(gt, torch.zeros_like(gt)):
-                gt_path = torch.diff(gt[:, :2], dim=0).norm(dim=-1).sum()
-                if gt_path < 1.0:
-                    return None
+            gt_path = torch.diff(gt[:, :2], dim=0).norm(dim=-1).sum()
+            if gt_path < 1.0:
+                return None
 
         # Normalize data
         norm_data = {
@@ -413,40 +410,34 @@ class GRPOExplorationTrainer:
                 continue
 
             # --- DiT GRPO loss (batched) ---
-            # Skip DiT loss entirely when learning_rate == 0.0 (explorer-only
-            # pretrain mode). Avoids spurious crashes in neighbor_reg_loss when
-            # input NPZs lack a populated ego_agent_future (e.g. sim-replay dumps).
-            if self.config.learning_rate > 0.0:
-                from rlvr.grpo_loss import compute_batched_grpo_loss
-                traj_list = group["trajectories"]
-                traj_tensor = torch.tensor(
-                    np.stack(traj_list) if isinstance(traj_list[0], np.ndarray) else traj_list,
-                    device=self.device, dtype=torch.float32,
-                )
-                dit_loss, dit_metrics = compute_batched_grpo_loss(
-                    policy_model=self.policy_model,
-                    trajectories_tensor=traj_tensor,
-                    advantages=advantages_np,
-                    data=group["data"],
-                    model_args=self.model_args,
-                    config=self.config,
-                    device=self.device,
-                )
+            from rlvr.grpo_loss import compute_batched_grpo_loss
+            traj_list = group["trajectories"]
+            traj_tensor = torch.tensor(
+                np.stack(traj_list) if isinstance(traj_list[0], np.ndarray) else traj_list,
+                device=self.device, dtype=torch.float32,
+            )
+            dit_loss, dit_metrics = compute_batched_grpo_loss(
+                policy_model=self.policy_model,
+                trajectories_tensor=traj_tensor,
+                advantages=advantages_np,
+                data=group["data"],
+                model_args=self.model_args,
+                config=self.config,
+                device=self.device,
+            )
 
-                scaled_dit_loss = dit_loss / self.config.grad_accum_groups
-                scaled_dit_loss.backward()
-                dit_accum += 1
+            scaled_dit_loss = dit_loss / self.config.grad_accum_groups
+            scaled_dit_loss.backward()
+            dit_accum += 1
 
-                if dit_accum >= self.config.grad_accum_groups:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in self.policy_model.parameters() if p.requires_grad],
-                        max_norm=5.0,
-                    )
-                    self.dit_optimizer.step()
-                    self.dit_optimizer.zero_grad()
-                    dit_accum = 0
-            else:
-                dit_metrics = {}
+            if dit_accum >= self.config.grad_accum_groups:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in self.policy_model.parameters() if p.requires_grad],
+                    max_norm=5.0,
+                )
+                self.dit_optimizer.step()
+                self.dit_optimizer.zero_grad()
+                dit_accum = 0
 
             # --- Exploration policy loss (advantage_logprob, best_sample_mse, or PPO) ---
             if self.use_explorer:
