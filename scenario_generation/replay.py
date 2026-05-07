@@ -1688,6 +1688,25 @@ def run_route_replay(
         ego_route_ids, snapped_xy, max_segments=25,
     ) or ego_route_ids[:25]
     route_lanes, route_sl, route_hsl = builder._route_to_33dim(initial_route_window)
+
+    # Precompute a world-frame polyline of the FULL ego route. Used by the
+    # off-route guardrail in the step loop: if the ego strays > 10 m from
+    # the closest point on this polyline a warning fires; if the condition
+    # persists for `_OFF_ROUTE_ABORT_STEPS` consecutive steps the sim
+    # aborts (prevents wrong-side commits from silently producing
+    # garbage metrics).
+    _route_polyline_pts: list[np.ndarray] = []
+    for ll_id in ego_route_ids:
+        ll = builder._ll_by_id.get(ll_id)
+        if ll is None:
+            continue
+        pts = np.array([[p.x, p.y] for p in ll.centerline], dtype=np.float64)
+        if len(pts) >= 2:
+            _route_polyline_pts.append(pts)
+    if _route_polyline_pts:
+        _route_polyline = np.vstack(_route_polyline_pts)
+    else:
+        _route_polyline = np.empty((0, 2), dtype=np.float64)
     # Initial kinematic derivatives from the synthesized history so the
     # first inference call sees realistic non-zero yaw_rate + steering +
     # acceleration (otherwise the model's first ~1-2 steps behave as if
@@ -1790,6 +1809,15 @@ def run_route_replay(
     # --- Main loop. ---
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
         pending_saves: list = []
+        # Off-route guardrail constants. Per-step distance threshold (10 m
+        # per user spec) and abort persistence threshold (30 consecutive
+        # steps = 3 s of off-route flight at dt=0.1 — long enough that
+        # transient noise doesn't kill a sim, short enough that a wrong
+        # commit at a curve aborts before producing pages of garbage PNGs).
+        _OFF_ROUTE_DIST_M = 10.0
+        _OFF_ROUTE_ABORT_STEPS = 30
+        _off_route_streak = 0
+
         for step in range(spawn_config.max_steps):
             # Keep NPC manager's sim time in sync for TL writes on spawn.
             npc_manager._sim_time = step * 0.1
@@ -1820,6 +1848,30 @@ def run_route_replay(
             # via center_xy, and slides the route window forward via
             # select_route_segment_indices.
             ego_xy = scene.ego_agent.current_position
+
+            # Off-route guardrail: warn if ego is > 10 m from the nearest
+            # point on the full route polyline; abort the sim if the
+            # condition holds for _OFF_ROUTE_ABORT_STEPS consecutive
+            # steps. Catches wrong-side commits that previously produced
+            # silent garbage metrics for thousands of frames.
+            if _route_polyline.shape[0] > 0:
+                _d2 = ((_route_polyline - ego_xy) ** 2).sum(axis=1)
+                _off_d = float(np.sqrt(_d2.min()))
+                if _off_d > _OFF_ROUTE_DIST_M:
+                    _off_route_streak += 1
+                    print(f"  [OFF-ROUTE WARNING] step={step:04d} ego at "
+                          f"({ego_xy[0]:.1f}, {ego_xy[1]:.1f}) is "
+                          f"{_off_d:.2f} m from nearest route point "
+                          f"(streak {_off_route_streak}/"
+                          f"{_OFF_ROUTE_ABORT_STEPS}; check step_{step:04d}.png)",
+                          flush=True)
+                    if _off_route_streak >= _OFF_ROUTE_ABORT_STEPS:
+                        print(f"  [OFF-ROUTE ABORT] ego left route for "
+                              f"{_OFF_ROUTE_ABORT_STEPS} consecutive steps; "
+                              f"stopping sim at step {step}.", flush=True)
+                        break
+                else:
+                    _off_route_streak = 0
 
             # Rebuild map_data periodically (expensive: closest-lanelet
             # query + polygon/line_string tensors).
