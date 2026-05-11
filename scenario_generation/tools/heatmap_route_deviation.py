@@ -117,8 +117,12 @@ def _recover_ego_world_series(run_dir: Path, route) -> np.ndarray:
             gp = d["goal_pose"]
         # tensor_converter._build_goal_pose stores [x, y, cos_h, sin_h] in
         # ego frame; gp[2] is cos(dyaw), not dyaw.
+        # ros_scripts/parse_rosbag.py stores [x, y, yaw_rad] directly (length 3).
         dx, dy = float(gp[0]), float(gp[1])
-        dyaw = math.atan2(float(gp[3]), float(gp[2]))
+        if gp.shape[0] >= 4:
+            dyaw = math.atan2(float(gp[3]), float(gp[2]))
+        else:
+            dyaw = float(gp[2])
         eyaw = gyaw_w - dyaw
         # wrap to [-pi, pi]
         eyaw = math.atan2(math.sin(eyaw), math.cos(eyaw))
