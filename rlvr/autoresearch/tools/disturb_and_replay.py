@@ -21,8 +21,17 @@ Outputs:
 
   * ``<output_dir>/<source_stem>_var<NN>.npz`` — perturbed NPZs ready to
     feed into ranked-SFT (or any tool that accepts a list of NPZ paths).
-    Lanes / route_lanes / line_strings are NOT shifted; only
-    ``ego_current_state`` and ``ego_agent_past`` carry the perturbation.
+    Map + neighbor + static + goal fields are transformed into the NEW
+    ego-baselink frame (perturbed ego at origin) so reward.py and the model
+    see a self-consistent frame. This was added 2026-05-12 — earlier
+    versions only shifted ``ego_current_state`` and ``ego_agent_past``,
+    leaving lanes/route_lanes/line_strings/polygons/neighbors/static/goal
+    in the OLD frame. The model output is ego-current-pose-relative, so
+    when reward.py compared ego_trajs to the unshifted map data, the
+    distance was computed in mismatched frames and was wrong by the
+    perturbation magnitude. That bug let trajectories crossing the road
+    border pass the RB gate (rank-1 winners visually exited the lane
+    while ``top1_rb_cross=False``). See git log for details.
     ``ego_agent_future`` is **inherited from the source NPZ unchanged**
     by default — ranked-SFT ignores ``ego_agent_future`` and synthesizes
     its own SFT target from the K-best ranked trajectory at training
@@ -466,6 +475,157 @@ def _build_variants(
     return variants
 
 
+def _apply_inverse_rigid_to_spatial(
+    out: dict[str, np.ndarray], dx: float, dy: float, dtheta: float
+) -> None:
+    """Re-anchor every spatial NPZ field to the NEW ego pose (perturbed pose
+    becomes the origin (0, 0) with heading along +x).
+
+    The transform is the inverse rigid of (dx, dy, dtheta): rotate by
+    ``-dtheta`` about origin, then translate by ``(-dx, -dy)``. Direction
+    channels (cos/sin headings, lane direction vectors, neighbor velocity)
+    rotate by ``-dtheta``. Yaw channels subtract ``dtheta`` and wrap.
+
+    Fields handled (anchored to OLD ego baselink frame in source NPZ):
+      ego_agent_past, ego_agent_future, neighbor_agents_past,
+      neighbor_agents_future, static_objects, lanes, route_lanes,
+      polygons, line_strings, goal_pose.
+
+    NOT touched (caller handles, or semantic):
+      ego_current_state (caller resets to origin), lanes_speed_limit,
+      route_lanes_speed_limit, *_has_speed_limit, turn_indicators,
+      version.
+
+    Mutates ``out`` in place.
+    """
+    c, s = math.cos(-dtheta), math.sin(-dtheta)
+    # ranks of arrays vary — write helpers that work on the last 2 dims.
+
+    def _xy_inv(arr: np.ndarray, ix: int = 0, iy: int = 1) -> None:
+        x = arr[..., ix] - np.float32(dx)
+        y = arr[..., iy] - np.float32(dy)
+        arr[..., ix] = (c * x - s * y).astype(arr.dtype)
+        arr[..., iy] = (s * x + c * y).astype(arr.dtype)
+
+    def _dir_inv(arr: np.ndarray, ix: int, iy: int) -> None:
+        x = arr[..., ix].copy()
+        y = arr[..., iy].copy()
+        arr[..., ix] = (c * x - s * y).astype(arr.dtype)
+        arr[..., iy] = (s * x + c * y).astype(arr.dtype)
+
+    def _wrap_yaw_inplace(arr: np.ndarray, idx: int) -> None:
+        # Subtract dtheta then wrap to (-pi, pi].
+        a = arr[..., idx] - np.float32(dtheta)
+        # vectorised wrap
+        a = (a + np.pi) % (2 * np.pi) - np.pi
+        arr[..., idx] = a.astype(arr.dtype)
+
+    # --- ego_agent_past (T, 3) [x, y, yaw] ---
+    if "ego_agent_past" in out:
+        past = out["ego_agent_past"]
+        # All steps are valid; no zero-padding to worry about
+        _xy_inv(past, 0, 1)
+        _wrap_yaw_inplace(past, 2)
+
+    # --- ego_agent_future (T, 3) [x, y, yaw] — zeros mark invalid steps ---
+    if "ego_agent_future" in out:
+        fut = out["ego_agent_future"]
+        valid = (fut[:, 0] != 0) | (fut[:, 1] != 0)
+        _xy_inv(fut, 0, 1)
+        _wrap_yaw_inplace(fut, 2)
+        # Restore zeros for originally-invalid slots
+        fut[~valid] = 0
+
+    # --- neighbor_agents_past (N, T, 11) ---
+    #   channels: [x, y, cos_h, sin_h, vx, vy, w, l, label_oh×3]
+    if "neighbor_agents_past" in out:
+        nap = out["neighbor_agents_past"]
+        valid = (nap[..., 0] != 0) | (nap[..., 1] != 0) | (nap[..., 2] != 0) | (nap[..., 3] != 0)
+        _xy_inv(nap, 0, 1)
+        _dir_inv(nap, 2, 3)
+        if nap.shape[-1] >= 6:
+            _dir_inv(nap, 4, 5)  # neighbor velocity (baselink-frame vx, vy)
+        # Zero out invalid slots (per parse_rosbag.py the inactive slots are all zero)
+        nap[~valid] = 0
+
+    # --- neighbor_agents_future (N, T, 3) [x, y, yaw] ---
+    if "neighbor_agents_future" in out:
+        naf = out["neighbor_agents_future"]
+        valid = (naf[..., 0] != 0) | (naf[..., 1] != 0)
+        _xy_inv(naf, 0, 1)
+        _wrap_yaw_inplace(naf, 2)
+        naf[~valid] = 0
+
+    # --- static_objects (5, 10) ---
+    #   channels: [x, y, cos_h, sin_h, w, l, label_oh×4]
+    if "static_objects" in out:
+        so = out["static_objects"]
+        valid = (so[..., 0] != 0) | (so[..., 1] != 0) | (so[..., 2] != 0) | (so[..., 3] != 0)
+        _xy_inv(so, 0, 1)
+        _dir_inv(so, 2, 3)
+        so[~valid] = 0
+
+    # --- lanes (S, P, 33): [x, y, dx, dy, ...other features] per point ---
+    if "lanes" in out:
+        lanes = out["lanes"]
+        valid = (lanes[..., 0] != 0) | (lanes[..., 1] != 0) | (lanes[..., 2] != 0) | (lanes[..., 3] != 0)
+        _xy_inv(lanes, 0, 1)
+        _dir_inv(lanes, 2, 3)
+        # Zero invalid points to preserve "valid = nonzero" convention
+        invalid_mask = ~valid
+        if invalid_mask.any():
+            inv_idx = np.where(invalid_mask)
+            lanes[inv_idx[0], inv_idx[1], :] = 0
+
+    # --- route_lanes (S, P, 33): same layout as lanes ---
+    if "route_lanes" in out:
+        rl = out["route_lanes"]
+        valid = (rl[..., 0] != 0) | (rl[..., 1] != 0) | (rl[..., 2] != 0) | (rl[..., 3] != 0)
+        _xy_inv(rl, 0, 1)
+        _dir_inv(rl, 2, 3)
+        invalid_mask = ~valid
+        if invalid_mask.any():
+            inv_idx = np.where(invalid_mask)
+            rl[inv_idx[0], inv_idx[1], :] = 0
+
+    # --- polygons (10, 40, 3) [x, y, intersection_oh] — xy only ---
+    if "polygons" in out:
+        poly = out["polygons"]
+        valid = (poly[..., 0] != 0) | (poly[..., 1] != 0)
+        _xy_inv(poly, 0, 1)
+        invalid_mask = ~valid
+        if invalid_mask.any():
+            inv_idx = np.where(invalid_mask)
+            poly[inv_idx[0], inv_idx[1], :2] = 0
+
+    # --- line_strings (60, 20, 4) [x, y, stop_oh, rb_oh] — xy only ---
+    if "line_strings" in out:
+        ls = out["line_strings"]
+        valid = (ls[..., 0] != 0) | (ls[..., 1] != 0)
+        _xy_inv(ls, 0, 1)
+        invalid_mask = ~valid
+        if invalid_mask.any():
+            inv_idx = np.where(invalid_mask)
+            ls[inv_idx[0], inv_idx[1], :2] = 0
+
+    # --- goal_pose (3,) or (4,) [x, y, yaw] (3,) or [x, y, cos, sin] (4,) ---
+    if "goal_pose" in out:
+        gp = out["goal_pose"].copy()
+        if gp.size >= 2:
+            x = float(gp[0]) - dx
+            y = float(gp[1]) - dy
+            gp[0] = c * x - s * y
+            gp[1] = s * x + c * y
+            if gp.size == 3:
+                gp[2] = _wrap_angle(float(gp[2]) - dtheta)
+            elif gp.size >= 4:
+                # cos/sin form
+                cg, sg = float(gp[2]), float(gp[3])
+                gp[2] = c * cg - s * sg
+                gp[3] = s * cg + c * sg
+        out["goal_pose"] = gp
+
+
 def _apply_variant(
     npz: dict[str, np.ndarray], variant: Variant, rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
@@ -481,47 +641,45 @@ def _apply_variant(
 
     dtheta = math.radians(variant.dtheta_deg)
     mode = getattr(variant, "mode", "shift")
+    # All modes converge to "the new ego pose is (dx, dy, dtheta) in the OLD
+    # baselink frame, and after this function the NPZ is anchored to that NEW
+    # pose so the model sees ego_current_state at (0, 0, 0) — in-distribution."
 
     if mode == "yaw":
-        # Pure rotation about (0,0). Velocity/accel rotate too.
-        out["ego_current_state"] = _apply_yaw_to_state(
-            out["ego_current_state"], dtheta, set_position=None
-        )
-        # Past rotates about ego pose (which is at the origin in ego frame).
-        out["ego_agent_past"] = _rotate_past_about_pivot(
-            out["ego_agent_past"], pivot_x=0.0, pivot_y=0.0, yaw_rad=dtheta
-        )
+        # Pure rotation about (0, 0). dx = dy = 0 by construction.
+        assert variant.dx == 0.0 and variant.dy == 0.0
+    # mode "shift" and "combo" both encode the new ego pose in (variant.dx,
+    # variant.dy, dtheta) — same downstream transform.
 
-    elif mode == "combo":
-        # Parallel shift first, then yaw rotation about the SHIFTED pose.
-        # ego_current_state: set position + rotate orientation/vel/accel.
-        out["ego_current_state"] = _apply_yaw_to_state(
-            out["ego_current_state"], dtheta, set_position=(variant.dx, variant.dy)
-        )
-        if variant.dv != 0.0:
-            ecs = out["ego_current_state"].copy()
-            ecs[4] = max(0.0, float(ecs[4]) + variant.dv)
-            out["ego_current_state"] = ecs
-        # Past: rigid translate by (dx, dy), then rotate about new pivot (dx, dy).
+    # Apply the inverse-rigid to every map/neighbor/static/goal field so they
+    # are now in the NEW ego-baselink frame.
+    _apply_inverse_rigid_to_spatial(out, variant.dx, variant.dy, dtheta)
+
+    # ego_agent_past: rotate xy by -dtheta about origin and translate by
+    # (-dx, -dy) so the trail leads correctly into the NEW origin.
+    # _apply_inverse_rigid_to_spatial already handled ego_agent_past; only
+    # need history jitter on top for the "shift" mode.
+    if mode == "shift" and variant.history_jitter_std > 0.0:
         past = out["ego_agent_past"].copy()
-        past[:, 0] = past[:, 0] + variant.dx
-        past[:, 1] = past[:, 1] + variant.dy
-        past = _rotate_past_about_pivot(past, variant.dx, variant.dy, dtheta)
+        noise = rng.normal(
+            loc=0.0, scale=variant.history_jitter_std, size=(past.shape[0], 2)
+        ).astype(np.float32)
+        past[:, :2] = past[:, :2] + noise
         out["ego_agent_past"] = past
 
-    else:  # mode == "shift" (existing kind 1 / kind 2 behavior)
-        out["ego_current_state"] = _set_ego_current_state(
-            out["ego_current_state"], variant.dx, variant.dy, dtheta, variant.dv
-        )
-        past = _apply_rigid_to_past(
-            out["ego_agent_past"], variant.dx, variant.dy, dtheta
-        )
-        if variant.history_jitter_std > 0.0:
-            noise = rng.normal(
-                loc=0.0, scale=variant.history_jitter_std, size=(past.shape[0], 2)
-            ).astype(np.float32)
-            past[:, :2] = past[:, :2] + noise
-        out["ego_agent_past"] = past
+    # ego_current_state: reset to the canonical origin pose (0, 0, heading
+    # along +x). Body-frame velocity / accel / steering / yaw_rate stay
+    # (they describe the ego's motion relative to its own body — perturbing
+    # the ego in space doesn't change them). Optional dv applied per
+    # variant.
+    ecs = out["ego_current_state"].copy()
+    ecs[0] = 0.0
+    ecs[1] = 0.0
+    ecs[2] = 1.0  # cos(0)
+    ecs[3] = 0.0  # sin(0)
+    if variant.dv != 0.0 and ecs.size >= 5:
+        ecs[4] = max(0.0, float(ecs[4]) + variant.dv)
+    out["ego_current_state"] = ecs
 
     return out
 
