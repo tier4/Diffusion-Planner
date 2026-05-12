@@ -857,7 +857,22 @@ def main(argv: Iterable[str] | None = None) -> None:
     )
     parser.add_argument("--reject_threshold", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--ego_shape", type=str, required=True,
+        help="Ego dimensions as 'WHEEL_BASE,LENGTH,WIDTH' in metres. REQUIRED "
+             "— there is no default to fall back to. The values are written "
+             "into every output NPZ's `ego_shape` field so downstream "
+             "reward.py sees the correct footprint (the previous silent "
+             "default undersized the gate by ~3 m on larger platforms).",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+    _ego_shape_parts = [float(x) for x in args.ego_shape.split(",")]
+    if len(_ego_shape_parts) != 3 or any(v <= 0 for v in _ego_shape_parts):
+        raise SystemExit(
+            f"--ego_shape must be 'WB,LEN,WIDTH' with 3 positive values; "
+            f"got {args.ego_shape!r}"
+        )
+    ego_shape_np = np.array(_ego_shape_parts, dtype=np.float32)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -905,6 +920,19 @@ def main(argv: Iterable[str] | None = None) -> None:
             print(f"[skip] {scene_idx} {scene_path}: load failed ({e})")
             continue
 
+        # Verify the source NPZ's ego_shape matches --ego_shape if present;
+        # always write our value into the output (no silent inheritance).
+        if "ego_shape" in npz:
+            src_es = np.asarray(npz["ego_shape"]).reshape(-1)[:3]
+            if not np.allclose(src_es, ego_shape_np, atol=1e-2):
+                raise SystemExit(
+                    f"Source NPZ {scene_path} has ego_shape={src_es.tolist()} "
+                    f"but --ego_shape={ego_shape_np.tolist()}. Pass the matching "
+                    f"value or fix the source NPZ — refusing to silently "
+                    f"override conflicting dims."
+                )
+        npz["ego_shape"] = ego_shape_np.copy()
+
         if "route_lanes" not in npz:
             print(f"[skip] {scene_idx} {scene_path}: no route_lanes")
             continue
@@ -925,6 +953,8 @@ def main(argv: Iterable[str] | None = None) -> None:
             by_kind[kind]["attempted"] += 1
 
             perturbed = _apply_variant(npz, variant, rng)
+            # Carry forward ego_shape (perturbation doesn't change dimensions).
+            perturbed["ego_shape"] = ego_shape_np.copy()
 
             out_path = output_dir / f"{scene_stem}_var{var_idx:02d}.npz"
             np.savez(out_path, **perturbed)

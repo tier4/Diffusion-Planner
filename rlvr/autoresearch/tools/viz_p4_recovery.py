@@ -132,11 +132,24 @@ def main() -> None:
                              "per call. K × scene_batch_size trajectories in "
                              "parallel through the diffusion loop. Requires "
                              "--no_viz when > 1.")
+    parser.add_argument(
+        "--ego_shape", type=str, required=True,
+        help="Ego dimensions as 'WHEEL_BASE,LENGTH,WIDTH' in metres. REQUIRED. "
+             "Asserted against every NPZ's ego_shape; mismatch is a hard fail "
+             "(prevents silent footprint undersizing in the safety gates).",
+    )
     args = parser.parse_args()
     if args.scene_batch_size > 1 and not args.no_viz:
         raise SystemExit("--scene_batch_size > 1 requires --no_viz.")
     if args.scene_batch_size < 1:
         raise SystemExit("--scene_batch_size must be >= 1.")
+    _ego_parts = [float(x) for x in args.ego_shape.split(",")]
+    if len(_ego_parts) != 3 or any(v <= 0 for v in _ego_parts):
+        raise SystemExit(
+            f"--ego_shape must be 'WB,LEN,WIDTH' with 3 positive values; "
+            f"got {args.ego_shape!r}"
+        )
+    cli_ego_shape = np.array(_ego_parts, dtype=np.float32)
 
     manifest_by_npz: dict[str, dict] = {}
     if args.manifest:
@@ -203,7 +216,20 @@ def main() -> None:
         datas_ok: list = []
         for p in scene_paths[batch_start : batch_start + SBS]:
             try:
-                datas_ok.append(load_npz_data(p, device))
+                _d = load_npz_data(p, device)
+                if "ego_shape" not in _d:
+                    raise SystemExit(
+                        f"NPZ {p} is missing ego_shape; refusing silent "
+                        f"fallback. Re-extract / pad upstream."
+                    )
+                _es = _d["ego_shape"].cpu().numpy().reshape(-1)[:3]
+                if not np.allclose(_es, cli_ego_shape, atol=1e-2):
+                    raise SystemExit(
+                        f"NPZ {p} has ego_shape={_es.tolist()} but "
+                        f"--ego_shape={cli_ego_shape.tolist()}. Mismatch — "
+                        f"refusing to score with wrong footprint."
+                    )
+                datas_ok.append(_d)
                 paths_ok.append(p)
             except Exception as e:  # noqa: BLE001
                 print(f"  [skip] {Path(p).name}: {e}")

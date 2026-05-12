@@ -2687,13 +2687,29 @@ def compute_reward_batch(
     device = ego_trajs.device
 
     # --- Ego shape ---
-    ego_shape = torch.tensor([2.79, 4.34, 1.70], device=device)
-    if "ego_shape" in data:
-        es = data["ego_shape"]
-        if es.dim() == 2:
-            es = es[0]
-        if es.numel() >= 3:
-            ego_shape = es[:3].to(device)
+    # No silent fallback: the wrong default footprint silently undersized RB /
+    # lane / collision gates by ~3 m of length and 0.5 m of width on larger
+    # platforms, letting trajectories that visibly crossed the border pass the
+    # gate. The NPZ MUST carry the correct ego_shape (wheel_base, length,
+    # width); callers (parse-from-bag, disturb_and_replay, etc.) are
+    # responsible for writing it.
+    if "ego_shape" not in data:
+        raise ValueError(
+            "compute_reward_batch: data is missing 'ego_shape' (wheel_base, "
+            "length, width). Refusing to fall back to a hardcoded default — "
+            "this previously caused silent footprint undersizing. Populate "
+            "ego_shape upstream (parse-from-bag / disturb_and_replay / scene "
+            "builder) and re-run."
+        )
+    es = data["ego_shape"]
+    if es.dim() == 2:
+        es = es[0]
+    if es.numel() < 3:
+        raise ValueError(
+            f"compute_reward_batch: ego_shape has shape {tuple(es.shape)}; "
+            "expected at least 3 elements (wheel_base, length, width)."
+        )
+    ego_shape = es[:3].to(device)
 
     # --- Neighbor data for collision ---
     neighbor_futures = torch.zeros(0, T, 4, device=device)
