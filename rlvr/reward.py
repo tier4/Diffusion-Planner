@@ -160,12 +160,12 @@ class RewardBreakdown:
     sc_cont_penalty: float = 0.0
     sc_min_dist: float = 99.0     # min OBB clearance to any stopped neighbor (t>=1, ego moving)
     sc_n_stopped: int = 0         # how many stopped neighbors were found in the scene
-    # Kinematic feasibility gate (yaw rate + bicycle-model curvature). When
-    # False, compute_reward_batch floors ``total`` to the offroad floor.
-    # Before this field existed the gate was applied silently — you could
-    # not tell from a RewardBreakdown whether the floor came from safety,
-    # lane, or kinematics.
-    kinematic_gate: bool = True
+    # Kinematic feasibility violation (yaw rate + bicycle-model curvature).
+    # When True, the trajectory is INFEASIBLE and compute_reward_batch floors
+    # ``total`` to the offroad floor. Convention matches the other gate
+    # booleans on this dataclass (rb_crossing, lane_crossing, static_crossing):
+    # True = violation occurred.
+    kinematic_violated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -3076,7 +3076,7 @@ def compute_reward_batch(
             sc_cont_penalty=float(sc_cont_pen[i]),
             sc_min_dist=float(sc_min_dist_scalar[i].item()),
             sc_n_stopped=sc_n_stopped_scene,
-            kinematic_gate=bool(kinematic_gate[i] >= 0.5),
+            kinematic_violated=bool(kinematic_gate[i] < 0.5),
         ))
 
     return results

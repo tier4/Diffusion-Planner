@@ -289,7 +289,7 @@ def main() -> None:
                     "cl": float(r.centerline),
                     "rb_cross": bool(r.rb_crossing),
                     "lane_cross": bool(r.lane_crossing),
-                    "kin_gate": bool(r.kinematic_gate),
+                    "kin_violated": bool(r.kinematic_violated),
                     "coll_step": (None if r.collision_step is None
                                   else int(r.collision_step)),
                 }
@@ -297,9 +297,16 @@ def main() -> None:
             ]
             per_k.sort(key=lambda d: (d["total"], d["cl"]), reverse=True)
             top1 = per_k[0]
-            delta = top1["cl"] - t0_cl
-            improves = delta > 0.0
+            # delta is trajectory-vs-trajectory: top1_cl − det_cl (both
+            # 80-frame trajectory cl scores from compute_reward_batch).
+            # Earlier versions compared top1_cl (80-frame) to t0_cl
+            # (1-frame at ego_current_state) — apples-to-oranges; that
+            # comparison let scenes where rank-1 was no better than
+            # deterministic sneak through. Filter rule canonical in
+            # percentile_filter_perturbed: top1 > det. We mirror it here.
             det_r = compute_reward_batch(det_traj_t, data, rcfg)[0]
+            delta = top1["cl"] - float(det_r.centerline)
+            improves = delta > 0.0
 
             if args.no_viz:
                 out_dir = out_root / ("improve" if improves else "no_improve")
@@ -316,7 +323,7 @@ def main() -> None:
                     "top1_total": top1["total"],
                     "top1_rb_cross": top1["rb_cross"],
                     "top1_lane_cross": top1["lane_cross"],
-                    "top1_kin_gate": top1["kin_gate"],
+                    "top1_kin_violated": top1["kin_violated"],
                     "top1_coll_step": top1["coll_step"],
                     "det_cl": float(det_r.centerline),
                     "det_total": float(det_r.total),
@@ -377,6 +384,19 @@ def main() -> None:
                 tr_full = np.concatenate([anchor, tr], axis=0)
                 ax.plot(tr_full[:, 0], tr_full[:, 1], "-", color="#888888", lw=0.7,
                         alpha=0.45, zorder=6)
+            # Ground truth from NPZ (ego_agent_future, 3-channel x,y,yaw at
+            # load time → 4-channel after heading_to_cos_sin). Drawn in green
+            # so the user can compare Det / Rank-1 / K=8 candidates against
+            # what the bag actually did.
+            gt_t = data.get("ego_agent_future")
+            if gt_t is not None:
+                gt_np = gt_t.detach().cpu().numpy()
+                if gt_np.ndim == 3:
+                    gt_np = gt_np[0]
+                if gt_np.shape[-1] >= 4 and (np.abs(gt_np[:, :2]).sum() > 0.1):
+                    gt_full = np.concatenate([anchor, gt_np.astype(det_traj.dtype)], axis=0)
+                    draw_traj(ax, gt_full, "GT (bag future)",
+                              "#2ca02c", npz_path, with_footprints=False)
             draw_traj(ax, det_full,
                       f"Det (cl={det_r.centerline:+.2f}  total={det_r.total:+.1f})",
                       "#1f77b4", npz_path, with_footprints=True)
@@ -422,8 +442,9 @@ def main() -> None:
             ax.set_title(
                 f"{prefix}{Path(npz_path).name}\n"
                 f"{perturb_str}\n"
-                f"t0_cl={t0_cl:+.3f}  rank1_cl={top1['cl']:+.3f}  Δ={delta:+.3f}  "
-                f"(rank1 by reward.total under baselink)",
+                f"t0_cl={t0_cl:+.3f}(1-frame)  det_cl={float(det_r.centerline):+.3f}  "
+                f"rank1_cl={top1['cl']:+.3f}  Δ_top1-det={delta:+.3f}  "
+                f"(rank1 by reward.total; Δ apples-to-apples 80-frame)",
                 fontsize=10,
             )
             out_dir = out_root / ("improve" if improves else "no_improve")
@@ -447,7 +468,7 @@ def main() -> None:
                 "top1_total": top1["total"],
                 "top1_rb_cross": top1["rb_cross"],
                 "top1_lane_cross": top1["lane_cross"],
-                "top1_kin_gate": top1["kin_gate"],
+                "top1_kin_violated": top1["kin_violated"],
                 "top1_coll_step": top1["coll_step"],
                 "det_cl": float(det_r.centerline),
                 "det_total": float(det_r.total),

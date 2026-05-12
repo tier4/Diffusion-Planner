@@ -45,6 +45,12 @@ def parse_args() -> argparse.Namespace:
                         "a clean SFT target. Use e.g. -0.10 / -0.05.")
     p.add_argument("--top1_cl_min", type=float, default=None,
                    help="See --det_cl_max. Floor on top1_cl. e.g. -0.05.")
+    p.add_argument("--min_top1_vs_det", type=float, default=0.0,
+                   help="Reject scenes where top1_cl - det_cl <= this value. "
+                        "Both top1_cl and det_cl are full-80-frame trajectory "
+                        "cl scores (apples-to-apples). Default 0.0 = strict "
+                        "improvement over deterministic. Set negative to "
+                        "relax (e.g. -0.05 allows ties / mild regressions).")
     p.add_argument("--eligible_t0_max", type=float, default=0.0,
                    help="Drop scenes with t0_cl > this value as already-fine. "
                         "Set to 0 (default) to disable this exclusion.")
@@ -65,7 +71,8 @@ def main() -> None:
         "top1_rb_cross": 0,
         "top1_lane_cross": 0,
         "top1_collision": 0,
-        "top1_kin_gate_failed": 0,
+        "top1_kin_violated": 0,
+        "no_improvement": 0,
     }
     eligible: list[dict] = []
     for s in scenes:
@@ -81,10 +88,28 @@ def main() -> None:
         if s["top1_coll_step"] is not None:
             rejected["top1_collision"] += 1
             continue
-        if not s["top1_kin_gate"]:
-            # top1_kin_gate=True per reward.py means gate PASSED (safe);
-            # False means infeasible — drop those as unsafe SFT targets.
-            rejected["top1_kin_gate_failed"] += 1
+        if s["top1_kin_violated"]:
+            # top1_kin_violated=True means infeasible — drop those as unsafe
+            # SFT targets. Convention matches the other gate booleans
+            # (rb_crossing, lane_crossing, static_crossing): True = violation.
+            rejected["top1_kin_violated"] += 1
+            continue
+        # Require the rank-1 winner to actually IMPROVE on the model's
+        # DETERMINISTIC output. Both top1_cl and det_cl come from
+        # compute_reward_batch on the FULL 80-frame trajectory — same
+        # quantity, apples-to-apples comparison. Scenes where rank-1 is
+        # no better than det produce no SFT signal (training the model on
+        # its own output is a no-op). The min_top1_vs_det floor is
+        # configurable; default 0.0 = strict improvement.
+        #
+        # WARNING: do NOT compare top1_cl to t0_cl. t0_cl is a 1-frame
+        # cl-score at ego_current_state (single point); top1_cl is the
+        # 80-frame mean — incommensurate. Filter version 2026-05-12 had
+        # this bug and over-rejected scenes whose trajectory naturally
+        # accumulates cl across a curve.
+        delta = s["top1_cl"] - s["det_cl"]
+        if delta <= args.min_top1_vs_det:
+            rejected["no_improvement"] += 1
             continue
         eligible.append(s)
 

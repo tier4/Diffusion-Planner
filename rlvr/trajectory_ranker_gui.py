@@ -696,7 +696,7 @@ class TrajectoryRanker:
             cs = getattr(rb, "collision_step", None)
             if cs is not None:
                 tags.append(f"Coll@{int(cs)}")
-            if not getattr(rb, "kinematic_gate", True):
+            if getattr(rb, "kinematic_violated", False):
                 tags.append("Kin✗")
             if getattr(rb, "static_crossing", False):
                 tags.append("SC✗")
