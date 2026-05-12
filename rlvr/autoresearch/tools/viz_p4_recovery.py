@@ -125,7 +125,18 @@ def main() -> None:
     parser.add_argument("--max_scenes", type=int, default=None,
                         help="Process only the first N scenes (sanity).")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--no_viz", action="store_true",
+                        help="Skip PNG plot (only write summary.json).")
+    parser.add_argument("--scene_batch_size", type=int, required=True,
+                        help="Scenes batched through K-generation + det forward "
+                             "per call. K × scene_batch_size trajectories in "
+                             "parallel through the diffusion loop. Requires "
+                             "--no_viz when > 1.")
     args = parser.parse_args()
+    if args.scene_batch_size > 1 and not args.no_viz:
+        raise SystemExit("--scene_batch_size > 1 requires --no_viz.")
+    if args.scene_batch_size < 1:
+        raise SystemExit("--scene_batch_size must be >= 1.")
 
     manifest_by_npz: dict[str, dict] = {}
     if args.manifest:
@@ -186,57 +197,45 @@ def main() -> None:
     summary: list[dict] = []
     improve_paths: list[str] = []
 
-    for si, npz_path in enumerate(scene_paths):
-        try:
-            data = load_npz_data(npz_path, device)
-        except Exception as e:  # noqa: BLE001
-            print(f"  [skip] {Path(npz_path).name}: {e}")
+    SBS = args.scene_batch_size
+    for batch_start in range(0, len(scene_paths), SBS):
+        paths_ok: list = []
+        datas_ok: list = []
+        for p in scene_paths[batch_start : batch_start + SBS]:
+            try:
+                datas_ok.append(load_npz_data(p, device))
+                paths_ok.append(p)
+            except Exception as e:  # noqa: BLE001
+                print(f"  [skip] {Path(p).name}: {e}")
+        if not datas_ok:
             continue
-        es = data.get("ego_shape")
-        ego_shape = es[0] if es is not None and es.dim() > 1 else es
+        B = len(datas_ok)
 
-        v_high = _gt_max_speed(data)
-        t0_cl = _t0_centerline(data, ego_shape, device)
+        ego_shapes = []
+        t0_cls = []
+        v_highs = []
+        for d in datas_ok:
+            es = d.get("ego_shape")
+            es_one = es[0] if es is not None and es.dim() > 1 else es
+            ego_shapes.append(es_one)
+            v_highs.append(_gt_max_speed(d))
+            t0_cls.append(_t0_centerline(d, es_one, device))
+        v_batch = max(v_highs)
 
-        # K trajectories from the training generation_variant
-        batch = _stack_scene_data([data], device)
+        batch = _stack_scene_data(datas_ok, device)
         norm_batch = _normalize_batch(batch, model_args)
-        trajs = generate_all_scenes_batched(
+        trajs_BKT4 = generate_all_scenes_batched(
             model, model_args, norm_batch,
             K=args.K, noise_range=(args.noise_min, args.noise_max),
             device=device, gen_chunk_size=args.K,
-            gt_max_speed=v_high, generation_variant=variant,
+            gt_max_speed=v_batch, generation_variant=variant,
             use_route_cl_guidance=use_route_cl,
-        )[0]  # [K, T, 4]
+        )  # [B, K, T, 4]
 
-        # Score each of the K with the REAL reward function
-        per_k = []
-        for ki in range(trajs.shape[0]):
-            tr = trajs[ki:ki + 1]
-            r = compute_reward_batch(tr, data, rcfg)[0]
-            per_k.append({
-                "k": ki,
-                "total": float(r.total),
-                "cl": float(r.centerline),
-                "rb_cross": bool(r.rb_crossing),
-                "lane_cross": bool(r.lane_crossing),
-                "kin_gate": bool(r.kinematic_gate),
-                "coll_step": (None if r.collision_step is None
-                              else int(r.collision_step)),
-            })
-        # Rank-1 by total reward (ties → highest CL)
-        per_k.sort(key=lambda d: (d["total"], d["cl"]), reverse=True)
-        top1 = per_k[0]
-        top1_traj = trajs[top1["k"]].cpu().numpy()
-        delta = top1["cl"] - t0_cl
-        improves = delta > 0.0  # reward.py CL is negative-or-zero (closer-to-0 = better)
-
-        # Deterministic baseline (for the plot — not used in ranking)
         decoder = model.module.decoder if hasattr(model, "module") else model.decoder
         saved_fn = decoder._guidance_fn
         decoder._guidance_fn = None
         try:
-            B = norm_batch["ego_current_state"].shape[0]
             P = 1 + model_args.predicted_neighbor_num
             future_len = model_args.future_len
             norm_batch_d = {k: v for k, v in norm_batch.items()}
@@ -244,154 +243,196 @@ def main() -> None:
                 B, P, future_len + 1, 4, device=device
             )
             _, det_out = model(norm_batch_d)
-            det_traj = det_out["prediction"][0, 0].detach().cpu().numpy()
+            det_trajs_BT4 = det_out["prediction"][:, 0].detach()  # [B, T, 4]
         finally:
             decoder._guidance_fn = saved_fn
-        det_r = compute_reward_batch(
-            torch.tensor(det_traj[None], device=device, dtype=torch.float32),
-            data, rcfg,
-        )[0]
 
-        # Lanelets in the perturbed NPZ stay in the ORIGINAL world frame
-        # (where the source pre-perturbation ego was at origin); only
-        # ego_current_state and ego_agent_past were shifted by (dx, dy).
-        # Model output is "ego-current-pose-relative" — pred[0] is always
-        # near (1, 0) for a 10 m/s ego regardless of perturbation. To draw
-        # the trajectory in the lanelet/world frame so it visually starts
-        # from the perturbed ego pose, translate every step by (dx, dy).
-        # When no manifest entry is present (no perturbation), dx_pert =
-        # dy_pert = 0 and behavior reduces to the unperturbed case.
-        meta = manifest_by_npz.get(str(npz_path)) or manifest_by_npz.get(npz_path)
-        dx_pert = float(meta["dx"]) if meta is not None else 0.0
-        dy_pert = float(meta["dy"]) if meta is not None else 0.0
-        anchor = np.array([[dx_pert, dy_pert, 1.0, 0.0]], dtype=det_traj.dtype)
-        def _to_lf(t):
-            t2 = t.copy()
-            t2[:, 0] = t2[:, 0] + dx_pert
-            t2[:, 1] = t2[:, 1] + dy_pert
-            return t2
-        det_full = np.concatenate([anchor, _to_lf(det_traj)], axis=0)
-        top1_full = np.concatenate([anchor, _to_lf(top1_traj)], axis=0)
+        for bi in range(B):
+            si = batch_start + bi
+            npz_path = paths_ok[bi]
+            data = datas_ok[bi]
+            t0_cl = t0_cls[bi]
+            trajs = trajs_BKT4[bi]  # [K, T, 4]
+            det_traj_t = det_trajs_BT4[bi:bi + 1]  # [1, T, 4]
 
-        # Plot
-        fig, ax = plt.subplots(figsize=(11, 11))
-        draw_scene_base(ax, npz_path)
+            all_rewards = compute_reward_batch(trajs, data, rcfg)
+            per_k = [
+                {
+                    "k": ki,
+                    "total": float(r.total),
+                    "cl": float(r.centerline),
+                    "rb_cross": bool(r.rb_crossing),
+                    "lane_cross": bool(r.lane_crossing),
+                    "kin_gate": bool(r.kinematic_gate),
+                    "coll_step": (None if r.collision_step is None
+                                  else int(r.collision_step)),
+                }
+                for ki, r in enumerate(all_rewards)
+            ]
+            per_k.sort(key=lambda d: (d["total"], d["cl"]), reverse=True)
+            top1 = per_k[0]
+            delta = top1["cl"] - t0_cl
+            improves = delta > 0.0
+            det_r = compute_reward_batch(det_traj_t, data, rcfg)[0]
 
-        # ------ Draw the PERTURBED ego at (dx, dy) in lanelet frame. ------
-        with np.load(npz_path, allow_pickle=True) as _d:
-            _es_np = _d["ego_shape"] if "ego_shape" in _d.files else None
-        wb = float(_es_np[0]) if _es_np is not None and len(_es_np) >= 1 else 4.76
-        elen = float(_es_np[1]) if _es_np is not None and len(_es_np) >= 2 else 7.24
-        ewid = float(_es_np[2]) if _es_np is not None and len(_es_np) >= 3 else 2.29
-        ro = elen - wb
-        t_rot_pert = (mtransforms.Affine2D()
-                      .rotate(0.0)
-                      .translate(dx_pert, dy_pert)
-                      + ax.transData)
-        ax.add_patch(Rectangle(
-            (-ro, -ewid / 2), elen, ewid, lw=1.6,
-            ec="#7a6500", fc="#ffe066", alpha=0.35, zorder=20,
-            transform=t_rot_pert,
-        ))
-        ax.plot([dx_pert], [dy_pert], "x", color="#7a6500",
-                ms=9, mew=2.2, zorder=21)
+            if args.no_viz:
+                out_dir = out_root / ("improve" if improves else "no_improve")
+                out_path = out_dir / f"{Path(npz_path).stem}.skipped.txt"
+                summary.append({
+                    "scene": str(npz_path),
+                    "scene_idx": si,
+                    "t0_cl": t0_cl,
+                    "top1_cl": top1["cl"],
+                    "delta_cl": delta,
+                    "improves": improves,
+                    "top1_k": top1["k"],
+                    "top1_slot": slot_labels[top1["k"]],
+                    "top1_total": top1["total"],
+                    "top1_rb_cross": top1["rb_cross"],
+                    "top1_lane_cross": top1["lane_cross"],
+                    "top1_kin_gate": top1["kin_gate"],
+                    "top1_coll_step": top1["coll_step"],
+                    "det_cl": float(det_r.centerline),
+                    "det_total": float(det_r.total),
+                    "png": str(out_path),
+                })
+                if improves:
+                    improve_paths.append(str(npz_path))
+                flag = "IMPROVE" if improves else "       "
+                print(
+                    f"  [{si:3d}] {flag}  t0={t0_cl:+.3f}  top1={top1['cl']:+.3f}  "
+                    f"Δ={delta:+.3f}  slot={slot_labels[top1['k']][:14]:14s}  "
+                    f"{Path(npz_path).name}"
+                )
+                continue
 
-        # Faint K=N background — also translated to lanelet frame
-        for ki in range(trajs.shape[0]):
-            tr = trajs[ki].cpu().numpy()
-            tr_full = np.concatenate([anchor, _to_lf(tr)], axis=0)
-            ax.plot(tr_full[:, 0], tr_full[:, 1], "-", color="#888888", lw=0.7,
-                    alpha=0.45, zorder=6)
-        # Det in blue
-        draw_traj(ax, det_full,
-                  f"Det (cl={det_r.centerline:+.2f}  total={det_r.total:+.1f})",
-                  "#1f77b4", npz_path, with_footprints=True)
-        # Rank-1 by reward in red
-        rank1_label = (
-            f"Rank-1 k={top1['k']} {slot_labels[top1['k']][:18]} "
-            f"(tot={top1['total']:+.1f}  cl={top1['cl']:+.2f})"
-        )
-        draw_traj(ax, top1_full, rank1_label, "#d62728", npz_path,
-                  with_footprints=True)
+            # Viz path (scene_batch_size == 1 guaranteed)
+            top1_traj = trajs[top1["k"]].cpu().numpy()
+            det_traj = det_trajs_BT4[bi].cpu().numpy()
 
-        # ------ Perturbation annotation from manifest ------
-        # In the lanelet frame: source pose = (0, 0), perturbed pose = (dx, dy).
-        # Arrow points source -> perturbed.
-        perturb_str = ""
-        if meta is not None:
-            lat = meta["lateral_offset_m"]
-            lon = meta["longitudinal_offset_m"]
-            side = "LEFT" if lat > 0 else ("RIGHT" if lat < 0 else "—")
-            perturb_str = (
-                f"perturb={meta['kind']}  lat={lat:+.2f}m ({side})  "
-                f"lon={lon:+.2f}m  yaw={meta['dtheta_deg']:+.1f}°  "
-                f"dv={meta['dv']:+.2f}m/s"
+            # As of disturb_and_replay 2026-05-12 (commit 3329364), the NPZ
+            # is re-anchored to the perturbed ego pose at origin. Trajectory
+            # and map data are already in the same frame, no _to_lf needed.
+            # Source pose (pre-perturbation ego) sits at (-dx, -dy) in this
+            # frame — kept for the annotation arrow only.
+            meta = manifest_by_npz.get(str(npz_path)) or manifest_by_npz.get(npz_path)
+            dx_pert = float(meta["dx"]) if meta is not None else 0.0
+            dy_pert = float(meta["dy"]) if meta is not None else 0.0
+            source_pose_xy = (-dx_pert, -dy_pert)
+            anchor = np.array([[0.0, 0.0, 1.0, 0.0]], dtype=det_traj.dtype)
+
+            det_full = np.concatenate([anchor, det_traj], axis=0)
+            top1_full = np.concatenate([anchor, top1_traj], axis=0)
+
+            fig, ax = plt.subplots(figsize=(11, 11))
+            draw_scene_base(ax, npz_path)
+
+            with np.load(npz_path, allow_pickle=True) as _d:
+                _es_np = _d["ego_shape"] if "ego_shape" in _d.files else None
+            wb = float(_es_np[0]) if _es_np is not None and len(_es_np) >= 1 else 4.76
+            elen = float(_es_np[1]) if _es_np is not None and len(_es_np) >= 2 else 7.24
+            ewid = float(_es_np[2]) if _es_np is not None and len(_es_np) >= 3 else 2.29
+            ro = elen - wb
+            # Perturbed ego (now-current) is at origin in the new frame.
+            t_rot_pert = (mtransforms.Affine2D()
+                          .rotate(0.0)
+                          .translate(0.0, 0.0)
+                          + ax.transData)
+            ax.add_patch(Rectangle(
+                (-ro, -ewid / 2), elen, ewid, lw=1.6,
+                ec="#7a6500", fc="#ffe066", alpha=0.35, zorder=20,
+                transform=t_rot_pert,
+            ))
+            ax.plot([0.0], [0.0], "x", color="#7a6500",
+                    ms=9, mew=2.2, zorder=21)
+
+            for ki in range(trajs.shape[0]):
+                tr = trajs[ki].cpu().numpy()
+                tr_full = np.concatenate([anchor, tr], axis=0)
+                ax.plot(tr_full[:, 0], tr_full[:, 1], "-", color="#888888", lw=0.7,
+                        alpha=0.45, zorder=6)
+            draw_traj(ax, det_full,
+                      f"Det (cl={det_r.centerline:+.2f}  total={det_r.total:+.1f})",
+                      "#1f77b4", npz_path, with_footprints=True)
+            rank1_label = (
+                f"Rank-1 k={top1['k']} {slot_labels[top1['k']][:18]} "
+                f"(tot={top1['total']:+.1f}  cl={top1['cl']:+.2f})"
             )
-            ax.annotate(
-                "", xy=(dx_pert, dy_pert), xytext=(0.0, 0.0),
-                arrowprops=dict(arrowstyle="->", color="#2ca02c", lw=2.2),
-                zorder=22,
+            draw_traj(ax, top1_full, rank1_label, "#d62728", npz_path,
+                      with_footprints=True)
+
+            perturb_str = ""
+            if meta is not None:
+                lat = meta["lateral_offset_m"]
+                lon = meta["longitudinal_offset_m"]
+                side = "LEFT" if lat > 0 else ("RIGHT" if lat < 0 else "—")
+                perturb_str = (
+                    f"perturb={meta['kind']}  lat={lat:+.2f}m ({side})  "
+                    f"lon={lon:+.2f}m  yaw={meta['dtheta_deg']:+.1f}°  "
+                    f"dv={meta['dv']:+.2f}m/s"
+                )
+                # Arrow from source pose to perturbed-now ego at origin.
+                ax.annotate(
+                    "", xy=(0.0, 0.0), xytext=source_pose_xy,
+                    arrowprops=dict(arrowstyle="->", color="#2ca02c", lw=2.2),
+                    zorder=22,
+                )
+                ax.plot([source_pose_xy[0]], [source_pose_xy[1]],
+                        "o", color="#2ca02c", ms=8, mew=0, zorder=22)
+                ax.text(source_pose_xy[0], source_pose_xy[1] - 0.4, "source pose",
+                        color="#2ca02c", fontsize=9, ha="center", zorder=22)
+
+            all_pts = np.vstack([
+                top1_full[:, :2], det_full[:, :2],
+                np.array([list(source_pose_xy)]),
+            ])
+            cx, cy = float(np.mean(all_pts[:, 0])), float(np.mean(all_pts[:, 1]))
+            half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8.0
+            ax.set_xlim(cx - half, cx + half)
+            ax.set_ylim(cy - half, cy + half)
+            ax.set_aspect("equal")
+            ax.legend(fontsize=8, loc="upper left")
+            prefix = "[IMPROVE] " if improves else "[no-improve] "
+            ax.set_title(
+                f"{prefix}{Path(npz_path).name}\n"
+                f"{perturb_str}\n"
+                f"t0_cl={t0_cl:+.3f}  rank1_cl={top1['cl']:+.3f}  Δ={delta:+.3f}  "
+                f"(rank1 by reward.total under baselink)",
+                fontsize=10,
             )
-            ax.plot([0.0], [0.0], "o", color="#2ca02c", ms=8, mew=0, zorder=22)
-            ax.text(0.0, -0.4, "source pose", color="#2ca02c",
-                    fontsize=9, ha="center", zorder=22)
+            out_dir = out_root / ("improve" if improves else "no_improve")
+            out_path = out_dir / f"scene_{si:03d}_{Path(npz_path).stem}.png"
+            fig.tight_layout()
+            fig.savefig(str(out_path), dpi=110, bbox_inches="tight")
+            plt.close(fig)
 
-        all_pts = np.vstack([
-            top1_full[:, :2], det_full[:, :2],
-            np.array([[dx_pert, dy_pert]]),
-        ])
-        cx, cy = float(np.mean(all_pts[:, 0])), float(np.mean(all_pts[:, 1]))
-        half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8.0
-        ax.set_xlim(cx - half, cx + half)
-        ax.set_ylim(cy - half, cy + half)
-        ax.set_aspect("equal")
-        ax.legend(fontsize=8, loc="upper left")
-        prefix = "[IMPROVE] " if improves else "[no-improve] "
-        ax.set_title(
-            f"{prefix}{Path(npz_path).name}\n"
-            f"{perturb_str}\n"
-            f"t0_cl={t0_cl:+.3f}  rank1_cl={top1['cl']:+.3f}  Δ={delta:+.3f}  "
-            f"(rank1 by reward.total under baselink)",
-            fontsize=10,
-        )
-        out_dir = out_root / ("improve" if improves else "no_improve")
-        out_path = out_dir / f"scene_{si:03d}_{Path(npz_path).stem}.png"
-        fig.tight_layout()
-        fig.savefig(str(out_path), dpi=110, bbox_inches="tight")
-        plt.close(fig)
+            if improves:
+                improve_paths.append(str(npz_path))
 
-        if improves:
-            improve_paths.append(str(npz_path))
-
-        summary.append({
-            "scene": str(npz_path),
-            "scene_idx": si,
-            "t0_cl": t0_cl,
-            "top1_cl": top1["cl"],
-            "delta_cl": delta,
-            "improves": improves,
-            "top1_k": top1["k"],
-            "top1_slot": slot_labels[top1["k"]],
-            "top1_total": top1["total"],
-            # Rank-1 safety: lets downstream filter scenes whose rank-1 winner
-            # would teach the model unsafe behavior (e.g. cutting through lanes
-            # or close to road borders) to recover. With enable_lane_departure
-            # off in reward.py, lane_cross does NOT gate total reward — so a
-            # rank-1 by total reward CAN have lane_cross=True. Filter on these.
-            "top1_rb_cross": top1["rb_cross"],
-            "top1_lane_cross": top1["lane_cross"],
-            "top1_kin_gate": top1["kin_gate"],
-            "top1_coll_step": top1["coll_step"],
-            "det_cl": float(det_r.centerline),
-            "det_total": float(det_r.total),
-            "png": str(out_path),
-        })
-        flag = "IMPROVE" if improves else "       "
-        print(
-            f"  [{si:3d}] {flag}  t0={t0_cl:+.3f}  top1={top1['cl']:+.3f}  "
-            f"Δ={delta:+.3f}  slot={slot_labels[top1['k']][:14]:14s}  "
-            f"{Path(npz_path).name}"
-        )
+            summary.append({
+                "scene": str(npz_path),
+                "scene_idx": si,
+                "t0_cl": t0_cl,
+                "top1_cl": top1["cl"],
+                "delta_cl": delta,
+                "improves": improves,
+                "top1_k": top1["k"],
+                "top1_slot": slot_labels[top1["k"]],
+                "top1_total": top1["total"],
+                "top1_rb_cross": top1["rb_cross"],
+                "top1_lane_cross": top1["lane_cross"],
+                "top1_kin_gate": top1["kin_gate"],
+                "top1_coll_step": top1["coll_step"],
+                "det_cl": float(det_r.centerline),
+                "det_total": float(det_r.total),
+                "png": str(out_path),
+            })
+            flag = "IMPROVE" if improves else "       "
+            print(
+                f"  [{si:3d}] {flag}  t0={t0_cl:+.3f}  top1={top1['cl']:+.3f}  "
+                f"Δ={delta:+.3f}  slot={slot_labels[top1['k']][:14]:14s}  "
+                f"{Path(npz_path).name}"
+            )
 
     n_imp = sum(1 for s in summary if s["improves"])
     print(f"\n[viz_p4_recovery] {n_imp} / {len(summary)} scenes improve under rank-1")
