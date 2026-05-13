@@ -41,8 +41,14 @@ import numpy as np
 SAMPLING_DIR = Path(__file__).resolve().parent.parent / "sampling"
 sys.path.insert(0, str(SAMPLING_DIR))
 
-from cluster import extract_features, load_npz_paths, main
+from cluster import load_npz_paths, main
 from utils.elbow import compute_wcss, elbow_kmeans, find_elbow
+from utils.pipeline import (
+    ClusteringStrategy,
+    ElbowKMeansStrategy,
+    cluster_trajectories,
+    extract_features,
+)
 
 
 # ─────────────────────────────── helpers ────────────────────────────────────
@@ -246,6 +252,114 @@ def test_elbow_kmeans_reproducible():
     print("  [PASS] elbow_kmeans same seed gives same result")
 
 
+# ──────────────────────────── ElbowKMeansStrategy ───────────────────────────
+
+
+def test_elbow_kmeans_strategy_labels_shape():
+    X = _synthetic_clusters(n_per_cluster=10, n_clusters=3)
+    strategy = ElbowKMeansStrategy(k_max=6, random_state=42)
+    labels = strategy.fit_predict(X)
+    assert labels.shape == (X.shape[0],), f"Expected ({X.shape[0]},), got {labels.shape}"
+    print("  [PASS] ElbowKMeansStrategy labels shape")
+
+
+def test_elbow_kmeans_strategy_n_clusters_set():
+    X = _synthetic_clusters(n_per_cluster=10, n_clusters=3)
+    strategy = ElbowKMeansStrategy(k_max=6, random_state=42)
+    strategy.fit_predict(X)
+    assert isinstance(strategy.n_clusters_, int), (
+        f"n_clusters_ should be int, got {type(strategy.n_clusters_)}"
+    )
+    assert 1 <= strategy.n_clusters_ <= 6
+    print("  [PASS] ElbowKMeansStrategy n_clusters_ set after fit_predict")
+
+
+def test_elbow_kmeans_strategy_is_subclass():
+    assert issubclass(ElbowKMeansStrategy, ClusteringStrategy)
+    print("  [PASS] ElbowKMeansStrategy is subclass of ClusteringStrategy")
+
+
+def test_elbow_kmeans_strategy_reproducible():
+    X = _synthetic_clusters()
+    s1 = ElbowKMeansStrategy(k_max=6, random_state=0)
+    s2 = ElbowKMeansStrategy(k_max=6, random_state=0)
+    np.testing.assert_array_equal(s1.fit_predict(X), s2.fit_predict(X))
+    assert s1.n_clusters_ == s2.n_clusters_
+    print("  [PASS] ElbowKMeansStrategy same seed gives same result")
+
+
+# ─────────────────────────── cluster_trajectories ───────────────────────────
+
+
+def test_cluster_trajectories_returns_dict():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_synthetic_dataset(tmp, n=15)
+        strategy = ElbowKMeansStrategy(k_max=5, random_state=42)
+        result = cluster_trajectories(npz_paths, strategy, pca_components=10)
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert isinstance(strategy.n_clusters_, int), (
+        f"strategy.n_clusters_ should be int after call, got {type(strategy.n_clusters_)}"
+    )
+    print("  [PASS] cluster_trajectories returns dict, strategy.n_clusters_ is int")
+
+
+def test_cluster_trajectories_all_paths_present():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_synthetic_dataset(tmp, n=20)
+        result = cluster_trajectories(
+            npz_paths, ElbowKMeansStrategy(k_max=5, random_state=42), pca_components=10
+        )
+    all_out = [p for paths in result.values() for p in paths]
+    assert sorted(all_out) == sorted(npz_paths), "Output paths do not match input paths"
+    print("  [PASS] cluster_trajectories all paths present")
+
+
+def test_cluster_trajectories_key_format():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_synthetic_dataset(tmp, n=15)
+        strategy = ElbowKMeansStrategy(k_max=5, random_state=42)
+        result = cluster_trajectories(npz_paths, strategy, pca_components=10)
+    for key in result:
+        assert key.startswith("cluster_id"), f"Unexpected key format: {key}"
+    assert len(result) == strategy.n_clusters_, (
+        f"Number of keys ({len(result)}) does not match strategy.n_clusters_ ({strategy.n_clusters_})"
+    )
+    print("  [PASS] cluster_trajectories key format and count")
+
+
+def test_cluster_trajectories_no_valid_files_raises():
+    strategy = ElbowKMeansStrategy(k_max=3)
+    try:
+        cluster_trajectories(["/nonexistent/a.npz", "/nonexistent/b.npz"], strategy)
+        assert False, "Should have raised RuntimeError"
+    except RuntimeError:
+        pass
+    print("  [PASS] cluster_trajectories raises on no valid files")
+
+
+def test_cluster_trajectories_uses_strategy():
+    """cluster_trajectories delegates clustering to the injected strategy."""
+
+    class _FixedKStrategy(ClusteringStrategy):
+        def __init__(self, k: int) -> None:
+            self._k = k
+
+        def fit_predict(self, features: np.ndarray) -> np.ndarray:
+            self.n_clusters_ = self._k
+            return np.arange(len(features)) % self._k
+
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_synthetic_dataset(tmp, n=9)
+        strategy = _FixedKStrategy(k=3)
+        result = cluster_trajectories(npz_paths, strategy, pca_components=5)
+
+    assert strategy.n_clusters_ == 3, "Strategy's fit_predict was not called"
+    assert len(result) == 3, f"Expected 3 clusters, got {len(result)}"
+    all_out = [p for paths in result.values() for p in paths]
+    assert sorted(all_out) == sorted(npz_paths)
+    print("  [PASS] cluster_trajectories delegates to injected strategy")
+
+
 # ──────────────────────────── integration: main ─────────────────────────────
 
 
@@ -391,6 +505,15 @@ ALL_TESTS = [
     test_elbow_kmeans_wcss_length,
     test_elbow_kmeans_k_max_clamped_to_n_samples,
     test_elbow_kmeans_reproducible,
+    test_elbow_kmeans_strategy_labels_shape,
+    test_elbow_kmeans_strategy_n_clusters_set,
+    test_elbow_kmeans_strategy_is_subclass,
+    test_elbow_kmeans_strategy_reproducible,
+    test_cluster_trajectories_returns_dict,
+    test_cluster_trajectories_all_paths_present,
+    test_cluster_trajectories_key_format,
+    test_cluster_trajectories_no_valid_files_raises,
+    test_cluster_trajectories_uses_strategy,
     test_main_end_to_end,
     test_main_output_no_duplicates,
     test_main_output_keys_sorted,

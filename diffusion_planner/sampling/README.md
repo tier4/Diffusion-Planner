@@ -1,35 +1,36 @@
 # Sampling Package
 
-## 概要
+## Overview
 
-Sampling Package は Diffusion Planner の学習に利用するデータの偏りを避けるため、データが適切な分布となるようにサンプリングを行うためのパッケージです。
+The Sampling Package provides tools to cluster trajectory datasets used for Diffusion Planner training.
+By grouping ego future trajectories into clusters, it helps avoid sampling bias and ensures a balanced data distribution across training scenarios.
 
-Sampling Package は下記のファイルから構成されます。
-
-## ファイル構成
+## File Structure
 
 ```
 sampling/
-├── cluster.py            # クラスタリング本体（エルボー法 + KMeans）
-├── visualize_cluster.py  # クラスタリング結果の可視化
+├── cluster.py            # CLI entry point — argument parsing and file I/O
+├── visualize_cluster.py  # Visualize clustering results as trajectory plots
 ├── utils/
-│   └── elbow.py          # WCSS 計算・エルボー検出・KMeans のユーティリティ
+│   ├── elbow.py          # WCSS computation, elbow detection, KMeans fitting
+│   └── pipeline.py       # Feature extraction, ClusteringStrategy interface, and pipeline
 └── README.md
 ```
 
-### 各ファイルの役割
+### File Roles
 
-| ファイル | 役割 |
+| File | Role |
 |---|---|
-| `cluster.py` | NPZ ファイル一覧を受け取り、ego の将来軌跡を特徴量として KMeans でクラスタリングする。最適クラスタ数はエルボー法で自動決定する。 |
-| `visualize_cluster.py` | `cluster.py` が出力した JSON を読み込み、クラスタごとに ego 将来軌跡を重ね描きしたサブプロット図を出力する。 |
-| `utils/elbow.py` | WCSS（クラスタ内二乗和）の計算、エルボー点の検出、KMeans フィットをまとめたユーティリティ。 |
+| `cluster.py` | CLI entry point. Reads an NPZ file list, runs the clustering pipeline, and writes the result JSON. |
+| `visualize_cluster.py` | Reads the result JSON from `cluster.py` and produces a grid of subplots, one per cluster, showing overlaid ego future trajectories. |
+| `utils/elbow.py` | Utilities for computing WCSS (within-cluster sum of squares), finding the elbow point, and fitting KMeans. |
+| `utils/pipeline.py` | Feature extraction from NPZ files, the `ClusteringStrategy` abstract interface, the `ElbowKMeansStrategy` concrete implementation, and the `cluster_trajectories` pipeline function. |
 
 ---
 
-## 使い方
+## Usage
 
-### Step 1: クラスタリング（`cluster.py`）
+### Step 1: Clustering (`cluster.py`)
 
 ```bash
 python cluster.py \
@@ -40,15 +41,15 @@ python cluster.py \
     [--seed 42]
 ```
 
-| 引数 | 必須 | デフォルト | 説明 |
+| Argument | Required | Default | Description |
 |---|---|---|---|
-| `--data_list` | ✓ | — | NPZ ファイルのパスを列挙した JSON |
-| `--output` | ✓ | — | クラスタリング結果を書き出す JSON のパス |
-| `--k_max` | | `20` | 評価するクラスタ数の上限 |
-| `--pca_components` | | `50` | PCA で削減する次元数 |
-| `--seed` | | `42` | 乱数シード |
+| `--data_list` | ✓ | — | Path to a JSON file listing NPZ file paths |
+| `--output` | ✓ | — | Output path for the clustering result JSON |
+| `--k_max` | | `20` | Upper bound on the number of clusters to evaluate |
+| `--pca_components` | | `50` | Number of PCA components for dimensionality reduction |
+| `--seed` | | `42` | Random seed |
 
-**入力 JSON 形式（`--data_list`）**
+**Input JSON format (`--data_list`)**
 
 ```json
 [
@@ -58,7 +59,7 @@ python cluster.py \
 ]
 ```
 
-### Step 2: 可視化（`visualize_cluster.py`）
+### Step 2: Visualization (`visualize_cluster.py`)
 
 ```bash
 python visualize_cluster.py \
@@ -68,47 +69,81 @@ python visualize_cluster.py \
     [--seed 42]
 ```
 
-| 引数 | 必須 | デフォルト | 説明 |
+| Argument | Required | Default | Description |
 |---|---|---|---|
-| `--cluster_json` | ✓ | — | `cluster.py` が出力した JSON |
-| `--output` | | — | 保存先のパス（PNG / PDF / SVG）。省略するとインタラクティブ表示 |
-| `--max_samples` | | `200` | クラスタごとに描画する軌跡の最大本数 |
-| `--seed` | | `42` | サンプリング乱数シード |
+| `--cluster_json` | ✓ | — | Clustering result JSON produced by `cluster.py` |
+| `--output` | | — | Output path (PNG / PDF / SVG). If omitted, the figure is shown interactively. |
+| `--max_samples` | | `200` | Maximum number of trajectories to draw per cluster |
+| `--seed` | | `42` | Random seed for trajectory sampling |
 
 ---
 
-## 処理パイプライン
+## Processing Pipeline
 
 ```
-NPZ ファイル群
+NPZ files
      │
      ▼
-ego_agent_future (80, 3) をフラット化 → (240,)
+Extract ego_agent_future (80, 3) → flatten → (240,)
      │
      ▼
-Z スコア正規化
+Z-score normalization
      │
      ▼
-PCA（240 次元 → pca_components 次元）
+PCA  (240-dim → pca_components-dim)
      │
      ▼
-エルボー法で最適 k を決定（k = 1 .. k_max）
-     │
-     ▼
-KMeans（k = optimal_k）
-     │
-     ▼
-result.json（クラスタ ID ごとに NPZ パスを分類）
+ClusteringStrategy.fit_predict(features)
+     │                 │
+     │    ElbowKMeansStrategy (default)
+     │      Determine optimal k via elbow method (k = 1 .. k_max)
+     │      Fit KMeans with k = optimal_k
+     │                 │
+     ▼                 ▼
+result.json  (NPZ paths grouped by cluster ID)
 ```
+
+The clustering step is implemented as a **Strategy pattern**.
+The preprocessing steps (feature extraction, Z-score normalization, PCA) are fixed,
+while the clustering algorithm is delegated to a `ClusteringStrategy` instance.
+This makes it straightforward to swap in a different algorithm without touching the pipeline.
 
 ---
 
-## 出力ファイル
+## Extending with a Custom Clustering Strategy
 
-### `cluster.py` の出力 JSON
+To use a different clustering algorithm, subclass `ClusteringStrategy` and implement `fit_predict`.
+The method must set `self.n_clusters_` as a side-effect so the pipeline can report the number of clusters used.
 
-クラスタ ID をキー、そのクラスタに属する NPZ ファイルのパス一覧を値とした辞書形式です。  
-キーは `cluster_id0`、`cluster_id1`、… の順にソートされています。
+```python
+import numpy as np
+from utils.pipeline import ClusteringStrategy, cluster_trajectories
+
+class MyStrategy(ClusteringStrategy):
+    def fit_predict(self, features: np.ndarray) -> np.ndarray:
+        # ... your algorithm ...
+        self.n_clusters_ = k  # must be set
+        return labels          # integer array of shape (n_samples,)
+
+strategy = MyStrategy()
+result = cluster_trajectories(npz_paths, strategy, pca_components=50)
+print(f"Clusters: {strategy.n_clusters_}")
+```
+
+### Built-in strategies
+
+| Class | Description |
+|---|---|
+| `ElbowKMeansStrategy(k_max, random_state)` | Selects the number of clusters automatically via the elbow method, then fits KMeans. |
+
+---
+
+## Output Files
+
+### Clustering result JSON (`cluster.py`)
+
+A dictionary mapping cluster IDs to lists of NPZ file paths.
+Keys are sorted as `cluster_id0`, `cluster_id1`, …
 
 ```json
 {
@@ -126,22 +161,22 @@ result.json（クラスタ ID ごとに NPZ パスを分類）
 }
 ```
 
-- 全入力ファイルがいずれか 1 つのクラスタに過不足なく割り当てられます。
-- 最適クラスタ数はエルボー法により `[1, k_max]` の範囲で自動決定されます。
+- Every input file appears in exactly one cluster.
+- The number of clusters is determined automatically within `[1, k_max]`.
 
-### `visualize_cluster.py` の出力図
+### Visualization figure (`visualize_cluster.py`)
 
-クラスタ数に応じてサブプロットを格子状に配置した PNG（または PDF / SVG）を出力します。  
-各サブプロットには、クラスタに属するサンプルの `(x, y)` 軌跡を重ね描きします。
+A PNG (or PDF / SVG) with one subplot per cluster arranged in a grid.
+Each subplot overlays the `(x, y)` trajectories of the samples assigned to that cluster.
 
 ---
 
-## トラブルシューティング
+## Troubleshooting
 
 ### `OpenBLAS: Program is Terminated. Because you tried to allocate too many memory regions.`
 
-エルボー法のループ中に OpenBLAS がメモリマップ領域の上限を超えることで発生します。  
-実行前に下記の環境変数を設定してください。
+This occurs when OpenBLAS exhausts the OS memory-map region limit during the elbow-method loop.
+Set the following environment variables before running:
 
 ```bash
 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 python cluster.py ...
