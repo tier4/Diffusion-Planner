@@ -154,7 +154,7 @@ def main() -> None:
             "percentile": args.percentile,
             "eligible_t0_max": args.eligible_t0_max,
             "n_total": len(scenes),
-            "n_eligible": 0,
+            "n_eligible": len(eligible),
             "n_kept": 0,
             "rejected_breakdown": rejected,
         }
