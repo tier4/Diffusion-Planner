@@ -643,8 +643,10 @@ def _apply_variant(
     # pose so the model sees ego_current_state at (0, 0, 0) — in-distribution."
 
     if mode == "yaw":
-        # Pure rotation about (0, 0). dx = dy = 0 by construction.
-        assert variant.dx == 0.0 and variant.dy == 0.0
+        if variant.dx != 0.0 or variant.dy != 0.0:
+            raise ValueError(
+                f"yaw mode requires dx=dy=0, got dx={variant.dx}, dy={variant.dy}"
+            )
     # mode "shift" and "combo" both encode the new ego pose in (variant.dx,
     # variant.dy, dtheta) — same downstream transform.
 

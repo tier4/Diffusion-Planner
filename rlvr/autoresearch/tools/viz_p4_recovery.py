@@ -122,7 +122,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no_viz", action="store_true",
                         help="Skip PNG plot (only write summary.json).")
-    parser.add_argument("--scene_batch_size", type=int, required=True,
+    parser.add_argument("--scene_batch_size", type=int, default=1,
                         help="Scenes batched through K-generation + det forward "
                              "per call. K × scene_batch_size trajectories in "
                              "parallel through the diffusion loop. Requires "
@@ -247,8 +247,11 @@ def main() -> None:
             ego_shapes.append(es_one)
             v_highs.append(_gt_max_speed(d))
             t0_cls.append(_t0_centerline(d, es_one, device))
-        # Approximation: use max GT speed across the batch (per-scene would
-        # require generate_all_scenes_batched to accept a per-scene vector).
+        # Approximation: use max GT speed across the batch. Per-scene speed
+        # would require generate_all_scenes_batched to accept a vector, which
+        # threads through the guidance system in diffusion_planner/.
+        # Conservative: higher speed = stricter speed guidance. Exact when
+        # scene_batch_size=1 (the default).
         v_batch = max(v_highs)
 
         batch = _stack_scene_data(datas_ok, device)

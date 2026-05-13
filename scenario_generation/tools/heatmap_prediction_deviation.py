@@ -41,7 +41,7 @@ import torch
 from preference_optimization.utils import load_npz_data
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
-from rlvr.autoresearch.tools.viz_p4_recovery import (
+from rlvr.grpo_trainer_batched import (
     _normalize_batch,
     _stack_scene_data,
 )
