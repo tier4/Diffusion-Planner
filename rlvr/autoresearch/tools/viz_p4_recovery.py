@@ -209,14 +209,18 @@ def main() -> None:
     for batch_start in range(0, len(scene_paths), SBS):
         paths_ok: list = []
         datas_ok: list = []
-        for p in scene_paths[batch_start : batch_start + SBS]:
+        orig_indices: list[int] = []
+        for gi, p in enumerate(scene_paths[batch_start : batch_start + SBS],
+                               start=batch_start):
             try:
-                _d = load_npz_data(p, device)
-                if "ego_shape" not in _d:
+                # Check raw NPZ before load_npz_data injects defaults.
+                raw_keys = set(np.load(p, allow_pickle=True).files)
+                if "ego_shape" not in raw_keys:
                     raise SystemExit(
                         f"NPZ {p} is missing ego_shape; refusing silent "
                         f"fallback. Re-extract / pad upstream."
                     )
+                _d = load_npz_data(p, device)
                 _es = _d["ego_shape"].cpu().numpy().reshape(-1)[:3]
                 if not np.allclose(_es, cli_ego_shape, atol=1e-2):
                     raise SystemExit(
@@ -226,6 +230,7 @@ def main() -> None:
                     )
                 datas_ok.append(_d)
                 paths_ok.append(p)
+                orig_indices.append(gi)
             except Exception as e:  # noqa: BLE001
                 print(f"  [skip] {Path(p).name}: {e}")
         if not datas_ok:
@@ -271,7 +276,7 @@ def main() -> None:
             decoder._guidance_fn = saved_fn
 
         for bi in range(B):
-            si = batch_start + bi
+            si = orig_indices[bi]
             npz_path = paths_ok[bi]
             data = datas_ok[bi]
             t0_cl = t0_cls[bi]
@@ -306,8 +311,6 @@ def main() -> None:
             improves = delta > 0.0
 
             if args.no_viz:
-                out_dir = out_root / ("improve" if improves else "no_improve")
-                out_path = out_dir / f"{Path(npz_path).stem}.skipped.txt"
                 summary.append({
                     "scene": str(npz_path),
                     "scene_idx": si,
@@ -324,7 +327,7 @@ def main() -> None:
                     "top1_coll_step": top1["coll_step"],
                     "det_cl": float(det_r.centerline),
                     "det_total": float(det_r.total),
-                    "png": str(out_path),
+                    "png": None,
                 })
                 if improves:
                     improve_paths.append(str(npz_path))

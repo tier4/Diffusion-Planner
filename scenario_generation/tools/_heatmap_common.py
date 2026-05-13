@@ -88,9 +88,9 @@ def project_to_polyline(
 def project_points_to_polyline(
     xys: np.ndarray, pts: np.ndarray, s: np.ndarray
 ) -> np.ndarray:
-    """Vectorised batch projection. xys: (M, 2). Returns (M, 3) = (arc, signed, |lat|).
+    """Batch projection via per-point loop. xys: (M, 2). Returns (M, 3) = (arc, signed, |lat|).
 
-    O(M*N) but vectorised; fine up to a few hundred thousand points.
+    O(M*N); fine up to a few hundred thousand points.
     """
     out = np.zeros((len(xys), 3), dtype=np.float64)
     for k, p in enumerate(xys):
