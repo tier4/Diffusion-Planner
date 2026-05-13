@@ -393,7 +393,14 @@ def main() -> None:
                 gt_np = gt_t.detach().cpu().numpy()
                 if gt_np.ndim == 3:
                     gt_np = gt_np[0]
-                if gt_np.shape[-1] >= 4 and (np.abs(gt_np[:, :2]).sum() > 0.1):
+                if gt_np.shape[-1] >= 3 and (np.abs(gt_np[:, :2]).sum() > 0.1):
+                    if gt_np.shape[-1] == 3:
+                        gt_4 = np.zeros((gt_np.shape[0], 4), dtype=np.float32)
+                        gt_4[:, 0] = gt_np[:, 0]
+                        gt_4[:, 1] = gt_np[:, 1]
+                        gt_4[:, 2] = np.cos(gt_np[:, 2])
+                        gt_4[:, 3] = np.sin(gt_np[:, 2])
+                        gt_np = gt_4
                     gt_full = np.concatenate([anchor, gt_np.astype(det_traj.dtype)], axis=0)
                     draw_traj(ax, gt_full, "GT (bag future)",
                               "#2ca02c", npz_path, with_footprints=False)
