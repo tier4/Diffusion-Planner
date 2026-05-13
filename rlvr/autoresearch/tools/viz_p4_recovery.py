@@ -80,16 +80,11 @@ def _gt_max_speed(data: dict) -> float:
 
 
 def _t0_centerline(data: dict, ego_shape, device) -> float:
-    """Compute the centerline reward at the ego's CURRENT (post-perturbation)
-    pose.
+    """Compute the centerline reward at the ego's CURRENT pose.
 
-    The perturbed NPZ dumps from ``disturb_and_replay`` shift
-    ``ego_current_state[0:4]`` by ``(dx, dy, dtheta)`` but leave
-    ``route_lanes`` in the original world frame. To score "where the ego
-    is right now" against the centerline, the 1-step trajectory must be
-    placed at ``ego_current_state``'s position/heading, not at the origin.
-    The earlier version hardcoded ``(0, 0, cos=1, sin=0)`` which silently
-    returned the SOURCE pose's CL for perturbed inputs.
+    Both ego_current_state and route_lanes are in the same frame (perturbed
+    ego at origin). Builds a 1-step trajectory at ego_current_state and
+    scores it against route_lanes.
     """
     ecs = data["ego_current_state"]
     if ecs.dim() == 2:
@@ -246,6 +241,8 @@ def main() -> None:
             ego_shapes.append(es_one)
             v_highs.append(_gt_max_speed(d))
             t0_cls.append(_t0_centerline(d, es_one, device))
+        # Approximation: use max GT speed across the batch (per-scene would
+        # require generate_all_scenes_batched to accept a per-scene vector).
         v_batch = max(v_highs)
 
         batch = _stack_scene_data(datas_ok, device)

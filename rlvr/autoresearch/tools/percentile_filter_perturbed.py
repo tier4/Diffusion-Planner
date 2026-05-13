@@ -54,9 +54,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eligible_t0_max", type=float, default=0.0,
                    help="Drop scenes with t0_cl > this value as already-fine. "
                         "Set to 0 (default) to disable this exclusion.")
-    # No kin_gate flag — the check is unconditional. A scene whose rank-1
-    # trajectory is kinematically infeasible (top1_kin_gate == False per
-    # reward.py:3063 convention: True = gate PASSED = safe) is poison for
+    # No kin flag — the check is unconditional. A scene whose rank-1
+    # trajectory has top1_kin_violated == True (infeasible) is poison for
     # SFT: training the model to imitate undriveable physics is unsafe.
     return p.parse_args()
 

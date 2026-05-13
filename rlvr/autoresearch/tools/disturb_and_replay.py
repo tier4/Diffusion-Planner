@@ -514,7 +514,7 @@ def _apply_inverse_rigid_to_spatial(
         arr[..., iy] = (s * x + c * y).astype(arr.dtype)
 
     def _wrap_yaw_inplace(arr: np.ndarray, idx: int) -> None:
-        # Subtract dtheta then wrap to (-pi, pi].
+        # Subtract dtheta then wrap to [-pi, pi).
         a = arr[..., idx] - np.float32(dtheta)
         # vectorised wrap
         a = (a + np.pi) % (2 * np.pi) - np.pi
@@ -631,8 +631,10 @@ def _apply_variant(
 ) -> dict[str, np.ndarray]:
     """Return a perturbed copy of ``npz`` per ``variant``.
 
-    NOTE: ``ego_agent_future`` is INTENTIONALLY NOT modified here. It will be
-    overwritten later with the baseline model's prediction.
+    All spatial fields (map, neighbors, ego past/future, goal, statics) are
+    transformed into the new ego frame via ``_apply_inverse_rigid_to_spatial``.
+    Ranked-SFT replaces ``ego_agent_future`` with the K-best trajectory at
+    training time, but the NPZ is kept self-consistent here.
     """
     out = {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in npz.items()}
 
