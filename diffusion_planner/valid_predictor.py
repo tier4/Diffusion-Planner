@@ -165,8 +165,8 @@ def validate_model(model, val_loader, args, return_pred=False, use_gt_roundtrip=
             turn_indicator_change_correct += correct[change_mask].sum().item()
             turn_indicator_change_total += change_count
         if return_pred:
-            predictions.append(prediction)
-            turn_indicators.append(turn_indicator)
+            predictions.append(prediction.cpu())
+            turn_indicators.append(turn_indicator.cpu())
 
         # Ego loss from control prediction (trajectory_and_control mode)
         if not use_gt_roundtrip and args.output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
@@ -190,7 +190,7 @@ def validate_model(model, val_loader, args, return_pred=False, use_gt_roundtrip=
         all_gt = all_gt[:, :, 1:, :]  # (B, Pn + 1, T, 4)
         loss_tensor = (prediction - all_gt) ** 2
         loss_ego = loss_tensor[:, 0, :]
-        loss_ego_list.append(loss_ego)
+        loss_ego_list.append(loss_ego.cpu())
         loss_nei = loss_tensor[:, 1:, :]
         loss_nei = loss_nei[neighbors_future_valid]
         total_loss_ego += loss_ego.mean().item() * B
@@ -203,7 +203,7 @@ def validate_model(model, val_loader, args, return_pred=False, use_gt_roundtrip=
         loss_dict = loss_func(prediction, all_gt)
         for key, val in loss_dict.items():
             # val : (B, Pn + 1, T)
-            total_result_dict[f"ego_{key}"].append(val[:, 0, :])  # (B, T)
+            total_result_dict[f"ego_{key}"].append(val[:, 0, :].cpu())  # (B, T)
 
         # Compute ego edge points for penalty metrics
         ego_edge_points = compute_ego_edge_points(
@@ -218,7 +218,7 @@ def validate_model(model, val_loader, args, return_pred=False, use_gt_roundtrip=
             denorm_inputs["neighbor_agents_past"],
             margin=args.neighbor_collision_margin,
         )
-        total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty)
+        total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty.cpu())
 
         # Road border collision metric
         rb_penalty = compute_road_border_penalty(
@@ -226,7 +226,7 @@ def validate_model(model, val_loader, args, return_pred=False, use_gt_roundtrip=
             denorm_inputs["line_strings"],
             margin=args.road_border_margin,
         )
-        total_result_dict["ego_road_border_loss"].append(rb_penalty)
+        total_result_dict["ego_road_border_loss"].append(rb_penalty.cpu())
 
     avg_loss_ego = total_loss_ego / total_samples_ego
     avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)

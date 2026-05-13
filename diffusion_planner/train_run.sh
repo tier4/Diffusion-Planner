@@ -40,7 +40,7 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --use_wandb True \
 --diffusion_model_type "x_start" \
 --save_dir ${SAVE_PATH} \
---train_epochs 40 \
+--train_epochs 80 \
 --save_utd 10 \
 2>&1 | tee ${SAVE_PATH}/train_log.txt
 
@@ -52,8 +52,8 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --use_wandb True \
 --diffusion_model_type "x_start" \
 --save_dir ${SAVE_PATH} \
---resume_model_path ${SAVE_PATH}/epoch0020/best_model.pth \
---train_epochs 40 \
+--resume_model_path ${SAVE_PATH}/epoch0060/best_model.pth \
+--train_epochs 80 \
 --save_utd 5 \
 2>&1 | tee ${SAVE_PATH}/sft_log.txt
 

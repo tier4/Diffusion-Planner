@@ -95,15 +95,16 @@ class GRPOConfig:
     w_smooth: float = 0.5
     w_feasibility: float = 5.0
     w_centerline: float = 5.0
-    # Centerline usage cap (passed to RewardConfig). Per-step lane_usage is
-    # clamped to this before squaring. 1.0 = current default (saturates at the
-    # lane boundary); raise to 1.5-2.0 to let past-boundary trajectories be
-    # penalized more and widen the ranking signal.
-    centerline_usage_cap: float = 1.0
     # Centerline usage mode (passed to RewardConfig):
-    #   "body" (default): lane_usage = (|baselink_lat| + ego_half_w) / side_hw
-    #   "baselink": lane_usage = |baselink_lat| / side_hw (ignores ego width)
-    centerline_usage_mode: str = "body"
+    #   "baselink" (default): lane_usage = |baselink_lat| / side_hw
+    #     Pure rear-axle offset / lane half-width. Directly interpretable —
+    #     0 = centered, 1 = baselink at lane edge.
+    #   "body" (DEPRECATED 2026-04-27): lane_usage = (|baselink_lat| + ego_half_w)
+    #     / side_hw. Adds half-vehicle-width to the offset, which is unitless
+    #     but easy to misread as lateral metres (a centered wide vehicle can
+    #     already read above 0.5). Emits DeprecationWarning when used. Kept only for loading
+    #     pre-2026-04-27 configs.
+    centerline_usage_mode: str = "baselink"
     # Centerline time-weight floor (passed to RewardConfig). Per-step penalty is
     # averaged with linspace(1.0, centerline_time_weight_min, T). Default 0.3 matches
     # historical behavior; 1.0 = flat uniform average. Raise when late-curve lane
@@ -433,6 +434,17 @@ class GRPOConfig:
                 data[new] = data.pop(old)
             elif old in data:
                 data.pop(old)  # new name takes precedence
+        # centerline_usage_cap was removed 2026-04-27. Old JSONs still carry
+        # it (often as 99.0 or 1.0); accept-and-ignore so legacy configs load.
+        if "centerline_usage_cap" in data:
+            import warnings
+            data.pop("centerline_usage_cap")
+            warnings.warn(
+                "centerline_usage_cap is no longer supported — the cap "
+                "mechanism was removed; lane_usage is always uncapped now.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
     def to_json(self, path: str | Path) -> None:

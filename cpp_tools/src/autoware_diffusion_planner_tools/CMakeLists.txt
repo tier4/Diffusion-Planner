@@ -41,3 +41,13 @@ ament_auto_add_executable(benchmark_tool
 ament_auto_package(
   INSTALL_TO_SHARE
 )
+
+# --- GoogleTest for unit tests ---
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_timestamp_stats test/test_timestamp_stats.cpp)
+  if(TARGET test_timestamp_stats)
+    target_include_directories(test_timestamp_stats PRIVATE include)
+  endif()
+endif()

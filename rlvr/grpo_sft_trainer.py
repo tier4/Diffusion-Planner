@@ -806,7 +806,7 @@ def train_epoch_ranked_sft(
     print(f"  {_reward_label}: {mean_best_reward:.2f}")
     if selective_thresh > 0:
         print(f"  Selective training: {n_selected}/{N} scenes selected "
-              f"(threshold={selective_thresh:.1f}, skipped {N - n_selected})")
+              f"(threshold={selective_thresh:g}, skipped {N - n_selected})")
     if _gt_scored_count > 0:
         _gt_mode_str = getattr(config, "gt_fallback_mode", "none")
         print(f"  GT fallback ({_gt_mode_str}): {_gt_fallback_count}/{_gt_scored_count} scenes "

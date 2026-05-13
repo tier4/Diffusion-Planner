@@ -472,6 +472,7 @@ def _predict_batch(
     map_cache: MapTensorCache | None = None,
     return_turn_indicators: bool = False,
     inference_delay: int = 0,
+    turn_indicator_keep_bias: float = 0.25,
 ) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], dict[str, int]]:
     """Run batched inference for multiple agents-as-ego.
 
@@ -490,6 +491,12 @@ def _predict_batch(
             closed-loop replay to feed model-predicted turn signals back
             into the next frame's ``turn_indicators`` history, matching
             the C++ ``TurnIndicatorManager`` control flow.
+        turn_indicator_keep_bias: Subtracted from the KEEP (class 4)
+            logit before argmax to imitate the C++ planner. A 0.25 bias
+            means KEEP has to beat the next-best class by 0.25 before we
+            pick it — avoids spurious KEEP locks on near-ties. Only
+            applied when ``return_turn_indicators=True``. Default 0.25;
+            set to 0.0 to reproduce the raw argmax.
 
     Returns ``{agent_id: (80, 4) ego-centric prediction}``, or a tuple
     ``(preds, turn_idx)`` when ``return_turn_indicators=True``.
@@ -514,7 +521,10 @@ def _predict_batch(
         ti_logit = outputs.get("turn_indicator_logit")
         ti = {}
         if ti_logit is not None:
-            ti[agent_ids[0]] = int(ti_logit[0].argmax(dim=-1).cpu().item())
+            biased = ti_logit[0].clone()
+            if turn_indicator_keep_bias != 0.0 and biased.shape[-1] > 4:
+                biased[..., 4] -= turn_indicator_keep_bias
+            ti[agent_ids[0]] = int(biased.argmax(dim=-1).cpu().item())
         return preds, ti
 
     batched = _cat_tensor_dicts(tensor_dicts)
@@ -526,7 +536,10 @@ def _predict_batch(
     ti_logit = outputs.get("turn_indicator_logit")
     ti: dict[str, int] = {}
     if ti_logit is not None:
-        ti_cls = ti_logit.argmax(dim=-1).cpu().numpy()
+        biased = ti_logit.clone()
+        if turn_indicator_keep_bias != 0.0 and biased.shape[-1] > 4:
+            biased[..., 4] -= turn_indicator_keep_bias
+        ti_cls = biased.argmax(dim=-1).cpu().numpy()
         for i, aid in enumerate(agent_ids):
             ti[aid] = int(ti_cls[i])
     return preds, ti

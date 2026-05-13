@@ -918,7 +918,7 @@ def test_advantage_softmax():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# centerline usage_cap + usage_mode (added 2026-04-22)
+# centerline usage_mode (added 2026-04-22)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -939,7 +939,7 @@ def _make_straight_lane_route_data(
 
 def test_centerline_baselink_zero_when_centered():
     """usage_mode='baselink' with ego riding the centerline → per-step usage 0
-    regardless of ego width (cap has no effect)."""
+    regardless of ego width."""
     from rlvr.reward import compute_centerline_score_batch
     T = 20
     lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
@@ -979,48 +979,36 @@ def test_centerline_body_penalizes_width_even_when_centered():
     print("  PASS  test_centerline_body_penalizes_width_even_when_centered")
 
 
-def test_centerline_usage_cap_rejects_nonpositive():
-    """usage_cap must be > 0 and finite; bad configs should fail fast."""
-    from rlvr.reward import compute_centerline_score_batch
-    T = 20
-    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
-    ego = torch.zeros(1, T, 4)
-    for t in range(T):
-        ego[0, t, 0] = t * 0.5
-        ego[0, t, 2] = 1.0
-    shape = torch.tensor([2.75, 4.34, 1.70])
-    for bad in (0.0, -0.5, float("inf"), float("nan")):
-        try:
-            compute_centerline_score_batch(ego, shape, data, usage_cap=bad)
-        except ValueError:
-            continue
-        raise AssertionError(f"usage_cap={bad} should have raised ValueError")
-    print("  PASS  test_centerline_usage_cap_rejects_nonpositive")
-
-
-def test_centerline_usage_cap_changes_past_boundary_scoring():
-    """usage_cap > 1.0 lets past-boundary trajectories accrue bigger penalties
-    than the default cap=1.0 (which clamps at the boundary)."""
+def test_centerline_uncapped_past_boundary_grows():
+    """lane_usage is no longer clamped — a trajectory drifted past the lane
+    boundary should accrue a penalty larger than the squared-boundary case."""
     from rlvr.reward import compute_centerline_score_batch
     T = 20
     lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
     shape = torch.tensor([2.75, 4.34, 1.70])
-    # Ego drifted 2.0 m off-centerline — past the 1.75 m boundary.
-    ego = torch.zeros(1, T, 4)
+    # On-boundary ego (y=1.75 → lane_usage≈1).
+    ego_on = torch.zeros(1, T, 4)
     for t in range(T):
-        ego[0, t, 0] = t * 0.5
-        ego[0, t, 1] = 2.0
-        ego[0, t, 2] = 1.0
-    cap_1 = compute_centerline_score_batch(ego, shape, data, usage_cap=1.0)
-    cap_2 = compute_centerline_score_batch(ego, shape, data, usage_cap=2.0)
-    # Larger cap lets the penalty grow, so score (negative) should be *more negative*.
-    assert float(cap_2[0]) < float(cap_1[0]), (
-        f"usage_cap=2.0 should produce a more-negative score than cap=1.0 for a past-boundary traj: "
-        f"cap=1.0→{float(cap_1[0])}  cap=2.0→{float(cap_2[0])}"
+        ego_on[0, t, 0] = t * 0.5
+        ego_on[0, t, 1] = 1.75
+        ego_on[0, t, 2] = 1.0
+    # Past-boundary ego (y=2.5 → lane_usage≈2.5/1.75 > 1).
+    ego_past = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego_past[0, t, 0] = t * 0.5
+        ego_past[0, t, 1] = 2.5
+        ego_past[0, t, 2] = 1.0
+    score_on = compute_centerline_score_batch(ego_on, shape, data)
+    score_past = compute_centerline_score_batch(ego_past, shape, data)
+    # Without a cap, past-boundary score must be strictly more negative.
+    assert float(score_past[0]) < float(score_on[0]), (
+        f"past-boundary score should be more negative than on-boundary: "
+        f"on={float(score_on[0])}  past={float(score_past[0])}"
     )
-    # And the cap=1.0 result is itself negative (penalty is accruing).
-    assert float(cap_1[0]) < 0, f"Off-lane traj should have negative score: {float(cap_1[0])}"
-    print("  PASS  test_centerline_usage_cap_changes_past_boundary_scoring")
+    # And both are negative (penalty accruing).
+    assert float(score_on[0]) < 0
+    assert float(score_past[0]) < 0
+    print("  PASS  test_centerline_uncapped_past_boundary_grows")
 
 
 if __name__ == "__main__":
@@ -1072,8 +1060,7 @@ if __name__ == "__main__":
         test_advantage_softmax,
         test_centerline_baselink_zero_when_centered,
         test_centerline_body_penalizes_width_even_when_centered,
-        test_centerline_usage_cap_rejects_nonpositive,
-        test_centerline_usage_cap_changes_past_boundary_scoring,
+        test_centerline_uncapped_past_boundary_grows,
     ]
 
     print("=" * 60)
