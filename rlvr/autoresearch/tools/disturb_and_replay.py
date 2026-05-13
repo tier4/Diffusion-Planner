@@ -482,8 +482,8 @@ def _apply_inverse_rigid_to_spatial(
     """Re-anchor every spatial NPZ field to the NEW ego pose (perturbed pose
     becomes the origin (0, 0) with heading along +x).
 
-    The transform is the inverse rigid of (dx, dy, dtheta): rotate by
-    ``-dtheta`` about origin, then translate by ``(-dx, -dy)``. Direction
+    The transform is the inverse rigid of (dx, dy, dtheta): translate by
+    ``(-dx, -dy)`` then rotate by ``-dtheta`` about the origin. Direction
     channels (cos/sin headings, lane direction vectors, neighbor velocity)
     rotate by ``-dtheta``. Yaw channels subtract ``dtheta`` and wrap.
 
@@ -594,20 +594,14 @@ def _apply_inverse_rigid_to_spatial(
         poly = out["polygons"]
         valid = (poly[..., 0] != 0) | (poly[..., 1] != 0)
         _xy_inv(poly, 0, 1)
-        invalid_mask = ~valid
-        if invalid_mask.any():
-            inv_idx = np.where(invalid_mask)
-            poly[inv_idx[0], inv_idx[1], :2] = 0
+        poly[~valid] = 0
 
     # --- line_strings (60, 20, 4) [x, y, stop_oh, rb_oh] — xy only ---
     if "line_strings" in out:
         ls = out["line_strings"]
         valid = (ls[..., 0] != 0) | (ls[..., 1] != 0)
         _xy_inv(ls, 0, 1)
-        invalid_mask = ~valid
-        if invalid_mask.any():
-            inv_idx = np.where(invalid_mask)
-            ls[inv_idx[0], inv_idx[1], :2] = 0
+        ls[~valid] = 0
 
     # --- goal_pose (3,) or (4,) [x, y, yaw] (3,) or [x, y, cos, sin] (4,) ---
     if "goal_pose" in out:

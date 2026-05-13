@@ -160,9 +160,13 @@ def main() -> None:
         }
     report_path.write_text(json.dumps(report, indent=2))
 
+    if args.det_cl_max is not None:
+        mode_desc = f"det_cl<{args.det_cl_max} & top1_cl>={args.top1_cl_min}"
+    else:
+        mode_desc = f"top {args.percentile:.0f}%"
     print(
         f"Filtered {len(scenes)} → eligible {len(eligible)} → kept {len(kept)} "
-        f"(top {args.percentile:.0f}%). Rejected: {rejected}. "
+        f"({mode_desc}). Rejected: {rejected}. "
         f"Wrote {args.output_scenes}."
     )
 
