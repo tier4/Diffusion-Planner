@@ -112,6 +112,8 @@ def main() -> None:
             continue
         eligible.append(s)
 
+    if (args.det_cl_max is None) != (args.top1_cl_min is None):
+        raise SystemExit("--det_cl_max and --top1_cl_min must both be set or both omitted.")
     if args.det_cl_max is not None and args.top1_cl_min is not None:
         # Two-threshold mode: real training signal (det bad + rank-1 good).
         kept = [

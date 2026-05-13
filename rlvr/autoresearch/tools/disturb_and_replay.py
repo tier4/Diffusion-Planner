@@ -32,10 +32,11 @@ Outputs:
     perturbation magnitude. That bug let trajectories crossing the road
     border pass the RB gate (rank-1 winners visually exited the lane
     while ``top1_rb_cross=False``). See git log for details.
-    ``ego_agent_future`` is **inherited from the source NPZ unchanged**
-    by default — ranked-SFT ignores ``ego_agent_future`` and synthesizes
-    its own SFT target from the K-best ranked trajectory at training
-    time, so writing into it is unnecessary.
+    ``ego_agent_future`` is re-expressed in the perturbed ego frame (same
+    inverse rigid transform as all other spatial fields) so the NPZ is
+    self-consistent. Ranked-SFT ignores ``ego_agent_future`` and
+    synthesizes its own SFT target from the K-best ranked trajectory at
+    training time, so the transformed value is not used in practice.
 
   * ``<output_dir>/manifest.json`` — per-output metadata including
     ``dx, dy, dtheta_deg, dv, lateral_offset_m, longitudinal_offset_m,

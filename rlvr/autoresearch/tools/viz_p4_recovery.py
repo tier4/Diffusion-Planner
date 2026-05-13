@@ -214,7 +214,8 @@ def main() -> None:
                                start=batch_start):
             try:
                 # Check raw NPZ before load_npz_data injects defaults.
-                raw_keys = set(np.load(p, allow_pickle=True).files)
+                with np.load(p, allow_pickle=True) as f:
+                    raw_keys = set(f.files)
                 if "ego_shape" not in raw_keys:
                     raise SystemExit(
                         f"NPZ {p} is missing ego_shape; refusing silent "
