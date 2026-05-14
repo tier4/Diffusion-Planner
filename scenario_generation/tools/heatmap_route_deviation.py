@@ -47,16 +47,24 @@ from scenario_generation.tools._heatmap_common import (
 
 
 def _recover_ego_world_series(run_dir: Path, route) -> np.ndarray:
-    """Recover (T,3) ego world poses [x, y, yaw_rad] from dumped NPZs."""
+    """Recover (T,4) array [x, y, yaw_rad, speed_mps] from dumped NPZs.
+
+    Speed comes from ego_current_state[4:6] (vx, vy in base_link).
+    """
     npz_dir = run_dir / "npz"
     files = sorted(npz_dir.glob("replay_step_*.npz"))
     if not files:
-        raise SystemExit(f"No replay_step_*.npz under {npz_dir}")
-    poses = np.zeros((len(files), 3), dtype=np.float64)
+        files = sorted(f for f in npz_dir.glob("*.npz")
+                        if "summary" not in f.name and "heatmap" not in f.name)
+    if not files:
+        raise SystemExit(f"No step NPZs under {npz_dir}")
+    poses = np.zeros((len(files), 4), dtype=np.float64)
     for k, fp in enumerate(files):
         with np.load(fp, allow_pickle=True) as d:
             gp = d["goal_pose"]
-        poses[k] = recover_ego_world_pose_from_goal(gp, route)
+            ecs = d["ego_current_state"]
+        poses[k, :3] = recover_ego_world_pose_from_goal(gp, route)
+        poses[k, 3] = float(np.linalg.norm(ecs[4:6]))
     return poses
 
 
@@ -76,6 +84,18 @@ def main():
                    help="Truncate both runs to the first N steps. Default: "
                         "min(len(run_a), len(run_b)) — so the comparison "
                         "covers the same temporal window.")
+    p.add_argument("--min_arc_m", type=float, default=None,
+                   help="Exclude route before this arc-length (metres). "
+                        "Useful to trim the initial convergence from a "
+                        "misplaced starting pose.")
+    p.add_argument("--max_arc_m", type=float, default=None,
+                   help="Exclude route beyond this arc-length (metres). "
+                        "Useful to trim the last N metres where the goal is "
+                        "far from the centerline.")
+    p.add_argument("--min_speed_mps", type=float, default=0.5,
+                   help="Exclude steps where ego speed is below this (m/s). "
+                        "Filters out stopped / crawling frames so they don't "
+                        "pollute the deviation signal. Default: 0.5 m/s.")
     args = p.parse_args()
 
     print(f"Loading route {args.route}")
@@ -105,8 +125,32 @@ def main():
         print(f"Comparing first {n_steps} steps of each run (min of both)")
     poses_a = poses_a[:n_steps]
     poses_b = poses_b[:n_steps]
+
+    if args.min_speed_mps > 0:
+        mask_a = poses_a[:, 3] >= args.min_speed_mps
+        mask_b = poses_b[:, 3] >= args.min_speed_mps
+        n_drop_a = int((~mask_a).sum())
+        n_drop_b = int((~mask_b).sum())
+        poses_a = poses_a[mask_a]
+        poses_b = poses_b[mask_b]
+        print(f"Speed filter >= {args.min_speed_mps:.1f} m/s: "
+              f"dropped {n_drop_a}/{n_steps} A, {n_drop_b}/{n_steps} B")
+
     dev_a = deviation_series(poses_a[:, :2], pts, s)
     dev_b = deviation_series(poses_b[:, :2], pts, s)
+
+    if args.min_arc_m is not None:
+        dev_a = dev_a[dev_a[:, 0] >= args.min_arc_m]
+        dev_b = dev_b[dev_b[:, 0] >= args.min_arc_m]
+        print(f"Trimmed to arc >= {args.min_arc_m:.1f} m  "
+              f"(A: {len(dev_a)} pts, B: {len(dev_b)} pts)")
+
+    if args.max_arc_m is not None:
+        dev_a = dev_a[dev_a[:, 0] <= args.max_arc_m]
+        dev_b = dev_b[dev_b[:, 0] <= args.max_arc_m]
+        s_max = min(s_max, args.max_arc_m)
+        print(f"Trimmed to arc <= {args.max_arc_m:.1f} m  "
+              f"(A: {len(dev_a)} pts, B: {len(dev_b)} pts)")
 
     bin_m = float(args.bin_m)
     bs_mid, mean_a, max_a = bin_by_arc(dev_a, s_max, bin_m)
