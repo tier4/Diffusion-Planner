@@ -104,7 +104,7 @@ Pass the output directly to `train_run.sh`:
 bash train_run.sh my_exp /path/to/sampled.json /path/to/valid.json /path/to/sft.json
 ```
 
-### Step 4: Visualization (`visualize_cluster.py`)
+### Step 3: Visualization (`visualize_cluster.py`)
 
 ```bash
 python visualize_cluster.py \
