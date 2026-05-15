@@ -237,6 +237,18 @@ def crop_run_by_offset(d: dict, max_offset_m: float) -> dict:
     return {k: v[m] for k, v in d.items()}
 
 
+def crop_run_by_speed(d: dict, min_speed: float) -> dict:
+    """Drop frames where ego speed is below ``min_speed`` m/s."""
+    m = d["speed"] >= min_speed
+    return {k: v[m] for k, v in d.items()}
+
+
+def crop_run_by_lon(d: dict, max_lon_m: float) -> dict:
+    """Drop frames beyond ``max_lon_m`` along the route arc-length."""
+    m = d["lon"] <= max_lon_m
+    return {k: v[m] for k, v in d.items()}
+
+
 def stats_line(name: str, d: dict, all_d: dict) -> str:
     """One-line summary of a run's cropped vs raw lateral offsets.
 

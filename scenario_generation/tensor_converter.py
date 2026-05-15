@@ -25,7 +25,7 @@ from scenario_generation.transforms import (
 # Model dimension constants (from diffusion_planner.dimensions)
 _INPUT_T = 30
 _POSE_DIM = 4
-_MAX_NUM_NEIGHBORS = 32
+_MAX_NUM_NEIGHBORS = 320
 _NUM_LANES = 140
 _NUM_ROUTE = 25
 _NUM_POLYGONS = 10
