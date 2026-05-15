@@ -115,8 +115,7 @@ def main():
 
     rng = random.Random(seed)
     sampled: list[str] = []
-    for cluster_key in sorted(clusters.keys()):
-        paths = clusters[cluster_key]
+    for cluster_key, paths in clusters.items():
         chosen = rng.sample(paths, min_count)
         sampled.extend(chosen)
         print(f"  {cluster_key}: {len(paths)} → sampled {min_count}")
