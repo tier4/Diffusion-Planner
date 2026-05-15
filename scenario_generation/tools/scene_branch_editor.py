@@ -197,6 +197,9 @@ def _inject_obstacles_into_tensors(
     nap = data["neighbor_agents_past"]  # [1, N, 31, 11]
     B, N, T, F = nap.shape
 
+    # Sort by distance from ego (at origin) to match the distance-sorted convention
+    obstacles = sorted(obstacles, key=lambda o: math.hypot(o.x, o.y))
+
     new_rows = []
     for obs in obstacles:
         cos_h = math.cos(obs.yaw_rad)
@@ -573,12 +576,12 @@ def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future:
         dy_local = -prev_in_cur[1]
         dyaw = -prev_in_cur[2]
 
-        # Rotate displacement into the accumulated frame
+        # Update yaw first, then rotate displacement into step-0 frame
+        cumulative_yaw += dyaw
         cos_a = math.cos(cumulative_yaw)
         sin_a = math.sin(cumulative_yaw)
         cumulative_x += cos_a * dx_local - sin_a * dy_local
         cumulative_y += sin_a * dx_local + cos_a * dy_local
-        cumulative_yaw += dyaw
 
         gt_points.append([cumulative_x, cumulative_y, cumulative_yaw])
 
@@ -1378,7 +1381,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
             device = model_cache._device
             model = model_cache._model
             model_args = model_cache._model_args
-            advance_fn = advance_scene_mpc if advance_mode == "mpc" else advance_scene
+            if advance_mode == "mpc":
+                _mpc_trackers: dict = {}
+                def advance_fn(sc, pr):
+                    advance_scene_mpc(sc, pr, _mpc_trackers)
+            else:
+                advance_fn = advance_scene
 
             placed_ids = {f"placed_{o.label}" for o in obs_at_step}
 
