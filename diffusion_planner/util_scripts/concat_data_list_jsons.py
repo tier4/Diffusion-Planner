@@ -19,8 +19,6 @@ if __name__ == "__main__":
 
     all_list = []
 
-    assert len(json_list) > 1
-
     for json_path in json_list:
         json_path = json_path.resolve()
         assert json_path.exists(), f"{json_path} does not exist."
