@@ -1413,9 +1413,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
             n = max(1, int(n_steps))
             npz_path = seq[min(s, len(seq) - 1)]
 
-            # Create output dir for this branch's resim
-            import tempfile
+            # Create clean output dir for this branch's resim (remove stale files)
             out_dir = Path(tree.base_npz_dir).parent / f"branch_{tree.active_branch}_resim"
+            if out_dir.exists():
+                for old_f in out_dir.glob("*.npz"):
+                    old_f.unlink()
             out_dir.mkdir(parents=True, exist_ok=True)
 
             progress(0, desc="Loading model...")
