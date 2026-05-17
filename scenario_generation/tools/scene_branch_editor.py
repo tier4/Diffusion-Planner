@@ -530,6 +530,62 @@ def _fig_to_pil(fig: matplotlib.figure.Figure):
     return Image.open(buf)
 
 
+def _transform_point_between_steps(
+    seq: list[str], from_step: int, to_step: int, x: float, y: float, yaw_rad: float,
+) -> tuple[float, float, float]:
+    """Transform a point from one timestep's ego frame to another's.
+
+    Uses the ego displacement chain from ego_agent_past[-2] at each step.
+    Works for both forward (to > from) and backward (to < from) transforms.
+    Returns (x', y', yaw') in to_step's ego frame.
+    """
+    if from_step == to_step:
+        return x, y, yaw_rad
+
+    # Chain displacements step-by-step
+    # Each step's ego_agent_past[-2] gives the previous ego position in the
+    # current step's frame. The displacement from prev→current in current's
+    # frame is (-past[-2][0], -past[-2][1]), yaw change = -past[-2][2].
+    cum_x, cum_y, cum_yaw = 0.0, 0.0, 0.0
+
+    if to_step > from_step:
+        # Forward: chain from from_step+1 to to_step
+        for s in range(from_step + 1, min(to_step + 1, len(seq))):
+            past = np.load(seq[s])["ego_agent_past"]
+            prev = past[-2]
+            dx_local, dy_local, dyaw = -prev[0], -prev[1], -prev[2]
+            cum_yaw += dyaw
+            c, sn = math.cos(cum_yaw), math.sin(cum_yaw)
+            cum_x += c * dx_local - sn * dy_local
+            cum_y += sn * dx_local + c * dy_local
+        # Point was at (x, y) in from_step frame. In to_step frame:
+        # First express (x, y) relative to ego's new position
+        rx, ry = x - cum_x, y - cum_y
+        c, sn = math.cos(-cum_yaw), math.sin(-cum_yaw)
+        new_x = c * rx - sn * ry
+        new_y = sn * rx + c * ry
+        new_yaw = yaw_rad - cum_yaw
+    else:
+        # Backward: chain from to_step+1 to from_step (then invert)
+        for s in range(to_step + 1, min(from_step + 1, len(seq))):
+            past = np.load(seq[s])["ego_agent_past"]
+            prev = past[-2]
+            dx_local, dy_local, dyaw = -prev[0], -prev[1], -prev[2]
+            cum_yaw += dyaw
+            c, sn = math.cos(cum_yaw), math.sin(cum_yaw)
+            cum_x += c * dx_local - sn * dy_local
+            cum_y += sn * dx_local + c * dy_local
+        # cum describes to_step→from_step. We need to apply the forward
+        # transform: the point at (x, y) in from_step frame maps to
+        # to_step frame by rotating by cum_yaw and translating.
+        c, sn = math.cos(cum_yaw), math.sin(cum_yaw)
+        new_x = c * x - sn * y + cum_x
+        new_y = sn * x + c * y + cum_y
+        new_yaw = yaw_rad + cum_yaw
+
+    return new_x, new_y, new_yaw
+
+
 def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future: int = 80) -> np.ndarray | None:
     """Reconstruct GT ego future from subsequent NPZ files in the sequence.
 
@@ -687,6 +743,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                 # Timeline playback
                 with gr.Row():
                     btn_play = gr.Button("Play ▶", size="sm", min_width=60)
+                    btn_stop = gr.Button("Stop ■", size="sm", min_width=60, variant="stop")
                     play_fps = gr.Slider(minimum=1, maximum=30, value=10, step=1,
                                          label="FPS", scale=1)
 
@@ -837,7 +894,23 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                 obstacles_at_step = []
             else:
                 obstacles = tree.get_all_obstacles(tree.active_branch)
-                obstacles_at_step = [o for o in obstacles if o.timestep <= step]
+                obstacles_at_step = []
+                for o in obstacles:
+                    if o.timestep > step:
+                        continue
+                    if o.timestep != step:
+                        # Transform from placement frame to current view frame
+                        nx, ny, nyaw = _transform_point_between_steps(
+                            seq, o.timestep, step, o.x, o.y, o.yaw_rad,
+                        )
+                        obstacles_at_step.append(ObstaclePlacement(
+                            label=o.label, timestep=o.timestep,
+                            x=nx, y=ny, yaw_deg=math.degrees(nyaw),
+                            length=o.length, width=o.width,
+                            history_steps=o.history_steps,
+                        ))
+                    else:
+                        obstacles_at_step.append(o)
 
             if preview_placement is not None:
                 obstacles_at_step = obstacles_at_step + [preview_placement]
@@ -1497,7 +1570,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
             interval = 1.0 / max(1, int(fps))
             branch = tree.branches[tree.active_branch]
             is_resimulated = branch.npz_dir is not None
-            obstacles = tree.get_all_obstacles(tree.active_branch) if not is_resimulated else []
+            raw_obstacles = tree.get_all_obstacles(tree.active_branch) if not is_resimulated else []
             while s <= max_s:
                 t0 = time.monotonic()
                 scene = from_npz(seq[s])
@@ -1505,7 +1578,23 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                     ego = scene.ego_agent
                     if ego:
                         ego.wheelbase, ego.length, ego.width = tree.ego_shape
-                obs_at_step = [o for o in obstacles if o.timestep <= s]
+                # Transform obstacles to current timestep's ego frame
+                obs_at_step = []
+                for o in raw_obstacles:
+                    if o.timestep > s:
+                        continue
+                    if o.timestep != s:
+                        nx, ny, nyaw = _transform_point_between_steps(
+                            seq, o.timestep, s, o.x, o.y, o.yaw_rad,
+                        )
+                        obs_at_step.append(ObstaclePlacement(
+                            label=o.label, timestep=o.timestep,
+                            x=nx, y=ny, yaw_deg=math.degrees(nyaw),
+                            length=o.length, width=o.width,
+                            history_steps=o.history_steps,
+                        ))
+                    else:
+                        obs_at_step.append(o)
                 gt_traj_r = None
                 if gt_on:
                     ego = scene.ego_agent
@@ -1526,11 +1615,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                     time.sleep(interval - elapsed)
                 s += 1
 
-        btn_play.click(
+        _play_event = btn_play.click(
             on_play,
             [tree_state, step_slider, view_half, show_gt, play_fps],
             [scene_image, step_info, step_slider],
         )
+        btn_stop.click(None, None, None, cancels=[_play_event])
 
         # Initial render
         demo.load(on_render, _render_trigger_inputs, _render_trigger_outputs)
