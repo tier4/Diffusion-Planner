@@ -268,6 +268,9 @@ def render_scene_at_step(
     guided_trajs: list[np.ndarray] | None = None,
     show_rb_dist: bool = False,
     show_nb_dist: bool = False,
+    hide_neighbors: bool = False,
+    map_border_polylines: list[np.ndarray] | None = None,
+    ego_world_pose: np.ndarray | None = None,
 ) -> matplotlib.figure.Figure:
     """Render a scene with placed obstacles overlaid, matching replay sim style."""
     fig, ax = plt.subplots(1, 1, figsize=figsize)
@@ -276,8 +279,34 @@ def render_scene_at_step(
     # Lane network
     draw_lanes(ax, scene.map_data, alpha=0.5)
 
-    # Road borders (red)
+    # Road borders (red) — from NPZ if available
     draw_road_borders(ax, scene.map_data)
+
+    # Road borders from lanelet2 map (world frame → ego frame transform)
+    _ego_frame_borders = None
+    if map_border_polylines and ego_world_pose is not None:
+        from matplotlib.collections import LineCollection as _LC
+        ex_w, ey_w, eyaw_w = ego_world_pose
+        cos_r, sin_r = math.cos(-eyaw_w), math.sin(-eyaw_w)
+        ego_segs = []
+        _ego_frame_borders = []
+        for pl in map_border_polylines:
+            if pl.shape[0] < 2:
+                continue
+            dx = pl[:, 0] - ex_w
+            dy = pl[:, 1] - ey_w
+            rx = cos_r * dx - sin_r * dy
+            ry = sin_r * dx + cos_r * dy
+            pts_ego = np.column_stack([rx, ry])
+            # Only draw borders within view
+            if np.abs(pts_ego).max() > view_half * 2:
+                in_view = (np.abs(pts_ego[:, 0]) < view_half * 1.5) & (np.abs(pts_ego[:, 1]) < view_half * 1.5)
+                if in_view.sum() < 2:
+                    continue
+            ego_segs.append(pts_ego)
+            _ego_frame_borders.append(pts_ego)
+        if ego_segs:
+            ax.add_collection(_LC(ego_segs, colors="red", linewidths=2.5, alpha=0.7, zorder=4))
 
     # Stop lines
     draw_stop_lines(ax, scene.map_data)
@@ -335,6 +364,8 @@ def render_scene_at_step(
     nb_idx = 0
     for agent in scene.agents:
         is_ego = agent.id == scene.ego_agent_id
+        if not is_ego and hide_neighbors:
+            continue
         pos = agent.current_position
         heading = agent.current_heading
 
@@ -427,6 +458,9 @@ def render_scene_at_step(
         if show_rb_dist:
             from scenario_generation.replay import _nearest_border_point
             border_polylines = _extract_border_polylines(scene)
+            # Fall back to map-derived borders (already in ego frame)
+            if not border_polylines and _ego_frame_borders:
+                border_polylines = _ego_frame_borders
             bp = _nearest_border_point(ego_pos, border_polylines)
             if bp is not None:
                 dist = float(np.linalg.norm(bp - ego_pos))
@@ -586,6 +620,26 @@ def _transform_point_between_steps(
     return new_x, new_y, new_yaw
 
 
+def _recover_ego_world_pose(seq: list[str], step: int) -> np.ndarray | None:
+    """Recover ego world pose at a given step by chaining displacements from step 0.
+
+    Returns [x_world, y_world, yaw_world] or None if not enough data.
+    The first NPZ's ego frame IS the world frame (step 0 = origin).
+    """
+    if step == 0 or not seq:
+        return np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    cum_x, cum_y, cum_yaw = 0.0, 0.0, 0.0
+    for s in range(1, min(step + 1, len(seq))):
+        past = np.load(seq[s])["ego_agent_past"]
+        prev = past[-2]
+        dx_local, dy_local, dyaw = -prev[0], -prev[1], -prev[2]
+        cum_yaw += dyaw
+        c, sn = math.cos(cum_yaw), math.sin(cum_yaw)
+        cum_x += c * dx_local - sn * dy_local
+        cum_y += sn * dx_local + c * dy_local
+    return np.array([cum_x, cum_y, cum_yaw], dtype=np.float64)
+
+
 def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future: int = 80) -> np.ndarray | None:
     """Reconstruct GT ego future from subsequent NPZ files in the sequence.
 
@@ -646,7 +700,8 @@ def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future:
     return np.array(gt_points, dtype=np.float32)
 
 
-def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
+def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
+                    map_borders: list[np.ndarray] | None = None):
     """Build the Gradio interface for the scene branch editor."""
 
     with gr.Blocks(title="Scene Branch Editor") as demo:
@@ -756,6 +811,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                                            interactive=_has_model, scale=1)
                     show_guided = gr.Checkbox(label="Show Guided", value=False,
                                               interactive=_has_model, scale=1)
+                    hide_neighbors = gr.Checkbox(label="Hide Neighbors", value=False, scale=1)
                     show_rb_dist = gr.Checkbox(label="Road Border", value=False, scale=1)
                     show_nb_dist = gr.Checkbox(label="Neighbor Dist", value=False, scale=1)
                     if not _has_model:
@@ -869,7 +925,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                     show_gt_val: bool = True,
                     det_traj: np.ndarray | None = None,
                     guided_trajs: list[np.ndarray] | None = None,
-                    rb_dist: bool = False, nb_dist: bool = False):
+                    rb_dist: bool = False, nb_dist: bool = False,
+                    hide_nb: bool = False):
             """Core render function: load NPZ at step, draw scene + obstacles."""
             branch = tree.branches[tree.active_branch]
             seq = tree.get_npz_sequence(tree.active_branch)
@@ -927,6 +984,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                 if gt_traj_render is None and len(seq) > step + 1:
                     gt_traj_render = _reconstruct_gt_from_sequence(seq, step, max_future=80)
 
+            # Ego world pose for map border transform
+            ego_wp = _recover_ego_world_pose(seq, step) if map_borders else None
+
             fig = render_scene_at_step(
                 scene, obstacles_at_step, selected_obs,
                 view_half=view_r, step_idx=step, total_steps=len(seq),
@@ -934,6 +994,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                 det_traj=det_traj,
                 guided_trajs=guided_trajs,
                 show_rb_dist=rb_dist, show_nb_dist=nb_dist,
+                hide_neighbors=hide_nb,
+                map_border_polylines=map_borders, ego_world_pose=ego_wp,
             )
             img = _fig_to_pil(fig)
             info = f"Step **{step}** / **{len(seq) - 1}** | Branch: `{tree.active_branch}`"
@@ -967,7 +1029,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
             return _traj_cos_sin_to_xyh(raw)
 
         def on_render(tree, step, view_r, selected_obs, gt_on, det_on, guided_on,
-                      rb_on, nb_on, det_cache, guided_cache):
+                      hide_nb, rb_on, nb_on, det_cache, guided_cache):
             det_traj = None
             if det_on and model_cache and model_cache.available:
                 det_traj = _predict_det_with_obs(tree, step)
@@ -982,7 +1044,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
             img, info = _render(tree, _safe_step(step), view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj,
                                 guided_trajs=guided_list,
-                                rb_dist=rb_on, nb_dist=nb_on)
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
             return img, info, det_cache, guided_cache
 
         def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on):
@@ -1277,16 +1339,13 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
         )
         _render_trigger_inputs = [tree_state, step_slider, view_half, selected_obstacle_state,
                                    show_gt, show_det, show_guided,
-                                   show_rb_dist, show_nb_dist,
+                                   hide_neighbors, show_rb_dist, show_nb_dist,
                                    det_traj_state, guided_trajs_state]
         _render_trigger_outputs = [scene_image, step_info, det_traj_state, guided_trajs_state]
 
-        view_half.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
-        show_gt.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
-        show_det.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
-        show_guided.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
-        show_rb_dist.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
-        show_nb_dist.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
+        for _trigger in [view_half, show_gt, show_det, show_guided,
+                         hide_neighbors, show_rb_dist, show_nb_dist]:
+            _trigger.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
 
         for direction, btn in [("first", btn_first), ("prev", btn_prev),
                                 ("next", btn_next), ("last", btn_last)]:
@@ -1441,6 +1500,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                 T_PAST = 31
                 history = np.tile([obs.x, obs.y, obs.yaw_rad], (T_PAST, 1)).astype(np.float32)
                 velocities = np.zeros((T_PAST, 2), dtype=np.float32)
+                h = getattr(obs, "history_steps", 30)
                 agent = Agent(
                     id=f"placed_{obs.label}",
                     agent_type=AgentType.VEHICLE,
@@ -1448,7 +1508,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                     wheelbase=obs.length * 0.65,
                     past_trajectory=history,
                     past_velocities=velocities,
-                    age_steps=T_PAST,
+                    age_steps=min(h, T_PAST - 1),
                 )
                 scene.agents.append(agent)
 
@@ -1464,19 +1524,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
                 advance_fn = advance_scene
 
             placed_ids = {f"placed_{o.label}" for o in obs_at_step}
-
-            # Pre-load TL data from parent NPZ sequence for each future step
-            parent_id = branch.parent_id or tree.active_branch
-            parent_seq = tree.get_npz_sequence(parent_id)
-            fork_step = branch.fork_timestep or s
-            # Map sim step i → parent step fork_step + i
-            def _get_tl_from_parent(sim_step_i):
-                parent_idx = fork_step + sim_step_i
-                if parent_idx < len(parent_seq):
-                    parent_npz = np.load(parent_seq[parent_idx])
-                    if "lanes" in parent_npz:
-                        return parent_npz["lanes"][:, :, 8:13].copy()
-                return None
 
             # Optionally apply guidance during simulation
             _orig_guidance_fn = model.decoder._guidance_fn
@@ -1507,13 +1554,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None):
             progress(0, desc=f"Simulating 0/{n} steps...")
             try:
                 for i in range(n):
-                    tl_data = _get_tl_from_parent(i + 1)
-                    if tl_data is not None:
-                        n_lanes = min(tl_data.shape[0], scene.map_data.lanes.shape[0])
-                        n_pts = min(tl_data.shape[1], scene.map_data.lanes.shape[1])
-                        scene.map_data.lanes[:n_lanes, :n_pts, 8:13] = tl_data[:n_lanes, :n_pts]
-                        map_cache = MapTensorCache(scene.map_data)
-
                     ids_to_predict = [a.id for a in scene.agents if a.id not in placed_ids]
                     preds = _predict_batch(model, model_args, scene, ids_to_predict, device,
                                            map_cache=map_cache)
@@ -1699,6 +1739,8 @@ def main():
                         help="Path to reward config JSON (for overlays)")
     parser.add_argument("--ego_shape", type=str, default=None,
                         help="Ego wheelbase,length,width (e.g. '4.76,7.24,2.29' for a bus)")
+    parser.add_argument("--map_path", type=str, default=None,
+                        help="Path to lanelet2 .osm map (for road border overlays)")
     parser.add_argument("--port", type=int, default=7870)
     args = parser.parse_args()
 
@@ -1717,7 +1759,19 @@ def main():
         tree.ego_shape = ego_shape_override
 
     mc = _ModelCache(args.model_path) if args.model_path else None
-    demo = build_interface(tree, model_cache=mc)
+
+    # Load road border polylines from lanelet2 map if provided
+    map_border_polylines = None
+    if args.map_path:
+        try:
+            from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
+            builder = LaneletSceneBuilder(args.map_path)
+            map_border_polylines = builder.road_border_polylines()
+            print(f"Loaded {len(map_border_polylines)} road border polylines from map")
+        except Exception as e:
+            print(f"Warning: could not load map borders: {e}")
+
+    demo = build_interface(tree, model_cache=mc, map_borders=map_border_polylines)
     demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True)
 
 
