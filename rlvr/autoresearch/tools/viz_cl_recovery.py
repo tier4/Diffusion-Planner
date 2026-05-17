@@ -238,7 +238,7 @@ def main():
             valid = (
                 not r.rb_crossing
                 and not r.lane_crossing
-                and r.kinematic_gate  # True = pass
+                and not r.kinematic_violated
                 and (r.collision_step is None or r.collision_step < 0)
             )
             per_k.append({"k": k_i, "total": new_total, "cl": cl_scores_k[k_i], "valid": valid})
@@ -250,7 +250,7 @@ def main():
         det_valid = (
             not r_det.rb_crossing
             and not r_det.lane_crossing
-            and r_det.kinematic_gate
+            and not r_det.kinematic_violated
             and (r_det.collision_step is None or r_det.collision_step < 0)
         )
         per_k_with_det = per_k + [{"k": -1, "total": None, "cl": det_cl,

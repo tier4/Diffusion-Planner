@@ -1192,7 +1192,6 @@ def save_step_figure(
     n_steps: int,
     route_polylines: list[np.ndarray] | None = None,
     view_half_m: float = _VIEW_HALF_M,
-    tl_controller: TrafficLightController | None = None,
     route_lanelet_ids: list[int] | None = None,
     sim_time: float = 0.0,
     road_border_polylines: list[np.ndarray] | None = None,
@@ -1232,41 +1231,40 @@ def save_step_figure(
 
     # 2b) Traffic-light coloured overlay on ALL lanes in map_data that have
     #     active TL state (route, parallel, and perpendicular). Read
-    #     centerline XY directly from the lane tensor [0:2].
-    if tl_controller is not None:
-        from matplotlib.collections import LineCollection
-        tl_segments: dict[str, list[np.ndarray]] = {}  # hex → list of polylines
-        lanes = scene.map_data.lanes
-        # Use the map_data_ll_ids that were stored when building map_data.
-        # They are passed via route_lanelet_ids for the route overlay, but
-        # for ALL lanes we need the builder's _last_map_data_ids — which
-        # we can't access here. Instead, read the TL one-hot directly from
-        # the lane tensor channels [8:13].
-        for i in range(lanes.shape[0]):
-            lane = lanes[i]
-            pts = lane[:, :2]
-            if np.abs(pts).sum() < 1e-6:
-                continue
-            tl_onehot = lane[0, 8:13]
-            if tl_onehot.sum() < 0.5:
-                continue
-            ch = int(np.argmax(tl_onehot))
-            from scenario_generation.traffic_light import TL_HEX, TL_NONE
-            if ch == TL_NONE:
-                continue
-            hex_color = TL_HEX.get(ch)
-            if hex_color is None:
-                continue
-            valid = np.abs(pts).sum(axis=1) > 0.1
-            if valid.sum() < 2:
-                continue
-            tl_segments.setdefault(hex_color, []).append(pts[valid])
+    #     centerline XY directly from the lane tensor [0:2] and the TL
+    #     one-hot from channels [8:13]. In live sim those channels are
+    #     populated by TrafficLightController.write_to_route_lanes()
+    #     upstream; in NPZ-replay they come straight from the recorded
+    #     tensor. The per-lane `tl_onehot.sum() < 0.5` filter below
+    #     skips lanes with no TL data.
+    from matplotlib.collections import LineCollection
+    from scenario_generation.traffic_light import TL_HEX, TL_NONE
+    tl_segments: dict[str, list[np.ndarray]] = {}  # hex → list of polylines
+    lanes = scene.map_data.lanes
+    for i in range(lanes.shape[0]):
+        lane = lanes[i]
+        pts = lane[:, :2]
+        if np.abs(pts).sum() < 1e-6:
+            continue
+        tl_onehot = lane[0, 8:13]
+        if tl_onehot.sum() < 0.5:
+            continue
+        ch = int(np.argmax(tl_onehot))
+        if ch == TL_NONE:
+            continue
+        hex_color = TL_HEX.get(ch)
+        if hex_color is None:
+            continue
+        valid = np.abs(pts).sum(axis=1) > 0.1
+        if valid.sum() < 2:
+            continue
+        tl_segments.setdefault(hex_color, []).append(pts[valid])
 
-        for hex_color, segs in tl_segments.items():
-            ax.add_collection(LineCollection(
-                segs, colors=hex_color, linewidths=2.5,
-                alpha=0.85, zorder=4,
-            ))
+    for hex_color, segs in tl_segments.items():
+        ax.add_collection(LineCollection(
+            segs, colors=hex_color, linewidths=2.5,
+            alpha=0.85, zorder=4,
+        ))
 
     # 3) Agents + per-agent predicted trajectories.
     # Assign colors by hashing the agent id (or extracting a stable numeric
@@ -1952,7 +1950,7 @@ def run_route_replay(
                 save_step_figure,
                 deepcopy(scene), agent_predictions, out_path,
                 step, spawn_config.max_steps, route_polylines,
-                _VIEW_HALF_M, tl_controller, _route_vis_ll_ids,
+                _VIEW_HALF_M, _route_vis_ll_ids,
                 step * 0.1, road_border_polylines,
                 overlay_metrics,
             ))

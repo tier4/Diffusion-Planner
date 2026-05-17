@@ -270,7 +270,7 @@ def test_survival_mode_sc_crossing_contributes_to_first_terminal():
 
 
 def test_kinematic_gate_field_exposed():
-    """Adding kinematic_gate to RewardBreakdown should never break default paths."""
+    """Adding kinematic_violated to RewardBreakdown should never break default paths."""
     ego = _straight_ego(speed=5.0)
     nf, ns, nv = _stopped_neighbor(center=(40.0, 10.0))  # far away, no interaction
     data = {
@@ -283,7 +283,7 @@ def test_kinematic_gate_field_exposed():
 
     out = compute_reward_batch(ego, data, RewardConfig())
     # Straight-line ego at constant speed is kinematically feasible.
-    assert out[0].kinematic_gate is True
+    assert out[0].kinematic_violated is False
 
 
 if __name__ == "__main__":

@@ -19,3 +19,5 @@ ros_scripts/convert_all_v4.sh
 CLAUDE.md
 memory/
 wandb/
+
+.vscode/
