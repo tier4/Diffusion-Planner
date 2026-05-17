@@ -185,7 +185,6 @@ def _render_one(args):
             step=idx,
             n_steps=_WORKER_N_STEPS,
             route_polylines=route_polylines,
-            tl_controller=None,
             road_border_polylines=road_border_polylines,
             metrics=None,
         )

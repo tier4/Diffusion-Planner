@@ -27,8 +27,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import math
-import pickle
 from pathlib import Path
 
 import matplotlib
@@ -36,181 +34,38 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.collections import LineCollection
 
-
-def _load_route(route_path: Path):
-    with open(route_path, "rb") as f:
-        return pickle.load(f)
-
-
-def _build_route_polyline(route) -> tuple[np.ndarray, np.ndarray]:
-    """Concatenate route lanelets into one polyline + cumulative arc length.
-
-    Returns (pts (N,2), s (N,)). Skips zero-length segments and drops
-    duplicated joint points between consecutive lanelets.
-    """
-    from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
-
-    builder = LaneletSceneBuilder(str(route.map_path))
-    pts_list = []
-    for i, ll_id in enumerate(route.route_lanelet_ids):
-        if not builder.has_lanelet_id(int(ll_id)):
-            print(f"  [WARN] lanelet {ll_id} missing from map; skipping")
-            continue
-        cl = builder.raw_centerline(int(ll_id)).astype(np.float32)
-        if len(cl) == 0:
-            continue
-        if pts_list:
-            # drop leading point if it equals previous tail (lanelet joints
-            # usually share a point exactly).
-            prev_tail = pts_list[-1][-1]
-            if np.allclose(cl[0], prev_tail, atol=1e-4):
-                cl = cl[1:]
-            if len(cl) == 0:
-                continue
-        pts_list.append(cl)
-    if not pts_list:
-        raise SystemExit("Route produced no centerline points — bad route or map mismatch.")
-    pts = np.concatenate(pts_list, axis=0)
-    seg = np.diff(pts, axis=0)
-    seg_len = np.sqrt((seg * seg).sum(axis=1))
-    s = np.concatenate([[0.0], np.cumsum(seg_len)])
-    return pts, s
-
-
-def _project_to_polyline(xy: np.ndarray, pts: np.ndarray, s: np.ndarray):
-    """Project one point onto polyline. Returns (s_arc, lateral_signed, dist).
-
-    Iterates all segments — fine for ~a few thousand points × ~a few hundred
-    steps, but O(N*M). Keep polyline resampled if runs get long.
-    """
-    a = pts[:-1]
-    b = pts[1:]
-    ab = b - a
-    ap = xy[None, :] - a
-    seg_len2 = (ab * ab).sum(axis=1)
-    seg_len2 = np.maximum(seg_len2, 1e-9)
-    t = (ap * ab).sum(axis=1) / seg_len2
-    t_clamped = np.clip(t, 0.0, 1.0)
-    proj = a + t_clamped[:, None] * ab
-    d = np.linalg.norm(xy[None, :] - proj, axis=1)
-    i = int(np.argmin(d))
-    # Signed side (left = +, right = −) from the cross product
-    cross = ab[i, 0] * (xy[1] - a[i, 1]) - ab[i, 1] * (xy[0] - a[i, 0])
-    seg_l = math.sqrt(float(seg_len2[i]))
-    sign = 1.0 if cross >= 0 else -1.0
-    s_arc = float(s[i] + t_clamped[i] * seg_l)
-    return s_arc, sign * float(d[i]), float(d[i])
+from scenario_generation.tools._heatmap_common import (
+    bin_by_arc,
+    build_route_polyline,
+    deviation_series,
+    load_route,
+    plot_route_heatmap,
+    recover_ego_world_pose_from_goal,
+    segments_from_polyline,
+)
 
 
 def _recover_ego_world_series(run_dir: Path, route) -> np.ndarray:
-    """Recover (T,3) ego world poses [x, y, yaw_rad] from dumped NPZs."""
+    """Recover (T,4) array [x, y, yaw_rad, speed_mps] from dumped NPZs.
+
+    Speed comes from ego_current_state[4:6] (vx, vy in base_link).
+    """
     npz_dir = run_dir / "npz"
     files = sorted(npz_dir.glob("replay_step_*.npz"))
     if not files:
-        raise SystemExit(f"No replay_step_*.npz under {npz_dir}")
-    gx_w, gy_w, gyaw_w = float(route.goal_pose[0]), float(route.goal_pose[1]), float(route.goal_pose[2])
-    poses = np.zeros((len(files), 3), dtype=np.float64)
+        files = sorted(f for f in npz_dir.glob("*.npz")
+                        if "summary" not in f.name and "heatmap" not in f.name)
+    if not files:
+        raise SystemExit(f"No step NPZs under {npz_dir}")
+    poses = np.zeros((len(files), 4), dtype=np.float64)
     for k, fp in enumerate(files):
         with np.load(fp, allow_pickle=True) as d:
             gp = d["goal_pose"]
-        # tensor_converter._build_goal_pose stores [x, y, cos_h, sin_h] in
-        # ego frame; gp[2] is cos(dyaw), not dyaw.
-        dx, dy = float(gp[0]), float(gp[1])
-        dyaw = math.atan2(float(gp[3]), float(gp[2]))
-        eyaw = gyaw_w - dyaw
-        # wrap to [-pi, pi]
-        eyaw = math.atan2(math.sin(eyaw), math.cos(eyaw))
-        c, s = math.cos(eyaw), math.sin(eyaw)
-        ex = gx_w - (c * dx - s * dy)
-        ey = gy_w - (s * dx + c * dy)
-        poses[k] = (ex, ey, eyaw)
+            ecs = d["ego_current_state"]
+        poses[k, :3] = recover_ego_world_pose_from_goal(gp, route)
+        poses[k, 3] = float(np.linalg.norm(ecs[4:6]))
     return poses
-
-
-def _deviation_series(poses: np.ndarray, pts: np.ndarray, s: np.ndarray):
-    """For each ego pose, return (arc, signed_lateral, abs_lateral)."""
-    out = np.zeros((len(poses), 3), dtype=np.float64)
-    for i, (x, y, _) in enumerate(poses):
-        s_arc, lat_signed, lat_abs = _project_to_polyline(np.array([x, y]), pts, s)
-        out[i] = (s_arc, lat_signed, lat_abs)
-    return out
-
-
-def _bin_by_arc(dev: np.ndarray, s_max: float, bin_m: float):
-    """Mean |lateral| per arc-length bin."""
-    n_bins = max(1, int(math.ceil(s_max / bin_m)))
-    bin_s_mid = (np.arange(n_bins) + 0.5) * bin_m
-    mean_abs = np.full(n_bins, np.nan, dtype=np.float64)
-    max_abs = np.full(n_bins, np.nan, dtype=np.float64)
-    idx = np.clip((dev[:, 0] // bin_m).astype(int), 0, n_bins - 1)
-    for b in range(n_bins):
-        mask = idx == b
-        if mask.any():
-            mean_abs[b] = np.mean(dev[mask, 2])
-            max_abs[b] = np.max(dev[mask, 2])
-    return bin_s_mid, mean_abs, max_abs
-
-
-def _segments_from_polyline(pts: np.ndarray, s: np.ndarray, bin_m: float, n_bins: int):
-    """For each arc-length bin, collect the sub-polyline that falls in it."""
-    segs = [[] for _ in range(n_bins)]
-    for i in range(len(pts) - 1):
-        s0, s1 = s[i], s[i + 1]
-        b0 = int(s0 // bin_m)
-        b1 = int(s1 // bin_m)
-        if b0 == b1 and 0 <= b0 < n_bins:
-            segs[b0].append(pts[i:i + 2])
-        else:
-            # cut the segment at each bin boundary
-            curr_s = s0
-            curr_pt = pts[i]
-            for b in range(b0, b1 + 1):
-                b_end_s = (b + 1) * bin_m
-                next_s = min(b_end_s, s1)
-                if next_s <= curr_s:
-                    continue
-                t = (next_s - s0) / max(s1 - s0, 1e-9)
-                next_pt = pts[i] + t * (pts[i + 1] - pts[i])
-                if 0 <= b < n_bins:
-                    segs[b].append(np.stack([curr_pt, next_pt], axis=0))
-                curr_s = next_s
-                curr_pt = next_pt
-    # stack each bin
-    out = []
-    for bs in segs:
-        if bs:
-            out.append(np.concatenate(bs, axis=0) if len(bs) > 1 else bs[0])
-        else:
-            out.append(None)
-    return out
-
-
-def _plot_heatmap(ax, pts, bin_segments, bin_values, title, vmin, vmax, cmap):
-    ax.set_aspect("equal")
-    # light grey base route
-    ax.plot(pts[:, 0], pts[:, 1], color="#cccccc", lw=1.0, zorder=1)
-
-    # per-bin coloured overlay
-    valid_segs = []
-    valid_vals = []
-    for segs, v in zip(bin_segments, bin_values):
-        if segs is None or np.isnan(v):
-            continue
-        valid_segs.append(segs)
-        valid_vals.append(v)
-    if valid_vals:
-        lc_lines = []
-        lc_colors = []
-        for segs, v in zip(valid_segs, valid_vals):
-            for i in range(len(segs) - 1):
-                lc_lines.append([segs[i], segs[i + 1]])
-                lc_colors.append(v)
-        lc = LineCollection(lc_lines, array=np.array(lc_colors), cmap=cmap,
-                            norm=plt.Normalize(vmin=vmin, vmax=vmax), linewidths=4.0)
-        ax.add_collection(lc)
-    ax.set_title(title, fontsize=10)
 
 
 def main():
@@ -229,15 +84,27 @@ def main():
                    help="Truncate both runs to the first N steps. Default: "
                         "min(len(run_a), len(run_b)) — so the comparison "
                         "covers the same temporal window.")
+    p.add_argument("--min_arc_m", type=float, default=None,
+                   help="Exclude route before this arc-length (metres). "
+                        "Useful to trim the initial convergence from a "
+                        "misplaced starting pose.")
+    p.add_argument("--max_arc_m", type=float, default=None,
+                   help="Exclude route beyond this arc-length (metres). "
+                        "Useful to trim the last N metres where the goal is "
+                        "far from the centerline.")
+    p.add_argument("--min_speed_mps", type=float, default=0.5,
+                   help="Exclude steps where ego speed is below this (m/s). "
+                        "Filters out stopped / crawling frames so they don't "
+                        "pollute the deviation signal. Default: 0.5 m/s.")
     args = p.parse_args()
 
     print(f"Loading route {args.route}")
-    route = _load_route(args.route)
+    route = load_route(args.route)
     print(f"  segments: {len(route.route_lanelet_ids)}  "
           f"start=({route.start_pose[0]:.1f},{route.start_pose[1]:.1f}) "
           f"goal=({route.goal_pose[0]:.1f},{route.goal_pose[1]:.1f})")
 
-    pts, s = _build_route_polyline(route)
+    pts, s = build_route_polyline(route)
     s_max = float(s[-1])
     print(f"Route polyline: {len(pts)} pts, arc length {s_max:.1f} m")
 
@@ -258,14 +125,38 @@ def main():
         print(f"Comparing first {n_steps} steps of each run (min of both)")
     poses_a = poses_a[:n_steps]
     poses_b = poses_b[:n_steps]
-    dev_a = _deviation_series(poses_a, pts, s)
-    dev_b = _deviation_series(poses_b, pts, s)
+
+    if args.min_speed_mps > 0:
+        mask_a = poses_a[:, 3] >= args.min_speed_mps
+        mask_b = poses_b[:, 3] >= args.min_speed_mps
+        n_drop_a = int((~mask_a).sum())
+        n_drop_b = int((~mask_b).sum())
+        poses_a = poses_a[mask_a]
+        poses_b = poses_b[mask_b]
+        print(f"Speed filter >= {args.min_speed_mps:.1f} m/s: "
+              f"dropped {n_drop_a}/{n_steps} A, {n_drop_b}/{n_steps} B")
+
+    dev_a = deviation_series(poses_a[:, :2], pts, s)
+    dev_b = deviation_series(poses_b[:, :2], pts, s)
+
+    if args.min_arc_m is not None:
+        dev_a = dev_a[dev_a[:, 0] >= args.min_arc_m]
+        dev_b = dev_b[dev_b[:, 0] >= args.min_arc_m]
+        print(f"Trimmed to arc >= {args.min_arc_m:.1f} m  "
+              f"(A: {len(dev_a)} pts, B: {len(dev_b)} pts)")
+
+    if args.max_arc_m is not None:
+        dev_a = dev_a[dev_a[:, 0] <= args.max_arc_m]
+        dev_b = dev_b[dev_b[:, 0] <= args.max_arc_m]
+        s_max = min(s_max, args.max_arc_m)
+        print(f"Trimmed to arc <= {args.max_arc_m:.1f} m  "
+              f"(A: {len(dev_a)} pts, B: {len(dev_b)} pts)")
 
     bin_m = float(args.bin_m)
-    bs_mid, mean_a, max_a = _bin_by_arc(dev_a, s_max, bin_m)
-    bs_mid_b, mean_b, max_b = _bin_by_arc(dev_b, s_max, bin_m)
+    bs_mid, mean_a, max_a = bin_by_arc(dev_a, s_max, bin_m)
+    bs_mid_b, mean_b, max_b = bin_by_arc(dev_b, s_max, bin_m)
     n_bins = len(bs_mid)
-    bin_segments = _segments_from_polyline(pts, s, bin_m, n_bins)
+    bin_segments = segments_from_polyline(pts, s, bin_m, n_bins)
 
     # color scale
     if args.clip_max_m is not None:
@@ -290,13 +181,13 @@ def main():
     ax_d = fig.add_subplot(gs[2], sharex=ax_a, sharey=ax_a)
     ax_line = fig.add_subplot(gs[3])
 
-    _plot_heatmap(ax_a, pts, bin_segments, mean_a,
+    plot_route_heatmap(ax_a, pts, bin_segments, mean_a,
                   f"{args.label_a}: |route deviation| per {bin_m:.0f} m bin",
                   0.0, vmax, "viridis")
-    _plot_heatmap(ax_b, pts, bin_segments, mean_b,
+    plot_route_heatmap(ax_b, pts, bin_segments, mean_b,
                   f"{args.label_b}: |route deviation| per {bin_m:.0f} m bin",
                   0.0, vmax, "viridis")
-    _plot_heatmap(ax_d, pts, bin_segments, diff,
+    plot_route_heatmap(ax_d, pts, bin_segments, diff,
                   f"{args.label_a} − {args.label_b}  (positive = A worse, blue = B worse)",
                   -diff_abs, diff_abs, "RdBu_r")
 

@@ -6,7 +6,9 @@ from diffusion_planner.utils.train_utils import openjson
 
 class DiffusionPlannerData(Dataset):
     def __init__(self, data_list):
-        self.data_list = openjson(data_list)
+        data = openjson(data_list)
+        # Accept both legacy list format and sampling.py dict format {"seed": ..., "files": [...]}
+        self.data_list = data["files"] if isinstance(data, dict) else data
 
     def __len__(self):
         return len(self.data_list)

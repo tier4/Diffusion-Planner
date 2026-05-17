@@ -160,12 +160,12 @@ class RewardBreakdown:
     sc_cont_penalty: float = 0.0
     sc_min_dist: float = 99.0     # min OBB clearance to any stopped neighbor (t>=1, ego moving)
     sc_n_stopped: int = 0         # how many stopped neighbors were found in the scene
-    # Kinematic feasibility gate (yaw rate + bicycle-model curvature). When
-    # False, compute_reward_batch floors ``total`` to the offroad floor.
-    # Before this field existed the gate was applied silently — you could
-    # not tell from a RewardBreakdown whether the floor came from safety,
-    # lane, or kinematics.
-    kinematic_gate: bool = True
+    # Kinematic feasibility violation (yaw rate + bicycle-model curvature).
+    # When True, the trajectory is INFEASIBLE and compute_reward_batch floors
+    # ``total`` to the offroad floor. Convention matches the other gate
+    # booleans on this dataclass (rb_crossing, lane_crossing, static_crossing):
+    # True = violation occurred.
+    kinematic_violated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -2687,13 +2687,29 @@ def compute_reward_batch(
     device = ego_trajs.device
 
     # --- Ego shape ---
-    ego_shape = torch.tensor([2.79, 4.34, 1.70], device=device)
-    if "ego_shape" in data:
-        es = data["ego_shape"]
-        if es.dim() == 2:
-            es = es[0]
-        if es.numel() >= 3:
-            ego_shape = es[:3].to(device)
+    # No silent fallback: the wrong default footprint silently undersized RB /
+    # lane / collision gates by ~3 m of length and 0.5 m of width on larger
+    # platforms, letting trajectories that visibly crossed the border pass the
+    # gate. The NPZ MUST carry the correct ego_shape (wheel_base, length,
+    # width); callers (parse-from-bag, disturb_and_replay, etc.) are
+    # responsible for writing it.
+    if "ego_shape" not in data:
+        raise ValueError(
+            "compute_reward_batch: data is missing 'ego_shape' (wheel_base, "
+            "length, width). Refusing to fall back to a hardcoded default — "
+            "this previously caused silent footprint undersizing. Populate "
+            "ego_shape upstream (parse-from-bag / disturb_and_replay / scene "
+            "builder) and re-run."
+        )
+    es = data["ego_shape"]
+    if es.dim() == 2:
+        es = es[0]
+    if es.numel() < 3:
+        raise ValueError(
+            f"compute_reward_batch: ego_shape has shape {tuple(es.shape)}; "
+            "expected at least 3 elements (wheel_base, length, width)."
+        )
+    ego_shape = es[:3].to(device)
 
     # --- Neighbor data for collision ---
     neighbor_futures = torch.zeros(0, T, 4, device=device)
@@ -3060,7 +3076,7 @@ def compute_reward_batch(
             sc_cont_penalty=float(sc_cont_pen[i]),
             sc_min_dist=float(sc_min_dist_scalar[i].item()),
             sc_n_stopped=sc_n_stopped_scene,
-            kinematic_gate=bool(kinematic_gate[i] >= 0.5),
+            kinematic_violated=bool(kinematic_gate[i] < 0.5),
         ))
 
     return results
