@@ -1546,12 +1546,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             model_cache._ensure_loaded()
 
             from scenario_generation.npz_loader import from_npz as _from_npz
-            from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
-            from scenario_generation.simulate import (
-                _predict_batch,
-                advance_scene,
-                advance_scene_mpc,
-            )
 
             scene = _from_npz(npz_path)
 
@@ -1575,27 +1569,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 )
                 scene.agents.append(agent)
 
-            # If we have the map builder, rebuild line_strings with proper
-            # border flags (psim NPZs lack them) so the model sees road borders
-            _has_builder = map_builder is not None
-            if _has_builder:
-                # Get initial ego world pose from sidecar JSON
-                _init_ego_wp = _recover_ego_world_pose(seq, min(s, len(seq) - 1))
-
-            map_cache = MapTensorCache(scene.map_data)
-            device = model_cache._device
-            model = model_cache._model
-            model_args = model_cache._model_args
-            if advance_mode == "mpc":
-                _mpc_trackers: dict = {}
-                def advance_fn(sc, pr):
-                    advance_scene_mpc(sc, pr, _mpc_trackers)
-            else:
-                advance_fn = advance_scene
-
             placed_ids = {f"placed_{o.label}" for o in obs_at_step}
 
             # Optionally apply guidance during simulation
+            model = model_cache._model
+            model_args = model_cache._model_args
             _orig_guidance_fn = model.decoder._guidance_fn
             _orig_guidance_scale = model.decoder._guidance_scale
             if use_guidance and guidance_args:
@@ -1621,62 +1599,23 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     model.decoder._guidance_fn = composer
                     model.decoder._guidance_scale = 1.0
 
-            # Track ego world pose for sidecar JSONs
-            import json as _json
-            if _has_builder and _init_ego_wp is not None:
-                _ego_world = _init_ego_wp.copy()
-            else:
-                _ego_world = None
+            # Get ego world pose for map refresh
+            ego_wp = _recover_ego_world_pose(seq, min(s, len(seq) - 1))
+            ego_wp_arr = np.array([ego_wp[0], ego_wp[1], ego_wp[2]]) if ego_wp is not None else None
 
-            progress(0, desc=f"Simulating 0/{n} steps...")
+            from scenario_generation.simulate import run_simulation
             try:
-                for i in range(n):
-                    # Refresh map data from the lanelet2 builder (same as replay.py
-                    # line 1824-1832). This gives the model correct lanes, road
-                    # borders, stop lines, and polygons in the current ego frame.
-                    if _has_builder and _ego_world is not None:
-                        ego_xy_w = _ego_world[:2].astype(np.float32)
-                        ll_ids = list(map_builder.closest_lanelets(ego_xy_w, 140))
-                        scene.map_data = map_builder._build_map_data(
-                            ll_ids, center_xy=ego_xy_w)
-                        map_cache = MapTensorCache(scene.map_data)
-
-                    ids_to_predict = [a.id for a in scene.agents if a.id not in placed_ids]
-                    preds = _predict_batch(model, model_args, scene, ids_to_predict, device,
-                                           map_cache=map_cache)
-
-                    # Save ego prediction into NPZ as ego_agent_future
-                    ego_id = scene.ego_agent_id
-                    data = dump_step_npz(scene, map_cache, future_len=80)
-                    if ego_id in preds:
-                        ego_pred = preds[ego_id]
-                        heading = np.arctan2(ego_pred[:, 3], ego_pred[:, 2])
-                        data["ego_agent_future"] = np.column_stack(
-                            [ego_pred[:, :2], heading]
-                        ).astype(np.float32)
-
-                    # Save sidecar JSON with ego world pose
-                    if _ego_world is not None:
-                        yaw_w = float(_ego_world[2])
-                        sidecar = {
-                            "x": float(_ego_world[0]), "y": float(_ego_world[1]),
-                            "qz": math.sin(yaw_w / 2), "qw": math.cos(yaw_w / 2),
-                        }
-                        (out_dir / f"replay_step_{i:04d}.json").write_text(_json.dumps(sidecar))
-
-                    advance_fn(scene, preds)
-                    np.savez(out_dir / f"replay_step_{i:04d}.npz", **data)
-
-                    # Update ego world pose: world = init_world + R(init_yaw) @ scene_pos
-                    if _ego_world is not None and _init_ego_wp is not None:
-                        ego_new = scene.ego_agent
-                        iy = float(_init_ego_wp[2])
-                        ci, si = math.cos(iy), math.sin(iy)
-                        ep = ego_new.current_position
-                        _ego_world[0] = _init_ego_wp[0] + ci * ep[0] - si * ep[1]
-                        _ego_world[1] = _init_ego_wp[1] + si * ep[0] + ci * ep[1]
-                        _ego_world[2] = iy + float(ego_new.current_heading)
-                    progress((i + 1) / n, desc=f"Simulating {i+1}/{n} steps...")
+                run_simulation(
+                    model, model_args, scene, n,
+                    out_dir, device=str(model_cache._device),
+                    mode="closed_loop",
+                    builder=map_builder,
+                    ego_world_pose=ego_wp_arr,
+                    skip_viz=True,
+                    static_agent_ids=placed_ids,
+                    dump_npz=True,
+                    progress_fn=lambda frac, desc: progress(frac, desc=desc),
+                )
             finally:
                 model.decoder._guidance_fn = _orig_guidance_fn
                 model.decoder._guidance_scale = _orig_guidance_scale
