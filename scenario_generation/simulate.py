@@ -692,17 +692,20 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                 )
                 map_cache = MapTensorCache(scene.map_data)
 
-            _saved_agents = None
             if zero_neighbors:
                 _saved_agents = scene.agents[:]
                 scene.agents = [a for a in scene.agents
                                 if a.id == ego_id or a.id in static_ids]
-            agent_predictions = _predict_batch(
-                model, model_args, scene, ids_to_predict, device,
-                map_cache=map_cache,
-            )
-            if _saved_agents is not None:
+                agent_predictions = _predict_batch(
+                    model, model_args, scene, [ego_id], device,
+                    map_cache=map_cache,
+                )
                 scene.agents = _saved_agents
+            else:
+                agent_predictions = _predict_batch(
+                    model, model_args, scene, ids_to_predict, device,
+                    map_cache=map_cache,
+                )
 
             mode_label = "CL" if mode == "closed_loop" else "semi-CL"
             if not skip_viz:
