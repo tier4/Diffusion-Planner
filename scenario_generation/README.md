@@ -287,6 +287,71 @@ Relevant modules:
 | `scenario_generation/gui/app.py` | GUI panels + live route overlay wiring |
 | `scene_search/map_canvas_js.py` | JS canvas: start / goal / waypoint arrows + route polyline |
 
+### Scene Branch Editor (static obstacle data generation)
+
+Interactive GUI for placing stopped vehicles in replay scenes, running
+closed-loop forward simulation, and managing a tree of branching scene
+modifications. Designed for generating synthetic static obstacle avoidance
+training data.
+
+```bash
+source .venv/bin/activate
+# ROS needed only for --map_path (road border overlays)
+source /opt/ros/humble/setup.bash 2>/dev/null
+python -m scenario_generation.tools.scene_branch_editor \
+    --npz_dir /path/to/replay_npz_dir \
+    --model_path /path/to/best_model.pth \
+    --ego_shape 4.76,7.24,2.29 \
+    --map_path /path/to/lanelet2_map.osm \
+    --port 7870
+```
+
+**Core workflow:**
+
+1. Load a replay NPZ directory (from `scenario_generation.replay` or psim)
+2. Scrub the timeline to find a suitable insertion point
+3. Place a stopped vehicle with position, heading, dimensions, and history
+   (how many past timesteps the model sees the obstacle)
+4. Preview the model's DET trajectory and guided trajectories
+5. Fork a branch and simulate N steps forward (perfect tracker or MPC)
+6. Play back the simulation result, inspect with reward overlays
+7. Save the scene tree as JSON for later reuse or further branching
+
+**Features:**
+
+| Feature | Description |
+|---|---|
+| Timeline | Slider + jump-to-step + play/stop at configurable FPS |
+| Obstacle placement | X/Y/Yaw/Length/Width + history steps (0=just appeared, 30=full) |
+| Obstacle management | Dropdown select, edit position/dims, remove |
+| Show GT | Reconstructed from future NPZ steps (green trajectory) |
+| Show DET | Deterministic model prediction (blue trajectory) |
+| Show Guided | Guided inference with configurable guidances + scales |
+| Forward simulation | Calls `run_simulation()` from `simulate.py` with map refresh |
+| Apply Guidance | Use guidance config during every simulation step |
+| Road border overlay | Distance line from ego to nearest border (from lanelet2 map) |
+| Neighbor distance | OBB-OBB closest pair lines (uses `reward.py` primitives) |
+| Branch tree | Fork/delete/switch branches, save/load as JSON |
+| Crop | Select timestep range within a branch |
+
+**CLI flags:**
+
+| Flag | Purpose |
+|---|---|
+| `--npz_dir` | Path to replay NPZ directory (required) |
+| `--model_path` | Model checkpoint for inference (optional, enables DET/guided/sim) |
+| `--ego_shape` | `wheelbase,length,width` — override when NPZ lacks `ego_shape` |
+| `--map_path` | Lanelet2 `.osm` map for road border overlays + model context |
+| `--port` | Gradio server port (default 7870) |
+
+**Key files:**
+
+| File | Role |
+|---|---|
+| `scenario_generation/tools/scene_branch_editor.py` | Main Gradio GUI |
+| `scenario_generation/tools/scene_tree.py` | `SceneTree` / `BranchNode` / `ObstaclePlacement` dataclasses + JSON persistence |
+| `scenario_generation/simulate.py` | `run_simulation()` — extended with `builder`, `ego_world_pose`, `dump_npz`, `skip_viz`, `static_agent_ids` params |
+
 ### Batch scene generation
 
 Generate N scenes per saved map snippet and run closed-loop + semi-closed-loop simulation:
