@@ -523,10 +523,11 @@ def train_epoch_ranked_sft(
                 gt = gt[0]
             gt_np = gt.cpu().numpy()
             if gt_np.shape[-1] == 3:
+                valid = np.abs(gt_np[:, :2]).sum(axis=-1) > 0.1
+                cos_h = np.where(valid, np.cos(gt_np[:, 2]), 0.0)
+                sin_h = np.where(valid, np.sin(gt_np[:, 2]), 0.0)
                 traj_4col = np.column_stack([
-                    gt_np[:, :2],
-                    np.cos(gt_np[:, 2]),
-                    np.sin(gt_np[:, 2]),
+                    gt_np[:, :2], cos_h, sin_h,
                 ]).astype(np.float32)
             else:
                 traj_4col = gt_np[:, :4].astype(np.float32)
