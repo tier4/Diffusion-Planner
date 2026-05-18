@@ -1922,7 +1922,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             ego_wp_arr = np.array([ego_wp[0], ego_wp[1], ego_wp[2]]) if ego_wp is not None else None
 
             if open_loop:
-                # Open-loop: step ego through the cached trajectory, no re-inference
+                # Open-loop: use the already-displayed trajectory (guided or DET)
+                from copy import deepcopy
+
+                from scenario_generation.simulate import _advance_agent
+                from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 
                 # Use cached trajectory — the one the user is looking at
                 plan = None
@@ -1946,43 +1950,48 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                             gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
                 n = min(n, plan.shape[0])
-                heading_full = np.arctan2(plan[:, 3], plan[:, 2])
-
-                # Load the base NPZ once — each step we patch ego pose + remaining future
-                with np.load(npz_path) as _base:
-                    base_npz = dict(_base)
-
-                _init_yaw = float(ego_wp_arr[2]) if ego_wp_arr is not None else 0.0
+                scene_ol = deepcopy(scene)
+                ego_id = scene_ol.ego_agent_id
+                map_cache_ol = MapTensorCache(scene_ol.map_data)
 
                 for t in range(n):
                     progress((t + 1) / n, f"Open-loop step {t+1}/{n}")
-                    # Ego pose at this step (in t=0 ego frame)
-                    ex, ey = float(plan[t, 0]), float(plan[t, 1])
-                    eh = float(heading_full[t])
-                    # Remaining future from this step onward
-                    remaining = plan[t:]  # (T-t, 4)
-                    rem_heading = heading_full[t:]
-                    future_xyh = np.column_stack([
-                        remaining[:, :2], rem_heading,
-                    ]).astype(np.float32)
-
-                    npz_data = dict(base_npz)
-                    npz_data["ego_agent_future"] = future_xyh
-
-                    # Sidecar JSON — compute world pose from t=0 world pose + plan offset
+                    # Dump current state as NPZ
+                    npz_data = dump_step_npz(scene_ol, map_cache_ol,
+                                             future_len=model_cache._model_args.future_len)
+                    heading_full = np.arctan2(plan[:, 3], plan[:, 2])
+                    npz_data["ego_agent_future"] = np.column_stack(
+                        [plan[:, :2], heading_full]).astype(np.float32)
+                    # Sidecar JSON for road borders
                     if ego_wp_arr is not None:
                         import json as _json_ol
                         import math as _math_ol
-                        ci, si = _math_ol.cos(_init_yaw), _math_ol.sin(_init_yaw)
-                        wx = ego_wp_arr[0] + ci * ex - si * ey
-                        wy = ego_wp_arr[1] + si * ex + ci * ey
-                        wyaw = _init_yaw + eh
+                        ep = scene_ol.get_agent(ego_id).current_position
+                        eh = scene_ol.get_agent(ego_id).current_heading
+                        _iy = float(ego_wp_arr[2])
+                        ci, si = _math_ol.cos(_iy), _math_ol.sin(_iy)
+                        wx = ego_wp_arr[0] + ci * ep[0] - si * ep[1]
+                        wy = ego_wp_arr[1] + si * ep[0] + ci * ep[1]
+                        wyaw = _iy + eh
                         sidecar = {"x": float(wx), "y": float(wy),
                                    "qz": _math_ol.sin(wyaw / 2), "qw": _math_ol.cos(wyaw / 2),
                                    "qx": 0.0, "qy": 0.0}
                         (out_dir / f"replay_step_{t:04d}.json").write_text(
                             _json_ol.dumps(sidecar))
                     np.savez(out_dir / f"replay_step_{t:04d}.npz", **npz_data)
+                    # Advance ego to next trajectory point
+                    if t < n - 1:
+                        step_pred = plan[t]
+                        ax_pos, ay_pos = scene_ol.get_agent(ego_id).current_position
+                        ah = scene_ol.get_agent(ego_id).current_heading
+                        cos_h, sin_h = float(step_pred[2]), float(step_pred[3])
+                        new_x = ax_pos + float(step_pred[0]) * cos_h - float(step_pred[1]) * sin_h
+                        new_y = ax_pos + float(step_pred[0]) * sin_h + float(step_pred[1]) * cos_h
+                        # Simpler: pred is already in ego frame, just use it directly
+                        new_heading = float(np.arctan2(step_pred[3], step_pred[2]))
+                        new_pos = np.array([float(step_pred[0]), float(step_pred[1]),
+                                            new_heading], dtype=np.float32)
+                        _advance_agent(scene_ol.get_agent(ego_id), new_pos)
             else:
                 from scenario_generation.simulate import run_simulation
                 try:
