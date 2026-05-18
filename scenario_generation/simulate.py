@@ -473,6 +473,7 @@ def _predict_batch(
     return_turn_indicators: bool = False,
     inference_delay: int = 0,
     turn_indicator_keep_bias: float = 0.25,
+    zero_neighbors: bool = False,
 ) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], dict[str, int]]:
     """Run batched inference for multiple agents-as-ego.
 
@@ -511,6 +512,13 @@ def _predict_batch(
                          inference_delay=inference_delay)
         for aid in agent_ids
     ]
+
+    if zero_neighbors:
+        import torch as _torch
+        for td in tensor_dicts:
+            for k in ("neighbor_agents_past", "neighbor_agents_future"):
+                if k in td and isinstance(td[k], _torch.Tensor):
+                    td[k] = _torch.zeros_like(td[k])
 
     model.decoder._guidance_fn = None
     if len(agent_ids) == 1:
@@ -590,7 +598,8 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                    skip_viz: bool = False,
                    static_agent_ids: set[str] | None = None,
                    dump_npz: bool = False,
-                   progress_fn=None):
+                   progress_fn=None,
+                   zero_neighbors: bool = False):
     """Run simulation with configurable ego behavior.
 
     Modes:
@@ -610,6 +619,8 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         static_agent_ids: Agent IDs to exclude from prediction (stationary).
         dump_npz: Save per-step NPZ files alongside PNGs.
         progress_fn: Optional callable(fraction, desc) for progress reporting.
+        zero_neighbors: Zero neighbor_agents_past in model input so the
+            model only sees placed obstacles, not original NPZ neighbors.
     """
     if mode not in ("closed_loop", "semi_closed_loop"):
         raise ValueError(f"Unknown mode {mode!r}. Use 'closed_loop' or 'semi_closed_loop'.")
@@ -693,6 +704,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
             agent_predictions = _predict_batch(
                 model, model_args, scene, ids_to_predict, device,
                 map_cache=map_cache,
+                zero_neighbors=zero_neighbors,
             )
 
             mode_label = "CL" if mode == "closed_loop" else "semi-CL"

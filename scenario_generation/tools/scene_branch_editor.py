@@ -1618,7 +1618,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         # Simulate N steps — closed-loop forward simulation
         def on_simulate(tree, step, n_steps, advance_mode, use_guidance,
-                        gt_on, view_r, *guidance_args, progress=gr.Progress()):
+                        gt_on, view_r, hide_nb, *guidance_args, progress=gr.Progress()):
             if model_cache is None or not model_cache.available:
                 return (tree, gr.update(), "No model loaded — pass `--model_path`",
                         gr.update(), gr.update(), gr.update(), gr.update(), None, None)
@@ -1651,9 +1651,25 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
             scene = _from_npz(npz_path)
 
-            # Inject placed obstacles as stationary agents
+            # Inject placed obstacles as stationary agents — transform from
+            # placement-step ego frame to the sim-start ego frame (step s).
             obstacles = tree.get_all_obstacles(tree.active_branch)
-            obs_at_step = [o for o in obstacles if o.timestep <= s]
+            obs_at_step = []
+            for o in obstacles:
+                if o.timestep > s:
+                    continue
+                if o.timestep != s and seq:
+                    nx, ny, nyaw = _transform_point_between_steps(
+                        seq, o.timestep, s, o.x, o.y, o.yaw_rad,
+                    )
+                    obs_at_step.append(ObstaclePlacement(
+                        label=o.label, timestep=o.timestep,
+                        x=nx, y=ny, yaw_deg=math.degrees(nyaw),
+                        length=o.length, width=o.width,
+                        history_steps=o.history_steps,
+                    ))
+                else:
+                    obs_at_step.append(o)
             from scenario_generation.scene_context import Agent, AgentType
             for obs in obs_at_step:
                 T_PAST = 31
@@ -1720,6 +1736,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     static_agent_ids=placed_ids,
                     dump_npz=True,
                     progress_fn=lambda frac, desc: progress(frac, desc=desc),
+                    zero_neighbors=hide_nb,
                 )
             finally:
                 model.decoder._guidance_fn = _orig_guidance_fn
@@ -1741,7 +1758,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     gr.update(maximum=max_step, value=0), info, None, None)
 
         _sim_inputs = ([tree_state, step_slider, sim_steps, sim_mode, sim_use_guidance,
-                        show_gt, view_half]
+                        show_gt, view_half, hide_neighbors]
                        + [v for gname in ALL_GUIDANCE_NAMES
                           for v in (guidance_toggles[gname], guidance_scales[gname])])
         sim_btn.click(
