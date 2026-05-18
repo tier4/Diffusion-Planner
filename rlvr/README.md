@@ -128,6 +128,7 @@ rlvr/
 | Mode | Config | Trainer | Description |
 |------|--------|---------|-------------|
 | **Ranked SFT** | `ranked_sft_mode: "gt_neighbor"` | `train_epoch_ranked_sft` | **Best for lane keeping.** Generate N trajs, pick best by reward, SG-filter, SFT loss on ego+neighbor. |
+| **Curated SFT** | `ranked_sft_mode: "curated"` | `train_epoch_ranked_sft` | Use pre-saved trajectories from Scene Branch Editor GUI as SFT target. Skips generation+ranking. |
 | Advantage Logprob GRPO | `grpo_loss_type: "advantage_logprob"` | `train_epoch_batched` | DDV2-style Gaussian log-prob. Can learn curvature but degrades neighbor L2. |
 | Advantage MSE GRPO | `grpo_loss_type: "advantage_mse"` | `train_epoch_batched` | Legacy. Cannot change trajectory shape, only length. |
 | Random guidance | `random_guidance_mode: "uniform"` | `GRPOExplorationTrainer` | Random η guidance diversity. |
@@ -186,9 +187,10 @@ adapted for diffusion planners with reward-based selection and Savitzky-Golay tr
 5. Train LoRA with standard SFT diffusion loss: sample random t, noise, denoise, MSE vs pseudo-GT
 6. **Post-hoc: zero LoRA block 0 weights** for better L2 preservation (the "no_block0 trick")
 
-**Neighbor modes:**
-- `"gt_neighbor"` (recommended): use real GT neighbor trajectories from NPZ data
-- `"baseline_neighbor"`: use baseline (no-LoRA) model predictions as neighbor target
+**Modes:**
+- `"gt_neighbor"` (recommended): generate K trajs, pick best by reward, use GT neighbors
+- `"baseline_neighbor"`: same as gt_neighbor but use base model neighbor predictions
+- `"curated"`: skip generation+ranking, use `ego_agent_future` from NPZ directly as SFT target (for trajectories saved via Scene Branch Editor GUI)
 
 **Config:**
 ```json
