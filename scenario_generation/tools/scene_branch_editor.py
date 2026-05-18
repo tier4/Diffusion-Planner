@@ -249,6 +249,11 @@ def _traj_cos_sin_to_xyh(traj: np.ndarray) -> np.ndarray:
     return np.column_stack([traj[:, :2], heading])
 
 
+def _obb_corners_from_placement(obs: ObstaclePlacement) -> np.ndarray:
+    from scenario_generation.gui.lanelet_scene_builder import _obb_corners
+    return _obb_corners(obs.x, obs.y, obs.yaw_rad, obs.length, obs.width)
+
+
 def _extract_border_polylines(scene: SceneContext) -> list[np.ndarray]:
     """Extract road border polylines from line_strings (channel 3 = border flag)."""
     ls = scene.map_data.line_strings
@@ -577,6 +582,9 @@ def render_scene_at_step(
             border_polylines_for_traj = _ego_frame_borders
 
         nb_agents = [a for a in scene.agents if a.id != scene.ego_agent_id]
+        _placed_obs_corners = []
+        for obs in (obstacles or []):
+            _placed_obs_corners.append(_obb_corners_from_placement(obs))
 
         _trajs_to_check: list[tuple[np.ndarray, str, str]] = []
         if det_traj is not None and det_traj.shape[0] > 1:
@@ -621,19 +629,20 @@ def render_scene_at_step(
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85),
                     )
 
-            if show_traj_nb and nb_agents:
+            _all_nb_corners = _placed_obs_corners[:]
+            if show_traj_nb:
                 import torch as _torch
 
                 from rlvr.reward import _closest_points_between_rects
                 from scenario_generation.gui.lanelet_scene_builder import _obb_corners
-                nb_corners_list = [
-                    _obb_corners(
+                for a in nb_agents:
+                    _all_nb_corners.append(_obb_corners(
                         float(a.current_position[0]), float(a.current_position[1]),
                         float(a.current_heading), float(a.length), float(a.width),
-                    ) for a in nb_agents
-                ]
-                n_nb = len(nb_agents)
-                r2 = _torch.from_numpy(np.stack(nb_corners_list).astype(np.float32))
+                    ))
+            if show_traj_nb and _all_nb_corners:
+                n_nb = len(_all_nb_corners)
+                r2 = _torch.from_numpy(np.stack(_all_nb_corners).astype(np.float32))
                 worst_nb_dist, worst_nb_idx = float("inf"), 0
                 worst_nb_pe, worst_nb_pn = None, None
                 for ti in idxs:
