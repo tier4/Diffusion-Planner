@@ -1455,7 +1455,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
             img, info = _render(tree, _safe_step(step), view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj,
-                                guided_trajs=guided_list)
+                                guided_trajs=guided_list, hide_nb=hide_nb)
             return img, info, det_cache, guided_list
 
         def on_branch_change(tree, branch_id, step, view_r, selected_obs, gt_on):
@@ -1821,10 +1821,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             out = Path(out_dir.strip())
             out.mkdir(parents=True, exist_ok=True)
 
-            existing = sorted(out.glob("scene_*.npz"))
+            existing = list(out.glob("scene_*.npz"))
             if existing:
-                last_stem = existing[-1].stem
-                idx = int(last_stem.split("_")[-1]) + 1
+                nums = []
+                for p in existing:
+                    try:
+                        nums.append(int(p.stem.split("_")[-1]))
+                    except ValueError:
+                        pass
+                idx = max(nums) + 1 if nums else 0
             else:
                 idx = 0
 
