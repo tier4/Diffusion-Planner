@@ -1959,9 +1959,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     # Dump current state as NPZ
                     npz_data = dump_step_npz(scene_ol, map_cache_ol,
                                              future_len=model_cache._model_args.future_len)
-                    heading_full = np.arctan2(plan[:, 3], plan[:, 2])
-                    npz_data["ego_agent_future"] = np.column_stack(
-                        [plan[:, :2], heading_full]).astype(np.float32)
+                    npz_data["ego_agent_future"] = np.zeros(
+                        (model_cache._model_args.future_len, 3), dtype=np.float32)
                     # Sidecar JSON for road borders
                     if ego_wp_arr is not None:
                         import json as _json_ol
