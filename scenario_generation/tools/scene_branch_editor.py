@@ -1064,16 +1064,17 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
             return img, info, det_cache, guided_cache
 
-        def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on):
-            det_traj = None
-            if det_on and model_cache and model_cache.available:
-                det_traj = _predict_det_with_obs(tree, step)
-            img, info = _render(tree, _safe_step(step), view_r, selected_obs,
-                                show_gt_val=gt_on, det_traj=det_traj,
+        def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on,
+                           guided_on, *g_args):
+            s = _safe_step(step)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
+            img, info = _render(tree, s, view_r, selected_obs,
+                                show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
-            return img, info, _safe_step(step), det_traj, None
+            return img, info, s, det_traj, guided
 
-        def on_nav(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on, direction):
+        def _on_nav_impl(direction, tree, step, view_r, selected_obs, gt_on, det_on,
+                         hide_nb, rb_on, nb_on, guided_on, *g_args):
             seq = tree.get_npz_sequence(tree.active_branch)
             max_s = max(0, len(seq) - 1) if seq else 0
             if direction == "first":
@@ -1084,13 +1085,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 s = min(max_s, _safe_step(step) + 1)
             else:
                 s = max_s
-            det_traj = None
-            if det_on and model_cache and model_cache.available:
-                det_traj = _predict_det_with_obs(tree, s)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
             img, info = _render(tree, s, view_r, selected_obs,
-                                show_gt_val=gt_on, det_traj=det_traj,
+                                show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
-            return img, info, s, det_traj, None
+            return img, info, s, det_traj, guided
 
         def on_preview(tree, step, view_r, selected_obs, x, y, yaw, length, width, gt_on, det_cache, guided_cache):
             preview = ObstaclePlacement(
@@ -1120,19 +1119,42 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             obstacles = tree.get_all_obstacles(tree.active_branch)
             return [o for o in obstacles if o.timestep <= step]
 
-        def _recompute_trajs(tree, step, det_on, guided_on=False, guided_cache=None):
-            """Recompute DET and guided trajectories if toggled on."""
+        def _recompute_trajs(tree, step, det_on, guided_on=False,
+                             guidance_args_tuple=None):
+            """Recompute DET and guided trajectories if toggled on.
+
+            When guided_on and guidance_args_tuple is provided, regenerates
+            guided trajectories with the current guidance config.
+            """
             det_traj = None
-            if det_on and model_cache and model_cache.available:
-                npz_path = _get_npz_path(tree, step)
-                if npz_path:
-                    obs = _get_obstacles_at_step(tree, step)
-                    raw = model_cache.predict_det(npz_path, obstacles=obs or None)
-                    det_traj = _traj_cos_sin_to_xyh(raw)
-            guided = guided_cache if guided_on else None
+            guided = None
+            if not (model_cache and model_cache.available):
+                return det_traj, guided
+            obs = _get_obstacles_at_step(tree, _safe_step(step))
+            npz_path = _get_npz_path(tree, step)
+            if not npz_path:
+                return det_traj, guided
+            if det_on:
+                raw = model_cache.predict_det(npz_path, obstacles=obs or None)
+                det_traj = _traj_cos_sin_to_xyh(raw)
+            if guided_on and guidance_args_tuple:
+                cfgs = []
+                for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
+                    enabled = guidance_args_tuple[gi * 2]
+                    scale = guidance_args_tuple[gi * 2 + 1]
+                    if enabled:
+                        cfgs.append((gname, float(scale)))
+                noise = float(guidance_args_tuple[-2])
+                k = int(guidance_args_tuple[-1])
+                raw_g = model_cache.predict_guided(
+                    npz_path, cfgs, noise_scale=noise, n_samples=max(1, k),
+                    obstacles=obs or None,
+                )
+                guided = [_traj_cos_sin_to_xyh(raw_g[j]) for j in range(raw_g.shape[0])]
             return det_traj, guided
 
-        def on_place(tree, step, view_r, x, y, yaw, length, width, history, gt_on, det_on):
+        def on_place(tree, step, view_r, x, y, yaw, length, width, history,
+                     gt_on, det_on, guided_on, hide_nb, rb_on, nb_on, *g_args):
             label = tree.next_obstacle_label(tree.active_branch)
             placement = ObstaclePlacement(
                 label=label, timestep=_safe_step(step),
@@ -1142,9 +1164,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             )
             tree.add_obstacle(tree.active_branch, placement)
             s = _safe_step(step)
-            det_traj, guided = _recompute_trajs(tree, s, det_on)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
-                                det_traj=det_traj)
+                                det_traj=det_traj, guided_trajs=guided,
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
             mods = _modifications_md(tree, tree.active_branch)
             choices = _obs_choices(tree)
             return (tree, img, info, mods, label, det_traj, guided,
@@ -1163,19 +1186,22 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
                     gr.update())
 
-        def on_remove_obstacle(tree, label, step, view_r, gt_on, det_on):
+        def on_remove_obstacle(tree, label, step, view_r, gt_on, det_on,
+                               guided_on, hide_nb, rb_on, nb_on, *g_args):
             if label:
                 tree.remove_obstacle(tree.active_branch, label.strip())
             s = _safe_step(step)
-            det_traj, guided = _recompute_trajs(tree, s, det_on)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
             img, info = _render(tree, s, view_r, None, show_gt_val=gt_on,
-                                det_traj=det_traj)
+                                det_traj=det_traj, guided_trajs=guided,
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
             mods = _modifications_md(tree, tree.active_branch)
             choices = _obs_choices(tree)
             return (tree, img, info, mods, None,
                     gr.update(choices=choices, value=None), det_traj, guided)
 
-        def on_apply_edit(tree, label, step, view_r, gt_on, det_on, x, y, yaw, length, width, history):
+        def on_apply_edit(tree, label, step, view_r, gt_on, det_on, guided_on,
+                          hide_nb, rb_on, nb_on, x, y, yaw, length, width, history, *g_args):
             if not label:
                 return (tree, gr.update(), "No obstacle selected",
                         gr.update(), gr.update(), gr.update(), gr.update())
@@ -1191,9 +1217,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     )
                     break
             s = _safe_step(step)
-            det_traj, guided = _recompute_trajs(tree, s, det_on)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
-                                det_traj=det_traj)
+                                det_traj=det_traj, guided_trajs=guided,
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
             mods = _modifications_md(tree, tree.active_branch)
             return tree, img, info, mods, label, det_traj, guided
 
@@ -1332,28 +1359,37 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return tree, img, info, b_info, gr.update(maximum=max_step, value=s)
 
         # ── Wire up events ──
-        nav_inputs = [tree_state, step_slider, view_half, selected_obstacle_state,
-                      show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist]
+        # Guidance toggle+scale inputs for recomputation, plus noise and K at end
+        _g_inputs = ([v for gname in ALL_GUIDANCE_NAMES
+                       for v in (guidance_toggles[gname], guidance_scales[gname])]
+                     + [guided_noise, guided_k])
+        _overlay_inputs = [show_guided, hide_neighbors, show_rb_dist, show_nb_dist]
+
+        nav_inputs = ([tree_state, step_slider, view_half, selected_obstacle_state,
+                       show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
+                       show_guided] + _g_inputs)
         nav_outputs = [scene_image, step_info, step_slider, det_traj_state, guided_trajs_state]
 
         step_slider.release(
             on_step_change, nav_inputs, nav_outputs,
         )
 
-        def on_step_jump(tree, jump_val, view_r, selected_obs, gt_on, det_on):
+        def on_step_jump(tree, jump_val, view_r, selected_obs, gt_on, det_on,
+                         hide_nb, rb_on, nb_on, guided_on, *g_args):
             s = _safe_step(jump_val)
             seq = tree.get_npz_sequence(tree.active_branch)
             s = min(s, max(0, len(seq) - 1)) if seq else 0
-            det_traj = None
-            if det_on and model_cache and model_cache.available:
-                det_traj = _predict_det_with_obs(tree, s)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
             img, info = _render(tree, s, view_r, selected_obs,
-                                show_gt_val=gt_on, det_traj=det_traj)
-            return img, info, s, det_traj, None
+                                show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
+            return img, info, s, det_traj, guided
 
         step_jump_btn.click(
             on_step_jump,
-            [tree_state, step_jump_input, view_half, selected_obstacle_state, show_gt, show_det],
+            [tree_state, step_jump_input, view_half, selected_obstacle_state,
+             show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
+             show_guided] + _g_inputs,
             nav_outputs,
         )
         _render_trigger_inputs = [tree_state, step_slider, view_half, selected_obstacle_state,
@@ -1369,7 +1405,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         for direction, btn in [("first", btn_first), ("prev", btn_prev),
                                 ("next", btn_next), ("last", btn_last)]:
             btn.click(
-                lambda tree, step, vr, so, gt, det, hn, rb, nb, d=direction: on_nav(tree, step, vr, so, gt, det, hn, rb, nb, d),
+                lambda *args, d=direction: _on_nav_impl(d, *args),
                 nav_inputs, nav_outputs,
             )
 
@@ -1384,7 +1420,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         place_btn.click(
             on_place,
             [tree_state, step_slider, view_half,
-             obs_x, obs_y, obs_yaw, obs_length, obs_width, obs_history, show_gt, show_det],
+             obs_x, obs_y, obs_yaw, obs_length, obs_width, obs_history,
+             show_gt, show_det] + _overlay_inputs + _g_inputs,
             [tree_state, scene_image, step_info, mods_display,
              selected_obstacle_state, det_traj_state, guided_trajs_state,
              obs_select],
@@ -1400,15 +1437,17 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         remove_obs_btn.click(
             on_remove_obstacle,
-            [tree_state, obs_select, step_slider, view_half, show_gt, show_det],
+            [tree_state, obs_select, step_slider, view_half,
+             show_gt, show_det] + _overlay_inputs + _g_inputs,
             [tree_state, scene_image, step_info, mods_display,
              selected_obstacle_state, obs_select, det_traj_state, guided_trajs_state],
         )
 
         apply_edit_btn.click(
             on_apply_edit,
-            [tree_state, obs_select, step_slider, view_half, show_gt, show_det,
-             edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history],
+            [tree_state, obs_select, step_slider, view_half,
+             show_gt, show_det] + _overlay_inputs +
+            [edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history] + _g_inputs,
             [tree_state, scene_image, step_info, mods_display, selected_obstacle_state,
              det_traj_state, guided_trajs_state],
         )
