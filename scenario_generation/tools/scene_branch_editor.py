@@ -1031,6 +1031,20 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                         interactive=_has_model)
                 sim_status = gr.Markdown("")
 
+                # Export & RSFT save — horizontal layout
+                with gr.Accordion("Export / Save for RSFT", open=False):
+                    with gr.Row():
+                        export_dir = gr.Textbox(label="Export Dir", placeholder="/path/to/export",
+                                                scale=3)
+                        export_btn = gr.Button("Export NPZs", variant="secondary", scale=1)
+                    export_status = gr.Markdown("")
+                    with gr.Row():
+                        rsft_dir = gr.Textbox(label="RSFT Dir", placeholder="/path/to/rsft_curated",
+                                              scale=3)
+                        rsft_save_btn = gr.Button("Save Scene + Guided Traj", variant="primary",
+                                                   interactive=_has_model, scale=1)
+                    rsft_status = gr.Markdown("")
+
             # ═══════ RIGHT PANEL ═══════
             with gr.Column(scale=1, min_width=280):
                 gr.Markdown("### Branch Tree")
@@ -1067,17 +1081,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     edit_width = gr.Slider(minimum=0.5, maximum=3.0, value=1.8, step=0.1, label="Wid")
                 edit_history = gr.Slider(minimum=0, maximum=30, value=30, step=1, label="History")
                 apply_edit_btn = gr.Button("Apply Edit", size="sm", variant="primary")
-
-                gr.Markdown("### Export")
-                export_dir = gr.Textbox(label="Output Dir", placeholder="/path/to/export")
-                export_btn = gr.Button("Export NPZs", variant="secondary")
-                export_status = gr.Markdown("")
-
-                gr.Markdown("### Save for RSFT")
-                rsft_dir = gr.Textbox(label="RSFT Dir", placeholder="/path/to/rsft_curated")
-                rsft_save_btn = gr.Button("Save Scene + Guided Traj", variant="primary",
-                                           interactive=_has_model)
-                rsft_status = gr.Markdown("")
 
                 save_status = gr.Markdown("")
 
