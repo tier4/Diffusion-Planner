@@ -1771,22 +1771,32 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             if not npz_path:
                 return "No NPZ at current step"
 
-            # Count existing scenes for sequential numbering
+            # Next index from max existing suffix (avoids overwrite on gaps)
             existing = sorted(out.glob("scene_*.npz"))
-            idx = len(existing)
+            if existing:
+                last_stem = existing[-1].stem  # e.g. "scene_0003"
+                idx = int(last_stem.split("_")[-1]) + 1
+            else:
+                idx = 0
 
-            # guided_cache[0] is (80, 3) [x, y, heading_rad] — convert to (80, 4) cos/sin
-            traj_xyh = np.array(guided_cache[0])
-            traj_4col = np.column_stack([
-                traj_xyh[:, :2],
-                np.cos(traj_xyh[:, 2]),
-                np.sin(traj_xyh[:, 2]),
-            ]).astype(np.float32)
+            # guided_cache[0] is (80, 3) [x, y, heading_rad] — training format
+            traj_xyh = np.array(guided_cache[0]).astype(np.float32)
 
-            # Copy source NPZ and overwrite ego_agent_future
+            # Copy source NPZ, inject obstacles into neighbor tensor, set future
             with np.load(npz_path) as src:
                 npz_data = dict(src)
-            npz_data["ego_agent_future"] = traj_4col
+            obs_at_step = _get_obstacles_at_step(tree, s)
+            if obs_at_step:
+                device = torch.device("cpu")
+                tmp_data = {k: torch.from_numpy(v).unsqueeze(0) if v.ndim < 3
+                            else torch.from_numpy(v) for k, v in npz_data.items()
+                            if isinstance(v, np.ndarray)}
+                tmp_data = _inject_obstacles_into_tensors(tmp_data, obs_at_step, device)
+                for k in ("neighbor_agents_past", "neighbor_agents_future"):
+                    if k in tmp_data:
+                        v = tmp_data[k]
+                        npz_data[k] = v.squeeze(0).numpy() if v.dim() > 2 else v.numpy()
+            npz_data["ego_agent_future"] = traj_xyh
             dst = out / f"scene_{idx:04d}.npz"
             np.savez(dst, **npz_data)
 
@@ -1802,7 +1812,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 _json.dump(scenes, f, indent=2)
 
             return (f"Saved scene **#{idx}** to `{dst}`\n\n"
-                    f"Guided traj ({traj_4col.shape[0]} steps) → `ego_agent_future`\n\n"
+                    f"Guided traj ({traj_xyh.shape[0]} steps) → `ego_agent_future`\n\n"
                     f"Total: {len(scenes)} scenes in `{scene_list_path}`")
 
         rsft_save_btn.click(

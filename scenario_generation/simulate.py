@@ -693,9 +693,10 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                 map_cache = MapTensorCache(scene.map_data)
 
             if zero_neighbors:
+                _placed_ids = set(static_agent_ids or [])
                 _saved_agents = scene.agents[:]
                 scene.agents = [a for a in scene.agents
-                                if a.id == ego_id or a.id in static_ids]
+                                if a.id == ego_id or a.id in _placed_ids]
                 agent_predictions = _predict_batch(
                     model, model_args, scene, [ego_id], device,
                     map_cache=map_cache,
