@@ -207,7 +207,11 @@ class SceneTree:
         return files
 
     def get_all_obstacles(self, branch_id: str) -> list[ObstaclePlacement]:
-        """Get all obstacles for a branch, including inherited from ancestors."""
+        """Get all obstacles for a branch, including inherited from non-resimulated ancestors.
+
+        Stops climbing at any ancestor that has been resimulated (npz_dir set),
+        because its obstacles are already baked into the NPZ as neighbors.
+        """
         obstacles = []
         bid = branch_id
         while bid is not None:
@@ -215,6 +219,11 @@ class SceneTree:
             if branch is None:
                 break
             obstacles.extend(branch.modifications)
+            # Stop inheriting from resimulated ancestors — their obstacles
+            # are already in the NPZ neighbor data
+            parent = self.branches.get(branch.parent_id) if branch.parent_id else None
+            if parent is not None and parent.npz_dir is not None:
+                break
             bid = branch.parent_id
         return obstacles
 
