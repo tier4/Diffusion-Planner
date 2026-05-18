@@ -664,8 +664,8 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
     # from the NPZ are correct and untouched.
     _can_refresh_ls = builder is not None and ego_world_pose is not None
     _scene_origin = np.array(ego_world_pose, dtype=np.float64) if ego_world_pose is not None else None
+    _init_yaw = float(_scene_origin[2]) if _scene_origin is not None else 0.0
     if _can_refresh_ls:
-        _init_yaw = float(_scene_origin[2])
         _refresh_line_strings(scene, builder, _scene_origin[:2], _scene_origin)
     map_cache = MapTensorCache(scene.map_data)
 

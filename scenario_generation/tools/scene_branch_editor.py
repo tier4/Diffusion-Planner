@@ -600,12 +600,11 @@ def _transform_point_between_steps(
                 past = _npz["ego_agent_past"]
             prev = past[-2]
             dx_local, dy_local, dyaw = -prev[0], -prev[1], -prev[2]
-            cum_yaw += dyaw
             c, sn = math.cos(cum_yaw), math.sin(cum_yaw)
             cum_x += c * dx_local - sn * dy_local
             cum_y += sn * dx_local + c * dy_local
+            cum_yaw += dyaw
         # Point was at (x, y) in from_step frame. In to_step frame:
-        # First express (x, y) relative to ego's new position
         rx, ry = x - cum_x, y - cum_y
         c, sn = math.cos(-cum_yaw), math.sin(-cum_yaw)
         new_x = c * rx - sn * ry
@@ -618,10 +617,10 @@ def _transform_point_between_steps(
                 past = _npz["ego_agent_past"]
             prev = past[-2]
             dx_local, dy_local, dyaw = -prev[0], -prev[1], -prev[2]
-            cum_yaw += dyaw
             c, sn = math.cos(cum_yaw), math.sin(cum_yaw)
             cum_x += c * dx_local - sn * dy_local
             cum_y += sn * dx_local + c * dy_local
+            cum_yaw += dyaw
         # cum describes to_step→from_step. We need to apply the forward
         # transform: the point at (x, y) in from_step frame maps to
         # to_step frame by rotating by cum_yaw and translating.
@@ -705,12 +704,12 @@ def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future:
         dy_local = -prev_in_cur[1]
         dyaw = -prev_in_cur[2]
 
-        # Update yaw first, then rotate displacement into step-0 frame
-        cumulative_yaw += dyaw
+        # Rotate displacement into accumulated frame, then update yaw
         cos_a = math.cos(cumulative_yaw)
         sin_a = math.sin(cumulative_yaw)
         cumulative_x += cos_a * dx_local - sin_a * dy_local
         cumulative_y += sin_a * dx_local + cos_a * dy_local
+        cumulative_yaw += dyaw
 
         gt_points.append([cumulative_x, cumulative_y, cumulative_yaw])
 
