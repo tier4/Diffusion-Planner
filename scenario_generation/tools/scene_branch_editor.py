@@ -282,25 +282,23 @@ def render_scene_at_step(
     # Road borders (red) — from NPZ if available
     draw_road_borders(ax, scene.map_data)
 
-    # Road borders from lanelet2 map (world frame → ego frame transform)
+    # Road borders from lanelet2 map (world frame → ego frame via canonical transform)
     _ego_frame_borders = None
     if map_border_polylines and ego_world_pose is not None:
         from matplotlib.collections import LineCollection as _LC
+        from scenario_generation.transforms import _rotation_matrix, transform_positions
         ex_w, ey_w, eyaw_w = ego_world_pose
-        cos_r, sin_r = math.cos(-eyaw_w), math.sin(-eyaw_w)
+        ego_xy_w = np.array([ex_w, ey_w], dtype=np.float64)
+        R_w = _rotation_matrix(eyaw_w)
         ego_segs = []
         _ego_frame_borders = []
         for pl in map_border_polylines:
             if pl.shape[0] < 2:
                 continue
-            dx = pl[:, 0] - ex_w
-            dy = pl[:, 1] - ey_w
-            rx = cos_r * dx - sin_r * dy
-            ry = sin_r * dx + cos_r * dy
-            pts_ego = np.column_stack([rx, ry])
-            # Only draw borders within view
+            pts_ego = transform_positions(pl.astype(np.float64), R_w, ego_xy_w)
             if np.abs(pts_ego).max() > view_half * 2:
-                in_view = (np.abs(pts_ego[:, 0]) < view_half * 1.5) & (np.abs(pts_ego[:, 1]) < view_half * 1.5)
+                in_view = ((np.abs(pts_ego[:, 0]) < view_half * 1.5) &
+                           (np.abs(pts_ego[:, 1]) < view_half * 1.5))
                 if in_view.sum() < 2:
                     continue
             ego_segs.append(pts_ego)
@@ -650,7 +648,9 @@ def _recover_ego_world_pose(seq: list[str], step: int) -> np.ndarray | None:
                 d = json.load(f)
             x, y = d["x"], d["y"]
             qz, qw = d.get("qz", 0.0), d.get("qw", 1.0)
-            yaw = math.atan2(2.0 * qw * qz, 1.0 - 2.0 * qz * qz)
+            from scenario_generation.transforms import yaw_from_quat
+            qx, qy = d.get("qx", 0.0), d.get("qy", 0.0)
+            yaw = yaw_from_quat(qx, qy, qz, qw)
             return np.array([x, y, yaw], dtype=np.float64)
         except (KeyError, json.JSONDecodeError):
             pass
@@ -1630,24 +1630,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
             progress(0, desc=f"Simulating 0/{n} steps...")
             try:
-                from scenario_generation.transforms import _rotation_matrix
                 for i in range(n):
-                    # Rebuild line_strings from map with proper border flags.
-                    # build_line_strings_tensor returns WORLD frame coords.
-                    # Transform world → ego frame using ego's WORLD pose.
+                    # Refresh map data from the lanelet2 builder (same as replay.py
+                    # line 1824-1832). This gives the model correct lanes, road
+                    # borders, stop lines, and polygons in the current ego frame.
                     if _has_builder and _ego_world is not None:
                         ego_xy_w = _ego_world[:2].astype(np.float32)
-                        ego_yaw_w = float(_ego_world[2])
-                        ls_world = map_builder.build_line_strings_tensor(ego_xy_w)
-                        R_w = _rotation_matrix(ego_yaw_w)
-                        ls_ego = ls_world.copy()
-                        for li in range(ls_ego.shape[0]):
-                            pts = ls_ego[li, :, :2]
-                            valid = np.abs(pts).sum(axis=1) > 0.1
-                            if valid.any():
-                                diff = pts[valid] - ego_xy_w.astype(np.float64)
-                                ls_ego[li, valid, :2] = (R_w @ diff.T).T.astype(np.float32)
-                        scene.map_data.line_strings = ls_ego
+                        ll_ids = list(map_builder.closest_lanelets(ego_xy_w, 140))
+                        scene.map_data = map_builder._build_map_data(
+                            ll_ids, center_xy=ego_xy_w)
                         map_cache = MapTensorCache(scene.map_data)
 
                     ids_to_predict = [a.id for a in scene.agents if a.id not in placed_ids]
