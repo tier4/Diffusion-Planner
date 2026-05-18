@@ -546,6 +546,41 @@ def _predict_batch(
 
 
 @torch.no_grad()
+def _refresh_line_strings(
+    scene: SceneContext, builder,
+    query_world_xy: np.ndarray,
+    scene_origin_world: np.ndarray,
+) -> None:
+    """Rebuild scene.map_data.line_strings from the lanelet2 builder.
+
+    Queries line_strings near ``query_world_xy`` (current ego world pos),
+    then transforms from world frame to scene frame using
+    ``scene_origin_world`` (the ego's world pose at sim start = scene origin).
+
+    Args:
+        query_world_xy: (2,) current ego world position (for spatial query).
+        scene_origin_world: (3,) [x, y, yaw] of the scene frame origin in
+            world frame (= ego world pose at step 0).
+    """
+    from scenario_generation.transforms import _rotation_matrix, transform_positions
+
+    ls_world = builder.build_line_strings_tensor(query_world_xy.astype(np.float32))
+
+    init_xy = scene_origin_world[:2].astype(np.float64)
+    R_init = _rotation_matrix(float(scene_origin_world[2]))
+
+    ls_scene = ls_world.copy()
+    for li in range(ls_scene.shape[0]):
+        pts = ls_scene[li, :, :2]
+        valid = np.abs(pts).sum(axis=1) > 0.1
+        if valid.any():
+            ls_scene[li, valid, :2] = transform_positions(
+                pts[valid].astype(np.float64), R_init, init_xy,
+            ).astype(np.float32)
+    scene.map_data.line_strings = ls_scene
+
+
+
 def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                    output_dir: Path, device: str = "cuda", per_agent: bool = False,
                    mode: str = "closed_loop",
@@ -581,31 +616,6 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
     output_dir.mkdir(parents=True, exist_ok=True)
     scene = deepcopy(scene)
     ego_id = scene.ego_agent_id
-
-    # Convert scene to world frame if builder is available
-    _in_world_frame = False
-    if builder is not None and ego_world_pose is not None:
-        _in_world_frame = True
-        wx, wy, wyaw = ego_world_pose
-        cos_w, sin_w = math.cos(wyaw), math.sin(wyaw)
-        for agent in scene.agents:
-            traj = agent.past_trajectory
-            for t in range(traj.shape[0]):
-                sx, sy = traj[t, 0], traj[t, 1]
-                traj[t, 0] = wx + cos_w * sx - sin_w * sy
-                traj[t, 1] = wy + sin_w * sx + cos_w * sy
-                traj[t, 2] += wyaw
-            if agent.past_velocities is not None:
-                vel = agent.past_velocities
-                for t in range(vel.shape[0]):
-                    vx, vy = vel[t, 0], vel[t, 1]
-                    vel[t, 0] = cos_w * vx - sin_w * vy
-                    vel[t, 1] = sin_w * vx + cos_w * vy
-            if agent.goal_pose is not None:
-                gx, gy = agent.goal_pose[0], agent.goal_pose[1]
-                agent.goal_pose[0] = wx + cos_w * gx - sin_w * gy
-                agent.goal_pose[1] = wy + sin_w * gx + cos_w * gy
-                agent.goal_pose[2] += wyaw
 
     scene.agents = [a for a in scene.agents if a.agent_type == AgentType.VEHICLE]
     n_agents = len(scene.agents)
@@ -649,23 +659,31 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         for agent in scene.agents:
             (output_dir / agent.id).mkdir(parents=True, exist_ok=True)
 
-    # Build initial map; optionally refresh from builder every N steps
-    if _in_world_frame and builder is not None:
-        ego_xy = scene.get_agent(ego_id).current_position.astype(np.float32)
-        ll_ids = list(builder.closest_lanelets(ego_xy, 140))
-        scene.map_data = builder._build_map_data(ll_ids, center_xy=ego_xy)
+    # Optionally rebuild line_strings from builder to get road border flags
+    # that psim NPZs lack. Only line_strings is replaced — lanes, polygons
+    # from the NPZ are correct and untouched.
+    _can_refresh_ls = builder is not None and ego_world_pose is not None
+    _scene_origin = np.array(ego_world_pose, dtype=np.float64) if ego_world_pose is not None else None
+    if _can_refresh_ls:
+        _init_yaw = float(_scene_origin[2])
+        _refresh_line_strings(scene, builder, _scene_origin[:2], _scene_origin)
     map_cache = MapTensorCache(scene.map_data)
 
-    # Precompute ordered list of agents to predict; simulated_ids is constant
     ids_to_predict = [a.id for a in scene.agents if a.id in simulated_ids]
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
         for step in range(n_steps):
-            # Refresh map from builder (like replay.py line 1824-1832)
-            if _in_world_frame and builder is not None and step % map_refresh_steps == 0:
-                ego_xy = scene.get_agent(ego_id).current_position.astype(np.float32)
-                ll_ids = list(builder.closest_lanelets(ego_xy, 140))
-                scene.map_data = builder._build_map_data(ll_ids, center_xy=ego_xy)
+            if _can_refresh_ls and step > 0 and step % map_refresh_steps == 0:
+                ep = scene.get_agent(ego_id).current_position
+                eh = scene.get_agent(ego_id).current_heading
+                ci, si = math.cos(_init_yaw), math.sin(_init_yaw)
+                cur_wx = _scene_origin[0] + ci * ep[0] - si * ep[1]
+                cur_wy = _scene_origin[1] + si * ep[0] + ci * ep[1]
+                _refresh_line_strings(
+                    scene, builder,
+                    np.array([cur_wx, cur_wy], dtype=np.float64),
+                    _scene_origin,
+                )
                 map_cache = MapTensorCache(scene.map_data)
 
             agent_predictions = _predict_batch(
@@ -689,13 +707,17 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                     npz_data["ego_agent_future"] = np.column_stack(
                         [ego_pred[:, :2], heading]).astype(np.float32)
                 # Save sidecar JSON with ego world pose
-                if _in_world_frame:
+                if _scene_origin is not None:
                     import json as _json
-                    ego_agent = scene.get_agent(ego_id)
-                    ep = ego_agent.current_position
-                    eh = ego_agent.current_heading
-                    sidecar = {"x": float(ep[0]), "y": float(ep[1]),
-                               "qz": math.sin(eh / 2), "qw": math.cos(eh / 2)}
+                    ep = scene.get_agent(ego_id).current_position
+                    eh = scene.get_agent(ego_id).current_heading
+                    ci, si = math.cos(_init_yaw), math.sin(_init_yaw)
+                    wx = _scene_origin[0] + ci * ep[0] - si * ep[1]
+                    wy = _scene_origin[1] + si * ep[0] + ci * ep[1]
+                    wyaw = _init_yaw + eh
+                    sidecar = {"x": float(wx), "y": float(wy),
+                               "qz": math.sin(wyaw / 2), "qw": math.cos(wyaw / 2),
+                               "qx": 0.0, "qy": 0.0}
                     (output_dir / f"replay_step_{step:04d}.json").write_text(
                         _json.dumps(sidecar))
                 np.savez(output_dir / f"replay_step_{step:04d}.npz", **npz_data)
