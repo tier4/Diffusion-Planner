@@ -473,7 +473,6 @@ def _predict_batch(
     return_turn_indicators: bool = False,
     inference_delay: int = 0,
     turn_indicator_keep_bias: float = 0.25,
-    zero_neighbors: bool = False,
 ) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], dict[str, int]]:
     """Run batched inference for multiple agents-as-ego.
 
@@ -513,14 +512,6 @@ def _predict_batch(
         for aid in agent_ids
     ]
 
-    if zero_neighbors:
-        import torch as _torch
-        for td in tensor_dicts:
-            for k in ("neighbor_agents_past", "neighbor_agents_future"):
-                if k in td and isinstance(td[k], _torch.Tensor):
-                    td[k] = _torch.zeros_like(td[k])
-
-    model.decoder._guidance_fn = None
     if len(agent_ids) == 1:
         _, outputs = model(tensor_dicts[0])
         preds = {agent_ids[0]: outputs["prediction"][0, 0].cpu().numpy()}
@@ -701,11 +692,17 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                 )
                 map_cache = MapTensorCache(scene.map_data)
 
+            _saved_agents = None
+            if zero_neighbors:
+                _saved_agents = scene.agents[:]
+                scene.agents = [a for a in scene.agents
+                                if a.id == ego_id or a.id in static_ids]
             agent_predictions = _predict_batch(
                 model, model_args, scene, ids_to_predict, device,
                 map_cache=map_cache,
-                zero_neighbors=zero_neighbors,
             )
+            if _saved_agents is not None:
+                scene.agents = _saved_agents
 
             mode_label = "CL" if mode == "closed_loop" else "semi-CL"
             if not skip_viz:
