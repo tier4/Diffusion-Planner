@@ -85,8 +85,8 @@ class SceneTree:
             raise ValueError(f"No replay_step_*.npz or step_*.npz files found in {npz_dir}")
 
         import numpy as np
-        first = np.load(npz_files[0])
-        ego_shape = tuple(float(v) for v in first["ego_shape"]) if "ego_shape" in first else (2.925, 4.5, 1.9)
+        with np.load(npz_files[0]) as first:
+            ego_shape = tuple(float(v) for v in first["ego_shape"]) if "ego_shape" in first else (2.925, 4.5, 1.9)
 
         tree = cls(
             base_npz_dir=npz_dir,

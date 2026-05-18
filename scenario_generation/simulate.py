@@ -673,7 +673,7 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="save") as save_pool:
         for step in range(n_steps):
-            if _can_refresh_ls and step > 0 and step % map_refresh_steps == 0:
+            if _can_refresh_ls and step > 0 and map_refresh_steps > 0 and step % map_refresh_steps == 0:
                 ep = scene.get_agent(ego_id).current_position
                 eh = scene.get_agent(ego_id).current_heading
                 ci, si = math.cos(_init_yaw), math.sin(_init_yaw)

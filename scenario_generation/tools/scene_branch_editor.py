@@ -596,7 +596,8 @@ def _transform_point_between_steps(
     if to_step > from_step:
         # Forward: chain from from_step+1 to to_step
         for s in range(from_step + 1, min(to_step + 1, len(seq))):
-            past = np.load(seq[s])["ego_agent_past"]
+            with np.load(seq[s]) as _npz:
+                past = _npz["ego_agent_past"]
             prev = past[-2]
             dx_local, dy_local, dyaw = -prev[0], -prev[1], -prev[2]
             cum_yaw += dyaw
@@ -613,7 +614,8 @@ def _transform_point_between_steps(
     else:
         # Backward: chain from to_step+1 to from_step (then invert)
         for s in range(to_step + 1, min(from_step + 1, len(seq))):
-            past = np.load(seq[s])["ego_agent_past"]
+            with np.load(seq[s]) as _npz:
+                past = _npz["ego_agent_past"]
             prev = past[-2]
             dx_local, dy_local, dyaw = -prev[0], -prev[1], -prev[2]
             cum_yaw += dyaw
@@ -671,8 +673,8 @@ def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future:
         return None
 
     # Load current step to get the ego's world-frame anchor
-    cur = np.load(seq[current_step])
-    cur_past = cur["ego_agent_past"]  # (31, 3) [x, y, yaw] in current ego frame
+    with np.load(seq[current_step]) as _cur:
+        cur_past = _cur["ego_agent_past"].copy()  # (31, 3) [x, y, yaw]
     # ego is at origin: cur_past[-1] = [0, 0, 0]
 
     # For each future step, load the ego_agent_past and extract the
@@ -694,8 +696,8 @@ def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future:
         future_idx = current_step + i
         if future_idx >= len(seq):
             break
-        fut = np.load(seq[future_idx])
-        fut_past = fut["ego_agent_past"]  # (31, 3)
+        with np.load(seq[future_idx]) as _fut:
+            fut_past = _fut["ego_agent_past"].copy()  # (31, 3)
         # Displacement from prev to current in this step's ego frame
         prev_in_cur = fut_past[-2]  # where ego was 1 step ago, in this step's frame
         # The ego moved from prev_in_cur to [0,0,0]
