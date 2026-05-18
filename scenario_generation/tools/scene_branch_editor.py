@@ -282,6 +282,8 @@ def render_scene_at_step(
     dim_neighbors: bool = False,
     map_border_polylines: list[np.ndarray] | None = None,
     ego_world_pose: np.ndarray | None = None,
+    show_traj_rb: bool = False,
+    show_traj_nb: bool = False,
 ) -> matplotlib.figure.Figure:
     """Render a scene with placed obstacles overlaid, matching replay sim style."""
     fig, ax = plt.subplots(1, 1, figsize=figsize)
@@ -567,6 +569,103 @@ def render_scene_at_step(
                 color = _GUIDED_COLORS[i % len(_GUIDED_COLORS)]
                 draw_trajectory(ax, gt, color, label=f"Guided #{i+1}", lw=1.5, zorder=27,
                                 show_footprints=False, length=ego_len, width=ego_wid)
+
+    # Worst-case RB/NB distance along predicted trajectories
+    if (show_traj_rb or show_traj_nb) and ego is not None:
+        border_polylines_for_traj = _extract_border_polylines(scene)
+        if not border_polylines_for_traj and _ego_frame_borders:
+            border_polylines_for_traj = _ego_frame_borders
+
+        nb_agents = [a for a in scene.agents if a.id != scene.ego_agent_id
+                     and not a.id.startswith("placed_")]
+
+        _trajs_to_check: list[tuple[np.ndarray, str, str]] = []
+        if det_traj is not None and det_traj.shape[0] > 1:
+            _trajs_to_check.append((det_traj, _DET_COLOR, "DET"))
+        if guided_trajs:
+            for gi, gtr in enumerate(guided_trajs):
+                if gtr is not None and gtr.shape[0] > 1:
+                    _trajs_to_check.append(
+                        (gtr, _GUIDED_COLORS[gi % len(_GUIDED_COLORS)], f"G#{gi+1}"))
+
+        for traj_pts, traj_color, traj_label in _trajs_to_check:
+            # Sample every 5th point for speed
+            idxs = list(range(0, traj_pts.shape[0], 5))
+            if (traj_pts.shape[0] - 1) not in idxs:
+                idxs.append(traj_pts.shape[0] - 1)
+
+            if show_traj_rb and border_polylines_for_traj:
+                from scenario_generation.replay import _nearest_border_point
+                worst_rb_dist, worst_rb_idx = float("inf"), 0
+                worst_rb_bp = None
+                for ti in idxs:
+                    px, py = float(traj_pts[ti, 0]), float(traj_pts[ti, 1])
+                    bp = _nearest_border_point(np.array([px, py]), border_polylines_for_traj)
+                    if bp is not None:
+                        d = float(np.linalg.norm(bp - np.array([px, py])))
+                        if d < worst_rb_dist:
+                            worst_rb_dist, worst_rb_idx, worst_rb_bp = d, ti, bp
+                if worst_rb_bp is not None and worst_rb_dist < 50.0:
+                    wx, wy = float(traj_pts[worst_rb_idx, 0]), float(traj_pts[worst_rb_idx, 1])
+                    wh = float(traj_pts[worst_rb_idx, 2])
+                    c = "#dd2222" if worst_rb_dist < 0.5 else "#ff8800" if worst_rb_dist < 1.0 else "#22bb22"
+                    draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, c,
+                                   alpha=0.35, lw=1.5, zorder=38)
+                    ax.plot([wx, worst_rb_bp[0]], [wy, worst_rb_bp[1]],
+                            "-", color=c, lw=2.5, alpha=0.9, zorder=39)
+                    ax.plot(worst_rb_bp[0], worst_rb_bp[1], "o", color=c, ms=5, zorder=39)
+                    ax.annotate(
+                        f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
+                        (wx, wy), fontsize=7, fontweight="bold", color=c,
+                        ha="center", va="top", xytext=(0, -8),
+                        textcoords="offset points", zorder=40,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=c, alpha=0.85),
+                    )
+
+            if show_traj_nb and nb_agents:
+                import torch as _torch
+
+                from rlvr.reward import _closest_points_between_rects
+                from scenario_generation.gui.lanelet_scene_builder import _obb_corners
+                nb_corners_list = [
+                    _obb_corners(
+                        float(a.current_position[0]), float(a.current_position[1]),
+                        float(a.current_heading), float(a.length), float(a.width),
+                    ) for a in nb_agents
+                ]
+                n_nb = len(nb_agents)
+                r2 = _torch.from_numpy(np.stack(nb_corners_list).astype(np.float32))
+                worst_nb_dist, worst_nb_idx = float("inf"), 0
+                worst_nb_pe, worst_nb_pn = None, None
+                for ti in idxs:
+                    px, py = float(traj_pts[ti, 0]), float(traj_pts[ti, 1])
+                    ph = float(traj_pts[ti, 2])
+                    ego_c = _obb_corners(px, py, ph, ego_len, ego_wid)
+                    r1 = _torch.from_numpy(
+                        np.broadcast_to(ego_c, (n_nb, 4, 2)).copy().astype(np.float32))
+                    pe, pn = _closest_points_between_rects(r1, r2)
+                    d_min = float((pe - pn).norm(dim=-1).min().item())
+                    if d_min < worst_nb_dist:
+                        worst_nb_dist = d_min
+                        worst_nb_idx = ti
+                        min_i = int((pe - pn).norm(dim=-1).argmin().item())
+                        worst_nb_pe = pe[min_i].numpy()
+                        worst_nb_pn = pn[min_i].numpy()
+                if worst_nb_pe is not None and worst_nb_dist < 20.0:
+                    wx, wy = float(traj_pts[worst_nb_idx, 0]), float(traj_pts[worst_nb_idx, 1])
+                    wh = float(traj_pts[worst_nb_idx, 2])
+                    c = "#dd2222" if worst_nb_dist < 0.5 else "#ff8800" if worst_nb_dist < 1.5 else "#22bb22"
+                    draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, c,
+                                   alpha=0.35, lw=1.5, zorder=38)
+                    ax.plot([worst_nb_pe[0], worst_nb_pn[0]], [worst_nb_pe[1], worst_nb_pn[1]],
+                            "-", color=c, lw=2.5, alpha=0.9, zorder=39)
+                    ax.annotate(
+                        f"{traj_label} NB {worst_nb_dist:.2f}m @t{worst_nb_idx}",
+                        (wx, wy), fontsize=7, fontweight="bold", color=c,
+                        ha="center", va="bottom", xytext=(0, 8),
+                        textcoords="offset points", zorder=40,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=c, alpha=0.85),
+                    )
 
     # Viewport: center on ego
     if ego is not None:
@@ -866,6 +965,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     hide_neighbors = gr.Checkbox(label="Dim/Zero Neighbors", value=False, scale=1)
                     show_rb_dist = gr.Checkbox(label="Road Border", value=True, scale=1)
                     show_nb_dist = gr.Checkbox(label="Neighbor Dist", value=True, scale=1)
+                with gr.Row():
+                    show_traj_rb = gr.Checkbox(label="Traj RB Worst", value=False, scale=1)
+                    show_traj_nb = gr.Checkbox(label="Traj NB Worst", value=False, scale=1)
                     if not _has_model:
                         gr.Markdown("*No model — pass `--model_path`*", scale=2)
 
@@ -980,7 +1082,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     det_traj: np.ndarray | None = None,
                     guided_trajs: list[np.ndarray] | None = None,
                     rb_dist: bool = True, nb_dist: bool = True,
-                    hide_nb: bool = False):
+                    hide_nb: bool = False,
+                    traj_rb: bool = False, traj_nb: bool = False):
             """Core render function: load NPZ at step, draw scene + obstacles."""
             branch = tree.branches[tree.active_branch]
             seq = tree.get_npz_sequence(tree.active_branch)
@@ -1050,6 +1153,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 show_rb_dist=rb_dist, show_nb_dist=nb_dist,
                 dim_neighbors=hide_nb,
                 map_border_polylines=map_borders, ego_world_pose=ego_wp,
+                show_traj_rb=traj_rb, show_traj_nb=traj_nb,
             )
             img = _fig_to_pil(fig)
             info = f"Step **{step}** / **{len(seq) - 1}** | Branch: `{tree.active_branch}`"
@@ -1088,7 +1192,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return _traj_cos_sin_to_xyh(raw)
 
         def on_render(tree, step, view_r, selected_obs, gt_on, det_on, guided_on,
-                      hide_nb, rb_on, nb_on, det_cache, guided_cache):
+                      hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
+                      det_cache, guided_cache):
             det_traj = None
             if det_on and model_cache and model_cache.available:
                 det_traj = _predict_det_with_obs(tree, step,
@@ -1104,22 +1209,25 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             img, info = _render(tree, _safe_step(step), view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj,
                                 guided_trajs=guided_list,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             return img, info, det_cache, guided_cache, _last_viewport[0]
 
         def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on,
-                           guided_on, prev_guided_cache, *g_args):
+                           traj_rb_on, traj_nb_on, guided_on, prev_guided_cache, *g_args):
             s = _safe_step(step)
             det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
                                                 prev_guided=prev_guided_cache,
                                                 zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             return img, info, s, det_traj, guided, _last_viewport[0]
 
         def _on_nav_impl(direction, tree, step, view_r, selected_obs, gt_on, det_on,
-                         hide_nb, rb_on, nb_on, guided_on, prev_guided_cache, *g_args):
+                         hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
+                         guided_on, prev_guided_cache, *g_args):
             seq = tree.get_npz_sequence(tree.active_branch)
             max_s = max(0, len(seq) - 1) if seq else 0
             if direction == "first":
@@ -1135,7 +1243,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                                 zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             return img, info, s, det_traj, guided, _last_viewport[0]
 
         def on_preview(tree, step, view_r, selected_obs, x, y, yaw, length, width, gt_on, det_cache, guided_cache):
@@ -1226,7 +1335,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return det_traj, guided
 
         def on_place(tree, step, view_r, x, y, yaw, length, width, history,
-                     gt_on, det_on, guided_on, hide_nb, rb_on, nb_on, *g_args):
+                     gt_on, det_on, guided_on, hide_nb, rb_on, nb_on,
+                     traj_rb_on, traj_nb_on, *g_args):
             label = tree.next_obstacle_label(tree.active_branch)
             placement = ObstaclePlacement(
                 label=label, timestep=_safe_step(step),
@@ -1240,7 +1350,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                                 zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
                                 det_traj=det_traj, guided_trajs=guided,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             mods = _modifications_md(tree, tree.active_branch)
             choices = _obs_choices(tree)
             return (tree, img, info, mods, label, det_traj, guided,
@@ -1260,7 +1371,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     gr.update())
 
         def on_remove_obstacle(tree, label, step, view_r, gt_on, det_on,
-                               guided_on, hide_nb, rb_on, nb_on, *g_args):
+                               guided_on, hide_nb, rb_on, nb_on,
+                               traj_rb_on, traj_nb_on, *g_args):
             if label:
                 tree.remove_obstacle(tree.active_branch, label.strip())
             s = _safe_step(step)
@@ -1268,14 +1380,16 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                                 zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, None, show_gt_val=gt_on,
                                 det_traj=det_traj, guided_trajs=guided,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             mods = _modifications_md(tree, tree.active_branch)
             choices = _obs_choices(tree)
             return (tree, img, info, mods, None,
                     gr.update(choices=choices, value=None), det_traj, guided)
 
         def on_apply_edit(tree, label, step, view_r, gt_on, det_on, guided_on,
-                          hide_nb, rb_on, nb_on, x, y, yaw, length, width, history, *g_args):
+                          hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
+                          x, y, yaw, length, width, history, *g_args):
             if not label:
                 return (tree, gr.update(), "No obstacle selected",
                         gr.update(), gr.update(), gr.update(), gr.update())
@@ -1295,7 +1409,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                                 zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
                                 det_traj=det_traj, guided_trajs=guided,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             mods = _modifications_md(tree, tree.active_branch)
             return tree, img, info, mods, label, det_traj, guided
 
@@ -1438,10 +1553,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         _g_inputs = ([v for gname in ALL_GUIDANCE_NAMES
                        for v in (guidance_toggles[gname], guidance_scales[gname])]
                      + [guided_noise, guided_k])
-        _overlay_inputs = [show_guided, hide_neighbors, show_rb_dist, show_nb_dist]
+        _overlay_inputs = [show_guided, hide_neighbors, show_rb_dist, show_nb_dist,
+                           show_traj_rb, show_traj_nb]
 
         nav_inputs = ([tree_state, step_slider, view_half, selected_obstacle_state,
                        show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
+                       show_traj_rb, show_traj_nb,
                        show_guided, guided_trajs_state] + _g_inputs)
         nav_outputs = [scene_image, step_info, step_slider, det_traj_state, guided_trajs_state,
                        viewport_state]
@@ -1451,7 +1568,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         )
 
         def on_step_jump(tree, jump_val, view_r, selected_obs, gt_on, det_on,
-                         hide_nb, rb_on, nb_on, guided_on, prev_guided_cache, *g_args):
+                         hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
+                         guided_on, prev_guided_cache, *g_args):
             s = _safe_step(jump_val)
             seq = tree.get_npz_sequence(tree.active_branch)
             s = min(s, max(0, len(seq) - 1)) if seq else 0
@@ -1460,25 +1578,29 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                                 zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             return img, info, s, det_traj, guided, _last_viewport[0]
 
         step_jump_btn.click(
             on_step_jump,
             [tree_state, step_jump_input, view_half, selected_obstacle_state,
              show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
+             show_traj_rb, show_traj_nb,
              show_guided, guided_trajs_state] + _g_inputs,
             nav_outputs,
         )
         _render_trigger_inputs = [tree_state, step_slider, view_half, selected_obstacle_state,
                                    show_gt, show_det, show_guided,
                                    hide_neighbors, show_rb_dist, show_nb_dist,
+                                   show_traj_rb, show_traj_nb,
                                    det_traj_state, guided_trajs_state]
         _render_trigger_outputs = [scene_image, step_info, det_traj_state, guided_trajs_state,
                                     viewport_state]
 
         for _trigger in [view_half, show_gt, show_det, show_guided,
-                         hide_neighbors, show_rb_dist, show_nb_dist]:
+                         hide_neighbors, show_rb_dist, show_nb_dist,
+                         show_traj_rb, show_traj_nb]:
             _trigger.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
 
         for direction, btn in [("first", btn_first), ("prev", btn_prev),
