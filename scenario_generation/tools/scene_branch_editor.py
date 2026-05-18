@@ -1921,79 +1921,68 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             ego_wp = _recover_ego_world_pose(seq, min(s, len(seq) - 1))
             ego_wp_arr = np.array([ego_wp[0], ego_wp[1], ego_wp[2]]) if ego_wp is not None else None
 
-            if open_loop:
-                # Open-loop: use the already-displayed trajectory (guided or DET)
-                from copy import deepcopy
+            try:
+                if open_loop:
+                    from copy import deepcopy
 
-                from scenario_generation.simulate import _advance_agent
-                from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
+                    from scenario_generation.simulate import _advance_agent
+                    from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 
-                # Use cached trajectory — the one the user is looking at
-                plan = None
-                if guided_cache and len(guided_cache) > 0:
-                    traj_xyh = np.array(guided_cache[0])  # (80, 3) [x, y, h]
-                    plan = np.column_stack([
-                        traj_xyh[:, :2],
-                        np.cos(traj_xyh[:, 2]),
-                        np.sin(traj_xyh[:, 2]),
-                    ]).astype(np.float32)
-                elif det_cache is not None:
-                    traj_xyh = np.array(det_cache)  # (80, 3) [x, y, h]
-                    plan = np.column_stack([
-                        traj_xyh[:, :2],
-                        np.cos(traj_xyh[:, 2]),
-                        np.sin(traj_xyh[:, 2]),
-                    ]).astype(np.float32)
-                if plan is None:
-                    return (tree, gr.update(),
-                            "Open loop requires a DET or guided trajectory — toggle Show DET or generate guided first",
-                            gr.update(), gr.update(), gr.update(), gr.update(), None, None)
+                    plan = None
+                    if guided_cache and len(guided_cache) > 0:
+                        traj_xyh = np.array(guided_cache[0])
+                        plan = np.column_stack([
+                            traj_xyh[:, :2],
+                            np.cos(traj_xyh[:, 2]),
+                            np.sin(traj_xyh[:, 2]),
+                        ]).astype(np.float32)
+                    elif det_cache is not None:
+                        traj_xyh = np.array(det_cache)
+                        plan = np.column_stack([
+                            traj_xyh[:, :2],
+                            np.cos(traj_xyh[:, 2]),
+                            np.sin(traj_xyh[:, 2]),
+                        ]).astype(np.float32)
+                    if plan is None:
+                        return (tree, gr.update(),
+                                "Open loop requires a DET or guided trajectory — toggle Show DET or generate guided first",
+                                gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
-                n = min(n, plan.shape[0])
-                scene_ol = deepcopy(scene)
-                ego_id = scene_ol.ego_agent_id
-                map_cache_ol = MapTensorCache(scene_ol.map_data)
+                    n = min(n, plan.shape[0])
+                    scene_ol = deepcopy(scene)
+                    ego_id = scene_ol.ego_agent_id
+                    map_cache_ol = MapTensorCache(scene_ol.map_data)
 
-                for t in range(n):
-                    progress((t + 1) / n, f"Open-loop step {t+1}/{n}")
-                    # Dump current state as NPZ
-                    npz_data = dump_step_npz(scene_ol, map_cache_ol,
-                                             future_len=model_cache._model_args.future_len)
-                    npz_data["ego_agent_future"] = np.zeros(
-                        (model_cache._model_args.future_len, 3), dtype=np.float32)
-                    # Sidecar JSON for road borders
-                    if ego_wp_arr is not None:
-                        import json as _json_ol
-                        import math as _math_ol
-                        ep = scene_ol.get_agent(ego_id).current_position
-                        eh = scene_ol.get_agent(ego_id).current_heading
-                        _iy = float(ego_wp_arr[2])
-                        ci, si = _math_ol.cos(_iy), _math_ol.sin(_iy)
-                        wx = ego_wp_arr[0] + ci * ep[0] - si * ep[1]
-                        wy = ego_wp_arr[1] + si * ep[0] + ci * ep[1]
-                        wyaw = _iy + eh
-                        sidecar = {"x": float(wx), "y": float(wy),
-                                   "qz": _math_ol.sin(wyaw / 2), "qw": _math_ol.cos(wyaw / 2),
-                                   "qx": 0.0, "qy": 0.0}
-                        (out_dir / f"replay_step_{t:04d}.json").write_text(
-                            _json_ol.dumps(sidecar))
-                    np.savez(out_dir / f"replay_step_{t:04d}.npz", **npz_data)
-                    # Advance ego to next trajectory point
-                    if t < n - 1:
-                        step_pred = plan[t]
-                        ax_pos, ay_pos = scene_ol.get_agent(ego_id).current_position
-                        ah = scene_ol.get_agent(ego_id).current_heading
-                        cos_h, sin_h = float(step_pred[2]), float(step_pred[3])
-                        new_x = ax_pos + float(step_pred[0]) * cos_h - float(step_pred[1]) * sin_h
-                        new_y = ax_pos + float(step_pred[0]) * sin_h + float(step_pred[1]) * cos_h
-                        # Simpler: pred is already in ego frame, just use it directly
-                        new_heading = float(np.arctan2(step_pred[3], step_pred[2]))
-                        new_pos = np.array([float(step_pred[0]), float(step_pred[1]),
-                                            new_heading], dtype=np.float32)
-                        _advance_agent(scene_ol.get_agent(ego_id), new_pos)
-            else:
-                from scenario_generation.simulate import run_simulation
-                try:
+                    for t in range(n):
+                        progress((t + 1) / n, f"Open-loop step {t+1}/{n}")
+                        npz_data = dump_step_npz(scene_ol, map_cache_ol,
+                                                 future_len=model_cache._model_args.future_len)
+                        npz_data["ego_agent_future"] = np.zeros(
+                            (model_cache._model_args.future_len, 4), dtype=np.float32)
+                        if ego_wp_arr is not None:
+                            import json as _json_ol
+                            import math as _math_ol
+                            ep = scene_ol.get_agent(ego_id).current_position
+                            eh = scene_ol.get_agent(ego_id).current_heading
+                            _iy = float(ego_wp_arr[2])
+                            ci, si = _math_ol.cos(_iy), _math_ol.sin(_iy)
+                            wx = ego_wp_arr[0] + ci * ep[0] - si * ep[1]
+                            wy = ego_wp_arr[1] + si * ep[0] + ci * ep[1]
+                            wyaw = _iy + eh
+                            sidecar = {"x": float(wx), "y": float(wy),
+                                       "qz": _math_ol.sin(wyaw / 2), "qw": _math_ol.cos(wyaw / 2),
+                                       "qx": 0.0, "qy": 0.0}
+                            (out_dir / f"replay_step_{t:04d}.json").write_text(
+                                _json_ol.dumps(sidecar))
+                        np.savez(out_dir / f"replay_step_{t:04d}.npz", **npz_data)
+                        if t < n - 1:
+                            step_pred = plan[t]
+                            new_heading = float(np.arctan2(step_pred[3], step_pred[2]))
+                            new_pos = np.array([float(step_pred[0]), float(step_pred[1]),
+                                                new_heading], dtype=np.float32)
+                            _advance_agent(scene_ol.get_agent(ego_id), new_pos)
+                else:
+                    from scenario_generation.simulate import run_simulation
                     run_simulation(
                         model, model_args, scene, n,
                         out_dir, device=str(model_cache._device),
@@ -2006,9 +1995,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         progress_fn=lambda frac, desc: progress(frac, desc=desc),
                         zero_neighbors=hide_nb,
                     )
-                finally:
-                    model.decoder._guidance_fn = _orig_guidance_fn
-                    model.decoder._guidance_scale = _orig_guidance_scale
+            finally:
+                model.decoder._guidance_fn = _orig_guidance_fn
+                model.decoder._guidance_scale = _orig_guidance_scale
 
             # Update branch with resim output
             branch.npz_dir = str(out_dir)
