@@ -92,11 +92,13 @@ class _ModelCache:
         self._model.eval()
 
     @torch.no_grad()
-    def predict_det(self, npz_path: str, obstacles: list | None = None) -> np.ndarray | None:
+    def predict_det(self, npz_path: str, obstacles: list | None = None,
+                    zero_neighbors: bool = False) -> np.ndarray | None:
         """Run deterministic inference. Returns (80, 4) [x,y,cos_h,sin_h] or None."""
         self._ensure_loaded()
         from guidance_gui.generate_samples import generate_samples
-        data = self._load_npz(npz_path, obstacles=obstacles)
+        data = self._load_npz(npz_path, obstacles=obstacles,
+                              zero_neighbors=zero_neighbors)
         trajs = generate_samples(
             self._model, self._model_args, data,
             noise_scale=0.0, n_samples=1, composer=None,
@@ -109,14 +111,17 @@ class _ModelCache:
         self, npz_path: str, guidance_cfgs: list[tuple[str, float]],
         noise_scale: float = 1.0, n_samples: int = 1,
         obstacles: list | None = None,
+        zero_neighbors: bool = False,
     ) -> np.ndarray | None:
         """Run guided inference. Returns (n_samples, 80, 4)."""
         self._ensure_loaded()
         from diffusion_planner.model.guidance.composer import GuidanceComposer
         from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+
         from guidance_gui.generate_samples import generate_samples
 
-        data = self._load_npz(npz_path, obstacles=obstacles)
+        data = self._load_npz(npz_path, obstacles=obstacles,
+                              zero_neighbors=zero_neighbors)
 
         # Compute DET trajectory first — needed as reference_trajectory for
         # lateral/longitudinal guidance (same pattern as trajectory_ranker_gui)
@@ -150,10 +155,15 @@ class _ModelCache:
             composer=composer, device=self._device,
         )
 
-    def _load_npz(self, npz_path: str, obstacles: list | None = None) -> dict[str, torch.Tensor]:
+    def _load_npz(self, npz_path: str, obstacles: list | None = None,
+                  zero_neighbors: bool = False) -> dict[str, torch.Tensor]:
         from preference_optimization.utils import load_npz_data
         data = load_npz_data(npz_path, self._device)
         pnn = self._model_args.predicted_neighbor_num
+        if zero_neighbors:
+            for k in ("neighbor_agents_past", "neighbor_agents_future"):
+                if k in data:
+                    data[k] = torch.zeros_like(data[k])
         # Inject obstacles BEFORE normalization so they're in the same space
         if obstacles:
             data = _inject_obstacles_into_tensors(data, obstacles, self._device)
@@ -269,6 +279,7 @@ def render_scene_at_step(
     show_rb_dist: bool = True,
     show_nb_dist: bool = True,
     hide_neighbors: bool = False,
+    dim_neighbors: bool = False,
     map_border_polylines: list[np.ndarray] | None = None,
     ego_world_pose: np.ndarray | None = None,
 ) -> matplotlib.figure.Figure:
@@ -286,6 +297,7 @@ def render_scene_at_step(
     _ego_frame_borders = None
     if map_border_polylines and ego_world_pose is not None:
         from matplotlib.collections import LineCollection as _LC
+
         from scenario_generation.transforms import _rotation_matrix, transform_positions
         ex_w, ey_w, eyaw_w = ego_world_pose
         ego_xy_w = np.array([ex_w, ey_w], dtype=np.float64)
@@ -362,26 +374,35 @@ def render_scene_at_step(
     nb_idx = 0
     for agent in scene.agents:
         is_ego = agent.id == scene.ego_agent_id
-        if not is_ego and hide_neighbors:
+        is_placed = agent.id.startswith("placed_")
+        is_neighbor = not is_ego and not is_placed
+        if is_neighbor and hide_neighbors:
             continue
         pos = agent.current_position
         heading = agent.current_heading
 
-        is_placed = agent.id.startswith("placed_")
+        # Dim neighbors: light grey, low alpha (still visible for context)
+        _dimmed = is_neighbor and dim_neighbors
         if is_ego:
             color = _EGO_COLOR
         elif is_placed:
             color = _PLACED_COLOR
+        elif _dimmed:
+            color = "#bbbbbb"
         else:
             color = _agent_color(agent.agent_type, nb_idx)
+        if is_neighbor:
             nb_idx += 1
+
+        _alpha_box = 0.2 if _dimmed else (0.85 if is_ego else 0.55)
+        _alpha_trail = 0.15 if _dimmed else 0.5
 
         # Past trail
         past = agent.past_trajectory
         valid = np.abs(past[:, :2]).sum(axis=1) > 1e-6
         if valid.sum() > 1:
             ax.plot(past[valid, 0], past[valid, 1], "--", color=color,
-                    lw=0.9, alpha=0.5, zorder=7)
+                    lw=0.9, alpha=_alpha_trail, zorder=7)
 
         # Bounding box
         if is_placed:
@@ -396,11 +417,14 @@ def render_scene_at_step(
         else:
             draw_agent_box(
                 ax, pos[0], pos[1], heading, agent.length, agent.width,
-                color, alpha=0.85 if is_ego else 0.55,
-                lw=2 if is_ego else 1, zorder=20 if is_ego else 15,
+                color, alpha=_alpha_box,
+                lw=2 if is_ego else (0.5 if _dimmed else 1),
+                zorder=20 if is_ego else 15,
             )
 
-        # Heading arrow
+        # Heading arrow (skip for dimmed neighbors)
+        if _dimmed:
+            continue
         arrow_len = max(agent.length, 2.5)
         ax.annotate(
             "", xy=(pos[0] + arrow_len * math.cos(heading),
@@ -488,9 +512,10 @@ def render_scene_at_step(
                 )
 
         if show_nb_dist:
-            from scenario_generation.gui.lanelet_scene_builder import _obb_corners
-            from rlvr.reward import _closest_points_between_rects
             import torch as _torch
+
+            from rlvr.reward import _closest_points_between_rects
+            from scenario_generation.gui.lanelet_scene_builder import _obb_corners
             ego_corners = _obb_corners(
                 float(ego_pos[0]), float(ego_pos[1]), ego_h,
                 float(ego.length), float(ego.width),
@@ -812,6 +837,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     type="pil",
                     interactive=False,
                     height=600,
+                    elem_id="scene-view",
+                )
+                drag_place_data = gr.Textbox(
+                    visible=False, elem_id="drag-place-data",
+                )
+                viewport_state = gr.JSON(
+                    visible=False, elem_id="viewport-info",
+                    value={"cx": 0.0, "cy": 0.0, "half": _VIEW_HALF_DEFAULT},
                 )
 
                 # Timeline playback
@@ -830,7 +863,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                            interactive=_has_model, scale=1)
                     show_guided = gr.Checkbox(label="Show Guided", value=False,
                                               interactive=_has_model, scale=1)
-                    hide_neighbors = gr.Checkbox(label="Hide Neighbors", value=False, scale=1)
+                    hide_neighbors = gr.Checkbox(label="Dim/Zero Neighbors", value=False, scale=1)
                     show_rb_dist = gr.Checkbox(label="Road Border", value=True, scale=1)
                     show_nb_dist = gr.Checkbox(label="Neighbor Dist", value=True, scale=1)
                     if not _has_model:
@@ -938,6 +971,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         # ── Callbacks ──
 
+        _last_viewport = [{"cx": 0.0, "cy": 0.0, "half": _VIEW_HALF_DEFAULT}]
+
         def _render(tree: SceneTree, step: int, view_r: float,
                     selected_obs: str | None,
                     preview_placement: ObstaclePlacement | None = None,
@@ -1013,7 +1048,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 det_traj=det_traj,
                 guided_trajs=guided_trajs,
                 show_rb_dist=rb_dist, show_nb_dist=nb_dist,
-                hide_neighbors=hide_nb,
+                dim_neighbors=hide_nb,
                 map_border_polylines=map_borders, ego_world_pose=ego_wp,
             )
             img = _fig_to_pil(fig)
@@ -1022,6 +1057,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 info += f" | Forked from parent step {branch.fork_timestep}"
             if branch.crop_range:
                 info += f" | Crop: [{branch.crop_range[0]}, {branch.crop_range[1]}]"
+            ego = scene.ego_agent
+            _last_viewport[0] = {"cx": float(ego.current_position[0]) if ego else 0.0,
+                                 "cy": float(ego.current_position[1]) if ego else 0.0,
+                                 "half": float(view_r)}
             return img, info
 
         def _safe_step(step):
@@ -1039,19 +1078,21 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             step = max(0, min(_safe_step(step), len(seq) - 1))
             return seq[step]
 
-        def _predict_det_with_obs(tree, step):
+        def _predict_det_with_obs(tree, step, zero_neighbors=False):
             npz_path = _get_npz_path(tree, step)
             if not npz_path:
                 return None
             obs = _get_obstacles_at_step(tree, _safe_step(step))
-            raw = model_cache.predict_det(npz_path, obstacles=obs or None)
+            raw = model_cache.predict_det(npz_path, obstacles=obs or None,
+                                          zero_neighbors=zero_neighbors)
             return _traj_cos_sin_to_xyh(raw)
 
         def on_render(tree, step, view_r, selected_obs, gt_on, det_on, guided_on,
                       hide_nb, rb_on, nb_on, det_cache, guided_cache):
             det_traj = None
             if det_on and model_cache and model_cache.available:
-                det_traj = _predict_det_with_obs(tree, step)
+                det_traj = _predict_det_with_obs(tree, step,
+                                                 zero_neighbors=hide_nb)
                 det_cache = det_traj
             elif det_on and det_cache is not None:
                 det_traj = det_cache
@@ -1064,17 +1105,18 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 show_gt_val=gt_on, det_traj=det_traj,
                                 guided_trajs=guided_list,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
-            return img, info, det_cache, guided_cache
+            return img, info, det_cache, guided_cache, _last_viewport[0]
 
         def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on,
                            guided_on, prev_guided_cache, *g_args):
             s = _safe_step(step)
             det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
-                                                prev_guided=prev_guided_cache)
+                                                prev_guided=prev_guided_cache,
+                                                zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
-            return img, info, s, det_traj, guided
+            return img, info, s, det_traj, guided, _last_viewport[0]
 
         def _on_nav_impl(direction, tree, step, view_r, selected_obs, gt_on, det_on,
                          hide_nb, rb_on, nb_on, guided_on, prev_guided_cache, *g_args):
@@ -1089,11 +1131,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             else:
                 s = max_s
             det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
-                                                prev_guided=prev_guided_cache)
+                                                prev_guided=prev_guided_cache,
+                                                zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
-            return img, info, s, det_traj, guided
+            return img, info, s, det_traj, guided, _last_viewport[0]
 
         def on_preview(tree, step, view_r, selected_obs, x, y, yaw, length, width, gt_on, det_cache, guided_cache):
             preview = ObstaclePlacement(
@@ -1124,10 +1167,28 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             if branch.npz_dir is not None:
                 return []
             obstacles = tree.get_all_obstacles(tree.active_branch)
-            return [o for o in obstacles if o.timestep <= step]
+            seq = tree.get_npz_sequence(tree.active_branch)
+            result = []
+            for o in obstacles:
+                if o.timestep > step:
+                    continue
+                if o.timestep != step and seq:
+                    nx, ny, nyaw = _transform_point_between_steps(
+                        seq, o.timestep, step, o.x, o.y, o.yaw_rad,
+                    )
+                    result.append(ObstaclePlacement(
+                        label=o.label, timestep=o.timestep,
+                        x=nx, y=ny, yaw_deg=math.degrees(nyaw),
+                        length=o.length, width=o.width,
+                        history_steps=o.history_steps,
+                    ))
+                else:
+                    result.append(o)
+            return result
 
         def _recompute_trajs(tree, step, det_on, guided_on=False,
-                             guidance_args_tuple=None, prev_guided=None):
+                             guidance_args_tuple=None, prev_guided=None,
+                             zero_neighbors=False):
             """Recompute DET and guided trajectories if toggled on.
 
             When guided_on and guidance_args_tuple is provided, regenerates
@@ -1143,7 +1204,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             if not npz_path:
                 return det_traj, guided
             if det_on:
-                raw = model_cache.predict_det(npz_path, obstacles=obs or None)
+                raw = model_cache.predict_det(npz_path, obstacles=obs or None,
+                                              zero_neighbors=zero_neighbors)
                 det_traj = _traj_cos_sin_to_xyh(raw)
             if guided_on and guidance_args_tuple:
                 cfgs = []
@@ -1158,6 +1220,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     raw_g = model_cache.predict_guided(
                         npz_path, cfgs, noise_scale=noise, n_samples=max(1, k),
                         obstacles=obs or None,
+                        zero_neighbors=zero_neighbors,
                     )
                     guided = [_traj_cos_sin_to_xyh(raw_g[j]) for j in range(raw_g.shape[0])]
             return det_traj, guided
@@ -1173,7 +1236,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             )
             tree.add_obstacle(tree.active_branch, placement)
             s = _safe_step(step)
-            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
+                                                zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
                                 det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
@@ -1200,7 +1264,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             if label:
                 tree.remove_obstacle(tree.active_branch, label.strip())
             s = _safe_step(step)
-            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
+                                                zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, None, show_gt_val=gt_on,
                                 det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
@@ -1226,7 +1291,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     )
                     break
             s = _safe_step(step)
-            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None)
+            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
+                                                zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
                                 det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
@@ -1377,7 +1443,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         nav_inputs = ([tree_state, step_slider, view_half, selected_obstacle_state,
                        show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
                        show_guided, guided_trajs_state] + _g_inputs)
-        nav_outputs = [scene_image, step_info, step_slider, det_traj_state, guided_trajs_state]
+        nav_outputs = [scene_image, step_info, step_slider, det_traj_state, guided_trajs_state,
+                       viewport_state]
 
         step_slider.release(
             on_step_change, nav_inputs, nav_outputs,
@@ -1389,11 +1456,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             seq = tree.get_npz_sequence(tree.active_branch)
             s = min(s, max(0, len(seq) - 1)) if seq else 0
             det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
-                                                prev_guided=prev_guided_cache)
+                                                prev_guided=prev_guided_cache,
+                                                zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
-            return img, info, s, det_traj, guided
+            return img, info, s, det_traj, guided, _last_viewport[0]
 
         step_jump_btn.click(
             on_step_jump,
@@ -1406,7 +1474,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                    show_gt, show_det, show_guided,
                                    hide_neighbors, show_rb_dist, show_nb_dist,
                                    det_traj_state, guided_trajs_state]
-        _render_trigger_outputs = [scene_image, step_info, det_traj_state, guided_trajs_state]
+        _render_trigger_outputs = [scene_image, step_info, det_traj_state, guided_trajs_state,
+                                    viewport_state]
 
         for _trigger in [view_half, show_gt, show_det, show_guided,
                          hide_neighbors, show_rb_dist, show_nb_dist]:
@@ -1523,6 +1592,30 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             [tree_state, scene_image, step_info, branch_info, step_slider],
         )
 
+        # Export NPZs — copy branch sequence to output dir with sequential naming
+        def on_export(tree, out_dir):
+            import json as _json
+            import shutil
+            if not out_dir or not out_dir.strip():
+                return "Specify an output directory"
+            out = Path(out_dir.strip())
+            seq = tree.get_npz_sequence(tree.active_branch)
+            if not seq:
+                return "No NPZ files to export"
+            out.mkdir(parents=True, exist_ok=True)
+            exported = []
+            for i, src in enumerate(seq):
+                dst = out / f"scene_{i:06d}.npz"
+                shutil.copy2(src, dst)
+                exported.append(str(dst))
+            scene_list = out / "scene_list.json"
+            with open(scene_list, "w") as f:
+                _json.dump(exported, f, indent=2)
+            return (f"Exported **{len(exported)}** NPZs to `{out}`\n\n"
+                    f"Scene list: `{scene_list}`")
+
+        export_btn.click(on_export, [tree_state, export_dir], [export_status])
+
         # Simulate N steps — closed-loop forward simulation
         def on_simulate(tree, step, n_steps, advance_mode, use_guidance,
                         gt_on, view_r, *guidance_args, progress=gr.Progress()):
@@ -1587,7 +1680,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             _orig_guidance_scale = model.decoder._guidance_scale
             if use_guidance and guidance_args:
                 from diffusion_planner.model.guidance.composer import GuidanceComposer
-                from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+                from diffusion_planner.model.guidance.config import (
+                    GuidanceConfig,
+                    GuidanceSetConfig,
+                )
                 fns = []
                 for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
                     enabled = guidance_args[gi * 2]
@@ -1703,7 +1799,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     view_half=view_r, step_idx=s, total_steps=len(seq),
                     gt_traj=gt_traj_r,
                     show_rb_dist=rb_on, show_nb_dist=nb_on,
-                    hide_neighbors=hide_nb,
+                    dim_neighbors=hide_nb,
                     map_border_polylines=map_borders, ego_world_pose=ego_wp,
                 )
                 img = _fig_to_pil(fig)
@@ -1721,6 +1817,118 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             [scene_image, step_info, step_slider],
         )
         btn_stop.click(None, None, None, cancels=[_play_event])
+
+        # Drag-to-place: JS overlay captures Shift+drag on image
+        def on_drag_place(drag_json):
+            import json as _json
+            if not drag_json or not drag_json.strip():
+                return gr.update(), gr.update(), gr.update()
+            try:
+                d = _json.loads(drag_json)
+                return float(d["x"]), float(d["y"]), float(d["yaw_deg"])
+            except (KeyError, ValueError, _json.JSONDecodeError):
+                return gr.update(), gr.update(), gr.update()
+
+        drag_place_data.change(
+            on_drag_place, [drag_place_data],
+            [obs_x, obs_y, obs_yaw],
+        )
+
+        _DRAG_JS = """
+        <script>
+        (function() {
+            let attached = false;
+            function attach() {
+                const container = document.querySelector('#scene-view');
+                if (!container || attached) { setTimeout(attach, 500); return; }
+                const img = container.querySelector('img');
+                if (!img) { setTimeout(attach, 500); return; }
+                attached = true;
+
+                let dragging = false, sx = 0, sy = 0;
+                const overlay = document.createElement('canvas');
+                overlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:100;';
+                img.parentElement.style.position = 'relative';
+                img.parentElement.appendChild(overlay);
+
+                function getPos(e) {
+                    const r = img.getBoundingClientRect();
+                    return { x: e.clientX - r.left, y: e.clientY - r.top, w: r.width, h: r.height };
+                }
+
+                img.parentElement.style.pointerEvents = 'auto';
+                img.parentElement.addEventListener('mousedown', function(e) {
+                    if (!e.shiftKey) return;
+                    e.preventDefault();
+                    const p = getPos(e);
+                    sx = p.x; sy = p.y;
+                    dragging = true;
+                    overlay.width = p.w; overlay.height = p.h;
+                });
+
+                document.addEventListener('mousemove', function(e) {
+                    if (!dragging) return;
+                    const p = getPos(e);
+                    const ctx = overlay.getContext('2d');
+                    ctx.clearRect(0, 0, overlay.width, overlay.height);
+                    ctx.strokeStyle = '#ff8800'; ctx.lineWidth = 3;
+                    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(p.x, p.y); ctx.stroke();
+                    // arrowhead
+                    const a = Math.atan2(p.y - sy, p.x - sx);
+                    ctx.beginPath();
+                    ctx.moveTo(p.x, p.y);
+                    ctx.lineTo(p.x - 15*Math.cos(a-0.4), p.y - 15*Math.sin(a-0.4));
+                    ctx.moveTo(p.x, p.y);
+                    ctx.lineTo(p.x - 15*Math.cos(a+0.4), p.y - 15*Math.sin(a+0.4));
+                    ctx.stroke();
+                    // circle at start
+                    ctx.beginPath(); ctx.arc(sx, sy, 5, 0, 2*Math.PI);
+                    ctx.fillStyle = '#ff8800'; ctx.fill();
+                });
+
+                document.addEventListener('mouseup', function(e) {
+                    if (!dragging) return;
+                    dragging = false;
+                    const ctx = overlay.getContext('2d');
+                    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+                    const p = getPos(e);
+                    const vpEl = document.querySelector('#viewport-info textarea');
+                    if (!vpEl) return;
+                    let vp;
+                    try { vp = JSON.parse(vpEl.value); } catch(e) { return; }
+
+                    const imgW = p.w, imgH = p.h;
+                    const cx = vp.cx, cy = vp.cy, half = vp.half;
+                    // pixel → scene (matplotlib axes: x right, y up; image: x right, y down)
+                    const sceneX = cx + (sx / imgW - 0.5) * 2 * half;
+                    const sceneY = cy - (sy / imgH - 0.5) * 2 * half;
+
+                    const dx = p.x - sx, dy = p.y - sy;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    let yawDeg = 0;
+                    if (dist > 5) {
+                        // atan2 in image coords: dx=right, -dy=up (scene y is up)
+                        yawDeg = Math.atan2(-dy, dx) * 180 / Math.PI;
+                        yawDeg = Math.round(yawDeg / 5) * 5;
+                    }
+
+                    const result = JSON.stringify({x: Math.round(sceneX*10)/10, y: Math.round(sceneY*10)/10, yaw_deg: yawDeg});
+                    const tb = document.querySelector('#drag-place-data textarea');
+                    if (tb) {
+                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                        nativeInputValueSetter.call(tb, result);
+                        tb.dispatchEvent(new Event('input', {bubbles: true}));
+                    }
+                });
+            }
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', attach);
+            else setTimeout(attach, 1000);
+        })();
+        </script>
+        <style>#scene-view img { cursor: crosshair; }</style>
+        """
+        gr.HTML(_DRAG_JS)
 
         # Initial render
         demo.load(on_render, _render_trigger_inputs, _render_trigger_outputs)

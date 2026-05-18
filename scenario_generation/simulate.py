@@ -613,6 +613,10 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
     """
     if mode not in ("closed_loop", "semi_closed_loop"):
         raise ValueError(f"Unknown mode {mode!r}. Use 'closed_loop' or 'semi_closed_loop'.")
+    if builder is not None and ego_world_pose is None:
+        import warnings
+        warnings.warn("builder provided without ego_world_pose — map refresh will be disabled",
+                      stacklevel=2)
     output_dir.mkdir(parents=True, exist_ok=True)
     scene = deepcopy(scene)
     ego_id = scene.ego_agent_id
