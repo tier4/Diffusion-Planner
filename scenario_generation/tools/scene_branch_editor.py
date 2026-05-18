@@ -1676,24 +1676,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     advance_fn(scene, preds)
                     np.savez(out_dir / f"replay_step_{i:04d}.npz", **data)
 
-                    # Update ego world pose by chaining the displacement
-                    if _ego_world is not None:
+                    # Update ego world pose: world = init_world + R(init_yaw) @ scene_pos
+                    if _ego_world is not None and _init_ego_wp is not None:
                         ego_new = scene.ego_agent
-                        dx_s = float(ego_new.current_position[0]) - float(ego_pos[0])
-                        dy_s = float(ego_new.current_position[1]) - float(ego_pos[1])
-                        dyaw_s = float(ego_new.current_heading) - float(ego_h)
-                        c_w, s_w = math.cos(_ego_world[2]), math.sin(_ego_world[2])
-                        # Scene-frame displacement → world-frame
-                        # Actually the scene frame IS the initial ego frame at fork.
-                        # The ego's scene-frame pose IS already tracked. We need
-                        # world = initial_world_pose + R(initial_yaw) @ scene_pos
-                        if _init_ego_wp is not None:
-                            iy = float(_init_ego_wp[2])
-                            ci, si = math.cos(iy), math.sin(iy)
-                            ep = ego_new.current_position
-                            _ego_world[0] = _init_ego_wp[0] + ci * ep[0] - si * ep[1]
-                            _ego_world[1] = _init_ego_wp[1] + si * ep[0] + ci * ep[1]
-                            _ego_world[2] = iy + float(ego_new.current_heading)
+                        iy = float(_init_ego_wp[2])
+                        ci, si = math.cos(iy), math.sin(iy)
+                        ep = ego_new.current_position
+                        _ego_world[0] = _init_ego_wp[0] + ci * ep[0] - si * ep[1]
+                        _ego_world[1] = _init_ego_wp[1] + si * ep[0] + ci * ep[1]
+                        _ego_world[2] = iy + float(ego_new.current_heading)
                     progress((i + 1) / n, desc=f"Simulating {i+1}/{n} steps...")
             finally:
                 model.decoder._guidance_fn = _orig_guidance_fn
