@@ -2262,8 +2262,8 @@ def main():
 
     reward_cfg = None
     if args.reward_config:
-        from rlvr.reward import RewardConfig as _RC
-        reward_cfg = _RC.from_json(args.reward_config)
+        from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+        reward_cfg = load_reward_config(args.reward_config)
         print(f"Loaded reward config from {args.reward_config}")
 
     demo = build_interface(tree, model_cache=mc, map_borders=map_border_polylines,
