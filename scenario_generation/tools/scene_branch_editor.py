@@ -1169,7 +1169,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 info += f" | Forked from parent step {branch.fork_timestep}"
             if branch.crop_range:
                 info += f" | Crop: [{branch.crop_range[0]}, {branch.crop_range[1]}]"
-            ego = scene.ego_agent
             return img, info
 
         def _safe_step(step):
@@ -1768,7 +1767,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             obs_at_step = _get_obstacles_at_step(tree, s)
             if obs_at_step:
                 device = torch.device("cpu")
-                tmp_data = {k: torch.from_numpy(v).unsqueeze(0) if v.ndim < 3
+                tmp_data = {k: torch.from_numpy(v).unsqueeze(0) if v.ndim < 4
                             else torch.from_numpy(v) for k, v in npz_data.items()
                             if isinstance(v, np.ndarray)}
                 tmp_data = _inject_obstacles_into_tensors(tmp_data, obs_at_step, device)
@@ -1948,7 +1947,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         npz_data = dump_step_npz(scene_ol, map_cache_ol,
                                                  future_len=model_cache._model_args.future_len)
                         npz_data["ego_agent_future"] = np.zeros(
-                            (model_cache._model_args.future_len, 4), dtype=np.float32)
+                            (model_cache._model_args.future_len, 3), dtype=np.float32)
                         if ego_wp_arr is not None:
                             import json as _json_ol
                             import math as _math_ol
