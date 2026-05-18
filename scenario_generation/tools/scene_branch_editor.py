@@ -266,8 +266,8 @@ def render_scene_at_step(
     gt_traj: np.ndarray | None = None,
     det_traj: np.ndarray | None = None,
     guided_trajs: list[np.ndarray] | None = None,
-    show_rb_dist: bool = False,
-    show_nb_dist: bool = False,
+    show_rb_dist: bool = True,
+    show_nb_dist: bool = True,
     hide_neighbors: bool = False,
     map_border_polylines: list[np.ndarray] | None = None,
     ego_world_pose: np.ndarray | None = None,
@@ -830,8 +830,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     show_guided = gr.Checkbox(label="Show Guided", value=False,
                                               interactive=_has_model, scale=1)
                     hide_neighbors = gr.Checkbox(label="Hide Neighbors", value=False, scale=1)
-                    show_rb_dist = gr.Checkbox(label="Road Border", value=False, scale=1)
-                    show_nb_dist = gr.Checkbox(label="Neighbor Dist", value=False, scale=1)
+                    show_rb_dist = gr.Checkbox(label="Road Border", value=True, scale=1)
+                    show_nb_dist = gr.Checkbox(label="Neighbor Dist", value=True, scale=1)
                     if not _has_model:
                         gr.Markdown("*No model — pass `--model_path`*", scale=2)
 
@@ -943,7 +943,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     show_gt_val: bool = True,
                     det_traj: np.ndarray | None = None,
                     guided_trajs: list[np.ndarray] | None = None,
-                    rb_dist: bool = False, nb_dist: bool = False,
+                    rb_dist: bool = True, nb_dist: bool = True,
                     hide_nb: bool = False):
             """Core render function: load NPZ at step, draw scene + obstacles."""
             branch = tree.branches[tree.active_branch]
