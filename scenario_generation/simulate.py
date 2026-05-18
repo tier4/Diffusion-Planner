@@ -654,6 +654,10 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         goal_dist = np.linalg.norm(agent.goal_pose[:2] - agent.current_position) if agent.goal_pose is not None else float("inf")
         if speed < 0.5 and goal_dist < 1.0:
             static_ids.add(agent.id)
+        elif speed < 0.1:
+            past = agent.past_trajectory
+            if past.shape[0] >= 2 and np.linalg.norm(past[-1, :2] - past[0, :2]) < 0.1:
+                static_ids.add(agent.id)
     if static_ids:
         print(f"Static agents: {static_ids}")
 
