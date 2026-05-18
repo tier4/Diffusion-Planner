@@ -852,7 +852,7 @@ def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future:
 
 def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     map_borders: list[np.ndarray] | None = None,
-                    map_builder=None):
+                    map_builder=None, reward_config=None):
     """Build the Gradio interface for the scene branch editor."""
 
     with gr.Blocks(title="Scene Branch Editor") as demo:
@@ -1767,10 +1767,33 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             if obs_at_step:
                 scene_data = _inject_obstacles_into_tensors(
                     scene_data, obs_at_step, torch.device("cpu"))
-            rc = _RC()
-            rc.rb_gate_enabled = True
-            rc.kinematic_gate_enabled = True
-            rc.enable_lane_departure = True
+            # Ensure line_strings have border flags (channel 3+) for RB scoring.
+            # Rebuild from lanelet2 map if the NPZ lacks them.
+            ls_check = scene_data.get("line_strings")
+            _has_rb = (ls_check is not None and ls_check.shape[-1] >= 4)
+            if not _has_rb:
+                if map_builder is None:
+                    return ("**ERROR** — line_strings lack road border flags "
+                            "and no --map_path provided. Pass --map_path to enable RB scoring.")
+                ego_wp = _recover_ego_world_pose(
+                    tree.get_npz_sequence(tree.active_branch), s)
+                if ego_wp is None:
+                    return ("**ERROR** — cannot recover ego world pose "
+                            "(no sidecar JSON). Cannot rebuild line_strings for RB scoring.")
+                from scenario_generation.npz_loader import from_npz as _fnpz
+                from scenario_generation.simulate import _refresh_line_strings
+                _tmp_scene = _fnpz(npz_path)
+                _origin = np.array(ego_wp, dtype=np.float64)
+                _refresh_line_strings(_tmp_scene, map_builder,
+                                     _origin[:2], _origin)
+                ls_t = torch.from_numpy(
+                    _tmp_scene.map_data.line_strings).unsqueeze(0).float()
+                scene_data["line_strings"] = ls_t
+            rc = reward_config if reward_config is not None else _RC()
+            if reward_config is None:
+                rc.rb_gate_enabled = True
+                rc.kinematic_gate_enabled = True
+                rc.enable_lane_departure = True
             rewards = _crb(traj_4col, scene_data, rc)
             r = rewards[0]
 
@@ -2229,8 +2252,14 @@ def main():
         except Exception as e:
             print(f"Warning: could not load map borders: {e}")
 
+    reward_cfg = None
+    if args.reward_config:
+        from rlvr.reward import RewardConfig as _RC
+        reward_cfg = _RC.from_json(args.reward_config)
+        print(f"Loaded reward config from {args.reward_config}")
+
     demo = build_interface(tree, model_cache=mc, map_borders=map_border_polylines,
-                           map_builder=builder)
+                           map_builder=builder, reward_config=reward_cfg)
     demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True)
 
 
