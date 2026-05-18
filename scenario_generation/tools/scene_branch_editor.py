@@ -845,7 +845,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 )
                     with gr.Row():
                         guided_noise = gr.Slider(
-                            minimum=0.0, maximum=5.0, value=1.0, step=0.1,
+                            minimum=0.0, maximum=5.0, value=0.0, step=0.1,
                             label="Noise", interactive=_has_model, scale=2,
                         )
                         guided_k = gr.Slider(
@@ -1047,15 +1047,16 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
             return img, info, det_cache, guided_cache
 
-        def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on):
+        def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on):
             det_traj = None
             if det_on and model_cache and model_cache.available:
                 det_traj = _predict_det_with_obs(tree, step)
             img, info = _render(tree, _safe_step(step), view_r, selected_obs,
-                                show_gt_val=gt_on, det_traj=det_traj)
+                                show_gt_val=gt_on, det_traj=det_traj,
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
             return img, info, _safe_step(step), det_traj, None
 
-        def on_nav(tree, step, view_r, selected_obs, gt_on, det_on, direction):
+        def on_nav(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on, direction):
             seq = tree.get_npz_sequence(tree.active_branch)
             max_s = max(0, len(seq) - 1) if seq else 0
             if direction == "first":
@@ -1070,7 +1071,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             if det_on and model_cache and model_cache.available:
                 det_traj = _predict_det_with_obs(tree, s)
             img, info = _render(tree, s, view_r, selected_obs,
-                                show_gt_val=gt_on, det_traj=det_traj)
+                                show_gt_val=gt_on, det_traj=det_traj,
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb)
             return img, info, s, det_traj, None
 
         def on_preview(tree, step, view_r, selected_obs, x, y, yaw, length, width, gt_on, det_cache, guided_cache):
@@ -1314,7 +1316,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         # ── Wire up events ──
         nav_inputs = [tree_state, step_slider, view_half, selected_obstacle_state,
-                      show_gt, show_det]
+                      show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist]
         nav_outputs = [scene_image, step_info, step_slider, det_traj_state, guided_trajs_state]
 
         step_slider.release(
@@ -1350,7 +1352,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         for direction, btn in [("first", btn_first), ("prev", btn_prev),
                                 ("next", btn_next), ("last", btn_last)]:
             btn.click(
-                lambda tree, step, vr, so, gt, det, d=direction: on_nav(tree, step, vr, so, gt, det, d),
+                lambda tree, step, vr, so, gt, det, hn, rb, nb, d=direction: on_nav(tree, step, vr, so, gt, det, hn, rb, nb, d),
                 nav_inputs, nav_outputs,
             )
 
@@ -1463,7 +1465,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
             branch = tree.branches[tree.active_branch]
+            # Get source scene from parent (not from any previous resim output)
+            saved_npz_dir = branch.npz_dir
+            branch.npz_dir = None  # temporarily clear so get_npz_sequence uses parent
             seq = tree.get_npz_sequence(tree.active_branch)
+            branch.npz_dir = saved_npz_dir  # restore
             if not seq:
                 return (tree, gr.update(), "No NPZ sequence",
                         gr.update(), gr.update(), gr.update(), gr.update(), None, None)
