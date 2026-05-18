@@ -944,14 +944,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     type="pil",
                     interactive=False,
                     height=600,
-                    elem_id="scene-view",
-                )
-                drag_place_data = gr.Textbox(
-                    visible=False, elem_id="drag-place-data",
-                )
-                viewport_state = gr.JSON(
-                    visible=False, elem_id="viewport-info",
-                    value={"cx": 0.0, "cy": 0.0, "half": _VIEW_HALF_DEFAULT},
                 )
 
                 # Timeline playback
@@ -1091,8 +1083,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         # ── Callbacks ──
 
-        _last_viewport = [{"cx": 0.0, "cy": 0.0, "half": _VIEW_HALF_DEFAULT}]
-
         def _render(tree: SceneTree, step: int, view_r: float,
                     selected_obs: str | None,
                     preview_placement: ObstaclePlacement | None = None,
@@ -1180,9 +1170,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             if branch.crop_range:
                 info += f" | Crop: [{branch.crop_range[0]}, {branch.crop_range[1]}]"
             ego = scene.ego_agent
-            _last_viewport[0] = {"cx": float(ego.current_position[0]) if ego else 0.0,
-                                 "cy": float(ego.current_position[1]) if ego else 0.0,
-                                 "half": float(view_r)}
             return img, info
 
         def _safe_step(step):
@@ -1229,8 +1216,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 guided_trajs=guided_list,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            return img, info, det_cache, guided_cache, _last_viewport[0]
-
+            return img, info, det_cache, guided_cache
         def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on,
                            traj_rb_on, traj_nb_on, guided_on, prev_guided_cache, *g_args):
             s = _safe_step(step)
@@ -1241,8 +1227,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            return img, info, s, det_traj, guided, _last_viewport[0]
-
+            return img, info, s, det_traj, guided
         def _on_nav_impl(direction, tree, step, view_r, selected_obs, gt_on, det_on,
                          hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
                          guided_on, prev_guided_cache, *g_args):
@@ -1263,8 +1248,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            return img, info, s, det_traj, guided, _last_viewport[0]
-
+            return img, info, s, det_traj, guided
         def on_preview(tree, step, view_r, selected_obs, x, y, yaw, length, width, gt_on, det_cache, guided_cache):
             preview = ObstaclePlacement(
                 label="(preview)", timestep=_safe_step(step),
@@ -1577,8 +1561,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                        show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
                        show_traj_rb, show_traj_nb,
                        show_guided, guided_trajs_state] + _g_inputs)
-        nav_outputs = [scene_image, step_info, step_slider, det_traj_state, guided_trajs_state,
-                       viewport_state]
+        nav_outputs = [scene_image, step_info, step_slider, det_traj_state, guided_trajs_state]
 
         step_slider.release(
             on_step_change, nav_inputs, nav_outputs,
@@ -1597,8 +1580,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            return img, info, s, det_traj, guided, _last_viewport[0]
-
+            return img, info, s, det_traj, guided
         step_jump_btn.click(
             on_step_jump,
             [tree_state, step_jump_input, view_half, selected_obstacle_state,
@@ -1612,8 +1594,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                    hide_neighbors, show_rb_dist, show_nb_dist,
                                    show_traj_rb, show_traj_nb,
                                    det_traj_state, guided_trajs_state]
-        _render_trigger_outputs = [scene_image, step_info, det_traj_state, guided_trajs_state,
-                                    viewport_state]
+        _render_trigger_outputs = [scene_image, step_info, det_traj_state, guided_trajs_state]
 
         for _trigger in [view_half, show_gt, show_det, show_guided,
                          hide_neighbors, show_rb_dist, show_nb_dist,
@@ -2101,145 +2082,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             [scene_image, step_info, step_slider],
         )
         btn_stop.click(None, None, None, cancels=[_play_event])
-
-        # Drag-to-place: Shift+drag on scene image → auto-place obstacle
-        def on_drag_place(drag_json, tree, step, view_r, gt_on, det_on,
-                          guided_on, hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
-                          det_cache, guided_cache, *g_args):
-            import json as _json
-            if not drag_json or not drag_json.strip():
-                return (tree, gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), det_cache, guided_cache, gr.update())
-            try:
-                d = _json.loads(drag_json)
-                x, y, yaw = float(d["x"]), float(d["y"]), float(d["yaw_deg"])
-            except (KeyError, ValueError, _json.JSONDecodeError):
-                return (tree, gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), det_cache, guided_cache, gr.update())
-            label = tree.next_obstacle_label(tree.active_branch)
-            placement = ObstaclePlacement(
-                label=label, timestep=_safe_step(step),
-                x=round(x, 1), y=round(y, 1), yaw_deg=round(yaw / 5) * 5,
-                length=4.5, width=1.8, history_steps=30,
-            )
-            tree.add_obstacle(tree.active_branch, placement)
-            s = _safe_step(step)
-            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
-                                                zero_neighbors=hide_nb)
-            img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
-                                det_traj=det_traj, guided_trajs=guided,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
-                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            mods = _modifications_md(tree, tree.active_branch)
-            choices = _obs_choices(tree)
-            return (tree, img, info, mods, label, det_traj, guided,
-                    gr.update(choices=choices, value=label))
-
-        _drag_place_inputs = ([drag_place_data, tree_state, step_slider, view_half,
-                               show_gt, show_det] + _overlay_inputs +
-                              [det_traj_state, guided_trajs_state] + _g_inputs)
-        drag_place_data.change(
-            on_drag_place, _drag_place_inputs,
-            [tree_state, scene_image, step_info, mods_display,
-             selected_obstacle_state, det_traj_state, guided_trajs_state,
-             obs_select],
-        )
-
-        _DRAG_JS = """
-        <script>
-        (function() {
-            function findImg() {
-                const c = document.getElementById('scene-view');
-                if (!c) return null;
-                return c.querySelector('img');
-            }
-            let overlay = null, dragging = false, sx = 0, sy = 0, lastImg = null;
-
-            function setupOverlay(img) {
-                if (lastImg === img && overlay) return;
-                if (overlay && overlay.parentElement) overlay.parentElement.removeChild(overlay);
-                lastImg = img;
-                overlay = document.createElement('canvas');
-                overlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:100;';
-                const wrap = img.closest('.image-container') || img.parentElement;
-                wrap.style.position = 'relative';
-                wrap.appendChild(overlay);
-            }
-
-            function getPos(e) {
-                const img = findImg();
-                if (!img) return null;
-                const r = img.getBoundingClientRect();
-                return {x: e.clientX - r.left, y: e.clientY - r.top, w: r.width, h: r.height};
-            }
-
-            document.addEventListener('mousedown', function(e) {
-                if (!e.shiftKey) return;
-                const img = findImg();
-                if (!img) return;
-                const r = img.getBoundingClientRect();
-                if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) return;
-                e.preventDefault();
-                setupOverlay(img);
-                const p = getPos(e);
-                sx = p.x; sy = p.y;
-                dragging = true;
-                overlay.width = p.w; overlay.height = p.h;
-            });
-
-            document.addEventListener('mousemove', function(e) {
-                if (!dragging || !overlay) return;
-                const p = getPos(e);
-                if (!p) return;
-                const ctx = overlay.getContext('2d');
-                ctx.clearRect(0, 0, overlay.width, overlay.height);
-                ctx.strokeStyle = '#ff8800'; ctx.lineWidth = 3;
-                ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(p.x, p.y); ctx.stroke();
-                const a = Math.atan2(p.y - sy, p.x - sx);
-                ctx.beginPath();
-                ctx.moveTo(p.x, p.y);
-                ctx.lineTo(p.x - 15*Math.cos(a-0.4), p.y - 15*Math.sin(a-0.4));
-                ctx.moveTo(p.x, p.y);
-                ctx.lineTo(p.x - 15*Math.cos(a+0.4), p.y - 15*Math.sin(a+0.4));
-                ctx.stroke();
-                ctx.beginPath(); ctx.arc(sx, sy, 5, 0, 2*Math.PI);
-                ctx.fillStyle = '#ff8800'; ctx.fill();
-            });
-
-            document.addEventListener('mouseup', function(e) {
-                if (!dragging) return;
-                dragging = false;
-                if (overlay) { const ctx = overlay.getContext('2d'); ctx.clearRect(0, 0, overlay.width, overlay.height); }
-                const p = getPos(e);
-                if (!p) return;
-                const vpEl = document.querySelector('#viewport-info textarea, #viewport-info input');
-                if (!vpEl) { console.warn('drag-place: no viewport-info element'); return; }
-                let vp;
-                try { vp = JSON.parse(vpEl.value); } catch(err) { console.warn('drag-place: bad viewport JSON', vpEl.value); return; }
-                const half = vp.half, cx = vp.cx, cy = vp.cy;
-                const sceneX = cx + (sx / p.w - 0.5) * 2 * half;
-                const sceneY = cy - (sy / p.h - 0.5) * 2 * half;
-                const dx = p.x - sx, dy = p.y - sy;
-                let yawDeg = 0;
-                if (Math.sqrt(dx*dx + dy*dy) > 5) {
-                    yawDeg = Math.atan2(-dy, dx) * 180 / Math.PI;
-                    yawDeg = Math.round(yawDeg / 5) * 5;
-                }
-                const result = JSON.stringify({x: Math.round(sceneX*10)/10, y: Math.round(sceneY*10)/10, yaw_deg: yawDeg});
-                const tb = document.querySelector('#drag-place-data textarea, #drag-place-data input');
-                if (tb) {
-                    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value') ||
-                                   Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-                    setter.set.call(tb, result);
-                    tb.dispatchEvent(new Event('input', {bubbles: true}));
-                    tb.dispatchEvent(new Event('change', {bubbles: true}));
-                }
-            });
-        })();
-        </script>
-        <style>#scene-view img { cursor: crosshair; }</style>
-        """
-        gr.HTML(_DRAG_JS)
 
         # Initial render
         demo.load(on_render, _render_trigger_inputs, _render_trigger_outputs)
