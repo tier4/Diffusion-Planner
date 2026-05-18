@@ -369,8 +369,11 @@ def render_scene_at_step(
         pos = agent.current_position
         heading = agent.current_heading
 
+        is_placed = agent.id.startswith("placed_")
         if is_ego:
             color = _EGO_COLOR
+        elif is_placed:
+            color = _PLACED_COLOR
         else:
             color = _agent_color(agent.agent_type, nb_idx)
             nb_idx += 1
@@ -383,11 +386,21 @@ def render_scene_at_step(
                     lw=0.9, alpha=0.5, zorder=7)
 
         # Bounding box
-        draw_agent_box(
-            ax, pos[0], pos[1], heading, agent.length, agent.width,
-            color, alpha=0.85 if is_ego else 0.55,
-            lw=2 if is_ego else 1, zorder=20 if is_ego else 15,
-        )
+        if is_placed:
+            rear_ovh = (agent.length - agent.length * 0.65) / 2
+            t_rot = mtransforms.Affine2D().rotate(heading).translate(pos[0], pos[1]) + ax.transData
+            rect = Rectangle(
+                (-rear_ovh, -agent.width / 2), agent.length, agent.width,
+                lw=2.5, ec=color, fc=color, alpha=0.3,
+                linestyle="--", zorder=25, transform=t_rot,
+            )
+            ax.add_patch(rect)
+        else:
+            draw_agent_box(
+                ax, pos[0], pos[1], heading, agent.length, agent.width,
+                color, alpha=0.85 if is_ego else 0.55,
+                lw=2 if is_ego else 1, zorder=20 if is_ego else 15,
+            )
 
         # Heading arrow
         arrow_len = max(agent.length, 2.5)
@@ -1612,7 +1625,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         )
 
         # Play button — pre-renders frames as PIL images for smooth playback
-        def on_play(tree, step, view_r, gt_on, fps):
+        def on_play(tree, step, view_r, gt_on, hide_nb, rb_on, nb_on, fps):
             import time
             seq = tree.get_npz_sequence(tree.active_branch)
             if not seq:
@@ -1630,7 +1643,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     ego = scene.ego_agent
                     if ego:
                         ego.wheelbase, ego.length, ego.width = tree.ego_shape
-                # Transform obstacles to current timestep's ego frame
                 obs_at_step = []
                 for o in raw_obstacles:
                     if o.timestep > s:
@@ -1654,10 +1666,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         gt_traj_r = ego.future_trajectory
                     if gt_traj_r is None and len(seq) > s + 1:
                         gt_traj_r = _reconstruct_gt_from_sequence(seq, s, max_future=80)
+                ego_wp = _recover_ego_world_pose(seq, s) if map_borders else None
                 fig = render_scene_at_step(
                     scene, obs_at_step, None,
                     view_half=view_r, step_idx=s, total_steps=len(seq),
                     gt_traj=gt_traj_r,
+                    show_rb_dist=rb_on, show_nb_dist=nb_on,
+                    hide_neighbors=hide_nb,
+                    map_border_polylines=map_borders, ego_world_pose=ego_wp,
                 )
                 img = _fig_to_pil(fig)
                 info = f"Step **{s}** / **{max_s}** | Branch: `{tree.active_branch}` | ▶ Playing"
@@ -1669,7 +1685,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         _play_event = btn_play.click(
             on_play,
-            [tree_state, step_slider, view_half, show_gt, play_fps],
+            [tree_state, step_slider, view_half, show_gt,
+             hide_neighbors, show_rb_dist, show_nb_dist, play_fps],
             [scene_image, step_info, step_slider],
         )
         btn_stop.click(None, None, None, cancels=[_play_event])
