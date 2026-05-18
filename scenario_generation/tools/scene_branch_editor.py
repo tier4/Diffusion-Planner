@@ -1119,6 +1119,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return None
 
         def _get_obstacles_at_step(tree, step):
+            branch = tree.branches[tree.active_branch]
+            if branch.npz_dir is not None:
+                return []
             obstacles = tree.get_all_obstacles(tree.active_branch)
             return [o for o in obstacles if o.timestep <= step]
 
