@@ -576,8 +576,7 @@ def render_scene_at_step(
         if not border_polylines_for_traj and _ego_frame_borders:
             border_polylines_for_traj = _ego_frame_borders
 
-        nb_agents = [a for a in scene.agents if a.id != scene.ego_agent_id
-                     and not a.id.startswith("placed_")]
+        nb_agents = [a for a in scene.agents if a.id != scene.ego_agent_id]
 
         _trajs_to_check: list[tuple[np.ndarray, str, str]] = []
         if det_traj is not None and det_traj.shape[0] > 1:
@@ -608,18 +607,18 @@ def render_scene_at_step(
                 if worst_rb_bp is not None and worst_rb_dist < 50.0:
                     wx, wy = float(traj_pts[worst_rb_idx, 0]), float(traj_pts[worst_rb_idx, 1])
                     wh = float(traj_pts[worst_rb_idx, 2])
-                    c = "#dd2222" if worst_rb_dist < 0.5 else "#ff8800" if worst_rb_dist < 1.0 else "#22bb22"
-                    draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, c,
-                                   alpha=0.35, lw=1.5, zorder=38)
+                    dc = "#dd2222" if worst_rb_dist < 0.5 else "#ff8800" if worst_rb_dist < 1.0 else "#22bb22"
+                    draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, traj_color,
+                                   alpha=0.4, lw=2.0, zorder=38)
                     ax.plot([wx, worst_rb_bp[0]], [wy, worst_rb_bp[1]],
-                            "-", color=c, lw=2.5, alpha=0.9, zorder=39)
-                    ax.plot(worst_rb_bp[0], worst_rb_bp[1], "o", color=c, ms=5, zorder=39)
+                            "-", color=dc, lw=2.5, alpha=0.9, zorder=39)
+                    ax.plot(worst_rb_bp[0], worst_rb_bp[1], "o", color=dc, ms=5, zorder=39)
                     ax.annotate(
                         f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
-                        (wx, wy), fontsize=7, fontweight="bold", color=c,
+                        (wx, wy), fontsize=7, fontweight="bold", color=dc,
                         ha="center", va="top", xytext=(0, -8),
                         textcoords="offset points", zorder=40,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=c, alpha=0.85),
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85),
                     )
 
             if show_traj_nb and nb_agents:
@@ -654,17 +653,17 @@ def render_scene_at_step(
                 if worst_nb_pe is not None and worst_nb_dist < 20.0:
                     wx, wy = float(traj_pts[worst_nb_idx, 0]), float(traj_pts[worst_nb_idx, 1])
                     wh = float(traj_pts[worst_nb_idx, 2])
-                    c = "#dd2222" if worst_nb_dist < 0.5 else "#ff8800" if worst_nb_dist < 1.5 else "#22bb22"
-                    draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, c,
-                                   alpha=0.35, lw=1.5, zorder=38)
+                    dc = "#dd2222" if worst_nb_dist < 0.5 else "#ff8800" if worst_nb_dist < 1.5 else "#22bb22"
+                    draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, traj_color,
+                                   alpha=0.4, lw=2.0, zorder=38)
                     ax.plot([worst_nb_pe[0], worst_nb_pn[0]], [worst_nb_pe[1], worst_nb_pn[1]],
-                            "-", color=c, lw=2.5, alpha=0.9, zorder=39)
+                            "-", color=dc, lw=2.5, alpha=0.9, zorder=39)
                     ax.annotate(
                         f"{traj_label} NB {worst_nb_dist:.2f}m @t{worst_nb_idx}",
-                        (wx, wy), fontsize=7, fontweight="bold", color=c,
+                        (wx, wy), fontsize=7, fontweight="bold", color=dc,
                         ha="center", va="bottom", xytext=(0, 8),
                         textcoords="offset points", zorder=40,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=c, alpha=0.85),
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85),
                     )
 
     # Viewport: center on ego
