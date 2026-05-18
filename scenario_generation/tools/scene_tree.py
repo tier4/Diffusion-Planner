@@ -114,8 +114,9 @@ class SceneTree:
             )
 
         if new_id is None:
-            existing = [b for b in self.branches if b.startswith(parent_id + "_")]
-            suffix = len(existing) + 1
+            suffix = 1
+            while f"{parent_id}_{suffix:03d}" in self.branches:
+                suffix += 1
             new_id = f"{parent_id}_{suffix:03d}"
 
         if new_id in self.branches:
@@ -262,11 +263,14 @@ class SceneTree:
             if crop is not None:
                 crop = tuple(crop)
             branches[bid] = BranchNode(modifications=mods, crop_range=crop, **bdict)
+        active = data.get("active_branch", "root")
+        if active not in branches:
+            active = "root" if "root" in branches else next(iter(branches), "root")
         return cls(
             version=data.get("version", 1),
             base_npz_dir=data["base_npz_dir"],
             ego_shape=tuple(data.get("ego_shape", [2.925, 4.5, 1.9])),
-            active_branch=data.get("active_branch", "root"),
+            active_branch=active,
             branches=branches,
         )
 

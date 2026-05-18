@@ -1350,7 +1350,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return f"Saved to `{path}`"
 
         def on_crop(tree, step, view_r, start, end, selected_obs, gt_on):
-            tree.set_crop(tree.active_branch, int(start), int(end))
+            tree.set_crop(tree.active_branch, _safe_step(start), _safe_step(end))
             seq = tree.get_npz_sequence(tree.active_branch)
             max_step = max(0, len(seq) - 1)
             s = min(_safe_step(step), max_step)
