@@ -1742,29 +1742,68 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 return "Specify an RSFT output directory"
             if not guided_cache or len(guided_cache) == 0:
                 return "Generate a guided trajectory first (Show Guided → Generate)"
-            out = Path(out_dir.strip())
-            out.mkdir(parents=True, exist_ok=True)
 
             s = _safe_step(step)
             npz_path = _get_npz_path(tree, s)
             if not npz_path:
                 return "No NPZ at current step"
 
-            # Next index from max existing suffix (avoids overwrite on gaps)
+            # guided_cache[0] is (80, 3) [x, y, heading_rad]
+            traj_xyh = np.array(guided_cache[0]).astype(np.float32)
+
+            # Convert to (T, 4) [x, y, cos, sin] for reward scoring
+            traj_4col = torch.from_numpy(np.column_stack([
+                traj_xyh[:, :2],
+                np.cos(traj_xyh[:, 2]),
+                np.sin(traj_xyh[:, 2]),
+            ]).astype(np.float32)).unsqueeze(0)
+
+            # Score trajectory against reward gates
+            from preference_optimization.utils import load_npz_data as _load_npz
+            from rlvr.reward import RewardConfig as _RC
+            from rlvr.reward import compute_reward_batch as _crb
+            scene_data = _load_npz(npz_path, torch.device("cpu"))
+            obs_at_step = _get_obstacles_at_step(tree, s)
+            if obs_at_step:
+                scene_data = _inject_obstacles_into_tensors(
+                    scene_data, obs_at_step, torch.device("cpu"))
+            rc = _RC()
+            rc.rb_gate_enabled = True
+            rc.kinematic_gate_enabled = True
+            rc.enable_lane_departure = True
+            rewards = _crb(traj_4col, scene_data, rc)
+            r = rewards[0]
+
+            violations = []
+            if r.rb_crossing:
+                violations.append(f"Road border crossing (min dist {r.rb_min_dist:.2f}m)")
+            if r.lane_crossing:
+                violations.append("Lane departure")
+            if r.kinematic_violated:
+                violations.append("Kinematic infeasibility")
+            if r.collision_step is not None:
+                violations.append(f"Collision at timestep {r.collision_step}")
+            if r.static_crossing:
+                violations.append(f"Static obstacle crossing (min dist {r.sc_min_dist:.2f}m)")
+
+            if violations:
+                return ("**REJECTED** — trajectory violates reward gates:\n\n"
+                        + "\n".join(f"- {v}" for v in violations)
+                        + f"\n\nTotal reward: {r.total:.1f}")
+
+            # Passed all gates — save
+            out = Path(out_dir.strip())
+            out.mkdir(parents=True, exist_ok=True)
+
             existing = sorted(out.glob("scene_*.npz"))
             if existing:
-                last_stem = existing[-1].stem  # e.g. "scene_0003"
+                last_stem = existing[-1].stem
                 idx = int(last_stem.split("_")[-1]) + 1
             else:
                 idx = 0
 
-            # guided_cache[0] is (80, 3) [x, y, heading_rad] — training format
-            traj_xyh = np.array(guided_cache[0]).astype(np.float32)
-
-            # Copy source NPZ, inject obstacles into neighbor tensor, set future
             with np.load(npz_path) as src:
                 npz_data = dict(src)
-            obs_at_step = _get_obstacles_at_step(tree, s)
             if obs_at_step:
                 device = torch.device("cpu")
                 tmp_data = {k: torch.from_numpy(v).unsqueeze(0) if v.ndim < 4
@@ -1779,7 +1818,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             dst = out / f"scene_{idx:04d}.npz"
             np.savez(dst, **npz_data)
 
-            # Update scene_list.json
             scene_list_path = out / "scene_list.json"
             if scene_list_path.exists():
                 with open(scene_list_path) as f:
@@ -1790,8 +1828,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             with open(scene_list_path, "w") as f:
                 _json.dump(scenes, f, indent=2)
 
-            return (f"Saved scene **#{idx}** to `{dst}`\n\n"
-                    f"Guided traj ({traj_xyh.shape[0]} steps) → `ego_agent_future`\n\n"
+            return (f"**SAVED** scene **#{idx}** to `{dst}`\n\n"
+                    f"Gates: RB={r.rb_min_dist:.2f}m, CL={r.centerline:.2f}, "
+                    f"reward={r.total:.1f}\n\n"
                     f"Total: {len(scenes)} scenes in `{scene_list_path}`")
 
         rsft_save_btn.click(
