@@ -591,7 +591,8 @@ def to_model_tensors(
     # Delay: number of prefix timesteps to keep fixed during diffusion.
     data_torch["delay"] = torch.tensor([inference_delay], dtype=torch.long, device=device)
 
-    # Sampled trajectories: zeros = deterministic (caller can override for stochastic)
+    # Sampled trajectories: zeros = deterministic (caller can override for stochastic).
+    # generate_samples.py overrides this with its own xT construction.
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
     data_torch["sampled_trajectories"] = torch.zeros(
@@ -624,7 +625,7 @@ def dump_step_npz(
         map_cache: Pre-computed map tensor cache for the scene's map.
         future_len: Number of future timesteps (typically 80 — from model_args).
         predicted_neighbor_num: Neighbor slot count for the future placeholder.
-            Must equal ``_MAX_NUM_NEIGHBORS`` (32) — the past array is built at
+            Must equal ``_MAX_NUM_NEIGHBORS`` (320) — the past array is built at
             that fixed shape, so a mismatch would produce NPZs where past and
             future disagree on the neighbor dimension and break the training
             NPZ loader.

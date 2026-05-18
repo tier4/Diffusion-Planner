@@ -512,7 +512,22 @@ def _predict_batch(
         for aid in agent_ids
     ]
 
-    model.decoder._guidance_fn = None
+    # When guidance is active, init sampled_trajectories from current states
+    # (matching generate_samples.py) instead of zeros — the DPM-Solver
+    # converges to different solutions depending on the starting latent.
+    if model.decoder._guidance_fn is not None:
+        import torch as _torch
+        P = 1 + model_args.predicted_neighbor_num
+        for td in tensor_dicts:
+            ego_cs = td["ego_current_state"][:, :4]
+            nb_past = td["neighbor_agents_past"]
+            nb_cs = (nb_past[:, :P - 1, -1, :4] if nb_past.shape[1] >= P - 1
+                     else _torch.zeros(1, P - 1, 4, dtype=_torch.float32,
+                                       device=ego_cs.device))
+            cs = _torch.cat([ego_cs[:, None], nb_cs], dim=1)
+            td["sampled_trajectories"] = cs[:, :, None, :].expand(
+                -1, -1, model_args.future_len + 1, -1).clone()
+
     if len(agent_ids) == 1:
         _, outputs = model(tensor_dicts[0])
         preds = {agent_ids[0]: outputs["prediction"][0, 0].cpu().numpy()}
@@ -590,7 +605,8 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                    skip_viz: bool = False,
                    static_agent_ids: set[str] | None = None,
                    dump_npz: bool = False,
-                   progress_fn=None):
+                   progress_fn=None,
+                   zero_neighbors: bool = False):
     """Run simulation with configurable ego behavior.
 
     Modes:
@@ -610,9 +626,15 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         static_agent_ids: Agent IDs to exclude from prediction (stationary).
         dump_npz: Save per-step NPZ files alongside PNGs.
         progress_fn: Optional callable(fraction, desc) for progress reporting.
+        zero_neighbors: Zero neighbor_agents_past in model input so the
+            model only sees placed obstacles, not original NPZ neighbors.
     """
     if mode not in ("closed_loop", "semi_closed_loop"):
         raise ValueError(f"Unknown mode {mode!r}. Use 'closed_loop' or 'semi_closed_loop'.")
+    if builder is not None and ego_world_pose is None:
+        import warnings
+        warnings.warn("builder provided without ego_world_pose — map refresh will be disabled",
+                      stacklevel=2)
     output_dir.mkdir(parents=True, exist_ok=True)
     scene = deepcopy(scene)
     ego_id = scene.ego_agent_id
@@ -632,6 +654,10 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
         goal_dist = np.linalg.norm(agent.goal_pose[:2] - agent.current_position) if agent.goal_pose is not None else float("inf")
         if speed < 0.5 and goal_dist < 1.0:
             static_ids.add(agent.id)
+        elif speed < 0.1:
+            past = agent.past_trajectory
+            if past.shape[0] >= 2 and np.linalg.norm(past[-1, :2] - past[0, :2]) < 0.1:
+                static_ids.add(agent.id)
     if static_ids:
         print(f"Static agents: {static_ids}")
 
@@ -686,10 +712,21 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                 )
                 map_cache = MapTensorCache(scene.map_data)
 
-            agent_predictions = _predict_batch(
-                model, model_args, scene, ids_to_predict, device,
-                map_cache=map_cache,
-            )
+            if zero_neighbors:
+                _placed_ids = set(static_agent_ids or [])
+                _saved_agents = scene.agents[:]
+                scene.agents = [a for a in scene.agents
+                                if a.id == ego_id or a.id in _placed_ids]
+                agent_predictions = _predict_batch(
+                    model, model_args, scene, [ego_id], device,
+                    map_cache=map_cache,
+                )
+                scene.agents = _saved_agents
+            else:
+                agent_predictions = _predict_batch(
+                    model, model_args, scene, ids_to_predict, device,
+                    map_cache=map_cache,
+                )
 
             mode_label = "CL" if mode == "closed_loop" else "semi-CL"
             if not skip_viz:

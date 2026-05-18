@@ -387,8 +387,8 @@ def train_epoch_ranked_sft(
 
     K = config.num_generations
     mode = config.ranked_sft_mode
-    assert mode in ("gt_neighbor", "baseline_neighbor"), (
-        f"ranked_sft_mode must be 'gt_neighbor' or 'baseline_neighbor', got {mode!r}"
+    assert mode in ("gt_neighbor", "baseline_neighbor", "curated"), (
+        f"ranked_sft_mode must be 'gt_neighbor', 'baseline_neighbor', or 'curated', got {mode!r}"
     )
 
     if epoch == 1:
@@ -503,8 +503,44 @@ def train_epoch_ranked_sft(
     # Extract speed stretch from schedule (default: 1.0 = no stretch)
     spd_stretch = scheduled.get("speed_stretch", 1.0)
 
-    # 2c. Optionally use exploration policy to generate K diverse trajectories per scene
-    if exploration_policy is not None:
+    # 2c. Curated mode: use ego_agent_future from NPZ directly as SFT target.
+    # Skips generation, ranking, and selective filtering entirely.
+    if mode == "curated":
+        print(f"  [curated] Using ego_agent_future from {N} scenes as SFT target")
+        best_ego_trajs = []
+        best_rewards_list = []
+        scene_train_mask = [True] * N
+        scene_improvements = [1.0] * N
+        _ra = None
+        for i in range(N):
+            gt = all_data[i].get("ego_agent_future")
+            if gt is None:
+                raise ValueError(
+                    f"Scene {valid_paths[i]} has no ego_agent_future — "
+                    f"curated mode requires pre-saved trajectories"
+                )
+            if gt.dim() == 3:
+                gt = gt[0]
+            gt_np = gt.cpu().numpy()
+            if gt_np.shape[-1] == 3:
+                valid = np.abs(gt_np[:, :2]).sum(axis=-1) > 0.1
+                cos_h = np.where(valid, np.cos(gt_np[:, 2]), 0.0)
+                sin_h = np.where(valid, np.sin(gt_np[:, 2]), 0.0)
+                traj_4col = np.column_stack([
+                    gt_np[:, :2], cos_h, sin_h,
+                ]).astype(np.float32)
+            else:
+                traj_4col = gt_np[:, :4].astype(np.float32)
+            best_traj_smooth = _smooth_trajectory(
+                traj_4col, config.sg_filter_window, config.sg_filter_order
+            )
+            best_ego_trajs.append(best_traj_smooth)
+            best_rewards_list.append(0.0)
+        mean_best_reward = 0.0
+        # Skip ahead to training (section 5+)
+
+    # 2d. Optionally use exploration policy to generate K diverse trajectories per scene
+    elif exploration_policy is not None:
         from diffusion_planner.model.guidance.composer import GuidanceComposer
         from diffusion_planner.model.guidance.config import GuidanceConfig as _GC
         from diffusion_planner.model.guidance.config import GuidanceSetConfig
@@ -602,303 +638,310 @@ def train_epoch_ranked_sft(
                 use_route_cl_guidance=getattr(config, "use_route_cl_guidance", False),
             )  # [N, K, T, 4]
 
-    torch.cuda.empty_cache()
-    gc.collect()
+    if mode != "curated":
+        torch.cuda.empty_cache()
+        gc.collect()
 
     # 4. Score and select best trajectory per scene
-    # Selective training: only SFT on scenes where best-of-K improves significantly
-    # over the deterministic (index 0) trajectory. Controlled by config.selective_threshold.
-    # 0 = train all scenes (default), >0 = skip scenes with best-det < threshold.
     selective_thresh = getattr(config, "selective_threshold", 0.0)
-    # Allow scheduling of selective_threshold (e.g., 0 for first epochs, then 3.0)
-    sched_thresh = scheduled.get("selective_threshold")
-    if sched_thresh is not None:
-        selective_thresh = sched_thresh
-    print(f"  Scoring and selecting best trajectories...")
-    best_ego_trajs = []  # [T, 4] numpy arrays
-    best_rewards_list = []
-    scene_train_mask = []  # True = train on this scene, False = skip
-    scene_improvements = []  # improvement value per scene for advantage weighting
-    _gt_fallback_count = 0  # scenes where best-of-K < GT reward by margin
-    _gt_scored_count = 0   # scenes where GT was scored
-    # Per-scene record of GT vs best-of-K — let us inspect which scenes are
-    # "hard" (GT clean but all K fail) and tune gt_fallback_margin.
-    _gt_scene_log: list[dict] = []
+    if mode == "curated":
+        n_selected = N
+        explorer_metrics = {}
+    else:
+        # Allow scheduling of selective_threshold (e.g., 0 for first epochs, then 3.0)
+        sched_thresh = scheduled.get("selective_threshold")
+        if sched_thresh is not None:
+            selective_thresh = sched_thresh
+        print(f"  Scoring and selecting best trajectories...")
+        best_ego_trajs = []  # [T, 4] numpy arrays
+        best_rewards_list = []
+        scene_train_mask = []  # True = train on this scene, False = skip
+        scene_improvements = []  # improvement value per scene for advantage weighting
+        _gt_fallback_count = 0  # scenes where best-of-K < GT reward by margin
+        _gt_scored_count = 0   # scenes where GT was scored
+        # Per-scene record of GT vs best-of-K — let us inspect which scenes are
+        # "hard" (GT clean but all K fail) and tune gt_fallback_margin.
+        _gt_scene_log: list[dict] = []
 
-    # Rank analytics: track which generation config wins per scene
-    from pathlib import Path
-    from rlvr.rank_analytics import (
-        EpochRankAnalytics, SceneRankRecord, breakdown_to_dict,
-        mean_breakdown_dict, compute_dominant_component, print_epoch_summary,
-        save_epoch_analytics,
-    )
-    from rlvr.grpo_trainer_batched import get_generation_config_labels_for_variant
-    _ra_variant = getattr(config, "generation_variant", "default")
-    _ra_labels = get_generation_config_labels_for_variant(_ra_variant, K)
-    if exploration_policy is not None:
-        _ra_labels = [f"explorer_{i}" for i in range(K)]
-    _ra = EpochRankAnalytics(epoch=epoch, n_scenes=N)
+        # Rank analytics: track which generation config wins per scene
+        from pathlib import Path
 
-    for i in tqdm(range(N), desc="Scoring"):
-        traj_K = all_trajs[i]  # [K, T, 4]
-        data_i = all_data[i]
-
-        # Inject baseline path length for this scene if using baseline underprogress ref
-        if baseline_path_lens:
-            key = str(valid_paths[i])
-            if key in baseline_path_lens:
-                data_i["baseline_path_len"] = torch.tensor(
-                    baseline_path_lens[key], device=device, dtype=torch.float32,
-                )
-
-        rewards = compute_reward_batch(traj_K, data_i, reward_config)
-        reward_vals = np.array([r.total for r in rewards])
-        best_idx = int(np.argmax(reward_vals))
-        best_reward = reward_vals[best_idx]
-        det_reward = reward_vals[0]  # deterministic trajectory is always index 0
-
-        # GT fallback: compare best-of-K against the GT trajectory's reward.
-        # If GT is better by more than gt_fallback_margin, either swap the SFT
-        # target to GT or skip the scene (per gt_fallback_mode).
-        _gt_mode = getattr(config, "gt_fallback_mode", "none")
-        _gt_margin = float(getattr(config, "gt_fallback_margin", 0.0))
-        _used_gt_fallback = False
-        gt_reward = float("nan")
-        gt_traj_4col = None
-        if _gt_mode != "none":
-            _real_gt = data_i.get("ego_agent_future")
-            if _real_gt is not None:
-                _g = _real_gt
-                if _g.dim() == 3:
-                    _g = _g[0]
-                # Map (T,3) -> (T,4) as (x, y, cos h, sin h). Align columns
-                # with traj_K (which is also x, y, cos, sin). Mask zero-
-                # padded trailing rows BEFORE cos/sin conversion so we don't
-                # inject a phantom "pointing-east" pose (cos=1, sin=0) on
-                # invalid timesteps — that would skew progress / RB on GT.
-                if _g.shape[-1] == 3:
-                    _valid = _g[..., :2].abs().sum(dim=-1) > 0.1
-                    _cos = torch.where(_valid, _g[..., 2].cos(), torch.zeros_like(_g[..., 2]))
-                    _sin = torch.where(_valid, _g[..., 2].sin(), torch.zeros_like(_g[..., 2]))
-                    _g = torch.stack([_g[..., 0], _g[..., 1], _cos, _sin], dim=-1)
-                _g = _g[..., :4]
-                T_gen = traj_K.shape[1]
-                T_g = _g.shape[0]
-                if T_g > T_gen:
-                    _g = _g[:T_gen]
-                elif T_g < T_gen:
-                    _pad = torch.zeros(T_gen - T_g, 4, device=_g.device, dtype=_g.dtype)
-                    _g = torch.cat([_g, _pad], dim=0)
-                gt_traj_4col = _g.to(traj_K.device, dtype=traj_K.dtype)
-                _gt_rewards = compute_reward_batch(
-                    gt_traj_4col.unsqueeze(0), data_i, reward_config,
-                )
-                gt_reward = float(_gt_rewards[0].total)
-                _gt_scored_count += 1
-                if best_reward < gt_reward - _gt_margin:
-                    _used_gt_fallback = True
-                    _gt_fallback_count += 1
-                # Always record per-scene comparison so we can analyze hard scenes
-                _gt_scene_log.append({
-                    "scene": Path(valid_paths[i]).stem,
-                    "gt_reward": gt_reward,
-                    "best_reward": float(best_reward),
-                    "det_reward": float(det_reward),
-                    "gap_best_minus_gt": float(best_reward - gt_reward),
-                    "best_idx": int(best_idx),
-                    "fallback": bool(_used_gt_fallback),
-                    # Gate / crossing flags from the GT-trajectory reward breakdown
-                    "gt_rb_crossing": bool(_gt_rewards[0].rb_crossing),
-                    "gt_lane_crossing": bool(_gt_rewards[0].lane_crossing),
-                    "gt_collision_step": _gt_rewards[0].collision_step,
-                })
-
-        # "effective" reward captures what we actually train on:
-        # best-of-K by default, GT when the il fallback fires. Downstream
-        # selective / advantage logic keys off this so IL-fallback scenes
-        # can't be accidentally filtered out by a high selective_threshold
-        # (the noisy best-of-K "improvement" isn't what we're training on).
-        effective_reward = (
-            gt_reward if (_gt_mode == "il" and _used_gt_fallback) else best_reward
+        from rlvr.grpo_trainer_batched import get_generation_config_labels_for_variant
+        from rlvr.rank_analytics import (
+            EpochRankAnalytics,
+            SceneRankRecord,
+            breakdown_to_dict,
+            compute_dominant_component,
+            mean_breakdown_dict,
+            print_epoch_summary,
+            save_epoch_analytics,
         )
-        improvement = effective_reward - det_reward
-        should_train = selective_thresh <= 0 or improvement >= selective_thresh
-        # GT-skip overrides selective
-        if _gt_mode == "skip" and _used_gt_fallback:
-            should_train = False
-        scene_train_mask.append(should_train)
-        # In advantage mode, respect selective_threshold: zero weight for scenes below it.
-        # Also zero out GT-skip scenes so they don't contribute gradient when
-        # selective_mode="advantage" (which ignores scene_train_mask and keys off
-        # scene_improvements instead).
-        if (selective_thresh > 0 and improvement < selective_thresh) or (
-            _gt_mode == "skip" and _used_gt_fallback
-        ):
-            scene_improvements.append(0.0)
-        else:
-            scene_improvements.append(max(0.0, improvement))
-        if selective_thresh > 0 and epoch <= 2 and should_train:
-            print(f"    SEL [{Path(valid_paths[i]).stem[:30]}] "
-                  f"det={det_reward:.1f} best={best_reward:.1f} "
-                  f"eff={effective_reward:.1f} imp={improvement:.1f}")
+        _ra_variant = getattr(config, "generation_variant", "default")
+        _ra_labels = get_generation_config_labels_for_variant(_ra_variant, K)
+        if exploration_policy is not None:
+            _ra_labels = [f"explorer_{i}" for i in range(K)]
+        _ra = EpochRankAnalytics(epoch=epoch, n_scenes=N)
 
-        # Rank analytics: record which config won and why
-        _ra_mean_bd = mean_breakdown_dict(rewards)
-        _ra_winner = rewards[best_idx]
-        _ra_dom_comp, _ra_dom_delta = compute_dominant_component(
-            _ra_winner, _ra_mean_bd, reward_config,
-        )
-        _ra.records.append(SceneRankRecord(
-            scene_path=Path(valid_paths[i]).stem,
-            winner_idx=best_idx,
-            winner_label=_ra_labels[best_idx],
-            winner_reward=float(reward_vals[best_idx]),
-            mean_reward=float(reward_vals.mean()),
-            det_reward=float(reward_vals[0]),
-            winner_breakdown=breakdown_to_dict(_ra_winner),
-            mean_breakdown=_ra_mean_bd,
-            dominant_component=_ra_dom_comp,
-            dominant_delta=_ra_dom_delta,
-        ))
-
-        # Get best trajectory and smooth it
-        if _gt_mode == "il" and _used_gt_fallback and gt_traj_4col is not None:
-            # Swap SFT target with GT when best-of-K is worse than GT.
-            best_traj = gt_traj_4col.detach().cpu().numpy()
-        else:
-            best_traj = traj_K[best_idx].cpu().numpy()  # [T, 4]
-        best_traj_smooth = _smooth_trajectory(
-            best_traj, config.sg_filter_window, config.sg_filter_order
-        )
-
-        best_ego_trajs.append(best_traj_smooth)
-        # Track the reward of the target we're actually training on
-        # (GT reward when il-fallback fires, else best-of-K).
-        best_rewards_list.append(effective_reward)
-
-    mean_best_reward = float(np.mean(best_rewards_list))
-
-    # Rank analytics: aggregate and print/save
-    _ra.finalize(_ra_labels)
-    print_epoch_summary(_ra)
-    if run_dir is not None:
-        save_epoch_analytics(_ra, Path(run_dir), epoch)
-
-    # Frozen selection: use ep1 mask for all epochs
-    use_frozen = getattr(config, "selective_frozen", False) and selective_thresh > 0
-    if use_frozen:
-        if not hasattr(config, "_frozen_mask"):
-            config._frozen_mask = list(scene_train_mask)
-            print(f"  [frozen] Saving first scene selection ({sum(scene_train_mask)}/{N} scenes)")
-        else:
-            scene_train_mask = list(config._frozen_mask)
-            print(f"  [frozen] Reusing frozen selection ({sum(scene_train_mask)}/{N} scenes)")
-
-    n_selected = sum(scene_train_mask)
-    # Effective target reward — best-of-K by default; GT when gt_fallback_mode="il"
-    # fires. Kept under the same metric name (mean_best_reward) for
-    # TSV backwards-compat.
-    _reward_label = (
-        "Mean training-target reward"
-        if getattr(config, "gt_fallback_mode", "none") == "il"
-        else f"Mean best-of-{K} reward"
-    )
-    print(f"  {_reward_label}: {mean_best_reward:.2f}")
-    if selective_thresh > 0:
-        print(f"  Selective training: {n_selected}/{N} scenes selected "
-              f"(threshold={selective_thresh:g}, skipped {N - n_selected})")
-    if _gt_scored_count > 0:
-        _gt_mode_str = getattr(config, "gt_fallback_mode", "none")
-        print(f"  GT fallback ({_gt_mode_str}): {_gt_fallback_count}/{_gt_scored_count} scenes "
-              f"had best-of-{K} < GT reward (margin={getattr(config, 'gt_fallback_margin', 0.0):.2f})")
-        # Print gap histogram — useful for picking a margin
-        if _gt_scene_log:
-            import numpy as _np
-            gaps = _np.array([r["gap_best_minus_gt"] for r in _gt_scene_log])
-            print(f"  best-GT gap: min={gaps.min():.1f} p10={_np.percentile(gaps, 10):.1f} "
-                  f"p50={_np.percentile(gaps, 50):.1f} p90={_np.percentile(gaps, 90):.1f} "
-                  f"max={gaps.max():.1f}")
-            for thr in (0.0, 2.0, 5.0, 10.0, 20.0):
-                n_below = int((gaps < -thr).sum())
-                print(f"    scenes with best < GT - {thr:>5.1f} : {n_below}/{len(gaps)} "
-                      f"({100*n_below/len(gaps):.1f}%)")
-            # Save per-scene log (sorted worst-gap-first) for offline analysis
-            if run_dir is not None:
-                import json as _json
-                log_path = Path(run_dir) / f"gt_fallback_epoch_{epoch:03d}.json"
-                sorted_log = sorted(_gt_scene_log, key=lambda r: r["gap_best_minus_gt"])
-                with open(log_path, "w") as _lf:
-                    _json.dump({"epoch": epoch, "margin": _gt_margin,
-                                "mode": _gt_mode_str, "scenes": sorted_log}, _lf, indent=2)
-                print(f"  [gt_log] saved per-scene comparison to {log_path.name} "
-                      f"(sorted worst-gap-first; N={len(sorted_log)})")
-
-    # --- Train explorer on trajectory rewards (if optimizer provided) ---
-    explorer_metrics = {}
-    if exploration_policy is not None and exploration_optimizer is not None and _explorer_scenes:
-        from exploration_policy.loss import compute_exploration_loss
-        from rlvr.reward import compute_group_advantages
-        print(f"  Training explorer on {len(_explorer_scenes)} scenes...")
-        exploration_policy.train()
-        exploration_optimizer.zero_grad()
-        total_policy_loss = 0.0
-        n_explorer = 0
-
-        for i in range(N):
-            if i >= len(_explorer_scenes):
-                break
-            es = _explorer_scenes[i]
+        for i in tqdm(range(N), desc="Scoring"):
             traj_K = all_trajs[i]  # [K, T, 4]
             data_i = all_data[i]
 
-            # Compute rewards for this scene's K trajectories
+            # Inject baseline path length for this scene if using baseline underprogress ref
+            if baseline_path_lens:
+                key = str(valid_paths[i])
+                if key in baseline_path_lens:
+                    data_i["baseline_path_len"] = torch.tensor(
+                        baseline_path_lens[key], device=device, dtype=torch.float32,
+                    )
+
             rewards = compute_reward_batch(traj_K, data_i, reward_config)
-            advantages = compute_group_advantages(rewards)
+            reward_vals = np.array([r.total for r in rewards])
+            best_idx = int(np.argmax(reward_vals))
+            best_reward = reward_vals[best_idx]
+            det_reward = reward_vals[0]  # deterministic trajectory is always index 0
 
-            if np.all(advantages == 0):
-                continue
+            # GT fallback: compare best-of-K against the GT trajectory's reward.
+            # If GT is better by more than gt_fallback_margin, either swap the SFT
+            # target to GT or skip the scene (per gt_fallback_mode).
+            _gt_mode = getattr(config, "gt_fallback_mode", "none")
+            _gt_margin = float(getattr(config, "gt_fallback_margin", 0.0))
+            _used_gt_fallback = False
+            gt_reward = float("nan")
+            gt_traj_4col = None
+            if _gt_mode != "none":
+                _real_gt = data_i.get("ego_agent_future")
+                if _real_gt is not None:
+                    _g = _real_gt
+                    if _g.dim() == 3:
+                        _g = _g[0]
+                    # Map (T,3) -> (T,4) as (x, y, cos h, sin h). Align columns
+                    # with traj_K (which is also x, y, cos, sin). Mask zero-
+                    # padded trailing rows BEFORE cos/sin conversion so we don't
+                    # inject a phantom "pointing-east" pose (cos=1, sin=0) on
+                    # invalid timesteps — that would skew progress / RB on GT.
+                    if _g.shape[-1] == 3:
+                        _valid = _g[..., :2].abs().sum(dim=-1) > 0.1
+                        _cos = torch.where(_valid, _g[..., 2].cos(), torch.zeros_like(_g[..., 2]))
+                        _sin = torch.where(_valid, _g[..., 2].sin(), torch.zeros_like(_g[..., 2]))
+                        _g = torch.stack([_g[..., 0], _g[..., 1], _cos, _sin], dim=-1)
+                    _g = _g[..., :4]
+                    T_gen = traj_K.shape[1]
+                    T_g = _g.shape[0]
+                    if T_g > T_gen:
+                        _g = _g[:T_gen]
+                    elif T_g < T_gen:
+                        _pad = torch.zeros(T_gen - T_g, 4, device=_g.device, dtype=_g.dtype)
+                        _g = torch.cat([_g, _pad], dim=0)
+                    gt_traj_4col = _g.to(traj_K.device, dtype=traj_K.dtype)
+                    _gt_rewards = compute_reward_batch(
+                        gt_traj_4col.unsqueeze(0), data_i, reward_config,
+                    )
+                    gt_reward = float(_gt_rewards[0].total)
+                    _gt_scored_count += 1
+                    if best_reward < gt_reward - _gt_margin:
+                        _used_gt_fallback = True
+                        _gt_fallback_count += 1
+                    # Always record per-scene comparison so we can analyze hard scenes
+                    _gt_scene_log.append({
+                        "scene": Path(valid_paths[i]).stem,
+                        "gt_reward": gt_reward,
+                        "best_reward": float(best_reward),
+                        "det_reward": float(det_reward),
+                        "gap_best_minus_gt": float(best_reward - gt_reward),
+                        "best_idx": int(best_idx),
+                        "fallback": bool(_used_gt_fallback),
+                        # Gate / crossing flags from the GT-trajectory reward breakdown
+                        "gt_rb_crossing": bool(_gt_rewards[0].rb_crossing),
+                        "gt_lane_crossing": bool(_gt_rewards[0].lane_crossing),
+                        "gt_collision_step": _gt_rewards[0].collision_step,
+                    })
 
-            # Recompute explorer distributions (with grad)
-            policy_output = exploration_policy(es["scene_enc"], es["x_ref"], deterministic=True)
-            log_probs = (policy_output.lat_dist.log_prob(es["eta_lat_01"])
-                         + policy_output.lon_dist.log_prob(es["eta_lon_01"]))
-            if log_probs.dim() > 1:
-                log_probs = log_probs.squeeze(-1)
-
-            advantages_t = torch.tensor(advantages, device=device, dtype=torch.float32)
-
-            if config.exploration_loss_type == "best_sample_mse":
-                best_idx = advantages_t.argmax()
-                pred_lat = policy_output.lat_dist.mean.squeeze()
-                pred_lon = policy_output.lon_dist.mean.squeeze()
-                policy_loss = (pred_lat - es["eta_lat_01"][best_idx].detach()) ** 2 \
-                            + (pred_lon - es["eta_lon_01"][best_idx].detach()) ** 2
+            # "effective" reward captures what we actually train on:
+            # best-of-K by default, GT when the il fallback fires. Downstream
+            # selective / advantage logic keys off this so IL-fallback scenes
+            # can't be accidentally filtered out by a high selective_threshold
+            # (the noisy best-of-K "improvement" isn't what we're training on).
+            effective_reward = (
+                gt_reward if (_gt_mode == "il" and _used_gt_fallback) else best_reward
+            )
+            improvement = effective_reward - det_reward
+            should_train = selective_thresh <= 0 or improvement >= selective_thresh
+            # GT-skip overrides selective
+            if _gt_mode == "skip" and _used_gt_fallback:
+                should_train = False
+            scene_train_mask.append(should_train)
+            # In advantage mode, respect selective_threshold: zero weight for scenes below it.
+            # Also zero out GT-skip scenes so they don't contribute gradient when
+            # selective_mode="advantage" (which ignores scene_train_mask and keys off
+            # scene_improvements instead).
+            if (selective_thresh > 0 and improvement < selective_thresh) or (
+                _gt_mode == "skip" and _used_gt_fallback
+            ):
+                scene_improvements.append(0.0)
             else:
-                policy_loss, _ = compute_exploration_loss(
-                    advantages=advantages_t, log_probs=log_probs,
-                    lat_dist=policy_output.lat_dist, lon_dist=policy_output.lon_dist,
-                    entropy_coef=config.exploration_entropy_coef,
-                    kl_coef=config.exploration_kl_coef,
-                )
+                scene_improvements.append(max(0.0, improvement))
+            if selective_thresh > 0 and epoch <= 2 and should_train:
+                print(f"    SEL [{Path(valid_paths[i]).stem[:30]}] "
+                      f"det={det_reward:.1f} best={best_reward:.1f} "
+                      f"eff={effective_reward:.1f} imp={improvement:.1f}")
 
-            (policy_loss / N).backward()
-            total_policy_loss += policy_loss.item()
-            n_explorer += 1
+            # Rank analytics: record which config won and why
+            _ra_mean_bd = mean_breakdown_dict(rewards)
+            _ra_winner = rewards[best_idx]
+            _ra_dom_comp, _ra_dom_delta = compute_dominant_component(
+                _ra_winner, _ra_mean_bd, reward_config,
+            )
+            _ra.records.append(SceneRankRecord(
+                scene_path=Path(valid_paths[i]).stem,
+                winner_idx=best_idx,
+                winner_label=_ra_labels[best_idx],
+                winner_reward=float(reward_vals[best_idx]),
+                mean_reward=float(reward_vals.mean()),
+                det_reward=float(reward_vals[0]),
+                winner_breakdown=breakdown_to_dict(_ra_winner),
+                mean_breakdown=_ra_mean_bd,
+                dominant_component=_ra_dom_comp,
+                dominant_delta=_ra_dom_delta,
+            ))
 
-        if n_explorer > 0:
-            torch.nn.utils.clip_grad_norm_(exploration_policy.parameters(), max_norm=1.0)
-            exploration_optimizer.step()
+            # Get best trajectory and smooth it
+            if _gt_mode == "il" and _used_gt_fallback and gt_traj_4col is not None:
+                # Swap SFT target with GT when best-of-K is worse than GT.
+                best_traj = gt_traj_4col.detach().cpu().numpy()
+            else:
+                best_traj = traj_K[best_idx].cpu().numpy()  # [T, 4]
+            best_traj_smooth = _smooth_trajectory(
+                best_traj, config.sg_filter_window, config.sg_filter_order
+            )
+
+            best_ego_trajs.append(best_traj_smooth)
+            # Track the reward of the target we're actually training on
+            # (GT reward when il-fallback fires, else best-of-K).
+            best_rewards_list.append(effective_reward)
+
+        mean_best_reward = float(np.mean(best_rewards_list))
+
+        # Rank analytics: aggregate and print/save
+        _ra.finalize(_ra_labels)
+        print_epoch_summary(_ra)
+        if run_dir is not None:
+            save_epoch_analytics(_ra, Path(run_dir), epoch)
+
+        # Frozen selection: use ep1 mask for all epochs
+        use_frozen = getattr(config, "selective_frozen", False) and selective_thresh > 0
+        if use_frozen:
+            if not hasattr(config, "_frozen_mask"):
+                config._frozen_mask = list(scene_train_mask)
+                print(f"  [frozen] Saving first scene selection ({sum(scene_train_mask)}/{N} scenes)")
+            else:
+                scene_train_mask = list(config._frozen_mask)
+                print(f"  [frozen] Reusing frozen selection ({sum(scene_train_mask)}/{N} scenes)")
+
+        n_selected = sum(scene_train_mask)
+        # Effective target reward — best-of-K by default; GT when gt_fallback_mode="il"
+        # fires. Kept under the same metric name (mean_best_reward) for
+        # TSV backwards-compat.
+        _reward_label = (
+            "Mean training-target reward"
+            if getattr(config, "gt_fallback_mode", "none") == "il"
+            else f"Mean best-of-{K} reward"
+        )
+        print(f"  {_reward_label}: {mean_best_reward:.2f}")
+        if selective_thresh > 0:
+            print(f"  Selective training: {n_selected}/{N} scenes selected "
+                  f"(threshold={selective_thresh:g}, skipped {N - n_selected})")
+        if _gt_scored_count > 0:
+            _gt_mode_str = getattr(config, "gt_fallback_mode", "none")
+            print(f"  GT fallback ({_gt_mode_str}): {_gt_fallback_count}/{_gt_scored_count} scenes "
+                  f"had best-of-{K} < GT reward (margin={getattr(config, 'gt_fallback_margin', 0.0):.2f})")
+            # Print gap histogram — useful for picking a margin
+            if _gt_scene_log:
+                import numpy as _np
+                gaps = _np.array([r["gap_best_minus_gt"] for r in _gt_scene_log])
+                print(f"  best-GT gap: min={gaps.min():.1f} p10={_np.percentile(gaps, 10):.1f} "
+                      f"p50={_np.percentile(gaps, 50):.1f} p90={_np.percentile(gaps, 90):.1f} "
+                      f"max={gaps.max():.1f}")
+                for thr in (0.0, 2.0, 5.0, 10.0, 20.0):
+                    n_below = int((gaps < -thr).sum())
+                    print(f"    scenes with best < GT - {thr:>5.1f} : {n_below}/{len(gaps)} "
+                          f"({100*n_below/len(gaps):.1f}%)")
+                # Save per-scene log (sorted worst-gap-first) for offline analysis
+                if run_dir is not None:
+                    import json as _json
+                    log_path = Path(run_dir) / f"gt_fallback_epoch_{epoch:03d}.json"
+                    sorted_log = sorted(_gt_scene_log, key=lambda r: r["gap_best_minus_gt"])
+                    with open(log_path, "w") as _lf:
+                        _json.dump({"epoch": epoch, "margin": _gt_margin,
+                                    "mode": _gt_mode_str, "scenes": sorted_log}, _lf, indent=2)
+                    print(f"  [gt_log] saved per-scene comparison to {log_path.name} "
+                          f"(sorted worst-gap-first; N={len(sorted_log)})")
+
+        # --- Train explorer on trajectory rewards (if optimizer provided) ---
+        explorer_metrics = {}
+        if exploration_policy is not None and exploration_optimizer is not None and _explorer_scenes:
+            from exploration_policy.loss import compute_exploration_loss
+            from rlvr.reward import compute_group_advantages
+            print(f"  Training explorer on {len(_explorer_scenes)} scenes...")
+            exploration_policy.train()
             exploration_optimizer.zero_grad()
-            explorer_metrics["explorer_loss"] = total_policy_loss / n_explorer
-            print(f"  Explorer loss: {explorer_metrics['explorer_loss']:.4f} ({n_explorer} scenes)")
+            total_policy_loss = 0.0
+            n_explorer = 0
 
-        exploration_policy.eval()
-        del _explorer_scenes
+            for i in range(N):
+                if i >= len(_explorer_scenes):
+                    break
+                es = _explorer_scenes[i]
+                traj_K = all_trajs[i]  # [K, T, 4]
+                data_i = all_data[i]
 
-    # Free generation tensors
-    del all_trajs
-    torch.cuda.empty_cache()
-    gc.collect()
+                # Compute rewards for this scene's K trajectories
+                rewards = compute_reward_batch(traj_K, data_i, reward_config)
+                advantages = compute_group_advantages(rewards)
+
+                if np.all(advantages == 0):
+                    continue
+
+                # Recompute explorer distributions (with grad)
+                policy_output = exploration_policy(es["scene_enc"], es["x_ref"], deterministic=True)
+                log_probs = (policy_output.lat_dist.log_prob(es["eta_lat_01"])
+                             + policy_output.lon_dist.log_prob(es["eta_lon_01"]))
+                if log_probs.dim() > 1:
+                    log_probs = log_probs.squeeze(-1)
+
+                advantages_t = torch.tensor(advantages, device=device, dtype=torch.float32)
+
+                if config.exploration_loss_type == "best_sample_mse":
+                    best_idx = advantages_t.argmax()
+                    pred_lat = policy_output.lat_dist.mean.squeeze()
+                    pred_lon = policy_output.lon_dist.mean.squeeze()
+                    policy_loss = (pred_lat - es["eta_lat_01"][best_idx].detach()) ** 2 \
+                                + (pred_lon - es["eta_lon_01"][best_idx].detach()) ** 2
+                else:
+                    policy_loss, _ = compute_exploration_loss(
+                        advantages=advantages_t, log_probs=log_probs,
+                        lat_dist=policy_output.lat_dist, lon_dist=policy_output.lon_dist,
+                        entropy_coef=config.exploration_entropy_coef,
+                        kl_coef=config.exploration_kl_coef,
+                    )
+
+                (policy_loss / N).backward()
+                total_policy_loss += policy_loss.item()
+                n_explorer += 1
+
+            if n_explorer > 0:
+                torch.nn.utils.clip_grad_norm_(exploration_policy.parameters(), max_norm=1.0)
+                exploration_optimizer.step()
+                exploration_optimizer.zero_grad()
+                explorer_metrics["explorer_loss"] = total_policy_loss / n_explorer
+                print(f"  Explorer loss: {explorer_metrics['explorer_loss']:.4f} ({n_explorer} scenes)")
+
+            exploration_policy.eval()
+            del _explorer_scenes
+
+        # Free generation tensors
+        del all_trajs
+        torch.cuda.empty_cache()
+        gc.collect()
 
     # 5. Optionally compute baseline neighbor predictions (once, before training)
     baseline_neighbor_preds = []
@@ -969,8 +1012,8 @@ def train_epoch_ranked_sft(
                 real_gt = ego_gt.clone()
             all_ego_gt_real.append(real_gt)
 
-        # Neighbor GT
-        if mode == "gt_neighbor":
+        # Neighbor GT (curated uses GT neighbors like gt_neighbor mode)
+        if mode in ("gt_neighbor", "curated"):
             data_i = all_data[i]
             neighbors_future = data_i.get("neighbor_agents_future")
             if neighbors_future is not None:

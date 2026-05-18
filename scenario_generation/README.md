@@ -303,6 +303,7 @@ python -m scenario_generation.tools.scene_branch_editor \
     --model_path /path/to/best_model.pth \
     --ego_shape 4.76,7.24,2.29 \
     --map_path /path/to/lanelet2_map.osm \
+    --reward_config /path/to/reward_config.json \
     --port 7870
 ```
 
@@ -313,9 +314,10 @@ python -m scenario_generation.tools.scene_branch_editor \
 3. Place a stopped vehicle with position, heading, dimensions, and history
    (how many past timesteps the model sees the obstacle)
 4. Preview the model's DET trajectory and guided trajectories
-5. Fork a branch and simulate N steps forward (perfect tracker or MPC)
+5. Fork a branch and simulate N steps forward (closed-loop or open-loop)
 6. Play back the simulation result, inspect with reward overlays
-7. Save the scene tree as JSON for later reuse or further branching
+7. Save for RSFT: save scene + guided trajectory for curated training
+8. Export NPZs: copy branch sequence with sequential naming
 
 **Features:**
 
@@ -327,10 +329,14 @@ python -m scenario_generation.tools.scene_branch_editor \
 | Show GT | Reconstructed from future NPZ steps (green trajectory) |
 | Show DET | Deterministic model prediction (blue trajectory) |
 | Show Guided | Guided inference with configurable guidances + scales |
-| Forward simulation | Calls `run_simulation()` from `simulate.py` with map refresh |
+| Dim/Zero Neighbors | Grey out neighbors visually + zero from model input |
+| Forward simulation | Closed-loop (re-inference per step) or open-loop (cached trajectory) |
 | Apply Guidance | Use guidance config during every simulation step |
 | Road border overlay | Distance line from ego to nearest border (from lanelet2 map) |
 | Neighbor distance | OBB-OBB closest pair lines (uses `reward.py` primitives) |
+| Traj RB/NB Worst | Worst-case clearance along DET/guided trajectories with ego footprint |
+| Save for RSFT | Save scene NPZ with guided trajectory as `ego_agent_future`, validates against reward gates |
+| Export NPZs | Copy branch NPZ sequence with sequential naming + `scene_list.json` |
 | Branch tree | Fork/delete/switch branches, save/load as JSON |
 | Crop | Select timestep range within a branch |
 
@@ -341,7 +347,8 @@ python -m scenario_generation.tools.scene_branch_editor \
 | `--npz_dir` | Path to replay NPZ directory (required) |
 | `--model_path` | Model checkpoint for inference (optional, enables DET/guided/sim) |
 | `--ego_shape` | `wheelbase,length,width` — override when NPZ lacks `ego_shape` |
-| `--map_path` | Lanelet2 `.osm` map for road border overlays + model context |
+| `--map_path` | Lanelet2 `.osm` map for road border overlays + RB gate scoring |
+| `--reward_config` | Reward config JSON for RSFT gate validation (uses canonical gates) |
 | `--port` | Gradio server port (default 7870) |
 
 **Key files:**
