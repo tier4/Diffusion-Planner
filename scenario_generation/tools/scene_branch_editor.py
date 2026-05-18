@@ -1630,26 +1630,23 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
             progress(0, desc=f"Simulating 0/{n} steps...")
             try:
+                from scenario_generation.transforms import _rotation_matrix
                 for i in range(n):
-                    # Rebuild line_strings from map if available (gives model road border context)
+                    # Rebuild line_strings from map with proper border flags.
+                    # build_line_strings_tensor returns WORLD frame coords.
+                    # Transform world → ego frame using ego's WORLD pose.
                     if _has_builder and _ego_world is not None:
                         ego_xy_w = _ego_world[:2].astype(np.float32)
+                        ego_yaw_w = float(_ego_world[2])
                         ls_world = map_builder.build_line_strings_tensor(ego_xy_w)
-                        # Transform from world to current ego frame
-                        ego = scene.ego_agent
-                        ego_pos = ego.current_position.astype(np.float64)
-                        ego_h = ego.current_heading
-                        from scenario_generation.transforms import _rotation_matrix
-                        R = _rotation_matrix(ego_h)
+                        R_w = _rotation_matrix(ego_yaw_w)
                         ls_ego = ls_world.copy()
                         for li in range(ls_ego.shape[0]):
                             pts = ls_ego[li, :, :2]
                             valid = np.abs(pts).sum(axis=1) > 0.1
                             if valid.any():
-                                # World→scene frame: scene frame = initial NPZ ego frame
-                                # Then scene→current ego: subtract ego_pos, rotate by R
-                                diff = pts[valid] - ego_pos
-                                ls_ego[li, valid, :2] = (R @ diff.T).T
+                                diff = pts[valid] - ego_xy_w.astype(np.float64)
+                                ls_ego[li, valid, :2] = (R_w @ diff.T).T.astype(np.float32)
                         scene.map_data.line_strings = ls_ego
                         map_cache = MapTensorCache(scene.map_data)
 
