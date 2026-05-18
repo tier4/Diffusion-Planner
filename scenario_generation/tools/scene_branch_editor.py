@@ -718,7 +718,8 @@ def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future:
 
 
 def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
-                    map_borders: list[np.ndarray] | None = None):
+                    map_borders: list[np.ndarray] | None = None,
+                    map_builder=None):
     """Build the Gradio interface for the scene branch editor."""
 
     with gr.Blocks(title="Scene Branch Editor") as demo:
@@ -1574,6 +1575,13 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 )
                 scene.agents.append(agent)
 
+            # If we have the map builder, rebuild line_strings with proper
+            # border flags (psim NPZs lack them) so the model sees road borders
+            _has_builder = map_builder is not None
+            if _has_builder:
+                # Get initial ego world pose from sidecar JSON
+                _init_ego_wp = _recover_ego_world_pose(seq, min(s, len(seq) - 1))
+
             map_cache = MapTensorCache(scene.map_data)
             device = model_cache._device
             model = model_cache._model
@@ -1613,9 +1621,38 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     model.decoder._guidance_fn = composer
                     model.decoder._guidance_scale = 1.0
 
+            # Track ego world pose for sidecar JSONs
+            import json as _json
+            if _has_builder and _init_ego_wp is not None:
+                _ego_world = _init_ego_wp.copy()
+            else:
+                _ego_world = None
+
             progress(0, desc=f"Simulating 0/{n} steps...")
             try:
                 for i in range(n):
+                    # Rebuild line_strings from map if available (gives model road border context)
+                    if _has_builder and _ego_world is not None:
+                        ego_xy_w = _ego_world[:2].astype(np.float32)
+                        ls_world = map_builder.build_line_strings_tensor(ego_xy_w)
+                        # Transform from world to current ego frame
+                        ego = scene.ego_agent
+                        ego_pos = ego.current_position.astype(np.float64)
+                        ego_h = ego.current_heading
+                        from scenario_generation.transforms import _rotation_matrix
+                        R = _rotation_matrix(ego_h)
+                        ls_ego = ls_world.copy()
+                        for li in range(ls_ego.shape[0]):
+                            pts = ls_ego[li, :, :2]
+                            valid = np.abs(pts).sum(axis=1) > 0.1
+                            if valid.any():
+                                # World→scene frame: scene frame = initial NPZ ego frame
+                                # Then scene→current ego: subtract ego_pos, rotate by R
+                                diff = pts[valid] - ego_pos
+                                ls_ego[li, valid, :2] = (R @ diff.T).T
+                        scene.map_data.line_strings = ls_ego
+                        map_cache = MapTensorCache(scene.map_data)
+
                     ids_to_predict = [a.id for a in scene.agents if a.id not in placed_ids]
                     preds = _predict_batch(model, model_args, scene, ids_to_predict, device,
                                            map_cache=map_cache)
@@ -1624,14 +1661,42 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     ego_id = scene.ego_agent_id
                     data = dump_step_npz(scene, map_cache, future_len=80)
                     if ego_id in preds:
-                        ego_pred = preds[ego_id]  # (80, 4) [x, y, cos_h, sin_h] ego-frame
+                        ego_pred = preds[ego_id]
                         heading = np.arctan2(ego_pred[:, 3], ego_pred[:, 2])
                         data["ego_agent_future"] = np.column_stack(
                             [ego_pred[:, :2], heading]
                         ).astype(np.float32)
 
+                    # Save sidecar JSON with ego world pose
+                    if _ego_world is not None:
+                        yaw_w = float(_ego_world[2])
+                        sidecar = {
+                            "x": float(_ego_world[0]), "y": float(_ego_world[1]),
+                            "qz": math.sin(yaw_w / 2), "qw": math.cos(yaw_w / 2),
+                        }
+                        (out_dir / f"replay_step_{i:04d}.json").write_text(_json.dumps(sidecar))
+
                     advance_fn(scene, preds)
                     np.savez(out_dir / f"replay_step_{i:04d}.npz", **data)
+
+                    # Update ego world pose by chaining the displacement
+                    if _ego_world is not None:
+                        ego_new = scene.ego_agent
+                        dx_s = float(ego_new.current_position[0]) - float(ego_pos[0])
+                        dy_s = float(ego_new.current_position[1]) - float(ego_pos[1])
+                        dyaw_s = float(ego_new.current_heading) - float(ego_h)
+                        c_w, s_w = math.cos(_ego_world[2]), math.sin(_ego_world[2])
+                        # Scene-frame displacement → world-frame
+                        # Actually the scene frame IS the initial ego frame at fork.
+                        # The ego's scene-frame pose IS already tracked. We need
+                        # world = initial_world_pose + R(initial_yaw) @ scene_pos
+                        if _init_ego_wp is not None:
+                            iy = float(_init_ego_wp[2])
+                            ci, si = math.cos(iy), math.sin(iy)
+                            ep = ego_new.current_position
+                            _ego_world[0] = _init_ego_wp[0] + ci * ep[0] - si * ep[1]
+                            _ego_world[1] = _init_ego_wp[1] + si * ep[0] + ci * ep[1]
+                            _ego_world[2] = iy + float(ego_new.current_heading)
                     progress((i + 1) / n, desc=f"Simulating {i+1}/{n} steps...")
             finally:
                 model.decoder._guidance_fn = _orig_guidance_fn
@@ -1828,6 +1893,7 @@ def main():
 
     # Load road border polylines from lanelet2 map if provided
     map_border_polylines = None
+    builder = None
     if args.map_path:
         try:
             from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
@@ -1837,7 +1903,8 @@ def main():
         except Exception as e:
             print(f"Warning: could not load map borders: {e}")
 
-    demo = build_interface(tree, model_cache=mc, map_borders=map_border_polylines)
+    demo = build_interface(tree, model_cache=mc, map_borders=map_border_polylines,
+                           map_builder=builder)
     demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True)
 
 
