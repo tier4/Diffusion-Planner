@@ -1433,11 +1433,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return tree, img, info, mods, label, det_traj, guided
 
         def on_generate_guided(tree, step, gt_on, view_r, selected_obs,
-                               noise, k, det_on, det_cache, *guidance_args):
+                               noise, k, det_on, det_cache, hide_nb,
+                               *guidance_args):
             if model_cache is None or not model_cache.available:
                 return gr.update(), "No model loaded", det_cache, None
 
-            # Parse guidance toggles/scales from *guidance_args
             cfgs = []
             for i, gname in enumerate(ALL_GUIDANCE_NAMES):
                 enabled = guidance_args[i * 2]
@@ -1451,20 +1451,19 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
             obs = _get_obstacles_at_step(tree, _safe_step(step))
 
-            # DET trajectory (recompute if toggled on)
             det_traj = None
             if det_on:
                 if det_cache is not None:
                     det_traj = det_cache
                 else:
-                    raw = model_cache.predict_det(npz_path, obstacles=obs or None)
+                    raw = model_cache.predict_det(npz_path, obstacles=obs or None,
+                                                  zero_neighbors=hide_nb)
                     det_traj = _traj_cos_sin_to_xyh(raw)
                     det_cache = det_traj
 
-            # Guided trajectories
             raw_guided = model_cache.predict_guided(
                 npz_path, cfgs, noise_scale=float(noise), n_samples=int(k),
-                obstacles=obs or None,
+                obstacles=obs or None, zero_neighbors=hide_nb,
             )
             guided_list = [_traj_cos_sin_to_xyh(raw_guided[i]) for i in range(raw_guided.shape[0])]
 
@@ -1674,7 +1673,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         # Guidance generation button
         guidance_btn_inputs = ([tree_state, step_slider, show_gt, view_half,
                                 selected_obstacle_state, guided_noise, guided_k,
-                                show_det, det_traj_state]
+                                show_det, det_traj_state, hide_neighbors]
                                + [v for gname in ALL_GUIDANCE_NAMES
                                   for v in (guidance_toggles[gname], guidance_scales[gname])])
         generate_guided_btn.click(

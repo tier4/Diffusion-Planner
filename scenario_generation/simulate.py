@@ -512,6 +512,22 @@ def _predict_batch(
         for aid in agent_ids
     ]
 
+    # When guidance is active, init sampled_trajectories from current states
+    # (matching generate_samples.py) instead of zeros — the DPM-Solver
+    # converges to different solutions depending on the starting latent.
+    if model.decoder._guidance_fn is not None:
+        import torch as _torch
+        P = 1 + model_args.predicted_neighbor_num
+        for td in tensor_dicts:
+            ego_cs = td["ego_current_state"][:, :4]
+            nb_past = td["neighbor_agents_past"]
+            nb_cs = (nb_past[:, :P - 1, -1, :4] if nb_past.shape[1] >= P - 1
+                     else _torch.zeros(1, P - 1, 4, dtype=_torch.float32,
+                                       device=ego_cs.device))
+            cs = _torch.cat([ego_cs[:, None], nb_cs], dim=1)
+            td["sampled_trajectories"] = cs[:, :, None, :].expand(
+                -1, -1, model_args.future_len + 1, -1).clone()
+
     if len(agent_ids) == 1:
         _, outputs = model(tensor_dicts[0])
         preds = {agent_ids[0]: outputs["prediction"][0, 0].cpu().numpy()}
