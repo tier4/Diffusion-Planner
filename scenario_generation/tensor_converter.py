@@ -591,12 +591,18 @@ def to_model_tensors(
     # Delay: number of prefix timesteps to keep fixed during diffusion.
     data_torch["delay"] = torch.tensor([inference_delay], dtype=torch.long, device=device)
 
-    # Sampled trajectories: zeros = deterministic (caller can override for stochastic)
+    # Sampled trajectories: current states expanded as initial latent (matches
+    # generate_samples deterministic init). Zeros cause divergent denoising
+    # paths when guidance is applied.
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
-    data_torch["sampled_trajectories"] = torch.zeros(
-        1, P, future_len + 1, _POSE_DIM, dtype=torch.float32, device=device,
-    )
+    ego_cs = data_torch["ego_current_state"][:, :4]  # [1, 4]
+    nb_past = data_torch["neighbor_agents_past"]
+    nb_cs = nb_past[:, :P - 1, -1, :4] if nb_past.shape[1] >= P - 1 else (
+        torch.zeros(1, P - 1, 4, dtype=torch.float32, device=device))
+    cs = torch.cat([ego_cs[:, None], nb_cs], dim=1)  # [1, P, 4]
+    data_torch["sampled_trajectories"] = cs[:, :, None, :].expand(
+        -1, -1, future_len + 1, -1).clone()
 
     # Apply observation normalization
     data_torch = model_args.observation_normalizer(data_torch)
