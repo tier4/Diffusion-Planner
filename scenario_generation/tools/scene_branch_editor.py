@@ -621,23 +621,27 @@ def _transform_point_between_steps(
 
 
 def _recover_ego_world_pose(seq: list[str], step: int) -> np.ndarray | None:
-    """Recover ego world pose at a given step by chaining displacements from step 0.
+    """Recover ego map-frame pose at a given step.
 
-    Returns [x_world, y_world, yaw_world] or None if not enough data.
-    The first NPZ's ego frame IS the world frame (step 0 = origin).
+    First tries the sidecar JSON (psim NPZs have one per step with x, y, qz, qw).
+    Falls back to None if unavailable.
     """
-    if step == 0 or not seq:
-        return np.array([0.0, 0.0, 0.0], dtype=np.float64)
-    cum_x, cum_y, cum_yaw = 0.0, 0.0, 0.0
-    for s in range(1, min(step + 1, len(seq))):
-        past = np.load(seq[s])["ego_agent_past"]
-        prev = past[-2]
-        dx_local, dy_local, dyaw = -prev[0], -prev[1], -prev[2]
-        cum_yaw += dyaw
-        c, sn = math.cos(cum_yaw), math.sin(cum_yaw)
-        cum_x += c * dx_local - sn * dy_local
-        cum_y += sn * dx_local + c * dy_local
-    return np.array([cum_x, cum_y, cum_yaw], dtype=np.float64)
+    if not seq or step >= len(seq):
+        return None
+    npz_path = Path(seq[min(step, len(seq) - 1)])
+    json_path = npz_path.with_suffix(".json")
+    if json_path.exists():
+        try:
+            import json
+            with open(json_path) as f:
+                d = json.load(f)
+            x, y = d["x"], d["y"]
+            qz, qw = d.get("qz", 0.0), d.get("qw", 1.0)
+            yaw = math.atan2(2.0 * qw * qz, 1.0 - 2.0 * qz * qz)
+            return np.array([x, y, yaw], dtype=np.float64)
+        except (KeyError, json.JSONDecodeError):
+            pass
+    return None
 
 
 def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future: int = 80) -> np.ndarray | None:
