@@ -1814,6 +1814,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         # Simulate N steps — closed-loop or open-loop forward simulation
         def on_simulate(tree, step, n_steps, advance_mode, use_guidance,
                         gt_on, view_r, hide_nb, open_loop,
+                        guided_cache, det_cache,
                         *guidance_args, progress=gr.Progress()):
             if model_cache is None or not model_cache.available:
                 return (tree, gr.update(), "No model loaded — pass `--model_path`",
@@ -1921,40 +1922,32 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             ego_wp_arr = np.array([ego_wp[0], ego_wp[1], ego_wp[2]]) if ego_wp is not None else None
 
             if open_loop:
-                # Open-loop: single inference at t=0, step through the trajectory
+                # Open-loop: use the already-displayed trajectory (guided or DET)
                 from copy import deepcopy
 
                 from scenario_generation.simulate import _advance_agent
                 from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 
-                obs_for_model = _get_obstacles_at_step(tree, s)
-                if use_guidance and guidance_args:
-                    cfgs = []
-                    for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
-                        enabled = guidance_args[gi * 2]
-                        scale = guidance_args[gi * 2 + 1]
-                        if enabled:
-                            params = {}
-                            if gname == "speed":
-                                ego_a = scene.ego_agent
-                                if ego_a:
-                                    spd = float(np.linalg.norm(ego_a.current_velocity))
-                                    params["v_high"] = spd * 1.2
-                                    params["v_low"] = max(0.0, spd * 0.5)
-                            cfgs.append((gname, float(scale)))
-                    if cfgs:
-                        raw = model_cache.predict_guided(
-                            npz_path, cfgs, noise_scale=1.0, n_samples=1,
-                            obstacles=obs_for_model or None,
-                            zero_neighbors=hide_nb,
-                        )
-                        plan = raw[0]  # (80, 4) [x, y, cos_h, sin_h]
-                    else:
-                        plan = model_cache.predict_det(npz_path, obstacles=obs_for_model or None,
-                                                       zero_neighbors=hide_nb)
-                else:
-                    plan = model_cache.predict_det(npz_path, obstacles=obs_for_model or None,
-                                                   zero_neighbors=hide_nb)
+                # Use cached trajectory — the one the user is looking at
+                plan = None
+                if guided_cache and len(guided_cache) > 0:
+                    traj_xyh = np.array(guided_cache[0])  # (80, 3) [x, y, h]
+                    plan = np.column_stack([
+                        traj_xyh[:, :2],
+                        np.cos(traj_xyh[:, 2]),
+                        np.sin(traj_xyh[:, 2]),
+                    ]).astype(np.float32)
+                elif det_cache is not None:
+                    traj_xyh = np.array(det_cache)  # (80, 3) [x, y, h]
+                    plan = np.column_stack([
+                        traj_xyh[:, :2],
+                        np.cos(traj_xyh[:, 2]),
+                        np.sin(traj_xyh[:, 2]),
+                    ]).astype(np.float32)
+                if plan is None:
+                    return (tree, gr.update(),
+                            "Open loop requires a DET or guided trajectory — toggle Show DET or generate guided first",
+                            gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
                 n = min(n, plan.shape[0])
                 scene_ol = deepcopy(scene)
@@ -2034,7 +2027,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     gr.update(maximum=max_step, value=0), info, None, None)
 
         _sim_inputs = ([tree_state, step_slider, sim_steps, sim_mode, sim_use_guidance,
-                        show_gt, view_half, hide_neighbors, sim_open_loop]
+                        show_gt, view_half, hide_neighbors, sim_open_loop,
+                        guided_trajs_state, det_traj_state]
                        + [v for gname in ALL_GUIDANCE_NAMES
                           for v in (guidance_toggles[gname], guidance_scales[gname])])
         sim_btn.click(
