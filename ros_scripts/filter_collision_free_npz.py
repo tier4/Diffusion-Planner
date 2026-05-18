@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--time_stride",
         type=int,
-        default=1,
+        default=5,
         help="Check every N-th timestep of ego_agent_future (1 = all 80 steps).",
     )
     parser.add_argument(
