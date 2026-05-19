@@ -2079,6 +2079,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     n = min(n, plan.shape[0])
                     scene_ol = deepcopy(scene)
                     ego_id = scene_ol.ego_agent_id
+                    if map_builder is not None and ego_wp_arr is not None:
+                        from scenario_generation.simulate import _refresh_line_strings
+                        _refresh_line_strings(
+                            scene_ol, map_builder,
+                            ego_wp_arr[:2], ego_wp_arr,
+                        )
                     map_cache_ol = MapTensorCache(scene_ol.map_data)
 
                     for t in range(n):
