@@ -139,6 +139,23 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
     # Ego box at t=0
     ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20))
 
+    # Neighbors at t=0
+    nb_past = npz["neighbor_agents_past"]  # (N, 31, 11)
+    for i in range(nb_past.shape[0]):
+        nb = nb_past[i]
+        if np.abs(nb).sum() < 1e-6:
+            continue
+        nx, ny = nb[-1, 0], nb[-1, 1]
+        ncos, nsin = nb[-1, 2], nb[-1, 3]
+        nw, nl = nb[-1, 6], nb[-1, 7]
+        if nl < 0.1 or nw < 0.1:
+            continue
+        nro = nl * 0.175
+        nh = np.arctan2(nsin, ncos)
+        t_rot = mtransforms.Affine2D().rotate(nh).translate(nx, ny) + ax.transData
+        ax.add_patch(Rectangle((-nro, -nw / 2), nl, nw, lw=1.5, ec="#cc4400",
+                               fc="#ff8844", alpha=0.7, zorder=15, transform=t_rot))
+
     # Trajectory + footprints
     pl = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
     ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=2, alpha=0.5, zorder=10)
