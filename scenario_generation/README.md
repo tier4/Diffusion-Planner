@@ -314,7 +314,7 @@ python -m scenario_generation.tools.scene_branch_editor \
 3. Place a stopped vehicle with position, heading, dimensions, and history
    (how many past timesteps the model sees the obstacle)
 4. Preview the model's DET trajectory and guided trajectories
-5. Fork a branch and simulate N steps forward (closed-loop or open-loop)
+5. Click Simulate -- auto-forks from the current step and runs N steps forward (closed-loop or open-loop)
 6. Play back the simulation result, inspect with reward overlays
 7. Save for RSFT: save scene + guided trajectory for curated training
 8. Export NPZs: copy branch sequence with sequential naming
@@ -330,9 +330,10 @@ python -m scenario_generation.tools.scene_branch_editor \
 | Show DET | Deterministic model prediction (blue trajectory) |
 | Show Guided | Guided inference with configurable guidances + scales |
 | Dim/Zero Neighbors | Grey out neighbors visually + zero from model input |
-| Forward simulation | Closed-loop (re-inference per step) or open-loop (cached trajectory) |
+| Forward simulation | Auto-forks current branch, runs N steps closed-loop (re-inference per step) or open-loop (cached trajectory) |
 | Apply Guidance | Use guidance config during every simulation step |
-| Road border overlay | Distance line from ego to nearest border (from lanelet2 map) |
+| Anchor guidance | Click-to-select prototype gallery (16 motion modes); anchor index + prototypes path passed to anchor_following guidance |
+| Road border overlay | Distance from ego OBB perimeter to nearest border segment (uses `compute_road_border_penalty` from `reward.py`) |
 | Neighbor distance | OBB-OBB closest pair lines (uses `reward.py` primitives) |
 | Traj RB/NB Worst | Worst-case clearance along DET/guided trajectories with ego footprint |
 | Save for RSFT | Save scene NPZ with guided trajectory as `ego_agent_future`, validates against reward gates |
@@ -346,7 +347,7 @@ python -m scenario_generation.tools.scene_branch_editor \
 |---|---|
 | `--npz_dir` | Path to replay NPZ directory (required) |
 | `--model_path` | Model checkpoint for inference (optional, enables DET/guided/sim) |
-| `--ego_shape` | `wheelbase,length,width` — override when NPZ lacks `ego_shape` |
+| `--ego_shape` | `wheelbase,length,width` — required when NPZ lacks `ego_shape` field (e.g. psim NPZs) |
 | `--map_path` | Lanelet2 `.osm` map for road border overlays + RB gate scoring |
 | `--reward_config` | Reward config JSON for RSFT gate validation (uses canonical gates) |
 | `--port` | Gradio server port (default 7870) |
