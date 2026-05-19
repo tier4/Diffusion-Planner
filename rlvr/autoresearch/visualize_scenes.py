@@ -243,11 +243,12 @@ def main():
             # Overlay LoRA trajectory with footprints
             npz = np.load(scenes[si], allow_pickle=True)
             es = npz.get("ego_shape", None)
-            # ego_shape = [wheel_base, length, width]
-            wb = float(es[0]) if es is not None and len(es) >= 1 else 2.75
-            length = float(es[1]) if es is not None and len(es) >= 2 else 4.34
-            width = float(es[2]) if es is not None and len(es) >= 3 else 1.70
-            ro = length - wb  # rear overhang
+            if es is None or len(es) < 3:
+                raise ValueError(
+                    f"NPZ at '{scenes[si]}' is missing 'ego_shape'."
+                )
+            wb, length, width = float(es[0]), float(es[1]), float(es[2])
+            ro = (length - wb) / 2
             pl_l = np.linalg.norm(np.diff(traj_l[:, :2], axis=0), axis=1).sum()
             ax.plot(traj_l[:, 0], traj_l[:, 1], "-", color="orange", lw=2, alpha=0.6, zorder=12)
             ax.plot(traj_l[::3, 0], traj_l[::3, 1], "o", color="orange", ms=3.5, alpha=0.9, mew=0,
