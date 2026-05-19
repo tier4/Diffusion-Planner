@@ -1327,7 +1327,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             obs = _get_obstacles_at_step(tree, _safe_step(step))
             raw = model_cache.predict_det(npz_path, obstacles=obs or None,
                                           zero_neighbors=zero_neighbors,
-                                              ego_shape_override=tree.ego_shape)
+                                          ego_shape_override=tree.ego_shape)
+            return _traj_cos_sin_to_xyh(raw)
 
         def on_render(tree, step, view_r, selected_obs, gt_on, det_on, guided_on,
                       hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
@@ -1455,6 +1456,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 raw = model_cache.predict_det(npz_path, obstacles=obs or None,
                                               zero_neighbors=zero_neighbors,
                                               ego_shape_override=tree.ego_shape)
+                det_traj = _traj_cos_sin_to_xyh(raw)
             if guided_on and guidance_args_tuple:
                 cfgs = []
                 for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
@@ -1583,7 +1585,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 else:
                     raw = model_cache.predict_det(npz_path, obstacles=obs or None,
                                                   zero_neighbors=hide_nb,
-                                              ego_shape_override=tree.ego_shape)
+                                                  ego_shape_override=tree.ego_shape)
+                    det_traj = _traj_cos_sin_to_xyh(raw)
                     det_cache = det_traj
 
             raw_guided = model_cache.predict_guided(
