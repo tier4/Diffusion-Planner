@@ -2124,24 +2124,29 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         *guidance_args, progress=gr.Progress()):
             if model_cache is None or not model_cache.available:
                 return (tree, gr.update(), "No model loaded — pass `--model_path`",
-                        gr.update(), gr.update(), gr.update(), gr.update(), None, None)
-
-            branch = tree.branches[tree.active_branch]
-            # Get source scene from parent (not from any previous resim output)
-            saved_npz_dir = branch.npz_dir
-            branch.npz_dir = None  # temporarily clear so get_npz_sequence uses parent
-            seq = tree.get_npz_sequence(tree.active_branch)
-            branch.npz_dir = saved_npz_dir  # restore
-            if not seq:
-                return (tree, gr.update(), "No NPZ sequence",
-                        gr.update(), gr.update(), gr.update(), gr.update(), None, None)
+                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
             s = _safe_step(step)
+
+            # Auto-fork from current step before simulating
+            new_id = tree.fork_branch(tree.active_branch, s)
+            tree.active_branch = new_id
+            branch = tree.branches[new_id]
+
+            parent_branch = tree.branches[branch.parent_id]
+            saved_npz_dir = parent_branch.npz_dir
+            parent_branch.npz_dir = None
+            seq = tree.get_npz_sequence(branch.parent_id)
+            parent_branch.npz_dir = saved_npz_dir
+            if not seq:
+                return (tree, gr.update(), "No NPZ sequence", gr.update(),
+                        gr.update(), gr.update(), gr.update(), gr.update(),
+                        None, None)
+
             n = max(1, int(n_steps))
             npz_path = seq[min(s, len(seq) - 1)]
 
-            # Create clean output dir for this branch's resim (remove stale files)
-            out_dir = Path(tree.base_npz_dir).parent / f"branch_{tree.active_branch}_resim"
+            out_dir = Path(tree.base_npz_dir).parent / f"branch_{new_id}_resim"
             if out_dir.exists():
                 for old_f in out_dir.glob("*.npz"):
                     old_f.unlink()
@@ -2247,7 +2252,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                             np.cos(traj_xyh[:, 2]),
                             np.sin(traj_xyh[:, 2]),
                         ]).astype(np.float32)
-                    elif det_cache is not None:
+                    if plan is None and det_cache is not None:
                         traj_xyh = np.array(det_cache)
                         plan = np.column_stack([
                             traj_xyh[:, :2],
@@ -2257,7 +2262,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     if plan is None:
                         return (tree, gr.update(),
                                 "Open loop requires a DET or guided trajectory — toggle Show DET or generate guided first",
-                                gr.update(), gr.update(), gr.update(), gr.update(), None, None)
+                                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
                     n = min(n, plan.shape[0])
                     scene_ol = deepcopy(scene)
@@ -2327,8 +2332,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
             b_info = _branch_info_md(tree, tree.active_branch)
             mods = _modifications_md(tree, tree.active_branch)
-            status = f"Simulated **{n}** steps ({advance_mode}). Output: `{out_dir}`"
+            choices = list(tree.branches.keys())
+            status = f"Simulated **{n}** steps ({advance_mode}) on branch `{new_id}`. Output: `{out_dir}`"
             return (tree, img, status, b_info, mods,
+                    gr.update(choices=choices, value=new_id),
                     gr.update(maximum=max_step, value=0), info, None, None)
 
         _sim_inputs = ([tree_state, step_slider, sim_steps, sim_mode, sim_use_guidance,
@@ -2341,7 +2348,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             on_simulate,
             _sim_inputs,
             [tree_state, scene_image, sim_status, branch_info, mods_display,
-             step_slider, step_info, det_traj_state, guided_trajs_state],
+             branch_dropdown, step_slider, step_info, det_traj_state, guided_trajs_state],
         )
 
         # Play button — pre-renders frames as PIL images for smooth playback
