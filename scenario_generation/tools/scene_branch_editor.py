@@ -116,6 +116,8 @@ class _ModelCache:
         obstacles: list | None = None,
         zero_neighbors: bool = False,
         ego_shape_override: tuple[float, ...] | None = None,
+        anchor_index: int = 0,
+        anchor_path: str | None = None,
     ) -> np.ndarray | None:
         """Run guided inference. Returns (n_samples, 80, 4)."""
         self._ensure_loaded()
@@ -147,6 +149,9 @@ class _ModelCache:
             if name == "speed":
                 params["v_high"] = speed * 1.2
                 params["v_low"] = max(0.0, speed * 0.5)
+            if name == "anchor_following" and anchor_path:
+                params["prototypes_path"] = anchor_path
+                params["anchor_index"] = int(anchor_index)
             fns.append(GuidanceConfig(name=name, enabled=True, scale=scale, params=params))
 
         composer = None
@@ -306,7 +311,7 @@ def render_scene_at_step(
     fig.patch.set_facecolor("#f8f8f8")
 
     # Lane network
-    draw_lanes(ax, scene.map_data, alpha=0.5)
+    draw_lanes(ax, scene.map_data, alpha=0.7)
 
     # Road borders (red) — from NPZ if available
     draw_road_borders(ax, scene.map_data)
@@ -1116,6 +1121,27 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                     minimum=_min, maximum=10.0, value=2.0, step=0.5,
                                     show_label=False, interactive=_has_model,
                                 )
+                    _default_proto = str(Path(__file__).resolve().parent.parent.parent
+                                         / "guidance_gui" / "prototypes_k16.npy")
+                    with gr.Accordion("Anchor Prototypes", open=False):
+                        with gr.Row():
+                            anchor_index_sl = gr.Slider(
+                                minimum=0, maximum=15, value=0, step=1,
+                                label="Anchor Index", interactive=_has_model, scale=1,
+                            )
+                            anchor_path_tb = gr.Textbox(
+                                value=_default_proto,
+                                label="Prototypes Path", interactive=_has_model, scale=2,
+                            )
+                        from guidance_gui.visualization import render_prototype_gallery
+                        _init_gallery = render_prototype_gallery(_default_proto) or []
+                        anchor_gallery = gr.Gallery(
+                            value=_init_gallery,
+                            columns=8, rows=2, height=220,
+                            allow_preview=False,
+                            selected_index=0 if _init_gallery else None,
+                            label="Click to select anchor",
+                        )
                     with gr.Row():
                         guided_noise = gr.Slider(
                             minimum=0.0, maximum=5.0, value=0.0, step=0.1,
@@ -1465,12 +1491,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     if enabled:
                         cfgs.append((gname, float(scale)))
                 if cfgs:
-                    noise = float(guidance_args_tuple[-2])
-                    k = int(guidance_args_tuple[-1])
+                    noise = float(guidance_args_tuple[-4])
+                    k = int(guidance_args_tuple[-3])
+                    a_idx = int(guidance_args_tuple[-2])
+                    a_path = str(guidance_args_tuple[-1])
                     raw_g = model_cache.predict_guided(
                         npz_path, cfgs, noise_scale=noise, n_samples=max(1, k),
                         zero_neighbors=zero_neighbors,
                         ego_shape_override=tree.ego_shape,
+                        anchor_index=a_idx, anchor_path=a_path,
                     )
                     guided = [_traj_cos_sin_to_xyh(raw_g[j]) for j in range(raw_g.shape[0])]
             return det_traj, guided
@@ -1561,6 +1590,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         def on_generate_guided(tree, step, gt_on, view_r, selected_obs,
                                noise, k, det_on, det_cache, hide_nb,
                                rb_on, nb_on, traj_rb_on, traj_nb_on,
+                               anchor_idx, anchor_proto_path,
                                *guidance_args):
             if model_cache is None or not model_cache.available:
                 return gr.update(), "No model loaded", det_cache, None
@@ -1593,6 +1623,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 npz_path, cfgs, noise_scale=float(noise), n_samples=int(k),
                 obstacles=obs or None, zero_neighbors=hide_nb,
                 ego_shape_override=tree.ego_shape,
+                anchor_index=int(anchor_idx), anchor_path=str(anchor_proto_path),
             )
             guided_list = [_traj_cos_sin_to_xyh(raw_guided[i]) for i in range(raw_guided.shape[0])]
 
@@ -1701,7 +1732,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         # Guidance toggle+scale inputs for recomputation, plus noise and K at end
         _g_inputs = ([v for gname in ALL_GUIDANCE_NAMES
                        for v in (guidance_toggles[gname], guidance_scales[gname])]
-                     + [guided_noise, guided_k])
+                     + [guided_noise, guided_k, anchor_index_sl, anchor_path_tb])
         _overlay_inputs = [show_guided, hide_neighbors, show_rb_dist, show_nb_dist,
                            show_traj_rb, show_traj_nb]
 
@@ -1805,13 +1836,32 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         guidance_btn_inputs = ([tree_state, step_slider, show_gt, view_half,
                                 selected_obstacle_state, guided_noise, guided_k,
                                 show_det, det_traj_state, hide_neighbors,
-                                show_rb_dist, show_nb_dist, show_traj_rb, show_traj_nb]
+                                show_rb_dist, show_nb_dist, show_traj_rb, show_traj_nb,
+                                anchor_index_sl, anchor_path_tb]
                                + [v for gname in ALL_GUIDANCE_NAMES
                                   for v in (guidance_toggles[gname], guidance_scales[gname])])
         generate_guided_btn.click(
             on_generate_guided,
             guidance_btn_inputs,
             [scene_image, step_info, det_traj_state, guided_trajs_state],
+        )
+
+        # Anchor gallery: click selects index, path change reloads gallery
+        def _on_anchor_select(evt: gr.SelectData):
+            return int(evt.index)
+
+        anchor_gallery.select(_on_anchor_select, None, anchor_index_sl)
+
+        def _on_anchor_path_change(path):
+            from guidance_gui.visualization import render_prototype_gallery as _rpg
+            imgs = _rpg(path) or []
+            k = len(imgs)
+            return (gr.update(value=imgs),
+                    gr.update(maximum=max(0, k - 1), value=0))
+
+        anchor_path_tb.change(
+            _on_anchor_path_change, [anchor_path_tb],
+            [anchor_gallery, anchor_index_sl],
         )
 
         _branch_switch_outputs = [tree_state, scene_image, step_info, branch_info, mods_display,
@@ -2153,6 +2203,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     GuidanceConfig,
                     GuidanceSetConfig,
                 )
+                _sim_anchor_idx = int(guidance_args[-2]) if len(guidance_args) > 2 else 0
+                _sim_anchor_path = str(guidance_args[-1]) if len(guidance_args) > 1 else ""
                 fns = []
                 for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
                     enabled = guidance_args[gi * 2]
@@ -2165,6 +2217,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 spd = float(np.linalg.norm(ego.current_velocity))
                                 params["v_high"] = spd * 1.2
                                 params["v_low"] = max(0.0, spd * 0.5)
+                        if gname == "anchor_following" and _sim_anchor_path:
+                            params["prototypes_path"] = _sim_anchor_path
+                            params["anchor_index"] = _sim_anchor_idx
                         fns.append(GuidanceConfig(name=gname, enabled=True,
                                                    scale=float(scale), params=params))
                 if fns:
@@ -2280,7 +2335,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         show_gt, view_half, hide_neighbors, sim_open_loop,
                         guided_trajs_state, det_traj_state]
                        + [v for gname in ALL_GUIDANCE_NAMES
-                          for v in (guidance_toggles[gname], guidance_scales[gname])])
+                          for v in (guidance_toggles[gname], guidance_scales[gname])]
+                       + [anchor_index_sl, anchor_path_tb])
         sim_btn.click(
             on_simulate,
             _sim_inputs,
