@@ -87,7 +87,7 @@ class SceneTree:
         import numpy as np
         with np.load(npz_files[0]) as first:
             if "ego_shape" in first:
-                ego_shape = tuple(float(v) for v in first["ego_shape"])
+                ego_shape = tuple(float(v) for v in np.asarray(first["ego_shape"]).reshape(-1)[:3])
             else:
                 raise ValueError(
                     f"First NPZ '{npz_files[0]}' is missing 'ego_shape'. "
@@ -290,7 +290,7 @@ class SceneTree:
         if "ego_shape" not in data:
             raise ValueError(
                 f"Tree JSON '{path}' is missing 'ego_shape'. "
-                "Re-save with a newer editor or pass --ego_shape WB,L,W."
+                "Re-save the tree with a newer editor."
             )
         return cls(
             version=data.get("version", 1),

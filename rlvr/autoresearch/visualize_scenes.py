@@ -150,7 +150,7 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
         nw, nl = nb[-1, 6], nb[-1, 7]
         if nl < 0.1 or nw < 0.1:
             continue
-        nro = nl * 0.175
+        nro = nl * 0.175  # ~(1 - 0.65) / 2; neighbors lack wheelbase, assume wb/l ~ 0.65
         nh = np.arctan2(nsin, ncos)
         t_rot = mtransforms.Affine2D().rotate(nh).translate(nx, ny) + ax.transData
         ax.add_patch(Rectangle((-nro, -nw / 2), nl, nw, lw=1.5, ec="#cc4400",
