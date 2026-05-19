@@ -93,12 +93,15 @@ class _ModelCache:
 
     @torch.no_grad()
     def predict_det(self, npz_path: str, obstacles: list | None = None,
-                    zero_neighbors: bool = False) -> np.ndarray | None:
+                    zero_neighbors: bool = False,
+                    ego_shape_override: tuple[float, ...] | None = None,
+                    ) -> np.ndarray | None:
         """Run deterministic inference. Returns (80, 4) [x,y,cos_h,sin_h] or None."""
         self._ensure_loaded()
         from guidance_gui.generate_samples import generate_samples
         data = self._load_npz(npz_path, obstacles=obstacles,
-                              zero_neighbors=zero_neighbors)
+                              zero_neighbors=zero_neighbors,
+                              ego_shape_override=ego_shape_override)
         trajs = generate_samples(
             self._model, self._model_args, data,
             noise_scale=0.0, n_samples=1, composer=None,
@@ -112,6 +115,9 @@ class _ModelCache:
         noise_scale: float = 1.0, n_samples: int = 1,
         obstacles: list | None = None,
         zero_neighbors: bool = False,
+        ego_shape_override: tuple[float, ...] | None = None,
+        anchor_index: int = 0,
+        anchor_path: str | None = None,
     ) -> np.ndarray | None:
         """Run guided inference. Returns (n_samples, 80, 4)."""
         self._ensure_loaded()
@@ -121,7 +127,8 @@ class _ModelCache:
         from guidance_gui.generate_samples import generate_samples
 
         data = self._load_npz(npz_path, obstacles=obstacles,
-                              zero_neighbors=zero_neighbors)
+                              zero_neighbors=zero_neighbors,
+                              ego_shape_override=ego_shape_override)
 
         # Compute DET trajectory first — needed as reference_trajectory for
         # lateral/longitudinal guidance (same pattern as trajectory_ranker_gui)
@@ -142,13 +149,19 @@ class _ModelCache:
             if name == "speed":
                 params["v_high"] = speed * 1.2
                 params["v_low"] = max(0.0, speed * 0.5)
+            if name == "anchor_following" and anchor_path:
+                params["prototypes_path"] = anchor_path
+                params["anchor_index"] = int(anchor_index)
             fns.append(GuidanceConfig(name=name, enabled=True, scale=scale, params=params))
 
-        if not fns:
+        composer = None
+        if fns:
+            set_cfg = GuidanceSetConfig(functions=fns, global_scale=1.0)
+            composer = GuidanceComposer(set_cfg)
+
+        if not fns and noise_scale == 0.0:
             return det_raw
 
-        set_cfg = GuidanceSetConfig(functions=fns, global_scale=1.0)
-        composer = GuidanceComposer(set_cfg)
         return generate_samples(
             self._model, self._model_args, data,
             noise_scale=noise_scale, n_samples=n_samples,
@@ -156,9 +169,12 @@ class _ModelCache:
         )
 
     def _load_npz(self, npz_path: str, obstacles: list | None = None,
-                  zero_neighbors: bool = False) -> dict[str, torch.Tensor]:
+                  zero_neighbors: bool = False,
+                  ego_shape_override: tuple[float, ...] | None = None,
+                  ) -> dict[str, torch.Tensor]:
         from preference_optimization.utils import load_npz_data
-        data = load_npz_data(npz_path, self._device)
+        data = load_npz_data(npz_path, self._device,
+                             ego_shape_override=ego_shape_override)
         pnn = self._model_args.predicted_neighbor_num
         if zero_neighbors:
             for k in ("neighbor_agents_past", "neighbor_agents_future"):
@@ -295,7 +311,7 @@ def render_scene_at_step(
     fig.patch.set_facecolor("#f8f8f8")
 
     # Lane network
-    draw_lanes(ax, scene.map_data, alpha=0.5)
+    draw_lanes(ax, scene.map_data, alpha=0.7)
 
     # Road borders (red) — from NPZ if available
     draw_road_borders(ax, scene.map_data)
@@ -498,25 +514,85 @@ def render_scene_at_step(
         ego_h = ego.current_heading
 
         if show_rb_dist:
-            from scenario_generation.replay import _nearest_border_point
-            border_polylines = _extract_border_polylines(scene)
-            # Fall back to map-derived borders (already in ego frame)
-            if not border_polylines and _ego_frame_borders:
-                border_polylines = _ego_frame_borders
-            bp = _nearest_border_point(ego_pos, border_polylines)
-            if bp is not None:
-                dist = float(np.linalg.norm(bp - ego_pos))
-                color = "#dd2222" if dist < 0.5 else "#ff8800" if dist < 1.0 else "#22bb22"
-                ax.plot([ego_pos[0], bp[0]], [ego_pos[1], bp[1]],
-                        "-", color=color, lw=2.5, alpha=0.9, zorder=35)
-                ax.plot(bp[0], bp[1], "o", color=color, ms=6, zorder=36)
-                mid_x, mid_y = (ego_pos[0] + bp[0]) / 2, (ego_pos[1] + bp[1]) / 2
-                ax.annotate(
-                    f"RB {dist:.2f}m", (mid_x, mid_y),
-                    fontsize=8, fontweight="bold", color=color,
-                    ha="center", va="bottom", zorder=37,
-                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85),
+            import torch as _t_rb
+            from rlvr.reward import compute_road_border_penalty, RewardConfig
+            ego_traj_1 = _t_rb.tensor([[[
+                float(ego_pos[0]), float(ego_pos[1]),
+                float(np.cos(ego_h)), float(np.sin(ego_h)),
+            ]]], dtype=_t_rb.float32)
+            ego_shape_t = _t_rb.tensor([
+                float(ego.wheelbase), float(ego.length), float(ego.width),
+            ], dtype=_t_rb.float32)
+            data_dict = {}
+            if hasattr(scene, "map_data") and scene.map_data is not None:
+                md = scene.map_data
+                if hasattr(md, "line_strings") and md.line_strings is not None:
+                    data_dict["line_strings"] = _t_rb.from_numpy(
+                        md.line_strings.astype(np.float32)
+                    )
+            if data_dict:
+                from rlvr.reward import _point_to_segments_dist
+                _, _, _, _, _, per_t_min = compute_road_border_penalty(
+                    ego_traj_1, ego_shape_t, data_dict, RewardConfig(),
                 )
+                dist = float(per_t_min[0, 0].item())
+                if dist < 50.0:
+                    color = "#dd2222" if dist < 0.5 else "#ff8800" if dist < 1.0 else "#22bb22"
+                    # Find closest ego perimeter point and border segment point
+                    ls_t = data_dict["line_strings"]
+                    if ls_t.dim() == 3:
+                        ls_t = ls_t.unsqueeze(0)
+                    border_flag = ls_t[0, :, :, 3] if ls_t.shape[-1] >= 4 else None
+                    if border_flag is not None:
+                        border_xy = ls_t[0, :, :, :2]
+                        is_border = border_flag > 0.5
+                        has_coords = border_xy.norm(dim=-1) > 1e-3
+                        valid = is_border & has_coords
+                        valid_pair = valid[:, :-1] & valid[:, 1:]
+                        idx = _t_rb.where(valid_pair.reshape(-1))[0]
+                        if idx.shape[0] > 0:
+                            seg_p1 = border_xy[:, :-1].reshape(-1, 2)[idx]
+                            seg_p2 = border_xy[:, 1:].reshape(-1, 2)[idx]
+                            wb_f = float(ego.wheelbase)
+                            ln_f = float(ego.length)
+                            wd_f = float(ego.width)
+                            ro_f = (ln_f - wb_f) / 2
+                            half_l = ln_f / 2
+                            corners = [
+                                (-ro_f, -wd_f/2), (-ro_f, 0.0), (-ro_f, wd_f/2),
+                                (ln_f - ro_f, -wd_f/2), (ln_f - ro_f, 0.0), (ln_f - ro_f, wd_f/2),
+                                (half_l - ro_f, -wd_f/2), (half_l - ro_f, wd_f/2),
+                            ]
+                            cos_h = float(np.cos(ego_h))
+                            sin_h = float(np.sin(ego_h))
+                            perim_pts = []
+                            for lx, ly in corners:
+                                wx = ego_pos[0] + cos_h * lx - sin_h * ly
+                                wy = ego_pos[1] + sin_h * lx + cos_h * ly
+                                perim_pts.append([wx, wy])
+                            perim_t = _t_rb.tensor(perim_pts, dtype=_t_rb.float32)
+                            d_mat = _point_to_segments_dist(perim_t, seg_p1, seg_p2)
+                            min_per_pt = d_mat.min(dim=1)
+                            best_pt_idx = min_per_pt.values.argmin().item()
+                            best_seg_idx = min_per_pt.indices[best_pt_idx].item()
+                            ep = perim_pts[best_pt_idx]
+                            s1 = seg_p1[best_seg_idx].numpy()
+                            s2 = seg_p2[best_seg_idx].numpy()
+                            p = np.array(ep, dtype=np.float64)
+                            d_seg = s2 - s1
+                            t_val = max(0.0, min(1.0, float(np.dot(p - s1, d_seg) / max(np.dot(d_seg, d_seg), 1e-12))))
+                            bp = s1 + t_val * d_seg
+                            ax.plot([ep[0], bp[0]], [ep[1], bp[1]],
+                                    "-", color=color, lw=2.5, alpha=0.9, zorder=35)
+                            ax.plot(bp[0], bp[1], "o", color=color, ms=6, zorder=36)
+                    mid_x = float(ego_pos[0])
+                    mid_y = float(ego_pos[1]) + 1.5
+                    ax.annotate(
+                        f"RB {dist:.2f}m", (mid_x, mid_y),
+                        fontsize=8, fontweight="bold", color=color,
+                        ha="center", va="bottom", zorder=37,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85),
+                    )
 
         if show_nb_dist:
             import torch as _torch
@@ -601,32 +677,84 @@ def render_scene_at_step(
             if (traj_pts.shape[0] - 1) not in idxs:
                 idxs.append(traj_pts.shape[0] - 1)
 
-            if show_traj_rb and border_polylines_for_traj:
-                from scenario_generation.replay import _nearest_border_point
-                worst_rb_dist, worst_rb_idx = float("inf"), 0
-                worst_rb_bp = None
-                for ti in idxs:
-                    px, py = float(traj_pts[ti, 0]), float(traj_pts[ti, 1])
-                    bp = _nearest_border_point(np.array([px, py]), border_polylines_for_traj)
-                    if bp is not None:
-                        d = float(np.linalg.norm(bp - np.array([px, py])))
-                        if d < worst_rb_dist:
-                            worst_rb_dist, worst_rb_idx, worst_rb_bp = d, ti, bp
-                if worst_rb_bp is not None and worst_rb_dist < 50.0:
-                    wx, wy = float(traj_pts[worst_rb_idx, 0]), float(traj_pts[worst_rb_idx, 1])
-                    wh = float(traj_pts[worst_rb_idx, 2])
-                    dc = "#dd2222" if worst_rb_dist < 0.5 else "#ff8800" if worst_rb_dist < 1.0 else "#22bb22"
-                    draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, traj_color,
-                                   alpha=0.4, lw=2.0, zorder=38)
-                    ax.plot([wx, worst_rb_bp[0]], [wy, worst_rb_bp[1]],
-                            "-", color=dc, lw=2.5, alpha=0.9, zorder=39)
-                    ax.plot(worst_rb_bp[0], worst_rb_bp[1], "o", color=dc, ms=5, zorder=39)
-                    ax.annotate(
-                        f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
-                        (wx, wy), fontsize=7, fontweight="bold", color=dc,
-                        ha="center", va="top", xytext=(0, -8),
-                        textcoords="offset points", zorder=40,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85),
+            if show_traj_rb:
+                import torch as _t_trb
+                from rlvr.reward import compute_road_border_penalty, RewardConfig
+                _trb_data = {}
+                if hasattr(scene, "map_data") and scene.map_data is not None:
+                    md = scene.map_data
+                    if hasattr(md, "line_strings") and md.line_strings is not None:
+                        _trb_data["line_strings"] = _t_trb.from_numpy(
+                            md.line_strings.astype(np.float32))
+                if _trb_data:
+                    T_tr = traj_pts.shape[0]
+                    ego_traj_t = _t_trb.zeros(1, T_tr, 4)
+                    ego_traj_t[0, :, 0] = _t_trb.from_numpy(traj_pts[:, 0].astype(np.float32))
+                    ego_traj_t[0, :, 1] = _t_trb.from_numpy(traj_pts[:, 1].astype(np.float32))
+                    ego_traj_t[0, :, 2] = _t_trb.from_numpy(np.cos(traj_pts[:, 2]).astype(np.float32))
+                    ego_traj_t[0, :, 3] = _t_trb.from_numpy(np.sin(traj_pts[:, 2]).astype(np.float32))
+                    ego_shape_t = _t_trb.tensor([
+                        float(ego.wheelbase), float(ego.length), float(ego.width),
+                    ], dtype=_t_trb.float32)
+                    _, _, _, _, _, per_t_min = compute_road_border_penalty(
+                        ego_traj_t, ego_shape_t, _trb_data, RewardConfig())
+                    per_t = per_t_min[0]  # (T,)
+                    worst_rb_idx = int(per_t.argmin().item())
+                    worst_rb_dist = float(per_t[worst_rb_idx].item())
+                    if worst_rb_dist < 50.0:
+                        wx = float(traj_pts[worst_rb_idx, 0])
+                        wy = float(traj_pts[worst_rb_idx, 1])
+                        wh = float(traj_pts[worst_rb_idx, 2])
+                        dc = "#dd2222" if worst_rb_dist < 0.5 else "#ff8800" if worst_rb_dist < 1.0 else "#22bb22"
+                        draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, traj_color,
+                                       alpha=0.4, lw=2.0, zorder=38)
+                        from rlvr.reward import _point_to_segments_dist as _ptsd_trb
+                        ls_trb = _trb_data["line_strings"]
+                        if ls_trb.dim() == 3:
+                            ls_trb = ls_trb.unsqueeze(0)
+                        bf = ls_trb[0, :, :, 3] if ls_trb.shape[-1] >= 4 else None
+                        if bf is not None:
+                            bxy = ls_trb[0, :, :, :2]
+                            vld = (bf > 0.5) & (bxy.norm(dim=-1) > 1e-3)
+                            vpair = vld[:, :-1] & vld[:, 1:]
+                            vidx = _t_trb.where(vpair.reshape(-1))[0]
+                            if vidx.shape[0] > 0:
+                                sp1 = bxy[:, :-1].reshape(-1, 2)[vidx]
+                                sp2 = bxy[:, 1:].reshape(-1, 2)[vidx]
+                                wb_t = float(ego.wheelbase)
+                                ro_t = (ego_len - wb_t) / 2
+                                cos_wh = float(np.cos(wh))
+                                sin_wh = float(np.sin(wh))
+                                half_lt = ego_len / 2
+                                corners_t = [
+                                    (-ro_t, -ego_wid/2), (-ro_t, 0.0), (-ro_t, ego_wid/2),
+                                    (ego_len - ro_t, -ego_wid/2), (ego_len - ro_t, 0.0), (ego_len - ro_t, ego_wid/2),
+                                    (half_lt - ro_t, -ego_wid/2), (half_lt - ro_t, ego_wid/2),
+                                ]
+                                pp = []
+                                for lx, ly in corners_t:
+                                    pp.append([wx + cos_wh*lx - sin_wh*ly,
+                                               wy + sin_wh*lx + cos_wh*ly])
+                                pp_t = _t_trb.tensor(pp, dtype=_t_trb.float32)
+                                dm = _ptsd_trb(pp_t, sp1, sp2)
+                                mpp = dm.min(dim=1)
+                                bpi = mpp.values.argmin().item()
+                                bsi = mpp.indices[bpi].item()
+                                ep_t = pp[bpi]
+                                s1_t = sp1[bsi].numpy()
+                                s2_t = sp2[bsi].numpy()
+                                d_s = s2_t - s1_t
+                                tv = max(0.0, min(1.0, float(np.dot(np.array(ep_t) - s1_t, d_s) / max(np.dot(d_s, d_s), 1e-12))))
+                                bp_t = s1_t + tv * d_s
+                                ax.plot([ep_t[0], bp_t[0]], [ep_t[1], bp_t[1]],
+                                        "-", color=dc, lw=2.5, alpha=0.9, zorder=39)
+                                ax.plot(bp_t[0], bp_t[1], "o", color=dc, ms=5, zorder=39)
+                        ax.annotate(
+                            f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
+                            (wx, wy), fontsize=7, fontweight="bold", color=dc,
+                            ha="center", va="top", xytext=(0, -8),
+                            textcoords="offset points", zorder=40,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85),
                     )
 
             _all_nb_corners = _placed_obs_corners[:]
@@ -923,12 +1051,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     place_btn = gr.Button("Place Obstacle", variant="primary")
                     preview_btn = gr.Button("Preview", variant="secondary")
 
-                gr.Markdown("### View")
-                view_half = gr.Slider(
-                    minimum=10, maximum=200, value=50, step=5,
-                    label="View radius (m)",
-                )
-
                 gr.Markdown("### Crop")
                 with gr.Row():
                     crop_start = gr.Number(label="Start", value=0, precision=0)
@@ -946,12 +1068,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     height=600,
                 )
 
-                # Timeline playback
+                # Timeline playback + view
                 with gr.Row():
                     btn_play = gr.Button("Play ▶", size="sm", min_width=60)
                     btn_stop = gr.Button("Stop ■", size="sm", min_width=60, variant="stop")
                     play_fps = gr.Slider(minimum=1, maximum=30, value=10, step=1,
                                          label="FPS", scale=1)
+                    view_half = gr.Slider(minimum=10, maximum=200, value=50, step=5,
+                                          label="View radius (m)", scale=1)
 
                 _has_model = model_cache is not None and model_cache.available
 
@@ -997,6 +1121,27 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                     minimum=_min, maximum=10.0, value=2.0, step=0.5,
                                     show_label=False, interactive=_has_model,
                                 )
+                    _default_proto = str(Path(__file__).resolve().parent.parent.parent
+                                         / "guidance_gui" / "prototypes_k16.npy")
+                    with gr.Accordion("Anchor Prototypes", open=False):
+                        with gr.Row():
+                            anchor_index_sl = gr.Slider(
+                                minimum=0, maximum=15, value=0, step=1,
+                                label="Anchor Index", interactive=_has_model, scale=1,
+                            )
+                            anchor_path_tb = gr.Textbox(
+                                value=_default_proto,
+                                label="Prototypes Path", interactive=_has_model, scale=2,
+                            )
+                        from guidance_gui.visualization import render_prototype_gallery
+                        _init_gallery = render_prototype_gallery(_default_proto) or []
+                        anchor_gallery = gr.Gallery(
+                            value=_init_gallery,
+                            columns=8, rows=2, height=220,
+                            allow_preview=False,
+                            selected_index=0 if _init_gallery else None,
+                            label="Click to select anchor",
+                        )
                     with gr.Row():
                         guided_noise = gr.Slider(
                             minimum=0.0, maximum=5.0, value=0.0, step=0.1,
@@ -1152,8 +1297,20 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 if gt_traj_render is None and len(seq) > step + 1:
                     gt_traj_render = _reconstruct_gt_from_sequence(seq, step, max_future=80)
 
-            # Ego world pose for map border transform
-            ego_wp = _recover_ego_world_pose(seq, step) if map_borders else None
+            # Ego world pose for map border transform + line_strings refresh
+            ego_wp = _recover_ego_world_pose(seq, step) if (map_borders or map_builder) else None
+
+            # Refresh line_strings from map if source NPZ lacks border flags
+            if (scene.map_data is not None
+                    and scene.map_data.line_strings is not None
+                    and scene.map_data.line_strings.shape[-1] < 4
+                    and map_builder is not None and ego_wp is not None):
+                from scenario_generation.simulate import _refresh_line_strings
+                _refresh_line_strings(
+                    scene, map_builder,
+                    np.array(ego_wp[:2], dtype=np.float64),
+                    np.array(ego_wp, dtype=np.float64),
+                )
 
             fig = render_scene_at_step(
                 scene, obstacles_at_step, selected_obs,
@@ -1195,7 +1352,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 return None
             obs = _get_obstacles_at_step(tree, _safe_step(step))
             raw = model_cache.predict_det(npz_path, obstacles=obs or None,
-                                          zero_neighbors=zero_neighbors)
+                                          zero_neighbors=zero_neighbors,
+                                          ego_shape_override=tree.ego_shape)
             return _traj_cos_sin_to_xyh(raw)
 
         def on_render(tree, step, view_r, selected_obs, gt_on, det_on, guided_on,
@@ -1251,7 +1409,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             return img, info, s, det_traj, guided
-        def on_preview(tree, step, view_r, selected_obs, x, y, yaw, length, width, gt_on, det_cache, guided_cache):
+        def on_preview(tree, step, view_r, selected_obs, x, y, yaw, length, width,
+                       gt_on, det_cache, guided_cache,
+                       rb_on, nb_on, hide_nb, traj_rb_on, traj_nb_on):
             preview = ObstaclePlacement(
                 label="(preview)", timestep=_safe_step(step),
                 x=round(float(x), 1), y=round(float(y), 1),
@@ -1260,7 +1420,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             )
             img, info = _render(tree, _safe_step(step), view_r, selected_obs, preview,
                                 show_gt_val=gt_on, det_traj=det_cache,
-                                guided_trajs=guided_cache)
+                                guided_trajs=guided_cache,
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             return img, info
 
         def _obs_choices(tree):
@@ -1318,7 +1480,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 return det_traj, guided
             if det_on:
                 raw = model_cache.predict_det(npz_path, obstacles=obs or None,
-                                              zero_neighbors=zero_neighbors)
+                                              zero_neighbors=zero_neighbors,
+                                              ego_shape_override=tree.ego_shape)
                 det_traj = _traj_cos_sin_to_xyh(raw)
             if guided_on and guidance_args_tuple:
                 cfgs = []
@@ -1328,12 +1491,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     if enabled:
                         cfgs.append((gname, float(scale)))
                 if cfgs:
-                    noise = float(guidance_args_tuple[-2])
-                    k = int(guidance_args_tuple[-1])
+                    noise = float(guidance_args_tuple[-4])
+                    k = int(guidance_args_tuple[-3])
+                    a_idx = int(guidance_args_tuple[-2])
+                    a_path = str(guidance_args_tuple[-1])
                     raw_g = model_cache.predict_guided(
                         npz_path, cfgs, noise_scale=noise, n_samples=max(1, k),
-                        obstacles=obs or None,
                         zero_neighbors=zero_neighbors,
+                        ego_shape_override=tree.ego_shape,
+                        anchor_index=a_idx, anchor_path=a_path,
                     )
                     guided = [_traj_cos_sin_to_xyh(raw_g[j]) for j in range(raw_g.shape[0])]
             return det_traj, guided
@@ -1361,11 +1527,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return (tree, img, info, mods, label, det_traj, guided,
                     gr.update(choices=choices, value=label))
 
-        def on_select_obstacle(tree, label, step, view_r, gt_on, det_on, det_cache, guided_cache):
+        def on_select_obstacle(tree, label, step, view_r, gt_on, det_on, det_cache, guided_cache,
+                               rb_on, nb_on, hide_nb, traj_rb_on, traj_nb_on):
             obs = _find_obs(tree, label)
             s = _safe_step(step)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
-                                det_traj=det_cache, guided_trajs=guided_cache)
+                                det_traj=det_cache, guided_trajs=guided_cache,
+                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             if obs:
                 return (img, info, label,
                         obs.x, obs.y, obs.yaw_deg, obs.length, obs.width,
@@ -1420,6 +1589,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         def on_generate_guided(tree, step, gt_on, view_r, selected_obs,
                                noise, k, det_on, det_cache, hide_nb,
+                               rb_on, nb_on, traj_rb_on, traj_nb_on,
+                               anchor_idx, anchor_proto_path,
                                *guidance_args):
             if model_cache is None or not model_cache.available:
                 return gr.update(), "No model loaded", det_cache, None
@@ -1443,19 +1614,25 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     det_traj = det_cache
                 else:
                     raw = model_cache.predict_det(npz_path, obstacles=obs or None,
-                                                  zero_neighbors=hide_nb)
+                                                  zero_neighbors=hide_nb,
+                                                  ego_shape_override=tree.ego_shape)
                     det_traj = _traj_cos_sin_to_xyh(raw)
                     det_cache = det_traj
 
             raw_guided = model_cache.predict_guided(
                 npz_path, cfgs, noise_scale=float(noise), n_samples=int(k),
                 obstacles=obs or None, zero_neighbors=hide_nb,
+                ego_shape_override=tree.ego_shape,
+                anchor_index=int(anchor_idx), anchor_path=str(anchor_proto_path),
             )
             guided_list = [_traj_cos_sin_to_xyh(raw_guided[i]) for i in range(raw_guided.shape[0])]
 
             img, info = _render(tree, _safe_step(step), view_r, selected_obs,
                                 show_gt_val=gt_on, det_traj=det_traj,
-                                guided_trajs=guided_list, hide_nb=hide_nb)
+                                guided_trajs=guided_list,
+                                rb_dist=rb_on, nb_dist=nb_on,
+                                hide_nb=hide_nb,
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             return img, info, det_cache, guided_list
 
         def on_branch_change(tree, branch_id, step, view_r, selected_obs, gt_on):
@@ -1555,7 +1732,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         # Guidance toggle+scale inputs for recomputation, plus noise and K at end
         _g_inputs = ([v for gname in ALL_GUIDANCE_NAMES
                        for v in (guidance_toggles[gname], guidance_scales[gname])]
-                     + [guided_noise, guided_k])
+                     + [guided_noise, guided_k, anchor_index_sl, anchor_path_tb])
         _overlay_inputs = [show_guided, hide_neighbors, show_rb_dist, show_nb_dist,
                            show_traj_rb, show_traj_nb]
 
@@ -1614,7 +1791,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             on_preview,
             [tree_state, step_slider, view_half, selected_obstacle_state,
              obs_x, obs_y, obs_yaw, obs_length, obs_width, show_gt,
-             det_traj_state, guided_trajs_state],
+             det_traj_state, guided_trajs_state,
+             show_rb_dist, show_nb_dist, hide_neighbors, show_traj_rb, show_traj_nb],
             [scene_image, step_info],
         )
 
@@ -1631,7 +1809,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         obs_select.change(
             on_select_obstacle,
             [tree_state, obs_select, step_slider, view_half, show_gt,
-             show_det, det_traj_state, guided_trajs_state],
+             show_det, det_traj_state, guided_trajs_state,
+             show_rb_dist, show_nb_dist, hide_neighbors, show_traj_rb, show_traj_nb],
             [scene_image, step_info, selected_obstacle_state,
              edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history],
         )
@@ -1656,13 +1835,33 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         # Guidance generation button
         guidance_btn_inputs = ([tree_state, step_slider, show_gt, view_half,
                                 selected_obstacle_state, guided_noise, guided_k,
-                                show_det, det_traj_state, hide_neighbors]
+                                show_det, det_traj_state, hide_neighbors,
+                                show_rb_dist, show_nb_dist, show_traj_rb, show_traj_nb,
+                                anchor_index_sl, anchor_path_tb]
                                + [v for gname in ALL_GUIDANCE_NAMES
                                   for v in (guidance_toggles[gname], guidance_scales[gname])])
         generate_guided_btn.click(
             on_generate_guided,
             guidance_btn_inputs,
             [scene_image, step_info, det_traj_state, guided_trajs_state],
+        )
+
+        # Anchor gallery: click selects index, path change reloads gallery
+        def _on_anchor_select(evt: gr.SelectData):
+            return int(evt.index)
+
+        anchor_gallery.select(_on_anchor_select, None, anchor_index_sl)
+
+        def _on_anchor_path_change(path):
+            from guidance_gui.visualization import render_prototype_gallery as _rpg
+            imgs = _rpg(path) or []
+            k = len(imgs)
+            return (gr.update(value=imgs),
+                    gr.update(maximum=max(0, k - 1), value=0))
+
+        anchor_path_tb.change(
+            _on_anchor_path_change, [anchor_path_tb],
+            [anchor_gallery, anchor_index_sl],
         )
 
         _branch_switch_outputs = [tree_state, scene_image, step_info, branch_info, mods_display,
@@ -1761,11 +1960,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 np.sin(traj_xyh[:, 2]),
             ]).astype(np.float32)).unsqueeze(0)
 
-            # Score trajectory against reward gates
             from preference_optimization.utils import load_npz_data as _load_npz
             from rlvr.reward import RewardConfig as _RC
             from rlvr.reward import compute_reward_batch as _crb
-            scene_data = _load_npz(npz_path, torch.device("cpu"))
+            scene_data = _load_npz(npz_path, torch.device("cpu"),
+                                   ego_shape_override=tree.ego_shape)
             obs_at_step = _get_obstacles_at_step(tree, s)
             if obs_at_step:
                 scene_data = _inject_obstacles_into_tensors(
@@ -1795,7 +1994,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             rc = reward_config if reward_config is not None else _RC()
             if reward_config is None:
                 rc.rb_gate_enabled = True
-                rc.kinematic_gate_enabled = True
                 rc.enable_lane_departure = True
             rewards = _crb(traj_4col, scene_data, rc)
             r = rewards[0]
@@ -1833,21 +2031,70 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             else:
                 idx = 0
 
-            with np.load(npz_path) as src:
-                npz_data = dict(src)
+            # Start from the raw NPZ (pre-load_npz_data) to avoid
+            # double heading_to_cos_sin conversion on ego_agent_past
+            # and goal_pose. Then overlay fields that were rebuilt/modified.
+            with np.load(npz_path) as raw:
+                npz_data = {k: raw[k].astype(np.float32)
+                            if raw[k].dtype == np.float64 else raw[k]
+                            for k in raw.files}
+            # Overlay obstacle-injected neighbors from scene_data
             if obs_at_step:
-                device = torch.device("cpu")
-                tmp_data = {k: torch.from_numpy(v).unsqueeze(0) if v.ndim < 4
-                            else torch.from_numpy(v) for k, v in npz_data.items()
-                            if isinstance(v, np.ndarray)}
-                tmp_data = _inject_obstacles_into_tensors(tmp_data, obs_at_step, device)
                 for k in ("neighbor_agents_past", "neighbor_agents_future"):
-                    if k in tmp_data:
-                        v = tmp_data[k]
-                        npz_data[k] = v.squeeze(0).numpy() if v.dim() > 2 else v.numpy()
+                    if k in scene_data and isinstance(scene_data[k], torch.Tensor):
+                        npz_data[k] = scene_data[k].squeeze(0).cpu().numpy()
+            # Overlay rebuilt line_strings (4-col with border flags)
+            if "line_strings" in scene_data:
+                ls = scene_data["line_strings"]
+                if isinstance(ls, torch.Tensor):
+                    ls = ls.squeeze(0).cpu().numpy()
+                if ls.shape[-1] >= 4:
+                    npz_data["line_strings"] = ls.astype(np.float32)
+            # Rebuild polygons from map (3-col with type) if source is 2-col
+            if map_builder is not None and npz_data.get("polygons") is not None:
+                if npz_data["polygons"].shape[-1] < 3:
+                    ego_wp = _recover_ego_world_pose(
+                        tree.get_npz_sequence(tree.active_branch), s)
+                    if ego_wp is not None:
+                        from scenario_generation.transforms import (
+                            _rotation_matrix, transform_positions,
+                        )
+                        poly_world = map_builder.build_polygons_tensor(
+                            np.array(ego_wp[:2], dtype=np.float32))
+                        R_init = _rotation_matrix(float(ego_wp[2]) if len(ego_wp) > 2 else 0.0)
+                        init_xy = np.array(ego_wp[:2], dtype=np.float64)
+                        for pi in range(poly_world.shape[0]):
+                            pts = poly_world[pi, :, :2]
+                            valid = np.abs(pts).sum(axis=1) > 0.1
+                            if valid.any():
+                                poly_world[pi, valid, :2] = transform_positions(
+                                    pts[valid].astype(np.float64), R_init, init_xy,
+                                ).astype(np.float32)
+                        npz_data["polygons"] = poly_world.astype(np.float32)
             npz_data["ego_agent_future"] = traj_xyh
+            if tree.ego_shape:
+                npz_data["ego_shape"] = np.array(list(tree.ego_shape), dtype=np.float32)
+            # Sanity: crash if critical fields are missing
+            for req in ("ego_agent_past", "neighbor_agents_past",
+                        "lanes", "line_strings", "ego_shape",
+                        "ego_current_state"):
+                if req not in npz_data:
+                    return f"**ERROR** — saved NPZ would be missing `{req}`. Fix upstream."
             dst = out / f"scene_{idx:04d}.npz"
             np.savez(dst, **npz_data)
+
+            # Save sidecar JSON with ego world pose for future map rebuilds
+            ego_wp = _recover_ego_world_pose(
+                tree.get_npz_sequence(tree.active_branch), s)
+            if ego_wp is not None:
+                import math as _math
+                yaw = float(ego_wp[2]) if len(ego_wp) > 2 else 0.0
+                sidecar = dst.with_suffix(".json")
+                with open(sidecar, "w") as _sf:
+                    _json.dump({"x": float(ego_wp[0]), "y": float(ego_wp[1]),
+                                "qx": 0.0, "qy": 0.0,
+                                "qz": _math.sin(yaw / 2),
+                                "qw": _math.cos(yaw / 2)}, _sf)
 
             scene_list_path = out / "scene_list.json"
             if scene_list_path.exists():
@@ -1877,24 +2124,25 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         *guidance_args, progress=gr.Progress()):
             if model_cache is None or not model_cache.available:
                 return (tree, gr.update(), "No model loaded — pass `--model_path`",
-                        gr.update(), gr.update(), gr.update(), gr.update(), None, None)
-
-            branch = tree.branches[tree.active_branch]
-            # Get source scene from parent (not from any previous resim output)
-            saved_npz_dir = branch.npz_dir
-            branch.npz_dir = None  # temporarily clear so get_npz_sequence uses parent
-            seq = tree.get_npz_sequence(tree.active_branch)
-            branch.npz_dir = saved_npz_dir  # restore
-            if not seq:
-                return (tree, gr.update(), "No NPZ sequence",
-                        gr.update(), gr.update(), gr.update(), gr.update(), None, None)
+                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
             s = _safe_step(step)
+
+            # Auto-fork from current step before simulating
+            new_id = tree.fork_branch(tree.active_branch, s)
+            tree.active_branch = new_id
+            branch = tree.branches[new_id]
+
+            seq = tree.get_npz_sequence(branch.parent_id)
+            if not seq:
+                return (tree, gr.update(), "No NPZ sequence", gr.update(),
+                        gr.update(), gr.update(), gr.update(), gr.update(),
+                        None, None)
+
             n = max(1, int(n_steps))
             npz_path = seq[min(s, len(seq) - 1)]
 
-            # Create clean output dir for this branch's resim (remove stale files)
-            out_dir = Path(tree.base_npz_dir).parent / f"branch_{tree.active_branch}_resim"
+            out_dir = Path(tree.base_npz_dir).parent / f"branch_{new_id}_resim"
             if out_dir.exists():
                 for old_f in out_dir.glob("*.npz"):
                     old_f.unlink()
@@ -1956,6 +2204,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     GuidanceConfig,
                     GuidanceSetConfig,
                 )
+                _sim_anchor_idx = int(guidance_args[-2]) if len(guidance_args) >= 2 else 0
+                _sim_anchor_path = str(guidance_args[-1]) if len(guidance_args) > 1 else ""
                 fns = []
                 for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
                     enabled = guidance_args[gi * 2]
@@ -1968,6 +2218,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 spd = float(np.linalg.norm(ego.current_velocity))
                                 params["v_high"] = spd * 1.2
                                 params["v_low"] = max(0.0, spd * 0.5)
+                        if gname == "anchor_following" and _sim_anchor_path:
+                            params["prototypes_path"] = _sim_anchor_path
+                            params["anchor_index"] = _sim_anchor_idx
                         fns.append(GuidanceConfig(name=gname, enabled=True,
                                                    scale=float(scale), params=params))
                 if fns:
@@ -1995,7 +2248,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                             np.cos(traj_xyh[:, 2]),
                             np.sin(traj_xyh[:, 2]),
                         ]).astype(np.float32)
-                    elif det_cache is not None:
+                    if plan is None and det_cache is not None:
                         traj_xyh = np.array(det_cache)
                         plan = np.column_stack([
                             traj_xyh[:, :2],
@@ -2005,11 +2258,17 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     if plan is None:
                         return (tree, gr.update(),
                                 "Open loop requires a DET or guided trajectory — toggle Show DET or generate guided first",
-                                gr.update(), gr.update(), gr.update(), gr.update(), None, None)
+                                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
                     n = min(n, plan.shape[0])
                     scene_ol = deepcopy(scene)
                     ego_id = scene_ol.ego_agent_id
+                    if map_builder is not None and ego_wp_arr is not None:
+                        from scenario_generation.simulate import _refresh_line_strings
+                        _refresh_line_strings(
+                            scene_ol, map_builder,
+                            ego_wp_arr[:2], ego_wp_arr,
+                        )
                     map_cache_ol = MapTensorCache(scene_ol.map_data)
 
                     for t in range(n):
@@ -2069,20 +2328,23 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
             b_info = _branch_info_md(tree, tree.active_branch)
             mods = _modifications_md(tree, tree.active_branch)
-            status = f"Simulated **{n}** steps ({advance_mode}). Output: `{out_dir}`"
+            choices = list(tree.branches.keys())
+            status = f"Simulated **{n}** steps ({advance_mode}) on branch `{new_id}`. Output: `{out_dir}`"
             return (tree, img, status, b_info, mods,
+                    gr.update(choices=choices, value=new_id),
                     gr.update(maximum=max_step, value=0), info, None, None)
 
         _sim_inputs = ([tree_state, step_slider, sim_steps, sim_mode, sim_use_guidance,
                         show_gt, view_half, hide_neighbors, sim_open_loop,
                         guided_trajs_state, det_traj_state]
                        + [v for gname in ALL_GUIDANCE_NAMES
-                          for v in (guidance_toggles[gname], guidance_scales[gname])])
+                          for v in (guidance_toggles[gname], guidance_scales[gname])]
+                       + [anchor_index_sl, anchor_path_tb])
         sim_btn.click(
             on_simulate,
             _sim_inputs,
             [tree_state, scene_image, sim_status, branch_info, mods_display,
-             step_slider, step_info, det_traj_state, guided_trajs_state],
+             branch_dropdown, step_slider, step_info, det_traj_state, guided_trajs_state],
         )
 
         # Play button — pre-renders frames as PIL images for smooth playback
@@ -2127,7 +2389,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         gt_traj_r = ego.future_trajectory
                     if gt_traj_r is None and len(seq) > s + 1:
                         gt_traj_r = _reconstruct_gt_from_sequence(seq, s, max_future=80)
-                ego_wp = _recover_ego_world_pose(seq, s) if map_borders else None
+                ego_wp = _recover_ego_world_pose(seq, s) if (map_borders or map_builder) else None
+                if (scene.map_data is not None
+                        and scene.map_data.line_strings is not None
+                        and scene.map_data.line_strings.shape[-1] < 4
+                        and map_builder is not None and ego_wp is not None):
+                    from scenario_generation.simulate import _refresh_line_strings as _rls2
+                    _rls2(scene, map_builder,
+                          np.array(ego_wp[:2], dtype=np.float64),
+                          np.array(ego_wp, dtype=np.float64))
                 fig = render_scene_at_step(
                     scene, obs_at_step, None,
                     view_half=view_r, step_idx=s, total_steps=len(seq),
@@ -2240,6 +2510,9 @@ def main():
 
     if args.tree_json:
         tree = SceneTree.load(args.tree_json)
+    elif ego_shape_override:
+        tree = SceneTree.create_from_npz_dir_with_shape(
+            args.npz_dir, ego_shape_override)
     else:
         tree = SceneTree.create_from_npz_dir(args.npz_dir)
 

@@ -71,6 +71,20 @@ def infer(model, args, npz_path, reward_config=None):
     if reward_config is None:
         reward_config = RewardConfig(enable_overprogress=True)
     data = load_npz_data(npz_path, DEVICE)
+    norm_dict = args.observation_normalizer._normalization_dict
+    for k, v in norm_dict.items():
+        if k in data and isinstance(data[k], torch.Tensor):
+            expected_dim = v["mean"].shape[-1]
+            actual_dim = data[k].shape[-1]
+            if actual_dim != expected_dim:
+                raise ValueError(
+                    f"NPZ '{npz_path}': field '{k}' has {actual_dim} columns "
+                    f"but the model normalizer expects {expected_dim}. "
+                    f"Fix the NPZ upstream -- do not pad."
+                )
+    for k in data:
+        if isinstance(data[k], torch.Tensor) and data[k].dtype == torch.float64:
+            data[k] = data[k].float()
     norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm = args.observation_normalizer(norm)
     traj = generate_samples(model, args, norm, 0.0, 1, None, DEVICE)[0]
@@ -81,10 +95,13 @@ def infer(model, args, npz_path, reward_config=None):
 
 def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
     npz = np.load(npz_path)
-    wb, length, width = 2.75, 4.34, 1.70
     es = npz.get("ego_shape", None)
-    if es is not None and len(es) >= 3:
-        wb, length, width = float(es[0]), float(es[1]), float(es[2])
+    if es is None or len(es) < 3:
+        raise ValueError(
+            f"NPZ at '{npz_path}' is missing 'ego_shape'. "
+            "Inject it upstream before visualizing."
+        )
+    wb, length, width = float(es[0]), float(es[1]), float(es[2])
     ro = (length - wb) / 2
 
     # Lanes
@@ -121,6 +138,23 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
 
     # Ego box at t=0
     ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20))
+
+    # Neighbors at t=0
+    nb_past = npz["neighbor_agents_past"]  # (N, 31, 11)
+    for i in range(nb_past.shape[0]):
+        nb = nb_past[i]
+        if np.abs(nb).sum() < 1e-6:
+            continue
+        nx, ny = nb[-1, 0], nb[-1, 1]
+        ncos, nsin = nb[-1, 2], nb[-1, 3]
+        nw, nl = nb[-1, 6], nb[-1, 7]
+        if nl < 0.1 or nw < 0.1:
+            continue
+        nro = nl * 0.175  # ~(1 - 0.65) / 2; neighbors lack wheelbase, assume wb/l ~ 0.65
+        nh = np.arctan2(nsin, ncos)
+        t_rot = mtransforms.Affine2D().rotate(nh).translate(nx, ny) + ax.transData
+        ax.add_patch(Rectangle((-nro, -nw / 2), nl, nw, lw=1.5, ec="#cc4400",
+                               fc="#ff8844", alpha=0.7, zorder=15, transform=t_rot))
 
     # Trajectory + footprints
     pl = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
@@ -226,11 +260,12 @@ def main():
             # Overlay LoRA trajectory with footprints
             npz = np.load(scenes[si], allow_pickle=True)
             es = npz.get("ego_shape", None)
-            # ego_shape = [wheel_base, length, width]
-            wb = float(es[0]) if es is not None and len(es) >= 1 else 2.75
-            length = float(es[1]) if es is not None and len(es) >= 2 else 4.34
-            width = float(es[2]) if es is not None and len(es) >= 3 else 1.70
-            ro = length - wb  # rear overhang
+            if es is None or len(es) < 3:
+                raise ValueError(
+                    f"NPZ at '{scenes[si]}' is missing 'ego_shape'."
+                )
+            wb, length, width = float(es[0]), float(es[1]), float(es[2])
+            ro = (length - wb) / 2
             pl_l = np.linalg.norm(np.diff(traj_l[:, :2], axis=0), axis=1).sum()
             ax.plot(traj_l[:, 0], traj_l[:, 1], "-", color="orange", lw=2, alpha=0.6, zorder=12)
             ax.plot(traj_l[::3, 0], traj_l[::3, 1], "o", color="orange", ms=3.5, alpha=0.9, mew=0,
