@@ -2133,11 +2133,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             tree.active_branch = new_id
             branch = tree.branches[new_id]
 
-            parent_branch = tree.branches[branch.parent_id]
-            saved_npz_dir = parent_branch.npz_dir
-            parent_branch.npz_dir = None
             seq = tree.get_npz_sequence(branch.parent_id)
-            parent_branch.npz_dir = saved_npz_dir
             if not seq:
                 return (tree, gr.update(), "No NPZ sequence", gr.update(),
                         gr.update(), gr.update(), gr.update(), gr.update(),
@@ -2208,7 +2204,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     GuidanceConfig,
                     GuidanceSetConfig,
                 )
-                _sim_anchor_idx = int(guidance_args[-2]) if len(guidance_args) > 2 else 0
+                _sim_anchor_idx = int(guidance_args[-2]) if len(guidance_args) >= 2 else 0
                 _sim_anchor_path = str(guidance_args[-1]) if len(guidance_args) > 1 else ""
                 fns = []
                 for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
