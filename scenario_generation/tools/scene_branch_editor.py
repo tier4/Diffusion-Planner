@@ -498,25 +498,35 @@ def render_scene_at_step(
         ego_h = ego.current_heading
 
         if show_rb_dist:
-            from scenario_generation.replay import _nearest_border_point
-            border_polylines = _extract_border_polylines(scene)
-            # Fall back to map-derived borders (already in ego frame)
-            if not border_polylines and _ego_frame_borders:
-                border_polylines = _ego_frame_borders
-            bp = _nearest_border_point(ego_pos, border_polylines)
-            if bp is not None:
-                dist = float(np.linalg.norm(bp - ego_pos))
-                color = "#dd2222" if dist < 0.5 else "#ff8800" if dist < 1.0 else "#22bb22"
-                ax.plot([ego_pos[0], bp[0]], [ego_pos[1], bp[1]],
-                        "-", color=color, lw=2.5, alpha=0.9, zorder=35)
-                ax.plot(bp[0], bp[1], "o", color=color, ms=6, zorder=36)
-                mid_x, mid_y = (ego_pos[0] + bp[0]) / 2, (ego_pos[1] + bp[1]) / 2
-                ax.annotate(
-                    f"RB {dist:.2f}m", (mid_x, mid_y),
-                    fontsize=8, fontweight="bold", color=color,
-                    ha="center", va="bottom", zorder=37,
-                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85),
+            import torch as _t_rb
+            from rlvr.reward import compute_road_border_penalty, RewardConfig
+            ego_traj_1 = _t_rb.tensor([[[
+                float(ego_pos[0]), float(ego_pos[1]),
+                float(np.cos(ego_h)), float(np.sin(ego_h)),
+            ]]], dtype=_t_rb.float32)
+            ego_shape_t = _t_rb.tensor([
+                float(ego.wheelbase), float(ego.length), float(ego.width),
+            ], dtype=_t_rb.float32)
+            data_dict = {}
+            if hasattr(scene, "map_data") and scene.map_data is not None:
+                md = scene.map_data
+                if hasattr(md, "line_strings") and md.line_strings is not None:
+                    data_dict["line_strings"] = _t_rb.from_numpy(
+                        md.line_strings.astype(np.float32)
+                    )
+            if data_dict:
+                _, _, _, _, _, per_t_min = compute_road_border_penalty(
+                    ego_traj_1, ego_shape_t, data_dict, RewardConfig(),
                 )
+                dist = float(per_t_min[0, 0].item())
+                if dist < 50.0:
+                    color = "#dd2222" if dist < 0.5 else "#ff8800" if dist < 1.0 else "#22bb22"
+                    ax.annotate(
+                        f"RB {dist:.2f}m", (float(ego_pos[0]), float(ego_pos[1]) + 1.5),
+                        fontsize=8, fontweight="bold", color=color,
+                        ha="center", va="bottom", zorder=37,
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85),
+                    )
 
         if show_nb_dist:
             import torch as _torch
@@ -601,32 +611,43 @@ def render_scene_at_step(
             if (traj_pts.shape[0] - 1) not in idxs:
                 idxs.append(traj_pts.shape[0] - 1)
 
-            if show_traj_rb and border_polylines_for_traj:
-                from scenario_generation.replay import _nearest_border_point
-                worst_rb_dist, worst_rb_idx = float("inf"), 0
-                worst_rb_bp = None
-                for ti in idxs:
-                    px, py = float(traj_pts[ti, 0]), float(traj_pts[ti, 1])
-                    bp = _nearest_border_point(np.array([px, py]), border_polylines_for_traj)
-                    if bp is not None:
-                        d = float(np.linalg.norm(bp - np.array([px, py])))
-                        if d < worst_rb_dist:
-                            worst_rb_dist, worst_rb_idx, worst_rb_bp = d, ti, bp
-                if worst_rb_bp is not None and worst_rb_dist < 50.0:
-                    wx, wy = float(traj_pts[worst_rb_idx, 0]), float(traj_pts[worst_rb_idx, 1])
-                    wh = float(traj_pts[worst_rb_idx, 2])
-                    dc = "#dd2222" if worst_rb_dist < 0.5 else "#ff8800" if worst_rb_dist < 1.0 else "#22bb22"
-                    draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, traj_color,
-                                   alpha=0.4, lw=2.0, zorder=38)
-                    ax.plot([wx, worst_rb_bp[0]], [wy, worst_rb_bp[1]],
-                            "-", color=dc, lw=2.5, alpha=0.9, zorder=39)
-                    ax.plot(worst_rb_bp[0], worst_rb_bp[1], "o", color=dc, ms=5, zorder=39)
-                    ax.annotate(
-                        f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
-                        (wx, wy), fontsize=7, fontweight="bold", color=dc,
-                        ha="center", va="top", xytext=(0, -8),
-                        textcoords="offset points", zorder=40,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85),
+            if show_traj_rb:
+                import torch as _t_trb
+                from rlvr.reward import compute_road_border_penalty, RewardConfig
+                _trb_data = {}
+                if hasattr(scene, "map_data") and scene.map_data is not None:
+                    md = scene.map_data
+                    if hasattr(md, "line_strings") and md.line_strings is not None:
+                        _trb_data["line_strings"] = _t_trb.from_numpy(
+                            md.line_strings.astype(np.float32))
+                if _trb_data:
+                    T_tr = traj_pts.shape[0]
+                    ego_traj_t = _t_trb.zeros(1, T_tr, 4)
+                    ego_traj_t[0, :, 0] = _t_trb.from_numpy(traj_pts[:, 0].astype(np.float32))
+                    ego_traj_t[0, :, 1] = _t_trb.from_numpy(traj_pts[:, 1].astype(np.float32))
+                    ego_traj_t[0, :, 2] = _t_trb.from_numpy(np.cos(traj_pts[:, 2]).astype(np.float32))
+                    ego_traj_t[0, :, 3] = _t_trb.from_numpy(np.sin(traj_pts[:, 2]).astype(np.float32))
+                    ego_shape_t = _t_trb.tensor([
+                        float(ego.wheelbase), float(ego.length), float(ego.width),
+                    ], dtype=_t_trb.float32)
+                    _, _, _, _, _, per_t_min = compute_road_border_penalty(
+                        ego_traj_t, ego_shape_t, _trb_data, RewardConfig())
+                    per_t = per_t_min[0]  # (T,)
+                    worst_rb_idx = int(per_t.argmin().item())
+                    worst_rb_dist = float(per_t[worst_rb_idx].item())
+                    if worst_rb_dist < 50.0:
+                        wx = float(traj_pts[worst_rb_idx, 0])
+                        wy = float(traj_pts[worst_rb_idx, 1])
+                        wh = float(traj_pts[worst_rb_idx, 2])
+                        dc = "#dd2222" if worst_rb_dist < 0.5 else "#ff8800" if worst_rb_dist < 1.0 else "#22bb22"
+                        draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, traj_color,
+                                       alpha=0.4, lw=2.0, zorder=38)
+                        ax.annotate(
+                            f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
+                            (wx, wy), fontsize=7, fontweight="bold", color=dc,
+                            ha="center", va="top", xytext=(0, -8),
+                            textcoords="offset points", zorder=40,
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=traj_color, alpha=0.85),
                     )
 
             _all_nb_corners = _placed_obs_corners[:]
@@ -923,12 +944,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     place_btn = gr.Button("Place Obstacle", variant="primary")
                     preview_btn = gr.Button("Preview", variant="secondary")
 
-                gr.Markdown("### View")
-                view_half = gr.Slider(
-                    minimum=10, maximum=200, value=50, step=5,
-                    label="View radius (m)",
-                )
-
                 gr.Markdown("### Crop")
                 with gr.Row():
                     crop_start = gr.Number(label="Start", value=0, precision=0)
@@ -946,12 +961,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     height=600,
                 )
 
-                # Timeline playback
+                # Timeline playback + view
                 with gr.Row():
                     btn_play = gr.Button("Play ▶", size="sm", min_width=60)
                     btn_stop = gr.Button("Stop ■", size="sm", min_width=60, variant="stop")
                     play_fps = gr.Slider(minimum=1, maximum=30, value=10, step=1,
                                          label="FPS", scale=1)
+                    view_half = gr.Slider(minimum=10, maximum=200, value=50, step=5,
+                                          label="View radius (m)", scale=1)
 
                 _has_model = model_cache is not None and model_cache.available
 
@@ -1766,6 +1783,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             from rlvr.reward import RewardConfig as _RC
             from rlvr.reward import compute_reward_batch as _crb
             scene_data = _load_npz(npz_path, torch.device("cpu"))
+            if tree.ego_shape:
+                scene_data["ego_shape"] = torch.tensor(
+                    [list(tree.ego_shape)], dtype=torch.float32)
             obs_at_step = _get_obstacles_at_step(tree, s)
             if obs_at_step:
                 scene_data = _inject_obstacles_into_tensors(
@@ -1833,21 +1853,70 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             else:
                 idx = 0
 
-            with np.load(npz_path) as src:
-                npz_data = dict(src)
+            # Start from the raw NPZ (pre-load_npz_data) to avoid
+            # double heading_to_cos_sin conversion on ego_agent_past
+            # and goal_pose. Then overlay fields that were rebuilt/modified.
+            with np.load(npz_path) as raw:
+                npz_data = {k: raw[k].astype(np.float32)
+                            if raw[k].dtype == np.float64 else raw[k]
+                            for k in raw.files}
+            # Overlay obstacle-injected neighbors from scene_data
             if obs_at_step:
-                device = torch.device("cpu")
-                tmp_data = {k: torch.from_numpy(v).unsqueeze(0) if v.ndim < 4
-                            else torch.from_numpy(v) for k, v in npz_data.items()
-                            if isinstance(v, np.ndarray)}
-                tmp_data = _inject_obstacles_into_tensors(tmp_data, obs_at_step, device)
                 for k in ("neighbor_agents_past", "neighbor_agents_future"):
-                    if k in tmp_data:
-                        v = tmp_data[k]
-                        npz_data[k] = v.squeeze(0).numpy() if v.dim() > 2 else v.numpy()
+                    if k in scene_data and isinstance(scene_data[k], torch.Tensor):
+                        npz_data[k] = scene_data[k].squeeze(0).cpu().numpy()
+            # Overlay rebuilt line_strings (4-col with border flags)
+            if "line_strings" in scene_data:
+                ls = scene_data["line_strings"]
+                if isinstance(ls, torch.Tensor):
+                    ls = ls.squeeze(0).cpu().numpy()
+                if ls.shape[-1] >= 4:
+                    npz_data["line_strings"] = ls.astype(np.float32)
+            # Rebuild polygons from map (3-col with type) if source is 2-col
+            if map_builder is not None and npz_data.get("polygons") is not None:
+                if npz_data["polygons"].shape[-1] < 3:
+                    ego_wp = _recover_ego_world_pose(
+                        tree.get_npz_sequence(tree.active_branch), s)
+                    if ego_wp is not None:
+                        from scenario_generation.transforms import (
+                            _rotation_matrix, transform_positions,
+                        )
+                        poly_world = map_builder.build_polygons_tensor(
+                            np.array(ego_wp[:2], dtype=np.float32))
+                        R_init = _rotation_matrix(float(ego_wp[2]) if len(ego_wp) > 2 else 0.0)
+                        init_xy = np.array(ego_wp[:2], dtype=np.float64)
+                        for pi in range(poly_world.shape[0]):
+                            pts = poly_world[pi, :, :2]
+                            valid = np.abs(pts).sum(axis=1) > 0.1
+                            if valid.any():
+                                poly_world[pi, valid, :2] = transform_positions(
+                                    pts[valid].astype(np.float64), R_init, init_xy,
+                                ).astype(np.float32)
+                        npz_data["polygons"] = poly_world.astype(np.float32)
             npz_data["ego_agent_future"] = traj_xyh
+            if tree.ego_shape:
+                npz_data["ego_shape"] = np.array(list(tree.ego_shape), dtype=np.float32)
+            # Sanity: crash if critical fields are missing
+            for req in ("ego_agent_past", "neighbor_agents_past",
+                        "lanes", "line_strings", "ego_shape",
+                        "ego_current_state"):
+                if req not in npz_data:
+                    return f"**ERROR** — saved NPZ would be missing `{req}`. Fix upstream."
             dst = out / f"scene_{idx:04d}.npz"
             np.savez(dst, **npz_data)
+
+            # Save sidecar JSON with ego world pose for future map rebuilds
+            ego_wp = _recover_ego_world_pose(
+                tree.get_npz_sequence(tree.active_branch), s)
+            if ego_wp is not None:
+                import math as _math
+                yaw = float(ego_wp[2]) if len(ego_wp) > 2 else 0.0
+                sidecar = dst.with_suffix(".json")
+                with open(sidecar, "w") as _sf:
+                    _json.dump({"x": float(ego_wp[0]), "y": float(ego_wp[1]),
+                                "qx": 0.0, "qy": 0.0,
+                                "qz": _math.sin(yaw / 2),
+                                "qw": _math.cos(yaw / 2)}, _sf)
 
             scene_list_path = out / "scene_list.json"
             if scene_list_path.exists():
@@ -2241,7 +2310,14 @@ def main():
     if args.tree_json:
         tree = SceneTree.load(args.tree_json)
     else:
-        tree = SceneTree.create_from_npz_dir(args.npz_dir)
+        try:
+            tree = SceneTree.create_from_npz_dir(args.npz_dir)
+        except ValueError as e:
+            if ego_shape_override and "ego_shape" in str(e):
+                tree = SceneTree._create_from_npz_dir_with_shape(
+                    args.npz_dir, ego_shape_override)
+            else:
+                raise
 
     if ego_shape_override:
         tree.ego_shape = ego_shape_override

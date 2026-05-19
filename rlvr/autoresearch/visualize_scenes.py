@@ -71,6 +71,20 @@ def infer(model, args, npz_path, reward_config=None):
     if reward_config is None:
         reward_config = RewardConfig(enable_overprogress=True)
     data = load_npz_data(npz_path, DEVICE)
+    norm_dict = args.observation_normalizer._normalization_dict
+    for k, v in norm_dict.items():
+        if k in data and isinstance(data[k], torch.Tensor):
+            expected_dim = v["mean"].shape[-1]
+            actual_dim = data[k].shape[-1]
+            if actual_dim != expected_dim:
+                raise ValueError(
+                    f"NPZ '{npz_path}': field '{k}' has {actual_dim} columns "
+                    f"but the model normalizer expects {expected_dim}. "
+                    f"Fix the NPZ upstream -- do not pad."
+                )
+    for k in data:
+        if isinstance(data[k], torch.Tensor) and data[k].dtype == torch.float64:
+            data[k] = data[k].float()
     norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm = args.observation_normalizer(norm)
     traj = generate_samples(model, args, norm, 0.0, 1, None, DEVICE)[0]
@@ -81,10 +95,13 @@ def infer(model, args, npz_path, reward_config=None):
 
 def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
     npz = np.load(npz_path)
-    wb, length, width = 2.75, 4.34, 1.70
     es = npz.get("ego_shape", None)
-    if es is not None and len(es) >= 3:
-        wb, length, width = float(es[0]), float(es[1]), float(es[2])
+    if es is None or len(es) < 3:
+        raise ValueError(
+            f"NPZ at '{npz_path}' is missing 'ego_shape'. "
+            "Inject it upstream before visualizing."
+        )
+    wb, length, width = float(es[0]), float(es[1]), float(es[2])
     ro = (length - wb) / 2
 
     # Lanes

@@ -32,11 +32,9 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
         data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
 
     if "ego_shape" not in data:
-        wheel_base = 2.79
-        ego_length = 4.34
-        ego_width = 1.70
-        data["ego_shape"] = torch.tensor(
-            [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=device
+        raise ValueError(
+            f"load_npz_data: '{npz_path}' is missing 'ego_shape' "
+            "(wheel_base, length, width)."
         )
 
     # v4 decoder requires delay (always 0 at inference, training uses random delay)

@@ -736,6 +736,13 @@ def run_simulation(model, model_args, scene: SceneContext, n_steps: int,
                 progress_fn((step + 1) / n_steps, f"Simulating {step+1}/{n_steps}")
 
             # --- Dump NPZ ---
+            if dump_npz and step == 0 and not _can_refresh_ls:
+                raise RuntimeError(
+                    "dump_npz=True but builder/ego_world_pose not provided. "
+                    "Line_strings border flags would be all zeros, silently "
+                    "breaking road border reward scoring. Pass builder + "
+                    "ego_world_pose to enable NPZ dump."
+                )
             if dump_npz:
                 npz_data = dump_step_npz(scene, map_cache, future_len=model_args.future_len)
                 if ego_id in agent_predictions:

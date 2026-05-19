@@ -86,7 +86,14 @@ class SceneTree:
 
         import numpy as np
         with np.load(npz_files[0]) as first:
-            ego_shape = tuple(float(v) for v in first["ego_shape"]) if "ego_shape" in first else (2.925, 4.5, 1.9)
+            if "ego_shape" in first:
+                ego_shape = tuple(float(v) for v in first["ego_shape"])
+            else:
+                raise ValueError(
+                    f"First NPZ '{npz_files[0]}' is missing 'ego_shape'. "
+                    "Pass --ego_shape WB,L,W on the command line or inject "
+                    "ego_shape into the NPZ."
+                )
 
         tree = cls(
             base_npz_dir=npz_dir,
@@ -96,6 +103,20 @@ class SceneTree:
             },
         )
         return tree
+
+    @classmethod
+    def _create_from_npz_dir_with_shape(
+        cls, npz_dir: str | Path, ego_shape: tuple[float, float, float],
+    ) -> SceneTree:
+        npz_dir = str(Path(npz_dir).resolve())
+        npz_files = _scan_npz_dir(npz_dir)
+        if not npz_files:
+            raise ValueError(f"No replay_step_*.npz or step_*.npz files found in {npz_dir}")
+        return cls(
+            base_npz_dir=npz_dir,
+            ego_shape=ego_shape,
+            branches={"root": BranchNode(id="root", npz_dir=npz_dir)},
+        )
 
     # ── Tree operations ───────────────────────────────────────────────
 
@@ -269,7 +290,7 @@ class SceneTree:
         return cls(
             version=data.get("version", 1),
             base_npz_dir=data["base_npz_dir"],
-            ego_shape=tuple(data.get("ego_shape", [2.925, 4.5, 1.9])),
+            ego_shape=tuple(data["ego_shape"]),
             active_branch=active,
             branches=branches,
         )
