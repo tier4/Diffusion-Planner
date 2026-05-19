@@ -544,8 +544,12 @@ def render_scene_at_step(
                             ln_f = float(ego.length)
                             wd_f = float(ego.width)
                             ro_f = (ln_f - wb_f) / 2
-                            corners = [(-ro_f, -wd_f/2), (-ro_f, wd_f/2),
-                                       (ln_f - ro_f, -wd_f/2), (ln_f - ro_f, wd_f/2)]
+                            half_l = ln_f / 2
+                            corners = [
+                                (-ro_f, -wd_f/2), (-ro_f, 0.0), (-ro_f, wd_f/2),
+                                (ln_f - ro_f, -wd_f/2), (ln_f - ro_f, 0.0), (ln_f - ro_f, wd_f/2),
+                                (half_l - ro_f, -wd_f/2), (half_l - ro_f, wd_f/2),
+                            ]
                             cos_h = float(np.cos(ego_h))
                             sin_h = float(np.sin(ego_h))
                             perim_pts = []
@@ -708,8 +712,12 @@ def render_scene_at_step(
                                 ro_t = (ego_len - wb_t) / 2
                                 cos_wh = float(np.cos(wh))
                                 sin_wh = float(np.sin(wh))
-                                corners_t = [(-ro_t, -ego_wid/2), (-ro_t, ego_wid/2),
-                                             (ego_len - ro_t, -ego_wid/2), (ego_len - ro_t, ego_wid/2)]
+                                half_lt = ego_len / 2
+                                corners_t = [
+                                    (-ro_t, -ego_wid/2), (-ro_t, 0.0), (-ro_t, ego_wid/2),
+                                    (ego_len - ro_t, -ego_wid/2), (ego_len - ro_t, 0.0), (ego_len - ro_t, ego_wid/2),
+                                    (half_lt - ro_t, -ego_wid/2), (half_lt - ro_t, ego_wid/2),
+                                ]
                                 pp = []
                                 for lx, ly in corners_t:
                                     pp.append([wx + cos_wh*lx - sin_wh*ly,
@@ -1260,6 +1268,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
             # Refresh line_strings from map if source NPZ lacks border flags
             if (scene.map_data is not None
+                    and scene.map_data.line_strings is not None
                     and scene.map_data.line_strings.shape[-1] < 4
                     and map_builder is not None and ego_wp is not None):
                 from scenario_generation.simulate import _refresh_line_strings
@@ -1926,7 +1935,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             rc = reward_config if reward_config is not None else _RC()
             if reward_config is None:
                 rc.rb_gate_enabled = True
-                rc.kinematic_gate_enabled = True
                 rc.enable_lane_departure = True
             rewards = _crb(traj_4col, scene_data, rc)
             r = rewards[0]
@@ -2315,6 +2323,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         gt_traj_r = _reconstruct_gt_from_sequence(seq, s, max_future=80)
                 ego_wp = _recover_ego_world_pose(seq, s) if (map_borders or map_builder) else None
                 if (scene.map_data is not None
+                        and scene.map_data.line_strings is not None
                         and scene.map_data.line_strings.shape[-1] < 4
                         and map_builder is not None and ego_wp is not None):
                     from scenario_generation.simulate import _refresh_line_strings as _rls2
