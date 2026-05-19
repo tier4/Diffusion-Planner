@@ -113,6 +113,8 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
     base_progress_ratios = [] # model_path / baseline_path per scene
     lane_departures, lane_nears, lane_wides = 0, [], []
     centerlines = []  # per-scene raw centerline score (see compute_centerline_score_batch)
+    sc_crossings = 0
+    sc_min_dists = []  # per-scene min OBB clearance to stopped neighbors
 
     if batch_size > 1:
         # Batched evaluation
@@ -176,6 +178,9 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                 lane_nears.append(reward.lane_near_frac)
                 lane_wides.append(reward.lane_wide_frac)
                 centerlines.append(reward.centerline)
+                if reward.static_crossing:
+                    sc_crossings += 1
+                sc_min_dists.append(reward.sc_min_dist)
                 traj_np = det_trajs[local_i].cpu().numpy()
                 pl = np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
@@ -209,6 +214,9 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
                 lane_nears.append(reward.lane_near_frac)
                 lane_wides.append(reward.lane_wide_frac)
                 centerlines.append(reward.centerline)
+                if reward.static_crossing:
+                    sc_crossings += 1
+                sc_min_dists.append(reward.sc_min_dist)
                 pl = np.linalg.norm(np.diff(det_traj[0, :, :2], axis=0), axis=1).sum()
                 path_lengths.append(pl)
                 if baseline_cache and path in baseline_cache:
@@ -246,6 +254,10 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
         "lane_wide_mean": float(np.mean(lane_wides)) if lane_wides else 0.0,
         "centerline_mean": float(np.mean(centerlines)) if centerlines else 0.0,
         "centerline_min": float(np.min(centerlines)) if centerlines else 0.0,
+        "sc_crossings": sc_crossings,
+        "sc_min_dist_min": float(np.min(sc_min_dists)) if sc_min_dists else 99.0,
+        "sc_min_dist_p5": float(np.percentile(sc_min_dists, 5)) if sc_min_dists else 99.0,
+        "sc_min_dist_mean": float(np.mean(sc_min_dists)) if sc_min_dists else 99.0,
     }
     if centerlines:
         cl_arr = np.array(centerlines)
@@ -315,6 +327,8 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
           f"lane_near={result['lane_near_mean']:.2f}, lane_wide={result['lane_wide_mean']:.2f}, "
           f"{cl_pct_str}{cl_lk_str}, "
           f"collision={result['collision_rate']:.1%}, "
+          f"sc_cross={result['sc_crossings']}/{n}, "
+          f"sc_dist=[min={result['sc_min_dist_min']:.2f} p5={result['sc_min_dist_p5']:.2f} mean={result['sc_min_dist_mean']:.2f}], "
           f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
     return result
 
@@ -760,7 +774,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             _n_val = max(val_eval["n_scenes"], 1)
             _rb_cross_rate = val_eval["rb_crossings"] / _n_val
             _collision_rate = val_eval["collision_rate"]
-            if _rb_cross_rate > 0.3 or _collision_rate > 0.1:
+            if _rb_cross_rate > grpo_config.collapse_rb_threshold or _collision_rate > grpo_config.collapse_collision_threshold:
                 print(f"  Val collapsed (rb_cross={_rb_cross_rate:.1%}, "
                       f"collision={_collision_rate:.1%}), stopping early")
                 break

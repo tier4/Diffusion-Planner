@@ -411,6 +411,10 @@ class GRPOConfig:
     #   }
     schedules: dict = field(default_factory=dict)
 
+    # Early-stop collapse thresholds (run_experiment.py)
+    collapse_rb_threshold: float = 0.3
+    collapse_collision_threshold: float = 0.1
+
     # Weights & Biases logging
     wandb_enabled: bool = False
     wandb_project: str = "rlvr-training"
