@@ -105,7 +105,7 @@ class SceneTree:
         return tree
 
     @classmethod
-    def _create_from_npz_dir_with_shape(
+    def create_from_npz_dir_with_shape(
         cls, npz_dir: str | Path, ego_shape: tuple[float, float, float],
     ) -> SceneTree:
         npz_dir = str(Path(npz_dir).resolve())
@@ -287,6 +287,11 @@ class SceneTree:
         active = data.get("active_branch", "root")
         if active not in branches:
             active = "root" if "root" in branches else next(iter(branches), "root")
+        if "ego_shape" not in data:
+            raise ValueError(
+                f"Tree JSON '{path}' is missing 'ego_shape'. "
+                "Re-save with a newer editor or pass --ego_shape WB,L,W."
+            )
         return cls(
             version=data.get("version", 1),
             base_npz_dir=data["base_npz_dir"],

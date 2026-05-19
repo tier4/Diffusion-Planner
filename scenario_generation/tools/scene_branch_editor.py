@@ -93,12 +93,15 @@ class _ModelCache:
 
     @torch.no_grad()
     def predict_det(self, npz_path: str, obstacles: list | None = None,
-                    zero_neighbors: bool = False) -> np.ndarray | None:
+                    zero_neighbors: bool = False,
+                    ego_shape_override: tuple[float, ...] | None = None,
+                    ) -> np.ndarray | None:
         """Run deterministic inference. Returns (80, 4) [x,y,cos_h,sin_h] or None."""
         self._ensure_loaded()
         from guidance_gui.generate_samples import generate_samples
         data = self._load_npz(npz_path, obstacles=obstacles,
-                              zero_neighbors=zero_neighbors)
+                              zero_neighbors=zero_neighbors,
+                              ego_shape_override=ego_shape_override)
         trajs = generate_samples(
             self._model, self._model_args, data,
             noise_scale=0.0, n_samples=1, composer=None,
@@ -112,6 +115,7 @@ class _ModelCache:
         noise_scale: float = 1.0, n_samples: int = 1,
         obstacles: list | None = None,
         zero_neighbors: bool = False,
+        ego_shape_override: tuple[float, ...] | None = None,
     ) -> np.ndarray | None:
         """Run guided inference. Returns (n_samples, 80, 4)."""
         self._ensure_loaded()
@@ -121,7 +125,8 @@ class _ModelCache:
         from guidance_gui.generate_samples import generate_samples
 
         data = self._load_npz(npz_path, obstacles=obstacles,
-                              zero_neighbors=zero_neighbors)
+                              zero_neighbors=zero_neighbors,
+                              ego_shape_override=ego_shape_override)
 
         # Compute DET trajectory first — needed as reference_trajectory for
         # lateral/longitudinal guidance (same pattern as trajectory_ranker_gui)
@@ -159,9 +164,12 @@ class _ModelCache:
         )
 
     def _load_npz(self, npz_path: str, obstacles: list | None = None,
-                  zero_neighbors: bool = False) -> dict[str, torch.Tensor]:
+                  zero_neighbors: bool = False,
+                  ego_shape_override: tuple[float, ...] | None = None,
+                  ) -> dict[str, torch.Tensor]:
         from preference_optimization.utils import load_npz_data
-        data = load_npz_data(npz_path, self._device)
+        data = load_npz_data(npz_path, self._device,
+                             ego_shape_override=ego_shape_override)
         pnn = self._model_args.predicted_neighbor_num
         if zero_neighbors:
             for k in ("neighbor_agents_past", "neighbor_agents_future"):
@@ -1318,8 +1326,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 return None
             obs = _get_obstacles_at_step(tree, _safe_step(step))
             raw = model_cache.predict_det(npz_path, obstacles=obs or None,
-                                          zero_neighbors=zero_neighbors)
-            return _traj_cos_sin_to_xyh(raw)
+                                          zero_neighbors=zero_neighbors,
+                                              ego_shape_override=tree.ego_shape)
 
         def on_render(tree, step, view_r, selected_obs, gt_on, det_on, guided_on,
                       hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
@@ -1445,8 +1453,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 return det_traj, guided
             if det_on:
                 raw = model_cache.predict_det(npz_path, obstacles=obs or None,
-                                              zero_neighbors=zero_neighbors)
-                det_traj = _traj_cos_sin_to_xyh(raw)
+                                              zero_neighbors=zero_neighbors,
+                                              ego_shape_override=tree.ego_shape)
             if guided_on and guidance_args_tuple:
                 cfgs = []
                 for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
@@ -1459,8 +1467,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     k = int(guidance_args_tuple[-1])
                     raw_g = model_cache.predict_guided(
                         npz_path, cfgs, noise_scale=noise, n_samples=max(1, k),
-                        obstacles=obs or None,
                         zero_neighbors=zero_neighbors,
+                        ego_shape_override=tree.ego_shape,
                     )
                     guided = [_traj_cos_sin_to_xyh(raw_g[j]) for j in range(raw_g.shape[0])]
             return det_traj, guided
@@ -1574,13 +1582,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     det_traj = det_cache
                 else:
                     raw = model_cache.predict_det(npz_path, obstacles=obs or None,
-                                                  zero_neighbors=hide_nb)
-                    det_traj = _traj_cos_sin_to_xyh(raw)
+                                                  zero_neighbors=hide_nb,
+                                              ego_shape_override=tree.ego_shape)
                     det_cache = det_traj
 
             raw_guided = model_cache.predict_guided(
                 npz_path, cfgs, noise_scale=float(noise), n_samples=int(k),
                 obstacles=obs or None, zero_neighbors=hide_nb,
+                ego_shape_override=tree.ego_shape,
             )
             guided_list = [_traj_cos_sin_to_xyh(raw_guided[i]) for i in range(raw_guided.shape[0])]
 
@@ -1898,14 +1907,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 np.sin(traj_xyh[:, 2]),
             ]).astype(np.float32)).unsqueeze(0)
 
-            # Score trajectory against reward gates
             from preference_optimization.utils import load_npz_data as _load_npz
             from rlvr.reward import RewardConfig as _RC
             from rlvr.reward import compute_reward_batch as _crb
-            scene_data = _load_npz(npz_path, torch.device("cpu"))
-            if tree.ego_shape:
-                scene_data["ego_shape"] = torch.tensor(
-                    [list(tree.ego_shape)], dtype=torch.float32)
+            scene_data = _load_npz(npz_path, torch.device("cpu"),
+                                   ego_shape_override=tree.ego_shape)
             obs_at_step = _get_obstacles_at_step(tree, s)
             if obs_at_step:
                 scene_data = _inject_obstacles_into_tensors(
@@ -2442,15 +2448,11 @@ def main():
 
     if args.tree_json:
         tree = SceneTree.load(args.tree_json)
+    elif ego_shape_override:
+        tree = SceneTree.create_from_npz_dir_with_shape(
+            args.npz_dir, ego_shape_override)
     else:
-        try:
-            tree = SceneTree.create_from_npz_dir(args.npz_dir)
-        except ValueError as e:
-            if ego_shape_override and "ego_shape" in str(e):
-                tree = SceneTree._create_from_npz_dir_with_shape(
-                    args.npz_dir, ego_shape_override)
-            else:
-                raise
+        tree = SceneTree.create_from_npz_dir(args.npz_dir)
 
     if ego_shape_override:
         tree.ego_shape = ego_shape_override
