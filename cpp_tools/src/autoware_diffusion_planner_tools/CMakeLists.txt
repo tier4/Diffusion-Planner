@@ -23,6 +23,8 @@ ament_auto_add_executable(data_converter
   src/data_converter.cpp
   src/io/frame_writer.cpp
   src/io/projector_factory.cpp
+  src/processing/ego_sequence.cpp
+  src/processing/neighbor_processor.cpp
 )
 target_include_directories(data_converter PRIVATE include src)
 target_link_libraries(data_converter yaml-cpp)

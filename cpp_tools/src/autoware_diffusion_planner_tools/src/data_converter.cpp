@@ -14,11 +14,13 @@
 
 #include "io/frame_writer.hpp"
 #include "io/projector_factory.hpp"
+#include "processing/ego_sequence.hpp"
+#include "processing/neighbor_processor.hpp"
 #include "rosbag_parser.hpp"
 #include "timestamp_stats.hpp"
 #include "types/frame_data.hpp"
 #include "types/skipping_info.hpp"
-#include "types/training_data_binary.hpp"
+#include "utils/timestamp_utils.hpp"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -63,178 +65,6 @@ using namespace autoware_planning_msgs::msg;
 using namespace autoware_vehicle_msgs::msg;
 using namespace geometry_msgs::msg;
 using namespace nav_msgs::msg;
-
-std::string create_token(const int64_t seq_id, const int64_t frame_id)
-{
-  std::ostringstream token_stream;
-  token_stream << std::setfill('0') << std::setw(8) << seq_id << "_" << std::setw(8) << frame_id;
-  return token_stream.str();
-}
-
-int64_t parse_timestamp(const builtin_interfaces::msg::Time & stamp)
-{
-  return static_cast<int64_t>(stamp.sec) * 1000000000LL + static_cast<int64_t>(stamp.nanosec);
-}
-
-template <typename T>
-std::vector<T> check_and_update_msg(
-  std::deque<T> & msgs, const builtin_interfaces::msg::Time & target_stamp)
-{
-  const int64_t target_time = parse_timestamp(target_stamp);
-  std::vector<T> result;
-  int64_t best_index = -1;
-
-  for (int64_t i = 0; i < static_cast<int64_t>(msgs.size()); ++i) {
-    const auto & msg = msgs[i];
-    builtin_interfaces::msg::Time msg_stamp;
-    if constexpr (
-      std::is_same_v<T, Odometry> || std::is_same_v<T, TrackedObjects> ||
-      std::is_same_v<T, AccelWithCovarianceStamped>) {
-      msg_stamp = msg.header.stamp;
-    } else if constexpr (
-      std::is_same_v<T, TurnIndicatorsReport> || std::is_same_v<T, TrafficLightGroupArray>) {
-      msg_stamp = msg.stamp;
-    }
-
-    const int64_t msg_time = parse_timestamp(msg_stamp);
-    const int64_t time_diff = target_time - msg_time;
-
-    // Only consider past messages, break if future message is encountered
-    if (time_diff < 0) {
-      break;
-    }
-
-    if (time_diff <= static_cast<int64_t>(2e8)) {  // 200 msec within loop
-      result.push_back(msg);                       // collect all within threshold
-      best_index = i;
-    }
-  }
-
-  // Remove processed messages up to the selected index
-  if (best_index >= 0) {
-    msgs.erase(msgs.begin(), msgs.begin() + best_index);
-  }
-  return result;
-}
-
-std::optional<std::vector<float>> create_ego_sequence(
-  const std::vector<FrameData> & data_list, const int64_t start_idx, const size_t num_timesteps,
-  const Eigen::Matrix4d & map2bl_matrix, const rclcpp::Time & reference_time,
-  const bool use_interpolation)
-{
-  std::deque<nav_msgs::msg::Odometry> odom_deque;
-
-  if (use_interpolation) {
-    // Collect odom messages from start_idx until timestamp >= reference_time
-    for (size_t j = static_cast<size_t>(std::max(int64_t(0), start_idx)); j < data_list.size();
-         ++j) {
-      odom_deque.push_back(data_list[j].kinematic_state);
-      if (rclcpp::Time(data_list[j].kinematic_state.header.stamp) >= reference_time) {
-        break;
-      }
-    }
-
-    // Error: data doesn't cover the reference_time
-    if (odom_deque.empty() || rclcpp::Time(odom_deque.back().header.stamp) < reference_time) {
-      return std::nullopt;
-    }
-
-    return preprocess::create_ego_agent_past(
-      odom_deque, num_timesteps, map2bl_matrix, reference_time);
-  } else {
-    // Without interpolation: collect exactly num_timesteps frames by index
-    for (size_t j = 0; j < num_timesteps; ++j) {
-      const int64_t index =
-        std::min(start_idx + static_cast<int64_t>(j), static_cast<int64_t>(data_list.size()) - 1);
-      if (index < 0) {
-        return std::nullopt;
-      }
-      odom_deque.push_back(data_list[index].kinematic_state);
-    }
-
-    if (odom_deque.empty()) {
-      return std::nullopt;
-    }
-
-    return preprocess::create_ego_agent_past(odom_deque, num_timesteps, map2bl_matrix);
-  }
-}
-
-std::pair<std::vector<float>, std::vector<float>> process_neighbor_agents_and_future(
-  const std::vector<FrameData> & data_list, const int64_t current_idx,
-  const Eigen::Matrix4d & map2bl_matrix)
-{
-  // Build agent histories using AgentData::update_histories
-  const int64_t start_idx =
-    std::max(static_cast<int64_t>(0), current_idx - INPUT_T_WITH_CURRENT + 1);
-  const bool ignore_unknown_agents = true;
-  autoware::diffusion_planner::AgentData agent_data_past;
-  for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
-    const int64_t frame_idx = start_idx + t;
-    if (frame_idx >= static_cast<int64_t>(data_list.size())) {
-      break;
-    }
-    agent_data_past.update_histories(data_list[frame_idx].tracked_objects, ignore_unknown_agents);
-  }
-  const auto transformed_histories =
-    agent_data_past.transformed_and_trimmed_histories(map2bl_matrix, MAX_NUM_NEIGHBORS);
-  const std::vector<float> neighbor_past =
-    flatten_histories_to_vector(transformed_histories, MAX_NUM_NEIGHBORS, INPUT_T_WITH_CURRENT);
-
-  // Build id -> AgentHistory map for future filling
-  const std::vector<AgentHistory> agent_histories = transformed_histories;
-  std::unordered_map<std::string, AgentHistory> id_to_history;
-  for (size_t i = 0; i < agent_histories.size(); ++i) {
-    const auto object_id = agent_histories[i].get_latest_state().object_id;
-    id_to_history.emplace(object_id, AgentHistory(OUTPUT_T));
-    id_to_history.at(object_id).update(
-      agent_histories[i].get_latest_state().original_info,
-      agent_histories[i].get_latest_state().timestamp);
-  }
-
-  // Future data: use AgentHistory for each agent
-  std::vector<float> neighbor_future(MAX_NUM_NEIGHBORS * OUTPUT_T * NEIGHBOR_FUTURE_DIM, 0.0f);
-  for (int64_t agent_idx = 0; agent_idx < static_cast<int64_t>(agent_histories.size());
-       ++agent_idx) {
-    const std::string & agent_id_str = agent_histories[agent_idx].get_latest_state().object_id;
-    AgentHistory & future_history = id_to_history.at(agent_id_str);
-    for (int64_t t = 1; t <= OUTPUT_T; ++t) {
-      const int64_t future_frame_idx = current_idx + t;
-      if (future_frame_idx >= static_cast<int64_t>(data_list.size())) {
-        break;
-      }
-      // Find object with same id in future frame
-      const auto & future_objects = data_list[future_frame_idx].tracked_objects.objects;
-      bool found = false;
-      for (const auto & obj : future_objects) {
-        const std::string obj_id = autoware_utils_uuid::to_hex_string(obj.object_id);
-        if (obj_id == agent_id_str) {
-          future_history.update(obj, data_list[future_frame_idx].kinematic_state.header.stamp);
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        break;
-      }
-    }
-    future_history.apply_transform(map2bl_matrix);
-
-    // Fill future array for this agent
-    const std::vector<float> arr = future_history.as_array();
-    for (int64_t t = 0; t < OUTPUT_T; ++t) {
-      const int64_t base_idx = agent_idx * OUTPUT_T * NEIGHBOR_FUTURE_DIM + t * NEIGHBOR_FUTURE_DIM;
-      for (int64_t d = 0; d < NEIGHBOR_FUTURE_DIM; ++d) {
-        if (t * AGENT_STATE_DIM + d >= arr.size()) {
-          break;
-        }
-        neighbor_future[base_idx + d] = arr[t * AGENT_STATE_DIM + d];
-      }
-    }
-  }
-
-  return std::make_pair(neighbor_past, neighbor_future);
-}
 
 int main(int argc, char ** argv)
 {
