@@ -135,6 +135,7 @@ def _compute_sft_diffusion_loss(
     ego_il_weight: float = 0.0,
     ego_il_mode: str = "gt",
     ego_gt_real: torch.Tensor | None = None,
+    velocity_weight: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute standard SFT diffusion loss with ego + neighbor targets.
 
@@ -285,6 +286,9 @@ def _compute_sft_diffusion_loss(
         sin_gt_e = ego_gt[..., 3]  # [B, T]
         lat_err = torch.abs(-pos_diff[..., 0] * sin_gt_e + pos_diff[..., 1] * cos_gt_e)
         lon_err = torch.abs(pos_diff[..., 0] * cos_gt_e + pos_diff[..., 1] * sin_gt_e)
+        if velocity_weight:
+            ego_speed = data["ego_current_state"][:, 4:5].abs().clamp(min=1.0)  # [B, 1]
+            lon_err = lon_err / ego_speed
         heading_err = torch.sum((ego_pred[..., 2:] - ego_gt[..., 2:]) ** 2, dim=-1)
         ego_loss = (lat_err + lon_err + heading_err).mean()
         total_ego_loss += ego_loss
@@ -1145,6 +1149,7 @@ def train_epoch_ranked_sft(
             ego_il_weight=config.ego_il_weight,
             ego_il_mode=config.ego_il_mode,
             ego_gt_real=mini_ego_gt_real,
+            velocity_weight=config.sft_velocity_weight,
         )
 
         # Scale loss to preserve per-scene gradient magnitude:
