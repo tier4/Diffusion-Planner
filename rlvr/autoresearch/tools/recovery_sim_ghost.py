@@ -34,11 +34,8 @@ import matplotlib
 matplotlib.use("Agg")
 import numpy as np
 import torch
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.config import Config
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
-from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
 
 # Reuse all the heavy lifting from recovery_sim
@@ -59,30 +56,15 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _VIEW_HALF_M,
     closed_loop_rollout_with_plans,
 )
-from rlvr.autoresearch.tools.ghost_sim_common import extract_stopped_neighbors
+from rlvr.autoresearch.tools.ghost_sim_common import (
+    extract_stopped_neighbors,
+    load_model as _load_model,
+)
 from rlvr.autoresearch.tools.recovery_test import get_tangent_at_origin
 
 
 _BASELINE_COLOR = "#1f77b4"   # blue
 _PRISM_COLOR    = "#d62728"   # red
-
-
-def _load_model(model_path: str, lora_path: str | None, device):
-    model_dir = Path(model_path).parent
-    args_path = model_dir / "args.json"
-    if not args_path.exists():
-        args_path = model_dir.parent / "args.json"
-    margs = Config(str(args_path))
-    model = Diffusion_Planner(margs)
-    ckpt = torch.load(model_path, map_location=device, weights_only=False)
-    state = ckpt.get("model", ckpt)
-    state = {k.replace("module.", ""): v for k, v in state.items()}
-    model.load_state_dict(state)
-    model.to(device).eval()
-    if lora_path:
-        model = load_lora_checkpoint(model, lora_path)
-        model.eval()
-    return model, margs
 
 
 def _render_ghost_step(
