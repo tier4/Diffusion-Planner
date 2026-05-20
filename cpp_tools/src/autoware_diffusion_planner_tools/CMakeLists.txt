@@ -21,8 +21,10 @@ endif()
 
 ament_auto_add_executable(data_converter
   src/data_converter.cpp
+  src/io/frame_writer.cpp
+  src/io/projector_factory.cpp
 )
-target_include_directories(data_converter PRIVATE include)
+target_include_directories(data_converter PRIVATE include src)
 target_link_libraries(data_converter yaml-cpp)
 
 ament_auto_add_executable(inference_tool
