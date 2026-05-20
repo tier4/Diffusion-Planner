@@ -17,11 +17,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <numeric>
-#include <vector>
 #include <string>
 #include <unordered_map>
-#include <iostream>
+#include <vector>
 
 namespace timestamp_stats
 {
@@ -74,11 +74,10 @@ public:
 
   void calc_stats()
   {
-
     // check monotonicity
     is_monotonic_header_ = std::is_sorted(header_timestamps_.begin(), header_timestamps_.end());
     is_monotonic_rosbag_ = std::is_sorted(rosbag_timestamps_.begin(), rosbag_timestamps_.end());
-  
+
     // check size
     if (header_timestamps_.size() < 1 || rosbag_timestamps_.size() < 1) {
       throw std::runtime_error("Not enough timestamps to calculate stats for topic " + topic_name_);
@@ -87,14 +86,14 @@ public:
     // calculate stats
     std::vector<int64_t> header_diffs;
     for (size_t i = 1; i < header_timestamps_.size(); ++i) {
-        header_diffs.push_back(header_timestamps_[i] - header_timestamps_[i - 1]);
+      header_diffs.push_back(header_timestamps_[i] - header_timestamps_[i - 1]);
     }
 
     std::vector<int64_t> rosbag_diffs;
     for (size_t i = 1; i < rosbag_timestamps_.size(); ++i) {
-        rosbag_diffs.push_back(rosbag_timestamps_[i] - rosbag_timestamps_[i - 1]);
+      rosbag_diffs.push_back(rosbag_timestamps_[i] - rosbag_timestamps_[i - 1]);
     }
-    
+
     std::vector<int64_t> diffs;
     for (size_t i = 0; i < std::min(header_timestamps_.size(), rosbag_timestamps_.size()); ++i) {
       diffs.push_back(rosbag_timestamps_[i] - header_timestamps_[i]);
@@ -108,68 +107,33 @@ public:
   bool is_monotonic_header() const { return is_monotonic_header_; }
   bool is_monotonic_rosbag() const { return is_monotonic_rosbag_; }
 
-  double diff_mean() const
-  {
-    return get_mean(diff_stats_);
-  }
+  double diff_mean() const { return get_mean(diff_stats_); }
 
-  double diff_std_dev() const
-  {
-    return get_std_dev(diff_stats_);
-  }
+  double diff_std_dev() const { return get_std_dev(diff_stats_); }
 
-  int64_t diff_min() const
-  {
-    return get_min(diff_stats_);
-  }
+  int64_t diff_min() const { return get_min(diff_stats_); }
 
-  int64_t diff_max() const
-  {
-    return get_max(diff_stats_);
-  }
+  int64_t diff_max() const { return get_max(diff_stats_); }
 
-  double header_diff_mean() const
-  {
-    return get_mean(header_diff_stats_);
-  }
+  double header_diff_mean() const { return get_mean(header_diff_stats_); }
 
-  double header_diff_std_dev() const
-  {
-    return get_std_dev(header_diff_stats_);
-  }
+  double header_diff_std_dev() const { return get_std_dev(header_diff_stats_); }
 
-  int64_t header_diff_min() const
-  {
-    return get_min(header_diff_stats_);
-  }
+  int64_t header_diff_min() const { return get_min(header_diff_stats_); }
 
-  int64_t header_diff_max() const
-  {
-    return get_max(header_diff_stats_);
-  }
+  int64_t header_diff_max() const { return get_max(header_diff_stats_); }
 
-  double rosbag_diff_mean() const
-  {
-    return get_mean(rosbag_diff_stats_);
-  }
+  double rosbag_diff_mean() const { return get_mean(rosbag_diff_stats_); }
 
-  double rosbag_diff_std_dev() const
-  {
-    return get_std_dev(rosbag_diff_stats_);
-  }
+  double rosbag_diff_std_dev() const { return get_std_dev(rosbag_diff_stats_); }
 
-  int64_t rosbag_diff_min() const
-  {
-    return get_min(rosbag_diff_stats_);
-  }
+  int64_t rosbag_diff_min() const { return get_min(rosbag_diff_stats_); }
 
-  int64_t rosbag_diff_max() const
-  {
-    return get_max(rosbag_diff_stats_);
-  }
+  int64_t rosbag_diff_max() const { return get_max(rosbag_diff_stats_); }
 
 private:
-  struct Stats {
+  struct Stats
+  {
     double mean_;
     double std_dev_;
     int64_t min_;
@@ -200,7 +164,6 @@ private:
   double get_std_dev(const Stats & stats) const { return stats.std_dev_; }
   int64_t get_min(const Stats & stats) const { return stats.min_; }
   int64_t get_max(const Stats & stats) const { return stats.max_; }
-
 };
 
 struct TimestampStatsMap
@@ -230,6 +193,6 @@ struct TimestampStatsMap
 
   std::unordered_map<std::string, TimestampStats> stats_map;
 };
-} // namespace timestamp_stats
+}  // namespace timestamp_stats
 
 #endif  // PLANNING__AUTOWARE_DIFFUSION_PLANNER_TOOLS_UTILS__TIMESTAMP_STATS_HPP_
