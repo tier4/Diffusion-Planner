@@ -259,9 +259,6 @@ def _compute_sft_diffusion_loss(
         xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         xT_full = torch.where(prefix_mask, all_gt, xT_full)
 
-        # Forward pass (clone normalized data each K-step to avoid inplace conflicts
-        # when training full model without LoRA — the model forward pass may modify
-        # internal tensor versions)
         merged_inputs = {k: v.clone() if isinstance(v, torch.Tensor) else v
                          for k, v in data_normalized.items()}
         merged_inputs["gt_trajectories"] = all_gt
@@ -1124,8 +1121,6 @@ def train_epoch_ranked_sft(
         batch_idx = indices[batch_start:batch_start + sft_bs]
         bs = len(batch_idx)
 
-        # Slice raw observation data for this mini-batch (clone to avoid
-        # inplace-op conflicts when training full model without LoRA)
         mini_data = {
             k: v[batch_idx].clone() if isinstance(v, torch.Tensor) and v.shape[0] == N else
                (v.clone() if isinstance(v, torch.Tensor) else v)

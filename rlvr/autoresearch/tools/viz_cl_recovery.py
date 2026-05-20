@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import matplotlib
@@ -89,6 +90,39 @@ def draw_scene_base(ax, npz_path):
             mask = ch3 > 0.5
             if mask.sum() >= 2:
                 ax.plot(pts[mask, 0], pts[mask, 1], "-", color="black", lw=1.1, alpha=0.9)
+
+    if "neighbor_agents_past" in npz.files and "neighbor_agents_future" in npz.files:
+        nb_past = npz["neighbor_agents_past"]
+        if nb_past.ndim == 4:
+            nb_past = nb_past[0]
+        nb_fut = npz["neighbor_agents_future"]
+        if nb_fut.ndim == 4:
+            nb_fut = nb_fut[0]
+        for i in range(nb_past.shape[0]):
+            xy0 = nb_past[i, -1, :2]
+            if abs(xy0[0]) + abs(xy0[1]) < 1e-6:
+                continue
+            fut_xy = nb_fut[i, :, :2]
+            fut_valid = np.abs(fut_xy).sum(axis=-1) > 1e-6
+            if fut_valid.sum() < 2:
+                disp = 0.0
+            else:
+                disp = float(np.linalg.norm(fut_xy[fut_valid].max(axis=0)
+                                             - fut_xy[fut_valid].min(axis=0)))
+            if disp >= 0.5:
+                continue
+            cos_h = nb_past[i, -1, 2]; sin_h = nb_past[i, -1, 3]
+            heading = math.atan2(sin_h, cos_h)
+            width = float(nb_past[i, -1, 6])
+            length = float(nb_past[i, -1, 7])
+            if width < 0.1 or length < 0.1:
+                continue
+            t_rot = mtransforms.Affine2D().rotate(heading).translate(xy0[0], xy0[1]) + ax.transData
+            ax.add_patch(Rectangle(
+                (-length / 2, -width / 2), length, width,
+                lw=1.2, ec="#cc6600", fc="#ffb366", alpha=0.75,
+                zorder=14, transform=t_rot,
+            ))
 
 
 def draw_traj(ax, traj, label, color, npz_path, with_footprints=True):
