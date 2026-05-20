@@ -93,6 +93,9 @@ def _render_ghost_step(
     ego_length: float, ego_width: float,
     perturbation_label: str, init_lateral: float,
     view_half_m: float = _VIEW_HALF_M,
+    neighbor_boxes: list[tuple[float, float, float, float, float]] | None = None,
+    baseline_label: str = "baseline (LoRA-less)",
+    trained_label: str = "PRiSM",
 ) -> None:
     bx, by, bh = float(bl_pose[0]), float(bl_pose[1]), float(bl_pose[2])
     px, py, ph = float(pr_pose[0]), float(pr_pose[1]), float(pr_pose[2])
@@ -129,6 +132,12 @@ def _render_ghost_step(
             ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR,
                     lw=2.5, alpha=0.55, zorder=3)
 
+    # Stopped neighbor OBBs
+    if neighbor_boxes:
+        for nx, ny, nh, nl, nw in neighbor_boxes:
+            _draw_agent_box(ax, nx, ny, nh, nl, nw,
+                            "#cc6600", alpha=0.75, lw=1.5, zorder=14)
+
     # Plans (faded thin)
     if bl_plan is not None and bl_plan.shape[0] > 1:
         ax.plot(bl_plan[:, 0], bl_plan[:, 1], "-",
@@ -160,9 +169,9 @@ def _render_ghost_step(
 
     # Legend
     ax.plot([], [], "-", color=_BASELINE_COLOR, lw=2,
-            label=f"baseline (LoRA-less)  v={bl_speed:.1f} m/s  lat={cur_lat_b:.2f}m")
+            label=f"{baseline_label}  v={bl_speed:.1f} m/s  lat={cur_lat_b:.2f}m")
     ax.plot([], [], "-", color=_PRISM_COLOR, lw=2,
-            label=f"PRiSM  v={pr_speed:.1f} m/s  lat={cur_lat_p:.2f}m")
+            label=f"{trained_label}  v={pr_speed:.1f} m/s  lat={cur_lat_p:.2f}m")
     ax.legend(fontsize=9, loc="upper left")
 
     ax.set_xlim(cx - view_half_m, cx + view_half_m)
@@ -173,8 +182,8 @@ def _render_ghost_step(
     ax.set_ylabel("Y (m, initial ego frame)")
     ax.set_title(
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  perturb={perturbation_label}  init lat={init_lateral:.2f}m\n"
-        f"baseline lat={cur_lat_b:.2f}m   PRiSM lat={cur_lat_p:.2f}m   "
-        f"Δ={cur_lat_b - cur_lat_p:+.2f}m (positive = PRiSM closer to centerline)",
+        f"{baseline_label} lat={cur_lat_b:.2f}m   {trained_label} lat={cur_lat_p:.2f}m   "
+        f"Δ={cur_lat_b - cur_lat_p:+.2f}m (positive = {trained_label} closer to centerline)",
         fontsize=10,
     )
     fig.tight_layout()
@@ -249,6 +258,33 @@ def main() -> None:
     route_polylines = _route_polylines(rl.cpu().numpy())
     centerline_segments = _build_segments(perturbed["route_lanes"])
 
+    # Extract stopped neighbor OBBs from NPZ (static obstacles)
+    data_np = dict(np.load(args.scene, allow_pickle=True))
+    nb_boxes = []
+    if "neighbor_agents_past" in data_np and "neighbor_agents_future" in data_np:
+        nb_past = data_np["neighbor_agents_past"]
+        if nb_past.ndim == 4:
+            nb_past = nb_past[0]
+        nb_fut = data_np["neighbor_agents_future"]
+        if nb_fut.ndim == 4:
+            nb_fut = nb_fut[0]
+        for i in range(nb_past.shape[0]):
+            xy0 = nb_past[i, -1, :2]
+            if abs(xy0[0]) + abs(xy0[1]) < 1e-6:
+                continue
+            fut_xy = nb_fut[i, :, :2]
+            fut_valid = np.abs(fut_xy).sum(axis=-1) > 1e-6
+            disp = 0.0 if fut_valid.sum() < 2 else float(
+                np.linalg.norm(fut_xy[fut_valid].max(0) - fut_xy[fut_valid].min(0)))
+            if disp >= 0.5:
+                continue
+            w = float(nb_past[i, -1, 6])
+            l = float(nb_past[i, -1, 7])
+            if w < 0.1 or l < 0.1:
+                continue
+            h = float(math.atan2(nb_past[i, -1, 3], nb_past[i, -1, 2]))
+            nb_boxes.append((float(xy0[0]), float(xy0[1]), h, l, w))
+
     # Render per-step PNGs
     n = args.steps
     print(f"[ghost-sim] rendering {n + 1} frames...")
@@ -268,6 +304,7 @@ def main() -> None:
             ego_length=args.ego_length, ego_width=args.ego_width,
             perturbation_label=perturb_label, init_lateral=init_lat,
             view_half_m=args.view_half_m,
+            neighbor_boxes=nb_boxes,
         )
 
     if args.make_webm:
