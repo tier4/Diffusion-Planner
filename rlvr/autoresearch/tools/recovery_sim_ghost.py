@@ -34,11 +34,8 @@ import matplotlib
 matplotlib.use("Agg")
 import numpy as np
 import torch
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.config import Config
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
-from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
 
 # Reuse all the heavy lifting from recovery_sim
@@ -59,29 +56,15 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _VIEW_HALF_M,
     closed_loop_rollout_with_plans,
 )
+from rlvr.autoresearch.tools.ghost_sim_common import (
+    extract_stopped_neighbors,
+    load_model as _load_model,
+)
 from rlvr.autoresearch.tools.recovery_test import get_tangent_at_origin
 
 
 _BASELINE_COLOR = "#1f77b4"   # blue
 _PRISM_COLOR    = "#d62728"   # red
-
-
-def _load_model(model_path: str, lora_path: str | None, device):
-    model_dir = Path(model_path).parent
-    args_path = model_dir / "args.json"
-    if not args_path.exists():
-        args_path = model_dir.parent / "args.json"
-    margs = Config(str(args_path))
-    model = Diffusion_Planner(margs)
-    ckpt = torch.load(model_path, map_location=device, weights_only=False)
-    state = ckpt.get("model", ckpt)
-    state = {k.replace("module.", ""): v for k, v in state.items()}
-    model.load_state_dict(state)
-    model.to(device).eval()
-    if lora_path:
-        model = load_lora_checkpoint(model, lora_path)
-        model.eval()
-    return model, margs
 
 
 def _render_ghost_step(
@@ -93,6 +76,9 @@ def _render_ghost_step(
     ego_length: float, ego_width: float,
     perturbation_label: str, init_lateral: float,
     view_half_m: float = _VIEW_HALF_M,
+    neighbor_boxes: list[tuple[float, float, float, float, float]] | None = None,
+    baseline_label: str = "baseline (LoRA-less)",
+    trained_label: str = "PRiSM",
 ) -> None:
     bx, by, bh = float(bl_pose[0]), float(bl_pose[1]), float(bl_pose[2])
     px, py, ph = float(pr_pose[0]), float(pr_pose[1]), float(pr_pose[2])
@@ -129,6 +115,12 @@ def _render_ghost_step(
             ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR,
                     lw=2.5, alpha=0.55, zorder=3)
 
+    # Stopped neighbor OBBs
+    if neighbor_boxes:
+        for nx, ny, nh, nl, nw in neighbor_boxes:
+            _draw_agent_box(ax, nx, ny, nh, nl, nw,
+                            "#cc6600", alpha=0.75, lw=1.5, zorder=14)
+
     # Plans (faded thin)
     if bl_plan is not None and bl_plan.shape[0] > 1:
         ax.plot(bl_plan[:, 0], bl_plan[:, 1], "-",
@@ -160,9 +152,9 @@ def _render_ghost_step(
 
     # Legend
     ax.plot([], [], "-", color=_BASELINE_COLOR, lw=2,
-            label=f"baseline (LoRA-less)  v={bl_speed:.1f} m/s  lat={cur_lat_b:.2f}m")
+            label=f"{baseline_label}  v={bl_speed:.1f} m/s  lat={cur_lat_b:.2f}m")
     ax.plot([], [], "-", color=_PRISM_COLOR, lw=2,
-            label=f"PRiSM  v={pr_speed:.1f} m/s  lat={cur_lat_p:.2f}m")
+            label=f"{trained_label}  v={pr_speed:.1f} m/s  lat={cur_lat_p:.2f}m")
     ax.legend(fontsize=9, loc="upper left")
 
     ax.set_xlim(cx - view_half_m, cx + view_half_m)
@@ -173,8 +165,8 @@ def _render_ghost_step(
     ax.set_ylabel("Y (m, initial ego frame)")
     ax.set_title(
         f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  perturb={perturbation_label}  init lat={init_lateral:.2f}m\n"
-        f"baseline lat={cur_lat_b:.2f}m   PRiSM lat={cur_lat_p:.2f}m   "
-        f"Δ={cur_lat_b - cur_lat_p:+.2f}m (positive = PRiSM closer to centerline)",
+        f"{baseline_label} lat={cur_lat_b:.2f}m   {trained_label} lat={cur_lat_p:.2f}m   "
+        f"Δ={cur_lat_b - cur_lat_p:+.2f}m (positive = {trained_label} closer to centerline)",
         fontsize=10,
     )
     fig.tight_layout()
@@ -202,6 +194,8 @@ def main() -> None:
     parser.add_argument("--view_half_m", type=float, default=_VIEW_HALF_M)
     parser.add_argument("--make_webm", action="store_true")
     parser.add_argument("--webm_fps", type=int, default=10)
+    parser.add_argument("--baseline_label", type=str, default="baseline (LoRA-less)")
+    parser.add_argument("--trained_label", type=str, default="PRiSM")
     args = parser.parse_args()
 
     out = Path(args.output_dir)
@@ -249,6 +243,8 @@ def main() -> None:
     route_polylines = _route_polylines(rl.cpu().numpy())
     centerline_segments = _build_segments(perturbed["route_lanes"])
 
+    nb_boxes = extract_stopped_neighbors(args.scene)
+
     # Render per-step PNGs
     n = args.steps
     print(f"[ghost-sim] rendering {n + 1} frames...")
@@ -268,6 +264,9 @@ def main() -> None:
             ego_length=args.ego_length, ego_width=args.ego_width,
             perturbation_label=perturb_label, init_lateral=init_lat,
             view_half_m=args.view_half_m,
+            neighbor_boxes=nb_boxes,
+            baseline_label=args.baseline_label,
+            trained_label=args.trained_label,
         )
 
     if args.make_webm:
