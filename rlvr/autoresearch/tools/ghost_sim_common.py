@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -38,8 +38,7 @@ from rlvr.autoresearch.tools.recovery_sim import (
 
 MODEL_A_COLOR = "#1f77b4"  # blue
 MODEL_B_COLOR = "#d62728"  # red
-_NB_EDGE_COLOR = "#cc6600"
-_NB_FACE_COLOR = "#ffb366"
+_NB_COLOR = "#cc6600"
 
 
 @dataclass
@@ -172,7 +171,7 @@ def render_ghost_step(
     if neighbor_boxes:
         for nx, ny, nh, nl, nw in neighbor_boxes:
             _draw_agent_box(ax, nx, ny, nh, nl, nw,
-                            _NB_EDGE_COLOR, alpha=0.75, lw=1.5, zorder=14)
+                            _NB_COLOR, alpha=0.75, lw=1.5, zorder=14)
 
     if a_plan is not None and a_plan.shape[0] > 1:
         ax.plot(a_plan[:, 0], a_plan[:, 1], "-",
@@ -298,8 +297,11 @@ def run_ghost_sim(
             "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32",
             "-row-mt", "1", str(webm_path),
         ]
-        subprocess.run(cmd, capture_output=True)
-        print(f"[ghost-sim] WebM: {webm_path}")
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            print(f"[ghost-sim] ffmpeg failed (rc={result.returncode}): {result.stderr.decode()[-200:]}")
+        else:
+            print(f"[ghost-sim] WebM: {webm_path}")
 
     print(f"\nDone — {output_dir} ({n + 1} frames)")
     return rollout_a, rollout_b, webm_path

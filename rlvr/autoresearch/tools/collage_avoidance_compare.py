@@ -116,9 +116,7 @@ def main():
 
     rows = (len(selected) + args.cols - 1) // args.cols
     fig, axes = plt.subplots(rows, args.cols, figsize=(7 * args.cols, 7 * rows))
-    if rows == 1:
-        axes = [axes] if args.cols == 1 else [axes]
-    axes_flat = np.array(axes).flatten()
+    axes_flat = np.atleast_1d(axes).ravel()
 
     for ax in axes_flat:
         ax.axis("off")

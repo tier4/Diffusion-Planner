@@ -212,6 +212,8 @@ def main() -> None:
     parser.add_argument("--view_half_m", type=float, default=_VIEW_HALF_M)
     parser.add_argument("--make_webm", action="store_true")
     parser.add_argument("--webm_fps", type=int, default=10)
+    parser.add_argument("--baseline_label", type=str, default="baseline (LoRA-less)")
+    parser.add_argument("--trained_label", type=str, default="PRiSM")
     args = parser.parse_args()
 
     out = Path(args.output_dir)
@@ -281,6 +283,8 @@ def main() -> None:
             perturbation_label=perturb_label, init_lateral=init_lat,
             view_half_m=args.view_half_m,
             neighbor_boxes=nb_boxes,
+            baseline_label=args.baseline_label,
+            trained_label=args.trained_label,
         )
 
     if args.make_webm:
