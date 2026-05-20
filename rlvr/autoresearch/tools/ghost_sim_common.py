@@ -117,10 +117,14 @@ def extract_scene_polylines(data: dict[str, torch.Tensor]):
     line_strings = data.get("line_strings")
     if line_strings is not None and line_strings.dim() == 4:
         line_strings = line_strings[0]
-    centerlines, lefts, rights = _lane_polylines(
-        lanes.cpu().numpy() if lanes is not None else None)
-    border_polylines = _road_border_polylines(
-        line_strings.cpu().numpy() if line_strings is not None else None)
+    if lanes is not None:
+        centerlines, lefts, rights = _lane_polylines(lanes.cpu().numpy())
+    else:
+        centerlines, lefts, rights = [], [], []
+    if line_strings is not None:
+        border_polylines = _road_border_polylines(line_strings.cpu().numpy())
+    else:
+        border_polylines = []
     route_polylines = _route_polylines(rl.cpu().numpy())
     centerline_segments = _build_segments(data["route_lanes"])
     return centerlines, lefts, rights, border_polylines, route_polylines, centerline_segments

@@ -77,9 +77,9 @@ def main():
 
         delta = sc_train["sc_min_dist"] - sc_base["sc_min_dist"]
 
-        png_candidates = list(Path(args.viz_dir).glob(f"*_{scene_name}.png"))
+        png_candidates = sorted(Path(args.viz_dir).glob(f"*_{scene_name}.png"))
         if not png_candidates:
-            png_candidates = list(Path(args.viz_dir).glob(f"scene_{i:03d}_*.png"))
+            png_candidates = sorted(Path(args.viz_dir).glob(f"scene_{i:03d}_*.png"))
         png_path = str(png_candidates[0]) if png_candidates else None
 
         results.append({
