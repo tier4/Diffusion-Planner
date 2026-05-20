@@ -412,18 +412,17 @@ def _draw_agent_view(
         gt = agent.future_trajectory
         ax.plot(gt[:, 0], gt[:, 1], "--", color="#22bb22", lw=1.5, alpha=0.5, zorder=15, label="GT")
 
-    # Zoom: center on agent, show ~30m radius
+    # Zoom: center on agent + plan tip, tight view
     zoom_pts = [pos.reshape(1, 2)]
     if agent_id in agent_predictions:
-        zoom_pts.append(plan_xy[:20])
-    if agent.goal_pose is not None:
-        zoom_pts.append(agent.goal_pose[:2].reshape(1, 2))
+        zoom_pts.append(plan_xy[:40])
     if len(world_history) > 1:
-        zoom_pts.append(np.array(world_history[-min(20, len(world_history)):]))
+        zoom_pts.append(np.array(world_history[-min(10, len(world_history)):]))
     all_pts = np.vstack(zoom_pts)
     cx, cy = np.mean(all_pts[:, 0]), np.mean(all_pts[:, 1])
-    half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8
-    half = max(half, 15)  # minimum 15m radius
+    half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.55 + 5
+    half = max(half, 20)
+    half = min(half, 40)
     ax.set_xlim(cx - half, cx + half)
     ax.set_ylim(cy - half, cy + half)
 
