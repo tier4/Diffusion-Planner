@@ -31,7 +31,6 @@ import torch
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_collision_guidance import _score_traj
 from rlvr.autoresearch.tools.viz_prism_compare import _load_model, _det_predict
-from rlvr.grpo_trainer_batched import _stack_scene_data
 from preference_optimization.utils import load_npz_data
 
 
@@ -156,7 +155,8 @@ def main():
     print(f"\nCollage saved to {args.output}")
 
     summary_path = Path(args.output).with_suffix(".json")
-    json.dump(results, open(summary_path, "w"), indent=2)
+    with open(summary_path, "w") as f:
+        json.dump(results, f, indent=2)
     print(f"Full results saved to {summary_path}")
 
 

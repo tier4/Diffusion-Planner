@@ -20,7 +20,6 @@ from diffusion_planner.utils.config import Config
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 from preference_optimization.lora_utils import load_lora_checkpoint
-from preference_optimization.utils import load_npz_data
 
 from rlvr.autoresearch.tools.recovery_sim import (
     _build_segments,

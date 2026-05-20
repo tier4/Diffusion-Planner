@@ -59,6 +59,7 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _VIEW_HALF_M,
     closed_loop_rollout_with_plans,
 )
+from rlvr.autoresearch.tools.ghost_sim_common import extract_stopped_neighbors
 from rlvr.autoresearch.tools.recovery_test import get_tangent_at_origin
 
 
@@ -258,32 +259,7 @@ def main() -> None:
     route_polylines = _route_polylines(rl.cpu().numpy())
     centerline_segments = _build_segments(perturbed["route_lanes"])
 
-    # Extract stopped neighbor OBBs from NPZ (static obstacles)
-    data_np = dict(np.load(args.scene, allow_pickle=True))
-    nb_boxes = []
-    if "neighbor_agents_past" in data_np and "neighbor_agents_future" in data_np:
-        nb_past = data_np["neighbor_agents_past"]
-        if nb_past.ndim == 4:
-            nb_past = nb_past[0]
-        nb_fut = data_np["neighbor_agents_future"]
-        if nb_fut.ndim == 4:
-            nb_fut = nb_fut[0]
-        for i in range(nb_past.shape[0]):
-            xy0 = nb_past[i, -1, :2]
-            if abs(xy0[0]) + abs(xy0[1]) < 1e-6:
-                continue
-            fut_xy = nb_fut[i, :, :2]
-            fut_valid = np.abs(fut_xy).sum(axis=-1) > 1e-6
-            disp = 0.0 if fut_valid.sum() < 2 else float(
-                np.linalg.norm(fut_xy[fut_valid].max(0) - fut_xy[fut_valid].min(0)))
-            if disp >= 0.5:
-                continue
-            w = float(nb_past[i, -1, 6])
-            l = float(nb_past[i, -1, 7])
-            if w < 0.1 or l < 0.1:
-                continue
-            h = float(math.atan2(nb_past[i, -1, 3], nb_past[i, -1, 2]))
-            nb_boxes.append((float(xy0[0]), float(xy0[1]), h, l, w))
+    nb_boxes = extract_stopped_neighbors(args.scene)
 
     # Render per-step PNGs
     n = args.steps
