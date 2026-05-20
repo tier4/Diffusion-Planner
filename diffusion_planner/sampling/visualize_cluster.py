@@ -27,13 +27,12 @@ The cluster JSON is the output of cluster.py:
         ...
     }
 
-Each sub-plot shows the (x, y) paths from ego_agent_future for one cluster.
+All clusters are plotted on a single axes, color-coded by cluster ID.
 If --output is omitted the figure is shown interactively.
 """
 
 import argparse
 import json
-import math
 import random
 from pathlib import Path
 
@@ -57,61 +56,73 @@ def load_trajectory(npz_path: str) -> np.ndarray:
 
 # ── plotting ─────────────────────────────────────────────────────────────────
 
-def _draw_cluster(ax: plt.Axes, paths: list, max_samples: int, color: str, rng: random.Random) -> None:
-    sampled = rng.sample(paths, min(max_samples, len(paths)))
-
-    for npz_path in sampled:
-        try:
-            xy = load_trajectory(npz_path)
-            ax.plot(xy[:, 0], xy[:, 1], color=color, alpha=0.3, linewidth=0.8)
-        except Exception as e:
-            print(f"  [warn] skipping {npz_path}: {e}")
-
-    # Mark the ego origin
-    ax.scatter([0], [0], color="black", s=20, zorder=5)
+def _path_length(xy: np.ndarray) -> float:
+    return float(np.sum(np.linalg.norm(np.diff(xy, axis=0), axis=1)))
 
 
-def visualize(cluster_json: str, output: str | None, max_samples: int, seed: int) -> None:
+def visualize(cluster_json: str, output: str | None, max_samples: int, seed: int, bg_gray: float = 1.0) -> None:
     clusters = load_cluster_json(cluster_json)
     cluster_ids = sorted(clusters.keys(), key=lambda x: int(x.replace("cluster_id", "")))
     n_clusters = len(cluster_ids)
 
-    # Grid layout: prefer roughly square arrangement
-    n_cols = math.ceil(math.sqrt(n_clusters))
-    n_rows = math.ceil(n_clusters / n_cols)
-
-    cmap = plt.get_cmap("tab20")
+    cmap = plt.get_cmap("hsv")
+    colors = [cmap(i / n_clusters) for i in range(n_clusters)]
     rng = random.Random(seed)
 
-    fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(4 * n_cols, 4 * n_rows),
-        squeeze=False,
-    )
+    # Collect all trajectories across all clusters, tagged with color and label
+    all_entries = []  # (path_length, xy, color, label_or_None)
+    label_used = [False] * n_clusters
+
+    for idx, cluster_id in enumerate(cluster_ids):
+        paths = clusters[cluster_id]
+        color = colors[idx]
+        cluster_label = f"{cluster_id} (n={len(paths)})"
+        sampled = rng.sample(paths, min(max_samples, len(paths)))
+
+        for npz_path in sampled:
+            try:
+                xy = load_trajectory(npz_path)
+                all_entries.append((_path_length(xy), xy, color, idx, cluster_label))
+            except Exception as e:
+                print(f"  [warn] skipping {npz_path}: {e}")
+
+    # Sort longest-first so shorter paths are drawn last (on top)
+    all_entries.sort(key=lambda t: t[0], reverse=True)
+
+    bg_color = (bg_gray, bg_gray, bg_gray)
+    fig, ax = plt.subplots(figsize=(8, 8), facecolor=bg_color)
+    ax.set_facecolor(bg_color)
     fig.suptitle(
         f"ego_agent_future trajectories by cluster  (max {max_samples} samples each)",
         fontsize=12,
+        color="white" if bg_gray < 0.5 else "black",
     )
 
-    for idx, cluster_id in enumerate(cluster_ids):
-        row, col = divmod(idx, n_cols)
-        ax = axes[row][col]
-        paths = clusters[cluster_id]
-        color = cmap(idx % 20)
+    for _, xy, color, idx, cluster_label in all_entries:
+        label = cluster_label if not label_used[idx] else None
+        ax.plot(xy[:, 0], xy[:, 1], color=color, alpha=0.3, linewidth=1.0, label=label)
+        label_used[idx] = True
 
-        _draw_cluster(ax, paths, max_samples, color, rng)
+    # Mark the ego origin
+    ax.scatter([0], [0], color="black", s=40, zorder=5, label="ego origin")
 
-        ax.set_title(f"{cluster_id}  (n={len(paths)})", fontsize=9)
-        ax.set_xlabel("x [m]", fontsize=7)
-        ax.set_ylabel("y [m]", fontsize=7)
-        ax.set_aspect("equal")
-        ax.grid(True, linewidth=0.4, alpha=0.5)
-        ax.tick_params(labelsize=7)
-
-    # Hide unused axes
-    for idx in range(n_clusters, n_rows * n_cols):
-        row, col = divmod(idx, n_cols)
-        axes[row][col].set_visible(False)
+    label_color = "white" if bg_gray < 0.5 else "black"
+    ax.set_xlabel("x [m]", color=label_color)
+    ax.set_ylabel("y [m]", color=label_color)
+    ax.tick_params(colors=label_color)
+    for spine in ax.spines.values():
+        spine.set_edgecolor(label_color)
+    ax.set_aspect("equal")
+    ax.grid(True, linewidth=0.4, alpha=0.5, color=label_color)
+    ax.legend(
+        fontsize=7,
+        loc="upper right",
+        ncol=max(1, n_clusters // 20),
+        markerscale=2,
+        labelcolor=label_color,
+        facecolor=bg_color,
+        edgecolor=label_color,
+    )
 
     fig.tight_layout()
 
@@ -149,6 +160,12 @@ def get_args():
         help="Maximum number of trajectories to draw per cluster (default: 200)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--bg_gray",
+        type=float,
+        default=1.0,
+        help="Background grayscale level: 0.0=black, 1.0=white (default: 1.0)",
+    )
     return parser.parse_args()
 
 
@@ -159,4 +176,5 @@ if __name__ == "__main__":
         output=args.output,
         max_samples=args.max_samples,
         seed=args.seed,
+        bg_gray=args.bg_gray,
     )
