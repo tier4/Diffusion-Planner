@@ -259,8 +259,8 @@ def _compute_sft_diffusion_loss(
         xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         xT_full = torch.where(prefix_mask, all_gt, xT_full)
 
-        # Forward pass
-        merged_inputs = {**data_normalized}
+        merged_inputs = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                         for k, v in data_normalized.items()}
         merged_inputs["gt_trajectories"] = all_gt
         merged_inputs["sampled_trajectories"] = xT_full
         merged_inputs["diffusion_time"] = t_4d
@@ -277,8 +277,16 @@ def _compute_sft_diffusion_loss(
 
         gt_target = all_gt[:, :, 1:, :]  # [B, P, T, 4]
 
-        # Ego loss: MSE over all timesteps (against ranked trajectory)
-        ego_loss = F.mse_loss(model_output[:, 0], gt_target[:, 0])
+        # Ego loss: decomposed lat/lon L1 + heading L2 (matching original SFT loss_func)
+        ego_pred = model_output[:, 0]  # [B, T, 4]
+        ego_gt = gt_target[:, 0]  # [B, T, 4]
+        pos_diff = ego_pred[..., :2] - ego_gt[..., :2]  # [B, T, 2]
+        cos_gt_e = ego_gt[..., 2]  # [B, T]
+        sin_gt_e = ego_gt[..., 3]  # [B, T]
+        lat_err = torch.abs(-pos_diff[..., 0] * sin_gt_e + pos_diff[..., 1] * cos_gt_e)
+        lon_err = torch.abs(pos_diff[..., 0] * cos_gt_e + pos_diff[..., 1] * sin_gt_e)
+        heading_err = torch.sum((ego_pred[..., 2:] - ego_gt[..., 2:]) ** 2, dim=-1)
+        ego_loss = (lat_err + lon_err + heading_err).mean()
         total_ego_loss += ego_loss
 
         # Ego IL loss (GT mode): MSE against real GT ego trajectory
@@ -330,8 +338,8 @@ def _compute_sft_diffusion_loss(
     neighbor_reg_avg = total_neighbor_reg_loss / K if isinstance(total_neighbor_reg_loss, torch.Tensor) else torch.tensor(0.0, device=device)
     ego_il_avg = total_ego_il_loss / K if isinstance(total_ego_il_loss, torch.Tensor) else torch.tensor(0.0, device=device)
 
-    # Combined loss: ego + neighbor (neighbor weight = 1.0 to match SFT) + neighbor reg + ego IL
-    loss = ego_loss_avg + neighbor_loss_avg
+    # Combined loss: ego + neighbor (weight 0.1 to match original SFT alpha_neighbor_loss)
+    loss = ego_loss_avg + 0.1 * neighbor_loss_avg
     if use_neighbor_reg:
         loss = loss + neighbor_reg_weight * neighbor_reg_avg
     if use_ego_il:
@@ -1113,9 +1121,9 @@ def train_epoch_ranked_sft(
         batch_idx = indices[batch_start:batch_start + sft_bs]
         bs = len(batch_idx)
 
-        # Slice raw observation data for this mini-batch
         mini_data = {
-            k: v[batch_idx] if isinstance(v, torch.Tensor) and v.shape[0] == N else v
+            k: v[batch_idx].clone() if isinstance(v, torch.Tensor) and v.shape[0] == N else
+               (v.clone() if isinstance(v, torch.Tensor) else v)
             for k, v in batch_data.items()
         }
         mini_ego_gt = ego_gt_all[batch_idx]           # [bs, T, 4]
