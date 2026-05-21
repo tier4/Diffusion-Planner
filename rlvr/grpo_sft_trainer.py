@@ -347,7 +347,8 @@ def _compute_sft_diffusion_loss(
                 ego_il_loss = F.mse_loss(model_output[:, 0], base_ego.detach())
                 total_ego_il_loss += ego_il_loss
 
-            # KL regularization: MSE between trained and base model outputs
+            # Output regularization (called "KL" by convention): MSE between
+            # trained and base model denoiser outputs at the same (noise, t).
             if use_kl:
                 kl_loss = F.mse_loss(model_output, base_output.detach())
                 total_kl_loss += kl_loss
@@ -1135,6 +1136,14 @@ def train_epoch_ranked_sft(
     print(f"  Training on {N_train}/{N} scenes (ranked SFT, mode={mode}, "
           f"sft_batch_size={sft_bs}, accum_steps={accum_steps})...")
     _base_model_ref = base_model
+    if config.kl_coef > 0.0 and exploration_policy is not None:
+        import warnings
+        warnings.warn(
+            "kl_coef > 0 with exploration_policy: KL regularization is only applied "
+            "in the SFT loss, not in the explorer's GRPO loss. The explorer gradient "
+            "is unregularized.",
+            stacklevel=2,
+        )
     if config.kl_coef > 0.0 and epoch == 1:
         inner = model.module if hasattr(model, "module") else model
         if hasattr(inner, "disable_adapter"):
