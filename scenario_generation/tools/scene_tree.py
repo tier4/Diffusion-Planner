@@ -16,7 +16,7 @@ from pathlib import Path
 
 @dataclass
 class ObstaclePlacement:
-    """A stopped vehicle placed by the user at a specific timestep."""
+    """A vehicle placed by the user at a specific timestep (static or moving)."""
 
     label: str
     timestep: int
@@ -26,6 +26,10 @@ class ObstaclePlacement:
     length: float = 4.5
     width: float = 1.8
     history_steps: int = 30
+    is_moving: bool = False
+    speed: float = 0.0
+    route_lanelet_ids: list[int] | None = None
+    goal_pose: tuple[float, float, float] | None = None
 
     @property
     def yaw_rad(self) -> float:
@@ -42,6 +46,10 @@ class ObstaclePlacement:
             length=self.length,
             width=self.width,
             history_steps=self.history_steps,
+            is_moving=self.is_moving,
+            speed=self.speed,
+            route_lanelet_ids=self.route_lanelet_ids,
+            goal_pose=self.goal_pose,
         )
 
 
@@ -279,7 +287,11 @@ class SceneTree:
         data = json.loads(path.read_text())
         branches = {}
         for bid, bdict in data["branches"].items():
-            mods = [ObstaclePlacement(**m) for m in bdict.pop("modifications", [])]
+            raw_mods = bdict.pop("modifications", [])
+            for m in raw_mods:
+                if "goal_pose" in m and m["goal_pose"] is not None:
+                    m["goal_pose"] = tuple(m["goal_pose"])
+            mods = [ObstaclePlacement(**m) for m in raw_mods]
             crop = bdict.pop("crop_range", None)
             if crop is not None:
                 crop = tuple(crop)

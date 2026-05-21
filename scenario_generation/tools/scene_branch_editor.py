@@ -47,6 +47,7 @@ from scenario_generation.visualize import (
 )
 
 _PLACED_COLOR = "#ff8800"
+_PLACED_MOVING_COLOR = "#00aaff"
 _PLACED_SELECTED_COLOR = "#ff2200"
 _DET_COLOR = "#0088ff"
 _GUIDED_COLORS = ["#ff00aa", "#aa00ff", "#00ccaa", "#ffaa00"]
@@ -226,19 +227,28 @@ def _inject_obstacles_into_tensors(
     # Sort by distance from ego (at origin) to match the distance-sorted convention
     obstacles = sorted(obstacles, key=lambda o: math.hypot(o.x, o.y))
 
+    DT = 0.1
     new_rows = []
     for obs in obstacles:
         cos_h = math.cos(obs.yaw_rad)
         sin_h = math.sin(obs.yaw_rad)
-        # 11 features: [x, y, cos_h, sin_h, vx, vy, width, length, vehicle, ped, bike]
-        feat = torch.tensor(
-            [obs.x, obs.y, cos_h, sin_h, 0.0, 0.0, obs.width, obs.length, 1.0, 0.0, 0.0],
-            dtype=torch.float32, device=device,
-        )
-        row = feat.unsqueeze(0).expand(T, -1).clone()  # [31, 11] same at every timestep
-        # Zero out older history beyond history_steps (matching C++ fill/age behavior)
+        spd = getattr(obs, "speed", 0.0) if getattr(obs, "is_moving", False) else 0.0
+        vx = spd * cos_h
+        vy = spd * sin_h
+        row = torch.zeros(T, F, dtype=torch.float32, device=device)
+        for t in range(T):
+            backward = (T - 1 - t) * spd * DT
+            row[t, 0] = obs.x - backward * cos_h
+            row[t, 1] = obs.y - backward * sin_h
+            row[t, 2] = cos_h
+            row[t, 3] = sin_h
+            row[t, 4] = vx
+            row[t, 5] = vy
+            row[t, 6] = obs.width
+            row[t, 7] = obs.length
+            row[t, 8] = 1.0  # vehicle
         hist = getattr(obs, "history_steps", 30)
-        n_valid = min(hist + 1, T)  # +1 for current frame
+        n_valid = min(hist + 1, T)
         if n_valid < T:
             row[:T - n_valid] = 0.0
         new_rows.append(row.unsqueeze(0).unsqueeze(0))  # [1, 1, 31, 11]
@@ -471,11 +481,17 @@ def render_scene_at_step(
             ax.plot(gx, gy, "*", color=color, ms=14, zorder=25,
                     markeredgecolor="black", markeredgewidth=0.8)
 
-    # Placed obstacles (distinctive orange dashed outline)
+    # Placed obstacles (orange=static, blue=moving, red=selected)
     if obstacles:
         for obs in obstacles:
             is_selected = (selected_obstacle == obs.label)
-            color = _PLACED_SELECTED_COLOR if is_selected else _PLACED_COLOR
+            _is_mov = getattr(obs, "is_moving", False)
+            if is_selected:
+                color = _PLACED_SELECTED_COLOR
+            elif _is_mov:
+                color = _PLACED_MOVING_COLOR
+            else:
+                color = _PLACED_COLOR
             lw = 3.0 if is_selected else 2.0
             yaw = obs.yaw_rad
 
@@ -489,8 +505,9 @@ def render_scene_at_step(
             )
             ax.add_patch(rect)
 
-            # Heading arrow
-            arrow_len = max(obs.length, 2.0)
+            # Heading arrow (longer for moving, proportional to speed)
+            _spd = getattr(obs, "speed", 0.0) if _is_mov else 0.0
+            arrow_len = max(obs.length, 2.0) + _spd * 0.3
             ax.annotate(
                 "", xy=(obs.x + arrow_len * math.cos(yaw),
                         obs.y + arrow_len * math.sin(yaw)),
@@ -499,9 +516,12 @@ def render_scene_at_step(
                 zorder=31,
             )
 
-            # Label
+            # Label (include speed for moving obstacles)
+            _lbl = f"[{obs.label}]"
+            if _is_mov and _spd > 0:
+                _lbl += f" {_spd:.1f} m/s"
             ax.annotate(
-                f"[{obs.label}]", (obs.x, obs.y),
+                _lbl, (obs.x, obs.y),
                 fontsize=8, fontweight="bold", color=color,
                 ha="center", va="bottom",
                 xytext=(0, 10), textcoords="offset points", zorder=32,
@@ -978,6 +998,172 @@ def _reconstruct_gt_from_sequence(seq: list[str], current_step: int, max_future:
     return np.array(gt_points, dtype=np.float32)
 
 
+def _build_moving_agent(
+    obs: ObstaclePlacement,
+    map_builder,
+    ego_wp_arr: np.ndarray | None,
+) -> "Agent":
+    """Build an Agent with plausible motion history for a moving obstacle."""
+    from scenario_generation.scene_context import Agent, AgentType
+
+    T_PAST = 31
+    DT = 0.1
+    aid = f"placed_{obs.label}"
+    yaw = obs.yaw_rad
+    spd = obs.speed
+
+    # Try map-based history if route is available
+    if (map_builder is not None
+            and obs.route_lanelet_ids
+            and ego_wp_arr is not None):
+        ci, si = math.cos(ego_wp_arr[2]), math.sin(ego_wp_arr[2])
+        wx = ego_wp_arr[0] + ci * obs.x - si * obs.y
+        wy = ego_wp_arr[1] + si * obs.x + ci * obs.y
+        wyaw = ego_wp_arr[2] + yaw
+        history_world, _ = map_builder.generate_history(
+            np.array([wx, wy], dtype=np.float32), wyaw, spd,
+            obs.route_lanelet_ids[0], n_steps=T_PAST, dt=DT,
+        )
+        # Transform world-frame history to ego-frame (sim-start frame)
+        from scenario_generation.transforms import _rotation_matrix, transform_positions
+        R_w = _rotation_matrix(ego_wp_arr[2])
+        ego_xy = np.array(ego_wp_arr[:2], dtype=np.float64)
+        hist_xy = transform_positions(
+            history_world[:, :2].astype(np.float64), R_w, ego_xy,
+        ).astype(np.float32)
+        hist_h = history_world[:, 2] - ego_wp_arr[2]
+        history = np.column_stack([hist_xy, hist_h]).astype(np.float32)
+
+        # Route tensors (world-frame -> ego-frame via tensor converter)
+        route_lanes, route_sl, route_hsl = map_builder._route_to_33dim(obs.route_lanelet_ids)
+        # Transform route_lanes centerline points to ego frame
+        for seg_i in range(route_lanes.shape[0]):
+            pts = route_lanes[seg_i, :, :2]
+            valid = np.abs(pts).sum(axis=1) > 0.01
+            if valid.any():
+                route_lanes[seg_i, valid, :2] = transform_positions(
+                    pts[valid].astype(np.float64), R_w, ego_xy,
+                ).astype(np.float32)
+
+        goal_pose_ego = None
+        if obs.goal_pose is not None:
+            gx, gy, gh = obs.goal_pose
+            g_ego = transform_positions(
+                np.array([[gx, gy]], dtype=np.float64), R_w, ego_xy,
+            ).astype(np.float32)[0]
+            goal_pose_ego = np.array([g_ego[0], g_ego[1], gh - ego_wp_arr[2]],
+                                     dtype=np.float32)
+    else:
+        # Straight-line fallback
+        cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+        history = np.zeros((T_PAST, 3), dtype=np.float32)
+        for t in range(T_PAST):
+            backward = (T_PAST - 1 - t) * spd * DT
+            history[t, 0] = obs.x - backward * cos_y
+            history[t, 1] = obs.y - backward * sin_y
+            history[t, 2] = yaw
+        route_lanes = None
+        route_sl = None
+        route_hsl = None
+        goal_pose_ego = None
+
+    # Derive velocities from history
+    velocities = np.zeros((T_PAST, 2), dtype=np.float32)
+    if T_PAST >= 2:
+        diffs = np.diff(history[:, :2], axis=0) / DT
+        velocities[1:] = diffs
+
+    agent = Agent(
+        id=aid,
+        agent_type=AgentType.VEHICLE,
+        length=obs.length, width=obs.width,
+        wheelbase=obs.length * 0.65,
+        past_trajectory=history,
+        past_velocities=velocities,
+        age_steps=T_PAST - 1,
+        route_lanes=route_lanes,
+        route_speed_limit=route_sl,
+        route_has_speed_limit=route_hsl,
+        goal_pose=goal_pose_ego,
+        route_lanelet_ids=obs.route_lanelet_ids,
+    )
+    return agent
+
+
+def _generate_neighbor_reference(
+    agent: "Agent",
+    map_builder,
+    ego_wp_arr: np.ndarray | None,
+    n_steps: int,
+    dt: float = 0.1,
+) -> np.ndarray:
+    """Generate an open-loop reference trajectory for a moving neighbor.
+
+    Returns (n_steps, 3) [x, y, yaw] in the sim ego frame.
+    """
+    pos = agent.current_position
+    heading = agent.current_heading
+    vel = agent.current_velocity
+    speed = float(np.linalg.norm(vel))
+
+    if (map_builder is not None
+            and agent.route_lanelet_ids
+            and ego_wp_arr is not None):
+        from scenario_generation.transforms import _rotation_matrix, transform_positions
+        ci, si = math.cos(ego_wp_arr[2]), math.sin(ego_wp_arr[2])
+        wx = ego_wp_arr[0] + ci * pos[0] - si * pos[1]
+        wy = ego_wp_arr[1] + si * pos[0] + ci * pos[1]
+
+        # Build forward centerline polyline from route
+        cl_pts = []
+        for ll_id in agent.route_lanelet_ids:
+            if ll_id in map_builder._cache:
+                cl_pts.append(map_builder._cache[ll_id].raw_centerline)
+        if cl_pts:
+            polyline = np.concatenate(cl_pts, axis=0)
+            # Project current world position onto polyline
+            diffs = polyline - np.array([wx, wy])
+            dists = np.linalg.norm(diffs, axis=1)
+            nearest_idx = int(np.argmin(dists))
+
+            # Walk forward from nearest_idx, sampling at speed * dt intervals
+            seg_diffs = np.diff(polyline[nearest_idx:], axis=0)
+            seg_lens = np.linalg.norm(seg_diffs, axis=1)
+            arc = np.concatenate([[0.0], np.cumsum(seg_lens)])
+
+            ref_world = np.zeros((n_steps, 3), dtype=np.float32)
+            for step in range(n_steps):
+                fwd_dist = (step + 1) * speed * dt
+                seg_i = np.searchsorted(arc, fwd_dist) - 1
+                seg_i = max(0, min(seg_i, len(arc) - 2))
+                seg_len = max(arc[seg_i + 1] - arc[seg_i], 1e-6)
+                frac = (fwd_dist - arc[seg_i]) / seg_len
+                frac = max(0.0, min(1.0, frac))
+                pt = polyline[nearest_idx + seg_i] + frac * seg_diffs[min(seg_i, len(seg_diffs) - 1)]
+                if seg_i < len(seg_diffs):
+                    h = math.atan2(seg_diffs[seg_i, 1], seg_diffs[seg_i, 0])
+                else:
+                    h = heading + ego_wp_arr[2]
+                ref_world[step] = [pt[0], pt[1], h]
+
+            # Transform to ego frame
+            R_w = _rotation_matrix(ego_wp_arr[2])
+            ego_xy = np.array(ego_wp_arr[:2], dtype=np.float64)
+            ref_ego_xy = transform_positions(
+                ref_world[:, :2].astype(np.float64), R_w, ego_xy,
+            ).astype(np.float32)
+            ref_ego_h = ref_world[:, 2] - ego_wp_arr[2]
+            return np.column_stack([ref_ego_xy, ref_ego_h]).astype(np.float32)
+
+    # Straight-line fallback
+    cos_h, sin_h = math.cos(heading), math.sin(heading)
+    ref = np.zeros((n_steps, 3), dtype=np.float32)
+    for step in range(n_steps):
+        d = (step + 1) * speed * dt
+        ref[step] = [pos[0] + d * cos_h, pos[1] + d * sin_h, heading]
+    return ref
+
+
 def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     map_borders: list[np.ndarray] | None = None,
                     map_builder=None, reward_config=None):
@@ -1047,6 +1233,13 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     minimum=0, maximum=30, value=30, step=1,
                     label="History steps (0=just appeared, 30=full)",
                 )
+                with gr.Row():
+                    obs_is_moving = gr.Checkbox(label="Moving", value=False)
+                    obs_speed = gr.Number(
+                        label="Speed (m/s)", value=5.0, precision=1,
+                        visible=False, min_width=100,
+                    )
+                obs_route_info = gr.Markdown("")
                 with gr.Row():
                     place_btn = gr.Button("Place Obstacle", variant="primary")
                     preview_btn = gr.Button("Preview", variant="secondary")
@@ -1168,9 +1361,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         label="Apply guidance", value=False,
                         interactive=_has_model, scale=1,
                     )
-                    sim_open_loop = gr.Checkbox(
-                        label="Open loop", value=False,
-                        interactive=_has_model, scale=1,
+                    sim_ego_mode = gr.Dropdown(
+                        choices=["closed-loop", "open-loop"],
+                        value="closed-loop", label="Ego",
+                        interactive=_has_model, scale=1, min_width=100,
+                    )
+                    sim_neighbor_mode = gr.Dropdown(
+                        choices=["closed-loop", "open-loop"],
+                        value="open-loop", label="Neighbors",
+                        interactive=_has_model, scale=1, min_width=100,
                     )
                     sim_btn = gr.Button("Simulate", variant="primary", scale=1,
                                         interactive=_has_model)
@@ -1225,6 +1424,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     edit_length = gr.Slider(minimum=1.0, maximum=15.0, value=4.5, step=0.1, label="Len")
                     edit_width = gr.Slider(minimum=0.5, maximum=3.0, value=1.8, step=0.1, label="Wid")
                 edit_history = gr.Slider(minimum=0, maximum=30, value=30, step=1, label="History")
+                with gr.Row():
+                    edit_is_moving = gr.Checkbox(label="Moving", value=False)
+                    edit_speed = gr.Number(label="Spd (m/s)", value=0.0, precision=1,
+                                           visible=False, min_width=80)
                 apply_edit_btn = gr.Button("Apply Edit", size="sm", variant="primary")
 
                 save_status = gr.Markdown("")
@@ -1278,6 +1481,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                             x=nx, y=ny, yaw_deg=math.degrees(nyaw),
                             length=o.length, width=o.width,
                             history_steps=o.history_steps,
+                            is_moving=o.is_moving, speed=o.speed,
+                            route_lanelet_ids=o.route_lanelet_ids,
+                            goal_pose=o.goal_pose,
                         ))
                     else:
                         obstacles_at_step.append(o)
@@ -1456,6 +1662,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         x=nx, y=ny, yaw_deg=math.degrees(nyaw),
                         length=o.length, width=o.width,
                         history_steps=o.history_steps,
+                        is_moving=o.is_moving, speed=o.speed,
+                        route_lanelet_ids=o.route_lanelet_ids,
+                        goal_pose=o.goal_pose,
                     ))
                 else:
                     result.append(o)
@@ -1505,17 +1714,50 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return det_traj, guided
 
         def on_place(tree, step, view_r, x, y, yaw, length, width, history,
+                     is_moving, speed_val,
                      gt_on, det_on, guided_on, hide_nb, rb_on, nb_on,
                      traj_rb_on, traj_nb_on, *g_args):
             label = tree.next_obstacle_label(tree.active_branch)
+            s = _safe_step(step)
+            _moving = bool(is_moving)
+            _speed = max(0.0, float(speed_val)) if _moving else 0.0
+
+            route_ids = None
+            goal = None
+            route_info_text = ""
+            if _moving and map_builder is not None:
+                seq = tree.get_npz_sequence(tree.active_branch)
+                ego_wp = _recover_ego_world_pose(seq, s) if seq else None
+                if ego_wp is not None:
+                    yaw_rad = math.radians(float(yaw))
+                    ci, si = math.cos(ego_wp[2]), math.sin(ego_wp[2])
+                    wx = ego_wp[0] + ci * float(x) - si * float(y)
+                    wy = ego_wp[1] + si * float(x) + ci * float(y)
+                    wyaw = ego_wp[2] + yaw_rad
+                    ll_id = map_builder.snap_to_nearest_ll(
+                        np.array([wx, wy]), heading_rad=wyaw,
+                    )
+                    if ll_id is not None:
+                        route_ids = map_builder.find_route(ll_id, min_length_m=150.0)
+                        goal_arr = map_builder._route_goal(route_ids)
+                        goal = (float(goal_arr[0]), float(goal_arr[1]), float(goal_arr[2]))
+                        route_info_text = f"Route: {len(route_ids)} lanelets"
+                    else:
+                        route_info_text = "Could not snap to lanelet"
+                else:
+                    route_info_text = "No ego world pose available"
+            elif _moving:
+                route_info_text = "No map -- straight-line mode"
+
             placement = ObstaclePlacement(
-                label=label, timestep=_safe_step(step),
+                label=label, timestep=s,
                 x=float(x), y=float(y), yaw_deg=float(yaw),
                 length=float(length), width=float(width),
                 history_steps=int(history),
+                is_moving=_moving, speed=_speed,
+                route_lanelet_ids=route_ids, goal_pose=goal,
             )
             tree.add_obstacle(tree.active_branch, placement)
-            s = _safe_step(step)
             det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
                                                 zero_neighbors=hide_nb)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
@@ -1525,7 +1767,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             mods = _modifications_md(tree, tree.active_branch)
             choices = _obs_choices(tree)
             return (tree, img, info, mods, label, det_traj, guided,
-                    gr.update(choices=choices, value=label))
+                    gr.update(choices=choices, value=label), route_info_text)
 
         def on_select_obstacle(tree, label, step, view_r, gt_on, det_on, det_cache, guided_cache,
                                rb_on, nb_on, hide_nb, traj_rb_on, traj_nb_on):
@@ -1536,12 +1778,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
             if obs:
+                _mov = getattr(obs, "is_moving", False)
+                _spd = getattr(obs, "speed", 0.0)
                 return (img, info, label,
                         obs.x, obs.y, obs.yaw_deg, obs.length, obs.width,
-                        getattr(obs, "history_steps", 30))
+                        getattr(obs, "history_steps", 30),
+                        _mov, _spd, gr.update(visible=_mov))
             return (img, info, label,
                     gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                    gr.update())
+                    gr.update(), gr.update(), gr.update(), gr.update())
 
         def on_remove_obstacle(tree, label, step, view_r, gt_on, det_on,
                                guided_on, hide_nb, rb_on, nb_on,
@@ -1562,7 +1807,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         def on_apply_edit(tree, label, step, view_r, gt_on, det_on, guided_on,
                           hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
-                          x, y, yaw, length, width, history, *g_args):
+                          x, y, yaw, length, width, history,
+                          ed_is_moving, ed_speed, *g_args):
             if not label:
                 return (tree, gr.update(), "No obstacle selected",
                         gr.update(), gr.update(), gr.update(), gr.update())
@@ -1575,6 +1821,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         yaw_deg=round(float(yaw) / 5) * 5,
                         length=float(length), width=float(width),
                         history_steps=int(history),
+                        is_moving=bool(ed_is_moving),
+                        speed=max(0.0, float(ed_speed)) if ed_is_moving else 0.0,
+                        route_lanelet_ids=o.route_lanelet_ids,
+                        goal_pose=o.goal_pose,
                     )
                     break
             s = _safe_step(step)
@@ -1796,14 +2046,25 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             [scene_image, step_info],
         )
 
+        # Toggle speed field visibility
+        obs_is_moving.change(
+            lambda v: gr.update(visible=v),
+            [obs_is_moving], [obs_speed],
+        )
+        edit_is_moving.change(
+            lambda v: gr.update(visible=v),
+            [edit_is_moving], [edit_speed],
+        )
+
         place_btn.click(
             on_place,
             [tree_state, step_slider, view_half,
              obs_x, obs_y, obs_yaw, obs_length, obs_width, obs_history,
+             obs_is_moving, obs_speed,
              show_gt, show_det] + _overlay_inputs + _g_inputs,
             [tree_state, scene_image, step_info, mods_display,
              selected_obstacle_state, det_traj_state, guided_trajs_state,
-             obs_select],
+             obs_select, obs_route_info],
         )
 
         obs_select.change(
@@ -1812,7 +2073,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
              show_det, det_traj_state, guided_trajs_state,
              show_rb_dist, show_nb_dist, hide_neighbors, show_traj_rb, show_traj_nb],
             [scene_image, step_info, selected_obstacle_state,
-             edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history],
+             edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history,
+             edit_is_moving, edit_speed, edit_speed],
         )
 
         remove_obs_btn.click(
@@ -1827,7 +2089,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             on_apply_edit,
             [tree_state, obs_select, step_slider, view_half,
              show_gt, show_det] + _overlay_inputs +
-            [edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history] + _g_inputs,
+            [edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history,
+             edit_is_moving, edit_speed] + _g_inputs,
             [tree_state, scene_image, step_info, mods_display, selected_obstacle_state,
              det_traj_state, guided_trajs_state],
         )
@@ -2117,18 +2380,17 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             [rsft_status],
         )
 
-        # Simulate N steps — closed-loop or open-loop forward simulation
+        # Simulate N steps — unified loop supporting independent ego/neighbor loop modes
         def on_simulate(tree, step, n_steps, advance_mode, use_guidance,
-                        gt_on, view_r, hide_nb, open_loop,
+                        gt_on, view_r, hide_nb, ego_mode, neighbor_mode,
                         guided_cache, det_cache,
                         *guidance_args, progress=gr.Progress()):
             if model_cache is None or not model_cache.available:
-                return (tree, gr.update(), "No model loaded — pass `--model_path`",
+                return (tree, gr.update(), "No model loaded -- pass `--model_path`",
                         gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None)
 
             s = _safe_step(step)
 
-            # Auto-fork from current step before simulating
             new_id = tree.fork_branch(tree.active_branch, s)
             tree.active_branch = new_id
             branch = tree.branches[new_id]
@@ -2151,12 +2413,21 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             progress(0, desc="Loading model...")
             model_cache._ensure_loaded()
 
+            from copy import deepcopy
+
+            from scenario_generation.mpc_tracker import PerfectTracker
             from scenario_generation.npz_loader import from_npz as _from_npz
+            from scenario_generation.simulate import (
+                _advance_agent,
+                _predict_batch,
+                advance_scene_mpc,
+                _refresh_line_strings,
+            )
+            from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 
             scene = _from_npz(npz_path)
 
-            # Inject placed obstacles as stationary agents — transform from
-            # placement-step ego frame to the sim-start ego frame (step s).
+            # ── Inject placed obstacles ──
             obstacles = tree.get_all_obstacles(tree.active_branch)
             obs_at_step = []
             for o in obstacles:
@@ -2171,29 +2442,50 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         x=nx, y=ny, yaw_deg=math.degrees(nyaw),
                         length=o.length, width=o.width,
                         history_steps=o.history_steps,
+                        is_moving=o.is_moving, speed=o.speed,
+                        route_lanelet_ids=o.route_lanelet_ids,
+                        goal_pose=o.goal_pose,
                     ))
                 else:
                     obs_at_step.append(o)
+
+            ego_wp = _recover_ego_world_pose(seq, min(s, len(seq) - 1))
+            ego_wp_arr = np.array([ego_wp[0], ego_wp[1], ego_wp[2]]) if ego_wp is not None else None
+
             from scenario_generation.scene_context import Agent, AgentType
+            moving_ids: set[str] = set()
+            static_ids: set[str] = set()
+
             for obs in obs_at_step:
+                aid = f"placed_{obs.label}"
                 T_PAST = 31
-                history = np.tile([obs.x, obs.y, obs.yaw_rad], (T_PAST, 1)).astype(np.float32)
-                velocities = np.zeros((T_PAST, 2), dtype=np.float32)
-                h = getattr(obs, "history_steps", 30)
-                agent = Agent(
-                    id=f"placed_{obs.label}",
-                    agent_type=AgentType.VEHICLE,
-                    length=obs.length, width=obs.width,
-                    wheelbase=obs.length * 0.65,
-                    past_trajectory=history,
-                    past_velocities=velocities,
-                    age_steps=min(h, T_PAST - 1),
-                )
+                DT = 0.1
+                _is_mov = obs.is_moving and obs.speed > 0
+
+                if _is_mov:
+                    moving_ids.add(aid)
+                    agent = _build_moving_agent(
+                        obs, map_builder, ego_wp_arr,
+                    )
+                else:
+                    static_ids.add(aid)
+                    history = np.tile([obs.x, obs.y, obs.yaw_rad], (T_PAST, 1)).astype(np.float32)
+                    velocities = np.zeros((T_PAST, 2), dtype=np.float32)
+                    h = getattr(obs, "history_steps", 30)
+                    agent = Agent(
+                        id=aid,
+                        agent_type=AgentType.VEHICLE,
+                        length=obs.length, width=obs.width,
+                        wheelbase=obs.length * 0.65,
+                        past_trajectory=history,
+                        past_velocities=velocities,
+                        age_steps=min(h, T_PAST - 1),
+                    )
                 scene.agents.append(agent)
 
-            placed_ids = {f"placed_{o.label}" for o in obs_at_step}
+            placed_ids = static_ids | moving_ids
 
-            # Optionally apply guidance during simulation
+            # ── Guidance setup ──
             model = model_cache._model
             model_args = model_cache._model_args
             _orig_guidance_fn = model.decoder._guidance_fn
@@ -2229,90 +2521,171 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     model.decoder._guidance_fn = composer
                     model.decoder._guidance_scale = 1.0
 
-            # Get ego world pose for map refresh
-            ego_wp = _recover_ego_world_pose(seq, min(s, len(seq) - 1))
-            ego_wp_arr = np.array([ego_wp[0], ego_wp[1], ego_wp[2]]) if ego_wp is not None else None
+            # ── Ego open-loop plan ──
+            ego_ol = (ego_mode == "open-loop")
+            ego_plan = None
+            if ego_ol:
+                if guided_cache and len(guided_cache) > 0:
+                    traj_xyh = np.array(guided_cache[0])
+                    ego_plan = np.column_stack([
+                        traj_xyh[:, :2],
+                        np.cos(traj_xyh[:, 2]),
+                        np.sin(traj_xyh[:, 2]),
+                    ]).astype(np.float32)
+                if ego_plan is None and det_cache is not None:
+                    traj_xyh = np.array(det_cache)
+                    ego_plan = np.column_stack([
+                        traj_xyh[:, :2],
+                        np.cos(traj_xyh[:, 2]),
+                        np.sin(traj_xyh[:, 2]),
+                    ]).astype(np.float32)
+                if ego_plan is None:
+                    return (tree, gr.update(),
+                            "Ego open-loop requires a DET or guided trajectory -- "
+                            "toggle Show DET or generate guided first",
+                            gr.update(), gr.update(), gr.update(), gr.update(),
+                            gr.update(), None, None)
+                n = min(n, ego_plan.shape[0])
+
+            # ── Neighbor open-loop references ──
+            nb_ol = (neighbor_mode == "open-loop")
+            neighbor_refs: dict[str, np.ndarray] = {}
+            if nb_ol and moving_ids:
+                for nid in moving_ids:
+                    agent = scene.get_agent(nid)
+                    neighbor_refs[nid] = _generate_neighbor_reference(
+                        agent, map_builder, ego_wp_arr, n,
+                    )
+
+            # ── Determine which IDs need model prediction ──
+            ids_to_predict: list[str] = []
+            ego_id = scene.ego_agent_id
+            if not ego_ol:
+                ids_to_predict.append(ego_id)
+            if not nb_ol:
+                ids_to_predict.extend(sorted(moving_ids))
+
+            scene_sim = deepcopy(scene)
+            ego_id = scene_sim.ego_agent_id
+
+            # Map refresh setup
+            if map_builder is not None and ego_wp_arr is not None:
+                _refresh_line_strings(
+                    scene_sim, map_builder, ego_wp_arr[:2], ego_wp_arr,
+                )
+            map_cache_sim = MapTensorCache(scene_sim.map_data)
+            _init_yaw = float(ego_wp_arr[2]) if ego_wp_arr is not None else 0.0
+
+            trackers: dict = {}
 
             try:
-                if open_loop:
-                    from copy import deepcopy
+                for t in range(n):
+                    progress((t + 1) / n, f"Sim step {t+1}/{n}")
 
-                    from scenario_generation.simulate import _advance_agent
-                    from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
-
-                    plan = None
-                    if guided_cache and len(guided_cache) > 0:
-                        traj_xyh = np.array(guided_cache[0])
-                        plan = np.column_stack([
-                            traj_xyh[:, :2],
-                            np.cos(traj_xyh[:, 2]),
-                            np.sin(traj_xyh[:, 2]),
-                        ]).astype(np.float32)
-                    if plan is None and det_cache is not None:
-                        traj_xyh = np.array(det_cache)
-                        plan = np.column_stack([
-                            traj_xyh[:, :2],
-                            np.cos(traj_xyh[:, 2]),
-                            np.sin(traj_xyh[:, 2]),
-                        ]).astype(np.float32)
-                    if plan is None:
-                        return (tree, gr.update(),
-                                "Open loop requires a DET or guided trajectory — toggle Show DET or generate guided first",
-                                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None)
-
-                    n = min(n, plan.shape[0])
-                    scene_ol = deepcopy(scene)
-                    ego_id = scene_ol.ego_agent_id
-                    if map_builder is not None and ego_wp_arr is not None:
-                        from scenario_generation.simulate import _refresh_line_strings
+                    # Map refresh every 5 steps
+                    if (map_builder is not None and ego_wp_arr is not None
+                            and t > 0 and t % 5 == 0):
+                        ep = scene_sim.get_agent(ego_id).current_position
+                        eh = scene_sim.get_agent(ego_id).current_heading
+                        ci, si = math.cos(_init_yaw), math.sin(_init_yaw)
+                        cur_wx = ego_wp_arr[0] + ci * ep[0] - si * ep[1]
+                        cur_wy = ego_wp_arr[1] + si * ep[0] + ci * ep[1]
                         _refresh_line_strings(
-                            scene_ol, map_builder,
-                            ego_wp_arr[:2], ego_wp_arr,
+                            scene_sim, map_builder,
+                            np.array([cur_wx, cur_wy], dtype=np.float64),
+                            ego_wp_arr,
                         )
-                    map_cache_ol = MapTensorCache(scene_ol.map_data)
+                        map_cache_sim = MapTensorCache(scene_sim.map_data)
 
-                    for t in range(n):
-                        progress((t + 1) / n, f"Open-loop step {t+1}/{n}")
-                        npz_data = dump_step_npz(scene_ol, map_cache_ol,
-                                                 future_len=model_cache._model_args.future_len)
-                        npz_data["ego_agent_future"] = np.zeros(
-                            (model_cache._model_args.future_len, 3), dtype=np.float32)
-                        if ego_wp_arr is not None:
-                            import json as _json_ol
-                            import math as _math_ol
-                            ep = scene_ol.get_agent(ego_id).current_position
-                            eh = scene_ol.get_agent(ego_id).current_heading
-                            _iy = float(ego_wp_arr[2])
-                            ci, si = _math_ol.cos(_iy), _math_ol.sin(_iy)
-                            wx = ego_wp_arr[0] + ci * ep[0] - si * ep[1]
-                            wy = ego_wp_arr[1] + si * ep[0] + ci * ep[1]
-                            wyaw = _iy + eh
-                            sidecar = {"x": float(wx), "y": float(wy),
-                                       "qz": _math_ol.sin(wyaw / 2), "qw": _math_ol.cos(wyaw / 2),
-                                       "qx": 0.0, "qy": 0.0}
-                            (out_dir / f"replay_step_{t:04d}.json").write_text(
-                                _json_ol.dumps(sidecar))
-                        np.savez(out_dir / f"replay_step_{t:04d}.npz", **npz_data)
-                        if t < n - 1:
-                            step_pred = plan[t]
-                            new_heading = float(np.arctan2(step_pred[3], step_pred[2]))
-                            new_pos = np.array([float(step_pred[0]), float(step_pred[1]),
-                                                new_heading], dtype=np.float32)
-                            _advance_agent(scene_ol.get_agent(ego_id), new_pos)
-                else:
-                    from scenario_generation.simulate import run_simulation
-                    run_simulation(
-                        model, model_args, scene, n,
-                        out_dir, device=str(model_cache._device),
-                        mode="closed_loop",
-                        builder=map_builder,
-                        ego_world_pose=ego_wp_arr,
-                        skip_viz=True,
-                        static_agent_ids=placed_ids,
-                        dump_npz=True,
-                        progress_fn=lambda frac, desc: progress(frac, desc=desc),
-                        zero_neighbors=hide_nb,
+                    # Model prediction for closed-loop agents
+                    preds: dict[str, np.ndarray] = {}
+                    if ids_to_predict:
+                        _live_ids = [aid for aid in ids_to_predict
+                                     if scene_sim.get_agent(aid) is not None]
+                        if _live_ids:
+                            if hide_nb:
+                                _keep = {ego_id} | placed_ids
+                                _saved = scene_sim.agents[:]
+                                scene_sim.agents = [a for a in scene_sim.agents
+                                                    if a.id in _keep]
+                                preds = _predict_batch(
+                                    model, model_args, scene_sim, _live_ids,
+                                    str(model_cache._device), map_cache=map_cache_sim,
+                                )
+                                scene_sim.agents = _saved
+                            else:
+                                preds = _predict_batch(
+                                    model, model_args, scene_sim, _live_ids,
+                                    str(model_cache._device), map_cache=map_cache_sim,
+                                )
+
+                    # Dump NPZ
+                    npz_data = dump_step_npz(
+                        scene_sim, map_cache_sim,
+                        future_len=model_args.future_len,
                     )
+                    npz_data["ego_agent_future"] = np.zeros(
+                        (model_args.future_len, 3), dtype=np.float32)
+                    if ego_wp_arr is not None:
+                        import json as _json_sim
+                        ep = scene_sim.get_agent(ego_id).current_position
+                        eh = scene_sim.get_agent(ego_id).current_heading
+                        ci, si = math.cos(_init_yaw), math.sin(_init_yaw)
+                        wx = ego_wp_arr[0] + ci * ep[0] - si * ep[1]
+                        wy = ego_wp_arr[1] + si * ep[0] + ci * ep[1]
+                        wyaw = _init_yaw + eh
+                        sidecar = {"x": float(wx), "y": float(wy),
+                                   "qz": math.sin(wyaw / 2), "qw": math.cos(wyaw / 2),
+                                   "qx": 0.0, "qy": 0.0}
+                        (out_dir / f"replay_step_{t:04d}.json").write_text(
+                            _json_sim.dumps(sidecar))
+                    np.savez(out_dir / f"replay_step_{t:04d}.npz", **npz_data)
+
+                    if t >= n - 1:
+                        break
+
+                    # ── Advance ego ──
+                    if ego_ol:
+                        step_pred = ego_plan[t]
+                        new_heading = float(np.arctan2(step_pred[3], step_pred[2]))
+                        new_pos = np.array([float(step_pred[0]), float(step_pred[1]),
+                                            new_heading], dtype=np.float32)
+                        _advance_agent(scene_sim.get_agent(ego_id), new_pos)
+                    elif ego_id in preds:
+                        advance_scene_mpc(
+                            scene_sim, {ego_id: preds[ego_id]}, trackers,
+                            tracker_type=advance_mode,
+                        )
+
+                    # ── Advance moving neighbors ──
+                    if not nb_ol and moving_ids:
+                        nb_preds = {nid: preds[nid] for nid in moving_ids if nid in preds}
+                        if nb_preds:
+                            advance_scene_mpc(
+                                scene_sim, nb_preds, trackers,
+                                tracker_type="perfect",
+                            )
+                    elif nb_ol and moving_ids:
+                        for nid in moving_ids:
+                            agent = scene_sim.get_agent(nid)
+                            if agent is None:
+                                continue
+                            ref = neighbor_refs.get(nid)
+                            if ref is None or t >= len(ref):
+                                continue
+                            if nid not in trackers:
+                                trackers[nid] = PerfectTracker(dt=0.1)
+                            vel = agent.current_velocity
+                            speed = float(np.linalg.norm(vel))
+                            x0 = np.array([
+                                float(agent.current_position[0]),
+                                float(agent.current_position[1]),
+                                float(agent.current_heading),
+                                speed,
+                            ], dtype=np.float64)
+                            new_pos, new_speed = trackers[nid].track(x0, ref[t:])
+                            _advance_agent(agent, new_pos, dt=0.1,
+                                           new_speed=float(new_speed))
             finally:
                 model.decoder._guidance_fn = _orig_guidance_fn
                 model.decoder._guidance_scale = _orig_guidance_scale
@@ -2329,13 +2702,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             b_info = _branch_info_md(tree, tree.active_branch)
             mods = _modifications_md(tree, tree.active_branch)
             choices = list(tree.branches.keys())
-            status = f"Simulated **{n}** steps ({advance_mode}) on branch `{new_id}`. Output: `{out_dir}`"
+            _modes = f"ego={ego_mode}, nb={neighbor_mode}"
+            status = (f"Simulated **{n}** steps ({advance_mode}, {_modes}) "
+                      f"on branch `{new_id}`. Output: `{out_dir}`")
             return (tree, img, status, b_info, mods,
                     gr.update(choices=choices, value=new_id),
                     gr.update(maximum=max_step, value=0), info, None, None)
 
         _sim_inputs = ([tree_state, step_slider, sim_steps, sim_mode, sim_use_guidance,
-                        show_gt, view_half, hide_neighbors, sim_open_loop,
+                        show_gt, view_half, hide_neighbors, sim_ego_mode, sim_neighbor_mode,
                         guided_trajs_state, det_traj_state]
                        + [v for gname in ALL_GUIDANCE_NAMES
                           for v in (guidance_toggles[gname], guidance_scales[gname])]
@@ -2379,6 +2754,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                             x=nx, y=ny, yaw_deg=math.degrees(nyaw),
                             length=o.length, width=o.width,
                             history_steps=o.history_steps,
+                            is_moving=o.is_moving, speed=o.speed,
+                            route_lanelet_ids=o.route_lanelet_ids,
+                            goal_pose=o.goal_pose,
                         ))
                     else:
                         obs_at_step.append(o)
@@ -2456,12 +2834,13 @@ def _modifications_md(tree: SceneTree, branch_id: str) -> str:
         return ""
     if not branch.modifications:
         return "*No obstacles placed in this branch.*"
-    lines = ["| Label | Step | X | Y | Yaw | Size |",
-             "|-------|------|---|---|-----|------|"]
+    lines = ["| Label | Step | X | Y | Yaw | Size | Type |",
+             "|-------|------|---|---|-----|------|------|"]
     for o in branch.modifications:
+        _type = f"{o.speed:.1f} m/s" if o.is_moving else "static"
         lines.append(
             f"| `{o.label}` | {o.timestep} | {o.x:.1f} | {o.y:.1f} "
-            f"| {o.yaw_deg:.0f}° | {o.length}×{o.width} |"
+            f"| {o.yaw_deg:.0f} | {o.length}x{o.width} | {_type} |"
         )
     inherited = [m for m in tree.get_all_obstacles(branch_id)
                  if m not in branch.modifications]
