@@ -1159,15 +1159,16 @@ def train_epoch_ranked_sft(
             "is unregularized.",
             stacklevel=2,
         )
-    if config.kl_coef > 0.0 and epoch == 1:
+    _kl_this_epoch = config.get_kl_coef(epoch, config.train_epochs)
+    if _kl_this_epoch > 0.0 and epoch == 1:
         inner = model.module if hasattr(model, "module") else model
         if hasattr(inner, "disable_adapter"):
-            print(f"  [KL] coef={config.kl_coef}, using LoRA disable_adapter for base reference")
+            print(f"  [KL] coef={_kl_this_epoch}, using LoRA disable_adapter for base reference")
         elif _base_model_ref is not None:
-            print(f"  [KL] coef={config.kl_coef}, using separate frozen base_model")
+            print(f"  [KL] coef={_kl_this_epoch}, using separate frozen base_model")
         else:
             raise ValueError(
-                f"kl_coef={config.kl_coef} but no LoRA disable_adapter and no base_model. "
+                f"kl_coef={_kl_this_epoch} but no LoRA disable_adapter and no base_model. "
                 "Pass --base_model_path for fullmodel training with KL."
             )
     model.train()
@@ -1206,7 +1207,7 @@ def train_epoch_ranked_sft(
             ego_il_mode=config.ego_il_mode,
             ego_gt_real=mini_ego_gt_real,
             velocity_weight=config.sft_velocity_weight,
-            kl_coef=config.kl_coef,
+            kl_coef=config.get_kl_coef(epoch, config.train_epochs),
             base_model=_base_model_ref,
         )
 
