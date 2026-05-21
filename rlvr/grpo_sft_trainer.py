@@ -172,7 +172,15 @@ def _compute_sft_diffusion_loss(
         ego_gt_real: [B, T, 4] real GT ego trajectory for IL regularization.
             Required only when ego_il_weight > 0 and ego_il_mode == "gt".
             Not needed for baseline mode (uses base model forward pass instead).
-            Required when ego_il_weight > 0.
+        velocity_weight: If True, divide longitudinal error by clamped ego speed,
+            matching the original SFT loss. Required for curated mode to prevent
+            catastrophic L2 drift on small datasets.
+        kl_coef: Coefficient for output regularization against base model (0=disabled).
+            Computes MSE(model_output, base_output) at the same (noise, timestep).
+            Requires either LoRA (uses disable_adapter) or a separate base_model.
+        base_model: Frozen reference model for KL/baseline-IL in full-model (non-LoRA)
+            training. Ignored when the policy model has LoRA (uses disable_adapter
+            instead). Must be in eval mode with requires_grad=False.
 
     Returns:
         (loss, metrics_dict)
@@ -318,10 +326,17 @@ def _compute_sft_diffusion_loss(
         need_base_pass = use_neighbor_reg or (use_ego_il and ego_il_mode == "baseline") or use_kl
         has_lora = hasattr(inner, "disable_adapter")
         if need_base_pass and not has_lora and base_model is None:
+            active = []
+            if use_kl:
+                active.append("kl_coef")
+            if use_ego_il and ego_il_mode == "baseline":
+                active.append("baseline ego_il")
+            if use_neighbor_reg:
+                active.append("neighbor_reg (requires LoRA)")
             raise ValueError(
-                "neighbor_reg, baseline ego IL, or kl_coef requires either a LoRA model "
-                "(with disable_adapter) or a separate base_model. "
-                "Pass base_model for fullmodel training."
+                f"Active features [{', '.join(active)}] need a base model reference. "
+                "Use LoRA (provides disable_adapter) or pass base_model for full-model training. "
+                "Note: neighbor_reg only works with LoRA's disable_adapter."
             )
         if need_base_pass:
             if has_lora:
