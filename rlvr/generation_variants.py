@@ -417,6 +417,25 @@ _VARIANTS: dict[str, GenerationVariant] = {
             _CL10_SPD10_NOISY,
         ],
     ),
+    "rl_cl_col_sweep": GenerationVariant(
+        description=(
+            "Route-CL sweep + collision guidance sweep for avoidance PRiSM. "
+            "K=8: 1 det + 3 rl_cl det sweep (1.5/2.0/2.5) + 4 collision-guided "
+            "slots (col 0.5/1.0/2.0/3.0 with rl_cl=2.0, varied noise). "
+            "Use with use_route_cl_guidance=True."
+        ),
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,
+            _RL_CL_2_0_SPD2_0_DET,
+            _RL_CL_2_5_SPD2_5_DET,
+            {"cl": 2.0, "spd": 0.0, "noise": (0.0, 0.0), "col": 0.5, "label": "RL_CL2.0_col05_det"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.3, 0.8), "col": 1.0, "label": "RL_CL2.0_col10_n0308"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.3, 0.8), "col": 2.0, "label": "RL_CL2.0_col20_n0308"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.5, 1.5), "col": 3.0, "label": "RL_CL2.0_col30_n0515"},
+        ],
+        noise_configs=[],
+    ),
+
     "rsft_v2_col4": GenerationVariant(
         description=(
             "Four collision-guided slots for the static-collision audit: "
