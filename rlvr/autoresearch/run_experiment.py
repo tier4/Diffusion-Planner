@@ -568,6 +568,21 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
 
+        # Load frozen base model for full-model (non-LoRA) training when features
+        # need a base reference: KL reg or baseline ego IL.
+        _frozen_base_model = None
+        _needs_base = (
+            grpo_config.kl_coef > 0.0
+            or (grpo_config.ego_il_weight > 0.0 and grpo_config.ego_il_mode == "baseline")
+        )
+        if _needs_base and not grpo_config.use_lora:
+            print(f"Loading frozen base model (kl_coef={grpo_config.kl_coef}, "
+                  f"ego_il={grpo_config.ego_il_weight}/{grpo_config.ego_il_mode})...")
+            _frozen_base_model, _ = load_model(checkpoint_path, DEVICE)
+            _frozen_base_model.eval()
+            for p in _frozen_base_model.parameters():
+                p.requires_grad_(False)
+
         # Training reward config uses the configured weights (may boost w_progress
         # to prevent reward hacking where the model learns to stop instead of drive)
         train_reward_config = RewardConfig(
@@ -726,6 +741,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                         exploration_policy=_explorer,
                         exploration_optimizer=_explorer_opt,
                         run_dir=run_dir,
+                        base_model=_frozen_base_model,
                     )
                 else:
                     # Fully batched training: all scenes in ~5 forward passes
