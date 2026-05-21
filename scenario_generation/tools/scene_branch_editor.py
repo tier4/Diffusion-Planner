@@ -47,7 +47,7 @@ from scenario_generation.visualize import (
 )
 
 _PLACED_COLOR = "#ff8800"
-_PLACED_MOVING_COLOR = "#00aaff"
+_PLACED_MOVING_COLOR = "#cc44ff"
 _PLACED_SELECTED_COLOR = "#ff2200"
 _DET_COLOR = "#0088ff"
 _GUIDED_COLORS = ["#ff00aa", "#aa00ff", "#00ccaa", "#ffaa00"]
@@ -96,19 +96,33 @@ class _ModelCache:
     def predict_det(self, npz_path: str, obstacles: list | None = None,
                     zero_neighbors: bool = False,
                     ego_shape_override: tuple[float, ...] | None = None,
-                    ) -> np.ndarray | None:
-        """Run deterministic inference. Returns (80, 4) [x,y,cos_h,sin_h] or None."""
+                    return_neighbor_preds: bool = False,
+                    ) -> np.ndarray | tuple[np.ndarray, np.ndarray] | None:
+        """Run deterministic inference.
+
+        Returns (80, 4) [x,y,cos_h,sin_h] or, when return_neighbor_preds=True,
+        a tuple of (ego (80,4), neighbors (N,80,4)).
+        """
         self._ensure_loaded()
-        from guidance_gui.generate_samples import generate_samples
         data = self._load_npz(npz_path, obstacles=obstacles,
                               zero_neighbors=zero_neighbors,
                               ego_shape_override=ego_shape_override)
-        trajs = generate_samples(
-            self._model, self._model_args, data,
-            noise_scale=0.0, n_samples=1, composer=None,
-            device=self._device,
-        )
-        return trajs[0]  # (80, 4)
+
+        P = 1 + self._model_args.predicted_neighbor_num
+        future_len = self._model_args.future_len
+        ego_current = data["ego_current_state"][:, :4]
+        neighbors_current = data["neighbor_agents_past"][:, :P - 1, -1, :4]
+        current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)
+        xT = current_states[:, :, None, :].expand(-1, -1, future_len + 1, -1).clone()
+        data["sampled_trajectories"] = xT
+
+        _, decoder_output = self._model(data)
+        pred = decoder_output["prediction"]  # (1, P, T, 4)
+        ego_traj = pred[0, 0].cpu().numpy()
+        if return_neighbor_preds:
+            nb_preds = pred[0, 1:].cpu().numpy()  # (P-1, T, 4)
+            return ego_traj, nb_preds
+        return ego_traj
 
     @torch.no_grad()
     def predict_guided(
@@ -315,6 +329,7 @@ def render_scene_at_step(
     ego_world_pose: np.ndarray | None = None,
     show_traj_rb: bool = False,
     show_traj_nb: bool = False,
+    nb_pred_trajs: np.ndarray | None = None,
 ) -> matplotlib.figure.Figure:
     """Render a scene with placed obstacles overlaid, matching replay sim style."""
     fig, ax = plt.subplots(1, 1, figsize=figsize)
@@ -670,6 +685,20 @@ def render_scene_at_step(
                 color = _GUIDED_COLORS[i % len(_GUIDED_COLORS)]
                 draw_trajectory(ax, gt, color, label=f"Guided #{i+1}", lw=1.5, zorder=27,
                                 show_footprints=False, length=ego_len, width=ego_wid)
+
+    # Neighbor predicted trajectories (thin lines, one per neighbor)
+    if nb_pred_trajs is not None:
+        _nb_colors = ["#ee6644", "#44aa88", "#8866cc", "#ccaa22", "#44aadd"]
+        nb_agents = [a for a in scene.agents if a.id != scene.ego_agent_id]
+        for ni in range(min(nb_pred_trajs.shape[0], len(nb_agents))):
+            traj_4 = nb_pred_trajs[ni]  # (T, 4) [x, y, cos_h, sin_h]
+            if np.abs(traj_4[:, :2]).sum() < 1e-4:
+                continue
+            heading = np.arctan2(traj_4[:, 3], traj_4[:, 2])
+            traj_xyh = np.column_stack([traj_4[:, :2], heading])
+            nc = _nb_colors[ni % len(_nb_colors)]
+            draw_trajectory(ax, traj_xyh, nc, label=None, lw=0.8, zorder=14,
+                            show_footprints=False, length=2.0, width=1.0)
 
     # Worst-case RB/NB distance along predicted trajectories
     if (show_traj_rb or show_traj_nb) and ego is not None:
@@ -1285,6 +1314,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 with gr.Row():
                     show_traj_rb = gr.Checkbox(label="Traj RB Worst", value=False, scale=1)
                     show_traj_nb = gr.Checkbox(label="Traj NB Worst", value=False, scale=1)
+                    show_nb_preds = gr.Checkbox(label="NB Preds", value=False,
+                                                interactive=_has_model, scale=1)
                     if not _has_model:
                         gr.Markdown("*No model — pass `--model_path`*", scale=2)
 
@@ -1368,7 +1399,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     )
                     sim_neighbor_mode = gr.Dropdown(
                         choices=["closed-loop", "open-loop"],
-                        value="open-loop", label="Neighbors",
+                        value="closed-loop", label="Neighbors",
                         interactive=_has_model, scale=1, min_width=100,
                     )
                     sim_btn = gr.Button("Simulate", variant="primary", scale=1,
@@ -1442,7 +1473,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     guided_trajs: list[np.ndarray] | None = None,
                     rb_dist: bool = True, nb_dist: bool = True,
                     hide_nb: bool = False,
-                    traj_rb: bool = False, traj_nb: bool = False):
+                    traj_rb: bool = False, traj_nb: bool = False,
+                    nb_pred_trajs: np.ndarray | None = None):
             """Core render function: load NPZ at step, draw scene + obstacles."""
             branch = tree.branches[tree.active_branch]
             seq = tree.get_npz_sequence(tree.active_branch)
@@ -1528,6 +1560,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 dim_neighbors=hide_nb,
                 map_border_polylines=map_borders, ego_world_pose=ego_wp,
                 show_traj_rb=traj_rb, show_traj_nb=traj_nb,
+                nb_pred_trajs=nb_pred_trajs,
             )
             img = _fig_to_pil(fig)
             info = f"Step **{step}** / **{len(seq) - 1}** | Branch: `{tree.active_branch}`"
@@ -1552,23 +1585,35 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             step = max(0, min(_safe_step(step), len(seq) - 1))
             return seq[step]
 
-        def _predict_det_with_obs(tree, step, zero_neighbors=False):
+        def _predict_det_with_obs(tree, step, zero_neighbors=False,
+                                  return_nb_preds=False):
             npz_path = _get_npz_path(tree, step)
             if not npz_path:
-                return None
+                return (None, None) if return_nb_preds else None
             obs = _get_obstacles_at_step(tree, _safe_step(step))
-            raw = model_cache.predict_det(npz_path, obstacles=obs or None,
-                                          zero_neighbors=zero_neighbors,
-                                          ego_shape_override=tree.ego_shape)
-            return _traj_cos_sin_to_xyh(raw)
+            result = model_cache.predict_det(
+                npz_path, obstacles=obs or None,
+                zero_neighbors=zero_neighbors,
+                ego_shape_override=tree.ego_shape,
+                return_neighbor_preds=return_nb_preds,
+            )
+            if return_nb_preds:
+                ego_raw, nb_raw = result
+                return _traj_cos_sin_to_xyh(ego_raw), nb_raw
+            return _traj_cos_sin_to_xyh(result)
 
         def on_render(tree, step, view_r, selected_obs, gt_on, det_on, guided_on,
                       hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
-                      det_cache, guided_cache):
+                      det_cache, guided_cache, nb_preds_on):
             det_traj = None
+            _nb_preds = None
             if det_on and model_cache and model_cache.available:
-                det_traj = _predict_det_with_obs(tree, step,
-                                                 zero_neighbors=hide_nb)
+                if nb_preds_on:
+                    det_traj, _nb_preds = _predict_det_with_obs(
+                        tree, step, zero_neighbors=hide_nb, return_nb_preds=True)
+                else:
+                    det_traj = _predict_det_with_obs(tree, step,
+                                                     zero_neighbors=hide_nb)
                 det_cache = det_traj
             elif det_on and det_cache is not None:
                 det_traj = det_cache
@@ -1581,7 +1626,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 show_gt_val=gt_on, det_traj=det_traj,
                                 guided_trajs=guided_list,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
-                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
+                                traj_rb=traj_rb_on, traj_nb=traj_nb_on,
+                                nb_pred_trajs=_nb_preds)
             return img, info, det_cache, guided_cache
         def on_step_change(tree, step, view_r, selected_obs, gt_on, det_on, hide_nb, rb_on, nb_on,
                            traj_rb_on, traj_nb_on, guided_on, prev_guided_cache, *g_args):
@@ -1812,21 +1858,53 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             if not label:
                 return (tree, gr.update(), "No obstacle selected",
                         gr.update(), gr.update(), gr.update(), gr.update())
-            branch = tree.branches[tree.active_branch]
-            for i, o in enumerate(branch.modifications):
-                if o.label == label:
-                    branch.modifications[i] = ObstaclePlacement(
-                        label=label, timestep=o.timestep,
-                        x=round(float(x), 1), y=round(float(y), 1),
-                        yaw_deg=round(float(yaw) / 5) * 5,
-                        length=float(length), width=float(width),
-                        history_steps=int(history),
-                        is_moving=bool(ed_is_moving),
-                        speed=max(0.0, float(ed_speed)) if ed_is_moving else 0.0,
-                        route_lanelet_ids=o.route_lanelet_ids,
-                        goal_pose=o.goal_pose,
-                    )
+            # Search current branch first, then walk ancestors to find the obstacle
+            _found = False
+            bid = tree.active_branch
+            while bid is not None and not _found:
+                br = tree.branches.get(bid)
+                if br is None:
                     break
+                for i, o in enumerate(br.modifications):
+                    if o.label == label:
+                        _moving = bool(ed_is_moving)
+                        _speed = max(0.0, float(ed_speed)) if _moving else 0.0
+                        _route = o.route_lanelet_ids
+                        _goal = o.goal_pose
+                        # Recompute route when toggling static->moving
+                        if _moving and not o.is_moving and map_builder is not None:
+                            s = _safe_step(step)
+                            seq = tree.get_npz_sequence(tree.active_branch)
+                            ego_wp = _recover_ego_world_pose(seq, s) if seq else None
+                            if ego_wp is not None:
+                                _yaw_r = math.radians(round(float(yaw) / 5) * 5)
+                                ci, si = math.cos(ego_wp[2]), math.sin(ego_wp[2])
+                                _rx = round(float(x), 1)
+                                _ry = round(float(y), 1)
+                                wx = ego_wp[0] + ci * _rx - si * _ry
+                                wy = ego_wp[1] + si * _rx + ci * _ry
+                                wyaw = ego_wp[2] + _yaw_r
+                                ll_id = map_builder.snap_to_nearest_ll(
+                                    np.array([wx, wy]), heading_rad=wyaw,
+                                )
+                                if ll_id is not None:
+                                    _route = map_builder.find_route(ll_id, min_length_m=150.0)
+                                    g_arr = map_builder._route_goal(_route)
+                                    _goal = (float(g_arr[0]), float(g_arr[1]), float(g_arr[2]))
+                        br.modifications[i] = ObstaclePlacement(
+                            label=label, timestep=o.timestep,
+                            x=round(float(x), 1), y=round(float(y), 1),
+                            yaw_deg=round(float(yaw) / 5) * 5,
+                            length=float(length), width=float(width),
+                            history_steps=int(history),
+                            is_moving=_moving,
+                            speed=_speed,
+                            route_lanelet_ids=_route,
+                            goal_pose=_goal,
+                        )
+                        _found = True
+                        break
+                bid = br.parent_id
             s = _safe_step(step)
             det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
                                                 zero_neighbors=hide_nb)
@@ -2022,12 +2100,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                    show_gt, show_det, show_guided,
                                    hide_neighbors, show_rb_dist, show_nb_dist,
                                    show_traj_rb, show_traj_nb,
-                                   det_traj_state, guided_trajs_state]
+                                   det_traj_state, guided_trajs_state, show_nb_preds]
         _render_trigger_outputs = [scene_image, step_info, det_traj_state, guided_trajs_state]
 
         for _trigger in [view_half, show_gt, show_det, show_guided,
                          hide_neighbors, show_rb_dist, show_nb_dist,
-                         show_traj_rb, show_traj_nb]:
+                         show_traj_rb, show_traj_nb, show_nb_preds]:
             _trigger.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
 
         for direction, btn in [("first", btn_first), ("prev", btn_prev),
@@ -2046,14 +2124,16 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             [scene_image, step_info],
         )
 
-        # Toggle speed field visibility
+        # Toggle speed field visibility (no queue to avoid blocking)
         obs_is_moving.change(
             lambda v: gr.update(visible=v),
             [obs_is_moving], [obs_speed],
+            queue=False,
         )
         edit_is_moving.change(
             lambda v: gr.update(visible=v),
             [edit_is_moving], [edit_speed],
+            queue=False,
         )
 
         place_btn.click(
@@ -2427,10 +2507,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
             scene = _from_npz(npz_path)
 
-            # ── Inject placed obstacles ──
-            obstacles = tree.get_all_obstacles(tree.active_branch)
+            # ── Collect obstacle placements (deep walk ignores npz_dir boundaries) ──
+            # This ensures moving-neighbor metadata survives across resim forks.
+            all_obstacles = tree.get_all_obstacles_deep(tree.active_branch)
             obs_at_step = []
-            for o in obstacles:
+            for o in all_obstacles:
                 if o.timestep > s:
                     continue
                 if o.timestep != s and seq:
@@ -2459,8 +2540,32 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             for obs in obs_at_step:
                 aid = f"placed_{obs.label}"
                 T_PAST = 31
-                DT = 0.1
                 _is_mov = obs.is_moving and obs.speed > 0
+
+                # Check if agent already exists in the NPZ (baked in from a previous resim)
+                existing = scene.get_agent(aid)
+                if existing is not None:
+                    if _is_mov:
+                        moving_ids.add(aid)
+                        # Carry route metadata to the existing agent
+                        existing.route_lanelet_ids = obs.route_lanelet_ids
+                        if obs.goal_pose is not None and ego_wp_arr is not None:
+                            from scenario_generation.transforms import (
+                                _rotation_matrix, transform_positions,
+                            )
+                            gx, gy, gh = obs.goal_pose
+                            R_w = _rotation_matrix(ego_wp_arr[2])
+                            ego_xy = np.array(ego_wp_arr[:2], dtype=np.float64)
+                            g_ego = transform_positions(
+                                np.array([[gx, gy]], dtype=np.float64),
+                                R_w, ego_xy,
+                            ).astype(np.float32)[0]
+                            existing.goal_pose = np.array(
+                                [g_ego[0], g_ego[1], gh - ego_wp_arr[2]],
+                                dtype=np.float32)
+                    else:
+                        static_ids.add(aid)
+                    continue
 
                 if _is_mov:
                     moving_ids.add(aid)

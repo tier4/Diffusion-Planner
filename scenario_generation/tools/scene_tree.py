@@ -257,6 +257,23 @@ class SceneTree:
             bid = branch.parent_id
         return obstacles
 
+    def get_all_obstacles_deep(self, branch_id: str) -> list[ObstaclePlacement]:
+        """Get all obstacles from all ancestors, ignoring npz_dir boundaries.
+
+        Unlike get_all_obstacles, this does NOT stop at resimulated ancestors.
+        Used by the simulation loop to recover obstacle metadata (is_moving, route)
+        for agents that were baked into a previous resim's NPZ output.
+        """
+        obstacles = []
+        bid = branch_id
+        while bid is not None:
+            branch = self.branches.get(bid)
+            if branch is None:
+                break
+            obstacles.extend(branch.modifications)
+            bid = branch.parent_id
+        return obstacles
+
     def next_obstacle_label(self, branch_id: str) -> str:
         """Generate a unique label for the next obstacle in this branch."""
         existing = self.get_all_obstacles(branch_id)
