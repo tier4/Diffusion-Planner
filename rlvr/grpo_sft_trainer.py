@@ -136,6 +136,8 @@ def _compute_sft_diffusion_loss(
     ego_il_mode: str = "gt",
     ego_gt_real: torch.Tensor | None = None,
     velocity_weight: bool = False,
+    kl_coef: float = 0.0,
+    base_model: nn.Module | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute standard SFT diffusion loss with ego + neighbor targets.
 
@@ -231,6 +233,8 @@ def _compute_sft_diffusion_loss(
     total_neighbor_loss = 0.0
     total_neighbor_reg_loss = 0.0
     total_ego_il_loss = 0.0
+    total_kl_loss = 0.0
+    use_kl = kl_coef > 0.0
     # Combine future padding mask with current-timestep validity:
     # a neighbor absent at the current timestep should not contribute to loss.
     neighbors_future_valid = ~neighbor_mask  # [B, Pn, T]
@@ -310,16 +314,22 @@ def _compute_sft_diffusion_loss(
             if masked_loss.numel() > 0:
                 total_neighbor_loss += masked_loss.mean()
 
-        # Neighbor regularization + ego IL (baseline mode): reuse base model forward pass
-        need_base_pass = use_neighbor_reg or (use_ego_il and ego_il_mode == "baseline")
-        if need_base_pass and not hasattr(inner, "disable_adapter"):
+        # Base model forward pass: needed for neighbor_reg, baseline ego IL, or KL
+        need_base_pass = use_neighbor_reg or (use_ego_il and ego_il_mode == "baseline") or use_kl
+        has_lora = hasattr(inner, "disable_adapter")
+        if need_base_pass and not has_lora and base_model is None:
             raise ValueError(
-                "neighbor_reg or baseline ego IL requires LoRA model with disable_adapter(). "
-                "Ensure the model is wrapped with PeftModel."
+                "neighbor_reg, baseline ego IL, or kl_coef requires either a LoRA model "
+                "(with disable_adapter) or a separate base_model. "
+                "Pass base_model for fullmodel training."
             )
-        if need_base_pass and hasattr(inner, "disable_adapter"):
-            with inner.disable_adapter(), torch.no_grad():
-                _, base_outputs = model(merged_inputs)
+        if need_base_pass:
+            if has_lora:
+                with inner.disable_adapter(), torch.no_grad():
+                    _, base_outputs = model(merged_inputs)
+            else:
+                with torch.no_grad():
+                    _, base_outputs = base_model(merged_inputs)
             base_output = base_outputs["model_output"][:, :, 1:, :]  # [B, P, T, 4]
 
             # Neighbor reg
@@ -337,10 +347,16 @@ def _compute_sft_diffusion_loss(
                 ego_il_loss = F.mse_loss(model_output[:, 0], base_ego.detach())
                 total_ego_il_loss += ego_il_loss
 
+            # KL regularization: MSE between trained and base model outputs
+            if use_kl:
+                kl_loss = F.mse_loss(model_output, base_output.detach())
+                total_kl_loss += kl_loss
+
     ego_loss_avg = total_ego_loss / K
     neighbor_loss_avg = total_neighbor_loss / K if isinstance(total_neighbor_loss, torch.Tensor) else torch.tensor(0.0, device=device)
     neighbor_reg_avg = total_neighbor_reg_loss / K if isinstance(total_neighbor_reg_loss, torch.Tensor) else torch.tensor(0.0, device=device)
     ego_il_avg = total_ego_il_loss / K if isinstance(total_ego_il_loss, torch.Tensor) else torch.tensor(0.0, device=device)
+    kl_loss_avg = total_kl_loss / K if isinstance(total_kl_loss, torch.Tensor) else torch.tensor(0.0, device=device)
 
     # Combined loss: ego + neighbor (weight 0.1 to match original SFT alpha_neighbor_loss)
     loss = ego_loss_avg + 0.1 * neighbor_loss_avg
@@ -348,6 +364,8 @@ def _compute_sft_diffusion_loss(
         loss = loss + neighbor_reg_weight * neighbor_reg_avg
     if use_ego_il:
         loss = loss + ego_il_weight * ego_il_avg
+    if use_kl:
+        loss = loss + kl_coef * kl_loss_avg
 
     metrics = {
         "sft_ego_loss": ego_loss_avg.item(),
@@ -355,6 +373,7 @@ def _compute_sft_diffusion_loss(
         "sft_total_loss": loss.item(),
         "sft_neighbor_reg_loss": neighbor_reg_avg.item() if isinstance(neighbor_reg_avg, torch.Tensor) else 0.0,
         "sft_ego_il_loss": ego_il_avg.item() if isinstance(ego_il_avg, torch.Tensor) else 0.0,
+        "sft_kl_loss": kl_loss_avg.item() if isinstance(kl_loss_avg, torch.Tensor) else 0.0,
     }
     return loss, metrics
 
@@ -371,6 +390,7 @@ def train_epoch_ranked_sft(
     exploration_policy=None,
     exploration_optimizer=None,
     run_dir=None,
+    base_model: nn.Module | None = None,
 ) -> dict[str, float]:
     """GRPO-ranked SFT epoch: generate, rank, filter, train with SFT loss.
 
@@ -1114,6 +1134,18 @@ def train_epoch_ranked_sft(
 
     print(f"  Training on {N_train}/{N} scenes (ranked SFT, mode={mode}, "
           f"sft_batch_size={sft_bs}, accum_steps={accum_steps})...")
+    _base_model_ref = base_model
+    if config.kl_coef > 0.0 and epoch == 1:
+        inner = model.module if hasattr(model, "module") else model
+        if hasattr(inner, "disable_adapter"):
+            print(f"  [KL] coef={config.kl_coef}, using LoRA disable_adapter for base reference")
+        elif _base_model_ref is not None:
+            print(f"  [KL] coef={config.kl_coef}, using separate frozen base_model")
+        else:
+            raise ValueError(
+                f"kl_coef={config.kl_coef} but no LoRA disable_adapter and no base_model. "
+                "Pass --base_model_path for fullmodel training with KL."
+            )
     model.train()
     optimizer.zero_grad()
 
@@ -1150,6 +1182,8 @@ def train_epoch_ranked_sft(
             ego_il_mode=config.ego_il_mode,
             ego_gt_real=mini_ego_gt_real,
             velocity_weight=config.sft_velocity_weight,
+            kl_coef=config.kl_coef,
+            base_model=_base_model_ref,
         )
 
         # Scale loss to preserve per-scene gradient magnitude:
