@@ -2718,9 +2718,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
                     # Model prediction for closed-loop agents
                     preds: dict[str, np.ndarray] = {}
+                    _agent_ids_in_sim = {a.id for a in scene_sim.agents}
                     if ids_to_predict:
                         _live_ids = [aid for aid in ids_to_predict
-                                     if scene_sim.get_agent(aid) is not None]
+                                     if aid in _agent_ids_in_sim]
                         if _live_ids:
                             if hide_nb:
                                 _keep = {ego_id} | placed_ids
@@ -2786,7 +2787,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                             )
                     elif nb_ol and moving_ids:
                         for nid in moving_ids:
-                            agent = scene_sim.get_agent(nid)
+                            agent = next((a for a in scene_sim.agents if a.id == nid), None)
                             if agent is None:
                                 continue
                             ref = neighbor_refs.get(nid)
