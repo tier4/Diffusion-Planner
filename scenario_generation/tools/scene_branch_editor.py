@@ -2538,27 +2538,24 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             static_ids: set[str] = set()
 
             # If starting from a previous resim, placed agents lost their IDs
-            # in the NPZ round-trip (placed_X -> neighbor_N). Read the saved
-            # ID mapping to identify and remove them before re-injection.
+            # in the NPZ round-trip (placed_X -> neighbor_N). Rename them back
+            # so the exact-ID check below finds them at their CURRENT position
+            # (not the original placement position).
             import json as _json_placed
             _placed_map_path = Path(npz_path).parent / "_placed_ids.json"
             if _placed_map_path.exists():
                 _saved_map = _json_placed.loads(_placed_map_path.read_text())
-                # _saved_map: {neighbor_index: placed_id}
-                # Remove the NPZ neighbors that are actually placed agents
-                _npz_ids_to_remove = set()
                 for _ni_str, _pid in _saved_map.items():
                     _nb_id = f"neighbor_{_ni_str}"
-                    _npz_ids_to_remove.add(_nb_id)
-                scene.agents = [a for a in scene.agents
-                                if a.id not in _npz_ids_to_remove]
+                    _agent = next((a for a in scene.agents if a.id == _nb_id), None)
+                    if _agent is not None:
+                        _agent.id = _pid
 
             for obs in obs_at_step:
                 aid = f"placed_{obs.label}"
                 T_PAST = 31
                 _is_mov = obs.is_moving and obs.speed > 0
 
-                # Check if agent still exists by exact ID (only on first sim)
                 existing = next((a for a in scene.agents if a.id == aid), None)
                 if existing is not None:
                     if _is_mov:
