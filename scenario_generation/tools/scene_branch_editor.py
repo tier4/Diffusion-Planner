@@ -2541,8 +2541,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             # in the NPZ round-trip (placed_X -> neighbor_N). Rename them back
             # so the exact-ID check below finds them at their CURRENT position
             # (not the original placement position).
+            # Restore placed agent IDs from the per-step mapping written by
+            # the previous resim.  The NPZ round-trip renames placed_X to
+            # neighbor_N; the per-step file records the correct rank at the
+            # exact step we're resuming from.
             import json as _json_placed
-            _placed_map_path = Path(npz_path).parent / "_placed_ids.json"
+            _npz_stem = Path(npz_path).stem  # e.g. "replay_step_0010"
+            _placed_map_path = Path(npz_path).parent / f"{_npz_stem}_placed.json"
+            if not _placed_map_path.exists():
+                _placed_map_path = Path(npz_path).parent / "_placed_ids.json"
             if _placed_map_path.exists():
                 _saved_map = _json_placed.loads(_placed_map_path.read_text())
                 for _ni_str, _pid in _saved_map.items():
@@ -2671,22 +2678,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             scene_sim = deepcopy(scene)
             ego_id = scene_sim.ego_agent_id
 
-            # Save placed agent ID mapping so subsequent resims can identify
-            # them after the NPZ round-trip strips their IDs.
-            # The tensor converter sorts neighbors by distance from ego, so
-            # record which distance-rank each placed agent lands at.
-            import json as _json_placed
-            _ego_pos = scene_sim.get_agent(ego_id).current_position
-            _nb_agents = [(a, math.hypot(a.current_position[0] - _ego_pos[0],
-                                          a.current_position[1] - _ego_pos[1]))
-                          for a in scene_sim.agents if a.id != ego_id]
-            _nb_agents.sort(key=lambda x: x[1])
-            _placed_map = {}
-            for _rank, (_a, _) in enumerate(_nb_agents):
-                if _a.id in placed_ids:
-                    _placed_map[str(_rank)] = _a.id
-            (out_dir / "_placed_ids.json").write_text(_json_placed.dumps(_placed_map))
-
             # Map refresh setup
             if map_builder is not None and ego_wp_arr is not None:
                 _refresh_line_strings(
@@ -2760,6 +2751,21 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         (out_dir / f"replay_step_{t:04d}.json").write_text(
                             _json_sim.dumps(sidecar))
                     np.savez(out_dir / f"replay_step_{t:04d}.npz", **npz_data)
+
+                    # Write per-step placed-agent ID mapping (distance rank
+                    # changes as agents move, so we write at every step).
+                    if placed_ids:
+                        _epos = scene_sim.get_agent(ego_id).current_position
+                        _nba = [(a, math.hypot(a.current_position[0] - _epos[0],
+                                               a.current_position[1] - _epos[1]))
+                                for a in scene_sim.agents if a.id != ego_id]
+                        _nba.sort(key=lambda x: x[1])
+                        _pm = {}
+                        for _rk, (_aa, _) in enumerate(_nba):
+                            if _aa.id in placed_ids:
+                                _pm[str(_rk)] = _aa.id
+                        (out_dir / f"replay_step_{t:04d}_placed.json").write_text(
+                            _json_sim.dumps(_pm))
 
                     if t >= n - 1:
                         break
