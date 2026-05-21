@@ -259,12 +259,16 @@ class StatePerturbation:
         device = aug_ego_state.device
         dtype = aug_ego_state.dtype
 
+        # ego_shape = [wheelbase, length, width]; fall back to module constants if absent.
+        if "ego_shape" in inputs:
+            ego_length = inputs["ego_shape"][:, 1:2].to(device=device, dtype=dtype)  # [B, 1]
+            ego_width = inputs["ego_shape"][:, 2:3].to(device=device, dtype=dtype)   # [B, 1]
+        else:
+            ego_length = torch.full((B, 1), EGO_LENGTH, device=device, dtype=dtype)
+            ego_width = torch.full((B, 1), EGO_WIDTH, device=device, dtype=dtype)
+
         ego_rect = torch.cat(
-            [
-                aug_ego_state[:, :4],  # x, y, cos_h, sin_h
-                torch.full((B, 1), EGO_LENGTH, device=device, dtype=dtype),
-                torch.full((B, 1), EGO_WIDTH, device=device, dtype=dtype),
-            ],
+            [aug_ego_state[:, :4], ego_length, ego_width],
             dim=-1,
         )  # [B, 6]
         ego_corners = _rect_corners(ego_rect)  # [B, 4, 2]

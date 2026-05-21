@@ -893,6 +893,30 @@ def test_check_aug_validity_ego_size_constants():
     print(f"  [PASS] EGO constants (length={EGO_LENGTH}, width={EGO_WIDTH})")
 
 
+def test_check_aug_validity_uses_ego_shape_from_inputs():
+    """ego_shape in inputs overrides hardcoded constants."""
+    aug = StatePerturbation()
+    B = 1
+    ego = _ego_state(B, vx=5.0)   # ego at (0, 0), heading=0
+
+    # Neighbour at (0, 3.5): well outside the default 5×2 m ego,
+    # but inside a 10×8 m ego provided via ego_shape.
+    nbr = _nbr(B, x=0.0, y=3.5, width=1.0, length=1.0)
+    lanes = torch.zeros(B, 5, 10, 33)
+
+    # Without ego_shape: uses default 5×2 → neighbour at y=3.5 is OUTSIDE → no collision
+    inputs_default = {"ego_current_state": ego, "neighbor_agents_past": nbr, "lanes": lanes}
+    assert not aug._check_aug_validity(ego, inputs_default).item(), \
+        "With default 5×2 ego, neighbour at y=3.5 should not collide"
+
+    # With ego_shape specifying 10×8 → neighbour at y=3.5 is INSIDE → collision
+    ego_shape = torch.tensor([[2.75, 10.0, 8.0]])  # (wheelbase, length=10, width=8)
+    inputs_with_shape = {**inputs_default, "ego_shape": ego_shape}
+    assert aug._check_aug_validity(ego, inputs_with_shape).item(), \
+        "With 10×8 ego, neighbour at y=3.5 should collide"
+    print("  [PASS] _check_aug_validity respects ego_shape from inputs")
+
+
 # ────────────── augment + collision filter (integration) ────────────────────
 
 
@@ -1025,6 +1049,7 @@ ALL_TESTS = [
     test_check_aug_validity_zero_boundary_offset_ignored,
     test_check_aug_validity_batch_mixed,
     test_check_aug_validity_ego_size_constants,
+    test_check_aug_validity_uses_ego_shape_from_inputs,
     # ── augment + collision filter (integration) ──
     test_augment_collision_suppresses_aug_flag,
     test_augment_no_collision_preserves_aug_flag,
