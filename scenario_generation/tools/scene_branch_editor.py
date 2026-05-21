@@ -2537,32 +2537,33 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             moving_ids: set[str] = set()
             static_ids: set[str] = set()
 
+            # If starting from a previous resim, placed agents lost their IDs
+            # in the NPZ round-trip (placed_X -> neighbor_N). Read the saved
+            # ID mapping to identify and remove them before re-injection.
+            import json as _json_placed
+            _placed_map_path = Path(npz_path).parent / "_placed_ids.json"
+            if _placed_map_path.exists():
+                _saved_map = _json_placed.loads(_placed_map_path.read_text())
+                # _saved_map: {neighbor_index: placed_id}
+                # Remove the NPZ neighbors that are actually placed agents
+                _npz_ids_to_remove = set()
+                for _ni_str, _pid in _saved_map.items():
+                    _nb_id = f"neighbor_{_ni_str}"
+                    _npz_ids_to_remove.add(_nb_id)
+                scene.agents = [a for a in scene.agents
+                                if a.id not in _npz_ids_to_remove]
+
             for obs in obs_at_step:
                 aid = f"placed_{obs.label}"
                 T_PAST = 31
                 _is_mov = obs.is_moving and obs.speed > 0
 
-                # Check if agent already exists in the NPZ (baked in from a previous resim)
-                existing = scene.get_agent(aid)
+                # Check if agent still exists by exact ID (only on first sim)
+                existing = next((a for a in scene.agents if a.id == aid), None)
                 if existing is not None:
                     if _is_mov:
                         moving_ids.add(aid)
-                        # Carry route metadata to the existing agent
                         existing.route_lanelet_ids = obs.route_lanelet_ids
-                        if obs.goal_pose is not None and ego_wp_arr is not None:
-                            from scenario_generation.transforms import (
-                                _rotation_matrix, transform_positions,
-                            )
-                            gx, gy, gh = obs.goal_pose
-                            R_w = _rotation_matrix(ego_wp_arr[2])
-                            ego_xy = np.array(ego_wp_arr[:2], dtype=np.float64)
-                            g_ego = transform_positions(
-                                np.array([[gx, gy]], dtype=np.float64),
-                                R_w, ego_xy,
-                            ).astype(np.float32)[0]
-                            existing.goal_pose = np.array(
-                                [g_ego[0], g_ego[1], gh - ego_wp_arr[2]],
-                                dtype=np.float32)
                     else:
                         static_ids.add(aid)
                     continue
@@ -2672,6 +2673,22 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
             scene_sim = deepcopy(scene)
             ego_id = scene_sim.ego_agent_id
+
+            # Save placed agent ID mapping so subsequent resims can identify
+            # them after the NPZ round-trip strips their IDs.
+            # The tensor converter sorts neighbors by distance from ego, so
+            # record which distance-rank each placed agent lands at.
+            import json as _json_placed
+            _ego_pos = scene_sim.get_agent(ego_id).current_position
+            _nb_agents = [(a, math.hypot(a.current_position[0] - _ego_pos[0],
+                                          a.current_position[1] - _ego_pos[1]))
+                          for a in scene_sim.agents if a.id != ego_id]
+            _nb_agents.sort(key=lambda x: x[1])
+            _placed_map = {}
+            for _rank, (_a, _) in enumerate(_nb_agents):
+                if _a.id in placed_ids:
+                    _placed_map[str(_rank)] = _a.id
+            (out_dir / "_placed_ids.json").write_text(_json_placed.dumps(_placed_map))
 
             # Map refresh setup
             if map_builder is not None and ego_wp_arr is not None:
