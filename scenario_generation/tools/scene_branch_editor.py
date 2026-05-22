@@ -1229,6 +1229,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     maximum=max(0, len(tree.get_npz_sequence("root")) - 1),
                     value=0, step=1, label="Step (drag)",
                 )
+                step_mirror = gr.Number(value=0, visible=False, precision=0)
                 with gr.Row():
                     btn_first = gr.Button("|<", size="sm", min_width=40)
                     btn_prev = gr.Button("<", size="sm", min_width=40)
@@ -1423,16 +1424,36 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             # ═══════ RIGHT PANEL ═══════
             with gr.Column(scale=1, min_width=280):
                 gr.Markdown("### Branch Tree")
+                branch_timeline = gr.HTML(
+                    value=_render_branch_svg(tree, 0),
+                    elem_id="branch_timeline",
+                )
+                branch_click_target = gr.Textbox(
+                    visible=False, elem_id="branch_click_target",
+                )
                 branch_dropdown = gr.Dropdown(
                     choices=list(tree.branches.keys()),
                     value=tree.active_branch,
                     label="Active Branch",
                     interactive=True,
+                    visible=False,
                 )
-                branch_info = gr.Markdown(_branch_info_md(tree, tree.active_branch))
+                branch_info = gr.HTML(_branch_info_html(tree, tree.active_branch))
                 with gr.Row():
                     fork_btn = gr.Button("Fork Here", size="sm", variant="primary")
                     delete_branch_btn = gr.Button("Delete Branch", size="sm", variant="stop")
+                with gr.Accordion("Fuse Timelines", open=False):
+                    _choices = list(tree.branches.keys())
+                    with gr.Row():
+                        fuse_branch_a = gr.Dropdown(
+                            choices=_choices, label="Prefix", scale=1,
+                        )
+                        fuse_branch_b = gr.Dropdown(
+                            choices=_choices, label="Suffix", scale=1,
+                        )
+                    fuse_step = gr.Number(label="Cut prefix at step", value=0, precision=0)
+                    fuse_btn = gr.Button("Fuse", size="sm", variant="primary")
+                    fuse_status = gr.Markdown("")
 
                 gr.Markdown("### Modifications")
                 mods_display = gr.Markdown(
@@ -1493,9 +1514,28 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     ego.length = ln
                     ego.width = wd
 
-            # Don't draw obstacle overlays on resimulated branches — they're
-            # already baked into the NPZ as regular neighbors.
+            # On resim branches, restore placed_* IDs from the sidecar so the
+            # renderer draws them with the distinctive placed-agent style.
             if branch.npz_dir is not None:
+                import json as _json_render
+                _npz_stem = Path(seq[step]).stem
+                _pm_path = Path(seq[step]).parent / f"{_npz_stem}_placed.json"
+                if not _pm_path.exists():
+                    _pm_path = Path(seq[step]).parent / "_placed_ids.json"
+                if _pm_path.exists():
+                    _pm = _json_render.loads(_pm_path.read_text())
+                    for _ni_str, _pid in _pm.items():
+                        _nb_id = f"neighbor_{_ni_str}"
+                        _agent = next((a for a in scene.agents if a.id == _nb_id), None)
+                        if _agent is not None:
+                            _agent.id = _pid
+                        else:
+                            with open("/tmp/branch_editor_sim.log", "a") as _rf:
+                                _rf.write(f"[RENDER] {_nb_id} not found in scene agents: "
+                                          f"{[a.id for a in scene.agents]}\n")
+                else:
+                    with open("/tmp/branch_editor_sim.log", "a") as _rf:
+                        _rf.write(f"[RENDER] no placed json at {_pm_path}\n")
                 obstacles_at_step = []
             else:
                 obstacles = tree.get_all_obstacles(tree.active_branch)
@@ -1639,7 +1679,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            return img, info, s, det_traj, guided
+            return img, info, s, s, det_traj, guided
         def _on_nav_impl(direction, tree, step, view_r, selected_obs, gt_on, det_on,
                          hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
                          guided_on, prev_guided_cache, *g_args):
@@ -1660,10 +1700,17 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            return img, info, s, det_traj, guided
+            return img, info, s, s, det_traj, guided
         def on_preview(tree, step, view_r, selected_obs, x, y, yaw, length, width,
                        gt_on, det_cache, guided_cache,
                        rb_on, nb_on, hide_nb, traj_rb_on, traj_nb_on):
+            if x is None or y is None:
+                img, info = _render(tree, _safe_step(step), view_r, selected_obs,
+                                    show_gt_val=gt_on, det_traj=det_cache,
+                                    guided_trajs=guided_cache,
+                                    rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                    traj_rb=traj_rb_on, traj_nb=traj_nb_on)
+                return img, info
             preview = ObstaclePlacement(
                 label="(preview)", timestep=_safe_step(step),
                 x=round(float(x), 1), y=round(float(y), 1),
@@ -1763,6 +1810,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                      is_moving, speed_val,
                      gt_on, det_on, guided_on, hide_nb, rb_on, nb_on,
                      traj_rb_on, traj_nb_on, *g_args):
+            if x is None or y is None:
+                img, info = _render(tree, _safe_step(step), view_r, None, show_gt_val=gt_on)
+                mods = _modifications_md(tree, tree.active_branch)
+                return (tree, img, info, mods, None, None, None,
+                        gr.update(), "X/Y must not be empty")
             label = tree.next_obstacle_label(tree.active_branch)
             s = _safe_step(step)
             _moving = bool(is_moving)
@@ -1966,47 +2018,57 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         def on_branch_change(tree, branch_id, step, view_r, selected_obs, gt_on):
             if branch_id not in tree.branches:
                 return (tree, gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), None, None)
+                        gr.update(), gr.update(), None, None, gr.update(), gr.update())
             if tree.active_branch == branch_id:
                 return (tree, gr.update(), gr.update(), gr.update(), gr.update(),
-                        gr.update(), gr.update(), gr.update(), gr.update())
+                        gr.update(), gr.update(), gr.update(), gr.update(),
+                        gr.update(), gr.update())
             tree.active_branch = branch_id
             seq = tree.get_npz_sequence(branch_id)
             max_step = max(0, len(seq) - 1)
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
-            b_info = _branch_info_md(tree, branch_id)
+            b_info = _branch_info_html(tree, branch_id)
             mods = _modifications_md(tree, branch_id)
+            svg = _render_branch_svg(tree, 0)
             return (tree, img, info, b_info, mods,
-                    gr.update(maximum=max_step, value=0), None, None, None)
+                    gr.update(maximum=max_step, value=0), 0, None, None, None, svg)
 
         def on_fork(tree, step, view_r, gt_on):
-            new_id = tree.fork_branch(tree.active_branch, _safe_step(step))
+            seq = tree.get_npz_sequence(tree.active_branch)
+            s = min(_safe_step(step), max(0, len(seq) - 1))
+            new_id = tree.fork_branch(tree.active_branch, s)
             tree.active_branch = new_id
             choices = list(tree.branches.keys())
             seq = tree.get_npz_sequence(new_id)
             max_step = max(0, len(seq) - 1)
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
-            b_info = _branch_info_md(tree, new_id)
+            b_info = _branch_info_html(tree, new_id)
             mods = _modifications_md(tree, new_id)
+            svg = _render_branch_svg(tree, 0)
             return (tree, img, info, b_info, mods,
                     gr.update(choices=choices, value=new_id),
-                    gr.update(maximum=max_step, value=0), None, None, None)
+                    gr.update(maximum=max_step, value=0), 0, None, None, None,
+                    svg, gr.update(choices=choices), gr.update(choices=choices))
 
         def on_delete_branch(tree, view_r, gt_on):
             if tree.active_branch == "root":
                 return (tree, gr.update(), "Cannot delete root", gr.update(),
-                        gr.update(), gr.update(), gr.update(), None, None, None)
+                        gr.update(), gr.update(), gr.update(), gr.update(),
+                        None, None, None,
+                        gr.update(), gr.update(), gr.update())
             tree.delete_branch(tree.active_branch)
             tree.active_branch = "root"
             choices = list(tree.branches.keys())
             seq = tree.get_npz_sequence("root")
             max_step = max(0, len(seq) - 1)
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
-            b_info = _branch_info_md(tree, "root")
+            b_info = _branch_info_html(tree, "root")
             mods = _modifications_md(tree, "root")
+            svg = _render_branch_svg(tree, 0)
             return (tree, img, info, b_info, mods,
                     gr.update(choices=choices, value="root"),
-                    gr.update(maximum=max_step, value=0), None, None, None)
+                    gr.update(maximum=max_step, value=0), 0, None, None, None,
+                    svg, gr.update(choices=choices), gr.update(choices=choices))
 
         def on_load_dir(tree, npz_dir, view_r, gt_on):
             new_tree = SceneTree.create_from_npz_dir(npz_dir)
@@ -2014,11 +2076,13 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             max_step = max(0, len(seq) - 1)
             img, info = _render(new_tree, 0, view_r, None, show_gt_val=gt_on)
             choices = list(new_tree.branches.keys())
-            b_info = _branch_info_md(new_tree, "root")
+            b_info = _branch_info_html(new_tree, "root")
             mods = _modifications_md(new_tree, "root")
+            svg = _render_branch_svg(new_tree, 0)
             return (new_tree, img, info, b_info, mods,
                     gr.update(choices=choices, value="root"),
-                    gr.update(maximum=max_step, value=0), None, None, None)
+                    gr.update(maximum=max_step, value=0), 0, None, None, None,
+                    svg, gr.update(choices=choices), gr.update(choices=choices))
 
         def on_load_tree(path, view_r, gt_on):
             loaded = SceneTree.load(path)
@@ -2026,11 +2090,13 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             max_step = max(0, len(seq) - 1)
             img, info = _render(loaded, 0, view_r, None, show_gt_val=gt_on)
             choices = list(loaded.branches.keys())
-            b_info = _branch_info_md(loaded, loaded.active_branch)
+            b_info = _branch_info_html(loaded, loaded.active_branch)
             mods = _modifications_md(loaded, loaded.active_branch)
+            svg = _render_branch_svg(loaded, 0)
             return (loaded, img, info, b_info, mods,
                     gr.update(choices=choices, value=loaded.active_branch),
-                    gr.update(maximum=max_step, value=0), None, None, None)
+                    gr.update(maximum=max_step, value=0), 0, None, None, None,
+                    svg, gr.update(choices=choices), gr.update(choices=choices))
 
         def on_save_tree(tree, path):
             if not path:
@@ -2044,8 +2110,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             max_step = max(0, len(seq) - 1)
             s = min(_safe_step(step), max_step)
             img, info = _render(tree, s, view_r, selected_obs, show_gt_val=gt_on)
-            b_info = _branch_info_md(tree, tree.active_branch)
-            return tree, img, info, b_info, gr.update(maximum=max_step, value=s)
+            b_info = _branch_info_html(tree, tree.active_branch)
+            return tree, img, info, b_info, gr.update(maximum=max_step, value=s), s
 
         def on_crop_clear(tree, step, view_r, selected_obs, gt_on):
             tree.clear_crop(tree.active_branch)
@@ -2053,8 +2119,29 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             max_step = max(0, len(seq) - 1)
             s = min(_safe_step(step), max_step)
             img, info = _render(tree, s, view_r, selected_obs, show_gt_val=gt_on)
-            b_info = _branch_info_md(tree, tree.active_branch)
-            return tree, img, info, b_info, gr.update(maximum=max_step, value=s)
+            b_info = _branch_info_html(tree, tree.active_branch)
+            return tree, img, info, b_info, gr.update(maximum=max_step, value=s), s
+
+        def on_fuse(tree, prefix_id, suffix_id, cut_step, view_r, gt_on):
+            try:
+                new_id = tree.fuse_branches(prefix_id, suffix_id, int(cut_step))
+            except (KeyError, IndexError, ValueError) as e:
+                n_out = len(_full_switch_outputs) + 1
+                return (tree,) + (gr.update(),) * (n_out - 2) + (str(e),)
+            tree.active_branch = new_id
+            choices = list(tree.branches.keys())
+            seq = tree.get_npz_sequence(new_id)
+            max_step = max(0, len(seq) - 1)
+            img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
+            b_info = _branch_info_html(tree, new_id)
+            mods = _modifications_md(tree, new_id)
+            svg = _render_branch_svg(tree, 0)
+            return (tree, img, info, b_info, mods,
+                    gr.update(choices=choices, value=new_id),
+                    gr.update(maximum=max_step, value=0), 0, None, None, None,
+                    svg, gr.update(choices=choices), gr.update(choices=choices),
+                    f"Fused `{prefix_id}`[:step {int(cut_step)}] + all of `{suffix_id}` "
+                    f"({len(seq)} total steps)")
 
         # ── Wire up events ──
         # Guidance toggle+scale inputs for recomputation, plus noise and K at end
@@ -2068,10 +2155,16 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                        show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
                        show_traj_rb, show_traj_nb,
                        show_guided, guided_trajs_state] + _g_inputs)
-        nav_outputs = [scene_image, step_info, step_slider, det_traj_state, guided_trajs_state]
+        nav_outputs = [scene_image, step_info, step_slider, step_mirror, det_traj_state, guided_trajs_state]
 
         step_slider.release(
             on_step_change, nav_inputs, nav_outputs,
+        )
+        step_slider.release(
+            lambda v: v, [step_slider], [step_mirror],
+        )
+        step_slider.change(
+            lambda v: v, [step_slider], [step_mirror],
         )
 
         def on_step_jump(tree, jump_val, view_r, selected_obs, gt_on, det_on,
@@ -2208,25 +2301,40 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         )
 
         _branch_switch_outputs = [tree_state, scene_image, step_info, branch_info, mods_display,
-                                  step_slider, selected_obstacle_state, det_traj_state, guided_trajs_state]
+                                  step_slider, step_mirror, selected_obstacle_state,
+                                  det_traj_state, guided_trajs_state, branch_timeline]
         _full_switch_outputs = [tree_state, scene_image, step_info, branch_info, mods_display,
-                                branch_dropdown, step_slider, selected_obstacle_state,
-                                det_traj_state, guided_trajs_state]
+                                branch_dropdown, step_slider, step_mirror,
+                                selected_obstacle_state,
+                                det_traj_state, guided_trajs_state, branch_timeline,
+                                fuse_branch_a, fuse_branch_b]
+
+        branch_click_target.change(
+            on_branch_change,
+            [tree_state, branch_click_target, step_mirror, view_half, selected_obstacle_state, show_gt],
+            _branch_switch_outputs,
+        )
 
         branch_dropdown.change(
             on_branch_change,
-            [tree_state, branch_dropdown, step_slider, view_half, selected_obstacle_state, show_gt],
+            [tree_state, branch_dropdown, step_mirror, view_half, selected_obstacle_state, show_gt],
             _branch_switch_outputs,
         )
 
         fork_btn.click(
-            on_fork, [tree_state, step_slider, view_half, show_gt],
+            on_fork, [tree_state, step_mirror, view_half, show_gt],
             _full_switch_outputs,
         )
 
         delete_branch_btn.click(
             on_delete_branch, [tree_state, view_half, show_gt],
             _full_switch_outputs,
+        )
+
+        fuse_btn.click(
+            on_fuse,
+            [tree_state, fuse_branch_a, fuse_branch_b, fuse_step, view_half, show_gt],
+            _full_switch_outputs + [fuse_status],
         )
 
         load_dir_btn.click(
@@ -2246,14 +2354,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         crop_btn.click(
             on_crop,
-            [tree_state, step_slider, view_half, crop_start, crop_end, selected_obstacle_state, show_gt],
-            [tree_state, scene_image, step_info, branch_info, step_slider],
+            [tree_state, step_mirror, view_half, crop_start, crop_end, selected_obstacle_state, show_gt],
+            [tree_state, scene_image, step_info, branch_info, step_slider, step_mirror],
         )
 
         crop_clear_btn.click(
             on_crop_clear,
-            [tree_state, step_slider, view_half, selected_obstacle_state, show_gt],
-            [tree_state, scene_image, step_info, branch_info, step_slider],
+            [tree_state, step_mirror, view_half, selected_obstacle_state, show_gt],
+            [tree_state, scene_image, step_info, branch_info, step_slider, step_mirror],
         )
 
         # Export NPZs — copy branch sequence to output dir with sequential naming
@@ -2461,28 +2569,63 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         )
 
         # Simulate N steps — unified loop supporting independent ego/neighbor loop modes
+        _SIM_LOG = Path("/tmp/branch_editor_sim.log")
+
+        def _simlog(msg: str) -> None:
+            import datetime as _dt
+            with open(_SIM_LOG, "a") as _f:
+                _f.write(f"[{_dt.datetime.now():%H:%M:%S}] {msg}\n")
+
         def on_simulate(tree, step, n_steps, advance_mode, use_guidance,
                         gt_on, view_r, hide_nb, ego_mode, neighbor_mode,
                         guided_cache, det_cache,
                         *guidance_args, progress=gr.Progress()):
+            _simlog("=" * 60)
+            _simlog(f"on_simulate called: step={step} n_steps={n_steps} "
+                    f"ego_mode={ego_mode} neighbor_mode={neighbor_mode} "
+                    f"active_branch={tree.active_branch}")
             if model_cache is None or not model_cache.available:
                 return (tree, gr.update(), "No model loaded -- pass `--model_path`",
-                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None)
+                        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                        gr.update(), None, None, gr.update(), gr.update(), gr.update())
 
             s = _safe_step(step)
 
-            new_id = tree.fork_branch(tree.active_branch, s)
-            tree.active_branch = new_id
-            branch = tree.branches[new_id]
+            active = tree.branches[tree.active_branch]
+            is_pending = (
+                active.npz_dir is None
+                and active.parent_id is not None
+                and active.fused_from is None
+            )
 
-            seq = tree.get_npz_sequence(branch.parent_id)
-            if not seq:
-                return (tree, gr.update(), "No NPZ sequence", gr.update(),
-                        gr.update(), gr.update(), gr.update(), gr.update(),
-                        None, None)
+            _simlog(f"is_pending={is_pending} active_branch={tree.active_branch}")
+
+            if is_pending:
+                new_id = tree.active_branch
+                branch = active
+                parent_seq = tree.get_npz_sequence(branch.parent_id)
+                fork_s = branch.fork_timestep or 0
+                _simlog(f"PENDING: parent={branch.parent_id} fork_s={fork_s} "
+                        f"parent_seq_len={len(parent_seq) if parent_seq else 0}")
+                if not parent_seq:
+                    return (tree, gr.update(), "No NPZ sequence", gr.update(),
+                            gr.update(), gr.update(), gr.update(), gr.update(),
+                            gr.update(), None, None, gr.update(), gr.update(), gr.update())
+                npz_path = parent_seq[min(fork_s, len(parent_seq) - 1)]
+                seq = parent_seq
+                s = fork_s
+            else:
+                new_id = tree.fork_branch(tree.active_branch, s)
+                tree.active_branch = new_id
+                branch = tree.branches[new_id]
+                seq = tree.get_npz_sequence(branch.parent_id)
+                if not seq:
+                    return (tree, gr.update(), "No NPZ sequence", gr.update(),
+                            gr.update(), gr.update(), gr.update(), gr.update(),
+                            gr.update(), None, None, gr.update(), gr.update(), gr.update())
+                npz_path = seq[min(s, len(seq) - 1)]
 
             n = max(1, int(n_steps))
-            npz_path = seq[min(s, len(seq) - 1)]
 
             out_dir = Path(tree.base_npz_dir).parent / f"branch_{new_id}_resim"
             if out_dir.exists():
@@ -2506,17 +2649,47 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 
             scene = _from_npz(npz_path)
+            _simlog(f"Loaded scene from {npz_path}")
+            _simlog(f"Scene agents ({len(scene.agents)}): {[a.id for a in scene.agents]}")
+            _simlog(f"Branch tree: active={tree.active_branch}")
+            for _bid, _br in tree.branches.items():
+                _simlog(f"  branch={_bid} parent={_br.parent_id} fork_t={_br.fork_timestep} "
+                        f"npz_dir={'SET' if _br.npz_dir else 'None'} "
+                        f"mods={[(m.label, m.is_moving, m.timestep) for m in _br.modifications]}")
 
             # ── Collect obstacle placements (deep walk ignores npz_dir boundaries) ──
             # This ensures moving-neighbor metadata survives across resim forks.
-            all_obstacles = tree.get_all_obstacles_deep(tree.active_branch)
+            # Only obstacles from the CURRENT pending branch get the fork offset;
+            # ancestor obstacles already carry absolute timesteps for their own
+            # sequence context.
+            own_labels = {o.label for o in tree.branches[tree.active_branch].modifications}
+            all_obstacles_raw = tree.get_all_obstacles_deep(tree.active_branch)
+            _simlog(f"all_obstacles_raw ({len(all_obstacles_raw)}): "
+                    f"{[(o.label, o.is_moving, o.speed, o.timestep) for o in all_obstacles_raw]}")
+            seen_labels: set[str] = set()
+            all_obstacles: list[ObstaclePlacement] = []
+            for o in all_obstacles_raw:
+                if o.label in seen_labels:
+                    _simlog(f"  DEDUP skipping {o.label} (is_moving={o.is_moving})")
+                    continue
+                seen_labels.add(o.label)
+                all_obstacles.append(o)
+            _simlog(f"after dedup ({len(all_obstacles)}): "
+                    f"{[(o.label, o.is_moving, o.speed, o.timestep) for o in all_obstacles]}")
+            fork_s_val = fork_s if is_pending else 0
+            _simlog(f"own_labels={own_labels} fork_s_val={fork_s_val} s={s}")
             obs_at_step = []
             for o in all_obstacles:
-                if o.timestep > s:
+                offset = fork_s_val if o.label in own_labels else 0
+                abs_t = o.timestep + offset
+                _simlog(f"  obs {o.label}: timestep={o.timestep} own={o.label in own_labels} "
+                        f"offset={offset} abs_t={abs_t} s={s} "
+                        f"is_moving={o.is_moving} -> {'SKIP(>s)' if abs_t > s else 'KEEP'}")
+                if abs_t > s:
                     continue
-                if o.timestep != s and seq:
+                if abs_t != s and seq:
                     nx, ny, nyaw = _transform_point_between_steps(
-                        seq, o.timestep, s, o.x, o.y, o.yaw_rad,
+                        seq, abs_t, s, o.x, o.y, o.yaw_rad,
                     )
                     obs_at_step.append(ObstaclePlacement(
                         label=o.label, timestep=o.timestep,
@@ -2564,18 +2737,47 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 _is_mov = obs.is_moving and obs.speed > 0
 
                 existing = next((a for a in scene.agents if a.id == aid), None)
-                if existing is not None:
+                is_own = obs.label in own_labels
+                if existing is not None and not is_own:
                     if _is_mov:
                         moving_ids.add(aid)
                         existing.route_lanelet_ids = obs.route_lanelet_ids
                     else:
                         static_ids.add(aid)
                     continue
+                if existing is not None and is_own:
+                    scene.agents = [a for a in scene.agents if a.id != aid]
+                    _simlog(f"  Removed baked-in {aid} to rebuild from own obstacle")
 
                 if _is_mov:
                     moving_ids.add(aid)
+                    _obs_for_build = obs
+                    if is_pending and map_builder is not None and ego_wp_arr is not None:
+                        yaw_r = obs.yaw_rad
+                        ci, si = math.cos(ego_wp_arr[2]), math.sin(ego_wp_arr[2])
+                        wx = ego_wp_arr[0] + ci * obs.x - si * obs.y
+                        wy = ego_wp_arr[1] + si * obs.x + ci * obs.y
+                        wyaw = ego_wp_arr[2] + yaw_r
+                        ll_id = map_builder.snap_to_nearest_ll(
+                            np.array([wx, wy], dtype=np.float64), heading_rad=wyaw,
+                        )
+                        if ll_id is not None:
+                            fresh_route = map_builder.find_route(ll_id, min_length_m=150.0)
+                            fresh_goal_arr = map_builder._route_goal(fresh_route)
+                            fresh_goal = (float(fresh_goal_arr[0]),
+                                          float(fresh_goal_arr[1]),
+                                          float(fresh_goal_arr[2]))
+                            _obs_for_build = ObstaclePlacement(
+                                label=obs.label, timestep=obs.timestep,
+                                x=obs.x, y=obs.y, yaw_deg=obs.yaw_deg,
+                                length=obs.length, width=obs.width,
+                                history_steps=obs.history_steps,
+                                is_moving=obs.is_moving, speed=obs.speed,
+                                route_lanelet_ids=fresh_route,
+                                goal_pose=fresh_goal,
+                            )
                     agent = _build_moving_agent(
-                        obs, map_builder, ego_wp_arr,
+                        _obs_for_build, map_builder, ego_wp_arr,
                     )
                 else:
                     static_ids.add(aid)
@@ -2591,9 +2793,19 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         past_velocities=velocities,
                         age_steps=min(h, T_PAST - 1),
                     )
-                scene.agents.append(agent)
+                if agent is not None:
+                    scene.agents.append(agent)
+                    _simlog(f"  APPENDED {aid} is_mov={_is_mov} "
+                            f"pos=({obs.x:.1f},{obs.y:.1f}) spd={obs.speed}")
+                else:
+                    _simlog(f"  agent=None for {aid}, NOT appended")
 
             placed_ids = static_ids | moving_ids
+            _simlog(f"placed_ids={placed_ids} moving={moving_ids} static={static_ids}")
+            _simlog(f"scene agents ({len(scene.agents)}): {[a.id for a in scene.agents]}")
+            for _a in scene.agents:
+                if _a.id.startswith("placed_"):
+                    _simlog(f"  {_a.id}: pos={_a.current_position} vel={_a.current_velocity}")
 
             # ── Guidance setup ──
             model = model_cache._model
@@ -2654,7 +2866,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                             "Ego open-loop requires a DET or guided trajectory -- "
                             "toggle Show DET or generate guided first",
                             gr.update(), gr.update(), gr.update(), gr.update(),
-                            gr.update(), None, None)
+                            gr.update(), gr.update(), None, None,
+                            gr.update(), gr.update(), gr.update())
                 n = min(n, ego_plan.shape[0])
 
             # ── Neighbor open-loop references ──
@@ -2674,9 +2887,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 ids_to_predict.append(ego_id)
             if not nb_ol:
                 ids_to_predict.extend(sorted(moving_ids))
+            _simlog(f"ego_ol={ego_ol} nb_ol={nb_ol} ids_to_predict={ids_to_predict}")
+            _simlog(f"neighbor_refs keys={list(neighbor_refs.keys())}")
 
             scene_sim = deepcopy(scene)
             ego_id = scene_sim.ego_agent_id
+            _simlog(f"scene_sim agents: {[a.id for a in scene_sim.agents]}")
 
             # Map refresh setup
             if map_builder is not None and ego_wp_arr is not None:
@@ -2708,6 +2924,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         map_cache_sim = MapTensorCache(scene_sim.map_data)
 
                     # Model prediction for closed-loop agents
+                    if t < 3 and moving_ids:
+                        for _mid in moving_ids:
+                            _ma = next((a for a in scene_sim.agents if a.id == _mid), None)
+                            if _ma is not None:
+                                _simlog(f"  [t={t}] {_mid} pos={_ma.current_position} "
+                                        f"heading={_ma.current_heading:.3f}")
+                            else:
+                                _simlog(f"  [t={t}] {_mid} MISSING from scene_sim!")
                     preds: dict[str, np.ndarray] = {}
                     _agent_ids_in_sim = {a.id for a in scene_sim.agents}
                     if ids_to_predict:
@@ -2729,6 +2953,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                     model, model_args, scene_sim, _live_ids,
                                     str(model_cache._device), map_cache=map_cache_sim,
                                 )
+
+                    if t < 3 and moving_ids:
+                        _simlog(f"  [t={t}] preds keys={list(preds.keys())}")
+                        for _mid in moving_ids:
+                            if _mid in preds:
+                                _simlog(f"  [t={t}] pred[{_mid}] shape={preds[_mid].shape} "
+                                        f"first_step={preds[_mid][0]}")
+                            else:
+                                _simlog(f"  [t={t}] pred[{_mid}] MISSING from preds!")
 
                     # Dump NPZ
                     npz_data = dump_step_npz(
@@ -2816,6 +3049,13 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 model.decoder._guidance_fn = _orig_guidance_fn
                 model.decoder._guidance_scale = _orig_guidance_scale
 
+            for _pid in placed_ids:
+                _pa = next((a for a in scene_sim.agents if a.id == _pid), None)
+                if _pa is not None:
+                    _simlog(f"Post-sim {_pid} pos={_pa.current_position}")
+                else:
+                    _simlog(f"Post-sim {_pid} MISSING from scene_sim!")
+
             # Update branch with resim output
             branch.npz_dir = str(out_dir)
             branch.resim_steps = n
@@ -2825,17 +3065,19 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             new_seq = tree.get_npz_sequence(tree.active_branch)
             max_step = max(0, len(new_seq) - 1)
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
-            b_info = _branch_info_md(tree, tree.active_branch)
+            b_info = _branch_info_html(tree, tree.active_branch)
             mods = _modifications_md(tree, tree.active_branch)
             choices = list(tree.branches.keys())
             _modes = f"ego={ego_mode}, nb={neighbor_mode}"
             status = (f"Simulated **{n}** steps ({advance_mode}, {_modes}) "
                       f"on branch `{new_id}`. Output: `{out_dir}`")
+            svg = _render_branch_svg(tree, 0)
             return (tree, img, status, b_info, mods,
                     gr.update(choices=choices, value=new_id),
-                    gr.update(maximum=max_step, value=0), info, None, None)
+                    gr.update(maximum=max_step, value=0), 0, info, None, None,
+                    svg, gr.update(choices=choices), gr.update(choices=choices))
 
-        _sim_inputs = ([tree_state, step_slider, sim_steps, sim_mode, sim_use_guidance,
+        _sim_inputs = ([tree_state, step_mirror, sim_steps, sim_mode, sim_use_guidance,
                         show_gt, view_half, hide_neighbors, sim_ego_mode, sim_neighbor_mode,
                         guided_trajs_state, det_traj_state]
                        + [v for gname in ALL_GUIDANCE_NAMES
@@ -2845,7 +3087,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             on_simulate,
             _sim_inputs,
             [tree_state, scene_image, sim_status, branch_info, mods_display,
-             branch_dropdown, step_slider, step_info, det_traj_state, guided_trajs_state],
+             branch_dropdown, step_slider, step_mirror, step_info,
+             det_traj_state, guided_trajs_state,
+             branch_timeline, fuse_branch_a, fuse_branch_b],
         )
 
         # Play button — pre-renders frames as PIL images for smooth playback
@@ -2932,26 +3176,216 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
     return demo
 
 
+# ── SVG timeline renderer ──
+
+
+def _render_branch_svg(tree: SceneTree, current_step: int = 0) -> str:
+    """Render the branch tree as an interactive SVG (git-graph style, one row per branch)."""
+    from html import escape as _esc
+
+    _ROW_H = 32
+    _INDENT = 18
+    _DOT_R = 5
+    _PAD_L = 12
+    _PAD_T = 8
+    _RAIL_X = _PAD_L + 6
+
+    _COL_ACTIVE = "#2563eb"
+    _COL_RESIM = "#16a34a"
+    _COL_PENDING = "#9ca3af"
+    _COL_FUSED = "#a855f7"
+    _COL_OBS = "#f59e0b"
+    _COL_BG = "#1e1e2e"
+    _COL_TEXT = "#cdd6f4"
+    _COL_DIM = "#6c7086"
+
+    branch_ids = list(tree.branches.keys())
+    if not branch_ids:
+        return "<div style='color:#888'>No branches</div>"
+
+    ordered: list[str] = []
+    depth_map: dict[str, int] = {}
+    row_map: dict[str, int] = {}
+
+    def _walk(bid: str, depth: int) -> None:
+        ordered.append(bid)
+        depth_map[bid] = depth
+        for child_id in tree.get_children(bid):
+            _walk(child_id, depth + 1)
+
+    if "root" in tree.branches:
+        _walk("root", 0)
+    for bid in branch_ids:
+        if bid not in depth_map:
+            _walk(bid, 0)
+
+    for i, bid in enumerate(ordered):
+        row_map[bid] = i
+
+    n_rows = len(ordered)
+    max_depth = max(depth_map.values(), default=0)
+    svg_w = max(240, _PAD_L + (max_depth + 1) * _INDENT + 200)
+    svg_h = _PAD_T + n_rows * _ROW_H + 8
+
+    def _row_y(row: int) -> float:
+        return _PAD_T + row * _ROW_H + _ROW_H // 2
+
+    def _dot_x(depth: int) -> float:
+        return _RAIL_X + depth * _INDENT
+
+    parts: list[str] = [
+        f'<div style="max-height:400px;overflow-y:auto;overflow-x:auto;'
+        f'background:{_COL_BG};border-radius:8px;padding:2px">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" height="{svg_h}" '
+        f'style="font-family:monospace;font-size:11px">',
+    ]
+
+    for bid in ordered:
+        b = tree.branches[bid]
+        row = row_map[bid]
+        depth = depth_map[bid]
+        cy = _row_y(row)
+        cx = _dot_x(depth)
+
+        is_active = bid == tree.active_branch
+        is_fused = b.fused_from is not None
+        is_resim = b.npz_dir is not None
+
+        if is_active:
+            color = _COL_ACTIVE
+        elif is_fused:
+            color = _COL_FUSED
+        elif is_resim:
+            color = _COL_RESIM
+        else:
+            color = _COL_PENDING
+
+        # Vertical line from parent to this node
+        if b.parent_id and b.parent_id in row_map:
+            p_row = row_map[b.parent_id]
+            p_depth = depth_map[b.parent_id]
+            px = _dot_x(p_depth)
+            py = _row_y(p_row)
+            # Down from parent, then across to child
+            corner_y = cy
+            parts.append(
+                f'<line x1="{px}" y1="{py + _DOT_R}" x2="{px}" y2="{corner_y}" '
+                f'stroke="{_COL_DIM}" stroke-width="1.5" />'
+            )
+            if px != cx:
+                parts.append(
+                    f'<line x1="{px}" y1="{corner_y}" x2="{cx}" y2="{corner_y}" '
+                    f'stroke="{_COL_DIM}" stroke-width="1.5" />'
+                )
+
+        # Fuse: dashed connector from suffix source
+        if is_fused:
+            _, suffix_id, _ = b.fused_from
+            if suffix_id in row_map:
+                s_row = row_map[suffix_id]
+                s_depth = depth_map[suffix_id]
+                sx = _dot_x(s_depth)
+                sy = _row_y(s_row)
+                parts.append(
+                    f'<line x1="{sx + _DOT_R}" y1="{sy}" x2="{cx - _DOT_R}" y2="{cy}" '
+                    f'stroke="{_COL_FUSED}" stroke-width="1.5" stroke-dasharray="4,3" />'
+                )
+
+        # Node dot
+        r = _DOT_R + 1 if is_active else _DOT_R
+        parts.append(f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{color}" />')
+
+        # Obstacle count indicator
+        n_obs = len(b.modifications)
+        if n_obs > 0:
+            parts.append(
+                f'<circle cx="{cx + _DOT_R + 4}" cy="{cy - _DOT_R}" r="3" '
+                f'fill="{_COL_OBS}" />'
+            )
+
+        # Label + step count
+        short = bid if len(bid) <= 18 else "..." + bid[-15:]
+        label_x = cx + _DOT_R + 10
+        fw = "bold" if is_active else "normal"
+
+        has_own_data = is_resim or bid == "root" or is_fused
+        if has_own_data:
+            seq = tree.get_npz_sequence(bid)
+            step_label = f" {len(seq)}s"
+            step_color = _COL_DIM
+        else:
+            step_label = " pending"
+            step_color = _COL_PENDING
+
+        parts.append(
+            f'<text x="{label_x}" y="{cy + 4}" fill="{_COL_TEXT}" '
+            f'style="cursor:pointer;font-weight:{fw}" '
+            f'onclick="branchClick(\'{_esc(bid)}\')">'
+            f'{_esc(short)}'
+            f'<tspan style="fill:{step_color};font-weight:normal">'
+            f'{step_label}</tspan></text>'
+        )
+
+        # Clickable hit area
+        parts.append(
+            f'<rect x="0" y="{cy - _ROW_H // 2}" width="{svg_w}" height="{_ROW_H}" '
+            f'fill="transparent" style="cursor:pointer" '
+            f'onclick="branchClick(\'{_esc(bid)}\')" />'
+        )
+
+    parts.append("</svg>")
+    parts.append(
+        "<script>"
+        "function branchClick(bid) {"
+        "  const el = document.querySelector('#branch_click_target textarea');"
+        "  if (el) {"
+        "    const nativeSetter = Object.getOwnPropertyDescriptor("
+        "      window.HTMLTextAreaElement.prototype, 'value').set;"
+        "    nativeSetter.call(el, bid);"
+        "    el.dispatchEvent(new Event('input', {bubbles: true}));"
+        "  }"
+        "}"
+        "</script>"
+    )
+    parts.append("</div>")
+    return "".join(parts)
+
+
 # ── Markdown helpers ──
 
 
-def _branch_info_md(tree: SceneTree, branch_id: str) -> str:
+def _branch_info_html(tree: SceneTree, branch_id: str) -> str:
+    from html import escape
     branch = tree.branches.get(branch_id)
     if branch is None:
-        return "Branch not found"
+        return "<span style='color:#888'>Branch not found</span>"
     seq = tree.get_npz_sequence(branch_id)
-    lines = [
-        f"**Branch:** `{branch_id}`",
-        f"**Parent:** `{branch.parent_id or 'none'}`",
-        f"**Fork step:** {branch.fork_timestep if branch.fork_timestep is not None else 'N/A'}",
-        f"**Steps:** {len(seq)}",
-        f"**Crop:** {branch.crop_range or 'none'}",
-        f"**Obstacles:** {len(branch.modifications)}",
-        f"**Children:** {', '.join(tree.get_children(branch_id)) or 'none'}",
+    bid = escape(branch_id)
+
+    parts = [
+        '<div style="font-family:monospace;font-size:13px;line-height:1.6;padding:4px 0">',
+        f'<div><code style="font-weight:bold">{bid}</code>'
+        f' &nbsp;<span style="color:#888">{len(seq)} steps</span></div>',
     ]
     if branch.resim_steps is not None:
-        lines.append(f"**Resim:** {branch.resim_steps} steps ({branch.resim_advance_mode})")
-    return "\n\n".join(lines)
+        parts.append(
+            f'<div style="color:#aaa;font-size:12px">'
+            f'Resim: {branch.resim_steps} steps ({branch.resim_advance_mode})</div>'
+        )
+    if branch.fused_from is not None:
+        prefix, suffix, cut = branch.fused_from
+        parts.append(
+            f'<div style="color:#aaa;font-size:12px">'
+            f'Fused: <code>{escape(prefix)}</code>[:{cut}]'
+            f' + <code>{escape(suffix)}</code></div>'
+        )
+    if branch.crop_range is not None:
+        s, e = branch.crop_range
+        parts.append(
+            f'<div style="color:#aaa;font-size:12px">Crop: [{s}, {e}]</div>'
+        )
+    parts.append('</div>')
+    return ''.join(parts)
 
 
 def _modifications_md(tree: SceneTree, branch_id: str) -> str:

@@ -66,6 +66,8 @@ class BranchNode:
     resim_advance_mode: str = "perfect"
     resim_model_path: str | None = None
     npz_dir: str | None = None
+    fused_from: tuple[str, str, int] | None = None
+    fused_npz_list: list[str] | None = None
 
     def obstacles_at_or_before(self, timestep: int) -> list[ObstaclePlacement]:
         """Return obstacles that exist at the given timestep (placed at or before it)."""
@@ -209,6 +211,49 @@ class SceneTree:
     def get_children(self, branch_id: str) -> list[str]:
         return [b.id for b in self.branches.values() if b.parent_id == branch_id]
 
+    def fuse_branches(
+        self, prefix_id: str, suffix_id: str, cut_step: int, new_id: str | None = None,
+    ) -> str:
+        """Fuse two timelines: prefix[:cut_step] + all of suffix.
+
+        At the cut point the suffix's step 0 replaces the prefix's step
+        (the suffix starts from its fork point with its own modifications).
+
+        Result length = cut_step + len(suffix_seq).
+        """
+        if prefix_id not in self.branches:
+            raise KeyError(f"Branch '{prefix_id}' not found")
+        if suffix_id not in self.branches:
+            raise KeyError(f"Branch '{suffix_id}' not found")
+        prefix_seq = self.get_npz_sequence(prefix_id)
+        suffix_seq = self.get_npz_sequence(suffix_id)
+        if cut_step < 0 or cut_step > len(prefix_seq):
+            raise IndexError(
+                f"Cut step {cut_step} out of range [0, {len(prefix_seq)}] "
+                f"for branch '{prefix_id}'"
+            )
+        if not suffix_seq:
+            raise ValueError(f"Branch '{suffix_id}' has no NPZ files")
+
+        fused_list = prefix_seq[:cut_step] + suffix_seq
+
+        if new_id is None:
+            suffix = 1
+            while f"fused_{suffix:03d}" in self.branches:
+                suffix += 1
+            new_id = f"fused_{suffix:03d}"
+        if new_id in self.branches:
+            raise ValueError(f"Branch '{new_id}' already exists")
+
+        self.branches[new_id] = BranchNode(
+            id=new_id,
+            parent_id=prefix_id,
+            fork_timestep=cut_step,
+            fused_from=(prefix_id, suffix_id, cut_step),
+            fused_npz_list=fused_list,
+        )
+        return new_id
+
     def get_npz_sequence(self, branch_id: str) -> list[str]:
         """Return the sorted list of NPZ paths for a branch.
 
@@ -221,7 +266,9 @@ class SceneTree:
             raise KeyError(f"Branch '{branch_id}' not found")
         branch = self.branches[branch_id]
 
-        if branch.npz_dir is not None:
+        if branch.fused_npz_list is not None:
+            files = list(branch.fused_npz_list)
+        elif branch.npz_dir is not None:
             files = _scan_npz_dir(branch.npz_dir)
         elif branch.parent_id is not None:
             parent_seq = self.get_npz_sequence(branch.parent_id)
@@ -276,7 +323,7 @@ class SceneTree:
 
     def next_obstacle_label(self, branch_id: str) -> str:
         """Generate a unique label for the next obstacle in this branch."""
-        existing = self.get_all_obstacles(branch_id)
+        existing = self.get_all_obstacles_deep(branch_id)
         idx = len(existing) + 1
         while any(o.label == f"obstacle_{idx}" for o in existing):
             idx += 1
@@ -312,7 +359,12 @@ class SceneTree:
             crop = bdict.pop("crop_range", None)
             if crop is not None:
                 crop = tuple(crop)
-            branches[bid] = BranchNode(modifications=mods, crop_range=crop, **bdict)
+            fused = bdict.pop("fused_from", None)
+            if fused is not None:
+                fused = (fused[0], fused[1], int(fused[2]))
+            branches[bid] = BranchNode(
+                modifications=mods, crop_range=crop, fused_from=fused, **bdict,
+            )
         active = data.get("active_branch", "root")
         if active not in branches:
             active = "root" if "root" in branches else next(iter(branches), "root")
@@ -353,4 +405,6 @@ def _branch_to_dict(b: BranchNode) -> dict:
     d["modifications"] = [asdict(m) for m in b.modifications]
     if b.crop_range is not None:
         d["crop_range"] = list(b.crop_range)
+    if b.fused_from is not None:
+        d["fused_from"] = list(b.fused_from)
     return d
