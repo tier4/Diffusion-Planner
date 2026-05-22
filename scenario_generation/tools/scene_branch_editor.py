@@ -1156,7 +1156,10 @@ def _generate_neighbor_reference(
             nearest_idx = int(np.argmin(dists))
 
             # Walk forward from nearest_idx, sampling at speed * dt intervals
-            seg_diffs = np.diff(polyline[nearest_idx:], axis=0)
+            forward_poly = polyline[nearest_idx:]
+            if len(forward_poly) < 2:
+                forward_poly = polyline[max(0, nearest_idx - 1):]
+            seg_diffs = np.diff(forward_poly, axis=0)
             seg_lens = np.linalg.norm(seg_diffs, axis=1)
             arc = np.concatenate([[0.0], np.cumsum(seg_lens)])
 
@@ -1168,7 +1171,7 @@ def _generate_neighbor_reference(
                 seg_len = max(arc[seg_i + 1] - arc[seg_i], 1e-6)
                 frac = (fwd_dist - arc[seg_i]) / seg_len
                 frac = max(0.0, min(1.0, frac))
-                pt = polyline[nearest_idx + seg_i] + frac * seg_diffs[min(seg_i, len(seg_diffs) - 1)]
+                pt = forward_poly[seg_i] + frac * seg_diffs[min(seg_i, len(seg_diffs) - 1)]
                 if seg_i < len(seg_diffs):
                     h = math.atan2(seg_diffs[seg_i, 1], seg_diffs[seg_i, 0])
                 else:
