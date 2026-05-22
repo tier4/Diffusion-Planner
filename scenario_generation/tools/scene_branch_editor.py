@@ -1893,10 +1893,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 return (img, info, label,
                         obs.x, obs.y, obs.yaw_deg, obs.length, obs.width,
                         getattr(obs, "history_steps", 30),
-                        _mov, _spd, gr.update(visible=_mov))
+                        _mov, gr.update(value=_spd, visible=_mov))
             return (img, info, label,
                     gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-                    gr.update(), gr.update(), gr.update(), gr.update())
+                    gr.update(), gr.update(), gr.update())
 
         def on_remove_obstacle(tree, label, step, view_r, gt_on, det_on,
                                guided_on, hide_nb, rb_on, nb_on,
@@ -2215,7 +2215,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
                                 traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            return img, info, s, det_traj, guided
+            return img, info, s, s, det_traj, guided
         step_jump_btn.click(
             on_step_jump,
             [tree_state, step_jump_input, view_half, selected_obstacle_state,
@@ -2282,7 +2282,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
              show_rb_dist, show_nb_dist, hide_neighbors, show_traj_rb, show_traj_nb],
             [scene_image, step_info, selected_obstacle_state,
              edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history,
-             edit_is_moving, edit_speed, edit_speed],
+             edit_is_moving, edit_speed],
         )
 
         remove_obs_btn.click(
