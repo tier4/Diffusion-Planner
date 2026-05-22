@@ -1436,7 +1436,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     value=tree.active_branch,
                     label="Active Branch",
                     interactive=True,
-                    visible=False,
                 )
                 branch_info = gr.HTML(_branch_info_html(tree, tree.active_branch))
                 with gr.Row():
