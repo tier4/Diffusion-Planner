@@ -283,6 +283,7 @@ class SceneTree:
                 prefix_mods.append(o)
                 seen_labels.add(o.label)
 
+        all_labels = {o.label for o in prefix_mods}
         self.branches[new_id] = BranchNode(
             id=new_id,
             parent_id=prefix_id,
@@ -290,6 +291,7 @@ class SceneTree:
             fused_from=(prefix_id, suffix_id, cut_step),
             fused_npz_list=fused_list,
             modifications=prefix_mods,
+            inherited_labels=all_labels,
         )
         return new_id
 
