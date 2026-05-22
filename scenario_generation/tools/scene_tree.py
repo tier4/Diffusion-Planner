@@ -130,8 +130,16 @@ class SceneTree:
 
     # ── Tree operations ───────────────────────────────────────────────
 
-    def fork_branch(self, parent_id: str, timestep: int, new_id: str | None = None) -> str:
+    def fork_branch(
+        self, parent_id: str, timestep: int, new_id: str | None = None,
+        extra_modifications: list[ObstaclePlacement] | None = None,
+    ) -> str:
         """Create a new branch forking from parent_id at the given timestep.
+
+        Copies the parent's obstacle placements to the child so each branch
+        owns its own state.  The caller can supply *extra_modifications*
+        (e.g. baked-in agent metadata read from a resim NPZ) that are
+        appended after the parent copy.
 
         Returns the new branch ID.
         """
@@ -153,10 +161,20 @@ class SceneTree:
         if new_id in self.branches:
             raise ValueError(f"Branch '{new_id}' already exists")
 
+        from copy import deepcopy
+        inherited = deepcopy(parent.modifications)
+        if extra_modifications:
+            seen = {o.label for o in inherited}
+            for o in extra_modifications:
+                if o.label not in seen:
+                    inherited.append(deepcopy(o))
+                    seen.add(o.label)
+
         self.branches[new_id] = BranchNode(
             id=new_id,
             parent_id=parent_id,
             fork_timestep=timestep,
+            modifications=inherited,
         )
         return new_id
 
@@ -207,6 +225,13 @@ class SceneTree:
             self.active_branch = "root"
 
         return to_delete
+
+    def is_pending(self, branch_id: str) -> bool:
+        """A branch is pending (editable) if it has a parent and no sim output."""
+        b = self.branches.get(branch_id)
+        if b is None:
+            return False
+        return b.parent_id is not None and b.npz_dir is None and b.fused_from is None
 
     def get_children(self, branch_id: str) -> list[str]:
         return [b.id for b in self.branches.values() if b.parent_id == branch_id]

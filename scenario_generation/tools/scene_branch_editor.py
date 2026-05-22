@@ -1538,7 +1538,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         _rf.write(f"[RENDER] no placed json at {_pm_path}\n")
                 obstacles_at_step = []
             else:
-                obstacles = tree.get_all_obstacles(tree.active_branch)
+                obstacles = tree.branches[tree.active_branch].modifications
                 obstacles_at_step = []
                 for o in obstacles:
                     if o.timestep > step:
@@ -1725,13 +1725,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return img, info
 
         def _obs_choices(tree):
-            branch = tree.branches[tree.active_branch]
-            return [o.label for o in branch.modifications]
+            return [o.label for o in tree.branches[tree.active_branch].modifications]
 
         def _find_obs(tree, label):
             if not label:
                 return None
-            for o in tree.get_all_obstacles(tree.active_branch):
+            for o in tree.branches[tree.active_branch].modifications:
                 if o.label == label:
                     return o
             return None
@@ -1740,7 +1739,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             branch = tree.branches[tree.active_branch]
             if branch.npz_dir is not None:
                 return []
-            obstacles = tree.get_all_obstacles(tree.active_branch)
+            obstacles = tree.branches[tree.active_branch].modifications
             seq = tree.get_npz_sequence(tree.active_branch)
             result = []
             for o in obstacles:
@@ -1810,6 +1809,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                      is_moving, speed_val,
                      gt_on, det_on, guided_on, hide_nb, rb_on, nb_on,
                      traj_rb_on, traj_nb_on, *g_args):
+            if not tree.is_pending(tree.active_branch):
+                img, info = _render(tree, _safe_step(step), view_r, None, show_gt_val=gt_on)
+                mods = _modifications_md(tree, tree.active_branch)
+                return (tree, img, info, mods, None, None, None,
+                        gr.update(), "Fork first -- only pending branches can be modified")
             if x is None or y is None:
                 img, info = _render(tree, _safe_step(step), view_r, None, show_gt_val=gt_on)
                 mods = _modifications_md(tree, tree.active_branch)
@@ -1889,7 +1893,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         def on_remove_obstacle(tree, label, step, view_r, gt_on, det_on,
                                guided_on, hide_nb, rb_on, nb_on,
                                traj_rb_on, traj_nb_on, *g_args):
-            if label:
+            if label and tree.is_pending(tree.active_branch):
                 tree.remove_obstacle(tree.active_branch, label.strip())
             s = _safe_step(step)
             det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
@@ -1907,6 +1911,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                           hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
                           x, y, yaw, length, width, history,
                           ed_is_moving, ed_speed, *g_args):
+            if not tree.is_pending(tree.active_branch):
+                return (tree, gr.update(), "Fork first -- only pending branches can be modified",
+                        gr.update(), gr.update(), gr.update(), gr.update())
             if not label:
                 return (tree, gr.update(), "No obstacle selected",
                         gr.update(), gr.update(), gr.update(), gr.update())
@@ -2657,39 +2664,21 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         f"npz_dir={'SET' if _br.npz_dir else 'None'} "
                         f"mods={[(m.label, m.is_moving, m.timestep) for m in _br.modifications]}")
 
-            # ── Collect obstacle placements (deep walk ignores npz_dir boundaries) ──
-            # This ensures moving-neighbor metadata survives across resim forks.
-            # Only obstacles from the CURRENT pending branch get the fork offset;
-            # ancestor obstacles already carry absolute timesteps for their own
-            # sequence context.
-            own_labels = {o.label for o in tree.branches[tree.active_branch].modifications}
-            all_obstacles_raw = tree.get_all_obstacles_deep(tree.active_branch)
-            _simlog(f"all_obstacles_raw ({len(all_obstacles_raw)}): "
-                    f"{[(o.label, o.is_moving, o.speed, o.timestep) for o in all_obstacles_raw]}")
-            seen_labels: set[str] = set()
-            all_obstacles: list[ObstaclePlacement] = []
-            for o in all_obstacles_raw:
-                if o.label in seen_labels:
-                    _simlog(f"  DEDUP skipping {o.label} (is_moving={o.is_moving})")
-                    continue
-                seen_labels.add(o.label)
-                all_obstacles.append(o)
-            _simlog(f"after dedup ({len(all_obstacles)}): "
+            # ── Collect obstacle placements ──
+            # Each branch owns its own modifications (copied on fork).
+            # Transform from placement frame to sim-start frame.
+            all_obstacles = tree.branches[tree.active_branch].modifications
+            _simlog(f"obstacles ({len(all_obstacles)}): "
                     f"{[(o.label, o.is_moving, o.speed, o.timestep) for o in all_obstacles]}")
-            fork_s_val = fork_s if is_pending else 0
-            _simlog(f"own_labels={own_labels} fork_s_val={fork_s_val} s={s}")
             obs_at_step = []
             for o in all_obstacles:
-                offset = fork_s_val if o.label in own_labels else 0
-                abs_t = o.timestep + offset
-                _simlog(f"  obs {o.label}: timestep={o.timestep} own={o.label in own_labels} "
-                        f"offset={offset} abs_t={abs_t} s={s} "
-                        f"is_moving={o.is_moving} -> {'SKIP(>s)' if abs_t > s else 'KEEP'}")
-                if abs_t > s:
+                _simlog(f"  obs {o.label}: timestep={o.timestep} s={s} "
+                        f"is_moving={o.is_moving} -> {'SKIP(>s)' if o.timestep > s else 'KEEP'}")
+                if o.timestep > s:
                     continue
-                if abs_t != s and seq:
+                if o.timestep != s and seq:
                     nx, ny, nyaw = _transform_point_between_steps(
-                        seq, abs_t, s, o.x, o.y, o.yaw_rad,
+                        seq, o.timestep, s, o.x, o.y, o.yaw_rad,
                     )
                     obs_at_step.append(ObstaclePlacement(
                         label=o.label, timestep=o.timestep,
@@ -2737,22 +2726,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 _is_mov = obs.is_moving and obs.speed > 0
 
                 existing = next((a for a in scene.agents if a.id == aid), None)
-                is_own = obs.label in own_labels
-                if existing is not None and not is_own:
-                    if _is_mov:
-                        moving_ids.add(aid)
-                        existing.route_lanelet_ids = obs.route_lanelet_ids
-                    else:
-                        static_ids.add(aid)
-                    continue
-                if existing is not None and is_own:
+                if existing is not None:
                     scene.agents = [a for a in scene.agents if a.id != aid]
-                    _simlog(f"  Removed baked-in {aid} to rebuild from own obstacle")
+                    _simlog(f"  Replaced baked-in {aid} with current placement")
 
                 if _is_mov:
                     moving_ids.add(aid)
                     _obs_for_build = obs
-                    if is_pending and map_builder is not None and ego_wp_arr is not None:
+                    if map_builder is not None and ego_wp_arr is not None:
                         yaw_r = obs.yaw_rad
                         ci, si = math.cos(ego_wp_arr[2]), math.sin(ego_wp_arr[2])
                         wx = ego_wp_arr[0] + ci * obs.x - si * obs.y
@@ -3103,7 +3084,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             interval = 1.0 / max(1, int(fps))
             branch = tree.branches[tree.active_branch]
             is_resimulated = branch.npz_dir is not None
-            raw_obstacles = tree.get_all_obstacles(tree.active_branch) if not is_resimulated else []
+            raw_obstacles = tree.branches[tree.active_branch].modifications if not is_resimulated else []
             while s <= max_s:
                 t0 = time.monotonic()
                 scene = from_npz(seq[s])
