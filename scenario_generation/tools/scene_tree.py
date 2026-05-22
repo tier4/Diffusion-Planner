@@ -267,12 +267,21 @@ class SceneTree:
         fused_list = prefix_seq[:cut_step] + suffix_seq
 
         if new_id is None:
-            suffix = 1
-            while f"fused_{suffix:03d}" in self.branches:
-                suffix += 1
-            new_id = f"fused_{suffix:03d}"
+            _suffix = 1
+            while f"fused_{_suffix:03d}" in self.branches:
+                _suffix += 1
+            new_id = f"fused_{_suffix:03d}"
         if new_id in self.branches:
             raise ValueError(f"Branch '{new_id}' already exists")
+
+        from copy import deepcopy
+        prefix_mods = deepcopy(self.get_all_obstacles_deep(prefix_id))
+        suffix_mods = deepcopy(self.get_all_obstacles_deep(suffix_id))
+        seen_labels = {o.label for o in prefix_mods}
+        for o in suffix_mods:
+            if o.label not in seen_labels:
+                prefix_mods.append(o)
+                seen_labels.add(o.label)
 
         self.branches[new_id] = BranchNode(
             id=new_id,
@@ -280,6 +289,7 @@ class SceneTree:
             fork_timestep=cut_step,
             fused_from=(prefix_id, suffix_id, cut_step),
             fused_npz_list=fused_list,
+            modifications=prefix_mods,
         )
         return new_id
 

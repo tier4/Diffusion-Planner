@@ -1450,7 +1450,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         fuse_branch_b = gr.Dropdown(
                             choices=_choices, label="Suffix", scale=1,
                         )
-                    fuse_step = gr.Number(label="Cut prefix at step", value=0, precision=0)
                     fuse_btn = gr.Button("Fuse", size="sm", variant="primary")
                     fuse_status = gr.Markdown("")
 
@@ -2149,9 +2148,18 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             b_info = _branch_info_html(tree, tree.active_branch)
             return tree, img, info, b_info, gr.update(maximum=max_step, value=s), s
 
-        def on_fuse(tree, prefix_id, suffix_id, cut_step, view_r, gt_on):
+        def on_fuse(tree, prefix_id, suffix_id, view_r, gt_on):
             try:
-                new_id = tree.fuse_branches(prefix_id, suffix_id, int(cut_step))
+                suffix_branch = tree.branches.get(suffix_id)
+                if suffix_branch is None:
+                    raise KeyError(f"Branch '{suffix_id}' not found")
+                if suffix_branch.fork_timestep is None:
+                    raise ValueError(
+                        f"Branch '{suffix_id}' has no fork_timestep — "
+                        f"can only fuse branches that were forked from a parent"
+                    )
+                cut_step = suffix_branch.fork_timestep
+                new_id = tree.fuse_branches(prefix_id, suffix_id, cut_step)
             except (KeyError, IndexError, ValueError) as e:
                 n_out = len(_full_switch_outputs) + 1
                 return (tree,) + (gr.update(),) * (n_out - 2) + (str(e),)
@@ -2167,7 +2175,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     gr.update(choices=choices, value=new_id),
                     gr.update(maximum=max_step, value=0), 0, None, None, None,
                     svg, gr.update(choices=choices), gr.update(choices=choices),
-                    f"Fused `{prefix_id}`[:step {int(cut_step)}] + all of `{suffix_id}` "
+                    f"Fused `{prefix_id}`[:step {cut_step}] + all of `{suffix_id}` "
                     f"({len(seq)} total steps)")
 
         # ── Wire up events ──
@@ -2360,7 +2368,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         fuse_btn.click(
             on_fuse,
-            [tree_state, fuse_branch_a, fuse_branch_b, fuse_step, view_half, show_gt],
+            [tree_state, fuse_branch_a, fuse_branch_b, view_half, show_gt],
             _full_switch_outputs + [fuse_status],
         )
 
@@ -2431,12 +2439,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             # guided_cache[0] is (80, 3) [x, y, heading_rad]
             traj_xyh = np.array(guided_cache[0]).astype(np.float32)
 
-            # Convert to (T, 4) [x, y, cos, sin] for reward scoring
-            traj_4col = torch.from_numpy(np.column_stack([
+            # Convert to (T, 4) [x, y, cos, sin] — canonical format for both
+            # reward scoring and the saved NPZ (no downstream conversion needed)
+            traj_4col_np = np.column_stack([
                 traj_xyh[:, :2],
                 np.cos(traj_xyh[:, 2]),
                 np.sin(traj_xyh[:, 2]),
-            ]).astype(np.float32)).unsqueeze(0)
+            ]).astype(np.float32)
+            traj_4col = torch.from_numpy(traj_4col_np).unsqueeze(0)
 
             from preference_optimization.utils import load_npz_data as _load_npz
             from rlvr.reward import RewardConfig as _RC
@@ -2444,6 +2454,21 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             scene_data = _load_npz(npz_path, torch.device("cpu"),
                                    ego_shape_override=tree.ego_shape)
             obs_at_step = _get_obstacles_at_step(tree, s)
+
+            # Block save if any moving neighbor lacks a simulated future.
+            # The user must run Simulate first so neighbor futures are populated.
+            has_moving = any(
+                getattr(o, "is_moving", False) for o in (obs_at_step or [])
+            )
+            if has_moving:
+                naf = scene_data.get("neighbor_agents_future")
+                if naf is None or not torch.any(naf != 0):
+                    return (
+                        "**ERROR** — Moving neighbor(s) present but no "
+                        "simulated futures found. Run **Simulate** first so "
+                        "neighbor futures are populated, then save from a "
+                        "post-simulation step."
+                    )
             if obs_at_step:
                 scene_data = _inject_obstacles_into_tensors(
                     scene_data, obs_at_step, torch.device("cpu"))
@@ -2549,7 +2574,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                     pts[valid].astype(np.float64), R_init, init_xy,
                                 ).astype(np.float32)
                         npz_data["polygons"] = poly_world.astype(np.float32)
-            npz_data["ego_agent_future"] = traj_xyh
+            npz_data["ego_agent_future"] = traj_4col_np
             if tree.ego_shape:
                 npz_data["ego_shape"] = np.array(list(tree.ego_shape), dtype=np.float32)
             # Sanity: crash if critical fields are missing
@@ -2684,9 +2709,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         f"mods={[(m.label, m.is_moving, m.timestep) for m in _br.modifications]}")
 
             # ── Collect obstacle placements ──
-            # Each branch owns its own modifications (copied on fork).
-            # Transform from placement frame to sim-start frame.
-            all_obstacles = tree.branches[tree.active_branch].modifications
+            # Walk the full ancestor chain so moving-neighbor metadata survives
+            # across fuse + fork boundaries (baked-in agents need their
+            # is_moving/speed/route recovered from the original placement).
+            all_obstacles = tree.get_all_obstacles_deep(tree.active_branch)
             _simlog(f"obstacles ({len(all_obstacles)}): "
                     f"{[(o.label, o.is_moving, o.speed, o.timestep) for o in all_obstacles]}")
             obs_at_step = []
@@ -3469,13 +3495,15 @@ def main():
     map_border_polylines = None
     builder = None
     if args.map_path:
-        try:
-            from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
-            builder = LaneletSceneBuilder(args.map_path)
-            map_border_polylines = builder.road_border_polylines()
-            print(f"Loaded {len(map_border_polylines)} road border polylines from map")
-        except Exception as e:
-            print(f"Warning: could not load map borders: {e}")
+        from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
+        builder = LaneletSceneBuilder(args.map_path)
+        map_border_polylines = builder.road_border_polylines()
+        if not map_border_polylines:
+            raise RuntimeError(
+                f"Map loaded from {args.map_path} but contains 0 road border polylines. "
+                "Check that the map has road_border line strings."
+            )
+        print(f"Loaded {len(map_border_polylines)} road border polylines from map")
 
     reward_cfg = None
     if args.reward_config:
