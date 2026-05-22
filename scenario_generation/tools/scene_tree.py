@@ -162,7 +162,10 @@ class SceneTree:
             raise ValueError(f"Branch '{new_id}' already exists")
 
         from copy import deepcopy
-        inherited = deepcopy(parent.modifications)
+        if parent.npz_dir is None:
+            inherited = deepcopy(parent.modifications)
+        else:
+            inherited = []
         if extra_modifications:
             seen = {o.label for o in inherited}
             for o in extra_modifications:

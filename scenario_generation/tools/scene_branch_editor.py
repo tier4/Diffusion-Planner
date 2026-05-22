@@ -1813,14 +1813,20 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 img, info = _render(tree, _safe_step(step), view_r, None, show_gt_val=gt_on)
                 mods = _modifications_md(tree, tree.active_branch)
                 return (tree, img, info, mods, None, None, None,
-                        gr.update(), "Fork first -- only pending branches can be modified")
+                        gr.update(), "Fork first -- only pending branches can be modified",
+                        gr.update(), gr.update())
             if x is None or y is None:
                 img, info = _render(tree, _safe_step(step), view_r, None, show_gt_val=gt_on)
                 mods = _modifications_md(tree, tree.active_branch)
                 return (tree, img, info, mods, None, None, None,
-                        gr.update(), "X/Y must not be empty")
+                        gr.update(), "X/Y must not be empty",
+                        gr.update(), gr.update())
             label = tree.next_obstacle_label(tree.active_branch)
-            s = _safe_step(step)
+            branch = tree.branches[tree.active_branch]
+            if branch.fork_timestep is not None:
+                s = branch.fork_timestep
+            else:
+                s = _safe_step(step)
             _moving = bool(is_moving)
             _speed = max(0.0, float(speed_val)) if _moving else 0.0
 
@@ -1869,7 +1875,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             mods = _modifications_md(tree, tree.active_branch)
             choices = _obs_choices(tree)
             return (tree, img, info, mods, label, det_traj, guided,
-                    gr.update(choices=choices, value=label), route_info_text)
+                    gr.update(choices=choices, value=label), route_info_text,
+                    gr.update(value=s), s)
 
         def on_select_obstacle(tree, label, step, view_r, gt_on, det_on, det_cache, guided_cache,
                                rb_on, nb_on, hide_nb, traj_rb_on, traj_nb_on):
@@ -2048,13 +2055,14 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             choices = list(tree.branches.keys())
             seq = tree.get_npz_sequence(new_id)
             max_step = max(0, len(seq) - 1)
-            img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
+            img, info = _render(tree, max_step, view_r, None, show_gt_val=gt_on)
             b_info = _branch_info_html(tree, new_id)
             mods = _modifications_md(tree, new_id)
             svg = _render_branch_svg(tree, 0)
             return (tree, img, info, b_info, mods,
                     gr.update(choices=choices, value=new_id),
-                    gr.update(maximum=max_step, value=0), 0, None, None, None,
+                    gr.update(maximum=max_step, value=max_step), max_step,
+                    None, None, None,
                     svg, gr.update(choices=choices), gr.update(choices=choices))
 
         def on_delete_branch(tree, view_r, gt_on):
@@ -2217,7 +2225,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         preview_btn.click(
             on_preview,
-            [tree_state, step_slider, view_half, selected_obstacle_state,
+            [tree_state, step_mirror, view_half, selected_obstacle_state,
              obs_x, obs_y, obs_yaw, obs_length, obs_width, show_gt,
              det_traj_state, guided_trajs_state,
              show_rb_dist, show_nb_dist, hide_neighbors, show_traj_rb, show_traj_nb],
@@ -2238,18 +2246,18 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         place_btn.click(
             on_place,
-            [tree_state, step_slider, view_half,
+            [tree_state, step_mirror, view_half,
              obs_x, obs_y, obs_yaw, obs_length, obs_width, obs_history,
              obs_is_moving, obs_speed,
              show_gt, show_det] + _overlay_inputs + _g_inputs,
             [tree_state, scene_image, step_info, mods_display,
              selected_obstacle_state, det_traj_state, guided_trajs_state,
-             obs_select, obs_route_info],
+             obs_select, obs_route_info, step_slider, step_mirror],
         )
 
         obs_select.change(
             on_select_obstacle,
-            [tree_state, obs_select, step_slider, view_half, show_gt,
+            [tree_state, obs_select, step_mirror, view_half, show_gt,
              show_det, det_traj_state, guided_trajs_state,
              show_rb_dist, show_nb_dist, hide_neighbors, show_traj_rb, show_traj_nb],
             [scene_image, step_info, selected_obstacle_state,
@@ -2259,7 +2267,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         remove_obs_btn.click(
             on_remove_obstacle,
-            [tree_state, obs_select, step_slider, view_half,
+            [tree_state, obs_select, step_mirror, view_half,
              show_gt, show_det] + _overlay_inputs + _g_inputs,
             [tree_state, scene_image, step_info, mods_display,
              selected_obstacle_state, obs_select, det_traj_state, guided_trajs_state],
@@ -2267,7 +2275,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         apply_edit_btn.click(
             on_apply_edit,
-            [tree_state, obs_select, step_slider, view_half,
+            [tree_state, obs_select, step_mirror, view_half,
              show_gt, show_det] + _overlay_inputs +
             [edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history,
              edit_is_moving, edit_speed] + _g_inputs,
