@@ -61,6 +61,7 @@ class BranchNode:
     parent_id: str | None = None
     fork_timestep: int | None = None
     modifications: list[ObstaclePlacement] = field(default_factory=list)
+    inherited_labels: set[str] = field(default_factory=set)
     crop_range: tuple[int, int] | None = None
     resim_steps: int | None = None
     resim_advance_mode: str = "perfect"
@@ -162,22 +163,22 @@ class SceneTree:
             raise ValueError(f"Branch '{new_id}' already exists")
 
         from copy import deepcopy
-        if parent.npz_dir is None:
-            inherited = deepcopy(parent.modifications)
-        else:
-            inherited = []
+        inherited = deepcopy(parent.modifications)
+        inherited_labels = {o.label for o in inherited}
         if extra_modifications:
             seen = {o.label for o in inherited}
             for o in extra_modifications:
                 if o.label not in seen:
                     inherited.append(deepcopy(o))
                     seen.add(o.label)
+                    inherited_labels.add(o.label)
 
         self.branches[new_id] = BranchNode(
             id=new_id,
             parent_id=parent_id,
             fork_timestep=timestep,
             modifications=inherited,
+            inherited_labels=inherited_labels,
         )
         return new_id
 
@@ -390,8 +391,10 @@ class SceneTree:
             fused = bdict.pop("fused_from", None)
             if fused is not None:
                 fused = (fused[0], fused[1], int(fused[2]))
+            inh = set(bdict.pop("inherited_labels", []))
             branches[bid] = BranchNode(
-                modifications=mods, crop_range=crop, fused_from=fused, **bdict,
+                modifications=mods, crop_range=crop, fused_from=fused,
+                inherited_labels=inh, **bdict,
             )
         active = data.get("active_branch", "root")
         if active not in branches:
@@ -431,6 +434,7 @@ def _scan_npz_dir(npz_dir: str) -> list[str]:
 def _branch_to_dict(b: BranchNode) -> dict:
     d = asdict(b)
     d["modifications"] = [asdict(m) for m in b.modifications]
+    d["inherited_labels"] = sorted(b.inherited_labels)
     if b.crop_range is not None:
         d["crop_range"] = list(b.crop_range)
     if b.fused_from is not None:
