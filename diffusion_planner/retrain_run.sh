@@ -29,7 +29,7 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --train_set_list $TRAIN_SET_LIST \
 --valid_set_list $VALID_SET_LIST \
 --resume_model_path $MODEL_PATH \
---train_epochs 70 \
+--train_epochs 80 \
 --save_utd 5 \
 --use_wandb True \
 --diffusion_model_type "x_start" \
