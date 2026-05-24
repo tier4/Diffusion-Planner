@@ -1,0 +1,48 @@
+// Copyright 2026 TIER IV, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef CLI__CONVERTER_OPTIONS_HPP_
+#define CLI__CONVERTER_OPTIONS_HPP_
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+struct ConverterOptions
+{
+  std::string rosbag_path;
+  std::string vector_map_path;
+  std::string save_dir;
+  std::string rosbag_dir_name;
+
+  int64_t step;
+  int64_t limit;
+  int64_t min_frames;
+  int64_t search_nearest_route;
+  int64_t convert_yellow;
+  int64_t convert_red;
+  int64_t interpolation;
+  double min_distance;
+  float ego_wheel_base;
+  float ego_length;
+  float ego_width;
+
+  std::vector<float> ego_shape;
+  bool use_interpolation;
+};
+
+std::optional<ConverterOptions> parse_arguments(int argc, char ** argv);
+
+#endif  // CLI__CONVERTER_OPTIONS_HPP_
