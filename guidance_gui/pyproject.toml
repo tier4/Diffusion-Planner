@@ -1,0 +1,30 @@
+[project]
+name = "guidance_gui"
+version = "0.1.0"
+description = "Guidance GUI for visualization"
+requires-python = ">=3.13"
+dependencies = [
+    "diffusion-planner",
+    "gradio>=6.14.0",
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.4",
+    "pillow>=12.2.0",
+    "preference-optimization",
+    "scipy>=1.17.1",
+    "torch>=2.11.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["guidance_gui"]
+package-dir = { "guidance_gui" = "." }
+
+[tool.setuptools.package-data]
+guidance_gui = ["*.npy"]
+
+[tool.uv.sources]
+diffusion-planner = { workspace = true }
+preference-optimization = { workspace = true }

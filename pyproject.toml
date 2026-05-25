@@ -1,3 +1,41 @@
+[project]
+name = "diffusion-planner-workspace"
+version = "4.0.0"
+description = "Diffusion Planner workspace"
+requires-python = ">=3.13"
+dependencies = [
+    "diffusion-planner",
+    "exploration-policy",
+    "guidance-gui",
+    "preference-optimization",
+    "rlvr",
+    "scenario-generation",
+    "scene-search",
+]
+
+[dependency-groups]
+dev = ["pre-commit>=4.0.0", "pytest>=8.0.0", "ruff>=0.8.0"]
+
+[tool.uv.workspace]
+members = [
+    "diffusion_planner",
+    "exploration_policy",
+    "preference_optimization",
+    "rlvr",
+    "scenario_generation",
+    "scene_search",
+    "guidance_gui",
+]
+
+[tool.uv.sources]
+diffusion-planner = { workspace = true }
+exploration-policy = { workspace = true }
+preference-optimization = { workspace = true }
+rlvr = { workspace = true }
+scenario-generation = { workspace = true }
+scene-search = { workspace = true }
+guidance-gui = { workspace = true }
+
 [tool.pytest.ini_options]
 markers = [
     "benchmark: performance profiling tests (deselect with '-m \"not benchmark\"')",
