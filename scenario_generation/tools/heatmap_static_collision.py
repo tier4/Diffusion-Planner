@@ -169,7 +169,6 @@ def _score_run(
     """Score a run. Returns (arc_positions (M,), min_clearance (M,))."""
     from rlvr.autoresearch.tools.audit_static_collision import (
         _score_prediction,
-        _synthesize_stopped_futures,
     )
     from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
     from scenario_generation.npz_loader import from_npz

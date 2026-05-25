@@ -64,6 +64,24 @@ matplotlib.use("Agg")
 import numpy as np
 import torch
 
+# Live per-step lane / border / centerline scoring. Imports are module-
+# level (unconditional); the scoring path itself only runs when both
+# dump_npz_dir and reward_config_path are set in SpawnConfig. Matches
+# the exact same primitives ranked-SFT uses for its reward, so the
+# metrics log here and the training run speak the same thresholds.
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+
+# Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
+# ranked-SFT to smooth diffusion-planner outputs before the SFT loss; same
+# defaults (window=11, order=3) and cos/sin-renormalisation logic apply at
+# replay time to suppress diffusion-sampler jitter. Importing rather than
+# duplicating so the two pipelines stay in sync.
+from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
+from rlvr.reward import (
+    RewardConfig,
+    compute_centerline_score_batch,
+    compute_reward_batch,
+)
 from scenario_generation.gui.lanelet_scene_builder import (
     LaneletSceneBuilder,
     _obb_collides,
@@ -81,31 +99,11 @@ from scenario_generation.simulate import (
 )
 from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 from scenario_generation.traffic_light import TrafficLightController
-
-# Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
-# ranked-SFT to smooth diffusion-planner outputs before the SFT loss; same
-# defaults (window=11, order=3) and cos/sin-renormalisation logic apply at
-# replay time to suppress diffusion-sampler jitter. Importing rather than
-# duplicating so the two pipelines stay in sync.
-from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
-
-# Live per-step lane / border / centerline scoring. Imports are module-
-# level (unconditional); the scoring path itself only runs when both
-# dump_npz_dir and reward_config_path are set in SpawnConfig. Matches
-# the exact same primitives ranked-SFT uses for its reward, so the
-# metrics log here and the training run speak the same thresholds.
-from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
-from rlvr.reward import (
-    RewardConfig,
-    compute_centerline_score_batch,
-    compute_reward_batch,
-)
 from scenario_generation.visualize import (
     _agent_color,
     draw_agent_box,
     draw_trajectory,
 )
-
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -412,6 +410,7 @@ class SceneNPCManager:
         # profile the full-map scan was 10 s of 114 s, and route progress
         # only ever advances through adjacent entries in the fixed route.
         self._last_ego_route_idx: int = 0
+        self._parked_vehicle_pool: list[tuple[np.ndarray, Agent, float | None]] = []
         # Flat (N, 2) world-frame stack of every valid centerline point
         # across the ego route. Used to reject NPC spawns whose goal
         # lands within ``cfg.npc_goal_min_dist_from_ego_route`` metres of
@@ -965,10 +964,10 @@ class SceneNPCManager:
         ``dimensions.{x,y,z}`` in world (map) frame — the format produced by
         ``extract_parked_vehicles_from_rosbag.py``.
         """
-        import yaml as _yaml
+        import yaml
 
         with open(yaml_path, "r") as fh:
-            data = _yaml.safe_load(fh)
+            data = yaml.safe_load(fh)
 
         vehicles = data.get("parked_vehicles", [])
         if not vehicles:
@@ -1033,18 +1032,22 @@ class SceneNPCManager:
         derived from the original bag's perception detection range + margin)
         if available, otherwise falls back to ``radius_m``.
         """
-        if not hasattr(self, "_parked_vehicle_pool"):
+        if not self._parked_vehicle_pool:
             return
 
         active_ids = {a.id for a in scene.agents}
+        to_add: list[Agent] = []
+        to_remove: set[str] = set()
         for world_pos, agent, per_vehicle_radius in self._parked_vehicle_pool:
             r = per_vehicle_radius if per_vehicle_radius is not None else radius_m
             dist = float(np.linalg.norm(ego_pos - world_pos))
-            is_active = agent.id in active_ids
-            if dist <= r and not is_active:
-                scene.agents.append(agent)
-            elif dist > r and is_active:
-                scene.agents = [a for a in scene.agents if a.id != agent.id]
+            if dist <= r and agent.id not in active_ids:
+                to_add.append(agent)
+            elif dist > r and agent.id in active_ids:
+                to_remove.add(agent.id)
+        if to_remove:
+            scene.agents = [a for a in scene.agents if a.id not in to_remove]
+        scene.agents.extend(to_add)
 
     def _trim_route_off_ego(self, route: list[int]) -> list[int]:
         """Trim route so its goal lanelet is not on an untransited ego lanelet.
@@ -1343,6 +1346,7 @@ def save_step_figure(
     #     tensor. The per-lane `tl_onehot.sum() < 0.5` filter below
     #     skips lanes with no TL data.
     from matplotlib.collections import LineCollection
+
     from scenario_generation.traffic_light import TL_HEX, TL_NONE
     tl_segments: dict[str, list[np.ndarray]] = {}  # hex → list of polylines
     lanes = scene.map_data.lanes
@@ -1859,6 +1863,11 @@ def run_route_replay(
     # One-shot stopped-NPC prepopulation (static-collision audit). No-op
     # when spawn_config.static_npc_count == 0 (default). These NPCs never
     # move and never despawn — see SceneNPCManager.prepopulate_static_npcs.
+    if spawn_config.static_npc_count > 0 and spawn_config.parked_vehicles_yaml:
+        raise ValueError(
+            "static_npc_count and parked_vehicles_yaml are mutually exclusive"
+        )
+
     if spawn_config.static_npc_count > 0:
         npc_manager.prepopulate_static_npcs(scene)
 
