@@ -456,6 +456,34 @@ _VARIANTS: dict[str, GenerationVariant] = {
         ],
         noise_configs=_NOISE_SWEEP_FULL,
     ),
+    "rl_cl_stretch_col4": GenerationVariant(
+        description="K=16 hybrid: 7 rl_cl+stretch CL slots + 4 collision-guided "
+                    "slots + 4 noise-sweep. Combines centerline improvement with "
+                    "static-obstacle avoidance in a single generation pass.",
+        cl_spd_configs=[
+            _RL_CL_1_5_SPD1_5_DET,
+            _RL_CL_2_0_SPD2_0_DET,
+            _RL_CL_2_5_SPD2_5_DET,
+            _RL_CL_2_0_SPD2_0_STR12,
+            _RL_CL_2_5_SPD2_5_STR13,
+            _RL_CL_3_0_SPD3_0_STR12,
+            _RL_CL_3_0_SPD3_0_STR14,
+            {"cl": 2.0, "spd": 0.0, "noise": (0.0, 0.0), "col": 0.5,
+             "label": "RL_CL2.0_col05_det"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.3, 0.8), "col": 1.0,
+             "label": "RL_CL2.0_col10_n0308"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.3, 0.8), "col": 2.0,
+             "label": "RL_CL2.0_col20_n0308"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.5, 1.5), "col": 3.0,
+             "label": "RL_CL2.0_col30_n0515"},
+        ],
+        noise_configs=[
+            {"noise": (0.5, 1.0), "label": "noise_n0510"},
+            {"noise": (0.8, 1.8), "label": "noise_n0818"},
+            {"noise": (1.0, 2.0), "label": "noise_n1020"},
+            {"noise": (0.3, 0.8), "label": "noise_n0308"},
+        ],
+    ),
 }
 
 
