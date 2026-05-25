@@ -43,6 +43,8 @@ def _classify_label(label: str) -> str:
     """Classify any label (including experimental ones) into a category."""
     if label in _CATEGORY_MAP:
         return _CATEGORY_MAP[label]
+    if label == "gt_candidate":
+        return "gt_candidate"
     if label.startswith("random_") or label.startswith("explorer_"):
         return "random"
     if label == "det_pure":
