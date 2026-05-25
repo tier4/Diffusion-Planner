@@ -52,8 +52,6 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from diffusion_planner.utils.data_augmentation import (
-    EGO_LENGTH,
-    EGO_WIDTH,
     StatePerturbation,
     _cross2d,
     _rect_corners,
@@ -62,6 +60,9 @@ from diffusion_planner.utils.data_augmentation import (
     heading_transform,
     vector_transform,
 )
+
+# Standard ego vehicle shape used across tests: (wheelbase, length, width) in metres.
+_EGO_SHAPE_DEFAULT = torch.tensor([[2.75, 5.0, 2.0]])
 
 ATOL = 1e-5
 
@@ -279,12 +280,19 @@ def test_get_transform_matrix_batch_90deg():
 # ────────────────────────────── augment ─────────────────────────────────────
 
 
+def _augment_inputs(B: int, vx: float = 10.0) -> dict:
+    """Minimal inputs for augment() tests: ego state + ego_shape, no neighbours or lanes."""
+    return {
+        "ego_current_state": _ego_state(B, vx=vx),
+        "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
+    }
+
+
 def test_augment_prob_zero():
     """augment_prob=0: no samples augmented regardless of velocity."""
     torch.manual_seed(42)
     aug = StatePerturbation(augment_prob=0.0)
-    inputs = {"ego_current_state": _ego_state(8, vx=10.0)}
-    aug_flag, _ = aug.augment(inputs)
+    aug_flag, _ = aug.augment(_augment_inputs(8))
     assert not aug_flag.any(), "augment_prob=0 should not augment any sample"
     print("  [PASS] augment prob=0 no augmentation")
 
@@ -294,7 +302,7 @@ def test_augment_prob_one_fast_vehicle():
     torch.manual_seed(0)
     aug = StatePerturbation(augment_prob=1.0)
     B = 4
-    inputs = {"ego_current_state": _ego_state(B, vx=10.0)}
+    inputs = _augment_inputs(B)
     original = inputs["ego_current_state"].clone()
     aug_flag, new_state = aug.augment(inputs)
     assert aug_flag.all(), "augment_prob=1 with fast vehicle should flag all samples"
@@ -307,8 +315,7 @@ def test_augment_slow_vehicle_not_augmented():
     """Slow vehicle (|vx| < 2) is never augmented even with prob=1."""
     torch.manual_seed(0)
     aug = StatePerturbation(augment_prob=1.0)
-    inputs = {"ego_current_state": _ego_state(4, vx=0.5)}
-    aug_flag, _ = aug.augment(inputs)
+    aug_flag, _ = aug.augment(_augment_inputs(4, vx=0.5))
     assert not aug_flag.any(), "Slow vehicle (vx=0.5) should not be augmented"
     print("  [PASS] augment slow vehicle not augmented")
 
@@ -317,8 +324,7 @@ def test_augment_velocity_nonneg():
     """Augmented vx >= 0 (velocity is clamped at 0)."""
     torch.manual_seed(123)
     aug = StatePerturbation(augment_prob=1.0)
-    inputs = {"ego_current_state": _ego_state(32, vx=2.5)}
-    _, new_state = aug.augment(inputs)
+    _, new_state = aug.augment(_augment_inputs(32, vx=2.5))
     vx = new_state[:, 4]
     assert (vx >= -1e-6).all(), f"Augmented vx has negative values: min={vx.min():.4f}"
     print("  [PASS] augment velocity non-negative")
@@ -327,7 +333,7 @@ def test_augment_velocity_nonneg():
 def test_augment_output_shape():
     aug = StatePerturbation()
     B = 3
-    inputs = {"ego_current_state": _ego_state(B, vx=5.0)}
+    inputs = _augment_inputs(B, vx=5.0)
     aug_flag, new_state = aug.augment(inputs)
     assert aug_flag.shape == (B,), f"aug_flag shape mismatch: {aug_flag.shape}"
     assert new_state.shape == inputs["ego_current_state"].shape, \
@@ -340,8 +346,7 @@ def test_augment_cos_sin_unit_norm():
     torch.manual_seed(42)
     aug = StatePerturbation(augment_prob=1.0)
     B = 8
-    inputs = {"ego_current_state": _ego_state(B, vx=5.0)}
-    _, new_state = aug.augment(inputs)
+    _, new_state = aug.augment(_augment_inputs(B, vx=5.0))
     norms = torch.hypot(new_state[:, 2], new_state[:, 3])
     assert torch.allclose(norms, torch.ones(B), atol=1e-5), \
         f"cos/sin not on unit circle after augment: norms={norms.tolist()}"
@@ -515,10 +520,14 @@ def _lanes(B: int, center_xs: list[float], left_y_off: float = 0.0,
 
 
 def _check_inputs(B: int, nbr_tensor: torch.Tensor, lane_tensor: torch.Tensor,
-                  vx: float = 5.0) -> dict:
+                  vx: float = 5.0,
+                  ego_shape: torch.Tensor | None = None) -> dict:
     """Minimal inputs dict for _check_aug_validity."""
+    if ego_shape is None:
+        ego_shape = _EGO_SHAPE_DEFAULT.expand(B, -1)
     return {
         "ego_current_state": _ego_state(B, vx=vx),
+        "ego_shape": ego_shape,
         "neighbor_agents_past": nbr_tensor,
         "lanes": lane_tensor,
     }
@@ -764,15 +773,19 @@ def test_segments_intersect_rect_multiple_segments_any():
 # ────────────────────────── _check_aug_validity ─────────────────────────────
 
 
-def test_check_aug_validity_no_input_keys():
-    """No neighbor or lane data in inputs: always valid (returns all False)."""
+def test_check_aug_validity_no_collision_sources():
+    """ego_shape present but no neighbor or lane data: always valid (returns all False)."""
     aug = StatePerturbation()
     B = 3
     ego = _ego_state(B, vx=5.0)
-    collision = aug._check_aug_validity(ego, {"ego_current_state": ego})
+    inputs = {
+        "ego_current_state": ego,
+        "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
+    }
+    collision = aug._check_aug_validity(ego, inputs)
     assert collision.shape == (B,)
     assert not collision.any(), "No neighbor/lane keys → no collision"
-    print("  [PASS] _check_aug_validity no input keys")
+    print("  [PASS] _check_aug_validity no collision sources")
 
 
 def test_check_aug_validity_neighbor_at_ego_position():
@@ -877,44 +890,42 @@ def test_check_aug_validity_batch_mixed():
     # b=1: neighbor at (50, 0) → no collision
     nbr[1, 0, -1, 0] = 50.0; nbr[1, 0, -1, 2] = 1.0
     nbr[1, 0, -1, 6] = 2.0; nbr[1, 0, -1, 7] = 4.5
-    inputs = {"ego_current_state": ego, "neighbor_agents_past": nbr,
-              "lanes": torch.zeros(B, 5, 10, 33)}
+    inputs = {
+        "ego_current_state": ego,
+        "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
+        "neighbor_agents_past": nbr,
+        "lanes": torch.zeros(B, 5, 10, 33),
+    }
     collision = aug._check_aug_validity(ego, inputs)
     assert collision[0].item() and not collision[1].item(), \
         f"Expected [True, False], got {collision.tolist()}"
     print("  [PASS] _check_aug_validity batch mixed")
 
 
-def test_check_aug_validity_ego_size_constants():
-    """EGO_LENGTH and EGO_WIDTH constants are positive and plausible."""
-    assert EGO_LENGTH > 0 and EGO_WIDTH > 0
-    assert 3.0 < EGO_LENGTH < 8.0, f"EGO_LENGTH={EGO_LENGTH} outside plausible range"
-    assert 1.0 < EGO_WIDTH < 4.0, f"EGO_WIDTH={EGO_WIDTH} outside plausible range"
-    print(f"  [PASS] EGO constants (length={EGO_LENGTH}, width={EGO_WIDTH})")
-
-
-def test_check_aug_validity_uses_ego_shape_from_inputs():
-    """ego_shape in inputs overrides hardcoded constants."""
+def test_check_aug_validity_ego_shape_controls_size():
+    """Different ego_shape values change which neighbours are detected as collisions."""
     aug = StatePerturbation()
     B = 1
     ego = _ego_state(B, vx=5.0)   # ego at (0, 0), heading=0
 
-    # Neighbour at (0, 3.5): well outside the default 5×2 m ego,
-    # but inside a 10×8 m ego provided via ego_shape.
+    # Neighbour at y=3.5 m: outside a 5×2 m ego (half-width=1 m) but inside a 10×8 m ego.
     nbr = _nbr(B, x=0.0, y=3.5, width=1.0, length=1.0)
     lanes = torch.zeros(B, 5, 10, 33)
 
-    # Without ego_shape: uses default 5×2 → neighbour at y=3.5 is OUTSIDE → no collision
-    inputs_default = {"ego_current_state": ego, "neighbor_agents_past": nbr, "lanes": lanes}
-    assert not aug._check_aug_validity(ego, inputs_default).item(), \
-        "With default 5×2 ego, neighbour at y=3.5 should not collide"
+    # Small ego (5×2 m): neighbour at y=3.5 is OUTSIDE → no collision
+    small_shape = torch.tensor([[2.75, 5.0, 2.0]])
+    inputs_small = {"ego_current_state": ego, "ego_shape": small_shape,
+                    "neighbor_agents_past": nbr, "lanes": lanes}
+    assert not aug._check_aug_validity(ego, inputs_small).item(), \
+        "5×2 ego: neighbour at y=3.5 must not collide"
 
-    # With ego_shape specifying 10×8 → neighbour at y=3.5 is INSIDE → collision
-    ego_shape = torch.tensor([[2.75, 10.0, 8.0]])  # (wheelbase, length=10, width=8)
-    inputs_with_shape = {**inputs_default, "ego_shape": ego_shape}
-    assert aug._check_aug_validity(ego, inputs_with_shape).item(), \
-        "With 10×8 ego, neighbour at y=3.5 should collide"
-    print("  [PASS] _check_aug_validity respects ego_shape from inputs")
+    # Large ego (10×8 m): neighbour at y=3.5 is INSIDE → collision
+    large_shape = torch.tensor([[2.75, 10.0, 8.0]])
+    inputs_large = {"ego_current_state": ego, "ego_shape": large_shape,
+                    "neighbor_agents_past": nbr, "lanes": lanes}
+    assert aug._check_aug_validity(ego, inputs_large).item(), \
+        "10×8 ego: neighbour at y=3.5 must collide"
+    print("  [PASS] _check_aug_validity ego_shape controls collision size")
 
 
 # ────────────── augment + collision filter (integration) ────────────────────
@@ -931,6 +942,7 @@ def test_augment_collision_suppresses_aug_flag():
     #   ego (5×2 m) and neighbour (4.5×2 m) share x and y extent even at max offset.
     inputs = {
         "ego_current_state": _ego_state(B, vx=10.0),
+        "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
         "neighbor_agents_past": _nbr(B, x=0.0, y=0.0),
         "lanes": torch.zeros(B, 5, 10, 33),
     }
@@ -947,6 +959,7 @@ def test_augment_no_collision_preserves_aug_flag():
     B = 4
     inputs = {
         "ego_current_state": _ego_state(B, vx=10.0),
+        "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
         "neighbor_agents_past": torch.zeros(B, 5, 31, 11),   # no neighbours
         "lanes": torch.zeros(B, 5, 10, 33),                  # no lane boundaries
     }
@@ -970,6 +983,7 @@ def test_augment_collision_batch_selectively_suppresses():
     nbr[1, 0, -1, 6] = 2.0; nbr[1, 0, -1, 7] = 4.5
     inputs = {
         "ego_current_state": _ego_state(B, vx=10.0),
+        "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
         "neighbor_agents_past": nbr,
         "lanes": torch.zeros(B, 5, 10, 33),
     }
@@ -1039,7 +1053,7 @@ ALL_TESTS = [
     test_segments_intersect_rect_batch,
     test_segments_intersect_rect_multiple_segments_any,
     # ── _check_aug_validity ──
-    test_check_aug_validity_no_input_keys,
+    test_check_aug_validity_no_collision_sources,
     test_check_aug_validity_neighbor_at_ego_position,
     test_check_aug_validity_neighbor_far,
     test_check_aug_validity_all_zero_neighbors_ignored,
@@ -1048,8 +1062,7 @@ ALL_TESTS = [
     test_check_aug_validity_lane_both_boundaries_clear,
     test_check_aug_validity_zero_boundary_offset_ignored,
     test_check_aug_validity_batch_mixed,
-    test_check_aug_validity_ego_size_constants,
-    test_check_aug_validity_uses_ego_shape_from_inputs,
+    test_check_aug_validity_ego_shape_controls_size,
     # ── augment + collision filter (integration) ──
     test_augment_collision_suppresses_aug_flag,
     test_augment_no_collision_preserves_aug_flag,

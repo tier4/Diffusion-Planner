@@ -5,8 +5,6 @@ from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_tr
 
 NUM_REFINE = 20
 TIME_INTERVAL = 0.1
-EGO_LENGTH = 5.0
-EGO_WIDTH = 2.0
 
 
 def vector_transform(vector, transform_mat, bias=None):
@@ -259,13 +257,10 @@ class StatePerturbation:
         device = aug_ego_state.device
         dtype = aug_ego_state.dtype
 
-        # ego_shape = [wheelbase, length, width]; fall back to module constants if absent.
-        if "ego_shape" in inputs:
-            ego_length = inputs["ego_shape"][:, 1:2].to(device=device, dtype=dtype)  # [B, 1]
-            ego_width = inputs["ego_shape"][:, 2:3].to(device=device, dtype=dtype)   # [B, 1]
-        else:
-            ego_length = torch.full((B, 1), EGO_LENGTH, device=device, dtype=dtype)
-            ego_width = torch.full((B, 1), EGO_WIDTH, device=device, dtype=dtype)
+        # ego_shape: [B, 3] = (wheelbase, length, width)
+        ego_shape = inputs["ego_shape"].to(device=device, dtype=dtype)
+        ego_length = ego_shape[:, 1:2]  # [B, 1]
+        ego_width = ego_shape[:, 2:3]   # [B, 1]
 
         ego_rect = torch.cat(
             [aug_ego_state[:, :4], ego_length, ego_width],
