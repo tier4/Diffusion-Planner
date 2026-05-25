@@ -233,6 +233,7 @@ class GRPOConfig:
     ranked_sft_mode: str = "none"
     sg_filter_window: int = 11  # Savitzky-Golay filter window length (must be odd)
     sg_filter_order: int = 3    # Savitzky-Golay filter polynomial order
+    sft_velocity_weight: bool = True  # divide lon_err by clamp(|ego_speed|, min=1) — matches original SFT
     # Neighbor regularization: penalize LoRA neighbor outputs diverging from base model.
     # Computes MSE(lora_neighbor_pred, base_neighbor_pred) at the same (noise, timestep)
     # by running a second forward pass with LoRA disabled. Adds ~2x training cost.
@@ -410,6 +411,10 @@ class GRPOConfig:
     #     "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 1.0}
     #   }
     schedules: dict = field(default_factory=dict)
+
+    # Early-stop collapse thresholds (run_experiment.py)
+    collapse_rb_threshold: float = 0.3
+    collapse_collision_threshold: float = 0.1
 
     # Weights & Biases logging
     wandb_enabled: bool = False

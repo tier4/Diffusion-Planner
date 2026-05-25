@@ -21,3 +21,4 @@ memory/
 wandb/
 
 .vscode/
+*.egg-info

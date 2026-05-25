@@ -34,7 +34,7 @@ _EGO_COLOR = "#3366cc"
 _NEIGHBOR_COLORS = ["#e67300", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
 _PED_COLOR = "#ff6699"
 _BIKE_COLOR = "#66ccff"
-_LANE_COLOR = "#bbbbbb"
+_LANE_COLOR = "#888888"
 _ROUTE_COLOR = "#4488ff"
 _GT_COLOR = "#22bb22"
 
@@ -59,13 +59,13 @@ def draw_lanes(ax, map_data, alpha=0.5):
         if valid.sum() < 2:
             continue
         # Centerline
-        ax.plot(pts[valid, 0], pts[valid, 1], "-", color=_LANE_COLOR, alpha=alpha * 0.5, lw=0.5)
+        ax.plot(pts[valid, 0], pts[valid, 1], "-", color=_LANE_COLOR, alpha=alpha * 0.8, lw=0.8)
         # Boundaries (offsets from centerline)
         if lane.shape[1] > 7:
             lb = lane[:, 4:6]
             rb = lane[:, 6:8]
-            ax.plot((pts + lb)[valid, 0], (pts + lb)[valid, 1], "-", color=_LANE_COLOR, alpha=alpha, lw=0.7)
-            ax.plot((pts + rb)[valid, 0], (pts + rb)[valid, 1], "-", color=_LANE_COLOR, alpha=alpha, lw=0.7)
+            ax.plot((pts + lb)[valid, 0], (pts + lb)[valid, 1], "-", color=_LANE_COLOR, alpha=alpha, lw=1.0)
+            ax.plot((pts + rb)[valid, 0], (pts + rb)[valid, 1], "-", color=_LANE_COLOR, alpha=alpha, lw=1.0)
 
 
 def draw_road_borders(ax, map_data):

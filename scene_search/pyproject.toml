@@ -1,0 +1,30 @@
+[project]
+name = "scene_search"
+version = "0.1.0"
+description = "Scene search GUI for NPZ driving scenes"
+requires-python = ">=3.13"
+dependencies = [
+    "diffusion-planner",
+    "gradio>=6.14.0",
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.4",
+    "pillow>=12.2.0",
+    "torch>=2.11.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "scene_search",
+    "scene_search.constraints",
+]
+package-dir = { "scene_search" = "." }
+
+[tool.setuptools.package-data]
+scene_search = ["static/*.js"]
+
+[tool.uv.sources]
+diffusion-planner = { workspace = true }
