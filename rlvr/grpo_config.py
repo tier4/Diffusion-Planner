@@ -289,6 +289,7 @@ class GRPOConfig:
     #                   accidentally filtered out by selective_threshold.
     gt_fallback_mode: str = "none"
     gt_fallback_margin: float = 0.0  # reward units. 0 = any GT advantage > 0 triggers fallback.
+    include_gt_candidate: bool = False  # append GT (ego_agent_future) as extra candidate in K+1 ranking pool
 
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
