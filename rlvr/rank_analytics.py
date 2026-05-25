@@ -261,7 +261,8 @@ class EpochRankAnalytics:
         cat_counter = Counter(get_category(r.winner_label) for r in self.records)
         # Include both standard and experimental categories
         all_cats = ["det_pure", "guided_det", "guided_noisy", "random",
-                    "lateral_exp", "stretched_exp", "decoupled_exp", "noise_only_exp", "collision_exp"]
+                    "lateral_exp", "stretched_exp", "decoupled_exp", "noise_only_exp",
+                    "collision_exp", "gt_candidate"]
         for cat in all_cats:
             self.category_rates[cat] = cat_counter.get(cat, 0) / n
 
