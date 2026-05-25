@@ -55,7 +55,9 @@ import torch
 from rlvr.autoresearch.tools._psim_centerline_common import (
     arc_bin_diff,
     build_route_polyline,
+    crop_run_by_lon,
     crop_run_by_offset,
+    crop_run_by_speed,
     polyline_cumulative_arclength,
     project_point_to_polyline_arclength,
     stats_line,
@@ -231,6 +233,12 @@ def main():
     ap.add_argument("--max_offset_m", type=float, default=10.0,
                     help="Drop frames whose |lateral offset| exceeds this "
                          "(off-route detours, teleport boundaries).")
+    ap.add_argument("--min_speed", type=float, default=1.0,
+                    help="Drop frames where ego speed < this (m/s). "
+                         "Prevents stopped frames from biasing stats.")
+    ap.add_argument("--trim_end_m", type=float, default=0.0,
+                    help="Trim the last N metres of the route (goal area "
+                         "where centerline may not be meaningful).")
     ap.add_argument("--ego_half_w", type=float, default=0.85,
                     help="Half ego width (m). Only consumed when usage_mode is "
                          "'body'; the tool currently hardcodes 'baselink' so "
@@ -268,6 +276,14 @@ def main():
 
     base_c = crop_run_by_offset(base, args.max_offset_m)
     prism_c = crop_run_by_offset(prism, args.max_offset_m)
+    if args.min_speed > 0:
+        base_c = crop_run_by_speed(base_c, args.min_speed)
+        prism_c = crop_run_by_speed(prism_c, args.min_speed)
+    if args.trim_end_m > 0:
+        poly_len = np.linalg.norm(np.diff(polyline, axis=0), axis=1).sum()
+        max_lon = poly_len - args.trim_end_m
+        base_c = crop_run_by_lon(base_c, max_lon)
+        prism_c = crop_run_by_lon(prism_c, max_lon)
     if len(base_c["lat"]) == 0 or len(prism_c["lat"]) == 0:
         empty = []
         if len(base_c["lat"]) == 0:
@@ -282,12 +298,17 @@ def main():
             "input data."
         )
 
+    filter_desc = [f"|lateral offset| > {args.max_offset_m} m"]
+    if args.min_speed > 0:
+        filter_desc.append(f"speed < {args.min_speed} m/s")
+    if args.trim_end_m > 0:
+        filter_desc.append(f"last {args.trim_end_m} m of route")
     summary_lines = [
         "psim centerline-tracking comparison (lateral via "
         "rlvr.reward.compute_centerline_score_batch / lat_offset_and_naive_score)",
         f"Reference: {args.route_json.name} ({len(polyline)} centerline points)",
         f"Map: {args.osm}",
-        f"Frames cropped where |lateral offset| > {args.max_offset_m} m.",
+        f"Frames excluded where: {'; '.join(filter_desc)}.",
         "Sign: + = left of route direction, − = right.",
         "",
         stats_line(args.baseline_label, base_c, base),
