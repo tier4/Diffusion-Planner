@@ -280,6 +280,10 @@ class SpawnConfig:
     # the listed vehicles are injected as static NPCs at their world-frame
     # positions — mutually exclusive with the synthetic static_npc_count.
     parked_vehicles_yaml: str | None = None
+    # Perception-range radius for parked vehicle visibility. Only parked
+    # vehicles within this distance of the ego are added to scene.agents;
+    # the rest stay in a pool. Mimics finite sensor range.
+    parked_vehicle_visibility_m: float = 125.0
 
     # Turn-indicator argmax: bias subtracted from the KEEP (class 4) logit
     # before argmax to imitate the C++ TurnIndicatorManager. Default 0.25
@@ -950,7 +954,11 @@ class SceneNPCManager:
     def inject_parked_vehicles_from_yaml(
         self, scene: "SceneContext", yaml_path: str,
     ) -> int:
-        """Inject real parked vehicles from a YAML file as static NPCs.
+        """Load real parked vehicles from a YAML into a visibility pool.
+
+        Vehicles are NOT added to ``scene.agents`` immediately. Call
+        :meth:`update_parked_visibility` each sim step to add/remove them
+        based on proximity to the ego — mimicking perception range.
 
         The YAML must contain a ``parked_vehicles`` list where each entry has
         ``pose.position.{x,y,z}``, ``pose.orientation.{x,y,z,w}``, and
@@ -968,7 +976,7 @@ class SceneNPCManager:
             return 0
 
         T_past = 31
-        added = 0
+        self._parked_vehicle_pool: list[tuple[np.ndarray, Agent, float | None]] = []
         for i, v in enumerate(vehicles):
             pos = v["pose"]["position"]
             ori = v["pose"]["orientation"]
@@ -1006,11 +1014,37 @@ class SceneNPCManager:
                 age_steps=T_past,
                 route_lanelet_ids=None,
             )
-            scene.agents.append(agent)
-            added += 1
+            world_pos = np.array([px, py], dtype=np.float32)
+            per_veh_radius = v.get("visibility_radius")
+            if per_veh_radius is not None:
+                per_veh_radius = float(per_veh_radius)
+            self._parked_vehicle_pool.append((world_pos, agent, per_veh_radius))
 
-        print(f"  [NPCManager] injected {added} parked vehicle(s) from {yaml_path}")
-        return added
+        print(f"  [NPCManager] loaded {len(self._parked_vehicle_pool)} parked vehicle(s) "
+              f"into visibility pool from {yaml_path}")
+        return len(self._parked_vehicle_pool)
+
+    def update_parked_visibility(
+        self, scene: "SceneContext", ego_pos: np.ndarray, radius_m: float,
+    ) -> None:
+        """Add/remove pooled parked vehicles based on distance to ego.
+
+        Each vehicle uses its own ``visibility_radius`` (from the YAML,
+        derived from the original bag's perception detection range + margin)
+        if available, otherwise falls back to ``radius_m``.
+        """
+        if not hasattr(self, "_parked_vehicle_pool"):
+            return
+
+        active_ids = {a.id for a in scene.agents}
+        for world_pos, agent, per_vehicle_radius in self._parked_vehicle_pool:
+            r = per_vehicle_radius if per_vehicle_radius is not None else radius_m
+            dist = float(np.linalg.norm(ego_pos - world_pos))
+            is_active = agent.id in active_ids
+            if dist <= r and not is_active:
+                scene.agents.append(agent)
+            elif dist > r and is_active:
+                scene.agents = [a for a in scene.agents if a.id != agent.id]
 
     def _trim_route_off_ego(self, route: list[int]) -> list[int]:
         """Trim route so its goal lanelet is not on an untransited ego lanelet.
@@ -1421,6 +1455,10 @@ def save_step_figure(
     ax.set_xlim(ex - view_half_m, ex + view_half_m)
     ax.set_ylim(ey - view_half_m, ey + view_half_m)
     ax.set_aspect("equal")
+    # Fixed tick spacing so the grid doesn't jitter between frames.
+    from matplotlib.ticker import MultipleLocator
+    ax.xaxis.set_major_locator(MultipleLocator(20.0))
+    ax.yaxis.set_major_locator(MultipleLocator(20.0))
     ax.grid(True, alpha=0.15)
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
@@ -1517,7 +1555,7 @@ def save_step_figure(
                     zorder=31)
 
     ax.set_title(title, fontsize=10)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.10, right=0.95, bottom=0.08, top=0.92)
     _save_and_close(fig, output_path)
 
 
@@ -1871,6 +1909,12 @@ def run_route_replay(
             # Track which ego route lanelets have been transited so NPC
             # goals avoid landing on the ego's future path.
             npc_manager.update_ego_progress(scene.ego_agent.current_position)
+
+            # Distance-gated parked vehicle visibility (perception range).
+            npc_manager.update_parked_visibility(
+                scene, scene.ego_agent.current_position,
+                spawn_config.parked_vehicle_visibility_m,
+            )
 
             # Run the NPC manager (after step 0 so the ego has a meaningful
             # ``current_position`` — always true by construction here).
