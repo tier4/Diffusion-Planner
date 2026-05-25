@@ -54,6 +54,106 @@ from scenario_generation.tools._heatmap_common import (
 _NPZ_RE = re.compile(r"replay_step_(\d+)\.npz$")
 
 
+def _score_run_ego_actual(
+    run_dir: Path,
+    route,
+    pts: np.ndarray,
+    s: np.ndarray,
+    stride: int = 1,
+    max_steps: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Score based on actual ego pose vs parked neighbors. No model needed."""
+    from diffusion_planner.model.guidance.collision import batch_signed_distance_rect
+
+    from rlvr.reward import _closest_points_between_rects
+    from scenario_generation.tools._heatmap_common import project_to_polyline
+
+    def _build_obb_corners(cx, cy, cos_h, sin_h, length, width, wheelbase):
+        """Build (1, 4, 2) OBB corners from center pose + dims."""
+        rear_overhang = (length - wheelbase) / 2.0
+        x0, x1 = -rear_overhang, length - rear_overhang
+        y0, y1 = -width / 2.0, width / 2.0
+        local = torch.tensor([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=torch.float32)
+        R = torch.tensor([[cos_h, -sin_h], [sin_h, cos_h]], dtype=torch.float32)
+        world = (R @ local.T).T + torch.tensor([cx, cy], dtype=torch.float32)
+        return world.unsqueeze(0)
+
+    npz_dir = run_dir / "npz"
+    if not npz_dir.exists():
+        npz_dir = run_dir
+    npz_paths = sorted(
+        p for p in npz_dir.glob("*.npz") if _NPZ_RE.search(p.name)
+    )
+    if stride > 1:
+        npz_paths = npz_paths[::stride]
+    if max_steps:
+        npz_paths = npz_paths[:max_steps]
+    if not npz_paths:
+        raise SystemExit(f"No replay_step_*.npz under {npz_dir}")
+    print(f"  {len(npz_paths)} steps to score (ego actual)")
+
+    arc_positions = []
+    min_clearances = []
+
+    for i, path in enumerate(npz_paths):
+        with np.load(path, allow_pickle=True) as raw:
+            data_np = {k: raw[k] for k in raw.files if k != "version"}
+
+        ex, ey, eyaw = recover_ego_world_pose_from_goal(data_np["goal_pose"], route)
+        s_arc, _, _ = project_to_polyline(np.array([ex, ey]), pts, s)
+
+        es = data_np["ego_shape"]
+        if es.ndim == 2:
+            es = es[0]
+        wb, ego_len, ego_w = float(es[0]), float(es[1]), float(es[2])
+
+        nb_past = data_np["neighbor_agents_past"]
+        if nb_past.ndim == 3:
+            nb_last = nb_past[:, -1, :]
+        else:
+            nb_last = nb_past[0, :, -1, :]
+        valid = np.abs(nb_last[:, :2]).sum(axis=-1) > 1e-6
+        if not valid.any():
+            arc_positions.append(s_arc)
+            min_clearances.append(99.0)
+            continue
+
+        nb_xy = nb_last[valid, :2]
+        nb_cos = nb_last[valid, 2]
+        nb_sin = nb_last[valid, 3]
+        nb_w = nb_last[valid, 6] if nb_last.shape[-1] > 6 else np.full(valid.sum(), 2.0)
+        nb_l = nb_last[valid, 7] if nb_last.shape[-1] > 7 else np.full(valid.sum(), 4.5)
+
+        # Ego at origin in ego frame, heading = 0 (forward along x)
+        ego_corners = _build_obb_corners(0.0, 0.0, 1.0, 0.0, ego_len, ego_w, wb)
+
+        best_d = 99.0
+        for j in range(len(nb_xy)):
+            nx, ny = float(nb_xy[j, 0]), float(nb_xy[j, 1])
+            nc, ns_ = float(nb_cos[j]), float(nb_sin[j])
+            nw = float(nb_w[j]) if nb_w[j] > 0.1 else 2.0
+            nl = float(nb_l[j]) if nb_l[j] > 0.1 else 4.5
+            npc_corners = _build_obb_corners(nx, ny, nc, ns_, nl, nw, nl * 0.65)
+
+            pt1, pt2 = _closest_points_between_rects(ego_corners, npc_corners)
+            d_val = float(torch.norm(pt1[0] - pt2[0]))
+
+            sd = batch_signed_distance_rect(ego_corners, npc_corners)
+            if float(sd[0]) < 0:
+                d_val = float(sd[0])
+
+            if d_val < best_d:
+                best_d = d_val
+
+        arc_positions.append(s_arc)
+        min_clearances.append(best_d)
+
+        if (i + 1) % 200 == 0:
+            print(f"    scored {i+1}/{len(npz_paths)}")
+
+    return np.array(arc_positions), np.array(min_clearances)
+
+
 def _score_run(
     run_dir: Path,
     model_path: Path,
@@ -134,11 +234,14 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--route", type=Path, required=True)
     p.add_argument("--run_a", type=Path, required=True)
-    p.add_argument("--model_a", type=Path, required=True)
+    p.add_argument("--model_a", type=Path, default=None)
     p.add_argument("--run_b", type=Path, default=None)
     p.add_argument("--model_b", type=Path, default=None)
-    p.add_argument("--config", type=Path, required=True,
-                   help="Reward config JSON (must have static_collision_enabled=true)")
+    p.add_argument("--config", type=Path, default=None,
+                   help="Reward config JSON (required for --mode predicted)")
+    p.add_argument("--mode", choices=["predicted", "ego_actual"], default="ego_actual",
+                   help="'ego_actual' scores the real ego pose at each step (no model). "
+                        "'predicted' scores the model's 80-step prediction (needs --model_a/b + --config).")
     p.add_argument("--label_a", default="A")
     p.add_argument("--label_b", default="B")
     p.add_argument("--output", type=Path, required=True)
@@ -160,21 +263,37 @@ def main():
     s_max = float(s[-1])
     print(f"Route polyline: {len(pts)} pts, arc length {s_max:.1f} m")
 
-    print(f"[{args.label_a}] scoring {args.run_a}")
-    arc_a, clr_a = _score_run(
-        args.run_a, args.model_a, route, args.config,
-        pts, s, device, args.stride, args.max_steps, args.inference_delay,
-    )
+    if args.mode == "predicted":
+        if args.model_a is None or args.config is None:
+            raise SystemExit("--mode predicted requires --model_a and --config")
+
+    print(f"[{args.label_a}] scoring {args.run_a} (mode={args.mode})")
+    if args.mode == "ego_actual":
+        arc_a, clr_a = _score_run_ego_actual(
+            args.run_a, route, pts, s, args.stride, args.max_steps,
+        )
+    else:
+        arc_a, clr_a = _score_run(
+            args.run_a, args.model_a, route, args.config,
+            pts, s, device, args.stride, args.max_steps, args.inference_delay,
+        )
     print(f"  {len(arc_a)} scored steps, clearance min={clr_a.min():.3f} "
           f"mean={clr_a.mean():.3f} p5={np.percentile(clr_a, 5):.3f}")
 
-    has_b = args.run_b is not None and args.model_b is not None
+    has_b = args.run_b is not None
     if has_b:
-        print(f"[{args.label_b}] scoring {args.run_b}")
-        arc_b, clr_b = _score_run(
-            args.run_b, args.model_b, route, args.config,
-            pts, s, device, args.stride, args.max_steps, args.inference_delay,
-        )
+        print(f"[{args.label_b}] scoring {args.run_b} (mode={args.mode})")
+        if args.mode == "ego_actual":
+            arc_b, clr_b = _score_run_ego_actual(
+                args.run_b, route, pts, s, args.stride, args.max_steps,
+            )
+        else:
+            if args.model_b is None:
+                raise SystemExit("--mode predicted with --run_b requires --model_b")
+            arc_b, clr_b = _score_run(
+                args.run_b, args.model_b, route, args.config,
+                pts, s, device, args.stride, args.max_steps, args.inference_delay,
+            )
         print(f"  {len(arc_b)} scored steps, clearance min={clr_b.min():.3f} "
               f"mean={clr_b.mean():.3f} p5={np.percentile(clr_b, 5):.3f}")
 
