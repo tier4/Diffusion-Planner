@@ -109,7 +109,7 @@ def get_args():
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
-    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.5)
+    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.6)
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
 
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
@@ -177,7 +177,7 @@ def get_args():
     parser.add_argument(
         "--coeff_control_traj_loss",
         type=float,
-        default=0.1,
+        default=0.3,
         help="Weight for control-to-trajectory sliding-window loss",
     )
 
