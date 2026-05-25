@@ -787,16 +787,16 @@ def train_epoch_ranked_sft(
             gt_reward = float("nan")
             gt_traj_4col = None
             if _gt_mode != "none":
-                _real_gt = data_i.get("ego_agent_future")
-                if _real_gt is not None:
+                # Reuse GT tensor + reward from include_gt_candidate if available
+                if _gt_appended:
+                    gt_traj_4col = traj_K[-1]
+                    gt_reward = float(reward_vals[-1])
+                    _gt_rewards = [rewards[-1]]
+                elif data_i.get("ego_agent_future") is not None:
+                    _real_gt = data_i["ego_agent_future"]
                     _g = _real_gt
                     if _g.dim() == 3:
                         _g = _g[0]
-                    # Map (T,3) -> (T,4) as (x, y, cos h, sin h). Align columns
-                    # with traj_K (which is also x, y, cos, sin). Mask zero-
-                    # padded trailing rows BEFORE cos/sin conversion so we don't
-                    # inject a phantom "pointing-east" pose (cos=1, sin=0) on
-                    # invalid timesteps — that would skew progress / RB on GT.
                     if _g.shape[-1] == 3:
                         _valid = _g[..., :2].abs().sum(dim=-1) > 0.1
                         _cos = torch.where(_valid, _g[..., 2].cos(), torch.zeros_like(_g[..., 2]))
@@ -815,11 +815,11 @@ def train_epoch_ranked_sft(
                         gt_traj_4col.unsqueeze(0), data_i, reward_config,
                     )
                     gt_reward = float(_gt_rewards[0].total)
+                if gt_traj_4col is not None:
                     _gt_scored_count += 1
                     if best_reward < gt_reward - _gt_margin:
                         _used_gt_fallback = True
                         _gt_fallback_count += 1
-                    # Always record per-scene comparison so we can analyze hard scenes
                     _gt_scene_log.append({
                         "scene": Path(valid_paths[i]).stem,
                         "gt_reward": gt_reward,
@@ -828,7 +828,6 @@ def train_epoch_ranked_sft(
                         "gap_best_minus_gt": float(best_reward - gt_reward),
                         "best_idx": int(best_idx),
                         "fallback": bool(_used_gt_fallback),
-                        # Gate / crossing flags from the GT-trajectory reward breakdown
                         "gt_rb_crossing": bool(_gt_rewards[0].rb_crossing),
                         "gt_lane_crossing": bool(_gt_rewards[0].lane_crossing),
                         "gt_collision_step": _gt_rewards[0].collision_step,
@@ -898,7 +897,7 @@ def train_epoch_ranked_sft(
             best_rewards_list.append(effective_reward)
 
         mean_best_reward = float(np.mean(best_rewards_list))
-        if _include_gt_cand:
+        if _include_gt_cand and _gt_cand_count > 0:
             _gt_wins = sum(1 for r in _ra.records if r.winner_label == "gt_candidate")
             print(f"  [GT candidate] {_gt_cand_count}/{N} scenes had GT, "
                   f"{_gt_wins}/{_gt_cand_count} GT won rank-1")
