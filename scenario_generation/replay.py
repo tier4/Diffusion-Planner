@@ -275,6 +275,12 @@ class SpawnConfig:
     static_npc_shoulder_margin_m: float = 0.3
     static_npc_seed: int | None = None
 
+    # Path to a YAML file with real parked-vehicle poses extracted from a
+    # rosbag (e.g. via extract_parked_vehicles_from_rosbag.py).  When set,
+    # the listed vehicles are injected as static NPCs at their world-frame
+    # positions — mutually exclusive with the synthetic static_npc_count.
+    parked_vehicles_yaml: str | None = None
+
     # Turn-indicator argmax: bias subtracted from the KEEP (class 4) logit
     # before argmax to imitate the C++ TurnIndicatorManager. Default 0.25
     # (the cpp planner's value); set to 0.0 to reproduce the raw argmax.
@@ -939,6 +945,71 @@ class SceneNPCManager:
         if added > 0:
             print(f"  [NPCManager] prepopulated {added} static NPC(s) "
                   f"(spacing≈{spacing:.0f} m, margin={self.cfg.static_npc_shoulder_margin_m:.2f} m)")
+        return added
+
+    def inject_parked_vehicles_from_yaml(
+        self, scene: "SceneContext", yaml_path: str,
+    ) -> int:
+        """Inject real parked vehicles from a YAML file as static NPCs.
+
+        The YAML must contain a ``parked_vehicles`` list where each entry has
+        ``pose.position.{x,y,z}``, ``pose.orientation.{x,y,z,w}``, and
+        ``dimensions.{x,y,z}`` in world (map) frame — the format produced by
+        ``extract_parked_vehicles_from_rosbag.py``.
+        """
+        import yaml as _yaml
+
+        with open(yaml_path, "r") as fh:
+            data = _yaml.safe_load(fh)
+
+        vehicles = data.get("parked_vehicles", [])
+        if not vehicles:
+            print(f"  [NPCManager] no parked_vehicles in {yaml_path}")
+            return 0
+
+        T_past = 31
+        added = 0
+        for i, v in enumerate(vehicles):
+            pos = v["pose"]["position"]
+            ori = v["pose"]["orientation"]
+            dims = v["dimensions"]
+
+            px, py = float(pos["x"]), float(pos["y"])
+            heading = 2.0 * math.atan2(float(ori["z"]), float(ori["w"]))
+            length = float(dims["x"])
+            width = float(dims["y"])
+            wheelbase = length * 0.65
+
+            history = np.zeros((T_past, 3), dtype=np.float32)
+            history[:, 0] = px
+            history[:, 1] = py
+            history[:, 2] = heading
+            velocities = np.zeros((T_past, 2), dtype=np.float32)
+
+            agent_id = f"{self.STATIC_NPC_PREFIX}parked_{i}"
+            agent = Agent(
+                id=agent_id,
+                agent_type=AgentType.VEHICLE,
+                length=length,
+                width=width,
+                wheelbase=wheelbase,
+                past_trajectory=history,
+                past_velocities=velocities,
+                acceleration=np.zeros(2, dtype=np.float32),
+                steering_angle=0.0,
+                yaw_rate=0.0,
+                goal_pose=None,
+                route_lanes=None,
+                route_speed_limit=None,
+                route_has_speed_limit=None,
+                turn_indicators=np.zeros(T_past, dtype=np.int32),
+                age_steps=T_past,
+                route_lanelet_ids=None,
+            )
+            scene.agents.append(agent)
+            added += 1
+
+        print(f"  [NPCManager] injected {added} parked vehicle(s) from {yaml_path}")
         return added
 
     def _trim_route_off_ego(self, route: list[int]) -> list[int]:
@@ -1752,6 +1823,11 @@ def run_route_replay(
     # move and never despawn — see SceneNPCManager.prepopulate_static_npcs.
     if spawn_config.static_npc_count > 0:
         npc_manager.prepopulate_static_npcs(scene)
+
+    if spawn_config.parked_vehicles_yaml:
+        npc_manager.inject_parked_vehicles_from_yaml(
+            scene, spawn_config.parked_vehicles_yaml,
+        )
 
     map_cache = MapTensorCache(scene.map_data)
     n_npc_spawned = 0
