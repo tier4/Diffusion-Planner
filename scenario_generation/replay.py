@@ -64,6 +64,24 @@ matplotlib.use("Agg")
 import numpy as np
 import torch
 
+# Live per-step lane / border / centerline scoring. Imports are module-
+# level (unconditional); the scoring path itself only runs when both
+# dump_npz_dir and reward_config_path are set in SpawnConfig. Matches
+# the exact same primitives ranked-SFT uses for its reward, so the
+# metrics log here and the training run speak the same thresholds.
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+
+# Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
+# ranked-SFT to smooth diffusion-planner outputs before the SFT loss; same
+# defaults (window=11, order=3) and cos/sin-renormalisation logic apply at
+# replay time to suppress diffusion-sampler jitter. Importing rather than
+# duplicating so the two pipelines stay in sync.
+from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
+from rlvr.reward import (
+    RewardConfig,
+    compute_centerline_score_batch,
+    compute_reward_batch,
+)
 from scenario_generation.gui.lanelet_scene_builder import (
     LaneletSceneBuilder,
     _obb_collides,
@@ -81,31 +99,11 @@ from scenario_generation.simulate import (
 )
 from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 from scenario_generation.traffic_light import TrafficLightController
-
-# Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
-# ranked-SFT to smooth diffusion-planner outputs before the SFT loss; same
-# defaults (window=11, order=3) and cos/sin-renormalisation logic apply at
-# replay time to suppress diffusion-sampler jitter. Importing rather than
-# duplicating so the two pipelines stay in sync.
-from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
-
-# Live per-step lane / border / centerline scoring. Imports are module-
-# level (unconditional); the scoring path itself only runs when both
-# dump_npz_dir and reward_config_path are set in SpawnConfig. Matches
-# the exact same primitives ranked-SFT uses for its reward, so the
-# metrics log here and the training run speak the same thresholds.
-from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
-from rlvr.reward import (
-    RewardConfig,
-    compute_centerline_score_batch,
-    compute_reward_batch,
-)
 from scenario_generation.visualize import (
     _agent_color,
     draw_agent_box,
     draw_trajectory,
 )
-
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -275,6 +273,16 @@ class SpawnConfig:
     static_npc_shoulder_margin_m: float = 0.3
     static_npc_seed: int | None = None
 
+    # Path to a YAML file with real parked-vehicle poses (e.g. via
+    # ``scenario_generation.tools.extract_parked_vehicles``).  When set,
+    # the listed vehicles are injected as static NPCs at their world-frame
+    # positions — mutually exclusive with the synthetic static_npc_count.
+    parked_vehicles_yaml: str | None = None
+    # Perception-range radius for parked vehicle visibility. Only parked
+    # vehicles within this distance of the ego are added to scene.agents;
+    # the rest stay in a pool. Mimics finite sensor range.
+    parked_vehicle_visibility_m: float = 125.0
+
     # Turn-indicator argmax: bias subtracted from the KEEP (class 4) logit
     # before argmax to imitate the C++ TurnIndicatorManager. Default 0.25
     # (the cpp planner's value); set to 0.0 to reproduce the raw argmax.
@@ -339,6 +347,16 @@ class SpawnConfig:
                 "metrics log is being produced. Set both, or disable the "
                 "overlay."
             )
+        if self.static_npc_count > 0 and self.parked_vehicles_yaml:
+            raise ValueError(
+                "static_npc_count and parked_vehicles_yaml are mutually "
+                "exclusive — use one or the other."
+            )
+        if self.parked_vehicle_visibility_m <= 0:
+            raise ValueError(
+                f"parked_vehicle_visibility_m must be > 0; "
+                f"got {self.parked_vehicle_visibility_m}"
+            )
 
     @classmethod
     def from_json(cls, path: str | Path) -> "SpawnConfig":
@@ -402,6 +420,7 @@ class SceneNPCManager:
         # profile the full-map scan was 10 s of 114 s, and route progress
         # only ever advances through adjacent entries in the fixed route.
         self._last_ego_route_idx: int = 0
+        self._parked_vehicle_pool: list[tuple[np.ndarray, Agent, float | None]] = []
         # Flat (N, 2) world-frame stack of every valid centerline point
         # across the ego route. Used to reject NPC spawns whose goal
         # lands within ``cfg.npc_goal_min_dist_from_ego_route`` metres of
@@ -941,6 +960,105 @@ class SceneNPCManager:
                   f"(spacing≈{spacing:.0f} m, margin={self.cfg.static_npc_shoulder_margin_m:.2f} m)")
         return added
 
+    def inject_parked_vehicles_from_yaml(
+        self, scene: "SceneContext", yaml_path: str,
+    ) -> int:
+        """Load real parked vehicles from a YAML into a visibility pool.
+
+        Vehicles are NOT added to ``scene.agents`` immediately. Call
+        :meth:`update_parked_visibility` each sim step to add/remove them
+        based on proximity to the ego — mimicking perception range.
+
+        The YAML must contain a ``parked_vehicles`` list where each entry has
+        ``pose.position.{x,y,z}``, ``pose.orientation.{x,y,z,w}``, and
+        ``dimensions.{x,y,z}`` in world (map) frame — the format produced by
+        ``scenario_generation.tools.extract_parked_vehicles``.
+        """
+        import yaml
+
+        with open(yaml_path, "r") as fh:
+            data = yaml.safe_load(fh)
+
+        vehicles = data.get("parked_vehicles", [])
+        if not vehicles:
+            print(f"  [NPCManager] no parked_vehicles in {yaml_path}")
+            return 0
+
+        T_past = 31
+        self._parked_vehicle_pool: list[tuple[np.ndarray, Agent, float | None]] = []
+        for i, v in enumerate(vehicles):
+            pos = v["pose"]["position"]
+            ori = v["pose"]["orientation"]
+            dims = v["dimensions"]
+
+            px, py = float(pos["x"]), float(pos["y"])
+            heading = 2.0 * math.atan2(float(ori["z"]), float(ori["w"]))
+            length = float(dims["x"])
+            width = float(dims["y"])
+            wheelbase = length * 0.65
+
+            history = np.zeros((T_past, 3), dtype=np.float32)
+            history[:, 0] = px
+            history[:, 1] = py
+            history[:, 2] = heading
+            velocities = np.zeros((T_past, 2), dtype=np.float32)
+
+            agent_id = f"{self.STATIC_NPC_PREFIX}parked_{i}"
+            agent = Agent(
+                id=agent_id,
+                agent_type=AgentType.VEHICLE,
+                length=length,
+                width=width,
+                wheelbase=wheelbase,
+                past_trajectory=history,
+                past_velocities=velocities,
+                acceleration=np.zeros(2, dtype=np.float32),
+                steering_angle=0.0,
+                yaw_rate=0.0,
+                goal_pose=None,
+                route_lanes=None,
+                route_speed_limit=None,
+                route_has_speed_limit=None,
+                turn_indicators=np.zeros(T_past, dtype=np.int32),
+                age_steps=T_past,
+                route_lanelet_ids=None,
+            )
+            world_pos = np.array([px, py], dtype=np.float32)
+            per_veh_radius = v.get("visibility_radius")
+            if per_veh_radius is not None:
+                per_veh_radius = float(per_veh_radius)
+            self._parked_vehicle_pool.append((world_pos, agent, per_veh_radius))
+
+        print(f"  [NPCManager] loaded {len(self._parked_vehicle_pool)} parked vehicle(s) "
+              f"into visibility pool from {yaml_path}")
+        return len(self._parked_vehicle_pool)
+
+    def update_parked_visibility(
+        self, scene: "SceneContext", ego_pos: np.ndarray, radius_m: float,
+    ) -> None:
+        """Add/remove pooled parked vehicles based on distance to ego.
+
+        Each vehicle uses its own ``visibility_radius`` (from the YAML,
+        derived from the original bag's perception detection range + margin)
+        if available, otherwise falls back to ``radius_m``.
+        """
+        if not self._parked_vehicle_pool:
+            return
+
+        active_ids = {a.id for a in scene.agents}
+        to_add: list[Agent] = []
+        to_remove: set[str] = set()
+        for world_pos, agent, per_vehicle_radius in self._parked_vehicle_pool:
+            r = per_vehicle_radius if per_vehicle_radius is not None else radius_m
+            dist = float(np.linalg.norm(ego_pos - world_pos))
+            if dist <= r and agent.id not in active_ids:
+                to_add.append(agent)
+            elif dist > r and agent.id in active_ids:
+                to_remove.add(agent.id)
+        if to_remove:
+            scene.agents = [a for a in scene.agents if a.id not in to_remove]
+        scene.agents.extend(to_add)
+
     def _trim_route_off_ego(self, route: list[int]) -> list[int]:
         """Trim route so its goal lanelet is not on an untransited ego lanelet.
 
@@ -1238,6 +1356,7 @@ def save_step_figure(
     #     tensor. The per-lane `tl_onehot.sum() < 0.5` filter below
     #     skips lanes with no TL data.
     from matplotlib.collections import LineCollection
+
     from scenario_generation.traffic_light import TL_HEX, TL_NONE
     tl_segments: dict[str, list[np.ndarray]] = {}  # hex → list of polylines
     lanes = scene.map_data.lanes
@@ -1350,6 +1469,10 @@ def save_step_figure(
     ax.set_xlim(ex - view_half_m, ex + view_half_m)
     ax.set_ylim(ey - view_half_m, ey + view_half_m)
     ax.set_aspect("equal")
+    # Fixed tick spacing so the grid doesn't jitter between frames.
+    from matplotlib.ticker import MultipleLocator
+    ax.xaxis.set_major_locator(MultipleLocator(20.0))
+    ax.yaxis.set_major_locator(MultipleLocator(20.0))
     ax.grid(True, alpha=0.15)
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
@@ -1446,7 +1569,7 @@ def save_step_figure(
                     zorder=31)
 
     ax.set_title(title, fontsize=10)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.10, right=0.95, bottom=0.08, top=0.92)
     _save_and_close(fig, output_path)
 
 
@@ -1753,6 +1876,11 @@ def run_route_replay(
     if spawn_config.static_npc_count > 0:
         npc_manager.prepopulate_static_npcs(scene)
 
+    if spawn_config.parked_vehicles_yaml:
+        npc_manager.inject_parked_vehicles_from_yaml(
+            scene, spawn_config.parked_vehicles_yaml,
+        )
+
     map_cache = MapTensorCache(scene.map_data)
     n_npc_spawned = 0
     goal_reached = False
@@ -1795,6 +1923,12 @@ def run_route_replay(
             # Track which ego route lanelets have been transited so NPC
             # goals avoid landing on the ego's future path.
             npc_manager.update_ego_progress(scene.ego_agent.current_position)
+
+            # Distance-gated parked vehicle visibility (perception range).
+            npc_manager.update_parked_visibility(
+                scene, scene.ego_agent.current_position,
+                spawn_config.parked_vehicle_visibility_m,
+            )
 
             # Run the NPC manager (after step 0 so the ego has a meaningful
             # ``current_position`` — always true by construction here).
