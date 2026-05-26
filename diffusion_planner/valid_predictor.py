@@ -24,6 +24,7 @@ from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
+from tqdm import tqdm
 
 
 @torch.no_grad()
@@ -48,7 +49,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
     delay = 0
 
-    for inputs in val_loader:
+    for inputs in tqdm(val_loader, desc="validate", disable=ddp.get_rank() != 0):
         inputs = {key: value.to(device) for key, value in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
 
