@@ -148,6 +148,32 @@ def bin_by_arc(
     return bin_s_mid, mean_abs, max_abs
 
 
+def bin_scalar_by_arc(
+    arc_s: np.ndarray, values: np.ndarray, s_max: float, bin_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Bin an arbitrary per-point scalar by arc-length.
+
+    Args:
+        arc_s:  (M,) arc-length position of each sample.
+        values: (M,) scalar value at each sample (e.g. min clearance).
+        s_max:  total route arc-length.
+        bin_m:  bin width in metres.
+
+    Returns (bin_s_mid, mean_val, min_val) — each (n_bins,), NaN for empty.
+    """
+    n_bins = max(1, int(math.ceil(s_max / bin_m)))
+    bin_s_mid = (np.arange(n_bins) + 0.5) * bin_m
+    mean_val = np.full(n_bins, np.nan, dtype=np.float64)
+    min_val = np.full(n_bins, np.nan, dtype=np.float64)
+    idx = np.clip((arc_s // bin_m).astype(int), 0, n_bins - 1)
+    for b in range(n_bins):
+        mask = idx == b
+        if mask.any():
+            mean_val[b] = np.mean(values[mask])
+            min_val[b] = np.min(values[mask])
+    return bin_s_mid, mean_val, min_val
+
+
 def segments_from_polyline(
     pts: np.ndarray, s: np.ndarray, bin_m: float, n_bins: int
 ) -> list:

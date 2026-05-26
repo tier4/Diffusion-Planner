@@ -240,6 +240,52 @@ across despawn, inference, and viz gates. Combine with
 `max_active_npcs=0, spawn_probability=0.0, enable_traffic_lights=false`
 to produce a static-only audit scene.
 
+**Parked vehicle injection from rosbag extraction.** Inject real parked
+vehicles (extracted from recorded rosbags) as static NPCs at their actual
+world-frame positions. Unlike synthetic `static_npc_*` placement, these
+vehicles have real dimensions and orientations from perception tracking.
+
+Config keys (on `SpawnConfig`, mutually exclusive with `static_npc_count`):
+
+- `parked_vehicles_yaml` (default `None` — feature off) — path to a YAML
+  file with a `parked_vehicles` list (each entry has `pose`, `orientation`,
+  `dimensions`)
+- `parked_vehicle_visibility_m` (default `125.0`) — perception-range
+  radius; parked vehicles are added/removed from `scene.agents` each step
+  based on distance to the ego, mimicking finite sensor range. Per-vehicle
+  `visibility_radius` from the YAML overrides this when present.
+
+Extract parked vehicles from rosbags:
+
+```bash
+python -m scenario_generation.tools.extract_parked_vehicles \
+    --bags /path/to/bag1.db3 /path/to/bag2.db3 ... \
+    --osm_path /path/to/lanelet2_map.osm \
+    --output /path/to/parked.yaml
+```
+
+The extraction tool processes ALL bag splits together so tracker UUIDs are
+merged — vehicles that eventually move (e.g. stopped at traffic lights) are
+correctly excluded. Overlapping detections are merged via OBB union-find.
+
+**Static collision clearance heatmap.** Scores ego clearance to parked
+vehicles along the route and renders an arc-binned heatmap.
+
+```bash
+# Ego-actual mode (default) — no model inference needed:
+python -m scenario_generation.tools.heatmap_static_collision \
+    --route /path/to/route.pkl \
+    --run_a /path/to/sim_dir_a \
+    --run_b /path/to/sim_dir_b \
+    --label_a baseline --label_b trained \
+    --output /path/to/heatmap.png \
+    --mode ego_actual --stride 2
+```
+
+Two modes: `ego_actual` (default) scores the real ego OBB at each step;
+`predicted` scores the model's 80-step predicted trajectory (requires
+`--model_a`, `--model_b`, `--config`).
+
 **Live ego ↔ stopped-NPC proximity line.** When the ego's OBB gets
 within `_STATIC_NPC_VIZ_THRESH_M` (= 2.0 m) of any static NPC's OBB,
 `_save_step_figure` draws a red line between the two closest-pair points
@@ -283,6 +329,8 @@ Relevant modules:
 | `scenario_generation/configs/replay_default.json` | Reference `SpawnConfig` template — not loaded automatically, `--config` is required |
 | `rlvr/autoresearch/tools/select_from_metrics_log.py` | Reads `metrics_log.json` + NPZ dir, emits pre-trigger scene list for training |
 | `rlvr/autoresearch/tools/rescore_replay_run.py` | Regenerate `metrics_log.json` from an existing run (no re-sim); `--mode instant` (no model) or `--mode full` (with model) — swap models to compare plans at the same observations |
+| `scenario_generation/tools/extract_parked_vehicles.py` | Multi-bag parked vehicle extraction with UUID merge |
+| `scenario_generation/tools/heatmap_static_collision.py` | Static collision clearance heatmap (ego_actual / predicted modes) |
 | `scenario_generation/tools/inspect_route.py` | CLI to dump a saved route pickle |
 | `scenario_generation/gui/app.py` | GUI panels + live route overlay wiring |
 | `scene_search/map_canvas_js.py` | JS canvas: start / goal / waypoint arrows + route polyline |
