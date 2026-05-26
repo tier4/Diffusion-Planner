@@ -326,7 +326,7 @@ class LaneletSceneBuilder:
             # (it shortcuts instead of following the loop). The C++
             # centerline3d() handles this correctly; resampling + midpoint
             # replicates that behaviour.
-            n_cl = max(len(raw_lb), len(raw_rb))
+            n_cl = min(max(len(raw_lb), len(raw_rb)), 50)
             raw_cl = ((_interpolate_lane(raw_lb, n_cl)
                        + _interpolate_lane(raw_rb, n_cl)) * 0.5).astype(np.float32)
 
