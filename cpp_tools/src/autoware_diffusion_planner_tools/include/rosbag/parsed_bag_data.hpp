@@ -29,16 +29,22 @@
 #include <deque>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
+
+// Pair of (rosbag arrival time in ns, message). The rosbag time is taken from
+// rosbag2_storage::SerializedBagMessage::time_stamp, not from the inner header.
+template <typename T>
+using TimedMsg = std::pair<int64_t, T>;
 
 struct ParsedBagData
 {
-  std::deque<nav_msgs::msg::Odometry> kinematic_states;
-  std::deque<geometry_msgs::msg::AccelWithCovarianceStamped> accelerations;
-  std::deque<autoware_perception_msgs::msg::TrackedObjects> tracked_objects_msgs;
-  std::deque<autoware_vehicle_msgs::msg::TurnIndicatorsReport> turn_indicators;
-  std::vector<autoware_planning_msgs::msg::LaneletRoute> route_msgs;
-  std::deque<autoware_perception_msgs::msg::TrafficLightGroupArray> traffic_signals;
+  std::deque<TimedMsg<nav_msgs::msg::Odometry>> kinematic_states;
+  std::deque<TimedMsg<geometry_msgs::msg::AccelWithCovarianceStamped>> accelerations;
+  std::deque<TimedMsg<autoware_perception_msgs::msg::TrackedObjects>> tracked_objects_msgs;
+  std::deque<TimedMsg<autoware_vehicle_msgs::msg::TurnIndicatorsReport>> turn_indicators;
+  std::vector<TimedMsg<autoware_planning_msgs::msg::LaneletRoute>> route_msgs;
+  std::deque<TimedMsg<autoware_perception_msgs::msg::TrafficLightGroupArray>> traffic_signals;
   timestamp_stats::TimestampStatsMap timestamp_stats_map;
 
   explicit ParsedBagData(const std::vector<std::string> & target_topics)
