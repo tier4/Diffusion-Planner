@@ -60,8 +60,13 @@ def _score_run_ego_actual(
     s: np.ndarray,
     stride: int = 1,
     max_steps: int | None = None,
+    relevance_m: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Score based on actual ego pose vs parked neighbors. No model needed."""
+    """Score based on actual ego pose vs parked neighbors. No model needed.
+
+    Only records steps where the closest parked vehicle is within
+    ``relevance_m`` — distant parked vehicles are irrelevant and skipped.
+    """
     from diffusion_planner.model.guidance.collision import batch_signed_distance_rect
 
     from rlvr.reward import _closest_points_between_rects
@@ -113,8 +118,6 @@ def _score_run_ego_actual(
             nb_last = nb_past[0, :, -1, :]
         valid = np.abs(nb_last[:, :2]).sum(axis=-1) > 1e-6
         if not valid.any():
-            arc_positions.append(s_arc)
-            min_clearances.append(99.0)
             continue
 
         nb_xy = nb_last[valid, :2]
@@ -128,10 +131,17 @@ def _score_run_ego_actual(
         nb_w = nb_last[valid, 6]
         nb_l = nb_last[valid, 7]
 
+        # Quick centre-distance pre-filter: skip neighbors whose centre
+        # is further than relevance_m + max possible half-diagonal.
+        centre_dists = np.sqrt(nb_xy[:, 0] ** 2 + nb_xy[:, 1] ** 2)
+        nearby_mask = centre_dists < relevance_m + 15.0
+        if not nearby_mask.any():
+            continue
+
         ego_corners = _build_obb_corners(0.0, 0.0, 1.0, 0.0, ego_len, ego_w, wb)
 
-        best_d = 99.0
-        for j in range(len(nb_xy)):
+        best_d = float("inf")
+        for j in np.where(nearby_mask)[0]:
             nx, ny = float(nb_xy[j, 0]), float(nb_xy[j, 1])
             nc, ns_ = float(nb_cos[j]), float(nb_sin[j])
             nw, nl = float(nb_w[j]), float(nb_l[j])
@@ -150,6 +160,9 @@ def _score_run_ego_actual(
 
             if d_val < best_d:
                 best_d = d_val
+
+        if best_d > relevance_m:
+            continue
 
         arc_positions.append(s_arc)
         min_clearances.append(best_d)
@@ -253,8 +266,11 @@ def main():
     p.add_argument("--bin_m", type=float, default=5.0)
     p.add_argument("--stride", type=int, default=1)
     p.add_argument("--max_steps", type=int, default=None)
-    p.add_argument("--clip_max_m", type=float, default=5.0,
-                   help="Clamp color scale at this clearance (m). Default 5.")
+    p.add_argument("--clip_max_m", type=float, default=3.0,
+                   help="Color scale ceiling (m). Default 3.")
+    p.add_argument("--relevance_m", type=float, default=3.0,
+                   help="Only record steps where closest parked vehicle is within "
+                        "this distance (m). Default 3.")
     p.add_argument("--min_arc_m", type=float, default=None)
     p.add_argument("--max_arc_m", type=float, default=None)
     p.add_argument("--inference_delay", type=int, default=0)
@@ -272,25 +288,29 @@ def main():
         if args.model_a is None or args.config is None:
             raise SystemExit("--mode predicted requires --model_a and --config")
 
-    print(f"[{args.label_a}] scoring {args.run_a} (mode={args.mode})")
+    print(f"[{args.label_a}] scoring {args.run_a} (mode={args.mode}, relevance={args.relevance_m}m)")
     if args.mode == "ego_actual":
         arc_a, clr_a = _score_run_ego_actual(
             args.run_a, route, pts, s, args.stride, args.max_steps,
+            args.relevance_m,
         )
     else:
         arc_a, clr_a = _score_run(
             args.run_a, args.model_a, route, args.config,
             pts, s, device, args.stride, args.max_steps, args.inference_delay,
         )
-    print(f"  {len(arc_a)} scored steps, clearance min={clr_a.min():.3f} "
+    if len(arc_a) == 0:
+        raise SystemExit("No steps had a parked vehicle within relevance range.")
+    print(f"  {len(arc_a)} relevant steps, clearance min={clr_a.min():.3f} "
           f"mean={clr_a.mean():.3f} p5={np.percentile(clr_a, 5):.3f}")
 
     has_b = args.run_b is not None
     if has_b:
-        print(f"[{args.label_b}] scoring {args.run_b} (mode={args.mode})")
+        print(f"[{args.label_b}] scoring {args.run_b} (mode={args.mode}, relevance={args.relevance_m}m)")
         if args.mode == "ego_actual":
             arc_b, clr_b = _score_run_ego_actual(
                 args.run_b, route, pts, s, args.stride, args.max_steps,
+                args.relevance_m,
             )
         else:
             if args.model_b is None:
@@ -365,7 +385,7 @@ def main():
         ax_line.axhline(0.2, color="#cc0000", lw=0.5, ls="--", label="cross (0.2m)")
         ax_line.axhline(0.4, color="#ff8800", lw=0.5, ls="--", label="near (0.4m)")
         ax_line.set_xlabel("Route arc length (m)")
-        ax_line.set_ylabel("Min OBB clearance to stopped neighbor (m)")
+        ax_line.set_ylabel("Ego-to-parked-vehicle clearance (m)")
         ax_line.legend(fontsize=8, ncol=3)
         ax_line.grid(alpha=0.3)
 
@@ -393,7 +413,7 @@ def main():
         ax_line.axhline(0.2, color="#cc0000", lw=0.5, ls="--", label="cross (0.2m)")
         ax_line.axhline(0.4, color="#ff8800", lw=0.5, ls="--", label="near (0.4m)")
         ax_line.set_xlabel("Route arc length (m)")
-        ax_line.set_ylabel("Min OBB clearance to stopped neighbor (m)")
+        ax_line.set_ylabel("Ego-to-parked-vehicle clearance (m)")
         ax_line.legend(fontsize=8)
         ax_line.grid(alpha=0.3)
 
