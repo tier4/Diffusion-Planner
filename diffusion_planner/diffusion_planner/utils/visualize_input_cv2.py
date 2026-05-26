@@ -191,8 +191,9 @@ def visualize_inputs_cv2(
 
     # ==== Ego vehicle ====
     ego_heading = np.arctan2(ego_state[3], ego_state[2])
-    car_length = 4.5
-    car_width = 2.0
+    shape = np.asarray(inputs["ego_shape"]).reshape(-1)
+    car_length = float(shape[1])
+    car_width = float(shape[2])
 
     # Draw ego vehicle as a filled rectangle
     draw_rotated_rect(img, ego_x, ego_y, car_length, car_width, ego_heading, (0, 0, 255))

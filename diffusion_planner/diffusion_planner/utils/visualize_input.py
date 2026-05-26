@@ -90,8 +90,9 @@ def draw_ego_vehicle(ax, inputs):
     ego_heading = np.arctan2(ego_state[3], ego_state[2])
 
     # Ego vehicle's length and width
-    car_length = 4.5
-    car_width = 2.0
+    shape = np.asarray(inputs["ego_shape"]).reshape(-1)
+    car_length = float(shape[1])
+    car_width = float(shape[2])
     dx = car_length / 2 * np.cos(ego_heading)
     dy = car_length / 2 * np.sin(ego_heading)
 
