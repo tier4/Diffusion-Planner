@@ -45,12 +45,68 @@ from scenario_generation.tools._heatmap_common import (
     bin_scalar_by_arc,
     build_route_polyline,
     load_route,
-    plot_route_heatmap,
     recover_ego_world_pose_from_goal,
     segments_from_polyline,
 )
 
 _NPZ_RE = re.compile(r"replay_step_(\d+)\.npz$")
+
+
+def _cluster_encounters(
+    arcs: np.ndarray, clrs: np.ndarray, gap: float = 20.0,
+) -> list[dict]:
+    """Group consecutive arc positions into encounters."""
+    if len(arcs) == 0:
+        return []
+    order = np.argsort(arcs)
+    arcs, clrs = arcs[order], clrs[order]
+    encounters: list[dict] = []
+    start = 0
+    for i in range(1, len(arcs)):
+        if arcs[i] - arcs[i - 1] > gap:
+            encounters.append({
+                "arc_mean": float(np.mean(arcs[start:i])),
+                "arc_lo": float(arcs[start]),
+                "arc_hi": float(arcs[i - 1]),
+                "min": float(np.min(clrs[start:i])),
+                "mean": float(np.mean(clrs[start:i])),
+                "n": i - start,
+            })
+            start = i
+    encounters.append({
+        "arc_mean": float(np.mean(arcs[start:])),
+        "arc_lo": float(arcs[start]),
+        "arc_hi": float(arcs[-1]),
+        "min": float(np.min(clrs[start:])),
+        "mean": float(np.mean(clrs[start:])),
+        "n": len(arcs) - start,
+    })
+    return encounters
+
+
+def _match_encounters(
+    enc_a: list[dict], enc_b: list[dict],
+) -> list[tuple[dict | None, dict | None]]:
+    """Match encounters from two runs by arc overlap."""
+    matched: list[tuple[dict | None, dict | None]] = []
+    used_b: set[int] = set()
+    for ea in enc_a:
+        best_j, best_ov = -1, -1.0
+        for j, eb in enumerate(enc_b):
+            if j in used_b:
+                continue
+            ov = min(ea["arc_hi"], eb["arc_hi"]) - max(ea["arc_lo"], eb["arc_lo"])
+            if ov > best_ov:
+                best_ov, best_j = ov, j
+        if best_j >= 0 and best_ov > 0:
+            matched.append((ea, enc_b[best_j]))
+            used_b.add(best_j)
+        else:
+            matched.append((ea, None))
+    for j, eb in enumerate(enc_b):
+        if j not in used_b:
+            matched.append((None, eb))
+    return matched
 
 
 def _score_run_ego_actual(
@@ -266,8 +322,9 @@ def main():
     p.add_argument("--bin_m", type=float, default=5.0)
     p.add_argument("--stride", type=int, default=1)
     p.add_argument("--max_steps", type=int, default=None)
-    p.add_argument("--clip_max_m", type=float, default=3.0,
-                   help="Color scale ceiling (m). Default 3.")
+    p.add_argument("--safe_thresh", type=float, default=1.0,
+                   help="Above this clearance both models are considered safe — "
+                        "no winner is highlighted. Default 1.0m.")
     p.add_argument("--relevance_m", type=float, default=3.0,
                    help="Only record steps where closest parked vehicle is within "
                         "this distance (m). Default 3.")
@@ -332,100 +389,126 @@ def main():
     if args.max_arc_m is not None:
         mask_a = arc_a <= args.max_arc_m
         arc_a, clr_a = arc_a[mask_a], clr_a[mask_a]
-        s_max = min(s_max, args.max_arc_m)
         if has_b:
             mask_b = arc_b <= args.max_arc_m
             arc_b, clr_b = arc_b[mask_b], clr_b[mask_b]
 
-    bin_m = args.bin_m
-    bs_mid_a, mean_a, min_a = bin_scalar_by_arc(arc_a, clr_a, s_max, bin_m)
-    n_bins = len(bs_mid_a)
-    bin_segments = segments_from_polyline(pts, s, bin_m, n_bins)
+    safe_thresh = args.safe_thresh
 
-    vmax = args.clip_max_m
+    enc_a = _cluster_encounters(arc_a, clr_a)
+    enc_b = _cluster_encounters(arc_b, clr_b) if has_b else []
+    matched = _match_encounters(enc_a, enc_b) if has_b else [(e, None) for e in enc_a]
+    n_enc = len(matched)
+
+    if n_enc == 0:
+        raise SystemExit("No encounters found — no parked vehicles within relevance range.")
+
+    labels, min_a_v, mean_a_v, min_b_v, mean_b_v = [], [], [], [], []
+    for ea, eb in matched:
+        arc = ea["arc_mean"] if ea else eb["arc_mean"]
+        labels.append(f"#{len(labels)+1}\n{arc:.0f}m")
+        min_a_v.append(ea["min"] if ea else np.nan)
+        mean_a_v.append(ea["mean"] if ea else np.nan)
+        min_b_v.append(eb["min"] if eb else np.nan)
+        mean_b_v.append(eb["mean"] if eb else np.nan)
+    min_a_v, mean_a_v = np.array(min_a_v), np.array(mean_a_v)
+    min_b_v, mean_b_v = np.array(min_b_v), np.array(mean_b_v)
+
+    fig = plt.figure(figsize=(max(14, n_enc * 2.0), 6))
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 3], wspace=0.08)
+    ax_map = fig.add_subplot(gs[0, 0])
+    ax_bars = fig.add_subplot(gs[0, 1])
+
+    ax_map.set_aspect("equal")
+    ax_map.plot(pts[:, 0], pts[:, 1], color="#cccccc", lw=2.0, zorder=1)
+    for i, (ea, eb) in enumerate(matched):
+        arc = ea["arc_mean"] if ea else eb["arc_mean"]
+        idx = min(int(np.searchsorted(s, arc)), len(pts) - 1)
+        tightest = min(
+            ea["min"] if ea else 99.0, eb["min"] if eb else 99.0,
+        )
+        c = "#cc0000" if tightest < 0.4 else "#ff8800" if tightest < safe_thresh else "#228B22"
+        ax_map.plot(pts[idx, 0], pts[idx, 1], "o", color=c, ms=8, zorder=10,
+                    markeredgecolor="black", markeredgewidth=0.8)
+        ax_map.annotate(
+            f"{i+1}", (pts[idx, 0], pts[idx, 1]),
+            fontsize=7, fontweight="bold", ha="center", va="bottom",
+            xytext=(0, 7), textcoords="offset points",
+            bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="black", lw=0.4),
+        )
+    ax_map.set_title("Route", fontsize=9)
+    ax_map.tick_params(labelsize=6)
+
+    x = np.arange(n_enc)
+    w = 0.18
+    ax_bars.bar(x - 1.5 * w, min_a_v, w, label=f"{args.label_a} min",
+                color="#d62728", alpha=0.9, edgecolor="black", lw=0.4)
+    ax_bars.bar(x - 0.5 * w, mean_a_v, w, label=f"{args.label_a} mean",
+                color="#d62728", alpha=0.35, edgecolor="black", lw=0.4)
+    if has_b:
+        ax_bars.bar(x + 0.5 * w, min_b_v, w, label=f"{args.label_b} min",
+                    color="#2166ac", alpha=0.9, edgecolor="black", lw=0.4)
+        ax_bars.bar(x + 1.5 * w, mean_b_v, w, label=f"{args.label_b} mean",
+                    color="#2166ac", alpha=0.35, edgecolor="black", lw=0.4)
+
+    for xi, va, vb in zip(x, min_a_v, min_b_v if has_b else [np.nan] * n_enc):
+        if not np.isnan(va):
+            ax_bars.text(xi - 1.5 * w, va + 0.02, f"{va:.2f}", ha="center",
+                         va="bottom", fontsize=6.5, color="#d62728", fontweight="bold")
+        if has_b and not np.isnan(vb):
+            ax_bars.text(xi + 0.5 * w, vb + 0.02, f"{vb:.2f}", ha="center",
+                         va="bottom", fontsize=6.5, color="#2166ac", fontweight="bold")
+
+    ax_bars.axhspan(0, 0.2, alpha=0.07, color="red")
+    ax_bars.axhspan(0.2, 0.4, alpha=0.04, color="orange")
+    ax_bars.axhline(0.2, color="#cc0000", lw=0.6, ls="--", alpha=0.5)
+    ax_bars.axhline(0.4, color="#ff8800", lw=0.6, ls="--", alpha=0.5)
+    ax_bars.axhline(safe_thresh, color="#228B22", lw=0.6, ls="--", alpha=0.3)
 
     if has_b:
-        bs_mid_b, mean_b, min_b = bin_scalar_by_arc(arc_b, clr_b, s_max, bin_m)
+        for i in range(n_enc):
+            ma, mb = min_a_v[i], min_b_v[i]
+            if np.isnan(ma) or np.isnan(mb):
+                continue
+            y_top = max(mean_a_v[i], mean_b_v[i]) + 0.12
+            if ma >= safe_thresh and mb >= safe_thresh:
+                ax_bars.text(x[i], y_top, "both safe", ha="center", fontsize=6,
+                             color="#228B22", fontstyle="italic")
+            elif mb > ma:
+                ax_bars.text(x[i], y_top, args.label_b, ha="center", fontsize=6,
+                             color="#2166ac", fontweight="bold")
+            elif ma > mb:
+                ax_bars.text(x[i], y_top, args.label_a, ha="center", fontsize=6,
+                             color="#d62728", fontweight="bold")
 
-        diff = mean_a - mean_b
-        diff_abs = float(np.nanmax(np.abs(diff))) if np.any(~np.isnan(diff)) else 1.0
-        diff_abs = max(diff_abs, 0.1)
+    ax_bars.set_xticks(x)
+    ax_bars.set_xticklabels(labels, fontsize=7)
+    ax_bars.set_ylabel("Clearance (m)", fontsize=10)
+    ax_bars.legend(fontsize=7, ncol=4, loc="upper right")
+    ax_bars.grid(axis="y", alpha=0.15)
+    all_v = np.concatenate(
+        [v[~np.isnan(v)] for v in [min_a_v, mean_a_v, min_b_v, mean_b_v]]
+    )
+    ax_bars.set_ylim(0, min(3.5, float(all_v.max()) * 1.2))
 
-        fig = plt.figure(figsize=(22, 12))
-        gs = fig.add_gridspec(2, 3, height_ratios=[1.8, 1.0],
-                              width_ratios=[1, 1, 1], hspace=0.25, wspace=0.15)
-        ax_a = fig.add_subplot(gs[0, 0])
-        ax_b = fig.add_subplot(gs[0, 1], sharex=ax_a, sharey=ax_a)
-        ax_d = fig.add_subplot(gs[0, 2], sharex=ax_a, sharey=ax_a)
-        ax_line = fig.add_subplot(gs[1, :])
-
-        plot_route_heatmap(ax_a, pts, bin_segments, mean_a,
-                           f"{args.label_a}: mean clearance (m)", 0.0, vmax, "RdYlGn")
-        plot_route_heatmap(ax_b, pts, bin_segments, mean_b,
-                           f"{args.label_b}: mean clearance (m)", 0.0, vmax, "RdYlGn")
-        plot_route_heatmap(ax_d, pts, bin_segments, diff,
-                           f"A − B  (red = A closer, blue = B closer)",
-                           -diff_abs, diff_abs, "RdBu")
-
-        for ax, vmin_, vmax_, cm in [
-            (ax_a, 0.0, vmax, "RdYlGn"),
-            (ax_b, 0.0, vmax, "RdYlGn"),
-            (ax_d, -diff_abs, diff_abs, "RdBu"),
-        ]:
-            sm = plt.cm.ScalarMappable(cmap=cm, norm=plt.Normalize(vmin=vmin_, vmax=vmax_))
-            sm.set_array([])
-            cb = plt.colorbar(sm, ax=ax, pad=0.02, fraction=0.04, aspect=30)
-            cb.ax.tick_params(labelsize=8)
-            cb.set_label("m", fontsize=8)
-
-        ax_line.plot(bs_mid_a, mean_a, label=f"{args.label_a} mean clr", color="C0", lw=1.4)
-        ax_line.plot(bs_mid_b, mean_b, label=f"{args.label_b} mean clr", color="C1", lw=1.4)
-        ax_line.plot(bs_mid_a, min_a, label=f"{args.label_a} min clr", color="C0", lw=0.8, alpha=0.5)
-        ax_line.plot(bs_mid_b, min_b, label=f"{args.label_b} min clr", color="C1", lw=0.8, alpha=0.5)
-        ax_line.axhline(0.2, color="#cc0000", lw=0.5, ls="--", label="cross (0.2m)")
-        ax_line.axhline(0.4, color="#ff8800", lw=0.5, ls="--", label="near (0.4m)")
-        ax_line.set_xlabel("Route arc length (m)")
-        ax_line.set_ylabel("Ego-to-parked-vehicle clearance (m)")
-        ax_line.legend(fontsize=8, ncol=3)
-        ax_line.grid(alpha=0.3)
-
-        fig.suptitle(
-            f"Static collision clearance: {args.label_a} vs {args.label_b}  "
-            f"({len(arc_a)} / {len(arc_b)} steps, route {s_max:.0f} m)",
-            fontsize=11,
-        )
-    else:
-        fig = plt.figure(figsize=(18, 8))
-        gs = fig.add_gridspec(2, 1, height_ratios=[1.5, 1.0], hspace=0.25)
-        ax_map = fig.add_subplot(gs[0])
-        ax_line = fig.add_subplot(gs[1])
-
-        plot_route_heatmap(ax_map, pts, bin_segments, mean_a,
-                           f"{args.label_a}: mean clearance (m)", 0.0, vmax, "RdYlGn")
-        sm = plt.cm.ScalarMappable(cmap="RdYlGn", norm=plt.Normalize(vmin=0.0, vmax=vmax))
-        sm.set_array([])
-        cb = plt.colorbar(sm, ax=ax_map, pad=0.02, fraction=0.04, aspect=30)
-        cb.ax.tick_params(labelsize=8)
-        cb.set_label("m", fontsize=8)
-
-        ax_line.plot(bs_mid_a, mean_a, label="mean clr", color="C0", lw=1.4)
-        ax_line.plot(bs_mid_a, min_a, label="min clr", color="C0", lw=0.8, alpha=0.5)
-        ax_line.axhline(0.2, color="#cc0000", lw=0.5, ls="--", label="cross (0.2m)")
-        ax_line.axhline(0.4, color="#ff8800", lw=0.5, ls="--", label="near (0.4m)")
-        ax_line.set_xlabel("Route arc length (m)")
-        ax_line.set_ylabel("Ego-to-parked-vehicle clearance (m)")
-        ax_line.legend(fontsize=8)
-        ax_line.grid(alpha=0.3)
-
-        fig.suptitle(
-            f"Static collision clearance: {args.label_a}  "
-            f"({len(arc_a)} steps, route {s_max:.0f} m)",
-            fontsize=11,
-        )
-
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    tight = sum(
+        1 for i in range(n_enc)
+        if not np.isnan(min_a_v[i])
+        and (not has_b or not np.isnan(min_b_v[i]))
+        and (min_a_v[i] < safe_thresh or (has_b and min_b_v[i] < safe_thresh))
+    )
+    title_parts = [
+        f"{args.label_a}" + (f" vs {args.label_b}" if has_b else ""),
+        f"{n_enc} encounters",
+        f"{tight} tight (< {safe_thresh}m)",
+    ]
+    fig.suptitle(
+        "Parked vehicle avoidance: " + ", ".join(title_parts),
+        fontsize=12, fontweight="bold",
+    )
+    fig.subplots_adjust(left=0.04, right=0.98, bottom=0.1, top=0.90)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.output, dpi=140, bbox_inches="tight")
+    fig.savefig(args.output, dpi=150, bbox_inches="tight")
     print(f"Saved {args.output}")
 
     np.savez(
@@ -433,9 +516,6 @@ def main():
         arc_a=arc_a, clr_a=clr_a,
         **({"arc_b": arc_b, "clr_b": clr_b} if has_b else {}),
         route_pts=pts, route_s=s,
-        bin_m=bin_m, bin_s_mid=bs_mid_a,
-        mean_a=mean_a, min_a=min_a,
-        **({"mean_b": mean_b, "min_b": min_b} if has_b else {}),
     )
     print(f"Saved {args.output.with_suffix('.npz')}")
 
