@@ -30,7 +30,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import re
 from pathlib import Path
@@ -99,7 +98,7 @@ def _score_run_ego_actual(
         with np.load(path, allow_pickle=True) as raw:
             data_np = {k: raw[k] for k in raw.files if k != "version"}
 
-        ex, ey, eyaw = recover_ego_world_pose_from_goal(data_np["goal_pose"], route)
+        ex, ey, _ = recover_ego_world_pose_from_goal(data_np["goal_pose"], route)
         s_arc, _, _ = project_to_polyline(np.array([ex, ey]), pts, s)
 
         es = data_np["ego_shape"]

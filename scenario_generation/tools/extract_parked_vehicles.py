@@ -103,8 +103,15 @@ def collect_tracks_and_ego(
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
 
-    ext = rosbag_path.suffix.lower()
-    storage_id = "mcap" if ext == ".mcap" else "sqlite3"
+    bag_path = Path(rosbag_path)
+    metadata = bag_path.parent / "metadata.yaml" if bag_path.is_file() else bag_path / "metadata.yaml"
+    if metadata.exists():
+        with open(metadata) as mf:
+            import re as _re
+            m = _re.search(r"storage_identifier:\s*(\S+)", mf.read())
+            storage_id = m.group(1) if m else "sqlite3"
+    else:
+        storage_id = "mcap" if bag_path.suffix.lower() == ".mcap" else "sqlite3"
 
     reader = rosbag2_py.SequentialReader()
     reader.open(
@@ -399,6 +406,11 @@ def main():
         print(f"Reading {bag} ...")
         tracks, ego_pos = collect_tracks_and_ego(bag, args.topic, args.kinematic_topic)
         print(f"  {len(tracks)} tracks, {len(ego_pos)} ego poses")
+        if ego_pos.ndim != 2 or ego_pos.shape[0] == 0:
+            raise RuntimeError(
+                f"No ego kinematic_state messages in {bag}. "
+                "Ensure the bag contains /localization/kinematic_state."
+            )
         all_ego.append(ego_pos)
         for key, entry in tracks.items():
             dst = merged_tracks[key]

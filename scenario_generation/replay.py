@@ -273,8 +273,8 @@ class SpawnConfig:
     static_npc_shoulder_margin_m: float = 0.3
     static_npc_seed: int | None = None
 
-    # Path to a YAML file with real parked-vehicle poses extracted from a
-    # rosbag (e.g. via extract_parked_vehicles_from_rosbag.py).  When set,
+    # Path to a YAML file with real parked-vehicle poses (e.g. via
+    # ``scenario_generation.tools.extract_parked_vehicles``).  When set,
     # the listed vehicles are injected as static NPCs at their world-frame
     # positions — mutually exclusive with the synthetic static_npc_count.
     parked_vehicles_yaml: str | None = None
@@ -346,6 +346,16 @@ class SpawnConfig:
                 "/ lane_gate values that only exist when the per-step "
                 "metrics log is being produced. Set both, or disable the "
                 "overlay."
+            )
+        if self.static_npc_count > 0 and self.parked_vehicles_yaml:
+            raise ValueError(
+                "static_npc_count and parked_vehicles_yaml are mutually "
+                "exclusive — use one or the other."
+            )
+        if self.parked_vehicle_visibility_m <= 0:
+            raise ValueError(
+                f"parked_vehicle_visibility_m must be > 0; "
+                f"got {self.parked_vehicle_visibility_m}"
             )
 
     @classmethod
@@ -962,7 +972,7 @@ class SceneNPCManager:
         The YAML must contain a ``parked_vehicles`` list where each entry has
         ``pose.position.{x,y,z}``, ``pose.orientation.{x,y,z,w}``, and
         ``dimensions.{x,y,z}`` in world (map) frame — the format produced by
-        ``extract_parked_vehicles_from_rosbag.py``.
+        ``scenario_generation.tools.extract_parked_vehicles``.
         """
         import yaml
 
@@ -1863,11 +1873,6 @@ def run_route_replay(
     # One-shot stopped-NPC prepopulation (static-collision audit). No-op
     # when spawn_config.static_npc_count == 0 (default). These NPCs never
     # move and never despawn — see SceneNPCManager.prepopulate_static_npcs.
-    if spawn_config.static_npc_count > 0 and spawn_config.parked_vehicles_yaml:
-        raise ValueError(
-            "static_npc_count and parked_vehicles_yaml are mutually exclusive"
-        )
-
     if spawn_config.static_npc_count > 0:
         npc_manager.prepopulate_static_npcs(scene)
 
