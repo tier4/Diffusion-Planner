@@ -314,12 +314,21 @@ class LaneletSceneBuilder:
 
         for ll in self._lanelet_map.laneletLayer:
             subtype = ll.attributes["subtype"] if "subtype" in ll.attributes else ""
-            raw_cl = np.array([(p.x, p.y) for p in ll.centerline], dtype=np.float32)
             raw_lb = np.array([(p.x, p.y) for p in ll.leftBound], dtype=np.float32)
             raw_rb = np.array([(p.x, p.y) for p in ll.rightBound], dtype=np.float32)
 
-            if len(raw_cl) < 2:
+            if len(raw_lb) < 2 or len(raw_rb) < 2:
                 continue
+
+            # Compute centerline as midpoint of arc-length-resampled bounds.
+            # The lanelet2 Python binding's ll.centerline produces broken
+            # geometry for U-turn lanelets with asymmetric left/right bounds
+            # (it shortcuts instead of following the loop). The C++
+            # centerline3d() handles this correctly; resampling + midpoint
+            # replicates that behaviour.
+            n_cl = min(max(len(raw_lb), len(raw_rb)), 50)
+            raw_cl = ((_interpolate_lane(raw_lb, n_cl)
+                       + _interpolate_lane(raw_rb, n_cl)) * 0.5).astype(np.float32)
 
             self._ll_by_id[ll.id] = ll
 
