@@ -120,18 +120,25 @@ def _score_run_ego_actual(
         nb_xy = nb_last[valid, :2]
         nb_cos = nb_last[valid, 2]
         nb_sin = nb_last[valid, 3]
-        nb_w = nb_last[valid, 6] if nb_last.shape[-1] > 6 else np.full(valid.sum(), 2.0)
-        nb_l = nb_last[valid, 7] if nb_last.shape[-1] > 7 else np.full(valid.sum(), 4.5)
+        if nb_last.shape[-1] < 8:
+            raise ValueError(
+                f"neighbor_agents_past has {nb_last.shape[-1]} columns, "
+                "expected >= 8 (x, y, cos, sin, vx, vy, width, length)"
+            )
+        nb_w = nb_last[valid, 6]
+        nb_l = nb_last[valid, 7]
 
-        # Ego at origin in ego frame, heading = 0 (forward along x)
         ego_corners = _build_obb_corners(0.0, 0.0, 1.0, 0.0, ego_len, ego_w, wb)
 
         best_d = 99.0
         for j in range(len(nb_xy)):
             nx, ny = float(nb_xy[j, 0]), float(nb_xy[j, 1])
             nc, ns_ = float(nb_cos[j]), float(nb_sin[j])
-            nw = float(nb_w[j]) if nb_w[j] > 0.1 else 2.0
-            nl = float(nb_l[j]) if nb_l[j] > 0.1 else 4.5
+            nw, nl = float(nb_w[j]), float(nb_l[j])
+            if nw < 0.1 or nl < 0.1:
+                raise ValueError(
+                    f"Neighbor {j} has invalid dimensions (w={nw}, l={nl})"
+                )
             npc_corners = _build_obb_corners(nx, ny, nc, ns_, nl, nw, nl * 0.65)
 
             pt1, pt2 = _closest_points_between_rects(ego_corners, npc_corners)
