@@ -332,7 +332,7 @@ def main() -> None:
                     "top1_lane_cross": top1["lane_cross"],
                     "top1_kin_violated": top1["kin_violated"],
                     "top1_coll_step": top1["coll_step"],
-                "top1_static_crossing": top1["static_crossing"],
+                    "top1_static_crossing": top1["static_crossing"],
                     "det_cl": float(det_r.centerline),
                     "det_total": float(det_r.total),
                     "png": None,

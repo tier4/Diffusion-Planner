@@ -1983,7 +1983,7 @@ def run_route_replay(
     # - each alive NPC's current lanelet pinned so neighbors always have
     #   lane context even when outside the ego bbox (NPCs can live up to
     #   despawn_distance = 120 m > bbox = 100 m from ego)
-    # - final hard cap at ``max_map_lanelets`` (140 = tensor_converter._NUM_LANES).
+    # - final 140-lane selection done per ego agent in MapTensorCache.get_lanes_ego.
     def _compute_map_lanelet_ids(
         ego_xy: np.ndarray,
         neighbor_positions: list[np.ndarray],
