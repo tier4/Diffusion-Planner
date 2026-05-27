@@ -58,6 +58,7 @@ enum class SkippingLabel {
 
   // Filter skipping reasons (ported from the standalone python filter scripts)
   Collision,  // GT ego trajectory collides with a static object, neighbor, or road border
+  OffLane,    // GT ego trajectory is too far from any lane centerline
 };
 
 // Structure to hold detailed skipping information
@@ -137,6 +138,16 @@ struct SkippingInfo
       details += reasons[i];
     }
     return {SkippingLabel::Collision, details, {}, {}};
+  }
+
+  static SkippingInfo off_lane(float mean_distance, float max_distance)
+  {
+    return {
+      SkippingLabel::OffLane,
+      "Off lane: mean_dist=" + std::to_string(mean_distance) +
+        "m, max_dist=" + std::to_string(max_distance) + "m",
+      {},
+      {}};
   }
 };
 

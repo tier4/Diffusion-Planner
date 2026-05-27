@@ -14,15 +14,20 @@ Usage:
 import argparse
 import json
 import os
-import sys
 from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from filter_collision_free_npz import load_path_list  # noqa: E402
+
+def load_path_list(input_json: Path) -> list[str]:
+    """Accept both legacy list format and sampling dict format {"seed": ..., "files": [...]}."""
+    with open(input_json, "r") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        return list(data["files"])
+    return list(data)
 
 
 def parse_args() -> argparse.Namespace:

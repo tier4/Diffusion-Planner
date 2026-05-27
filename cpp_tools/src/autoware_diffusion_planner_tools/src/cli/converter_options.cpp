@@ -53,6 +53,10 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
   options.road_border_margin = 0.0f;
   options.collision_time_stride = 5;
 
+  // In-lanelet filter defaults match filter_in_lanelet_npz.py.
+  options.offlane_max_score = 6.0f;
+  options.offlane_time_stride = 1;
+
   for (int64_t i = 4; i < argc; ++i) {
     const std::string arg = argv[i];
     std::cout << "arg[" << i << "] = " << arg << std::endl;
@@ -86,6 +90,10 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
       options.road_border_margin = std::stof(arg.substr(21));
     } else if (arg.find("--collision_time_stride=") == 0) {
       options.collision_time_stride = std::stoll(arg.substr(24));
+    } else if (arg.find("--offlane_max_score=") == 0) {
+      options.offlane_max_score = std::stof(arg.substr(20));
+    } else if (arg.find("--offlane_time_stride=") == 0) {
+      options.offlane_time_stride = std::stoll(arg.substr(22));
     }
   }
 
@@ -111,6 +119,8 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
             << ", neighbor_margin: " << options.neighbor_margin
             << ", road_border_margin: " << options.road_border_margin
             << ", collision_time_stride: " << options.collision_time_stride << std::endl;
+  std::cout << "Off-lane filter max_score: " << options.offlane_max_score
+            << ", offlane_time_stride: " << options.offlane_time_stride << std::endl;
 
   return options;
 }

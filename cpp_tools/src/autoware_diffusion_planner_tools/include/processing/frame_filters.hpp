@@ -258,6 +258,70 @@ inline bool check_road_border_collision(
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// In-lanelet ("off-lane") filter, ported from score_offroad_npz.py /
+// filter_in_lanelet_npz.py: score = mean over the (strided) future steps of the
+// minimum distance from ego_agent_future xy to any valid lane centerline point.
+// ---------------------------------------------------------------------------
+
+struct OffLaneResult
+{
+  float mean_distance;  // the score; mean over evaluated steps of min centerline distance
+  float max_distance;
+  bool has_centerline;  // false == no valid centerline points (treated as +inf score)
+};
+
+inline OffLaneResult compute_offlane_score(
+  const std::vector<float> & ego_future, const std::vector<float> & lanes, int64_t time_stride)
+{
+  using autoware::diffusion_planner::NUM_SEGMENTS_IN_LANE;
+  using autoware::diffusion_planner::OUTPUT_T;
+  using autoware::diffusion_planner::POINTS_PER_SEGMENT;
+  using autoware::diffusion_planner::POSE_DIM;
+  using autoware::diffusion_planner::SEGMENT_POINT_DIM;
+  if (time_stride < 1) time_stride = 1;
+
+  // Valid lane centerline points (xy), matching collect_centerline_points().
+  std::vector<std::array<float, 2>> pts;
+  pts.reserve(NUM_SEGMENTS_IN_LANE * POINTS_PER_SEGMENT);
+  for (int64_t s = 0; s < NUM_SEGMENTS_IN_LANE; ++s) {
+    for (int64_t p = 0; p < POINTS_PER_SEGMENT; ++p) {
+      const float * c = &lanes[(s * POINTS_PER_SEGMENT + p) * SEGMENT_POINT_DIM];
+      if (std::fabs(c[0]) + std::fabs(c[1]) > 1e-6f) pts.push_back({c[0], c[1]});
+    }
+  }
+
+  OffLaneResult result{0.0f, 0.0f, !pts.empty()};
+  if (pts.empty()) return result;  // score == +inf
+
+  double sum = 0.0;
+  int64_t count = 0;
+  for (int64_t t = 0; t < OUTPUT_T; t += time_stride) {
+    const float ex = ego_future[t * POSE_DIM + 0];
+    const float ey = ego_future[t * POSE_DIM + 1];
+    float best_sq = 1e30f;
+    for (const auto & pt : pts) {
+      const float dx = ex - pt[0];
+      const float dy = ey - pt[1];
+      const float d_sq = dx * dx + dy * dy;
+      if (d_sq < best_sq) best_sq = d_sq;
+    }
+    const float d = std::sqrt(best_sq);
+    sum += d;
+    result.max_distance = std::max(result.max_distance, d);
+    ++count;
+  }
+  result.mean_distance = static_cast<float>(sum / std::max<int64_t>(count, 1));
+  return result;
+}
+
+// A frame is off-lane (dropped) when there is no centerline or the mean distance
+// reaches max_score, matching filter_in_lanelet_npz.py's `score >= max_score` drop.
+inline bool is_off_lane(const OffLaneResult & r, float max_score)
+{
+  return !r.has_centerline || r.mean_distance >= max_score;
+}
+
 // Top-level: returns the list of collision reasons for one frame (empty == keep).
 inline CollisionResult check_collision(
   const std::vector<float> & ego_future, const std::vector<float> & ego_shape,

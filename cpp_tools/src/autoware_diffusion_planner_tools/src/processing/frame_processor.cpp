@@ -306,6 +306,22 @@ void process_sequence(
       }
     }
 
+    // In-lanelet filter (ported from filter_in_lanelet_npz.py), always applied:
+    // drop frames whose GT ego trajectory is too far from any lane centerline.
+    {
+      const frame_filters::OffLaneResult offlane =
+        frame_filters::compute_offlane_score(ego_future, lanes, options.offlane_time_stride);
+      if (frame_filters::is_off_lane(offlane, options.offlane_max_score)) {
+        std::cout << "Skip this frame " << i << " due to off-lane (mean_dist="
+                  << offlane.mean_distance << "m)" << std::endl;
+        save_frame_json(
+          options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
+          seq.data_list[i].timestamp,
+          SkippingInfo::off_lane(offlane.mean_distance, offlane.max_distance));
+        continue;
+      }
+    }
+
     save_frame_data(
       options.save_dir, options.rosbag_dir_name, token, ego_past, ego_current, ego_future,
       neighbor_past, neighbor_future, static_objects, lanes, lanes_speed_limit,

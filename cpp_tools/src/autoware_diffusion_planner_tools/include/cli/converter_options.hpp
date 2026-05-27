@@ -49,6 +49,12 @@ struct ConverterOptions
   float neighbor_margin;
   float road_border_margin;
   int64_t collision_time_stride;
+
+  // In-lanelet filter (ported from filter_in_lanelet_npz.py), always applied.
+  // A frame whose GT ego trajectory is on average >= offlane_max_score metres from
+  // any lane centerline is skipped during conversion.
+  float offlane_max_score;
+  int64_t offlane_time_stride;
 };
 
 std::optional<ConverterOptions> parse_arguments(int argc, char ** argv);
