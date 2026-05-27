@@ -436,6 +436,35 @@ _VARIANTS: dict[str, GenerationVariant] = {
         noise_configs=[],
     ),
 
+    "avoidance_cl_col16": GenerationVariant(
+        description=(
+            "K=16 avoidance PRiSM variant: 8 collision-guided + 7 CL-guided "
+            "+ 1 det. Collision slots sweep col scale 0.5-3.0 with varied "
+            "noise. CL slots sweep rl_cl 1.5-3.0 with speed + stretch. "
+            "Use with use_route_cl_guidance=True."
+        ),
+        cl_spd_configs=[
+            # 7 CL-guided slots (rl_cl sweep with speed + stretch)
+            _RL_CL_1_5_SPD1_5_DET,
+            _RL_CL_2_0_SPD2_0_DET,
+            _RL_CL_2_5_SPD2_5_DET,
+            _RL_CL_3_0_SPD3_0_DET,
+            {"cl": 2.0, "spd": 2.0, "noise": (0.3, 0.8), "label": "RL_CL2.0_SPD2.0_n0308"},
+            {"cl": 2.5, "spd": 2.5, "noise": (0.3, 0.8), "label": "RL_CL2.5_SPD2.5_n0308"},
+            {"cl": 2.0, "spd": 2.0, "noise": (0.5, 1.5), "stretch": 1.1, "label": "RL_CL2.0_SPD2.0_str11_n0515"},
+            # 8 collision-guided slots (col sweep with rl_cl anchor)
+            {"cl": 2.0, "spd": 0.0, "noise": (0.0, 0.0), "col": 0.5, "label": "RL_CL2.0_col05_det"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.0, 0.0), "col": 1.0, "label": "RL_CL2.0_col10_det"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.3, 0.8), "col": 1.0, "label": "RL_CL2.0_col10_n0308"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.3, 0.8), "col": 2.0, "label": "RL_CL2.0_col20_n0308"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.5, 1.5), "col": 2.0, "label": "RL_CL2.0_col20_n0515"},
+            {"cl": 2.0, "spd": 0.0, "noise": (0.5, 1.5), "col": 3.0, "label": "RL_CL2.0_col30_n0515"},
+            {"cl": 3.0, "spd": 0.0, "noise": (0.3, 0.8), "col": 1.5, "label": "RL_CL3.0_col15_n0308"},
+            {"cl": 3.0, "spd": 0.0, "noise": (0.5, 1.5), "col": 2.5, "label": "RL_CL3.0_col25_n0515"},
+        ],
+        noise_configs=[],
+    ),
+
     "rsft_v2_col4": GenerationVariant(
         description=(
             "Four collision-guided slots for the static-collision audit: "

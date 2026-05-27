@@ -192,7 +192,7 @@ class SpawnConfig:
     # 5-15 m of the goal then drive off into the horizon.
     goal_pass_window_m: float = 25.0
     map_refresh_steps: int = 5
-    max_map_lanelets: int = 140
+    max_map_lanelets: int = 2000
     # ROS node uses 100 m; empirical survey of our training NPZs shows
     # ~23 (min) – 89 (max) non-zero lanes per scene, median 61. 100 m on the
     # Shinagawa map tops out at ~22 lanelets — at the bottom of training
@@ -512,7 +512,10 @@ class SceneNPCManager:
             print(f"  [NPCManager] despawned {removed} (beyond {self.cfg.despawn_distance:.0f} m)")
 
         # --- Spawn pass ---
-        active_nb = sum(1 for a in scene.agents if a.id != scene.ego_agent_id)
+        active_nb = sum(
+            1 for a in scene.agents
+            if a.id != scene.ego_agent_id and not self.is_static_npc(a.id)
+        )
         if active_nb >= self.cfg.max_active_npcs:
             return
         if self._rng.random() >= self.cfg.spawn_probability:
@@ -561,6 +564,7 @@ class SceneNPCManager:
             _obb_corners(
                 a.current_position[0], a.current_position[1],
                 a.current_heading, a.length, a.width,
+                wheelbase=None if self.is_static_npc(a.id) else a.wheelbase,
             )
             for a in scene.agents
         ]
@@ -876,6 +880,7 @@ class SceneNPCManager:
             _obb_corners(
                 a.current_position[0], a.current_position[1],
                 a.current_heading, a.length, a.width,
+                wheelbase=None if self.is_static_npc(a.id) else a.wheelbase,
             )
             for a in scene.agents
         ]
@@ -1226,20 +1231,13 @@ def _nearest_border_point(
 
 def _ego_obb_corners(
     ex: float, ey: float, heading: float, length: float, width: float,
+    wheelbase: float | None = None,
 ) -> np.ndarray:
-    """Four OBB corners of the ego footprint in world frame (pure geometry).
+    """Four OBB corners of the ego footprint in world frame.
 
-    Matches the rear-axle convention used by ``scenario_generation.visualize
-    .draw_agent_box``: baselink (ego x, y) sits rear_overhang behind the
-    back of the box.
+    Uses the shared ``_obb_corners`` with the ego's actual wheelbase.
     """
-    rear_overhang = (length - length * 0.65) / 2
-    x0, x1 = -rear_overhang, length - rear_overhang
-    y0, y1 = -width / 2, width / 2
-    local = np.array([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=np.float64)
-    c, s = math.cos(heading), math.sin(heading)
-    R = np.array([[c, -s], [s, c]], dtype=np.float64)
-    return (R @ local.T).T + np.array([ex, ey], dtype=np.float64)
+    return _obb_corners(ex, ey, heading, length, width, wheelbase=wheelbase)
 
 
 def _ego_nearest_static_npc(
@@ -1279,6 +1277,60 @@ def _ego_nearest_static_npc(
     ego_corners = _obb_corners(
         float(ego_pos[0]), float(ego_pos[1]),
         float(ego.current_heading), float(ego.length), float(ego.width),
+        wheelbase=float(ego.wheelbase),
+    )
+    npc_corners_list = [
+        _obb_corners(
+            float(a.current_position[0]), float(a.current_position[1]),
+            float(a.current_heading), float(a.length), float(a.width),
+        )
+        for a in candidates
+    ]
+    n = len(candidates)
+    r1 = torch.from_numpy(np.broadcast_to(ego_corners, (n, 4, 2)).copy().astype(np.float32))
+    r2 = torch.from_numpy(np.stack(npc_corners_list).astype(np.float32))
+    pt_e, pt_n = _closest_points_between_rects(r1, r2)
+    dists = (pt_e - pt_n).norm(dim=-1)
+    i_best = int(dists.argmin().item())
+    d_best = float(dists[i_best].item())
+    if d_best >= threshold_m:
+        return None
+    return (
+        pt_e[i_best].numpy(), pt_n[i_best].numpy(), d_best,
+        candidates[i_best].id,
+    )
+
+
+def _ego_nearest_moving_npc(
+    scene: SceneContext,
+    threshold_m: float = 5.0,
+) -> tuple[np.ndarray, np.ndarray, float, str] | None:
+    """Return the ego↔moving-NPC closest-pair when clearance < threshold."""
+    ego = scene.ego_agent
+    if ego is None:
+        return None
+    moving = [
+        a for a in scene.agents
+        if a.id != scene.ego_agent_id and not SceneNPCManager.is_static_npc(a.id)
+    ]
+    if not moving:
+        return None
+
+    ego_pos = ego.current_position
+    reach = threshold_m + float(ego.length)
+    candidates = [
+        a for a in moving
+        if float(np.linalg.norm(a.current_position - ego_pos)) <= reach + float(a.length)
+    ]
+    if not candidates:
+        return None
+
+    from rlvr.reward import _closest_points_between_rects
+
+    ego_corners = _obb_corners(
+        float(ego_pos[0]), float(ego_pos[1]),
+        float(ego.current_heading), float(ego.length), float(ego.width),
+        wheelbase=float(ego.wheelbase),
     )
     npc_corners_list = [
         _obb_corners(
@@ -1426,6 +1478,7 @@ def save_step_figure(
             ax, pos[0], pos[1], heading, agent.length, agent.width,
             color, alpha=0.85 if is_ego else 0.55, lw=2 if is_ego else 1,
             zorder=20 if is_ego else 15,
+            wheelbase=agent.wheelbase if is_ego else None,
         )
         arrow_len = max(agent.length, 2.5)
         ax.annotate(
@@ -1507,32 +1560,31 @@ def save_step_figure(
             f"lane={gate_s}  "
             f"lane_near={metrics.get('lane_near_frac', 0.0):.2f}"
         )
-        # Position the viz pointer using the nearest border point to the
-        # ego rear axle, then anchor the line on the nearest OBB corner
-        # (body edge, not baselink) so the visual length roughly tracks
-        # the body-to-border distance shown in the label.
-        border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
-        if border_pt is not None:
-            corners = _ego_obb_corners(
-                ex, ey, ego.current_heading,
-                float(ego.length), float(ego.width),
-            )
-            d_corner = np.hypot(corners[:, 0] - border_pt[0],
-                                corners[:, 1] - border_pt[1])
-            start = corners[int(d_corner.argmin())]
-            body_d = metrics.get("rb_min_dist", float("nan"))
-            ax.plot([start[0], border_pt[0]], [start[1], border_pt[1]],
-                    "k--", linewidth=1.3, alpha=0.7, zorder=29)
-            ax.plot(border_pt[0], border_pt[1], "ko", markersize=6, zorder=30,
-                    markeredgecolor="white", markeredgewidth=0.8)
-            mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
-            ax.annotate(f"{body_d:.2f} m",
-                        xy=(mx, my), fontsize=8, color="black",
-                        ha="center", va="center",
-                        bbox=dict(boxstyle="round,pad=0.2",
-                                  facecolor="white", edgecolor="black",
-                                  alpha=0.7),
-                        zorder=31)
+
+    # Road border distance line — always drawn (not gated on metrics).
+    border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
+    if border_pt is not None:
+        corners = _ego_obb_corners(
+            ex, ey, ego.current_heading,
+            float(ego.length), float(ego.width),
+            wheelbase=float(ego.wheelbase),
+        )
+        d_corner = np.hypot(corners[:, 0] - border_pt[0],
+                            corners[:, 1] - border_pt[1])
+        start = corners[int(d_corner.argmin())]
+        body_d = float(d_corner.min())
+        ax.plot([start[0], border_pt[0]], [start[1], border_pt[1]],
+                "k--", linewidth=1.3, alpha=0.7, zorder=29)
+        ax.plot(border_pt[0], border_pt[1], "ko", markersize=6, zorder=30,
+                markeredgecolor="white", markeredgewidth=0.8)
+        mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
+        ax.annotate(f"rb {body_d:.2f}m",
+                    xy=(mx, my), fontsize=8, color="black",
+                    ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.2",
+                              facecolor="white", edgecolor="black",
+                              alpha=0.7),
+                    zorder=31)
 
     # Ego ↔ nearest stopped-NPC closest-pair line. Drawn regardless of
     # whether metrics are enabled — only gate is proximity < threshold so
@@ -1565,6 +1617,31 @@ def save_step_figure(
                     ha="center", va="center",
                     bbox=dict(boxstyle="round,pad=0.1",
                               facecolor="white", edgecolor="#cc0000",
+                              alpha=0.85),
+                    zorder=31)
+
+    # Ego ↔ nearest moving NPC closest-pair line (blue).
+    mv_pair = _ego_nearest_moving_npc(scene, threshold_m=5.0)
+    if mv_pair is not None:
+        pt_e, pt_n, mv_d, mv_id = mv_pair
+        ax.plot([pt_e[0], pt_n[0]], [pt_e[1], pt_n[1]],
+                "-", color="#0055cc", lw=1.8, alpha=0.85, zorder=29)
+        ax.plot([pt_e[0], pt_n[0]], [pt_e[1], pt_n[1]],
+                "o", color="#0055cc", ms=5, zorder=30,
+                markeredgecolor="white", markeredgewidth=0.7)
+        mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
+        dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
+        seg_len = math.hypot(dx, dy)
+        if seg_len > 1e-6:
+            nx, ny = -dy / seg_len, dx / seg_len
+        else:
+            nx, ny = 0.0, 1.0
+        ax.annotate(f"{mv_d:.2f} m",
+                    xy=(mx + nx * 1.2, my + ny * 1.2),
+                    fontsize=7, color="#0055cc",
+                    ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.1",
+                              facecolor="white", edgecolor="#0055cc",
                               alpha=0.85),
                     zorder=31)
 
@@ -1682,6 +1759,141 @@ def _score_step(
     return out
 
 
+def _backfill_neighbor_futures(npz_dir: Path) -> None:
+    """Fill neighbor_agents_future in dumped NPZs with actual subsequent positions.
+
+    NPZs are ego-centric. To build step-S's neighbor future we transform
+    subsequent frames' neighbor world positions back into step-S's ego
+    frame. Uses vectorized numpy ops for the heavy lifting.
+    """
+    import glob as _glob
+
+    traj_log_path = npz_dir.parent / "trajectory_log.json"
+    if not traj_log_path.exists():
+        print("  [backfill] no trajectory_log.json found, skipping")
+        return
+
+    with open(traj_log_path) as f:
+        traj_log = json.load(f)
+
+    npz_paths = sorted(_glob.glob(str(npz_dir / "replay_step_*.npz")))
+    if not npz_paths:
+        return
+    S = len(npz_paths)
+    future_len = 80
+    match_thresh = 2.0
+
+    # ── Phase 1: load ego poses and all neighbor current positions ──
+    ego_poses = np.zeros((S, 3), dtype=np.float64)  # x, y, heading
+    step_nums = []
+    all_nb_ego_xy = []   # list of (N, 2)
+    all_nb_ego_cs = []   # list of (N, 2) cos,sin
+    for fi, p in enumerate(npz_paths):
+        d = np.load(p)
+        nb_past = d["neighbor_agents_past"]  # (N, 31, 11)
+        all_nb_ego_xy.append(nb_past[:, -1, :2].copy())
+        all_nb_ego_cs.append(nb_past[:, -1, 2:4].copy())
+        sn = int(Path(p).stem.split("_")[-1])
+        step_nums.append(sn)
+
+    # Map step numbers to trajectory log entries
+    step_to_pose = {e["step"]: (e["x"], e["y"], e["heading"]) for e in traj_log}
+    for fi, sn in enumerate(step_nums):
+        pose = step_to_pose.get(sn)
+        if pose:
+            ego_poses[fi] = pose
+
+    # ── Phase 2: batch ego→world transform for all neighbors ──
+    N = all_nb_ego_xy[0].shape[0]  # neighbor slot count (320)
+    # Stack into (S, N, 2)
+    nb_ego = np.stack(all_nb_ego_xy)       # (S, N, 2)
+    nb_cs = np.stack(all_nb_ego_cs)        # (S, N, 2)
+    nb_head_ego = np.arctan2(nb_cs[:, :, 1], nb_cs[:, :, 0])  # (S, N)
+
+    # Valid mask: neighbor slot has non-zero position
+    valid_mask = np.any(nb_ego != 0, axis=2)  # (S, N)
+
+    # Ego→world: world_xy = R(h) @ ego_xy + [ex, ey]
+    cos_h = np.cos(ego_poses[:, 2])  # (S,)
+    sin_h = np.sin(ego_poses[:, 2])  # (S,)
+    nb_world = np.zeros_like(nb_ego)
+    nb_world[:, :, 0] = (cos_h[:, None] * nb_ego[:, :, 0]
+                          - sin_h[:, None] * nb_ego[:, :, 1]
+                          + ego_poses[:, 0:1])
+    nb_world[:, :, 1] = (sin_h[:, None] * nb_ego[:, :, 0]
+                          + cos_h[:, None] * nb_ego[:, :, 1]
+                          + ego_poses[:, 1:2])
+    nb_world[~valid_mask] = 0
+
+    # World heading per neighbor
+    nb_head_world = nb_head_ego + ego_poses[:, 2:3]  # (S, N)
+
+    # ── Phase 3: match + fill futures ──
+    print(f"  [backfill] filling futures for {S} steps, {N} neighbor slots ...")
+    patched = 0
+
+    for si in range(S):
+        s_ex, s_ey, s_eh = ego_poses[si]
+        cos_inv = math.cos(-s_eh)
+        sin_inv = math.sin(-s_eh)
+
+        cur_world_si = nb_world[si]       # (N, 2)
+        valid_si = valid_mask[si]          # (N,)
+        active = np.where(valid_si)[0]
+        if len(active) == 0:
+            continue
+
+        # Precompute the future frame range
+        fj_end = min(si + future_len + 1, S)
+        n_future = fj_end - si - 1
+        if n_future <= 0:
+            continue
+
+        # Start from existing futures (preserves stopped-neighbor constant
+        # poses set by dump_step_npz) and overwrite only what we can track.
+        d = dict(np.load(npz_paths[si]))
+        nb_future_arr = d["neighbor_agents_future"].copy()
+        if nb_future_arr.shape[-1] < 4:
+            nb_future_arr = np.zeros((N, future_len, 4), dtype=np.float32)
+        changed = False
+
+        for i in active:
+            prev_w = cur_world_si[i].copy()
+            for t in range(n_future):
+                fj = si + t + 1
+                v_fj = valid_mask[fj]
+                if not v_fj.any():
+                    break
+                cands = nb_world[fj]
+                diffs = cands[v_fj] - prev_w
+                dists = np.sqrt(diffs[:, 0]**2 + diffs[:, 1]**2)
+                best = np.argmin(dists)
+                if dists[best] > match_thresh:
+                    break
+                real_idx = np.where(v_fj)[0][best]
+                matched_w = cands[real_idx]
+                # World→ego_S transform
+                dx = matched_w[0] - s_ex
+                dy = matched_w[1] - s_ey
+                nb_future_arr[i, t, 0] = cos_inv * dx - sin_inv * dy
+                nb_future_arr[i, t, 1] = sin_inv * dx + cos_inv * dy
+                local_head = nb_head_world[fj, real_idx] - s_eh
+                nb_future_arr[i, t, 2] = math.cos(local_head)
+                nb_future_arr[i, t, 3] = math.sin(local_head)
+                prev_w = matched_w.copy()
+                changed = True
+
+        if changed:
+            d["neighbor_agents_future"] = nb_future_arr
+            np.savez(npz_paths[si], **d)
+            patched += 1
+
+        if (si + 1) % 500 == 0:
+            print(f"    {si + 1}/{S} steps processed, {patched} patched")
+
+    print(f"  [backfill] patched {patched}/{S} NPZs with actual neighbor futures")
+
+
 def run_route_replay(
     model,
     model_args,
@@ -1771,7 +1983,7 @@ def run_route_replay(
     # - each alive NPC's current lanelet pinned so neighbors always have
     #   lane context even when outside the ego bbox (NPCs can live up to
     #   despawn_distance = 120 m > bbox = 100 m from ego)
-    # - final hard cap at ``max_map_lanelets`` (140 = tensor_converter._NUM_LANES).
+    # - final 140-lane selection done per ego agent in MapTensorCache.get_lanes_ego.
     def _compute_map_lanelet_ids(
         ego_xy: np.ndarray,
         neighbor_positions: list[np.ndarray],
@@ -1886,6 +2098,8 @@ def run_route_replay(
     goal_reached = False
     reason = "max_steps"
     min_goal_d = float("inf")  # closest approach to goal seen so far
+    stuck_counter = 0          # consecutive low-speed steps for stuck recovery
+    stuck_nudge_remaining = 0  # frames left in current nudge burst
 
     # Per-step trajectory log for post-hoc evaluation.
     trajectory_log: list[dict] = []
@@ -2049,6 +2263,33 @@ def run_route_replay(
                         spawn_config.sg_filter_order,
                     )
 
+            # Stuck recovery: if ego speed has been ~0 for too many consecutive
+            # steps, nudge the ego's predicted trajectory forward so it doesn't
+            # sit behind a parked vehicle forever.  Once triggered the nudge
+            # persists for _STUCK_HOLD frames so the ego actually clears the
+            # obstacle instead of inching one step and stopping again.
+            _STUCK_SPEED_THRESH = 0.3  # m/s
+            _STUCK_PATIENCE = 400      # steps (~40 s at 10 Hz, > max red+yellow 35s)
+            _STUCK_HOLD = 40           # keep nudging for this many frames once triggered
+            _STUCK_NUDGE_MPS = 2.0     # forward speed to inject
+            ego_id = scene.ego_agent.id
+            _cur_speed = float(np.linalg.norm(scene.ego_agent.past_velocities[-1])) \
+                if scene.ego_agent.past_velocities is not None else 0.0
+            if _cur_speed < _STUCK_SPEED_THRESH:
+                stuck_counter += 1
+            else:
+                if stuck_nudge_remaining <= 0:
+                    stuck_counter = 0
+            if stuck_counter >= _STUCK_PATIENCE and stuck_nudge_remaining <= 0:
+                stuck_nudge_remaining = _STUCK_HOLD
+                print(f"  [stuck-recovery] ego stuck for {_STUCK_PATIENCE} steps at step {step}, nudging for {_STUCK_HOLD} frames")
+            if stuck_nudge_remaining > 0 and ego_id in agent_predictions:
+                _traj = agent_predictions[ego_id]
+                for _t in range(_traj.shape[0]):
+                    _traj[_t, 0] += _STUCK_NUDGE_MPS * 0.1 * (_t + 1)
+                agent_predictions[ego_id] = _traj
+                stuck_nudge_remaining -= 1
+
             # Optional: dump per-step observation NPZ (training-scene format).
             # Captures the scene as the model sees it just before this step's
             # prediction. Future trajectories are filled with zeros (ranked-
@@ -2209,10 +2450,17 @@ def run_route_replay(
     final_step = step
     print(f"Done. {final_step + 1} frames saved to {output_dir}; reason={reason}")
 
-    # Save trajectory log for post-hoc evaluation.
+    # Save trajectory log for post-hoc evaluation (must precede backfill
+    # which reads it for ego world poses).
     traj_log_path = output_dir / "trajectory_log.json"
     with open(traj_log_path, "w") as f:
         json.dump(trajectory_log, f)
+
+    # Post-hoc: fill neighbor_agents_future in dumped NPZs with actual
+    # positions from subsequent sim steps. At dump time we only have the
+    # past; now the full sim is done so we can look ahead.
+    if getattr(spawn_config, "dump_npz_dir", None):
+        _backfill_neighbor_futures(Path(spawn_config.dump_npz_dir))
 
     # Persist the effective SpawnConfig alongside the dumps so downstream
     # tools (notably rlvr.autoresearch.tools.rescore_replay_run) can reload

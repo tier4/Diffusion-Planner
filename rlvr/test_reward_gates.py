@@ -265,7 +265,7 @@ def test_underprogress_reference_baseline_path():
     # Bare-minimum data dict — most reward terms degenerate to zero on this synthetic input.
     data = {
         "ego_agent_future": torch.zeros(T, 4),
-        "neighbor_agents_future": torch.zeros(0, T, 3),
+        "neighbor_agents_future": torch.zeros(0, T, 4),
         "neighbor_agents_past": torch.zeros(0, 21, 11),
         "lanes": _trivial_lane(),
         "route_lanes": _trivial_lane(),
@@ -298,7 +298,7 @@ def test_underprogress_reference_baseline_falls_back_when_key_missing():
     ego_trajs = _minimal_scene_data(K=K, T=T)
     data = {
         "ego_agent_future": torch.zeros(T, 4),
-        "neighbor_agents_future": torch.zeros(0, T, 3),
+        "neighbor_agents_future": torch.zeros(0, T, 4),
         "neighbor_agents_past": torch.zeros(0, 21, 11),
         "lanes": _trivial_lane(),
         "route_lanes": _trivial_lane(),
@@ -328,7 +328,7 @@ def test_underprogress_baseline_accepts_python_scalar():
     ego_trajs = _minimal_scene_data(K=K, T=T)
     base = {
         "ego_agent_future": torch.zeros(T, 4),
-        "neighbor_agents_future": torch.zeros(0, T, 3),
+        "neighbor_agents_future": torch.zeros(0, T, 4),
         "neighbor_agents_past": torch.zeros(0, 21, 11),
         "lanes": _trivial_lane(),
         "route_lanes": _trivial_lane(),

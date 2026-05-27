@@ -112,9 +112,18 @@ def draw_route(ax, route_lanes, color=None, alpha=0.4, lw=1.5):
         ax.plot(pts[valid, 0], pts[valid, 1], "-", color=c, alpha=alpha, lw=lw)
 
 
-def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, zorder=10):
-    """Draw an oriented bounding box for an agent."""
-    rear_overhang = (length - length * 0.65) / 2
+def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, zorder=10,
+                   wheelbase: float | None = None):
+    """Draw an oriented bounding box for an agent.
+
+    When ``wheelbase`` is provided, (x, y) is treated as rear-axle midpoint
+    (ego convention). When None, (x, y) is the bbox centroid (neighbor
+    convention from the perception pipeline).
+    """
+    if wheelbase is not None:
+        rear_overhang = (length - wheelbase) / 2
+    else:
+        rear_overhang = length / 2
     t_rot = mtransforms.Affine2D().rotate(heading).translate(x, y) + ax.transData
     rect = Rectangle(
         (-rear_overhang, -width / 2), length, width,
@@ -191,7 +200,8 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
 
         # Current bounding box
         draw_agent_box(ax, pos[0], pos[1], heading, agent.length, agent.width,
-                       color, alpha=0.8 if is_ego else 0.5, lw=2 if is_ego else 1, zorder=zorder)
+                       color, alpha=0.8 if is_ego else 0.5, lw=2 if is_ego else 1, zorder=zorder,
+                       wheelbase=agent.wheelbase if is_ego else None)
 
         # Past trajectory
         past = agent.past_trajectory

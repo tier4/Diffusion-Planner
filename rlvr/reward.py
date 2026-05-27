@@ -1821,12 +1821,12 @@ def compute_static_collision_penalty(
     wide_thresh = float(config.sc_wide_thresh)
     cont_thresh = float(config.sc_cont_thresh)
 
-    # Crossing: clearance below cross_thresh at any t>=1 with ego moving.
-    # Use per_ts_min for the raw signal; masking for gate/penalty decisions.
+    # Crossing: clearance below cross_thresh at any timestep where either
+    # (a) t=0 (ego starts overlapping — always a collision regardless of
+    #     speed), or (b) t>=1 with ego moving.
     is_crossing_full = per_ts_min < cross_thresh  # (N, T), raw
-    # For gate: exclude t=0 and ego-stopped steps
     gate_steps = ego_moving.clone()
-    gate_steps[:, 0] = False
+    gate_steps[:, 0] = True  # t=0 overlap is always a crossing
     is_crossing_gated = is_crossing_full & gate_steps  # (N, T)
     has_crossing = is_crossing_gated.any(dim=1)
     crossing_gate = (~has_crossing).float()
@@ -2720,15 +2720,15 @@ def compute_reward_batch(
         nf = data["neighbor_agents_future"]
         if nf.dim() == 4:
             nf = nf[0]
-        if nf.shape[1] >= T and nf.shape[2] >= 3:
-            # NPZ stores (x, y, yaw_rad) -- convert to (x, y, cos, sin)
-            if nf.shape[2] == 3:
-                nf_xy = nf[:, :T, :2]
-                nf_yaw = nf[:, :T, 2:3]
-                nf_cos_sin = torch.cat([torch.cos(nf_yaw), torch.sin(nf_yaw)], dim=-1)
-                nf_data = torch.cat([nf_xy, nf_cos_sin], dim=-1)  # (N_nb, T, 4)
-            else:
-                nf_data = nf[:, :T, :4]
+        if nf.shape[1] >= T and nf.shape[2] >= 4:
+            nf_data = nf[:, :T, :4]  # (N_nb, T, 4) = x, y, cos, sin
+        elif nf.shape[0] > 0 and nf.shape[1] >= T and nf.shape[2] == 3:
+            raise ValueError(
+                f"neighbor_agents_future has 3 columns (x, y, heading_rad) but "
+                f"4 columns (x, y, cos, sin) are required. Re-generate the NPZ "
+                f"with the updated tensor_converter / _backfill_neighbor_futures."
+            )
+        if nf.shape[1] >= T and nf.shape[2] >= 4:
             slot_valid = nf_data[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6
             if slot_valid.any():
                 neighbor_futures = nf_data[slot_valid]
@@ -2803,6 +2803,7 @@ def compute_reward_batch(
     # Static-collision penalty (stopped-neighbor OBB clearance).
     # Default-off: when disabled, returns safe zeros + no gate effect.
     if config.static_collision_enabled:
+        # Check the predicted trajectory as usual.
         sc_result = compute_static_collision_penalty(
             ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid, config,
         )
@@ -2813,6 +2814,7 @@ def compute_reward_batch(
         sc_crossing_steps = sc_result["first_crossing_steps"]
         sc_per_ts_min = sc_result["per_timestep_min"]
         sc_n_stopped_scene = int(sc_result["stopped_mask"].sum().item())
+
     else:
         sc_crossing_gate = torch.ones(N, device=device)
         sc_near_pen = torch.zeros(N, device=device)

@@ -205,7 +205,7 @@ def _score_run_ego_actual(
                 raise ValueError(
                     f"Neighbor {j} has invalid dimensions (w={nw}, l={nl})"
                 )
-            npc_corners = _build_obb_corners(nx, ny, nc, ns_, nl, nw, nl * 0.65)
+            npc_corners = _build_obb_corners(nx, ny, nc, ns_, nl, nw, 0.0)
 
             pt1, pt2 = _closest_points_between_rects(ego_corners, npc_corners)
             d_val = float(torch.norm(pt1[0] - pt2[0]))

@@ -393,18 +393,24 @@ class MapTensorCache:
     """
 
     def __init__(self, map_data: MapData) -> None:
-        # -- lanes: (n, 20, 33) --
-        n_lanes = min(map_data.lanes.shape[0], _NUM_LANES)
-        self._lanes = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
-        self._lanes[:n_lanes] = map_data.lanes[:n_lanes].astype(np.float32)
-        self._lanes_mask = np.sum(np.abs(self._lanes[:, :, :8]), axis=-1) == 0
+        # -- lanes: store ALL map lanes; get_lanes_ego selects the closest
+        # _NUM_LANES by distance to ego (matching the cpp node which sorts
+        # all lane segments by distance and takes the top 140).
+        self._all_lanes = map_data.lanes.astype(np.float32)  # (N_all, 20, 33)
+        # Pre-compute representative point per lane for distance sorting.
+        # cpp uses min(dist(first_pt), dist(second_to_last_pt)).
+        first_pts = self._all_lanes[:, 0, :2]   # (N_all, 2)
+        last_pts = self._all_lanes[:, -2, :2]    # (N_all, 2) second to last like cpp
+        self._lane_ref_a = first_pts
+        self._lane_ref_b = last_pts
+        self._lane_valid = np.abs(self._all_lanes[:, :, :2]).sum(axis=(1, 2)) > 0.1
 
-        # speed limits (no per-agent transform needed)
+        # speed limits — store all, selected alongside lanes in get_lanes_ego
+        self._all_speed_limit = map_data.lanes_speed_limit.astype(np.float32)
+        self._all_has_speed_limit = map_data.lanes_has_speed_limit.astype(bool)
+        # Updated by get_lanes_ego to match the selected 140
         self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
         self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
-        n_sl = min(map_data.lanes_speed_limit.shape[0], _NUM_LANES)
-        self._lanes_speed_limit[0, :n_sl] = map_data.lanes_speed_limit[:n_sl].astype(np.float32)
-        self._lanes_has_speed_limit[0, :n_sl] = map_data.lanes_has_speed_limit[:n_sl].astype(bool)
 
         # -- static objects: (n, 10) --
         n_static = min(map_data.static_objects.shape[0], _NUM_STATIC)
@@ -449,26 +455,71 @@ class MapTensorCache:
         Only the 5-dim TL one-hot is synced; geometry (``[0:8]``) and
         line-type channels (``[13:33]``) never change post-build.
         """
-        n = min(map_data.lanes.shape[0], self._lanes.shape[0])
+        n = min(map_data.lanes.shape[0], self._all_lanes.shape[0])
         if n > 0:
-            # ``np.copyto`` with ``same_kind`` avoids the fresh allocation that
-            # ``.astype(np.float32)`` forces every tick — map_data.lanes is
-            # already float32 in the production path, so this is a pure memcpy.
             np.copyto(
-                self._lanes[:n, :, 8:13],
+                self._all_lanes[:n, :, 8:13],
                 map_data.lanes[:n, :, 8:13],
                 casting="same_kind",
             )
 
     def get_lanes_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
-        """Return lanes in ego frame: [1, NUM_LANES, 20, 33]."""
-        src = self._lanes.copy()
-        src[:, :, :2] = transform_positions(src[:, :, :2], R, ego_xy)
-        src[:, :, 2:4] = transform_directions(src[:, :, 2:4], R)
-        src[:, :, 4:6] = transform_directions(src[:, :, 4:6], R)
-        src[:, :, 6:8] = transform_directions(src[:, :, 6:8], R)
-        src[self._lanes_mask] = 0.0
-        return src[np.newaxis]
+        """Return closest _NUM_LANES lanes in ego frame: [1, NUM_LANES, 20, 33].
+
+        Matches the cpp node: sort all map lane segments by min distance
+        of first/second-to-last centerline point to ego, take top 140.
+        Also updates lanes_speed_limit / lanes_has_speed_limit to match.
+        """
+        # Match cpp: a segment is eligible if ANY of its 20 centerline
+        # points falls within ±100m AABB of ego, then rank by min distance
+        # of first / second-to-last point.
+        _MASK_RANGE = 100.0
+        all_pts = self._all_lanes[:, :, :2]  # (N_all, 20, 2)
+        dx = np.abs(all_pts[:, :, 0] - ego_xy[0])
+        dy = np.abs(all_pts[:, :, 1] - ego_xy[1])
+        inside = (dx <= _MASK_RANGE) & (dy <= _MASK_RANGE)
+        eligible = inside.any(axis=1) & self._lane_valid
+
+        da = np.linalg.norm(self._lane_ref_a - ego_xy, axis=1)
+        db = np.linalg.norm(self._lane_ref_b - ego_xy, axis=1)
+        dists = np.minimum(da, db)
+        dists[~eligible] = 1e9
+
+        n_all = len(dists)
+        n_select = min(_NUM_LANES, n_all)
+        if n_select == 0:
+            out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
+            self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+            self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+            return out[np.newaxis]
+
+        if n_select >= n_all:
+            top_idx = np.argsort(dists)[:n_select]
+        else:
+            top_idx = np.argpartition(dists, n_select)[:n_select]
+            top_idx = top_idx[np.argsort(dists[top_idx])]
+
+        selected = self._all_lanes[top_idx].copy()
+        selected[:, :, :2] = transform_positions(selected[:, :, :2], R, ego_xy)
+        selected[:, :, 2:4] = transform_directions(selected[:, :, 2:4], R)
+        selected[:, :, 4:6] = transform_directions(selected[:, :, 4:6], R)
+        selected[:, :, 6:8] = transform_directions(selected[:, :, 6:8], R)
+        mask = np.sum(np.abs(selected[:, :, :8]), axis=-1) == 0
+        selected[mask] = 0.0
+
+        out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
+        out[:n_select] = selected
+
+        # Update speed limits to match selected lanes
+        self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+        n_sl = min(self._all_speed_limit.shape[0], self._all_lanes.shape[0])
+        for j, idx in enumerate(top_idx):
+            if idx < n_sl:
+                self._lanes_speed_limit[0, j] = self._all_speed_limit[idx]
+                self._lanes_has_speed_limit[0, j] = self._all_has_speed_limit[idx]
+
+        return out[np.newaxis]
 
     def get_static_objects_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
         """Return static objects in ego frame: [1, 5, 10]."""
@@ -540,6 +591,14 @@ def to_model_tensors(
     ego = scene.get_agent(ego_agent_id)
     ego_xy = ego.current_position.astype(np.float64)
     ego_heading = ego.current_heading
+
+    # When the "ego" is actually a non-ego NPC, its stored position is the
+    # bbox centroid. The model expects rear-axle. Shift back by wb/2.
+    if ego_agent_id != scene.ego_agent_id:
+        wb = getattr(ego, "wheelbase", 0.0) or 0.0
+        ego_xy = ego_xy.copy()
+        ego_xy[0] -= np.cos(ego_heading) * wb / 2.0
+        ego_xy[1] -= np.sin(ego_heading) * wb / 2.0
 
     R = _rotation_matrix(ego_heading)
 
@@ -696,9 +755,26 @@ def dump_step_npz(
 
     # GT-future placeholders (caller fills if desired; ranked-SFT ignores).
     data["ego_agent_future"] = np.zeros((future_len, 3), dtype=np.float32)
-    data["neighbor_agents_future"] = np.zeros(
-        (predicted_neighbor_num, future_len, 3), dtype=np.float32,
+    nb_future = np.zeros(
+        (predicted_neighbor_num, future_len, 4), dtype=np.float32,
     )
+    # Fill stopped-neighbor futures with their current pose held constant
+    # as (x, y, cos_heading, sin_heading) — matching the 4-column format
+    # that compute_reward_batch / compute_static_collision_penalty expect.
+    # Moving-agent futures are filled post-hoc by _backfill_neighbor_futures
+    # in replay.py after the full sim completes.
+    nb_past = data["neighbor_agents_past"]  # (N, 31, 11)
+    for i in range(min(predicted_neighbor_num, nb_past.shape[0])):
+        cur = nb_past[i, -1]
+        if np.all(cur[:2] == 0):
+            continue
+        vx, vy = float(cur[4]), float(cur[5])
+        if np.hypot(vx, vy) < 0.5:
+            nb_future[i, :, 0] = cur[0]
+            nb_future[i, :, 1] = cur[1]
+            nb_future[i, :, 2] = cur[2]  # cos
+            nb_future[i, :, 3] = cur[3]  # sin
+    data["neighbor_agents_future"] = nb_future
     data["version"] = np.array(1, dtype=np.int64)
 
     return data
