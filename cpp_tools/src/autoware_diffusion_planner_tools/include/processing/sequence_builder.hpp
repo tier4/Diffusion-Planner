@@ -23,7 +23,6 @@
 #include <vector>
 
 std::vector<SequenceData> build_sequences(
-  ParsedBagData & data, const int64_t search_nearest_route, const std::string & save_dir,
-  const std::string & rosbag_dir_name);
+  ParsedBagData & data, const int64_t search_nearest_route);
 
 #endif  // PROCESSING__SEQUENCE_BUILDER_HPP_

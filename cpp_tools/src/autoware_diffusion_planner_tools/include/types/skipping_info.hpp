@@ -46,7 +46,9 @@ enum class SkippingLabel {
   MissingRequiredTopic,  // Required ROS topic is missing from rosbag
 
   // Frame-level skipping reasons (incomplete data)
-  IncompleteData,  // Some messages are missing at the beginning of recording
+  IncompleteData,  // A required message is missing at this tick (recording warm-up
+                   // at the start, or a transient gap mid-drive). Only this frame is
+                   // skipped; processing continues.
 
   // Sequence-level skipping reasons
   InsufficientFrames,    // Sequence has fewer frames than minimum required
@@ -148,6 +150,27 @@ struct SkippingInfo
         "m, max_dist=" + std::to_string(max_distance) + "m",
       {},
       {}};
+  }
+
+  // The freshest required message at this tick is too old (large "乖離"). Reuses the
+  // IncompleteData label: the frame's inputs are effectively not available in time.
+  static SkippingInfo stale_data(int64_t max_age_ns)
+  {
+    return {
+      SkippingLabel::IncompleteData,
+      "Stale data: max_age=" + std::to_string(max_age_ns / 1'000'000) + "ms",
+      {},
+      {}};
+  }
+
+  static SkippingInfo invalid_covariance(double covariance_xx, double covariance_yy)
+  {
+    return {
+      SkippingLabel::IncompleteData,
+      "Invalid kinematic covariance: xx=" + std::to_string(covariance_xx) +
+        ", yy=" + std::to_string(covariance_yy),
+      {},
+      {IncompleteDataType::KinematicState}};
   }
 };
 

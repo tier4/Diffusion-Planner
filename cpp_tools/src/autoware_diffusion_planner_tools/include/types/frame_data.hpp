@@ -15,14 +15,16 @@
 #ifndef TYPES__FRAME_DATA_HPP_
 #define TYPES__FRAME_DATA_HPP_
 
+#include <autoware/diffusion_planner/preprocessing/traffic_signals.hpp>
+
 #include <autoware_perception_msgs/msg/tracked_objects.hpp>
-#include <autoware_perception_msgs/msg/traffic_light_group_array.hpp>
 #include <autoware_planning_msgs/msg/lanelet_route.hpp>
 #include <autoware_vehicle_msgs/msg/turn_indicators_report.hpp>
 #include <geometry_msgs/msg/accel_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
 #include <cstdint>
+#include <map>
 #include <vector>
 
 struct FrameData
@@ -31,8 +33,13 @@ struct FrameData
   autoware_perception_msgs::msg::TrackedObjects tracked_objects;
   nav_msgs::msg::Odometry kinematic_state;
   geometry_msgs::msg::AccelWithCovarianceStamped acceleration;
-  std::vector<autoware_perception_msgs::msg::TrafficLightGroupArray> traffic_signals;
+  // Traffic-light state resolved at this tick by build_sequences (persistent map + TTL,
+  // matching the runtime node); frame_processor consumes it directly.
+  std::map<lanelet::Id, autoware::diffusion_planner::preprocess::TrafficSignalStamped>
+    traffic_light_id_map;
   autoware_vehicle_msgs::msg::TurnIndicatorsReport turn_indicator;
+  // Largest staleness (tick - latest message arrival time) across the required topics.
+  int64_t max_msg_age_ns;
 };
 
 struct SequenceData

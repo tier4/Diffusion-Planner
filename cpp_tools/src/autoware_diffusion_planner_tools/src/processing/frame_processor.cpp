@@ -108,6 +108,9 @@ void process_sequence(
   // Replace the goal pose with the last frame's pose
   seq.route.goal_pose = seq.data_list.back().kinematic_state.pose.pose;
 
+  // Frames whose freshest required message is older than this are skipped as stale. build_sequences records the age; the decision is made here.
+  constexpr int64_t kStaleThresholdNs = 500'000'000LL;  // 500 ms
+
   // Process frames with stopping count tracking
   int64_t stopping_count = 0;
   for (int64_t i = INPUT_T_WITH_CURRENT; i < n; i += options.step) {
@@ -155,17 +158,10 @@ void process_sequence(
     const double center_y = ego_pos.y;
     const double center_z = ego_pos.z;
 
-    // Process traffic signals for this frame using the traffic signals from FrameData
-    std::map<lanelet::Id, preprocess::TrafficSignalStamped> traffic_light_id_map;
-    const auto current_stamp = seq.data_list[i].tracked_objects.header.stamp;
-    const rclcpp::Time current_time(current_stamp);
-
-    std::vector<autoware_perception_msgs::msg::TrafficLightGroupArray::ConstSharedPtr> msg_vec;
-    for (const auto & traffic_signal_msg : seq.data_list[i].traffic_signals) {
-      msg_vec.push_back(std::make_shared<autoware_perception_msgs::msg::TrafficLightGroupArray>(
-        traffic_signal_msg));
-    }
-    preprocess::process_traffic_signals(msg_vec, traffic_light_id_map, current_time, 5.0);
+    // Traffic-light state was resolved by build_sequences (persistent map + TTL, matching
+    // the runtime node); use it directly.
+    const std::map<lanelet::Id, preprocess::TrafficSignalStamped> & traffic_light_id_map =
+      seq.data_list[i].traffic_light_id_map;
 
     // Get lanes data with speed limits
     const std::vector<int64_t> lane_segment_indices =
@@ -271,7 +267,12 @@ void process_sequence(
     // (ported from filter_collision_free_npz.py / filter_in_lanelet_npz.py) are
     // only checked when the frame has not already been skipped.
     SkippingInfo skipping_info = SkippingInfo::accepted();
-    if (is_stop && is_red_or_yellow && is_future_forward) {
+    const auto & covariance = seq.data_list[i].kinematic_state.pose.covariance;
+    if (seq.data_list[i].max_msg_age_ns > kStaleThresholdNs) {
+      skipping_info = SkippingInfo::stale_data(seq.data_list[i].max_msg_age_ns);
+    } else if (covariance[0] > 1e-1 || covariance[7] > 1e-1) {
+      skipping_info = SkippingInfo::invalid_covariance(covariance[0], covariance[7]);
+    } else if (is_stop && is_red_or_yellow && is_future_forward) {
       skipping_info = SkippingInfo::red_or_yellow_light();
     } else if (stopping_count > (INPUT_T + 5) && is_red_or_yellow) {
       skipping_info = SkippingInfo::vehicle_stopped();

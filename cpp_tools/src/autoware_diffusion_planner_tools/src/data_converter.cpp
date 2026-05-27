@@ -63,8 +63,8 @@ int main(int argc, char ** argv)
     return 0;
   }
 
-  std::vector<SequenceData> sequences = build_sequences(
-    bag_data, options.search_nearest_route, options.save_dir, options.rosbag_dir_name);
+  std::vector<SequenceData> sequences =
+    build_sequences(bag_data, options.search_nearest_route);
 
   std::cout << "Total " << sequences.size() << " sequences" << std::endl;
 
