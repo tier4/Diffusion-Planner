@@ -471,20 +471,10 @@ class MapTensorCache:
         of first/second-to-last centerline point to ego, take top 140.
         Also updates lanes_speed_limit / lanes_has_speed_limit to match.
         """
-        # Match cpp: a segment is eligible if ANY of its 20 centerline
-        # points falls within ±100m AABB of ego. Then rank by min distance
-        # of first / second-to-last point (same as cpp).
-        _MASK_RANGE = 100.0
-        all_pts = self._all_lanes[:, :, :2]  # (N_all, 20, 2)
-        dx = np.abs(all_pts[:, :, 0] - ego_xy[0])  # (N_all, 20)
-        dy = np.abs(all_pts[:, :, 1] - ego_xy[1])
-        inside = (dx <= _MASK_RANGE) & (dy <= _MASK_RANGE)
-        eligible = inside.any(axis=1) & self._lane_valid  # (N_all,)
-
         da = np.linalg.norm(self._lane_ref_a - ego_xy, axis=1)
         db = np.linalg.norm(self._lane_ref_b - ego_xy, axis=1)
         dists = np.minimum(da, db)
-        dists[~eligible] = 1e9
+        dists[~self._lane_valid] = 1e9
 
         n_all = len(dists)
         n_select = min(_NUM_LANES, n_all)
