@@ -5,6 +5,10 @@ This is the canonical PRiSM filter as of 2026-05-07 (replacing σ-Δ and absolut
 and produced unfittable training targets). See memory ``project_prism_method``
 + ``feedback_prism_filter_canonical``.
 
+The gate-check logic (``is_scene_eligible``) is the single source of truth
+for whether a rank-1 trajectory is safe for training. Both this filter and
+``viz_p4_recovery`` import it — never duplicate the checks.
+
 Selection rule (top P percentile of *eligible* scenes by ``top1_cl``):
   1. Drop scenes whose t=0 is already-fine (``t0_cl > eligible_t0_max``).
   2. Drop scenes whose rank-1 winner is unsafe (rb_cross / lane_cross /
@@ -22,6 +26,30 @@ Output: filtered scene list JSON + a one-page summary.
 import argparse
 import json
 from pathlib import Path
+
+
+def is_scene_eligible(top1: dict, t0_cl: float = -999.0,
+                      eligible_t0_max: float = 0.0) -> bool:
+    """Check if a rank-1 result passes all safety gates for training.
+
+    This is the single source of truth — used by both this filter script
+    and viz_p4_recovery to classify scenes as improve/no_improve.
+
+    Returns True if the scene is safe for training (no gate violations).
+    """
+    if t0_cl > eligible_t0_max:
+        return False
+    if top1.get("rb_cross", False):
+        return False
+    if top1.get("lane_cross", False):
+        return False
+    if top1.get("coll_step") is not None:
+        return False
+    if top1.get("static_crossing", False):
+        return False
+    if top1.get("kin_violated", False):
+        return False
+    return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,32 +94,21 @@ def main() -> None:
     scenes = data["scenes"]
 
     rejected = {
-        "already_fine_t0": 0,
-        "top1_rb_cross": 0,
-        "top1_lane_cross": 0,
-        "top1_collision": 0,
-        "top1_kin_violated": 0,
+        "gate_violated": 0,
         "no_improvement": 0,
     }
     eligible: list[dict] = []
     for s in scenes:
-        if s["t0_cl"] > args.eligible_t0_max:
-            rejected["already_fine_t0"] += 1
-            continue
-        if s["top1_rb_cross"]:
-            rejected["top1_rb_cross"] += 1
-            continue
-        if s["top1_lane_cross"]:
-            rejected["top1_lane_cross"] += 1
-            continue
-        if s["top1_coll_step"] is not None:
-            rejected["top1_collision"] += 1
-            continue
-        if s["top1_kin_violated"]:
-            # top1_kin_violated=True means infeasible — drop those as unsafe
-            # SFT targets. Convention matches the other gate booleans
-            # (rb_crossing, lane_crossing, static_crossing): True = violation.
-            rejected["top1_kin_violated"] += 1
+        top1_dict = {
+            "rb_cross": s["top1_rb_cross"],
+            "lane_cross": s["top1_lane_cross"],
+            "coll_step": s["top1_coll_step"],
+            "static_crossing": s.get("top1_static_crossing", False),
+            "kin_violated": s["top1_kin_violated"],
+        }
+        if not is_scene_eligible(top1_dict, t0_cl=s["t0_cl"],
+                                 eligible_t0_max=args.eligible_t0_max):
+            rejected["gate_violated"] += 1
             continue
         # Require the rank-1 winner to actually IMPROVE on the model's
         # DETERMINISTIC output. Both top1_cl and det_cl come from

@@ -541,6 +541,14 @@ def to_model_tensors(
     ego_xy = ego.current_position.astype(np.float64)
     ego_heading = ego.current_heading
 
+    # When the "ego" is actually a non-ego NPC, its stored position is the
+    # bbox centroid. The model expects rear-axle. Shift back by wb/2.
+    if ego_agent_id != scene.ego_agent_id:
+        wb = getattr(ego, "wheelbase", 0.0) or 0.0
+        ego_xy = ego_xy.copy()
+        ego_xy[0] -= np.cos(ego_heading) * wb / 2.0
+        ego_xy[1] -= np.sin(ego_heading) * wb / 2.0
+
     R = _rotation_matrix(ego_heading)
 
     # Build all numpy arrays
@@ -696,9 +704,26 @@ def dump_step_npz(
 
     # GT-future placeholders (caller fills if desired; ranked-SFT ignores).
     data["ego_agent_future"] = np.zeros((future_len, 3), dtype=np.float32)
-    data["neighbor_agents_future"] = np.zeros(
-        (predicted_neighbor_num, future_len, 3), dtype=np.float32,
+    nb_future = np.zeros(
+        (predicted_neighbor_num, future_len, 4), dtype=np.float32,
     )
+    # Fill stopped-neighbor futures with their current pose held constant
+    # as (x, y, cos_heading, sin_heading) — matching the 4-column format
+    # that compute_reward_batch / compute_static_collision_penalty expect.
+    # Moving-agent futures are filled post-hoc by _backfill_neighbor_futures
+    # in replay.py after the full sim completes.
+    nb_past = data["neighbor_agents_past"]  # (N, 31, 11)
+    for i in range(min(predicted_neighbor_num, nb_past.shape[0])):
+        cur = nb_past[i, -1]
+        if np.all(cur[:2] == 0):
+            continue
+        vx, vy = float(cur[4]), float(cur[5])
+        if np.hypot(vx, vy) < 0.5:
+            nb_future[i, :, 0] = cur[0]
+            nb_future[i, :, 1] = cur[1]
+            nb_future[i, :, 2] = cur[2]  # cos
+            nb_future[i, :, 3] = cur[3]  # sin
+    data["neighbor_agents_future"] = nb_future
     data["version"] = np.array(1, dtype=np.int64)
 
     return data

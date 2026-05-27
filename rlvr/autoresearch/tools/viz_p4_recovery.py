@@ -44,6 +44,7 @@ from matplotlib.patches import Rectangle
 
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.percentile_filter_perturbed import is_scene_eligible
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_cl_recovery import (
     draw_scene_base,
@@ -298,6 +299,7 @@ def main() -> None:
                     "kin_violated": bool(r.kinematic_violated),
                     "coll_step": (None if r.collision_step is None
                                   else int(r.collision_step)),
+                    "static_crossing": bool(r.static_crossing),
                 }
                 for ki, r in enumerate(all_rewards)
             ]
@@ -308,11 +310,12 @@ def main() -> None:
             # Earlier versions compared top1_cl (80-frame) to t0_cl
             # (1-frame at ego_current_state) — apples-to-oranges; that
             # comparison let scenes where rank-1 was no better than
-            # deterministic sneak through. Filter rule canonical in
-            # percentile_filter_perturbed: top1 > det. We mirror it here.
             det_r = compute_reward_batch(det_traj_t, data, rcfg)[0]
             delta = top1["cl"] - float(det_r.centerline)
-            improves = delta > 0.0
+            top1_better_reward = top1["total"] > float(det_r.total)
+            top1_is_different = top1["k"] != 0  # k=0 is deterministic
+            improves = (top1_better_reward and top1_is_different
+                        and is_scene_eligible(top1, t0_cl=t0_cl))
 
             if args.no_viz:
                 summary.append({
@@ -329,6 +332,7 @@ def main() -> None:
                     "top1_lane_cross": top1["lane_cross"],
                     "top1_kin_violated": top1["kin_violated"],
                     "top1_coll_step": top1["coll_step"],
+                    "top1_static_crossing": top1["static_crossing"],
                     "det_cl": float(det_r.centerline),
                     "det_total": float(det_r.total),
                     "png": None,
@@ -481,6 +485,7 @@ def main() -> None:
                 "top1_lane_cross": top1["lane_cross"],
                 "top1_kin_violated": top1["kin_violated"],
                 "top1_coll_step": top1["coll_step"],
+                    "top1_static_crossing": top1["static_crossing"],
                 "det_cl": float(det_r.centerline),
                 "det_total": float(det_r.total),
                 "png": str(out_path),

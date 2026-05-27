@@ -190,12 +190,23 @@ def _one_hot(class_idx: int, num_classes: int = LineType.NUM.value) -> np.ndarra
     return arr
 
 
-def _obb_corners(x: float, y: float, heading: float, length: float, width: float) -> np.ndarray:
-    """Return (4, 2) corners of an oriented bounding box centered on rear axle."""
+def _obb_corners(
+    x: float, y: float, heading: float, length: float, width: float,
+    wheelbase: float | None = None,
+) -> np.ndarray:
+    """Return (4, 2) corners of an oriented bounding box.
+
+    When ``wheelbase`` is provided, (x, y) is treated as the rear-axle
+    midpoint and the box is offset forward accordingly (ego convention).
+    When ``wheelbase`` is None, (x, y) is treated as the bbox centroid
+    (neighbor/tracked-object convention from the perception pipeline).
+    """
     cos_h, sin_h = math.cos(heading), math.sin(heading)
-    rear_overhang = (length - length * 0.65) / 2.0
-    # Longitudinal: from -rear_overhang to length - rear_overhang
-    dx_lo, dx_hi = -rear_overhang, length - rear_overhang
+    if wheelbase is not None:
+        rear_overhang = (length - wheelbase) / 2.0
+        dx_lo, dx_hi = -rear_overhang, length - rear_overhang
+    else:
+        dx_lo, dx_hi = -length / 2.0, length / 2.0
     dy_lo, dy_hi = -width / 2.0, width / 2.0
     local_corners = np.array([
         [dx_lo, dy_lo], [dx_hi, dy_lo], [dx_hi, dy_hi], [dx_lo, dy_hi],

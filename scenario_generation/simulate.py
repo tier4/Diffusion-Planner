@@ -190,12 +190,20 @@ def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
                   dt: float = 0.1) -> None:
     """Advance the scene by one timestep using per-agent predictions (in-place).
 
+    The model predicted each agent's trajectory in rear-axle convention
+    (it thought the agent was the ego). But non-ego agents store their
+    position at the bbox centroid. So for non-ego agents we undo the
+    rear-axle assumption: shift the predicted world position forward
+    by wheelbase/2 along the predicted heading to recover centroid.
+    The ego's position IS rear-axle, so no shift needed for it.
+
     Args:
         scene: SceneContext to modify in-place.
         agent_predictions: Maps agent_id -> (80, 4) ego-centric prediction
             [x, y, cos_h, sin_h] from running that agent as ego.
         dt: Timestep duration.
     """
+    ego_id = scene.ego_agent_id
     for agent in scene.agents:
         if agent.id not in agent_predictions:
             continue
@@ -203,14 +211,21 @@ def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
         pred = agent_predictions[agent.id]  # (80, 4) in that agent's ego frame
         step = pred[0]  # First step
 
-        # Convert from agent's ego frame back to world
         ax, ay = agent.current_position
         ah = agent.current_heading
         new_xy, new_h = _ego_to_world(
             step[:2].reshape(1, 2), step[2:4].reshape(1, 2),
             float(ax), float(ay), ah,
         )
-        new_pos = np.array([new_xy[0, 0], new_xy[0, 1], new_h[0]], dtype=np.float32)
+        wx, wy = float(new_xy[0, 0]), float(new_xy[0, 1])
+        wh = float(new_h[0])
+
+        if agent.id != ego_id:
+            wb = getattr(agent, "wheelbase", 0.0) or 0.0
+            wx += math.cos(wh) * wb / 2.0
+            wy += math.sin(wh) * wb / 2.0
+
+        new_pos = np.array([wx, wy, wh], dtype=np.float32)
         _advance_agent(agent, new_pos, dt)
 
 
