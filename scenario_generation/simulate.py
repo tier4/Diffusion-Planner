@@ -396,8 +396,10 @@ def _draw_agent_view(
                        ocolor, alpha=0.35, lw=0.8, zorder=5)
 
     # This agent's bounding box
+    is_ego = (agent_id == scene.ego_agent_id)
     draw_agent_box(ax, pos[0], pos[1], heading, agent.length, agent.width,
-                   color, alpha=0.9, lw=2.0, zorder=20)
+                   color, alpha=0.9, lw=2.0, zorder=20,
+                   wheelbase=agent.wheelbase if is_ego else None)
 
     # Heading arrow
     arrow_len = max(agent.length, 2.0)
