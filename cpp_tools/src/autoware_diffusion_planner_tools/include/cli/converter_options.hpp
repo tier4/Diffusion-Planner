@@ -55,6 +55,11 @@ struct ConverterOptions
   // any lane centerline is skipped during conversion.
   float offlane_max_score;
   int64_t offlane_time_stride;
+
+  // When true, also write the npz for frame-level skipped frames (collision,
+  // off-lane, red/yellow light, vehicle stopped) so they can be visualised with
+  // their skip reason. Intended for inspection/testing only; off in production.
+  bool write_skipped_npz;
 };
 
 std::optional<ConverterOptions> parse_arguments(int argc, char ** argv);

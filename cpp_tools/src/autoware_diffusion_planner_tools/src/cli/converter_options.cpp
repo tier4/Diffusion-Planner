@@ -57,6 +57,9 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
   options.offlane_max_score = 6.0f;
   options.offlane_time_stride = 1;
 
+  // Inspection-only: production keeps this off so skipped frames write no npz.
+  options.write_skipped_npz = false;
+
   for (int64_t i = 4; i < argc; ++i) {
     const std::string arg = argv[i];
     std::cout << "arg[" << i << "] = " << arg << std::endl;
@@ -94,6 +97,8 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
       options.offlane_max_score = std::stof(arg.substr(20));
     } else if (arg.find("--offlane_time_stride=") == 0) {
       options.offlane_time_stride = std::stoll(arg.substr(22));
+    } else if (arg.find("--write_skipped_npz=") == 0) {
+      options.write_skipped_npz = static_cast<bool>(std::stoll(arg.substr(20)));
     }
   }
 
@@ -121,6 +126,7 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
             << ", collision_time_stride: " << options.collision_time_stride << std::endl;
   std::cout << "Off-lane filter max_score: " << options.offlane_max_score
             << ", offlane_time_stride: " << options.offlane_time_stride << std::endl;
+  std::cout << "Write skipped npz: " << options.write_skipped_npz << std::endl;
 
   return options;
 }

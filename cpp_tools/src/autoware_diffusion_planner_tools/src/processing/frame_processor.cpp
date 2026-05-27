@@ -266,70 +266,42 @@ void process_sequence(
                              .turn_indicator.report;
     }
 
+    // Decide whether this frame is skipped and why. Reasons are evaluated in
+    // priority order and short-circuit: the collision and in-lanelet filters
+    // (ported from filter_collision_free_npz.py / filter_in_lanelet_npz.py) are
+    // only checked when the frame has not already been skipped.
+    SkippingInfo skipping_info = SkippingInfo::accepted();
     if (is_stop && is_red_or_yellow && is_future_forward) {
-      std::cout << "Skip this frame " << i
-                << " because it is stop at red or yellow light and future trajectory is forward"
-                << std::endl;
-      save_frame_json(
-        options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-        seq.data_list[i].timestamp, SkippingInfo::red_or_yellow_light());
-      continue;
-    }
-    if (stopping_count > (INPUT_T + 5) && is_red_or_yellow) {
-      std::cout << "Skip this frame " << i << " because stopping_count=" << stopping_count
-                << " and red or yellow light" << std::endl;
-      save_frame_json(
-        options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-        seq.data_list[i].timestamp, SkippingInfo::vehicle_stopped());
-      continue;
+      skipping_info = SkippingInfo::red_or_yellow_light();
+    } else if (stopping_count > (INPUT_T + 5) && is_red_or_yellow) {
+      skipping_info = SkippingInfo::vehicle_stopped();
+    } else if (const frame_filters::CollisionResult collision = frame_filters::check_collision(
+                 ego_future, options.ego_shape, static_objects, neighbor_future, neighbor_past,
+                 line_strings, options.static_object_margin, options.neighbor_margin,
+                 options.road_border_margin, options.collision_time_stride);
+               collision.collided()) {
+      skipping_info = SkippingInfo::collision(collision.reasons);
+    } else if (const frame_filters::OffLaneResult offlane = frame_filters::compute_offlane_score(
+                 ego_future, lanes, options.offlane_time_stride);
+               frame_filters::is_off_lane(offlane, options.offlane_max_score)) {
+      skipping_info = SkippingInfo::off_lane(offlane.mean_distance, offlane.max_distance);
     }
 
-    // Collision-free filter (ported from filter_collision_free_npz.py), always applied:
-    // drop frames whose GT ego trajectory collides with a static object, neighbor,
-    // or road border.
-    {
-      const frame_filters::CollisionResult collision = frame_filters::check_collision(
-        ego_future, options.ego_shape, static_objects, neighbor_future, neighbor_past, line_strings,
-        options.static_object_margin, options.neighbor_margin, options.road_border_margin,
-        options.collision_time_stride);
-      if (collision.collided()) {
-        std::cout << "Skip this frame " << i << " due to collision (";
-        for (size_t r = 0; r < collision.reasons.size(); ++r) {
-          if (r > 0) std::cout << ", ";
-          std::cout << collision.reasons[r];
-        }
-        std::cout << ")" << std::endl;
-        save_frame_json(
-          options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-          seq.data_list[i].timestamp, SkippingInfo::collision(collision.reasons));
-        continue;
-      }
+    const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
+    if (is_skipped) {
+      std::cout << "Skip frame " << i << ": " << skipping_info.details << std::endl;
     }
-
-    // In-lanelet filter (ported from filter_in_lanelet_npz.py), always applied:
-    // drop frames whose GT ego trajectory is too far from any lane centerline.
-    {
-      const frame_filters::OffLaneResult offlane =
-        frame_filters::compute_offlane_score(ego_future, lanes, options.offlane_time_stride);
-      if (frame_filters::is_off_lane(offlane, options.offlane_max_score)) {
-        std::cout << "Skip this frame " << i << " due to off-lane (mean_dist="
-                  << offlane.mean_distance << "m)" << std::endl;
-        save_frame_json(
-          options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-          seq.data_list[i].timestamp,
-          SkippingInfo::off_lane(offlane.mean_distance, offlane.max_distance));
-        continue;
-      }
+    // Accepted frames are always written; skipped frames only on request.
+    if (!is_skipped || options.write_skipped_npz) {
+      save_frame_data(
+        options.save_dir, options.rosbag_dir_name, token, ego_past, ego_current, ego_future,
+        neighbor_past, neighbor_future, static_objects, lanes, lanes_speed_limit,
+        lanes_has_speed_limit, route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit,
+        polygons, line_strings, goal_pose_vec, turn_indicators, options.ego_shape);
     }
-
-    save_frame_data(
-      options.save_dir, options.rosbag_dir_name, token, ego_past, ego_current, ego_future,
-      neighbor_past, neighbor_future, static_objects, lanes, lanes_speed_limit,
-      lanes_has_speed_limit, route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit,
-      polygons, line_strings, goal_pose_vec, turn_indicators, options.ego_shape);
     save_frame_json(
       options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-      seq.data_list[i].timestamp, SkippingInfo::accepted());
+      seq.data_list[i].timestamp, skipping_info);
 
     if (i % 100 == 0) {
       std::cout << "Processed frame " << i << "/" << n << std::endl;

@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument("--collision_time_stride", type=int, default=5)
     parser.add_argument("--offlane_max_score", type=float, default=6.0)
     parser.add_argument("--offlane_time_stride", type=int, default=1)
+    parser.add_argument("--write_skipped_npz", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=32)
     return parser.parse_args()
 
@@ -124,6 +125,7 @@ def process_single_bag(args_tuple):
         collision_time_stride,
         offlane_max_score,
         offlane_time_stride,
+        write_skipped_npz,
     ) = args_tuple
 
     logging.info(f"Processing bag: {bag_path}")
@@ -166,6 +168,7 @@ def process_single_bag(args_tuple):
             collision_time_stride=collision_time_stride,
             offlane_max_score=offlane_max_score,
             offlane_time_stride=offlane_time_stride,
+            write_skipped_npz=write_skipped_npz,
         )
         logging.info(f"Completed: {save_dir}")
     except Exception as e:
@@ -196,6 +199,7 @@ if __name__ == "__main__":
     collision_time_stride = args.collision_time_stride
     offlane_max_score = args.offlane_max_score
     offlane_time_stride = args.offlane_time_stride
+    write_skipped_npz = args.write_skipped_npz
     num_workers = args.num_workers or cpu_count()
 
     save_root = save_root.resolve()
@@ -243,6 +247,7 @@ if __name__ == "__main__":
                 collision_time_stride,
                 offlane_max_score,
                 offlane_time_stride,
+                write_skipped_npz,
             )
         )
 

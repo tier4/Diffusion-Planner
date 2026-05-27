@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--collision_time_stride", type=int, default=5)
     parser.add_argument("--offlane_max_score", type=float, default=6.0)
     parser.add_argument("--offlane_time_stride", type=int, default=1)
+    parser.add_argument("--write_skipped_npz", type=int, default=0)
     return parser.parse_args()
 
 
@@ -55,6 +56,7 @@ def main(
     collision_time_stride: int,
     offlane_max_score: float,
     offlane_time_stride: int,
+    write_skipped_npz: int,
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
@@ -80,6 +82,7 @@ def main(
         f"--collision_time_stride={collision_time_stride}",
         f"--offlane_max_score={offlane_max_score}",
         f"--offlane_time_stride={offlane_time_stride}",
+        f"--write_skipped_npz={write_skipped_npz}",
     ]
     print(" ".join(command))
     result = subprocess.run(
