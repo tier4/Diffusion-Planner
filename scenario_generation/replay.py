@@ -512,7 +512,10 @@ class SceneNPCManager:
             print(f"  [NPCManager] despawned {removed} (beyond {self.cfg.despawn_distance:.0f} m)")
 
         # --- Spawn pass ---
-        active_nb = sum(1 for a in scene.agents if a.id != scene.ego_agent_id)
+        active_nb = sum(
+            1 for a in scene.agents
+            if a.id != scene.ego_agent_id and not self.is_static_npc(a.id)
+        )
         if active_nb >= self.cfg.max_active_npcs:
             return
         if self._rng.random() >= self.cfg.spawn_probability:
