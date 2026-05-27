@@ -412,7 +412,6 @@ class MapTensorCache:
         # Updated by get_lanes_ego to match the selected 140
         self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
         self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
-        self._lanes_has_speed_limit[0, :n_sl] = map_data.lanes_has_speed_limit[:n_sl].astype(bool)
 
         # -- static objects: (n, 10) --
         n_static = min(map_data.static_objects.shape[0], _NUM_STATIC)
