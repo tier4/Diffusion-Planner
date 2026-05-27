@@ -410,8 +410,8 @@ class MapTensorCache:
         self._all_speed_limit = map_data.lanes_speed_limit.astype(np.float32)
         self._all_has_speed_limit = map_data.lanes_has_speed_limit.astype(bool)
         # Updated by get_lanes_ego to match the selected 140
-        self.lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
-        self.lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+        self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
         self._lanes_has_speed_limit[0, :n_sl] = map_data.lanes_has_speed_limit[:n_sl].astype(bool)
 
         # -- static objects: (n, 10) --
@@ -484,8 +484,8 @@ class MapTensorCache:
         n_select = min(_NUM_LANES, n_valid)
         if n_select == 0:
             out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
-            self.lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
-            self.lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+            self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+            self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
             return out[np.newaxis]
 
         top_idx = np.argpartition(dists, n_select)[:n_select]
@@ -503,8 +503,8 @@ class MapTensorCache:
         out[:n_select] = selected
 
         # Update speed limits to match selected lanes
-        self.lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
-        self.lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+        self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
         n_sl = min(self._all_speed_limit.shape[0], self._all_lanes.shape[0])
         for j, idx in enumerate(top_idx):
             if idx < n_sl:
