@@ -476,16 +476,19 @@ class MapTensorCache:
         dists = np.minimum(da, db)
         dists[~self._lane_valid] = 1e9
 
-        n_valid = int(self._lane_valid.sum())
-        n_select = min(_NUM_LANES, n_valid)
+        n_all = len(dists)
+        n_select = min(_NUM_LANES, n_all)
         if n_select == 0:
             out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
             self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
             self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
             return out[np.newaxis]
 
-        top_idx = np.argpartition(dists, n_select)[:n_select]
-        top_idx = top_idx[np.argsort(dists[top_idx])]
+        if n_select >= n_all:
+            top_idx = np.argsort(dists)[:n_select]
+        else:
+            top_idx = np.argpartition(dists, n_select)[:n_select]
+            top_idx = top_idx[np.argsort(dists[top_idx])]
 
         selected = self._all_lanes[top_idx].copy()
         selected[:, :, :2] = transform_positions(selected[:, :, :2], R, ego_xy)
