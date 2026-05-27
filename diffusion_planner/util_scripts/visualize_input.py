@@ -18,6 +18,30 @@ def parse_args():
     return parser.parse_args()
 
 
+def build_annotation(npz_path: Path) -> tuple[str, str]:
+    """Build the top banner for a frame as (text, color).
+
+    The banner is always two lines (status + npz path) drawn at a fixed size so the
+    figure height stays constant across frames (avoids the mp4 "jumping" when only
+    some frames carried a banner). Kept frames show a faint grey "OK"; frames that
+    the C++ data_converter would drop show the reason in red. The filter result is
+    read from the sibling <token>.json (npz keys are left unchanged).
+    """
+    status, color = "OK", "0.7"  # faint grey for kept frames
+    json_path = npz_path.with_suffix(".json")
+    if json_path.is_file():
+        try:
+            with open(json_path, "r") as f:
+                info = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            info = {}
+        if info.get("is_skipped"):
+            details = info.get("skipping_info", {}).get("details", "skipped")
+            status = f"WOULD BE DROPPED IN REAL GENERATION — {details}"
+            color = "red"
+    return f"{status}\n{npz_path}", color
+
+
 if __name__ == "__main__":
     args = parse_args()
     input_path = args.input_path
@@ -36,7 +60,11 @@ if __name__ == "__main__":
         data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
         data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
 
-        visualize_inputs(data, save_path, view_ranges=[60, 150])
+        annotation, annotation_color = build_annotation(input_path)
+        visualize_inputs(
+            data, save_path, view_ranges=[60, 150], annotation=annotation,
+            annotation_color=annotation_color,
+        )
 
     if ext == ".npz":
         process_one_data(input_path, save_path)
