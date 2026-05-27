@@ -192,7 +192,7 @@ class SpawnConfig:
     # 5-15 m of the goal then drive off into the horizon.
     goal_pass_window_m: float = 25.0
     map_refresh_steps: int = 5
-    max_map_lanelets: int = 140
+    max_map_lanelets: int = 2000
     # ROS node uses 100 m; empirical survey of our training NPZs shows
     # ~23 (min) – 89 (max) non-zero lanes per scene, median 61. 100 m on the
     # Shinagawa map tops out at ~22 lanelets — at the bottom of training
