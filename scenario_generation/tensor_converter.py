@@ -507,8 +507,8 @@ class MapTensorCache:
         n_sl = min(self._all_speed_limit.shape[0], self._all_lanes.shape[0])
         for j, idx in enumerate(top_idx):
             if idx < n_sl:
-                self.lanes_speed_limit[0, j] = self._all_speed_limit[idx]
-                self.lanes_has_speed_limit[0, j] = self._all_has_speed_limit[idx]
+                self._lanes_speed_limit[0, j] = self._all_speed_limit[idx]
+                self._lanes_has_speed_limit[0, j] = self._all_has_speed_limit[idx]
 
         return out[np.newaxis]
 
