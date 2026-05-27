@@ -1680,7 +1680,7 @@ def _score_step(
     return out
 
 
-def _backfill_neighbor_futures(npz_dir: Path, final_step: int) -> None:
+def _backfill_neighbor_futures(npz_dir: Path) -> None:
     """Fill neighbor_agents_future in dumped NPZs with actual subsequent positions.
 
     NPZs are ego-centric. To build step-S's neighbor future we transform
@@ -1706,9 +1706,7 @@ def _backfill_neighbor_futures(npz_dir: Path, final_step: int) -> None:
 
     # ── Phase 1: load ego poses and all neighbor current positions ──
     ego_poses = np.zeros((S, 3), dtype=np.float64)  # x, y, heading
-    step_to_idx = {}
     for entry in traj_log:
-        step_to_idx[entry["step"]] = None  # will fill below
 
     step_nums = []
     all_nb_ego_xy = []   # list of (N, 2)
@@ -2385,7 +2383,7 @@ def run_route_replay(
     # positions from subsequent sim steps. At dump time we only have the
     # past; now the full sim is done so we can look ahead.
     if getattr(spawn_config, "dump_npz_dir", None):
-        _backfill_neighbor_futures(Path(spawn_config.dump_npz_dir), final_step)
+        _backfill_neighbor_futures(Path(spawn_config.dump_npz_dir))
 
     # Persist the effective SpawnConfig alongside the dumps so downstream
     # tools (notably rlvr.autoresearch.tools.rescore_replay_run) can reload

@@ -399,7 +399,7 @@ class MapTensorCache:
         self._all_lanes = map_data.lanes.astype(np.float32)  # (N_all, 20, 33)
         # Pre-compute representative point per lane for distance sorting.
         # cpp uses min(dist(first_pt), dist(second_to_last_pt)).
-        # We approximate with the mean of first and last valid point.
+        # cpp uses min(dist(first_pt), dist(second_to_last_pt)).
         first_pts = self._all_lanes[:, 0, :2]   # (N_all, 2)
         last_pts = self._all_lanes[:, -2, :2]    # (N_all, 2) second to last like cpp
         self._lane_ref_a = first_pts

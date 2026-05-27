@@ -195,7 +195,7 @@ class TestDumpStepNPZ:
     def test_shapes_and_dtypes_match_loader(self, synthetic_scene):
         data = self._dump(synthetic_scene, future_len=80, predicted_neighbor_num=32)
         assert data["ego_agent_future"].shape == (80, 3)
-        assert data["neighbor_agents_future"].shape == (32, 80, 3)
+        assert data["neighbor_agents_future"].shape == (_MAX_NUM_NEIGHBORS, 80, 4)
         assert data["ego_agent_future"].dtype == np.float32
         assert data["neighbor_agents_future"].dtype == np.float32
         # has_speed_limit fields must be bool (training loader expects it).
@@ -231,7 +231,7 @@ class TestDumpStepNPZ:
         assert data["ego_agent_future"].shape == (40, 3)
         # Neighbor count is locked at _MAX_NUM_NEIGHBORS (past and future must match)
         from scenario_generation.tensor_converter import _MAX_NUM_NEIGHBORS
-        assert data["neighbor_agents_future"].shape == (_MAX_NUM_NEIGHBORS, 40, 3)
+        assert data["neighbor_agents_future"].shape == (_MAX_NUM_NEIGHBORS, 40, 4)
 
     def test_mismatched_neighbor_count_raises(self, synthetic_scene):
         """predicted_neighbor_num must equal _MAX_NUM_NEIGHBORS (past is fixed)."""
