@@ -393,17 +393,25 @@ class MapTensorCache:
     """
 
     def __init__(self, map_data: MapData) -> None:
-        # -- lanes: (n, 20, 33) --
-        n_lanes = min(map_data.lanes.shape[0], _NUM_LANES)
-        self._lanes = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
-        self._lanes[:n_lanes] = map_data.lanes[:n_lanes].astype(np.float32)
-        self._lanes_mask = np.sum(np.abs(self._lanes[:, :, :8]), axis=-1) == 0
+        # -- lanes: store ALL map lanes; get_lanes_ego selects the closest
+        # _NUM_LANES by distance to ego (matching the cpp node which sorts
+        # all lane segments by distance and takes the top 140).
+        self._all_lanes = map_data.lanes.astype(np.float32)  # (N_all, 20, 33)
+        # Pre-compute representative point per lane for distance sorting.
+        # cpp uses min(dist(first_pt), dist(second_to_last_pt)).
+        # We approximate with the mean of first and last valid point.
+        first_pts = self._all_lanes[:, 0, :2]   # (N_all, 2)
+        last_pts = self._all_lanes[:, -2, :2]    # (N_all, 2) second to last like cpp
+        self._lane_ref_a = first_pts
+        self._lane_ref_b = last_pts
+        self._lane_valid = np.abs(self._all_lanes[:, :, :2]).sum(axis=(1, 2)) > 0.1
 
-        # speed limits (no per-agent transform needed)
-        self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
-        self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
-        n_sl = min(map_data.lanes_speed_limit.shape[0], _NUM_LANES)
-        self._lanes_speed_limit[0, :n_sl] = map_data.lanes_speed_limit[:n_sl].astype(np.float32)
+        # speed limits — store all, selected alongside lanes in get_lanes_ego
+        self._all_speed_limit = map_data.lanes_speed_limit.astype(np.float32)
+        self._all_has_speed_limit = map_data.lanes_has_speed_limit.astype(bool)
+        # Updated by get_lanes_ego to match the selected 140
+        self.lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        self.lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
         self._lanes_has_speed_limit[0, :n_sl] = map_data.lanes_has_speed_limit[:n_sl].astype(bool)
 
         # -- static objects: (n, 10) --
@@ -461,14 +469,49 @@ class MapTensorCache:
             )
 
     def get_lanes_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
-        """Return lanes in ego frame: [1, NUM_LANES, 20, 33]."""
-        src = self._lanes.copy()
-        src[:, :, :2] = transform_positions(src[:, :, :2], R, ego_xy)
-        src[:, :, 2:4] = transform_directions(src[:, :, 2:4], R)
-        src[:, :, 4:6] = transform_directions(src[:, :, 4:6], R)
-        src[:, :, 6:8] = transform_directions(src[:, :, 6:8], R)
-        src[self._lanes_mask] = 0.0
-        return src[np.newaxis]
+        """Return closest _NUM_LANES lanes in ego frame: [1, NUM_LANES, 20, 33].
+
+        Matches the cpp node: sort all map lane segments by min distance
+        of first/second-to-last centerline point to ego, take top 140.
+        Also updates lanes_speed_limit / lanes_has_speed_limit to match.
+        """
+        da = np.linalg.norm(self._lane_ref_a - ego_xy, axis=1)
+        db = np.linalg.norm(self._lane_ref_b - ego_xy, axis=1)
+        dists = np.minimum(da, db)
+        dists[~self._lane_valid] = 1e9
+
+        n_valid = int(self._lane_valid.sum())
+        n_select = min(_NUM_LANES, n_valid)
+        if n_select == 0:
+            out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
+            self.lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+            self.lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+            return out[np.newaxis]
+
+        top_idx = np.argpartition(dists, n_select)[:n_select]
+        top_idx = top_idx[np.argsort(dists[top_idx])]
+
+        selected = self._all_lanes[top_idx].copy()
+        selected[:, :, :2] = transform_positions(selected[:, :, :2], R, ego_xy)
+        selected[:, :, 2:4] = transform_directions(selected[:, :, 2:4], R)
+        selected[:, :, 4:6] = transform_directions(selected[:, :, 4:6], R)
+        selected[:, :, 6:8] = transform_directions(selected[:, :, 6:8], R)
+        mask = np.sum(np.abs(selected[:, :, :8]), axis=-1) == 0
+        selected[mask] = 0.0
+
+        out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
+        out[:n_select] = selected
+
+        # Update speed limits to match selected lanes
+        self.lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        self.lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+        n_sl = min(self._all_speed_limit.shape[0], self._all_lanes.shape[0])
+        for j, idx in enumerate(top_idx):
+            if idx < n_sl:
+                self.lanes_speed_limit[0, j] = self._all_speed_limit[idx]
+                self.lanes_has_speed_limit[0, j] = self._all_has_speed_limit[idx]
+
+        return out[np.newaxis]
 
     def get_static_objects_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
         """Return static objects in ego frame: [1, 5, 10]."""
