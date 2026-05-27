@@ -28,6 +28,10 @@ def parse_args():
     parser.add_argument("--ego_wheel_base", type=float, default=2.75)
     parser.add_argument("--ego_length", type=float, default=4.34)
     parser.add_argument("--ego_width", type=float, default=1.70)
+    parser.add_argument("--static_object_margin", type=float, default=0.0)
+    parser.add_argument("--neighbor_margin", type=float, default=0.0)
+    parser.add_argument("--road_border_margin", type=float, default=0.0)
+    parser.add_argument("--collision_time_stride", type=int, default=5)
     parser.add_argument("--num_workers", type=int, default=32)
     return parser.parse_args()
 
@@ -48,6 +52,10 @@ def process_single_bag(args_tuple):
         ego_wheel_base,
         ego_length,
         ego_width,
+        static_object_margin,
+        neighbor_margin,
+        road_border_margin,
+        collision_time_stride,
     ) = args_tuple
 
     logging.info(f"Processing bag: {bag_path}")
@@ -86,6 +94,10 @@ def process_single_bag(args_tuple):
             ego_wheel_base=ego_wheel_base,
             ego_length=ego_length,
             ego_width=ego_width,
+            static_object_margin=static_object_margin,
+            neighbor_margin=neighbor_margin,
+            road_border_margin=road_border_margin,
+            collision_time_stride=collision_time_stride,
         )
         logging.info(f"Completed: {save_dir}")
     except Exception as e:
@@ -110,6 +122,10 @@ if __name__ == "__main__":
     ego_wheel_base = args.ego_wheel_base
     ego_length = args.ego_length
     ego_width = args.ego_width
+    static_object_margin = args.static_object_margin
+    neighbor_margin = args.neighbor_margin
+    road_border_margin = args.road_border_margin
+    collision_time_stride = args.collision_time_stride
     num_workers = args.num_workers or cpu_count()
 
     save_root = save_root.resolve()
@@ -154,6 +170,10 @@ if __name__ == "__main__":
                 ego_wheel_base,
                 ego_length,
                 ego_width,
+                static_object_margin,
+                neighbor_margin,
+                road_border_margin,
+                collision_time_stride,
             )
         )
 

@@ -41,6 +41,14 @@ struct ConverterOptions
 
   std::vector<float> ego_shape;
   bool use_interpolation;
+
+  // Collision-free filter (ported from filter_collision_free_npz.py), always applied.
+  // A frame whose GT ego trajectory collides with a static object, neighbor, or
+  // road border is skipped during conversion (no npz written, like other skips).
+  float static_object_margin;
+  float neighbor_margin;
+  float road_border_margin;
+  int64_t collision_time_stride;
 };
 
 std::optional<ConverterOptions> parse_arguments(int argc, char ** argv);

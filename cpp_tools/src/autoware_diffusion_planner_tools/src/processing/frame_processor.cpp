@@ -16,6 +16,7 @@
 
 #include "io/frame_writer.hpp"
 #include "processing/ego_sequence.hpp"
+#include "processing/frame_filters.hpp"
 #include "processing/neighbor_processor.hpp"
 #include "types/skipping_info.hpp"
 #include "utils/timestamp_utils.hpp"
@@ -281,6 +282,28 @@ void process_sequence(
         options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
         seq.data_list[i].timestamp, SkippingInfo::vehicle_stopped());
       continue;
+    }
+
+    // Collision-free filter (ported from filter_collision_free_npz.py), always applied:
+    // drop frames whose GT ego trajectory collides with a static object, neighbor,
+    // or road border.
+    {
+      const frame_filters::CollisionResult collision = frame_filters::check_collision(
+        ego_future, options.ego_shape, static_objects, neighbor_future, neighbor_past, line_strings,
+        options.static_object_margin, options.neighbor_margin, options.road_border_margin,
+        options.collision_time_stride);
+      if (collision.collided()) {
+        std::cout << "Skip this frame " << i << " due to collision (";
+        for (size_t r = 0; r < collision.reasons.size(); ++r) {
+          if (r > 0) std::cout << ", ";
+          std::cout << collision.reasons[r];
+        }
+        std::cout << ")" << std::endl;
+        save_frame_json(
+          options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
+          seq.data_list[i].timestamp, SkippingInfo::collision(collision.reasons));
+        continue;
+      }
     }
 
     save_frame_data(

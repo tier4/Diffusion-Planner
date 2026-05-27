@@ -55,6 +55,9 @@ enum class SkippingLabel {
   // Frame processing skipping reasons
   RedOrYellowLight,  // At red or yellow light with forward future trajectory
   VehicleStopped,    // Ego vehicle is stopped
+
+  // Filter skipping reasons (ported from the standalone python filter scripts)
+  Collision,  // GT ego trajectory collides with a static object, neighbor, or road border
 };
 
 // Structure to hold detailed skipping information
@@ -123,6 +126,17 @@ struct SkippingInfo
       "At red/yellow light with forward moving future trajectory",
       {},
       {}};
+  }
+
+  // reasons: any of "static_object", "neighbor", "road_border"
+  static SkippingInfo collision(const std::vector<std::string> & reasons)
+  {
+    std::string details = "Collision: ";
+    for (size_t i = 0; i < reasons.size(); ++i) {
+      if (i > 0) details += ", ";
+      details += reasons[i];
+    }
+    return {SkippingLabel::Collision, details, {}, {}};
   }
 };
 
