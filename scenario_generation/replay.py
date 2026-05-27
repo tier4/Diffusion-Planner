@@ -1301,6 +1301,59 @@ def _ego_nearest_static_npc(
     )
 
 
+def _ego_nearest_moving_npc(
+    scene: SceneContext,
+    threshold_m: float = 5.0,
+) -> tuple[np.ndarray, np.ndarray, float, str] | None:
+    """Return the ego↔moving-NPC closest-pair when clearance < threshold."""
+    ego = scene.ego_agent
+    if ego is None:
+        return None
+    moving = [
+        a for a in scene.agents
+        if a.id != scene.ego_agent_id and not SceneNPCManager.is_static_npc(a.id)
+    ]
+    if not moving:
+        return None
+
+    ego_pos = ego.current_position
+    reach = threshold_m + float(ego.length)
+    candidates = [
+        a for a in moving
+        if float(np.linalg.norm(a.current_position - ego_pos)) <= reach + float(a.length)
+    ]
+    if not candidates:
+        return None
+
+    from rlvr.reward import _closest_points_between_rects
+
+    ego_corners = _obb_corners(
+        float(ego_pos[0]), float(ego_pos[1]),
+        float(ego.current_heading), float(ego.length), float(ego.width),
+        wheelbase=float(ego.wheelbase),
+    )
+    npc_corners_list = [
+        _obb_corners(
+            float(a.current_position[0]), float(a.current_position[1]),
+            float(a.current_heading), float(a.length), float(a.width),
+        )
+        for a in candidates
+    ]
+    n = len(candidates)
+    r1 = torch.from_numpy(np.broadcast_to(ego_corners, (n, 4, 2)).copy().astype(np.float32))
+    r2 = torch.from_numpy(np.stack(npc_corners_list).astype(np.float32))
+    pt_e, pt_n = _closest_points_between_rects(r1, r2)
+    dists = (pt_e - pt_n).norm(dim=-1)
+    i_best = int(dists.argmin().item())
+    d_best = float(dists[i_best].item())
+    if d_best >= threshold_m:
+        return None
+    return (
+        pt_e[i_best].numpy(), pt_n[i_best].numpy(), d_best,
+        candidates[i_best].id,
+    )
+
+
 def save_step_figure(
     scene: SceneContext,
     agent_predictions: dict,
@@ -1507,33 +1560,31 @@ def save_step_figure(
             f"lane={gate_s}  "
             f"lane_near={metrics.get('lane_near_frac', 0.0):.2f}"
         )
-        # Position the viz pointer using the nearest border point to the
-        # ego rear axle, then anchor the line on the nearest OBB corner
-        # (body edge, not baselink) so the visual length roughly tracks
-        # the body-to-border distance shown in the label.
-        border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
-        if border_pt is not None:
-            corners = _ego_obb_corners(
-                ex, ey, ego.current_heading,
-                float(ego.length), float(ego.width),
-                wheelbase=float(ego.wheelbase),
-            )
-            d_corner = np.hypot(corners[:, 0] - border_pt[0],
-                                corners[:, 1] - border_pt[1])
-            start = corners[int(d_corner.argmin())]
-            body_d = metrics.get("rb_min_dist", float("nan"))
-            ax.plot([start[0], border_pt[0]], [start[1], border_pt[1]],
-                    "k--", linewidth=1.3, alpha=0.7, zorder=29)
-            ax.plot(border_pt[0], border_pt[1], "ko", markersize=6, zorder=30,
-                    markeredgecolor="white", markeredgewidth=0.8)
-            mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
-            ax.annotate(f"{body_d:.2f} m",
-                        xy=(mx, my), fontsize=8, color="black",
-                        ha="center", va="center",
-                        bbox=dict(boxstyle="round,pad=0.2",
-                                  facecolor="white", edgecolor="black",
-                                  alpha=0.7),
-                        zorder=31)
+
+    # Road border distance line — always drawn (not gated on metrics).
+    border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
+    if border_pt is not None:
+        corners = _ego_obb_corners(
+            ex, ey, ego.current_heading,
+            float(ego.length), float(ego.width),
+            wheelbase=float(ego.wheelbase),
+        )
+        d_corner = np.hypot(corners[:, 0] - border_pt[0],
+                            corners[:, 1] - border_pt[1])
+        start = corners[int(d_corner.argmin())]
+        body_d = float(d_corner.min())
+        ax.plot([start[0], border_pt[0]], [start[1], border_pt[1]],
+                "k--", linewidth=1.3, alpha=0.7, zorder=29)
+        ax.plot(border_pt[0], border_pt[1], "ko", markersize=6, zorder=30,
+                markeredgecolor="white", markeredgewidth=0.8)
+        mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
+        ax.annotate(f"rb {body_d:.2f}m",
+                    xy=(mx, my), fontsize=8, color="black",
+                    ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.2",
+                              facecolor="white", edgecolor="black",
+                              alpha=0.7),
+                    zorder=31)
 
     # Ego ↔ nearest stopped-NPC closest-pair line. Drawn regardless of
     # whether metrics are enabled — only gate is proximity < threshold so
@@ -1566,6 +1617,31 @@ def save_step_figure(
                     ha="center", va="center",
                     bbox=dict(boxstyle="round,pad=0.1",
                               facecolor="white", edgecolor="#cc0000",
+                              alpha=0.85),
+                    zorder=31)
+
+    # Ego ↔ nearest moving NPC closest-pair line (blue).
+    mv_pair = _ego_nearest_moving_npc(scene, threshold_m=5.0)
+    if mv_pair is not None:
+        pt_e, pt_n, mv_d, mv_id = mv_pair
+        ax.plot([pt_e[0], pt_n[0]], [pt_e[1], pt_n[1]],
+                "-", color="#0055cc", lw=1.8, alpha=0.85, zorder=29)
+        ax.plot([pt_e[0], pt_n[0]], [pt_e[1], pt_n[1]],
+                "o", color="#0055cc", ms=5, zorder=30,
+                markeredgecolor="white", markeredgewidth=0.7)
+        mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
+        dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
+        seg_len = math.hypot(dx, dy)
+        if seg_len > 1e-6:
+            nx, ny = -dy / seg_len, dx / seg_len
+        else:
+            nx, ny = 0.0, 1.0
+        ax.annotate(f"{mv_d:.2f} m",
+                    xy=(mx + nx * 1.2, my + ny * 1.2),
+                    fontsize=7, color="#0055cc",
+                    ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.1",
+                              facecolor="white", edgecolor="#0055cc",
                               alpha=0.85),
                     zorder=31)
 
