@@ -1706,8 +1706,6 @@ def _backfill_neighbor_futures(npz_dir: Path) -> None:
 
     # ── Phase 1: load ego poses and all neighbor current positions ──
     ego_poses = np.zeros((S, 3), dtype=np.float64)  # x, y, heading
-    for entry in traj_log:
-
     step_nums = []
     all_nb_ego_xy = []   # list of (N, 2)
     all_nb_ego_cs = []   # list of (N, 2) cos,sin
