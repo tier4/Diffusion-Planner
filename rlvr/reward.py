@@ -2722,7 +2722,7 @@ def compute_reward_batch(
             nf = nf[0]
         if nf.shape[1] >= T and nf.shape[2] >= 4:
             nf_data = nf[:, :T, :4]  # (N_nb, T, 4) = x, y, cos, sin
-        elif nf.shape[1] >= T and nf.shape[2] == 3:
+        elif nf.shape[0] > 0 and nf.shape[1] >= T and nf.shape[2] == 3:
             raise ValueError(
                 f"neighbor_agents_future has 3 columns (x, y, heading_rad) but "
                 f"4 columns (x, y, cos, sin) are required. Re-generate the NPZ "

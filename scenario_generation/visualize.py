@@ -200,7 +200,8 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
 
         # Current bounding box
         draw_agent_box(ax, pos[0], pos[1], heading, agent.length, agent.width,
-                       color, alpha=0.8 if is_ego else 0.5, lw=2 if is_ego else 1, zorder=zorder)
+                       color, alpha=0.8 if is_ego else 0.5, lw=2 if is_ego else 1, zorder=zorder,
+                       wheelbase=agent.wheelbase if is_ego else None)
 
         # Past trajectory
         past = agent.past_trajectory

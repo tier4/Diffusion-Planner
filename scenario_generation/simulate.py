@@ -213,15 +213,26 @@ def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
 
         ax, ay = agent.current_position
         ah = agent.current_heading
+
+        if agent.id != ego_id:
+            # Inference used rear-axle origin (centroid shifted back by wb/2).
+            # Use that same origin for the inverse transform.
+            wb = getattr(agent, "wheelbase", 0.0) or 0.0
+            origin_x = float(ax) - math.cos(ah) * wb / 2.0
+            origin_y = float(ay) - math.sin(ah) * wb / 2.0
+        else:
+            origin_x, origin_y = float(ax), float(ay)
+            wb = 0.0
+
         new_xy, new_h = _ego_to_world(
             step[:2].reshape(1, 2), step[2:4].reshape(1, 2),
-            float(ax), float(ay), ah,
+            origin_x, origin_y, ah,
         )
         wx, wy = float(new_xy[0, 0]), float(new_xy[0, 1])
         wh = float(new_h[0])
 
         if agent.id != ego_id:
-            wb = getattr(agent, "wheelbase", 0.0) or 0.0
+            # Shift predicted rear-axle position forward to centroid
             wx += math.cos(wh) * wb / 2.0
             wy += math.sin(wh) * wb / 2.0
 

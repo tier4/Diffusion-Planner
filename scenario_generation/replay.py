@@ -1774,8 +1774,12 @@ def _backfill_neighbor_futures(npz_dir: Path, final_step: int) -> None:
         if n_future <= 0:
             continue
 
-        # For each active neighbor, track through future frames
-        nb_future_arr = np.zeros((N, future_len, 4), dtype=np.float32)
+        # Start from existing futures (preserves stopped-neighbor constant
+        # poses set by dump_step_npz) and overwrite only what we can track.
+        d = dict(np.load(npz_paths[si]))
+        nb_future_arr = d["neighbor_agents_future"].copy()
+        if nb_future_arr.shape[-1] < 4:
+            nb_future_arr = np.zeros((N, future_len, 4), dtype=np.float32)
         changed = False
 
         for i in active:
@@ -1805,7 +1809,6 @@ def _backfill_neighbor_futures(npz_dir: Path, final_step: int) -> None:
                 changed = True
 
         if changed:
-            d = dict(np.load(npz_paths[si]))
             d["neighbor_agents_future"] = nb_future_arr
             np.savez(npz_paths[si], **d)
             patched += 1
@@ -2206,11 +2209,9 @@ def run_route_replay(
                 stuck_nudge_remaining = _STUCK_HOLD
                 print(f"  [stuck-recovery] ego stuck for {_STUCK_PATIENCE} steps at step {step}, nudging for {_STUCK_HOLD} frames")
             if stuck_nudge_remaining > 0 and ego_id in agent_predictions:
-                _h = float(scene.ego_agent.current_heading)
-                _fwd = np.array([math.cos(_h), math.sin(_h)], dtype=np.float32)
                 _traj = agent_predictions[ego_id]
                 for _t in range(_traj.shape[0]):
-                    _traj[_t, :2] += _fwd * _STUCK_NUDGE_MPS * 0.1 * (_t + 1)
+                    _traj[_t, 0] += _STUCK_NUDGE_MPS * 0.1 * (_t + 1)
                 agent_predictions[ego_id] = _traj
                 stuck_nudge_remaining -= 1
 

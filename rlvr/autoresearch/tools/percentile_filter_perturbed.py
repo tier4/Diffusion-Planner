@@ -94,7 +94,12 @@ def main() -> None:
     scenes = data["scenes"]
 
     rejected = {
-        "gate_violated": 0,
+        "already_fine_t0": 0,
+        "top1_rb_cross": 0,
+        "top1_lane_cross": 0,
+        "top1_collision": 0,
+        "top1_static_crossing": 0,
+        "top1_kin_violated": 0,
         "no_improvement": 0,
     }
     eligible: list[dict] = []
@@ -108,7 +113,18 @@ def main() -> None:
         }
         if not is_scene_eligible(top1_dict, t0_cl=s["t0_cl"],
                                  eligible_t0_max=args.eligible_t0_max):
-            rejected["gate_violated"] += 1
+            if s["t0_cl"] > args.eligible_t0_max:
+                rejected["already_fine_t0"] += 1
+            elif s["top1_rb_cross"]:
+                rejected["top1_rb_cross"] += 1
+            elif s["top1_lane_cross"]:
+                rejected["top1_lane_cross"] += 1
+            elif s["top1_coll_step"] is not None:
+                rejected["top1_collision"] += 1
+            elif s.get("top1_static_crossing", False):
+                rejected["top1_static_crossing"] += 1
+            elif s["top1_kin_violated"]:
+                rejected["top1_kin_violated"] += 1
             continue
         # Require the rank-1 winner to actually IMPROVE on the model's
         # DETERMINISTIC output. Both top1_cl and det_cl come from
