@@ -69,6 +69,13 @@ def det_inference_batched(
     if norm_batch is None:
         batch = _stack_scene_data(datas, device)
         norm_batch = _normalize_batch(batch, model_args)
+    else:
+        B_nb = norm_batch["ego_current_state"].shape[0]
+        if B_nb != len(datas):
+            raise ValueError(
+                f"norm_batch has batch size {B_nb} but len(datas)={len(datas)}. "
+                f"They must match when norm_batch is pre-provided."
+            )
 
     decoder = model.module.decoder if hasattr(model, "module") else model.decoder
     saved_fn = decoder._guidance_fn

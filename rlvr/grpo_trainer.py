@@ -790,12 +790,13 @@ class GRPOTrainer:
 
         # Ranked SFT uses sft_-prefixed keys; GRPO uses unprefixed.
         is_sft = "sft_total_loss" in metrics
-        loss = _fmt(metrics.get("sft_total_loss" if is_sft else "loss", None))
-        if loss is None:
+        loss_val = metrics.get("sft_total_loss" if is_sft else "loss", None)
+        if loss_val is None:
             raise KeyError(
                 f"Neither 'loss' nor 'sft_total_loss' found in metrics. "
                 f"Available keys: {sorted(metrics.keys())}"
             )
+        loss = _fmt(loss_val)
         kl = _fmt(metrics.get("sft_kl_loss" if is_sft else "kl_loss", 0))
         if is_sft:
             ego_l = _fmt(metrics.get("sft_ego_loss", 0))
