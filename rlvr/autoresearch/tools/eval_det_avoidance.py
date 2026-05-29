@@ -163,7 +163,7 @@ def score_det_scenes(
             })
             flag = "COL" if r.static_crossing else "   "
             print(
-                f"  [{start + bi:3d}] {flag}  "
+                f"  [{len(results) - 1:3d}] {flag}  "
                 f"sc={float(getattr(r, 'sc_min_dist', 99.0)):+.3f}m  "
                 f"rb={float(getattr(r, 'rb_min_dist', 99.0)):.3f}m  "
                 f"{Path(p).name}"

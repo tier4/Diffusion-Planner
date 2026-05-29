@@ -119,7 +119,6 @@ def main():
         det_b = det_inference_batched(model_b, args_b, datas, device)
 
         for bi, sp in enumerate(valid_paths):
-            si = start + bi
             name = Path(sp).stem
 
             r_a = compute_reward_batch(det_a[bi : bi + 1], datas[bi], rcfg)[0]
@@ -135,6 +134,7 @@ def main():
             sc_b = d_b["det_sc_min_dist"]
             flag_a = "COL" if d_a["det_static_crossing"] else "   "
             flag_b = "COL" if d_b["det_static_crossing"] else "   "
+            si = len(results_a) - 1
             print(
                 f"  [{si:3d}] {name:30s}  "
                 f"A: {flag_a} sc={sc_a:+.2f}m  "
