@@ -113,6 +113,10 @@ void process_sequence(
 
   // Process frames with stopping count tracking
   int64_t stopping_count = 0;
+  // Skip frames where the GT future has not advanced for ≥3s (ego stuck / stationary
+  // beyond just red lights). Tracks consecutive iterations with !is_future_forward.
+  constexpr int64_t kStuckThresholdTicks = 30;  // 3 seconds at 10 Hz
+  int64_t no_future_progress_count = 0;
   for (int64_t i = INPUT_T_WITH_CURRENT; i < n; i += options.step) {
     // Create token in canonical format: seq_id(8digits) + "_" + i(8digits)
     const std::string token = create_token(seq_id, i);
@@ -251,6 +255,11 @@ void process_sequence(
       sum_mileage += std::sqrt(dx * dx + dy * dy);
     }
     const bool is_future_forward = sum_mileage > 1.0;
+    if (!is_future_forward) {
+      no_future_progress_count++;
+    } else {
+      no_future_progress_count = 0;
+    }
 
     // Create placeholder data for static objects
     const std::vector<float> static_objects(
@@ -275,7 +284,11 @@ void process_sequence(
     } else if (is_stop && is_red_or_yellow && is_future_forward) {
       skipping_info = SkippingInfo::red_or_yellow_light();
     } else if (stopping_count > (INPUT_T + 5) && is_red_or_yellow) {
-      skipping_info = SkippingInfo::vehicle_stopped();
+      skipping_info = SkippingInfo::stopped_at_traffic_light();
+    } else if (no_future_progress_count * options.step > kStuckThresholdTicks) {
+      const double sustained_s =
+        static_cast<double>(no_future_progress_count * options.step) / 10.0;
+      skipping_info = SkippingInfo::no_future_progress(sustained_s);
     } else if (const frame_filters::CollisionResult collision = frame_filters::check_collision(
                  ego_future, options.ego_shape, static_objects, neighbor_future, neighbor_past,
                  line_strings, options.static_object_margin, options.neighbor_margin,

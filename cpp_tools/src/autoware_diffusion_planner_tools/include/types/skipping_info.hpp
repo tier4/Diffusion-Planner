@@ -55,12 +55,17 @@ enum class SkippingLabel {
   InsufficientDistance,  // Traveled distance of sequence is too short
 
   // Frame processing skipping reasons
-  RedOrYellowLight,  // At red or yellow light with forward future trajectory
-  VehicleStopped,    // Ego vehicle is stopped
+  RedOrYellowLight,        // At red or yellow light with forward future trajectory
+  StoppedAtTrafficLight,   // Sustained stop at red/yellow light (formerly VehicleStopped;
+                           // contrast with NoFutureProgress for non-light stops)
 
   // Filter skipping reasons (ported from the standalone python filter scripts)
   Collision,  // GT ego trajectory collides with a static object, neighbor, or road border
   OffLane,    // GT ego trajectory is too far from any lane centerline
+
+  // Sustained-state skipping reasons
+  NoFutureProgress,  // GT future trajectory has not advanced for >=3s (ego stuck beyond
+                     // just red lights, e.g. stop sign / behind another vehicle / parked).
 };
 
 // Structure to hold detailed skipping information
@@ -117,9 +122,10 @@ struct SkippingInfo
       {}};
   }
 
-  static SkippingInfo vehicle_stopped()
+  static SkippingInfo stopped_at_traffic_light()
   {
-    return {SkippingLabel::VehicleStopped, "Ego vehicle is stopped", {}, {}};
+    return {
+      SkippingLabel::StoppedAtTrafficLight, "Sustained stop at red/yellow light", {}, {}};
   }
 
   static SkippingInfo red_or_yellow_light()
@@ -171,6 +177,16 @@ struct SkippingInfo
         ", yy=" + std::to_string(covariance_yy),
       {},
       {IncompleteDataType::KinematicState}};
+  }
+
+  static SkippingInfo no_future_progress(double sustained_seconds)
+  {
+    return {
+      SkippingLabel::NoFutureProgress,
+      "GT future has not advanced for " + std::to_string(sustained_seconds) +
+        "s (ego stuck beyond red lights)",
+      {},
+      {}};
   }
 };
 
