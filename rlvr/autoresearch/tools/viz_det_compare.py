@@ -90,6 +90,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     results_a, results_b = [], []
+    cached_trajs_a, cached_trajs_b = [], []
 
     for start in range(0, len(scene_paths), args.batch_size):
         batch_paths = scene_paths[start : start + args.batch_size]
@@ -141,11 +142,13 @@ def main():
                 f"B: {flag_b} sc={sc_b:+.2f}m"
             )
 
-            if args.no_viz:
-                continue
-
             traj_a_np = det_a[bi].cpu().numpy()
             traj_b_np = det_b[bi].cpu().numpy()
+            cached_trajs_a.append(traj_a_np)
+            cached_trajs_b.append(traj_b_np)
+
+            if args.no_viz:
+                continue
 
             fig, ax = plt.subplots(1, 1, figsize=(12, 12))
             draw_scene_base(ax, sp)
@@ -217,14 +220,12 @@ def main():
             if si >= len(axes_flat):
                 break
             ax = axes_flat[si]
-            d = load_npz_data(sp, device)
-            t_a = det_inference_batched(model_a, args_a, [d], device)[0].cpu().numpy()
-            t_b = det_inference_batched(model_b, args_b, [d], device)[0].cpu().numpy()
 
             draw_scene_base(ax, sp)
-            draw_traj(ax, t_a, args.label_a, "#1f77b4", sp)
-            draw_traj(ax, t_b, args.label_b, "#d62728", sp)
+            draw_traj(ax, cached_trajs_a[si], args.label_a, "#1f77b4", sp)
+            draw_traj(ax, cached_trajs_b[si], args.label_b, "#d62728", sp)
 
+            t_a, t_b = cached_trajs_a[si], cached_trajs_b[si]
             all_pts = np.vstack([t_a[:, :2], t_b[:, :2], [[0, 0]]])
             cx, cy = np.mean(all_pts[:, 0]), np.mean(all_pts[:, 1])
             half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 6
