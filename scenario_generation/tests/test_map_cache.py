@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from scenario_generation.tensor_converter import (
+    _MAX_NUM_NEIGHBORS,
     _NUM_LANES,
     _NUM_LINE_STRINGS,
     _NUM_POLYGONS,
@@ -189,7 +190,7 @@ class TestDumpStepNPZ:
     """dump_step_npz produces un-normalised per-step arrays in the shape the
     training NPZ loader expects."""
 
-    def _dump(self, scene, future_len=80, predicted_neighbor_num=32):
+    def _dump(self, scene, future_len=80, predicted_neighbor_num=_MAX_NUM_NEIGHBORS):
         cache = MapTensorCache(scene.map_data)
         return dump_step_npz(
             scene, cache,
@@ -211,9 +212,11 @@ class TestDumpStepNPZ:
         assert not missing, f"dump missing keys: {missing}"
 
     def test_shapes_and_dtypes_match_loader(self, synthetic_scene):
-        data = self._dump(synthetic_scene, future_len=80, predicted_neighbor_num=32)
+        data = self._dump(synthetic_scene, future_len=80)
         assert data["ego_agent_future"].shape == (80, 3)
         assert data["neighbor_agents_future"].shape == (_MAX_NUM_NEIGHBORS, 80, 4)
+        # past and future neighbor dims must agree
+        assert data["neighbor_agents_past"].shape[0] == _MAX_NUM_NEIGHBORS
         assert data["ego_agent_future"].dtype == np.float32
         assert data["neighbor_agents_future"].dtype == np.float32
         # has_speed_limit fields must be bool (training loader expects it).
@@ -247,16 +250,22 @@ class TestDumpStepNPZ:
         """Caller-provided future_len flows through to both ego and neighbor futures."""
         data = self._dump(synthetic_scene, future_len=40)
         assert data["ego_agent_future"].shape == (40, 3)
-        # Neighbor count is locked at _MAX_NUM_NEIGHBORS (past and future must match)
-        from scenario_generation.tensor_converter import _MAX_NUM_NEIGHBORS
+        # Neighbor count defaults to _MAX_NUM_NEIGHBORS (past and future match)
         assert data["neighbor_agents_future"].shape == (_MAX_NUM_NEIGHBORS, 40, 4)
 
-    def test_mismatched_neighbor_count_raises(self, synthetic_scene):
-        """predicted_neighbor_num must equal _MAX_NUM_NEIGHBORS (past is fixed)."""
+    def test_custom_neighbor_count_propagates(self, synthetic_scene):
+        """A non-default predicted_neighbor_num sizes BOTH past and future,
+        keeping the NPZ internally consistent."""
+        data = self._dump(synthetic_scene, future_len=80, predicted_neighbor_num=16)
+        assert data["neighbor_agents_future"].shape == (16, 80, 4)
+        assert data["neighbor_agents_past"].shape[0] == 16
+
+    def test_zero_neighbor_count_raises(self, synthetic_scene):
+        """predicted_neighbor_num must be >= 1."""
         import pytest
         cache = MapTensorCache(synthetic_scene.map_data)
         with pytest.raises(ValueError, match="predicted_neighbor_num"):
             dump_step_npz(
                 synthetic_scene, cache,
-                future_len=80, predicted_neighbor_num=16,
+                future_len=80, predicted_neighbor_num=0,
             )
