@@ -44,6 +44,10 @@ from matplotlib.patches import Rectangle
 
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.eval_det_avoidance import (
+    det_inference_batched,
+    reward_breakdown_to_det_dict,
+)
 from rlvr.autoresearch.tools.percentile_filter_perturbed import is_scene_eligible
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_cl_recovery import (
@@ -265,20 +269,9 @@ def main() -> None:
             use_route_cl_guidance=use_route_cl,
         )  # [B, K, T, 4]
 
-        decoder = model.module.decoder if hasattr(model, "module") else model.decoder
-        saved_fn = decoder._guidance_fn
-        decoder._guidance_fn = None
-        try:
-            P = 1 + model_args.predicted_neighbor_num
-            future_len = model_args.future_len
-            norm_batch_d = {k: v for k, v in norm_batch.items()}
-            norm_batch_d["sampled_trajectories"] = torch.zeros(
-                B, P, future_len + 1, 4, device=device
-            )
-            _, det_out = model(norm_batch_d)
-            det_trajs_BT4 = det_out["prediction"][:, 0].detach()  # [B, T, 4]
-        finally:
-            decoder._guidance_fn = saved_fn
+        det_trajs_BT4 = det_inference_batched(
+            model, model_args, datas_ok, device, norm_batch=norm_batch,
+        )
 
         for bi in range(B):
             si = orig_indices[bi]
@@ -318,7 +311,7 @@ def main() -> None:
                         and is_scene_eligible(top1, t0_cl=t0_cl))
 
             if args.no_viz:
-                summary.append({
+                entry = {
                     "scene": str(npz_path),
                     "scene_idx": si,
                     "t0_cl": t0_cl,
@@ -333,10 +326,10 @@ def main() -> None:
                     "top1_kin_violated": top1["kin_violated"],
                     "top1_coll_step": top1["coll_step"],
                     "top1_static_crossing": top1["static_crossing"],
-                    "det_cl": float(det_r.centerline),
-                    "det_total": float(det_r.total),
                     "png": None,
-                })
+                }
+                entry.update(reward_breakdown_to_det_dict(det_r))
+                summary.append(entry)
                 if improves:
                     improve_paths.append(str(npz_path))
                 flag = "IMPROVE" if improves else "       "
@@ -486,10 +479,9 @@ def main() -> None:
                 "top1_kin_violated": top1["kin_violated"],
                 "top1_coll_step": top1["coll_step"],
                 "top1_static_crossing": top1["static_crossing"],
-                "det_cl": float(det_r.centerline),
-                "det_total": float(det_r.total),
                 "png": str(out_path),
             })
+            summary[-1].update(reward_breakdown_to_det_dict(det_r))
             flag = "IMPROVE" if improves else "       "
             print(
                 f"  [{si:3d}] {flag}  t0={t0_cl:+.3f}  top1={top1['cl']:+.3f}  "

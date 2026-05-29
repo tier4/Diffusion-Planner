@@ -788,15 +788,30 @@ class GRPOTrainer:
                 return f"{v:.2e}"
             return f"{v:.6f}"
 
-        loss = _fmt(metrics.get("loss", 0))
-        ploss = _fmt(metrics.get("policy_loss", 0))
-        kl = _fmt(metrics.get("kl_loss", 0))
-        logp = _fmt(metrics.get("mean_policy_logprob", 0))
-        print(
-            f"  Epoch {epoch} [{mode_str}]: "
-            f"Loss={loss}, PolicyLoss={ploss}, KL={kl}, "
-            f"MeanLogProb={logp}{clip_str}"
-        )
+        # Ranked SFT uses sft_-prefixed keys; GRPO uses unprefixed.
+        is_sft = "sft_total_loss" in metrics
+        loss = _fmt(metrics.get("sft_total_loss" if is_sft else "loss", None))
+        if loss is None:
+            raise KeyError(
+                f"Neither 'loss' nor 'sft_total_loss' found in metrics. "
+                f"Available keys: {sorted(metrics.keys())}"
+            )
+        kl = _fmt(metrics.get("sft_kl_loss" if is_sft else "kl_loss", 0))
+        if is_sft:
+            ego_l = _fmt(metrics.get("sft_ego_loss", 0))
+            nreg = _fmt(metrics.get("sft_neighbor_reg_loss", 0))
+            print(
+                f"  Epoch {epoch} [{mode_str}]: "
+                f"Loss={loss}, EgoLoss={ego_l}, NeighReg={nreg}, KL={kl}{clip_str}"
+            )
+        else:
+            ploss = _fmt(metrics.get("policy_loss", 0))
+            logp = _fmt(metrics.get("mean_policy_logprob", 0))
+            print(
+                f"  Epoch {epoch} [{mode_str}]: "
+                f"Loss={loss}, PolicyLoss={ploss}, KL={kl}, "
+                f"MeanLogProb={logp}{clip_str}"
+            )
 
     def save_epoch1_baselines(self, npz_paths: list[str]) -> None:
         """Save deterministic trajectories as epoch-1 reference for drift tracking.
