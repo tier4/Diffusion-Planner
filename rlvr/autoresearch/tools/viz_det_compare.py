@@ -97,7 +97,8 @@ def main():
 
         for sp in batch_paths:
             try:
-                raw = set(np.load(sp, allow_pickle=True).keys())
+                with np.load(sp, allow_pickle=True) as npz:
+                    raw = set(npz.keys())
                 if "ego_shape" not in raw:
                     print(f"  [skip] {Path(sp).name}: missing ego_shape")
                     continue
@@ -127,8 +128,8 @@ def main():
             d_a = reward_breakdown_to_det_dict(r_a)
             d_b = reward_breakdown_to_det_dict(r_b)
 
-            results_a.append({"scene": name, **d_a})
-            results_b.append({"scene": name, **d_b})
+            results_a.append({"scene": name, "scene_path": str(sp), **d_a})
+            results_b.append({"scene": name, "scene_path": str(sp), **d_b})
 
             sc_a = d_a["det_sc_min_dist"]
             sc_b = d_b["det_sc_min_dist"]
@@ -182,6 +183,12 @@ def main():
             for r in results
         ]
 
+    if not results_a:
+        raise SystemExit(
+            f"All {len(scene_paths)} scenes were skipped (ego_shape mismatch "
+            f"or missing). Check --ego_shape matches the NPZs."
+        )
+
     agg_a = aggregate_stats(_to_score_list(results_a))
     agg_b = aggregate_stats(_to_score_list(results_b))
 
@@ -193,7 +200,8 @@ def main():
     # --- Collage ---
     if not args.no_viz and results_a:
         print("Creating collage...")
-        n = len(results_a)
+        scored_paths = [r["scene_path"] for r in results_a]
+        n = len(scored_paths)
         cols = args.collage_cols
         rows = (n + cols - 1) // cols
         fig, axes = plt.subplots(rows, cols, figsize=(8 * cols, 8 * rows))
@@ -205,7 +213,7 @@ def main():
             axes = axes[:, None]
         axes_flat = axes.flatten()
 
-        for si, sp in enumerate(scene_paths[: len(results_a)]):
+        for si, sp in enumerate(scored_paths):
             if si >= len(axes_flat):
                 break
             ax = axes_flat[si]

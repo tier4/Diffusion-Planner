@@ -122,7 +122,8 @@ def score_det_scenes(
 
         for p in batch_paths:
             try:
-                raw_keys = set(np.load(p, allow_pickle=True).keys())
+                with np.load(p, allow_pickle=True) as npz:
+                    raw_keys = set(npz.keys())
                 if "ego_shape" not in raw_keys:
                     print(f"  [skip] {Path(p).name}: missing ego_shape")
                     continue
@@ -282,6 +283,12 @@ def main():
         model, model_args, scene_paths, rcfg, ego_shape,
         device, batch_size=args.batch_size,
     )
+
+    if not results:
+        raise SystemExit(
+            f"All {len(scene_paths)} scenes were skipped (ego_shape mismatch "
+            f"or missing). Check --ego_shape={args.ego_shape} matches the NPZs."
+        )
 
     agg = aggregate_stats(results)
     print_summary(agg)
