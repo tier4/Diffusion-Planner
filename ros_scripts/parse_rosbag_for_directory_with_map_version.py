@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument("--cpp_binary_path", type=Path, default=DEFAULT_CPP_BINARY)
     parser.add_argument("--step", type=int, default=2)
     parser.add_argument("--limit", type=int, default=-1)
-    parser.add_argument("--min_frames", type=int, default=1700)
+    parser.add_argument("--min_frames", type=int, default=0)
     parser.add_argument("--min_distance", type=float, default=50.0)
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
