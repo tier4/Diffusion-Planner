@@ -102,7 +102,7 @@ def _render_one(npz_path, reward_config, view_half):
         show_nb_dist=True,
         show_traj_rb=True,        # worst RB clearance along the target
         show_traj_nb=True,        # worst neighbor clearance along the target
-        dim_neighbors=True,       # obstacles visible but dimmed (GUI style)
+        dim_neighbors=False,      # draw obstacles solid (verification view)
         figsize=(8, 8),
     )
     r = _score_saved_target(npz_path, reward_config)
