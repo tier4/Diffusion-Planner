@@ -103,22 +103,29 @@ def _build_ego_current_state(
     vel = ego.current_velocity  # world frame [Vx_w, Vy_w]
     speed = float(np.sqrt(vel[0] ** 2 + vel[1] ** 2))
 
-    # Full acceleration magnitude carried on the longitudinal axis; lateral = 0.
-    # base_link convention: velocity and acceleration live entirely on ego-x
-    # (vy = ay = 0). The lateral/centripetal component is folded into the
-    # magnitude here, never written to ay.
-    accel = ego.acceleration  # world frame
-    accel_ego = transform_directions(accel.reshape(1, 2), R).flatten()
-    accel_mag = float(np.copysign(np.hypot(accel_ego[0], accel_ego[1]), accel_ego[0]))
+    # base_link convention: vy = ay = 0, all kinematics on ego-x. The C++ node
+    # gets this for free from ego-frame messages; in sim we derive it from
+    # world-frame motion instead:
+    #   vx = |v| = ds/dt              (scalar speed)
+    #   ax = d(vx)/dt = (v·a)/|v|     (tangential accel = rate of change of speed)
+    # NOT the accel-vector magnitude and NOT the heading projection — those
+    # leak the centripetal/lateral term, which must stay out (ay = 0).
+    accel = ego.acceleration  # world frame (= dv/dt)
+    if speed > 1e-3:
+        ax_long = float((vel[0] * accel[0] + vel[1] * accel[1]) / speed)
+    else:
+        # standstill: velocity direction undefined; project accel onto heading
+        accel_ego = transform_directions(accel.reshape(1, 2), R).flatten()
+        ax_long = float(accel_ego[0])
 
     state = np.zeros(10, dtype=np.float32)
     state[0] = 0.0           # x
     state[1] = 0.0           # y
     state[2] = 1.0           # cos(0)
     state[3] = 0.0           # sin(0)
-    state[4] = speed         # vx = |V| (full velocity magnitude on ego-x)
+    state[4] = speed         # vx = |v| = ds/dt
     state[5] = 0.0           # vy = 0 (base_link: no lateral velocity)
-    state[6] = accel_mag     # ax = |A| (full accel magnitude on ego-x)
+    state[6] = ax_long       # ax = d(vx)/dt (tangential accel)
     state[7] = 0.0           # ay = 0 (base_link: no lateral accel)
     state[8] = ego.steering_angle
     state[9] = ego.yaw_rate
