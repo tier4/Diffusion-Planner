@@ -83,9 +83,11 @@ def _draw_agent_box(ax, x, y, heading, length, width, color,
                         alpha=alpha, lw=lw, zorder=zorder, wheelbase=wheelbase)
 
 
-def _ego_obb_corners(ex, ey, heading, length, width) -> np.ndarray:
-    """Four OBB corners (world frame) — used to attach the border-distance line."""
-    rear_overhang = (length - length * 0.65) / 2
+def _ego_obb_corners(ex, ey, heading, length, width, wheelbase=None) -> np.ndarray:
+    """Four OBB corners (world frame) — used to attach the border-distance line.
+    Ego is rear-axle referenced: rear edge at -(length-wheelbase)/2."""
+    wb = wheelbase if wheelbase is not None else length * 0.65
+    rear_overhang = (length - wb) / 2
     x0, x1 = -rear_overhang, length - rear_overhang
     y0, y1 = -width / 2, width / 2
     local = np.array([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=np.float64)
@@ -312,6 +314,7 @@ def _render_step(
     centerline_segments: np.ndarray,    # (N_seg, 2, 2) for nearest-distance label
     ego_length: float,
     ego_width: float,
+    ego_wheelbase: float = 4.76,
     perturbation_label: str,
     init_lateral: float,
     view_half_m: float = _VIEW_HALF_M,
@@ -366,7 +369,7 @@ def _render_step(
 
     # 3) Ego footprint + heading arrow
     _draw_agent_box(ax, ex, ey, eh, ego_length, ego_width, _EGO_COLOR,
-                    alpha=0.85, lw=2, zorder=20, wheelbase=ego_length * 0.65)
+                    alpha=0.85, lw=2, zorder=20, wheelbase=ego_wheelbase)
     arrow_len = max(ego_length, 2.5)
     ax.annotate(
         "",
@@ -387,13 +390,13 @@ def _render_step(
         _draw_agent_box(
             ax, plan_world[-1, 0], plan_world[-1, 1], plan_world[-1, 2],
             ego_length, ego_width, _PRED_COLOR, alpha=0.25, lw=1.0, zorder=24,
-            wheelbase=ego_length * 0.65,
+            wheelbase=ego_wheelbase,
         )
 
     # 5) Body-to-border distance overlay
     border_pt = _nearest_border_point(np.array([ex, ey]), border_polylines)
     if border_pt is not None:
-        corners = _ego_obb_corners(ex, ey, eh, ego_length, ego_width)
+        corners = _ego_obb_corners(ex, ey, eh, ego_length, ego_width, ego_wheelbase)
         d_corner = np.hypot(corners[:, 0] - border_pt[0],
                             corners[:, 1] - border_pt[1])
         start = corners[int(d_corner.argmin())]
@@ -496,6 +499,7 @@ def main():
     parser.add_argument("--advance_k", type=int, default=0)
     parser.add_argument("--ego_length", type=float, default=7.2369)
     parser.add_argument("--ego_width", type=float, default=2.29156)
+    parser.add_argument("--ego_wheelbase", type=float, default=4.76)
     parser.add_argument("--view_half_m", type=float, default=_VIEW_HALF_M)
     parser.add_argument("--make_webm", action="store_true",
                         help="Encode the PNG sequence as a vp9 WebM at 10 fps")
@@ -594,6 +598,7 @@ def main():
             centerline_segments=centerline_segments,
             ego_length=args.ego_length,
             ego_width=args.ego_width,
+            ego_wheelbase=args.ego_wheelbase,
             perturbation_label=perturbation_label,
             init_lateral=init_lateral,
             view_half_m=args.view_half_m,
