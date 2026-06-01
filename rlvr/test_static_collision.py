@@ -174,21 +174,15 @@ def test_near_zone_no_crossing():
 # ---------------------------------------------------------------------------
 
 
-def test_stationary_ego_behind_parked_car_not_flagged():
-    """Ego idles 0.5m behind a parked car: no crossing because ego speed < threshold."""
-    # Ego sitting at origin, not moving (all timesteps same)
+def test_stationary_ego_overlapping_parked_car_flagged_at_t0():
+    """Ego idles overlapping a parked car: crossing fires at t=0 regardless of speed."""
     ego = torch.zeros(1, T, 4)
-    ego[..., 0] = 0.0
-    ego[..., 1] = 0.0
     ego[..., 2] = 1.0  # cos_h=1, sin_h=0 (facing +x)
-    # Car right in front of ego (ego length=4.34, so ego front at x=4.34-wb_half)
-    # Place NPC so it almost touches: ego front edge is at x = (4.34-2.79)/2 + 4.34/2 ≈ 2.95
-    # NPC center at x=5.0 with length 4.5 → rear at x=2.75 → gap ≈ 0.2m
+    # NPC at x=5.0 overlaps ego OBB at t=0 (OBB clearance ~ -0.8m)
     nf, ns, nv = _stopped_neighbor(center=(5.0, 0.0))
     out = compute_static_collision_penalty(ego, _ego_shape(), nf, ns, nv, _cfg())
-    # Ego never moves faster than 1 m/s → no gate fire
-    assert float(out["crossing_gate"][0]) == 1.0
-    assert out["first_crossing_steps"][0] is None
+    assert float(out["crossing_gate"][0]) == 0.0
+    assert out["first_crossing_steps"][0] == 0
 
 
 # ---------------------------------------------------------------------------

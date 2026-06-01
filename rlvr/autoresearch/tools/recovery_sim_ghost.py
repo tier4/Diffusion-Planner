@@ -75,6 +75,7 @@ def _render_ghost_step(
     centerline_segments,
     ego_length: float, ego_width: float,
     perturbation_label: str, init_lateral: float,
+    ego_wheelbase: float = 4.76,
     view_half_m: float = _VIEW_HALF_M,
     neighbor_boxes: list[tuple[float, float, float, float, float]] | None = None,
     baseline_label: str = "baseline (LoRA-less)",
@@ -129,11 +130,13 @@ def _render_ghost_step(
         ax.plot(pr_plan[:, 0], pr_plan[:, 1], "-",
                 color=_PRISM_COLOR, lw=1.4, alpha=0.45, zorder=24)
 
-    # Ego footprints + arrows
+    # Ego footprints + arrows (ego is rear-axle referenced)
     _draw_agent_box(ax, bx, by, bh, ego_length, ego_width,
-                    _BASELINE_COLOR, alpha=0.78, lw=2, zorder=20)
+                    _BASELINE_COLOR, alpha=0.78, lw=2, zorder=20,
+                    wheelbase=ego_wheelbase)
     _draw_agent_box(ax, px, py, ph, ego_length, ego_width,
-                    _PRISM_COLOR, alpha=0.78, lw=2, zorder=21)
+                    _PRISM_COLOR, alpha=0.78, lw=2, zorder=21,
+                    wheelbase=ego_wheelbase)
     al = max(ego_length, 2.5)
     ax.annotate("", xy=(bx + al * math.cos(bh), by + al * math.sin(bh)),
                 xytext=(bx, by),
@@ -191,6 +194,7 @@ def main() -> None:
     parser.add_argument("--advance_k", type=int, default=0)
     parser.add_argument("--ego_length", type=float, default=7.2369)
     parser.add_argument("--ego_width", type=float, default=2.29156)
+    parser.add_argument("--ego_wheelbase", type=float, default=4.76)
     parser.add_argument("--view_half_m", type=float, default=_VIEW_HALF_M)
     parser.add_argument("--make_webm", action="store_true")
     parser.add_argument("--webm_fps", type=int, default=10)
@@ -262,6 +266,7 @@ def main() -> None:
             border_polylines=border_polylines, route_polylines=route_polylines,
             centerline_segments=centerline_segments,
             ego_length=args.ego_length, ego_width=args.ego_width,
+            ego_wheelbase=args.ego_wheelbase,
             perturbation_label=perturb_label, init_lateral=init_lat,
             view_half_m=args.view_half_m,
             neighbor_boxes=nb_boxes,

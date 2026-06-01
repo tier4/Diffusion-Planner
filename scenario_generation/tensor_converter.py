@@ -86,36 +86,68 @@ def _build_ego_current_state(
     ego: Agent,
     R: np.ndarray,
 ) -> np.ndarray:
-    """Build ego_current_state: ``[1, 10]`` in ego frame.
+    """Build ``ego_current_state`` ``[1, 10]`` =
+    ``[x, y, cos, sin, vx, vy, ax, ay, steering_angle, yaw_rate]``.
 
-    Convention matches the training data / C++ Autoware:
-    - position (x, y) is (0, 0) — self-frame
-    - heading (cos, sin) is (1, 0) — self-frame
-    - **vx carries the full global speed magnitude**, vy is exactly 0
-    - ax is the longitudinal projection of world-frame acceleration onto
-      ego forward, ay is exactly 0
-    - steering_angle and yaw_rate are scalars set by the physics updater
+    VELOCITY / ACCELERATION CONVENTION (read before changing vx/vy/ax/ay)
+    --------------------------------------------------------------------
+    The model is fed kinematics in the **ego base_link frame**, where the car
+    is non-holonomic: there is **no lateral velocity or lateral acceleration**,
+    so ``vy = 0`` and ``ay = 0`` *always*. All motion lives on the longitudinal
+    (ego-x) axis:
+      - ``vx`` = scalar speed = ``|v|`` = ``ds/dt`` (full velocity magnitude)
+      - ``ax`` = ``d(vx)/dt`` = **tangential** acceleration = ``(v·a)/|v|``
+                 (the rate of change of *speed*)
 
-    Forcing vy=ay=0 matches the training NPZ convention — the car's motion
-    is canonicalized to its own heading axis so the lateral dimension is
-    only a kinematics cue (rate of heading change), never a velocity.
+    In the production C++ node (`create_ego_current_state`) this is free: vx/vy
+    come straight from the base_link twist (vy≈0) and ax/ay from the base_link
+    accel message (ay≈0). In SIM we have no base_link-framed messages — we only
+    have world-frame `current_velocity` and `acceleration` (= dv/dt) — so we
+    derive the scalars ourselves:
+      - ``vx = |current_velocity|``
+      - ``ax = (current_velocity · acceleration) / |current_velocity|``
+
+    Do NOT write the world-frame accel's lateral/centripetal component into
+    ``ay``, and do NOT put the accel-vector *magnitude* (`|a|`) into ``ax`` —
+    both leak the centripetal term the model never saw in training. ``ax`` is
+    the tangential component only; the centripetal part is simply not represented
+    (matching real data, where ``ay = 0``). At standstill (``|v|≈0``) the velocity
+    direction is undefined, so ``ax`` falls back to the heading projection.
+
+    Note: NPC futures / GT trajectories carry NO speed at all — they are
+    ``(x, y, heading)`` only; speed there is implicit in position deltas.
+
+    - position (x, y) = (0, 0), heading (cos, sin) = (1, 0): the state is
+      self-referential (always the ego's own origin/heading).
+    - steering_angle and yaw_rate are scalars set by the physics updater.
     """
     vel = ego.current_velocity  # world frame [Vx_w, Vy_w]
     speed = float(np.sqrt(vel[0] ** 2 + vel[1] ** 2))
 
-    # Longitudinal acceleration = projection onto ego forward. Lateral = 0.
-    accel = ego.acceleration  # world frame
-    accel_ego = transform_directions(accel.reshape(1, 2), R).flatten()
+    # base_link convention: vy = ay = 0, all kinematics on ego-x. The C++ node
+    # gets this for free from ego-frame messages; in sim we derive it from
+    # world-frame motion instead:
+    #   vx = |v| = ds/dt              (scalar speed)
+    #   ax = d(vx)/dt = (v·a)/|v|     (tangential accel = rate of change of speed)
+    # NOT the accel-vector magnitude and NOT the heading projection — those
+    # leak the centripetal/lateral term, which must stay out (ay = 0).
+    accel = ego.acceleration  # world frame (= dv/dt)
+    if speed > 1e-3:
+        ax_long = float((vel[0] * accel[0] + vel[1] * accel[1]) / speed)
+    else:
+        # standstill: velocity direction undefined; project accel onto heading
+        accel_ego = transform_directions(accel.reshape(1, 2), R).flatten()
+        ax_long = float(accel_ego[0])
 
     state = np.zeros(10, dtype=np.float32)
     state[0] = 0.0           # x
     state[1] = 0.0           # y
     state[2] = 1.0           # cos(0)
     state[3] = 0.0           # sin(0)
-    state[4] = speed         # vx = |V| (full magnitude in ego frame)
-    state[5] = 0.0           # vy = 0 (canonicalized to forward axis)
-    state[6] = accel_ego[0]  # ax = longitudinal accel
-    state[7] = 0.0           # ay = 0
+    state[4] = speed         # vx = |v| = ds/dt
+    state[5] = 0.0           # vy = 0 (base_link: no lateral velocity)
+    state[6] = ax_long       # ax = d(vx)/dt (tangential accel)
+    state[7] = 0.0           # ay = 0 (base_link: no lateral accel)
     state[8] = ego.steering_angle
     state[9] = ego.yaw_rate
     return state[np.newaxis]  # [1, 10]
@@ -127,13 +159,17 @@ def _build_neighbor_agents_past(
     R: np.ndarray,
     ego_xy: np.ndarray,
     ego_heading: float,
+    num_neighbors: int = _MAX_NUM_NEIGHBORS,
 ) -> np.ndarray:
-    """Build neighbor_agents_past: [1, 32, INPUT_T+1, 11].
+    """Build neighbor_agents_past: [1, num_neighbors, INPUT_T+1, 11].
 
-    Neighbors sorted by distance from ego (closest first).
+    Neighbors sorted by distance from ego (closest first). ``num_neighbors``
+    defaults to ``_MAX_NUM_NEIGHBORS`` (the model's neighbor slot count); pass
+    a different value only when emitting NPZs for a model with a different
+    neighbor dimension.
     """
     T_needed = _INPUT_T + 1
-    out = np.zeros((1, _MAX_NUM_NEIGHBORS, T_needed, 11), dtype=np.float32)
+    out = np.zeros((1, num_neighbors, T_needed, 11), dtype=np.float32)
 
     # Collect non-ego agents with their distance to ego
     neighbors_with_dist: list[tuple[float, Agent]] = []
@@ -147,7 +183,7 @@ def _build_neighbor_agents_past(
     # Sort by distance
     neighbors_with_dist.sort(key=lambda x: x[0])
 
-    for slot_idx, (_, agent) in enumerate(neighbors_with_dist[:_MAX_NUM_NEIGHBORS]):
+    for slot_idx, (_, agent) in enumerate(neighbors_with_dist[:num_neighbors]):
         traj = agent.past_trajectory  # (T, 3) [x, y, heading_rad]
         T_agent = traj.shape[0]
 
@@ -393,18 +429,24 @@ class MapTensorCache:
     """
 
     def __init__(self, map_data: MapData) -> None:
-        # -- lanes: (n, 20, 33) --
-        n_lanes = min(map_data.lanes.shape[0], _NUM_LANES)
-        self._lanes = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
-        self._lanes[:n_lanes] = map_data.lanes[:n_lanes].astype(np.float32)
-        self._lanes_mask = np.sum(np.abs(self._lanes[:, :, :8]), axis=-1) == 0
+        # -- lanes: store ALL map lanes; get_lanes_ego selects the closest
+        # _NUM_LANES by distance to ego (matching the cpp node which sorts
+        # all lane segments by distance and takes the top 140).
+        self._all_lanes = map_data.lanes.astype(np.float32)  # (N_all, 20, 33)
+        # Pre-compute representative point per lane for distance sorting.
+        # cpp uses min(dist(first_pt), dist(second_to_last_pt)).
+        first_pts = self._all_lanes[:, 0, :2]   # (N_all, 2)
+        last_pts = self._all_lanes[:, -2, :2]    # (N_all, 2) second to last like cpp
+        self._lane_ref_a = first_pts
+        self._lane_ref_b = last_pts
+        self._lane_valid = np.abs(self._all_lanes[:, :, :2]).sum(axis=(1, 2)) > 0.1
 
-        # speed limits (no per-agent transform needed)
+        # speed limits — store all, selected alongside lanes in get_lanes_ego
+        self._all_speed_limit = map_data.lanes_speed_limit.astype(np.float32)
+        self._all_has_speed_limit = map_data.lanes_has_speed_limit.astype(bool)
+        # Updated by get_lanes_ego to match the selected 140
         self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
         self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
-        n_sl = min(map_data.lanes_speed_limit.shape[0], _NUM_LANES)
-        self._lanes_speed_limit[0, :n_sl] = map_data.lanes_speed_limit[:n_sl].astype(np.float32)
-        self._lanes_has_speed_limit[0, :n_sl] = map_data.lanes_has_speed_limit[:n_sl].astype(bool)
 
         # -- static objects: (n, 10) --
         n_static = min(map_data.static_objects.shape[0], _NUM_STATIC)
@@ -449,26 +491,71 @@ class MapTensorCache:
         Only the 5-dim TL one-hot is synced; geometry (``[0:8]``) and
         line-type channels (``[13:33]``) never change post-build.
         """
-        n = min(map_data.lanes.shape[0], self._lanes.shape[0])
+        n = min(map_data.lanes.shape[0], self._all_lanes.shape[0])
         if n > 0:
-            # ``np.copyto`` with ``same_kind`` avoids the fresh allocation that
-            # ``.astype(np.float32)`` forces every tick — map_data.lanes is
-            # already float32 in the production path, so this is a pure memcpy.
             np.copyto(
-                self._lanes[:n, :, 8:13],
+                self._all_lanes[:n, :, 8:13],
                 map_data.lanes[:n, :, 8:13],
                 casting="same_kind",
             )
 
     def get_lanes_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
-        """Return lanes in ego frame: [1, NUM_LANES, 20, 33]."""
-        src = self._lanes.copy()
-        src[:, :, :2] = transform_positions(src[:, :, :2], R, ego_xy)
-        src[:, :, 2:4] = transform_directions(src[:, :, 2:4], R)
-        src[:, :, 4:6] = transform_directions(src[:, :, 4:6], R)
-        src[:, :, 6:8] = transform_directions(src[:, :, 6:8], R)
-        src[self._lanes_mask] = 0.0
-        return src[np.newaxis]
+        """Return closest _NUM_LANES lanes in ego frame: [1, NUM_LANES, 20, 33].
+
+        Matches the cpp node: sort all map lane segments by min distance
+        of first/second-to-last centerline point to ego, take top 140.
+        Also updates lanes_speed_limit / lanes_has_speed_limit to match.
+        """
+        # Match cpp: a segment is eligible if ANY of its 20 centerline
+        # points falls within ±100m AABB of ego, then rank by min distance
+        # of first / second-to-last point.
+        _MASK_RANGE = 100.0
+        all_pts = self._all_lanes[:, :, :2]  # (N_all, 20, 2)
+        dx = np.abs(all_pts[:, :, 0] - ego_xy[0])
+        dy = np.abs(all_pts[:, :, 1] - ego_xy[1])
+        inside = (dx <= _MASK_RANGE) & (dy <= _MASK_RANGE)
+        eligible = inside.any(axis=1) & self._lane_valid
+
+        da = np.linalg.norm(self._lane_ref_a - ego_xy, axis=1)
+        db = np.linalg.norm(self._lane_ref_b - ego_xy, axis=1)
+        dists = np.minimum(da, db)
+        dists[~eligible] = 1e9
+
+        n_all = len(dists)
+        n_select = min(_NUM_LANES, n_all)
+        if n_select == 0:
+            out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
+            self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+            self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+            return out[np.newaxis]
+
+        if n_select >= n_all:
+            top_idx = np.argsort(dists)[:n_select]
+        else:
+            top_idx = np.argpartition(dists, n_select)[:n_select]
+            top_idx = top_idx[np.argsort(dists[top_idx])]
+
+        selected = self._all_lanes[top_idx].copy()
+        selected[:, :, :2] = transform_positions(selected[:, :, :2], R, ego_xy)
+        selected[:, :, 2:4] = transform_directions(selected[:, :, 2:4], R)
+        selected[:, :, 4:6] = transform_directions(selected[:, :, 4:6], R)
+        selected[:, :, 6:8] = transform_directions(selected[:, :, 6:8], R)
+        mask = np.sum(np.abs(selected[:, :, :8]), axis=-1) == 0
+        selected[mask] = 0.0
+
+        out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
+        out[:n_select] = selected
+
+        # Update speed limits to match selected lanes
+        self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
+        self._lanes_has_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=bool)
+        n_sl = min(self._all_speed_limit.shape[0], self._all_lanes.shape[0])
+        for j, idx in enumerate(top_idx):
+            if idx < n_sl:
+                self._lanes_speed_limit[0, j] = self._all_speed_limit[idx]
+                self._lanes_has_speed_limit[0, j] = self._all_has_speed_limit[idx]
+
+        return out[np.newaxis]
 
     def get_static_objects_ego(self, R: np.ndarray, ego_xy: np.ndarray) -> np.ndarray:
         """Return static objects in ego frame: [1, 5, 10]."""
@@ -540,6 +627,14 @@ def to_model_tensors(
     ego = scene.get_agent(ego_agent_id)
     ego_xy = ego.current_position.astype(np.float64)
     ego_heading = ego.current_heading
+
+    # When the "ego" is actually a non-ego NPC, its stored position is the
+    # bbox centroid. The model expects rear-axle. Shift back by wb/2.
+    if ego_agent_id != scene.ego_agent_id:
+        wb = getattr(ego, "wheelbase", 0.0) or 0.0
+        ego_xy = ego_xy.copy()
+        ego_xy[0] -= np.cos(ego_heading) * wb / 2.0
+        ego_xy[1] -= np.sin(ego_heading) * wb / 2.0
 
     R = _rotation_matrix(ego_heading)
 
@@ -624,11 +719,10 @@ def dump_step_npz(
         scene: Current scene at this replay step.
         map_cache: Pre-computed map tensor cache for the scene's map.
         future_len: Number of future timesteps (typically 80 — from model_args).
-        predicted_neighbor_num: Neighbor slot count for the future placeholder.
-            Must equal ``_MAX_NUM_NEIGHBORS`` (320) — the past array is built at
-            that fixed shape, so a mismatch would produce NPZs where past and
-            future disagree on the neighbor dimension and break the training
-            NPZ loader.
+        predicted_neighbor_num: Neighbor slot count for BOTH the past array and
+            the future placeholder. Defaults to ``_MAX_NUM_NEIGHBORS`` (320, the
+            model's neighbor dimension). Past and future are always built at the
+            same count here, so the resulting NPZ is internally consistent.
 
     Returns:
         Dict with the standard NPZ keys (ego_agent_past, ego_current_state,
@@ -638,13 +732,9 @@ def dump_step_npz(
         stripped of batch dim and have dtypes compatible with the training
         NPZ loader.
     """
-    if predicted_neighbor_num != _MAX_NUM_NEIGHBORS:
+    if predicted_neighbor_num < 1:
         raise ValueError(
-            f"predicted_neighbor_num={predicted_neighbor_num} disagrees with "
-            f"the fixed past-neighbor shape {_MAX_NUM_NEIGHBORS}. Pass "
-            f"{_MAX_NUM_NEIGHBORS} or omit (default). Threading a per-call "
-            f"neighbor count through _build_neighbor_agents_past is a "
-            f"follow-up if you need non-default future slots."
+            f"predicted_neighbor_num must be >= 1; got {predicted_neighbor_num}"
         )
     ego = scene.get_agent(scene.ego_agent_id)
     ego_xy = ego.current_position.astype(np.float64)
@@ -656,6 +746,7 @@ def dump_step_npz(
     data["ego_current_state"] = _build_ego_current_state(ego, R)
     data["neighbor_agents_past"] = _build_neighbor_agents_past(
         scene, scene.ego_agent_id, R, ego_xy, ego_h,
+        num_neighbors=predicted_neighbor_num,
     )
     data["static_objects"] = map_cache.get_static_objects_ego(R, ego_xy)
     data["lanes"] = map_cache.get_lanes_ego(R, ego_xy)
@@ -696,9 +787,26 @@ def dump_step_npz(
 
     # GT-future placeholders (caller fills if desired; ranked-SFT ignores).
     data["ego_agent_future"] = np.zeros((future_len, 3), dtype=np.float32)
-    data["neighbor_agents_future"] = np.zeros(
-        (predicted_neighbor_num, future_len, 3), dtype=np.float32,
+    nb_future = np.zeros(
+        (predicted_neighbor_num, future_len, 4), dtype=np.float32,
     )
+    # Fill stopped-neighbor futures with their current pose held constant
+    # as (x, y, cos_heading, sin_heading) — matching the 4-column format
+    # that compute_reward_batch / compute_static_collision_penalty expect.
+    # Moving-agent futures are filled post-hoc by _backfill_neighbor_futures
+    # in replay.py after the full sim completes.
+    nb_past = data["neighbor_agents_past"]  # (N, 31, 11)
+    for i in range(min(predicted_neighbor_num, nb_past.shape[0])):
+        cur = nb_past[i, -1]
+        if np.all(cur[:2] == 0):
+            continue
+        vx, vy = float(cur[4]), float(cur[5])
+        if np.hypot(vx, vy) < 0.5:
+            nb_future[i, :, 0] = cur[0]
+            nb_future[i, :, 1] = cur[1]
+            nb_future[i, :, 2] = cur[2]  # cos
+            nb_future[i, :, 3] = cur[3]  # sin
+    data["neighbor_agents_future"] = nb_future
     data["version"] = np.array(1, dtype=np.int64)
 
     return data

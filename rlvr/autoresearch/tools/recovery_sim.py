@@ -33,13 +33,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from matplotlib.collections import LineCollection
-from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
-import matplotlib.transforms as mtransforms
-
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
+from matplotlib.collections import LineCollection
+from matplotlib.figure import Figure
+
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.recovery_test import (
@@ -53,6 +51,7 @@ from rlvr.autoresearch.tools.recovery_test import (
     get_tangent_at_origin,
     transform_to_new_ego_frame,
 )
+from scenario_generation.visualize import draw_agent_box as _viz_draw_agent_box
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -72,22 +71,20 @@ _VIEW_HALF_M = 50.0
 
 
 def _draw_agent_box(ax, x, y, heading, length, width, color,
-                    alpha=0.85, lw=1.5, zorder=20) -> None:
-    """OBB ego footprint at world (x, y, heading). Rear-axle anchored — same
-    convention as ``scenario_generation.visualize.draw_agent_box``.
+                    alpha=0.85, lw=1.5, zorder=20, wheelbase=None) -> None:
+    """OBB footprint at world (x, y, heading). Delegates to the central
+    ``scenario_generation.visualize.draw_agent_box``: pass ``wheelbase`` for the
+    ego (rear-axle convention, box offset forward); leave None for neighbors
+    (centroid convention).
     """
-    rear_overhang = (length - length * 0.65) / 2
-    t_rot = mtransforms.Affine2D().rotate(heading).translate(x, y) + ax.transData
-    rect = Rectangle(
-        (-rear_overhang, -width / 2), length, width,
-        lw=lw, ec=color, fc=color, alpha=alpha, zorder=zorder, transform=t_rot,
-    )
-    ax.add_patch(rect)
+    _viz_draw_agent_box(ax, x, y, heading, length, width, color,
+                        alpha=alpha, lw=lw, zorder=zorder, wheelbase=wheelbase)
 
 
-def _ego_obb_corners(ex, ey, heading, length, width) -> np.ndarray:
-    """Four OBB corners (world frame) — used to attach the border-distance line."""
-    rear_overhang = (length - length * 0.65) / 2
+def _ego_obb_corners(ex, ey, heading, length, width, wheelbase) -> np.ndarray:
+    """Four OBB corners (world frame) — used to attach the border-distance line.
+    Ego is rear-axle referenced: rear edge at -(length-wheelbase)/2."""
+    rear_overhang = (length - wheelbase) / 2
     x0, x1 = -rear_overhang, length - rear_overhang
     y0, y1 = -width / 2, width / 2
     local = np.array([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=np.float64)
@@ -314,6 +311,7 @@ def _render_step(
     centerline_segments: np.ndarray,    # (N_seg, 2, 2) for nearest-distance label
     ego_length: float,
     ego_width: float,
+    ego_wheelbase: float = 4.76,
     perturbation_label: str,
     init_lateral: float,
     view_half_m: float = _VIEW_HALF_M,
@@ -368,7 +366,7 @@ def _render_step(
 
     # 3) Ego footprint + heading arrow
     _draw_agent_box(ax, ex, ey, eh, ego_length, ego_width, _EGO_COLOR,
-                    alpha=0.85, lw=2, zorder=20)
+                    alpha=0.85, lw=2, zorder=20, wheelbase=ego_wheelbase)
     arrow_len = max(ego_length, 2.5)
     ax.annotate(
         "",
@@ -389,12 +387,13 @@ def _render_step(
         _draw_agent_box(
             ax, plan_world[-1, 0], plan_world[-1, 1], plan_world[-1, 2],
             ego_length, ego_width, _PRED_COLOR, alpha=0.25, lw=1.0, zorder=24,
+            wheelbase=ego_wheelbase,
         )
 
     # 5) Body-to-border distance overlay
     border_pt = _nearest_border_point(np.array([ex, ey]), border_polylines)
     if border_pt is not None:
-        corners = _ego_obb_corners(ex, ey, eh, ego_length, ego_width)
+        corners = _ego_obb_corners(ex, ey, eh, ego_length, ego_width, ego_wheelbase)
         d_corner = np.hypot(corners[:, 0] - border_pt[0],
                             corners[:, 1] - border_pt[1])
         start = corners[int(d_corner.argmin())]
@@ -497,6 +496,7 @@ def main():
     parser.add_argument("--advance_k", type=int, default=0)
     parser.add_argument("--ego_length", type=float, default=7.2369)
     parser.add_argument("--ego_width", type=float, default=2.29156)
+    parser.add_argument("--ego_wheelbase", type=float, default=4.76)
     parser.add_argument("--view_half_m", type=float, default=_VIEW_HALF_M)
     parser.add_argument("--make_webm", action="store_true",
                         help="Encode the PNG sequence as a vp9 WebM at 10 fps")
@@ -595,6 +595,7 @@ def main():
             centerline_segments=centerline_segments,
             ego_length=args.ego_length,
             ego_width=args.ego_width,
+            ego_wheelbase=args.ego_wheelbase,
             perturbation_label=perturbation_label,
             init_lateral=init_lateral,
             view_half_m=args.view_half_m,
