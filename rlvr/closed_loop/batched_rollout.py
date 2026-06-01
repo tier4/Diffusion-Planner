@@ -78,15 +78,12 @@ def _batched_generate(
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
-    ego_current = batch_data["ego_current_state"][:, :4]
-    neighbors_current = batch_data["neighbor_agents_past"][:, :P - 1, -1, :4]
-    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)
-
-    xT = current_states[:, :, None, :].expand(-1, -1, future_len + 1, -1).clone()
     if noise_scale > 0.0:
-        xT[:, :, 1:, :] = noise_scale * torch.randn(
-            B, P, future_len, 4, device=device,
+        xT = noise_scale * torch.randn(
+            B, P, future_len + 1, 4, device=device,
         )
+    else:
+        xT = torch.zeros(B, P, future_len + 1, 4, device=device)
     batch_data["sampled_trajectories"] = xT
 
     try:
@@ -156,12 +153,6 @@ def _batched_generate_varied_noise(
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
-    ego_current = batch_data["ego_current_state"][:, :4]
-    neighbors_current = batch_data["neighbor_agents_past"][:, :P - 1, -1, :4]
-    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)
-
-    xT = current_states[:, :, None, :].expand(-1, -1, future_len + 1, -1).clone()
-
     # Per-element noise with independent scales
     noise_scales = torch.zeros(B, 1, 1, 1, device=device)
     for i in range(B):
@@ -170,8 +161,8 @@ def _batched_generate_varied_noise(
         else:
             noise_scales[i] = random.uniform(noise_min, noise_max)
 
-    raw_noise = torch.randn(B, P, future_len, 4, device=device)
-    xT[:, :, 1:, :] = noise_scales * raw_noise
+    raw_noise = torch.randn(B, P, future_len + 1, 4, device=device)
+    xT = noise_scales * raw_noise
 
     batch_data["sampled_trajectories"] = xT
 

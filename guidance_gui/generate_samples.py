@@ -68,13 +68,12 @@ def generate_samples(
     try:
         for _ in range(n_samples):
             # Build noisy initial latent xT.
-            xT = current_states[:, :, None, :].expand(-1, -1, future_len + 1, -1).clone()
             if noise_scale > 0.0:
-                xT[:, :, 1:, :] = noise_scale * torch.randn(
-                    B, P, future_len, 4, device=device
+                xT = noise_scale * torch.randn(
+                    B, P, future_len + 1, 4, device=device
                 )
-            # data["sampled_trajectories"] shape expected by decoder: (B, P, (T+1)*4) or (B, P, T+1, 4)
-            # Existing working code in generate_trajectory_pair passes (B, P, T+1, 4) directly.
+            else:
+                xT = torch.zeros(B, P, future_len + 1, 4, device=device)
             data["sampled_trajectories"] = xT
 
             _, decoder_output = model(data)

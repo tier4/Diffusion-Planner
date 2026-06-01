@@ -110,11 +110,10 @@ class _ModelCache:
 
         P = 1 + self._model_args.predicted_neighbor_num
         future_len = self._model_args.future_len
-        ego_current = data["ego_current_state"][:, :4]
-        neighbors_current = data["neighbor_agents_past"][:, :P - 1, -1, :4]
-        current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)
-        xT = current_states[:, :, None, :].expand(-1, -1, future_len + 1, -1).clone()
-        data["sampled_trajectories"] = xT
+        data["sampled_trajectories"] = torch.zeros(
+            1, P, future_len + 1, 4,
+            device=data["ego_current_state"].device,
+        )
 
         _, decoder_output = self._model(data)
         pred = decoder_output["prediction"]  # (1, P, T, 4)
