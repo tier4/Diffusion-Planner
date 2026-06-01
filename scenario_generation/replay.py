@@ -335,6 +335,11 @@ class SpawnConfig:
             raise ValueError(
                 f"ego_init_speed must be >= 0 when set; got {self.ego_init_speed}"
             )
+        if self.dump_npz_dir and self.dump_neighbor_count < 1:
+            raise ValueError(
+                f"dump_neighbor_count must be >= 1 when dumping NPZs; "
+                f"got {self.dump_neighbor_count}"
+            )
         if self.dump_npz_dir and not self.reward_config_path:
             raise ValueError(
                 "reward_config_path is required when dump_npz_dir is set; "

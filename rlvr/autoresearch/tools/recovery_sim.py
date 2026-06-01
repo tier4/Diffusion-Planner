@@ -31,14 +31,12 @@ import math
 import subprocess
 from pathlib import Path
 
-import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
 
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
