@@ -117,7 +117,7 @@ def main():
     p = argparse.ArgumentParser()
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--scene_dir")
-    g.add_argument("--scenes", help="JSON list of NPZ paths")
+    g.add_argument("--scenes", help="Path to a JSON file containing a list of NPZ paths")
     p.add_argument("--reward_config", required=True)
     p.add_argument("--output_dir", required=True)
     p.add_argument("--view_half", type=float, default=45.0)

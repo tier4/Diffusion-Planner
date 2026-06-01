@@ -10,8 +10,9 @@ pairing, threshold, and pruning logic that is irrelevant here.
 
 import numpy as np
 import torch
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
+
+from rlvr.closed_loop.batched_rollout import make_initial_latent
 
 
 @torch.no_grad()
@@ -60,7 +61,6 @@ def generate_samples(
     results = []
     try:
         for _ in range(n_samples):
-            from rlvr.closed_loop.batched_rollout import make_initial_latent
             data["sampled_trajectories"] = make_initial_latent(
                 B, P, future_len, device, noise_scale,
             )

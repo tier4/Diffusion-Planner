@@ -86,19 +86,40 @@ def _build_ego_current_state(
     ego: Agent,
     R: np.ndarray,
 ) -> np.ndarray:
-    """Build ego_current_state: ``[1, 10]`` in ego frame.
+    """Build ``ego_current_state`` ``[1, 10]`` =
+    ``[x, y, cos, sin, vx, vy, ax, ay, steering_angle, yaw_rate]``.
 
-    Convention matches the training data / C++ Autoware:
-    - position (x, y) is (0, 0) — self-frame
-    - heading (cos, sin) is (1, 0) — self-frame
-    - **vx carries the full global speed magnitude**, vy is exactly 0
-    - ax is the longitudinal projection of world-frame acceleration onto
-      ego forward, ay is exactly 0
-    - steering_angle and yaw_rate are scalars set by the physics updater
+    VELOCITY / ACCELERATION CONVENTION (read before changing vx/vy/ax/ay)
+    --------------------------------------------------------------------
+    The model is fed kinematics in the **ego base_link frame**, where the car
+    is non-holonomic: there is **no lateral velocity or lateral acceleration**,
+    so ``vy = 0`` and ``ay = 0`` *always*. All motion lives on the longitudinal
+    (ego-x) axis:
+      - ``vx`` = scalar speed = ``|v|`` = ``ds/dt`` (full velocity magnitude)
+      - ``ax`` = ``d(vx)/dt`` = **tangential** acceleration = ``(v·a)/|v|``
+                 (the rate of change of *speed*)
 
-    Forcing vy=ay=0 matches the training NPZ convention — the car's motion
-    is canonicalized to its own heading axis so the lateral dimension is
-    only a kinematics cue (rate of heading change), never a velocity.
+    In the production C++ node (`create_ego_current_state`) this is free: vx/vy
+    come straight from the base_link twist (vy≈0) and ax/ay from the base_link
+    accel message (ay≈0). In SIM we have no base_link-framed messages — we only
+    have world-frame `current_velocity` and `acceleration` (= dv/dt) — so we
+    derive the scalars ourselves:
+      - ``vx = |current_velocity|``
+      - ``ax = (current_velocity · acceleration) / |current_velocity|``
+
+    Do NOT write the world-frame accel's lateral/centripetal component into
+    ``ay``, and do NOT put the accel-vector *magnitude* (`|a|`) into ``ax`` —
+    both leak the centripetal term the model never saw in training. ``ax`` is
+    the tangential component only; the centripetal part is simply not represented
+    (matching real data, where ``ay = 0``). At standstill (``|v|≈0``) the velocity
+    direction is undefined, so ``ax`` falls back to the heading projection.
+
+    Note: NPC futures / GT trajectories carry NO speed at all — they are
+    ``(x, y, heading)`` only; speed there is implicit in position deltas.
+
+    - position (x, y) = (0, 0), heading (cos, sin) = (1, 0): the state is
+      self-referential (always the ego's own origin/heading).
+    - steering_angle and yaw_rate are scalars set by the physics updater.
     """
     vel = ego.current_velocity  # world frame [Vx_w, Vy_w]
     speed = float(np.sqrt(vel[0] ** 2 + vel[1] ** 2))
