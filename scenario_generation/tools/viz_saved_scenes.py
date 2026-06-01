@@ -70,10 +70,8 @@ def _verdict(r):
     return ok, summary, flags
 
 
-def _target_xyh(npz_path):
-    """Baked ego target as (T, 3) [x, y, heading], valid steps only."""
-    npz = np.load(str(npz_path), allow_pickle=True)
-    fut = npz["ego_agent_future"]
+def _xyh_from_xycs(fut):
+    """(T, >=4) [x,y,cos,sin] -> (T,3) [x,y,heading], valid steps only."""
     if fut.ndim == 3:
         fut = fut[0]
     heading = np.arctan2(fut[:, 3], fut[:, 2])
@@ -82,26 +80,57 @@ def _target_xyh(npz_path):
     return traj[valid] if valid.sum() > 1 else traj
 
 
-def _render_one(npz_path, reward_config, view_half):
+def _target_xyh(npz_path):
+    """Baked ego target as (T, 3) [x, y, heading]."""
+    return _xyh_from_xycs(np.load(str(npz_path), allow_pickle=True)["ego_agent_future"])
+
+
+def _model_det(npz_path, model, model_args, device, reward_config):
+    """Run the model's deterministic prediction. Returns (xyh traj, reward breakdown)."""
+    from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched
+    data = load_npz_data(str(npz_path), device)
+    if "neighbor_agents_future" in data:
+        data["neighbor_agents_future"] = _ensure_neighbor_future_4col(
+            data["neighbor_agents_future"])
+    traj4 = det_inference_batched(model, model_args, [data], device)  # (1, T, 4)
+    r = compute_reward_batch(traj4[:, :, :4].to("cpu"),
+                             {k: (v.to("cpu") if isinstance(v, torch.Tensor) else v)
+                              for k, v in data.items()}, reward_config)[0]
+    return _xyh_from_xycs(traj4[0].cpu().numpy()), r
+
+
+def _render_one(npz_path, reward_config, view_half, model=None, model_args=None, device=None):
     scene = from_npz(str(npz_path))
     target = _target_xyh(npz_path)
+    r_t = _score_saved_target(npz_path, reward_config)
+    ok_t, sum_t, flags_t = _verdict(r_t)
+
+    if model is not None:
+        # GREEN = baked target (what we train toward); BLUE = model's current
+        # deterministic prediction (baseline, untrained on this avoidance).
+        det, r_m = _model_det(npz_path, model, model_args, device, reward_config)
+        ok_m, sum_m, _ = _verdict(r_m)
+        fig = render_scene_at_step(
+            scene, gt_traj=target, det_traj=det, view_half=view_half,
+            show_rb_dist=True, show_nb_dist=True,
+            show_traj_rb=True, show_traj_nb=True, dim_neighbors=False, figsize=(8, 8),
+        )
+        title = (f"{Path(npz_path).stem}\n"
+                 f"GT/target [{'PASS' if ok_t else 'FAIL'}] {sum_t}\n"
+                 f"model DET [{'PASS' if ok_m else 'FAIL'}] {sum_m}")
+        fig.suptitle(title, fontsize=9,
+                     color="#1f9e3a" if ok_t else "#cc2222", y=0.995)
+        return fig, (ok_t, sum_t, flags_t)
+
     fig = render_scene_at_step(
-        scene,
-        det_traj=target,          # baked target, drawn green w/ footprints
-        view_half=view_half,
-        show_rb_dist=True,
-        show_nb_dist=True,
-        show_traj_rb=True,        # worst RB clearance along the target
-        show_traj_nb=True,        # worst neighbor clearance along the target
-        dim_neighbors=False,      # draw obstacles solid (verification view)
-        figsize=(8, 8),
+        scene, det_traj=target, view_half=view_half,
+        show_rb_dist=True, show_nb_dist=True,
+        show_traj_rb=True, show_traj_nb=True, dim_neighbors=False, figsize=(8, 8),
     )
-    r = _score_saved_target(npz_path, reward_config)
-    ok, summary, flags = _verdict(r)
-    verdict = "PASS" if ok else "FAIL: " + ", ".join(flags)
-    fig.suptitle(f"{Path(npz_path).stem}   [{verdict}]   {summary}",
-                 fontsize=11, color="#1f9e3a" if ok else "#cc2222", y=0.99)
-    return fig, (ok, summary, flags)
+    verdict = "PASS" if ok_t else "FAIL: " + ", ".join(flags_t)
+    fig.suptitle(f"{Path(npz_path).stem}   [{verdict}]   {sum_t}",
+                 fontsize=11, color="#1f9e3a" if ok_t else "#cc2222", y=0.99)
+    return fig, (ok_t, sum_t, flags_t)
 
 
 def main():
@@ -113,7 +142,16 @@ def main():
     p.add_argument("--output_dir", required=True)
     p.add_argument("--view_half", type=float, default=45.0)
     p.add_argument("--cols", type=int, default=4)
+    p.add_argument("--model_path", default=None,
+                   help="If set, overlay the model's DET prediction (blue) vs the "
+                        "baked target (green).")
     args = p.parse_args()
+
+    model = model_args = device = None
+    if args.model_path:
+        from rlvr.autoresearch.tools.eval_det_avoidance import load_model
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, model_args = load_model(args.model_path, device)
 
     if args.scene_dir:
         paths = sorted(Path(args.scene_dir).glob("scene_*.npz"))
@@ -134,7 +172,8 @@ def main():
 
     png_paths, n_pass = [], 0
     for pth in paths:
-        fig, (ok, summary, flags) = _render_one(pth, reward_config, args.view_half)
+        fig, (ok, summary, flags) = _render_one(pth, reward_config, args.view_half,
+                                                model=model, model_args=model_args, device=device)
         png = out / f"{pth.stem}.png"
         fig.savefig(png, dpi=110, bbox_inches="tight")
         plt.close(fig)
