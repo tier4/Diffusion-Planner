@@ -86,36 +86,68 @@ def _build_ego_current_state(
     ego: Agent,
     R: np.ndarray,
 ) -> np.ndarray:
-    """Build ego_current_state: ``[1, 10]`` in ego frame.
+    """Build ``ego_current_state`` ``[1, 10]`` =
+    ``[x, y, cos, sin, vx, vy, ax, ay, steering_angle, yaw_rate]``.
 
-    Convention matches the training data / C++ Autoware:
-    - position (x, y) is (0, 0) — self-frame
-    - heading (cos, sin) is (1, 0) — self-frame
-    - **vx carries the full global speed magnitude**, vy is exactly 0
-    - ax is the longitudinal projection of world-frame acceleration onto
-      ego forward, ay is exactly 0
-    - steering_angle and yaw_rate are scalars set by the physics updater
+    VELOCITY / ACCELERATION CONVENTION (read before changing vx/vy/ax/ay)
+    --------------------------------------------------------------------
+    The model is fed kinematics in the **ego base_link frame**, where the car
+    is non-holonomic: there is **no lateral velocity or lateral acceleration**,
+    so ``vy = 0`` and ``ay = 0`` *always*. All motion lives on the longitudinal
+    (ego-x) axis:
+      - ``vx`` = scalar speed = ``|v|`` = ``ds/dt`` (full velocity magnitude)
+      - ``ax`` = ``d(vx)/dt`` = **tangential** acceleration = ``(v·a)/|v|``
+                 (the rate of change of *speed*)
 
-    Forcing vy=ay=0 matches the training NPZ convention — the car's motion
-    is canonicalized to its own heading axis so the lateral dimension is
-    only a kinematics cue (rate of heading change), never a velocity.
+    In the production C++ node (`create_ego_current_state`) this is free: vx/vy
+    come straight from the base_link twist (vy≈0) and ax/ay from the base_link
+    accel message (ay≈0). In SIM we have no base_link-framed messages — we only
+    have world-frame `current_velocity` and `acceleration` (= dv/dt) — so we
+    derive the scalars ourselves:
+      - ``vx = |current_velocity|``
+      - ``ax = (current_velocity · acceleration) / |current_velocity|``
+
+    Do NOT write the world-frame accel's lateral/centripetal component into
+    ``ay``, and do NOT put the accel-vector *magnitude* (`|a|`) into ``ax`` —
+    both leak the centripetal term the model never saw in training. ``ax`` is
+    the tangential component only; the centripetal part is simply not represented
+    (matching real data, where ``ay = 0``). At standstill (``|v|≈0``) the velocity
+    direction is undefined, so ``ax`` falls back to the heading projection.
+
+    Note: NPC futures / GT trajectories carry NO speed at all — they are
+    ``(x, y, heading)`` only; speed there is implicit in position deltas.
+
+    - position (x, y) = (0, 0), heading (cos, sin) = (1, 0): the state is
+      self-referential (always the ego's own origin/heading).
+    - steering_angle and yaw_rate are scalars set by the physics updater.
     """
     vel = ego.current_velocity  # world frame [Vx_w, Vy_w]
     speed = float(np.sqrt(vel[0] ** 2 + vel[1] ** 2))
 
-    # Longitudinal acceleration = projection onto ego forward. Lateral = 0.
-    accel = ego.acceleration  # world frame
-    accel_ego = transform_directions(accel.reshape(1, 2), R).flatten()
+    # base_link convention: vy = ay = 0, all kinematics on ego-x. The C++ node
+    # gets this for free from ego-frame messages; in sim we derive it from
+    # world-frame motion instead:
+    #   vx = |v| = ds/dt              (scalar speed)
+    #   ax = d(vx)/dt = (v·a)/|v|     (tangential accel = rate of change of speed)
+    # NOT the accel-vector magnitude and NOT the heading projection — those
+    # leak the centripetal/lateral term, which must stay out (ay = 0).
+    accel = ego.acceleration  # world frame (= dv/dt)
+    if speed > 1e-3:
+        ax_long = float((vel[0] * accel[0] + vel[1] * accel[1]) / speed)
+    else:
+        # standstill: velocity direction undefined; project accel onto heading
+        accel_ego = transform_directions(accel.reshape(1, 2), R).flatten()
+        ax_long = float(accel_ego[0])
 
     state = np.zeros(10, dtype=np.float32)
     state[0] = 0.0           # x
     state[1] = 0.0           # y
     state[2] = 1.0           # cos(0)
     state[3] = 0.0           # sin(0)
-    state[4] = speed         # vx = |V| (full magnitude in ego frame)
-    state[5] = 0.0           # vy = 0 (canonicalized to forward axis)
-    state[6] = accel_ego[0]  # ax = longitudinal accel
-    state[7] = 0.0           # ay = 0
+    state[4] = speed         # vx = |v| = ds/dt
+    state[5] = 0.0           # vy = 0 (base_link: no lateral velocity)
+    state[6] = ax_long       # ax = d(vx)/dt (tangential accel)
+    state[7] = 0.0           # ay = 0 (base_link: no lateral accel)
     state[8] = ego.steering_angle
     state[9] = ego.yaw_rate
     return state[np.newaxis]  # [1, 10]
@@ -127,13 +159,17 @@ def _build_neighbor_agents_past(
     R: np.ndarray,
     ego_xy: np.ndarray,
     ego_heading: float,
+    num_neighbors: int = _MAX_NUM_NEIGHBORS,
 ) -> np.ndarray:
-    """Build neighbor_agents_past: [1, 32, INPUT_T+1, 11].
+    """Build neighbor_agents_past: [1, num_neighbors, INPUT_T+1, 11].
 
-    Neighbors sorted by distance from ego (closest first).
+    Neighbors sorted by distance from ego (closest first). ``num_neighbors``
+    defaults to ``_MAX_NUM_NEIGHBORS`` (the model's neighbor slot count); pass
+    a different value only when emitting NPZs for a model with a different
+    neighbor dimension.
     """
     T_needed = _INPUT_T + 1
-    out = np.zeros((1, _MAX_NUM_NEIGHBORS, T_needed, 11), dtype=np.float32)
+    out = np.zeros((1, num_neighbors, T_needed, 11), dtype=np.float32)
 
     # Collect non-ego agents with their distance to ego
     neighbors_with_dist: list[tuple[float, Agent]] = []
@@ -147,7 +183,7 @@ def _build_neighbor_agents_past(
     # Sort by distance
     neighbors_with_dist.sort(key=lambda x: x[0])
 
-    for slot_idx, (_, agent) in enumerate(neighbors_with_dist[:_MAX_NUM_NEIGHBORS]):
+    for slot_idx, (_, agent) in enumerate(neighbors_with_dist[:num_neighbors]):
         traj = agent.past_trajectory  # (T, 3) [x, y, heading_rad]
         T_agent = traj.shape[0]
 
@@ -683,11 +719,10 @@ def dump_step_npz(
         scene: Current scene at this replay step.
         map_cache: Pre-computed map tensor cache for the scene's map.
         future_len: Number of future timesteps (typically 80 — from model_args).
-        predicted_neighbor_num: Neighbor slot count for the future placeholder.
-            Must equal ``_MAX_NUM_NEIGHBORS`` (320) — the past array is built at
-            that fixed shape, so a mismatch would produce NPZs where past and
-            future disagree on the neighbor dimension and break the training
-            NPZ loader.
+        predicted_neighbor_num: Neighbor slot count for BOTH the past array and
+            the future placeholder. Defaults to ``_MAX_NUM_NEIGHBORS`` (320, the
+            model's neighbor dimension). Past and future are always built at the
+            same count here, so the resulting NPZ is internally consistent.
 
     Returns:
         Dict with the standard NPZ keys (ego_agent_past, ego_current_state,
@@ -697,13 +732,9 @@ def dump_step_npz(
         stripped of batch dim and have dtypes compatible with the training
         NPZ loader.
     """
-    if predicted_neighbor_num != _MAX_NUM_NEIGHBORS:
+    if predicted_neighbor_num < 1:
         raise ValueError(
-            f"predicted_neighbor_num={predicted_neighbor_num} disagrees with "
-            f"the fixed past-neighbor shape {_MAX_NUM_NEIGHBORS}. Pass "
-            f"{_MAX_NUM_NEIGHBORS} or omit (default). Threading a per-call "
-            f"neighbor count through _build_neighbor_agents_past is a "
-            f"follow-up if you need non-default future slots."
+            f"predicted_neighbor_num must be >= 1; got {predicted_neighbor_num}"
         )
     ego = scene.get_agent(scene.ego_agent_id)
     ego_xy = ego.current_position.astype(np.float64)
@@ -715,6 +746,7 @@ def dump_step_npz(
     data["ego_current_state"] = _build_ego_current_state(ego, R)
     data["neighbor_agents_past"] = _build_neighbor_agents_past(
         scene, scene.ego_agent_id, R, ego_xy, ego_h,
+        num_neighbors=predicted_neighbor_num,
     )
     data["static_objects"] = map_cache.get_static_objects_ego(R, ego_xy)
     data["lanes"] = map_cache.get_lanes_ego(R, ego_xy)

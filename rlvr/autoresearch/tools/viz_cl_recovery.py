@@ -137,7 +137,9 @@ def draw_traj(ax, traj, label, color, npz_path, with_footprints=True):
     wb = float(es[0]) if es is not None and len(es) >= 1 else 4.76
     length = float(es[1]) if es is not None and len(es) >= 2 else 7.24
     width = float(es[2]) if es is not None and len(es) >= 3 else 2.29
-    ro = length - wb
+    # Ego pose is the rear axle (base_link); the box rear edge sits at
+    # -(length - wheelbase)/2 behind it (symmetric overhang), not -(length-wb).
+    ro = (length - wb) / 2
     for ts in [0, 20, 40, 60, len(traj) - 1]:
         if ts >= len(traj): continue
         cx, cy = traj[ts, 0], traj[ts, 1]

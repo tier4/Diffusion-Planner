@@ -285,8 +285,19 @@ def advance_scene_mpc(
         # Transform full trajectory to world frame
         ax, ay = agent.current_position
         ah = agent.current_heading
+        if agent.id != scene.ego_agent_id:
+            # Neighbor-as-ego: inference shifted its stored centroid back to the
+            # rear axle (tensor_converter), so the prediction is rear-axle framed.
+            # Use the rear-axle origin for the inverse transform + tracker state,
+            # then shift the tracked result back to the centroid (mirrors
+            # advance_scene). Without this the NPC is biased ~wb/2 forward.
+            wb = getattr(agent, "wheelbase", 0.0) or 0.0
+            origin_x = float(ax) - math.cos(ah) * wb / 2.0
+            origin_y = float(ay) - math.sin(ah) * wb / 2.0
+        else:
+            origin_x, origin_y, wb = float(ax), float(ay), 0.0
         world_xy, world_h = _ego_to_world(
-            pred[:, :2], pred[:, 2:4], float(ax), float(ay), ah,
+            pred[:, :2], pred[:, 2:4], origin_x, origin_y, ah,
         )
 
         # Build world-frame reference (N, 3) [x, y, yaw]
@@ -315,9 +326,14 @@ def advance_scene_mpc(
         vel = agent.current_velocity
         speed = float(vel[0] * math.cos(ah) + vel[1] * math.sin(ah))
         speed = max(speed, 0.0)
-        x0 = np.array([float(ax), float(ay), ah, speed], dtype=np.float64)
+        x0 = np.array([origin_x, origin_y, ah, speed], dtype=np.float64)
 
         new_pos, new_speed = tracker.track(x0, ref_world)
+        if wb:
+            # Tracker state is rear-axle; shift back to centroid for storage.
+            new_pos = np.asarray(new_pos, dtype=np.float64).copy()
+            new_pos[0] += math.cos(new_pos[2]) * wb / 2.0
+            new_pos[1] += math.sin(new_pos[2]) * wb / 2.0
         # Use None — not 0.0 — when a tracker lacks the telemetry
         # attribute. _advance_agent treats None as "fall back to MA
         # estimate"; 0.0 would be treated as a valid zero command and
@@ -416,7 +432,8 @@ def _draw_agent_view(
         )
         plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
         draw_trajectory(ax, plan_traj, "#3366cc", label="Plan", lw=2, zorder=25,
-                        show_footprints=True, length=agent.length, width=agent.width)
+                        show_footprints=True, length=agent.length, width=agent.width,
+                        wheelbase=agent.wheelbase if is_ego else None)
 
     # Route
     if agent.route_lanes is not None:
@@ -539,21 +556,9 @@ def _predict_batch(
         for aid in agent_ids
     ]
 
-    # When guidance is active, init sampled_trajectories from current states
-    # (matching generate_samples.py) instead of zeros — the DPM-Solver
-    # converges to different solutions depending on the starting latent.
-    if model.decoder._guidance_fn is not None:
-        import torch as _torch
-        P = 1 + model_args.predicted_neighbor_num
-        for td in tensor_dicts:
-            ego_cs = td["ego_current_state"][:, :4]
-            nb_past = td["neighbor_agents_past"]
-            nb_cs = (nb_past[:, :P - 1, -1, :4] if nb_past.shape[1] >= P - 1
-                     else _torch.zeros(1, P - 1, 4, dtype=_torch.float32,
-                                       device=ego_cs.device))
-            cs = _torch.cat([ego_cs[:, None], nb_cs], dim=1)
-            td["sampled_trajectories"] = cs[:, :, None, :].expand(
-                -1, -1, model_args.future_len + 1, -1).clone()
+    # sampled_trajectories is already zeros from tensor_converter.
+    # The C++ production node uses randn * temperature (0.0 for deterministic).
+    # No override needed — zeros is the canonical deterministic init.
 
     if len(agent_ids) == 1:
         _, outputs = model(tensor_dicts[0])

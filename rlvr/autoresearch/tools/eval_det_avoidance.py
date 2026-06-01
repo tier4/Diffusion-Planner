@@ -84,8 +84,9 @@ def det_inference_batched(
         P = 1 + model_args.predicted_neighbor_num
         future_len = model_args.future_len
         norm_batch_d = {k: v for k, v in norm_batch.items()}
-        norm_batch_d["sampled_trajectories"] = torch.zeros(
-            len(datas), P, future_len + 1, 4, device=device,
+        from rlvr.closed_loop.batched_rollout import make_initial_latent
+        norm_batch_d["sampled_trajectories"] = make_initial_latent(
+            len(datas), P, future_len, device,
         )
         _, det_out = model(norm_batch_d)
         return det_out["prediction"][:, 0].detach()  # (B, T, 4)

@@ -240,6 +240,10 @@ class SpawnConfig:
     # When set, per-step observations are dumped as training-style NPZs to
     # this directory. GT future is zeroed out (ranked-SFT generates its own).
     dump_npz_dir: str | None = None
+    # Neighbor-slot count for the dumped NPZs. Defaults to the model's
+    # neighbor dimension (320). Set lower only when dumping for a model with
+    # a different neighbor dimension. Past and future are built at this count.
+    dump_neighbor_count: int = 320
     # Path to a training-style (GRPO) config JSON. Required when dump_npz_dir
     # is set: per-step lane / border / centerline metrics are logged using
     # the same thresholds the training run will use, so downstream scene
@@ -330,6 +334,11 @@ class SpawnConfig:
         if self.ego_init_speed is not None and self.ego_init_speed < 0:
             raise ValueError(
                 f"ego_init_speed must be >= 0 when set; got {self.ego_init_speed}"
+            )
+        if self.dump_npz_dir and self.dump_neighbor_count < 1:
+            raise ValueError(
+                f"dump_neighbor_count must be >= 1 when dumping NPZs; "
+                f"got {self.dump_neighbor_count}"
             )
         if self.dump_npz_dir and not self.reward_config_path:
             raise ValueError(
@@ -1117,6 +1126,12 @@ _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
 # PNGs and post-hoc audit agree on when the line appears.
 _STATIC_NPC_VIZ_THRESH_M = 2.0
 
+# Max range at which the per-step clearance log records a nearest-obstacle
+# distance. Beyond this the ego is clearly safe and the obstacle is logged as
+# None (no sample for that arc bin) — also lets the cheap centre-distance
+# reject skip far parked vehicles, so logging stays fast.
+_CLEARANCE_LOG_MAX_M = 30.0
+
 
 def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
     """Draw lane centerlines **and** left/right borders from the 33-dim tensor.
@@ -1354,6 +1369,31 @@ def _ego_nearest_moving_npc(
     )
 
 
+def _ego_border_distance(
+    ego,
+    road_border_polylines: list[np.ndarray] | None,
+) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """Closest ego-OBB corner to the nearest road-border point.
+
+    Returns ``(ego_corner_xy, border_pt_xy, distance_m)`` or ``None`` when
+    there is no border / no ego. Single source for both the live PNG overlay
+    and the clearance log, so the rb number drawn IS the number logged.
+    """
+    if ego is None:
+        return None
+    border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
+    if border_pt is None:
+        return None
+    corners = _ego_obb_corners(
+        float(ego.current_position[0]), float(ego.current_position[1]),
+        float(ego.current_heading), float(ego.length), float(ego.width),
+        wheelbase=float(ego.wheelbase),
+    )
+    d_corner = np.hypot(corners[:, 0] - border_pt[0], corners[:, 1] - border_pt[1])
+    i = int(d_corner.argmin())
+    return corners[i], border_pt, float(d_corner[i])
+
+
 def save_step_figure(
     scene: SceneContext,
     agent_predictions: dict,
@@ -1509,6 +1549,7 @@ def save_step_figure(
                 zorder=25 if is_ego else 18,
                 show_footprints=is_ego,
                 length=agent.length, width=agent.width,
+                wheelbase=agent.wheelbase if is_ego else None,
             )
 
     # 4) Ego goal marker (if within viewport).
@@ -1562,17 +1603,9 @@ def save_step_figure(
         )
 
     # Road border distance line — always drawn (not gated on metrics).
-    border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
-    if border_pt is not None:
-        corners = _ego_obb_corners(
-            ex, ey, ego.current_heading,
-            float(ego.length), float(ego.width),
-            wheelbase=float(ego.wheelbase),
-        )
-        d_corner = np.hypot(corners[:, 0] - border_pt[0],
-                            corners[:, 1] - border_pt[1])
-        start = corners[int(d_corner.argmin())]
-        body_d = float(d_corner.min())
+    rb_info = _ego_border_distance(ego, road_border_polylines)
+    if rb_info is not None:
+        start, border_pt, body_d = rb_info
         ax.plot([start[0], border_pt[0]], [start[1], border_pt[1]],
                 "k--", linewidth=1.3, alpha=0.7, zorder=29)
         ax.plot(border_pt[0], border_pt[1], "ko", markersize=6, zorder=30,
@@ -2112,6 +2145,12 @@ def run_route_replay(
     if spawn_config.dump_npz_dir and spawn_config.reward_config_path:
         reward_cfg = load_reward_config(spawn_config.reward_config_path)
 
+    # Per-step realized obstacle clearances (ego world pose + nearest
+    # road-border / stopped-NPC / moving-NPC distances). Uses the same
+    # helpers that draw the live PNG overlays, so the logged numbers match
+    # what's drawn. Always recorded (cheap) — drives the clearance heatmaps.
+    clearance_records: list[dict] = []
+
     # Tracker state (lazy-init per agent inside advance_scene_mpc).
     _use_tracker = spawn_config.advance_mode in ("mpc", "perfect")
     mpc_trackers: dict = {}
@@ -2297,13 +2336,14 @@ def run_route_replay(
             if getattr(spawn_config, "dump_npz_dir", None):
                 npz_dir = Path(spawn_config.dump_npz_dir)
                 npz_dir.mkdir(parents=True, exist_ok=True)
-                # NPZ neighbor count is locked by the past array's fixed shape
-                # (_MAX_NUM_NEIGHBORS=32), not by model_args.predicted_neighbor_num
-                # (which counts predicted future trajectories, not past slots).
+                # Neighbor-slot count for the dump. Defaults to 320 (the
+                # model's neighbor dimension); dump_step_npz builds both past
+                # and future at this count so the NPZ stays self-consistent.
                 data = dump_step_npz(
                     scene,
                     map_cache,
                     future_len=getattr(model_args, "future_len", 80),
+                    predicted_neighbor_num=spawn_config.dump_neighbor_count,
                 )
                 np.savez(npz_dir / f"replay_step_{step:04d}.npz", **data)
 
@@ -2329,6 +2369,28 @@ def run_route_replay(
                 step * 0.1, road_border_polylines,
                 overlay_metrics,
             ))
+
+            # Record realized obstacle clearances (ego world pose + nearest
+            # road-border / stopped-NPC / moving-NPC distances) for the
+            # clearance heatmaps. Same helpers as the PNG overlay → same
+            # numbers. Recorded every step regardless of NPZ dumping.
+            ego_now = scene.ego_agent
+            if ego_now is not None:
+                rb_info = _ego_border_distance(ego_now, road_border_polylines)
+                sc_pair = _ego_nearest_static_npc(scene, threshold_m=_CLEARANCE_LOG_MAX_M)
+                mv_pair = _ego_nearest_moving_npc(scene, threshold_m=_CLEARANCE_LOG_MAX_M)
+                clearance_records.append({
+                    "step": step,
+                    "ego_x": float(ego_now.current_position[0]),
+                    "ego_y": float(ego_now.current_position[1]),
+                    "ego_yaw": float(ego_now.current_heading),
+                    "rb_dist": float(rb_info[2]) if rb_info is not None else None,
+                    "stopped_dist": float(sc_pair[2]) if sc_pair is not None else None,
+                    "stopped_id": sc_pair[3] if sc_pair is not None else None,
+                    "moving_dist": float(mv_pair[2]) if mv_pair is not None else None,
+                    "moving_id": mv_pair[3] if mv_pair is not None else None,
+                    "png": out_path.name,
+                })
 
             # Drain finished saves so memory doesn't balloon. Call
             # .result() to surface any exceptions from background saves.
@@ -2487,6 +2549,23 @@ def run_route_replay(
         with open(metrics_log_path, "w") as f:
             json.dump(payload, f)
 
+    # Per-step realized clearances → drives the stopped/moving clearance
+    # heatmaps (heatmap_npc_clearance.py reads this + the route pickle).
+    clearance_log_path: Path | None = None
+    if clearance_records:
+        clearance_log_path = output_dir / "clearance_log.json"
+        with open(clearance_log_path, "w") as f:
+            json.dump({
+                "ego_shape": [
+                    spawn_config.ego_wheelbase,
+                    spawn_config.ego_length,
+                    spawn_config.ego_width,
+                ],
+                "max_range_m": _CLEARANCE_LOG_MAX_M,
+                "png_dir": str(output_dir),
+                "records": clearance_records,
+            }, f)
+
     out = {
         "final_step": final_step,
         "goal_reached": goal_reached,
@@ -2496,6 +2575,8 @@ def run_route_replay(
     }
     if metrics_log_path is not None:
         out["metrics_log_path"] = str(metrics_log_path)
+    if clearance_log_path is not None:
+        out["clearance_log_path"] = str(clearance_log_path)
     return out
 
 
