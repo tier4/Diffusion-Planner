@@ -57,24 +57,13 @@ def generate_samples(
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
-    # Precompute current-state tensor used as the pinned first element of xT.
-    ego_current = data["ego_current_state"][:, :4]                         # [B, 4]
-    neighbors_current = data["neighbor_agents_past"][:, :P - 1, -1, :4]   # [B, P-1, 4]
-    current_states = torch.cat(
-        [ego_current[:, None], neighbors_current], dim=1
-    )  # [B, P, 4]
-
     results = []
     try:
         for _ in range(n_samples):
-            # Build noisy initial latent xT.
-            if noise_scale > 0.0:
-                xT = noise_scale * torch.randn(
-                    B, P, future_len + 1, 4, device=device
-                )
-            else:
-                xT = torch.zeros(B, P, future_len + 1, 4, device=device)
-            data["sampled_trajectories"] = xT
+            from rlvr.closed_loop.batched_rollout import make_initial_latent
+            data["sampled_trajectories"] = make_initial_latent(
+                B, P, future_len, device, noise_scale,
+            )
 
             _, decoder_output = model(data)
             ego_trajectory = decoder_output["prediction"][0, 0].cpu().numpy()  # (OUTPUT_T, 4)

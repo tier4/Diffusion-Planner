@@ -18,6 +18,20 @@ import numpy as np
 import torch
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+
+
+def make_initial_latent(
+    B: int, P: int, future_len: int, device: torch.device,
+    noise_scale: float = 0.0,
+) -> torch.Tensor:
+    """Build the initial sampled_trajectories tensor for DPM-Solver.
+
+    Matches the C++ production node: randn * temperature (zeros when
+    temperature/noise_scale is 0).  Shape: (B, P, future_len + 1, 4).
+    """
+    if noise_scale > 0.0:
+        return noise_scale * torch.randn(B, P, future_len + 1, 4, device=device)
+    return torch.zeros(B, P, future_len + 1, 4, device=device)
 from torch import nn
 
 from exploration_policy.model import ExplorationPolicy
@@ -78,13 +92,9 @@ def _batched_generate(
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
-    if noise_scale > 0.0:
-        xT = noise_scale * torch.randn(
-            B, P, future_len + 1, 4, device=device,
-        )
-    else:
-        xT = torch.zeros(B, P, future_len + 1, 4, device=device)
-    batch_data["sampled_trajectories"] = xT
+    batch_data["sampled_trajectories"] = make_initial_latent(
+        B, P, future_len, device, noise_scale,
+    )
 
     try:
         _, decoder_output = model(batch_data)

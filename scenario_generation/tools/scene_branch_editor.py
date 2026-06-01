@@ -110,9 +110,9 @@ class _ModelCache:
 
         P = 1 + self._model_args.predicted_neighbor_num
         future_len = self._model_args.future_len
-        data["sampled_trajectories"] = torch.zeros(
-            1, P, future_len + 1, 4,
-            device=data["ego_current_state"].device,
+        from rlvr.closed_loop.batched_rollout import make_initial_latent
+        data["sampled_trajectories"] = make_initial_latent(
+            1, P, future_len, data["ego_current_state"].device,
         )
 
         _, decoder_output = self._model(data)
@@ -496,6 +496,10 @@ def render_scene_at_step(
                 color, alpha=_alpha_box,
                 lw=2 if is_ego else (0.5 if _dimmed else 1),
                 zorder=20 if is_ego else 15,
+                # Ego pose is the rear axle (base_link); offset the box forward.
+                # Neighbors are centroid-referenced — leave wheelbase=None.
+                wheelbase=(float(ego.wheelbase)
+                           if is_ego and ego is not None else None),
             )
 
         # Heading arrow (skip for dimmed neighbors)
@@ -665,6 +669,7 @@ def render_scene_at_step(
             ego_corners = _obb_corners(
                 float(ego_pos[0]), float(ego_pos[1]), ego_h,
                 float(ego.length), float(ego.width),
+                float(ego.wheelbase),  # ego pose is rear axle — offset forward
             )
             nb_agents = [a for a in scene.agents if a.id != scene.ego_agent_id]
             if nb_agents:
@@ -701,18 +706,23 @@ def render_scene_at_step(
     # Trajectory overlays
     ego_len = ego.length if ego else 4.5
     ego_wid = ego.width if ego else 1.8
+    # Ego pose is the rear axle (base_link); footprints must offset forward.
+    ego_wb = float(ego.wheelbase) if ego else None
     if gt_traj is not None and gt_traj.shape[0] > 1:
         draw_trajectory(ax, gt_traj, _GT_COLOR, label="GT", lw=2.0, zorder=25,
-                        show_footprints=True, length=ego_len, width=ego_wid)
+                        show_footprints=True, length=ego_len, width=ego_wid,
+                        wheelbase=ego_wb)
     if det_traj is not None and det_traj.shape[0] > 1:
         draw_trajectory(ax, det_traj, _DET_COLOR, label="DET", lw=2.0, zorder=26,
-                        show_footprints=True, length=ego_len, width=ego_wid)
+                        show_footprints=True, length=ego_len, width=ego_wid,
+                        wheelbase=ego_wb)
     if guided_trajs:
         for i, gt in enumerate(guided_trajs):
             if gt is not None and gt.shape[0] > 1:
                 color = _GUIDED_COLORS[i % len(_GUIDED_COLORS)]
                 draw_trajectory(ax, gt, color, label=f"Guided #{i+1}", lw=1.5, zorder=27,
-                                show_footprints=False, length=ego_len, width=ego_wid)
+                                show_footprints=False, length=ego_len, width=ego_wid,
+                                wheelbase=ego_wb)
 
     # Neighbor predicted trajectories (thin lines, one per neighbor)
     if nb_pred_trajs is not None:
@@ -784,7 +794,8 @@ def render_scene_at_step(
                         wh = float(traj_pts[worst_rb_idx, 2])
                         dc = "#dd2222" if worst_rb_dist < 0.5 else "#ff8800" if worst_rb_dist < 1.0 else "#22bb22"
                         draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, traj_color,
-                                       alpha=0.4, lw=2.0, zorder=38)
+                                       alpha=0.4, lw=2.0, zorder=38,
+                                       wheelbase=float(ego.wheelbase))
                         from rlvr.reward import _point_to_segments_dist as _ptsd_trb
                         ls_trb = _trb_data["line_strings"]
                         if ls_trb.dim() == 3:
@@ -853,7 +864,8 @@ def render_scene_at_step(
                 for ti in idxs:
                     px, py = float(traj_pts[ti, 0]), float(traj_pts[ti, 1])
                     ph = float(traj_pts[ti, 2])
-                    ego_c = _obb_corners(px, py, ph, ego_len, ego_wid)
+                    ego_c = _obb_corners(px, py, ph, ego_len, ego_wid,
+                                         float(ego.wheelbase))
                     r1 = _torch.from_numpy(
                         np.broadcast_to(ego_c, (n_nb, 4, 2)).copy().astype(np.float32))
                     pe, pn = _closest_points_between_rects(r1, r2)
@@ -869,7 +881,8 @@ def render_scene_at_step(
                     wh = float(traj_pts[worst_nb_idx, 2])
                     dc = "#dd2222" if worst_nb_dist < 0.5 else "#ff8800" if worst_nb_dist < 1.5 else "#22bb22"
                     draw_agent_box(ax, wx, wy, wh, ego_len, ego_wid, traj_color,
-                                   alpha=0.4, lw=2.0, zorder=38)
+                                   alpha=0.4, lw=2.0, zorder=38,
+                                   wheelbase=float(ego.wheelbase))
                     ax.plot([worst_nb_pe[0], worst_nb_pn[0]], [worst_nb_pe[1], worst_nb_pn[1]],
                             "-", color=dc, lw=2.5, alpha=0.9, zorder=39)
                     ax.annotate(

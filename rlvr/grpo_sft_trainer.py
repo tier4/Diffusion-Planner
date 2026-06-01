@@ -96,8 +96,9 @@ def _get_baseline_neighbor_prediction(
 
     data_copy = {k: v.clone() if isinstance(v, torch.Tensor) else v
                  for k, v in norm_data.items()}
-    data_copy["sampled_trajectories"] = torch.zeros(
-        B, P, future_len + 1, 4, device=norm_data["ego_current_state"].device,
+    from rlvr.closed_loop.batched_rollout import make_initial_latent
+    data_copy["sampled_trajectories"] = make_initial_latent(
+        B, P, future_len, norm_data["ego_current_state"].device,
     )
 
     ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()

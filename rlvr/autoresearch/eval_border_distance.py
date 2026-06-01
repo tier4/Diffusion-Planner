@@ -73,9 +73,10 @@ def load_model_for_eval(args):
 
 def generate_deterministic_trajectory(model, model_args, data, device="cuda"):
     """Generate a single deterministic trajectory (noise_scale=0)."""
+    from rlvr.closed_loop.batched_rollout import make_initial_latent
     P = 1 + model_args.predicted_neighbor_num
-    data["sampled_trajectories"] = torch.zeros(
-        1, P, (OUTPUT_T + 1) * 4, device=data["ego_current_state"].device,
+    data["sampled_trajectories"] = make_initial_latent(
+        1, P, OUTPUT_T, data["ego_current_state"].device,
     )
 
     with torch.no_grad():
