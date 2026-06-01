@@ -33,19 +33,10 @@ from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import compute_reward_batch
 from scenario_generation.npz_loader import from_npz
-from scenario_generation.scene_render import render_scene_at_step
-
-
-def _ensure_neighbor_future_4col(naf):
-    """3-col (x,y,heading) -> 4-col (x,y,cos,sin); no-op if >=4 cols; empty rows stay 0."""
-    if naf is None or naf.shape[-1] != 3:
-        return naf
-    h = naf[..., 2]
-    cos, sin = torch.cos(h), torch.sin(h)
-    invalid = naf[..., :2].abs().sum(dim=-1) <= 1e-6
-    cos = cos.masked_fill(invalid, 0.0)
-    sin = sin.masked_fill(invalid, 0.0)
-    return torch.cat([naf[..., :2], cos.unsqueeze(-1), sin.unsqueeze(-1)], dim=-1)
+from scenario_generation.scene_render import (
+    _ensure_neighbor_future_4col,
+    render_scene_at_step,
+)
 
 
 def _score_saved_target(npz_path, reward_config):

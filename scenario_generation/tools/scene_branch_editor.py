@@ -28,6 +28,19 @@ from matplotlib.patches import Rectangle
 
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
+from scenario_generation.scene_render import (
+    _DET_COLOR,
+    _GT_COLOR,
+    _GUIDED_COLORS,
+    _PLACED_COLOR,
+    _PLACED_MOVING_COLOR,
+    _PLACED_SELECTED_COLOR,
+    _VIEW_HALF_DEFAULT,
+    _ensure_neighbor_future_4col,
+    _extract_border_polylines,
+    _obb_corners_from_placement,
+    render_scene_at_step,
+)
 from scenario_generation.tools.scene_tree import (
     BranchNode,
     ObstaclePlacement,
@@ -44,19 +57,6 @@ from scenario_generation.visualize import (
     draw_route,
     draw_stop_lines,
     draw_trajectory,
-)
-
-from scenario_generation.scene_render import (
-    _DET_COLOR,
-    _GT_COLOR,
-    _GUIDED_COLORS,
-    _PLACED_COLOR,
-    _PLACED_MOVING_COLOR,
-    _PLACED_SELECTED_COLOR,
-    _VIEW_HALF_DEFAULT,
-    _extract_border_polylines,
-    _obb_corners_from_placement,
-    render_scene_at_step,
 )
 
 ALL_GUIDANCE_NAMES = [
@@ -291,35 +291,6 @@ def _traj_cos_sin_to_xyh(traj: np.ndarray) -> np.ndarray:
     """Convert (T, 4) [x,y,cos_h,sin_h] to (T, 3) [x,y,heading_rad]."""
     heading = np.arctan2(traj[:, 3], traj[:, 2])
     return np.column_stack([traj[:, :2], heading])
-
-
-def _ensure_neighbor_future_4col(naf):
-    """Convert a 3-col (x, y, heading_rad) neighbor_agents_future to the
-    canonical 4-col (x, y, cos, sin). No-op if the last dim is already >= 4.
-
-    Older replay/psim NPZs (dumped before `_backfill_neighbor_futures`) store
-    neighbor heading as a single column, but reward.py (compute_reward_batch)
-    and the model tensor_converter both require cos/sin. Accepts a torch.Tensor
-    or np.ndarray; preserves type, dtype, device, and all leading dims.
-    """
-    if naf is None or naf.shape[-1] != 3:
-        return naf
-    if isinstance(naf, torch.Tensor):
-        h = naf[..., 2]
-        cos, sin = torch.cos(h), torch.sin(h)
-        # Empty/padded entries (x==y==0) must stay all-zero, not cos=1.
-        invalid = naf[..., :2].abs().sum(dim=-1) <= 1e-6
-        cos = cos.masked_fill(invalid, 0.0)
-        sin = sin.masked_fill(invalid, 0.0)
-        return torch.cat([naf[..., :2], cos.unsqueeze(-1), sin.unsqueeze(-1)], dim=-1)
-    h = naf[..., 2]
-    cos, sin = np.cos(h), np.sin(h)
-    invalid = np.abs(naf[..., :2]).sum(axis=-1) <= 1e-6
-    cos[invalid] = 0.0
-    sin[invalid] = 0.0
-    return np.concatenate(
-        [naf[..., :2], cos[..., None], sin[..., None]], axis=-1
-    ).astype(naf.dtype)
 
 
 def _fig_to_pil(fig: matplotlib.figure.Figure):
@@ -2017,7 +1988,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         tree.get_npz_sequence(tree.active_branch), s)
                     if ego_wp is not None:
                         from scenario_generation.transforms import (
-                            _rotation_matrix, transform_positions,
+                            _rotation_matrix,
+                            transform_positions,
                         )
                         poly_world = map_builder.build_polygons_tensor(
                             np.array(ego_wp[:2], dtype=np.float32))
@@ -2156,8 +2128,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             from scenario_generation.simulate import (
                 _advance_agent,
                 _predict_batch,
-                advance_scene_mpc,
                 _refresh_line_strings,
+                advance_scene_mpc,
             )
             from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz
 

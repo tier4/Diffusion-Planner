@@ -31,18 +31,17 @@ import math
 import subprocess
 from pathlib import Path
 
+import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.config import Config
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
-import matplotlib.transforms as mtransforms
 
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.config import Config
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
-from scenario_generation.visualize import draw_agent_box as _viz_draw_agent_box
 from rlvr.autoresearch.tools.recovery_test import (
     _build_segments,
     _point_to_segments_dist,
@@ -54,6 +53,7 @@ from rlvr.autoresearch.tools.recovery_test import (
     get_tangent_at_origin,
     transform_to_new_ego_frame,
 )
+from scenario_generation.visualize import draw_agent_box as _viz_draw_agent_box
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -83,11 +83,10 @@ def _draw_agent_box(ax, x, y, heading, length, width, color,
                         alpha=alpha, lw=lw, zorder=zorder, wheelbase=wheelbase)
 
 
-def _ego_obb_corners(ex, ey, heading, length, width, wheelbase=None) -> np.ndarray:
+def _ego_obb_corners(ex, ey, heading, length, width, wheelbase) -> np.ndarray:
     """Four OBB corners (world frame) — used to attach the border-distance line.
     Ego is rear-axle referenced: rear edge at -(length-wheelbase)/2."""
-    wb = wheelbase if wheelbase is not None else length * 0.65
-    rear_overhang = (length - wb) / 2
+    rear_overhang = (length - wheelbase) / 2
     x0, x1 = -rear_overhang, length - rear_overhang
     y0, y1 = -width / 2, width / 2
     local = np.array([[x0, y0], [x0, y1], [x1, y1], [x1, y0]], dtype=np.float64)

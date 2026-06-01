@@ -12,8 +12,6 @@ import numpy as np
 import torch
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 
-from rlvr.closed_loop.batched_rollout import make_initial_latent
-
 
 @torch.no_grad()
 def generate_samples(
@@ -53,6 +51,11 @@ def generate_samples(
         model.decoder._guidance_scale = composer._set_config.global_scale
     else:
         model.decoder._guidance_scale = 0.5
+
+    # Function-scope import (not module-top): rlvr.closed_loop.batched_rollout
+    # pulls in modules that import back here, so a top-level import would create
+    # an import cycle. Imported once per call here (not per loop iteration).
+    from rlvr.closed_loop.batched_rollout import make_initial_latent
 
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num

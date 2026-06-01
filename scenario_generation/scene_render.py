@@ -14,6 +14,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import numpy as np
+import torch
 from matplotlib.patches import Rectangle
 
 from scenario_generation.scene_context import AgentType, SceneContext
@@ -39,6 +40,35 @@ _DET_COLOR = "#0088ff"
 _GUIDED_COLORS = ["#ff00aa", "#aa00ff", "#00ccaa", "#ffaa00"]
 _GT_COLOR = "#22bb22"
 _VIEW_HALF_DEFAULT = 50.0
+
+
+def _ensure_neighbor_future_4col(naf):
+    """Convert a 3-col (x, y, heading_rad) neighbor_agents_future to the
+    canonical 4-col (x, y, cos, sin). No-op if the last dim is already >= 4.
+
+    Older replay/psim NPZs (dumped before `_backfill_neighbor_futures`) store
+    neighbor heading as a single column, but reward.py (compute_reward_batch)
+    and the model tensor_converter both require cos/sin. Accepts a torch.Tensor
+    or np.ndarray; preserves type, dtype, device, and all leading dims.
+    """
+    if naf is None or naf.shape[-1] != 3:
+        return naf
+    if isinstance(naf, torch.Tensor):
+        h = naf[..., 2]
+        cos, sin = torch.cos(h), torch.sin(h)
+        # Empty/padded entries (x==y==0) must stay all-zero, not cos=1.
+        invalid = naf[..., :2].abs().sum(dim=-1) <= 1e-6
+        cos = cos.masked_fill(invalid, 0.0)
+        sin = sin.masked_fill(invalid, 0.0)
+        return torch.cat([naf[..., :2], cos.unsqueeze(-1), sin.unsqueeze(-1)], dim=-1)
+    h = naf[..., 2]
+    cos, sin = np.cos(h), np.sin(h)
+    invalid = np.abs(naf[..., :2]).sum(axis=-1) <= 1e-6
+    cos[invalid] = 0.0
+    sin[invalid] = 0.0
+    return np.concatenate(
+        [naf[..., :2], cos[..., None], sin[..., None]], axis=-1
+    ).astype(naf.dtype)
 
 
 def _obb_corners_from_placement(obs: ObstaclePlacement) -> np.ndarray:
@@ -306,7 +336,8 @@ def render_scene_at_step(
 
         if show_rb_dist:
             import torch as _t_rb
-            from rlvr.reward import compute_road_border_penalty, RewardConfig
+
+            from rlvr.reward import RewardConfig, compute_road_border_penalty
             ego_traj_1 = _t_rb.tensor([[[
                 float(ego_pos[0]), float(ego_pos[1]),
                 float(np.cos(ego_h)), float(np.sin(ego_h)),
@@ -490,7 +521,8 @@ def render_scene_at_step(
 
             if show_traj_rb:
                 import torch as _t_trb
-                from rlvr.reward import compute_road_border_penalty, RewardConfig
+
+                from rlvr.reward import RewardConfig, compute_road_border_penalty
                 _trb_data = {}
                 if hasattr(scene, "map_data") and scene.map_data is not None:
                     md = scene.map_data
