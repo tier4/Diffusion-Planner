@@ -183,9 +183,11 @@ def render_ghost_step(
                 color=cfg.model_b_color, lw=1.4, alpha=0.45, zorder=24)
 
     _draw_agent_box(ax, ax_val, ay_val, ah_val, cfg.ego_length, cfg.ego_width,
-                    cfg.model_a_color, alpha=0.78, lw=2, zorder=20)
+                    cfg.model_a_color, alpha=0.78, lw=2, zorder=20,
+                    wheelbase=cfg.ego_length * 0.65)
     _draw_agent_box(ax, bx_val, by_val, bh_val, cfg.ego_length, cfg.ego_width,
-                    cfg.model_b_color, alpha=0.78, lw=2, zorder=21)
+                    cfg.model_b_color, alpha=0.78, lw=2, zorder=21,
+                    wheelbase=cfg.ego_length * 0.65)
     arrow_len = max(cfg.ego_length, 2.5)
     ax.annotate("", xy=(ax_val + arrow_len * math.cos(ah_val),
                         ay_val + arrow_len * math.sin(ah_val)),

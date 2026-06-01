@@ -42,6 +42,7 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
+from scenario_generation.visualize import draw_agent_box as _viz_draw_agent_box
 from rlvr.autoresearch.tools.recovery_test import (
     _build_segments,
     _point_to_segments_dist,
@@ -72,17 +73,14 @@ _VIEW_HALF_M = 50.0
 
 
 def _draw_agent_box(ax, x, y, heading, length, width, color,
-                    alpha=0.85, lw=1.5, zorder=20) -> None:
-    """OBB ego footprint at world (x, y, heading). Rear-axle anchored — same
-    convention as ``scenario_generation.visualize.draw_agent_box``.
+                    alpha=0.85, lw=1.5, zorder=20, wheelbase=None) -> None:
+    """OBB footprint at world (x, y, heading). Delegates to the central
+    ``scenario_generation.visualize.draw_agent_box``: pass ``wheelbase`` for the
+    ego (rear-axle convention, box offset forward); leave None for neighbors
+    (centroid convention).
     """
-    rear_overhang = (length - length * 0.65) / 2
-    t_rot = mtransforms.Affine2D().rotate(heading).translate(x, y) + ax.transData
-    rect = Rectangle(
-        (-rear_overhang, -width / 2), length, width,
-        lw=lw, ec=color, fc=color, alpha=alpha, zorder=zorder, transform=t_rot,
-    )
-    ax.add_patch(rect)
+    _viz_draw_agent_box(ax, x, y, heading, length, width, color,
+                        alpha=alpha, lw=lw, zorder=zorder, wheelbase=wheelbase)
 
 
 def _ego_obb_corners(ex, ey, heading, length, width) -> np.ndarray:
@@ -368,7 +366,7 @@ def _render_step(
 
     # 3) Ego footprint + heading arrow
     _draw_agent_box(ax, ex, ey, eh, ego_length, ego_width, _EGO_COLOR,
-                    alpha=0.85, lw=2, zorder=20)
+                    alpha=0.85, lw=2, zorder=20, wheelbase=ego_length * 0.65)
     arrow_len = max(ego_length, 2.5)
     ax.annotate(
         "",
@@ -389,6 +387,7 @@ def _render_step(
         _draw_agent_box(
             ax, plan_world[-1, 0], plan_world[-1, 1], plan_world[-1, 2],
             ego_length, ego_width, _PRED_COLOR, alpha=0.25, lw=1.0, zorder=24,
+            wheelbase=ego_length * 0.65,
         )
 
     # 5) Body-to-border distance overlay

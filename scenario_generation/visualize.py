@@ -133,11 +133,14 @@ def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, z
 
 
 def draw_trajectory(ax, traj, color, label=None, lw=2, zorder=10, show_footprints=False,
-                    length=4.0, width=1.8):
+                    length=4.0, width=1.8, wheelbase: float | None = None):
     """Draw a trajectory line with optional footprints.
 
     Args:
         traj: (T, 3) [x, y, heading_rad] in scene frame.
+        wheelbase: when provided, footprint boxes treat each (x, y) as the
+            rear-axle midpoint and offset forward (ego convention). When None,
+            (x, y) is the bbox centroid (neighbor convention).
     """
     ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=lw, alpha=0.6, zorder=zorder)
     ax.plot(traj[::3, 0], traj[::3, 1], "o", color=color, ms=2.5, alpha=0.8,
@@ -146,10 +149,12 @@ def draw_trajectory(ax, traj, color, label=None, lw=2, zorder=10, show_footprint
     if show_footprints:
         for ts in range(5, len(traj), 10):
             draw_agent_box(ax, traj[ts, 0], traj[ts, 1], traj[ts, 2],
-                           length, width, color, alpha=0.12, lw=0.3, zorder=zorder - 1)
+                           length, width, color, alpha=0.12, lw=0.3, zorder=zorder - 1,
+                           wheelbase=wheelbase)
         if len(traj) > 1:
             draw_agent_box(ax, traj[-1, 0], traj[-1, 1], traj[-1, 2],
-                           length, width, color, alpha=0.35, lw=1.0, zorder=zorder - 1)
+                           length, width, color, alpha=0.35, lw=1.0, zorder=zorder - 1,
+                           wheelbase=wheelbase)
 
 
 def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):

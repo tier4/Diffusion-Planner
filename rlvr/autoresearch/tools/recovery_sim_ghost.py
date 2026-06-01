@@ -129,11 +129,13 @@ def _render_ghost_step(
         ax.plot(pr_plan[:, 0], pr_plan[:, 1], "-",
                 color=_PRISM_COLOR, lw=1.4, alpha=0.45, zorder=24)
 
-    # Ego footprints + arrows
+    # Ego footprints + arrows (ego is rear-axle referenced)
     _draw_agent_box(ax, bx, by, bh, ego_length, ego_width,
-                    _BASELINE_COLOR, alpha=0.78, lw=2, zorder=20)
+                    _BASELINE_COLOR, alpha=0.78, lw=2, zorder=20,
+                    wheelbase=ego_length * 0.65)
     _draw_agent_box(ax, px, py, ph, ego_length, ego_width,
-                    _PRISM_COLOR, alpha=0.78, lw=2, zorder=21)
+                    _PRISM_COLOR, alpha=0.78, lw=2, zorder=21,
+                    wheelbase=ego_length * 0.65)
     al = max(ego_length, 2.5)
     ax.annotate("", xy=(bx + al * math.cos(bh), by + al * math.sin(bh)),
                 xytext=(bx, by),

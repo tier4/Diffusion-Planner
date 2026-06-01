@@ -366,7 +366,8 @@ def main() -> None:
             wb = float(_es_np[0]) if _es_np is not None and len(_es_np) >= 1 else 4.76
             elen = float(_es_np[1]) if _es_np is not None and len(_es_np) >= 2 else 7.24
             ewid = float(_es_np[2]) if _es_np is not None and len(_es_np) >= 3 else 2.29
-            ro = elen - wb
+            # Ego pose is the rear axle; symmetric overhang is (length-wheelbase)/2.
+            ro = (elen - wb) / 2
             # Perturbed ego (now-current) is at origin in the new frame.
             t_rot_pert = (mtransforms.Affine2D()
                           .rotate(0.0)

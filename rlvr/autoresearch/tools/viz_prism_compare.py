@@ -229,7 +229,8 @@ def main() -> None:
         wb = float(es_np[0]) if es_np is not None and len(es_np) >= 1 else 4.76
         elen = float(es_np[1]) if es_np is not None and len(es_np) >= 2 else 7.24
         ewid = float(es_np[2]) if es_np is not None and len(es_np) >= 3 else 2.29
-        ro = elen - wb
+        # Ego pose is the rear axle; symmetric overhang is (length-wheelbase)/2.
+        ro = (elen - wb) / 2
         t_rot_pert = (mtransforms.Affine2D()
                       .rotate(0.0)
                       .translate(dx_pert, dy_pert)

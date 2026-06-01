@@ -1544,6 +1544,7 @@ def save_step_figure(
                 zorder=25 if is_ego else 18,
                 show_footprints=is_ego,
                 length=agent.length, width=agent.width,
+                wheelbase=agent.wheelbase if is_ego else None,
             )
 
     # 4) Ego goal marker (if within viewport).
