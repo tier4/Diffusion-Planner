@@ -288,6 +288,35 @@ def _traj_cos_sin_to_xyh(traj: np.ndarray) -> np.ndarray:
     return np.column_stack([traj[:, :2], heading])
 
 
+def _ensure_neighbor_future_4col(naf):
+    """Convert a 3-col (x, y, heading_rad) neighbor_agents_future to the
+    canonical 4-col (x, y, cos, sin). No-op if the last dim is already >= 4.
+
+    Older replay/psim NPZs (dumped before `_backfill_neighbor_futures`) store
+    neighbor heading as a single column, but reward.py (compute_reward_batch)
+    and the model tensor_converter both require cos/sin. Accepts a torch.Tensor
+    or np.ndarray; preserves type, dtype, device, and all leading dims.
+    """
+    if naf is None or naf.shape[-1] != 3:
+        return naf
+    if isinstance(naf, torch.Tensor):
+        h = naf[..., 2]
+        cos, sin = torch.cos(h), torch.sin(h)
+        # Empty/padded entries (x==y==0) must stay all-zero, not cos=1.
+        invalid = naf[..., :2].abs().sum(dim=-1) <= 1e-6
+        cos = cos.masked_fill(invalid, 0.0)
+        sin = sin.masked_fill(invalid, 0.0)
+        return torch.cat([naf[..., :2], cos.unsqueeze(-1), sin.unsqueeze(-1)], dim=-1)
+    h = naf[..., 2]
+    cos, sin = np.cos(h), np.sin(h)
+    invalid = np.abs(naf[..., :2]).sum(axis=-1) <= 1e-6
+    cos[invalid] = 0.0
+    sin[invalid] = 0.0
+    return np.concatenate(
+        [naf[..., :2], cos[..., None], sin[..., None]], axis=-1
+    ).astype(naf.dtype)
+
+
 def _obb_corners_from_placement(obs: ObstaclePlacement) -> np.ndarray:
     from scenario_generation.gui.lanelet_scene_builder import _obb_corners
     return _obb_corners(obs.x, obs.y, obs.yaw_rad, obs.length, obs.width)
@@ -2455,6 +2484,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             from rlvr.reward import compute_reward_batch as _crb
             scene_data = _load_npz(npz_path, torch.device("cpu"),
                                    ego_shape_override=tree.ego_shape)
+            # Older replay/psim NPZs store neighbor futures as 3-col
+            # (x, y, heading); reward scoring + canonical NPZ need 4-col
+            # (x, y, cos, sin). Convert before injection/scoring/save.
+            if "neighbor_agents_future" in scene_data:
+                scene_data["neighbor_agents_future"] = _ensure_neighbor_future_4col(
+                    scene_data["neighbor_agents_future"])
             obs_at_step = _get_obstacles_at_step(tree, s)
 
             # Block save if any moving neighbor lacks a simulated future.
@@ -2577,6 +2612,11 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 ).astype(np.float32)
                         npz_data["polygons"] = poly_world.astype(np.float32)
             npz_data["ego_agent_future"] = traj_4col_np
+            # Canonicalize neighbor futures to 4-col (x, y, cos, sin). The raw
+            # NPZ (and no-obstacle path) may carry 3-col (x, y, heading).
+            if "neighbor_agents_future" in npz_data:
+                npz_data["neighbor_agents_future"] = _ensure_neighbor_future_4col(
+                    npz_data["neighbor_agents_future"])
             if tree.ego_shape:
                 npz_data["ego_shape"] = np.array(list(tree.ego_shape), dtype=np.float32)
             # Sanity: crash if critical fields are missing
