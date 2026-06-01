@@ -707,7 +707,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         label="Length (m)",
                     )
                     obs_width = gr.Slider(
-                        minimum=0.5, maximum=3.0, value=1.8, step=0.1,
+                        minimum=0.5, maximum=6.0, value=1.8, step=0.1,
                         label="Width (m)",
                     )
                 obs_history = gr.Slider(
@@ -923,7 +923,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     edit_yaw = gr.Slider(minimum=-180, maximum=180, value=0, step=5, label="Yaw (deg)")
                 with gr.Row():
                     edit_length = gr.Slider(minimum=1.0, maximum=15.0, value=4.5, step=0.1, label="Len")
-                    edit_width = gr.Slider(minimum=0.5, maximum=3.0, value=1.8, step=0.1, label="Wid")
+                    edit_width = gr.Slider(minimum=0.5, maximum=6.0, value=1.8, step=0.1, label="Wid")
                 edit_history = gr.Slider(minimum=0, maximum=30, value=30, step=1, label="History")
                 with gr.Row():
                     edit_is_moving = gr.Checkbox(label="Moving", value=False)
@@ -2463,8 +2463,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     )
                     npz_data["ego_agent_future"] = np.zeros(
                         (model_args.future_len, 3), dtype=np.float32)
+                    import json as _json_sim
                     if ego_wp_arr is not None:
-                        import json as _json_sim
                         ep = scene_sim.get_agent(ego_id).current_position
                         eh = scene_sim.get_agent(ego_id).current_heading
                         ci, si = math.cos(_init_yaw), math.sin(_init_yaw)
