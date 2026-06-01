@@ -47,6 +47,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--advance_k", type=int, default=0)
     parser.add_argument("--view_half_m", type=float, default=30.0)
+    parser.add_argument("--ego_wheelbase", type=float, default=4.76,
+                        help="Ego wheelbase (m); ego footprint is rear-axle offset by (length-wheelbase)/2")
     parser.add_argument("--make_webm", action="store_true")
     parser.add_argument("--webm_fps", type=int, default=10)
     parser.add_argument("--show_lateral", action="store_true",
@@ -67,6 +69,7 @@ def main() -> None:
         advance_k=args.advance_k,
         webm_fps=args.webm_fps,
         show_lateral=args.show_lateral,
+        ego_wheelbase=args.ego_wheelbase,
     )
 
     out_root = Path(args.output_dir)

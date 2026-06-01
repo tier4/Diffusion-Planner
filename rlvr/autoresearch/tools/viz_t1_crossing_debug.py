@@ -200,7 +200,8 @@ def plot(traj_t, data, ego_shape, info, out_path, target_t, scene_name, traj_lab
     wb = ego_shape[0].item()
     length = ego_shape[1].item()
     width = ego_shape[2].item()
-    ro = (length - wb) / 2
+    # center-shift idiom: box center is rear-axle + (wheelbase/2) forward (loss.py convention)
+    ro = wb / 2
     cx = x + cos_h * ro
     cy = y + sin_h * ro
     hl, hw = length / 2, width / 2

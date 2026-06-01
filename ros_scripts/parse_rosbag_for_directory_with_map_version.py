@@ -1,10 +1,9 @@
 import argparse
+import json
 import logging
-import re
 import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
-from typing import Optional
 
 from parse_rosbag_by_cpp import main as parse_rosbag_main_cpp
 
@@ -21,7 +20,7 @@ def parse_args():
     parser.add_argument("--cpp_binary_path", type=Path, default=DEFAULT_CPP_BINARY)
     parser.add_argument("--step", type=int, default=2)
     parser.add_argument("--limit", type=int, default=-1)
-    parser.add_argument("--min_frames", type=int, default=1700)
+    parser.add_argument("--min_frames", type=int, default=0)
     parser.add_argument("--min_distance", type=float, default=50.0)
     parser.add_argument("--search_nearest_route", type=int, default=1)
     parser.add_argument("--convert_yellow", type=int, default=0)
@@ -30,31 +29,28 @@ def parse_args():
     parser.add_argument("--ego_wheel_base", type=float, default=2.75)
     parser.add_argument("--ego_length", type=float, default=4.34)
     parser.add_argument("--ego_width", type=float, default=1.70)
+    parser.add_argument("--static_object_margin", type=float, default=0.0)
+    parser.add_argument("--neighbor_margin", type=float, default=0.0)
+    parser.add_argument("--road_border_margin", type=float, default=0.0)
+    parser.add_argument("--collision_time_stride", type=int, default=5)
+    parser.add_argument("--offlane_max_score", type=float, default=6.0)
+    parser.add_argument("--offlane_time_stride", type=int, default=1)
+    parser.add_argument("--write_skipped_npz", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=32)
     return parser.parse_args()
 
 
-def _extract_scalar(metadata_text: str, key: str) -> Optional[str]:
-    match = re.search(rf"^\s*{re.escape(key)}\s*:\s*(.+?)\s*$", metadata_text, flags=re.MULTILINE)
-    if not match:
-        return None
-    value = match.group(1).strip()
-    if value.startswith("'") and value.endswith("'"):
-        return value[1:-1]
-    if value.startswith('"') and value.endswith('"'):
-        return value[1:-1]
-    return value
-
-
 def _resolve_vector_map_path(bag_path: Path) -> Path:
-    metadata_path = bag_path / "metadata.yaml"
+    # area_map_version_id は log_file_info.json から読む（metadata.yaml は参照しない）
+    info_path = bag_path / "log_file_info.json"
     date = bag_path.parent.name
     bag_time = bag_path.name
 
     map_version_id = None
-    if metadata_path.is_file():
-        metadata_text = metadata_path.read_text(encoding="utf-8")
-        map_version_id = _extract_scalar(metadata_text, "area_map_version_id")
+    if info_path.is_file():
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        if "area_map_version_id" in info:
+            map_version_id = info["area_map_version_id"]
 
     # Search from near bag path to upper directories to support multiple layouts.
     candidate_bases = []
@@ -90,7 +86,7 @@ def _resolve_vector_map_path(bag_path: Path) -> Path:
     )
     raise FileNotFoundError(
         f"lanelet2_map.osm was not found for bag: {bag_path}\n"
-        f"metadata: {metadata_path}\n"
+        f"log_file_info: {info_path}\n"
         f"area_map_version_id: {map_version_id}\n"
         f"searched:\n{searched}"
     )
@@ -112,6 +108,13 @@ def process_single_bag(args_tuple):
         ego_wheel_base,
         ego_length,
         ego_width,
+        static_object_margin,
+        neighbor_margin,
+        road_border_margin,
+        collision_time_stride,
+        offlane_max_score,
+        offlane_time_stride,
+        write_skipped_npz,
     ) = args_tuple
 
     logging.info(f"Processing bag: {bag_path}")
@@ -148,6 +151,13 @@ def process_single_bag(args_tuple):
             ego_wheel_base=ego_wheel_base,
             ego_length=ego_length,
             ego_width=ego_width,
+            static_object_margin=static_object_margin,
+            neighbor_margin=neighbor_margin,
+            road_border_margin=road_border_margin,
+            collision_time_stride=collision_time_stride,
+            offlane_max_score=offlane_max_score,
+            offlane_time_stride=offlane_time_stride,
+            write_skipped_npz=write_skipped_npz,
         )
         logging.info(f"Completed: {save_dir}")
     except Exception as e:
@@ -172,6 +182,13 @@ if __name__ == "__main__":
     ego_wheel_base = args.ego_wheel_base
     ego_length = args.ego_length
     ego_width = args.ego_width
+    static_object_margin = args.static_object_margin
+    neighbor_margin = args.neighbor_margin
+    road_border_margin = args.road_border_margin
+    collision_time_stride = args.collision_time_stride
+    offlane_max_score = args.offlane_max_score
+    offlane_time_stride = args.offlane_time_stride
+    write_skipped_npz = args.write_skipped_npz
     num_workers = args.num_workers or cpu_count()
 
     save_root = save_root.resolve()
@@ -213,6 +230,13 @@ if __name__ == "__main__":
                 ego_wheel_base,
                 ego_length,
                 ego_width,
+                static_object_margin,
+                neighbor_margin,
+                road_border_margin,
+                collision_time_stride,
+                offlane_max_score,
+                offlane_time_stride,
+                write_skipped_npz,
             )
         )
 

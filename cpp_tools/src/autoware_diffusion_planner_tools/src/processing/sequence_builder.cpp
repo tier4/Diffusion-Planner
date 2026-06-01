@@ -17,191 +17,175 @@
 #include "io/frame_writer.hpp"
 #include "utils/timestamp_utils.hpp"
 
+#include <autoware/diffusion_planner/preprocessing/traffic_signals.hpp>
+#include <rclcpp/time.hpp>
+
 #include <algorithm>
-#include <array>
+#include <cstdint>
 #include <iostream>
+#include <limits>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
+namespace
+{
+
+constexpr int64_t CLOCK_PERIOD_NS = 100'000'000LL;  // 10 Hz
+// Traffic-light validity, matching the runtime node's process_traffic_signals TTL.
+constexpr double TRAFFIC_TTL_S = 5.0;
+
+// Advance `cursor` (initially -1) to the largest index whose rosbag_time is <= tick.
+template <typename T>
+void advance_cursor(
+  const std::deque<TimedMsg<T>> & msgs, int64_t & cursor, const int64_t tick)
+{
+  while (cursor + 1 < static_cast<int64_t>(msgs.size()) &&
+         msgs[cursor + 1].first <= tick) {
+    ++cursor;
+  }
+}
+
+}  // namespace
+
+// Build per-route sequences of fixed-rate (10 Hz) frames.
+//
+// This stage is pure assembly: every tick produces exactly one frame and is appended to
+// its route's sequence — there is no skipping here. Each frame carries the latest message
+// at-or-before the tick for every required topic (zero-order hold, matching how the
+// runtime node plans from the most recent message it has received), plus the largest
+// message staleness at that tick. All skip decisions (stale data, covariance, stop, red
+// light, collision, off-lane) are made later in frame_processor.
+//
+// The clock starts only once every required topic has produced a message and a route
+// exists, so each tick has real (possibly stale) data and a route bin; this removes both
+// the "no route yet" and "missing data" early-outs the loop used to have.
 std::vector<SequenceData> build_sequences(
-  ParsedBagData & data, const int64_t search_nearest_route, const std::string & save_dir,
-  const std::string & rosbag_dir_name)
+  ParsedBagData & data, const int64_t search_nearest_route)
 {
   using autoware_perception_msgs::msg::TrackedObjects;
   using autoware_perception_msgs::msg::TrafficLightGroupArray;
-  using autoware_planning_msgs::msg::LaneletRoute;
   using autoware_vehicle_msgs::msg::TurnIndicatorsReport;
   using geometry_msgs::msg::AccelWithCovarianceStamped;
   using nav_msgs::msg::Odometry;
+  using autoware::diffusion_planner::preprocess::process_traffic_signals;
+  using autoware::diffusion_planner::preprocess::TrafficSignalStamped;
 
-  // Create sequences based on tracked objects (base topic at 10Hz)
-  std::vector<SequenceData> sequences;
-  for (const LaneletRoute & route : data.route_msgs) {
-    sequences.push_back({{}, route});
+  if (data.route_msgs.empty()) {
+    std::cout << "No route messages; nothing to build." << std::endl;
+    return {};
   }
 
-  // Process each tracked objects message with synchronization like Python version
-  const int64_t n = static_cast<int64_t>(data.tracked_objects_msgs.size());
-  std::cout << "n=" << n << std::endl;
-
-  for (int64_t i = 0; i < n; ++i) {
-    const TrackedObjects & tracking = data.tracked_objects_msgs[i];
-    const int64_t timestamp = parse_timestamp(tracking.header.stamp);
-
-    // Find matching messages with synchronization check like Python version
-    Odometry kinematic;
-    AccelWithCovarianceStamped accel;
-    std::vector<TrafficLightGroupArray> traffic_signal;
-    TurnIndicatorsReport turn_ind;
-    std::vector<std::string> incomplete_details;
-
-    bool ok = true;
-
-    // Check all messages
-    const auto kinematic_vec =
-      check_and_update_msg(data.kinematic_states, tracking.header.stamp);
-    if (!kinematic_vec.empty()) {
-      kinematic = kinematic_vec.back();
+  // Merge consecutive routes that share a start_pose up front. FreeSpacePlanner sometimes
+  // only changes goal_pose, so such routes belong to one sequence. route_to_group maps a
+  // route index -> its merged-sequence index.
+  std::vector<SequenceData> sequences;
+  std::vector<int64_t> route_to_group(data.route_msgs.size());
+  for (size_t j = 0; j < data.route_msgs.size(); ++j) {
+    if (
+      j > 0 &&
+      data.route_msgs[j].second.start_pose == data.route_msgs[j - 1].second.start_pose) {
+      route_to_group[j] = static_cast<int64_t>(sequences.size()) - 1;
     } else {
-      ok = false;
-      incomplete_details.emplace_back("KinematicState");
-      std::cout << "No matching kinematic_state for tracked_objects at " << i << std::endl;
+      route_to_group[j] = static_cast<int64_t>(sequences.size());
+      sequences.push_back({{}, data.route_msgs[j].second});
     }
+  }
 
-    const auto accel_vec = check_and_update_msg(data.accelerations, tracking.header.stamp);
-    if (!accel_vec.empty()) {
-      accel = accel_vec.back();
-    } else {
-      ok = false;
-      incomplete_details.emplace_back("Acceleration");
-      std::cout << "No matching acceleration for tracked_objects at " << i << std::endl;
+  // Clock range: start when every required topic and a route are available; end at the
+  // latest message across topics. Traffic is drop-tolerated and does not gate the clock.
+  const auto first_or_max = [](const auto & dq) {
+    return dq.empty() ? std::numeric_limits<int64_t>::max() : dq.front().first;
+  };
+  const auto last_or_min = [](const auto & dq) {
+    return dq.empty() ? std::numeric_limits<int64_t>::min() : dq.back().first;
+  };
+  int64_t earliest_route = std::numeric_limits<int64_t>::max();
+  for (const auto & route_entry : data.route_msgs) {
+    earliest_route = std::min(earliest_route, route_entry.first);
+  }
+  const int64_t clock_start = std::max({
+    first_or_max(data.kinematic_states), first_or_max(data.accelerations),
+    first_or_max(data.tracked_objects_msgs), first_or_max(data.turn_indicators), earliest_route});
+  // End once any required topic is exhausted: beyond its last message the loop could only
+  // carry stale data forward. Symmetric with clock_start; traffic does not gate the clock.
+  const int64_t clock_end = std::min({
+    last_or_min(data.kinematic_states), last_or_min(data.accelerations),
+    last_or_min(data.tracked_objects_msgs), last_or_min(data.turn_indicators)});
+  std::cout << "clock_start=" << clock_start << " clock_end=" << clock_end
+            << " period_ns=" << CLOCK_PERIOD_NS << std::endl;
+
+  // Forward-walking cursors.
+  int64_t kin_cursor = -1;
+  int64_t accel_cursor = -1;
+  int64_t tracked_cursor = -1;
+  int64_t turn_ind_cursor = -1;
+  int64_t traffic_high_cursor = -1;
+  int64_t traffic_low_cursor = 0;
+
+  // Persistent traffic-light state, maintained at 10 Hz exactly like the runtime node:
+  // each tick folds in the traffic msgs that arrived since the previous tick and expires
+  // entries older than TRAFFIC_TTL_S. A snapshot is stored on each frame.
+  std::map<lanelet::Id, TrafficSignalStamped> traffic_map;
+
+  for (int64_t tick = clock_start; tick <= clock_end; tick += CLOCK_PERIOD_NS) {
+    advance_cursor(data.kinematic_states, kin_cursor, tick);
+    advance_cursor(data.accelerations, accel_cursor, tick);
+    advance_cursor(data.tracked_objects_msgs, tracked_cursor, tick);
+    advance_cursor(data.turn_indicators, turn_ind_cursor, tick);
+    advance_cursor(data.traffic_signals, traffic_high_cursor, tick);
+
+    // Required topics: latest message at or before tick (zero-order hold). clock_start
+    // guarantees each cursor is valid; the staleness decision is made in frame_processor.
+    const Odometry & kinematic = data.kinematic_states[kin_cursor].second;
+    const AccelWithCovarianceStamped & accel = data.accelerations[accel_cursor].second;
+    const TrackedObjects & tracked = data.tracked_objects_msgs[tracked_cursor].second;
+    const TurnIndicatorsReport & turn_ind = data.turn_indicators[turn_ind_cursor].second;
+
+    const int64_t max_msg_age_ns = std::max({
+      tick - data.kinematic_states[kin_cursor].first,
+      tick - data.accelerations[accel_cursor].first,
+      tick - data.tracked_objects_msgs[tracked_cursor].first,
+      tick - data.turn_indicators[turn_ind_cursor].first});
+
+    // Traffic: consume every msg that arrived since the previous tick into the persistent
+    // map (latest-per-light + TTL), then snapshot the current state for this frame.
+    std::vector<TrafficLightGroupArray::ConstSharedPtr> new_traffic;
+    for (int64_t k = traffic_low_cursor; k <= traffic_high_cursor; ++k) {
+      new_traffic.push_back(
+        std::make_shared<TrafficLightGroupArray>(data.traffic_signals[k].second));
     }
+    traffic_low_cursor = traffic_high_cursor + 1;
+    // Use RCL_ROS_TIME to match the msg header stamps (process_traffic_signals subtracts
+    // current_time from each signal's stamp; mixing clock sources throws).
+    process_traffic_signals(new_traffic, traffic_map, rclcpp::Time(tick, RCL_ROS_TIME), TRAFFIC_TTL_S);
 
-    const auto traffic_signal_vec =
-      check_and_update_msg(data.traffic_signals, tracking.header.stamp);
-    if (!traffic_signal_vec.empty()) {
-      traffic_signal = traffic_signal_vec;
-    } else {
-      // Tolerate drops: traffic_signal publisher is known to drop messages even in
-      // healthy recordings (measured 23 gaps >150ms, up to 393ms, in this bag).
-      // Keep the frame with an empty signal vector instead of failing it.
-      std::cout << "No matching traffic_signal for tracked_objects at " << i << " (drop tolerated)"
-                << std::endl;
-    }
-
-    const auto turn_ind_vec = check_and_update_msg(data.turn_indicators, tracking.header.stamp);
-    if (!turn_ind_vec.empty()) {
-      turn_ind = turn_ind_vec.back();
-    } else {
-      ok = false;
-      incomplete_details.emplace_back("TurnIndicators");
-      std::cout << "No matching turn_indicators for tracked_objects at " << i << std::endl;
-    }
-
-    // Check route
-    int64_t max_route_index = -1;
+    // Resolve the route for this tick (latest route with rosbag_time <= tick).
+    int64_t max_route_index = 0;
     if (search_nearest_route) {
-      // Find the latest route msg
-      int64_t max_route_timestamp = 0;
+      int64_t best_route_time = std::numeric_limits<int64_t>::min();
       for (int64_t j = 0; j < static_cast<int64_t>(data.route_msgs.size()); ++j) {
-        const LaneletRoute & route_msg = data.route_msgs[j];
-        const int64_t route_stamp = parse_timestamp(route_msg.header.stamp);
-        if (max_route_timestamp <= route_stamp && route_stamp <= timestamp) {
-          max_route_timestamp = route_stamp;
+        const int64_t route_time = data.route_msgs[j].first;
+        if (route_time <= tick && route_time >= best_route_time) {
+          best_route_time = route_time;
           max_route_index = j;
         }
       }
-      if (max_route_index == -1) {
-        std::cout << "Cannot find route msg at " << i << std::endl;
-        continue;
-      }
-    } else {
-      // Use the first route msg
-      max_route_index = 0;
     }
 
-    // Check kinematic_state covariance validation
-    if (ok) {
-      const std::array<double, 36> & covariance = kinematic.pose.covariance;
-      const double covariance_xx = covariance[0];
-      const double covariance_yy = covariance[7];
-
-      if (covariance_xx > 1e-1 || covariance_yy > 1e-1) {
-        std::cout << "Invalid kinematic_state covariance_xx=" << covariance_xx
-                  << ", covariance_yy=" << covariance_yy << std::endl;
-        ok = false;
-        incomplete_details.emplace_back("InvalidKinematicCovariance");
-      }
-    }
-
-    SequenceData & sequence = sequences[max_route_index];
-
-    // Handle frame based on validation result
-    if (!ok) {
-      if (sequence.data_list.empty()) {
-        // At the beginning of recording, some msgs may be missing - Skip this frame
-        // Convert incomplete_details (vector<string>) to vector<IncompleteDataType>
-        std::vector<IncompleteDataType> incomplete_types;
-        for (const auto & s : incomplete_details) {
-          if (s == "KinematicState" || s == "InvalidKinematicCovariance")
-            incomplete_types.push_back(IncompleteDataType::KinematicState);
-          else if (s == "Acceleration")
-            incomplete_types.push_back(IncompleteDataType::Acceleration);
-          else if (s == "TrackedObjects")
-            incomplete_types.push_back(IncompleteDataType::TrackedObjects);
-          else if (s == "TrafficSignals")
-            incomplete_types.push_back(IncompleteDataType::TrafficSignals);
-          else if (s == "TurnIndicators")
-            incomplete_types.push_back(IncompleteDataType::TurnIndicators);
-        }
-        const SkippingInfo skipping_info = SkippingInfo::incomplete_data(incomplete_types);
-        Odometry fallback_kinematic = kinematic;
-        fallback_kinematic.header.stamp = tracking.header.stamp;
-        save_frame_json(
-          save_dir, rosbag_dir_name, create_token(max_route_index >= 0 ? max_route_index : 0, i),
-          fallback_kinematic, timestamp, skipping_info);
-        std::cout << "Skip this frame i=" << i << "/n=" << n << std::endl;
-        continue;
-      } else {
-        // If the msg is missing in the middle of recording, we can use the msgs to this point
-        std::cout << "Finish at this frame i=" << i << "/n=" << n << std::endl;
-        break;
-      }
-    }
-
-    // Shift kinematic pose to center
-    // kinematic.pose.pose = utils::shift_x(kinematic.pose.pose, (ego_wheel_base / 2.0));
-
-    const FrameData frame_data{timestamp, tracking, kinematic, accel, traffic_signal, turn_ind};
-
-    sequence.data_list.push_back(frame_data);
+    FrameData frame;
+    frame.timestamp = tick;
+    frame.tracked_objects = tracked;
+    frame.kinematic_state = kinematic;
+    frame.acceleration = accel;
+    frame.traffic_light_id_map = traffic_map;
+    frame.turn_indicator = turn_ind;
+    frame.max_msg_age_ns = max_msg_age_ns;
+    sequences[route_to_group[max_route_index]].data_list.push_back(frame);
   }
 
-  // Because FreeSpacePlanner sometimes changes goal_pose at the end, combine such things.
-  for (int64_t i = static_cast<int64_t>(sequences.size()) - 2; i >= 0; --i) {
-    const LaneletRoute & route_msg_l = sequences[i].route;
-    const LaneletRoute & route_msg_r = sequences[i + 1].route;
-
-    if (route_msg_l.start_pose != route_msg_r.start_pose) {
-      std::cout << "Route start pose mismatch: " << i << " != " << i + 1 << std::endl;
-      continue;
-    }
-
-    std::cout << "Concatenate sequence " << i << " and " << i + 1 << std::endl;
-    std::cout << "Before sequence[" << i << "].data_list.size()=" << sequences[i].data_list.size()
-              << " frames" << std::endl;
-
-    sequences[i].data_list.insert(
-      sequences[i].data_list.end(), sequences[i + 1].data_list.begin(),
-      sequences[i + 1].data_list.end());
-
-    std::cout << "After sequence[" << i << "].data_list.size()=" << sequences[i].data_list.size()
-              << " frames" << std::endl;
-
-    sequences.erase(sequences.begin() + i + 1);
-  }
-
-  // Sort each sequence's data_list by timestamp to ensure ascending order
+  // Frames are pushed in tick order; keep each sequence's data_list ascending by timestamp.
   for (auto & seq : sequences) {
     std::sort(
       seq.data_list.begin(), seq.data_list.end(),

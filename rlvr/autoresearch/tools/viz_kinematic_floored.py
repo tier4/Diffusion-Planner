@@ -103,7 +103,8 @@ def plot_floored(traj, ego_shape, data, yaw_rate, speed, rcfg, out_path, title_p
     t_np = traj.cpu().numpy()
     T = traj.shape[0]
     wb = ego_shape[0].item(); length = ego_shape[1].item(); width = ego_shape[2].item()
-    ro = (length - wb) / 2
+    # center-shift idiom: box center is rear-axle + (wheelbase/2) forward (loss.py convention)
+    ro = wb / 2
     step = max(1, T // 12)
     draw_ts = list(range(0, T, step))
     if (T - 1) not in draw_ts: draw_ts.append(T - 1)

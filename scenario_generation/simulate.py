@@ -190,12 +190,20 @@ def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
                   dt: float = 0.1) -> None:
     """Advance the scene by one timestep using per-agent predictions (in-place).
 
+    The model predicted each agent's trajectory in rear-axle convention
+    (it thought the agent was the ego). But non-ego agents store their
+    position at the bbox centroid. So for non-ego agents we undo the
+    rear-axle assumption: shift the predicted world position forward
+    by wheelbase/2 along the predicted heading to recover centroid.
+    The ego's position IS rear-axle, so no shift needed for it.
+
     Args:
         scene: SceneContext to modify in-place.
         agent_predictions: Maps agent_id -> (80, 4) ego-centric prediction
             [x, y, cos_h, sin_h] from running that agent as ego.
         dt: Timestep duration.
     """
+    ego_id = scene.ego_agent_id
     for agent in scene.agents:
         if agent.id not in agent_predictions:
             continue
@@ -203,14 +211,32 @@ def advance_scene(scene: SceneContext, agent_predictions: dict[str, np.ndarray],
         pred = agent_predictions[agent.id]  # (80, 4) in that agent's ego frame
         step = pred[0]  # First step
 
-        # Convert from agent's ego frame back to world
         ax, ay = agent.current_position
         ah = agent.current_heading
+
+        if agent.id != ego_id:
+            # Inference used rear-axle origin (centroid shifted back by wb/2).
+            # Use that same origin for the inverse transform.
+            wb = getattr(agent, "wheelbase", 0.0) or 0.0
+            origin_x = float(ax) - math.cos(ah) * wb / 2.0
+            origin_y = float(ay) - math.sin(ah) * wb / 2.0
+        else:
+            origin_x, origin_y = float(ax), float(ay)
+            wb = 0.0
+
         new_xy, new_h = _ego_to_world(
             step[:2].reshape(1, 2), step[2:4].reshape(1, 2),
-            float(ax), float(ay), ah,
+            origin_x, origin_y, ah,
         )
-        new_pos = np.array([new_xy[0, 0], new_xy[0, 1], new_h[0]], dtype=np.float32)
+        wx, wy = float(new_xy[0, 0]), float(new_xy[0, 1])
+        wh = float(new_h[0])
+
+        if agent.id != ego_id:
+            # Shift predicted rear-axle position forward to centroid
+            wx += math.cos(wh) * wb / 2.0
+            wy += math.sin(wh) * wb / 2.0
+
+        new_pos = np.array([wx, wy, wh], dtype=np.float32)
         _advance_agent(agent, new_pos, dt)
 
 
@@ -259,8 +285,19 @@ def advance_scene_mpc(
         # Transform full trajectory to world frame
         ax, ay = agent.current_position
         ah = agent.current_heading
+        if agent.id != scene.ego_agent_id:
+            # Neighbor-as-ego: inference shifted its stored centroid back to the
+            # rear axle (tensor_converter), so the prediction is rear-axle framed.
+            # Use the rear-axle origin for the inverse transform + tracker state,
+            # then shift the tracked result back to the centroid (mirrors
+            # advance_scene). Without this the NPC is biased ~wb/2 forward.
+            wb = getattr(agent, "wheelbase", 0.0) or 0.0
+            origin_x = float(ax) - math.cos(ah) * wb / 2.0
+            origin_y = float(ay) - math.sin(ah) * wb / 2.0
+        else:
+            origin_x, origin_y, wb = float(ax), float(ay), 0.0
         world_xy, world_h = _ego_to_world(
-            pred[:, :2], pred[:, 2:4], float(ax), float(ay), ah,
+            pred[:, :2], pred[:, 2:4], origin_x, origin_y, ah,
         )
 
         # Build world-frame reference (N, 3) [x, y, yaw]
@@ -289,9 +326,14 @@ def advance_scene_mpc(
         vel = agent.current_velocity
         speed = float(vel[0] * math.cos(ah) + vel[1] * math.sin(ah))
         speed = max(speed, 0.0)
-        x0 = np.array([float(ax), float(ay), ah, speed], dtype=np.float64)
+        x0 = np.array([origin_x, origin_y, ah, speed], dtype=np.float64)
 
         new_pos, new_speed = tracker.track(x0, ref_world)
+        if wb:
+            # Tracker state is rear-axle; shift back to centroid for storage.
+            new_pos = np.asarray(new_pos, dtype=np.float64).copy()
+            new_pos[0] += math.cos(new_pos[2]) * wb / 2.0
+            new_pos[1] += math.sin(new_pos[2]) * wb / 2.0
         # Use None — not 0.0 — when a tracker lacks the telemetry
         # attribute. _advance_agent treats None as "fall back to MA
         # estimate"; 0.0 would be treated as a valid zero command and
@@ -370,8 +412,10 @@ def _draw_agent_view(
                        ocolor, alpha=0.35, lw=0.8, zorder=5)
 
     # This agent's bounding box
+    is_ego = (agent_id == scene.ego_agent_id)
     draw_agent_box(ax, pos[0], pos[1], heading, agent.length, agent.width,
-                   color, alpha=0.9, lw=2.0, zorder=20)
+                   color, alpha=0.9, lw=2.0, zorder=20,
+                   wheelbase=agent.wheelbase if is_ego else None)
 
     # Heading arrow
     arrow_len = max(agent.length, 2.0)
@@ -388,7 +432,8 @@ def _draw_agent_view(
         )
         plan_traj = np.concatenate([plan_xy, plan_h[:, np.newaxis]], axis=-1)
         draw_trajectory(ax, plan_traj, "#3366cc", label="Plan", lw=2, zorder=25,
-                        show_footprints=True, length=agent.length, width=agent.width)
+                        show_footprints=True, length=agent.length, width=agent.width,
+                        wheelbase=agent.wheelbase if is_ego else None)
 
     # Route
     if agent.route_lanes is not None:
@@ -511,21 +556,9 @@ def _predict_batch(
         for aid in agent_ids
     ]
 
-    # When guidance is active, init sampled_trajectories from current states
-    # (matching generate_samples.py) instead of zeros — the DPM-Solver
-    # converges to different solutions depending on the starting latent.
-    if model.decoder._guidance_fn is not None:
-        import torch as _torch
-        P = 1 + model_args.predicted_neighbor_num
-        for td in tensor_dicts:
-            ego_cs = td["ego_current_state"][:, :4]
-            nb_past = td["neighbor_agents_past"]
-            nb_cs = (nb_past[:, :P - 1, -1, :4] if nb_past.shape[1] >= P - 1
-                     else _torch.zeros(1, P - 1, 4, dtype=_torch.float32,
-                                       device=ego_cs.device))
-            cs = _torch.cat([ego_cs[:, None], nb_cs], dim=1)
-            td["sampled_trajectories"] = cs[:, :, None, :].expand(
-                -1, -1, model_args.future_len + 1, -1).clone()
+    # sampled_trajectories is already zeros from tensor_converter.
+    # The C++ production node uses randn * temperature (0.0 for deterministic).
+    # No override needed — zeros is the canonical deterministic init.
 
     if len(agent_ids) == 1:
         _, outputs = model(tensor_dicts[0])

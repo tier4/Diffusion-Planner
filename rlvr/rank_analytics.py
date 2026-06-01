@@ -43,6 +43,8 @@ def _classify_label(label: str) -> str:
     """Classify any label (including experimental ones) into a category."""
     if label in _CATEGORY_MAP:
         return _CATEGORY_MAP[label]
+    if label == "gt_candidate":
+        return "gt_candidate"
     if label.startswith("random_") or label.startswith("explorer_"):
         return "random"
     if label == "det_pure":
@@ -259,7 +261,8 @@ class EpochRankAnalytics:
         cat_counter = Counter(get_category(r.winner_label) for r in self.records)
         # Include both standard and experimental categories
         all_cats = ["det_pure", "guided_det", "guided_noisy", "random",
-                    "lateral_exp", "stretched_exp", "decoupled_exp", "noise_only_exp", "collision_exp"]
+                    "lateral_exp", "stretched_exp", "decoupled_exp", "noise_only_exp",
+                    "collision_exp", "gt_candidate"]
         for cat in all_cats:
             self.category_rates[cat] = cat_counter.get(cat, 0) / n
 

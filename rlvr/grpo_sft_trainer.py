@@ -94,16 +94,12 @@ def _get_baseline_neighbor_prediction(
     future_len = model_args.future_len
     B = norm_data["ego_current_state"].shape[0]
 
-    ego_current = norm_data["ego_current_state"][:, :4]
-    neighbors_current = norm_data["neighbor_agents_past"][:, :P - 1, -1, :4]
-    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)
-
-    xT = current_states[:, :, None, :].expand(-1, -1, future_len + 1, -1).clone()
-    xT[:, :, 1:, :] = 0.0  # deterministic
-
     data_copy = {k: v.clone() if isinstance(v, torch.Tensor) else v
                  for k, v in norm_data.items()}
-    data_copy["sampled_trajectories"] = xT
+    from rlvr.closed_loop.batched_rollout import make_initial_latent
+    data_copy["sampled_trajectories"] = make_initial_latent(
+        B, P, future_len, norm_data["ego_current_state"].device,
+    )
 
     ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
     with ctx, torch.no_grad():
@@ -730,6 +726,9 @@ def train_epoch_ranked_sft(
             _ra_labels = [f"explorer_{i}" for i in range(K)]
         _ra = EpochRankAnalytics(epoch=epoch, n_scenes=N)
 
+        _include_gt_cand = getattr(config, "include_gt_candidate", False)
+        _gt_cand_count = 0
+
         for i in tqdm(range(N), desc="Scoring"):
             traj_K = all_trajs[i]  # [K, T, 4]
             data_i = all_data[i]
@@ -741,6 +740,33 @@ def train_epoch_ranked_sft(
                     data_i["baseline_path_len"] = torch.tensor(
                         baseline_path_lens[key], device=device, dtype=torch.float32,
                     )
+
+            # Optionally append GT trajectory as extra candidate in ranking pool
+            _gt_appended = False
+            if _include_gt_cand:
+                _real_gt = data_i.get("ego_agent_future")
+                if _real_gt is not None:
+                    _g = _real_gt
+                    if _g.dim() == 3:
+                        _g = _g[0]
+                    if _g.shape[-1] == 3:
+                        _valid = _g[..., :2].abs().sum(dim=-1) > 0.1
+                        _cos = torch.where(_valid, _g[..., 2].cos(), torch.zeros_like(_g[..., 2]))
+                        _sin = torch.where(_valid, _g[..., 2].sin(), torch.zeros_like(_g[..., 2]))
+                        _g = torch.stack([_g[..., 0], _g[..., 1], _cos, _sin], dim=-1)
+                    _g = _g[..., :4]
+                    T_gen = traj_K.shape[1]
+                    if _g.shape[0] > T_gen:
+                        _g = _g[:T_gen]
+                    elif _g.shape[0] < T_gen:
+                        _pad = torch.zeros(T_gen - _g.shape[0], 4, device=_g.device, dtype=_g.dtype)
+                        _g = torch.cat([_g, _pad], dim=0)
+                    traj_K = torch.cat([traj_K, _g.unsqueeze(0).to(traj_K.device, dtype=traj_K.dtype)], dim=0)
+                    _gt_appended = True
+                    _gt_cand_count += 1
+
+            # Extend labels if GT was appended
+            _scene_ra_labels = _ra_labels + (["gt_candidate"] if _gt_appended else [])
 
             rewards = compute_reward_batch(traj_K, data_i, reward_config)
             reward_vals = np.array([r.total for r in rewards])
@@ -757,16 +783,16 @@ def train_epoch_ranked_sft(
             gt_reward = float("nan")
             gt_traj_4col = None
             if _gt_mode != "none":
-                _real_gt = data_i.get("ego_agent_future")
-                if _real_gt is not None:
+                # Reuse GT tensor + reward from include_gt_candidate if available
+                if _gt_appended:
+                    gt_traj_4col = traj_K[-1]
+                    gt_reward = float(reward_vals[-1])
+                    _gt_rewards = [rewards[-1]]
+                elif data_i.get("ego_agent_future") is not None:
+                    _real_gt = data_i["ego_agent_future"]
                     _g = _real_gt
                     if _g.dim() == 3:
                         _g = _g[0]
-                    # Map (T,3) -> (T,4) as (x, y, cos h, sin h). Align columns
-                    # with traj_K (which is also x, y, cos, sin). Mask zero-
-                    # padded trailing rows BEFORE cos/sin conversion so we don't
-                    # inject a phantom "pointing-east" pose (cos=1, sin=0) on
-                    # invalid timesteps — that would skew progress / RB on GT.
                     if _g.shape[-1] == 3:
                         _valid = _g[..., :2].abs().sum(dim=-1) > 0.1
                         _cos = torch.where(_valid, _g[..., 2].cos(), torch.zeros_like(_g[..., 2]))
@@ -785,11 +811,11 @@ def train_epoch_ranked_sft(
                         gt_traj_4col.unsqueeze(0), data_i, reward_config,
                     )
                     gt_reward = float(_gt_rewards[0].total)
+                if gt_traj_4col is not None:
                     _gt_scored_count += 1
                     if best_reward < gt_reward - _gt_margin:
                         _used_gt_fallback = True
                         _gt_fallback_count += 1
-                    # Always record per-scene comparison so we can analyze hard scenes
                     _gt_scene_log.append({
                         "scene": Path(valid_paths[i]).stem,
                         "gt_reward": gt_reward,
@@ -798,7 +824,6 @@ def train_epoch_ranked_sft(
                         "gap_best_minus_gt": float(best_reward - gt_reward),
                         "best_idx": int(best_idx),
                         "fallback": bool(_used_gt_fallback),
-                        # Gate / crossing flags from the GT-trajectory reward breakdown
                         "gt_rb_crossing": bool(_gt_rewards[0].rb_crossing),
                         "gt_lane_crossing": bool(_gt_rewards[0].lane_crossing),
                         "gt_collision_step": _gt_rewards[0].collision_step,
@@ -842,7 +867,7 @@ def train_epoch_ranked_sft(
             _ra.records.append(SceneRankRecord(
                 scene_path=Path(valid_paths[i]).stem,
                 winner_idx=best_idx,
-                winner_label=_ra_labels[best_idx],
+                winner_label=_scene_ra_labels[best_idx],
                 winner_reward=float(reward_vals[best_idx]),
                 mean_reward=float(reward_vals.mean()),
                 det_reward=float(reward_vals[0]),
@@ -868,9 +893,14 @@ def train_epoch_ranked_sft(
             best_rewards_list.append(effective_reward)
 
         mean_best_reward = float(np.mean(best_rewards_list))
+        if _include_gt_cand and _gt_cand_count > 0:
+            _gt_wins = sum(1 for r in _ra.records if r.winner_label == "gt_candidate")
+            print(f"  [GT candidate] {_gt_cand_count}/{N} scenes had GT, "
+                  f"{_gt_wins}/{_gt_cand_count} GT won rank-1")
 
         # Rank analytics: aggregate and print/save
-        _ra.finalize(_ra_labels)
+        _ra_labels_final = _ra_labels + (["gt_candidate"] if _include_gt_cand else [])
+        _ra.finalize(_ra_labels_final)
         print_epoch_summary(_ra)
         if run_dir is not None:
             save_epoch_analytics(_ra, Path(run_dir), epoch)

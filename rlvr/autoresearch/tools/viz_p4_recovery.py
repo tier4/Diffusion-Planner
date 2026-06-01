@@ -44,6 +44,11 @@ from matplotlib.patches import Rectangle
 
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.eval_det_avoidance import (
+    det_inference_batched,
+    reward_breakdown_to_det_dict,
+)
+from rlvr.autoresearch.tools.percentile_filter_perturbed import is_scene_eligible
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_cl_recovery import (
     draw_scene_base,
@@ -264,20 +269,9 @@ def main() -> None:
             use_route_cl_guidance=use_route_cl,
         )  # [B, K, T, 4]
 
-        decoder = model.module.decoder if hasattr(model, "module") else model.decoder
-        saved_fn = decoder._guidance_fn
-        decoder._guidance_fn = None
-        try:
-            P = 1 + model_args.predicted_neighbor_num
-            future_len = model_args.future_len
-            norm_batch_d = {k: v for k, v in norm_batch.items()}
-            norm_batch_d["sampled_trajectories"] = torch.zeros(
-                B, P, future_len + 1, 4, device=device
-            )
-            _, det_out = model(norm_batch_d)
-            det_trajs_BT4 = det_out["prediction"][:, 0].detach()  # [B, T, 4]
-        finally:
-            decoder._guidance_fn = saved_fn
+        det_trajs_BT4 = det_inference_batched(
+            model, model_args, datas_ok, device, norm_batch=norm_batch,
+        )
 
         for bi in range(B):
             si = orig_indices[bi]
@@ -298,6 +292,7 @@ def main() -> None:
                     "kin_violated": bool(r.kinematic_violated),
                     "coll_step": (None if r.collision_step is None
                                   else int(r.collision_step)),
+                    "static_crossing": bool(r.static_crossing),
                 }
                 for ki, r in enumerate(all_rewards)
             ]
@@ -308,14 +303,15 @@ def main() -> None:
             # Earlier versions compared top1_cl (80-frame) to t0_cl
             # (1-frame at ego_current_state) — apples-to-oranges; that
             # comparison let scenes where rank-1 was no better than
-            # deterministic sneak through. Filter rule canonical in
-            # percentile_filter_perturbed: top1 > det. We mirror it here.
             det_r = compute_reward_batch(det_traj_t, data, rcfg)[0]
             delta = top1["cl"] - float(det_r.centerline)
-            improves = delta > 0.0
+            top1_better_reward = top1["total"] > float(det_r.total)
+            top1_is_different = top1["k"] != 0  # k=0 is deterministic
+            improves = (top1_better_reward and top1_is_different
+                        and is_scene_eligible(top1, t0_cl=t0_cl))
 
             if args.no_viz:
-                summary.append({
+                entry = {
                     "scene": str(npz_path),
                     "scene_idx": si,
                     "t0_cl": t0_cl,
@@ -329,10 +325,11 @@ def main() -> None:
                     "top1_lane_cross": top1["lane_cross"],
                     "top1_kin_violated": top1["kin_violated"],
                     "top1_coll_step": top1["coll_step"],
-                    "det_cl": float(det_r.centerline),
-                    "det_total": float(det_r.total),
+                    "top1_static_crossing": top1["static_crossing"],
                     "png": None,
-                })
+                }
+                entry.update(reward_breakdown_to_det_dict(det_r))
+                summary.append(entry)
                 if improves:
                     improve_paths.append(str(npz_path))
                 flag = "IMPROVE" if improves else "       "
@@ -369,7 +366,8 @@ def main() -> None:
             wb = float(_es_np[0]) if _es_np is not None and len(_es_np) >= 1 else 4.76
             elen = float(_es_np[1]) if _es_np is not None and len(_es_np) >= 2 else 7.24
             ewid = float(_es_np[2]) if _es_np is not None and len(_es_np) >= 3 else 2.29
-            ro = elen - wb
+            # Ego pose is the rear axle; symmetric overhang is (length-wheelbase)/2.
+            ro = (elen - wb) / 2
             # Perturbed ego (now-current) is at origin in the new frame.
             t_rot_pert = (mtransforms.Affine2D()
                           .rotate(0.0)
@@ -481,10 +479,10 @@ def main() -> None:
                 "top1_lane_cross": top1["lane_cross"],
                 "top1_kin_violated": top1["kin_violated"],
                 "top1_coll_step": top1["coll_step"],
-                "det_cl": float(det_r.centerline),
-                "det_total": float(det_r.total),
+                "top1_static_crossing": top1["static_crossing"],
                 "png": str(out_path),
             })
+            summary[-1].update(reward_breakdown_to_det_dict(det_r))
             flag = "IMPROVE" if improves else "       "
             print(
                 f"  [{si:3d}] {flag}  t0={t0_cl:+.3f}  top1={top1['cl']:+.3f}  "

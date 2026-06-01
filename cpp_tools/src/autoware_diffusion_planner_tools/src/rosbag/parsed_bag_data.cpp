@@ -44,46 +44,43 @@ ParsedBagData load_rosbag(const std::string & rosbag_path, int64_t limit)
   int64_t parse_count = 0;
   while (rosbag_parser.has_next() && (limit < 0 || parse_count < limit)) {
     const rosbag2_storage::SerializedBagMessageSharedPtr msg = rosbag_parser.read_next();
+    const int64_t rosbag_time = static_cast<int64_t>(msg->time_stamp);
 
     if (msg->topic_name == "/localization/kinematic_state") {
       const Odometry odometry = rosbag_parser.deserialize_message<Odometry>(msg);
-      data.kinematic_states.push_back(odometry);
+      data.kinematic_states.push_back({rosbag_time, odometry});
       data.timestamp_stats_map.add_timestamp(
-        "/localization/kinematic_state", parse_timestamp(odometry.header.stamp),
-        static_cast<int64_t>(msg->time_stamp));
+        "/localization/kinematic_state", parse_timestamp(odometry.header.stamp), rosbag_time);
     } else if (msg->topic_name == "/localization/acceleration") {
       const AccelWithCovarianceStamped accel =
         rosbag_parser.deserialize_message<AccelWithCovarianceStamped>(msg);
-      data.accelerations.push_back(accel);
+      data.accelerations.push_back({rosbag_time, accel});
       data.timestamp_stats_map.add_timestamp(
-        "/localization/acceleration", parse_timestamp(accel.header.stamp),
-        static_cast<int64_t>(msg->time_stamp));
+        "/localization/acceleration", parse_timestamp(accel.header.stamp), rosbag_time);
     } else if (msg->topic_name == "/perception/object_recognition/tracking/objects") {
       const TrackedObjects objects = rosbag_parser.deserialize_message<TrackedObjects>(msg);
-      data.tracked_objects_msgs.push_back(objects);
+      data.tracked_objects_msgs.push_back({rosbag_time, objects});
       data.timestamp_stats_map.add_timestamp(
         "/perception/object_recognition/tracking/objects", parse_timestamp(objects.header.stamp),
-        static_cast<int64_t>(msg->time_stamp));
+        rosbag_time);
     } else if (msg->topic_name == "/planning/mission_planning/route") {
       const LaneletRoute route = rosbag_parser.deserialize_message<LaneletRoute>(msg);
-      data.route_msgs.push_back(route);
+      data.route_msgs.push_back({rosbag_time, route});
       data.timestamp_stats_map.add_timestamp(
-        "/planning/mission_planning/route", parse_timestamp(route.header.stamp),
-        static_cast<int64_t>(msg->time_stamp));
+        "/planning/mission_planning/route", parse_timestamp(route.header.stamp), rosbag_time);
     } else if (msg->topic_name == "/vehicle/status/turn_indicators_status") {
       const TurnIndicatorsReport turn_ind =
         rosbag_parser.deserialize_message<TurnIndicatorsReport>(msg);
-      data.turn_indicators.push_back(turn_ind);
+      data.turn_indicators.push_back({rosbag_time, turn_ind});
       data.timestamp_stats_map.add_timestamp(
-        "/vehicle/status/turn_indicators_status", parse_timestamp(turn_ind.stamp),
-        static_cast<int64_t>(msg->time_stamp));
+        "/vehicle/status/turn_indicators_status", parse_timestamp(turn_ind.stamp), rosbag_time);
     } else if (msg->topic_name == "/perception/traffic_light_recognition/traffic_signals") {
       const TrafficLightGroupArray traffic_signal =
         rosbag_parser.deserialize_message<TrafficLightGroupArray>(msg);
-      data.traffic_signals.push_back(traffic_signal);
+      data.traffic_signals.push_back({rosbag_time, traffic_signal});
       data.timestamp_stats_map.add_timestamp(
         "/perception/traffic_light_recognition/traffic_signals",
-        parse_timestamp(traffic_signal.stamp), static_cast<int64_t>(msg->time_stamp));
+        parse_timestamp(traffic_signal.stamp), rosbag_time);
     }
 
     parse_count++;

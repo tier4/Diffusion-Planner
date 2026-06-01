@@ -46,15 +46,26 @@ enum class SkippingLabel {
   MissingRequiredTopic,  // Required ROS topic is missing from rosbag
 
   // Frame-level skipping reasons (incomplete data)
-  IncompleteData,  // Some messages are missing at the beginning of recording
+  IncompleteData,  // A required message is missing at this tick (recording warm-up
+                   // at the start, or a transient gap mid-drive). Only this frame is
+                   // skipped; processing continues.
 
   // Sequence-level skipping reasons
   InsufficientFrames,    // Sequence has fewer frames than minimum required
   InsufficientDistance,  // Traveled distance of sequence is too short
 
   // Frame processing skipping reasons
-  RedOrYellowLight,  // At red or yellow light with forward future trajectory
-  VehicleStopped,    // Ego vehicle is stopped
+  RedOrYellowLight,        // At red or yellow light with forward future trajectory
+  StoppedAtTrafficLight,   // Sustained stop at red/yellow light (formerly VehicleStopped;
+                           // contrast with NoFutureProgress for non-light stops)
+
+  // Filter skipping reasons (ported from the standalone python filter scripts)
+  Collision,  // GT ego trajectory collides with a static object, neighbor, or road border
+  OffLane,    // GT ego trajectory is too far from any lane centerline
+
+  // Sustained-state skipping reasons
+  NoFutureProgress,  // GT future trajectory has not advanced for >=3s (ego stuck beyond
+                     // just red lights, e.g. stop sign / behind another vehicle / parked).
 };
 
 // Structure to hold detailed skipping information
@@ -111,9 +122,10 @@ struct SkippingInfo
       {}};
   }
 
-  static SkippingInfo vehicle_stopped()
+  static SkippingInfo stopped_at_traffic_light()
   {
-    return {SkippingLabel::VehicleStopped, "Ego vehicle is stopped", {}, {}};
+    return {
+      SkippingLabel::StoppedAtTrafficLight, "Sustained stop at red/yellow light", {}, {}};
   }
 
   static SkippingInfo red_or_yellow_light()
@@ -121,6 +133,58 @@ struct SkippingInfo
     return {
       SkippingLabel::RedOrYellowLight,
       "At red/yellow light with forward moving future trajectory",
+      {},
+      {}};
+  }
+
+  // reasons: any of "static_object", "neighbor", "road_border"
+  static SkippingInfo collision(const std::vector<std::string> & reasons)
+  {
+    std::string details = "Collision: ";
+    for (size_t i = 0; i < reasons.size(); ++i) {
+      if (i > 0) details += ", ";
+      details += reasons[i];
+    }
+    return {SkippingLabel::Collision, details, {}, {}};
+  }
+
+  static SkippingInfo off_lane(float mean_distance, float max_distance)
+  {
+    return {
+      SkippingLabel::OffLane,
+      "Off lane: mean_dist=" + std::to_string(mean_distance) +
+        "m, max_dist=" + std::to_string(max_distance) + "m",
+      {},
+      {}};
+  }
+
+  // The freshest required message at this tick is too old (large "乖離"). Reuses the
+  // IncompleteData label: the frame's inputs are effectively not available in time.
+  static SkippingInfo stale_data(int64_t max_age_ns)
+  {
+    return {
+      SkippingLabel::IncompleteData,
+      "Stale data: max_age=" + std::to_string(max_age_ns / 1'000'000) + "ms",
+      {},
+      {}};
+  }
+
+  static SkippingInfo invalid_covariance(double covariance_xx, double covariance_yy)
+  {
+    return {
+      SkippingLabel::IncompleteData,
+      "Invalid kinematic covariance: xx=" + std::to_string(covariance_xx) +
+        ", yy=" + std::to_string(covariance_yy),
+      {},
+      {IncompleteDataType::KinematicState}};
+  }
+
+  static SkippingInfo no_future_progress(double sustained_seconds)
+  {
+    return {
+      SkippingLabel::NoFutureProgress,
+      "GT future has not advanced for " + std::to_string(sustained_seconds) +
+        "s (ego stuck beyond red lights)",
       {},
       {}};
   }

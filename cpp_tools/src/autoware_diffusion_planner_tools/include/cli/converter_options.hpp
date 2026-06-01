@@ -41,6 +41,25 @@ struct ConverterOptions
 
   std::vector<float> ego_shape;
   bool use_interpolation;
+
+  // Collision-free filter (ported from filter_collision_free_npz.py), always applied.
+  // A frame whose GT ego trajectory collides with a static object, neighbor, or
+  // road border is skipped during conversion (no npz written, like other skips).
+  float static_object_margin;
+  float neighbor_margin;
+  float road_border_margin;
+  int64_t collision_time_stride;
+
+  // In-lanelet filter (ported from filter_in_lanelet_npz.py), always applied.
+  // A frame whose GT ego trajectory is on average >= offlane_max_score metres from
+  // any lane centerline is skipped during conversion.
+  float offlane_max_score;
+  int64_t offlane_time_stride;
+
+  // When true, also write the npz for frame-level skipped frames (collision,
+  // off-lane, red/yellow light, vehicle stopped) so they can be visualised with
+  // their skip reason. Intended for inspection/testing only; off in production.
+  bool write_skipped_npz;
 };
 
 std::optional<ConverterOptions> parse_arguments(int argc, char ** argv);

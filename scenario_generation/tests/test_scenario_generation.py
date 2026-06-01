@@ -314,7 +314,10 @@ class TestTensorConverter:
         np.testing.assert_allclose(state[0, :4], [0.0, 0.0, 1.0, 0.0], atol=1e-5)
 
     def test_neighbor_tensor_shape(self, tmp_path):
-        from scenario_generation.tensor_converter import _build_neighbor_agents_past
+        from scenario_generation.tensor_converter import (
+            _MAX_NUM_NEIGHBORS,
+            _build_neighbor_agents_past,
+        )
 
         npz_path = _make_synthetic_npz(tmp_path)
         scene = from_npz(npz_path)
@@ -324,7 +327,13 @@ class TestTensorConverter:
         ego_xy = ego.current_position.astype(np.float64)
 
         nb = _build_neighbor_agents_past(scene, "ego", R, ego_xy, ego.current_heading)
-        assert nb.shape == (1, 32, 31, 11)
+        assert nb.shape == (1, _MAX_NUM_NEIGHBORS, 31, 11)
+
+        # A smaller explicit count sizes the slot dim accordingly.
+        nb16 = _build_neighbor_agents_past(
+            scene, "ego", R, ego_xy, ego.current_heading, num_neighbors=16,
+        )
+        assert nb16.shape == (1, 16, 31, 11)
 
         # Slot 0 should be closest neighbor (neighbor_0 at ~(5,3), distance ~5.83)
         # Slot 1 should be neighbor_1 (at (10,-2), distance ~10.2)

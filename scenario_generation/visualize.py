@@ -112,9 +112,18 @@ def draw_route(ax, route_lanes, color=None, alpha=0.4, lw=1.5):
         ax.plot(pts[valid, 0], pts[valid, 1], "-", color=c, alpha=alpha, lw=lw)
 
 
-def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, zorder=10):
-    """Draw an oriented bounding box for an agent."""
-    rear_overhang = (length - length * 0.65) / 2
+def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, zorder=10,
+                   wheelbase: float | None = None):
+    """Draw an oriented bounding box for an agent.
+
+    When ``wheelbase`` is provided, (x, y) is treated as rear-axle midpoint
+    (ego convention). When None, (x, y) is the bbox centroid (neighbor
+    convention from the perception pipeline).
+    """
+    if wheelbase is not None:
+        rear_overhang = (length - wheelbase) / 2
+    else:
+        rear_overhang = length / 2
     t_rot = mtransforms.Affine2D().rotate(heading).translate(x, y) + ax.transData
     rect = Rectangle(
         (-rear_overhang, -width / 2), length, width,
@@ -124,11 +133,14 @@ def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, z
 
 
 def draw_trajectory(ax, traj, color, label=None, lw=2, zorder=10, show_footprints=False,
-                    length=4.0, width=1.8):
+                    length=4.0, width=1.8, wheelbase: float | None = None):
     """Draw a trajectory line with optional footprints.
 
     Args:
         traj: (T, 3) [x, y, heading_rad] in scene frame.
+        wheelbase: when provided, footprint boxes treat each (x, y) as the
+            rear-axle midpoint and offset forward (ego convention). When None,
+            (x, y) is the bbox centroid (neighbor convention).
     """
     ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=lw, alpha=0.6, zorder=zorder)
     ax.plot(traj[::3, 0], traj[::3, 1], "o", color=color, ms=2.5, alpha=0.8,
@@ -137,10 +149,12 @@ def draw_trajectory(ax, traj, color, label=None, lw=2, zorder=10, show_footprint
     if show_footprints:
         for ts in range(5, len(traj), 10):
             draw_agent_box(ax, traj[ts, 0], traj[ts, 1], traj[ts, 2],
-                           length, width, color, alpha=0.12, lw=0.3, zorder=zorder - 1)
+                           length, width, color, alpha=0.12, lw=0.3, zorder=zorder - 1,
+                           wheelbase=wheelbase)
         if len(traj) > 1:
             draw_agent_box(ax, traj[-1, 0], traj[-1, 1], traj[-1, 2],
-                           length, width, color, alpha=0.35, lw=1.0, zorder=zorder - 1)
+                           length, width, color, alpha=0.35, lw=1.0, zorder=zorder - 1,
+                           wheelbase=wheelbase)
 
 
 def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
@@ -191,7 +205,8 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
 
         # Current bounding box
         draw_agent_box(ax, pos[0], pos[1], heading, agent.length, agent.width,
-                       color, alpha=0.8 if is_ego else 0.5, lw=2 if is_ego else 1, zorder=zorder)
+                       color, alpha=0.8 if is_ego else 0.5, lw=2 if is_ego else 1, zorder=zorder,
+                       wheelbase=agent.wheelbase if is_ego else None)
 
         # Past trajectory
         past = agent.past_trajectory
