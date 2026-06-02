@@ -53,6 +53,6 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
   --sft_prob 0.5 \
   --learning_rate 1e-5 \
   --train_epochs 50 \
-  --save_utd 5 \
+  --save_utd 1 \
   --use_wandb True \
   2>&1 | tee ${SAVE_PATH}/grpo_log.txt
