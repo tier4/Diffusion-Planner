@@ -102,10 +102,13 @@ def main():
               f"{np.mean(to_start):14.3f} | {trend}")
         if arcs is not None:
             line = "      per-arc L2->target: "
-            for lo in range(900, 1850, 150):
-                m = (arcs >= lo) & (arcs < lo + 150)
+            bin_m = 150
+            a0 = int(np.floor(arcs.min() / bin_m) * bin_m)
+            a1 = int(np.ceil(arcs.max() / bin_m) * bin_m)
+            for lo in range(a0, a1, bin_m):
+                m = (arcs >= lo) & (arcs < lo + bin_m)
                 if m.sum():
-                    line += f"[{lo}-{lo+150}]{np.mean(np.array(to_tgt)[m]):.2f} "
+                    line += f"[{lo}-{lo+bin_m}]{np.mean(np.array(to_tgt)[m]):.2f} "
             print(line)
 
 

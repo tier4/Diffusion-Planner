@@ -1,7 +1,7 @@
 """Ghost-racing dual-ego renderer.
 
-Reads two completed `replay.py` outputs (ours = "primary", e.g. cons_warmst,
-plus one "ghost" overlay, e.g. baseline) and re-renders each step with both
+Reads two completed `replay.py` outputs (ours = "primary", e.g. the model under
+test, plus one "ghost" overlay, e.g. baseline) and re-renders each step with both
 egos drawn in the same world frame on a fixed viewport. The primary sim
 provides the world-state context (lanes, road borders, route, NPCs); the
 ghost ego is overlaid at its own world pose at that step.
@@ -18,7 +18,7 @@ Usage:
         --primary_dir <path/to/route_sim_perfect_mt> \
         --ghost_dir   <path/to/baseline_perfect_mt> \
         --output_dir  <path/to/dual_ego_perfect_mt> \
-        --primary_label cons_warmst --ghost_label baseline \
+        --primary_label model_a --ghost_label baseline \
         --view_half_m 40 --webm
 """
 from __future__ import annotations

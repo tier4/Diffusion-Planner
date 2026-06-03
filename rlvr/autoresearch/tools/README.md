@@ -304,7 +304,7 @@ Check whether a scene's target `ego_agent_future` crosses the road border, using
 Road-border crossings of the REALIZED closed-loop ego (from a psim `.db3` bag's `/localization/kinematic_state`), scored vs real map borders. `--stride 10` subsamples ~100Hz localization to ~10Hz; `--front_cut`/`--tail_cut` skip route ends; `--localize` bins crossings by arc. Reports full distribution (min/p5/p50/mean) + crossings. Usage: `--route <pkl> --bag <bag_dir> --ego_shape WB,L,W --stride 10 --front_cut 50 --tail_cut 50 --localize`.
 
 ### psim_per_arc_metrics.py
-Per-arc CL + road-border table for one-or-more psim bags side by side. Per pose: arc + |lateral| from route centerline (CL) via `project_to_polyline`, and border distance via the reward OBB (RB). Bins by arc and prints per-bin clμ (mean |lat|), clmx (max |lat|), rb min-dist, X (crossings). Usage: `python -m rlvr.autoresearch.tools.psim_per_arc_metrics <route.pkl> <label1> <bag1> <label2> <bag2> ...`.
+Per-arc CL + road-border table for one-or-more psim bags side by side. Per pose: arc + |lateral| from route centerline (CL) via `project_to_polyline`, and border distance via the reward OBB (RB). Bins by arc and prints per-bin clμ (mean |lat|), clmx (max |lat|), rb min-dist, X (crossings) + an in-bounds total. Usage: `python -m rlvr.autoresearch.tools.psim_per_arc_metrics --route <pkl> --ego_shape WB,L,W [--bin_m 250 --front_cut 50 --tail_cut 50 --stride 10] --models LABEL1 BAG1 LABEL2 BAG2 ...`.
 
 ### psim_rb_crossing_viz.py
 **Video of where the RB crossings happen.** Renders REALIZED RB-crossing regions as dual-ego WebM clips (baseline vs model, arc-synced over the actual map lanes + road borders + route centerline; the ego footprint gets a red outline on frames where its perimeter is within `rb_cross_thresh` of a border). Auto-detects the crossing arc windows from EITHER bag (so you see exactly the places the realized ego grazes the curb) and emits one WebM per window. Same footprint/border style as the perfect-track ghost sims; fails loudly if ffmpeg errors. Run under a ROS env. Usage: `python -m rlvr.autoresearch.tools.psim_rb_crossing_viz --route <pkl> --baseline_bag <bag> --model_bag <bag> --model_label <NAME> --ego_shape WB,L,W --output_dir <dir> [--stride 5 --front_cut 50 --tail_cut 50 --view_half 22 --pad_m 60 --fps 10]`.
@@ -340,6 +340,10 @@ Select the time-window NPZs around an override moment from a per-session parsed-
 
 ### ghost_render.py
 Standalone dual-ego ghost-overlay frame renderer (footprints over map lanes/borders/route); rollout primitive shared by the ghost-sim tools.
+
+### Related tools in other dirs
+- `scenario_generation/tools/select_npz_by_arc_range.py` — select scenes by route arc-range (signed/abs lateral, speed filter), optionally inject `ego_shape`; world pose via `recover_ego_world_pose_from_goal`.
+- `ros_scripts/extract_route_from_chunk0.py` — extract/pickle the latched route message from a session's chunk-0 rosbag (run under ROS env).
 
 ## Frame-transform note
 

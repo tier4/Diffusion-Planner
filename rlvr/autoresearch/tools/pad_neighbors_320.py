@@ -1,9 +1,9 @@
 """In-place pad NPZ neighbor_agents_past/future from 32-slot to 320-slot.
 
 parse_rosbag.py emits NPZs with MAX_NUM_NEIGHBORS=32 (from
-diffusion_planner.dimensions), but the 320-neighbor model checkpoint
-(PhaseG ep4 + descendants) expects 320 slots. Real bag scenes have
-≤ 32 tracked neighbors, so the extra slots are just zeros.
+diffusion_planner.dimensions), but the 320-neighbor model checkpoints
+expect 320 slots. Real bag scenes have ≤ 32 tracked neighbors, so the
+extra slots are just zeros.
 
 This script rewrites each NPZ with padded neighbor arrays (and a
 matching `static_objects` count if needed — but static_objects_num=5
