@@ -102,19 +102,21 @@ def main() -> None:
     ego_shape_np = None
     if args.inject_ego_shape:
         vals = [float(x) for x in args.inject_ego_shape.split(",")]
-        assert len(vals) == 3, "--inject_ego_shape must be WB,L,W"
+        if len(vals) != 3:
+            raise ValueError(f"--inject_ego_shape must be WB,L,W (3 values); got {args.inject_ego_shape!r}")
         ego_shape_np = np.array(vals, dtype=np.float32)
 
     matched: list[dict] = []
     skipped_speed = 0
     for i, npz_path in enumerate(npz_files):
-        d = np.load(npz_path)
-        state = d["ego_current_state"]
+        with np.load(npz_path) as d:  # context manager: close fd promptly when scanning many files
+            state = d["ego_current_state"]
+            goal_pose = d["goal_pose"]
         speed = float(np.sqrt(state[4] ** 2 + state[5] ** 2))
         if speed < args.speed_thresh:
             skipped_speed += 1
             continue
-        ex, ey, eyaw = recover_ego_world_pose_from_goal(d["goal_pose"], route)
+        ex, ey, eyaw = recover_ego_world_pose_from_goal(goal_pose, route)
         arc, lat_signed, lat_abs = project_to_polyline(
             np.array([ex, ey]), pts, s
         )
@@ -150,7 +152,8 @@ def main() -> None:
         print(f"Injecting ego_shape {ego_shape_np.tolist()} into {len(all_selected)} NPZs ...")
         for e in all_selected:
             p_path = Path(e["path"])
-            d = dict(np.load(p_path))
+            with np.load(p_path) as _z:  # close fd promptly when modifying many files
+                d = dict(_z)
             if "ego_shape" not in d or not np.allclose(
                 d["ego_shape"], ego_shape_np, atol=1e-4
             ):

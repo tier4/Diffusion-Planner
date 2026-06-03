@@ -10,15 +10,10 @@ Reuses (no hand-rolled geometry):
 - border distance: reward._point_to_segments_min_dist, thresh = RewardConfig.rb_cross_thresh
 """
 import argparse
-import subprocess
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
 import numpy as np
 import torch
-from matplotlib.collections import LineCollection
-from matplotlib.figure import Figure
 
 from scenario_generation.tools._heatmap_common import (
     build_route_polyline, load_route, project_to_polyline,
@@ -81,6 +76,10 @@ def main():
         dists[i] = _point_to_segments_min_dist(torch.tensor(peri), seg1, seg2).min().item()
 
     d_in = dists[keep]
+    if d_in.size == 0:
+        raise SystemExit(
+            f"no in-bounds poses (front_cut={args.front_cut} tail_cut={args.tail_cut} "
+            f"removed all {len(poses)} subsampled poses) — cannot compute RB metrics")
     cross_mask = keep & (dists < thresh)
     n_cross = int(cross_mask.sum())
     print(f"{args.label}: {int(keep.sum())} steps in-bounds (stride {args.stride}, cut {args.front_cut:.0f}/{args.tail_cut:.0f}m) | "

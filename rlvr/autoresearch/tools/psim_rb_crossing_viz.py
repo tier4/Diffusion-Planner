@@ -142,9 +142,13 @@ def main():
             ax.set_title(f"RB crossing region  arc~{int(ma)}m   (red outline = ego crossing border, thresh {thresh:.2f}m)", fontsize=11)
             fig.tight_layout(); fig.savefig(wd / f"f{fi:04d}.png", dpi=100); fig.clf()
         webm = out / f"win{wi}_arc{int(wlo)}-{int(whi)}.webm"
-        subprocess.run(["ffmpeg", "-y", "-framerate", str(args.fps), "-i", str(wd / "f%04d.png"),
-                        "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-row-mt", "1",
-                        "-pix_fmt", "yuv420p", str(webm)], capture_output=True)
+        r = subprocess.run(["ffmpeg", "-y", "-framerate", str(args.fps), "-i", str(wd / "f%04d.png"),
+                            "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-row-mt", "1",
+                            "-pix_fmt", "yuv420p", str(webm)], capture_output=True)
+        if r.returncode != 0 or not webm.exists():
+            raise RuntimeError(
+                f"ffmpeg failed for window {wi} (rc={r.returncode}); no WebM written.\n"
+                f"{r.stderr.decode(errors='replace')[-2000:]}")
         print(f"window {wi}: arc {int(wlo)}-{int(whi)}m, {len(frames)} frames -> {webm.name}")
 
 

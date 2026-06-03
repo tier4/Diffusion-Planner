@@ -40,7 +40,12 @@ def main():
     for sp in scenes:
         d = np.load(sp, allow_pickle=True)
         ex, ey, eyaw = recover_ego_world_pose_from_goal(np.asarray(d["goal_pose"]), route)
-        fut = np.asarray(d["ego_agent_future"]).astype(np.float32)  # ego-frame x,y,cos,sin
+        fut = np.asarray(d["ego_agent_future"]).astype(np.float32)  # ego-frame
+        if fut.shape[-1] == 3:  # (x,y,heading) -> (x,y,cos,sin); explicit, not a silent default
+            h = fut[:, 2]
+            fut = np.stack([fut[:, 0], fut[:, 1], np.cos(h), np.sin(h)], -1).astype(np.float32)
+        elif fut.shape[-1] != 4:
+            raise ValueError(f"{sp}: ego_agent_future last dim must be 3 or 4, got {fut.shape}")
         c, s = math.cos(eyaw), math.sin(eyaw)
         x, y = fut[:, 0], fut[:, 1]
         wx = ex + c * x - s * y

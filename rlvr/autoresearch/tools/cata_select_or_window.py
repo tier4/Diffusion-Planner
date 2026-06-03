@@ -48,8 +48,8 @@ def main() -> None:
             skipped += 1
             continue
         try:
-            ts = json.loads(sidecar.read_text())["timestamp"]
-        except (KeyError, json.JSONDecodeError):
+            ts = int(json.loads(sidecar.read_text())["timestamp"])  # str or num; raises loudly on garbage
+        except (KeyError, json.JSONDecodeError, ValueError, TypeError):
             skipped += 1
             continue
         if lo_ns <= ts <= hi_ns:
