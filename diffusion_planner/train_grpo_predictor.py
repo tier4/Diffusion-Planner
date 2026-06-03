@@ -95,7 +95,7 @@ def get_args():
     # ----- GRPO-specific -----
     parser.add_argument("--num_generations", type=int, default=8,
                         help="N: trajectories sampled per scene (the GRPO group size)")
-    parser.add_argument("--grpo_noise_scale", type=float, default=1.0,
+    parser.add_argument("--grpo_noise_scale", type=float, default=3.0,
                         help="multiplier on the initial diffusion noise during sampling")
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
     parser.add_argument("--w_collision", type=float, default=1.0,

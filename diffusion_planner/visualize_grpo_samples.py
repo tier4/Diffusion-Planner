@@ -71,7 +71,7 @@ def parse_viz_args():
                    help="draw the ego bounding-box footprint along the trajectories")
     p.add_argument("--footprint_stride", type=int, default=20,
                    help="draw a footprint every this many trajectory steps")
-    p.add_argument("--grpo_noise_scale", type=float, default=1.0)
+    p.add_argument("--grpo_noise_scale", type=float, default=3.0)
     p.add_argument("--aug_mode", type=str, default="synthetic",
                    choices=["synthetic", "none"],
                    help="neighbor augmentation: synthetic colliders / none")
