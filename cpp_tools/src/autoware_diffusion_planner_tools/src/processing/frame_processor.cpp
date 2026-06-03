@@ -302,9 +302,6 @@ void process_sequence(
     }
 
     const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
-    if (is_skipped) {
-      std::cout << "Skip frame " << i << ": " << skipping_info.details << std::endl;
-    }
     // Accepted frames are always written; skipped frames only on request.
     if (!is_skipped || options.write_skipped_npz) {
       save_frame_data(
