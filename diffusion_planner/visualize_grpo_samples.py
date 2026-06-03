@@ -75,7 +75,7 @@ def parse_viz_args():
     p.add_argument("--aug_mode", type=str, default="synthetic",
                    choices=["synthetic", "none"],
                    help="neighbor augmentation: synthetic colliders / none")
-    p.add_argument("--neighbor_inject_max", type=int, default=5)
+    p.add_argument("--neighbor_inject_max", type=int, default=1)
     p.add_argument("--neighbor_inject_prob", type=float, default=1.0)
     p.add_argument("--pedestrian_prob", type=float, default=0.3,
                    help="(synthetic) fraction of injected colliders that are pedestrians")
@@ -219,18 +219,14 @@ def main():
     raw, idx = select_batch(v.data_list, v.num_scenes, v.seed, device)
     S = v.num_scenes
 
-    def empty_slots(t):  # [S, Pn] True where the neighbor past track is all-zero padding
-        return (t["neighbor_agents_past"] != 0.0).any(dim=(2, 3)).logical_not().cpu().numpy()
-
     injected_mask = np.zeros((S, raw["neighbor_agents_past"].shape[1]), dtype=bool)
     if v.aug_mode != "none":
         injector = SyntheticColliderInjector(
             pedestrian_prob=v.pedestrian_prob, bicycle_prob=v.bicycle_prob,
             keep_clear_radius=v.keep_clear_radius)
-        before = empty_slots(raw)
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
-        # slots that were empty before and are filled after == augmentation-added
-        injected_mask = before & ~empty_slots(raw)
+        # the injector reports exactly which slots it wrote (may overwrite a real neighbor)
+        injected_mask = injector.last_injected_mask.cpu().numpy()
         print(f"Augmentation '{v.aug_mode}' applied; "
               f"injected {int(injected_mask.sum())} neighbors across {S} scenes")
 

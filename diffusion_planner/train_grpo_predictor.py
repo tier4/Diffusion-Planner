@@ -109,7 +109,7 @@ def get_args():
     # Synthetic adversarial neighbor augmentation (see utils/synthetic_neighbors.py):
     # spawn constant-acceleration neighbors that are guaranteed to collide with the ego GT
     # (but avoidable -- they keep clear of the ego's t=0 pose), to drive the collision reward.
-    parser.add_argument("--neighbor_inject_max", type=int, default=5,
+    parser.add_argument("--neighbor_inject_max", type=int, default=1,
                         help="max synthetic colliders injected per scene (count ~ U[1, max])")
     parser.add_argument("--neighbor_inject_prob", type=float, default=0.5,
                         help="per-scene probability of injecting any synthetic colliders")

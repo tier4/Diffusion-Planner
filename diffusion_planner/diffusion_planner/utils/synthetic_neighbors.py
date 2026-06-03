@@ -41,10 +41,10 @@ _TYPE_BASE = 8  # one-hot [vehicle, pedestrian, bicycle] occupies columns 8..10
 # range that is sampled along a single factor so width and length scale together (a small car
 # stays narrow, a long truck stays wide).
 _TYPES = {
-    "vehicle": dict(speed=(2.0, 14.0), accel_max=2.5, idx=0,
+    "vehicle": dict(speed=(0.0, 14.0), accel_max=2.5, idx=0,
                     size=((1.84, 4.34), (2.5649, 10.7462))),
-    "pedestrian": dict(speed=(0.3, 2.0), accel_max=1.0, idx=1, width=0.7, length=0.7),
-    "bicycle": dict(speed=(1.0, 7.0), accel_max=1.5, idx=2, width=0.6, length=1.8),
+    "pedestrian": dict(speed=(0.0, 2.0), accel_max=1.0, idx=1, width=0.7, length=0.7),
+    "bicycle": dict(speed=(0.0, 7.0), accel_max=1.5, idx=2, width=0.6, length=1.8),
 }
 
 
@@ -54,7 +54,8 @@ class SyntheticColliderInjector:
     def __init__(
         self,
         dt: float = 0.1,
-        pos_range: tuple[float, float] = (-10.0, 40.0),
+        x_range: tuple[float, float] = (-10.0, 40.0),
+        y_half_width: float = 25.0,
         pedestrian_prob: float = 0.3,
         bicycle_prob: float = 0.2,
         min_collision_time: float = 0.8,
@@ -62,7 +63,10 @@ class SyntheticColliderInjector:
         max_tries: int = 50,
     ):
         self.dt = dt
-        self.pos_lo, self.pos_hi = pos_range
+        # spawn box (ego frame): x in [x_lo, x_hi] (forward-biased), y in [-y_half_width,
+        # +y_half_width] (symmetric left/right).
+        self.x_lo, self.x_hi = x_range
+        self.y_half_width = y_half_width
         # explicit categorical type mix; vehicle takes the remainder.
         assert pedestrian_prob + bicycle_prob <= 1.0 + 1e-6, "ped + bike prob must be <= 1"
         self.pedestrian_prob = pedestrian_prob
@@ -133,8 +137,8 @@ class SyntheticColliderInjector:
             t_c = float(tau_f[k_c])
             target = ego_xy[k_c]  # [2]
 
-            p0 = torch.stack([self._rand(self.pos_lo, self.pos_hi, device),
-                              self._rand(self.pos_lo, self.pos_hi, device)])
+            p0 = torch.stack([self._rand(self.x_lo, self.x_hi, device),
+                              self._rand(-self.y_half_width, self.y_half_width, device)])
             speed = self._rand(spec["speed"][0], spec["speed"][1], device)
             ang = self._rand(-math.pi, math.pi, device)
             v0 = torch.stack([speed * torch.cos(ang), speed * torch.sin(ang)])
@@ -170,11 +174,17 @@ class SyntheticColliderInjector:
         past_pos, past_vel = motion(tau_p)   # [31,2]
         fut_pos, fut_vel = motion(tau_f)      # [80,2]
 
+        # reference heading for ~stationary steps (atan2 of a ~0 vector is noisy): prefer the
+        # initial-velocity direction, else the acceleration direction (handles v0 == 0).
+        if float(v0.norm()) > 1e-3:
+            ref_ang = torch.atan2(v0[1], v0[0])
+        else:
+            ref_ang = torch.atan2(a[1], a[0])
+
         def heading(vel):
             h = torch.atan2(vel[:, 1], vel[:, 0])
-            # freeze heading where the neighbor is ~stationary (atan2 of ~0 vector is noisy)
             slow = vel.norm(dim=-1) < 1e-3
-            h[slow] = torch.atan2(v0[1], v0[0])
+            h[slow] = ref_ang
             return h
 
         h_past = heading(past_vel)
@@ -193,9 +203,16 @@ class SyntheticColliderInjector:
 
     @torch.no_grad()
     def inject(self, inputs: dict, inject_max: int, inject_prob: float) -> dict:
-        """Fill empty neighbor slots with synthetic colliding neighbors (in place).
+        """Inject synthetic colliding neighbors into the batch (in place).
 
-        Call on a *raw* batch before ``heading_to_cos_sin`` / normalization.
+        Real neighbors are front-packed (low indices) with empty slots at the back, so always
+        writing into an empty slot would place every collider at a high index and let the
+        model key off position. Instead each collider goes to a **random index in
+        ``[0, first_empty]`` inclusive** -- it may overwrite a real neighbor or take the first
+        empty slot -- so colliders are interspersed with the real agents.
+
+        Call on a *raw* batch before ``heading_to_cos_sin`` / normalization. The boolean mask
+        of slots actually written is stored on ``self.last_injected_mask`` ([B, Pn]).
         """
         neighbor_past = inputs["neighbor_agents_past"]      # [B, Pn, 31, 11]
         neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3]
@@ -204,21 +221,25 @@ class SyntheticColliderInjector:
         B, Pn = neighbor_past.shape[:2]
 
         empty = (neighbor_past != 0.0).any(dim=(2, 3)).logical_not()  # [B, Pn]
+        injected = torch.zeros(B, Pn, dtype=torch.bool, device=device)
 
         for b in range(B):
             if torch.rand((), device=device).item() > inject_prob:
-                continue
-            slots = torch.nonzero(empty[b], as_tuple=False).squeeze(-1)
-            if slots.numel() == 0:
                 continue
 
             ego_xy = ego_future[b, :, :2]  # [80, 2]
             if (ego_xy.abs().sum(dim=-1) > 1e-3).sum() == 0:
                 continue  # fully padded ego -> nothing meaningful to collide with
 
+            # first empty slot (= number of real, front-packed neighbors). Candidate write
+            # positions are [0, first_empty] inclusive.
+            empty_idx = torch.nonzero(empty[b], as_tuple=False).squeeze(-1)
+            first_empty = int(empty_idx.min().item()) if empty_idx.numel() > 0 else Pn - 1
+            n_positions = first_empty + 1
+
             k = int(torch.randint(1, inject_max + 1, (), device=device).item())
-            k = min(k, slots.numel())
-            chosen = slots[torch.randperm(slots.numel(), device=device)[:k]]
+            k = min(k, n_positions)
+            chosen = torch.randperm(n_positions, device=device)[:k]
 
             for slot in chosen:
                 out = self._make_neighbor(ego_xy, device)
@@ -227,5 +248,7 @@ class SyntheticColliderInjector:
                 past, future = out
                 neighbor_past[b, slot] = past
                 neighbor_future[b, slot] = future
+                injected[b, slot] = True
 
+        self.last_injected_mask = injected
         return inputs
