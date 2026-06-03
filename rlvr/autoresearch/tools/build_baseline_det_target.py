@@ -33,7 +33,7 @@ import numpy as np
 import torch
 
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model, det_inference_batched
-from rlvr.grpo_trainer_batched import load_npz_data
+from preference_optimization.utils import load_npz_data  # canonical loader (injects v4 delay key)
 
 
 def main():

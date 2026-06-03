@@ -14,7 +14,6 @@ Example:
 
 import argparse
 import datetime as dt
-import glob
 import json
 from pathlib import Path
 
@@ -57,7 +56,11 @@ def main() -> None:
 
     selected.sort()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    out = {
+    # --output is a PLAIN list of NPZ paths (the scenes-list format rlvr autoresearch
+    # tools consume); window metadata goes to a .meta.json sidecar.
+    paths = [p for _, p in selected]
+    args.output.write_text(json.dumps(paths, indent=2))
+    meta = {
         "or_jst": args.or_jst,
         "or_ns": or_ns,
         "window_pre_s": args.pre_s,
@@ -65,10 +68,9 @@ def main() -> None:
         "n_total_npz": len(npz_paths),
         "n_in_window": len(selected),
         "n_skipped_no_sidecar": skipped,
-        "paths": [p for _, p in selected],
         "timestamps_ns": [ts for ts, _ in selected],
     }
-    args.output.write_text(json.dumps(out, indent=2))
+    args.output.with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
     print(
         f"Wrote {args.output}: {len(selected)}/{len(npz_paths)} NPZs in window "
         f"[{args.or_jst} -{args.pre_s}s, +{args.post_s}s]. Skipped {skipped} without sidecar."

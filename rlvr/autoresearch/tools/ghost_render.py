@@ -94,7 +94,7 @@ def _extract_polylines_from_tensor(tensor: np.ndarray, valid_ch: int = 3,
     """tensor: (N, 20, C). Returns list of (M, 2) ego-frame polylines."""
     polys = []
     for i in range(tensor.shape[0]):
-        pts = tensor[i, :, list(xy_cols)].T  # (20, 2)
+        pts = tensor[i][:, list(xy_cols)]  # (20, 2) — index in two steps (no ambiguous transpose)
         if valid_ch is not None:
             valid = tensor[i, :, valid_ch] > 0.5
             valid &= np.abs(pts).sum(axis=1) > 0.01

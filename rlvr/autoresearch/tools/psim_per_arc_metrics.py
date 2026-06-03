@@ -55,7 +55,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--route", required=True)
     ap.add_argument("--ego_shape", required=True, help="WB,L,W (no default — fail loudly)")
-    ap.add_argument("--bin_m", type=float, default=250.0)
+    ap.add_argument("--bin_m", type=int, default=250, help="arc bin width in m (int — used as a range step)")
     ap.add_argument("--front_cut", type=float, default=50.0, help="skip first N m (ends not in-bounds)")
     ap.add_argument("--tail_cut", type=float, default=50.0, help="skip last N m")
     ap.add_argument("--stride", type=int, default=10, help="subsample ~100Hz localization to planning rate")
@@ -83,6 +83,8 @@ def main():
         pl = np.asarray(pl)[:, :2]
         if pl.shape[0] >= 2:
             s1.append(pl[:-1]); s2.append(pl[1:])
+    if not s1:
+        raise SystemExit(f"map {route.map_path} has no road-border polylines (>=2 points) — cannot score RB")
     seg1 = torch.tensor(np.concatenate(s1), dtype=torch.float32)
     seg2 = torch.tensor(np.concatenate(s2), dtype=torch.float32)
 

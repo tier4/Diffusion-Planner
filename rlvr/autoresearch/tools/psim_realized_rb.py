@@ -57,6 +57,8 @@ def main():
         pl = np.asarray(pl)[:, :2]
         if pl.shape[0] >= 2:
             s1.append(pl[:-1]); s2.append(pl[1:])
+    if not s1:
+        raise SystemExit(f"map {route.map_path} has no road-border polylines (>=2 points) — cannot score RB")
     seg1 = torch.tensor(np.concatenate(s1), dtype=torch.float32)
     seg2 = torch.tensor(np.concatenate(s2), dtype=torch.float32)
 

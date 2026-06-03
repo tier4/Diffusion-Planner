@@ -36,7 +36,8 @@ def main():
     scenes = json.load(open(args.scenes))
     written = []
     for sp in scenes:
-        d = dict(np.load(sp, allow_pickle=True))
+        with np.load(sp, allow_pickle=True) as _z:  # close fd promptly on large scene lists
+            d = dict(_z)
         ex, ey, eyaw = recover_ego_world_pose_from_goal(np.asarray(d["goal_pose"]), route)
         ls_w = np.asarray(b.build_line_strings_tensor(np.array([ex, ey], dtype=float)),
                           dtype=np.float32)  # (60,20,4) world: x,y,stop_line,road_border

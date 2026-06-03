@@ -77,6 +77,8 @@ def main():
     for pl in b.road_border_polylines():
         pl = np.asarray(pl)[:, :2]
         if pl.shape[0] >= 2: s1.append(pl[:-1]); s2.append(pl[1:])
+    if not s1:
+        raise SystemExit(f"map {route.map_path} has no road-border polylines (>=2 points) — cannot render RB crossings")
     seg1 = torch.tensor(np.concatenate(s1), dtype=torch.float32)
     seg2 = torch.tensor(np.concatenate(s2), dtype=torch.float32)
     borders = [np.asarray(pl)[:, :2] for pl in b.road_border_polylines()]
@@ -119,6 +121,9 @@ def main():
         a0, a1 = wlo - args.pad_m, whi + args.pad_m
         # arc-synced frames: step the model's poses in the window
         frames = [r for r in mod if a0 <= r[3] <= a1]
+        if not frames:
+            print(f"window {wi}: arc {int(wlo)}-{int(whi)}m has no model poses in [{a0:.0f},{a1:.0f}]m — skipping")
+            continue
         wd = out / f"win{wi}_arc{int(wlo)}-{int(whi)}"; wd.mkdir(exist_ok=True)
         for fi, mr in enumerate(frames):
             ma = mr[3]

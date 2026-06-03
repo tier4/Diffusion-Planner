@@ -35,12 +35,14 @@ def main():
     route = load_route(Path(args.route))
     b = LaneletSceneBuilder(str(route.map_path))
 
-    scenes = json.load(open(args.scenes))
+    with open(args.scenes) as _f:
+        scenes = json.load(_f)
     clean, crossed, mind = [], 0, []
     for sp in scenes:
-        d = np.load(sp, allow_pickle=True)
-        ex, ey, eyaw = recover_ego_world_pose_from_goal(np.asarray(d["goal_pose"]), route)
-        fut = np.asarray(d["ego_agent_future"]).astype(np.float32)  # ego-frame
+        with np.load(sp, allow_pickle=True) as _z:  # close fd promptly on large scene lists
+            goal_pose = np.asarray(_z["goal_pose"])
+            fut = np.asarray(_z["ego_agent_future"]).astype(np.float32)  # ego-frame
+        ex, ey, eyaw = recover_ego_world_pose_from_goal(goal_pose, route)
         if fut.shape[-1] == 3:  # (x,y,heading) -> (x,y,cos,sin); explicit, not a silent default
             h = fut[:, 2]
             fut = np.stack([fut[:, 0], fut[:, 1], np.cos(h), np.sin(h)], -1).astype(np.float32)
