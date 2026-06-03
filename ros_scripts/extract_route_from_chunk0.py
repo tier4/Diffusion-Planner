@@ -2,9 +2,9 @@
 
 Session recordings are split into 1-minute chunks. The LaneletRoute msg is
 latched once at engage time, so only chunk 0 of each session carries it.
-For PRiSM Category-A processing we extract the msg once per session and
-hand it to parse_rosbag.py via --external_route_pickle, then drop the
-session-0 db3 to reclaim disk before pulling the override chunk.
+For per-session processing we extract the msg once per session and hand it
+to parse_rosbag.py via --external_route_pickle, then drop the session-0 db3
+to reclaim disk before pulling the rest of the session.
 """
 
 import argparse

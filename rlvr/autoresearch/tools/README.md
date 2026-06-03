@@ -342,7 +342,7 @@ Select the time-window NPZs around an override moment from a per-session parsed-
 Standalone dual-ego ghost-overlay frame renderer (footprints over map lanes/borders/route); rollout primitive shared by the ghost-sim tools.
 
 ### Related tools in other dirs
-- `scenario_generation/tools/select_npz_by_arc_range.py` — select scenes by route arc-range (signed/abs lateral, speed filter), optionally inject `ego_shape`; world pose via `recover_ego_world_pose_from_goal`.
+- `scenario_generation/tools/select_npz_by_arc_range.py` — select scenes by route arc-range (filters on arc-range + `--speed_thresh`; records signed/abs lateral per scene but does not filter on it), optionally inject `ego_shape`; world pose via `recover_ego_world_pose_from_goal`.
 - `ros_scripts/extract_route_from_chunk0.py` — extract/pickle the latched route message from a session's chunk-0 rosbag (run under ROS env).
 
 ## Frame-transform note

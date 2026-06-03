@@ -20,8 +20,8 @@ Usage:
 
 Notes:
 - ``--model`` is the TARGET source (e.g. the baseline that keeps centerline at the
-  wounded arc), NOT the model being trained. Train (curated GRAFT, lr 5e-5) warm-started
-  from the wounded model toward these targets. See [[method-graft-heal]] Mechanism B.
+  wounded arc), NOT the model being trained. Train (curated low-LR ranked-SFT, e.g.
+  lr 5e-5) warm-started from the wounded model toward these targets.
 - Scenes must already carry ``ego_shape`` OR pass --ego_shape (asserted to match if present).
 """
 from __future__ import annotations

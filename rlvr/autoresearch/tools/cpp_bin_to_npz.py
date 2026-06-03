@@ -13,9 +13,9 @@ Key transforms:
 - neighbor_agents_future: cpp (320, 80, 4) → npz (320, 80, 3) [x,y,yaw]
 - speed-limit fields: (N,) → (N, 1), int32 has-flag → bool
 
-heading is recovered with atan2(sin, cos). Avoids the "double conversion"
-bug from CAMPAIGN_HANDOFF.md schema lesson #4 — Python `load_npz_data`
-applies `heading_to_cos_sin` once at load time on 3-channel inputs.
+heading is recovered with atan2(sin, cos). This avoids a double-conversion bug:
+Python `load_npz_data` applies `heading_to_cos_sin` once at load time on 3-channel
+inputs, so emit 3-channel heading here (do NOT pre-convert to cos/sin).
 """
 
 import argparse
