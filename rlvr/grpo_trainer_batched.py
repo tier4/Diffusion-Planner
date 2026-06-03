@@ -157,6 +157,15 @@ def generate_all_scenes_batched(
     if use_lon or use_lat:
         norm_batch["reference_trajectory"] = det_trajs  # no clone needed, not mutated
 
+    # Optional env-gated road_border guidance in generation (default OFF; normally
+    # skipped for OOM on large batches — safe at scene_batch_size 1). GEN_RB_SCALE>0
+    # enables road_border guidance; GEN_NO_CL=1 disables centerline guidance. Read
+    # once here so both the guided-slot and random-pool loops see them even when
+    # cl_spd_configs is empty.
+    import os as _os
+    _gen_rb_scale = float(_os.environ.get("GEN_RB_SCALE", "0"))
+    _gen_no_cl = _os.environ.get("GEN_NO_CL", "") not in ("", "0")
+
     for cfg in cl_spd_configs:
         cl_scale = cfg["cl"]
         spd_scale = cfg["spd"]
@@ -177,11 +186,13 @@ def generate_all_scenes_batched(
         # (cl=0, spd=0) skip lon guidance even when the global flag is on,
         # to keep them as pure stochastic exploration.
         is_guided_slot = cl_scale > 0 or spd_scale > 0
-        # Build guidance functions
+        # Build guidance functions (road_border gate read once above the loops)
         fns = []
-        if cl_scale > 0:
+        if cl_scale > 0 and not _gen_no_cl:
             cl_name = "route_centerline_following" if use_route_cl_guidance else "centerline_following"
             fns.append(GuidanceConfig(cl_name, enabled=True, scale=cl_scale))
+        if _gen_rb_scale > 0:
+            fns.append(GuidanceConfig("road_border", enabled=True, scale=_gen_rb_scale))
         if spd_scale > 0:
             fns.append(GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params))
         if use_lon and is_guided_slot:
@@ -224,12 +235,14 @@ def generate_all_scenes_batched(
 
     for n_pass in n_per_pass:
         fns = []
-        if random.random() < 0.7:
+        if random.random() < 0.7 and not _gen_no_cl:
             cl_name = "route_centerline_following" if use_route_cl_guidance else "centerline_following"
             fns.append(GuidanceConfig(cl_name, enabled=True,
                                        scale=random.uniform(2.0, 8.0)))
-        # Skip road_border guidance in generation (causes OOM with large batches)
-        # Road border avoidance is handled by the reward function instead
+        # road_border guidance is normally skipped (OOM on large batches; reward
+        # handles RB). Env-gated on for small-batch RB-focused generation.
+        if _gen_rb_scale > 0:
+            fns.append(GuidanceConfig("road_border", enabled=True, scale=_gen_rb_scale))
         gs = random.uniform(0.3, 1.5)
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=gs)) if fns else None
 
