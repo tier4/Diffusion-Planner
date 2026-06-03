@@ -4,8 +4,8 @@ Reproduces the exact GRPO sampling path used in training (``grpo_epoch._grpo_ste
 ``grpo_utils.sample_group``):
 
   1. Pick a few scenes from a data list.
-  2. (optionally) augment each scene with random neighbors from the neighbor-pattern DB
-     -- i.e. expand the training data the way GRPO does.
+  2. (optionally) augment each scene with synthetic adversarial neighbors that are guaranteed
+     to collide with the ego GT -- i.e. expand the training data the way GRPO does.
   3. Replicate each scene ``N = num_generations`` times and draw ``N`` ego trajectories in a
      single multi-batch inference pass (random initial diffusion noise -> diverse samples).
   4. Plot, per scene, the ``N`` sampled ego trajectories overlaid on the (augmented) scene
@@ -14,11 +14,10 @@ Reproduces the exact GRPO sampling path used in training (``grpo_epoch._grpo_ste
 This shows how much the policy spreads its ``N`` samples per scene -- the signal GRPO turns
 into group-relative advantages.
 
-Example (8 samples, 6 scenes, with neighbor augmentation):
+Example (8 samples, 12 scenes, with synthetic collider augmentation):
     python3 visualize_grpo_samples.py \
         --resume_model_path /path/to/best_model.pth \
-        --neighbor_db_path /path/to/neighbor_db.npz \
-        --num_scenes 6 --num_generations 8 --output_path grpo_samples.png
+        --num_scenes 12 --num_generations 8 --output_path grpo_samples.png
 """
 
 import argparse
@@ -35,7 +34,6 @@ from diffusion_planner.grpo_utils import expand_batch, sample_group  # noqa: E40
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner  # noqa: E402
 from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
 from diffusion_planner.utils.dataset import DiffusionPlannerData  # noqa: E402
-from diffusion_planner.utils.neighbor_db import NeighborPatternDB  # noqa: E402
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector  # noqa: E402
 from diffusion_planner.utils.visualize_input import (  # noqa: E402
     draw_lanes,
@@ -44,7 +42,7 @@ from diffusion_planner.utils.visualize_input import (  # noqa: E402
     draw_static_objects,
 )
 
-# Column layout of a neighbor past row (see loss.py / visualize_neighbor_db.py).
+# Column layout of a neighbor past row (see loss.py).
 _PAST_X, _PAST_Y, _PAST_COS, _PAST_SIN = 0, 1, 2, 3
 _PAST_WIDTH, _PAST_LENGTH = 6, 7
 
@@ -53,7 +51,6 @@ _DEFAULT_CKPT = (
     "20260503-220950_with_takanawa_16days_weak_smoothing_epoch0060_epoch0080/best_model.pth"
 )
 _DEFAULT_DATA = "/mnt/nvme/dataset/basic_dataset/path_list_train.json"
-_DEFAULT_DB = "/mnt/nvme/dataset/basic_dataset/neighbor_db_full.npz"
 
 
 def boolean(v):
@@ -66,7 +63,6 @@ def parse_viz_args():
     p = argparse.ArgumentParser(description="Visualize GRPO sample-group diversity")
     p.add_argument("--resume_model_path", type=str, default=_DEFAULT_CKPT)
     p.add_argument("--data_list", type=str, default=_DEFAULT_DATA)
-    p.add_argument("--neighbor_db_path", type=str, default=_DEFAULT_DB)
     p.add_argument("--num_scenes", type=int, default=12, help="scenes to visualize")
     p.add_argument("--num_generations", type=int, default=8, help="N samples per scene")
     p.add_argument("--show_road", type=boolean, default=True,
@@ -77,8 +73,8 @@ def parse_viz_args():
                    help="draw a footprint every this many trajectory steps")
     p.add_argument("--grpo_noise_scale", type=float, default=1.0)
     p.add_argument("--aug_mode", type=str, default="synthetic",
-                   choices=["synthetic", "db", "none"],
-                   help="neighbor augmentation: synthetic colliders / DB copy / none")
+                   choices=["synthetic", "none"],
+                   help="neighbor augmentation: synthetic colliders / none")
     p.add_argument("--neighbor_inject_max", type=int, default=5)
     p.add_argument("--neighbor_inject_prob", type=float, default=1.0)
     p.add_argument("--pedestrian_prob", type=float, default=0.3,
@@ -112,7 +108,6 @@ def build_train_args(v):
         "--train_set_list", v.data_list,
         "--valid_set_list", v.data_list,
         "--resume_model_path", v.resume_model_path,
-        "--neighbor_db_path", v.neighbor_db_path,
         "--diffusion_model_type", "x_start",
         "--num_generations", str(v.num_generations),
         "--grpo_noise_scale", str(v.grpo_noise_scale),
@@ -229,12 +224,9 @@ def main():
 
     injected_mask = np.zeros((S, raw["neighbor_agents_past"].shape[1]), dtype=bool)
     if v.aug_mode != "none":
-        if v.aug_mode == "db":
-            injector = NeighborPatternDB(v.neighbor_db_path)
-        else:
-            injector = SyntheticColliderInjector(
-                pedestrian_prob=v.pedestrian_prob, bicycle_prob=v.bicycle_prob,
-                keep_clear_radius=v.keep_clear_radius)
+        injector = SyntheticColliderInjector(
+            pedestrian_prob=v.pedestrian_prob, bicycle_prob=v.bicycle_prob,
+            keep_clear_radius=v.keep_clear_radius)
         before = empty_slots(raw)
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
         # slots that were empty before and are filled after == augmentation-added
@@ -258,7 +250,7 @@ def main():
     ego_samples = ego_world.view(S, n, ego_world.shape[1], 4).cpu().numpy()  # [S,N,T,4] (x,y,cos,sin)
 
     # --- plot ---
-    cols = min(3, S)
+    cols = min(4, S)
     rows = int(np.ceil(S / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 6 * rows))
     axes = np.atleast_1d(axes).ravel()

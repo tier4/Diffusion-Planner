@@ -1,10 +1,9 @@
 """Synthetic adversarial neighbor generator for GRPO augmentation.
 
-Instead of copying real neighbor patterns from a DB (see ``neighbor_db.py``), this builds
-*synthetic* neighbors that are **guaranteed to collide with the ego GT trajectory** if the
-ego does nothing (i.e. follows its recorded GT future). The idea is to give the
-collision-based GRPO reward a strong, always-present signal: every injected neighbor forces
-the ego to deviate.
+This builds *synthetic* neighbors that are **guaranteed to collide with the ego GT
+trajectory** if the ego does nothing (i.e. follows its recorded GT future). The idea is to
+give the collision-based GRPO reward a strong, always-present signal: every injected neighbor
+forces the ego to deviate.
 
 Each neighbor moves with **constant acceleration** (a person or a vehicle):
 
@@ -21,9 +20,9 @@ Candidates whose required acceleration exceeds a realistic cap are rejected and 
 (``max_tries``), so the kept neighbors are both colliding *and* physically plausible.
 
 The output columns match ``neighbor_agents_past`` / ``neighbor_agents_future`` exactly, so an
-injected neighbor flows through the normal preprocessing with no special handling -- the
-``inject`` signature mirrors ``NeighborPatternDB.inject`` so it is a drop-in replacement in
-``grpo_epoch._grpo_step``.
+injected neighbor flows through the normal preprocessing with no special handling. ``inject``
+takes ``(inputs, inject_max, inject_prob)`` and mutates the raw batch in place, and is called
+from ``grpo_epoch._grpo_step`` (and ``visualize_grpo_samples.py``).
 """
 
 import math
@@ -36,12 +35,16 @@ from diffusion_planner.dimensions import INPUT_T, OUTPUT_T
 _X, _Y, _COS, _SIN, _VX, _VY, _WIDTH, _LENGTH = 0, 1, 2, 3, 4, 5, 6, 7
 _TYPE_BASE = 8  # one-hot [vehicle, pedestrian, bicycle] occupies columns 8..10
 
-# Per-type kinematics: (speed_min, speed_max) m/s, accel_max m/s^2, width m, length m, type idx.
-# type idx matches the neighbor one-hot ordering [vehicle, pedestrian, bicycle] (cols 8..10).
+# Per-type kinematics. ``speed`` is (min, max) m/s, ``accel_max`` is m/s^2, ``idx`` matches the
+# neighbor one-hot ordering [vehicle, pedestrian, bicycle] (cols 8..10). Size is either a fixed
+# (width, length) in metres, or a ``size`` = ((width_min, length_min), (width_max, length_max))
+# range that is sampled along a single factor so width and length scale together (a small car
+# stays narrow, a long truck stays wide).
 _TYPES = {
-    "vehicle": dict(speed=(2.0, 14.0), accel_max=2.5, width=2.0, length=4.6, idx=0),
-    "pedestrian": dict(speed=(0.3, 2.0), accel_max=1.0, width=0.7, length=0.7, idx=1),
-    "bicycle": dict(speed=(1.0, 7.0), accel_max=1.5, width=0.6, length=1.8, idx=2),
+    "vehicle": dict(speed=(2.0, 14.0), accel_max=2.5, idx=0,
+                    size=((1.84, 4.34), (2.5649, 10.7462))),
+    "pedestrian": dict(speed=(0.3, 2.0), accel_max=1.0, idx=1, width=0.7, length=0.7),
+    "bicycle": dict(speed=(1.0, 7.0), accel_max=1.5, idx=2, width=0.6, length=1.8),
 }
 
 
@@ -60,15 +63,19 @@ class SyntheticColliderInjector:
     ):
         self.dt = dt
         self.pos_lo, self.pos_hi = pos_range
-        # categorical type mix; the remainder (1 - ped - bike) is vehicle.
+        # explicit categorical type mix; vehicle takes the remainder.
+        assert pedestrian_prob + bicycle_prob <= 1.0 + 1e-6, "ped + bike prob must be <= 1"
         self.pedestrian_prob = pedestrian_prob
         self.bicycle_prob = bicycle_prob
+        self.vehicle_prob = max(0.0, 1.0 - pedestrian_prob - bicycle_prob)
+        self.type_probs = {"vehicle": self.vehicle_prob,
+                           "pedestrian": pedestrian_prob,
+                           "bicycle": bicycle_prob}
         self.min_collision_time = min_collision_time
         # the synthetic path must stay this far from the ego's t=0 pose (origin), so a
         # stationary ego is never hit -> the forced collision is always avoidable.
         self.keep_clear_radius = keep_clear_radius
         self.max_tries = max_tries
-        self.num_patterns = float("inf")  # for parity with NeighborPatternDB logging
 
         self._tau_past = torch.arange(-INPUT_T, 1, dtype=torch.float32) * dt   # [31] in [-3,0]
         self._tau_future = torch.arange(1, OUTPUT_T + 1, dtype=torch.float32) * dt  # [80] in [.1,8]
@@ -99,6 +106,15 @@ class SyntheticColliderInjector:
             spec = _TYPES["bicycle"]
         else:
             spec = _TYPES["vehicle"]
+
+        # body size: fixed for ped/bike, sampled along one factor for vehicles so width and
+        # length scale together (small car -> narrow, long truck -> wide).
+        if "size" in spec:
+            (w_lo, l_lo), (w_hi, l_hi) = spec["size"]
+            f = float(torch.rand((), device=device))
+            width, length = w_lo + f * (w_hi - w_lo), l_lo + f * (l_hi - l_lo)
+        else:
+            width, length = spec["width"], spec["length"]
 
         # candidate collision steps: non-padding GT waypoints that are far enough from the
         # ego's t=0 position that hitting them is avoidable by not driving there.
@@ -142,9 +158,9 @@ class SyntheticColliderInjector:
         if best is None:
             return None  # no origin-clearing candidate found within max_tries
         _, p0, v0, a = best
-        return self._assemble(p0, v0, a, tau_p, tau_f, spec, device)
+        return self._assemble(p0, v0, a, tau_p, tau_f, spec, width, length, device)
 
-    def _assemble(self, p0, v0, a, tau_p, tau_f, spec, device):
+    def _assemble(self, p0, v0, a, tau_p, tau_f, spec, width, length, device):
         def motion(tau):  # tau [M] -> pos [M,2], vel [M,2]
             t = tau[:, None]
             pos = p0[None, :] + v0[None, :] * t + 0.5 * a[None, :] * (t * t)
@@ -168,7 +184,7 @@ class SyntheticColliderInjector:
         past[:, _X], past[:, _Y] = past_pos[:, 0], past_pos[:, 1]
         past[:, _COS], past[:, _SIN] = torch.cos(h_past), torch.sin(h_past)
         past[:, _VX], past[:, _VY] = past_vel[:, 0], past_vel[:, 1]
-        past[:, _WIDTH], past[:, _LENGTH] = spec["width"], spec["length"]
+        past[:, _WIDTH], past[:, _LENGTH] = width, length
         past[:, _TYPE_BASE + spec["idx"]] = 1.0
 
         future = torch.zeros(OUTPUT_T, 3, device=device)
@@ -179,8 +195,7 @@ class SyntheticColliderInjector:
     def inject(self, inputs: dict, inject_max: int, inject_prob: float) -> dict:
         """Fill empty neighbor slots with synthetic colliding neighbors (in place).
 
-        Mirrors ``NeighborPatternDB.inject``: call on a *raw* batch before
-        ``heading_to_cos_sin`` / normalization.
+        Call on a *raw* batch before ``heading_to_cos_sin`` / normalization.
         """
         neighbor_past = inputs["neighbor_agents_past"]      # [B, Pn, 31, 11]
         neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3]

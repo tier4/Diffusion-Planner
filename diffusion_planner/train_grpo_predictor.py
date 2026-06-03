@@ -20,7 +20,7 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
-from diffusion_planner.utils.neighbor_db import NeighborPatternDB
+from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from timm.utils import ModelEma
@@ -106,11 +106,20 @@ def get_args():
                         help="probability of running a normal supervised step instead of a "
                              "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)")
 
-    # Random neighbor augmentation
-    parser.add_argument("--neighbor_db_path", type=str, default=None,
-                        help="path to a neighbor-pattern DB (built by build_neighbor_db.py)")
-    parser.add_argument("--neighbor_inject_max", type=int, default=5)
-    parser.add_argument("--neighbor_inject_prob", type=float, default=0.5)
+    # Synthetic adversarial neighbor augmentation (see utils/synthetic_neighbors.py):
+    # spawn constant-acceleration neighbors that are guaranteed to collide with the ego GT
+    # (but avoidable -- they keep clear of the ego's t=0 pose), to drive the collision reward.
+    parser.add_argument("--neighbor_inject_max", type=int, default=5,
+                        help="max synthetic colliders injected per scene (count ~ U[1, max])")
+    parser.add_argument("--neighbor_inject_prob", type=float, default=0.5,
+                        help="per-scene probability of injecting any synthetic colliders")
+    parser.add_argument("--pedestrian_prob", type=float, default=0.3,
+                        help="fraction of injected colliders that are pedestrians")
+    parser.add_argument("--bicycle_prob", type=float, default=0.2,
+                        help="fraction of injected colliders that are bicycles (rest: vehicles)")
+    parser.add_argument("--collider_keep_clear_radius", type=float, default=3.0,
+                        help="min distance the collider path keeps from the ego t=0 pose "
+                             "(guarantees the forced collision is avoidable)")
 
     # Loss coefficients (shared with the supervised trainer / loss machinery)
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
@@ -207,13 +216,15 @@ def model_training(args):
     batch_size = args.batch_size
     save_utd = args.save_utd
 
-    # Neighbor pattern DB for random augmentation (loaded per-process on CPU).
-    if args.neighbor_db_path is not None:
-        neighbor_db = NeighborPatternDB(args.neighbor_db_path)
-        if global_rank == 0:
-            print(f"Neighbor DB loaded: {neighbor_db.num_patterns} patterns")
-    else:
-        neighbor_db = None
+    # Synthetic adversarial neighbor generator for GRPO augmentation.
+    collider_injector = SyntheticColliderInjector(
+        pedestrian_prob=args.pedestrian_prob,
+        bicycle_prob=args.bicycle_prob,
+        keep_clear_radius=args.collider_keep_clear_radius,
+    )
+    if global_rank == 0:
+        print(f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
+              f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m")
 
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
@@ -305,7 +316,7 @@ def model_training(args):
             torch.distributed.barrier()
 
         train_loss, train_total_loss = train_grpo_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, neighbor_db
+            train_loader, diffusion_planner, optimizer, args, model_ema, collider_injector
         )
 
         if global_rank == 0:

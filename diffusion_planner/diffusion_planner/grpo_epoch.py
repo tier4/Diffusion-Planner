@@ -73,14 +73,14 @@ def _sft_step(raw_inputs, model, optimizer, args, ema):
     }
 
 
-def _grpo_step(raw_inputs, model, optimizer, args, ema, neighbor_db):
+def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector):
     """A GRPO step: sample a group per scene, reward, advantage, policy-gradient update."""
     n = args.num_generations
 
-    # Random neighbor augmentation on the *scene* batch so every sample in a group faces an
-    # identical scene (a prerequisite for comparable group advantages).
-    if neighbor_db is not None:
-        raw_inputs = neighbor_db.inject(
+    # Synthetic adversarial neighbor augmentation on the *scene* batch so every sample in a
+    # group faces an identical scene (a prerequisite for comparable group advantages).
+    if collider_injector is not None:
+        raw_inputs = collider_injector.inject(
             raw_inputs, args.neighbor_inject_max, args.neighbor_inject_prob
         )
 
@@ -126,7 +126,7 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, neighbor_db):
     }
 
 
-def train_grpo_epoch(data_loader, model, optimizer, args, ema, neighbor_db):
+def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector):
     epoch_loss = []
 
     model.train()
@@ -147,7 +147,7 @@ def train_grpo_epoch(data_loader, model, optimizer, args, ema, neighbor_db):
         if step_rng.random() < args.sft_prob:
             step_loss = _sft_step(raw_inputs, model, optimizer, args, ema)
         else:
-            step_loss = _grpo_step(raw_inputs, model, optimizer, args, ema, neighbor_db)
+            step_loss = _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector)
 
         if args.ddp:
             torch.cuda.synchronize()

@@ -4,7 +4,7 @@
 # Usage:
 #   ./grpo_run.sh <RESUME_MODEL_PATH> <exp_name> <TRAIN_SET_LIST> <VALID_SET_LIST>
 #
-# Builds the neighbor-pattern DB once (cached next to the train list), then runs GRPO.
+# Adversarial neighbors are generated synthetically at train time (no DB build step).
 set -ux
 RESUME_MODEL_PATH=$(readlink -f ${1})
 exp_name=${2}
@@ -29,23 +29,16 @@ mkdir -p ${SAVE_PATH}
 git show -s > ${SAVE_PATH}/git_show.txt
 git diff > ${SAVE_PATH}/git_diff.txt
 
-# 1) Build the neighbor-pattern DB (closest 1-5 neighbors per scene), cached.
-NEIGHBOR_DB="${SAVE_PATH}/neighbor_db.npz"
-python3 -m diffusion_planner.utils.neighbor_db \
-  --train_set_list ${TRAIN_SET_LIST} \
-  --output_path ${NEIGHBOR_DB} \
-  --max_per_scene 5
-
-# (optional) sanity-check the DB by rendering 10 random patterns:
-# python3 visualize_neighbor_db.py --db_path ${NEIGHBOR_DB} --output_path ${SAVE_PATH}/neighbor_db_sample.png
-
-# 2) GRPO fine-tuning from a pretrained/SFT checkpoint.
+# GRPO fine-tuning from a pretrained/SFT checkpoint. Adversarial neighbor augmentation is
+# synthetic (utils/synthetic_neighbors.py) -- no DB to build; tune it via the --*_prob /
+# --neighbor_inject_* / --collider_keep_clear_radius flags below if needed.
+# (optional) sanity-check the augmentation + sample diversity:
+#   python3 visualize_grpo_samples.py --resume_model_path ${RESUME_MODEL_PATH} --output_path ${SAVE_PATH}/grpo_samples.png
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_grpo_predictor.py \
   --exp_name ${exp_name}_grpo \
   --train_set_list ${TRAIN_SET_LIST} \
   --valid_set_list ${VALID_SET_LIST} \
   --resume_model_path ${RESUME_MODEL_PATH} \
-  --neighbor_db_path ${NEIGHBOR_DB} \
   --diffusion_model_type "x_start" \
   --save_dir ${SAVE_PATH} \
   --batch_size 64 \
