@@ -15,7 +15,8 @@
 """Trajectory feature extraction and clustering pipeline.
 
 Feature pipeline:
-    ego_agent_future (80, 3) → flatten (240,) → Z-score → PCA → ClusteringStrategy
+    ego_agent_future (80, 3) → flatten (240,)  ┐
+    ego_current_state[4:8]   → (vx, vy, ax, ay) ┘ concat → Z-score → PCA → ClusteringStrategy
 
 Usage example:
     strategy = ElbowKMeansStrategy(k_max=20, random_state=42)
@@ -84,14 +85,17 @@ class ElbowKMeansStrategy(ClusteringStrategy):
 
 
 def extract_features(npz_path: str) -> np.ndarray:
-    """Return the flattened ego_agent_future trajectory as a feature vector.
+    """Return a feature vector combining ego_agent_future and current velocity/acceleration.
 
-    ego_agent_future has shape (T, 3) with columns [x, y, heading_rad].
-    The returned vector has shape (T*3,).
+    ego_agent_future has shape (T, 3) with columns [x, y, heading_rad] → flattened to (T*3,).
+    ego_current_state[4:10] provides [vx, vy, ax, ay, steering_angle, yaw_rate] at the current timestep.
+    The returned vector has shape (T*3 + 6,).
     """
     data = np.load(npz_path, allow_pickle=True)
     ego_future = data["ego_agent_future"].astype(float)
-    return ego_future.flatten()
+    ego_current = data["ego_current_state"].astype(float)
+    vel_acc = ego_current[4:10]  # [vx, vy, ax, ay, steering_angle, yaw_rate]
+    return np.concatenate([ego_future.flatten(), vel_acc])
 
 
 # ──────────────────────────── Pipeline ───────────────────────────────────────
