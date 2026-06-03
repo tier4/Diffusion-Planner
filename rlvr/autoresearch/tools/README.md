@@ -318,6 +318,9 @@ Filter already-converted (ego-centric) psim NPZs to a route arc band: recover eg
 ### track_cl_heal_learning.py
 Per-epoch L2-to-target distribution (+ per-arc) tracker for a HEAL/curated run, on a held-out arc scene set — distinguishes genuine healing (held-out improves) from training-fit overfit.
 
+### build_baseline_det_target.py
+Build curated GRAFT-CL targets = a competent model's deterministic trajectory. Runs `--model`'s det inference (`eval_det_avoidance.det_inference_batched`) on a scene list, unit-normalizes the (cos,sin) heading columns, and writes the result into each NPZ's `ego_agent_future` (the curated SFT target) — for HEAL Mechanism B (train the wounded model toward a known-good line instead of ranking its own samples). `--model` is the TARGET source (e.g. the baseline that keeps the line where the grafted model drifted), NOT the model being trained; train curated (lr 5e-5) warm-started from the wounded model. Usage: `--model <competent.pth> --scenes <json> --ego_shape WB,L,W --out_dir <dir> --out_list <json>`.
+
 ## Data preparation (NPZ format / mining)
 
 ### convert_3col_to_4col.py / convert_4col_to_3col.py
