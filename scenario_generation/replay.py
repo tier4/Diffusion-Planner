@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -2355,20 +2356,25 @@ def run_route_replay(
                     ))
 
             # Save PNG (concurrent with next step's compute).
+            # REPLAY_NO_PNG=1 skips per-step PNG rendering entirely — avoids the
+            # deepcopy(scene) backlog (a per-step memory leak under CPU contention
+            # that OOM-kills long runs) when only the NPZ dump is needed.
+            # out_path is still defined (used by the clearance log below).
             out_path = output_dir / f"step_{step:04d}.png"
-            overlay_metrics = (
-                metrics_log[-1]
-                if spawn_config.overlay_metrics_on_png and metrics_log
-                else None
-            )
-            pending_saves.append(save_pool.submit(
-                save_step_figure,
-                deepcopy(scene), agent_predictions, out_path,
-                step, spawn_config.max_steps, route_polylines,
-                _VIEW_HALF_M, _route_vis_ll_ids,
-                step * 0.1, road_border_polylines,
-                overlay_metrics,
-            ))
+            if os.environ.get("REPLAY_NO_PNG") != "1":
+                overlay_metrics = (
+                    metrics_log[-1]
+                    if spawn_config.overlay_metrics_on_png and metrics_log
+                    else None
+                )
+                pending_saves.append(save_pool.submit(
+                    save_step_figure,
+                    deepcopy(scene), agent_predictions, out_path,
+                    step, spawn_config.max_steps, route_polylines,
+                    _VIEW_HALF_M, _route_vis_ll_ids,
+                    step * 0.1, road_border_polylines,
+                    overlay_metrics,
+                ))
 
             # Record realized obstacle clearances (ego world pose + nearest
             # road-border / stopped-NPC / moving-NPC distances) for the
