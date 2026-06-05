@@ -126,6 +126,7 @@ def _compute_sft_diffusion_loss(
     neighbor_mask: torch.Tensor,
     device: torch.device,
     K: int = 8,
+    neighbor_loss_weight: float = 0.1,
     neighbor_reg_weight: float = 0.0,
     neighbor_reg_only: bool = False,
     ego_il_weight: float = 0.0,
@@ -370,8 +371,9 @@ def _compute_sft_diffusion_loss(
     ego_il_avg = total_ego_il_loss / K if isinstance(total_ego_il_loss, torch.Tensor) else torch.tensor(0.0, device=device)
     kl_loss_avg = total_kl_loss / K if isinstance(total_kl_loss, torch.Tensor) else torch.tensor(0.0, device=device)
 
-    # Combined loss: ego + neighbor (weight 0.1 to match original SFT alpha_neighbor_loss)
-    loss = ego_loss_avg + 0.1 * neighbor_loss_avg
+    # Combined loss: ego + neighbor (weight from config.neighbor_loss_weight,
+    # default 0.1 to match original SFT alpha_neighbor_loss; set to 0 to disable)
+    loss = ego_loss_avg + neighbor_loss_weight * neighbor_loss_avg
     if use_neighbor_reg:
         loss = loss + neighbor_reg_weight * neighbor_reg_avg
     if use_ego_il:
@@ -1231,6 +1233,7 @@ def train_epoch_ranked_sft(
             neighbor_mask=mini_neighbor_mask,
             device=device,
             K=config.diffusion_k_steps,
+            neighbor_loss_weight=config.neighbor_loss_weight,
             neighbor_reg_weight=config.neighbor_reg_weight,
             neighbor_reg_only=config.neighbor_reg_only,
             ego_il_weight=config.ego_il_weight,
