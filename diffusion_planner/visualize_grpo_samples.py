@@ -79,7 +79,9 @@ def parse_viz_args():
     p.add_argument("--show_gt_reward", type=boolean, default=True,
                    help="also score the GT ego trajectory with the same reward for comparison")
     p.add_argument("--footprint_stride", type=int, default=20,
-                   help="draw a footprint every this many trajectory steps")
+                   help="(footprint_mode=all) draw a footprint every this many trajectory steps")
+    p.add_argument("--footprint_mode", type=str, default="tail", choices=["tail", "all"],
+                   help="'tail': one box at the trajectory end; 'all': a box every stride steps")
     p.add_argument("--grpo_noise_scale", type=float, default=3.0)
     p.add_argument("--aug_mode", type=str, default="synthetic",
                    choices=["synthetic", "none"],
@@ -181,13 +183,25 @@ def draw_road(ax, raw_np, s):
             print(f"[draw_road] {fn.__name__} skipped for scene {s}: {e}")
 
 
-def draw_footprints(ax, traj_xyhead, length, width, color, stride, alpha=0.35, lw=0.8):
-    """Draw the ego bounding box along a trajectory at fixed step intervals.
+def draw_footprints(ax, traj_xyhead, length, width, color, stride, alpha=0.35, lw=0.8,
+                    mode="tail"):
+    """Draw the ego bounding box along a trajectory.
 
     traj_xyhead: [T, 4] (x, y, cos, sin). Padding rows (x==y==0) are skipped.
+    mode:
+        "tail" - a single box at the last valid pose (clean overview).
+        "all"  - a box every ``stride`` steps over all T steps (shows the per-step rollout).
     """
-    T = traj_xyhead.shape[0]
-    for t in range(0, T, max(stride, 1)):
+    valid = np.where(np.any(traj_xyhead[:, :2] != 0.0, axis=-1))[0]
+    if valid.size == 0:
+        return
+    if mode == "all":
+        steps = list(range(0, traj_xyhead.shape[0], max(stride, 1)))
+        if valid[-1] not in steps:
+            steps.append(int(valid[-1]))  # always include the final pose
+    else:
+        steps = [int(valid[-1])]
+    for t in steps:
         x, y, cos, sin = traj_xyhead[t]
         if x == 0.0 and y == 0.0:
             continue
@@ -330,7 +344,8 @@ def main():
             gt_full = ego_future_gt[s]  # [T, 3] (x, y, heading)
             gt_xyh = np.stack([gt_full[:, 0], gt_full[:, 1],
                                np.cos(gt_full[:, 2]), np.sin(gt_full[:, 2])], axis=-1)
-            draw_footprints(ax, gt_xyh, ego_len, ego_wid, "black", v.footprint_stride, alpha=0.3)
+            draw_footprints(ax, gt_xyh, ego_len, ego_wid, "black", v.footprint_stride, alpha=0.3,
+                            mode=v.footprint_mode)
 
         # N sampled ego trajectories, colored by reward (or by index) (+ footprints)
         for i in range(n):
@@ -343,7 +358,8 @@ def main():
             ax.plot(traj[:, 0], traj[:, 1], "-", color=color,
                     lw=1.5, alpha=0.85, label=sample_lbl, zorder=4)
             if v.show_footprint:
-                draw_footprints(ax, traj, ego_len, ego_wid, color, v.footprint_stride, alpha=0.3)
+                draw_footprints(ax, traj, ego_len, ego_wid, color, v.footprint_stride, alpha=0.3,
+                                mode=v.footprint_mode)
             if v.annotate_reward:
                 end = _nonzero_rows(traj[:, :2])
                 if end.shape[0] > 0:

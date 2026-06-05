@@ -32,8 +32,8 @@ git diff > ${SAVE_PATH}/git_diff.txt
 # GRPO fine-tuning from a pretrained/SFT checkpoint. Adversarial neighbor augmentation is
 # synthetic (utils/synthetic_neighbors.py) -- no DB to build; tune it via the --*_prob /
 # --neighbor_inject_* / --collider_keep_clear_radius flags below if needed.
-# (optional) sanity-check the augmentation + sample diversity:
-#   python3 visualize_grpo_samples.py --resume_model_path ${RESUME_MODEL_PATH} --output_path ${SAVE_PATH}/grpo_samples.png
+# (optional) sanity-check the augmentation + sample diversity + reward:
+#   python3 visualize_grpo_samples.py --resume_model_path ${RESUME_MODEL_PATH} --data_list ${TRAIN_SET_LIST} --output_path ${SAVE_PATH}/grpo_samples.png
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_grpo_predictor.py \
   --exp_name ${exp_name}_grpo \
   --train_set_list ${TRAIN_SET_LIST} \
