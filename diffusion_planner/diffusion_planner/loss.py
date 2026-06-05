@@ -351,6 +351,38 @@ def compute_road_border_penalty(
     )
 
 
+def _box_outward_normals(corners: torch.Tensor) -> torch.Tensor:
+    """Unit outward edge normals of a convex box. corners: [..., 4, 2] -> [..., 4, 2]."""
+    edges = torch.roll(corners, -1, dims=-2) - corners
+    normals = torch.stack([-edges[..., 1], edges[..., 0]], dim=-1)
+    return normals / torch.linalg.norm(normals, dim=-1, keepdim=True).clamp_min(1e-9)
+
+
+def sat_penetration_depth(ego_corners: torch.Tensor, nbr_corners: torch.Tensor) -> torch.Tensor:
+    """SAT overlap (penetration) depth between an ego box and neighbor boxes.
+
+    Unlike the point-to-segment distance, this registers *any* polygon overlap (including
+    shallow / interpenetrating ones the discrete edge-point sampling misses), returning the
+    minimum-translation-distance magnitude.
+
+    Args:
+        ego_corners: [B, S, 4, 2] ego box corners per (batch, eval step).
+        nbr_corners: [B, S, Pn, 4, 2] neighbor box corners.
+
+    Returns:
+        depth: [B, S, Pn] >= 0 (0 when the boxes are disjoint).
+    """
+    B, S, Pn, _, _ = nbr_corners.shape
+    ego = ego_corners[:, :, None].expand(B, S, Pn, 4, 2)
+    # candidate separating axes: edge normals of both boxes.
+    axes = torch.cat([_box_outward_normals(ego), _box_outward_normals(nbr_corners)], dim=-2)
+    pe = torch.einsum("bspax,bspcx->bspac", axes, ego)          # [B, S, Pn, 8, 4]
+    pn = torch.einsum("bspax,bspcx->bspac", axes, nbr_corners)  # [B, S, Pn, 8, 4]
+    overlap = torch.minimum(pe.amax(-1), pn.amax(-1)) - torch.maximum(pe.amin(-1), pn.amin(-1))
+    # disjoint <=> some axis has non-positive overlap -> min over axes <= 0 -> relu = 0.
+    return overlap.amin(-1).clamp_min(0.0)  # [B, S, Pn]
+
+
 def compute_neighbor_collision_penalty(
     ego_edge_points: torch.Tensor,
     neighbors_future: torch.Tensor,
@@ -439,12 +471,20 @@ def compute_neighbor_collision_penalty(
     min_dist = dist.min(dim=-1).values.min(dim=-1).values  # [B*S]
     min_dist = min_dist.reshape(B, S)
 
-    # Hinge penalty
+    # Proximity hinge: penalise getting within `margin` of a neighbor edge.
     penalty_s = torch.where(
         torch.isfinite(min_dist),
         F.relu(margin - min_dist),
         torch.zeros_like(min_dist),
     )
+
+    # SAT overlap term: add the deepest penetration so *actual* overlaps (which the discrete
+    # point-to-segment distance can under-report at a small margin) are always penalised.
+    ego_corners = ego_edge_pts[:, :, ::K // 4, :]  # [B, S, 4, 2] (corners are every n_pts points)
+    nbr_corners = neighbor_corners.permute(0, 2, 1, 3, 4)  # [B, S, Pn, 4, 2]
+    penetration = sat_penetration_depth(ego_corners, nbr_corners)  # [B, S, Pn]
+    penetration = torch.where(valid.permute(0, 2, 1), penetration, torch.zeros_like(penetration))
+    penalty_s = penalty_s + penetration.amax(dim=-1)  # worst overlap per (B, step)
 
     # Scatter to full T
     penalty = torch.zeros(B, T_full, device=device)
