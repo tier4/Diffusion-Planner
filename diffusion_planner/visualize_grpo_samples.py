@@ -25,12 +25,20 @@ import argparse
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.cm as cm  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
+from matplotlib.colors import Normalize  # noqa: E402
 from torch.utils.data import default_collate  # noqa: E402
 
-from diffusion_planner.grpo_utils import expand_batch, sample_group  # noqa: E402
+from diffusion_planner.grpo_epoch import _neighbor_future_world  # noqa: E402
+from diffusion_planner.grpo_utils import (  # noqa: E402
+    compute_collision_reward,
+    compute_group_advantages,
+    expand_batch,
+    sample_group,
+)
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner  # noqa: E402
 from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
 from diffusion_planner.utils.dataset import DiffusionPlannerData  # noqa: E402
@@ -46,13 +54,6 @@ from diffusion_planner.utils.visualize_input import (  # noqa: E402
 _PAST_X, _PAST_Y, _PAST_COS, _PAST_SIN = 0, 1, 2, 3
 _PAST_WIDTH, _PAST_LENGTH = 6, 7
 
-_DEFAULT_CKPT = (
-    "/mnt/nvme/training_result/"
-    "20260503-220950_with_takanawa_16days_weak_smoothing_epoch0060_epoch0080/best_model.pth"
-)
-_DEFAULT_DATA = "/mnt/nvme/dataset/basic_dataset/path_list_train.json"
-
-
 def boolean(v):
     if isinstance(v, bool):
         return v
@@ -61,14 +62,22 @@ def boolean(v):
 
 def parse_viz_args():
     p = argparse.ArgumentParser(description="Visualize GRPO sample-group diversity")
-    p.add_argument("--resume_model_path", type=str, default=_DEFAULT_CKPT)
-    p.add_argument("--data_list", type=str, default=_DEFAULT_DATA)
+    p.add_argument("--resume_model_path", type=str, required=True,
+                   help="path to the GRPO/SFT checkpoint (.pth) to visualize")
+    p.add_argument("--data_list", type=str, required=True,
+                   help="path to a dataset path-list JSON (e.g. path_list_train.json)")
     p.add_argument("--num_scenes", type=int, default=12, help="scenes to visualize")
     p.add_argument("--num_generations", type=int, default=8, help="N samples per scene")
     p.add_argument("--show_road", type=boolean, default=True,
                    help="draw lanes / route / road-borders / static objects")
     p.add_argument("--show_footprint", type=boolean, default=True,
                    help="draw the ego bounding-box footprint along the trajectories")
+    p.add_argument("--color_by_reward", type=boolean, default=True,
+                   help="color each sampled trajectory by its collision reward (else by index)")
+    p.add_argument("--annotate_reward", type=boolean, default=True,
+                   help="annotate each sampled trajectory endpoint with reward / advantage")
+    p.add_argument("--show_gt_reward", type=boolean, default=True,
+                   help="also score the GT ego trajectory with the same reward for comparison")
     p.add_argument("--footprint_stride", type=int, default=20,
                    help="draw a footprint every this many trajectory steps")
     p.add_argument("--grpo_noise_scale", type=float, default=3.0)
@@ -237,13 +246,44 @@ def main():
     ego_future_gt = raw_np["ego_agent_future"]       # [S, T, 3]
     ego_shape = raw_np["ego_shape"]                  # [S, 3] -> [_, length, width]
 
-    # --- exact GRPO sampling path ---
+    # --- exact GRPO sampling path (mirrors grpo_epoch._grpo_step) ---
     exp = expand_batch(raw, n)
     exp["ego_agent_past"] = heading_to_cos_sin(exp["ego_agent_past"])
     exp["goal_pose"] = heading_to_cos_sin(exp["goal_pose"])
+    # neighbor futures in world frame (x, y, cos, sin) + validity -- needed for the reward.
+    neighbors_future, neighbor_future_mask = _neighbor_future_world(exp["neighbor_agents_future"])
+    neighbors_future_valid = ~neighbor_future_mask
     norm_exp = args.observation_normalizer(exp)
     ego_world = sample_group(model, norm_exp, v.grpo_noise_scale, device)  # [S*N, T, 4]
     ego_samples = ego_world.view(S, n, ego_world.shape[1], 4).cpu().numpy()  # [S,N,T,4] (x,y,cos,sin)
+
+    # --- reward (same collision reward GRPO turns into group-relative advantages) ---
+    reward_flat, _, _ = compute_collision_reward(
+        ego_world, norm_exp, neighbors_future, neighbors_future_valid, args
+    )  # [S*N]
+    advantages_flat = compute_group_advantages(reward_flat, S, n, args.advantage_eps)  # [S*N]
+    rewards = reward_flat.view(S, n).cpu().numpy()        # [S, N]
+    advantages = advantages_flat.view(S, n).cpu().numpy()  # [S, N]
+
+    # score the GT ego trajectory with the *same* reward, using each group's representative row.
+    gt_rewards = None
+    if v.show_gt_reward:
+        rep = {k: val[::n] for k, val in norm_exp.items()}  # one row per scene -> [S, ...]
+        gt_ego_cs = heading_to_cos_sin(raw["ego_agent_future"])  # [S, T, 4] (x, y, cos, sin)
+        gt_reward_flat, _, _ = compute_collision_reward(
+            gt_ego_cs, rep, neighbors_future[::n], neighbors_future_valid[::n], args
+        )
+        gt_rewards = gt_reward_flat.cpu().numpy()  # [S]
+
+    # shared reward color scale across all scenes (higher reward = greener = fewer collisions).
+    r_all = rewards.ravel()
+    if gt_rewards is not None:
+        r_all = np.concatenate([r_all, gt_rewards])
+    r_lo, r_hi = float(r_all.min()), float(r_all.max())
+    if r_hi - r_lo < 1e-6:
+        r_lo, r_hi = r_lo - 1.0, r_hi + 1.0
+    reward_norm = Normalize(vmin=r_lo, vmax=r_hi)
+    reward_cmap = plt.get_cmap("RdYlGn")
 
     # --- plot ---
     cols = min(4, S)
@@ -284,21 +324,34 @@ def main():
         # GT ego future (+ footprints)
         gt = _nonzero_rows(ego_future_gt[s, :, :2])
         if gt.shape[0] > 0:
-            ax.plot(gt[:, 0], gt[:, 1], "k--", lw=2.0, label="GT ego", zorder=5)
+            gt_lbl = "GT ego" if not v.show_gt_reward else f"GT ego (r={gt_rewards[s]:.1f})"
+            ax.plot(gt[:, 0], gt[:, 1], "k--", lw=2.0, label=gt_lbl if s == 0 else None, zorder=5)
         if v.show_footprint:
             gt_full = ego_future_gt[s]  # [T, 3] (x, y, heading)
             gt_xyh = np.stack([gt_full[:, 0], gt_full[:, 1],
                                np.cos(gt_full[:, 2]), np.sin(gt_full[:, 2])], axis=-1)
             draw_footprints(ax, gt_xyh, ego_len, ego_wid, "black", v.footprint_stride, alpha=0.3)
 
-        # N sampled ego trajectories (+ footprints)
+        # N sampled ego trajectories, colored by reward (or by index) (+ footprints)
         for i in range(n):
             traj = ego_samples[s, i]  # [T, 4] (x, y, cos, sin)
-            color = cmap(i / max(n - 1, 1))
+            if v.color_by_reward:
+                color = reward_cmap(reward_norm(rewards[s, i]))
+            else:
+                color = cmap(i / max(n - 1, 1))
+            sample_lbl = f"sample {i}" if (s == 0 and not v.color_by_reward) else None
             ax.plot(traj[:, 0], traj[:, 1], "-", color=color,
-                    lw=1.5, alpha=0.85, label=f"sample {i}" if s == 0 else None, zorder=4)
+                    lw=1.5, alpha=0.85, label=sample_lbl, zorder=4)
             if v.show_footprint:
                 draw_footprints(ax, traj, ego_len, ego_wid, color, v.footprint_stride, alpha=0.3)
+            if v.annotate_reward:
+                end = _nonzero_rows(traj[:, :2])
+                if end.shape[0] > 0:
+                    ax.annotate(f"r={rewards[s, i]:.1f}\na={advantages[s, i]:+.2f}",
+                                xy=(end[-1, 0], end[-1, 1]), fontsize=6, color="black",
+                                ha="center", va="center", zorder=7,
+                                bbox=dict(boxstyle="round,pad=0.1", fc="white", ec=color,
+                                          lw=0.8, alpha=0.7))
 
         # current ego box at the origin (its actual shape and heading)
         ego_cur = raw_np["ego_current_state"][s]  # [10]: x, y, cos, sin, ...
@@ -306,8 +359,12 @@ def main():
         ax.plot(ego_box[:, 0], ego_box[:, 1], "-", color="black", lw=2.0, zorder=6)
         ax.plot(0, 0, "k*", ms=10, zorder=6)
         ep, path = diversity_metrics(ego_samples[s, :, :, :2])
-        ax.set_title(f"scene #{idx[s]}  endpoint_spread={ep:.2f}m  path_spread={path:.2f}m",
-                     fontsize=10)
+        best_i = int(np.argmax(rewards[s]))
+        gt_str = f" GT={gt_rewards[s]:.1f}" if v.show_gt_reward else ""
+        ax.set_title(
+            f"scene #{idx[s]}  reward[{rewards[s].min():.1f},{rewards[s].max():.1f}]"
+            f" best#{best_i}{gt_str}\nendpoint_spread={ep:.2f}m  path_spread={path:.2f}m",
+            fontsize=9)
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.3)
 
@@ -334,14 +391,26 @@ def main():
     fig.legend(handles + proxies, labels + [p.get_label() for p in proxies],
                loc="upper right", fontsize=8, ncol=2)
     all_ep = np.mean([diversity_metrics(ego_samples[s, :, :, :2])[0] for s in range(S)])
+    mean_reward = float(rewards.mean())
+    mean_best = float(rewards.max(axis=1).mean())  # mean over scenes of the per-group best
+    gt_str = f", mean GT reward={float(gt_rewards.mean()):.2f}" if v.show_gt_reward else ""
     fig.suptitle(
-        f"GRPO sample-group diversity: N={n} per scene, noise_scale={v.grpo_noise_scale}, "
-        f"aug={v.aug_mode}  |  mean endpoint_spread={all_ep:.2f}m",
+        f"GRPO samples & reward: N={n} per scene, noise_scale={v.grpo_noise_scale}, "
+        f"aug={v.aug_mode}  |  mean reward={mean_reward:.2f}, mean best-of-group={mean_best:.2f}"
+        f"{gt_str}  |  mean endpoint_spread={all_ep:.2f}m",
         fontsize=12,
     )
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    if v.color_by_reward:
+        sm = cm.ScalarMappable(norm=reward_norm, cmap=reward_cmap)
+        cbar = fig.colorbar(sm, ax=axes.tolist(), fraction=0.02, pad=0.01)
+        cbar.set_label("collision reward  (higher = fewer/less-severe collisions)", fontsize=9)
     fig.savefig(v.output_path, dpi=120)
-    print(f"Saved {S} scenes to {v.output_path}  (mean endpoint_spread={all_ep:.2f} m)")
+    print(f"Saved {S} scenes to {v.output_path}")
+    print(f"  mean reward={mean_reward:.3f}  mean best-of-group={mean_best:.3f}"
+          f"  mean endpoint_spread={all_ep:.2f} m")
+    if v.show_gt_reward:
+        print(f"  mean GT reward={float(gt_rewards.mean()):.3f}")
 
 
 if __name__ == "__main__":
