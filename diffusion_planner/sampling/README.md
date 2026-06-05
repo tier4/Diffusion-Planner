@@ -63,40 +63,86 @@ python cluster.py \
 
 ### Step 2: Balanced Sampling (`sampling.py`)
 
-```bash
-# Specify seed directly
-python sampling.py \
-    --cluster_json /path/to/cluster_result.json \
-    --output       /path/to/sampled.json \
-    --seed 42
+Two strategies are available via `--method`:
 
-# Read seed from a previous sampling output (for reproducibility)
+| Strategy | Description |
+|---|---|
+| `random` (default) | Uniform random sampling. Requires `--seed` or `--seed_json`. |
+| `coverage` | Greedy Farthest Point Sampling (FPS) in PCA-whitened feature space. Maximises coverage of each cluster's data distribution. Deterministic — no seed needed. |
+
+```bash
+# Random sampling
 python sampling.py \
     --cluster_json /path/to/cluster_result.json \
     --output       /path/to/sampled.json \
-    --seed_json    /path/to/previous_sampled.json
+    --method random --seed 42
+
+# Read seed from a previous random-sampling output
+python sampling.py \
+    --cluster_json /path/to/cluster_result.json \
+    --output       /path/to/sampled.json \
+    --method random --seed_json /path/to/previous_sampled.json
+
+# Coverage-maximising sampling (deterministic)
+python sampling.py \
+    --cluster_json /path/to/cluster_result.json \
+    --output       /path/to/sampled.json \
+    --method coverage [--pca_components 50]
 ```
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--cluster_json` | ✓ | — | Clustering result JSON produced by `cluster.py` |
 | `--output` | ✓ | — | Output path for the sampled file list JSON |
-| `--seed` | ✓ (one of) | — | Random seed value (integer) |
-| `--seed_json` | ✓ (one of) | — | JSON file containing a `"seed"` key (e.g. a previous `sampling.py` output) |
+| `--method` | | `random` | Sampling strategy: `random` or `coverage` |
+| `--seed` | ✓ for random | — | Random seed value (integer) |
+| `--seed_json` | ✓ for random | — | JSON file containing a `"seed"` key (e.g. a previous `sampling.py` output) |
+| `--pca_components` | | `50` | PCA components used by coverage sampling |
 
-`--seed` and `--seed_json` are mutually exclusive. Exactly one must be provided.
+`--seed` and `--seed_json` are mutually exclusive and required only when `--method random`.
 
 **Output JSON format**
 
 ```json
-{
-    "seed": 42,
-    "files": [
-        "/path/to/sample_0.npz",
-        "/path/to/sample_1.npz"
-    ]
-}
+// random
+{"method": "random", "seed": 42, "files": ["/path/to/sample_0.npz", ...]}
+
+// coverage
+{"method": "coverage", "pca_components": 50, "files": ["/path/to/sample_0.npz", ...]}
 ```
+
+#### Coverage sampling — how it works
+
+For each cluster independently (`sampling.py` re-extracts features without relying on `cluster.py` internals):
+
+```
+cluster paths
+     │
+     ▼
+Load NPZ files in parallel (ThreadPoolExecutor, num_workers threads)
+     │
+     ▼
+Extract ego_agent_future + ego_current_state[4:10] per file
+     │
+     ▼
+Z-score normalisation (within cluster)
+     │
+     ▼
+PCA (within cluster, up to --pca_components)
+     │
+     ▼
+Whitening: divide each PC by its standard deviation
+(Euclidean distance in whitened space = Mahalanobis distance in original space)
+     │
+     ▼
+Greedy FPS: start from point farthest from centroid,
+iteratively add the point maximising the minimum distance to the selected set
+     │
+     ▼
+sampled paths
+```
+
+**Memory management**: Intermediate arrays are explicitly freed after each stage to prevent memory accumulation across clusters (relevant for datasets with many large clusters). Garbage collection is invoked at key checkpoints.
 
 Pass the output directly to `train_run.sh`:
 
