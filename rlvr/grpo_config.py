@@ -225,6 +225,14 @@ class GRPOConfig:
     reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
     lane_dep_trim_n: int = 0  # drop N scenes with highest lane departure fraction (0=disabled)
     neighbor_loss_weight: float = 0.1  # weight for neighbor SFT loss term (default 0.1 matches original SFT alpha_neighbor_loss; 0=disabled)
+    # Anchor source for the base pass used by neighbor_reg / baseline ego-IL / KL.
+    # "warmstart" (default): forward the LoRA model with adapters disabled
+    #   (disable_adapter) — i.e. the merged warmstart's predictions (current behavior).
+    # "baseline": forward an EXTERNAL frozen base model (the true original baseline)
+    #   loaded from neighbor_reg_anchor_path instead of disable_adapter.
+    neighbor_reg_anchor: str = "warmstart"
+    # Path to the external baseline .pth. REQUIRED when neighbor_reg_anchor=="baseline".
+    neighbor_reg_anchor_path: str | None = None
 
     # Ranked SFT mode: generate N trajectories, pick best by reward, SFT on it.
     # "none": standard GRPO training (default).
