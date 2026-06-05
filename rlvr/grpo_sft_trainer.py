@@ -135,6 +135,7 @@ def _compute_sft_diffusion_loss(
     velocity_weight: bool = False,
     kl_coef: float = 0.0,
     base_model: nn.Module | None = None,
+    prefer_external_base: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute standard SFT diffusion loss with ego + neighbor targets.
 
@@ -176,8 +177,13 @@ def _compute_sft_diffusion_loss(
             Computes MSE(model_output, base_output) at the same (noise, timestep).
             Requires either LoRA (uses disable_adapter) or a separate base_model.
         base_model: Frozen reference model for KL/baseline-IL in full-model (non-LoRA)
-            training. Ignored when the policy model has LoRA (uses disable_adapter
-            instead). Must be in eval mode with requires_grad=False.
+            training. By default ignored when the policy model has LoRA (uses
+            disable_adapter instead). Must be in eval mode with requires_grad=False.
+        prefer_external_base: If True AND base_model is not None, route the base pass
+            (neighbor_reg / baseline ego-IL / KL) through the EXTERNAL frozen base_model
+            instead of disable_adapter — even when the policy has LoRA. Lets these terms
+            anchor to the true original baseline rather than the merged warmstart.
+            Default False preserves the disable_adapter (warmstart) behavior exactly.
 
     Returns:
         (loss, metrics_dict)
@@ -322,6 +328,10 @@ def _compute_sft_diffusion_loss(
         # Base model forward pass: needed for neighbor_reg, baseline ego IL, or KL
         need_base_pass = use_neighbor_reg or (use_ego_il and ego_il_mode == "baseline") or use_kl
         has_lora = hasattr(inner, "disable_adapter")
+        if need_base_pass and prefer_external_base and base_model is None:
+            raise ValueError(
+                "neighbor_reg_anchor='baseline' requires an external base_model; got None"
+            )
         if need_base_pass and not has_lora and base_model is None:
             active = []
             if use_kl:
@@ -336,12 +346,26 @@ def _compute_sft_diffusion_loss(
                 "Note: neighbor_reg only works with LoRA's disable_adapter."
             )
         if need_base_pass:
-            if has_lora:
+            use_external = prefer_external_base and (base_model is not None)
+            if has_lora and not use_external:
                 with inner.disable_adapter(), torch.no_grad():
                     _, base_outputs = model(merged_inputs)
             else:
-                with torch.no_grad():
-                    _, base_outputs = base_model(merged_inputs)
+                # The decoder dispatches on self.training: train mode ->
+                # _forward_training returns "model_output" (the denoiser output at
+                # this (noise, t)); eval mode -> _forward_inference returns a sampled
+                # "prediction" with NO "model_output" key. The disable_adapter path
+                # above runs the policy in train mode (model.train() in the epoch
+                # loop), so the external base_model must also forward in train mode to
+                # return "model_output" identically. Params stay frozen via
+                # requires_grad_(False) + no_grad; only the forward mode is toggled.
+                base_was_training = base_model.training
+                base_model.train()
+                try:
+                    with torch.no_grad():
+                        _, base_outputs = base_model(merged_inputs)
+                finally:
+                    base_model.train(base_was_training)
             base_output = base_outputs["model_output"][:, :, 1:, :]  # [B, P, T, 4]
 
             # Neighbor reg
@@ -405,6 +429,7 @@ def train_epoch_ranked_sft(
     exploration_optimizer=None,
     run_dir=None,
     base_model: nn.Module | None = None,
+    prefer_external_base: bool = False,
 ) -> dict[str, float]:
     """GRPO-ranked SFT epoch: generate, rank, filter, train with SFT loss.
 
@@ -1242,6 +1267,7 @@ def train_epoch_ranked_sft(
             velocity_weight=config.sft_velocity_weight,
             kl_coef=config.get_kl_coef(epoch, config.train_epochs),
             base_model=_base_model_ref,
+            prefer_external_base=(config.neighbor_reg_anchor == "baseline"),
         )
 
         # Scale loss to preserve per-scene gradient magnitude:
