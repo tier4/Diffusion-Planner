@@ -224,7 +224,7 @@ class GRPOConfig:
     # high-progress lane-departing scenes at top, heavily crashed scenes at bottom).
     reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
     lane_dep_trim_n: int = 0  # drop N scenes with highest lane departure fraction (0=disabled)
-    neighbor_loss_weight: float = 0.0  # weight for neighbor prediction regularization (0=disabled)
+    neighbor_loss_weight: float = 0.1  # weight for neighbor SFT loss term (default 0.1 matches original SFT alpha_neighbor_loss; 0=disabled)
 
     # Ranked SFT mode: generate N trajectories, pick best by reward, SFT on it.
     # "none": standard GRPO training (default).
