@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-import sys
+from pathlib import Path
 
 import pandas as pd
 import torch
@@ -34,6 +34,35 @@ def boolean(v):
         return False
     else:
         raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def find_upward(start_file: str, target_name: str) -> Path:
+    directory = Path(start_file).resolve().parent
+    for candidate_dir in [directory, *directory.parents]:
+        candidate = candidate_dir / target_name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"{target_name} up {directory}")
+
+
+def log_dataset_artifact(run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str) -> None:
+    artifact = wandb.Artifact(
+        name=f"dataset_{exp_name}",
+        type="dataset",
+        metadata={"train_set_list": train_set_list, "valid_set_list": valid_set_list},
+    )
+    train_path = Path(train_set_list)
+    valid_path = Path(valid_set_list)
+    artifact.add_file(str(train_path), name=train_path.name)
+    artifact.add_file(str(valid_path), name=valid_path.name)
+    summary_csv = find_upward(train_set_list, "summary.csv")
+    artifact.add_file(str(summary_csv), name="summary.csv")
+    try:
+        rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
+        artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
+    except FileNotFoundError:
+        print("rosbag_summary.csv not found, skipping.")
+    run.use_artifact(artifact)
 
 
 def get_args():
@@ -334,6 +363,7 @@ def model_training(args):
             dir=f"{save_path}",
         )
         wandb.config.update(args)
+        log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
 
     if args.ddp:
         torch.distributed.barrier()
