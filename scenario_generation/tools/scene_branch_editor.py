@@ -672,6 +672,16 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             ".scrub .head {display: none !important;} "
             ".scrub .wrap {margin: 0 !important;} "
             ".scrub {padding-top: 0 !important; padding-bottom: 0 !important;} "
+            # YouTube-style scrub bar: hardcode the track gradient (red played /
+            # gray remaining) on the pseudo-elements, using Gradio's JS-set
+            # --range_progress as the split (bypasses the --slider-color theme var).
+            ".scrub input[type='range']::-webkit-slider-runnable-track "
+            "{background: linear-gradient(to right, #ff0000 var(--range_progress), "
+            "#c9ccd1 var(--range_progress)) !important;} "
+            ".scrub input[type='range']::-moz-range-progress "
+            "{background-color: #ff0000 !important;} "
+            ".scrub input[type='range']::-moz-range-track "
+            "{background: #c9ccd1 !important;}"
             # Vertically center every control in the playback bar.
             ".playbar {align-items: center !important;} "
             ".playbar > * {align-self: center !important; margin-top: 0 !important; "
@@ -808,17 +818,19 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                             value=0, precision=0, show_label=False, container=False,
                             min_width=72, scale=0,
                         )
-                    # View radius / FPS tucked into a collapsed config accordion.
-                    with gr.Accordion("⚙ View / FPS", open=False):
-                        with gr.Row():
-                            view_half = gr.Number(
-                                value=50, precision=0, label="View radius (m)",
-                                minimum=10, maximum=200, scale=1,
-                            )
-                            play_fps = gr.Number(
-                                value=10, precision=0, label="FPS",
-                                minimum=1, maximum=30, scale=1,
-                            )
+
+                # View radius / FPS — collapsed config menu (outside the group so
+                # it has no box outline, matching the Export accordion).
+                with gr.Accordion("⚙ View / FPS", open=False):
+                    with gr.Row():
+                        view_half = gr.Number(
+                            value=50, precision=0, label="View radius (m)",
+                            minimum=10, maximum=200, scale=1,
+                        )
+                        play_fps = gr.Number(
+                            value=10, precision=0, label="FPS",
+                            minimum=1, maximum=30, scale=1,
+                        )
 
                 # Simulate controls — horizontal row
                 with gr.Row():
