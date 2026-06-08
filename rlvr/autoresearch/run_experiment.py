@@ -575,7 +575,34 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             grpo_config.kl_coef > 0.0
             or (grpo_config.ego_il_weight > 0.0 and grpo_config.ego_il_mode == "baseline")
         )
-        if _needs_base and not grpo_config.use_lora:
+        if grpo_config.neighbor_reg_anchor == "baseline":
+            # The external anchor is consumed ONLY by the ranked-SFT trainer (it is
+            # passed as base_model + prefer_external_base to train_epoch_ranked_sft).
+            # Fail loudly rather than load-and-ignore for the other trainers.
+            if (grpo_config.use_closed_loop or grpo_config.use_exploration_policy
+                    or grpo_config.ranked_sft_mode == "none"):
+                raise ValueError(
+                    "neighbor_reg_anchor='baseline' is only supported by the ranked-SFT "
+                    "trainer (ranked_sft_mode in gt_neighbor/baseline_neighbor/curated, with "
+                    "use_closed_loop=False and use_exploration_policy=False); got "
+                    f"ranked_sft_mode={grpo_config.ranked_sft_mode!r}, "
+                    f"use_closed_loop={grpo_config.use_closed_loop}, "
+                    f"use_exploration_policy={grpo_config.use_exploration_policy}. "
+                    "Loading the anchor for another trainer would silently have no effect."
+                )
+            anchor_path = grpo_config.neighbor_reg_anchor_path
+            if not anchor_path or not Path(anchor_path).is_file():
+                raise ValueError(
+                    "neighbor_reg_anchor='baseline' requires neighbor_reg_anchor_path "
+                    f"to point to an existing .pth file; got {anchor_path!r}"
+                )
+            print(f"Loading EXTERNAL frozen baseline anchor from {anchor_path} "
+                  f"(neighbor_reg_anchor='baseline')...")
+            _frozen_base_model, _ = load_model(Path(anchor_path), DEVICE)
+            _frozen_base_model.eval()
+            for p in _frozen_base_model.parameters():
+                p.requires_grad_(False)
+        elif _needs_base and not grpo_config.use_lora:
             print(f"Loading frozen base model (kl_coef={grpo_config.kl_coef}, "
                   f"ego_il={grpo_config.ego_il_weight}/{grpo_config.ego_il_mode})...")
             _frozen_base_model, _ = load_model(checkpoint_path, DEVICE)

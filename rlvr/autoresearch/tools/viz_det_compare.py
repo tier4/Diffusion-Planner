@@ -70,6 +70,8 @@ def main():
     p.add_argument("--output_dir", required=True)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--collage_cols", type=int, default=5)
+    p.add_argument("--show_gt", action="store_true",
+                   help="overlay the scene's ego_agent_future (hand-drawn GT) as a 3rd trajectory")
     p.add_argument("--no_viz", action="store_true",
                    help="Skip per-scene PNGs and collage; only print stats.")
     args = p.parse_args()
@@ -90,7 +92,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     results_a, results_b = [], []
-    cached_trajs_a, cached_trajs_b = [], []
+    cached_trajs_a, cached_trajs_b, cached_gt = [], [], []
 
     for start in range(0, len(scene_paths), args.batch_size):
         batch_paths = scene_paths[start : start + args.batch_size]
@@ -147,11 +149,19 @@ def main():
             cached_trajs_a.append(traj_a_np)
             cached_trajs_b.append(traj_b_np)
 
+            gt_np = None
+            if args.show_gt:
+                _gt = np.load(sp, allow_pickle=True)["ego_agent_future"]
+                gt_np = _gt[:, :4] if _gt.shape[-1] >= 4 else _gt
+            cached_gt.append(gt_np)
+
             if args.no_viz:
                 continue
 
             fig, ax = plt.subplots(1, 1, figsize=(12, 12))
             draw_scene_base(ax, sp)
+            if gt_np is not None:
+                draw_traj(ax, gt_np, "GT (hand-drawn)", "#2ca02c", sp)
             draw_traj(ax, traj_a_np,
                       f"{args.label_a} (sc={sc_a:.2f}m)", "#1f77b4", sp)
             draw_traj(ax, traj_b_np,
@@ -222,6 +232,8 @@ def main():
             ax = axes_flat[si]
 
             draw_scene_base(ax, sp)
+            if si < len(cached_gt) and cached_gt[si] is not None:
+                draw_traj(ax, cached_gt[si], "GT", "#2ca02c", sp)
             draw_traj(ax, cached_trajs_a[si], args.label_a, "#1f77b4", sp)
             draw_traj(ax, cached_trajs_b[si], args.label_b, "#d62728", sp)
 

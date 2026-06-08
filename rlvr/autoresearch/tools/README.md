@@ -290,6 +290,61 @@ One-shot K=N + closed-loop rollout recovery diagnostic. Applies parallel / yaw /
 ### recovery_sim.py
 Sim-style closed-loop rollout PNG renderer for a single perturbed scene. Used both standalone and as the rollout primitive for `recovery_sim_ghost`.
 
+## Road-border (HEAL) & realized-ego analysis
+
+Tools for measuring and fixing **road-border** behaviour against the *real map* borders. The parsed psim NPZ `line_strings` conflate lane lines with curbs, so reward RB scoring / `road_border` guidance on them is invalid — these tools rebuild and score against true map borders. All reuse `reward.py` OBB geometry (`_obb_corners`, `_point_to_segments_min_dist`, `compute_road_border_penalty`) and `LaneletSceneBuilder` — no hand-rolled geometry. Lanelet-dependent ones must run under a ROS env.
+
+### rebuild_realborder_npz.py
+Rewrite a scene NPZ's `line_strings` with the REAL map borders in the scene's ego frame. Recovers ego world pose (`recover_ego_world_pose_from_goal`), rebuilds the canonical stop_line+road_border tensor (`LaneletSceneBuilder.build_line_strings_tensor`, ch2=stop_line/ch3=road_border), transforms point xy into ego frame, injects `ego_shape`, copies other fields. After this, `viz_p4_recovery` / `compute_reward_batch` RB scoring AND `road_border` guidance act on the true curb. Usage: `--scenes <json> --route <pkl> --ego_shape WB,L,W --out_dir <dir> --out_list <json>`.
+
+### verify_target_realborder.py
+Check whether a scene's target `ego_agent_future` crosses the road border, using `compute_road_border_penalty` with real map borders (not the parsed NPZ line_strings). The tool reports the crossing gate (t≥1, the gate excludes t=0 by construction) and the per-timestep min border distance over t≥1. Pipeline rule: before training toward a target, confirm the target itself stays off the curb; discard scenes whose target crosses. **Related rule (enforce separately):** because the crossing gate ignores t=0, also require the ego OBB to be off the border at t=0 — build the ego current pose and read `compute_road_border_penalty` `per_ts_min[:,0] ≥ rb_cross_thresh` — you cannot train recovery from an already-violating start state.
+
+### psim_realized_rb.py
+Road-border crossings of the REALIZED closed-loop ego (from a psim `.db3` bag's `/localization/kinematic_state`), scored vs real map borders. `--stride 10` subsamples ~100Hz localization to ~10Hz; `--front_cut`/`--tail_cut` skip route ends; `--localize` bins crossings by arc. Reports full distribution (min/p5/p50/mean) + crossings. Usage: `--route <pkl> --bag <bag_dir> --ego_shape WB,L,W --stride 10 --front_cut 50 --tail_cut 50 --localize`.
+
+### psim_per_arc_metrics.py
+Per-arc CL + road-border table for one-or-more psim bags side by side. Per pose: arc + |lateral| from route centerline (CL) via `project_to_polyline`, and border distance via the reward OBB (RB). Bins by arc and prints per-bin clμ (mean |lat|), clmx (max |lat|), rb min-dist, X (crossings) + an in-bounds total. Usage: `python -m rlvr.autoresearch.tools.psim_per_arc_metrics --route <pkl> --ego_shape WB,L,W [--bin_m 250 --front_cut 50 --tail_cut 50 --stride 10] --models LABEL1 BAG1 LABEL2 BAG2 ...`.
+
+### psim_rb_crossing_viz.py
+**Video of where the RB crossings happen.** Renders REALIZED RB-crossing regions as dual-ego WebM clips (baseline vs model, arc-synced over the actual map lanes + road borders + route centerline; the ego footprint gets a red outline on frames where its perimeter is within `rb_cross_thresh` of a border). Auto-detects the crossing arc windows from EITHER bag (so you see exactly the places the realized ego grazes the curb) and emits one WebM per window. Same footprint/border style as the perfect-track ghost sims; fails loudly if ffmpeg errors. Run under a ROS env. Usage: `python -m rlvr.autoresearch.tools.psim_rb_crossing_viz --route <pkl> --baseline_bag <bag> --model_bag <bag> --model_label <NAME> --ego_shape WB,L,W --output_dir <dir> [--stride 5 --front_cut 50 --tail_cut 50 --view_half 22 --pad_m 60 --fps 10]`.
+
+### ghost_replay_openloop.py
+Dual-model OPEN-LOOP perfect-tracking replay video per scene (baseline vs model): one deterministic inference at t0 per model, each ego perfect-tracks its 80-step plan, preceded by the recorded ego history; per-neighbor visibility windowing. WebM.
+
+### mine_arc_from_goalpose.py
+Filter already-converted (ego-centric) psim NPZs to a route arc band: recover ego world pose from each NPZ's `goal_pose` (`recover_ego_world_pose_from_goal`) → `project_to_polyline` → keep frames in `[arc_lo, arc_hi]`. Closes the frame→arc gap for arc-targeted MEND mining. Usage: `--npz_dir <dir> --route_pkl <pkl> --arc_lo <m> --arc_hi <m> --out_list <json>`.
+
+### track_cl_heal_learning.py
+Per-epoch L2-to-target distribution (+ per-arc) tracker for a HEAL/curated run, on a held-out arc scene set — distinguishes genuine healing (held-out improves) from training-fit overfit.
+
+### build_baseline_det_target.py
+Build curated GRAFT-CL targets = a competent model's deterministic trajectory. Runs `--model`'s det inference (`eval_det_avoidance.det_inference_batched`) on a scene list, unit-normalizes the (cos,sin) heading columns, and writes the result into each NPZ's `ego_agent_future` (the curated SFT target) — for HEAL Mechanism B (train the wounded model toward a known-good line instead of ranking its own samples). `--model` is the TARGET source (e.g. the baseline that keeps the line where the grafted model drifted), NOT the model being trained; train curated (lr 5e-5) warm-started from the wounded model. Usage: `--model <competent.pth> --scenes <json> --ego_shape WB,L,W --out_dir <dir> --out_list <json>`.
+
+## Data preparation (NPZ format / mining)
+
+### convert_3col_to_4col.py / convert_4col_to_3col.py
+Convert ego/neighbor futures between canonical 3-col `(x,y,heading)` and 4-col `(x,y,cos,sin)`. Curated ranked-SFT cats prob+normal in one batch, so all scenes must share a column format. No silent fallbacks: missing fields raise.
+
+### pad_neighbors_320.py
+Pad/truncate `neighbor_agents_*` to a fixed neighbor-slot count (e.g. 320) so heterogeneous NPZs stack into one batch.
+
+### cpp_bin_to_npz.py
+Convert the C++ converter's binary tensor dumps to training-format NPZs (heading → cos/sin where needed).
+
+### filter_avoidance_fittable.py
+Keep only scenes where a competent target source can produce a candidate that clears all safety/feasibility gates with real margin — i.e. genuinely fittable avoidance scenes; drops scenes even an expert can't satisfy.
+
+### cata_select_or_window.py
+Select the time-window NPZs around an override moment from a per-session parsed-rosbag NPZ dir (sibling `.json` carries the ego timestamp).
+
+### ghost_render.py
+Standalone dual-ego ghost-overlay frame renderer (footprints over map lanes/borders/route); rollout primitive shared by the ghost-sim tools.
+
+### Related tools in other dirs
+- `scenario_generation/tools/select_npz_by_arc_range.py` — select scenes by route arc-range (filters on arc-range + `--speed_thresh`; records signed/abs lateral per scene but does not filter on it), optionally inject `ego_shape`; world pose via `recover_ego_world_pose_from_goal`.
+- `ros_scripts/extract_route_from_chunk0.py` — extract/pickle the latched route message from a session's chunk-0 rosbag (run under ROS env).
+
 ## Frame-transform note
 
 `disturb_and_replay` shifts `ego_current_state[0:4]` and `ego_agent_past` by `(dx, dy, dtheta)` but leaves `lanes` / `route_lanes` / `line_strings` in the original world frame. The model output is in an "ego-current-pose-relative" frame: `pred[0]` is always near `(1, 0)` for a 10 m/s ego, regardless of perturbation magnitude. To draw the trajectory in the world/lanelet frame, **add `(dx, dy)` to every step** and place the perturbed-ego footprint at `(dx, dy)`. Skip this and the perturbation will look invisible. `viz_p4_recovery` and `viz_prism_compare` both apply the translation; the canonical helper is `viz_prism_compare._to_lanelet_frame`.

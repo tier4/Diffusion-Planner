@@ -680,7 +680,9 @@ def compute_batched_grpo_loss(
         policy_losses_k, ref_losses_k = _compute_batched_losses_and_ref(
             policy_model, trajectories_tensor, data, model_args, device, noise, t,
             compute_ref=True,
-            neighbor_loss_weight=getattr(config, 'neighbor_loss_weight', 0.0),
+            # None (the dataclass default) means "GRPO neighbor term off" → 0.0,
+            # preserving prior behavior for configs that never set this field.
+            neighbor_loss_weight=(getattr(config, 'neighbor_loss_weight', None) or 0.0),
         )
         policy_losses_sum = policy_losses_sum + policy_losses_k
         ref_losses_sum = ref_losses_sum + ref_losses_k
