@@ -164,6 +164,11 @@ def main():
             ax.plot(corners[:, 0], corners[:, 1], "-", color=box_c,
                     lw=1.4 if is_inj else 0.8, alpha=0.9 if is_inj else 0.7,
                     zorder=3.5 if is_inj else 2)
+            # past / history trajectory (model input): dashed, to distinguish from solid future
+            hist = _nonzero_rows(past[:, :2])
+            if hist.shape[0] > 0:
+                ax.plot(hist[:, 0], hist[:, 1], "--", color=box_c,
+                        lw=1.0 if is_inj else 0.7, alpha=0.7 if is_inj else 0.4, zorder=2)
             fut = _nonzero_rows(neigh_future[s, p, :, :2])
             if fut.shape[0] > 0:
                 ax.plot(fut[:, 0], fut[:, 1], "-", color=box_c,

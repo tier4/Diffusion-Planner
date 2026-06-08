@@ -103,12 +103,18 @@ def get_args():
                         help="weight on the neighbor-collision penalty in the reward")
     parser.add_argument("--w_road_border", type=float, default=1.0,
                         help="weight on the road-border penalty in the reward (0 disables)")
-    parser.add_argument("--w_anchor", type=float, default=0.0,
+    parser.add_argument("--w_anchor", type=float, default=0.1,
                         help="weight on the realism anchor penalty (ADE to nearest GT-mode "
                              "prototype) in the reward (0 disables)")
     parser.add_argument("--anchor_prototypes_path", type=str, default="",
                         help="path to a (K, T, 2) prototypes .npy from sampling/build_prototypes.py; "
-                             "required when --w_anchor > 0")
+                             "if empty and --w_anchor > 0, prototypes are built automatically from "
+                             "--train_set_list and cached under --save_dir")
+    parser.add_argument("--anchor_num_clusters", type=int, default=64,
+                        help="K: trajectory-mode prototypes to build when auto-generating anchors")
+    parser.add_argument("--anchor_max_samples", type=int, default=30000,
+                        help="max GT futures to subsample when auto-building anchor prototypes "
+                             "(0 = use all)")
     parser.add_argument("--sft_prob", type=float, default=0.5,
                         help="probability of running a normal supervised step instead of a "
                              "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)")
@@ -236,13 +242,38 @@ def model_training(args):
     # Realism anchor prototypes (KMeans GT-mode vocabulary) for the optional anchor reward.
     anchor_prototypes = None
     if args.w_anchor > 0.0:
-        if not args.anchor_prototypes_path:
-            raise ValueError("--w_anchor > 0 requires --anchor_prototypes_path")
-        protos = np.load(args.anchor_prototypes_path)  # (K, T, 2)
+        proto_path = args.anchor_prototypes_path
+        if not proto_path:
+            # Auto-build from the training set and cache under the run dir (args.save_dir is
+            # identical on every rank). Only rank 0 builds/writes; the others wait and load.
+            proto_path = os.path.join(
+                args.save_dir, f"anchor_prototypes_k{args.anchor_num_clusters}.npy"
+            )
+            if global_rank == 0 and not os.path.exists(proto_path):
+                from sampling.build_prototypes import load_xy_futures, torch_kmeans
+
+                with open(args.train_set_list, "r", encoding="utf-8") as f:
+                    paths = json.load(f)
+                if isinstance(paths, dict):  # sampling.py dict format {"files": [...]}
+                    paths = paths["files"]
+                print(f"Auto-building anchor prototypes (K={args.anchor_num_clusters}) from "
+                      f"{len(paths)} GT futures -> {proto_path} ...")
+                feats, T = load_xy_futures(paths, args.anchor_max_samples, args.seed)
+                centers, _ = torch_kmeans(
+                    torch.from_numpy(feats), args.anchor_num_clusters, 100, args.seed, args.device
+                )
+                protos = centers.cpu().numpy().reshape(
+                    args.anchor_num_clusters, T, 2
+                ).astype(np.float32)
+                np.save(proto_path, protos)
+                print(f"Saved auto-built anchor prototypes {protos.shape} to {proto_path}")
+            if args.ddp:
+                torch.distributed.barrier()  # ensure the file exists before other ranks load
+        protos = np.load(proto_path)  # (K, T, 2)
         anchor_prototypes = torch.tensor(protos, dtype=torch.float32, device=args.device)
         if global_rank == 0:
             print(f"Anchor reward enabled: w_anchor={args.w_anchor}, "
-                  f"prototypes {tuple(anchor_prototypes.shape)} from {args.anchor_prototypes_path}")
+                  f"prototypes {tuple(anchor_prototypes.shape)} from {proto_path}")
 
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
