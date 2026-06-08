@@ -1764,12 +1764,10 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         step_slider.release(
             lambda v: v, [step_slider], [step_mirror],
         )
+        # Client-side sync (js -> no server round-trip, no loading spinner) so the
+        # hidden mirror and the visible Step box update instantly while dragging.
         step_slider.change(
-            lambda v: v, [step_slider], [step_mirror],
-        )
-        # Keep the Step box (right of the bar) in sync as scrubber/buttons move.
-        step_slider.change(
-            lambda v: v, [step_slider], [step_jump_box],
+            None, [step_slider], [step_mirror, step_jump_box], js="(v) => [v, v]",
         )
         # Typing in the Step box jumps there (same handler, box as the step source).
         _nav_inputs_jump = ([tree_state, step_jump_box, view_half, selected_obstacle_state,
