@@ -20,6 +20,7 @@ from torch import nn
 from tqdm import tqdm
 
 from diffusion_planner.grpo_utils import (
+    compute_anchor_distance,
     compute_collision_reward,
     compute_grpo_loss,
     compute_group_advantages,
@@ -73,7 +74,7 @@ def _sft_step(raw_inputs, model, optimizer, args, ema):
     }
 
 
-def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector):
+def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, anchor_prototypes):
     """A GRPO step: sample a group per scene, reward, advantage, policy-gradient update."""
     n = args.num_generations
 
@@ -103,6 +104,13 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector):
     reward, nc_penalty, rb_penalty = compute_collision_reward(
         ego_world, norm_exp, neighbors_future, neighbors_future_valid, args
     )
+
+    # Optional realism anchor: penalise distance to the nearest GT-mode prototype.
+    anchor_dist = torch.zeros_like(reward)
+    if anchor_prototypes is not None and args.w_anchor > 0.0:
+        anchor_dist = compute_anchor_distance(ego_world, anchor_prototypes)
+        reward = reward - args.w_anchor * anchor_dist
+
     advantages = compute_group_advantages(reward, num_scenes, n, args.advantage_eps)
 
     optimizer.zero_grad()
@@ -121,12 +129,13 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector):
         "reward_max": reward.view(num_scenes, n).max(dim=1).values.mean().detach(),
         "neighbor_collision_penalty": nc_penalty.sum(dim=-1).mean().detach(),
         "road_border_penalty": rb_penalty.sum(dim=-1).mean().detach(),
+        "anchor_distance": anchor_dist.mean().detach(),
         "abs_advantage": loss_dict["abs_advantage"],
         "is_grpo": torch.tensor(1.0),
     }
 
 
-def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector):
+def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector, anchor_prototypes):
     epoch_loss = []
 
     model.train()
@@ -147,7 +156,8 @@ def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector
         if step_rng.random() < args.sft_prob:
             step_loss = _sft_step(raw_inputs, model, optimizer, args, ema)
         else:
-            step_loss = _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector)
+            step_loss = _grpo_step(
+                raw_inputs, model, optimizer, args, ema, collider_injector, anchor_prototypes)
 
         if args.ddp:
             torch.cuda.synchronize()

@@ -34,6 +34,12 @@ git diff > ${SAVE_PATH}/git_diff.txt
 # --neighbor_inject_* / --collider_keep_clear_radius flags below if needed.
 # (optional) sanity-check the augmentation + sample diversity + reward:
 #   python3 visualize_grpo_samples.py --resume_model_path ${RESUME_MODEL_PATH} --data_list ${TRAIN_SET_LIST} --output_path ${SAVE_PATH}/grpo_samples.png
+#
+# (optional) realism anchor reward: penalise distance to the nearest GT-mode prototype so the
+# policy stays on plausible maneuvers while avoiding colliders. First build the prototypes once:
+#   python3 sampling/build_prototypes.py --data_list ${TRAIN_SET_LIST} \
+#       --output ${SAVE_PATH}/prototypes_k64.npy --num_clusters 64 --max_samples 30000
+# then pass --w_anchor <w> --anchor_prototypes_path ${SAVE_PATH}/prototypes_k64.npy below.
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_grpo_predictor.py \
   --exp_name ${exp_name}_grpo \
   --train_set_list ${TRAIN_SET_LIST} \

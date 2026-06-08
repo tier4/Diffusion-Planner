@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 
+import numpy as np
 import pandas as pd
 import torch
 import wandb
@@ -102,6 +103,12 @@ def get_args():
                         help="weight on the neighbor-collision penalty in the reward")
     parser.add_argument("--w_road_border", type=float, default=1.0,
                         help="weight on the road-border penalty in the reward (0 disables)")
+    parser.add_argument("--w_anchor", type=float, default=0.0,
+                        help="weight on the realism anchor penalty (ADE to nearest GT-mode "
+                             "prototype) in the reward (0 disables)")
+    parser.add_argument("--anchor_prototypes_path", type=str, default="",
+                        help="path to a (K, T, 2) prototypes .npy from sampling/build_prototypes.py; "
+                             "required when --w_anchor > 0")
     parser.add_argument("--sft_prob", type=float, default=0.5,
                         help="probability of running a normal supervised step instead of a "
                              "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)")
@@ -226,6 +233,17 @@ def model_training(args):
         print(f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
               f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m")
 
+    # Realism anchor prototypes (KMeans GT-mode vocabulary) for the optional anchor reward.
+    anchor_prototypes = None
+    if args.w_anchor > 0.0:
+        if not args.anchor_prototypes_path:
+            raise ValueError("--w_anchor > 0 requires --anchor_prototypes_path")
+        protos = np.load(args.anchor_prototypes_path)  # (K, T, 2)
+        anchor_prototypes = torch.tensor(protos, dtype=torch.float32, device=args.device)
+        if global_rank == 0:
+            print(f"Anchor reward enabled: w_anchor={args.w_anchor}, "
+                  f"prototypes {tuple(anchor_prototypes.shape)} from {args.anchor_prototypes_path}")
+
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
 
@@ -316,7 +334,8 @@ def model_training(args):
             torch.distributed.barrier()
 
         train_loss, train_total_loss = train_grpo_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, collider_injector
+            train_loader, diffusion_planner, optimizer, args, model_ema, collider_injector,
+            anchor_prototypes,
         )
 
         if global_rank == 0:

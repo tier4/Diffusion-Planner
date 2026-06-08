@@ -139,6 +139,32 @@ def compute_collision_reward(
     return reward, nc_penalty, rb_penalty
 
 
+@torch.no_grad()
+def compute_anchor_distance(
+    ego_world: torch.Tensor,
+    prototypes: torch.Tensor,
+) -> torch.Tensor:
+    """ADE from each generated trajectory to its nearest GT-mode prototype.
+
+    The prototypes are a KMeans "vocabulary" of plausible ego maneuvers (see
+    ``sampling/build_prototypes.py``), in the same ego-centric frame as ``ego_world``. Rewarding
+    a small distance to the *nearest* mode anchors samples to realistic driving without forcing
+    them onto the scene's own GT (which the synthetic colliders are placed to hit).
+
+    Args:
+        ego_world: [B, T, 4] generated ego trajectories (x, y, cos, sin), ego frame, metres.
+        prototypes: [K, Tp, 2] mode prototype trajectories (x, y).
+
+    Returns:
+        d_min: [B] mean-waypoint L2 distance (ADE) to the closest prototype.
+    """
+    ego_xy = ego_world[..., :2]
+    T = min(ego_xy.shape[1], prototypes.shape[1])
+    diff = ego_xy[:, None, :T, :] - prototypes[None, :, :T, :]  # [B, K, T, 2]
+    ade = torch.linalg.norm(diff, dim=-1).mean(dim=-1)  # [B, K]
+    return ade.min(dim=1).values  # [B]
+
+
 def compute_group_advantages(reward: torch.Tensor, num_scenes: int, n: int, eps: float):
     """Group-relative advantages: normalise rewards within each group of ``n`` samples.
 
