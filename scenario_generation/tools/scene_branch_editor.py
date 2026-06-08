@@ -67,10 +67,51 @@ ALL_GUIDANCE_NAMES = [
     "road_border",
     "route_following",
     "collision",
+    "collision_swerve",
     "anchor_following",
     "lateral",
     "longitudinal",
 ]
+
+# Lateral guidance: the GUI exposes two sliders -- the offset target eta
+# (sign = direction: + left / - right) and a separate strength (energy scale).
+# lambda is the max lateral offset in metres that eta scales against.
+_LATERAL_LAMBDA = 3.0
+# Collision-swerve guidance: the slider sign picks the side (+ left / - right),
+# magnitude is the strength. Default proximity range in metres.
+_COLLISION_SWERVE_RANGE = 8.0
+
+
+def _build_guidance_params(name, scale, *, speed=None, anchor_path=None,
+                           anchor_index=0, lateral_strength=1.0):
+    """Map a (name, slider value) pair to the (scale, params) a GuidanceConfig needs.
+
+    Centralises the per-guidance slider semantics so the Generate, step-recompute,
+    and Simulate paths all interpret the sliders identically:
+      - speed            -> v_high/v_low derived from current ego speed
+      - anchor_following -> prototypes_path + anchor_index
+      - lateral          -> slider = offset target eta in [-1, 1] (+L/-R);
+                            energy scale comes from the separate Lateral Strength slider
+      - collision_swerve -> slider sign = side (+L/-R), magnitude = energy scale
+      - others           -> slider is the energy scale verbatim
+    """
+    params = {}
+    scale = float(scale)
+    if name == "speed" and speed is not None:
+        params["v_high"] = speed * 1.2
+        params["v_low"] = max(0.0, speed * 0.5)
+    if name == "anchor_following" and anchor_path:
+        params["prototypes_path"] = anchor_path
+        params["anchor_index"] = int(anchor_index)
+    if name == "lateral":
+        params["eta_lat"] = max(-3.0, min(3.0, scale))
+        params["lambda_lat"] = _LATERAL_LAMBDA
+        scale = float(lateral_strength)
+    if name == "collision_swerve":
+        params["side"] = 1.0 if scale >= 0 else -1.0
+        params["range"] = _COLLISION_SWERVE_RANGE
+        scale = abs(scale)
+    return scale, params
 
 
 class _ModelCache:
@@ -137,12 +178,14 @@ class _ModelCache:
         ego_shape_override: tuple[float, ...] | None = None,
         anchor_index: int = 0,
         anchor_path: str | None = None,
+        lateral_strength: float = 1.0,
     ) -> np.ndarray | None:
         """Run guided inference. Returns (n_samples, 80, 4)."""
         self._ensure_loaded()
         from diffusion_planner.model.guidance.composer import GuidanceComposer
         from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 
+        import guidance_gui.custom_guidance  # noqa: F401 -- registers collision_swerve
         from guidance_gui.generate_samples import generate_samples
 
         data = self._load_npz(npz_path, obstacles=obstacles,
@@ -164,13 +207,10 @@ class _ModelCache:
 
         fns = []
         for name, scale in guidance_cfgs:
-            params = {}
-            if name == "speed":
-                params["v_high"] = speed * 1.2
-                params["v_low"] = max(0.0, speed * 0.5)
-            if name == "anchor_following" and anchor_path:
-                params["prototypes_path"] = anchor_path
-                params["anchor_index"] = int(anchor_index)
+            scale, params = _build_guidance_params(
+                name, scale, speed=speed, anchor_path=anchor_path,
+                anchor_index=anchor_index, lateral_strength=lateral_strength,
+            )
             fns.append(GuidanceConfig(name=name, enabled=True, scale=scale, params=params))
 
         composer = None
@@ -758,16 +798,35 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 )
                     with gr.Row():
                         for gname in ALL_GUIDANCE_NAMES[5:]:
-                            _min = -10.0 if gname == "lateral" else 0.0
+                            # Per-guidance slider semantics:
+                            #   lateral          -> offset target eta in [-1, 1] (+ left / - right)
+                            #   collision_swerve -> signed strength (sign = side, + left / - right)
+                            #   others           -> energy scale in [0, 10]
+                            if gname == "lateral":
+                                _smin, _smax, _sstep, _sval = -3.0, 3.0, 0.1, 0.0
+                                _slabel = "Lateral η (+L/-R)"
+                            elif gname == "collision_swerve":
+                                _smin, _smax, _sstep, _sval = -10.0, 10.0, 0.5, 3.0
+                                _slabel = "Collision Swerve (+L/-R)"
+                            else:
+                                _smin, _smax, _sstep, _sval = 0.0, 10.0, 0.5, 2.0
+                                _slabel = None
                             with gr.Column(min_width=100):
                                 guidance_toggles[gname] = gr.Checkbox(
                                     label=gname.replace("_following", "").replace("_", " ").title(),
                                     value=False, interactive=_has_model,
                                 )
                                 guidance_scales[gname] = gr.Slider(
-                                    minimum=_min, maximum=10.0, value=2.0, step=0.5,
-                                    show_label=False, interactive=_has_model,
+                                    minimum=_smin, maximum=_smax, value=_sval, step=_sstep,
+                                    label=_slabel, show_label=_slabel is not None,
+                                    interactive=_has_model,
                                 )
+                    with gr.Row():
+                        lateral_strength_sl = gr.Slider(
+                            minimum=0.1, maximum=2.0, value=1.0, step=0.1,
+                            label="Lateral Strength (how hard to pull toward η target)",
+                            interactive=_has_model,
+                        )
                     _default_proto = str(Path(__file__).resolve().parent.parent.parent
                                          / "guidance_gui" / "prototypes_k16.npy")
                     with gr.Accordion("Anchor Prototypes", open=False):
@@ -1219,15 +1278,17 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     if enabled:
                         cfgs.append((gname, float(scale)))
                 if cfgs:
-                    noise = float(guidance_args_tuple[-4])
-                    k = int(guidance_args_tuple[-3])
-                    a_idx = int(guidance_args_tuple[-2])
-                    a_path = str(guidance_args_tuple[-1])
+                    noise = float(guidance_args_tuple[-5])
+                    k = int(guidance_args_tuple[-4])
+                    a_idx = int(guidance_args_tuple[-3])
+                    a_path = str(guidance_args_tuple[-2])
+                    lat_str = float(guidance_args_tuple[-1])
                     raw_g = model_cache.predict_guided(
                         npz_path, cfgs, noise_scale=noise, n_samples=max(1, k),
                         zero_neighbors=zero_neighbors,
                         ego_shape_override=tree.ego_shape,
                         anchor_index=a_idx, anchor_path=a_path,
+                        lateral_strength=lat_str,
                     )
                     guided = [_traj_cos_sin_to_xyh(raw_g[j]) for j in range(raw_g.shape[0])]
             return det_traj, guided
@@ -1407,7 +1468,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         def on_generate_guided(tree, step, gt_on, view_r, selected_obs,
                                noise, k, det_on, det_cache, hide_nb,
                                rb_on, nb_on, traj_rb_on, traj_nb_on,
-                               anchor_idx, anchor_proto_path,
+                               anchor_idx, anchor_proto_path, lateral_strength,
                                *guidance_args):
             if model_cache is None or not model_cache.available:
                 return gr.update(), "No model loaded", det_cache, None
@@ -1441,6 +1502,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 obstacles=obs or None, zero_neighbors=hide_nb,
                 ego_shape_override=tree.ego_shape,
                 anchor_index=int(anchor_idx), anchor_path=str(anchor_proto_path),
+                lateral_strength=float(lateral_strength),
             )
             guided_list = [_traj_cos_sin_to_xyh(raw_guided[i]) for i in range(raw_guided.shape[0])]
 
@@ -1604,7 +1666,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         # Guidance toggle+scale inputs for recomputation, plus noise and K at end
         _g_inputs = ([v for gname in ALL_GUIDANCE_NAMES
                        for v in (guidance_toggles[gname], guidance_scales[gname])]
-                     + [guided_noise, guided_k, anchor_index_sl, anchor_path_tb])
+                     + [guided_noise, guided_k, anchor_index_sl, anchor_path_tb,
+                        lateral_strength_sl])
         _overlay_inputs = [show_guided, hide_neighbors, show_rb_dist, show_nb_dist,
                            show_traj_rb, show_traj_nb]
 
@@ -1730,7 +1793,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                 selected_obstacle_state, guided_noise, guided_k,
                                 show_det, det_traj_state, hide_neighbors,
                                 show_rb_dist, show_nb_dist, show_traj_rb, show_traj_nb,
-                                anchor_index_sl, anchor_path_tb]
+                                anchor_index_sl, anchor_path_tb, lateral_strength_sl]
                                + [v for gname in ALL_GUIDANCE_NAMES
                                   for v in (guidance_toggles[gname], guidance_scales[gname])])
         generate_guided_btn.click(
@@ -2283,25 +2346,23 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     GuidanceConfig,
                     GuidanceSetConfig,
                 )
-                _sim_anchor_idx = int(guidance_args[-2]) if len(guidance_args) >= 2 else 0
-                _sim_anchor_path = str(guidance_args[-1]) if len(guidance_args) > 1 else ""
+                _sim_lat_strength = float(guidance_args[-1]) if len(guidance_args) >= 1 else 1.0
+                _sim_anchor_path = str(guidance_args[-2]) if len(guidance_args) >= 2 else ""
+                _sim_anchor_idx = int(guidance_args[-3]) if len(guidance_args) >= 3 else 0
+                _ego = scene.ego_agent
+                _sim_spd = float(np.linalg.norm(_ego.current_velocity)) if _ego is not None else None
                 fns = []
                 for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
                     enabled = guidance_args[gi * 2]
                     scale = guidance_args[gi * 2 + 1]
                     if enabled:
-                        params = {}
-                        if gname == "speed":
-                            ego = scene.ego_agent
-                            if ego is not None:
-                                spd = float(np.linalg.norm(ego.current_velocity))
-                                params["v_high"] = spd * 1.2
-                                params["v_low"] = max(0.0, spd * 0.5)
-                        if gname == "anchor_following" and _sim_anchor_path:
-                            params["prototypes_path"] = _sim_anchor_path
-                            params["anchor_index"] = _sim_anchor_idx
+                        scale, params = _build_guidance_params(
+                            gname, scale, speed=_sim_spd,
+                            anchor_path=_sim_anchor_path, anchor_index=_sim_anchor_idx,
+                            lateral_strength=_sim_lat_strength,
+                        )
                         fns.append(GuidanceConfig(name=gname, enabled=True,
-                                                   scale=float(scale), params=params))
+                                                   scale=scale, params=params))
                 if fns:
                     set_cfg = GuidanceSetConfig(functions=fns, global_scale=1.0)
                     composer = GuidanceComposer(set_cfg)
@@ -2547,7 +2608,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         guided_trajs_state, det_traj_state]
                        + [v for gname in ALL_GUIDANCE_NAMES
                           for v in (guidance_toggles[gname], guidance_scales[gname])]
-                       + [anchor_index_sl, anchor_path_tb])
+                       + [anchor_index_sl, anchor_path_tb, lateral_strength_sl])
         sim_btn.click(
             on_simulate,
             _sim_inputs,
