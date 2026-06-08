@@ -224,8 +224,16 @@ class GRPOConfig:
     # high-progress lane-departing scenes at top, heavily crashed scenes at bottom).
     reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
     lane_dep_trim_n: int = 0  # drop N scenes with highest lane departure fraction (0=disabled)
-    neighbor_loss_weight: float = 0.1  # weight for neighbor SFT loss term (default 0.1 matches original SFT alpha_neighbor_loss; 0=disabled)
-    # Anchor source for the base pass used by neighbor_reg / baseline ego-IL / KL.
+    # Weight for the neighbor loss term, consumed by BOTH the ranked-SFT path
+    # (grpo_sft_trainer: neighbor SFT loss) and the GRPO path (grpo_loss: neighbor
+    # MSE on trajectories). None = use each path's own default: ranked-SFT → 0.1
+    # (matches original SFT alpha_neighbor_loss), GRPO → 0.0 (neighbor term off,
+    # preserving prior behavior). An explicit float (including 0.0 to disable) is
+    # honored verbatim by both paths. (Sentinel None avoids silently enabling the
+    # GRPO neighbor term for configs that never set this field.)
+    neighbor_loss_weight: float | None = None
+    # Anchor source for the base pass used by neighbor_reg / baseline ego-IL / KL,
+    # in the RANKED-SFT path only (the fully-batched GRPO trainer does not read it).
     # "warmstart" (default): forward the LoRA model with adapters disabled
     #   (disable_adapter) — i.e. the merged warmstart's predictions (current behavior).
     # "baseline": forward an EXTERNAL frozen base model (the true original baseline)

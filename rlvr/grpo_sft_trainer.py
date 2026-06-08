@@ -429,7 +429,6 @@ def train_epoch_ranked_sft(
     exploration_optimizer=None,
     run_dir=None,
     base_model: nn.Module | None = None,
-    prefer_external_base: bool = False,
 ) -> dict[str, float]:
     """GRPO-ranked SFT epoch: generate, rank, filter, train with SFT loss.
 
@@ -1258,7 +1257,9 @@ def train_epoch_ranked_sft(
             neighbor_mask=mini_neighbor_mask,
             device=device,
             K=config.diffusion_k_steps,
-            neighbor_loss_weight=config.neighbor_loss_weight,
+            # None (the dataclass default) means "ranked-SFT neighbor term = 0.1"
+            # (matches original SFT alpha_neighbor_loss); an explicit float (incl. 0.0) is honored.
+            neighbor_loss_weight=(0.1 if config.neighbor_loss_weight is None else config.neighbor_loss_weight),
             neighbor_reg_weight=config.neighbor_reg_weight,
             neighbor_reg_only=config.neighbor_reg_only,
             ego_il_weight=config.ego_il_weight,

@@ -577,10 +577,10 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         )
         if grpo_config.neighbor_reg_anchor == "baseline":
             anchor_path = grpo_config.neighbor_reg_anchor_path
-            if not anchor_path or not Path(anchor_path).exists():
+            if not anchor_path or not Path(anchor_path).is_file():
                 raise ValueError(
                     "neighbor_reg_anchor='baseline' requires neighbor_reg_anchor_path "
-                    f"to point to an existing .pth; got {anchor_path!r}"
+                    f"to point to an existing .pth file; got {anchor_path!r}"
                 )
             print(f"Loading EXTERNAL frozen baseline anchor from {anchor_path} "
                   f"(neighbor_reg_anchor='baseline')...")
