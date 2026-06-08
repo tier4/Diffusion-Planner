@@ -140,29 +140,29 @@ def compute_collision_reward(
 
 
 @torch.no_grad()
-def compute_anchor_distance(
+def compute_gt_l2_distance(
     ego_world: torch.Tensor,
-    prototypes: torch.Tensor,
+    ego_future_gt: torch.Tensor,
 ) -> torch.Tensor:
-    """ADE from each generated trajectory to its nearest GT-mode prototype.
+    """ADE (mean per-waypoint L2) from each generated trajectory to the scene's own GT future.
 
-    The prototypes are a KMeans "vocabulary" of plausible ego maneuvers (see
-    ``sampling/build_prototypes.py``), in the same ego-centric frame as ``ego_world``. Rewarding
-    a small distance to the *nearest* mode anchors samples to realistic driving without forcing
-    them onto the scene's own GT (which the synthetic colliders are placed to hit).
+    Penalising this distance keeps the generated ego trajectory close to the real recorded
+    maneuver, so the policy cannot reward-hack the collision term by, e.g., standing still.
 
     Args:
         ego_world: [B, T, 4] generated ego trajectories (x, y, cos, sin), ego frame, metres.
-        prototypes: [K, Tp, 2] mode prototype trajectories (x, y).
+        ego_future_gt: [B, Tg, >=2] GT ego future (x, y, ...), same ego-centric frame.
 
     Returns:
-        d_min: [B] mean-waypoint L2 distance (ADE) to the closest prototype.
+        ade: [B] mean L2 distance over valid (non-zero-padded) GT waypoints.
     """
-    ego_xy = ego_world[..., :2]
-    T = min(ego_xy.shape[1], prototypes.shape[1])
-    diff = ego_xy[:, None, :T, :] - prototypes[None, :, :T, :]  # [B, K, T, 2]
-    ade = torch.linalg.norm(diff, dim=-1).mean(dim=-1)  # [B, K]
-    return ade.min(dim=1).values  # [B]
+    gen_xy = ego_world[..., :2]
+    gt_xy = ego_future_gt[..., :2]
+    T = min(gen_xy.shape[1], gt_xy.shape[1])
+    gen_xy, gt_xy = gen_xy[:, :T], gt_xy[:, :T]
+    dist = torch.linalg.norm(gen_xy - gt_xy, dim=-1)  # [B, T]
+    valid = (gt_xy.abs().sum(dim=-1) > 1e-6).float()  # mask zero-padded GT waypoints
+    return (dist * valid).sum(dim=-1) / valid.sum(dim=-1).clamp_min(1.0)  # [B]
 
 
 def compute_group_advantages(reward: torch.Tensor, num_scenes: int, n: int, eps: float):

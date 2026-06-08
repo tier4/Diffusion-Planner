@@ -19,8 +19,7 @@ KMeans cluster centers ARE the mean trajectories of each mode -- a compact "voca
 plausible maneuvers (straight at various speeds, turns, stop, lane changes, ...).
 
 The output is a ``(K, T, 2)`` .npy array in the ego-centric frame (origin at the ego t=0
-pose), the same format consumed by ``model/guidance/anchor_following.py`` and the GRPO
-anchor reward (``grpo_utils.compute_anchor_distance``).
+pose), the same format consumed by ``model/guidance/anchor_following.py``.
 
 Usage:
     python build_prototypes.py \
