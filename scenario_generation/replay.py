@@ -2356,9 +2356,10 @@ def run_route_replay(
                     ))
 
             # Save PNG (concurrent with next step's compute).
-            # REPLAY_NO_PNG=1 skips per-step PNG rendering entirely — avoids the
-            # deepcopy(scene) backlog (a per-step memory leak under CPU contention
-            # that OOM-kills long runs) when only the NPZ dump is needed.
+            # REPLAY_NO_PNG=1 skips per-step PNG rendering entirely. Under CPU
+            # contention the save threadpool can't drain, so queued deep-copied
+            # scenes accumulate (unbounded memory growth, not a true leak) and
+            # OOM-kill long runs. Skipping is for when only the NPZ dump is needed.
             # out_path is still defined (used by the clearance log below).
             out_path = output_dir / f"step_{step:04d}.png"
             if os.environ.get("REPLAY_NO_PNG") != "1":
