@@ -898,8 +898,8 @@ class UnicycleAccelCurvatureActionSpace(ActionSpace):
         curvature_bounds: tuple[float, float] = (-0.2, 0.2),  # min and max bounds for curvature
         dt: float = 0.1,
         n_waypoints: int = 80,
-        theta_lambda: float = 1e-1,
-        theta_ridge: float = 1e-2,
+        theta_lambda: float = 1e-2,
+        theta_ridge: float = 1e-4,
         v_lambda: float = 1e-6,
         v_ridge: float = 1e-4,
         a_lambda: float = 1e-4,

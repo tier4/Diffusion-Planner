@@ -3,7 +3,6 @@ import torch
 
 from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
-NUM_REFINE = 20
 TIME_INTERVAL = 0.1
 
 
@@ -135,28 +134,33 @@ class StatePerturbation:
 
     def __init__(
         self,
-        augment_prob: float = 0.5,
-        wheel_base: float = 2.75,
-        device: torch.device | str = "cpu",
+        augment_prob: float,
+        num_refine: int,
+        device: torch.device | str,
+        ego_past_noise_std: float,
+        use_smoothing_future_trajectory: bool,
     ) -> None:
         """
         Initialize the augmentor,
-        :param low: Parameter to set lower bound vector of the Uniform noise on [x, y, yaw, vx, vy, ax, ay, steering angle, yaw rate].
-        :param high: Parameter to set upper bound vector of the Uniform noise on [x, y, yaw, vx, vy, ax, ay, steering angle, yaw rate].
         :param augment_prob: probability between 0 and 1 of applying the data augmentation
+        :param num_refine: number of refinement steps for quintic interpolation
+        :param device: torch device
+        :param ego_past_noise_std: std of noise applied to ego past trajectory
+        :param use_smoothing_future_trajectory: whether to apply smoothing to future trajectory
         """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
+        self._ego_past_noise_std = ego_past_noise_std
+        self._use_smoothing_future_trajectory = use_smoothing_future_trajectory
         lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
         hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
         self._high = torch.tensor(hi).to(self._device)
-        self._wheel_base = wheel_base
 
-        self.num_refine = NUM_REFINE
+        self.num_refine = num_refine
         self.time_interval = TIME_INTERVAL
 
-        REFINE_HORIZON = NUM_REFINE * TIME_INTERVAL
+        REFINE_HORIZON = num_refine * TIME_INTERVAL
 
         T = REFINE_HORIZON + TIME_INTERVAL
         self.coeff_matrix = torch.linalg.inv(
@@ -174,7 +178,7 @@ class StatePerturbation:
             )
         )
         self.t_matrix = torch.pow(
-            torch.linspace(TIME_INTERVAL, REFINE_HORIZON, NUM_REFINE).unsqueeze(1),
+            torch.linspace(TIME_INTERVAL, REFINE_HORIZON, num_refine).unsqueeze(1),
             torch.arange(6).unsqueeze(0),
         ).to(device=device)  # shape (B, N+1)
 
@@ -189,11 +193,29 @@ class StatePerturbation:
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
 
+        # Scale past trajectory and current state velocity/acceleration
+        B_aug = aug_flag.sum().item()
+        if B_aug > 0:
+            W = self._ego_past_noise_std
+            scale = torch.normal(mean=1.0, std=W, size=(B_aug, 1, 1)).to(
+                inputs["ego_agent_past"].device
+            )
+            scale = torch.clamp(scale, 1.0 - 2 * W, 1.0 + 2 * W)
+
+            ego_past_aug = inputs["ego_agent_past"][aug_flag].clone()
+            ego_past_aug[..., :2] = ego_past_aug[..., :2] * scale
+            inputs["ego_agent_past"][aug_flag] = ego_past_aug
+
+            scale_1d = scale.squeeze(-1)  # (B_aug, 1)
+            inputs["ego_current_state"][aug_flag, 4:6] *= scale_1d  # vx, vy
+            inputs["ego_current_state"][aug_flag, 6:8] *= scale_1d  # ax, ay
+
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
     def augment(self, inputs):
         # Only aug current state
         ego_current_state = inputs["ego_current_state"].clone()
+        wheel_base = inputs["ego_shape"][:, 0]  # (B,)
 
         B = ego_current_state.shape[0]
         aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
@@ -227,7 +249,7 @@ class StatePerturbation:
         mask = torch.abs(cur_velocity) < 0.2
         not_mask = ~mask
         steering_angle[not_mask] = torch.atan(
-            yaw_rate[not_mask] * self._wheel_base / torch.abs(cur_velocity[not_mask])
+            yaw_rate[not_mask] * wheel_base[not_mask] / torch.abs(cur_velocity[not_mask])
         )
         steering_angle[not_mask] = torch.clamp(
             steering_angle[not_mask], -2 / 3 * np.pi, 2 / 3 * np.pi
@@ -397,9 +419,10 @@ class StatePerturbation:
             dim=-1,
         )
 
-        ego_future4d = smoothing_future_trajectory(
-            ego_past4d, inputs["ego_current_state"], ego_future4d
-        )
+        if self._use_smoothing_future_trajectory:
+            ego_future4d = smoothing_future_trajectory(
+                ego_past4d, inputs["ego_current_state"], ego_future4d
+            )
 
         ego_future = torch.cat(
             [
@@ -582,102 +605,3 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
-
-
-if __name__ == "__main__":
-    import argparse
-    from copy import deepcopy
-    from pathlib import Path
-
-    import matplotlib.patches as patches
-    import matplotlib.pyplot as plt
-
-    from diffusion_planner.train_epoch import heading_to_cos_sin
-    from diffusion_planner.utils.visualize_input import visualize_inputs
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("target_npz", type=Path)
-    args = parser.parse_args()
-
-    target_npz = args.target_npz
-
-    save_dir = target_npz.parent.parent / "augmented"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    loaded = np.load(target_npz)
-    data = {}
-    for key, value in loaded.items():
-        if key == "token":
-            continue
-        data[key] = torch.tensor(value).unsqueeze(0)
-        if key == "goal_pose" or key == "ego_agent_past":
-            data[key] = heading_to_cos_sin(data[key])
-
-    # Load future trajectories separately
-    ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
-    neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
-
-    aug = StatePerturbation(augment_prob=1.0, device="cpu")
-
-    # Save original data visualization with augmentation range rectangle
-    original_save_path = save_dir / "original.png"
-    fig, ax = plt.subplots(figsize=(10, 10))
-
-    # Visualize inputs on the ax
-    view_range = 20
-    visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
-
-    # Get augmentation ranges from the aug object
-    lo = aug._low.cpu().numpy()[0]  # Extract from tuple
-    hi = aug._high.cpu().numpy()[0]  # Extract from tuple
-    x_min, y_min = lo[0], lo[1]
-    x_max, y_max = hi[0], hi[1]
-
-    # Draw the augmentation range rectangle
-    rect = patches.Rectangle(
-        (x_min, y_min),
-        x_max - x_min,
-        y_max - y_min,
-        linewidth=2,
-        edgecolor="red",
-        facecolor="none",
-        linestyle="--",
-        label="Augmentation Range",
-    )
-    ax.add_patch(rect)
-    ax.legend()
-
-    plt.tight_layout()
-    plt.savefig(original_save_path, dpi=100)
-    plt.close()
-
-    trial_num = 10
-    for i in range(trial_num):
-        aug_data, aug_ego_future, aug_neighbors_future = aug(
-            deepcopy(data), ego_future.clone(), neighbors_future.clone()
-        )
-
-        # Save augmented data to npz file
-        data_dict = {}
-        for key, value in aug_data.items():
-            if isinstance(value, torch.Tensor):
-                data_dict[key] = value.squeeze(0).detach().cpu().numpy()
-            else:
-                data_dict[key] = value
-
-        # Add future trajectories with consistent naming
-        data_dict["ego_agent_future"] = aug_ego_future.squeeze(0).detach().cpu().numpy()
-        data_dict["neighbor_agents_future"] = aug_neighbors_future.squeeze(0).detach().cpu().numpy()
-        aug_data["ego_agent_future"] = aug_ego_future
-        aug_data["neighbor_agents_future"] = aug_neighbors_future
-
-        # Save to npz file
-        output_path = save_dir / f"augmented_{i:08d}.npz"
-        np.savez(output_path, **data_dict)
-
-        # Use deepcopy to avoid side effects from visualize_inputs
-        visualize_inputs(
-            deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[view_range]
-        )
-
-    print(f"Augmented data saved: {trial_num} files to {save_dir}")

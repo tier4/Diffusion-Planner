@@ -1,3 +1,9 @@
 build
 log
 install
+
+# External repositories imported via vcs (see cpp_tools.repos / prepare_repos.sh).
+# These must not be tracked here; only autoware_diffusion_planner_tools is ours.
+/src/core/
+/src/universe/
+/src/sensor_component/

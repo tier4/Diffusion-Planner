@@ -351,6 +351,38 @@ def compute_road_border_penalty(
     )
 
 
+def _box_outward_normals(corners: torch.Tensor) -> torch.Tensor:
+    """Unit outward edge normals of a convex box. corners: [..., 4, 2] -> [..., 4, 2]."""
+    edges = torch.roll(corners, -1, dims=-2) - corners
+    normals = torch.stack([-edges[..., 1], edges[..., 0]], dim=-1)
+    return normals / torch.linalg.norm(normals, dim=-1, keepdim=True).clamp_min(1e-9)
+
+
+def sat_penetration_depth(ego_corners: torch.Tensor, nbr_corners: torch.Tensor) -> torch.Tensor:
+    """SAT overlap (penetration) depth between an ego box and neighbor boxes.
+
+    Unlike the point-to-segment distance, this registers *any* polygon overlap (including
+    shallow / interpenetrating ones the discrete edge-point sampling misses), returning the
+    minimum-translation-distance magnitude.
+
+    Args:
+        ego_corners: [B, S, 4, 2] ego box corners per (batch, eval step).
+        nbr_corners: [B, S, Pn, 4, 2] neighbor box corners.
+
+    Returns:
+        depth: [B, S, Pn] >= 0 (0 when the boxes are disjoint).
+    """
+    B, S, Pn, _, _ = nbr_corners.shape
+    ego = ego_corners[:, :, None].expand(B, S, Pn, 4, 2)
+    # candidate separating axes: edge normals of both boxes.
+    axes = torch.cat([_box_outward_normals(ego), _box_outward_normals(nbr_corners)], dim=-2)
+    pe = torch.einsum("bspax,bspcx->bspac", axes, ego)          # [B, S, Pn, 8, 4]
+    pn = torch.einsum("bspax,bspcx->bspac", axes, nbr_corners)  # [B, S, Pn, 8, 4]
+    overlap = torch.minimum(pe.amax(-1), pn.amax(-1)) - torch.maximum(pe.amin(-1), pn.amin(-1))
+    # disjoint <=> some axis has non-positive overlap -> min over axes <= 0 -> relu = 0.
+    return overlap.amin(-1).clamp_min(0.0)  # [B, S, Pn]
+
+
 def compute_neighbor_collision_penalty(
     ego_edge_points: torch.Tensor,
     neighbors_future: torch.Tensor,
@@ -360,12 +392,20 @@ def compute_neighbor_collision_penalty(
 ) -> torch.Tensor:
     """Compute neighbor collision penalty for ego trajectory.
 
+    The neighbor box is inflated by ``margin`` on every side and the penalty is the SAT
+    penetration depth of the ego box into that inflated box. This is equivalent to a
+    ``relu(margin - distance)`` proximity hinge while a buffer remains, smoothly continuing into
+    a true overlap-depth penalty once the boxes actually touch -- and, unlike a point-to-segment
+    distance, it does not depend on any discrete edge-point sampling (so it never misses shallow
+    overlaps or a small agent sitting inside the ego footprint).
+
     Args:
-        ego_edge_points: [B, T, K, 2] sample points on ego bbox edges.
+        ego_edge_points: [B, T, K, 2] sample points on ego bbox edges (only the 4 corners,
+            i.e. every ``K // 4``-th point, are used here).
         neighbors_future: [B, Pn, T, 4] neighbor future trajectories in world frame.
         neighbors_future_valid: [B, Pn, T] validity mask for neighbor timesteps.
         neighbor_agents_past: [B, Pn_max, T_past, D] denormalized neighbor past states.
-        margin: distance threshold (meters).
+        margin: clearance threshold (meters); neighbor boxes are inflated by this amount.
 
     Returns:
         penalty: [B, T] non-negative penalty per timestep.
@@ -381,15 +421,15 @@ def compute_neighbor_collision_penalty(
     if S == 0:
         return torch.zeros(B, T_full, device=device)
 
-    # Ego edge points at eval timesteps
-    ego_edge_pts = ego_edge_points[:, steps]  # [B, S, K, 2]
+    # Ego box corners at eval timesteps (corners are every K // 4-th edge sample point).
+    ego_corners = ego_edge_points[:, steps][:, :, :: K // 4, :]  # [B, S, 4, 2]
 
-    # Neighbor sizes from last past timestep
+    # Neighbor sizes from last past timestep, inflated by `margin` on each side.
     neighbor_sizes = neighbor_agents_past[:, :Pn, -1, :]
-    neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3)  # [B, Pn]
-    neighbor_length = torch.clamp(neighbor_sizes[..., 7], min=1e-3)  # [B, Pn]
+    neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3) + 2.0 * margin  # [B, Pn]
+    neighbor_length = torch.clamp(neighbor_sizes[..., 7], min=1e-3) + 2.0 * margin  # [B, Pn]
 
-    # Neighbor trajectory at eval timesteps
+    # Neighbor pose at eval timesteps.
     neighbor_pos = neighbors_future[:, :, steps, :2]  # [B, Pn, S, 2]
     neighbor_cos = neighbors_future[:, :, steps, 2]  # [B, Pn, S]
     neighbor_sin = neighbors_future[:, :, steps, 3]  # [B, Pn, S]
@@ -397,7 +437,7 @@ def compute_neighbor_collision_penalty(
     neighbor_cos = neighbor_cos / orientation_norm
     neighbor_sin = neighbor_sin / orientation_norm
 
-    # Build neighbor rect: [B, Pn, S, 6]
+    # Build the inflated neighbor rect: [B, Pn, S, 6] -> corners [B, Pn, S, 4, 2].
     neighbor_rect = torch.stack(
         [
             neighbor_pos[..., 0],
@@ -409,42 +449,14 @@ def compute_neighbor_collision_penalty(
         ],
         dim=-1,
     )
+    neighbor_corners = center_rect_to_points(neighbor_rect.reshape(-1, 6)).reshape(B, Pn, S, 4, 2)
 
-    # Neighbor corners -> edge segments
-    neighbor_corners = center_rect_to_points(neighbor_rect.reshape(-1, 6))
-    neighbor_corners = neighbor_corners.reshape(B, Pn, S, 4, 2)
-    seg_a = neighbor_corners  # [B, Pn, S, 4, 2]
-    seg_b = torch.roll(neighbor_corners, -1, dims=3)
-
-    # Valid mask expanded to edges
-    valid = neighbors_future_valid[:, :, steps]  # [B, Pn, S]
-    valid_edges = valid.unsqueeze(-1).expand(-1, -1, -1, 4)  # [B, Pn, S, 4]
-
-    # Reshape: align timestep dim with ego (dim 1)
-    seg_a = seg_a.permute(0, 2, 1, 3, 4).reshape(B, S, Pn * 4, 2)
-    seg_b = seg_b.permute(0, 2, 1, 3, 4).reshape(B, S, Pn * 4, 2)
-    valid_flat = valid_edges.permute(0, 2, 1, 3).reshape(B, S, Pn * 4)
-
-    # Point-to-segment distance
-    p = ego_edge_pts.reshape(B * S, K, 1, 2)
-    a = seg_a.reshape(B * S, 1, Pn * 4, 2)
-    b = seg_b.reshape(B * S, 1, Pn * 4, 2)
-    dist = point_to_segment_distance(p, a, b)  # [B*S, K, Pn*4]
-
-    # Mask invalid neighbor segments
-    valid_bs = valid_flat.reshape(B * S, Pn * 4)
-    dist = torch.where(valid_bs[:, None, :], dist, torch.full_like(dist, float("inf")))
-
-    # Min distance over ego edge points and neighbor segments
-    min_dist = dist.min(dim=-1).values.min(dim=-1).values  # [B*S]
-    min_dist = min_dist.reshape(B, S)
-
-    # Hinge penalty
-    penalty_s = torch.where(
-        torch.isfinite(min_dist),
-        F.relu(margin - min_dist),
-        torch.zeros_like(min_dist),
-    )
+    # SAT penetration of the ego box into each inflated neighbor box.
+    nbr_corners = neighbor_corners.permute(0, 2, 1, 3, 4)  # [B, S, Pn, 4, 2]
+    penetration = sat_penetration_depth(ego_corners, nbr_corners)  # [B, S, Pn]
+    valid = neighbors_future_valid[:, :, steps].permute(0, 2, 1)  # [B, S, Pn]
+    penetration = torch.where(valid, penetration, torch.zeros_like(penetration))
+    penalty_s = penetration.amax(dim=-1)  # worst (deepest) overlap per (B, step)
 
     # Scatter to full T
     penalty = torch.zeros(B, T_full, device=device)
