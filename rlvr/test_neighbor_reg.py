@@ -548,11 +548,18 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="selective_mode"):
             GRPOConfig(selective_mode="bad")
 
+    def test_invalid_neighbor_reg_anchor(self):
+        from rlvr.grpo_config import GRPOConfig
+        with pytest.raises(ValueError, match="neighbor_reg_anchor"):
+            GRPOConfig(neighbor_reg_anchor="basline")  # typo must fail loudly, not silently warmstart
+
     def test_valid_modes_pass(self):
         from rlvr.grpo_config import GRPOConfig
-        c = GRPOConfig(ego_il_mode="baseline", selective_mode="advantage")
+        c = GRPOConfig(ego_il_mode="baseline", selective_mode="advantage",
+                       neighbor_reg_anchor="baseline")
         assert c.ego_il_mode == "baseline"
         assert c.selective_mode == "advantage"
+        assert c.neighbor_reg_anchor == "baseline"
 
     def test_schedule_constant_no_end(self):
         from rlvr.grpo_config import GRPOConfig

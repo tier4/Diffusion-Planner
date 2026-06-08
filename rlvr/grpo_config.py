@@ -679,6 +679,10 @@ class GRPOConfig:
             raise ValueError(
                 f"gt_fallback_mode must be 'none', 'skip', or 'il', got {self.gt_fallback_mode!r}"
             )
+        if self.neighbor_reg_anchor not in ("warmstart", "baseline"):
+            raise ValueError(
+                f"neighbor_reg_anchor must be 'warmstart' or 'baseline', got {self.neighbor_reg_anchor!r}"
+            )
 
     @property
     def uses_importance_sampling(self) -> bool:
