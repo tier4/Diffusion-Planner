@@ -103,11 +103,14 @@ def _build_guidance_params(name, scale, *, speed=None, anchor_path=None,
         params["prototypes_path"] = anchor_path
         params["anchor_index"] = int(anchor_index)
     if name == "lateral":
-        params["eta_lat"] = max(-3.0, min(3.0, scale))
+        # Slider sign matches screen direction: right (+) swerves right. The
+        # underlying eta_lat convention is +left, so negate.
+        params["eta_lat"] = -max(-3.0, min(3.0, scale))
         params["lambda_lat"] = _LATERAL_LAMBDA
         scale = float(lateral_strength)
     if name == "collision_swerve":
-        params["side"] = 1.0 if scale >= 0 else -1.0
+        # Right (+) on the slider swerves right (side = -1 is right internally).
+        params["side"] = -1.0 if scale >= 0 else 1.0
         params["range"] = _COLLISION_SWERVE_RANGE
         scale = abs(scale)
     return scale, params
@@ -942,9 +945,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     #   others           -> energy scale in [0, 10]
                     def _guidance_slider_spec(gname):
                         if gname == "lateral":
-                            return (-3.0, 3.0, 0.1, 0.0, "η (+L/-R)")
+                            return (-3.0, 3.0, 0.1, 0.0, "η (L / R)")
                         if gname == "collision_swerve":
-                            return (-10.0, 10.0, 0.5, 3.0, "Swerve (+L/-R)")
+                            return (-10.0, 10.0, 0.5, 3.0, "Swerve (L / R)")
                         return (0.0, 10.0, 0.5, 2.0, "Scale")
 
                     def _guidance_toggle_label(gname):
@@ -994,30 +997,30 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     _OTHER_GUIDANCES = [g for g in ALL_GUIDANCE_NAMES
                                         if g not in _MAIN_GUIDANCES]
                     _emit_guidance_grid(_MAIN_GUIDANCES)
-                    with gr.Accordion("Other guidances", open=False):
-                        _emit_guidance_grid(_OTHER_GUIDANCES)
+                with gr.Accordion("Other guidances", open=False):
+                    _emit_guidance_grid(_OTHER_GUIDANCES)
 
-                    _default_proto = str(Path(__file__).resolve().parent.parent.parent
-                                         / "guidance_gui" / "prototypes_k16.npy")
-                    with gr.Accordion("Anchor Prototypes", open=False):
-                        with gr.Row():
-                            anchor_index_sl = gr.Slider(
-                                minimum=0, maximum=15, value=0, step=1,
-                                label="Anchor Index", interactive=_has_model, scale=1,
-                            )
-                            anchor_path_tb = gr.Textbox(
-                                value=_default_proto,
-                                label="Prototypes Path", interactive=_has_model, scale=2,
-                            )
-                        from guidance_gui.visualization import render_prototype_gallery
-                        _init_gallery = render_prototype_gallery(_default_proto) or []
-                        anchor_gallery = gr.Gallery(
-                            value=_init_gallery,
-                            columns=8, rows=2, height=220,
-                            allow_preview=False,
-                            selected_index=0 if _init_gallery else None,
-                            label="Click to select anchor",
+                _default_proto = str(Path(__file__).resolve().parent.parent.parent
+                                     / "guidance_gui" / "prototypes_k16.npy")
+                with gr.Accordion("Anchor Prototypes", open=False):
+                    with gr.Row():
+                        anchor_index_sl = gr.Slider(
+                            minimum=0, maximum=15, value=0, step=1,
+                            label="Anchor Index", interactive=_has_model, scale=1,
                         )
+                        anchor_path_tb = gr.Textbox(
+                            value=_default_proto,
+                            label="Prototypes Path", interactive=_has_model, scale=2,
+                        )
+                    from guidance_gui.visualization import render_prototype_gallery
+                    _init_gallery = render_prototype_gallery(_default_proto) or []
+                    anchor_gallery = gr.Gallery(
+                        value=_init_gallery,
+                        columns=8, rows=2, height=220,
+                        allow_preview=False,
+                        selected_index=0 if _init_gallery else None,
+                        label="Click to select anchor",
+                    )
 
         # ── Callbacks ──
 
