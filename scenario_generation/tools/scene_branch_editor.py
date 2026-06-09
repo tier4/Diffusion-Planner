@@ -1350,6 +1350,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     lat_str = float(guidance_args_tuple[-1])
                     raw_g = model_cache.predict_guided(
                         npz_path, cfgs, noise_scale=noise, n_samples=max(1, k),
+                        obstacles=obs or None,
                         zero_neighbors=zero_neighbors,
                         ego_shape_override=tree.ego_shape,
                         anchor_index=a_idx, anchor_path=a_path,
