@@ -26,6 +26,7 @@ import numpy as np
 import torch
 from matplotlib.patches import Rectangle
 
+import guidance_gui.custom_guidance  # noqa: F401 -- registers the collision_swerve guidance
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
 from scenario_generation.scene_render import (
@@ -66,11 +67,60 @@ ALL_GUIDANCE_NAMES = [
     "lane_keeping",
     "road_border",
     "route_following",
-    "collision",
+    "collision_swerve",
     "anchor_following",
     "lateral",
     "longitudinal",
 ]
+
+# Lateral guidance: the GUI exposes two sliders -- the offset target eta
+# (sign = SCREEN direction: + right / - left) and a separate strength (energy scale).
+# lambda is the max lateral offset in metres that eta scales against.
+_LATERAL_LAMBDA = 3.0
+# Collision-swerve guidance: slider sign picks the side in SCREEN direction
+# (+ = right / - = left), magnitude is the strength. Proximity range in metres.
+_COLLISION_SWERVE_RANGE = 8.0
+
+
+def _build_guidance_params(name, scale, *, speed=None, anchor_path=None,
+                           anchor_index=0, lateral_strength=1.0):
+    """Map a (name, slider value) pair to the (scale, params) a GuidanceConfig needs.
+
+    Centralises the per-guidance slider semantics so the Generate, step-recompute,
+    and Simulate paths all interpret the sliders identically:
+      - speed            -> v_high/v_low derived from current ego speed
+      - anchor_following -> prototypes_path + anchor_index
+      - lateral          -> slider in [-3, 3] is the offset target in SCREEN
+                            direction (+ right / - left), written to eta_lat
+                            (negated, since eta_lat's native +is-left); target
+                            offset = lambda_lat * eta_lat. Energy scale comes from
+                            the separate Lateral Strength slider. (eta intentionally
+                            exceeds the [-1,1] PPO convention so manual swerves can
+                            reach larger offsets; the energy is well-defined for any eta.)
+      - collision_swerve -> slider sign = side in SCREEN direction (+ right /
+                            - left), magnitude = energy scale
+      - others           -> slider is the energy scale verbatim
+    """
+    params = {}
+    scale = float(scale)
+    if name == "speed" and speed is not None:
+        params["v_high"] = speed * 1.2
+        params["v_low"] = max(0.0, speed * 0.5)
+    if name == "anchor_following" and anchor_path:
+        params["prototypes_path"] = anchor_path
+        params["anchor_index"] = int(anchor_index)
+    if name == "lateral":
+        # Slider sign matches screen direction: right (+) swerves right. The
+        # underlying eta_lat convention is +left, so negate.
+        params["eta_lat"] = -max(-3.0, min(3.0, scale))
+        params["lambda_lat"] = _LATERAL_LAMBDA
+        scale = float(lateral_strength)
+    if name == "collision_swerve":
+        # Right (+) on the slider swerves right (side = -1 is right internally).
+        params["side"] = -1.0 if scale >= 0 else 1.0
+        params["range"] = _COLLISION_SWERVE_RANGE
+        scale = abs(scale)
+    return scale, params
 
 
 class _ModelCache:
@@ -137,6 +187,7 @@ class _ModelCache:
         ego_shape_override: tuple[float, ...] | None = None,
         anchor_index: int = 0,
         anchor_path: str | None = None,
+        lateral_strength: float = 1.0,
     ) -> np.ndarray | None:
         """Run guided inference. Returns (n_samples, 80, 4)."""
         self._ensure_loaded()
@@ -164,13 +215,10 @@ class _ModelCache:
 
         fns = []
         for name, scale in guidance_cfgs:
-            params = {}
-            if name == "speed":
-                params["v_high"] = speed * 1.2
-                params["v_low"] = max(0.0, speed * 0.5)
-            if name == "anchor_following" and anchor_path:
-                params["prototypes_path"] = anchor_path
-                params["anchor_index"] = int(anchor_index)
+            scale, params = _build_guidance_params(
+                name, scale, speed=speed, anchor_path=anchor_path,
+                anchor_index=anchor_index, lateral_strength=lateral_strength,
+            )
             fns.append(GuidanceConfig(name=name, enabled=True, scale=scale, params=params))
 
         composer = None
@@ -615,12 +663,45 @@ def _generate_neighbor_reference(
     return ref
 
 
+# Custom CSS for the editor. Passed to demo.launch() (Gradio 6 dropped the css
+# kwarg from the Blocks constructor — it is silently ignored there).
+_GUI_CSS = (
+    ".gradio-container {max-width: 100% !important; width: 100% !important; "
+    "padding-left: 1% !important; padding-right: 1% !important;} "
+    # Thin scrub bar: Gradio's slider stacks a .head (label + number box) above
+    # the .wrap (the track). Hiding .head removes the empty top area so the track
+    # sits inline with the buttons (the separate Step box is the readout/jump field).
+    ".scrub .head {display: none !important;} "
+    ".scrub .wrap {margin: 0 !important;} "
+    ".scrub {padding-top: 0 !important; padding-bottom: 0 !important;} "
+    # YouTube-style scrub bar: hardcode the track gradient (red played / gray
+    # remaining) on the pseudo-elements, using Gradio's JS-set --range_progress
+    # as the split (bypasses the --slider-color theme var).
+    ".scrub input[type='range']::-webkit-slider-runnable-track "
+    "{background: linear-gradient(to right, #ff0000 var(--range_progress), "
+    "#c9ccd1 var(--range_progress)) !important;} "
+    ".scrub input[type='range']::-moz-range-progress "
+    "{background-color: #ff0000 !important;} "
+    ".scrub input[type='range']::-moz-range-track "
+    "{background: #c9ccd1 !important;} "
+    # Vertically center every control in the playback bar.
+    ".playbar {align-items: center !important;} "
+    ".playbar > * {align-self: center !important; margin-top: 0 !important; "
+    "margin-bottom: 0 !important;}"
+)
+
+
 def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     map_borders: list[np.ndarray] | None = None,
                     map_builder=None, reward_config=None):
     """Build the Gradio interface for the scene branch editor."""
 
-    with gr.Blocks(title="Scene Branch Editor") as demo:
+    # NOTE: css is passed to demo.launch() (Gradio 6 dropped css from the Blocks
+    # constructor); see _GUI_CSS and main().
+    with gr.Blocks(
+        title="Scene Branch Editor",
+        fill_width=True,
+    ) as demo:
         # ── State ──
         tree_state = gr.State(value=tree)
         selected_obstacle_state = gr.State(value=None)
@@ -629,83 +710,95 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         gr.Markdown("# Scene Branch Editor")
 
+        _has_model = model_cache is not None and model_cache.available
+
+        # ═══════════════════════════════════════════════════════════════
+        # TOP — full-width Branch row (SVG tree + active/fork/delete + fuse)
+        # ═══════════════════════════════════════════════════════════════
+        with gr.Group():
+            gr.Markdown("### Branches")
+            with gr.Row():
+                with gr.Column(scale=3, min_width=360):
+                    branch_timeline = gr.HTML(
+                        value=_render_branch_svg(tree, 0),
+                        elem_id="branch_timeline",
+                    )
+                    branch_click_target = gr.Textbox(
+                        visible=False, elem_id="branch_click_target",
+                    )
+                with gr.Column(scale=2, min_width=300):
+                    branch_dropdown = gr.Dropdown(
+                        choices=list(tree.branches.keys()),
+                        value=tree.active_branch,
+                        label="Active Branch",
+                        interactive=True,
+                    )
+                    branch_info = gr.HTML(_branch_info_html(tree, tree.active_branch))
+                    with gr.Row():
+                        fork_btn = gr.Button("Fork Here", size="sm", variant="primary")
+                        delete_branch_btn = gr.Button("Delete Branch", size="sm", variant="stop")
+                    with gr.Accordion("Fuse Timelines", open=False):
+                        _choices = list(tree.branches.keys())
+                        with gr.Row():
+                            fuse_branch_a = gr.Dropdown(
+                                choices=_choices, label="Prefix", scale=1,
+                            )
+                            fuse_branch_b = gr.Dropdown(
+                                choices=_choices, label="Suffix", scale=1,
+                            )
+                        fuse_btn = gr.Button("Fuse", size="sm", variant="primary")
+                        fuse_status = gr.Markdown("")
+
         with gr.Row():
-            # ═══════ LEFT PANEL ═══════
-            with gr.Column(scale=1, min_width=280):
-                gr.Markdown("### Navigation")
-                with gr.Row():
-                    load_dir_input = gr.Textbox(
-                        label="NPZ Directory", value=tree.base_npz_dir,
-                        scale=3, interactive=True,
+            # ═══════ LEFT PANEL — obstacle + modifications ═══════
+            with gr.Column(scale=1, min_width=300):
+                # ── Fused Obstacle box (Add new / Edit existing) ──
+                with gr.Group():
+                    gr.Markdown("### Obstacle")
+                    # Dropdown to pick the obstacle to act on. "Add new" (default)
+                    # places a brand-new obstacle; any other entry edits that
+                    # existing obstacle. Selecting one auto-fills the shared
+                    # fields below.
+                    obs_select = gr.Dropdown(
+                        choices=["Add new"], value="Add new",
+                        label="Obstacle (Add new / pick to edit)",
+                        interactive=True, allow_custom_value=False,
                     )
-                    load_dir_btn = gr.Button("Load", size="sm", scale=1)
-
-                load_tree_input = gr.Textbox(label="Tree JSON", placeholder="/path/to/scene_tree.json")
-                with gr.Row():
-                    load_tree_btn = gr.Button("Load Tree", size="sm")
-                    save_tree_btn = gr.Button("Save Tree", size="sm")
-
-                gr.Markdown("### Timeline")
-                step_slider = gr.Slider(
-                    minimum=0,
-                    maximum=max(0, len(tree.get_npz_sequence("root")) - 1),
-                    value=0, step=1, label="Step (drag)",
-                )
-                step_mirror = gr.Number(value=0, visible=False, precision=0)
-                with gr.Row():
-                    btn_first = gr.Button("|<", size="sm", min_width=40)
-                    btn_prev = gr.Button("<", size="sm", min_width=40)
-                    btn_next = gr.Button(">", size="sm", min_width=40)
-                    btn_last = gr.Button(">|", size="sm", min_width=40)
-                with gr.Row():
-                    step_jump_input = gr.Number(
-                        label="Jump to step", value=0, precision=0, scale=2,
+                    # Shared input widgets for BOTH add + edit.
+                    with gr.Row():
+                        obs_x = gr.Number(label="X (m)", value=10.0, precision=1)
+                        obs_y = gr.Number(label="Y (m)", value=0.0, precision=1)
+                    obs_yaw = gr.Slider(
+                        minimum=-180, maximum=180, value=0, step=5,
+                        label="Yaw (deg)",
                     )
-                    step_jump_btn = gr.Button("Go", size="sm", scale=1)
-                step_info = gr.Markdown("Step 0 / 0")
-
-                gr.Markdown("### Obstacle Placement")
-                with gr.Row():
-                    obs_x = gr.Number(label="X (m)", value=10.0, precision=1)
-                    obs_y = gr.Number(label="Y (m)", value=0.0, precision=1)
-                obs_yaw = gr.Slider(
-                    minimum=-180, maximum=180, value=0, step=5,
-                    label="Yaw (deg)",
-                )
-                with gr.Row():
-                    obs_length = gr.Slider(
-                        minimum=1.0, maximum=15.0, value=4.5, step=0.1,
-                        label="Length (m)",
+                    with gr.Row():
+                        obs_length = gr.Slider(
+                            minimum=1.0, maximum=15.0, value=4.5, step=0.1,
+                            label="Length (m)",
+                        )
+                        obs_width = gr.Slider(
+                            minimum=0.5, maximum=6.0, value=1.8, step=0.1,
+                            label="Width (m)",
+                        )
+                    obs_history = gr.Slider(
+                        minimum=0, maximum=30, value=30, step=1,
+                        label="History steps (0=just appeared, 30=full)",
                     )
-                    obs_width = gr.Slider(
-                        minimum=0.5, maximum=6.0, value=1.8, step=0.1,
-                        label="Width (m)",
-                    )
-                obs_history = gr.Slider(
-                    minimum=0, maximum=30, value=30, step=1,
-                    label="History steps (0=just appeared, 30=full)",
-                )
-                with gr.Row():
-                    obs_is_moving = gr.Checkbox(label="Moving", value=False)
-                    obs_speed = gr.Number(
-                        label="Speed (m/s)", value=5.0, precision=1,
-                        visible=False, min_width=100,
-                    )
-                obs_route_info = gr.Markdown("")
-                with gr.Row():
-                    place_btn = gr.Button("Place Obstacle", variant="primary")
-                    preview_btn = gr.Button("Preview", variant="secondary")
+                    with gr.Row():
+                        obs_is_moving = gr.Checkbox(label="Moving", value=False)
+                        obs_speed = gr.Number(
+                            label="Speed (m/s)", value=5.0, precision=1,
+                            visible=False, min_width=100,
+                        )
+                    obs_route_info = gr.Markdown("")
+                    with gr.Row():
+                        obstacle_action_btn = gr.Button("Apply", variant="primary")
+                        preview_btn = gr.Button("Preview", variant="secondary")
+                        remove_obs_btn = gr.Button("Remove", variant="stop")
 
-                gr.Markdown("### Crop")
-                with gr.Row():
-                    crop_start = gr.Number(label="Start", value=0, precision=0)
-                    crop_end = gr.Number(label="End", value=0, precision=0)
-                with gr.Row():
-                    crop_btn = gr.Button("Apply Crop", size="sm")
-                    crop_clear_btn = gr.Button("Clear Crop", size="sm")
-
-            # ═══════ CENTER PANEL ═══════
-            with gr.Column(scale=3, min_width=600):
+            # ═══════ CENTER PANEL (render + simulate + export/load/save) ═══════
+            with gr.Column(scale=2, min_width=520):
                 scene_image = gr.Image(
                     label="Scene View",
                     type="pil",
@@ -713,94 +806,44 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     height=600,
                 )
 
-                # Timeline playback + view
-                with gr.Row():
-                    btn_play = gr.Button("Play ▶", size="sm", min_width=60)
-                    btn_stop = gr.Button("Stop ■", size="sm", min_width=60, variant="stop")
-                    play_fps = gr.Slider(minimum=1, maximum=30, value=10, step=1,
-                                         label="FPS", scale=1)
-                    view_half = gr.Slider(minimum=10, maximum=200, value=50, step=5,
-                                          label="View radius (m)", scale=1)
-
-                _has_model = model_cache is not None and model_cache.available
-
-                # Trajectory overlay controls — below canvas
-                with gr.Row():
-                    show_gt = gr.Checkbox(label="Show GT", value=True, scale=1)
-                    show_det = gr.Checkbox(label="Show DET", value=False,
-                                           interactive=_has_model, scale=1)
-                    show_guided = gr.Checkbox(label="Show Guided", value=False,
-                                              interactive=_has_model, scale=1)
-                    hide_neighbors = gr.Checkbox(label="Dim/Zero Neighbors", value=False, scale=1)
-                    show_rb_dist = gr.Checkbox(label="Road Border", value=True, scale=1)
-                    show_nb_dist = gr.Checkbox(label="Neighbor Dist", value=True, scale=1)
-                with gr.Row():
-                    show_traj_rb = gr.Checkbox(label="Traj RB Worst", value=False, scale=1)
-                    show_traj_nb = gr.Checkbox(label="Traj NB Worst", value=False, scale=1)
-                    show_nb_preds = gr.Checkbox(label="NB Preds", value=False,
-                                                interactive=_has_model, scale=1)
-                    if not _has_model:
-                        gr.Markdown("*No model — pass `--model_path`*", scale=2)
-
-                with gr.Accordion("Guidance Controls", open=False):
-                    guidance_toggles = {}
-                    guidance_scales = {}
-                    with gr.Row():
-                        for gname in ALL_GUIDANCE_NAMES[:5]:
-                            with gr.Column(min_width=100):
-                                guidance_toggles[gname] = gr.Checkbox(
-                                    label=gname.replace("_following", "").replace("_", " ").title(),
-                                    value=False, interactive=_has_model,
-                                )
-                                guidance_scales[gname] = gr.Slider(
-                                    minimum=0.0, maximum=10.0, value=2.0, step=0.5,
-                                    show_label=False, interactive=_has_model,
-                                )
-                    with gr.Row():
-                        for gname in ALL_GUIDANCE_NAMES[5:]:
-                            _min = -10.0 if gname == "lateral" else 0.0
-                            with gr.Column(min_width=100):
-                                guidance_toggles[gname] = gr.Checkbox(
-                                    label=gname.replace("_following", "").replace("_", " ").title(),
-                                    value=False, interactive=_has_model,
-                                )
-                                guidance_scales[gname] = gr.Slider(
-                                    minimum=_min, maximum=10.0, value=2.0, step=0.5,
-                                    show_label=False, interactive=_has_model,
-                                )
-                    _default_proto = str(Path(__file__).resolve().parent.parent.parent
-                                         / "guidance_gui" / "prototypes_k16.npy")
-                    with gr.Accordion("Anchor Prototypes", open=False):
-                        with gr.Row():
-                            anchor_index_sl = gr.Slider(
-                                minimum=0, maximum=15, value=0, step=1,
-                                label="Anchor Index", interactive=_has_model, scale=1,
-                            )
-                            anchor_path_tb = gr.Textbox(
-                                value=_default_proto,
-                                label="Prototypes Path", interactive=_has_model, scale=2,
-                            )
-                        from guidance_gui.visualization import render_prototype_gallery
-                        _init_gallery = render_prototype_gallery(_default_proto) or []
-                        anchor_gallery = gr.Gallery(
-                            value=_init_gallery,
-                            columns=8, rows=2, height=220,
-                            allow_preview=False,
-                            selected_index=0 if _init_gallery else None,
-                            label="Click to select anchor",
+                # Playback control bar — YouTube-style, directly under the render:
+                # transport buttons + a thin scrub bar + a Step box to type/jump.
+                with gr.Group():
+                    step_mirror = gr.Number(value=0, visible=False, precision=0)
+                    # Kept (hidden) -- many handlers output the step/branch string here.
+                    step_info = gr.Markdown("Step 0 / 0", visible=False)
+                    # Single control bar: transport buttons + a thin scrub slider
+                    # (its built-in head/number is hidden via CSS) + a separate
+                    # Step number box that mirrors it and accepts typed jumps.
+                    with gr.Row(elem_classes=["playbar"]):
+                        btn_play = gr.Button("▶", size="sm", min_width=36, scale=0)
+                        btn_stop = gr.Button("■", size="sm", min_width=36, variant="stop", scale=0)
+                        btn_first = gr.Button("|<", size="sm", min_width=34, scale=0)
+                        btn_prev = gr.Button("<", size="sm", min_width=34, scale=0)
+                        btn_next = gr.Button(">", size="sm", min_width=34, scale=0)
+                        btn_last = gr.Button(">|", size="sm", min_width=34, scale=0)
+                        step_slider = gr.Slider(
+                            minimum=0,
+                            maximum=max(0, len(tree.get_npz_sequence("root")) - 1),
+                            value=0, step=1, show_label=False, scale=6,
+                            elem_classes=["scrub"],
                         )
+                        step_jump_box = gr.Number(
+                            value=0, precision=0, show_label=False, container=False,
+                            min_width=72, scale=0,
+                        )
+
+                # View radius / FPS — collapsed config menu (outside the group so
+                # it has no box outline, matching the Export accordion).
+                with gr.Accordion("⚙ View / FPS", open=False):
                     with gr.Row():
-                        guided_noise = gr.Slider(
-                            minimum=0.0, maximum=5.0, value=0.0, step=0.1,
-                            label="Noise", interactive=_has_model, scale=2,
+                        view_half = gr.Slider(
+                            minimum=1, maximum=200, value=50, step=1,
+                            label="View radius (m)", scale=1,
                         )
-                        guided_k = gr.Slider(
-                            minimum=1, maximum=8, value=1, step=1,
-                            label="K", interactive=_has_model, scale=1,
-                        )
-                        generate_guided_btn = gr.Button(
-                            "Generate", variant="primary",
-                            interactive=_has_model, scale=1,
+                        play_fps = gr.Slider(
+                            minimum=1, maximum=50, value=10, step=1,
+                            label="FPS", scale=1,
                         )
 
                 # Simulate controls — horizontal row
@@ -829,7 +872,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                         interactive=_has_model)
                 sim_status = gr.Markdown("")
 
-                # Export & RSFT save — horizontal layout
+                # Export & RSFT save + Load/Save — all folded into one accordion
                 with gr.Accordion("Export / Save for RSFT", open=False):
                     with gr.Row():
                         export_dir = gr.Textbox(label="Export Dir", placeholder="/path/to/export",
@@ -843,66 +886,152 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                                    interactive=_has_model, scale=1)
                     rsft_status = gr.Markdown("")
 
-            # ═══════ RIGHT PANEL ═══════
-            with gr.Column(scale=1, min_width=280):
-                gr.Markdown("### Branch Tree")
-                branch_timeline = gr.HTML(
-                    value=_render_branch_svg(tree, 0),
-                    elem_id="branch_timeline",
-                )
-                branch_click_target = gr.Textbox(
-                    visible=False, elem_id="branch_click_target",
-                )
-                branch_dropdown = gr.Dropdown(
-                    choices=list(tree.branches.keys()),
-                    value=tree.active_branch,
-                    label="Active Branch",
-                    interactive=True,
-                )
-                branch_info = gr.HTML(_branch_info_html(tree, tree.active_branch))
-                with gr.Row():
-                    fork_btn = gr.Button("Fork Here", size="sm", variant="primary")
-                    delete_branch_btn = gr.Button("Delete Branch", size="sm", variant="stop")
-                with gr.Accordion("Fuse Timelines", open=False):
-                    _choices = list(tree.branches.keys())
+                    gr.Markdown("#### Load / Save")
                     with gr.Row():
-                        fuse_branch_a = gr.Dropdown(
-                            choices=_choices, label="Prefix", scale=1,
+                        load_dir_input = gr.Textbox(
+                            label="NPZ Directory", value=tree.base_npz_dir,
+                            scale=3, interactive=True,
                         )
-                        fuse_branch_b = gr.Dropdown(
-                            choices=_choices, label="Suffix", scale=1,
+                        load_dir_btn = gr.Button("Load", size="sm", scale=1)
+                    load_tree_input = gr.Textbox(
+                        label="Tree JSON", placeholder="/path/to/scene_tree.json")
+                    with gr.Row():
+                        load_tree_btn = gr.Button("Load Tree", size="sm")
+                        save_tree_btn = gr.Button("Save Tree", size="sm")
+                    save_status = gr.Markdown("")
+
+                # Modifications — collapsed, below the Export / Save box.
+                with gr.Accordion("Modifications", open=False):
+                    mods_display = gr.Markdown(
+                        _modifications_md(tree, tree.active_branch),
+                    )
+
+            # ═══════ RIGHT PANEL — overlay toggles + guidance ═══════
+            with gr.Column(scale=1, min_width=400):
+                with gr.Group():
+                    # Overlay toggles at the TOP, in a tidy grid.
+                    gr.Markdown("### Overlays")
+                    with gr.Row():
+                        show_gt = gr.Checkbox(label="Show GT", value=True, scale=1)
+                        show_det = gr.Checkbox(label="Show DET", value=True,
+                                               interactive=_has_model, scale=1)
+                        show_guided = gr.Checkbox(label="Show Guided", value=True,
+                                                  interactive=_has_model, scale=1)
+                    with gr.Row():
+                        hide_neighbors = gr.Checkbox(label="Dim/Zero Neighbors",
+                                                     value=False, scale=1)
+                        show_rb_dist = gr.Checkbox(label="Road Border", value=True, scale=1)
+                        show_nb_dist = gr.Checkbox(label="Neighbor Dist", value=True, scale=1)
+                    with gr.Row():
+                        show_traj_rb = gr.Checkbox(label="Traj RB Worst", value=True, scale=1)
+                        show_traj_nb = gr.Checkbox(label="Traj NB Worst", value=True, scale=1)
+                        show_nb_preds = gr.Checkbox(label="NB Preds", value=True,
+                                                    interactive=_has_model, scale=1)
+                    if not _has_model:
+                        gr.Markdown("*No model — pass `--model_path`*")
+
+                    # Guidance panel — grouped directly below the overlays.
+                    gr.Markdown("### Guidance")
+                    generate_guided_btn = gr.Button(
+                        "Generate", variant="primary",
+                        interactive=_has_model,
+                    )
+                    with gr.Row():
+                        guided_noise = gr.Slider(
+                            minimum=0.0, maximum=5.0, value=0.0, step=0.1,
+                            label="Noise", interactive=_has_model, scale=2,
                         )
-                    fuse_btn = gr.Button("Fuse", size="sm", variant="primary")
-                    fuse_status = gr.Markdown("")
+                        guided_k = gr.Slider(
+                            minimum=1, maximum=8, value=1, step=1,
+                            label="K", interactive=_has_model, scale=1,
+                        )
 
-                gr.Markdown("### Modifications")
-                mods_display = gr.Markdown(
-                    _modifications_md(tree, tree.active_branch),
-                )
-                obs_select = gr.Dropdown(
-                    choices=[], value=None,
-                    label="Select obstacle", interactive=True,
-                    allow_custom_value=False,
-                )
-                with gr.Row():
-                    remove_obs_btn = gr.Button("Remove", size="sm", variant="stop")
-                gr.Markdown("#### Edit selected")
-                with gr.Row():
-                    edit_x = gr.Number(label="X", value=0, precision=1)
-                    edit_y = gr.Number(label="Y", value=0, precision=1)
-                with gr.Row():
-                    edit_yaw = gr.Slider(minimum=-180, maximum=180, value=0, step=5, label="Yaw (deg)")
-                with gr.Row():
-                    edit_length = gr.Slider(minimum=1.0, maximum=15.0, value=4.5, step=0.1, label="Len")
-                    edit_width = gr.Slider(minimum=0.5, maximum=6.0, value=1.8, step=0.1, label="Wid")
-                edit_history = gr.Slider(minimum=0, maximum=30, value=30, step=1, label="History")
-                with gr.Row():
-                    edit_is_moving = gr.Checkbox(label="Moving", value=False)
-                    edit_speed = gr.Number(label="Spd (m/s)", value=0.0, precision=1,
-                                           visible=False, min_width=80)
-                apply_edit_btn = gr.Button("Apply Edit", size="sm", variant="primary")
+                    guidance_toggles = {}
+                    guidance_scales = {}
+                    lateral_strength_sl = None  # created inside the lateral cell below
 
-                save_status = gr.Markdown("")
+                    # Per-guidance slider semantics (sign = SCREEN direction):
+                    #   lateral          -> offset target eta in [-3, 3] (+ right / - left)
+                    #   collision_swerve -> signed strength (sign = side, + right / - left)
+                    #   others           -> energy scale in [0, 10]
+                    def _guidance_slider_spec(gname):
+                        if gname == "lateral":
+                            return (-3.0, 3.0, 0.1, 0.0, "η (L / R)")
+                        if gname == "collision_swerve":
+                            return (-10.0, 10.0, 0.5, 3.0, "Swerve (L / R)")
+                        return (0.0, 10.0, 0.5, 2.0, "Scale")
+
+                    def _guidance_toggle_label(gname):
+                        if gname == "collision_swerve":
+                            return "Collision (L/R)"
+                        return gname.replace("_following", "").replace("_", " ").title()
+
+                    # Compact horizontal grid: 2 guidance cells per row. Each cell
+                    # is a small column holding the toggle + its slider, with
+                    # consistent widths so the panel reads as a tidy grid.
+                    def _emit_guidance_cell(gname):
+                        nonlocal lateral_strength_sl
+                        _smin, _smax, _sstep, _sval, _slabel = _guidance_slider_spec(gname)
+                        with gr.Column(scale=1, min_width=160):
+                            guidance_toggles[gname] = gr.Checkbox(
+                                label=_guidance_toggle_label(gname),
+                                value=False, interactive=_has_model,
+                            )
+                            guidance_scales[gname] = gr.Slider(
+                                minimum=_smin, maximum=_smax, value=_sval, step=_sstep,
+                                label=_slabel, show_label=True,
+                                interactive=_has_model,
+                            )
+                            # Lateral has a second knob (strength) inside its own cell.
+                            if gname == "lateral":
+                                lateral_strength_sl = gr.Slider(
+                                    minimum=0.1, maximum=2.0, value=1.0, step=0.1,
+                                    label="Strength", interactive=_has_model,
+                                )
+
+                    # 2-cells-per-row grid emitter for a subset of guidance names.
+                    def _emit_guidance_grid(names):
+                        for _gi in range(0, len(names), 2):
+                            with gr.Row(equal_height=True):
+                                _emit_guidance_cell(names[_gi])
+                                if _gi + 1 < len(names):
+                                    _emit_guidance_cell(names[_gi + 1])
+
+                    # Commonly-used guidances stay in the main grid; the rest go in
+                    # a collapsed "Other guidances" accordion. ALL_GUIDANCE_NAMES
+                    # order is unchanged (it drives the input wiring) -- this only
+                    # splits WHERE each toggle/slider is rendered.
+                    _MAIN_GUIDANCES = [g for g in (
+                        "route_centerline_following", "road_border", "collision_swerve",
+                        "anchor_following", "lateral", "longitudinal",
+                    ) if g in ALL_GUIDANCE_NAMES]
+                    _OTHER_GUIDANCES = [g for g in ALL_GUIDANCE_NAMES
+                                        if g not in _MAIN_GUIDANCES]
+                    _emit_guidance_grid(_MAIN_GUIDANCES)
+                with gr.Accordion("Other guidances", open=False):
+                    _emit_guidance_grid(_OTHER_GUIDANCES)
+
+                _default_proto = str(Path(__file__).resolve().parent.parent.parent
+                                     / "guidance_gui" / "prototypes_k16.npy")
+                with gr.Accordion("Anchor Prototypes", open=False):
+                    with gr.Row():
+                        anchor_index_sl = gr.Slider(
+                            minimum=0, maximum=15, value=0, step=1,
+                            label="Anchor Index", interactive=_has_model, scale=1,
+                        )
+                        anchor_path_tb = gr.Textbox(
+                            value=_default_proto,
+                            label="Prototypes Path", interactive=_has_model, scale=2,
+                        )
+                    from guidance_gui.visualization import render_prototype_gallery
+                    _init_gallery = render_prototype_gallery(_default_proto) or []
+                    anchor_gallery = gr.Gallery(
+                        value=_init_gallery,
+                        columns=8, rows=2, height=220,
+                        allow_preview=False,
+                        selected_index=0 if _init_gallery else None,
+                        label="Click to select anchor",
+                    )
 
         # ── Callbacks ──
 
@@ -1152,7 +1281,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             return [o for o in br.modifications if o.label not in br.inherited_labels]
 
         def _obs_choices(tree):
-            return [o.label for o in _own_obstacles(tree)]
+            # "Add new" is always the first, always-selectable option.
+            return ["Add new"] + [o.label for o in _own_obstacles(tree)]
 
         def _find_obs(tree, label):
             if not label:
@@ -1219,15 +1349,18 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     if enabled:
                         cfgs.append((gname, float(scale)))
                 if cfgs:
-                    noise = float(guidance_args_tuple[-4])
-                    k = int(guidance_args_tuple[-3])
-                    a_idx = int(guidance_args_tuple[-2])
-                    a_path = str(guidance_args_tuple[-1])
+                    noise = float(guidance_args_tuple[-5])
+                    k = int(guidance_args_tuple[-4])
+                    a_idx = int(guidance_args_tuple[-3])
+                    a_path = str(guidance_args_tuple[-2])
+                    lat_str = float(guidance_args_tuple[-1])
                     raw_g = model_cache.predict_guided(
                         npz_path, cfgs, noise_scale=noise, n_samples=max(1, k),
+                        obstacles=obs or None,
                         zero_neighbors=zero_neighbors,
                         ego_shape_override=tree.ego_shape,
                         anchor_index=a_idx, anchor_path=a_path,
+                        lateral_strength=lat_str,
                     )
                     guided = [_traj_cos_sin_to_xyh(raw_g[j]) for j in range(raw_g.shape[0])]
             return det_traj, guided
@@ -1303,8 +1436,18 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
 
         def on_select_obstacle(tree, label, step, view_r, gt_on, det_on, det_cache, guided_cache,
                                rb_on, nb_on, hide_nb, traj_rb_on, traj_nb_on):
-            obs = _find_obs(tree, label)
             s = _safe_step(step)
+            # "Add new" (or empty) -> reset the shared fields to placement
+            # defaults and clear the selection so the next Apply places fresh.
+            if not label or label == "Add new":
+                img, info = _render(tree, s, view_r, None, show_gt_val=gt_on,
+                                    det_traj=det_cache, guided_trajs=guided_cache,
+                                    rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
+                                    traj_rb=traj_rb_on, traj_nb=traj_nb_on)
+                return (img, info, None,
+                        10.0, 0.0, 0, 4.5, 1.8, 30,
+                        False, gr.update(value=5.0, visible=False))
+            obs = _find_obs(tree, label)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
                                 det_traj=det_cache, guided_trajs=guided_cache,
                                 rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
@@ -1335,7 +1478,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             mods = _modifications_md(tree, tree.active_branch)
             choices = _obs_choices(tree)
             return (tree, img, info, mods, None,
-                    gr.update(choices=choices, value=None), det_traj, guided)
+                    gr.update(choices=choices, value="Add new"), det_traj, guided)
 
         def on_apply_edit(tree, label, step, view_r, gt_on, det_on, guided_on,
                           hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
@@ -1404,10 +1547,39 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             mods = _modifications_md(tree, tree.active_branch)
             return tree, img, info, mods, label, det_traj, guided
 
+        def on_obstacle_action(tree, label, step, view_r,
+                               x, y, yaw, length, width, history,
+                               is_moving, speed_val,
+                               gt_on, det_on, guided_on, hide_nb, rb_on, nb_on,
+                               traj_rb_on, traj_nb_on, *g_args):
+            """Dispatch the single fused Obstacle "Apply" button.
+
+            The mode is read from the obstacle dropdown value (`label`):
+              "Add new" (or empty) -> on_place (places a brand-new obstacle).
+              any existing label    -> on_apply_edit (edits that obstacle).
+
+            on_place returns 11 outputs; on_apply_edit returns 7. The shared
+            .click(outputs=...) list is on_place's superset, so the edit path
+            pads the trailing 4 (obs_select, obs_route_info, step_slider,
+            step_mirror) with gr.update() no-ops.
+            """
+            if label and label != "Add new":
+                (t, img, info, mods, sel, det_traj, guided) = on_apply_edit(
+                    tree, label, step, view_r, gt_on, det_on, guided_on,
+                    hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
+                    x, y, yaw, length, width, history,
+                    is_moving, speed_val, *g_args)
+                return (t, img, info, mods, sel, det_traj, guided,
+                        gr.update(), gr.update(), gr.update(), gr.update())
+            return on_place(
+                tree, step, view_r, x, y, yaw, length, width, history,
+                is_moving, speed_val, gt_on, det_on, guided_on, hide_nb,
+                rb_on, nb_on, traj_rb_on, traj_nb_on, *g_args)
+
         def on_generate_guided(tree, step, gt_on, view_r, selected_obs,
                                noise, k, det_on, det_cache, hide_nb,
                                rb_on, nb_on, traj_rb_on, traj_nb_on,
-                               anchor_idx, anchor_proto_path,
+                               anchor_idx, anchor_proto_path, lateral_strength,
                                *guidance_args):
             if model_cache is None or not model_cache.available:
                 return gr.update(), "No model loaded", det_cache, None
@@ -1441,6 +1613,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 obstacles=obs or None, zero_neighbors=hide_nb,
                 ego_shape_override=tree.ego_shape,
                 anchor_index=int(anchor_idx), anchor_path=str(anchor_proto_path),
+                lateral_strength=float(lateral_strength),
             )
             guided_list = [_traj_cos_sin_to_xyh(raw_guided[i]) for i in range(raw_guided.shape[0])]
 
@@ -1552,24 +1725,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             tree.save(path)
             return f"Saved to `{path}`"
 
-        def on_crop(tree, step, view_r, start, end, selected_obs, gt_on):
-            tree.set_crop(tree.active_branch, _safe_step(start), _safe_step(end))
-            seq = tree.get_npz_sequence(tree.active_branch)
-            max_step = max(0, len(seq) - 1)
-            s = min(_safe_step(step), max_step)
-            img, info = _render(tree, s, view_r, selected_obs, show_gt_val=gt_on)
-            b_info = _branch_info_html(tree, tree.active_branch)
-            return tree, img, info, b_info, gr.update(maximum=max_step, value=s), s
-
-        def on_crop_clear(tree, step, view_r, selected_obs, gt_on):
-            tree.clear_crop(tree.active_branch)
-            seq = tree.get_npz_sequence(tree.active_branch)
-            max_step = max(0, len(seq) - 1)
-            s = min(_safe_step(step), max_step)
-            img, info = _render(tree, s, view_r, selected_obs, show_gt_val=gt_on)
-            b_info = _branch_info_html(tree, tree.active_branch)
-            return tree, img, info, b_info, gr.update(maximum=max_step, value=s), s
-
         def on_fuse(tree, prefix_id, suffix_id, view_r, gt_on):
             try:
                 suffix_branch = tree.branches.get(suffix_id)
@@ -1604,7 +1759,8 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         # Guidance toggle+scale inputs for recomputation, plus noise and K at end
         _g_inputs = ([v for gname in ALL_GUIDANCE_NAMES
                        for v in (guidance_toggles[gname], guidance_scales[gname])]
-                     + [guided_noise, guided_k, anchor_index_sl, anchor_path_tb])
+                     + [guided_noise, guided_k, anchor_index_sl, anchor_path_tb,
+                        lateral_strength_sl])
         _overlay_inputs = [show_guided, hide_neighbors, show_rb_dist, show_nb_dist,
                            show_traj_rb, show_traj_nb]
 
@@ -1620,32 +1776,20 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         step_slider.release(
             lambda v: v, [step_slider], [step_mirror],
         )
+        # Client-side sync (js -> no server round-trip, no loading spinner) so the
+        # hidden mirror and the visible Step box update instantly while dragging.
         step_slider.change(
-            lambda v: v, [step_slider], [step_mirror],
+            None, [step_slider], [step_mirror, step_jump_box], js="(v) => [v, v]",
+        )
+        # Typing in the Step box jumps there (same handler, box as the step source).
+        _nav_inputs_jump = ([tree_state, step_jump_box, view_half, selected_obstacle_state,
+                             show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
+                             show_traj_rb, show_traj_nb,
+                             show_guided, guided_trajs_state] + _g_inputs)
+        step_jump_box.submit(
+            on_step_change, _nav_inputs_jump, nav_outputs,
         )
 
-        def on_step_jump(tree, jump_val, view_r, selected_obs, gt_on, det_on,
-                         hide_nb, rb_on, nb_on, traj_rb_on, traj_nb_on,
-                         guided_on, prev_guided_cache, *g_args):
-            s = _safe_step(jump_val)
-            seq = tree.get_npz_sequence(tree.active_branch)
-            s = min(s, max(0, len(seq) - 1)) if seq else 0
-            det_traj, guided = _recompute_trajs(tree, s, det_on, guided_on, g_args or None,
-                                                prev_guided=prev_guided_cache,
-                                                zero_neighbors=hide_nb)
-            img, info = _render(tree, s, view_r, selected_obs,
-                                show_gt_val=gt_on, det_traj=det_traj, guided_trajs=guided,
-                                rb_dist=rb_on, nb_dist=nb_on, hide_nb=hide_nb,
-                                traj_rb=traj_rb_on, traj_nb=traj_nb_on)
-            return img, info, s, s, det_traj, guided
-        step_jump_btn.click(
-            on_step_jump,
-            [tree_state, step_jump_input, view_half, selected_obstacle_state,
-             show_gt, show_det, hide_neighbors, show_rb_dist, show_nb_dist,
-             show_traj_rb, show_traj_nb,
-             show_guided, guided_trajs_state] + _g_inputs,
-            nav_outputs,
-        )
         _render_trigger_inputs = [tree_state, step_slider, view_half, selected_obstacle_state,
                                    show_gt, show_det, show_guided,
                                    hide_neighbors, show_rb_dist, show_nb_dist,
@@ -1680,15 +1824,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
             [obs_is_moving], [obs_speed],
             queue=False,
         )
-        edit_is_moving.change(
-            lambda v: gr.update(visible=v),
-            [edit_is_moving], [edit_speed],
-            queue=False,
-        )
 
-        place_btn.click(
-            on_place,
-            [tree_state, step_mirror, view_half,
+        # Fused Obstacle "Apply" button — dispatches on the obs_select value
+        # ("Add new" -> place, any existing label -> edit).
+        obstacle_action_btn.click(
+            on_obstacle_action,
+            [tree_state, obs_select, step_mirror, view_half,
              obs_x, obs_y, obs_yaw, obs_length, obs_width, obs_history,
              obs_is_moving, obs_speed,
              show_gt, show_det] + _overlay_inputs + _g_inputs,
@@ -1697,14 +1838,15 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
              obs_select, obs_route_info, step_slider, step_mirror],
         )
 
+        # Selecting an existing obstacle auto-fills the shared obs_* fields.
         obs_select.change(
             on_select_obstacle,
             [tree_state, obs_select, step_mirror, view_half, show_gt,
              show_det, det_traj_state, guided_trajs_state,
              show_rb_dist, show_nb_dist, hide_neighbors, show_traj_rb, show_traj_nb],
             [scene_image, step_info, selected_obstacle_state,
-             edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history,
-             edit_is_moving, edit_speed],
+             obs_x, obs_y, obs_yaw, obs_length, obs_width, obs_history,
+             obs_is_moving, obs_speed],
         )
 
         remove_obs_btn.click(
@@ -1715,22 +1857,12 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
              selected_obstacle_state, obs_select, det_traj_state, guided_trajs_state],
         )
 
-        apply_edit_btn.click(
-            on_apply_edit,
-            [tree_state, obs_select, step_mirror, view_half,
-             show_gt, show_det] + _overlay_inputs +
-            [edit_x, edit_y, edit_yaw, edit_length, edit_width, edit_history,
-             edit_is_moving, edit_speed] + _g_inputs,
-            [tree_state, scene_image, step_info, mods_display, selected_obstacle_state,
-             det_traj_state, guided_trajs_state],
-        )
-
         # Guidance generation button
         guidance_btn_inputs = ([tree_state, step_slider, show_gt, view_half,
                                 selected_obstacle_state, guided_noise, guided_k,
                                 show_det, det_traj_state, hide_neighbors,
                                 show_rb_dist, show_nb_dist, show_traj_rb, show_traj_nb,
-                                anchor_index_sl, anchor_path_tb]
+                                anchor_index_sl, anchor_path_tb, lateral_strength_sl]
                                + [v for gname in ALL_GUIDANCE_NAMES
                                   for v in (guidance_toggles[gname], guidance_scales[gname])])
         generate_guided_btn.click(
@@ -1807,18 +1939,6 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
         save_tree_btn.click(
             on_save_tree, [tree_state, load_tree_input],
             [save_status],
-        )
-
-        crop_btn.click(
-            on_crop,
-            [tree_state, step_mirror, view_half, crop_start, crop_end, selected_obstacle_state, show_gt],
-            [tree_state, scene_image, step_info, branch_info, step_slider, step_mirror],
-        )
-
-        crop_clear_btn.click(
-            on_crop_clear,
-            [tree_state, step_mirror, view_half, selected_obstacle_state, show_gt],
-            [tree_state, scene_image, step_info, branch_info, step_slider, step_mirror],
         )
 
         # Export NPZs — copy branch sequence to output dir with sequential naming
@@ -2283,25 +2403,23 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     GuidanceConfig,
                     GuidanceSetConfig,
                 )
-                _sim_anchor_idx = int(guidance_args[-2]) if len(guidance_args) >= 2 else 0
-                _sim_anchor_path = str(guidance_args[-1]) if len(guidance_args) > 1 else ""
+                _sim_lat_strength = float(guidance_args[-1]) if len(guidance_args) >= 1 else 1.0
+                _sim_anchor_path = str(guidance_args[-2]) if len(guidance_args) >= 2 else ""
+                _sim_anchor_idx = int(guidance_args[-3]) if len(guidance_args) >= 3 else 0
+                _ego = scene.ego_agent
+                _sim_spd = float(np.linalg.norm(_ego.current_velocity)) if _ego is not None else None
                 fns = []
                 for gi, gname in enumerate(ALL_GUIDANCE_NAMES):
                     enabled = guidance_args[gi * 2]
                     scale = guidance_args[gi * 2 + 1]
                     if enabled:
-                        params = {}
-                        if gname == "speed":
-                            ego = scene.ego_agent
-                            if ego is not None:
-                                spd = float(np.linalg.norm(ego.current_velocity))
-                                params["v_high"] = spd * 1.2
-                                params["v_low"] = max(0.0, spd * 0.5)
-                        if gname == "anchor_following" and _sim_anchor_path:
-                            params["prototypes_path"] = _sim_anchor_path
-                            params["anchor_index"] = _sim_anchor_idx
+                        scale, params = _build_guidance_params(
+                            gname, scale, speed=_sim_spd,
+                            anchor_path=_sim_anchor_path, anchor_index=_sim_anchor_idx,
+                            lateral_strength=_sim_lat_strength,
+                        )
                         fns.append(GuidanceConfig(name=gname, enabled=True,
-                                                   scale=float(scale), params=params))
+                                                   scale=scale, params=params))
                 if fns:
                     set_cfg = GuidanceSetConfig(functions=fns, global_scale=1.0)
                     composer = GuidanceComposer(set_cfg)
@@ -2547,7 +2665,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                         guided_trajs_state, det_traj_state]
                        + [v for gname in ALL_GUIDANCE_NAMES
                           for v in (guidance_toggles[gname], guidance_scales[gname])]
-                       + [anchor_index_sl, anchor_path_tb])
+                       + [anchor_index_sl, anchor_path_tb, lateral_strength_sl])
         sim_btn.click(
             on_simulate,
             _sim_inputs,
@@ -2699,8 +2817,8 @@ def _render_branch_svg(tree: SceneTree, current_step: int = 0) -> str:
         return _RAIL_X + depth * _INDENT
 
     parts: list[str] = [
-        f'<div style="max-height:400px;overflow-y:auto;overflow-x:auto;'
-        f'background:{_COL_BG};border-radius:8px;padding:2px">',
+        f'<div style="min-height:170px;max-height:400px;overflow-y:auto;overflow-x:auto;'
+        f'background:{_COL_BG};border-radius:8px;padding:2px;box-sizing:border-box">',
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" height="{svg_h}" '
         f'style="font-family:monospace;font-size:11px">',
     ]
@@ -2947,7 +3065,8 @@ def main():
 
     demo = build_interface(tree, model_cache=mc, map_borders=map_border_polylines,
                            map_builder=builder, reward_config=reward_cfg)
-    demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True)
+    demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True,
+                css=_GUI_CSS)
 
 
 if __name__ == "__main__":
