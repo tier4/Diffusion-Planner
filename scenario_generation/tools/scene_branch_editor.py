@@ -74,7 +74,7 @@ ALL_GUIDANCE_NAMES = [
 ]
 
 # Lateral guidance: the GUI exposes two sliders -- the offset target eta
-# (sign = direction: + left / - right) and a separate strength (energy scale).
+# (sign = SCREEN direction: + right / - left) and a separate strength (energy scale).
 # lambda is the max lateral offset in metres that eta scales against.
 _LATERAL_LAMBDA = 3.0
 # Collision-swerve guidance: slider sign picks the side in SCREEN direction
@@ -950,9 +950,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     guidance_scales = {}
                     lateral_strength_sl = None  # created inside the lateral cell below
 
-                    # Per-guidance slider semantics:
-                    #   lateral          -> offset target eta in [-1, 1] (+ left / - right)
-                    #   collision_swerve -> signed strength (sign = side, + left / - right)
+                    # Per-guidance slider semantics (sign = SCREEN direction):
+                    #   lateral          -> offset target eta in [-3, 3] (+ right / - left)
+                    #   collision_swerve -> signed strength (sign = side, + right / - left)
                     #   others           -> energy scale in [0, 10]
                     def _guidance_slider_spec(gname):
                         if gname == "lateral":
