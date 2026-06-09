@@ -77,8 +77,8 @@ ALL_GUIDANCE_NAMES = [
 # (sign = direction: + left / - right) and a separate strength (energy scale).
 # lambda is the max lateral offset in metres that eta scales against.
 _LATERAL_LAMBDA = 3.0
-# Collision-swerve guidance: the slider sign picks the side (+ left / - right),
-# magnitude is the strength. Default proximity range in metres.
+# Collision-swerve guidance: slider sign picks the side in SCREEN direction
+# (+ = right / - = left), magnitude is the strength. Proximity range in metres.
 _COLLISION_SWERVE_RANGE = 8.0
 
 
@@ -90,9 +90,15 @@ def _build_guidance_params(name, scale, *, speed=None, anchor_path=None,
     and Simulate paths all interpret the sliders identically:
       - speed            -> v_high/v_low derived from current ego speed
       - anchor_following -> prototypes_path + anchor_index
-      - lateral          -> slider = offset target eta in [-1, 1] (+L/-R);
-                            energy scale comes from the separate Lateral Strength slider
-      - collision_swerve -> slider sign = side (+L/-R), magnitude = energy scale
+      - lateral          -> slider in [-3, 3] is the offset target in SCREEN
+                            direction (+ right / - left), written to eta_lat
+                            (negated, since eta_lat's native +is-left); target
+                            offset = lambda_lat * eta_lat. Energy scale comes from
+                            the separate Lateral Strength slider. (eta intentionally
+                            exceeds the [-1,1] PPO convention so manual swerves can
+                            reach larger offsets; the energy is well-defined for any eta.)
+      - collision_swerve -> slider sign = side in SCREEN direction (+ right /
+                            - left), magnitude = energy scale
       - others           -> slider is the energy scale verbatim
     """
     params = {}
@@ -1440,7 +1446,7 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                                     traj_rb=traj_rb_on, traj_nb=traj_nb_on)
                 return (img, info, None,
                         10.0, 0.0, 0, 4.5, 1.8, 30,
-                        False, gr.update(value=0.0, visible=False))
+                        False, gr.update(value=5.0, visible=False))
             obs = _find_obs(tree, label)
             img, info = _render(tree, s, view_r, label, show_gt_val=gt_on,
                                 det_traj=det_cache, guided_trajs=guided_cache,

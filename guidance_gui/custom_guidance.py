@@ -72,7 +72,7 @@ class CollisionSwerveGuidance(BaseGuidance):
         nb_xy = nb_cur[..., :2]                    # [B, Pn, 2]
         nb_valid = nb_cur.abs().sum(dim=-1) > 0    # [B, Pn]
 
-        if nb_valid.sum() == 0:
+        if nb_valid.sum().item() == 0:
             return torch.zeros(B, device=device)
 
         # Centroid gap ego_t <-> neighbour (detached -> proximity gate only).
