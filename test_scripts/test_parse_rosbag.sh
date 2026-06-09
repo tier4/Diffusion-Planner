@@ -3,9 +3,9 @@ set -eux
 
 cd $(dirname $0)/..
 ROOT_DIR=$(pwd)
-converter_type=${1}  # python or cpp
+converter_type=${1:-cpp}  # python or cpp
 
-result_dir=/mnt/nvme0/sakoda/test/$(date +%Y%m%d_%H%M%S)_test_${converter_type}
+result_dir=/mnt/nvme/test/$(date +%Y%m%d_%H%M%S)_test_${converter_type}
 
 rm -rf ${result_dir}
 
