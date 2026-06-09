@@ -53,20 +53,23 @@ def _jerk_mag(xy: np.ndarray, window: int) -> np.ndarray:
 
 
 def _comfort_cost(past_xy: np.ndarray, fut_xy: np.ndarray, jerk_weight: float,
-                  peak_weight: float, window: int) -> float:
+                  peak_weight: float, window: int, mean_weight: float = 1.0) -> float:
     """Comfort cost over past⊕future positions (continuity-aware).
 
-    cost = mean|lat_accel| + peak_weight*max|lat_accel| + jerk_weight*(mean|jerk| + max|jerk|/10)
+    cost = mean_weight*mean|lat_accel| + peak_weight*max|lat_accel|
+           + jerk_weight*(mean|jerk| + max|jerk|/10)
 
     'Violent curves' is dominated by the PEAK lateral accel and the JERK (sudden
     steering), NOT the mean — a centered curve can be taken with a gentle steering
-    ramp (low jerk/peak) at the same mean lat_accel. Weighting peak+jerk finds the
-    least-violent centered candidate instead of just the lowest-average one.
+    ramp (low jerk/peak) at the same mean lat_accel. Set mean_weight=0 to target
+    ONLY peak+jerk: this keeps the trajectory's mean lat-accel GT-like (so it stays
+    close to GT → low ego-L2 cost), unlike penalizing the mean which drifts ego off
+    GT (the v1 +7.2% ego-L2 regression).
     """
     cat = np.concatenate([past_xy, fut_xy], axis=0)  # (Tp+T, 2)
     la = np.abs(lat_accel_smoothed(cat, window=window))
     jk = _jerk_mag(cat, window)
-    return float(la.mean() + peak_weight * la.max()
+    return float(mean_weight * la.mean() + peak_weight * la.max()
                  + jerk_weight * (jk.mean() + jk.max() / 10.0))
 
 
@@ -86,6 +89,8 @@ def main():
                     help="weight of jerk (mean+max/10) in comfort cost")
     ap.add_argument("--peak_weight", type=float, default=0.5,
                     help="weight of max|lat_accel| (the 'violence' peak) in comfort cost")
+    ap.add_argument("--mean_weight", type=float, default=1.0,
+                    help="weight of mean|lat_accel|; set 0 to target ONLY peak+jerk (keeps mean GT-like → low ego-L2 cost)")
     ap.add_argument("--comfort_window", type=int, default=11, help="SG window for lat_accel/jerk")
     ap.add_argument("--report", default=None, help="optional JSON report of per-scene selection")
     args = ap.parse_args()
@@ -123,7 +128,8 @@ def main():
             continue
 
         costs = [(_comfort_cost(past_xy, trajs[i, :, :2].detach().cpu().numpy(),
-                                args.jerk_weight, args.peak_weight, args.comfort_window), i) for i in idxs]
+                                args.jerk_weight, args.peak_weight, args.comfort_window,
+                                args.mean_weight), i) for i in idxs]
         best_cost, best = min(costs)
         if float(cl[best]) > -0.05:
             n_cen += 1
