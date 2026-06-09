@@ -26,6 +26,7 @@ import numpy as np
 import torch
 from matplotlib.patches import Rectangle
 
+import guidance_gui.custom_guidance  # noqa: F401 -- registers the collision_swerve guidance
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
 from scenario_generation.scene_render import (
@@ -187,7 +188,6 @@ class _ModelCache:
         from diffusion_planner.model.guidance.composer import GuidanceComposer
         from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 
-        import guidance_gui.custom_guidance  # noqa: F401 -- registers collision_swerve
         from guidance_gui.generate_samples import generate_samples
 
         data = self._load_npz(npz_path, obstacles=obstacles,
@@ -657,39 +657,44 @@ def _generate_neighbor_reference(
     return ref
 
 
+# Custom CSS for the editor. Passed to demo.launch() (Gradio 6 dropped the css
+# kwarg from the Blocks constructor — it is silently ignored there).
+_GUI_CSS = (
+    ".gradio-container {max-width: 100% !important; width: 100% !important; "
+    "padding-left: 1% !important; padding-right: 1% !important;} "
+    # Thin scrub bar: Gradio's slider stacks a .head (label + number box) above
+    # the .wrap (the track). Hiding .head removes the empty top area so the track
+    # sits inline with the buttons (the separate Step box is the readout/jump field).
+    ".scrub .head {display: none !important;} "
+    ".scrub .wrap {margin: 0 !important;} "
+    ".scrub {padding-top: 0 !important; padding-bottom: 0 !important;} "
+    # YouTube-style scrub bar: hardcode the track gradient (red played / gray
+    # remaining) on the pseudo-elements, using Gradio's JS-set --range_progress
+    # as the split (bypasses the --slider-color theme var).
+    ".scrub input[type='range']::-webkit-slider-runnable-track "
+    "{background: linear-gradient(to right, #ff0000 var(--range_progress), "
+    "#c9ccd1 var(--range_progress)) !important;} "
+    ".scrub input[type='range']::-moz-range-progress "
+    "{background-color: #ff0000 !important;} "
+    ".scrub input[type='range']::-moz-range-track "
+    "{background: #c9ccd1 !important;} "
+    # Vertically center every control in the playback bar.
+    ".playbar {align-items: center !important;} "
+    ".playbar > * {align-self: center !important; margin-top: 0 !important; "
+    "margin-bottom: 0 !important;}"
+)
+
+
 def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     map_borders: list[np.ndarray] | None = None,
                     map_builder=None, reward_config=None):
     """Build the Gradio interface for the scene branch editor."""
 
+    # NOTE: css is passed to demo.launch() (Gradio 6 dropped css from the Blocks
+    # constructor); see _GUI_CSS and main().
     with gr.Blocks(
         title="Scene Branch Editor",
         fill_width=True,
-        css=(
-            ".gradio-container {max-width: 100% !important; width: 100% !important; "
-            "padding-left: 1% !important; padding-right: 1% !important;} "
-            # Thin scrub bar: Gradio's slider stacks a .head (label + number box)
-            # above the .wrap (the track). Hiding .head removes the empty top area
-            # so the track sits inline with the buttons (the separate Step box on
-            # the right is the readout/jump field).
-            ".scrub .head {display: none !important;} "
-            ".scrub .wrap {margin: 0 !important;} "
-            ".scrub {padding-top: 0 !important; padding-bottom: 0 !important;} "
-            # YouTube-style scrub bar: hardcode the track gradient (red played /
-            # gray remaining) on the pseudo-elements, using Gradio's JS-set
-            # --range_progress as the split (bypasses the --slider-color theme var).
-            ".scrub input[type='range']::-webkit-slider-runnable-track "
-            "{background: linear-gradient(to right, #ff0000 var(--range_progress), "
-            "#c9ccd1 var(--range_progress)) !important;} "
-            ".scrub input[type='range']::-moz-range-progress "
-            "{background-color: #ff0000 !important;} "
-            ".scrub input[type='range']::-moz-range-track "
-            "{background: #c9ccd1 !important;}"
-            # Vertically center every control in the playback bar.
-            ".playbar {align-items: center !important;} "
-            ".playbar > * {align-self: center !important; margin-top: 0 !important; "
-            "margin-bottom: 0 !important;}"
-        ),
     ) as demo:
         # ── State ──
         tree_state = gr.State(value=tree)
@@ -801,9 +806,9 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                     step_mirror = gr.Number(value=0, visible=False, precision=0)
                     # Kept (hidden) -- many handlers output the step/branch string here.
                     step_info = gr.Markdown("Step 0 / 0", visible=False)
-                    # Single control bar: transport buttons + a label-less scrub
-                    # slider whose built-in number box (the scrub class flexes it
-                    # inline with the track) is the type-to-jump field.
+                    # Single control bar: transport buttons + a thin scrub slider
+                    # (its built-in head/number is hidden via CSS) + a separate
+                    # Step number box that mirrors it and accepts typed jumps.
                     with gr.Row(elem_classes=["playbar"]):
                         btn_play = gr.Button("▶", size="sm", min_width=36, scale=0)
                         btn_stop = gr.Button("■", size="sm", min_width=36, variant="stop", scale=0)
@@ -826,13 +831,13 @@ def build_interface(tree: SceneTree, model_cache: _ModelCache | None = None,
                 # it has no box outline, matching the Export accordion).
                 with gr.Accordion("⚙ View / FPS", open=False):
                     with gr.Row():
-                        view_half = gr.Number(
-                            value=50, precision=0, label="View radius (m)",
-                            minimum=10, maximum=200, scale=1,
+                        view_half = gr.Slider(
+                            minimum=1, maximum=200, value=50, step=1,
+                            label="View radius (m)", scale=1,
                         )
-                        play_fps = gr.Number(
-                            value=10, precision=0, label="FPS",
-                            minimum=1, maximum=30, scale=1,
+                        play_fps = gr.Slider(
+                            minimum=1, maximum=50, value=10, step=1,
+                            label="FPS", scale=1,
                         )
 
                 # Simulate controls — horizontal row
@@ -3053,7 +3058,8 @@ def main():
 
     demo = build_interface(tree, model_cache=mc, map_borders=map_border_polylines,
                            map_builder=builder, reward_config=reward_cfg)
-    demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True)
+    demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True,
+                css=_GUI_CSS)
 
 
 if __name__ == "__main__":

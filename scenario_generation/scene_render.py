@@ -671,14 +671,15 @@ def render_scene_at_step(
     # of the title (top) and the trajectory legend (upper-right)). Reads the ego's
     # velocity at the current frame, which is accurate on base AND simulated/branched
     # NPZs (resim writes ego_current_state via tensor_converter._build_ego_current_state).
-    # No fallback: if there is no ego the editor is in a broken state and we let it raise.
-    ego_speed = float(np.linalg.norm(ego.current_velocity))
-    ax.text(
-        0.015, 0.015, f"ego speed: {ego_speed:.1f} m/s ({ego_speed * 3.6:.0f} km/h)",
-        transform=ax.transAxes, ha="left", va="bottom",
-        fontsize=10, fontweight="bold", color="black", zorder=30,
-        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.75),
-    )
+    # Guarded like the rest of the function: scenes without an ego just skip it.
+    if ego is not None:
+        ego_speed = float(np.linalg.norm(ego.current_velocity))
+        ax.text(
+            0.015, 0.015, f"ego speed: {ego_speed:.1f} m/s ({ego_speed * 3.6:.0f} km/h)",
+            transform=ax.transAxes, ha="left", va="bottom",
+            fontsize=10, fontweight="bold", color="black", zorder=30,
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.75),
+        )
 
     fig.tight_layout()
     return fig
