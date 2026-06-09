@@ -134,6 +134,7 @@ def _compute_sft_diffusion_loss(
     ego_gt_real: torch.Tensor | None = None,
     velocity_weight: bool = False,
     kl_coef: float = 0.0,
+    comfort_loss_weight: float = 0.0,
     base_model: nn.Module | None = None,
     prefer_external_base: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
@@ -240,6 +241,7 @@ def _compute_sft_diffusion_loss(
     if use_ego_il and ego_il_mode == "gt":
         ego_gt_real_norm = (ego_gt_real - ego_mean) / ego_std  # [B, T, 4]
 
+    total_comfort_loss = 0.0
     total_ego_loss = 0.0
     total_neighbor_loss = 0.0
     total_neighbor_reg_loss = 0.0
@@ -307,6 +309,17 @@ def _compute_sft_diffusion_loss(
         heading_err = torch.sum((ego_pred[..., 2:] - ego_gt[..., 2:]) ** 2, dim=-1)
         ego_loss = (lat_err + lon_err + heading_err).mean()
         total_ego_loss += ego_loss
+
+        # Comfort loss: penalize the model's own ego-plan JERK (3rd difference of
+        # predicted positions). Reference-free (the real human GT is unavailable in
+        # curated mode — ego_agent_future is the curated target), so we minimize the
+        # plan's absolute jerk: smooths sudden steering changes (the "violent curve"
+        # the real vehicle feels) WITHOUT forbidding steady cornering. ego_loss keeps
+        # the plan centered; comfort_loss_weight tunes the comfort<->centering/L2 trade.
+        if comfort_loss_weight > 0.0:
+            p = ego_pred[..., :2]  # [B, T, 2] (normalized positions)
+            jerk = p[:, 3:] - 3.0 * p[:, 2:-1] + 3.0 * p[:, 1:-2] - p[:, :-3]  # [B, T-3, 2]
+            total_comfort_loss = total_comfort_loss + (jerk ** 2).sum(-1).mean()
 
         # Ego IL loss (GT mode): MSE against real GT ego trajectory
         if use_ego_il and ego_il_mode == "gt":
@@ -394,6 +407,8 @@ def _compute_sft_diffusion_loss(
     neighbor_reg_avg = total_neighbor_reg_loss / K if isinstance(total_neighbor_reg_loss, torch.Tensor) else torch.tensor(0.0, device=device)
     ego_il_avg = total_ego_il_loss / K if isinstance(total_ego_il_loss, torch.Tensor) else torch.tensor(0.0, device=device)
     kl_loss_avg = total_kl_loss / K if isinstance(total_kl_loss, torch.Tensor) else torch.tensor(0.0, device=device)
+    comfort_loss_avg = total_comfort_loss / K if isinstance(total_comfort_loss, torch.Tensor) else torch.tensor(0.0, device=device)
+    use_comfort = comfort_loss_weight > 0.0
 
     # Combined loss: ego + neighbor (weight from config.neighbor_loss_weight,
     # default 0.1 to match original SFT alpha_neighbor_loss; set to 0 to disable)
@@ -404,6 +419,8 @@ def _compute_sft_diffusion_loss(
         loss = loss + ego_il_weight * ego_il_avg
     if use_kl:
         loss = loss + kl_coef * kl_loss_avg
+    if use_comfort:
+        loss = loss + comfort_loss_weight * comfort_loss_avg
 
     metrics = {
         "sft_ego_loss": ego_loss_avg.item(),
@@ -412,6 +429,7 @@ def _compute_sft_diffusion_loss(
         "sft_neighbor_reg_loss": neighbor_reg_avg.item() if isinstance(neighbor_reg_avg, torch.Tensor) else 0.0,
         "sft_ego_il_loss": ego_il_avg.item() if isinstance(ego_il_avg, torch.Tensor) else 0.0,
         "sft_kl_loss": kl_loss_avg.item() if isinstance(kl_loss_avg, torch.Tensor) else 0.0,
+        "sft_comfort_loss": comfort_loss_avg.item() if isinstance(comfort_loss_avg, torch.Tensor) else 0.0,
     }
     return loss, metrics
 
@@ -1267,6 +1285,7 @@ def train_epoch_ranked_sft(
             ego_gt_real=mini_ego_gt_real,
             velocity_weight=config.sft_velocity_weight,
             kl_coef=config.get_kl_coef(epoch, config.train_epochs),
+            comfort_loss_weight=getattr(config, "comfort_loss_weight", 0.0),
             base_model=_base_model_ref,
             prefer_external_base=(config.neighbor_reg_anchor == "baseline"),
         )

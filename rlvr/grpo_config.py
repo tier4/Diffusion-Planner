@@ -250,6 +250,11 @@ class GRPOConfig:
     sg_filter_window: int = 11  # Savitzky-Golay filter window length (must be odd)
     sg_filter_order: int = 3    # Savitzky-Golay filter polynomial order
     sft_velocity_weight: bool = True  # divide lon_err by clamp(|ego_speed|, min=1) — matches original SFT
+    # Comfort loss: penalize the model's own ego-plan jerk (3rd diff of predicted
+    # positions) during SFT. Reference-free; smooths sudden steering changes (the
+    # "violent curve") without forbidding steady cornering. 0=off (opt-in). Tunes the
+    # comfort<->centering/L2 trade alongside the curated ego loss.
+    comfort_loss_weight: float = 0.0
     # Neighbor regularization: penalize LoRA neighbor outputs diverging from base model.
     # Computes MSE(lora_neighbor_pred, base_neighbor_pred) at the same (noise, timestep)
     # by running a second forward pass with LoRA disabled. Adds ~2x training cost.
