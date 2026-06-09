@@ -40,9 +40,12 @@ _TYPE_BASE = 8  # one-hot [vehicle, pedestrian, bicycle] occupies columns 8..10
 # (width, length) in metres, or a ``size`` = ((width_min, length_min), (width_max, length_max))
 # range that is sampled along a single factor so width and length scale together (a small car
 # stays narrow, a long truck stays wide).
+# ``min_turn_radius`` (metres) caps how sharply a synthetic path may bend: a constant-accel
+# path with low initial speed and large acceleration degenerates into a near-cusp hairpin, which
+# is unrealistic for a car. Only vehicles get the cap (pedestrians / bicycles can turn sharply).
 _TYPES = {
     "vehicle": dict(speed=(0.0, 14.0), accel_max=2.5, idx=0,
-                    size=((1.84, 4.34), (2.5649, 10.7462))),
+                    size=((1.84, 4.34), (2.5649, 10.7462)), min_turn_radius=5.0),
     "pedestrian": dict(speed=(0.0, 2.0), accel_max=1.0, idx=1, width=0.7, length=0.7),
     "bicycle": dict(speed=(0.0, 7.0), accel_max=1.5, idx=2, width=0.6, length=1.8),
 }
@@ -151,6 +154,18 @@ class SyntheticColliderInjector:
             min_clear = min(float(p0.norm()), float(path.norm(dim=-1).min()))
             if min_clear < self.keep_clear_radius:
                 continue
+
+            # vehicles can't turn arbitrarily sharply: reject near-cusp constant-accel paths
+            # whose minimum turn radius falls below the per-type cap. Curvature of a
+            # constant-accel path is k(t) = |v0 x a| / |v(t)|^3, maximal where speed is lowest.
+            min_turn_radius = spec.get("min_turn_radius", 0.0)
+            if min_turn_radius > 0.0:
+                tau_all = torch.cat([tau_p, tau_f])
+                vel = v0[None, :] + a[None, :] * tau_all[:, None]  # [M, 2]
+                cross = (vel[:, 0] * a[1] - vel[:, 1] * a[0]).abs()
+                max_curv = float((cross / vel.norm(dim=-1).pow(3).clamp_min(1e-6)).max())
+                if max_curv * min_turn_radius > 1.0:  # min radius < cap -> too sharp
+                    continue
 
             excess = float(a.norm()) - spec["accel_max"]
             if excess <= 0.0:
