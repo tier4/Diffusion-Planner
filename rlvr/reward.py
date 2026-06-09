@@ -23,7 +23,14 @@ class RewardConfig:
     w_safety: float = 5.0
     w_progress: float = 2.0
     w_smooth: float = 0.5
-    w_feasibility: float = 5.0
+    # Feasibility (longitudinal + lateral acceleration) penalty weight. Default 0.0:
+    # historically the feasibility_scores term was computed but NEVER added to the
+    # reward sum, so lateral-accel comfort had zero influence on trajectory ranking.
+    # The term is now wired into quality_score (below); default 0.0 keeps every
+    # existing config bit-identical (opt-in). Set >0 to make ranking comfort-aware.
+    # Note: only penalizes |lat_accel| ABOVE max_lat_accel (relu) — it clips peaks,
+    # it does not pull the whole distribution down (use ego_il baseline anchor for that).
+    w_feasibility: float = 0.0
     w_centerline: float = 5.0
     # Centerline usage mode:
     #   "baselink" (default): lane_usage = |baselink_lat| / side_hw —
@@ -2995,6 +3002,7 @@ def compute_reward_batch(
         config.w_progress * clamped_progress
         + config.w_safety * safety_scores
         + config.w_smooth * smoothness_scores
+        + config.w_feasibility * feasibility_scores
         + config.w_centerline * centerline_scores
         + ttc_bonus
         - rb_penalty
