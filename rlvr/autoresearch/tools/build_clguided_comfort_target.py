@@ -19,9 +19,9 @@ no silent poison targets.
 WHY: build_clguided_target picks argmax(centerline) with zero comfort/feasibility
 consideration. Under strong CL guidance the most-centered slot on a curve is a
 centered-but-SHARP trajectory; curated SFT on it teaches the model to plan sharp
-curves (the open-loop lat-accel regression the real vehicle feels as "violent
-curves" even though psim's controller smooths it). This keeps centering (CL/RB/bias)
-while removing the sharpness, and guarantees continuity with the actual ego state.
+curves (a high open-loop lat-accel that reads as harsh curve-taking, even when a
+closed-loop tracker smooths it). This keeps centering (CL/RB/bias) while removing the
+sharpness, and guarantees continuity with the actual ego state.
 
 Reuses ONLY existing fns: eval_det_avoidance.{load_model,load_npz_data},
 grpo_trainer_batched.{_stack_scene_data,_normalize_batch,generate_all_scenes_batched},
@@ -59,12 +59,12 @@ def _comfort_cost(past_xy: np.ndarray, fut_xy: np.ndarray, jerk_weight: float,
     cost = mean_weight*mean|lat_accel| + peak_weight*max|lat_accel|
            + jerk_weight*(mean|jerk| + max|jerk|/10)
 
-    'Violent curves' is dominated by the PEAK lateral accel and the JERK (sudden
+    Harsh curve-taking is dominated by the PEAK lateral accel and the JERK (sudden
     steering), NOT the mean — a centered curve can be taken with a gentle steering
     ramp (low jerk/peak) at the same mean lat_accel. Set mean_weight=0 to target
     ONLY peak+jerk: this keeps the trajectory's mean lat-accel GT-like (so it stays
     close to GT → low ego-L2 cost), unlike penalizing the mean which drifts ego off
-    GT (the v1 +7.2% ego-L2 regression).
+    GT and inflates ego-L2.
     """
     cat = np.concatenate([past_xy, fut_xy], axis=0)  # (Tp+T, 2)
     la = np.abs(lat_accel_smoothed(cat, window=window))
@@ -75,7 +75,7 @@ def _comfort_cost(past_xy: np.ndarray, fut_xy: np.ndarray, jerk_weight: float,
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", required=True, help="centered source (baseline ep60_80)")
+    ap.add_argument("--model", required=True, help="centered source model (.pth)")
     ap.add_argument("--scenes", required=True)
     ap.add_argument("--ego_shape", required=True, help="WB,L,W")
     ap.add_argument("--out_dir", required=True)

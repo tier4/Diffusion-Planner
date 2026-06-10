@@ -15,7 +15,7 @@ Merged checkpoints are written under <output_dir>/merged_epNNN and deleted after
 scoring unless --keep_merged is given (each is ~230MB).
 
 Usage:
-    python -m rlvr.autoresearch.tools.sweep_lora_epochs \
+    python -m rlvr.autoresearch.tools.sweep_epoch_comfort \
         --run_dir <run with lora_epoch_NNN> \
         --base_model <base.pth> \
         --scenes <scenes.json> \
@@ -77,9 +77,9 @@ def comfort_for_epoch(model, model_args, scene_paths, device) -> dict:
     for p in scene_paths:
         try:
             d = _load_npz_comfort(p, device)
-        except Exception:
+            traj = generate_trajectory(model, model_args, d, device)
+        except Exception:   # one bad scene must not abort a multi-epoch sweep
             continue
-        traj = generate_trajectory(model, model_args, d, device)
         traj = traj.detach().cpu().numpy() if hasattr(traj, "detach") else np.asarray(traj)
         xy = traj[:, :2].astype(np.float32)
         la_all.append(np.abs(lat_accel_smoothed(xy)))
