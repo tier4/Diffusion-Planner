@@ -106,7 +106,9 @@ def compute_exploration_loss(
         "exploration_policy_loss": policy_loss.item(),
         "exploration_entropy": entropy_value.item(),
         "exploration_kl": kl_value.item(),
-        "exploration_action_cost": float(action_cost),
+        "exploration_action_cost": float(
+            action_cost.detach() if isinstance(action_cost, torch.Tensor) else action_cost
+        ),
         "exploration_total_loss": total_loss.item(),
     }
     for name, d in dists.items():
