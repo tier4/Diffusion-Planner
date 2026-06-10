@@ -77,7 +77,7 @@ def _make_trainer(tmp_path, config=None, dit_optimizer=None):
     )
 
 
-def _make_group(advantages, eta_lat_01=None, eta_lon_01=None):
+def _make_group(advantages, heads=("lateral", "longitudinal")):
     eta = torch.tensor([0.5, 0.3, 0.7, 0.6])
     return {
         "npz_path": "fake.npz",
@@ -90,8 +90,7 @@ def _make_group(advantages, eta_lat_01=None, eta_lon_01=None):
         "det_trajectory": np.zeros((FUTURE_LEN, 4), dtype=np.float32),
         "scene_encoding": torch.randn(1, 5, ENC_DIM),
         "x_ref": torch.randn(1, FUTURE_LEN, 4),
-        "eta_lat_01": eta_lat_01 if eta_lat_01 is not None else eta.clone(),
-        "eta_lon_01": eta_lon_01 if eta_lon_01 is not None else eta.clone(),
+        "eta_01": {h: eta.clone() for h in heads},
     }
 
 
@@ -191,10 +190,12 @@ def test_frozen_dit_unchanged_policy_updates(tmp_path):
 def _capture_loss_args(monkeypatch, calls):
     import rlvr.grpo_exploration_trainer as get_mod
 
-    def fake_loss(advantages, log_probs, lat_dist, lon_dist, entropy_coef, kl_coef):
+    def fake_loss(advantages, log_probs, dists=None, entropy_coef=0.05,
+                  kl_coef=0.01, action_cost_coef=0.0, **kwargs):
         calls["advantages"] = advantages.detach().clone()
         calls["n_log_probs"] = log_probs.shape[0]
-        loss = log_probs.sum() * 0.0 + lat_dist.mean.sum() * 0.0
+        anchor = sum(d.mean.sum() for d in dists.values()) if dists else 0.0
+        loss = log_probs.sum() * 0.0 + anchor * 0.0
         return loss, {"exploration_total_loss": 0.0}
 
     monkeypatch.setattr(get_mod, "compute_exploration_loss", fake_loss)
@@ -287,3 +288,40 @@ def test_aggregate_policy_eval_empty():
     out = aggregate_policy_eval([])
     assert out["reward_mean"] == float("-inf")
     assert out["n_scenes"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Head-spec composer (multi-head trainer path)
+# ---------------------------------------------------------------------------
+
+def test_collision_head_trainer(tmp_path):
+    """Trainer with heads=['lateral','collision'] trains the policy and
+    builds collision_swerve_batched guidance configs."""
+    cfg = _make_config(exploration_heads=["lateral", "collision"],
+                       exploration_col_scale=6.0, exploration_lat_scale=1.5)
+    trainer = _make_trainer(tmp_path, cfg)
+    assert trainer.heads == ["lateral", "collision"]
+
+    fns = trainer._build_guidance_fns({
+        "lateral": torch.zeros(K), "collision": torch.zeros(K),
+    })
+    assert [f.name for f in fns] == ["lateral", "collision_swerve_batched"]
+    assert fns[0].scale == 1.5 and fns[1].scale == 6.0
+
+    policy_before = {k: v.clone() for k, v in trainer.exploration_policy.state_dict().items()}
+    group = _make_group([0.0, 1.0, -1.0, 0.5], heads=("lateral", "collision"))
+    metrics = trainer.train_on_groups([group], epoch=1)
+    changed = any(
+        not torch.equal(v, policy_before[k])
+        for k, v in trainer.exploration_policy.state_dict().items()
+    )
+    assert changed
+    assert "exploration_eta_collision_mean" in metrics
+
+
+def test_unknown_head_raises(tmp_path):
+    trainer = _make_trainer(tmp_path, _make_config(
+        exploration_heads=["lateral", "warp_drive"]))
+    with pytest.raises(ValueError, match="unknown exploration head"):
+        trainer._build_guidance_fns({"lateral": torch.zeros(K),
+                                     "warp_drive": torch.zeros(K)})

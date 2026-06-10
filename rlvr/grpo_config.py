@@ -345,6 +345,24 @@ class GRPOConfig:
     exploration_lambda_lat: float = 2.5   # max lateral offset in metres
     exploration_lambda_lon: float = 0.25  # max speed deviation fraction
     exploration_guidance_scale: float = 0.5  # global guidance scale for policy-guided trajectories
+    # Guidance heads for the exploration policy. Default reproduces the
+    # original 2-head layout. Supported: "lateral" (lateral offset, existing
+    # guidance), "longitudinal" (legacy, weak), "collision"
+    # (collision_swerve_batched: sign = side, |eta| = strength), "stretch"
+    # (speed_stretch_batched: stretch = 1 + lambda_spd * eta).
+    exploration_heads: list[str] = field(default_factory=lambda: ["lateral", "longitudinal"])
+    # Per-function energy scales (multiply each guidance fn's energy; the
+    # campaign avoidance envelope uses lat_scale=1.5, col_scale=6.0,
+    # lambda_lat=4.0, col_range=8.0 — must match the sweep that produced any
+    # warm-start labels).
+    exploration_lat_scale: float = 1.0
+    exploration_col_scale: float = 2.0
+    exploration_col_range: float = 8.0
+    exploration_lambda_spd: float = 0.2
+    exploration_stretch_scale: float = 1.0
+    # Action-cost coefficient: pulls each head's deterministic action (Beta
+    # mean) toward 0 — inertness tie-breaker on reward-indifferent scenes.
+    exploration_action_cost: float = 0.0
     # GuidanceHead init mode: "zeros" (recommended) or "normal"
     exploration_head_init: str = "zeros"
     exploration_head_init_std: float = 0.01

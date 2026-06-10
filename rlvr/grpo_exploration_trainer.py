@@ -23,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+import rlvr.guidance_batched  # noqa: F401 -- registers collision_swerve_batched etc.
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from torch import nn, optim
@@ -138,6 +140,13 @@ class GRPOExplorationTrainer:
         self.random_guidance_mode = config.random_guidance_mode
         self.use_explorer = self.random_guidance_mode == "explorer"
 
+        self.heads = list(config.exploration_heads)
+        if not self.use_explorer and self.heads != ["lateral", "longitudinal"]:
+            raise ValueError(
+                f"random_guidance_mode={self.random_guidance_mode!r} supports only "
+                f"the default ['lateral', 'longitudinal'] heads, got {self.heads}."
+            )
+
         if self.use_explorer:
             ep_config = ExplorationPolicyConfig(
                 hidden_dim=config.exploration_hidden_dim,
@@ -149,6 +158,7 @@ class GRPOExplorationTrainer:
                 head_init=config.exploration_head_init,
                 head_init_std=config.exploration_head_init_std,
                 head_raw_scale=config.exploration_head_raw_scale,
+                heads=self.heads,
             )
             self.exploration_policy = ExplorationPolicy(
                 ep_config, ref_seq_len=model_args.future_len,
@@ -185,6 +195,43 @@ class GRPOExplorationTrainer:
         self.eval_log: list[dict] = []
         self.best_det_reward: float = float("-inf")
         self.best_epoch: int = 0
+
+    def _build_guidance_fns(self, eta_vals: dict[str, torch.Tensor]) -> list[GuidanceConfig]:
+        """Map head-name -> GuidanceConfig with per-sample eta tensors.
+
+        Default ["lateral", "longitudinal"] reproduces the original hard-coded
+        pair exactly; "collision"/"stretch" use the batched variants from
+        rlvr.guidance_batched.
+        """
+        cfg = self.config
+        fns = []
+        for head in self.heads:
+            eta = eta_vals[head]
+            if head == "lateral":
+                fns.append(GuidanceConfig(
+                    name="lateral", enabled=True, scale=cfg.exploration_lat_scale,
+                    params={"lambda_lat": self.lambda_lat, "eta_lat": eta},
+                ))
+            elif head == "longitudinal":
+                fns.append(GuidanceConfig(
+                    name="longitudinal", enabled=True, scale=1.0,
+                    params={"lambda_lon": self.lambda_lon, "eta_lon": eta},
+                ))
+            elif head == "collision":
+                fns.append(GuidanceConfig(
+                    name="collision_swerve_batched", enabled=True,
+                    scale=cfg.exploration_col_scale,
+                    params={"eta_col": eta, "range": cfg.exploration_col_range},
+                ))
+            elif head == "stretch":
+                fns.append(GuidanceConfig(
+                    name="speed_stretch_batched", enabled=True,
+                    scale=cfg.exploration_stretch_scale,
+                    params={"stretch": 1.0 + cfg.exploration_lambda_spd * eta},
+                ))
+            else:
+                raise ValueError(f"unknown exploration head {head!r}")
+        return fns
 
     def _sample_random_eta(self, K: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Sample random η values based on random_guidance_mode."""
@@ -262,21 +309,21 @@ class GRPOExplorationTrainer:
                 scene_encoding = run_frozen_encoder(self.policy_model, norm_data)
 
                 policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
-                lat_dist = policy_output.lat_dist
-                lon_dist = policy_output.lon_dist
+                dists = policy_output.dists
 
-                eta_lat_01 = lat_dist.rsample((K,)).squeeze(-1)
-                eta_lon_01 = lon_dist.rsample((K,)).squeeze(-1)
+                eta_01 = {
+                    h: dists[h].rsample((K,)).squeeze(-1) for h in self.heads
+                }
                 if self.config.exploration_pin_zero_eta:
                     # Slot 0 = forced η=0 (0.5 in Beta space): the unguided
                     # reference the group advantages compare against. Excluded
                     # from the policy log-prob gradient in train_on_groups.
-                    eta_lat_01[0] = 0.5
-                    eta_lon_01[0] = 0.5
-                eta_lat_vals = 2.0 * eta_lat_01 - 1.0
-                eta_lon_vals = 2.0 * eta_lon_01 - 1.0
+                    for h in self.heads:
+                        eta_01[h][0] = 0.5
+                eta_vals = {h: 2.0 * v - 1.0 for h, v in eta_01.items()}
             else:
-                # Random guidance path: sample η directly
+                # Random guidance path: sample η directly (default heads only,
+                # validated in __init__)
                 eta_lat_vals, eta_lon_vals = self._sample_random_eta(K)
 
                 # Generate reference trajectory (needed by lateral/longitudinal guidance)
@@ -287,10 +334,9 @@ class GRPOExplorationTrainer:
                 norm_data["reference_trajectory"] = x_ref
 
                 scene_encoding = None
-                lat_dist = None
-                lon_dist = None
-                eta_lat_01 = (eta_lat_vals + 1.0) / 2.0  # map to (0,1) for compatibility
-                eta_lon_01 = (eta_lon_vals + 1.0) / 2.0
+                dists = None
+                eta_vals = {"lateral": eta_lat_vals, "longitudinal": eta_lon_vals}
+                eta_01 = {h: (v + 1.0) / 2.0 for h, v in eta_vals.items()}
 
             # 6. Generate K trajectories — batched with per-trajectory varied noise
             from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
@@ -304,17 +350,8 @@ class GRPOExplorationTrainer:
                 else:
                     K_data[k_key] = v
 
-            # Build batched composer with K etas
-            guidance_fns = [
-                GuidanceConfig(
-                    name="lateral", enabled=True, scale=1.0,
-                    params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat_vals},
-                ),
-                GuidanceConfig(
-                    name="longitudinal", enabled=True, scale=1.0,
-                    params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon_vals},
-                ),
-            ]
+            # Build batched composer with K etas per configured head
+            guidance_fns = self._build_guidance_fns(eta_vals)
             set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
             composer = GuidanceComposer(set_cfg)
 
@@ -337,14 +374,18 @@ class GRPOExplorationTrainer:
             fixed_scale=self.config.advantage_fixed_scale,
         )
 
-        # Store sampled eta values for recomputation during training
-        if self.use_explorer:
+        # Store sampled eta values for recomputation during training.
+        # PolicyGroupMetadata is lat/lon-specific bookkeeping kept for the
+        # default head layout only (train_on_groups recomputes log-probs).
+        if self.use_explorer and self.heads == ["lateral", "longitudinal"]:
             policy_meta = PolicyGroupMetadata(
                 log_probs=torch.zeros(K, device=self.device),
-                lat_dist_params=(lat_dist.concentration1.detach(), lat_dist.concentration0.detach()),
-                lon_dist_params=(lon_dist.concentration1.detach(), lon_dist.concentration0.detach()),
-                eta_lat_samples=eta_lat_vals.detach(),
-                eta_lon_samples=eta_lon_vals.detach(),
+                lat_dist_params=(dists["lateral"].concentration1.detach(),
+                                 dists["lateral"].concentration0.detach()),
+                lon_dist_params=(dists["longitudinal"].concentration1.detach(),
+                                 dists["longitudinal"].concentration0.detach()),
+                eta_lat_samples=eta_vals["lateral"].detach(),
+                eta_lon_samples=eta_vals["longitudinal"].detach(),
             )
         else:
             policy_meta = None
@@ -360,8 +401,7 @@ class GRPOExplorationTrainer:
             "det_trajectory": det_traj,
             "scene_encoding": scene_encoding.detach() if scene_encoding is not None else None,
             "x_ref": x_ref.detach() if x_ref is not None else None,
-            "eta_lat_01": eta_lat_01.detach(),
-            "eta_lon_01": eta_lon_01.detach(),
+            "eta_01": {h: v.detach() for h, v in eta_01.items()},
         }
 
     def train_on_groups(
@@ -446,8 +486,7 @@ class GRPOExplorationTrainer:
             if self.use_explorer:
                 scene_encoding = group["scene_encoding"]
                 x_ref = group["x_ref"]
-                eta_lat_01 = group["eta_lat_01"]
-                eta_lon_01 = group["eta_lon_01"]
+                eta_01 = group["eta_01"]
 
                 grad_enabled = not policy_frozen
                 advantages_t = torch.tensor(advantages_np, device=self.device, dtype=torch.float32)
@@ -455,23 +494,21 @@ class GRPOExplorationTrainer:
                 inner_epochs = self.config.exploration_inner_epochs
                 clip_eps = self.config.exploration_clip_epsilon
 
+                def _sum_log_probs(dists_by_head):
+                    lp = sum(dists_by_head[h].log_prob(eta_01[h]) for h in self.heads)
+                    return lp.squeeze(-1) if lp.dim() > 1 else lp
+
                 if inner_epochs > 1:
                     with torch.no_grad():
                         old_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
-                        old_lp = old_output.lat_dist.log_prob(eta_lat_01) + old_output.lon_dist.log_prob(eta_lon_01)
-                        if old_lp.dim() > 1:
-                            old_lp = old_lp.squeeze(-1)
-                        old_log_probs = old_lp.detach()
+                        old_log_probs = _sum_log_probs(old_output.dists).detach()
 
                 for inner_ep in range(inner_epochs):
                     with torch.set_grad_enabled(grad_enabled):
                         policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
-                    lat_dist = policy_output.lat_dist
-                    lon_dist = policy_output.lon_dist
+                    dists = policy_output.dists
 
-                    log_probs = lat_dist.log_prob(eta_lat_01) + lon_dist.log_prob(eta_lon_01)
-                    if log_probs.dim() > 1:
-                        log_probs = log_probs.squeeze(-1)
+                    log_probs = _sum_log_probs(dists)
 
                     # Pinned slot 0 is a forced (not sampled) action — exclude it
                     # from log-prob-based policy gradients. best_sample_mse keeps
@@ -495,9 +532,9 @@ class GRPOExplorationTrainer:
                         surr2 = clipped_ratio * pg_advantages
                         ppo_loss = -torch.min(surr1, surr2).mean()
 
-                        entropy_value = (lat_dist.entropy() + lon_dist.entropy()).mean()
-                        init_lat, init_lon = _get_init_distributions(self.device)
-                        kl_value = (kl_div(lat_dist, init_lat) + kl_div(lon_dist, init_lon)).mean()
+                        entropy_value = sum(d.entropy().mean() for d in dists.values())
+                        init_dist, _ = _get_init_distributions(self.device)
+                        kl_value = sum(kl_div(d, init_dist).mean() for d in dists.values())
 
                         policy_loss = (
                             ppo_loss
@@ -509,11 +546,10 @@ class GRPOExplorationTrainer:
                             "exploration_entropy": entropy_value.item(),
                             "exploration_kl": kl_value.item(),
                             "exploration_total_loss": policy_loss.item(),
-                            "exploration_eta_lat_mean": lat_dist.mean.mean().item() * 2 - 1,
-                            "exploration_eta_lon_mean": lon_dist.mean.mean().item() * 2 - 1,
-                            "exploration_eta_lat_std": (lat_dist.variance.mean().item() * 4) ** 0.5,
-                            "exploration_eta_lon_std": (lon_dist.variance.mean().item() * 4) ** 0.5,
                         }
+                        for h, d in dists.items():
+                            policy_metrics[f"exploration_eta_{h}_mean"] = d.mean.mean().item() * 2 - 1
+                            policy_metrics[f"exploration_eta_{h}_std"] = (d.variance.mean().item() * 4) ** 0.5
 
                         if not policy_frozen:
                             self.policy_optimizer.zero_grad()
@@ -527,36 +563,29 @@ class GRPOExplorationTrainer:
                         # Unlike advantage_logprob which uses all K samples, this directly supervises
                         # the policy to output the best-reward eta for each scene.
                         best_idx = advantages_t.argmax()
-                        best_eta_lat_01 = eta_lat_01[best_idx].detach()  # target (0,1)
-                        best_eta_lon_01 = eta_lon_01[best_idx].detach()
-
-                        # MSE between policy's deterministic mean and the best eta
-                        pred_lat_mean = lat_dist.mean.squeeze()  # policy's predicted mean in (0,1)
-                        pred_lon_mean = lon_dist.mean.squeeze()
-                        rsft_loss = (
-                            (pred_lat_mean - best_eta_lat_01) ** 2
-                            + (pred_lon_mean - best_eta_lon_01) ** 2
+                        rsft_loss = sum(
+                            (dists[h].mean.squeeze() - eta_01[h][best_idx].detach()) ** 2
+                            for h in self.heads
                         )
 
                         policy_loss = rsft_loss
                         policy_metrics = {
                             "exploration_policy_loss": rsft_loss.item(),
-                            "exploration_entropy": (lat_dist.entropy() + lon_dist.entropy()).mean().item(),
+                            "exploration_entropy": float(sum(d.entropy().mean() for d in dists.values())),
                             "exploration_kl": 0.0,
                             "exploration_total_loss": rsft_loss.item(),
-                            "exploration_eta_lat_mean": lat_dist.mean.mean().item() * 2 - 1,
-                            "exploration_eta_lon_mean": lon_dist.mean.mean().item() * 2 - 1,
-                            "exploration_eta_lat_std": (lat_dist.variance.mean().item() * 4) ** 0.5,
-                            "exploration_eta_lon_std": (lon_dist.variance.mean().item() * 4) ** 0.5,
                         }
+                        for h, d in dists.items():
+                            policy_metrics[f"exploration_eta_{h}_mean"] = d.mean.mean().item() * 2 - 1
+                            policy_metrics[f"exploration_eta_{h}_std"] = (d.variance.mean().item() * 4) ** 0.5
                     else:
                         policy_loss, policy_metrics = compute_exploration_loss(
                             advantages=pg_advantages,
                             log_probs=pg_log_probs,
-                            lat_dist=lat_dist,
-                            lon_dist=lon_dist,
+                            dists=dists,
                             entropy_coef=self.config.exploration_entropy_coef,
                             kl_coef=self.config.exploration_kl_coef,
+                            action_cost_coef=self.config.exploration_action_cost,
                         )
                     # Backward pass for advantage_logprob and best_sample_mse paths
                     # (PPO path handles its own backward+step above)
@@ -575,12 +604,12 @@ class GRPOExplorationTrainer:
                 if not self.config.exploration_step_per_group:
                     n_policy_accum += 1
 
-                per_scene_eta_lat.append(lat_dist.mean.mean().item() * 2 - 1)
-                per_scene_eta_lon.append(lon_dist.mean.mean().item() * 2 - 1)
+                per_scene_eta_lat.append(dists[self.heads[0]].mean.mean().item() * 2 - 1)
+                per_scene_eta_lon.append(dists[self.heads[-1]].mean.mean().item() * 2 - 1)
             else:
                 # Random guidance: no policy to train, just track η stats
-                eta_lat_01 = group["eta_lat_01"]
-                eta_lon_01 = group["eta_lon_01"]
+                eta_lat_01 = group["eta_01"]["lateral"]
+                eta_lon_01 = group["eta_01"]["longitudinal"]
                 eta_lat_vals = 2.0 * eta_lat_01 - 1.0
                 eta_lon_vals = 2.0 * eta_lon_01 - 1.0
                 policy_metrics = {
@@ -772,19 +801,12 @@ class GRPOExplorationTrainer:
             scene_encoding = run_frozen_encoder(self.policy_model, norm_data)
 
             policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
-            eta_lat = (2.0 * policy_output.lat_dist.mean - 1.0).reshape(1)
-            eta_lon = (2.0 * policy_output.lon_dist.mean - 1.0).reshape(1)
+            etas = {
+                h: (2.0 * policy_output.dists[h].mean - 1.0).reshape(1)
+                for h in self.heads
+            }
 
-            guidance_fns = [
-                GuidanceConfig(
-                    name="lateral", enabled=True, scale=1.0,
-                    params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat},
-                ),
-                GuidanceConfig(
-                    name="longitudinal", enabled=True, scale=1.0,
-                    params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon},
-                ),
-            ]
+            guidance_fns = self._build_guidance_fns(etas)
             set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
             composer = GuidanceComposer(set_cfg)
 
@@ -811,8 +833,7 @@ class GRPOExplorationTrainer:
             )
             rows.append({
                 "npz_path": npz_path,
-                "eta_lat": float(eta_lat.item()),
-                "eta_lon": float(eta_lon.item()),
+                **{f"eta_{h}": float(v.item()) for h, v in etas.items()},
                 "reward": guided_bd.total,
                 "det_reward": det_bd.total,
                 "static_crossing": bool(guided_bd.static_crossing),
@@ -940,12 +961,15 @@ def aggregate_policy_eval(rows: list[dict]) -> dict[str, float]:
         "deviation_mean": _mean([r["deviation"] for r in rows]),
         "deviation_max": float(max((r["deviation"] for r in rows), default=0.0)),
         "n_avoidance_scenes": len(avoid),
-        "eta_lat_abs_avoid": _mean([abs(r["eta_lat"]) for r in avoid]),
-        "eta_lon_abs_avoid": _mean([abs(r["eta_lon"]) for r in avoid]),
-        "eta_lat_abs_normal": _mean([abs(r["eta_lat"]) for r in normal]),
-        "eta_lon_abs_normal": _mean([abs(r["eta_lon"]) for r in normal]),
         "deviation_mean_normal": _mean([r["deviation"] for r in normal]),
     }
+    eta_keys = [k for k in rows[0] if k.startswith("eta_")]
+    for k in eta_keys:
+        suffix = k[len("eta_"):]
+        # Short aliases for the original layout: lateral->lat, longitudinal->lon
+        suffix = {"lateral": "lat", "longitudinal": "lon"}.get(suffix, suffix)
+        out[f"eta_{suffix}_abs_avoid"] = _mean([abs(r[k]) for r in avoid])
+        out[f"eta_{suffix}_abs_normal"] = _mean([abs(r[k]) for r in normal])
     return out
 
 
