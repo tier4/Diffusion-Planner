@@ -184,7 +184,7 @@ def test_zero_initialization():
 
     # Check that the guidance head output layer is zero-initialized
     assert (policy.guidance_head.fc2.weight == 0).all(), "GuidanceHead output weight not zero"
-    assert (policy.guidance_head.fc2.bias == 0).all(), "GuidanceHead output bias not zero"
+    assert policy.guidance_head.fc2.bias is None, "GuidanceHead fc2 is bias=False by design"
 
     # Check that value head output layer is zero-initialized
     assert (policy.value_head.fc2.weight == 0).all(), "ValueHead output weight not zero"

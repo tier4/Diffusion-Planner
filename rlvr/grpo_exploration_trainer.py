@@ -47,6 +47,25 @@ def _load_npz(npz_path, device):
     return data
 
 
+def reward_config_from_grpo(config: GRPOConfig) -> RewardConfig:
+    """Build a RewardConfig from every GRPOConfig field that RewardConfig shares.
+
+    Field-name intersection reproduces exactly the mapping run_experiment.py
+    uses for its train_reward_config (verified: 52 shared fields, no renames),
+    and cannot silently drop newly added reward fields the way a hand-copied
+    kwargs list can (the old list here omitted all static-collision fields).
+    """
+    from dataclasses import fields as _dc_fields
+
+    reward_field_names = {f.name for f in _dc_fields(RewardConfig)}
+    kwargs = {
+        name: getattr(config, name)
+        for name in reward_field_names
+        if hasattr(config, name)
+    }
+    return RewardConfig(**kwargs)
+
+
 class GRPOExplorationTrainer:
     """Joint trainer for DiT planner (GRPO) + exploration policy.
 
@@ -67,7 +86,7 @@ class GRPOExplorationTrainer:
         self,
         policy_model: nn.Module,
         model_args,
-        dit_optimizer: optim.Optimizer,
+        dit_optimizer: optim.Optimizer | None,
         device: torch.device,
         run_dir: Path,
         config: GRPOConfig,
@@ -80,52 +99,23 @@ class GRPOExplorationTrainer:
         self.run_dir = run_dir
         self.config = config
         self.use_lora = use_lora
+        self.train_dit = config.train_dit
+
+        if self.train_dit and dit_optimizer is None:
+            raise ValueError(
+                "train_dit=True requires a dit_optimizer; pass train_dit=False "
+                "in the config for frozen-DiT policy-only training."
+            )
 
         assert config.inner_epochs == 1, (
             f"GRPOExplorationTrainer only supports on-policy training (inner_epochs=1), "
             f"got inner_epochs={config.inner_epochs}. For multi-epoch training, use GRPOTrainer."
         )
 
-        # Reward config (same as standard GRPO)
-        self.reward_config = RewardConfig(
-            w_safety=config.w_safety,
-            w_progress=config.w_progress,
-            w_smooth=config.w_smooth,
-            w_feasibility=config.w_feasibility,
-            w_centerline=config.w_centerline,
-            centerline_usage_mode=config.centerline_usage_mode,
-            rb_near_scale=config.rb_near_scale,
-            rb_wide_scale=config.rb_wide_scale,
-            rb_cont_scale=config.rb_cont_scale,
-            rb_gate_enabled=config.rb_gate_enabled,
-            rb_penalty_mode=config.rb_penalty_mode,
-            rb_cross_thresh=config.rb_cross_thresh,
-            rb_near_thresh=config.rb_near_thresh,
-            rb_wide_thresh=config.rb_wide_thresh,
-            rb_cont_thresh=config.rb_cont_thresh,
-            max_lat_accel=config.max_lat_accel,
-            lat_accel_scale=config.lat_accel_scale,
-            enable_overprogress=config.enable_overprogress,
-            overprogress_margin=config.overprogress_margin,
-            overprogress_penalty=config.overprogress_penalty,
-            stopped_penalty=config.stopped_penalty,
-            reward_mode=config.reward_mode,
-            enable_lane_departure=config.enable_lane_departure,
-            lane_gate_enabled=config.lane_gate_enabled,
-            lane_near_scale=config.lane_near_scale,
-            lane_wide_scale=config.lane_wide_scale,
-            lane_cont_scale=config.lane_cont_scale,
-            lane_cross_thresh=config.lane_cross_thresh,
-            lane_near_thresh=config.lane_near_thresh,
-            lane_wide_thresh=config.lane_wide_thresh,
-            lane_cont_thresh=config.lane_cont_thresh,
-            max_yaw_rate=config.max_yaw_rate,
-            max_steer=config.max_steer,
-            kinematic_margin=config.kinematic_margin,
-            underprogress_penalty=config.underprogress_penalty,
-            underprogress_threshold=config.underprogress_threshold,
-            underprogress_reference=config.underprogress_reference,
-        )
+        # Reward config: every GRPOConfig field shared with RewardConfig
+        # (including the static-collision sc_* family — the previous
+        # hand-copied list silently dropped them).
+        self.reward_config = reward_config_from_grpo(config)
 
         # Sampler config (only used for eval, not for policy-guided generation)
         self.sampler_config = SamplerConfig(
@@ -277,6 +267,12 @@ class GRPOExplorationTrainer:
 
                 eta_lat_01 = lat_dist.rsample((K,)).squeeze(-1)
                 eta_lon_01 = lon_dist.rsample((K,)).squeeze(-1)
+                if self.config.exploration_pin_zero_eta:
+                    # Slot 0 = forced η=0 (0.5 in Beta space): the unguided
+                    # reference the group advantages compare against. Excluded
+                    # from the policy log-prob gradient in train_on_groups.
+                    eta_lat_01[0] = 0.5
+                    eta_lon_01[0] = 0.5
                 eta_lat_vals = 2.0 * eta_lat_01 - 1.0
                 eta_lon_vals = 2.0 * eta_lon_01 - 1.0
             else:
@@ -391,13 +387,17 @@ class GRPOExplorationTrainer:
         per_scene_eta_lat: list[float] = []
         per_scene_eta_lon: list[float] = []
 
-        self.policy_model.train()
+        if self.train_dit:
+            self.policy_model.train()
+        else:
+            self.policy_model.eval()
         if self.use_explorer:
             if not policy_frozen:
                 self.exploration_policy.train()
             else:
                 self.exploration_policy.eval()
-        self.dit_optimizer.zero_grad()
+        if self.train_dit:
+            self.dit_optimizer.zero_grad()
         if self.use_explorer and not policy_frozen:
             self.policy_optimizer.zero_grad()
 
@@ -409,35 +409,38 @@ class GRPOExplorationTrainer:
             if np.all(advantages_np == 0):
                 continue
 
-            # --- DiT GRPO loss (batched) ---
-            from rlvr.grpo_loss import compute_batched_grpo_loss
-            traj_list = group["trajectories"]
-            traj_tensor = torch.tensor(
-                np.stack(traj_list) if isinstance(traj_list[0], np.ndarray) else traj_list,
-                device=self.device, dtype=torch.float32,
-            )
-            dit_loss, dit_metrics = compute_batched_grpo_loss(
-                policy_model=self.policy_model,
-                trajectories_tensor=traj_tensor,
-                advantages=advantages_np,
-                data=group["data"],
-                model_args=self.model_args,
-                config=self.config,
-                device=self.device,
-            )
-
-            scaled_dit_loss = dit_loss / self.config.grad_accum_groups
-            scaled_dit_loss.backward()
-            dit_accum += 1
-
-            if dit_accum >= self.config.grad_accum_groups:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.policy_model.parameters() if p.requires_grad],
-                    max_norm=5.0,
+            # --- DiT GRPO loss (batched) — skipped entirely when the DiT is frozen ---
+            if self.train_dit:
+                from rlvr.grpo_loss import compute_batched_grpo_loss
+                traj_list = group["trajectories"]
+                traj_tensor = torch.tensor(
+                    np.stack(traj_list) if isinstance(traj_list[0], np.ndarray) else traj_list,
+                    device=self.device, dtype=torch.float32,
                 )
-                self.dit_optimizer.step()
-                self.dit_optimizer.zero_grad()
-                dit_accum = 0
+                dit_loss, dit_metrics = compute_batched_grpo_loss(
+                    policy_model=self.policy_model,
+                    trajectories_tensor=traj_tensor,
+                    advantages=advantages_np,
+                    data=group["data"],
+                    model_args=self.model_args,
+                    config=self.config,
+                    device=self.device,
+                )
+
+                scaled_dit_loss = dit_loss / self.config.grad_accum_groups
+                scaled_dit_loss.backward()
+                dit_accum += 1
+
+                if dit_accum >= self.config.grad_accum_groups:
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in self.policy_model.parameters() if p.requires_grad],
+                        max_norm=5.0,
+                    )
+                    self.dit_optimizer.step()
+                    self.dit_optimizer.zero_grad()
+                    dit_accum = 0
+            else:
+                dit_metrics = {}
 
             # --- Exploration policy loss (advantage_logprob, best_sample_mse, or PPO) ---
             if self.use_explorer:
@@ -470,11 +473,26 @@ class GRPOExplorationTrainer:
                     if log_probs.dim() > 1:
                         log_probs = log_probs.squeeze(-1)
 
+                    # Pinned slot 0 is a forced (not sampled) action — exclude it
+                    # from log-prob-based policy gradients. best_sample_mse keeps
+                    # all slots: η=0 winning is a valid regression target.
+                    if self.config.exploration_pin_zero_eta:
+                        pg_log_probs = log_probs[1:]
+                        pg_advantages = advantages_t[1:]
+                    else:
+                        pg_log_probs = log_probs
+                        pg_advantages = advantages_t
+
                     if inner_epochs > 1:
-                        ratio = (log_probs - old_log_probs).exp()
+                        pg_old_log_probs = (
+                            old_log_probs[1:]
+                            if self.config.exploration_pin_zero_eta
+                            else old_log_probs
+                        )
+                        ratio = (pg_log_probs - pg_old_log_probs).exp()
                         clipped_ratio = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps)
-                        surr1 = ratio * advantages_t
-                        surr2 = clipped_ratio * advantages_t
+                        surr1 = ratio * pg_advantages
+                        surr2 = clipped_ratio * pg_advantages
                         ppo_loss = -torch.min(surr1, surr2).mean()
 
                         entropy_value = (lat_dist.entropy() + lon_dist.entropy()).mean()
@@ -533,8 +551,8 @@ class GRPOExplorationTrainer:
                         }
                     else:
                         policy_loss, policy_metrics = compute_exploration_loss(
-                            advantages=advantages_t,
-                            log_probs=log_probs,
+                            advantages=pg_advantages,
+                            log_probs=pg_log_probs,
                             lat_dist=lat_dist,
                             lon_dist=lon_dist,
                             entropy_coef=self.config.exploration_entropy_coef,
@@ -594,7 +612,7 @@ class GRPOExplorationTrainer:
                 })
 
         # Flush remaining DiT gradients
-        if dit_accum > 0:
+        if self.train_dit and dit_accum > 0:
             torch.nn.utils.clip_grad_norm_(
                 [p for p in self.policy_model.parameters() if p.requires_grad],
                 max_norm=5.0,
@@ -710,8 +728,130 @@ class GRPOExplorationTrainer:
             f"scene_var_lat={scene_std_lat}, scene_var_lon={scene_std_lon}"
         )
 
+    @torch.no_grad()
+    def evaluate_policy_guided(
+        self,
+        npz_paths: list[str],
+        reward_config: RewardConfig | None = None,
+        label: str = "policy-eval",
+    ) -> dict[str, float]:
+        """Deterministic policy-guided eval: per scene, run the policy with
+        deterministic=True (Beta means → η), generate ONE guided trajectory
+        (noise=0) plus the unguided det trajectory, score both.
+
+        Unlike evaluate_checkpoint (which ignores the policy and is constant
+        when the DiT is frozen), this measures what the explorer actually does.
+        Returns aggregate metrics keyed like evaluate_checkpoint (reward_mean,
+        rb_crossings, collision_rate) plus guidance-specific extras.
+        """
+        if not self.use_explorer:
+            raise ValueError("evaluate_policy_guided requires random_guidance_mode='explorer'")
+        reward_config = reward_config or self.reward_config
+
+        self.policy_model.eval()
+        self.exploration_policy.eval()
+
+        rows: list[dict] = []
+        for npz_path in tqdm(npz_paths, desc=label):
+            try:
+                data = _load_npz(npz_path, self.device)
+            except Exception as e:
+                print(f"  [{label}] skipping {npz_path}: {e}")
+                continue
+            norm_data = {
+                k: v.clone() if isinstance(v, torch.Tensor) else v
+                for k, v in data.items()
+            }
+            norm_data = self.model_args.observation_normalizer(norm_data)
+
+            x_ref_np = generate_reference_trajectory(
+                self.policy_model, self.model_args, norm_data, self.device,
+            )
+            x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)
+            norm_data["reference_trajectory"] = x_ref
+            scene_encoding = run_frozen_encoder(self.policy_model, norm_data)
+
+            policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+            eta_lat = (2.0 * policy_output.lat_dist.mean - 1.0).reshape(1)
+            eta_lon = (2.0 * policy_output.lon_dist.mean - 1.0).reshape(1)
+
+            guidance_fns = [
+                GuidanceConfig(
+                    name="lateral", enabled=True, scale=1.0,
+                    params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat},
+                ),
+                GuidanceConfig(
+                    name="longitudinal", enabled=True, scale=1.0,
+                    params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon},
+                ),
+            ]
+            set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
+            composer = GuidanceComposer(set_cfg)
+
+            guided_traj = generate_samples(
+                model=self.policy_model, model_args=self.model_args,
+                data=norm_data, noise_scale=0.0, n_samples=1,
+                composer=composer, device=self.device,
+            )[0]
+            det_traj = generate_samples(
+                model=self.policy_model, model_args=self.model_args,
+                data=norm_data, noise_scale=0.0, n_samples=1,
+                composer=None, device=self.device,
+            )[0]
+
+            traj_batch = torch.tensor(
+                np.stack([guided_traj, det_traj]),
+                device=self.device, dtype=torch.float32,
+            )
+            guided_bd, det_bd = compute_reward_batch(traj_batch, data, reward_config)
+            deviation = float(
+                np.linalg.norm(
+                    np.asarray(guided_traj)[:, :2] - np.asarray(det_traj)[:, :2], axis=-1
+                ).mean()
+            )
+            rows.append({
+                "npz_path": npz_path,
+                "eta_lat": float(eta_lat.item()),
+                "eta_lon": float(eta_lon.item()),
+                "reward": guided_bd.total,
+                "det_reward": det_bd.total,
+                "static_crossing": bool(guided_bd.static_crossing),
+                "det_static_crossing": bool(det_bd.static_crossing),
+                "sc_min_dist": float(guided_bd.sc_min_dist),
+                "det_sc_min_dist": float(det_bd.sc_min_dist),
+                "rb_crossing": bool(guided_bd.rb_crossing),
+                "collision": guided_bd.collision_step is not None,
+                "sc_n_stopped": int(guided_bd.sc_n_stopped),
+                "deviation": deviation,
+            })
+
+        self.last_eval_rows = rows  # per-scene detail for eval/viz tools
+        return aggregate_policy_eval(rows)
+
     def save_checkpoint(self, epoch: int, args_dict: dict) -> None:
-        """Save both DiT and exploration policy checkpoints."""
+        """Save both DiT and exploration policy checkpoints.
+
+        With train_dit=False only the exploration policy (+ its optimizer and
+        config) is saved — the frozen DiT is the unchanged input checkpoint.
+        """
+        if not self.train_dit:
+            torch.save(
+                self.exploration_policy.state_dict(),
+                self.run_dir / f"exploration_policy_epoch_{epoch:03d}.pth",
+            )
+            torch.save(
+                self.exploration_policy.state_dict(),
+                self.run_dir / "exploration_policy.pth",
+            )
+            torch.save(
+                self.policy_optimizer.state_dict(),
+                self.run_dir / "policy_optimizer.pth",
+            )
+            self.exploration_policy.config.to_json(
+                self.run_dir / "exploration_policy_config.json"
+            )
+            self.config.to_json(self.run_dir / "grpo_config.json")
+            return
         if self.use_lora:
             from preference_optimization.lora_utils import save_lora_checkpoint
 
@@ -766,6 +906,47 @@ class GRPOExplorationTrainer:
                 epoch_path = self.run_dir / f"epoch_{epoch:03d}.pth"
                 torch.save(checkpoint_data, epoch_path)
                 print(f"  Saved checkpoint: {epoch_path}")
+
+
+def aggregate_policy_eval(rows: list[dict]) -> dict[str, float]:
+    """Aggregate per-scene policy-guided eval rows into summary metrics.
+
+    Keys mirror evaluate_checkpoint (reward_mean, rb_crossings,
+    collision_rate) so run_experiment best-tracking works unchanged, plus
+    guidance-specific extras. Scenes are split into avoidance
+    (sc_n_stopped > 0) vs normal for the per-type |η| inertness metrics.
+    """
+    if not rows:
+        return {
+            "reward_mean": float("-inf"), "rb_crossings": 999,
+            "collision_rate": 1.0, "n_scenes": 0,
+        }
+    avoid = [r for r in rows if r["sc_n_stopped"] > 0]
+    normal = [r for r in rows if r["sc_n_stopped"] == 0]
+
+    def _mean(vals):
+        return float(np.mean(vals)) if len(vals) else 0.0
+
+    out = {
+        "n_scenes": len(rows),
+        "reward_mean": _mean([r["reward"] for r in rows]),
+        "det_reward_mean": _mean([r["det_reward"] for r in rows]),
+        "rb_crossings": int(sum(r["rb_crossing"] for r in rows)),
+        "collision_rate": _mean([float(r["collision"]) for r in rows]),
+        "static_crossings": int(sum(r["static_crossing"] for r in rows)),
+        "det_static_crossings": int(sum(r["det_static_crossing"] for r in rows)),
+        "sc_min_dist_mean": _mean([r["sc_min_dist"] for r in avoid]),
+        "det_sc_min_dist_mean": _mean([r["det_sc_min_dist"] for r in avoid]),
+        "deviation_mean": _mean([r["deviation"] for r in rows]),
+        "deviation_max": float(max((r["deviation"] for r in rows), default=0.0)),
+        "n_avoidance_scenes": len(avoid),
+        "eta_lat_abs_avoid": _mean([abs(r["eta_lat"]) for r in avoid]),
+        "eta_lon_abs_avoid": _mean([abs(r["eta_lon"]) for r in avoid]),
+        "eta_lat_abs_normal": _mean([abs(r["eta_lat"]) for r in normal]),
+        "eta_lon_abs_normal": _mean([abs(r["eta_lon"]) for r in normal]),
+        "deviation_mean_normal": _mean([r["deviation"] for r in normal]),
+    }
+    return out
 
 
 def _empty_metrics() -> dict[str, float]:

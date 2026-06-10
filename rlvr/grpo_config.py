@@ -395,6 +395,19 @@ class GRPOConfig:
     # "none": η=0 always (no guidance, pure noise diversity).
     random_guidance_mode: str = "explorer"
 
+    # Train the DiT planner alongside the exploration policy. When False, the
+    # DiT is fully frozen (no GRPO loss, no DiT optimizer step) and ONLY the
+    # exploration policy trains — i.e. learn guidance params for a fixed base
+    # model. Only honored by GRPOExplorationTrainer; validated in __post_init__.
+    train_dit: bool = True
+    # Pin generation slot 0 to η=0 for all guidance heads. With
+    # noise_scale_range=[0,0] this makes slot 0 the exact unguided
+    # deterministic trajectory, giving the group a true no-guidance reference
+    # so advantages compare "guided" vs "do nothing" (slot 0 is excluded from
+    # the policy log-prob gradient since it is a forced, not sampled, action).
+    # Set False to reproduce older runs where slot 0's η was sampled.
+    exploration_pin_zero_eta: bool = True
+
     # --- Closed-loop training ---
     # When True, uses ClosedLoopExplorationTrainer instead of GRPOExplorationTrainer.
     # The explorer operates per-step (0.1s) with GAE temporal credit assignment.
@@ -683,6 +696,26 @@ class GRPOConfig:
             raise ValueError(
                 f"neighbor_reg_anchor must be 'warmstart' or 'baseline', got {self.neighbor_reg_anchor!r}"
             )
+        if not self.train_dit:
+            if not self.use_exploration_policy or self.use_closed_loop:
+                raise ValueError(
+                    "train_dit=False (frozen-DiT, policy-only training) is only "
+                    "supported by GRPOExplorationTrainer; requires "
+                    "use_exploration_policy=True and use_closed_loop=False, got "
+                    f"use_exploration_policy={self.use_exploration_policy}, "
+                    f"use_closed_loop={self.use_closed_loop}."
+                )
+            if self.use_lora:
+                raise ValueError(
+                    "train_dit=False is incompatible with use_lora=True: a frozen "
+                    "DiT must not carry trainable LoRA adapters."
+                )
+            if self.random_guidance_mode != "explorer":
+                raise ValueError(
+                    "train_dit=False trains ONLY the exploration policy, so "
+                    f"random_guidance_mode must be 'explorer', got "
+                    f"{self.random_guidance_mode!r} (nothing would train)."
+                )
 
     @property
     def uses_importance_sampling(self) -> bool:
