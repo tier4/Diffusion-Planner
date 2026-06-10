@@ -41,13 +41,16 @@ _TYPE_BASE = 8  # one-hot [vehicle, pedestrian, bicycle] occupies columns 8..10
 # range that is sampled along a single factor so width and length scale together (a small car
 # stays narrow, a long truck stays wide).
 # ``min_turn_radius`` (metres) caps how sharply a synthetic path may bend: a constant-accel
-# path with low initial speed and large acceleration degenerates into a near-cusp hairpin, which
-# is unrealistic for a car. Only vehicles get the cap (pedestrians / bicycles can turn sharply).
+# path with low initial speed and large acceleration degenerates into a near-cusp hairpin (an
+# ~180-deg reversal from the agent's own past), which is unpredictable from its history. Every
+# type gets a cap, looser for the more agile ones (pedestrian < bicycle < vehicle).
 _TYPES = {
     "vehicle": dict(speed=(0.0, 14.0), accel_max=2.5, idx=0,
                     size=((1.84, 4.34), (2.5649, 10.7462)), min_turn_radius=5.0),
-    "pedestrian": dict(speed=(0.0, 2.0), accel_max=1.0, idx=1, width=0.7, length=0.7),
-    "bicycle": dict(speed=(0.0, 7.0), accel_max=1.5, idx=2, width=0.6, length=1.8),
+    "pedestrian": dict(speed=(0.0, 2.0), accel_max=1.0, idx=1, width=0.7, length=0.7,
+                       min_turn_radius=1.0),
+    "bicycle": dict(speed=(0.0, 7.0), accel_max=1.5, idx=2, width=0.6, length=1.8,
+                    min_turn_radius=2.0),
 }
 
 
@@ -56,20 +59,17 @@ class SyntheticColliderInjector:
 
     def __init__(
         self,
-        dt: float = 0.1,
-        x_range: tuple[float, float] = (-10.0, 40.0),
-        y_half_width: float = 25.0,
-        pedestrian_prob: float = 0.3,
-        bicycle_prob: float = 0.2,
-        min_collision_time: float = 0.8,
-        keep_clear_radius: float = 3.0,
-        max_tries: int = 50,
+        pedestrian_prob: float,
+        bicycle_prob: float,
+        keep_clear_radius: float,
+        straight_line: bool,
     ):
+        dt = 0.1
         self.dt = dt
         # spawn box (ego frame): x in [x_lo, x_hi] (forward-biased), y in [-y_half_width,
         # +y_half_width] (symmetric left/right).
-        self.x_lo, self.x_hi = x_range
-        self.y_half_width = y_half_width
+        self.x_lo, self.x_hi = -10.0, 40.0
+        self.y_half_width = 25.0
         # explicit categorical type mix; vehicle takes the remainder.
         assert pedestrian_prob + bicycle_prob <= 1.0 + 1e-6, "ped + bike prob must be <= 1"
         self.pedestrian_prob = pedestrian_prob
@@ -78,11 +78,16 @@ class SyntheticColliderInjector:
         self.type_probs = {"vehicle": self.vehicle_prob,
                            "pedestrian": pedestrian_prob,
                            "bicycle": bicycle_prob}
-        self.min_collision_time = min_collision_time
+        self.min_collision_time = 0.8
         # the synthetic path must stay this far from the ego's t=0 pose (origin), so a
         # stationary ego is never hit -> the forced collision is always avoidable.
         self.keep_clear_radius = keep_clear_radius
-        self.max_tries = max_tries
+        self.max_tries = 50
+        # straight_line: the collider drives at constant velocity straight at the collision
+        # point (heading aimed at the target, zero acceleration -> zero curvature). This is the
+        # easy, fully-history-predictable regime. False restores random-heading constant-accel
+        # colliders (curved approaches, capped by each type's min_turn_radius).
+        self.straight_line = straight_line
 
         self._tau_past = torch.arange(-INPUT_T, 1, dtype=torch.float32) * dt   # [31] in [-3,0]
         self._tau_future = torch.arange(1, OUTPUT_T + 1, dtype=torch.float32) * dt  # [80] in [.1,8]
@@ -142,11 +147,21 @@ class SyntheticColliderInjector:
 
             p0 = torch.stack([self._rand(self.x_lo, self.x_hi, device),
                               self._rand(-self.y_half_width, self.y_half_width, device)])
-            speed = self._rand(spec["speed"][0], spec["speed"][1], device)
-            ang = self._rand(-math.pi, math.pi, device)
-            v0 = torch.stack([speed * torch.cos(ang), speed * torch.sin(ang)])
 
-            a = 2.0 * (target - p0 - v0 * t_c) / (t_c * t_c)
+            if self.straight_line:
+                # Constant velocity straight at the target: v0 = (target - p0) / t_c, a = 0.
+                # Heading is aimed at the collision point, so the whole path is a straight line.
+                disp = target - p0
+                v0 = disp / t_c
+                a = torch.zeros_like(v0)
+                # skip if the implied constant speed is unrealistic for this type
+                if float(v0.norm()) > spec["speed"][1]:
+                    continue
+            else:
+                speed = self._rand(spec["speed"][0], spec["speed"][1], device)
+                ang = self._rand(-math.pi, math.pi, device)
+                v0 = torch.stack([speed * torch.cos(ang), speed * torch.sin(ang)])
+                a = 2.0 * (target - p0 - v0 * t_c) / (t_c * t_c)
 
             # reject if the path ever comes within keep_clear_radius of the ego's t=0 pose
             t = tau_f[:, None]

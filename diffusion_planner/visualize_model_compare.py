@@ -70,6 +70,8 @@ def parse_viz_args():
     p.add_argument("--pedestrian_prob", type=float, default=0.3)
     p.add_argument("--bicycle_prob", type=float, default=0.2)
     p.add_argument("--keep_clear_radius", type=float, default=3.0)
+    p.add_argument("--collider_straight_line", type=boolean, default=True,
+                   help="constant-velocity straight colliders (True) vs curved constant-accel (False)")
     p.add_argument("--use_ema", type=boolean, default=False)
     p.add_argument("--noise_scale", type=float, default=0.0,
                    help="initial-diffusion-noise scale for the single sample (0 = temperature 0)")
@@ -78,6 +80,12 @@ def parse_viz_args():
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--zoom_margin", type=float, default=15.0,
                    help="metres of padding around the trajectories+GT; <=0 disables zoom")
+    p.add_argument("--require_injected", type=boolean, default=True,
+                   help="only visualize scenes where an adversarial collider was generated; "
+                        "scenes with no collider are dropped and the failure rate is reported")
+    p.add_argument("--scene_pool_mult", type=int, default=5,
+                   help="(require_injected) oversample this many x num_scenes candidate scenes, "
+                        "then keep the first num_scenes that got a collider")
     return p.parse_known_args()
 
 
@@ -108,17 +116,38 @@ def main():
     model_b = load_model(args, v.model_path_b, v.use_ema, device)
     print(f"Loaded A={v.model_path_a}\n       B={v.model_path_b} (ema={v.use_ema})")
 
-    raw, idx = select_batch(v.data_list, v.num_scenes, v.seed, device)
-    S = v.num_scenes
+    # When require_injected, oversample candidate scenes so we can drop the ones where no
+    # collider could be generated and still end up with num_scenes panels.
+    oversample = v.aug_mode != "none" and v.require_injected
+    n_select = v.num_scenes * v.scene_pool_mult if oversample else v.num_scenes
+    raw, idx = select_batch(v.data_list, n_select, v.seed, device)
 
-    injected_mask = np.zeros((S, raw["neighbor_agents_past"].shape[1]), dtype=bool)
+    injected_mask = np.zeros((raw["neighbor_agents_past"].shape[0],
+                              raw["neighbor_agents_past"].shape[1]), dtype=bool)
     if v.aug_mode != "none":
         injector = SyntheticColliderInjector(
             pedestrian_prob=v.pedestrian_prob, bicycle_prob=v.bicycle_prob,
-            keep_clear_radius=v.keep_clear_radius)
+            keep_clear_radius=v.keep_clear_radius, straight_line=v.collider_straight_line)
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
         injected_mask = injector.last_injected_mask.cpu().numpy()
-        print(f"Injected {int(injected_mask.sum())} synthetic colliders across {S} scenes")
+
+    if oversample:
+        has_collider = injected_mask.any(axis=1)
+        n_attempted, n_fail = len(has_collider), int((~has_collider).sum())
+        keep = np.nonzero(has_collider)[0][:v.num_scenes]
+        print(f"Collider generation failed for {n_fail}/{n_attempted} candidate scenes "
+              f"({100.0 * n_fail / max(n_attempted, 1):.1f}%); "
+              f"keeping {len(keep)} scenes with a collider")
+        if len(keep) == 0:
+            print("No scene produced a collider; nothing to visualize.")
+            return
+        keep_t = torch.as_tensor(keep, device=device, dtype=torch.long)
+        raw = {k: val[keep_t] for k, val in raw.items()}
+        injected_mask = injected_mask[keep]
+        idx = idx[keep]
+
+    S = raw["neighbor_agents_past"].shape[0]
+    print(f"Injected {int(injected_mask.sum())} synthetic colliders across {S} scenes")
 
     raw_np = {k: val.detach().cpu().numpy() for k, val in raw.items()}
     neigh_past = raw_np["neighbor_agents_past"]

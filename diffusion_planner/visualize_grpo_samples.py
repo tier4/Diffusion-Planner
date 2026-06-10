@@ -94,6 +94,8 @@ def parse_viz_args():
                    help="(synthetic) fraction of injected colliders that are bicycles")
     p.add_argument("--keep_clear_radius", type=float, default=3.0,
                    help="(synthetic) min distance the collider path keeps from the ego t=0 pose")
+    p.add_argument("--collider_straight_line", type=boolean, default=True,
+                   help="constant-velocity straight colliders (True) vs curved constant-accel (False)")
     p.add_argument("--use_ema", type=boolean, default=False,
                    help="load EMA weights instead of the raw policy")
     p.add_argument("--output_path", type=str, default="grpo_samples.png")
@@ -246,7 +248,7 @@ def main():
     if v.aug_mode != "none":
         injector = SyntheticColliderInjector(
             pedestrian_prob=v.pedestrian_prob, bicycle_prob=v.bicycle_prob,
-            keep_clear_radius=v.keep_clear_radius)
+            keep_clear_radius=v.keep_clear_radius, straight_line=v.collider_straight_line)
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
         # the injector reports exactly which slots it wrote (may overwrite a real neighbor)
         injected_mask = injector.last_injected_mask.cpu().numpy()

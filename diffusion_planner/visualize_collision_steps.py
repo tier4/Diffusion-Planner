@@ -73,6 +73,8 @@ def parse_viz_args():
     p.add_argument("--pedestrian_prob", type=float, default=0.3)
     p.add_argument("--bicycle_prob", type=float, default=0.2)
     p.add_argument("--keep_clear_radius", type=float, default=3.0)
+    p.add_argument("--collider_straight_line", type=boolean, default=True,
+                   help="constant-velocity straight colliders (True) vs curved constant-accel (False)")
     p.add_argument("--show_road", type=boolean, default=True)
     p.add_argument("--use_ema", type=boolean, default=False)
     p.add_argument("--output_path", type=str, default="collision_steps.png")
@@ -117,7 +119,7 @@ def main():
     if v.aug_mode != "none":
         injector = SyntheticColliderInjector(
             pedestrian_prob=v.pedestrian_prob, bicycle_prob=v.bicycle_prob,
-            keep_clear_radius=v.keep_clear_radius)
+            keep_clear_radius=v.keep_clear_radius, straight_line=v.collider_straight_line)
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
         injected_mask = injector.last_injected_mask.cpu().numpy()[0]
         print(f"Augmentation '{v.aug_mode}' applied; injected {int(injected_mask.sum())} neighbors")

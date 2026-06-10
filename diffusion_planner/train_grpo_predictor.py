@@ -124,6 +124,10 @@ def get_args():
     parser.add_argument("--collider_keep_clear_radius", type=float, default=3.0,
                         help="min distance the collider path keeps from the ego t=0 pose "
                              "(guarantees the forced collision is avoidable)")
+    parser.add_argument("--collider_straight_line", type=boolean, default=True,
+                        help="colliders drive at constant velocity straight at the collision "
+                             "point (easy, history-predictable). False = random-heading "
+                             "constant-accel (curved) colliders")
 
     # Loss coefficients (shared with the supervised trainer / loss machinery)
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
@@ -225,6 +229,7 @@ def model_training(args):
         pedestrian_prob=args.pedestrian_prob,
         bicycle_prob=args.bicycle_prob,
         keep_clear_radius=args.collider_keep_clear_radius,
+        straight_line=args.collider_straight_line,
     )
     if global_rank == 0:
         print(f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
