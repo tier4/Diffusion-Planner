@@ -134,18 +134,20 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
     cand_bds, d_bd = bds[:-1], bds[-1]
 
     # Pick the best candidate: no NEW violations, then max total reward.
-    # Falls back to the unguided det when every candidate regresses
-    # (certify mode) or none beats it.
+    # Certify semantics: guidance exists ONLY for avoidance — when the
+    # unguided det has no static crossing, keep it untouched (strict
+    # inertness on scenes with no avoidance need). When det fails, pick the
+    # best clean candidate; fall back to det if every candidate regresses.
     pick, g_bd = 0, cand_bds[0]
-    if args.certify or K > 1:
+    if args.certify and not d_bd.static_crossing:
+        pick, g_bd = -1, d_bd
+    elif args.certify or K > 1:
         clean = [i for i, b in enumerate(cand_bds) if not _new_violation(b, d_bd)]
         if not clean:
             pick, g_bd = -1, d_bd  # fall back to baseline
         else:
             pick = max(clean, key=lambda i: cand_bds[i].total)
             g_bd = cand_bds[pick]
-            if args.certify and g_bd.total < d_bd.total and not d_bd.static_crossing:
-                pick, g_bd = -1, d_bd
 
     guided = det if pick == -1 else cands[pick]
     etas = (
