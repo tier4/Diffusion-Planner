@@ -9,18 +9,18 @@ Why: a model can score great on mean centerline distance (cl) yet take a
 dynamically violent / oscillating line through a turn — the comfort cost lives
 in the derivatives, which no geometric metric in the suite ever measured.
 
-Reuses (NO hand-rolled geometry, NO hand-rolled differentiation):
-- bag ego world poses [x,y,yaw,speed]: heatmap_route_deviation._extract_poses_from_bag
+★ Metrics use MEASURED twist (no position derivatives), and dt is derived from the
+message timestamps per bag — NOT assumed. (An earlier version assumed 100 Hz / dt=0.1
+and took 3rd-derivatives of position; psim localization is ~40 Hz, so that inflated
+speed ~2.5x, lat-accel ~6x, jerk ~16x. Fixed.)
+- kinematics (t, x, y, speed=twist.linear.x, yaw_rate=twist.angular.z) from
+  /localization/kinematic_state via _extract_kinematics. base_link frame → twist.linear.y≈0,
+  so lateral motion is NOT in y; lateral accel = yaw_rate*speed.
+- lat_accel = |yaw_rate*speed| (measured). jerk = |d(lat_accel)/dt| (lateral jerk, ONE
+  derivative of a measured signal, reward._build_sg_diff_kernel deriv=1 with the REAL dt).
+  curvature = |yaw_rate|/max(|speed|,0.5). speed = measured forward speed.
 - route centerline polyline + arc + signed lateral: _heatmap_common
-  (build_route_polyline / project_to_polyline / segments_from_polyline /
-   bin_scalar_by_arc / plot_route_heatmap)
-- the EXACT Savitzky-Golay differentiation kernel reward.py uses to score
-  smoothness/feasibility: reward._build_sg_diff_kernel(window=11, poly=3).
-  Per-sample jerk = SG deriv=3 of position; lat_accel = |vx*ay - vy*ax|/max(|v|,0.5)
-  from SG deriv=1/2 of position; yaw_rate = |dtheta|/dt from SG-smoothed heading.
-  Identical to compute_smoothness_score_batch / compute_feasibility_score_batch /
-  compute_kinematic_gate — we keep the per-timestep arrays those functions average
-  away, so the diagnostic is apples-to-apples with the training reward.
+  (build_route_polyline / project_to_polyline / segments_from_polyline / plot_route_heatmap).
 
 Run under the ROS env (lanelet2 + rosbag), e.g.:
   bash -c "source /opt/ros/humble/setup.bash && ROS_DOMAIN_ID=33 \
@@ -45,79 +45,75 @@ from scenario_generation.tools._heatmap_common import (
     project_to_polyline,
     segments_from_polyline,
 )
-from scenario_generation.tools.heatmap_route_deviation import _extract_poses_from_bag
 from rlvr.reward import _build_sg_diff_kernel, RewardConfig
 
-# SG window/poly used by reward.py for jerk + lat-accel + yaw-rate. Do NOT enlarge:
-# window=11 @ 10Hz = 1.1s — kills localization jitter (<0.1s) but preserves a real
-# >1s violent correction. Larger windows smooth away the signal we are measuring.
+# SG window/poly for the lateral-jerk derivative. ★ dt is DERIVED from the message
+# timestamps per bag (psim localization is ~40 Hz, NOT 100 Hz) — assuming a fixed dt
+# was a real bug that inflated every position-derivative (speed 2.5x, lat-accel 6x,
+# jerk 16x). All comfort scalars below use MEASURED twist (no position derivatives).
 SG_WINDOW = 11
 SG_POLY = 3
 
 
-def _sg_apply(arr_2t: np.ndarray, deriv: int, dt: float) -> np.ndarray:
-    """Apply reward.py's SG-diff kernel to a [2, T] signal -> [2, T]. Replicate-pad."""
-    kernel = _build_sg_diff_kernel(window=SG_WINDOW, poly=SG_POLY, deriv=deriv, delta=dt)
-    x = torch.tensor(arr_2t, dtype=torch.float32).unsqueeze(0)  # [1, 2, T]
+def _extract_kinematics(bag_dir):
+    """(t[s], x, y, speed[m/s], yaw_rate[rad/s]) from /localization/kinematic_state.
+
+    speed = twist.linear.x, yaw_rate = twist.angular.z — both MEASURED in base_link
+    (twist.linear.y ≈ 0, so lateral motion is NOT in the y component; lateral accel =
+    yaw_rate*speed). No position derivative; dt comes from the timestamps.
+    """
+    import sqlite3
+    import glob as _glob
+    from rclpy.serialization import deserialize_message
+    from nav_msgs.msg import Odometry
+    dbs = sorted(_glob.glob(str(Path(bag_dir) / "*.db3")))
+    if not dbs:
+        raise SystemExit(f"no .db3 in {bag_dir}")
+    con = sqlite3.connect(dbs[0]); cur = con.cursor()
+    row = cur.execute("SELECT id FROM topics WHERE name='/localization/kinematic_state'").fetchone()
+    if row is None:
+        raise SystemExit(f"no /localization/kinematic_state in {bag_dir}")
+    msgs = cur.execute("SELECT timestamp,data FROM messages WHERE topic_id=? ORDER BY timestamp", (row[0],)).fetchall()
+    con.close()
+    t = np.array([m[0] for m in msgs], dtype=np.float64) / 1e9
+    M = [deserialize_message(m[1], Odometry) for m in msgs]
+    x = np.array([m.pose.pose.position.x for m in M])
+    y = np.array([m.pose.pose.position.y for m in M])
+    speed = np.array([m.twist.twist.linear.x for m in M])
+    yaw_rate = np.array([m.twist.twist.angular.z for m in M])
+    return t, x, y, speed, yaw_rate
+
+
+def _sg_deriv1(arr_1d, dt: float) -> np.ndarray:
+    """SG 1st derivative of a 1-D signal (replicate-padded)."""
+    kernel = _build_sg_diff_kernel(window=SG_WINDOW, poly=SG_POLY, deriv=1, delta=dt)
+    x = torch.tensor(np.asarray(arr_1d)[None, None], dtype=torch.float32)
     pad = SG_WINDOW // 2
     xp = torch.nn.functional.pad(x, (pad, pad), mode="replicate")
-    out = torch.nn.functional.conv1d(xp, kernel.view(1, 1, -1).expand(2, 1, -1), groups=2)
-    return out.squeeze(0).numpy()  # [2, T]
+    return torch.nn.functional.conv1d(xp, kernel.view(1, 1, -1)).squeeze().numpy()
 
 
-def compute_dynamics(poses: np.ndarray, dt: float, max_jump_speed: float = 30.0) -> tuple[dict, np.ndarray]:
-    """Per-sample comfort scalars from realized poses [T,4]=(x,y,yaw,speed).
+def compute_dynamics(speed, yaw_rate, dt: float, max_jump_speed: float = 30.0) -> tuple[dict, np.ndarray]:
+    """Per-sample MEASURED comfort scalars (inputs already subsampled).
 
-    Returns (dict of [T] arrays, glitch_mask). Arrays: lat_accel (m/s^2),
-    jerk (m/s^3), yaw_rate (rad/s), curvature (1/m), speed (m/s). Edge samples
-    (SG pad) AND localization-glitch samples (consecutive jump > max_jump_speed
-    m/s) are set to NaN so they don't bias the per-arc bins. The glitch count is
-    returned so the caller reports it (no silent dropping).
+    lat_accel = |yaw_rate*speed| (centripetal, measured — no position derivatives).
+    jerk = |d(lat_accel)/dt| (lateral jerk: ONE derivative of a measured signal, with
+    dt from timestamps). curvature = |yaw_rate|/max(|speed|,0.5). yaw_rate, speed
+    measured. Edge (SG pad) + glitch (|speed|>max_jump_speed) samples are NaN'd.
     """
-    T = poses.shape[0]
-    pad = SG_WINDOW // 2
-    pos = poses[:, :2].T.astype(np.float64)          # [2, T]
-    yaw = poses[:, 2].astype(np.float64)             # [T]
-
-    # Localization-glitch mask: implied step speed over a physical cap (psim
-    # localization discontinuity). Dilate by the SG window so the kernel's spread
-    # of one bad sample is also excluded. Count is reported by the caller.
-    step = np.linalg.norm(np.diff(poses[:, :2], axis=0), axis=1) / dt   # [T-1]
-    step = np.concatenate([step[:1], step])                            # [T]
-    glitch = step > max_jump_speed
+    speed = np.asarray(speed, np.float64); yaw_rate = np.asarray(yaw_rate, np.float64)
+    T = len(speed); pad = SG_WINDOW // 2
+    lat_accel = np.abs(yaw_rate * speed)
+    curvature = np.abs(yaw_rate) / np.clip(np.abs(speed), 0.5, None)
+    jerk = np.abs(_sg_deriv1(lat_accel, dt)) if T > SG_WINDOW else np.full(T, np.nan)
+    glitch = np.abs(speed) > max_jump_speed
     if glitch.any():
         for j in np.where(glitch)[0]:
             glitch[max(0, j - pad):min(T, j + pad + 1)] = True
-
-    # Jerk: SG 3rd derivative of position (== compute_smoothness_score_batch).
-    jerk_vec = _sg_apply(pos, deriv=3, dt=dt)        # [2, T]
-    jerk = np.linalg.norm(jerk_vec, axis=0)          # [T]
-
-    # SG velocity / acceleration of position (== compute_feasibility_score_batch).
-    vel = _sg_apply(pos, deriv=1, dt=dt)             # [2, T]
-    acc = _sg_apply(pos, deriv=2, dt=dt)             # [2, T]
-    vx, vy = vel[0], vel[1]
-    ax, ay = acc[0], acc[1]
-    speed = np.sqrt(vx ** 2 + vy ** 2)
-    cross = np.abs(vx * ay - vy * ax)
-    lat_accel = cross / np.clip(speed, 0.5, None)
-    lat_accel = np.where(speed > 0.5, lat_accel, 0.0)
-
-    # Yaw rate from SG-smoothed heading (== compute_kinematic_gate).
-    cos_sin = np.stack([np.cos(yaw), np.sin(yaw)], axis=0)  # [2, T]
-    cs_sg = _sg_apply(cos_sin, deriv=0, dt=dt)             # [2, T] smoothed
-    theta = np.arctan2(cs_sg[1], cs_sg[0])
-    dtheta = np.diff(theta)
-    dtheta = np.arctan2(np.sin(dtheta), np.cos(dtheta))   # wrap
-    yaw_rate = np.abs(dtheta) / dt                         # [T-1]
-    yaw_rate = np.concatenate([yaw_rate, yaw_rate[-1:]])  # pad to T
-    curvature = yaw_rate / np.clip(speed, 0.5, None)
-
-    out = {"lat_accel": lat_accel, "jerk": jerk, "yaw_rate": yaw_rate,
-           "curvature": curvature, "speed": speed}
-    # NaN the SG edge artifacts AND glitch samples so bins ignore them.
+    out = {"lat_accel": lat_accel, "jerk": np.asarray(jerk, np.float64),
+           "yaw_rate": np.abs(yaw_rate), "curvature": curvature, "speed": np.abs(speed)}
     for k in out:
-        out[k] = out[k].astype(np.float64)
+        out[k] = out[k].astype(np.float64).copy()
         out[k][glitch] = np.nan
         if T > 2 * pad:
             out[k][:pad] = np.nan
@@ -148,14 +144,17 @@ def _bin_stats(arc_s, vals, s_max, bin_m):
     return mid, mean, p95, mx
 
 
-def analyze_bag(bag, route_obj, pts, arc, args, dt):
-    """Realized comfort scalars binned by arc for one bag."""
-    poses = _extract_poses_from_bag(Path(bag))[::args.stride]
-    dyn, glitch = compute_dynamics(poses, dt, max_jump_speed=args.max_jump_speed)
+def analyze_bag(bag, route_obj, pts, arc, args, dt_unused=None):
+    """Realized comfort scalars binned by arc for one bag (MEASURED kinematics)."""
+    t, x, y, speed, yaw_rate = _extract_kinematics(bag)
+    s = slice(None, None, args.stride)
+    t, x, y, speed, yaw_rate = t[s], x[s], y[s], speed[s], yaw_rate[s]
+    dt = float(np.median(np.diff(t))) if len(t) > 1 else 0.1   # REAL dt from timestamps
+    dyn, glitch = compute_dynamics(speed, yaw_rate, dt, max_jump_speed=args.max_jump_speed)
 
     arc_max = float(arc.max())
-    proj = np.array([project_to_polyline(np.array([float(p[0]), float(p[1])]), pts, arc)
-                     for p in poses])
+    proj = np.array([project_to_polyline(np.array([float(px), float(py)]), pts, arc)
+                     for px, py in zip(x, y)])
     pose_arc = proj[:, 0]
     signed_lat = proj[:, 1].copy()
     abs_lat = proj[:, 2].copy()
@@ -167,19 +166,17 @@ def analyze_bag(bag, route_obj, pts, arc, args, dt):
         raise SystemExit(f"{bag}: no in-bounds poses after front/tail cut")
 
     n_glitch = int(glitch.sum())
-    print(f"  [{Path(bag).name}] {len(poses)} subsampled poses, "
-          f"{int(keep.sum())} in-bounds, {n_glitch} glitch samples dropped "
-          f"(>{args.max_jump_speed:.0f} m/s jump)")
+    print(f"  [{Path(bag).name}] {len(x)} samples (dt={dt:.3f}s), "
+          f"{int(keep.sum())} in-bounds, {n_glitch} glitch dropped (>{args.max_jump_speed:.0f} m/s)")
 
-    # Probe: dump per-sample series for an arc window, to confirm real vs artifact.
+    # Probe: dump per-sample series for an arc window.
     if args.probe_lo is not None:
         pm = keep & (pose_arc >= args.probe_lo) & (pose_arc < args.probe_hi)
         print(f"  PROBE {Path(bag).name} arc [{args.probe_lo:.0f},{args.probe_hi:.0f}) "
-              f"n={int(pm.sum())}: arc | lat_signed | lat_acc | jerk | yaw_rate | step_speed")
-        step_sp = np.concatenate([[0.0], np.linalg.norm(np.diff(poses[:, :2], axis=0), axis=1) / dt])
+              f"n={int(pm.sum())}: arc | lat_signed | lat_acc | jerk | yaw_rate | speed")
         for i in np.where(pm)[0]:
             print(f"    {pose_arc[i]:7.1f} | {proj[i,1]:+6.2f} | {dyn['lat_accel'][i]:6.2f} | "
-                  f"{dyn['jerk'][i]:8.2f} | {dyn['yaw_rate'][i]:5.2f} | {step_sp[i]:5.1f}")
+                  f"{dyn['jerk'][i]:8.2f} | {dyn['yaw_rate'][i]:5.2f} | {dyn['speed'][i]:5.1f}")
 
     arc_k = pose_arc[keep]
     res = {"n_steps": int(keep.sum()), "n_glitch": n_glitch, "arc_max": arc_max, "bins": {}}
@@ -205,14 +202,6 @@ def analyze_bag(bag, route_obj, pts, arc, args, dt):
     res["bins"]["cl"] = {"mid": ((np.arange(n_bins) + 0.5) * args.bin_m).tolist(),
                          "mean": cl_mean.tolist(), "std": cl_std.tolist(),
                          "max": cl_max.tolist(), "n": n_samp.tolist()}
-    # raw (unsmoothed) jerk p95 per arc, as a sanity check smoothing isn't erasing signal
-    pos = poses[:, :2].astype(np.float64)
-    raw_jerk = np.full(len(poses), np.nan)
-    if len(poses) > 3:
-        rj = np.linalg.norm(np.diff(pos, n=3, axis=0), axis=1) / (dt ** 3)
-        raw_jerk[3:] = rj
-    _, _, rj_p95, _ = _bin_stats(arc_k, raw_jerk[keep], arc_max, args.bin_m)
-    res["bins"]["jerk_raw"] = {"p95": rj_p95.tolist()}
     return res
 
 
@@ -305,8 +294,7 @@ def main():
     ap.add_argument("--stride", type=int, default=10,
                     help="subsample realized poses (loc ~100Hz; stride 10 -> ~10Hz planning rate)")
     ap.add_argument("--dt", type=float, default=0.1,
-                    help="timestep after subsampling. MUST match stride (default 0.1 == stride 10 @ 100Hz). "
-                         "Comparison is dt-robust; absolute thresholds are not.")
+                    help="DEPRECATED / ignored — dt is now derived per-bag from the message timestamps.")
     ap.add_argument("--front_cut", type=float, default=50.0)
     ap.add_argument("--tail_cut", type=float, default=50.0)
     ap.add_argument("--bin_m", type=float, default=100.0)
@@ -322,8 +310,8 @@ def main():
         ap.error("--probe_lo and --probe_hi must be given together")
 
     out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
-    print(f"[comfort] route={Path(args.route).name} stride={args.stride} dt={args.dt} "
-          f"(SG window={SG_WINDOW}/poly={SG_POLY}, bin={args.bin_m:.0f}m) ego_shape={args.ego_shape}")
+    print(f"[comfort] route={Path(args.route).name} stride={args.stride} (dt derived from timestamps) "
+          f"MEASURED twist: lat_accel=|yaw_rate*speed|, jerk=d(lat_accel)/dt; bin={args.bin_m:.0f}m ego_shape={args.ego_shape}")
 
     route_obj = load_route(Path(args.route))
     pts, arc = build_route_polyline(route_obj)
