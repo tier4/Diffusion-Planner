@@ -83,8 +83,8 @@ def get_args():
     # Training
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--train_epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=8, help="number of scenes per step")
-    parser.add_argument("--save_utd", type=int, default=5)
+    parser.add_argument("--batch_size", type=int, default=64, help="number of scenes per step")
+    parser.add_argument("--save_utd", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--warm_up_epoch", type=int, default=2)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
@@ -103,10 +103,10 @@ def get_args():
                         help="weight on the neighbor-collision penalty in the reward")
     parser.add_argument("--w_road_border", type=float, default=1.0,
                         help="weight on the road-border penalty in the reward (0 disables)")
-    parser.add_argument("--w_gt_l2", type=float, default=0.1,
+    parser.add_argument("--w_gt_l2", type=float, default=0.02,
                         help="weight on the realism penalty: ADE (mean L2) between the generated "
                              "ego trajectory and the scene's own GT ego future (0 disables)")
-    parser.add_argument("--sft_prob", type=float, default=0.5,
+    parser.add_argument("--sft_prob", type=float, default=0.4,
                         help="probability of running a normal supervised step instead of a "
                              "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)")
 
@@ -168,7 +168,7 @@ def get_args():
     parser.add_argument("--resume_model_path", type=str, default=None,
                         help="pretrained checkpoint to start GRPO from (recommended)")
 
-    parser.add_argument("--use_wandb", default=False, type=boolean)
+    parser.add_argument("--use_wandb", default=True, type=boolean)
     parser.add_argument("--notes", default="", type=str)
 
     parser.add_argument("--ddp", default=True, type=boolean)

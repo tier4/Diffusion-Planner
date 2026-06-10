@@ -40,13 +40,5 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
   --train_set_list ${TRAIN_SET_LIST} \
   --valid_set_list ${VALID_SET_LIST} \
   --resume_model_path ${RESUME_MODEL_PATH} \
-  --diffusion_model_type "x_start" \
   --save_dir ${SAVE_PATH} \
-  --batch_size 64 \
-  --num_generations 8 \
-  --sft_prob 0.5 \
-  --learning_rate 1e-5 \
-  --train_epochs 50 \
-  --save_utd 1 \
-  --use_wandb True \
   2>&1 | tee ${SAVE_PATH}/grpo_log.txt
