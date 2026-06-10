@@ -115,6 +115,9 @@ def _extract_accel_y(bag_dir):
     msgs = cur.execute("SELECT timestamp,data FROM messages WHERE topic_id=? ORDER BY timestamp", (row[0],)).fetchall()
     con.close()
     msgs = msgs[1:]   # drop first message (NaN / uninitialized EKF state)
+    if not msgs:
+        raise SystemExit(f"/localization/acceleration in {bag_dir} has ≤1 message — "
+                         f"no usable lateral-accel signal")
     t = np.array([m[0] for m in msgs], dtype=np.float64) / 1e9
     M = [deserialize_message(m[1], AccelWithCovarianceStamped) for m in msgs]
     accel_y = np.array([m.accel.accel.linear.y for m in M])
@@ -346,15 +349,16 @@ def main():
     ap.add_argument("--label", default="model")
     ap.add_argument("--baseline_label", default="baseline")
     ap.add_argument("--stride", type=int, default=10,
-                    help="subsample realized poses (loc ~100Hz; stride 10 -> ~10Hz planning rate)")
+                    help="subsample realized poses by this factor (psim localization is ~40Hz, so "
+                         "stride 10 -> ~4Hz; exact dt is derived per-bag from timestamps regardless)")
     ap.add_argument("--dt", type=float, default=0.1,
                     help="DEPRECATED / ignored — dt is now derived per-bag from the message timestamps.")
     ap.add_argument("--front_cut", type=float, default=50.0)
     ap.add_argument("--tail_cut", type=float, default=50.0)
     ap.add_argument("--bin_m", type=float, default=100.0)
     ap.add_argument("--max_jump_speed", type=float, default=30.0,
-                    help="reject poses implying a consecutive jump faster than this (m/s) as a "
-                         "localization glitch; count is reported, not silently dropped")
+                    help="NaN out samples whose REPORTED speed (|twist.linear.x|) exceeds this (m/s) "
+                         "as a localization glitch; count is reported, not silently dropped")
     ap.add_argument("--probe_lo", type=float, default=None,
                     help="if set, dump per-sample series for arc window [probe_lo, probe_hi)")
     ap.add_argument("--probe_hi", type=float, default=None)

@@ -113,7 +113,8 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     written, before, after = [], [], []
     for p in paths:
-        raw = dict(np.load(p, allow_pickle=True))
+        with np.load(p, allow_pickle=True) as z:   # close each NPZ's FD promptly (long lists)
+            raw = dict(z)
         fut = np.asarray(raw["ego_agent_future"]).astype(np.float32)
         before.append(_lat_peak(fut))
         fut2 = _retime(fut, args.a_lat_max, args.a_long_max, args.v_min)

@@ -116,6 +116,8 @@ def main():
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     jp = Path(args.output_dir) / "plan_comfort.json"
     jp.write_text(json.dumps(out, indent=2))
+    if out["n"] == 0:
+        raise SystemExit(f"no scenes scored (all {len(scenes)} skipped or empty list) — wrote {jp}")
     la, jk, cs = out["plan_lat_accel_p95"], out["plan_jerk_p95"], out["curve_speed"]
     print(f"PLAN comfort ({len(la95)} scenes, dt={args.dt}): "
           f"lat_accel p95 mean={la['mean']:.2f} p50={la['p50']:.2f} p95={la['p95']:.2f} max={la['max']:.2f} m/s² | "
