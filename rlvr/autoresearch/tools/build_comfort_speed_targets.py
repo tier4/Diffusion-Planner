@@ -3,8 +3,9 @@
 The comfort regression on the big curve is sustained lateral accel = v²·κ (the
 centered curve's radius). You cannot lower it by moving the path (that de-centers
 and breaks RB). The one lever that keeps the centered path is SLOWING in the curve:
-lat = v²·κ, so capping v where κ is high cuts lat-accel while the geometry (centering)
-is byte-identical. Straights keep GT speed → minimal longitudinal-L2 / progress cost.
+lat = v²·κ, so capping v where κ is high cuts lat-accel while the path geometry (the
+centered line itself) is unchanged — the waypoints are only re-sampled to new positions
+ALONG that same line. Straights keep GT speed → minimal longitudinal-L2 / progress cost.
 
 For each curated target NPZ this:
   1. takes ego_agent_future (x,y,cos,sin) as a fixed PATH (prepended with the
@@ -34,6 +35,10 @@ def _retime(fut: np.ndarray, a_lat_max: float, a_long_max: float, v_min: float) 
     seg = np.diff(nodes, axis=0)                            # [T,2]
     seg_len = np.linalg.norm(seg, axis=1)                   # [T]
     S = np.concatenate([[0.0], np.cumsum(seg_len)])         # [T+1] arc at each node
+    # Zero-length segments (duplicate consecutive path points) make S non-strictly-increasing,
+    # which gives np.interp implementation-defined values at the ties. Nudge to strictly
+    # increasing (≤ ~1e-4 m total over 80 nodes — negligible vs the meter-scale arc).
+    S = S + np.arange(S.size) * 1e-6
     L = float(S[-1])
     if L < 1e-3:
         return fut  # degenerate / stopped target — leave as-is
@@ -57,7 +62,10 @@ def _retime(fut: np.ndarray, a_lat_max: float, a_long_max: float, v_min: float) 
         v[k] = min(v[k], v[k - 1] + a_long_max * DT)
     for k in range(T - 2, -1, -1):
         v[k] = min(v[k], v[k + 1] + a_long_max * DT)
-    v = np.maximum(v, 0.0)
+    # Re-assert the v_min floor that the (min-only) accel passes can dip below — but never
+    # above the original speed (don't speed a naturally-slow segment up to v_min). At an
+    # ultra-sharp curve where v_min²·κ > a_lat_max, the floor wins (we don't crawl to a stop).
+    v = np.minimum(np.maximum(v, v_min), v_orig)
 
     # New arc positions over T steps (start one step in, like the original future[0]).
     s_new = np.cumsum(v * DT)                              # [T] arc reached at each step
@@ -112,6 +120,9 @@ def main():
         after.append(_lat_peak(fut2))
         raw["ego_agent_future"] = fut2
         out_p = os.path.join(args.out_dir, os.path.basename(p))
+        if out_p in written:   # two inputs share a basename → would silently overwrite
+            raise SystemExit(f"output basename collision: {out_p} (input {p}); "
+                             f"inputs must have unique basenames")
         np.savez(out_p, **raw); written.append(out_p)
     json.dump(written, open(args.out_list, "w"), indent=1)
     before, after = np.array(before), np.array(after)
