@@ -3,12 +3,11 @@ set -ux
 exp_name=${1}
 TRAIN_SET_LIST=${2}
 VALID_SET_LIST=${3}
-SFT_SET_LIST=${4}
+MODEL_PATH=${4:-}  # optional: resume from this .pth if given
 
 # to convert full paths
 TRAIN_SET_LIST=$(readlink -f $TRAIN_SET_LIST)
 VALID_SET_LIST=$(readlink -f $VALID_SET_LIST)
-SFT_SET_LIST=$(readlink -f $SFT_SET_LIST)
 
 cd $(dirname $0)
 
@@ -32,7 +31,13 @@ mkdir -p ${SAVE_PATH}
 git show -s > ${SAVE_PATH}/git_show.txt
 git diff > ${SAVE_PATH}/git_diff.txt
 
-# pretraining
+# Build optional resume argument
+RESUME_ARGS=()
+if [ -n "$MODEL_PATH" ]; then
+    MODEL_PATH=$(readlink -f $MODEL_PATH)
+    RESUME_ARGS=(--resume_model_path $MODEL_PATH)
+fi
+
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
 --exp_name ${exp_name} \
 --train_set_list $TRAIN_SET_LIST \
@@ -42,20 +47,8 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --save_dir ${SAVE_PATH} \
 --train_epochs 80 \
 --save_utd 10 \
+"${RESUME_ARGS[@]}" \
 2>&1 | tee ${SAVE_PATH}/train_log.txt
-
-# sft
-python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
---exp_name ${exp_name}_sft \
---train_set_list $SFT_SET_LIST \
---valid_set_list $VALID_SET_LIST \
---use_wandb True \
---diffusion_model_type "x_start" \
---save_dir ${SAVE_PATH} \
---resume_model_path ${SAVE_PATH}/epoch0060/best_model.pth \
---train_epochs 80 \
---save_utd 5 \
-2>&1 | tee ${SAVE_PATH}/sft_log.txt
 
 # Convert the trained PyTorch model to ONNX format
 python3 ../ros_scripts/torch2onnx.py ${SAVE_PATH}
