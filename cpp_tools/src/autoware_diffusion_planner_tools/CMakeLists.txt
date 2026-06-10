@@ -26,9 +26,11 @@ ament_auto_add_executable(data_converter
   src/io/projector_factory.cpp
   src/processing/ego_sequence.cpp
   src/processing/frame_processor.cpp
+  src/processing/frame_skip_decision.cpp
   src/processing/neighbor_processor.cpp
   src/processing/sequence_builder.cpp
   src/rosbag/parsed_bag_data.cpp
+  src/rosbag/missing_topics.cpp
 )
 target_include_directories(data_converter PRIVATE include src)
 target_link_libraries(data_converter yaml-cpp)
@@ -54,8 +56,66 @@ ament_auto_package(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
 
+  # Existing test
   ament_add_gtest(test_timestamp_stats test/test_timestamp_stats.cpp)
   if(TARGET test_timestamp_stats)
     target_include_directories(test_timestamp_stats PRIVATE include)
+  endif()
+
+  # cli/converter_options — no ROS message deps, no heavy linking
+  ament_add_gtest(test_converter_options
+    test/test_converter_options.cpp
+    src/cli/converter_options.cpp
+  )
+  if(TARGET test_converter_options)
+    target_include_directories(test_converter_options PRIVATE include src)
+  endif()
+
+  # processing/frame_filters — header-only pure functions; needs autoware_diffusion_planner dims
+  ament_add_gtest(test_frame_filters
+    test/test_frame_filters.cpp
+  )
+  if(TARGET test_frame_filters)
+    target_include_directories(test_frame_filters PRIVATE include src)
+    ament_target_dependencies(test_frame_filters autoware_diffusion_planner)
+  endif()
+
+  # io/frame_writer pure builders — needs nav_msgs + autoware_diffusion_planner
+  ament_add_gtest(test_frame_writer
+    test/test_frame_writer.cpp
+    src/io/frame_writer.cpp
+  )
+  if(TARGET test_frame_writer)
+    target_include_directories(test_frame_writer PRIVATE include src)
+    ament_target_dependencies(test_frame_writer
+      nav_msgs
+      autoware_diffusion_planner
+    )
+  endif()
+
+  # processing/frame_skip_decision — pure logic, needs autoware_diffusion_planner dims
+  ament_add_gtest(test_frame_processor
+    test/test_frame_processor.cpp
+    src/processing/frame_skip_decision.cpp
+  )
+  if(TARGET test_frame_processor)
+    target_include_directories(test_frame_processor PRIVATE include src)
+    ament_target_dependencies(test_frame_processor autoware_diffusion_planner)
+  endif()
+
+  # rosbag/check_missing_topics — needs ROS message types but NOT rosbag2_storage
+  ament_add_gtest(test_parsed_bag_data
+    test/test_parsed_bag_data.cpp
+    src/rosbag/missing_topics.cpp
+  )
+  if(TARGET test_parsed_bag_data)
+    target_include_directories(test_parsed_bag_data PRIVATE include src)
+    ament_target_dependencies(test_parsed_bag_data
+      nav_msgs
+      autoware_perception_msgs
+      autoware_planning_msgs
+      autoware_vehicle_msgs
+      geometry_msgs
+    )
   endif()
 endif()
