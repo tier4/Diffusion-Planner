@@ -70,6 +70,16 @@ def make_composer(etas: dict[str, torch.Tensor], args) -> GuidanceComposer:
     return GuidanceComposer(set_cfg)
 
 
+def _new_violation(g, d) -> bool:
+    """Guided introduces a violation the baseline det didn't have."""
+    return (
+        (g.static_crossing and not d.static_crossing)
+        or (g.rb_crossing and not d.rb_crossing)
+        or (g.lane_crossing and not d.lane_crossing)
+        or (g.collision_step is not None and d.collision_step is None)
+    )
+
+
 @torch.no_grad()
 def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
     data = load_npz_data(npz_path, device)
@@ -84,17 +94,65 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
     enc = run_frozen_encoder(model, norm_data)
 
     out = policy(enc, x_ref, deterministic=True)
-    etas = {h: (2.0 * out.dists[h].mean - 1.0).reshape(1) for h in heads}
+    mean_etas = {h: (2.0 * out.dists[h].mean - 1.0).reshape(1) for h in heads}
 
-    composer = make_composer(etas, args)
-    guided = generate_samples(model=model, model_args=model_args, data=norm_data,
-                              noise_scale=0.0, n_samples=1, composer=composer,
-                              device=device)[0]
+    K = max(1, args.refine_k)
+    if K > 1:
+        # Candidate 0 = the deterministic mean; the rest sampled from the
+        # policy's Beta distributions (its own uncertainty = search width).
+        cand = {
+            h: torch.cat([
+                mean_etas[h],
+                (2.0 * out.dists[h].rsample((K - 1,)).reshape(-1) - 1.0),
+            ])
+            for h in heads
+        }
+        K_data = {}
+        for k, v in norm_data.items():
+            if isinstance(v, torch.Tensor) and v.shape[0] == 1:
+                K_data[k] = v.expand(K, *v.shape[1:]).contiguous()
+            else:
+                K_data[k] = v
+        composer = make_composer(cand, args)
+        from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+        cands = _batched_generate_varied_noise(
+            model, model_args, K_data, noise_min=0.0, noise_max=0.0,
+            first_deterministic=False, composer=composer, device=device,
+        ).cpu().numpy()
+    else:
+        cand = mean_etas
+        composer = make_composer(cand, args)
+        cands = generate_samples(model=model, model_args=model_args, data=norm_data,
+                                 noise_scale=0.0, n_samples=1, composer=composer,
+                                 device=device)[None, 0]
+
     det = x_ref_np  # x_ref IS the unguided det trajectory
+    traj_batch = torch.tensor(
+        np.concatenate([cands, det[None]]), device=device, dtype=torch.float32,
+    )
+    bds = compute_reward_batch(traj_batch, data, rcfg)
+    cand_bds, d_bd = bds[:-1], bds[-1]
 
-    traj_batch = torch.tensor(np.stack([guided, det]), device=device,
-                              dtype=torch.float32)
-    g_bd, d_bd = compute_reward_batch(traj_batch, data, rcfg)
+    # Pick the best candidate: no NEW violations, then max total reward.
+    # Falls back to the unguided det when every candidate regresses
+    # (certify mode) or none beats it.
+    pick, g_bd = 0, cand_bds[0]
+    if args.certify or K > 1:
+        clean = [i for i, b in enumerate(cand_bds) if not _new_violation(b, d_bd)]
+        if not clean:
+            pick, g_bd = -1, d_bd  # fall back to baseline
+        else:
+            pick = max(clean, key=lambda i: cand_bds[i].total)
+            g_bd = cand_bds[pick]
+            if args.certify and g_bd.total < d_bd.total and not d_bd.static_crossing:
+                pick, g_bd = -1, d_bd
+
+    guided = det if pick == -1 else cands[pick]
+    etas = (
+        {h: 0.0 for h in heads} if pick == -1
+        else {h: float(cand[h][pick].item()) for h in heads}
+    )
+    etas = {h: torch.tensor([v], device=device) for h, v in etas.items()}
     deviation = float(np.linalg.norm(guided[:, :2] - det[:, :2], axis=-1).mean())
 
     def _row(r):
@@ -181,6 +239,15 @@ def main():
     parser.add_argument("--ego_shape", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--render", action="store_true")
+    parser.add_argument("--certify", action="store_true",
+                        help="Fall back to the unguided det trajectory whenever "
+                             "the guided one introduces a NEW violation (or "
+                             "lowers total reward on an already-clean scene). "
+                             "Guarantees no regressions by construction.")
+    parser.add_argument("--refine_k", type=int, default=1,
+                        help="Sample K-1 extra eta candidates from the policy "
+                             "distribution, score all, pick the best clean one "
+                             "(policy = prior, reward = judge). 1 = mean only.")
     # Guidance envelope (must match the sweep that produced the training labels)
     parser.add_argument("--lambda_lat", type=float, default=4.0)
     parser.add_argument("--lat_scale", type=float, default=1.5)
