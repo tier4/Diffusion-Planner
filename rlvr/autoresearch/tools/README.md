@@ -241,7 +241,7 @@ python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
 ```
 
 ### build_comfort_speed_targets.py
-Re-times curated cl-guided **curve** targets to cap curve lateral-accel by *slowing where curvature is high* (`lat = v²·κ`), re-sampling the SAME path geometry (centering / road-border kept byte-for-byte) and interpolating the original headings — only the curve speed drops, straights are unchanged. Produces curated SFT targets for a slow-in-curves leg (curated `ranked_sft_mode`). Keep `--a_long_max ≥ 1.5`: lower over-slows the ego and blows up ego-L2. Usage: `python -m rlvr.autoresearch.tools.build_comfort_speed_targets --scenes <json> --out_dir <dir> --out_list <json> [--a_lat_max 1.5 --a_long_max 1.5 --v_min 2.0]`.
+Re-times curated cl-guided **curve** targets to cap curve lateral-accel by *slowing where curvature is high* (`lat = v²·κ`), re-sampling along the SAME path polyline (the geometry/trace is preserved — waypoints move *along* the unchanged line, so centering / road-border are kept) and interpolating the original headings — only the curve speed drops, straights are unchanged. Produces curated SFT targets for a slow-in-curves leg (curated `ranked_sft_mode`). Keep `--a_long_max ≥ 1.5`: lower over-slows the ego and blows up ego-L2. Usage: `python -m rlvr.autoresearch.tools.build_comfort_speed_targets --scenes <json> --out_dir <dir> --out_list <json> [--a_lat_max 1.5 --a_long_max 1.5 --v_min 2.0]`.
 
 ## PRiSM — Perturbation-Recovery iterative Self-Mining
 

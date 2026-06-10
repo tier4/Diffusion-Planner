@@ -51,7 +51,7 @@ from scenario_generation.tools._heatmap_common import (
     project_to_polyline,
     segments_from_polyline,
 )
-from rlvr.reward import _build_sg_diff_kernel, RewardConfig
+from rlvr.reward import _build_sg_diff_kernel
 
 # SG window/poly for the lateral-jerk derivative. ★ dt is DERIVED from the message
 # timestamps per bag (psim localization is ~40 Hz, NOT 100 Hz) — assuming a fixed dt
@@ -78,6 +78,7 @@ def _extract_kinematics(bag_dir):
     con = sqlite3.connect(dbs[0]); cur = con.cursor()
     row = cur.execute("SELECT id FROM topics WHERE name='/localization/kinematic_state'").fetchone()
     if row is None:
+        con.close()
         raise SystemExit(f"no /localization/kinematic_state in {bag_dir}")
     msgs = cur.execute("SELECT timestamp,data FROM messages WHERE topic_id=? ORDER BY timestamp", (row[0],)).fetchall()
     con.close()
@@ -108,6 +109,7 @@ def _extract_accel_y(bag_dir):
     con = sqlite3.connect(dbs[0]); cur = con.cursor()
     row = cur.execute("SELECT id FROM topics WHERE name='/localization/acceleration'").fetchone()
     if row is None:
+        con.close()
         raise SystemExit(f"no /localization/acceleration in {bag_dir} — needed for the measured "
                          f"lateral-accel (accel.y) signal")
     msgs = cur.execute("SELECT timestamp,data FROM messages WHERE topic_id=? ORDER BY timestamp", (row[0],)).fetchall()
@@ -183,7 +185,7 @@ def _bin_stats(arc_s, vals, s_max, bin_m):
     return mid, mean, p95, mx
 
 
-def analyze_bag(bag, route_obj, pts, arc, args, dt_unused=None):
+def analyze_bag(bag, route_obj, pts, arc, args):
     """Realized comfort scalars binned by arc for one bag (MEASURED kinematics)."""
     t, x, y, speed, yaw_rate = _extract_kinematics(bag)
     s = slice(None, None, args.stride)
@@ -230,7 +232,8 @@ def analyze_bag(bag, route_obj, pts, arc, args, dt_unused=None):
                   f"{dyn['jerk'][i]:8.2f} | {dyn['yaw_rate'][i]:5.2f} | {dyn['speed'][i]:5.1f}")
 
     arc_k = pose_arc[keep]
-    res = {"n_steps": int(keep.sum()), "n_glitch": n_glitch, "arc_max": arc_max, "bins": {}}
+    res = {"n_steps": int(keep.sum()), "n_glitch": n_glitch, "arc_max": arc_max,
+           "dt": dt, "bins": {}}   # dt = the REAL per-bag dt actually used (from timestamps)
     # comfort scalars (speed + curvature included so lat_accel = v^2 * kappa can be decomposed)
     for name in ("lat_accel", "lat_accel_kin", "jerk", "yaw_rate", "curvature", "speed"):
         mid, mean, p95, mx = _bin_stats(arc_k, dyn[name][keep], arc_max, args.bin_m)
@@ -303,7 +306,7 @@ def print_speed_decomp(route_name, base, model, args):
         bc, mc = g(base, "curvature", "p95"), g(model, "curvature", "p95")
         bl, ml = g(base, "lat_accel", "p95"), g(model, "lat_accel", "p95")
         tag = ""
-        if None not in (bs, ms, bc, mc, bl, ml) and bl > 0.3 or (ml is not None and ml > 0.3):
+        if None not in (bs, ms, bc, mc, bl, ml) and (bl > 0.3 or ml > 0.3):
             sp_r = (ms / bs) if (bs and bs > 0.5) else float("nan")
             cu_r = (mc / bc) if (bc and bc > 1e-3) else float("nan")
             if np.isfinite(sp_r) and np.isfinite(cu_r):
@@ -368,12 +371,14 @@ def main():
     route_obj = load_route(Path(args.route))
     pts, arc = build_route_polyline(route_obj)
 
-    model = analyze_bag(args.bag, route_obj, pts, arc, args, args.dt)
-    result = {"route": str(args.route), "stride": args.stride, "dt": args.dt,
+    model = analyze_bag(args.bag, route_obj, pts, arc, args)
+    # "dt" reflects the REAL per-bag dt derived from timestamps inside analyze_bag — NOT the
+    # deprecated --dt flag (which is ignored). Record the model bag's dt at the top level.
+    result = {"route": str(args.route), "stride": args.stride, "dt": model["dt"],
               "bin_m": args.bin_m, "model": {"label": args.label, "bag": args.bag, **model}}
 
     if args.baseline_bag:
-        base = analyze_bag(args.baseline_bag, route_obj, pts, arc, args, args.dt)
+        base = analyze_bag(args.baseline_bag, route_obj, pts, arc, args)
         result["baseline"] = {"label": args.baseline_label, "bag": args.baseline_bag, **base}
         print_compare_table(Path(args.route).stem, base, model, args)
         print_speed_decomp(Path(args.route).stem, base, model, args)

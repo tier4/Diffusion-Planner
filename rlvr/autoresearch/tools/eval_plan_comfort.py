@@ -63,6 +63,10 @@ def plan_comfort(traj_T4: np.ndarray, dt: float, curve_lat: float = 1.0) -> tupl
     dyaw = np.arctan2(np.sin(dyaw), np.cos(dyaw))            # wrap
     yaw_rate = np.abs(dyaw) / dt                             # [T-1]
     lat_accel = np.abs(yaw_rate * speed)                    # [T-1]
+    # Raw np.diff (NOT the SG-derivative kernel reward.py uses on realized 10Hz localization):
+    # the plan is an already-denoised diffusion output, so a plain finite difference is clean
+    # here. The companion psim_comfort_heatmap DOES use the SG kernel because realized
+    # localization is noisy. Intentional asymmetry — do not "fix" this to the SG kernel.
     jerk = np.abs(np.diff(lat_accel) / dt)                  # [T-2]
     curvy = lat_accel > curve_lat
     curve_speed = float(np.mean(speed[curvy])) if curvy.any() else float("nan")
