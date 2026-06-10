@@ -148,6 +148,15 @@ TEST(ApplyNamedArgTest, UnrecognisedArgReturnsFalse)
   EXPECT_FALSE(apply_named_arg(opts, ""));
 }
 
+TEST(ApplyNamedArgTest, InvalidValueReturnsFalse)
+{
+  ConverterOptions opts = make_default_opts();
+  // Malformed values should not throw — they return false.
+  EXPECT_FALSE(apply_named_arg(opts, "--step=abc"));
+  EXPECT_FALSE(apply_named_arg(opts, "--ego_wheel_base=not_a_number"));
+  EXPECT_FALSE(apply_named_arg(opts, "--min_distance=x"));
+}
+
 TEST(ApplyNamedArgTest, DoesNotModifyOtherFieldsOnSingleArg)
 {
   ConverterOptions before = make_default_opts();
@@ -190,11 +199,10 @@ TEST(ValidateOptionsTest, NegativeWidthReturnsError)
   EXPECT_TRUE(validate_options(opts).has_value());
 }
 
-TEST(ValidateOptionsTest, ZeroWheelBaseReturnsError)
+TEST(ValidateOptionsTest, ZeroWheelBasePasses)
 {
   ConverterOptions opts = make_default_opts();
   opts.ego_wheel_base = 0.0f;
-  // 0.0 < 0.0 is false, so zero should pass (dimensions may legitimately be zero-ish)
-  // Actual logic: < 0.0 only — zero itself passes.
+  // Validation requires < 0.0; zero itself is accepted.
   EXPECT_FALSE(validate_options(opts).has_value());
 }

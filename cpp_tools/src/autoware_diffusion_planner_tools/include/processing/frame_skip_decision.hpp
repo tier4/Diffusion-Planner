@@ -28,14 +28,26 @@ namespace frame_processor
 // has no side effects and is straightforwardly unit-testable.
 struct FrameSkipInputs
 {
-  int64_t max_msg_age_ns;         // max staleness across required topics at this tick
-  double cov_xx;                  // kinematic_state.pose.covariance[0]
-  double cov_yy;                  // kinematic_state.pose.covariance[7]
-  bool is_stop;                   // linear.x < 0.1
-  bool is_red_or_yellow;          // next route segment has red/yellow light
-  bool is_future_forward;         // GT future mileage > 1.0 m
-  int64_t stopping_count;         // consecutive ticks ego has been stopped
+  int64_t max_msg_age_ns;             // max staleness across required topics at this tick
+  double cov_xx;                      // kinematic_state.pose.covariance[0]
+  double cov_yy;                      // kinematic_state.pose.covariance[7]
+  bool is_stop;                       // linear.x < 0.1
+  bool is_red_or_yellow;              // next route segment has red/yellow light
+  bool is_future_forward;             // GT future mileage > 1.0 m
+  int64_t stopping_count;             // consecutive ticks ego has been stopped
   int64_t no_future_progress_x_step;  // no_future_progress_count * step (scaled ticks)
+};
+
+// Filter thresholds forwarded from ConverterOptions.
+// Grouping prevents argument-order mistakes at the call site.
+struct FrameFilterParams
+{
+  float static_object_margin;
+  float neighbor_margin;
+  float road_border_margin;
+  int64_t collision_time_stride;
+  float offlane_max_score;
+  int64_t offlane_time_stride;
 };
 
 // Pure skip-reason computation — no I/O, no ROS time, no file system.
@@ -49,12 +61,7 @@ SkippingInfo decide_frame_skip(
   const std::vector<float> & neighbor_past,
   const std::vector<float> & line_strings,
   const std::vector<float> & lanes,
-  float static_object_margin,
-  float neighbor_margin,
-  float road_border_margin,
-  int64_t collision_time_stride,
-  float offlane_max_score,
-  int64_t offlane_time_stride);
+  const FrameFilterParams & filter_params);
 
 }  // namespace frame_processor
 

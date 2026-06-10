@@ -41,12 +41,7 @@ SkippingInfo decide_frame_skip(
   const std::vector<float> & neighbor_past,
   const std::vector<float> & line_strings,
   const std::vector<float> & lanes,
-  float static_object_margin,
-  float neighbor_margin,
-  float road_border_margin,
-  int64_t collision_time_stride,
-  float offlane_max_score,
-  int64_t offlane_time_stride)
+  const FrameFilterParams & filter_params)
 {
   using autoware::diffusion_planner::INPUT_T;
 
@@ -73,14 +68,15 @@ SkippingInfo decide_frame_skip(
 
   if (const frame_filters::CollisionResult collision = frame_filters::check_collision(
         ego_future, ego_shape, static_objects, neighbor_future, neighbor_past, line_strings,
-        static_object_margin, neighbor_margin, road_border_margin, collision_time_stride);
+        filter_params.static_object_margin, filter_params.neighbor_margin,
+        filter_params.road_border_margin, filter_params.collision_time_stride);
       collision.collided()) {
     return SkippingInfo::collision(collision.reasons);
   }
 
   if (const frame_filters::OffLaneResult offlane =
-        frame_filters::compute_offlane_score(ego_future, lanes, offlane_time_stride);
-      frame_filters::is_off_lane(offlane, offlane_max_score)) {
+        frame_filters::compute_offlane_score(ego_future, lanes, filter_params.offlane_time_stride);
+      frame_filters::is_off_lane(offlane, filter_params.offlane_max_score)) {
     return SkippingInfo::off_lane(offlane.mean_distance, offlane.max_distance);
   }
 

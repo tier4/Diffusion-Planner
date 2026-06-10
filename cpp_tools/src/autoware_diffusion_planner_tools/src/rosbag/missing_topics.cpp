@@ -14,48 +14,32 @@
 
 #include "rosbag/parsed_bag_data.hpp"
 
-#include <iostream>
-#include <string>
 #include <vector>
 
 std::optional<SkippingInfo> check_missing_topics(const ParsedBagData & data)
 {
-  std::vector<std::string> missing_topics;
   std::vector<MissingTopicType> missing_topic_types;
   if (data.kinematic_states.empty()) {
-    missing_topics.emplace_back("/localization/kinematic_state");
     missing_topic_types.push_back(MissingTopicType::KinematicState);
   }
   if (data.accelerations.empty()) {
-    missing_topics.emplace_back("/localization/acceleration");
     missing_topic_types.push_back(MissingTopicType::Acceleration);
   }
   if (data.tracked_objects_msgs.empty()) {
-    missing_topics.emplace_back("/perception/object_recognition/tracking/objects");
     missing_topic_types.push_back(MissingTopicType::TrackedObjects);
   }
   if (data.route_msgs.empty()) {
-    missing_topics.emplace_back("/planning/mission_planning/route");
     missing_topic_types.push_back(MissingTopicType::Route);
   }
   if (data.turn_indicators.empty()) {
-    missing_topics.emplace_back("/vehicle/status/turn_indicators_status");
     missing_topic_types.push_back(MissingTopicType::TurnIndicators);
   }
   if (data.traffic_signals.empty()) {
-    missing_topics.emplace_back("/perception/traffic_light_recognition/traffic_signals");
     missing_topic_types.push_back(MissingTopicType::TrafficSignals);
   }
 
-  if (missing_topics.empty()) {
+  if (missing_topic_types.empty()) {
     return std::nullopt;
   }
-
-  std::cout << "Skipping rosbag due to missing required topics:" << std::endl;
-  for (const auto & topic : missing_topics) {
-    std::cout << "  - " << topic << std::endl;
-  }
-  std::cout << "No training samples will be generated from this rosbag." << std::endl;
-
   return SkippingInfo::missing_topics(missing_topic_types);
 }

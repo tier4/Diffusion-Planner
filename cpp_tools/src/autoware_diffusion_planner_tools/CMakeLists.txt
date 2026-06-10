@@ -94,23 +94,23 @@ if(BUILD_TESTING)
   endif()
 
   # processing/frame_skip_decision — pure logic, needs autoware_diffusion_planner dims
-  ament_add_gtest(test_frame_processor
-    test/test_frame_processor.cpp
+  ament_add_gtest(test_frame_skip_decision
+    test/test_frame_skip_decision.cpp
     src/processing/frame_skip_decision.cpp
   )
-  if(TARGET test_frame_processor)
-    target_include_directories(test_frame_processor PRIVATE include src)
-    ament_target_dependencies(test_frame_processor autoware_diffusion_planner)
+  if(TARGET test_frame_skip_decision)
+    target_include_directories(test_frame_skip_decision PRIVATE include src)
+    ament_target_dependencies(test_frame_skip_decision autoware_diffusion_planner)
   endif()
 
   # rosbag/check_missing_topics — needs ROS message types but NOT rosbag2_storage
-  ament_add_gtest(test_parsed_bag_data
-    test/test_parsed_bag_data.cpp
+  ament_add_gtest(test_missing_topics
+    test/test_missing_topics.cpp
     src/rosbag/missing_topics.cpp
   )
-  if(TARGET test_parsed_bag_data)
-    target_include_directories(test_parsed_bag_data PRIVATE include src)
-    ament_target_dependencies(test_parsed_bag_data
+  if(TARGET test_missing_topics)
+    target_include_directories(test_missing_topics PRIVATE include src)
+    ament_target_dependencies(test_missing_topics
       nav_msgs
       autoware_perception_msgs
       autoware_planning_msgs

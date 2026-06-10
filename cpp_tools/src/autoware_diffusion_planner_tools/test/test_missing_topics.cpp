@@ -148,7 +148,6 @@ TEST(CheckMissingTopicsTest, MultipleMissingTopicsReported)
   const auto result = check_missing_topics(data);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->missing_topic_types.size(), 2u);
-  // KinematicState checked before Route in implementation
   const auto & types = result->missing_topic_types;
   EXPECT_TRUE(
     std::find(types.begin(), types.end(), MissingTopicType::KinematicState) != types.end());

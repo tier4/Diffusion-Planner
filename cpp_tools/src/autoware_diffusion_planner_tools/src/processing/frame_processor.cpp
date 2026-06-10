@@ -274,11 +274,17 @@ void process_sequence(
       stopping_count,
       no_future_progress_count * options.step};
 
+    const frame_processor::FrameFilterParams filter_params{
+      options.static_object_margin,
+      options.neighbor_margin,
+      options.road_border_margin,
+      options.collision_time_stride,
+      options.offlane_max_score,
+      options.offlane_time_stride};
+
     const SkippingInfo skipping_info = frame_processor::decide_frame_skip(
       skip_inputs, ego_future, options.ego_shape, static_objects, neighbor_future, neighbor_past,
-      line_strings, lanes, options.static_object_margin, options.neighbor_margin,
-      options.road_border_margin, options.collision_time_stride, options.offlane_max_score,
-      options.offlane_time_stride);
+      line_strings, lanes, filter_params);
 
     const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
     // Accepted frames are always written; skipped frames only on request.

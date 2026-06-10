@@ -48,6 +48,11 @@ FrameSkipInputs make_clear_inputs()
   return in;
 }
 
+FrameFilterParams make_default_filter_params()
+{
+  return FrameFilterParams{0.0f, 0.0f, 0.0f, 5, 6.0f, 1};
+}
+
 // Vectors sized for a valid call with no objects/lanes (all zeros → no collision/offlane).
 struct ZeroVectors
 {
@@ -79,13 +84,7 @@ SkippingInfo call_decide(const FrameSkipInputs & inputs, const ZeroVectors & vec
 {
   return decide_frame_skip(
     inputs, vecs.ego_future, vecs.ego_shape, vecs.static_objects, vecs.neighbor_future,
-    vecs.neighbor_past, vecs.line_strings, vecs.lanes,
-    /*static_object_margin=*/0.0f,
-    /*neighbor_margin=*/0.0f,
-    /*road_border_margin=*/0.0f,
-    /*collision_time_stride=*/5,
-    /*offlane_max_score=*/6.0f,
-    /*offlane_time_stride=*/1);
+    vecs.neighbor_past, vecs.line_strings, vecs.lanes, make_default_filter_params());
 }
 
 }  // namespace
@@ -96,15 +95,12 @@ SkippingInfo call_decide(const FrameSkipInputs & inputs, const ZeroVectors & vec
 
 TEST(DecideFrameSkipTest, AllClearReturnsAccepted)
 {
-  const ZeroVectors vecs;
-  // With no valid centerline points, empty lanes → is_off_lane = true.
-  // Provide a non-zero lane point so the score can be evaluated.
-  ZeroVectors vecs2 = vecs;
-  // Place a centerline point at (1,0) so has_centerline = true, score = distance from (0,0)→1 m.
-  vecs2.lanes[0] = 1.0f;
+  ZeroVectors vecs;
+  // Provide a non-zero lane point so has_centerline = true and score ~ 1 m < 6 m threshold.
+  vecs.lanes[0] = 1.0f;
 
   const FrameSkipInputs inputs = make_clear_inputs();
-  const SkippingInfo info = call_decide(inputs, vecs2);
+  const SkippingInfo info = call_decide(inputs, vecs);
   EXPECT_EQ(info.label, SkippingLabel::NotSkipped);
 }
 
@@ -155,7 +151,8 @@ TEST(DecideFrameSkipTest, StoppedAtTrafficLightSkip)
   vecs.lanes[0] = 1.0f;
 
   FrameSkipInputs inputs = make_clear_inputs();
-  // is_stop && is_future_forward but NOT is_future_forward (so first check doesn't fire)
+  // is_stop and is_red_or_yellow, but NOT is_future_forward — so the red_or_yellow_light
+  // check (which requires all three) does not fire; stopped_at_traffic_light fires instead.
   inputs.is_stop = true;
   inputs.is_future_forward = false;
   inputs.is_red_or_yellow = true;
