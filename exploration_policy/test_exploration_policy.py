@@ -299,3 +299,79 @@ if __name__ == "__main__":
     test_grpo_config_exploration_fields()
 
     print("\nAll tests passed!")
+
+
+# ---------------------------------------------------------------------------
+# Multi-head (config-driven heads) tests
+# ---------------------------------------------------------------------------
+
+def test_multi_head_config():
+    """Three heads -> three Beta dists, etas dict keyed by head name."""
+    config = ExplorationPolicyConfig(
+        hidden_dim=64, n_attn_heads=2, encoder_hidden_dim=128,
+        heads=["lateral", "collision", "stretch"],
+    )
+    policy = ExplorationPolicy(config, ref_seq_len=20)
+    policy.eval()
+    out = policy(torch.randn(2, 10, 128), torch.randn(2, 20, 4))
+    assert set(out.etas.keys()) == {"lateral", "collision", "stretch"}
+    assert policy.guidance_head.fc2.weight.shape[0] == 6
+    for eta in out.etas.values():
+        assert eta.shape == (2,)
+        assert (eta >= -1).all() and (eta <= 1).all()
+    # lateral accessor works; longitudinal must fail loudly (not configured)
+    _ = out.eta_lat
+    try:
+        _ = out.eta_lon
+        raise AssertionError("eta_lon should raise for a policy without that head")
+    except KeyError:
+        pass
+
+
+def test_default_heads_checkpoint_backward_compat(tmp_path):
+    """A default-config (2-head) state dict round-trips into the new layout."""
+    config = ExplorationPolicyConfig(hidden_dim=64, n_attn_heads=2, encoder_hidden_dim=128)
+    policy = ExplorationPolicy(config, ref_seq_len=20)
+    path = tmp_path / "p.pth"
+    torch.save(policy.state_dict(), path)
+    fresh = ExplorationPolicy(
+        ExplorationPolicyConfig(hidden_dim=64, n_attn_heads=2, encoder_hidden_dim=128),
+        ref_seq_len=20,
+    )
+    fresh.load_state_dict(torch.load(path), strict=True)
+    out = fresh(torch.randn(1, 5, 128), torch.randn(1, 20, 4), deterministic=True)
+    assert abs(out.eta_lat.item()) < 1e-5  # zero-init -> inert mean
+    assert abs(out.eta_lon.item()) < 1e-5
+
+
+def test_multi_head_zero_init_inert():
+    """Every head's deterministic action is exactly 0 at zero-init."""
+    config = ExplorationPolicyConfig(
+        hidden_dim=64, n_attn_heads=2, encoder_hidden_dim=128,
+        heads=["lateral", "collision"],
+    )
+    policy = ExplorationPolicy(config, ref_seq_len=20)
+    policy.eval()
+    out = policy(torch.randn(4, 8, 128), torch.randn(4, 20, 4), deterministic=True)
+    for name, eta in out.etas.items():
+        assert torch.all(eta.abs() < 1e-5), f"head {name} not inert at init"
+
+
+def test_loss_multi_head_dists():
+    """compute_exploration_loss accepts a dists dict + action cost."""
+    from exploration_policy.loss import compute_exploration_loss
+    from torch.distributions import Beta
+
+    dists = {
+        "lateral": Beta(torch.tensor([2.0]), torch.tensor([1.5])),
+        "collision": Beta(torch.tensor([1.7]), torch.tensor([1.7])),
+    }
+    adv = torch.tensor([1.0, -1.0, 0.5])
+    lp = torch.tensor([-1.0, -2.0, -1.5], requires_grad=True)
+    loss, metrics = compute_exploration_loss(
+        advantages=adv, log_probs=lp, dists=dists, action_cost_coef=0.01,
+    )
+    assert loss.dim() == 0
+    assert "exploration_eta_collision_mean" in metrics
+    assert "exploration_eta_lat_mean" in metrics  # legacy alias
+    assert metrics["exploration_action_cost"] > 0
