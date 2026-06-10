@@ -70,7 +70,7 @@ bool apply_named_arg(ConverterOptions & opts, const std::string & arg)
 std::optional<std::string> validate_options(const ConverterOptions & opts)
 {
   if (opts.ego_wheel_base < 0.0 || opts.ego_length < 0.0 || opts.ego_width < 0.0) {
-    return "Ego vehicle dimensions must be specified with positive values.";
+    return "Ego vehicle dimensions must be non-negative.";
   }
   return std::nullopt;
 }

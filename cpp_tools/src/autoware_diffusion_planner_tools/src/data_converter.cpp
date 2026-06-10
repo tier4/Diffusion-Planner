@@ -58,14 +58,7 @@ int main(int argc, char ** argv)
   if (missing_topics_skip) {
     std::cout << "Skipping rosbag due to missing required topics:" << std::endl;
     for (const auto & t : missing_topics_skip->missing_topic_types) {
-      static const char * const topic_names[] = {
-        "/localization/kinematic_state",
-        "/localization/acceleration",
-        "/perception/object_recognition/tracking/objects",
-        "/planning/mission_planning/route",
-        "/vehicle/status/turn_indicators_status",
-        "/perception/traffic_light_recognition/traffic_signals"};
-      std::cout << "  - " << topic_names[static_cast<int>(t)] << std::endl;
+      std::cout << "  - " << to_topic_name(t) << std::endl;
     }
     std::cout << "No training samples will be generated from this rosbag." << std::endl;
     save_route_json(
