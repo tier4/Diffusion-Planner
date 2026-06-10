@@ -112,6 +112,13 @@ python -m rlvr.autoresearch.tools.eval_reward_vs_gt \
   --model_path <model.pth> --scenes <scenes.json> --tag <name>
 ```
 
+### eval_plan_comfort.py
+Fast OPEN-LOOP **plan** gentleness metric (deterministic inference only — no psim/ROS), cheap enough to run every epoch alongside the avoidance/L2 evals. Computes planned lateral-accel = `|yaw_rate·speed|` and lateral jerk = `|d(lat_accel)/dt|` from the model's `[80,4]` plan at the KNOWN plan timestep (`dt`=0.1s, `RewardConfig.dt`), and reports the across-scene distribution of per-plan p95 values plus a `curve_speed` column (mean planned speed at steps where lat-accel exceeds `--curve_lat`, default 1.0 m/s² — the signal a slow-in-curves re-timing is meant to drop). Catches a comfort regression at training time — the blind spot the geometric (cl/RB) metrics miss. Point it at a curve scene-list to score curve behavior specifically. NOTE: open-loop is an optimistic proxy (the realized closed-loop drive is rougher), so use it as a *relative-improvement* signal on route/cruise scenes; the closed-loop `psim_comfort_heatmap` (post-hoc, ≥3 runs) is the ground-truth gate. Reuses `load_model`/`det_inference_batched` from `eval_det_avoidance.py`.
+```bash
+python -m rlvr.autoresearch.tools.eval_plan_comfort \
+  --model_path <merged.pth> --scenes <route_scenes.json> --output_dir <dir>
+```
+
 ### grpo_viz.py
 Visualizes all K GRPO trajectories per scene with reward breakdown. Each scene gets one figure:
 left panel shows trajectories colored by rank (green=best, red=worst) with road borders and lane
@@ -233,6 +240,9 @@ python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
   --scenes <input.json> --output <cleaned.json> --min_clearance 0.2
 ```
 
+### build_comfort_speed_targets.py
+Re-times curated cl-guided **curve** targets to cap curve lateral-accel by *slowing where curvature is high* (`lat = v²·κ`), re-sampling along the SAME path polyline (the geometry/trace is preserved — waypoints move *along* the unchanged line, so centering / road-border are kept) and interpolating the original headings — only the curve speed drops, straights are unchanged. Produces curated SFT targets for a slow-in-curves leg (curated `ranked_sft_mode`). Keep `--a_long_max ≥ 1.5`: lower over-slows the ego and blows up ego-L2. Usage: `python -m rlvr.autoresearch.tools.build_comfort_speed_targets --scenes <json> --out_dir <dir> --out_list <json> [--a_lat_max 1.5 --a_long_max 1.5 --v_min 2.0]`.
+
 ## PRiSM — Perturbation-Recovery iterative Self-Mining
 
 Tools for the self-improvement loop described in `rlvr/README.md` (see "PRiSM" section). Per round: sim NPZ pool → mine warm scenes → perturb → K=N + reward.py rank → filter → ranked-SFT warmstarted → iterate.
@@ -302,6 +312,9 @@ Check whether a scene's target `ego_agent_future` crosses the road border, using
 
 ### psim_realized_rb.py
 Road-border crossings of the REALIZED closed-loop ego (from a psim `.db3` bag's `/localization/kinematic_state`), scored vs real map borders. `--stride 10` subsamples ~100Hz localization to ~10Hz; `--front_cut`/`--tail_cut` skip route ends; `--localize` bins crossings by arc. Reports full distribution (min/p5/p50/mean) + crossings. Usage: `--route <pkl> --bag <bag_dir> --ego_shape WB,L,W --stride 10 --front_cut 50 --tail_cut 50 --localize`.
+
+### psim_comfort_heatmap.py
+COMFORT/dynamics of the REALIZED closed-loop ego from a psim `.db3` bag, arc-binned (the RB-heatmap analog for dynamics). Per-arc lateral-accel, lateral jerk, curvature, speed + centerline-offset, all from MEASURED signals — NO position derivatives — with **dt derived from the message timestamps** (psim localization is ~40Hz, NOT 100Hz; assuming a fixed dt inflates speed ~2.5×/lat-accel ~6×/jerk ~16× — a real bug this avoids). The PRIMARY lateral signal is measured `|accel.y|` from `/localization/acceleration` (base_link EKF, the felt accel; first msg dropped, interpolated onto pose timestamps), with kinematic `|yaw_rate·speed|` reported as a SECONDARY sanity column — in psim there's no IMU so the EKF derives `accel.y` as `v·ω` and the two are identical (the tool prints their `corr`/`max|Δ|`; on a REAL-vehicle bag the gap is diagnostic of slip/noise). Jerk = `|d(accel.y)/dt|` (one derivative, never 3rd-deriv of position). Pass `--baseline_bag` for a side-by-side table + heatmaps + a v-vs-κ decomposition. Reports p95 as the primary statistic (not mean/max). Run under a ROS env (reads `/localization/{kinematic_state,acceleration}`; reuses `_heatmap_common` arc-binning). Usage: `python -m rlvr.autoresearch.tools.psim_comfort_heatmap --route <pkl> --bag <bag_dir> [--baseline_bag <bag_dir>] --ego_shape WB,L,W --out_dir <dir> [--stride 10 --bin_m 100 --front_cut 50 --tail_cut 50]`.
 
 ### psim_per_arc_metrics.py
 Per-arc CL + road-border table for one-or-more psim bags side by side. Per pose: arc + |lateral| from route centerline (CL) via `project_to_polyline`, and border distance via the reward OBB (RB). Bins by arc and prints per-bin clμ (mean |lat|), clmx (max |lat|), rb min-dist, X (crossings) + an in-bounds total. Usage: `python -m rlvr.autoresearch.tools.psim_per_arc_metrics --route <pkl> --ego_shape WB,L,W [--bin_m 250 --front_cut 50 --tail_cut 50 --stride 10] --models LABEL1 BAG1 LABEL2 BAG2 ...`.
