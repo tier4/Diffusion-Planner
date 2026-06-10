@@ -230,6 +230,17 @@ class SpawnConfig:
     # Model inference delay: number of initial timesteps kept fixed as prefix.
     # Matches the "delay" input tensor to the diffusion decoder.
     inference_delay: int = 0
+    # Exploration-policy guidance for the EGO (frozen planner + learned
+    # per-step guidance etas). Directory must contain exploration_policy.pth
+    # + exploration_policy_config.json (rlvr.train_explorer_regression
+    # output). None = disabled (plain forward for everyone). Other agents
+    # always use the plain forward. The guidance-envelope strengths live in
+    # scenario_generation.explorer_runner.ExplorerEnvelope and must match
+    # the sweep envelope the policy was trained against.
+    explorer_dir: str | None = None
+    # Exponential smoothing factor on per-step etas (0 = raw, ->1 = frozen).
+    # Damps left/right flip-flop near decision boundaries mid-avoidance.
+    explorer_eta_smooth: float = 0.5
     # Skip traffic-light state propagation entirely. Useful for MPC-gen
     # data runs where TL-driven speed drops would bias the replay ego
     # toward stop-and-go behaviour we don't want in training.
@@ -1960,6 +1971,18 @@ def run_route_replay(
         spawn_config = SpawnConfig()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Optional exploration-policy guidance for the ego (frozen planner +
+    # learned guidance etas). Fails loudly if the dir is missing/incomplete.
+    explorer_runner = None
+    if spawn_config.explorer_dir:
+        from scenario_generation.explorer_runner import ExplorerGuidanceRunner
+        explorer_runner = ExplorerGuidanceRunner(
+            spawn_config.explorer_dir, model_args, device,
+            eta_smooth=spawn_config.explorer_eta_smooth,
+        )
+        print(f"  [explorer] guidance policy loaded from {spawn_config.explorer_dir} "
+              f"(heads={explorer_runner.heads}, eta_smooth={spawn_config.explorer_eta_smooth})")
+
     # Seed ALL random sources for full reproducibility across runs.
     if spawn_config.seed is not None:
         torch.manual_seed(spawn_config.seed)
@@ -2289,6 +2312,25 @@ def run_route_replay(
                     turn_indicator_keep_bias=spawn_config.turn_indicator_keep_bias,
                 )
 
+            # Explorer guidance: regenerate the EGO trajectory through the
+            # guidance composer, using its plain det prediction (just
+            # computed in the shared batch) as the reference. Other agents
+            # keep their plain predictions. Runs BEFORE SG smoothing so the
+            # guided trajectory gets the same smoothing as the plain one.
+            step_explorer_etas: dict[str, float] | None = None
+            if explorer_runner is not None:
+                _eid = scene.ego_agent.id
+                if _eid in agent_predictions:
+                    from scenario_generation.tensor_converter import to_model_tensors
+                    _ego_dict = to_model_tensors(
+                        scene, _eid, model_args, device, map_cache=map_cache,
+                        inference_delay=spawn_config.inference_delay,
+                    )
+                    _guided, step_explorer_etas = explorer_runner.guided_ego_prediction(
+                        model, _ego_dict, agent_predictions[_eid],
+                    )
+                    agent_predictions[_eid] = _guided
+
             # Optional Savitzky-Golay smoothing on each agent's predicted
             # trajectory. Reuses the same smoother the RL ranked-SFT
             # pipeline applies before its SFT loss (rlvr/grpo_sft_trainer.
@@ -2396,6 +2438,7 @@ def run_route_replay(
                     "stopped_id": sc_pair[3] if sc_pair is not None else None,
                     "moving_dist": float(mv_pair[2]) if mv_pair is not None else None,
                     "moving_id": mv_pair[3] if mv_pair is not None else None,
+                    "explorer_etas": step_explorer_etas,
                     "png": out_path.name,
                 })
 
@@ -2615,6 +2658,12 @@ def main() -> None:
                              "a config per run.")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--explorer_dir", type=str, default=None,
+                        help="Exploration-policy dir (exploration_policy.pth + "
+                             "config json) for guided EGO generation. Overrides "
+                             "SpawnConfig.explorer_dir.")
+    parser.add_argument("--explorer_eta_smooth", type=float, default=None,
+                        help="Override SpawnConfig.explorer_eta_smooth (0=raw etas)")
     args = parser.parse_args()
 
     route = Route.load(args.route)
@@ -2631,6 +2680,10 @@ def main() -> None:
         cfg.spawn_probability = args.spawn_probability
     if args.seed is not None:
         cfg.seed = args.seed
+    if args.explorer_dir is not None:
+        cfg.explorer_dir = args.explorer_dir
+    if args.explorer_eta_smooth is not None:
+        cfg.explorer_eta_smooth = args.explorer_eta_smooth
     # Re-run validation after CLI overrides so bad values (e.g. --steps 0)
     # are rejected at startup instead of much later.
     cfg.validate()
