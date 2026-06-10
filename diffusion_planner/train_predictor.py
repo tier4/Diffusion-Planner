@@ -224,11 +224,8 @@ def model_training(args):
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
 
-        if args.resume_model_path is not None:
-            save_path = os.path.dirname(args.resume_model_path)
-        else:
-            save_path = args.save_dir
-            os.makedirs(save_path, exist_ok=True)
+        save_path = args.save_dir
+        os.makedirs(save_path, exist_ok=True)
 
         # Save args
         args_dict = vars(args)
