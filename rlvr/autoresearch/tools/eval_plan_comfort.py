@@ -46,8 +46,13 @@ def _dist(vals):
             "p75": q(75), "p95": q(95), "max": float(a.max()), "n": int(a.size)}
 
 
-def plan_comfort(traj_T4: np.ndarray, dt: float) -> tuple[float, float]:
-    """Per-trajectory (lat_accel p95, jerk p95) from a [T,4] plan (x,y,cos,sin)."""
+def plan_comfort(traj_T4: np.ndarray, dt: float, curve_lat: float = 1.0) -> tuple[float, float, float]:
+    """Per-trajectory (lat_accel p95, jerk p95, curve_speed) from a [T,4] plan (x,y,cos,sin).
+
+    curve_speed = mean planned speed at the steps where lat_accel > curve_lat — i.e. how
+    fast the plan takes the curvy part. It's the signal a slow-in-curves re-timing is meant
+    to drop, so it's reported alongside the comfort percentiles.
+    """
     x, y = traj_T4[:, 0], traj_T4[:, 1]
     cos, sin = traj_T4[:, 2], traj_T4[:, 3]
     vx = np.diff(x) / dt
@@ -59,12 +64,15 @@ def plan_comfort(traj_T4: np.ndarray, dt: float) -> tuple[float, float]:
     yaw_rate = np.abs(dyaw) / dt                             # [T-1]
     lat_accel = np.abs(yaw_rate * speed)                    # [T-1]
     jerk = np.abs(np.diff(lat_accel) / dt)                  # [T-2]
+    curvy = lat_accel > curve_lat
+    curve_speed = float(np.mean(speed[curvy])) if curvy.any() else float("nan")
     return (float(np.percentile(lat_accel, 95)),
-            float(np.percentile(jerk, 95)) if jerk.size else float("nan"))
+            float(np.percentile(jerk, 95)) if jerk.size else float("nan"),
+            curve_speed)
 
 
-def eval_plan_comfort(model, model_args, scene_paths, device, dt=0.1, batch_size=32):
-    la95, jk95 = [], []
+def eval_plan_comfort(model, model_args, scene_paths, device, dt=0.1, batch_size=32, curve_lat=1.0):
+    la95, jk95, cspd = [], [], []
     for start in range(0, len(scene_paths), batch_size):
         datas, valid = [], []
         for p in scene_paths[start:start + batch_size]:
@@ -76,9 +84,9 @@ def eval_plan_comfort(model, model_args, scene_paths, device, dt=0.1, batch_size
             continue
         trajs = det_inference_batched(model, model_args, datas, device).cpu().numpy()
         for bi in range(len(valid)):
-            a, j = plan_comfort(trajs[bi], dt)
-            la95.append(a); jk95.append(j)
-    return la95, jk95
+            a, j, c = plan_comfort(trajs[bi], dt, curve_lat)
+            la95.append(a); jk95.append(j); cspd.append(c)
+    return la95, jk95, cspd
 
 
 def main():
@@ -88,24 +96,32 @@ def main():
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--dt", type=float, default=0.1, help="plan timestep (RewardConfig.dt = 0.1s)")
     ap.add_argument("--batch_size", type=int, default=32)
+    ap.add_argument("--curve_lat", type=float, default=1.0,
+                    help="lat_accel threshold (m/s²) above which a step counts as 'in the curve' for curve_speed")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, model_args = load_model(args.model_path, device)
     scenes = json.load(open(args.scenes))
-    la95, jk95 = eval_plan_comfort(model, model_args, scenes, device, args.dt, args.batch_size)
+    la95, jk95, cspd = eval_plan_comfort(model, model_args, scenes, device, args.dt, args.batch_size, args.curve_lat)
 
-    # headline = the distribution of per-plan p95 lat-accel / jerk across scenes
+    # headline = the distribution of per-plan p95 lat-accel / jerk + curve speed across scenes
     out = {"model": args.model_path, "scenes": args.scenes, "n": len(la95), "dt": args.dt,
-           "plan_lat_accel_p95": _dist(la95), "plan_jerk_p95": _dist(jk95)}
+           "curve_lat": args.curve_lat, "plan_lat_accel_p95": _dist(la95),
+           "plan_jerk_p95": _dist(jk95), "curve_speed": _dist(cspd)}
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     jp = Path(args.output_dir) / "plan_comfort.json"
     jp.write_text(json.dumps(out, indent=2))
-    la, jk = out["plan_lat_accel_p95"], out["plan_jerk_p95"]
+    la, jk, cs = out["plan_lat_accel_p95"], out["plan_jerk_p95"], out["curve_speed"]
     print(f"PLAN comfort ({len(la95)} scenes, dt={args.dt}): "
           f"lat_accel p95 mean={la['mean']:.2f} p50={la['p50']:.2f} p95={la['p95']:.2f} max={la['max']:.2f} m/s² | "
-          f"jerk p95 mean={jk['mean']:.2f} p50={jk['p50']:.2f} p95={jk['p95']:.2f} max={jk['max']:.2f} m/s³")
+          f"jerk p95 mean={jk['mean']:.2f} p50={jk['p50']:.2f} p95={jk['p95']:.2f} max={jk['max']:.2f} m/s³ | "
+          f"curve_speed(lat>{args.curve_lat:.1f}) mean={_fmt(cs['mean'])} p50={_fmt(cs['p50'])} m/s")
     print(f"  wrote {jp}")
+
+
+def _fmt(v):
+    return "—" if v is None else f"{v:.2f}"
 
 
 if __name__ == "__main__":

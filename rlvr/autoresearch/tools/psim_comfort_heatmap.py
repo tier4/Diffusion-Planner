@@ -14,10 +14,16 @@ message timestamps per bag — NOT assumed. (An earlier version assumed 100 Hz /
 and took 3rd-derivatives of position; psim localization is ~40 Hz, so that inflated
 speed ~2.5x, lat-accel ~6x, jerk ~16x. Fixed.)
 - kinematics (t, x, y, speed=twist.linear.x, yaw_rate=twist.angular.z) from
-  /localization/kinematic_state via _extract_kinematics. base_link frame → twist.linear.y≈0,
-  so lateral motion is NOT in y; lateral accel = yaw_rate*speed.
-- lat_accel = |yaw_rate*speed| (measured). jerk = |d(lat_accel)/dt| (lateral jerk, ONE
-  derivative of a measured signal, reward._build_sg_diff_kernel deriv=1 with the REAL dt).
+  /localization/kinematic_state via _extract_kinematics (base_link → twist.linear.y≈0).
+- lat_accel (PRIMARY) = |accel.y| from /localization/acceleration (base_link, EKF) — the
+  measured/felt lateral accel, interpolated onto the pose timestamps (first msg dropped as
+  NaN/uninitialized). In psim there is no IMU so the EKF derives it as the kinematic
+  centripetal v·ω → verified identical to |yaw_rate*speed| (corr 1.000 on a psim bag). On a
+  REAL-vehicle bag it is the genuine felt accel and can diverge from v·ω (slip/bank/noise).
+  lat_accel_kin = |yaw_rate*speed| is kept as a SECONDARY sanity column (the accel.y-vs-v·ω
+  gap is ≈0 in psim, diagnostic on a real bag).
+- jerk = |d(lat_accel)/dt| (lateral jerk: ONE derivative of the measured accel signal,
+  reward._build_sg_diff_kernel deriv=1 with the REAL dt — NEVER a 3rd-derivative of position).
   curvature = |yaw_rate|/max(|speed|,0.5). speed = measured forward speed.
 - route centerline polyline + arc + signed lateral: _heatmap_common
   (build_route_polyline / project_to_polyline / segments_from_polyline / plot_route_heatmap).
@@ -84,6 +90,35 @@ def _extract_kinematics(bag_dir):
     return t, x, y, speed, yaw_rate
 
 
+def _extract_accel_y(bag_dir):
+    """(t[s], accel_y[m/s²]) measured lateral accel from /localization/acceleration.
+
+    accel.y in base_link is the felt lateral acceleration. The first message is dropped
+    (NaN/uninitialized). Raises if the topic is absent — no silent fallback to v·ω; the
+    caller decides. (In psim accel.y ≡ v·ω, verified corr 1.000, so dropping back would be
+    lossless there, but on a real bag the measured signal is the one we actually want.)
+    """
+    import sqlite3
+    import glob as _glob
+    from rclpy.serialization import deserialize_message
+    from geometry_msgs.msg import AccelWithCovarianceStamped
+    dbs = sorted(_glob.glob(str(Path(bag_dir) / "*.db3")))
+    if not dbs:
+        raise SystemExit(f"no .db3 in {bag_dir}")
+    con = sqlite3.connect(dbs[0]); cur = con.cursor()
+    row = cur.execute("SELECT id FROM topics WHERE name='/localization/acceleration'").fetchone()
+    if row is None:
+        raise SystemExit(f"no /localization/acceleration in {bag_dir} — needed for the measured "
+                         f"lateral-accel (accel.y) signal")
+    msgs = cur.execute("SELECT timestamp,data FROM messages WHERE topic_id=? ORDER BY timestamp", (row[0],)).fetchall()
+    con.close()
+    msgs = msgs[1:]   # drop first message (NaN / uninitialized EKF state)
+    t = np.array([m[0] for m in msgs], dtype=np.float64) / 1e9
+    M = [deserialize_message(m[1], AccelWithCovarianceStamped) for m in msgs]
+    accel_y = np.array([m.accel.accel.linear.y for m in M])
+    return t, accel_y
+
+
 def _sg_deriv1(arr_1d, dt: float) -> np.ndarray:
     """SG 1st derivative of a 1-D signal (replicate-padded)."""
     kernel = _build_sg_diff_kernel(window=SG_WINDOW, poly=SG_POLY, deriv=1, delta=dt)
@@ -93,24 +128,28 @@ def _sg_deriv1(arr_1d, dt: float) -> np.ndarray:
     return torch.nn.functional.conv1d(xp, kernel.view(1, 1, -1)).squeeze().numpy()
 
 
-def compute_dynamics(speed, yaw_rate, dt: float, max_jump_speed: float = 30.0) -> tuple[dict, np.ndarray]:
+def compute_dynamics(speed, yaw_rate, dt: float, lat_accel_meas=None,
+                     max_jump_speed: float = 30.0) -> tuple[dict, np.ndarray]:
     """Per-sample MEASURED comfort scalars (inputs already subsampled).
 
-    lat_accel = |yaw_rate*speed| (centripetal, measured — no position derivatives).
-    jerk = |d(lat_accel)/dt| (lateral jerk: ONE derivative of a measured signal, with
-    dt from timestamps). curvature = |yaw_rate|/max(|speed|,0.5). yaw_rate, speed
-    measured. Edge (SG pad) + glitch (|speed|>max_jump_speed) samples are NaN'd.
+    lat_accel (PRIMARY) = |lat_accel_meas| when given (measured |accel.y|), else the
+    kinematic |yaw_rate*speed|. lat_accel_kin = |yaw_rate*speed| is always emitted as a
+    SECONDARY sanity column. jerk = |d(lat_accel)/dt| (lateral jerk: ONE derivative of the
+    primary accel signal, with dt from timestamps — never a 3rd-derivative of position).
+    curvature = |yaw_rate|/max(|speed|,0.5). Edge (SG pad) + glitch (|speed|>max_jump_speed)
+    samples are NaN'd.
     """
     speed = np.asarray(speed, np.float64); yaw_rate = np.asarray(yaw_rate, np.float64)
     T = len(speed); pad = SG_WINDOW // 2
-    lat_accel = np.abs(yaw_rate * speed)
+    lat_accel_kin = np.abs(yaw_rate * speed)
+    lat_accel = np.abs(np.asarray(lat_accel_meas, np.float64)) if lat_accel_meas is not None else lat_accel_kin
     curvature = np.abs(yaw_rate) / np.clip(np.abs(speed), 0.5, None)
     jerk = np.abs(_sg_deriv1(lat_accel, dt)) if T > SG_WINDOW else np.full(T, np.nan)
     glitch = np.abs(speed) > max_jump_speed
     if glitch.any():
         for j in np.where(glitch)[0]:
             glitch[max(0, j - pad):min(T, j + pad + 1)] = True
-    out = {"lat_accel": lat_accel, "jerk": np.asarray(jerk, np.float64),
+    out = {"lat_accel": lat_accel, "lat_accel_kin": lat_accel_kin, "jerk": np.asarray(jerk, np.float64),
            "yaw_rate": np.abs(yaw_rate), "curvature": curvature, "speed": np.abs(speed)}
     for k in out:
         out[k] = out[k].astype(np.float64).copy()
@@ -150,7 +189,19 @@ def analyze_bag(bag, route_obj, pts, arc, args, dt_unused=None):
     s = slice(None, None, args.stride)
     t, x, y, speed, yaw_rate = t[s], x[s], y[s], speed[s], yaw_rate[s]
     dt = float(np.median(np.diff(t))) if len(t) > 1 else 0.1   # REAL dt from timestamps
-    dyn, glitch = compute_dynamics(speed, yaw_rate, dt, max_jump_speed=args.max_jump_speed)
+    # PRIMARY lateral signal: measured |accel.y|, interpolated onto the (strided) pose
+    # timestamps (the accel topic and kinematic_state are not perfectly co-rate).
+    t_acc, accel_y = _extract_accel_y(bag)
+    lat_meas = np.interp(t, t_acc, np.abs(accel_y))
+    dyn, glitch = compute_dynamics(speed, yaw_rate, dt, lat_accel_meas=lat_meas,
+                                   max_jump_speed=args.max_jump_speed)
+    # sanity: accel.y ≡ v·ω in psim (EKF-derived, no IMU); on a real bag the gap is real.
+    fin = np.isfinite(dyn["lat_accel"]) & np.isfinite(dyn["lat_accel_kin"])
+    if fin.sum() > 2:
+        d = np.abs(dyn["lat_accel"][fin] - dyn["lat_accel_kin"][fin])
+        cc = float(np.corrcoef(dyn["lat_accel"][fin], dyn["lat_accel_kin"][fin])[0, 1])
+        print(f"  [{Path(bag).name}] accel.y vs v·ω: corr={cc:.3f} max|Δ|={d.max():.3f} "
+              f"(≈0 in psim; >0 on a real bag = slip/noise)")
 
     arc_max = float(arc.max())
     proj = np.array([project_to_polyline(np.array([float(px), float(py)]), pts, arc)
@@ -181,7 +232,7 @@ def analyze_bag(bag, route_obj, pts, arc, args, dt_unused=None):
     arc_k = pose_arc[keep]
     res = {"n_steps": int(keep.sum()), "n_glitch": n_glitch, "arc_max": arc_max, "bins": {}}
     # comfort scalars (speed + curvature included so lat_accel = v^2 * kappa can be decomposed)
-    for name in ("lat_accel", "jerk", "yaw_rate", "curvature", "speed"):
+    for name in ("lat_accel", "lat_accel_kin", "jerk", "yaw_rate", "curvature", "speed"):
         mid, mean, p95, mx = _bin_stats(arc_k, dyn[name][keep], arc_max, args.bin_m)
         res["bins"][name] = {"mid": mid.tolist(), "mean": mean.tolist(),
                              "p95": p95.tolist(), "max": mx.tolist()}
@@ -311,7 +362,8 @@ def main():
 
     out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
     print(f"[comfort] route={Path(args.route).name} stride={args.stride} (dt derived from timestamps) "
-          f"MEASURED twist: lat_accel=|yaw_rate*speed|, jerk=d(lat_accel)/dt; bin={args.bin_m:.0f}m ego_shape={args.ego_shape}")
+          f"PRIMARY lat_accel=|accel.y| (measured) + v·ω sanity col, jerk=d(lat_accel)/dt; "
+          f"bin={args.bin_m:.0f}m ego_shape={args.ego_shape}")
 
     route_obj = load_route(Path(args.route))
     pts, arc = build_route_polyline(route_obj)
