@@ -30,6 +30,48 @@ from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import run_frozen_encoder
 
 
+def plan_static_clearance(
+    plan_ego_frame: np.ndarray,
+    static_boxes_ego_frame: list[tuple[float, float, float, float, float]],
+    ego_shape_wlw: tuple[float, float, float],
+    device,
+) -> float:
+    """Min OBB clearance of an ego-frame plan to static boxes (canonical fn).
+
+    Args:
+        plan_ego_frame: (T, 4) [x, y, cos, sin] ego-centric plan.
+        static_boxes_ego_frame: list of (x, y, heading, length, width) in the
+            SAME ego frame.
+        ego_shape_wlw: (wheelbase, length, width).
+
+    Returns min clearance in metres (99.0 when no static boxes). Geometry is
+    entirely compute_static_collision_penalty (no hand-rolled OBB math).
+    """
+    from rlvr.reward import RewardConfig, compute_static_collision_penalty
+
+    if not static_boxes_ego_frame:
+        return 99.0
+    T = plan_ego_frame.shape[0]
+    ego_trajs = torch.from_numpy(np.ascontiguousarray(plan_ego_frame)).float()
+    ego_trajs = ego_trajs.unsqueeze(0).to(device)
+    S = len(static_boxes_ego_frame)
+    nb = torch.zeros(S, T, 4, device=device)
+    shapes = torch.zeros(S, 2, device=device)
+    for i, (x, y, h, length, w) in enumerate(static_boxes_ego_frame):
+        nb[i, :, 0] = x
+        nb[i, :, 1] = y
+        nb[i, :, 2] = float(np.cos(h))
+        nb[i, :, 3] = float(np.sin(h))
+        shapes[i, 0] = w
+        shapes[i, 1] = length
+    valid = torch.ones(S, T, dtype=torch.bool, device=device)
+    ego_shape = torch.tensor(ego_shape_wlw, device=device, dtype=torch.float32)
+    res = compute_static_collision_penalty(
+        ego_trajs, ego_shape, nb, shapes, valid, RewardConfig(),
+    )
+    return float(res["per_timestep_min"][0, 1:].min().item())
+
+
 @dataclass
 class ExplorerEnvelope:
     """Guidance strengths; defaults = the campaign sweep envelope."""
