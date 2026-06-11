@@ -50,7 +50,7 @@ def get_args():
     # Data
     parser.add_argument("--train_set_list", type=str, required=True)
     parser.add_argument("--valid_set_list", type=str, required=True)
-    parser.add_argument("--train_subsample_step", type=int, default=1,
+    parser.add_argument("--train_subsample_step", type=int, default=10,
                         help="keep every Nth training sample (data_list[::N]); 1 = use all, "
                              "10 = use 1/10 for faster iteration")
 
