@@ -28,7 +28,30 @@ import argparse
 import json
 
 
-def relabel_scene(r: dict, margin: float, min_gain: float) -> dict:
+def _neighborhood_min_clearance(c: dict, combos: list[dict],
+                                radius: float) -> float:
+    """Worst sc clearance over the combo's eta-neighbourhood (incl. itself).
+
+    A combo whose neighbours collide sits on a response CLIFF (prior mode
+    boundary): regression eta error — and the Beta mean's compression of
+    +-1 targets — lands the policy on the bad side at inference (measured:
+    label eta +1.0 -> clearance +1.6, policy eta +0.82 -> -0.97 on the
+    same scene). Robust labels live mid-plateau. Crossing/stopped
+    neighbours count as clearance 0.
+    """
+    worst = c["sc_min_dist"]
+    for o in combos:
+        if (abs(o["eta_lat"] - c["eta_lat"]) <= radius + 1e-6
+                and abs(o["eta_col"] - c["eta_col"]) <= radius + 1e-6
+                and o.get("stretch", 1.0) == c.get("stretch", 1.0)):
+            v = 0.0 if (o["static_crossing"] or o["rb_cross"] or o["stopped"]) \
+                else o["sc_min_dist"]
+            worst = min(worst, v)
+    return worst
+
+
+def relabel_scene(r: dict, margin: float, min_gain: float,
+                  robust_radius: float = 0.0) -> dict:
     out = dict(r)
     det = r["det"]
     combos = r["combos"]
@@ -37,12 +60,22 @@ def relabel_scene(r: dict, margin: float, min_gain: float) -> dict:
         out["best"] = None
         return out
 
+    def pick(cands):
+        if robust_radius > 0:
+            best = max(cands, key=lambda c: (
+                _neighborhood_min_clearance(c, combos, robust_radius),
+                c["total"]))
+            out["robust_min_clr"] = round(
+                _neighborhood_min_clearance(best, combos, robust_radius), 3)
+            return best
+        return max(cands, key=lambda c: c["total"])
+
     clean = [c for c in combos
              if not c["static_crossing"] and not c["rb_cross"] and not c["stopped"]]
     at_margin = [c for c in clean if c["sc_min_dist"] >= margin]
     if at_margin:
         out["status"] = "solved"
-        out["best"] = max(at_margin, key=lambda c: c["total"])
+        out["best"] = pick(at_margin)
     else:
         improved = [c for c in clean
                     if c["sc_min_dist"] >= det["sc_min_dist"] + min_gain]
@@ -51,10 +84,8 @@ def relabel_scene(r: dict, margin: float, min_gain: float) -> dict:
             # No combo reaches the margin: take the one with max clearance
             # (reward as tiebreak) — partial-but-real improvement.
             best_clr = max(c["sc_min_dist"] for c in improved)
-            out["best"] = max(
-                [c for c in improved if c["sc_min_dist"] >= best_clr - 0.05],
-                key=lambda c: c["total"],
-            )
+            out["best"] = pick(
+                [c for c in improved if c["sc_min_dist"] >= best_clr - 0.05])
         else:
             out["status"] = "unsolved"
             out["best"] = None
@@ -68,6 +99,11 @@ def main():
     parser.add_argument("--labels", required=True, nargs="+")
     parser.add_argument("--margin", type=float, required=True)
     parser.add_argument("--min_gain", type=float, default=0.3)
+    parser.add_argument("--robust_radius", type=float, default=0.0,
+                        help="eta-neighbourhood radius for plateau-centred "
+                             "(cliff-avoiding) label selection; 0 = argmax "
+                             "reward (original behaviour). Grid step is "
+                             "0.25, so 0.25 = adjacent combos, 0.5 = 2 steps.")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -79,13 +115,15 @@ def main():
             if r["scene_path"] in seen:
                 continue
             seen.add(r["scene_path"])
-            scenes.append(relabel_scene(r, args.margin, args.min_gain))
+            scenes.append(relabel_scene(r, args.margin, args.min_gain,
+                                        args.robust_radius))
 
     n = {"solved": 0, "already_clean": 0, "unsolved": 0}
     for r in scenes:
         n[r["status"]] += 1
     summary = {
         "margin": args.margin, "min_gain": args.min_gain,
+        "robust_radius": args.robust_radius,
         "n_scenes": len(scenes), **{f"n_{k}": v for k, v in n.items()},
     }
     with open(args.out, "w") as f:
