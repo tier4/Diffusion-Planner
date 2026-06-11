@@ -59,6 +59,11 @@ class GuidedPlannerShim(nn.Module):
 
     @torch.no_grad()
     def forward(self, inputs: dict):
+        # validate_model builds sampled_trajectories on CPU; pin everything to
+        # the model device before the forward passes.
+        dev = next(self.model.parameters()).device
+        inputs = {k: (v.to(dev) if isinstance(v, torch.Tensor) else v)
+                  for k, v in inputs.items()}
         decoder = self.model.module.decoder if hasattr(self.model, "module") else self.model.decoder
         saved_fn, saved_scale = decoder._guidance_fn, decoder._guidance_scale
 
