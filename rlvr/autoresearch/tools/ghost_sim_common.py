@@ -277,28 +277,36 @@ def run_ghost_sim(
     extra_title_fn=None,
     predict_fn_a=None,
     predict_fn_b=None,
+    sg_smooth: bool = True,
+    rollout_a: dict | None = None,
+    rollout_b: dict | None = None,
 ):
     """Run dual-model ghost sim and render per-step PNGs + optional webm.
 
     extra_title_fn: optional callable(step, a_pose, b_pose) -> str for per-step subtitle.
     predict_fn_a / predict_fn_b: optional per-step planner-call overrides for
-        the rollouts (e.g. SG smoothing, exploration-policy guided generation);
+        the rollouts (e.g. exploration-policy guided generation);
         same signature as recovery_sim.deterministic_predict.
+    sg_smooth: SG-filter every per-step plan before tracking (sim convention).
+    rollout_a / rollout_b: precomputed rollout dicts (closed_loop_rollout_with_plans
+        format) — render-only mode, models may be None (no GPU needed).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[ghost-sim] rollout ({cfg.model_a_label})...")
-    rollout_a = closed_loop_rollout_with_plans(
-        model_a, model_a_args, scene_data,
-        n_steps=cfg.steps, advance_k=cfg.advance_k,
-        predict_fn=predict_fn_a,
-    )
-    print(f"[ghost-sim] rollout ({cfg.model_b_label})...")
-    rollout_b = closed_loop_rollout_with_plans(
-        model_b, model_b_args, scene_data,
-        n_steps=cfg.steps, advance_k=cfg.advance_k,
-        predict_fn=predict_fn_b,
-    )
+    if rollout_a is None:
+        print(f"[ghost-sim] rollout ({cfg.model_a_label})...")
+        rollout_a = closed_loop_rollout_with_plans(
+            model_a, model_a_args, scene_data,
+            n_steps=cfg.steps, advance_k=cfg.advance_k,
+            predict_fn=predict_fn_a, sg_smooth=sg_smooth,
+        )
+    if rollout_b is None:
+        print(f"[ghost-sim] rollout ({cfg.model_b_label})...")
+        rollout_b = closed_loop_rollout_with_plans(
+            model_b, model_b_args, scene_data,
+            n_steps=cfg.steps, advance_k=cfg.advance_k,
+            predict_fn=predict_fn_b, sg_smooth=sg_smooth,
+        )
 
     centerlines, lefts, rights, border_polylines, route_polylines, cl_segments = \
         extract_scene_polylines(scene_data)

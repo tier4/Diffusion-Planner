@@ -62,9 +62,10 @@ def main() -> None:
     parser.add_argument("--policy_dir", default=None,
                         help="exploration-policy dir: model B = model A + guidance "
                              "(per-step policy etas via composer); --model_b ignored")
-    parser.add_argument("--sg_smooth", action="store_true",
-                        help="Savitzky-Golay smooth both legs' per-step plans "
-                             "(11/3) — matches scenario_generation.replay behavior")
+    parser.add_argument("--no_sg_smooth", action="store_true",
+                        help="disable the default SG plan filtering (11/3, "
+                             "grpo_sft_trainer._smooth_trajectory) applied by "
+                             "the rollout — matches scenario_generation.replay")
     parser.add_argument("--lambda_lat", type=float, default=5.0)
     parser.add_argument("--lat_scale", type=float, default=2.0)
     parser.add_argument("--col_scale", type=float, default=9.0)
@@ -99,14 +100,9 @@ def main() -> None:
     else:
         raise SystemExit("pass either --model_b or --policy_dir")
 
-    def _sg(traj):
-        if not args.sg_smooth:
-            return traj
-        from rlvr.grpo_sft_trainer import _smooth_trajectory
-        return _smooth_trajectory(traj, 11, 3)
-
     def make_predict_fns(eta_log):
-        """(predict_a, predict_b): plain[+SG] vs explorer-guided[+SG]."""
+        """(predict_a, predict_b): plain vs explorer-guided (SG happens in
+        the rollout itself, on whatever the predict fn returns)."""
         from exploration_policy.utils import run_frozen_encoder
         from rlvr.autoresearch.tools.eval_policy_avoidance import make_composer
         from rlvr.autoresearch.tools.recovery_sim import deterministic_predict
@@ -114,12 +110,12 @@ def main() -> None:
         from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 
         def predict_a(model, model_args, data):
-            return _sg(deterministic_predict(model, model_args, data))
+            return deterministic_predict(model, model_args, data)
 
         def predict_b(model, model_args, data):
             det = deterministic_predict(model, model_args, data)
             if policy is None:
-                return _sg(det)
+                return det
             batch = _stack_scene_data([data], device)
             norm = _normalize_batch(batch, model_args)
             x_ref = torch.from_numpy(np.ascontiguousarray(det)).float()
@@ -162,7 +158,7 @@ def main() -> None:
                 model, model_args, gen, noise_min=0.0, noise_max=0.0,
                 first_deterministic=False, composer=composer, device=device,
             ).cpu().numpy()
-            guided = _sg(trajs[0])
+            guided = trajs[0]
             if N:
                 return guided, [trajs[i] for i in range(1, B)]
             return guided
@@ -214,8 +210,9 @@ def main() -> None:
             neighbor_boxes=nb_boxes,
             make_webm=args.make_webm,
             extra_title_fn=eta_title if policy is not None else None,
-            predict_fn_a=predict_a if args.sg_smooth else None,
-            predict_fn_b=predict_b if (policy is not None or args.sg_smooth) else None,
+            predict_fn_a=None,
+            predict_fn_b=predict_b if policy is not None else None,
+            sg_smooth=not args.no_sg_smooth,
         )
 
 

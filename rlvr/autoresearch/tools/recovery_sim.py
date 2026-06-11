@@ -184,10 +184,28 @@ def closed_loop_rollout_with_plans(
     advance_k: int = 0,
     dt: float = 0.1,
     predict_fn=None,
+    sg_smooth: bool = True,
+    sg_window: int = 11,
+    sg_order: int = 3,
+    trim_backward: bool = False,
 ) -> dict:
     """Run the closed-loop rollout and capture per-step predictions in the
     initial ego frame. Direct extension of recovery_test.closed_loop_rollout —
     forked because we need extra outputs (yaw + per-step world-frame plans).
+
+    sg_smooth: Savitzky-Golay smooth every per-step plan before the tracker
+    consumes it — same filter (and 11/3 defaults) scenario_generation.replay
+    applies via SpawnConfig.sg_smooth_enabled. Raw diffusion/guided output can
+    place the first plan point slightly behind the ego, which an unfiltered
+    advance_k=0 tracker turns into a backwards step.
+
+    trim_backward: drop a leading run of plan points that sit BEHIND the ego
+    (longitudinal x < 0) before tracking, advancing to the first forward
+    point. Guidance gradients are strongest on the points nearest an
+    obstacle and can bend the plan's near-field a few cm backwards at
+    standstill; SG smoothing preserves that systematic offset, and the
+    literal advance_k=0 tracker would reverse — a lookahead tracker (real
+    vehicle) would not.
 
     Returns dict:
         positions: [n_steps + 1, 3] (x, y, yaw) in initial ego frame
@@ -224,6 +242,13 @@ def closed_loop_rollout_with_plans(
             pred, _cands = _out
         else:
             pred, _cands = _out, []
+        if sg_smooth:
+            from rlvr.grpo_sft_trainer import _smooth_trajectory
+            pred = _smooth_trajectory(pred, sg_window, sg_order)
+        if trim_backward and pred[0, 0] < -1e-3:
+            fwd = np.nonzero(pred[:, 0] > 0.05)[0]
+            if len(fwd):
+                pred = pred[int(fwd[0]):]
 
         # Re-express the ENTIRE plan in the INITIAL frame for visualization.
         # current frame -> initial frame: p_init = (cum_x, cum_y) + R(cum) @ p_cur

@@ -99,6 +99,9 @@ def main():
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--steps", type=int, default=80)
+    parser.add_argument("--trim_backward", action="store_true",
+                        help="trim leading behind-ego plan points before "
+                             "tracking (see recovery_sim rollout docstring)")
     parser.add_argument("--ego_shape", default="4.76,7.24,2.29")
     parser.add_argument("--lambda_lat", type=float, default=5.0)
     parser.add_argument("--lat_scale", type=float, default=2.0)
@@ -124,10 +127,12 @@ def main():
             data = load_npz_data(sp, device)
             boxes = extract_stopped_neighbors(sp)
             r_base = closed_loop_rollout_with_plans(
-                model, margs, data, n_steps=args.steps)
+                model, margs, data, n_steps=args.steps,
+                trim_backward=args.trim_backward)
             r_gui = closed_loop_rollout_with_plans(
                 model, margs, data, n_steps=args.steps,
-                predict_fn=guided_predict)
+                predict_fn=guided_predict,
+                trim_backward=args.trim_backward)
         except Exception as e:  # noqa: BLE001
             print(f"  [err ] {Path(sp).name}: {e}")
             continue
