@@ -212,6 +212,8 @@ class BatchedRolloutManager:
         reward_config: RewardConfig | None = None,
         batch_size: int = 16,
         drop_last: bool = True,
+        heads: list[str] | None = None,
+        head_params: dict | None = None,
     ):
         self.policy_model = policy_model
         self.model_args = model_args
@@ -220,6 +222,13 @@ class BatchedRolloutManager:
         self.lambda_lat = lambda_lat
         self.lambda_lon = lambda_lon
         self.guidance_scale = guidance_scale
+        # Head spec: None keeps the original lateral+longitudinal behavior.
+        # Anything else routes through guidance_batched.build_head_composer
+        # (e.g. ["lateral", "collision"] with envelope-v2 head_params:
+        # lambda_lat / lat_scale / col_scale / col_range / lambda_spd /
+        # stretch_scale / guidance_scale).
+        self.heads = heads
+        self.head_params = head_params or {}
         self.rollout_steps = rollout_steps
         self.noise_range = noise_range
         self.gamma = gamma
@@ -260,21 +269,35 @@ class BatchedRolloutManager:
         return GuidanceComposer(set_cfg)
 
     def _build_batched_composer(
-        self, eta_lat_batch: torch.Tensor, eta_lon_batch: torch.Tensor,
+        self, etas: dict[str, torch.Tensor],
     ) -> GuidanceComposer:
         """Build composer with batched etas [B] for GPU-parallel guidance.
 
-        The lateral/longitudinal guidance functions support tensor etas,
-        so this creates a single composer that applies per-element guidance.
+        With self.heads set, routes through the shared head mapping
+        (guidance_batched.build_head_composer). Otherwise keeps the original
+        lateral+longitudinal wiring byte-for-byte.
         """
+        if self.heads is not None:
+            from rlvr.guidance_batched import build_head_composer
+            return build_head_composer(
+                etas,
+                lambda_lat=self.head_params.get("lambda_lat", self.lambda_lat),
+                guidance_scale=self.head_params.get(
+                    "guidance_scale", self.guidance_scale),
+                **{k: v for k, v in self.head_params.items()
+                   if k in ("lat_scale", "col_scale", "col_range",
+                            "lambda_spd", "stretch_scale", "lambda_lon")},
+            )
         guidance_fns = [
             GuidanceConfig(
                 name="lateral", enabled=True, scale=1.0,
-                params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat_batch},
+                params={"lambda_lat": self.lambda_lat,
+                        "eta_lat": etas["lateral"]},
             ),
             GuidanceConfig(
                 name="longitudinal", enabled=True, scale=1.0,
-                params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon_batch},
+                params={"lambda_lon": self.lambda_lon,
+                        "eta_lon": etas["longitudinal"]},
             ),
         ]
         set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
@@ -375,20 +398,21 @@ class BatchedRolloutManager:
 
                 # Explorer policy (batched) — or zero-init if no explorer
                 noise = random.uniform(*self.noise_range)
+                active_heads = self.heads or ["lateral", "longitudinal"]
                 if self.exploration_policy is not None:
                     policy_out = self.exploration_policy(
                         scene_encoding, ref_trajs, deterministic=False,
                     )
-                    eta_lat_batch = policy_out.eta_lat[:B_chunk]
-                    eta_lon_batch = policy_out.eta_lon[:B_chunk]
+                    etas_batch = {h: policy_out.etas[h][:B_chunk]
+                                  for h in active_heads}
                 else:
                     # No explorer — use zero guidance (equivalent to zero-init)
                     policy_out = None
-                    eta_lat_batch = torch.zeros(B_chunk, device=self.device)
-                    eta_lon_batch = torch.zeros(B_chunk, device=self.device)
+                    etas_batch = {h: torch.zeros(B_chunk, device=self.device)
+                                  for h in active_heads}
 
                 # Build batched composer — guidance functions support tensor etas [B]
-                composer = self._build_batched_composer(eta_lat_batch, eta_lon_batch)
+                composer = self._build_batched_composer(etas_batch)
 
                 # Batched guided trajectory generation
                 guided_trajs = _batched_generate(
@@ -404,16 +428,20 @@ class BatchedRolloutManager:
 
                     # Eta values for this scene
                     if policy_out is not None:
-                        eta_lat_01_raw = (policy_out.eta_lat[local_idx].item() + 1.0) / 2.0
-                        eta_lon_01_raw = (policy_out.eta_lon[local_idx].item() + 1.0) / 2.0
-                        log_prob = (policy_out.log_prob_lat[local_idx].item()
-                                   + policy_out.log_prob_lon[local_idx].item())
+                        etas_01 = {
+                            h: (policy_out.etas[h][local_idx].item() + 1.0) / 2.0
+                            for h in active_heads
+                        }
+                        log_prob = sum(
+                            policy_out.log_probs[h][local_idx].item()
+                            for h in active_heads)
                         value = policy_out.value[local_idx].item()
                     else:
-                        eta_lat_01_raw = 0.5  # zero-init maps to 0.5 in (0,1) space
-                        eta_lon_01_raw = 0.5
+                        etas_01 = {h: 0.5 for h in active_heads}  # zero-eta
                         log_prob = 0.0
                         value = 0.0
+                    eta_lat_01_raw = etas_01.get("lateral", 0.5)
+                    eta_lon_01_raw = etas_01.get("longitudinal", 0.5)
 
                     # Get neighbor positions for reward
                     data_i = scene_data[global_idx]
@@ -474,6 +502,7 @@ class BatchedRolloutManager:
                         value=value,
                         reward=step_reward.total,
                         terminal=step_reward.terminal,
+                        etas_01=etas_01,
                     ))
                     buffers[global_idx].total_return += step_reward.total
                     buffers[global_idx].episode_length = step_t + 1
@@ -589,20 +618,19 @@ class BatchedRolloutManager:
 
                 policy_out = self.exploration_policy(scene_enc, x_ref, deterministic=False)
 
-                eta_lat_01 = torch.tensor(
-                    step.eta_lat_01, dtype=torch.float32, device=self.device,
-                ).clamp(1e-6, 1 - 1e-6)
-                eta_lon_01 = torch.tensor(
-                    step.eta_lon_01, dtype=torch.float32, device=self.device,
-                ).clamp(1e-6, 1 - 1e-6)
-
-                log_prob = (policy_out.lat_dist.log_prob(eta_lat_01)
-                           + policy_out.lon_dist.log_prob(eta_lon_01))
+                step_etas = step.etas_01 or {"lateral": step.eta_lat_01,
+                                             "longitudinal": step.eta_lon_01}
+                log_prob = sum(
+                    policy_out.dists[h].log_prob(torch.tensor(
+                        v, dtype=torch.float32, device=self.device,
+                    ).clamp(1e-6, 1 - 1e-6))
+                    for h, v in step_etas.items())
 
                 adv = advantages[t].to(self.device)
                 reinforce_loss = -(log_prob * adv.detach())
                 value_loss = (policy_out.value.squeeze() - value_targets[t].to(self.device).detach()) ** 2
-                entropy = policy_out.lat_dist.entropy() + policy_out.lon_dist.entropy()
+                entropy = sum(policy_out.dists[h].entropy()
+                              for h in step_etas)
 
                 step_loss = (reinforce_loss
                             + self.online_value_coef * value_loss

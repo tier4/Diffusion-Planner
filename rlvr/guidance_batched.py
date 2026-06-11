@@ -203,3 +203,66 @@ class LateralBatchedGuidance(BaseGuidance):
             w[:, : self._head_protect] = 0.0
             return -(err2 * w).sum(dim=-1) / w.sum(dim=-1).clamp_min(1.0)
         return -err2.mean(dim=-1)
+
+
+def build_head_composer(
+    etas,
+    *,
+    lambda_lat: float = 5.0,
+    lat_scale: float = 2.0,
+    col_scale: float = 9.0,
+    col_range: float = 8.0,
+    lambda_spd: float = 0.2,
+    stretch_scale: float = 1.0,
+    guidance_scale: float = 0.5,
+    head_protect: int = 0,
+    lambda_lon: float = 0.25,
+):
+    """Build a GuidanceComposer from a head->eta dict (scalar or [B] tensor).
+
+    Single source of truth for the head-name -> guidance-function mapping
+    (lateral / collision / stretch / legacy longitudinal), shared by the
+    eval tools and the closed-loop rollout managers. Defaults are
+    envelope-v2; a legacy lateral+longitudinal trainer config reproduces
+    exactly with lat_scale=1.0, lambda_lat=2.5, lambda_lon=0.25.
+    """
+    from diffusion_planner.model.guidance.composer import GuidanceComposer
+    from diffusion_planner.model.guidance.config import (
+        GuidanceConfig,
+        GuidanceSetConfig,
+    )
+
+    hp = int(head_protect)
+    fns = []
+    if "lateral" in etas:
+        if hp > 0:
+            fns.append(GuidanceConfig(
+                name="lateral_batched", enabled=True, scale=lat_scale,
+                params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"],
+                        "head_protect": hp},
+            ))
+        else:
+            fns.append(GuidanceConfig(
+                name="lateral", enabled=True, scale=lat_scale,
+                params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"]},
+            ))
+    if "collision" in etas:
+        fns.append(GuidanceConfig(
+            name="collision_swerve_batched", enabled=True, scale=col_scale,
+            params={"eta_col": etas["collision"], "range": col_range,
+                    "head_protect": hp},
+        ))
+    if "stretch" in etas:
+        fns.append(GuidanceConfig(
+            name="speed_stretch_batched", enabled=True, scale=stretch_scale,
+            params={"stretch": 1.0 + lambda_spd * etas["stretch"]},
+        ))
+    if "longitudinal" in etas:
+        # Legacy head (known-broken for speed control; kept so old
+        # lateral+longitudinal configs reproduce bit-for-bit).
+        fns.append(GuidanceConfig(
+            name="longitudinal", enabled=True, scale=1.0,
+            params={"lambda_lon": lambda_lon, "eta_lon": etas["longitudinal"]},
+        ))
+    set_cfg = GuidanceSetConfig(functions=fns, global_scale=guidance_scale)
+    return GuidanceComposer(set_cfg)
