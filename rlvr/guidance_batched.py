@@ -433,3 +433,102 @@ class LateralRampBatchedGuidance(BaseGuidance):
 
         psi = ((lateral_proj - target) ** 2).mean(dim=-1)
         return -psi
+
+
+class FastGuidanceComposer:
+    """Drop-in faster GuidanceComposer (same classifier_fn interface).
+
+    Three measured wins over diffusion_planner's GuidanceComposer, with
+    identical math (see TODO_guidance_latency.md):
+      1. inputs inverse-normalisation cached ONCE per generation (the base
+         composer inverse-normalises the full observation dict — lanes,
+         neighbours — at EVERY denoise step although it never changes).
+      2. eta~0 short-circuit: if every active function reports an inert
+         command (|eta| < eta_eps), return a zero surrogate immediately —
+         no x0-correction model forward, no energy autograd. With an inert
+         policy (the common case on a route) the guided generation cost
+         collapses to the unguided baseline.
+      3. optional skip_x0_correction: evaluate energies on the solver's
+         current x directly instead of running an EXTRA full model forward
+         to refine x0 first. Off by default (changes results slightly —
+         enable only after the equivalence battery passes).
+
+    Construction mirrors GuidanceComposer (GuidanceSetConfig), so
+    build_head_composer can emit either.
+    """
+
+    def __init__(self, set_config, eta_eps: float = 1e-3,
+                 skip_x0_correction: bool = False, **build_kwargs):
+        from diffusion_planner.model.guidance.registry import build as _build
+        self._set_config = set_config
+        self._functions = [
+            _build(fn_cfg, **build_kwargs)
+            for fn_cfg in set_config.active_functions()
+        ]
+        self._eta_eps = float(eta_eps)
+        self._skip_x0 = bool(skip_x0_correction)
+        self._inputs_phys = None  # per-generation cache
+
+    def reset_cache(self):
+        self._inputs_phys = None
+
+    def _all_inert(self) -> bool:
+        for fn in self._functions:
+            for attr in ("_eta_lat", "_eta_col"):
+                v = getattr(fn, attr, None)
+                if v is None:
+                    continue
+                if isinstance(v, torch.Tensor):
+                    if v.abs().max().item() > self._eta_eps:
+                        return False
+                elif abs(float(v)) > self._eta_eps:
+                    return False
+            stretch = getattr(fn, "_stretch", None)
+            if stretch is not None:
+                if isinstance(stretch, torch.Tensor):
+                    if (stretch - 1.0).abs().max().item() > self._eta_eps:
+                        return False
+                elif abs(float(stretch) - 1.0) > self._eta_eps:
+                    return False
+        return True
+
+    def __call__(self, x_in, t_input, cond, *args, **kwargs):
+        B = x_in.shape[0]
+        if self._all_inert():
+            # zero surrogate with a real graph so the solver's autograd
+            # produces an (all-zero) gradient of the right shape
+            return (x_in * 0.0).sum()
+
+        state_normalizer = kwargs["state_normalizer"]
+        P = x_in.shape[1]
+        x_4d = x_in.reshape(B, P, -1, 4)
+        if self._skip_x0:
+            x_corrected = x_4d
+        else:
+            model = kwargs["model"]
+            model_condition = kwargs["model_condition"]
+            x_fix = model(x_4d, t_input, **model_condition).detach() - x_4d.detach()
+            x_fix[:, :, 0] = 0.0
+            x_corrected = x_4d + x_fix
+
+        x_phys = state_normalizer.inverse(x_corrected.detach())
+        if self._inputs_phys is None:
+            self._inputs_phys = kwargs["observation_normalizer"].inverse(
+                kwargs["inputs"])
+        inputs = self._inputs_phys
+
+        t_scalar = t_input.reshape(B, -1)[:, 0] if t_input.dim() > 1 else t_input
+        x_phys_grad = x_phys.detach().requires_grad_(True)
+        raw_energy = torch.zeros(B, device=x_in.device)
+        for fn in self._functions:
+            e = fn.energy(x_phys_grad, t_scalar, inputs)
+            if torch.isnan(e).any():
+                continue
+            raw_energy = raw_energy + e
+        if raw_energy.requires_grad:
+            grad_phys = torch.autograd.grad(raw_energy.sum(), x_phys_grad)[0]
+        else:
+            grad_phys = torch.zeros_like(x_phys_grad)
+        std = state_normalizer.std.to(grad_phys.device)
+        grad_flat = (grad_phys * std).detach().reshape(x_in.shape)
+        return (grad_flat * x_in).sum()
