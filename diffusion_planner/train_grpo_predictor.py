@@ -50,6 +50,9 @@ def get_args():
     # Data
     parser.add_argument("--train_set_list", type=str, required=True)
     parser.add_argument("--valid_set_list", type=str, required=True)
+    parser.add_argument("--train_subsample_step", type=int, default=1,
+                        help="keep every Nth training sample (data_list[::N]); 1 = use all, "
+                             "10 = use 1/10 for faster iteration")
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
@@ -240,6 +243,8 @@ def model_training(args):
 
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
+
+    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
