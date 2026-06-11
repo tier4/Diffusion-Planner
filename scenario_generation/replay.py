@@ -246,6 +246,11 @@ class SpawnConfig:
     # slightly before the 0.2 m crossing threshold. Plans clear of statics
     # pass through untouched (inertness in closed loop).
     explorer_activate_clearance: float = 0.3
+    # ALWAYS-ON mode: bypass the activation gate AND the keep-only-if-improves
+    # certify rule — the policy runs every step and its guided plan is always
+    # used. This is the honest "does always-on guidance work closed-loop"
+    # assessment; the gated mode above is the conservative deployment flavor.
+    explorer_always_on: bool = False
     # Guidance envelope for the explorer — MUST match the envelope the policy
     # was trained against (stage1_reg_v4_env2 = envelope-v2: 5.0/2.0/9.0).
     explorer_lambda_lat: float = 5.0
@@ -2365,23 +2370,34 @@ def run_route_replay(
                     _eshape = (spawn_config.ego_wheelbase,
                                spawn_config.ego_length, spawn_config.ego_width)
                     _det_plan = agent_predictions[_eid]
-                    _det_min = plan_static_clearance(_det_plan, _boxes, _eshape, device)
-                    if _det_min < spawn_config.explorer_activate_clearance:
+                    if spawn_config.explorer_always_on:
                         from scenario_generation.tensor_converter import to_model_tensors
                         _ego_dict = to_model_tensors(
                             scene, _eid, model_args, device, map_cache=map_cache,
                             inference_delay=spawn_config.inference_delay,
                         )
-                        _guided, _etas = explorer_runner.guided_ego_prediction(
+                        _guided, step_explorer_etas = explorer_runner.guided_ego_prediction(
                             model, _ego_dict, _det_plan,
                         )
-                        _g_min = plan_static_clearance(_guided, _boxes, _eshape, device)
-                        if _g_min > _det_min:
-                            agent_predictions[_eid] = _guided
-                            step_explorer_etas = _etas
-                        # else: keep det (certified fallback), smoothing state stays
+                        agent_predictions[_eid] = _guided
                     else:
-                        explorer_runner.reset()  # inert stretch: clear eta smoothing
+                        _det_min = plan_static_clearance(_det_plan, _boxes, _eshape, device)
+                        if _det_min < spawn_config.explorer_activate_clearance:
+                            from scenario_generation.tensor_converter import to_model_tensors
+                            _ego_dict = to_model_tensors(
+                                scene, _eid, model_args, device, map_cache=map_cache,
+                                inference_delay=spawn_config.inference_delay,
+                            )
+                            _guided, _etas = explorer_runner.guided_ego_prediction(
+                                model, _ego_dict, _det_plan,
+                            )
+                            _g_min = plan_static_clearance(_guided, _boxes, _eshape, device)
+                            if _g_min > _det_min:
+                                agent_predictions[_eid] = _guided
+                                step_explorer_etas = _etas
+                            # else: keep det (certified fallback), smoothing state stays
+                        else:
+                            explorer_runner.reset()  # inert stretch: clear eta smoothing
 
             # Optional Savitzky-Golay smoothing on each agent's predicted
             # trajectory. Reuses the same smoother the RL ranked-SFT
