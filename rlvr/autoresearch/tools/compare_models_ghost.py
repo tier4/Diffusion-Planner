@@ -40,7 +40,7 @@ def main() -> None:
     parser.add_argument("--model_a", required=True, help="First model (e.g. baseline)")
     parser.add_argument("--lora_a", default=None)
     parser.add_argument("--label_a", default="baseline")
-    parser.add_argument("--model_b", required=True, help="Second model (e.g. trained)")
+    parser.add_argument("--model_b", default=None, help="Second model; omit with --policy_dir")
     parser.add_argument("--lora_b", default=None)
     parser.add_argument("--label_b", default="trained")
     parser.add_argument("--scenes", nargs="+", required=True, help="NPZ scene paths")
@@ -80,9 +80,11 @@ def main() -> None:
         policy, policy_heads = load_policy(args.policy_dir, args_a, device)
         model_b, args_b = model_a, args_a
         print(f"[compare] model B = model A + explorer ({args.policy_dir})")
-    else:
+    elif args.model_b:
         print(f"[compare] loading model B: {args.label_b}")
         model_b, args_b = load_model(args.model_b, args.lora_b, device)
+    else:
+        raise SystemExit("pass either --model_b or --policy_dir")
 
     def _sg(traj):
         if not args.sg_smooth:
