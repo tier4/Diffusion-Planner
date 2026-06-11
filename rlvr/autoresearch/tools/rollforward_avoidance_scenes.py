@@ -143,7 +143,10 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"  [err ] {Path(sp).name}: {e}")
             continue
-        stem = Path(sp).stem
+        # Pool-prefixed stem: perturbation pools share basenames (e.g.
+        # train_parallel/ and train_yaw/ both hold scene_0008_var02.npz),
+        # which previously silently overwrote rolls across pools.
+        stem = f"{Path(sp).parent.name}__{Path(sp).stem}"
         for k in steps:
             try:
                 rolled = rollforward_scene(raw, guided, k)
