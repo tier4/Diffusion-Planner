@@ -67,16 +67,33 @@ def build_grid(eta_lat_grid, eta_col_grid, stretch_grid):
 
 def make_composer(eta_lat, eta_col, stretch, args) -> GuidanceComposer:
     """Composer with per-sample [K] tensors for all three knobs."""
-    fns = [
-        GuidanceConfig(
-            name="lateral", enabled=True, scale=args.lat_scale,
-            params={"lambda_lat": args.lambda_lat, "eta_lat": eta_lat},
-        ),
-        GuidanceConfig(
-            name="collision_swerve_batched", enabled=True, scale=args.col_scale,
-            params={"eta_col": eta_col, "range": args.col_range},
-        ),
-    ]
+    if getattr(args, "envelope", "v1") == "v2":
+        # v2 guidances: ramped lateral target + ramp-and-hold bounded swerve
+        # (new opt-in registry names; v1 labels/policies are untouched).
+        fns = [
+            GuidanceConfig(
+                name="lateral_ramp_batched", enabled=True, scale=args.lat_scale,
+                params={"lambda_lat": args.lambda_lat, "eta_lat": eta_lat,
+                        "ramp_steps": 20},
+            ),
+            GuidanceConfig(
+                name="collision_swerve_v2_batched", enabled=True,
+                scale=args.col_scale,
+                params={"eta_col": eta_col, "lambda_col": args.lambda_col,
+                        "range": args.col_range},
+            ),
+        ]
+    else:
+        fns = [
+            GuidanceConfig(
+                name="lateral", enabled=True, scale=args.lat_scale,
+                params={"lambda_lat": args.lambda_lat, "eta_lat": eta_lat},
+            ),
+            GuidanceConfig(
+                name="collision_swerve_batched", enabled=True, scale=args.col_scale,
+                params={"eta_col": eta_col, "range": args.col_range},
+            ),
+        ]
     if bool((stretch != 1.0).any()):
         fns.append(GuidanceConfig(
             name="speed_stretch_batched", enabled=True, scale=args.stretch_scale,
@@ -221,6 +238,12 @@ def main():
     parser.add_argument("--lat_scale", type=float, default=1.0)
     parser.add_argument("--col_scale", type=float, default=2.0)
     parser.add_argument("--col_range", type=float, default=8.0)
+    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1",
+                        help="guidance set: v1 = stock lateral + linear "
+                             "collision_swerve; v2 = lateral_ramp + bounded "
+                             "ramp-and-hold collision_swerve_v2")
+    parser.add_argument("--lambda_col", type=float, default=3.0,
+                        help="v2 swerve max target offset in metres")
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--audit_scenes", type=int, default=0,
