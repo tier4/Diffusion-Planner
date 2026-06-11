@@ -145,15 +145,19 @@ def main() -> None:
             composer = make_composer(etas, args)
             if args.speed_floor > 0:
                 from diffusion_planner.model.guidance.config import GuidanceConfig
-                ecs = data["ego_current_state"]
-                ecs = ecs[0] if ecs.dim() == 2 else ecs
-                v_now = float(torch.linalg.vector_norm(ecs[4:6]).item())
-                composer._functions.append(__import__(
-                    "diffusion_planner.model.guidance.registry",
-                    fromlist=["build"]).build(GuidanceConfig(
-                        name="speed", enabled=True, scale=args.speed_scale,
-                        params={"v_low": args.speed_floor * v_now,
-                                "v_high": max(1.2 * v_now, 8.0)})))
+                from diffusion_planner.model.guidance.registry import build as _build_g
+                # Anchor the floor to the scene's INITIAL speed — anchoring to
+                # the current speed lets the floor decay with the stall spiral.
+                if not hasattr(predict_b, "_v_init"):
+                    ecs = data["ego_current_state"]
+                    ecs = ecs[0] if ecs.dim() == 2 else ecs
+                    predict_b._v_init = max(
+                        float(torch.linalg.vector_norm(ecs[4:6]).item()), 2.0)
+                v0 = predict_b._v_init
+                composer._functions.append(_build_g(GuidanceConfig(
+                    name="speed", enabled=True, scale=args.speed_scale,
+                    params={"v_low": args.speed_floor * v0,
+                            "v_high": max(1.3 * v0, 8.0)})))
             trajs = _batched_generate_varied_noise(
                 model, model_args, gen, noise_min=0.0, noise_max=0.0,
                 first_deterministic=False, composer=composer, device=device,
