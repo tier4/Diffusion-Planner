@@ -51,7 +51,8 @@ def _neighborhood_min_clearance(c: dict, combos: list[dict],
 
 
 def relabel_scene(r: dict, margin: float, min_gain: float,
-                  robust_radius: float = 0.0) -> dict:
+                  robust_radius: float = 0.0,
+                  robust_min_required: float = 0.0) -> dict:
     out = dict(r)
     det = r["det"]
     combos = r["combos"]
@@ -76,6 +77,14 @@ def relabel_scene(r: dict, margin: float, min_gain: float,
     if at_margin:
         out["status"] = "solved"
         out["best"] = pick(at_margin)
+        # Cliffy-scene exclusion: a "solution" whose eta-neighbourhood
+        # contains a crossing is unlearnable by regression (the policy's
+        # eta error lands on the cliff) — exclude from training like
+        # unsolved scenes instead of teaching a target it cannot hit.
+        if (robust_radius > 0 and robust_min_required > 0
+                and out.get("robust_min_clr", 0.0) < robust_min_required):
+            out["status"] = "unsolved"
+            out["best"] = None
     else:
         improved = [c for c in clean
                     if c["sc_min_dist"] >= det["sc_min_dist"] + min_gain]
@@ -104,6 +113,11 @@ def main():
                              "(cliff-avoiding) label selection; 0 = argmax "
                              "reward (original behaviour). Grid step is "
                              "0.25, so 0.25 = adjacent combos, 0.5 = 2 steps.")
+    parser.add_argument("--robust_min_required", type=float, default=0.0,
+                        help="exclude (mark unsolved) solved scenes whose "
+                             "best label's neighbourhood-min clearance is "
+                             "below this — cliff-edge scenes are unlearnable "
+                             "by regression")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -116,7 +130,8 @@ def main():
                 continue
             seen.add(r["scene_path"])
             scenes.append(relabel_scene(r, args.margin, args.min_gain,
-                                        args.robust_radius))
+                                        args.robust_radius,
+                                        args.robust_min_required))
 
     n = {"solved": 0, "already_clean": 0, "unsolved": 0}
     for r in scenes:
