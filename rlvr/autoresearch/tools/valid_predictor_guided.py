@@ -28,10 +28,23 @@ from torch.utils.data import DataLoader
 import rlvr.guidance_batched  # noqa: F401
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
-from diffusion_planner.valid_predictor import validate_model
 from exploration_policy.utils import run_frozen_encoder
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model
 from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer
+
+
+def _load_validate_model():
+    """valid_predictor.py is a SCRIPT under <repo>/diffusion_planner/, not a
+    package module — load it by file path (same code the canonical torchrun
+    invocation executes)."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "diffusion_planner" / "valid_predictor.py"
+    spec = importlib.util.spec_from_file_location("dp_valid_predictor", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.validate_model
 
 
 class GuidedPlannerShim(nn.Module):
@@ -108,6 +121,7 @@ def main():
     print(f"[valid_guided] {len(valid_set)} scenes, batch {args.batch_size}, "
           f"heads={heads}")
 
+    validate_model = _load_validate_model()
     ego_loss, nbr_loss = validate_model(shim, loader, cfg)
 
     report = {
