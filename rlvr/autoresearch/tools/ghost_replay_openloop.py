@@ -76,8 +76,9 @@ def _scene_base(ax, polylines, cx, cy, view_half):
 
 
 def _render_frame(out_png, egos, polylines, neighbor_boxes, show_nb, title,
-                  view_half, ego_shape):
+                  view_half, ego_shape, extra_lines=None):
     # egos: list of dicts {pose:[x,y,h], trail:(N,2), color, label, lw}
+    # extra_lines: optional list of (xy:(N,2), color, alpha, label|None) static lines
     cx = float(np.mean([e["pose"][0] for e in egos]))
     cy = float(np.mean([e["pose"][1] for e in egos]))
     fig = Figure(figsize=(11, 11))
@@ -87,6 +88,12 @@ def _render_frame(out_png, egos, polylines, neighbor_boxes, show_nb, title,
     if show_nb and neighbor_boxes:
         for nx, ny, nh, nl, nw in neighbor_boxes:
             _draw_agent_box(ax, nx, ny, nh, nl, nw, _NB_COLOR, alpha=0.8, lw=1.5, zorder=14)
+    if extra_lines:
+        labeled = False
+        for xy, color, alpha, lab in extra_lines:
+            ax.plot(xy[:, 0], xy[:, 1], "-", color=color, lw=1.0, alpha=alpha,
+                    zorder=16, label=(lab if not labeled and lab else None))
+            labeled = labeled or bool(lab)
     for e in egos:
         tr = e["trail"]
         if tr.shape[0] > 1:
@@ -140,6 +147,9 @@ def main():
     p.add_argument("--lambda_spd", type=float, default=0.2)
     p.add_argument("--stretch_scale", type=float, default=1.0)
     p.add_argument("--guidance_scale", type=float, default=0.5)
+    p.add_argument("--n_candidates", type=int, default=0,
+                   help="additionally sample N etas from the policy distribution "
+                        "and draw their guided trajectories as a faint candidate fan")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -165,6 +175,7 @@ def main():
         data = load_npz_data(sp, device)
         traj_base = det_inference_batched(m_base, a_base, [data], device)[0].cpu().numpy()
         label_best = args.label_best
+        cand_lines = []
         if policy is not None:
             norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v
                          for k, v in data.items()}
@@ -182,6 +193,28 @@ def main():
             )[0]
             eta_str = " ".join(f"{h[:3]}={float(v.item()):+.2f}" for h, v in etas.items())
             label_best = f"{args.label_best} ({eta_str})"
+            cand_lines = []
+            if args.n_candidates > 0:
+                from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+                N = args.n_candidates
+                cand = {h: (2.0 * pout.dists[h].rsample((N,)).reshape(-1) - 1.0)
+                        for h in heads}
+                N_data = {}
+                for k, v in norm_data.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == 1:
+                        N_data[k] = v.expand(N, *v.shape[1:]).contiguous()
+                    else:
+                        N_data[k] = v
+                cand_trajs = _batched_generate_varied_noise(
+                    m_base, a_base, N_data, noise_min=0.0, noise_max=0.0,
+                    first_deterministic=False, composer=make_composer(cand, args),
+                    device=device,
+                ).cpu().numpy()
+                cand_lines = [
+                    (cand_trajs[i, :, :2], BEST_COLOR, 0.22,
+                     f"{N} candidates from policy distribution" if i == 0 else None)
+                    for i in range(N)
+                ]
         else:
             traj_best = det_inference_batched(m_best, a_best, [data], device)[0].cpu().numpy()
         past = np.load(sp, allow_pickle=True)["ego_agent_past"].astype(np.float32)
@@ -224,7 +257,7 @@ def main():
             ]
             _render_frame(sc_dir / f"f{fi:04d}.png", egos, polylines, nb_boxes,
                           True, f"{name}   t={i*0.1:+.1f}s   PERFECT-TRACK (baseline vs best)",
-                          args.view_half, ego_shape)
+                          args.view_half, ego_shape, extra_lines=cand_lines)
             fi += 1
 
         webm = out_root / f"{name}.webm"
