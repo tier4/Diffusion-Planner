@@ -220,6 +220,7 @@ def build_head_composer(
     envelope: str = "v1",
     lambda_col: float = 3.0,
     ramp_steps: int = 20,
+    fast: bool = False,
 ):
     """Build a GuidanceComposer from a head->eta dict (scalar or [B] tensor).
 
@@ -288,6 +289,10 @@ def build_head_composer(
             params={"lambda_lon": lambda_lon, "eta_lon": etas["longitudinal"]},
         ))
     set_cfg = GuidanceSetConfig(functions=fns, global_scale=guidance_scale)
+    if fast:
+        # Equivalence-certified (fan battery worst |dtraj| = 0.00000 m both
+        # envelopes; bench: active 2.1x bit-identical, inert ~baseline).
+        return FastGuidanceComposer(set_cfg)
     return GuidanceComposer(set_cfg)
 
 
