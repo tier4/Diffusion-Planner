@@ -585,8 +585,6 @@ class ClosedLoopExplorationTrainer:
             dit_metrics = self._run_dit_grpo(scene_paths, epoch)
             metrics.update(dit_metrics)
 
-        lat_shift_cm = eta_lat_mean * self.lambda_lat * 100
-        lon_shift_pct = eta_lon_mean * self.lambda_lon * 100
 
         print(
             f"  Epoch {epoch}: "
@@ -597,9 +595,11 @@ class ClosedLoopExplorationTrainer:
             f"policy_loss={metrics['policy_loss']:.4f}, "
             f"value_loss={metrics['value_loss']:.4f}, "
             f"entropy={metrics['entropy']:.4f}, "
-            f"η_lat={eta_lat_mean:.4f}±{eta_lat_std:.4f} ({lat_shift_cm:+.1f}cm), "
-            f"η_lon={eta_lon_mean:.4f}±{eta_lon_std:.4f} ({lon_shift_pct:+.1f}%), "
-            f"scene_var_lat={scene_var_lat:.4f}, scene_var_lon={scene_var_lon:.4f}"
+            + ", ".join(
+                f"η_{h}={head_stats[f'eta_{h}_mean']:+.4f}"
+                f"±{head_stats[f'eta_{h}_std']:.4f}"
+                f" (scene_var {head_stats[f'scene_var_{h}']:.4f})"
+                for h in self.heads)
         )
         if "dit_loss" in metrics:
             print(f"  DiT GRPO loss: {metrics['dit_loss']:.4f}")
@@ -646,6 +646,17 @@ class ClosedLoopExplorationTrainer:
             elif latest_link.is_dir():
                 shutil.rmtree(latest_link)
             latest_link.symlink_to(f"lora_epoch_{epoch:03d}")
+        elif self.config.closed_loop_freeze_dit:
+            # Frozen DiT: per-epoch policy-only checkpoints (the DiT is the
+            # unchanged base model — re-serializing it every epoch wastes
+            # gigabytes and loses the per-epoch history needed for sweeps).
+            ep_dir = self.run_dir / f"policy_epoch_{epoch:03d}"
+            ep_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(self.exploration_policy.state_dict(),
+                       ep_dir / "exploration_policy.pth")
+            torch.save(self.policy_optimizer.state_dict(),
+                       ep_dir / "policy_optimizer.pth")
+            self.config.to_json(ep_dir / "grpo_config.json")
         else:
             checkpoint_data = {
                 "epoch": epoch,
