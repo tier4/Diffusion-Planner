@@ -143,6 +143,7 @@ def render_ghost_step(
     extra_title: str = "",
     history_mode: bool = False,
     history_trail: np.ndarray | None = None,
+    fan_plans: list[np.ndarray] | None = None,
 ) -> None:
     ax_val, ay_val, ah_val = float(a_pose[0]), float(a_pose[1]), float(a_pose[2])
     bx_val, by_val, bh_val = float(b_pose[0]), float(b_pose[1]), float(b_pose[2])
@@ -201,6 +202,12 @@ def render_ghost_step(
         fig.clf()
         return
 
+    if fan_plans:
+        for fi, fp in enumerate(fan_plans):
+            ax.plot(fp[:, 0], fp[:, 1], "-", color=cfg.model_b_color,
+                    lw=0.8, alpha=0.16, zorder=22,
+                    label=(f"{len(fan_plans)} candidates from policy dist"
+                           if fi == 0 else None))
     if a_plan is not None and a_plan.shape[0] > 1:
         ax.plot(a_plan[:, 0], a_plan[:, 1], "-",
                 color=cfg.model_a_color, lw=1.4, alpha=0.45, zorder=24)
@@ -349,6 +356,8 @@ def run_ghost_sim(
             cfg=cfg,
             neighbor_boxes=neighbor_boxes,
             extra_title=et,
+            fan_plans=(rollout_b.get("extra_plans_world", [[]])[step_i]
+                       if step_i < len(rollout_b.get("extra_plans_world", [])) else None),
         )
 
     webm_path = None

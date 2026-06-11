@@ -205,6 +205,7 @@ def closed_loop_rollout_with_plans(
     positions = [np.array([0.0, 0.0, 0.0])]
     velocities = [0.0]
     plans_world: list[np.ndarray] = []
+    extra_plans_world: list[list[np.ndarray]] = []
 
     # Initial speed from ego_current_state (channels 4=vx, 5=vy in current frame)
     ecs0 = data["ego_current_state"]
@@ -216,7 +217,13 @@ def closed_loop_rollout_with_plans(
     for step_i in range(n_steps):
         # predict_fn lets callers swap the per-step planner call (e.g.
         # explorer-guided generation); default = plain deterministic forward.
-        pred = (predict_fn or deterministic_predict)(model, model_args, data)  # [T, 4] CURRENT frame
+        # It may return (pred, [candidate_plans...]) — candidates are
+        # transformed alongside and stored in extra_plans_world.
+        _out = (predict_fn or deterministic_predict)(model, model_args, data)
+        if isinstance(_out, tuple):
+            pred, _cands = _out
+        else:
+            pred, _cands = _out, []
 
         # Re-express the ENTIRE plan in the INITIAL frame for visualization.
         # current frame -> initial frame: p_init = (cum_x, cum_y) + R(cum) @ p_cur
@@ -228,6 +235,15 @@ def closed_loop_rollout_with_plans(
         cum_yaw = math.atan2(cum_sin, cum_cos)
         wh = (cur_h + cum_yaw).astype(np.float64)
         plans_world.append(np.stack([wx, wy, wh], axis=-1))
+
+        step_extra = []
+        for c in _cands:
+            cxy = c[:, :2].astype(np.float64)
+            step_extra.append(np.stack([
+                cum_x + cum_cos * cxy[:, 0] - cum_sin * cxy[:, 1],
+                cum_y + cum_sin * cxy[:, 0] + cum_cos * cxy[:, 1],
+            ], axis=-1))
+        extra_plans_world.append(step_extra)
 
         if pred.shape[0] <= advance_k:
             advance_k = pred.shape[0] - 1
@@ -288,7 +304,8 @@ def closed_loop_rollout_with_plans(
 
     return {
         "positions": np.stack(positions, axis=0),  # [N+1, 3]
-        "plans_world": plans_world,                # len N
+        "plans_world": plans_world,
+        "extra_plans_world": extra_plans_world,                # len N
         "velocities": np.array(velocities),
     }
 

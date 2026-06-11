@@ -53,6 +53,9 @@ def main() -> None:
     parser.add_argument("--make_webm", action="store_true")
     parser.add_argument("--hist_steps", type=int, default=0,
                         help="render N recorded-history frames (gray ego) before the sim")
+    parser.add_argument("--n_candidates", type=int, default=0,
+                        help="per step, also sample N etas from the policy "
+                             "distribution and render their plans as a faint fan")
     parser.add_argument("--webm_fps", type=int, default=10)
     parser.add_argument("--show_lateral", action="store_true",
                         help="Show lateral offset to route centerline")
@@ -114,14 +117,30 @@ def main() -> None:
             norm["reference_trajectory"] = x_ref
             enc = run_frozen_encoder(model, norm)
             out = policy(enc, x_ref, deterministic=True)
-            etas = {h: (2.0 * out.dists[h].mean - 1.0).reshape(1) for h in policy_heads}
-            eta_log.append({h: float(v.item()) for h, v in etas.items()})
+            N = max(0, args.n_candidates)
+            etas = {
+                h: torch.cat([
+                    (2.0 * out.dists[h].mean - 1.0).reshape(1),
+                    (2.0 * out.dists[h].rsample((N,)).reshape(-1) - 1.0),
+                ]) if N else (2.0 * out.dists[h].mean - 1.0).reshape(1)
+                for h in policy_heads
+            }
+            eta_log.append({h: float(v[0].item()) for h, v in etas.items()})
+            B = 1 + N
+            gen = dict(norm)
+            if N:
+                for k, v in norm.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == 1:
+                        gen[k] = v.expand(B, *v.shape[1:]).contiguous()
             composer = make_composer(etas, args)
-            guided = _batched_generate_varied_noise(
-                model, model_args, norm, noise_min=0.0, noise_max=0.0,
+            trajs = _batched_generate_varied_noise(
+                model, model_args, gen, noise_min=0.0, noise_max=0.0,
                 first_deterministic=False, composer=composer, device=device,
-            )[0].cpu().numpy()
-            return _sg(guided)
+            ).cpu().numpy()
+            guided = _sg(trajs[0])
+            if N:
+                return guided, [trajs[i] for i in range(1, B)]
+            return guided
 
         return predict_a, predict_b
 
