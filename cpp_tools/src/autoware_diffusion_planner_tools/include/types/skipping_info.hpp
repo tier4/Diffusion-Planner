@@ -46,6 +46,7 @@ inline const char * to_topic_name(MissingTopicType t)
     case MissingTopicType::TrafficSignals:
       return "/perception/traffic_light_recognition/traffic_signals";
   }
+  __builtin_unreachable();
 }
 
 // Detailed categorization of incomplete data at frame level
