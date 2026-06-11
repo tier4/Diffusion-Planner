@@ -434,6 +434,10 @@ class GRPOConfig:
     closed_loop_gamma: float = 0.99         # GAE discount factor
     closed_loop_gae_lambda: float = 0.95    # GAE lambda
     closed_loop_value_coef: float = 0.5     # value loss coefficient
+    # Train ONLY the value head for the first N epochs (policy/entropy terms
+    # skipped) so REINFORCE advantages aren't driven by a cold critic —
+    # counters the early-epoch policy drift seen with warm-started policies.
+    closed_loop_value_warmup_epochs: int = 0
     closed_loop_alive_bonus: float = 0.5    # per-step alive reward
     closed_loop_freeze_dit: bool = True     # freeze DiT during explorer training
     closed_loop_batch_size: int = 8        # scenes per batch in rollout (8 fits ~24GB VRAM)

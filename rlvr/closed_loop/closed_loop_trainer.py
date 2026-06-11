@@ -500,11 +500,16 @@ class ClosedLoopExplorationTrainer:
                 # Entropy bonus
                 entropy = sum(policy_out.dists[h].entropy() for h in step_etas)
 
-                step_loss = (
-                    reinforce_loss
-                    + self.config.closed_loop_value_coef * value_loss
-                    - self.config.exploration_entropy_coef * entropy
-                )
+                if epoch <= self.config.closed_loop_value_warmup_epochs:
+                    # Value-head warmup: no policy/entropy gradient until the
+                    # critic has seen real returns.
+                    step_loss = self.config.closed_loop_value_coef * value_loss
+                else:
+                    step_loss = (
+                        reinforce_loss
+                        + self.config.closed_loop_value_coef * value_loss
+                        - self.config.exploration_entropy_coef * entropy
+                    )
                 step_loss = step_loss / n_steps_in_buf  # normalize by steps in THIS scene
                 step_loss.backward()
 
