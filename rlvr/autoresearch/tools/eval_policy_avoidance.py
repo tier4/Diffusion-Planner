@@ -65,7 +65,7 @@ def make_composer(etas: dict[str, torch.Tensor], args) -> GuidanceComposer:
         head_protect=int(getattr(args, "head_protect", 0)),
         envelope=getattr(args, "envelope", "v1"),
         lambda_col=getattr(args, "lambda_col", 3.0),
-        fast=bool(getattr(args, "fast_composer", False)),
+        fast=not bool(getattr(args, "slow_composer", False)),
     )
 
 
@@ -259,9 +259,10 @@ def main():
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
     parser.add_argument("--lambda_col", type=float, default=3.0)
-    parser.add_argument("--fast_composer", action="store_true",
-                        help="use FastGuidanceComposer (equivalence-certified: "
-                             "bit-identical active frames, inert short-circuit)")
+    parser.add_argument("--slow_composer", action="store_true",
+                        help="use the original GuidanceComposer (FastGuidance"
+                             "Composer is the default: 288/288 active "
+                             "generations bit-identical, inert short-circuit)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

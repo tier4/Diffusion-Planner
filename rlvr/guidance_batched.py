@@ -220,7 +220,7 @@ def build_head_composer(
     envelope: str = "v1",
     lambda_col: float = 3.0,
     ramp_steps: int = 20,
-    fast: bool = False,
+    fast: bool = True,
 ):
     """Build a GuidanceComposer from a head->eta dict (scalar or [B] tensor).
 
