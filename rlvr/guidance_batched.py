@@ -266,3 +266,147 @@ def build_head_composer(
         ))
     set_cfg = GuidanceSetConfig(functions=fns, global_scale=guidance_scale)
     return GuidanceComposer(set_cfg)
+
+
+@register
+class CollisionSwerveV2BatchedGuidance(BaseGuidance):
+    """Bounded-target, support-normalized swerve (v2 of collision_swerve).
+
+    Fixes two defects of ``collision_swerve_batched`` measured on the
+    response-curve probe (gain varied ~40x between scenes):
+      1. The v1 energy ``eta * sum_t(w_t * y_t)`` is LINEAR in y with no
+         target — gradient magnitude scales with how many steps are in
+         range, and it keeps pushing forever (one scene reached +31 m).
+      2. No support normalization — slow approaches (many in-range steps)
+         get a huge cumulative gradient, brief encounters almost none.
+
+    v2 energy (maximised by the solver):
+        E = - sum_t( w_t * (y_t - sign(eta) * lambda_col * |eta|)^2 ) / sum_t(w_t)
+    A given eta now means the SAME bounded target offset in every scene,
+    applied only where the proximity gate w_t is active. eta = 0 keeps the
+    v1 contract: exactly zero energy and gradient.
+
+    Params:
+        eta_col (float | Tensor[B]): signed command in [-1, 1].
+        lambda_col (float): max target lateral offset in metres. Default 3.0.
+        range (float): proximity radius in metres. Default 8.0.
+        head_protect (int): zero weights on the first N future steps. Default 0.
+    """
+
+    name = "collision_swerve_v2_batched"
+    _energy_scale = 10.0
+
+    def __init__(self, config: "GuidanceConfig", **kwargs):  # noqa: F821
+        super().__init__(config)
+        self._eta_col = config.params.get("eta_col", 0.0)
+        self._lambda_col = float(config.params.get("lambda_col", 3.0))
+        self._range = float(config.params.get("range", 8.0))
+        self._head_protect = int(config.params.get("head_protect", 0))
+
+    def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
+        B = x.shape[0]
+        device = x.device
+        nb = inputs.get("neighbor_agents_past")
+        ref = inputs.get("reference_trajectory")
+        if nb is None or ref is None:
+            return torch.zeros(B, device=device)
+
+        eta = _as_batch_param(self._eta_col, B, device)
+
+        ego_xy = x[:, 0, 1:, :2]                   # [B, T, 2] (grad kept)
+        T = ego_xy.shape[1]
+        nb_cur = nb[:, :, -1, :4].detach()
+        nb_xy = nb_cur[..., :2]
+        nb_valid = nb_cur.abs().sum(dim=-1) > 0
+        if nb_valid.sum().item() == 0:
+            return torch.zeros(B, device=device)
+
+        # Proximity bump from the (detached) REFERENCE trajectory — using the
+        # current noisy x here would gate on garbage early in denoising.
+        ref = ref[:, :T, :].detach()
+        d = torch.cdist(ref[..., :2], nb_xy)       # [B, T, Pn]
+        big = torch.full_like(d, 1e6)
+        d = torch.where(nb_valid[:, None, :], d, big)
+        w = torch.clamp(1.0 - d / self._range, min=0.0).max(dim=-1).values  # [B, T]
+        if self._head_protect > 0:
+            w = w.clone()
+            w[:, : self._head_protect] = 0.0
+        support = w.sum(dim=-1)                    # [B]
+
+        # Lateral deviation from the reference (handles curved routes),
+        # identical machinery to the stock lateral energy.
+        cos_h = ref[..., 2]
+        sin_h = ref[..., 3]
+        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        n_perp_x, n_perp_y = -sin_h / h_norm, cos_h / h_norm
+        dx = ego_xy[..., 0] - ref[..., 0]
+        dy = ego_xy[..., 1] - ref[..., 1]
+        lateral_proj = n_perp_x * dx + n_perp_y * dy            # [B, T]
+
+        # Ramp-up-and-HOLD target profile: cummax of the proximity gate
+        # rises on approach and holds its peak after passing — the offset is
+        # demanded over the remaining horizon like the (stable) stock
+        # lateral target, instead of a bump that forces return-to-zero
+        # mid-pass (bump variants needed unstable scales to act at all:
+        # weak at scale 8, sign-inverting/divergent at 16).
+        s = torch.cummax(w, dim=-1).values                      # [B, T]
+        target = (self._lambda_col * eta)[:, None] * s          # [B, T]
+        psi = ((lateral_proj - target) ** 2).mean(dim=-1)
+        # eta == 0 -> exactly inert; negligible support -> exactly inert
+        gate = (eta.abs() > 1e-6).float() * (support > 0.05).float()
+        return -psi * gate
+
+
+@register
+class LateralRampBatchedGuidance(BaseGuidance):
+    """Lateral guidance (Eq. 2) with a kinematic feasibility RAMP (v2).
+
+    The stock ``lateral`` energy demands the full lambda*eta offset at EVERY
+    future step including t = 0.1 s — kinematically impossible, producing
+    huge near-field gradients (measured: plan-head distortion, backwards-
+    bent leading points at low speed, scene-dependent gain 2.3-6.8 m at the
+    same eta). v2 ramps the target linearly from 0 to lambda*eta over
+    ``ramp_steps`` future steps, then holds.
+
+    Params:
+        lambda_lat (float): max lateral offset in metres. Default 3.0.
+        eta_lat (float | Tensor[B]): command in [-1, 1].
+        ramp_steps (int): steps to reach the full target. Default 20 (2 s).
+    """
+
+    name = "lateral_ramp_batched"
+    _energy_scale = 10.0
+
+    def __init__(self, config: "GuidanceConfig", **kwargs):  # noqa: F821
+        super().__init__(config)
+        self._lambda_lat = float(config.params.get("lambda_lat", 3.0))
+        self._eta_lat = config.params.get("eta_lat", 0.0)
+        self._ramp_steps = int(config.params.get("ramp_steps", 20))
+
+    def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
+        B, P, T_plus1, _ = x.shape
+        T = T_plus1 - 1
+        device = x.device
+        ref = inputs.get("reference_trajectory")
+        if ref is None:
+            return torch.zeros(B, device=device)
+        ref = ref[:, :T, :]
+
+        cos_h = ref[..., 2]
+        sin_h = ref[..., 3]
+        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        cos_h, sin_h = cos_h / h_norm, sin_h / h_norm
+        n_perp_x, n_perp_y = -sin_h, cos_h
+
+        ego_pos = x[:, 0, 1:, :2]
+        dx = ego_pos[..., 0] - ref[..., 0]
+        dy = ego_pos[..., 1] - ref[..., 1]
+        lateral_proj = n_perp_x * dx + n_perp_y * dy        # [B, T]
+
+        eta = _as_batch_param(self._eta_lat, B, device)
+        ramp = torch.arange(1, T + 1, device=device, dtype=torch.float32)
+        ramp = (ramp / max(self._ramp_steps, 1)).clamp(max=1.0)  # [T]
+        target = (self._lambda_lat * eta)[:, None] * ramp[None, :]  # [B, T]
+
+        psi = ((lateral_proj - target) ** 2).mean(dim=-1)
+        return -psi
