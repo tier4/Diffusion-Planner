@@ -131,6 +131,9 @@ def main():
     parser.add_argument("--head_raw_scale", type=float, default=10.0)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--patience", type=int, default=50)
+    parser.add_argument("--init_from", default=None,
+                        help="warm-start: load this exploration_policy.pth "
+                             "before training (heads/arch must match)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -190,6 +193,10 @@ def main():
         heads=heads,
     )
     policy = ExplorationPolicy(ep_config, ref_seq_len=model_args.future_len).to(device)
+    if args.init_from:
+        state = torch.load(args.init_from, map_location=device, weights_only=False)
+        policy.load_state_dict(state, strict=True)
+        print(f"[warm-start] loaded {args.init_from}")
     optimizer = optim.AdamW(policy.parameters(), lr=args.lr)
 
     def pred_etas(idx_batch):
