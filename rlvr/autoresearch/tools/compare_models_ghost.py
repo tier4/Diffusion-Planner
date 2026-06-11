@@ -75,6 +75,13 @@ def main() -> None:
     parser.add_argument("--head_protect", type=int, default=0,
                         help="zero guidance on the first N plan steps "
                              "(closed-loop stall fix; 0 = off)")
+    parser.add_argument("--speed_floor", type=float, default=0.0,
+                        help="add stock band speed guidance with v_low = this "
+                             "fraction of current ego speed (e.g. 0.85) to the "
+                             "guided leg — prevents the closed-loop speed-decay "
+                             "spiral (the Branch Editor pairs swerve with speed "
+                             "guidance the same way). 0 = off")
+    parser.add_argument("--speed_scale", type=float, default=2.0)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -136,6 +143,17 @@ def main() -> None:
                     if isinstance(v, torch.Tensor) and v.shape[0] == 1:
                         gen[k] = v.expand(B, *v.shape[1:]).contiguous()
             composer = make_composer(etas, args)
+            if args.speed_floor > 0:
+                from diffusion_planner.model.guidance.config import GuidanceConfig
+                ecs = data["ego_current_state"]
+                ecs = ecs[0] if ecs.dim() == 2 else ecs
+                v_now = float(torch.linalg.vector_norm(ecs[4:6]).item())
+                composer._functions.append(__import__(
+                    "diffusion_planner.model.guidance.registry",
+                    fromlist=["build"]).build(GuidanceConfig(
+                        name="speed", enabled=True, scale=args.speed_scale,
+                        params={"v_low": args.speed_floor * v_now,
+                                "v_high": max(1.2 * v_now, 8.0)})))
             trajs = _batched_generate_varied_noise(
                 model, model_args, gen, noise_min=0.0, noise_max=0.0,
                 first_deterministic=False, composer=composer, device=device,
