@@ -135,3 +135,27 @@ def test_stretch_batched_per_sample():
     assert (fwd_grad[0] <= 0).all() and fwd_grad[0].sum() < 0   # slow down
     assert torch.all(grad[1] == 0)                              # inert
     assert (fwd_grad[2] >= 0).all() and fwd_grad[2].sum() > 0   # speed up
+
+
+def test_lateral_batched_matches_stock_when_unprotected():
+    from diffusion_planner.model.guidance.lateral_guidance import LateralGuidance
+    x = _make_x()
+    ref = torch.zeros(2 if False else B, T, 4); ref[..., 2] = 1.0
+    inputs = {"reference_trajectory": ref}
+    for eta in (0.0, 0.5, torch.tensor([0.3, -0.7, 1.0])):
+        stock = LateralGuidance(GuidanceConfig(name="lateral",
+                                params={"lambda_lat": 4.0, "eta_lat": eta}))
+        mine = _swerve("lateral_batched", lambda_lat=4.0, eta_lat=eta, head_protect=0)
+        assert torch.allclose(stock._compute(x, inputs), mine._compute(x, inputs), atol=1e-6)
+
+
+def test_head_protect_zeroes_early_gradient():
+    x = _make_x(requires_grad=True)
+    ref = torch.zeros(B, T, 4); ref[..., 2] = 1.0
+    inputs = {"reference_trajectory": ref, **_make_inputs()}
+    lat = _swerve("lateral_batched", lambda_lat=4.0, eta_lat=1.0, head_protect=5)
+    col = _swerve("collision_swerve_batched", eta_col=1.0, range=8.0, head_protect=5)
+    out = lat._compute(x, inputs) + col._compute(x, inputs)
+    grad = torch.autograd.grad(out.sum(), x)[0]
+    assert torch.all(grad[:, 0, 1:6, :] == 0), "first 5 future steps must carry no gradient"
+    assert grad[:, 0, 6:, :].abs().sum() > 0

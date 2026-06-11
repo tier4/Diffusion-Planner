@@ -48,6 +48,10 @@ class CollisionSwerveBatchedGuidance(BaseGuidance):
             magnitude: push strength. 0 = inert (zero energy AND gradient).
         range (float): proximity radius in metres within which the swerve
             activates (centroid gap ego<->neighbour). Default 8.0.
+        head_protect (int): zero the guidance weight on the FIRST N future
+            steps. The closed loop executes the plan head; gradient guidance
+            distorting it stalls the ego (sideways pull eats the first-step
+            forward displacement). Default 0 = original behavior.
 
     Energy (maximised by the solver):
         E = eta_col * Σ_t  w_t * y_t
@@ -64,6 +68,7 @@ class CollisionSwerveBatchedGuidance(BaseGuidance):
         super().__init__(config)
         self._eta_col = config.params.get("eta_col", 0.0)
         self._range = float(config.params.get("range", 8.0))
+        self._head_protect = int(config.params.get("head_protect", 0))
 
     def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
         """
@@ -99,6 +104,9 @@ class CollisionSwerveBatchedGuidance(BaseGuidance):
         d = torch.where(nb_valid[:, None, :], d, big)
         w = torch.clamp(1.0 - d / self._range, min=0.0)   # [B, T, Pn]
         w = w.max(dim=-1).values                          # [B, T]
+        if self._head_protect > 0:
+            w = w.clone()
+            w[:, : self._head_protect] = 0.0
 
         y = ego_xy[..., 1]                                # [B, T] lateral, +y = left
         reward = (eta[:, None] * w.detach() * y).sum(dim=-1)  # [B]
@@ -141,3 +149,57 @@ class SpeedStretchBatchedGuidance(BaseGuidance):
         correction = disp * (stretch[:, None, None] - 1.0)
         reward = torch.sum(correction.detach() * pos[:, 1:, :2], dim=(1, 2))
         return reward
+
+
+@register
+class LateralBatchedGuidance(BaseGuidance):
+    """PlannerRFT Eq.2 lateral guidance with head protection.
+
+    Identical energy to the stock ``lateral`` (which already takes [B] eta)
+    EXCEPT the first ``head_protect`` future steps carry zero weight — the
+    closed loop executes the plan head, and bending it sideways stalls the
+    ego. head_protect=0 reproduces the stock function exactly.
+
+    Params: lambda_lat (float), eta_lat (float | Tensor[B]),
+            head_protect (int, default 0).
+    """
+
+    name = "lateral_batched"
+    _energy_scale = 10.0
+
+    def __init__(self, config: "GuidanceConfig", **kwargs):  # noqa: F821
+        super().__init__(config)
+        self._lambda_lat = config.params.get("lambda_lat", 3.0)
+        self._eta_lat = config.params.get("eta_lat", 0.0)
+        self._head_protect = int(config.params.get("head_protect", 0))
+
+    def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
+        B, P, T_plus1, _ = x.shape
+        T = T_plus1 - 1
+        device = x.device
+        ref = inputs.get("reference_trajectory")
+        if ref is None:
+            return torch.zeros(B, device=device)
+        ref = ref[:, :T, :]
+
+        cos_h = ref[..., 2]
+        sin_h = ref[..., 3]
+        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        n_perp_x = -sin_h / h_norm
+        n_perp_y = cos_h / h_norm
+
+        ego_pos = x[:, 0, 1:, :2]
+        dx = ego_pos[..., 0] - ref[..., 0]
+        dy = ego_pos[..., 1] - ref[..., 1]
+        lateral_proj = n_perp_x * dx + n_perp_y * dy  # [B, T]
+
+        target = self._lambda_lat * self._eta_lat
+        if isinstance(target, torch.Tensor) and target.dim() >= 1:
+            target = target.unsqueeze(-1)
+
+        err2 = (lateral_proj - target) ** 2  # [B, T]
+        if self._head_protect > 0:
+            w = torch.ones_like(err2)
+            w[:, : self._head_protect] = 0.0
+            return -(err2 * w).sum(dim=-1) / w.sum(dim=-1).clamp_min(1.0)
+        return -err2.mean(dim=-1)

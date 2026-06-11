@@ -72,6 +72,9 @@ def main() -> None:
     parser.add_argument("--lambda_spd", type=float, default=0.2)
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
+    parser.add_argument("--head_protect", type=int, default=0,
+                        help="zero guidance on the first N plan steps "
+                             "(closed-loop stall fix; 0 = off)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

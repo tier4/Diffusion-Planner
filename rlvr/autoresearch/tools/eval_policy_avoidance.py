@@ -50,16 +50,27 @@ def load_policy(policy_dir: str, model_args, device) -> tuple[ExplorationPolicy,
 
 
 def make_composer(etas: dict[str, torch.Tensor], args) -> GuidanceComposer:
+    # head_protect > 0 zeroes guidance on the first N plan steps (closed-loop
+    # stall fix); 0 keeps the exact original functions/behavior.
+    hp = int(getattr(args, "head_protect", 0))
     fns = []
     if "lateral" in etas:
-        fns.append(GuidanceConfig(
-            name="lateral", enabled=True, scale=args.lat_scale,
-            params={"lambda_lat": args.lambda_lat, "eta_lat": etas["lateral"]},
-        ))
+        if hp > 0:
+            fns.append(GuidanceConfig(
+                name="lateral_batched", enabled=True, scale=args.lat_scale,
+                params={"lambda_lat": args.lambda_lat, "eta_lat": etas["lateral"],
+                        "head_protect": hp},
+            ))
+        else:
+            fns.append(GuidanceConfig(
+                name="lateral", enabled=True, scale=args.lat_scale,
+                params={"lambda_lat": args.lambda_lat, "eta_lat": etas["lateral"]},
+            ))
     if "collision" in etas:
         fns.append(GuidanceConfig(
             name="collision_swerve_batched", enabled=True, scale=args.col_scale,
-            params={"eta_col": etas["collision"], "range": args.col_range},
+            params={"eta_col": etas["collision"], "range": args.col_range,
+                    "head_protect": hp},
         ))
     if "stretch" in etas:
         fns.append(GuidanceConfig(
