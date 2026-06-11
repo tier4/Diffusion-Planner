@@ -217,6 +217,9 @@ def build_head_composer(
     guidance_scale: float = 0.5,
     head_protect: int = 0,
     lambda_lon: float = 0.25,
+    envelope: str = "v1",
+    lambda_col: float = 3.0,
+    ramp_steps: int = 20,
 ):
     """Build a GuidanceComposer from a head->eta dict (scalar or [B] tensor).
 
@@ -234,24 +237,44 @@ def build_head_composer(
 
     hp = int(head_protect)
     fns = []
-    if "lateral" in etas:
+    if envelope == "v2":
+        # v2 set: ramped lateral target + ramp-and-hold bounded swerve.
+        # head_protect is not implemented for v2 (the ramp already spares
+        # the plan head) — fail loudly rather than silently ignore it.
         if hp > 0:
+            raise ValueError("head_protect is a v1-envelope option")
+        if "lateral" in etas:
             fns.append(GuidanceConfig(
-                name="lateral_batched", enabled=True, scale=lat_scale,
+                name="lateral_ramp_batched", enabled=True, scale=lat_scale,
                 params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"],
+                        "ramp_steps": ramp_steps},
+            ))
+        if "collision" in etas:
+            fns.append(GuidanceConfig(
+                name="collision_swerve_v2_batched", enabled=True,
+                scale=col_scale,
+                params={"eta_col": etas["collision"], "lambda_col": lambda_col,
+                        "range": col_range},
+            ))
+    else:
+        if "lateral" in etas:
+            if hp > 0:
+                fns.append(GuidanceConfig(
+                    name="lateral_batched", enabled=True, scale=lat_scale,
+                    params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"],
+                            "head_protect": hp},
+                ))
+            else:
+                fns.append(GuidanceConfig(
+                    name="lateral", enabled=True, scale=lat_scale,
+                    params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"]},
+                ))
+        if "collision" in etas:
+            fns.append(GuidanceConfig(
+                name="collision_swerve_batched", enabled=True, scale=col_scale,
+                params={"eta_col": etas["collision"], "range": col_range,
                         "head_protect": hp},
             ))
-        else:
-            fns.append(GuidanceConfig(
-                name="lateral", enabled=True, scale=lat_scale,
-                params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"]},
-            ))
-    if "collision" in etas:
-        fns.append(GuidanceConfig(
-            name="collision_swerve_batched", enabled=True, scale=col_scale,
-            params={"eta_col": etas["collision"], "range": col_range,
-                    "head_protect": hp},
-        ))
     if "stretch" in etas:
         fns.append(GuidanceConfig(
             name="speed_stretch_batched", enabled=True, scale=stretch_scale,

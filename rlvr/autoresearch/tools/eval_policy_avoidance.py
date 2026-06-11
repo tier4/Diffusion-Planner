@@ -63,6 +63,8 @@ def make_composer(etas: dict[str, torch.Tensor], args) -> GuidanceComposer:
         stretch_scale=args.stretch_scale,
         guidance_scale=args.guidance_scale,
         head_protect=int(getattr(args, "head_protect", 0)),
+        envelope=getattr(args, "envelope", "v1"),
+        lambda_col=getattr(args, "lambda_col", 3.0),
     )
 
 
@@ -254,6 +256,8 @@ def main():
     parser.add_argument("--lambda_spd", type=float, default=0.2)
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
+    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
+    parser.add_argument("--lambda_col", type=float, default=3.0)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
