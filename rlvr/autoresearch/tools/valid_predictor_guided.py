@@ -127,11 +127,16 @@ def main():
           f"heads={heads}")
 
     validate_model = _load_validate_model()
-    ego_loss, nbr_loss = validate_model(shim, loader, cfg)
+    result = validate_model(shim, loader, cfg)
+    ego_loss = result["avg_loss_ego"]
+    nbr_loss = result["avg_loss_neighbor"]
+    extra = {k: float(v) for k, v in result.items()
+             if isinstance(v, float)}
 
     report = {
         "ego_avg_loss": float(ego_loss),
         "neighbor_avg_loss": float(nbr_loss),
+        "extra": extra,
         "n_scenes": len(valid_set),
         "guidance_args": {k: getattr(args, k) for k in (
             "lambda_lat", "lat_scale", "col_scale", "col_range",
