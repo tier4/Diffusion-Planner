@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import torch
 from preference_optimization.utils import load_npz_data
 
@@ -53,13 +54,72 @@ def main() -> None:
     parser.add_argument("--webm_fps", type=int, default=10)
     parser.add_argument("--show_lateral", action="store_true",
                         help="Show lateral offset to route centerline")
+    parser.add_argument("--policy_dir", default=None,
+                        help="exploration-policy dir: model B = model A + guidance "
+                             "(per-step policy etas via composer); --model_b ignored")
+    parser.add_argument("--sg_smooth", action="store_true",
+                        help="Savitzky-Golay smooth both legs' per-step plans "
+                             "(11/3) — matches scenario_generation.replay behavior")
+    parser.add_argument("--lambda_lat", type=float, default=5.0)
+    parser.add_argument("--lat_scale", type=float, default=2.0)
+    parser.add_argument("--col_scale", type=float, default=9.0)
+    parser.add_argument("--col_range", type=float, default=8.0)
+    parser.add_argument("--lambda_spd", type=float, default=0.2)
+    parser.add_argument("--stretch_scale", type=float, default=1.0)
+    parser.add_argument("--guidance_scale", type=float, default=0.5)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[compare] loading model A: {args.label_a}")
     model_a, args_a = load_model(args.model_a, args.lora_a, device)
-    print(f"[compare] loading model B: {args.label_b}")
-    model_b, args_b = load_model(args.model_b, args.lora_b, device)
+    policy = None
+    if args.policy_dir:
+        from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
+        policy, policy_heads = load_policy(args.policy_dir, args_a, device)
+        model_b, args_b = model_a, args_a
+        print(f"[compare] model B = model A + explorer ({args.policy_dir})")
+    else:
+        print(f"[compare] loading model B: {args.label_b}")
+        model_b, args_b = load_model(args.model_b, args.lora_b, device)
+
+    def _sg(traj):
+        if not args.sg_smooth:
+            return traj
+        from rlvr.grpo_sft_trainer import _smooth_trajectory
+        return _smooth_trajectory(traj, 11, 3)
+
+    def make_predict_fns(eta_log):
+        """(predict_a, predict_b): plain[+SG] vs explorer-guided[+SG]."""
+        from exploration_policy.utils import run_frozen_encoder
+        from rlvr.autoresearch.tools.eval_policy_avoidance import make_composer
+        from rlvr.autoresearch.tools.recovery_sim import deterministic_predict
+        from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+        from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
+
+        def predict_a(model, model_args, data):
+            return _sg(deterministic_predict(model, model_args, data))
+
+        def predict_b(model, model_args, data):
+            det = deterministic_predict(model, model_args, data)
+            if policy is None:
+                return _sg(det)
+            batch = _stack_scene_data([data], device)
+            norm = _normalize_batch(batch, model_args)
+            x_ref = torch.from_numpy(np.ascontiguousarray(det)).float()
+            x_ref = x_ref.unsqueeze(0).to(device)
+            norm["reference_trajectory"] = x_ref
+            enc = run_frozen_encoder(model, norm)
+            out = policy(enc, x_ref, deterministic=True)
+            etas = {h: (2.0 * out.dists[h].mean - 1.0).reshape(1) for h in policy_heads}
+            eta_log.append({h: float(v.item()) for h, v in etas.items()})
+            composer = make_composer(etas, args)
+            guided = _batched_generate_varied_noise(
+                model, model_args, norm, noise_min=0.0, noise_max=0.0,
+                first_deterministic=False, composer=composer, device=device,
+            )[0].cpu().numpy()
+            return _sg(guided)
+
+        return predict_a, predict_b
 
     cfg = GhostSimConfig(
         model_a_label=args.label_a,
@@ -86,6 +146,15 @@ def main() -> None:
         scene_out = out_root / scene_name if len(args.scenes) > 1 else out_root
         cfg.subtitle = scene_name
 
+        eta_log: list[dict] = []
+        predict_a, predict_b = make_predict_fns(eta_log)
+
+        def eta_title(step, a_pose, b_pose):
+            if not eta_log or step >= len(eta_log):
+                return ""
+            e = eta_log[step]
+            return "  explorer η: " + " ".join(f"{h[:3]}={v:+.2f}" for h, v in e.items())
+
         run_ghost_sim(
             scene_path=scene_path,
             model_a=model_a, model_a_args=args_a,
@@ -95,6 +164,9 @@ def main() -> None:
             cfg=cfg,
             neighbor_boxes=nb_boxes,
             make_webm=args.make_webm,
+            extra_title_fn=eta_title if policy is not None else None,
+            predict_fn_a=predict_a if args.sg_smooth else None,
+            predict_fn_b=predict_b if (policy is not None or args.sg_smooth) else None,
         )
 
 

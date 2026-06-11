@@ -243,10 +243,15 @@ def run_ghost_sim(
     neighbor_boxes: list[tuple[float, float, float, float, float]] | None = None,
     make_webm: bool = True,
     extra_title_fn=None,
+    predict_fn_a=None,
+    predict_fn_b=None,
 ):
     """Run dual-model ghost sim and render per-step PNGs + optional webm.
 
     extra_title_fn: optional callable(step, a_pose, b_pose) -> str for per-step subtitle.
+    predict_fn_a / predict_fn_b: optional per-step planner-call overrides for
+        the rollouts (e.g. SG smoothing, exploration-policy guided generation);
+        same signature as recovery_sim.deterministic_predict.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -254,11 +259,13 @@ def run_ghost_sim(
     rollout_a = closed_loop_rollout_with_plans(
         model_a, model_a_args, scene_data,
         n_steps=cfg.steps, advance_k=cfg.advance_k,
+        predict_fn=predict_fn_a,
     )
     print(f"[ghost-sim] rollout ({cfg.model_b_label})...")
     rollout_b = closed_loop_rollout_with_plans(
         model_b, model_b_args, scene_data,
         n_steps=cfg.steps, advance_k=cfg.advance_k,
+        predict_fn=predict_fn_b,
     )
 
     centerlines, lefts, rights, border_polylines, route_polylines, cl_segments = \

@@ -183,6 +183,7 @@ def closed_loop_rollout_with_plans(
     n_steps: int = 80,
     advance_k: int = 0,
     dt: float = 0.1,
+    predict_fn=None,
 ) -> dict:
     """Run the closed-loop rollout and capture per-step predictions in the
     initial ego frame. Direct extension of recovery_test.closed_loop_rollout —
@@ -213,7 +214,9 @@ def closed_loop_rollout_with_plans(
     velocities[0] = init_speed
 
     for step_i in range(n_steps):
-        pred = deterministic_predict(model, model_args, data)  # [T, 4] in CURRENT frame
+        # predict_fn lets callers swap the per-step planner call (e.g.
+        # explorer-guided generation); default = plain deterministic forward.
+        pred = (predict_fn or deterministic_predict)(model, model_args, data)  # [T, 4] CURRENT frame
 
         # Re-express the ENTIRE plan in the INITIAL frame for visualization.
         # current frame -> initial frame: p_init = (cum_x, cum_y) + R(cum) @ p_cur
