@@ -246,6 +246,13 @@ class SpawnConfig:
     # slightly before the 0.2 m crossing threshold. Plans clear of statics
     # pass through untouched (inertness in closed loop).
     explorer_activate_clearance: float = 0.3
+    # Guidance envelope for the explorer — MUST match the envelope the policy
+    # was trained against (stage1_reg_v4_env2 = envelope-v2: 5.0/2.0/9.0).
+    explorer_lambda_lat: float = 5.0
+    explorer_lat_scale: float = 2.0
+    explorer_col_scale: float = 9.0
+    explorer_col_range: float = 8.0
+    explorer_guidance_scale: float = 0.5
     # Skip traffic-light state propagation entirely. Useful for MPC-gen
     # data runs where TL-driven speed drops would bias the replay ego
     # toward stop-and-go behaviour we don't want in training.
@@ -1980,9 +1987,19 @@ def run_route_replay(
     # learned guidance etas). Fails loudly if the dir is missing/incomplete.
     explorer_runner = None
     if spawn_config.explorer_dir:
-        from scenario_generation.explorer_runner import ExplorerGuidanceRunner
+        from scenario_generation.explorer_runner import (
+            ExplorerEnvelope,
+            ExplorerGuidanceRunner,
+        )
         explorer_runner = ExplorerGuidanceRunner(
             spawn_config.explorer_dir, model_args, device,
+            envelope=ExplorerEnvelope(
+                lambda_lat=spawn_config.explorer_lambda_lat,
+                lat_scale=spawn_config.explorer_lat_scale,
+                col_scale=spawn_config.explorer_col_scale,
+                col_range=spawn_config.explorer_col_range,
+                guidance_scale=spawn_config.explorer_guidance_scale,
+            ),
             eta_smooth=spawn_config.explorer_eta_smooth,
         )
         print(f"  [explorer] guidance policy loaded from {spawn_config.explorer_dir} "

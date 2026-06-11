@@ -76,9 +76,9 @@ def plan_static_clearance(
 class ExplorerEnvelope:
     """Guidance strengths; defaults = the campaign sweep envelope."""
 
-    lambda_lat: float = 4.0
-    lat_scale: float = 1.5
-    col_scale: float = 6.0
+    lambda_lat: float = 5.0
+    lat_scale: float = 2.0
+    col_scale: float = 9.0
     col_range: float = 8.0
     lambda_spd: float = 0.2
     stretch_scale: float = 1.0
