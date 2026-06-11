@@ -51,6 +51,8 @@ def main() -> None:
     parser.add_argument("--ego_wheelbase", type=float, default=4.76,
                         help="Ego wheelbase (m); ego footprint is rear-axle offset by (length-wheelbase)/2")
     parser.add_argument("--make_webm", action="store_true")
+    parser.add_argument("--hist_steps", type=int, default=0,
+                        help="render N recorded-history frames (gray ego) before the sim")
     parser.add_argument("--webm_fps", type=int, default=10)
     parser.add_argument("--show_lateral", action="store_true",
                         help="Show lateral offset to route centerline")
@@ -128,6 +130,7 @@ def main() -> None:
         steps=args.steps,
         advance_k=args.advance_k,
         webm_fps=args.webm_fps,
+        hist_steps=args.hist_steps,
         show_lateral=args.show_lateral,
         ego_wheelbase=args.ego_wheelbase,
     )
