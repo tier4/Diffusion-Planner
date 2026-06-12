@@ -22,6 +22,7 @@ from diffusion_planner.utils import ddp
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
+from diffusion_planner.utils.neighbor_db import NeighborPatternDB
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from timm.utils import ModelEma
@@ -132,6 +133,21 @@ def get_args():
                              "point (easy, history-predictable). False = random-heading "
                              "constant-accel (curved) colliders")
 
+    # Real-neighbor DB collision-search augmentation (utils/neighbor_db.py). When
+    # --neighbor_db_path is set, real neighbor tracks that already collide with the scene's ego
+    # GT are searched and pasted verbatim, instead of the synthetic colliders above.
+    parser.add_argument("--neighbor_db_path", type=str, default="",
+                        help="path to a neighbor-pattern DB (built by neighbor_db.py); "
+                             "empty = use the synthetic collider generator instead")
+    parser.add_argument("--neighbor_db_collision_margin", type=float, default=2.0,
+                        help="(DB) max distance [m] from an ego GT waypoint to count as a "
+                             "colliding track during the DB search")
+    parser.add_argument("--neighbor_min_collision_time", type=float, default=0.8,
+                        help="(DB) earliest future time [s] a collision may occur at")
+    parser.add_argument("--neighbor_search_subsample", type=int, default=0,
+                        help="(DB) cap the per-scene search to this many random patterns "
+                             "(0 = search the whole DB)")
+
     # Loss coefficients (shared with the supervised trainer / loss machinery)
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
     parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
@@ -227,16 +243,31 @@ def model_training(args):
     batch_size = args.batch_size
     save_utd = args.save_utd
 
-    # Synthetic adversarial neighbor generator for GRPO augmentation.
-    collider_injector = SyntheticColliderInjector(
-        pedestrian_prob=args.pedestrian_prob,
-        bicycle_prob=args.bicycle_prob,
-        keep_clear_radius=args.collider_keep_clear_radius,
-        straight_line=args.collider_straight_line,
-    )
-    if global_rank == 0:
-        print(f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
-              f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m")
+    # Adversarial neighbor generator for GRPO augmentation: either real tracks searched from a
+    # DB (collision-search) or synthetic constant-velocity/accel colliders.
+    if args.neighbor_db_path:
+        collider_injector = NeighborPatternDB(
+            db_path=args.neighbor_db_path,
+            collision_margin=args.neighbor_db_collision_margin,
+            keep_clear_radius=args.collider_keep_clear_radius,
+            min_collision_time=args.neighbor_min_collision_time,
+            search_subsample=args.neighbor_search_subsample,
+        )
+        if global_rank == 0:
+            print(f"Neighbor DB collision-search augmentation: "
+                  f"{collider_injector.num_patterns} patterns, "
+                  f"margin={args.neighbor_db_collision_margin}m "
+                  f"keep_clear={args.collider_keep_clear_radius}m")
+    else:
+        collider_injector = SyntheticColliderInjector(
+            pedestrian_prob=args.pedestrian_prob,
+            bicycle_prob=args.bicycle_prob,
+            keep_clear_radius=args.collider_keep_clear_radius,
+            straight_line=args.collider_straight_line,
+        )
+        if global_rank == 0:
+            print(f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
+                  f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m")
 
     if global_rank == 0 and args.w_gt_l2 > 0.0:
         print(f"GT-L2 realism reward enabled: w_gt_l2={args.w_gt_l2}")
