@@ -34,6 +34,7 @@ import rlvr.guidance_batched  # noqa: F401
 from exploration_policy.utils import run_frozen_encoder
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model
 from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer
+from rlvr.guidance_batched import dit_memo
 
 
 class _LossAccum:
@@ -158,7 +159,10 @@ def main():
         decoder._guidance_fn = composer
         decoder._guidance_scale = composer._set_config.global_scale
         try:
-            _, gui_out = model(data)
+            # dit_memo: solver reuses the composer's x0-refinement forward
+            # (same deployment-path optimization as explorer_runner).
+            with dit_memo(decoder):
+                _, gui_out = model(data)
         finally:
             decoder._guidance_fn = saved_fn
             decoder._guidance_scale = saved_scale

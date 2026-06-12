@@ -56,6 +56,7 @@ def generate_samples(
     # pulls in modules that import back here, so a top-level import would create
     # an import cycle. Imported once per call here (not per loop iteration).
     from rlvr.closed_loop.batched_rollout import make_initial_latent
+    from rlvr.guidance_batched import dit_memo
 
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
@@ -72,7 +73,13 @@ def generate_samples(
                 noise_scale,
             )
 
-            _, decoder_output = model(data)
+            if composer is not None:
+                # dit_memo: the solver reuses the composer's x0-refinement
+                # forward at the same (x, t) — ~25% off guided frames.
+                with dit_memo(model.decoder):
+                    _, decoder_output = model(data)
+            else:
+                _, decoder_output = model(data)
             ego_trajectory = decoder_output["prediction"][0, 0].cpu().numpy()  # (OUTPUT_T, 4)
             results.append(ego_trajectory)
     finally:

@@ -602,3 +602,108 @@ class FastGuidanceComposer:
         std = state_normalizer.std.to(grad_phys.device)
         grad_flat = (grad_phys * std).detach().reshape(x_in.shape)
         return (grad_flat * x_in).sum()
+
+
+class DiTForwardMemo(torch.nn.Module):
+    """Single-slot forward memo for the decoder's DiT during guided sampling.
+
+    In ``dpm.model_wrapper``'s classifier branch every solver evaluation runs
+    the DiT twice on the same input: first inside the guidance composer's
+    x̂0-refinement (``cond_grad_fn`` → composer → ``model(x_4d, t, ...)``),
+    then again in ``noise_pred_fn`` for the same ``(x, t)``. Both call sites
+    reshape x to ``[B, P, -1, 4]`` and pass the solver's time tensor straight
+    through, so the computations are value-identical — the second call can
+    return the first call's output. That removes one full DiT forward per
+    guided solver evaluation (~2x on the active guided path).
+
+    Matching is exact: positional tensor args must be value-equal
+    (``torch.equal`` against a detached CLONE — a plain detached view would
+    alias the caller's storage and could report stale equality after an
+    in-place update), keyword tensors (the per-generation conditioning) must
+    be the same objects, and any non-tensor arg must compare ``==``. Any
+    mismatch falls through to a real forward, so a miss costs only the
+    comparison.
+
+    The wrapped forward runs under ``no_grad``: every classifier_fn in this
+    repo detaches the DiT output (straight-through x̂0 correction), and the
+    sampling call sites are already no_grad — the graph the composer's call
+    would otherwise build inside ``cond_grad_fn``'s enable_grad block is pure
+    waste. Consequently this wrapper is for SAMPLING only; never install it
+    around a training forward.
+    """
+
+    def __init__(self, dit: torch.nn.Module):
+        super().__init__()
+        # Plain-list indirection keeps the wrapped DiT out of _modules, so
+        # while the memo is installed the decoder's state_dict/apply never
+        # see a "dit.<wrapped>" level.
+        self._wrapped = [dit]
+        self._args = None
+        self._kwargs = None
+        self._out = None
+        self.hits = 0
+        self.misses = 0
+
+    def _match(self, args, kwargs) -> bool:
+        if self._out is None or len(args) != len(self._args):
+            return False
+        if set(kwargs.keys()) != set(self._kwargs.keys()):
+            return False
+        for a, c in zip(args, self._args):
+            if torch.is_tensor(a) != torch.is_tensor(c):
+                return False
+            if torch.is_tensor(a):
+                if a.shape != c.shape or not torch.equal(a, c):
+                    return False
+            elif a != c:
+                return False
+        for k, v in kwargs.items():
+            c = self._kwargs[k]
+            if torch.is_tensor(v):
+                if v is not c:
+                    return False
+            elif v != c:
+                return False
+        return True
+
+    def forward(self, *args, **kwargs):
+        if self._match(args, kwargs):
+            self.hits += 1
+            return self._out
+        with torch.no_grad():
+            out = self._wrapped[0](*args, **kwargs)
+        self._args = tuple(a.detach().clone() if torch.is_tensor(a) else a for a in args)
+        self._kwargs = dict(kwargs)
+        self._out = out
+        self.misses += 1
+        return out
+
+
+class dit_memo:
+    """Context manager: swap ``decoder.dit`` for a :class:`DiTForwardMemo`.
+
+    Usage::
+
+        with dit_memo(model.decoder) as memo:
+            _, out = model(batch_data)   # guided x_start inference
+        # memo.hits / memo.misses available after the block
+
+    Scoped install/restore mirrors the ``_guidance_fn`` swap pattern the
+    rollout helpers already use, so nothing outside the guided generation
+    ever sees the wrapper.
+    """
+
+    def __init__(self, decoder: torch.nn.Module):
+        self._decoder = decoder
+        self._orig = None
+        self.memo = None
+
+    def __enter__(self) -> DiTForwardMemo:
+        self._orig = self._decoder.dit
+        self.memo = DiTForwardMemo(self._orig)
+        self._decoder.dit = self.memo
+        return self.memo
+
+    def __exit__(self, exc_type, exc, tb):
+        self._decoder.dit = self._orig
+        return False
