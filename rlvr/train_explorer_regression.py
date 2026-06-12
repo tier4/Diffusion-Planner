@@ -38,18 +38,21 @@ from rlvr.autoresearch.tools.eval_det_avoidance import load_model
 
 HEAD_TO_LABEL_KEY = {"lateral": "eta_lat", "collision": "eta_col", "stretch": "stretch"}
 
+LAMBDA_SPD = 0.2  # stretch = 1 + LAMBDA_SPD * eta — must match the
+                  # inference envelope's lambda_spd (build_head_composer)
+
 
 def label_target(head: str, best: dict) -> float:
     """Map a sweep best-combo entry to the head's eta target in [-1, 1]."""
     key = HEAD_TO_LABEL_KEY[head]
     v = float(best[key])
     if head == "stretch":
-        # sweep records the stretch factor; policy eta is symmetric around 1.0
-        # via stretch = 1 + lambda_spd * eta (lambda_spd fixed downstream).
-        raise NotImplementedError(
-            "stretch head targets need the lambda_spd mapping — add when the "
-            "stretch axis joins the sweep grid."
-        )
+        # The sweep records the stretch FACTOR; the policy's eta is symmetric
+        # around 1.0 via stretch = 1 + lambda_spd * eta. With lambda_spd 0.2
+        # the grid value 0.8 maps to eta -1.0 (saturation); clamp anything
+        # beyond to the Beta support.
+        eta = (v - 1.0) / LAMBDA_SPD
+        return float(max(-1.0, min(1.0, eta)))
     return v
 
 
