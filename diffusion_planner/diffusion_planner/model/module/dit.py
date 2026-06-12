@@ -43,13 +43,19 @@ class DiTBlock(nn.Module):
         x = (
             x
             + gate_msa
-            * self.attn(modulated_x, modulated_x, modulated_x, key_padding_mask=attn_mask)[0]
+            * self.attn(
+                modulated_x,
+                modulated_x,
+                modulated_x,
+                key_padding_mask=attn_mask,
+                need_weights=False,
+            )[0]
         )
 
         modulated_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + gate_mlp * self.mlp1(modulated_x)
 
-        x = x + self.cross_attn(self.norm3(x), cross_c, cross_c)[0]
+        x = x + self.cross_attn(self.norm3(x), cross_c, cross_c, need_weights=False)[0]
         x = x + self.mlp2(self.norm4(x))
 
         return x
