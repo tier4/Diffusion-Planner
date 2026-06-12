@@ -25,10 +25,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-import rlvr.guidance_batched  # noqa: F401 -- registers batched guidance
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+
+import rlvr.guidance_batched  # noqa: F401 -- registers batched guidance
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
 from guidance_gui.generate_samples import generate_samples

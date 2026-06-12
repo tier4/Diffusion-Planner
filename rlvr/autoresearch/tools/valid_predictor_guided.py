@@ -22,14 +22,14 @@ import json
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, Subset
-from tqdm import tqdm
-
-import rlvr.guidance_batched  # noqa: F401
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
+from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
+
+import rlvr.guidance_batched  # noqa: F401
 from exploration_policy.utils import run_frozen_encoder
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model
 from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer

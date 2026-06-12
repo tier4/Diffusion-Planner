@@ -359,8 +359,9 @@ def test_multi_head_zero_init_inert():
 
 def test_loss_multi_head_dists():
     """compute_exploration_loss accepts a dists dict + action cost."""
-    from exploration_policy.loss import compute_exploration_loss
     from torch.distributions import Beta
+
+    from exploration_policy.loss import compute_exploration_loss
 
     dists = {
         "lateral": Beta(torch.tensor([2.0]), torch.tensor([1.5])),

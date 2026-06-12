@@ -36,10 +36,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-import rlvr.guidance_batched  # noqa: F401 -- registers batched guidance
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+
+import rlvr.guidance_batched  # noqa: F401 -- registers batched guidance
 from exploration_policy.utils import generate_reference_trajectory
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model

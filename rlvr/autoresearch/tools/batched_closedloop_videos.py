@@ -169,7 +169,9 @@ def _render_one(job):
     import matplotlib
     matplotlib.use("Agg")
     from rlvr.autoresearch.tools.ghost_sim_common import (
-        GhostSimConfig, extract_stopped_neighbors, run_ghost_sim,
+        GhostSimConfig,
+        extract_stopped_neighbors,
+        run_ghost_sim,
     )
     # Disambiguate same-basename scenes from different perturbation pools
     # (e.g. train_parallel/ and train_yaw/ both holding scene_0008_var02.npz).

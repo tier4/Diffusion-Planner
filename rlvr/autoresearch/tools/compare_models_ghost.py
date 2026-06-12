@@ -24,8 +24,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from preference_optimization.utils import load_npz_data
 
+from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.ghost_sim_common import (
     GhostSimConfig,
     extract_stopped_neighbors,

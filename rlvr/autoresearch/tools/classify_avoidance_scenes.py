@@ -35,35 +35,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
+from exploration_policy.utils import run_frozen_encoder
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import (
     det_inference_batched,
     load_model,
 )
 from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer
-
-
-@torch.no_grad()
-def scene_etas(model, model_args, policy, heads, npz_path, device):
-    """Deterministic per-head etas in [-1, 1] for one scene.
-
-    Returns (etas, det_traj, norm_data): the unguided deterministic
-    trajectory IS the policy's x_ref input — the etas are a judgment of
-    that specific baseline plan, not of the scene in isolation.
-    """
-    data = load_npz_data(npz_path, device)
-    norm_data = {
-        k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
-    }
-    norm_data = model_args.observation_normalizer(norm_data)
-    x_ref_np = generate_reference_trajectory(model, model_args, norm_data, device)
-    x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(device)
-    norm_data["reference_trajectory"] = x_ref
-    enc = run_frozen_encoder(model, norm_data)
-    out = policy(enc, x_ref, deterministic=True)
-    etas = {h: float(2.0 * out.dists[h].mean - 1.0) for h in heads}
-    return etas, x_ref_np, norm_data
 
 
 @torch.no_grad()
@@ -181,7 +159,10 @@ def main():
                              "+ collages")
     parser.add_argument("--ego_shape", default=None,
                         help="WB,L,W — required with --render_dir or "
-                             "--verify_clearance, no default")
+                             "--verify_clearance, no default. Used for the "
+                             "render footprint + clearance OBB, and as a "
+                             "FALLBACK for NPZs missing ego_shape (NPZs "
+                             "carrying their own keep it for model input)")
     parser.add_argument("--verify_clearance", type=float, default=0.0,
                         help="if > 0: cross-check flagged scenes with the "
                              "canonical det-plan OBB clearance vs stopped "

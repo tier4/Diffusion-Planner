@@ -13,7 +13,7 @@ one guided generation per batch of scenes.
 Usage:
     python -m rlvr.autoresearch.tools.eval_policy_l2 \
         --model_path <base.pth> --policy_dir <dir> --scenes <val.json> \
-        --ego_shape WB,L,W --output_dir <dir> \
+        --output_dir <dir> \
         [--lambda_lat 5.0] [--lat_scale 2.0] [--col_scale 9.0] \
         [--batch_size 32] [--limit 0]
 """
@@ -26,16 +26,16 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-import rlvr.guidance_batched  # noqa: F401
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+
+import rlvr.guidance_batched  # noqa: F401
 from exploration_policy.utils import run_frozen_encoder
+from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
 from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
 from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
-from preference_optimization.utils import load_npz_data
 
 
 def make_composer(etas, args):

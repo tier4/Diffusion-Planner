@@ -22,6 +22,7 @@ import subprocess
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import numpy as np
 import torch
@@ -31,16 +32,16 @@ from matplotlib.figure import Figure
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
 from rlvr.autoresearch.tools.ghost_sim_common import (
+    _NB_COLOR,
     extract_scene_polylines,
     extract_stopped_neighbors,
-    _NB_COLOR,
 )
 from rlvr.autoresearch.tools.recovery_sim import (
-    _draw_agent_box,
     _LANE_BORDER_COLOR,
     _LANE_COLOR,
     _ROAD_BORDER_COLOR,
     _ROUTE_COLOR,
+    _draw_agent_box,
 )
 
 BASELINE_COLOR = "#1f77b4"  # blue

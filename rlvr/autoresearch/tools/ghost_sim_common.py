@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import numpy as np
 import torch
@@ -19,20 +20,20 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
-from preference_optimization.lora_utils import load_lora_checkpoint
 
+from preference_optimization.lora_utils import load_lora_checkpoint
 from rlvr.autoresearch.tools.recovery_sim import (
+    _LANE_BORDER_COLOR,
+    _LANE_COLOR,
+    _ROAD_BORDER_COLOR,
+    _ROUTE_COLOR,
+    _VIEW_HALF_M,
     _build_segments,
     _draw_agent_box,
     _lane_polylines,
     _point_to_segments_dist,
     _road_border_polylines,
     _route_polylines,
-    _LANE_BORDER_COLOR,
-    _LANE_COLOR,
-    _ROAD_BORDER_COLOR,
-    _ROUTE_COLOR,
-    _VIEW_HALF_M,
     closed_loop_rollout_with_plans,
 )
 

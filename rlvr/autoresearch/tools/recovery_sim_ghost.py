@@ -36,10 +36,23 @@ import numpy as np
 import torch
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
+
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.ghost_sim_common import (
+    extract_stopped_neighbors,
+)
+from rlvr.autoresearch.tools.ghost_sim_common import (
+    load_model as _load_model,
+)
 
 # Reuse all the heavy lifting from recovery_sim
 from rlvr.autoresearch.tools.recovery_sim import (
+    _LANE_BORDER_COLOR,
+    _LANE_COLOR,
+    _ROAD_BORDER_COLOR,
+    _ROUTE_COLOR,
+    _VIEW_HALF_M,
+    _apply_perturbation,
     _build_segments,
     _draw_agent_box,
     _ego_obb_corners,
@@ -48,20 +61,9 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _point_to_segments_dist,
     _road_border_polylines,
     _route_polylines,
-    _apply_perturbation,
-    _LANE_BORDER_COLOR,
-    _LANE_COLOR,
-    _ROAD_BORDER_COLOR,
-    _ROUTE_COLOR,
-    _VIEW_HALF_M,
     closed_loop_rollout_with_plans,
 )
-from rlvr.autoresearch.tools.ghost_sim_common import (
-    extract_stopped_neighbors,
-    load_model as _load_model,
-)
 from rlvr.autoresearch.tools.recovery_test import get_tangent_at_origin
-
 
 _BASELINE_COLOR = "#1f77b4"   # blue
 _PRISM_COLOR    = "#d62728"   # red

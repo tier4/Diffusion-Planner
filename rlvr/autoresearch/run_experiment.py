@@ -553,11 +553,11 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             else:
                 from preference_optimization.lora_utils import (
                     LORA_TARGET_BLOCKS_01_REGEX,
+                    LORA_TARGET_BLOCKS_02_REGEX,
                     LORA_TARGET_FIRST_BLOCK_REGEX,
                     LORA_TARGET_LAST_BLOCK_REGEX,
                     apply_lora,
                 )
-                from preference_optimization.lora_utils import LORA_TARGET_BLOCKS_02_REGEX
                 target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX, "blocks02": LORA_TARGET_BLOCKS_02_REGEX}.get(grpo_config.lora_target)
                 kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
                              lora_dropout=grpo_config.lora_dropout)
@@ -737,7 +737,10 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                     if grpo_config.ranked_sft_use_explorer and grpo_config.exploration_checkpoint_path:
                         from pathlib import Path as _P
 
-                        from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
+                        from exploration_policy.model import (
+                            ExplorationPolicy,
+                            ExplorationPolicyConfig,
+                        )
                         _ckpt = _P(grpo_config.exploration_checkpoint_path)
                         if not _ckpt.exists():
                             print(f"  WARNING: exploration_checkpoint_path not found: {_ckpt}")
