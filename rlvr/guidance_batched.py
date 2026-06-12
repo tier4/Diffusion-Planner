@@ -494,6 +494,13 @@ class FastGuidanceComposer:
                     return False
             stretch = getattr(fn, "_stretch", None)
             if stretch is not None:
+                # Stock SpeedGuidance carries _v_low/_v_high and at
+                # stretch==1.0 runs in BAND mode (speed clamping — active
+                # regardless of stretch). Only the dedicated stretch-mode
+                # variants (no band attrs) are inert at 1.0.
+                if (getattr(fn, "_v_low", None) is not None
+                        or getattr(fn, "_v_high", None) is not None):
+                    return False
                 recognized = True
                 if isinstance(stretch, torch.Tensor):
                     if (stretch - 1.0).abs().max().item() > self._eta_eps:
@@ -501,9 +508,8 @@ class FastGuidanceComposer:
                 elif abs(float(stretch) - 1.0) > self._eta_eps:
                     return False
             if not recognized:
-                # A function exposing no known eta attribute (e.g. a stock
-                # speed band appended by a caller) must be treated as
-                # active — short-circuiting would silently drop it.
+                # A function exposing no known eta attribute must be treated
+                # as active — short-circuiting would silently drop it.
                 return False
         return True
 

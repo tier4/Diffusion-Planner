@@ -180,8 +180,8 @@ def test_fast_composer_inert_detection():
     comp = build_head_composer({"lateral": 0.0, "longitudinal": 0.0})
     assert comp._all_inert()
 
-    # a function exposing NO recognized eta attribute (e.g. a stock speed
-    # band appended by a caller) must force the composer active
+    # a function exposing NO recognized eta attribute must force the
+    # composer active
     comp = build_head_composer({"lateral": 0.0, "collision": 0.0})
     assert comp._all_inert()
 
@@ -189,4 +189,13 @@ def test_fast_composer_inert_detection():
         pass
 
     comp._functions.append(_NoEtaFn())
+    assert not comp._all_inert()
+
+    # a REAL stock SpeedGuidance band fn (stretch==1.0 but v_low/v_high
+    # clamping active — the --speed_floor pattern) must force active too
+    band = build(GuidanceConfig(name="speed", enabled=True, scale=1.0,
+                                params={"v_low": 2.0, "v_high": 14.0}))
+    assert getattr(band, "_stretch", None) == 1.0  # the trap: looks inert
+    comp = build_head_composer({"lateral": 0.0, "collision": 0.0})
+    comp._functions.append(band)
     assert not comp._all_inert()

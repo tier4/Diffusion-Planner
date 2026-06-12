@@ -340,6 +340,54 @@ Per-epoch L2-to-target distribution (+ per-arc) tracker for a HEAL/curated run, 
 ### build_baseline_det_target.py
 Build curated GRAFT-CL targets = a competent model's deterministic trajectory. Runs `--model`'s det inference (`eval_det_avoidance.det_inference_batched`) on a scene list, unit-normalizes the (cos,sin) heading columns, and writes the result into each NPZ's `ego_agent_future` (the curated SFT target) — for HEAL Mechanism B (train the wounded model toward a known-good line instead of ranking its own samples). `--model` is the TARGET source (e.g. the baseline that keeps the line where the grafted model drifted), NOT the model being trained; train curated (lr 5e-5) warm-started from the wounded model. Usage: `--model <competent.pth> --scenes <json> --ego_shape WB,L,W --out_dir <dir> --out_list <json>`.
 
+## Guidance-explorer tools
+
+Tools around the exploration policy (small Beta-head network that outputs
+per-scene guidance etas steering the FROZEN planner — see
+`docs/guidance_explorer_framework.md` for the training method). The training
+chain is `sweep_guidance_params` → `rederive_margin_labels` →
+`split_labels_holdout` → `rlvr.train_explorer_regression`; eval via
+`eval_policy_avoidance` (open-loop + inertness) and
+`batched_closedloop_videos` (lockstep closed-loop + renders).
+
+### classify_avoidance_scenes.py
+Use a trained explorer as an **avoidance-scene detector** over any NPZ scene
+list. Per scene it runs the frozen planner's deterministic inference (the
+policy's `x_ref` input), the frozen encoder, and the policy head
+(deterministic = Beta means), then flags the scene as avoidance when the
+requested guidance exceeds per-head thresholds — a weak signal below
+threshold is treated as not-really-avoidance.
+
+**Semantics caveat:** the etas judge *the baseline's plan*, not the scene in
+isolation. A scene whose obstacle the frozen planner already avoids unaided
+reads as "normal" (the policy's inertness contract) — usually what you want
+when mining training data, but not a "does this scene contain a parked car"
+detector. The signal is strongly bimodal (flagged scenes cluster at high
+|eta|, normals at ~0), so the threshold has wide margin; lower it to ~0.05
+to also catch borderline scenes, raise it for high-precision curation.
+
+```bash
+python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
+  --model_path <base.pth> --policy_dir <dir with exploration_policy.pth + config> \
+  --scenes <scenes.json> --out <report.json> \
+  [--lat_thresh 0.15] [--col_thresh 0.15] [--rule any|both] \
+  [--out_avoidance_list <a.json>] [--out_normal_list <n.json>] \
+  [--render_dir <dir>]
+```
+
+- `--model_path` must be the planner the policy was trained against (the
+  etas are conditional on that model's det trajectory).
+- Report JSON: per-scene etas + verdict + triggered head(s), plus summary
+  counts and |eta| distribution percentiles per head.
+- `--out_avoidance_list` / `--out_normal_list`: plain NPZ path lists,
+  directly usable as dataset lists.
+- `--render_dir`: per-scene verdict PNGs for human audit — det trajectory
+  (black) + stopped-neighbor OBBs (crimson) + the policy-guided trajectory
+  (green, dashed) on flagged scenes — and `collage_avoid.png` /
+  `collage_normal.png`. The guidance envelope flags (`--lambda_lat`,
+  `--lat_scale`, `--col_scale`, `--envelope`, ...) only affect these
+  renders and must match the policy's training envelope.
+
 ## Data preparation (NPZ format / mining)
 
 ### convert_3col_to_4col.py / convert_4col_to_3col.py

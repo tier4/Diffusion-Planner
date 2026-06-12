@@ -36,12 +36,17 @@ import torch
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model
-from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
+from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer
 
 
 @torch.no_grad()
-def scene_etas(model, model_args, policy, heads, npz_path, device) -> dict[str, float]:
-    """Deterministic per-head etas in [-1, 1] for one scene."""
+def scene_etas(model, model_args, policy, heads, npz_path, device):
+    """Deterministic per-head etas in [-1, 1] for one scene.
+
+    Returns (etas, det_traj, norm_data): the unguided deterministic
+    trajectory IS the policy's x_ref input — the etas are a judgment of
+    that specific baseline plan, not of the scene in isolation.
+    """
     data = load_npz_data(npz_path, device)
     norm_data = {
         k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
@@ -52,7 +57,52 @@ def scene_etas(model, model_args, policy, heads, npz_path, device) -> dict[str, 
     norm_data["reference_trajectory"] = x_ref
     enc = run_frozen_encoder(model, norm_data)
     out = policy(enc, x_ref, deterministic=True)
-    return {h: float(2.0 * out.dists[h].mean - 1.0) for h in heads}
+    etas = {h: float(2.0 * out.dists[h].mean - 1.0) for h in heads}
+    return etas, x_ref_np, norm_data
+
+
+@torch.no_grad()
+def render_verdict(model, model_args, scene_path, etas, det, norm_data,
+                   is_avoid, triggers, args, device, out_png):
+    """Scene render for human judgment: det trajectory + stopped-neighbor
+    OBBs + verdict; flagged scenes also show the policy-guided trajectory
+    (what the policy wants to do instead)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from guidance_gui.generate_samples import generate_samples
+    from rlvr.autoresearch.tools.ghost_sim_common import extract_stopped_neighbors
+    from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base
+    from scenario_generation.visualize import draw_agent_box
+
+    guided = None
+    if is_avoid:
+        eta_t = {h: torch.tensor([v], device=device) for h, v in etas.items()}
+        composer = make_composer(eta_t, args)
+        guided = generate_samples(model=model, model_args=model_args,
+                                  data=norm_data, noise_scale=0.0, n_samples=1,
+                                  composer=composer, device=device)[0]
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    draw_scene_base(ax, scene_path)
+    for (x, y, h, length, w) in extract_stopped_neighbors(scene_path):
+        draw_agent_box(ax, x, y, h, length, w, color="crimson", alpha=0.5)
+    ax.plot(det[:, 0], det[:, 1], "-", color="black", lw=2.2, label="baseline det")
+    if guided is not None:
+        ax.plot(guided[:, 0], guided[:, 1], "--", color="lime", lw=2.2,
+                label="policy-guided")
+    verdict = ("AVOIDANCE [" + "+".join(triggers) + "]") if is_avoid else "normal"
+    eta_str = " ".join(f"{h[:3]}={v:+.2f}" for h, v in etas.items())
+    ax.set_title(f"{Path(scene_path).stem}\n{verdict}  η: {eta_str}",
+                 color=("darkred" if is_avoid else "darkgreen"))
+    ax.legend(loc="upper right", fontsize=9)
+    ax.set_aspect("equal")
+    span = float(np.abs(det[..., :2]).max()) + 12
+    ax.set_xlim(-12, max(span, 40))
+    ax.set_ylim(-span / 2, span / 2)
+    fig.savefig(out_png, dpi=110, bbox_inches="tight")
+    plt.close(fig)
 
 
 def classify(etas: dict[str, float], lat_thresh: float, col_thresh: float,
@@ -108,6 +158,23 @@ def main():
                         help="optional JSON list of flagged NPZ paths")
     parser.add_argument("--out_normal_list", default=None,
                         help="optional JSON list of non-flagged NPZ paths")
+    parser.add_argument("--render_dir", default=None,
+                        help="render per-scene verdict PNGs (det trajectory + "
+                             "stopped neighbors; flagged scenes also show the "
+                             "policy-guided trajectory) + collages")
+    # Guidance envelope — only used for the guided trajectory in renders;
+    # must match what the policy was trained against.
+    parser.add_argument("--lambda_lat", type=float, default=5.0)
+    parser.add_argument("--lat_scale", type=float, default=2.0)
+    parser.add_argument("--col_scale", type=float, default=9.0)
+    parser.add_argument("--col_range", type=float, default=8.0)
+    parser.add_argument("--lambda_spd", type=float, default=0.2)
+    parser.add_argument("--stretch_scale", type=float, default=1.0)
+    parser.add_argument("--guidance_scale", type=float, default=0.5)
+    parser.add_argument("--head_protect", type=int, default=0)
+    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
+    parser.add_argument("--lambda_col", type=float, default=3.0)
+    parser.add_argument("--slow_composer", action="store_true")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -121,9 +188,14 @@ def main():
     with open(args.scenes) as f:
         paths = json.load(f)
 
+    render_dir = Path(args.render_dir) if args.render_dir else None
+    if render_dir:
+        render_dir.mkdir(parents=True, exist_ok=True)
+
     rows, per_head_abs = [], {h: [] for h in heads}
     for i, sp in enumerate(paths):
-        etas = scene_etas(model, model_args, policy, heads, sp, device)
+        etas, det, norm_data = scene_etas(
+            model, model_args, policy, heads, sp, device)
         is_avoid, triggers = classify(
             etas, args.lat_thresh, args.col_thresh, args.rule)
         rows.append({
@@ -134,6 +206,13 @@ def main():
         })
         for h, v in etas.items():
             per_head_abs[h].append(v)
+        if render_dir:
+            # pool-prefix the PNG name (same-basename scenes across pools)
+            png = render_dir / (
+                f"{'avoid' if is_avoid else 'normal'}__"
+                f"{Path(sp).parent.name}__{Path(sp).stem}.png")
+            render_verdict(model, model_args, sp, etas, det, norm_data,
+                           is_avoid, triggers, args, device, png)
         if (i + 1) % 50 == 0:
             print(f"  [classify] {i + 1}/{len(paths)}")
 
@@ -158,6 +237,14 @@ def main():
     if args.out_normal_list:
         with open(args.out_normal_list, "w") as f:
             json.dump([r["scene"] for r in rows if not r["avoidance"]], f, indent=1)
+
+    if render_dir:
+        from rlvr.autoresearch.tools.eval_policy_avoidance import make_collage
+        for cls in ("avoid", "normal"):
+            pngs = sorted(render_dir.glob(f"{cls}__*.png"))
+            make_collage(pngs, render_dir / f"collage_{cls}.png")
+        print(f"[render] {len(list(render_dir.glob('*__*.png')))} PNGs + "
+              f"collages -> {render_dir}")
 
     print(f"\n[classify] {len(rows)} scenes: {n_avoid} avoidance, "
           f"{len(rows) - n_avoid} normal "
