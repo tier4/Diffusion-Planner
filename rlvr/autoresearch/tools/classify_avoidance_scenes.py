@@ -88,6 +88,10 @@ def render_verdict(model, model_args, scene_path, etas, det, norm_data,
     draw_scene_base(ax, scene_path)
     for (x, y, h, length, w) in extract_stopped_neighbors(scene_path):
         draw_agent_box(ax, x, y, h, length, w, color="crimson", alpha=0.5)
+    # ego footprint at t0 (ego frame: rear axle at origin, heading 0)
+    wb, length, width = args.ego_shape_t
+    draw_agent_box(ax, 0.0, 0.0, 0.0, length, width, color="royalblue",
+                   alpha=0.35, wheelbase=wb)
     ax.plot(det[:, 0], det[:, 1], "-", color="black", lw=2.2, label="baseline det")
     if guided is not None:
         ax.plot(guided[:, 0], guided[:, 1], "--", color="lime", lw=2.2,
@@ -159,9 +163,13 @@ def main():
     parser.add_argument("--out_normal_list", default=None,
                         help="optional JSON list of non-flagged NPZ paths")
     parser.add_argument("--render_dir", default=None,
-                        help="render per-scene verdict PNGs (det trajectory + "
-                             "stopped neighbors; flagged scenes also show the "
-                             "policy-guided trajectory) + collages")
+                        help="render per-scene verdict PNGs (ego footprint + "
+                             "det trajectory + stopped neighbors; flagged "
+                             "scenes also show the policy-guided trajectory) "
+                             "+ collages")
+    parser.add_argument("--ego_shape", default=None,
+                        help="WB,L,W — required with --render_dir (ego "
+                             "footprint), no default")
     # Guidance envelope — only used for the guided trajectory in renders;
     # must match what the policy was trained against.
     parser.add_argument("--lambda_lat", type=float, default=5.0)
@@ -194,6 +202,10 @@ def main():
 
     render_dir = Path(args.render_dir) if args.render_dir else None
     if render_dir:
+        if not args.ego_shape:
+            raise ValueError("--render_dir requires --ego_shape WB,L,W "
+                             "(ego footprint) — no default")
+        args.ego_shape_t = tuple(float(x) for x in args.ego_shape.split(","))
         render_dir.mkdir(parents=True, exist_ok=True)
 
     rows, per_head_abs = [], {h: [] for h in heads}

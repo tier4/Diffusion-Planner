@@ -372,7 +372,7 @@ python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
   --scenes <scenes.json> --out <report.json> \
   [--lat_thresh 0.15] [--col_thresh 0.15] [--rule any|both] \
   [--out_avoidance_list <a.json>] [--out_normal_list <n.json>] \
-  [--render_dir <dir>]
+  [--render_dir <dir> --ego_shape WB,L,W]
 ```
 
 - `--model_path` must be the planner the policy was trained against (the
@@ -381,7 +381,8 @@ python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
   counts and |eta| distribution percentiles per head.
 - `--out_avoidance_list` / `--out_normal_list`: plain NPZ path lists,
   directly usable as dataset lists.
-- `--render_dir`: per-scene verdict PNGs for human audit — det trajectory
+- `--render_dir`: per-scene verdict PNGs for human audit — ego footprint at
+  t0 (blue, requires `--ego_shape WB,L,W`, no default) + det trajectory
   (black) + stopped-neighbor OBBs (crimson) + the policy-guided trajectory
   (green, dashed) on flagged scenes — and `collage_avoid.png` /
   `collage_normal.png`. The guidance envelope flags (`--lambda_lat`,

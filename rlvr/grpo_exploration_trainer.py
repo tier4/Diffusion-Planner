@@ -1,5 +1,11 @@
 """Joint GRPO + Exploration Policy trainer.
 
+DEPRECATED for guidance-explorer training: the canonical pipeline is
+supervised regression on sweep-derived robust labels
+(rlvr.train_explorer_regression) with optional closed-loop RL polish
+(rlvr.closed_loop.closed_loop_trainer.ClosedLoopExplorationTrainer).
+This open-loop group-GRPO trainer is kept for reproducing older runs only.
+
 Extends the standard GRPO training with a learned exploration policy that
 outputs (eta_lat, eta_lon) from Beta distributions. The policy and DiT
 planner are trained simultaneously:
@@ -424,8 +430,10 @@ class GRPOExplorationTrainer:
 
         all_metrics: dict[str, float] = {}
         num_groups = 0
-        per_scene_eta_lat: list[float] = []
-        per_scene_eta_lon: list[float] = []
+        per_scene_eta: dict[str, list[float]] = {h: [] for h in self.heads}
+        # random-guidance branch logs the legacy lateral/longitudinal pair
+        for _h in ("lateral", "longitudinal"):
+            per_scene_eta.setdefault(_h, [])
 
         if self.train_dit:
             self.policy_model.train()
@@ -604,8 +612,9 @@ class GRPOExplorationTrainer:
                 if not self.config.exploration_step_per_group:
                     n_policy_accum += 1
 
-                per_scene_eta_lat.append(dists[self.heads[0]].mean.mean().item() * 2 - 1)
-                per_scene_eta_lon.append(dists[self.heads[-1]].mean.mean().item() * 2 - 1)
+                for h in self.heads:
+                    per_scene_eta[h].append(
+                        dists[h].mean.mean().item() * 2 - 1)
             else:
                 # Random guidance: no policy to train, just track η stats
                 eta_lat_01 = group["eta_01"]["lateral"]
@@ -622,8 +631,8 @@ class GRPOExplorationTrainer:
                     "exploration_eta_lat_std": eta_lat_vals.std().item(),
                     "exploration_eta_lon_std": eta_lon_vals.std().item(),
                 }
-                per_scene_eta_lat.append(eta_lat_vals.mean().item())
-                per_scene_eta_lon.append(eta_lon_vals.mean().item())
+                per_scene_eta["lateral"].append(eta_lat_vals.mean().item())
+                per_scene_eta["longitudinal"].append(eta_lon_vals.mean().item())
 
             # Merge metrics
             for k, v in dit_metrics.items():
@@ -665,11 +674,13 @@ class GRPOExplorationTrainer:
             return _empty_metrics()
 
         result = {k: v / num_groups for k, v in all_metrics.items()}
-        # Add per-scene η variance (measures scene-dependence of policy output)
-        if per_scene_eta_lat:
-            import numpy as _np
-            result["exploration_eta_lat_scene_std"] = float(_np.std(per_scene_eta_lat))
-            result["exploration_eta_lon_scene_std"] = float(_np.std(per_scene_eta_lon))
+        # Add per-scene η variance (measures scene-dependence of policy
+        # output), keyed by the ACTUAL head name (previously heads[0]/[-1]
+        # were logged as lat/lon regardless of the head spec).
+        import numpy as _np
+        for h, vals in per_scene_eta.items():
+            if vals:
+                result[f"exploration_eta_{h}_scene_std"] = float(_np.std(vals))
         return result
 
     def train_epoch(
