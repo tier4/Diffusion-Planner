@@ -402,6 +402,13 @@ class ClosedLoopExplorationTrainer:
         self.exploration_policy.eval()
         self.policy_model.eval()
 
+        # Value-warmup epochs: freeze everything except the value head so
+        # critic gradients cannot drift the shared trunk (and thereby the
+        # actor outputs) before policy training starts.
+        in_warmup = epoch <= self.config.closed_loop_value_warmup_epochs
+        for name, p in self.exploration_policy.named_parameters():
+            p.requires_grad = (not in_warmup) or name.startswith("value_head")
+
         rollout_buffers: list[RolloutBuffer] = []
         total_steps = 0
         total_return = 0.0
@@ -502,7 +509,11 @@ class ClosedLoopExplorationTrainer:
 
                 if epoch <= self.config.closed_loop_value_warmup_epochs:
                     # Value-head warmup: no policy/entropy gradient until the
-                    # critic has seen real returns.
+                    # critic has seen real returns. NOTE: the value head
+                    # shares the trunk with the actor heads — value gradients
+                    # through the trunk DRIFT the actor indirectly (measured:
+                    # warmup ep3 checkpoint diverged from the warm-start).
+                    # The epoch loop freezes non-value params during warmup.
                     step_loss = self.config.closed_loop_value_coef * value_loss
                 else:
                     step_loss = (
