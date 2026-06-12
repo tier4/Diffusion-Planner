@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-import sys
+from pathlib import Path
 
 import pandas as pd
 import torch
@@ -11,6 +11,9 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation_bridge import (
+    StatePerturbation as BridgeStatePerturbation,
+)
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -33,11 +36,40 @@ def boolean(v):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
+def find_upward(start_file: str, target_name: str) -> Path:
+    directory = Path(start_file).resolve().parent
+    for candidate_dir in [directory, *directory.parents]:
+        candidate = candidate_dir / target_name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"{target_name} up {directory}")
+
+
+def log_dataset_artifact(run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str) -> None:
+    artifact = wandb.Artifact(
+        name=f"dataset_{exp_name}",
+        type="dataset",
+        metadata={"train_set_list": train_set_list, "valid_set_list": valid_set_list},
+    )
+    train_path = Path(train_set_list)
+    valid_path = Path(valid_set_list)
+    artifact.add_file(str(train_path), name=train_path.name)
+    artifact.add_file(str(valid_path), name=valid_path.name)
+    summary_csv = find_upward(train_set_list, "summary.csv")
+    artifact.add_file(str(summary_csv), name="summary.csv")
+    try:
+        rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
+        artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
+    except FileNotFoundError:
+        print("rosbag_summary.csv not found, skipping.")
+    run.use_artifact(artifact)
+
+
 def get_args():
     # Arguments
     parser = argparse.ArgumentParser(description="Training")
     parser.add_argument("--exp_name", type=str, required=True)
-    parser.add_argument("--save_dir", type=str, help="save dir for model ckpt", default=".")
+    parser.add_argument("--save_dir", type=str, help="save path for model ckpt", required=True)
 
     # Data
     parser.add_argument("--train_set_list", type=str, required=True)
@@ -68,8 +100,16 @@ def get_args():
     # DataLoader parameters
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, help="augmentation probability", default=0.5)
+    parser.add_argument(
+        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+    )
+    parser.add_argument(
+        "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
+    )
+    parser.add_argument("--ego_past_noise_std", type=float, default=0.1, help="std of noise applied to ego past trajectory during augmentation")
+    parser.add_argument("--use_smoothing_future_trajectory", default=True, type=boolean, help="whether to apply smoothing to future trajectory")
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
-    parser.add_argument("--num_workers", default=4, type=int)
+    parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
@@ -77,14 +117,14 @@ def get_args():
     # Training
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--train_epochs", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--save_utd", type=int, default=10)
-    parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--warm_up_epoch", type=int, default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
-    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.6)
+    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.4)
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
 
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
@@ -103,7 +143,7 @@ def get_args():
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
     parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
-    parser.add_argument("--neighbor_collision_margin", type=float, default=2.0)
+    parser.add_argument("--neighbor_collision_margin", type=float, default=0.25)
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
@@ -157,7 +197,7 @@ def get_args():
         choices=["x_start", "flow_matching"],
         default="x_start",
     )
-    parser.add_argument("--predicted_neighbor_num", type=int, default=32)
+    parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
 
@@ -196,16 +236,8 @@ def model_training(args):
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
 
-        if args.resume_model_path is not None:
-            save_path = os.path.dirname(args.resume_model_path)
-        else:
-            from datetime import datetime
-
-            time = datetime.now()
-            time = time.strftime("%Y%m%d-%H%M%S")
-
-            save_path = f"{args.save_dir}/{time}_{args.exp_name}/"
-            os.makedirs(save_path, exist_ok=True)
+        save_path = args.save_dir
+        os.makedirs(save_path, exist_ok=True)
 
         # Save args
         args_dict = vars(args)
@@ -230,11 +262,19 @@ def model_training(args):
     save_utd = args.save_utd
 
     # set up data loaders
-    aug = (
-        StatePerturbation(augment_prob=args.augment_prob, device=args.device)
-        if args.use_data_augment
-        else None
-    )
+    if args.use_data_augment:
+        if args.augment_type == "bridge":
+            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        else:
+            aug = StatePerturbation(
+                augment_prob=args.augment_prob,
+                num_refine=args.num_refine,
+                device=args.device,
+                ego_past_noise_std=args.ego_past_noise_std,
+                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
+            )
+    else:
+        aug = None
 
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
@@ -257,7 +297,7 @@ def model_training(args):
     if global_rank == 0:
         valid_loader = DataLoader(
             valid_set,
-            batch_size=batch_size // 2,
+            batch_size=batch_size // 4,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
@@ -332,6 +372,7 @@ def model_training(args):
             dir=f"{save_path}",
         )
         wandb.config.update(args)
+        log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
 
     if args.ddp:
         torch.distributed.barrier()

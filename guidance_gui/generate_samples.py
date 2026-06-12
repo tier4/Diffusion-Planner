@@ -10,7 +10,6 @@ pairing, threshold, and pruning logic that is irrelevant here.
 
 import numpy as np
 import torch
-
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 
 
@@ -53,29 +52,21 @@ def generate_samples(
     else:
         model.decoder._guidance_scale = 0.5
 
+    # Function-scope import (not module-top): rlvr.closed_loop.batched_rollout
+    # pulls in modules that import back here, so a top-level import would create
+    # an import cycle. Imported once per call here (not per loop iteration).
+    from rlvr.closed_loop.batched_rollout import make_initial_latent
+
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
 
-    # Precompute current-state tensor used as the pinned first element of xT.
-    ego_current = data["ego_current_state"][:, :4]                         # [B, 4]
-    neighbors_current = data["neighbor_agents_past"][:, :P - 1, -1, :4]   # [B, P-1, 4]
-    current_states = torch.cat(
-        [ego_current[:, None], neighbors_current], dim=1
-    )  # [B, P, 4]
-
     results = []
     try:
         for _ in range(n_samples):
-            # Build noisy initial latent xT.
-            xT = current_states[:, :, None, :].expand(-1, -1, future_len + 1, -1).clone()
-            if noise_scale > 0.0:
-                xT[:, :, 1:, :] = noise_scale * torch.randn(
-                    B, P, future_len, 4, device=device
-                )
-            # data["sampled_trajectories"] shape expected by decoder: (B, P, (T+1)*4) or (B, P, T+1, 4)
-            # Existing working code in generate_trajectory_pair passes (B, P, T+1, 4) directly.
-            data["sampled_trajectories"] = xT
+            data["sampled_trajectories"] = make_initial_latent(
+                B, P, future_len, device, noise_scale,
+            )
 
             _, decoder_output = model(data)
             ego_trajectory = decoder_output["prediction"][0, 0].cpu().numpy()  # (OUTPUT_T, 4)

@@ -24,6 +24,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ego_wheel_base", type=float, default=2.75)
     parser.add_argument("--ego_length", type=float, default=4.34)
     parser.add_argument("--ego_width", type=float, default=1.70)
+    parser.add_argument("--static_object_margin", type=float, default=0.0)
+    parser.add_argument("--neighbor_margin", type=float, default=0.0)
+    parser.add_argument("--road_border_margin", type=float, default=0.0)
+    parser.add_argument("--collision_time_stride", type=int, default=5)
+    parser.add_argument("--offlane_max_score", type=float, default=6.0)
+    parser.add_argument("--offlane_time_stride", type=int, default=1)
+    parser.add_argument("--write_skipped_npz", type=int, default=0)
     return parser.parse_args()
 
 
@@ -43,6 +50,13 @@ def main(
     ego_wheel_base: float,
     ego_length: float,
     ego_width: float,
+    static_object_margin: float,
+    neighbor_margin: float,
+    road_border_margin: float,
+    collision_time_stride: int,
+    offlane_max_score: float,
+    offlane_time_stride: int,
+    write_skipped_npz: int,
 ):
     # C++バイナリでrosbagを処理
     print("Running C++ binary to process rosbag...")
@@ -62,6 +76,13 @@ def main(
         f"--ego_wheel_base={ego_wheel_base}",
         f"--ego_length={ego_length}",
         f"--ego_width={ego_width}",
+        f"--static_object_margin={static_object_margin}",
+        f"--neighbor_margin={neighbor_margin}",
+        f"--road_border_margin={road_border_margin}",
+        f"--collision_time_stride={collision_time_stride}",
+        f"--offlane_max_score={offlane_max_score}",
+        f"--offlane_time_stride={offlane_time_stride}",
+        f"--write_skipped_npz={write_skipped_npz}",
     ]
     print(" ".join(command))
     result = subprocess.run(

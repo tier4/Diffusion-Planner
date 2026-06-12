@@ -8,23 +8,29 @@ from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetC
 from diffusion_planner.train_epoch import heading_to_cos_sin
 
 
-def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch.Tensor]:
+def load_npz_data(
+    npz_path: str | Path,
+    device: torch.device,
+    ego_shape_override: tuple[float, ...] | None = None,
+) -> dict[str, torch.Tensor]:
     """Load NPZ file into tensors on the specified device.
 
     Args:
-        npz_path: Path to the NPZ file
-        device: Device to load tensors onto
+        npz_path: Path to the NPZ file.
+        device: Device to load tensors onto.
+        ego_shape_override: If provided and the NPZ lacks ego_shape,
+            use this (wheelbase, length, width) instead of crashing.
 
     Returns:
-        Dictionary of tensors with observation data
+        Dictionary of tensors with observation data.
     """
-    loaded = np.load(str(npz_path))
-    data: dict[str, torch.Tensor] = {}
+    with np.load(str(npz_path)) as loaded:
+        data: dict[str, torch.Tensor] = {}
 
-    for key, value in loaded.items():
-        if key in {"map_name", "token", "delay"}:
-            continue
-        data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
+        for key, value in loaded.items():
+            if key in {"map_name", "token", "delay"}:
+                continue
+            data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
 
     if "goal_pose" in data:
         data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
@@ -32,12 +38,15 @@ def load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch
         data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
 
     if "ego_shape" not in data:
-        wheel_base = 2.79
-        ego_length = 4.34
-        ego_width = 1.70
-        data["ego_shape"] = torch.tensor(
-            [[wheel_base, ego_length, ego_width]], dtype=torch.float32, device=device
-        )
+        if ego_shape_override is not None:
+            data["ego_shape"] = torch.tensor(
+                [list(ego_shape_override)], dtype=torch.float32, device=device,
+            )
+        else:
+            raise ValueError(
+                f"load_npz_data: '{npz_path}' is missing 'ego_shape' "
+                "(wheel_base, length, width)."
+            )
 
     # v4 decoder requires delay (always 0 at inference, training uses random delay)
     if "delay" not in data:

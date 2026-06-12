@@ -23,11 +23,21 @@ class BaseConstraint(ABC):
         """
 
     @abstractmethod
-    def filter(self, npz_path: str, npz_data: np.lib.npyio.NpzFile, params: dict) -> bool:
+    def filter(
+        self,
+        npz_path: str,
+        npz_data: np.lib.npyio.NpzFile,
+        params: dict,
+        entry: dict | None = None,
+    ) -> bool:
         """Return True if the scene passes this constraint.
 
         Args:
             npz_path: Path to the NPZ file.
             npz_data: Loaded NPZ data (numpy NpzFile).
             params: Dict of parameter values from UI.
+            entry: Optional index entry dict (carries precomputed fields like
+                replay ``metrics``). NPZ-only constraints can ignore it;
+                metric constraints read fields from here instead of
+                re-deriving them from the NPZ.
         """

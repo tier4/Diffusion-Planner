@@ -236,7 +236,7 @@ def process_single_file(input_file: Path, output_dir: Path) -> None:
         output_file = output_dir / f"{token}.npz"
 
         # npz形式で保存
-        np.savez(str(output_file), **data)
+        np.savez_compressed(str(output_file), **data)
 
         # 元のバイナリファイルを削除
         input_file.unlink()

@@ -90,8 +90,9 @@ def draw_ego_vehicle(ax, inputs):
     ego_heading = np.arctan2(ego_state[3], ego_state[2])
 
     # Ego vehicle's length and width
-    car_length = 4.5
-    car_width = 2.0
+    shape = np.asarray(inputs["ego_shape"]).reshape(-1)
+    car_length = float(shape[1])
+    car_width = float(shape[2])
     dx = car_length / 2 * np.cos(ego_heading)
     dy = car_length / 2 * np.sin(ego_heading)
 
@@ -441,6 +442,8 @@ def visualize_inputs(
     save_path: Path | None = None,
     ax: None = None,
     view_ranges: list = None,
+    annotation: str | None = None,
+    annotation_color: str = "red",
 ):
     """
     Draw the input data of the diffusion_planner model on the xy plane.
@@ -450,6 +453,10 @@ def visualize_inputs(
         save_path: Path to save the visualization
         ax: Matplotlib axis (for single plot compatibility)
         view_ranges: List of view ranges in meters [60, 120] for multi-range visualization
+        annotation: Optional banner drawn at the top of the figure. Drawn with a fixed
+            size/position so the figure height stays constant across frames (e.g. the
+            reason a frame would be dropped, or a faint "OK" for kept frames).
+        annotation_color: Colour of the annotation banner.
 
     Returns:
         For single range: ax
@@ -505,6 +512,9 @@ def visualize_inputs(
 
         # Add title to distinguish different ranges
         current_ax.set_title(f"View Range: {view_range}m")
+
+    if annotation is not None:
+        fig.suptitle(annotation, color=annotation_color, fontsize=12, fontweight="bold")
 
     if save_path is not None:
         plt.tight_layout()

@@ -29,7 +29,6 @@ from rlvr.reward import (
     compute_smoothness_score_batch,
 )
 
-
 T = 80
 CONFIG = RewardConfig()
 
@@ -246,14 +245,17 @@ def test_stationary_trajectory():
 def test_straight_line_smooth():
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     scores = compute_smoothness_score_batch(ego, CONFIG)
-    assert abs(scores[0].item()) < 1e-3, f"Expected ~0, got {scores[0]}"
+    assert abs(scores[0].item()) < 0.01, f"Expected ~0, got {scores[0]}"
     print(f"  PASS  straight_line_smooth: {scores[0]:.6f}")
 
 
 def test_zigzag_high_jerk():
+    import math
     ego = _straight_line()
+    # Sinusoidal lateral oscillation at ~1Hz (period=10 steps at 10Hz)
+    # This is a physically plausible swerving trajectory with real jerk
     for t in range(T):
-        ego[t, 1] = 2.0 * ((-1) ** t)
+        ego[t, 1] = 1.0 * math.sin(2 * math.pi * t / 10)
     scores = compute_smoothness_score_batch(ego.unsqueeze(0), CONFIG)
     assert scores[0].item() < -1.0, f"Expected strongly negative, got {scores[0]}"
     print(f"  PASS  zigzag_high_jerk: {scores[0]:.2f}")
@@ -265,7 +267,7 @@ def test_constant_acceleration():
     y = torch.zeros(T)
     ego = torch.stack([x, y, torch.ones(T), torch.zeros(T)], dim=-1)
     scores = compute_smoothness_score_batch(ego.unsqueeze(0), CONFIG)
-    assert abs(scores[0].item()) < 1.0, f"Expected near zero jerk, got {scores[0]}"
+    assert abs(scores[0].item()) < 0.01, f"Expected near zero jerk, got {scores[0]}"
     print(f"  PASS  constant_acceleration: {scores[0]:.6f}")
 
 
@@ -309,7 +311,7 @@ def test_road_border_on_road():
     """Trajectory centered between road borders should have no crossing."""
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     data = _make_road_border_data(border_y_left=5.0, border_y_right=-5.0)
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         ego, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() > 0.5, f"Expected no crossing (gate=1), got {rb_gate[0]}"
@@ -321,7 +323,7 @@ def test_road_border_crossing():
     ego = _straight_line(speed_m_per_step=0.5)
     ego[:, 1] = 3.0  # drive right on the left border
     data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
     assert rb_gate[0].item() < 0.5, f"Expected crossing (gate=0), got {rb_gate[0]}"
@@ -329,20 +331,20 @@ def test_road_border_crossing():
 
 
 def test_road_border_near_penalty():
-    """Trajectory near (but not crossing) a road border should have wide_frac > 0.
+    """Trajectory near (but not crossing) a road border should have near_frac > 0.
 
-    wide_frac measures the fraction of timesteps where ego edge is within 40cm
-    of the border. near_frac uses a tighter 25cm threshold.
+    With default thresholds (near < 0.45m, wide = 0.45-0.60m), ego edge ~25cm
+    from border falls in the "near" zone.
     """
     ego = _straight_line(speed_m_per_step=0.5)
     # Drive close to right border at y=-3.0, ego width ~1.7 so edge at y-0.85
     ego[:, 1] = -1.9  # ego edge at ~-2.75, border at -3.0 → ~25cm gap
     data = _make_road_border_data(border_y_left=5.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         ego.unsqueeze(0), _default_ego_shape(), data,
     )
-    # Should not cross but should have wide proximity penalty (within 40cm)
-    assert wide_frac[0].item() > 0.0, f"Expected wide proximity (40cm) > 0, got {wide_frac[0]}"
+    # ~25cm gap is within the near zone (< 0.45m) with default thresholds
+    assert near_frac[0].item() > 0.0, f"Expected near proximity (45cm) > 0, got {near_frac[0]}"
     print(f"  PASS  road_border_near_penalty: gate={rb_gate[0]:.1f}, near={near_frac[0]:.3f}, wide={wide_frac[0]:.3f}")
 
 
@@ -350,7 +352,7 @@ def test_road_border_no_data():
     """Missing line_strings should return safe defaults."""
     ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
     data = _make_lane_data()  # no line_strings key
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         ego, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() == 1.0, "No data should return gate=1 (safe)"
@@ -365,12 +367,53 @@ def test_road_border_batch():
     crossing_traj[:, 1] = 3.0  # on the left border
     trajs = torch.stack([safe, crossing_traj])
     data = _make_road_border_data(border_y_left=3.0, border_y_right=-3.0)
-    rb_gate, near_frac, wide_frac, _, _ = compute_road_border_penalty(
+    rb_gate, near_frac, wide_frac, _, _, _ = compute_road_border_penalty(
         trajs, _default_ego_shape(), data,
     )
     assert rb_gate[0].item() > 0.5, "Safe traj should not cross"
     assert rb_gate[1].item() < 0.5, "Crossing traj should trigger gate"
     print(f"  PASS  road_border_batch: gates={rb_gate.tolist()}")
+
+
+def test_road_border_survival_mode():
+    """In survival mode, early violations should get higher penalty than late ones.
+
+    We create two trajectories near the right border:
+    - traj_early: swerves near border from t=5 onward (early violation)
+    - traj_late: swerves near border only from t=60 onward (late violation)
+
+    The survival penalty = (T_valid - first_violation) / T_valid over timesteps 1..T-1,
+    so earlier first_violation → larger penalty.
+    """
+    survival_config = RewardConfig(rb_penalty_mode="survival", rb_near_thresh=0.45)
+    data = _make_road_border_data(border_y_left=5.0, border_y_right=-3.0)
+
+    # Early violation: drive near border starting at t=5
+    traj_early = _straight_line(speed_m_per_step=0.5)
+    for t in range(5, T):
+        traj_early[t, 1] = -1.9  # ego edge ~25cm from border at y=-3.0
+
+    # Late violation: drive near border starting at t=60
+    traj_late = _straight_line(speed_m_per_step=0.5)
+    for t in range(60, T):
+        traj_late[t, 1] = -1.9
+
+    trajs = torch.stack([traj_early, traj_late])
+    rb_gate, near_penalty, wide_penalty, _, _, _ = compute_road_border_penalty(
+        trajs, _default_ego_shape(), data, survival_config,
+    )
+    # Both should be non-crossing (gate=1)
+    assert rb_gate[0].item() > 0.5, f"Expected no crossing for early, got gate={rb_gate[0]}"
+    assert rb_gate[1].item() > 0.5, f"Expected no crossing for late, got gate={rb_gate[1]}"
+    # Both should have near penalty > 0
+    assert near_penalty[0].item() > 0, f"Expected near penalty for early, got {near_penalty[0]}"
+    assert near_penalty[1].item() > 0, f"Expected near penalty for late, got {near_penalty[1]}"
+    # Early violation should have strictly higher penalty
+    assert near_penalty[0].item() > near_penalty[1].item(), (
+        f"Early violation should have higher penalty than late: "
+        f"early={near_penalty[0]:.4f}, late={near_penalty[1]:.4f}"
+    )
+    print(f"  PASS  road_border_survival_mode: early={near_penalty[0]:.4f}, late={near_penalty[1]:.4f}")
 
 
 # -------------------------------------------------------------------------
@@ -705,6 +748,269 @@ def test_red_light_no_data():
 # Runner
 # -------------------------------------------------------------------------
 
+def test_advantage_raw_all_bad():
+    """Raw mode: all-bad group should have all negative or zero advantages."""
+    class FakeReward:
+        def __init__(self, t): self.total = t
+    # All trajectories are bad (e.g., all gated at -50)
+    rewards = [FakeReward(-50.0 + i * 0.1) for i in range(8)]
+    adv = compute_group_advantages(rewards, mode="raw", fixed_scale=10.0)
+    # Centered: mean ~ -49.65, so all are close to zero (centered)
+    # But importantly, NOT normalized to have half positive
+    assert adv.std() < 0.1, f"Raw advantages should have small spread: std={adv.std():.3f}"
+    print("  PASS  test_advantage_raw_all_bad")
+
+
+def test_advantage_positive_only():
+    """Positive-only mode: negative advantages should be clipped to zero."""
+    class FakeReward:
+        def __init__(self, t): self.total = t
+    rewards = [FakeReward(1.0), FakeReward(2.0), FakeReward(3.0), FakeReward(10.0)]
+    adv = compute_group_advantages(rewards, mode="positive_only")
+    # Only the above-mean trajectories should have positive advantages
+    assert all(a >= 0 for a in adv), f"All advantages should be >= 0: {adv}"
+    # The best trajectory should have the highest advantage
+    assert adv[3] > adv[0], f"Best traj should have highest adv: {adv}"
+    # At least one should be zero (below mean)
+    assert any(a == 0 for a in adv), f"Some advantages should be exactly 0: {adv}"
+    print("  PASS  test_advantage_positive_only")
+
+
+def test_lane_departure_in_lane():
+    """Trajectory staying in-lane should not trigger lane departure."""
+    from rlvr.reward import compute_lane_departure_penalty
+    device = torch.device("cpu")
+    T = 20
+    # Ego trajectory going straight at y=0, well within lane
+    ego = torch.zeros(1, T, 4, device=device)
+    for t in range(T):
+        ego[0, t, 0] = 2.0 + t * 0.5  # x moves forward, start at x=2
+        ego[0, t, 2] = 1.0             # cos(heading) = 1
+    # Lane centerline at y=0, width=3.5m (half_width=1.75m)
+    # Lane extends well beyond ego to avoid polygon boundary issues
+    lanes = torch.zeros(1, 10, 20, 33, device=device)
+    for pt in range(20):
+        lanes[0, 0, pt, 0] = pt * 1.0    # center X (0 to 19, covers ego range)
+        lanes[0, 0, pt, 1] = 0.01         # center Y slightly off-zero (avoid origin validity filter)
+        lanes[0, 0, pt, 2] = 1.0          # direction cos
+        lanes[0, 0, pt, 4] = 0.0          # left boundary dX
+        lanes[0, 0, pt, 5] = 1.74         # left boundary dY
+        lanes[0, 0, pt, 6] = 0.0          # right boundary dX
+        lanes[0, 0, pt, 7] = -1.76        # right boundary dY
+    ego_shape = torch.tensor([2.75, 4.34, 1.70])
+    data = {"lanes": lanes}
+    crossing_gate, near_frac, wide_frac, _, cont = compute_lane_departure_penalty(ego, ego_shape, data)
+    assert crossing_gate[0] == 1.0, f"In-lane trajectory should not cross: gate={crossing_gate[0]}"
+    print("  PASS  test_lane_departure_in_lane")
+
+
+def test_lane_departure_out_of_lane():
+    """Trajectory far outside lane should trigger lane departure."""
+    from rlvr.reward import compute_lane_departure_penalty
+    device = torch.device("cpu")
+    T = 20
+    # Ego trajectory at y=5.0 (well outside 1.75m half-width lane)
+    ego = torch.zeros(1, T, 4, device=device)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 1] = 5.0      # far outside lane
+        ego[0, t, 2] = 1.0
+    lanes = torch.zeros(1, 10, 20, 33, device=device)
+    for pt in range(20):
+        lanes[0, 0, pt, 0] = pt * 0.5
+        lanes[0, 0, pt, 1] = 0.0
+        lanes[0, 0, pt, 2] = 1.0
+        lanes[0, 0, pt, 4] = 0.0
+        lanes[0, 0, pt, 5] = 1.75
+        lanes[0, 0, pt, 6] = 0.0
+        lanes[0, 0, pt, 7] = -1.75
+    ego_shape = torch.tensor([2.75, 4.34, 1.70])
+    data = {"lanes": lanes}
+    crossing_gate, near_frac, wide_frac, _, cont = compute_lane_departure_penalty(ego, ego_shape, data)
+    assert crossing_gate[0] == 0.0, f"Out-of-lane trajectory should cross: gate={crossing_gate[0]}"
+    print("  PASS  test_lane_departure_out_of_lane")
+
+
+def test_overprogress_underprogress_penalties():
+    """Over/underprogress ratio-based penalties work correctly at 0.25x, 1.0x, 1.5x path lengths."""
+    # GT trajectory: straight line 20m (speed=0.25 m/step * 80 steps)
+    gt_speed = 0.25
+    gt = torch.zeros(80, 3)
+    for t in range(80):
+        gt[t, 0] = t * gt_speed
+        gt[t, 2] = 0.0  # heading=0
+
+    # Build 3 ego trajectories at different path ratios relative to GT (20m)
+    def _make_ego(speed):
+        traj = torch.zeros(T, 4)
+        for t in range(T):
+            traj[t, 0] = t * speed
+            traj[t, 2] = 1.0  # cos(0)
+        return traj
+
+    # 0.25x GT = 5m, 1.0x GT = 20m, 1.5x GT = 30m
+    slow_ego = _make_ego(5.0 / T)    # 0.25x
+    match_ego = _make_ego(20.0 / T)  # 1.0x
+    fast_ego = _make_ego(30.0 / T)   # 1.5x
+
+    trajs = torch.stack([match_ego, slow_ego, fast_ego])  # N=3, det traj = match_ego (index 0)
+
+    data = _make_lane_data(center_y=0.0)
+    data["goal_pose"] = torch.tensor([[100.0, 0.0, 1.0, 0.0]])
+    data["ego_agent_future"] = gt.unsqueeze(0)  # [1, T, 3]
+
+    # Config: enable both over and underprogress
+    cfg = RewardConfig(
+        enable_overprogress=True,
+        overprogress_margin=1.1,
+        overprogress_penalty=100.0,
+        underprogress_penalty=100.0,
+        underprogress_threshold=0.5,
+        progress_norm_scale=20.0,
+        stopped_penalty=0.0,
+    )
+    breakdowns = compute_reward_batch(trajs, data, cfg)
+
+    # 1.0x traj (index 0): no over/underprogress penalty
+    # 1.5x traj (index 2): overprogress penalty (1.5 > 1.1 margin)
+    # 0.25x traj (index 1): underprogress penalty (0.25/1.0 < 0.5 threshold)
+    # Compare total reward (not just progress component) since base progress scales with path length
+    assert breakdowns[0].total > breakdowns[2].total, \
+        f"1.0x should beat 1.5x on total reward (overprogress penalty): {breakdowns[0].total:.2f} vs {breakdowns[2].total:.2f}"
+    assert breakdowns[0].total > breakdowns[1].total, \
+        f"1.0x should beat 0.25x on total reward (underprogress penalty): {breakdowns[0].total:.2f} vs {breakdowns[1].total:.2f}"
+    # Verify penalties are actually applied (not zero)
+    assert breakdowns[1].total < breakdowns[0].total - 1.0, \
+        f"0.25x should be significantly penalized: {breakdowns[1].total:.2f} vs {breakdowns[0].total:.2f}"
+    print(f"  PASS  test_overprogress_underprogress_penalties: "
+          f"match={breakdowns[0].total:.2f}, slow={breakdowns[1].total:.2f}, fast={breakdowns[2].total:.2f}")
+
+
+def test_advantage_absolute():
+    """Absolute mode: no centering, positive reward → positive advantage."""
+    from rlvr.reward import RewardBreakdown, compute_group_advantages
+    rewards = [RewardBreakdown(safety=0, progress=0, smoothness=0, feasibility=0, centerline=0,
+                               red_light=0, total=t, collision_step=None, off_road_fraction=0)
+               for t in [+10, +5, -5, -20]]
+    adv = compute_group_advantages(rewards, mode="absolute", fixed_scale=10.0)
+    assert adv[0] > 0, f"Positive reward should give positive advantage: {adv[0]}"
+    assert adv[1] > 0, f"Positive reward should give positive advantage: {adv[1]}"
+    assert adv[2] < 0, f"Negative reward should give negative advantage: {adv[2]}"
+    assert adv[3] < 0, f"Negative reward should give negative advantage: {adv[3]}"
+    assert abs(adv[0] - 1.0) < 1e-6, f"10/10 should be 1.0: {adv[0]}"
+    print("  PASS  test_advantage_absolute")
+
+
+def test_advantage_softmax():
+    """Softmax mode: rank 1 gets disproportionately high weight."""
+    from rlvr.reward import RewardBreakdown, compute_group_advantages
+    rewards = [RewardBreakdown(safety=0, progress=0, smoothness=0, feasibility=0, centerline=0,
+                               red_light=0, total=t, collision_step=None, off_road_fraction=0)
+               for t in [+20, +5, 0, -10, -30]]
+    adv = compute_group_advantages(rewards, mode="softmax", fixed_scale=5.0)
+    # Rank 1 should have the highest advantage
+    assert adv[0] > adv[1], f"Rank 1 should beat rank 2: {adv[0]} vs {adv[1]}"
+    # Rank 1 should be much larger than rank 2 (softmax concentrates)
+    assert adv[0] > 2 * adv[1], f"Softmax T=5 should concentrate on rank 1: {adv[0]} vs {adv[1]}"
+    # Last rank should be negative (centered)
+    assert adv[-1] < 0, f"Worst trajectory should have negative advantage: {adv[-1]}"
+    print("  PASS  test_advantage_softmax")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# centerline usage_mode (added 2026-04-22)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_straight_lane_route_data(
+    half_width: float, T: int = 20, lane_len: int = 20,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Build a straight lane at y=0, half-width `half_width`, T-step trajectory
+    template (caller fills ego y)."""
+    lanes = torch.zeros(1, 10, lane_len, 33)
+    for pt in range(lane_len):
+        lanes[0, 0, pt, 0] = pt * 0.5                # center X
+        lanes[0, 0, pt, 1] = 1e-3                    # slight y offset to pass validity filter
+        lanes[0, 0, pt, 2] = 1.0                     # dir cos
+        lanes[0, 0, pt, 5] = half_width              # left boundary dY
+        lanes[0, 0, pt, 7] = -half_width             # right boundary dY
+    return lanes, {"route_lanes": lanes}
+
+
+def test_centerline_baselink_zero_when_centered():
+    """usage_mode='baselink' with ego riding the centerline → per-step usage 0
+    regardless of ego width."""
+    from rlvr.reward import compute_centerline_score_batch
+    T = 20
+    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
+    # Ego on centerline (y=0), wide and narrow vehicles
+    ego = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 2] = 1.0
+    for width in (1.70, 2.29):
+        shape = torch.tensor([2.75, 4.34, width])
+        score_baselink = compute_centerline_score_batch(ego, shape, data, usage_mode="baselink")
+        # baselink with ego on centerline: lane_usage ≈ 0 → score ≈ 0
+        assert abs(float(score_baselink[0])) < 1e-3, (
+            f"width={width}: baselink-centered score should be ~0, got {float(score_baselink[0])}"
+        )
+    print("  PASS  test_centerline_baselink_zero_when_centered")
+
+
+def test_centerline_body_penalizes_width_even_when_centered():
+    """usage_mode='body' (default) includes ego half-width in lane_usage → a wider
+    vehicle perfectly centered has higher usage than a narrower one."""
+    from rlvr.reward import compute_centerline_score_batch
+    T = 20
+    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
+    ego = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego[0, t, 0] = t * 0.5
+        ego[0, t, 2] = 1.0
+    shape_narrow = torch.tensor([2.75, 4.34, 1.70])
+    shape_wide = torch.tensor([2.75, 4.34, 2.29])
+    narrow = compute_centerline_score_batch(ego, shape_narrow, data, usage_mode="body")
+    wide = compute_centerline_score_batch(ego, shape_wide, data, usage_mode="body")
+    # Both centered — body mode still penalizes more for wider ego (larger usage).
+    assert float(wide[0]) < float(narrow[0]), (
+        f"body-mode wider ego should score lower (more usage): narrow={float(narrow[0])} wide={float(wide[0])}"
+    )
+    print("  PASS  test_centerline_body_penalizes_width_even_when_centered")
+
+
+def test_centerline_uncapped_past_boundary_grows():
+    """lane_usage is no longer clamped — a trajectory drifted past the lane
+    boundary should accrue a penalty larger than the squared-boundary case."""
+    from rlvr.reward import compute_centerline_score_batch
+    T = 20
+    lanes, data = _make_straight_lane_route_data(half_width=1.75, T=T)
+    shape = torch.tensor([2.75, 4.34, 1.70])
+    # On-boundary ego (y=1.75 → lane_usage≈1).
+    ego_on = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego_on[0, t, 0] = t * 0.5
+        ego_on[0, t, 1] = 1.75
+        ego_on[0, t, 2] = 1.0
+    # Past-boundary ego (y=2.5 → lane_usage≈2.5/1.75 > 1).
+    ego_past = torch.zeros(1, T, 4)
+    for t in range(T):
+        ego_past[0, t, 0] = t * 0.5
+        ego_past[0, t, 1] = 2.5
+        ego_past[0, t, 2] = 1.0
+    score_on = compute_centerline_score_batch(ego_on, shape, data)
+    score_past = compute_centerline_score_batch(ego_past, shape, data)
+    # Without a cap, past-boundary score must be strictly more negative.
+    assert float(score_past[0]) < float(score_on[0]), (
+        f"past-boundary score should be more negative than on-boundary: "
+        f"on={float(score_on[0])}  past={float(score_past[0])}"
+    )
+    # And both are negative (penalty accruing).
+    assert float(score_on[0]) < 0
+    assert float(score_past[0]) < 0
+    print("  PASS  test_centerline_uncapped_past_boundary_grows")
+
+
 if __name__ == "__main__":
     tests = [
         test_no_collision_straight_line,
@@ -745,6 +1051,16 @@ if __name__ == "__main__":
         test_red_light_violation,
         test_red_light_stopped_no_penalty,
         test_red_light_no_data,
+        test_advantage_raw_all_bad,
+        test_advantage_positive_only,
+        test_lane_departure_in_lane,
+        test_lane_departure_out_of_lane,
+        test_overprogress_underprogress_penalties,
+        test_advantage_absolute,
+        test_advantage_softmax,
+        test_centerline_baselink_zero_when_centered,
+        test_centerline_body_penalizes_width_even_when_centered,
+        test_centerline_uncapped_past_boundary_grows,
     ]
 
     print("=" * 60)

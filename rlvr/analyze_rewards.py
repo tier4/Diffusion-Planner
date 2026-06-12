@@ -28,7 +28,7 @@ import torch
 from preference_optimization.model_utils import load_model
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_sampler import SamplerConfig, generate_diverse_group
-from rlvr.reward import RewardConfig, compute_reward_batch, compute_group_advantages
+from rlvr.reward import RewardConfig, compute_group_advantages, compute_reward_batch
 
 
 def analyze(
@@ -53,7 +53,7 @@ def analyze(
     sample_paths = rng.choice(npz_paths, size=min(n_scenes, len(npz_paths)), replace=False)
 
     config = SamplerConfig(n_trajectories=n_trajectories)
-    reward_config = RewardConfig()
+    reward_config = RewardConfig(enable_overprogress=True)
 
     all_totals = []
     all_collisions = 0

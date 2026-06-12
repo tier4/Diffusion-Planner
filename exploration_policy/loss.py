@@ -2,12 +2,13 @@
 
 The policy outputs a Beta distribution, K η values are sampled from it,
 each generates a trajectory scored by the reward function. GRPO-style
-group-relative advantages are used to train the policy via REINFORCE.
+group-relative advantages are used to train the policy via advantage-weighted
+log probability (advantage_logprob mode).
 
 Loss = policy_gradient + c_e * entropy_loss + c_kl * kl_loss
 
 Where:
-- policy_gradient: -mean(A_k * log_prob_k) — REINFORCE with GRPO advantages
+- policy_gradient: -mean(A_k * log_prob_k) — advantage-weighted log_prob
 - entropy_loss: -mean(H(lat_dist) + H(lon_dist)) — encourage exploration
 - kl_loss: KL(current || init) — anchor to initial uniform-ish policy
 """
@@ -18,7 +19,6 @@ import math
 
 import torch
 from torch.distributions import Beta, kl_divergence
-
 
 # Initial Beta params from zero-initialized GuidanceHead: softplus(0) + 1
 _INIT_PARAM = math.log(2) + 1.0
@@ -59,7 +59,7 @@ def compute_exploration_loss(
     """
     device = advantages.device
 
-    # --- REINFORCE policy gradient ---
+    # --- Advantage-weighted policy gradient ---
     # Negative because we maximize reward (minimize negative advantage-weighted log_prob)
     policy_loss = -(advantages * log_probs).mean()
 

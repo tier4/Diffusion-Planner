@@ -18,247 +18,125 @@ from pathlib import Path
 
 import gradio as gr
 import numpy as np
+from PIL import Image as PILImage
 
-from scene_search.batch_search import Batch, build_index, find_batches, load_index_parquet, save_index_parquet
+from scene_search.batch_search import (
+    Batch,
+    build_index,
+    find_batches,
+    load_index_parquet,
+    save_index_parquet,
+)
 from scene_search.constraints import list_available as list_constraints
 from scene_search.constraints.registry import build as build_constraint
+from scene_search.map_canvas_js import build_map_canvas_js
 from scene_search.map_renderer import MapRenderer, Viewport
-from scene_search.scene_previewer import render_batch_thumbnails, render_single_thumbnail, thumbnails_to_pil_images
-from PIL import Image as PILImage
+from scene_search.replay_index import load_replay_runs
+from scene_search.scene_previewer import (
+    render_batch_thumbnails,
+    render_single_thumbnail,
+    thumbnails_to_pil_images,
+)
+
+## Heatmap metric auto-discovery
+#
+# The replay writes whatever the RewardBreakdown dataclass exposes — adding
+# a new reward component on the training side should "just work" here.
+# We derive the dropdown choices from the union of numeric fields across
+# loaded heatmap points, and transmit each metric's observed min/max range
+# to the canvas so the JS colour ramp can auto-scale.
+#
+# Polarity (is higher = good or bad?) can't be inferred from data alone,
+# so we fall back to a naming heuristic: metric names containing any of
+# these substrings are treated as "higher = worse". Everything else is
+# assumed "higher = better" (distance-, reward-, and score-style fields).
+_HIGHER_IS_WORSE_SUBSTRINGS = (
+    "penalty", "crossing", "collision", "off_road", "red_light",
+    "near_frac", "wide_frac",
+)
+
+
+def _metric_polarity(name: str) -> int:
+    """Return +1 if higher is better (safe), -1 if higher is worse (drift)."""
+    lo = name.lower()
+    for s in _HIGHER_IS_WORSE_SUBSTRINGS:
+        if s in lo:
+            return -1
+    return +1
 
 MAX_VISIBLE_BATCHES = 10
 
-# ── JS for the interactive map canvas ──────────────────────────────────────
-# All pan/zoom is client-side. The full-map image is loaded once via props.map_b64.
-# Only calls server.render_map() on deep zoom (debounced).
+MAP_CANVAS_JS = build_map_canvas_js(tool="arrow")
 
-MAP_CANVAS_JS = r"""
-(function() {
-    const W = 900, H = 700;
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
-    canvas.style.cssText = 'display:block; margin:auto; border:1px solid #ccc; cursor:grab;';
-    element.innerHTML = '';
-    element.appendChild(canvas);
-    const help = document.createElement('div');
-    help.style.cssText = 'text-align:center; font-size:12px; color:#666; margin-top:4px;';
-    help.innerHTML = 'Drag=pan | Scroll=zoom | <b>Shift+drag=arrow</b>';
-    element.appendChild(help);
-    const ctx = canvas.getContext('2d');
+def _heatmap_points(index: list[dict]) -> list[dict]:
+    """Pick entries that carry per-step metrics (replay runs) and project to
+    the compact form the JS canvas consumes. Every numeric/bool field from
+    ``metrics`` is copied verbatim — no per-field allowlist. Sidecar-backed
+    entries have no "metrics" key and are silently skipped."""
+    out = []
+    for e in index:
+        m = e.get("metrics") or {}
+        if not m:
+            continue
+        point = {"x": e["x"], "y": e["y"]}
+        for k, v in m.items():
+            if isinstance(v, bool):
+                point[k] = 1.0 if v else 0.0
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                point[k] = float(v)
+            # Drop None / str / list — not colourable.
+        out.append(point)
+    return out
 
-    // World bounds of the full map image
-    const bounds = JSON.parse(props.map_bounds);
-    // Current view in world coords
-    let vx0 = bounds.xmin, vy0 = bounds.ymin, vx1 = bounds.xmax, vy1 = bounds.ymax;
 
-    // Full map image (loaded once)
-    let fullImg = null;
-    // Hi-res tile for current zoom (loaded on demand)
-    let tileImg = null;
-    let tileBounds = null;
+def _heatmap_metadata(points: list[dict]) -> dict:
+    """Derive per-metric display metadata from the loaded heatmap points.
 
-    // Arrow state — stored in WORLD coords so it survives pan/zoom
-    let arrowStartPx = null, arrowEndPx = null;
-    let arrowStartWorld = null, arrowEndWorld = null;
-    let isDrawing = false;
-    // Pan state
-    let isPanning = false, panPrev = null;
-    // Debounce timer for tile re-render
-    let tileTimer = null;
+    Returns::
 
-    function worldToCanvas(wx, wy) {
-        return {
-            x: (wx - vx0) / (vx1 - vx0) * W,
-            y: (vy1 - wy) / (vy1 - vy0) * H
-        };
+        {
+            "metrics": ["total", "rb_min_dist", ...],   # sorted field names
+            "ranges":  {"total": [min, max], ...},       # observed range
+            "polarity": {"total": 1, "rb_near_penalty": -1, ...},
+        }
+
+    The canvas uses this to auto-scale a colour ramp without any metric-
+    specific JS. Polarity comes from ``_metric_polarity`` (naming heuristic).
+    """
+    if not points:
+        return {"metrics": [], "ranges": {}, "polarity": {}}
+    field_names: set[str] = set()
+    for p in points:
+        for k in p.keys():
+            if k in ("x", "y"):
+                continue
+            field_names.add(k)
+    ranges: dict[str, list[float]] = {}
+    for k in field_names:
+        vals = [p[k] for p in points if k in p and p[k] is not None]
+        if not vals:
+            continue
+        ranges[k] = [float(min(vals)), float(max(vals))]
+    polarity = {k: _metric_polarity(k) for k in ranges}
+    # cl_score is a signed rear-axle offset with "safe" values near zero:
+    # both large-positive and large-negative magnitudes indicate drift.
+    # The generic min/max + monotonic polarity used by every other metric
+    # would colour the two tails differently (one as drift, one as safe),
+    # which is misleading. Hide the raw field from the dropdown and
+    # expose only the derived absolute-magnitude view — the canvas's
+    # abs_cl_score branch already does the |·| + polarity flip. Same
+    # pattern applies to pred_cl_score when it's present.
+    hidden_signed = {"cl_score", "pred_cl_score"}
+    metrics = sorted(k for k in ranges.keys() if k not in hidden_signed)
+    if "cl_score" in ranges:
+        metrics.append("abs_cl_score")
+    if "pred_cl_score" in ranges:
+        metrics.append("abs_pred_cl_score")
+    return {
+        "metrics": metrics,
+        "ranges": ranges,
+        "polarity": polarity,
     }
-    function canvasToWorld(cx, cy) {
-        return {
-            x: vx0 + (cx / W) * (vx1 - vx0),
-            y: vy1 - (cy / H) * (vy1 - vy0)
-        };
-    }
-    function m2px(m) { return m / (vx1 - vx0) * W; }
-
-    function drawMapImage() {
-        ctx.fillStyle = '#f0f0f0';
-        ctx.fillRect(0, 0, W, H);
-
-        // Draw the tile (hi-res) if available and covers viewport, else draw full image
-        let img = null, ib = null;
-        if (tileImg && tileImg.complete && tileBounds) {
-            img = tileImg; ib = tileBounds;
-        } else if (fullImg && fullImg.complete) {
-            img = fullImg; ib = bounds;
-        }
-        if (img && ib) {
-            // Source rect in image pixels
-            const imgW = img.naturalWidth, imgH = img.naturalHeight;
-            const sx = (vx0 - ib.xmin) / (ib.xmax - ib.xmin) * imgW;
-            const sy = (ib.ymax - vy1) / (ib.ymax - ib.ymin) * imgH;
-            const sw = (vx1 - vx0) / (ib.xmax - ib.xmin) * imgW;
-            const sh = (vy1 - vy0) / (ib.ymax - ib.ymin) * imgH;
-            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
-        }
-    }
-
-    function redraw() {
-        drawMapImage();
-        // Recompute pixel positions from world coords (so arrow follows pan/zoom)
-        if (arrowStartWorld && !isDrawing) {
-            arrowStartPx = worldToCanvas(arrowStartWorld.x, arrowStartWorld.y);
-            if (arrowEndWorld) {
-                arrowEndPx = worldToCanvas(arrowEndWorld.x, arrowEndWorld.y);
-            }
-        }
-        const radius = parseFloat(props.radius) || 50;
-        // Radius circle + arrow
-        if (arrowStartPx) {
-            const rPx = m2px(radius);
-            ctx.strokeStyle = 'rgba(255,68,0,0.5)';
-            ctx.lineWidth = 2;
-            ctx.setLineDash([6, 4]);
-            ctx.beginPath();
-            ctx.arc(arrowStartPx.x, arrowStartPx.y, rPx, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            // Heading tolerance wedge
-            const htol = parseFloat(props.heading_tol) || 30;
-            if (arrowEndPx) {
-                const dx = arrowEndPx.x - arrowStartPx.x;
-                const dy = arrowEndPx.y - arrowStartPx.y;
-                const ang = Math.atan2(dy, dx);
-                const halfTol = htol * Math.PI / 180;
-                ctx.fillStyle = 'rgba(255,68,0,0.08)';
-                ctx.beginPath();
-                ctx.moveTo(arrowStartPx.x, arrowStartPx.y);
-                ctx.arc(arrowStartPx.x, arrowStartPx.y, rPx, ang - halfTol, ang + halfTol);
-                ctx.closePath();
-                ctx.fill();
-            }
-        }
-        if (arrowStartPx && arrowEndPx) {
-            const dx = arrowEndPx.x - arrowStartPx.x;
-            const dy = arrowEndPx.y - arrowStartPx.y;
-            const len = Math.sqrt(dx*dx + dy*dy);
-            if (len > 3) {
-                const ang = Math.atan2(dy, dx);
-                ctx.strokeStyle = '#ff4400'; ctx.lineWidth = 3;
-                ctx.beginPath();
-                ctx.moveTo(arrowStartPx.x, arrowStartPx.y);
-                ctx.lineTo(arrowEndPx.x, arrowEndPx.y);
-                ctx.stroke();
-                const hl = Math.min(18, len * 0.3);
-                ctx.fillStyle = '#ff4400';
-                ctx.beginPath();
-                ctx.moveTo(arrowEndPx.x, arrowEndPx.y);
-                ctx.lineTo(arrowEndPx.x - hl*Math.cos(ang-0.4), arrowEndPx.y - hl*Math.sin(ang-0.4));
-                ctx.lineTo(arrowEndPx.x - hl*Math.cos(ang+0.4), arrowEndPx.y - hl*Math.sin(ang+0.4));
-                ctx.closePath(); ctx.fill();
-            }
-            ctx.fillStyle = '#ff4400';
-            ctx.beginPath();
-            ctx.arc(arrowStartPx.x, arrowStartPx.y, 5, 0, Math.PI * 2);
-            ctx.fill();
-        }
-        // Scale bar
-        const scaleM = Math.pow(10, Math.floor(Math.log10((vx1-vx0)*0.2)));
-        const scalePx = m2px(scaleM);
-        ctx.fillStyle = '#333'; ctx.font = '11px monospace';
-        ctx.fillText(scaleM >= 1000 ? (scaleM/1000)+'km' : scaleM+'m', 15, H-20);
-        ctx.strokeStyle = '#333'; ctx.lineWidth = 2; ctx.setLineDash([]);
-        ctx.beginPath(); ctx.moveTo(15, H-12); ctx.lineTo(15+scalePx, H-12); ctx.stroke();
-    }
-
-    function scheduleTileRefresh() {
-        clearTimeout(tileTimer);
-        tileTimer = setTimeout(async () => {
-            const vpJson = JSON.stringify({xmin:vx0, ymin:vy0, xmax:vx1, ymax:vy1,
-                                           canvas_w: 2000, canvas_h: 1600});
-            try {
-                const b64 = await server.render_map(vpJson);
-                tileImg = new Image();
-                tileBounds = {xmin:vx0, ymin:vy0, xmax:vx1, ymax:vy1};
-                tileImg.onload = redraw;
-                tileImg.src = 'data:image/png;base64,' + b64;
-            } catch(e) { console.warn('tile render failed', e); }
-        }, 400);
-    }
-
-    // Mouse handlers
-    canvas.addEventListener('mousedown', (e) => {
-        const r = canvas.getBoundingClientRect();
-        const cx = e.clientX - r.left, cy = e.clientY - r.top;
-        if (e.shiftKey) {
-            isDrawing = true;
-            arrowStartPx = {x:cx, y:cy};
-            arrowEndPx = {x:cx, y:cy};
-            canvas.style.cursor = 'crosshair';
-        } else {
-            isPanning = true;
-            panPrev = {x:cx, y:cy};
-            canvas.style.cursor = 'grabbing';
-        }
-    });
-    canvas.addEventListener('mousemove', (e) => {
-        const r = canvas.getBoundingClientRect();
-        const cx = e.clientX - r.left, cy = e.clientY - r.top;
-        if (isDrawing) {
-            arrowEndPx = {x:cx, y:cy};
-            redraw();
-        } else if (isPanning && panPrev) {
-            const dx = cx - panPrev.x, dy = cy - panPrev.y;
-            panPrev = {x:cx, y:cy};
-            const dwx = (dx / W) * (vx1 - vx0);
-            const dwy = (dy / H) * (vy1 - vy0);
-            vx0 -= dwx; vx1 -= dwx;
-            vy0 += dwy; vy1 += dwy;
-            redraw();
-            scheduleTileRefresh();
-        }
-    });
-    canvas.addEventListener('mouseup', (e) => {
-        if (isDrawing && arrowStartPx && arrowEndPx) {
-            isDrawing = false;
-            canvas.style.cursor = 'grab';
-            // Store in world coords so arrow survives pan/zoom
-            arrowStartWorld = canvasToWorld(arrowStartPx.x, arrowStartPx.y);
-            arrowEndWorld = canvasToWorld(arrowEndPx.x, arrowEndPx.y);
-            const hdeg = Math.atan2(arrowEndWorld.y - arrowStartWorld.y,
-                                     arrowEndWorld.x - arrowStartWorld.x) * 180 / Math.PI;
-            trigger('click', {x: arrowStartWorld.x, y: arrowStartWorld.y, heading: hdeg});
-            redraw();
-        }
-        if (isPanning) { isPanning = false; panPrev = null; canvas.style.cursor = 'grab'; }
-    });
-    canvas.addEventListener('mouseleave', () => {
-        if (isPanning) { isPanning = false; panPrev = null; canvas.style.cursor = 'grab'; }
-        if (isDrawing) { isDrawing = false; canvas.style.cursor = 'grab'; }
-    });
-    canvas.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        const r = canvas.getBoundingClientRect();
-        const cx = e.clientX - r.left, cy = e.clientY - r.top;
-        const factor = e.deltaY > 0 ? 1.25 : 0.8;
-        const cw = canvasToWorld(cx, cy);
-        const nw = (vx1 - vx0) * factor, nh = (vy1 - vy0) * factor;
-        // Zoom centered on cursor
-        const rx = cx / W, ry = cy / H;
-        vx0 = cw.x - rx * nw; vx1 = cw.x + (1-rx) * nw;
-        vy0 = cw.y - (1-ry) * nh; vy1 = cw.y + ry * nh;
-        redraw();
-        scheduleTileRefresh();
-    }, {passive: false});
-
-    // Load full map image
-    const b64 = props.map_b64;
-    if (b64) {
-        fullImg = new Image();
-        fullImg.onload = redraw;
-        fullImg.src = 'data:image/png;base64,' + b64;
-    }
-})();
-"""
 
 
 def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | None = None):
@@ -270,6 +148,15 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
     full_map_b64 = renderer.render_viewport_base64(full_vp, dpi=100)
     full_bounds = full_vp.to_json()
     print(f"  Map image: {len(full_map_b64)//1024}KB base64")
+
+    heatmap_points = _heatmap_points(index)
+    heatmap_meta = _heatmap_metadata(heatmap_points)
+    heatmap_json = json.dumps(heatmap_points)
+    heatmap_meta_json = json.dumps(heatmap_meta)
+    if heatmap_points:
+        print(f"  Heatmap: {len(heatmap_points)} scored points across "
+              f"{len(heatmap_meta['metrics'])} metric(s) "
+              f"({len(heatmap_json)//1024}KB + {len(heatmap_meta_json)//1024}KB JSON)")
 
     def render_map(viewport_json: str) -> str:
         """Server function for hi-res tile at current zoom. Called from JS (debounced)."""
@@ -297,6 +184,17 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 n_before_slider = gr.Slider(0, 100, value=30, step=5, label="Frames before")
                 n_after_slider = gr.Slider(0, 200, value=80, step=5, label="Frames after")
                 search_btn = gr.Button("Search", variant="primary")
+
+                if heatmap_points:
+                    gr.Markdown("### Heatmap")
+                    heatmap_metric_dd = gr.Dropdown(
+                        choices=["off"] + heatmap_meta["metrics"],
+                        value="off",
+                        label="Overlay metric",
+                        interactive=True,
+                    )
+                else:
+                    heatmap_metric_dd = None
 
                 gr.Markdown("### Constraints")
                 # Build toggle panels for each registered constraint
@@ -343,6 +241,9 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                     map_bounds=json.dumps(full_bounds),
                     radius=50,
                     heading_tol=30,
+                    heatmap_json=heatmap_json,
+                    heatmap_meta_json=heatmap_meta_json,
+                    heatmap_metric="off",
                 )
 
                 gr.Markdown("### Search Results")
@@ -386,6 +287,13 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         def on_heading_tol_change(val):
             return gr.update(heading_tol=val)
         heading_tol_slider.release(on_heading_tol_change, inputs=[heading_tol_slider], outputs=[map_canvas])
+
+        if heatmap_metric_dd is not None:
+            def on_heatmap_metric_change(val):
+                return gr.update(heatmap_metric=val)
+            heatmap_metric_dd.change(on_heatmap_metric_change,
+                                     inputs=[heatmap_metric_dd],
+                                     outputs=[map_canvas])
 
         # --- Build constraint input list for search ---
         # Order: [enable_1, param_1a, param_1b, ..., enable_2, param_2a, ...]
@@ -460,6 +368,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 return [gr.update()] * (1 + MAX_VISIBLE_BATCHES)
 
             from concurrent.futures import ThreadPoolExecutor
+
             from scene_search.batch_search import Batch
 
             def _render_one(bd):
@@ -593,31 +502,63 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
 def main():
     parser = argparse.ArgumentParser(description="Scene Search GUI")
     parser.add_argument("--map_path", type=Path, required=True, help="Path to lanelet2 map (.osm)")
-    parser.add_argument("--npz_list", type=str, required=True, help="path_list.json or NPZ directory")
-    parser.add_argument("--index", type=str, default=None, help="Cached parquet index (requires pyarrow)")
+    parser.add_argument("--npz_list", type=str, default=None,
+                        help="path_list.json or NPZ directory (sidecar-backed scenes)")
+    parser.add_argument("--replay_runs", type=str, nargs="+", default=None,
+                        help="One or more scenario_generation.replay output "
+                             "directories. Uses trajectory_log.json + "
+                             "metrics_log.json instead of per-NPZ sidecars; "
+                             "enables the drift heatmap overlay.")
+    parser.add_argument("--index", type=str, default=None,
+                        help="Cached parquet index (requires pyarrow). Valid as "
+                             "a standalone scene source when the parquet already "
+                             "contains every scene you want to browse. If the "
+                             "parquet exists it is loaded verbatim — passing "
+                             "--npz_list alongside an existing parquet does NOT "
+                             "refresh it; delete the parquet to force rebuild.")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     args = parser.parse_args()
 
+    if not args.npz_list and not args.replay_runs and not (args.index and Path(args.index).exists()):
+        parser.error("supply at least one scene source: --npz_list, --replay_runs, "
+                     "or an existing --index parquet.")
+
     print("Loading lanelet2 map...")
     renderer = MapRenderer(str(args.map_path))
 
-    if args.index and Path(args.index).exists():
+    index: list[dict] = []
+    # --index alone is a valid scene source when the parquet already holds
+    # the scenes we want to browse. With --npz_list we either load the
+    # parquet if it exists or build + save one; without --npz_list we
+    # load the parquet read-only.
+    if args.index and Path(args.index).exists() and not args.npz_list:
         print(f"Loading cached index from {args.index}")
-        index = load_index_parquet(args.index)
-    else:
-        print("Building spatial index from NPZ sidecars...")
-        p = Path(args.npz_list)
-        if p.is_file() and p.suffix == ".json":
-            with open(p) as f: npz_paths = json.load(f)
-        elif p.is_dir():
-            npz_paths = sorted(str(f) for f in p.rglob("*.npz"))
+        index.extend(load_index_parquet(args.index))
+    elif args.npz_list:
+        if args.index and Path(args.index).exists():
+            print(f"Loading cached index from {args.index}")
+            index.extend(load_index_parquet(args.index))
         else:
-            raise ValueError(f"--npz_list must be .json or directory: {args.npz_list}")
-        index = build_index(npz_paths, workers=8)
-        if args.index:
-            save_index_parquet(index, args.index)
-            print(f"Saved index to {args.index}")
+            print("Building spatial index from NPZ sidecars...")
+            p = Path(args.npz_list)
+            if p.is_file() and p.suffix == ".json":
+                with open(p) as f: npz_paths = json.load(f)
+            elif p.is_dir():
+                npz_paths = sorted(str(f) for f in p.rglob("*.npz"))
+            else:
+                raise ValueError(f"--npz_list must be .json or directory: {args.npz_list}")
+            sidecar_index = build_index(npz_paths, workers=8)
+            index.extend(sidecar_index)
+            if args.index:
+                save_index_parquet(sidecar_index, args.index)
+                print(f"Saved sidecar index to {args.index}")
+
+    if args.replay_runs:
+        print(f"Loading {len(args.replay_runs)} replay run(s)...")
+        replay_entries = load_replay_runs(args.replay_runs)
+        index.extend(replay_entries)
+        print(f"  Replay entries: {len(replay_entries)}")
 
     print(f"Index: {len(index)} scenes")
     demo = build_interface(renderer, index, args.index)

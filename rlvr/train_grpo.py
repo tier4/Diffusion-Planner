@@ -35,13 +35,8 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-import sys
 from datetime import datetime
 from pathlib import Path
-
-parent_dir = Path(__file__).resolve().parent.parent
-if str(parent_dir) not in sys.path:
-    sys.path.insert(0, str(parent_dir))
 
 import torch
 from torch import optim
@@ -64,8 +59,8 @@ def parse_args() -> argparse.Namespace:
                         help="JSON list of training .npz paths")
     parser.add_argument("--valid_npz_list", type=Path, required=True,
                         help="JSON list of validation .npz paths")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="Path to GRPO config JSON (default: on-policy M=1)")
+    parser.add_argument("--config", type=Path, required=True,
+                        help="Path to GRPO config JSON (required)")
     parser.add_argument("--exp_name", type=str, default="grpo_experiment")
     parser.add_argument("--mode", type=str, choices=["rule", "gui"], default="rule")
     parser.add_argument("--port", type=int, default=7863)
@@ -117,13 +112,11 @@ def setup_experiment(args: argparse.Namespace, config: GRPOConfig) -> tuple[Path
 def main():
     args = parse_args()
 
-    # Load config
-    if args.config and args.config.exists():
-        config = GRPOConfig.from_json(args.config)
-        print(f"Loaded config from {args.config}")
-    else:
-        config = GRPOConfig()
-        print("Using default GRPOConfig (on-policy: M=1)")
+    # Load config (required)
+    if not args.config.exists():
+        raise FileNotFoundError(f"GRPO config not found: {args.config}")
+    config = GRPOConfig.from_json(args.config)
+    print(f"Loaded config from {args.config}")
 
     mode_str = "multi-epoch" if config.uses_importance_sampling else "on-policy"
     print(f"Mode: {mode_str} (N={config.num_generations}, M={config.inner_epochs}, "
@@ -201,32 +194,47 @@ def _run_rule_mode(
     # Fix evaluation scenes from validation set (sampled once, reused every epoch)
     trainer.setup_eval_scenes(valid_npz_paths, n_scenes=50)
 
-    # Evaluate base model before any training (epoch 0)
-    print("\nEvaluating base model (epoch 0)...")
-    trainer.evaluate_rewards(epoch=0)
+    # Initialize wandb logging (no-op if disabled in config)
+    from rlvr.wandb_logger import WandbLogger
+    wandb_log = WandbLogger.from_config(
+        trainer.config,
+        run_dir=str(trainer.run_dir),
+        run_name=args.exp_name,
+        extra_tags=["standalone"],
+    )
 
-    print(f"\nStarting GRPO training for {trainer.config.train_epochs} epochs...")
-    print("=" * 60)
+    try:
+        # Evaluate base model before any training (epoch 0)
+        print("\nEvaluating base model (epoch 0)...")
+        trainer.evaluate_rewards(epoch=0)
 
-    total_epochs = trainer.config.train_epochs
-    for epoch in range(1, total_epochs + 1):
-        print(f"\nEpoch {epoch}/{total_epochs}")
-        print("-" * 60)
+        print(f"\nStarting GRPO training for {trainer.config.train_epochs} epochs...")
+        print("=" * 60)
 
-        if drift_info:
-            print(f"  {drift_info}")
+        total_epochs = trainer.config.train_epochs
+        for epoch in range(1, total_epochs + 1):
+            print(f"\nEpoch {epoch}/{total_epochs}")
+            print("-" * 60)
 
-        if epoch == 1:
-            trainer.save_epoch1_baselines(train_npz_paths)
+            if drift_info:
+                print(f"  {drift_info}")
 
-        metrics = trainer.train_epoch(train_npz_paths, epoch)
+            if epoch == 1:
+                trainer.save_epoch1_baselines(train_npz_paths)
 
-        drift_info = trainer.compute_trajectory_drift()
-        trainer.log_metrics(epoch, metrics)
-        trainer.save_checkpoint(epoch, args_dict)
-        trainer.evaluate_rewards(epoch)
+            metrics = trainer.train_epoch(train_npz_paths, epoch)
 
-        print("-" * 60)
+            drift_info = trainer.compute_trajectory_drift()
+            trainer.log_metrics(epoch, metrics)
+            trainer.save_checkpoint(epoch, args_dict)
+            eval_result = trainer.evaluate_rewards(epoch)
+
+            wandb_log.log_training(epoch, metrics)
+            wandb_log.log_eval(epoch, val_result=eval_result)
+
+            print("-" * 60)
+    finally:
+        wandb_log.finish()
 
     print("\n" + "=" * 60)
     print("Training complete!")
@@ -241,10 +249,10 @@ def _run_gui_mode(
     config: GRPOConfig,
 ):
     from rlvr.trajectory_ranker_gui import (
+        _DEFAULT_PROTOTYPES_PATH,
         TrajectoryRanker,
         build_interface,
         ensure_prototypes,
-        _DEFAULT_PROTOTYPES_PATH,
     )
 
     prototypes_path = config.prototypes_path or _DEFAULT_PROTOTYPES_PATH

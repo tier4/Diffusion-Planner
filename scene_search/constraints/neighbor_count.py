@@ -18,7 +18,8 @@ class NeighborCountConstraint(BaseConstraint):
             "within_radius": {"type": "float", "default": 30.0, "label": "Within radius (m)", "min": 1.0, "max": 100.0, "step": 1.0},
         }
 
-    def filter(self, npz_path: str, npz_data: np.lib.npyio.NpzFile, params: dict) -> bool:
+    def filter(self, npz_path: str, npz_data: np.lib.npyio.NpzFile,
+               params: dict, entry: dict | None = None) -> bool:
         neighbors = npz_data["neighbor_agents_past"]  # (32, 21, 11)
         current = neighbors[:, -1, :]  # (32, 11) — last timestep (t=0)
         # A neighbor is active if any of its features are nonzero

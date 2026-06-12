@@ -1,0 +1,35 @@
+[project]
+name = "scenario_generation"
+version = "0.1.0"
+description = "Scenario generation utilities"
+requires-python = ">=3.13"
+dependencies = [
+    "diffusion-planner",
+    "gradio>=6.14.0",
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.4",
+    "rlvr",
+    "scene-search",
+    "scipy>=1.17.1",
+    "torch>=2.11.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "scenario_generation",
+    "scenario_generation.gui",
+    "scenario_generation.tools",
+]
+package-dir = { "scenario_generation" = "." }
+
+[tool.setuptools.package-data]
+scenario_generation = ["configs/*.json"]
+
+[tool.uv.sources]
+diffusion-planner = { workspace = true }
+rlvr = { workspace = true }
+scene-search = { workspace = true }

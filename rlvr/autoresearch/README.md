@@ -29,6 +29,7 @@ python -m rlvr.autoresearch.check_lora_training \
 python -m rlvr.autoresearch.visualize_scenes \
   --model_path /path/to/best_model.pth \
   --scenes /path/to/scenes.json \
+  --config /path/to/grpo_config.json \
   --output_dir /path/to/output_images/ \
   --n_scenes 12
 
@@ -36,10 +37,19 @@ python -m rlvr.autoresearch.visualize_scenes \
 python -m rlvr.autoresearch.visualize_scenes \
   --model_path /path/to/best_model.pth \
   --scenes /path/to/scenes.json \
+  --config /path/to/grpo_config.json \
   --lora_path /path/to/lora_epoch_004 \
   --output_dir /path/to/output_images/ \
   --indices 87 89 91 93 95
 ```
+
+> **Note — `--config` is required on all reward-dependent tools.**
+> Every tool that computes rb / lane / centerline metrics takes a GRPO
+> training config JSON and uses the thresholds/weights from it. The
+> fallback to `RewardConfig` defaults was removed because it silently
+> diverged from training values. If a field is missing from the JSON,
+> `load_reward_config` raises. Serialised configs from
+> `GRPOConfig.to_json` always have all required fields.
 
 ## Tools
 
@@ -72,9 +82,13 @@ output_dir/YYYYMMDD-HHMMSS_name/
 **Key eval metrics reported:**
 - `rb_cross`: scenes where ego perimeter crosses road border (within 10cm)
 - `rb_near`: fraction of timesteps with ego edge within 25cm of border
+- `lane_dep`: scenes where ego departs lane (within 10cm of lane edge)
+- `lane_near`: fraction of timesteps within 25cm of lane edge
+- `lane_wide`: fraction of timesteps within 40cm of lane edge
 - `reward`: total reward (road border + progress + safety + feasibility)
 - `collision`: collision rate
 - `path`: mean trajectory path length
+- `stopped`: count of scenes where model path < 1m
 
 ### `check_lora_training.py` — LoRA Verification
 
@@ -101,6 +115,8 @@ Generates publication-quality trajectory visualizations with:
 **Args:**
 - `--model_path`: Base model `.pth` (required)
 - `--scenes`: JSON list of NPZ paths (required)
+- `--config`: GRPO training config JSON (required) — reward thresholds
+  used for the `rb_crossing` / `lane_crossing` flags in titles come from here
 - `--lora_path`: LoRA checkpoint dir for comparison (optional)
 - `--output_dir`: Save images here (required)
 - `--indices`: Specific scene indices to show (optional)
@@ -117,7 +133,7 @@ aggregate stats (min, mean, p5) and optionally visualizes worst scenes.
 python -m rlvr.autoresearch.eval_border_distance \
   --merged_model_path /path/to/merged.pth \
   --args_json /path/to/args.json \
-  --scenes /path/to/miraikan_scenes.json \
+  --scenes /path/to/problem_scenes.json \
   --tag model_name \
   --output_dir /path/to/output/
 
@@ -141,16 +157,118 @@ python -m rlvr.autoresearch.compare_models \
   --models name1:/path/to/merged1.pth name2:/path/to/merged2.pth \
   --args_jsons /path/to/args1.json /path/to/args2.json \
   --scenes /path/to/scenes.json \
+  --config /path/to/grpo_config.json \
   --output_dir /path/to/output/ \
   --indices 48 47 49 1 3 --cols 2
 ```
+
+### `tools/cleanse_lane_scenes.py` — Scene-list cleanse
+
+Filters a JSON list of NPZ paths and drops scenes that would corrupt the
+training signal: ego footprint out-of-lane at t=0, GT trajectory leaving
+the lane within the first N timesteps, or (new) the GT ego passing within
+a minimum margin of any road border in the opening window.
+
+```bash
+python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
+  --scenes /path/to/scenes.json \
+  --output /path/to/scenes_clean.json \
+  --threshold 0.15 \
+  --also_check_road_border \
+  --check_gt_lane --gt_max_t 20 --min_gt_path 5.0 \
+  --check_rb_future --rb_thresh 0.4 --rb_max_t 10
+```
+
+Flags:
+- `--threshold` — min lane clearance at t=0 (m). Strict `> 0` also applied,
+  so `--threshold 0` still rejects zero-clearance crossings (previously
+  a no-op).
+- `--also_check_road_border` — reject t=0 ego within the configured
+  `rb_*_thresh` of any road border.
+- `--check_gt_lane --gt_max_t 20` — reject if GT exits the lane in first 20
+  steps. `--min_gt_path` drops scenes with degenerate GT paths.
+- `--check_rb_future --rb_thresh 0.4 --rb_max_t 10` — reject if GT ego
+  footprint comes within `rb_thresh` m of any road border at any of the
+  first `rb_max_t` timesteps. Uses `compute_road_border_penalty` directly
+  so perimeter sampling matches training exactly.
+
+### `tools/eval_detailed_metrics.py` — Per-scene distribution eval
+
+Multi-LoRA side-by-side evaluation with per-scene arrays. `--dump_json`
+writes a `per_scene` dict (cl_mean, rb_dist_min, rb_near_frac,
+rb_wide_frac, lane_near_frac, lane_wide_frac, path, rb_crossing,
+lane_crossing) so downstream tools can rank scenes by worst cl / tightest
+rb without re-running the eval.
+
+```bash
+python -m rlvr.autoresearch.tools.eval_detailed_metrics \
+  --model_path /path/to/base.pth \
+  --scenes /path/to/val.json \
+  --config /path/to/grpo_config.json \
+  --loras run1/lora_epoch_009 run2/lora_epoch_005 \
+  --labels run1_ep9 run2_ep5 \
+  --dump_json /path/to/per_scene.json
+```
+
+### `tools/experiment_watchdog.py` — Background Experiment Monitor
+
+Tracks named experiments in the background. Only outputs NEW eval lines as they appear.
+Fires alerts on `stopped>2` or `rb_cross>10`. Detects when experiment processes die.
+Supports adding experiments dynamically. Never exits on its own.
+
+```bash
+# Start after launching experiments:
+nohup python -m rlvr.autoresearch.tools.experiment_watchdog \
+  --exp_dir /path/to/experiments --names exp1 exp2 --interval 30 &
+
+# Add more experiments later:
+echo "exp3" >> /tmp/watchdog_add.txt
+
+# Check status:
+cat /tmp/experiment_status.log
+
+# Kill when done (avoid leaving a stray background process):
+pkill -f experiment_watchdog
+```
+
+### `tools/viz_explorer_per_scene.py` — Exploration Policy Per-Scene Analysis
+
+Loads a trained exploration policy checkpoint and runs deterministic inference
+on each scene to show the learned eta_lat/eta_lon guidance parameters.
+
+```bash
+python -m rlvr.autoresearch.tools.viz_explorer_per_scene \
+  --model_path /path/to/base_model.pth \
+  --exp_dir /path/to/experiment_dir \
+  --scenes /path/to/scenes.json \
+  --epoch 10
+```
+
+Prints per-scene eta values, scene-to-scene statistics, and extreme scenes.
+
+### `tools/viz_explorer_trajectories.py` — Explorer Trajectory Visualization
+
+Generates images showing reference trajectory (blue) vs explorer-guided
+trajectory (red) for each scene, with road borders and lane geometry.
+
+```bash
+python -m rlvr.autoresearch.tools.viz_explorer_trajectories \
+  --model_path /path/to/base_model.pth \
+  --exp_dir /path/to/experiment_dir \
+  --scenes /path/to/scenes.json \
+  --epoch 10 \
+  --output_dir /path/to/output \
+  --n_scenes 12
+```
+
+Outputs a grid image and individual per-scene images with eta annotations.
 
 ## Scene Lists
 
 Training requires three JSON files, each a list of NPZ paths:
 
 - **Problem scenes**: Scenes where the baseline model has issues (e.g., road border
-  crossings at miraikan exit). Should be < 30% of total training scenes.
+  crossings at critical intersections). Should be < 30% of total training scenes.
 - **Normal scenes**: Diverse driving scenes for general performance preservation.
 - **Validation scenes**: Fixed set for per-epoch evaluation (not used in training).
   Should include a mix of problem + normal + anchor scenes.
@@ -175,9 +293,22 @@ See `rlvr/configs/grpo_onpolicy.json` for the recommended config. Key parameters
 | `rejection_keep` | 8 | Keep top 8 of 16 trajectories |
 | `n_prob_scenes` | 0-50 | Problem scenes in training set. **Always set explicitly.** |
 | `n_normal_scenes` | 250-300 | Normal scenes. **Always set explicitly.** |
-| `lora_target` | `"first"` | Block 0 only. Other blocks degrade neighbor predictions. |
-| `advantage_mode` | `"normalized"` | `"normalized"` or `"vd_grpo"` (see below) |
-| `advantage_fixed_scale` | 10.0 | Denominator for VD-GRPO mode |
+| `lora_target` | `"first"` | Block 0 only for standard GRPO. For ranked SFT, use `"all"` + post-hoc block removal (`"last"` diverges by ep9). |
+| `advantage_mode` | `"normalized"` | `"normalized"`, `"vd_grpo"`, `"raw"`, `"positive_only"`, `"absolute"`, `"softmax"` |
+| `advantage_fixed_scale` | 10.0 | Denominator for vd_grpo/raw/absolute; temperature for softmax |
+| `diffusion_k_steps` | 8 | Number of (noise, t) samples averaged per GRPO loss (matches DPO K=8) |
+| `enable_lane_departure` | `false` | Enable lane departure detection in reward |
+| `lane_gate_enabled` | `false` | Lane crossing as hard gate in survival mode |
+| `lane_near_scale` | 3.0 | Soft penalty for being within 25cm of lane edge |
+| `lane_wide_scale` | 0.2 | Soft penalty for being within 40cm of lane edge |
+| `lane_cont_scale` | 0.0 | Continuous lane proximity penalty |
+| `underprogress_penalty` | 0.0 | Penalize model driving << GT path (0=disabled) |
+| `underprogress_threshold` | 0.5 | Penalize if model_path/gt_path < threshold |
+| `progress_norm_scale` | 20.0 | Max progress points at 100% GT match (when overprogress enabled) |
+| `lane_dep_trim_n` | 0 | Drop N scenes with worst lane departure fraction per epoch (0=disabled) |
+| `neighbor_loss_weight` | 0.0 | Neighbor prediction regularization weight vs GT (0=disabled) |
+| `neighbor_reg_weight` | 0.0 | Neighbor reg: MSE(lora_neighbor, base_neighbor). 0 for standard GRPO. For ranked SFT, set to ≥1.0 (0.5/0.75 diverge at ep5-6). |
+| `neighbor_reg_only` | `true` | When true, drop neighbor SFT loss; only use reg term (loss = ego_sft + reg) |
 | `kl_schedule` | `"constant"` | `"constant"`, `"linear"`, `"cosine"`, or `"step"` (see below) |
 | `kl_coef_final` | 0.05 | Target KL coef at end of training (for non-constant schedules) |
 | `kl_warmup_fraction` | 0.5 | Fraction of epochs to hold initial `kl_coef` (for `"step"` schedule) |
@@ -217,6 +348,27 @@ absolute magnitude of negative rewards for crashes across groups.
 **`advantage_fixed_scale` tuning:** Controls advantage magnitude. Larger values
 produce smaller advantages (more conservative updates). Start with 10.0. If
 training is too aggressive, increase to 20.0. If too slow, decrease to 5.0.
+
+### Additional Advantage Modes
+
+- **`raw`**: Centered (subtract group mean), divided by `advantage_fixed_scale`. Same as
+  VD-GRPO. If all trajectories are bad, all get negative advantages.
+- **`positive_only`**: Standard normalization but clips negative advantages to zero. Only
+  reinforces trajectories better than group mean; never pushes away from bad ones.
+- **`absolute`**: No centering. `advantage = total / fixed_scale`. Positive reward → positive
+  advantage. Unstable in practice (can explode), use with caution.
+- **`softmax`**: Softmax-weighted advantages with temperature = `advantage_fixed_scale`.
+  Rank 1 gets disproportionate weight. Low temperature (5) = very sharp; high (20) = softer.
+
+### GRPO Loss: K-Averaging and Prefix Mask
+
+The GRPO loss averages over `diffusion_k_steps` (default 8) different (noise, timestep)
+samples per trajectory, matching DPO's K=8 approach. A single sample gives noisy gradients
+that can point in the wrong direction. K=8 was verified to fix gradient direction.
+
+The loss also applies SFT-style prefix masking: a random delay (0-5 steps) conditions
+the denoising on clean initial timesteps, matching the training distribution the model
+was pretrained with. Without prefix mask, gradient signal is 27x weaker.
 
 ### KL Schedule: Decaying KL Coefficient
 

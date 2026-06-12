@@ -3,7 +3,6 @@ import torch
 
 from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
-NUM_REFINE = 20
 TIME_INTERVAL = 0.1
 
 
@@ -39,6 +38,94 @@ def heading_transform(heading, transform_mat):
     ).reshape(*shape)
 
 
+def _cross2d(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """2D cross product along the last dimension: u × v = u.x*v.y - u.y*v.x"""
+    return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
+
+
+def _rect_corners(rect: torch.Tensor) -> torch.Tensor:
+    """
+    rect: [B, 6] — (x, y, cos_h, sin_h, length, width)
+    Returns [B, 4, 2] corner points.
+    """
+    B = rect.shape[0]
+    xy, cos_h, sin_h, lw = rect[:, :2], rect[:, 2], rect[:, 3], rect[:, 4:]
+    rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=1).reshape(B, 2, 2)
+    signs = torch.tensor([[1.0, 1], [-1, 1], [-1, -1], [1, -1]], device=lw.device)
+    local = torch.einsum("bj,ij->bij", lw / 2, signs)  # [B, 4, 2]
+    local = torch.einsum("bij,bkj->bik", local, rot)   # [B, 4, 2]
+    return xy[:, None, :] + local
+
+
+def _sat_signed_distance(c1: torch.Tensor, c2: torch.Tensor) -> torch.Tensor:
+    """
+    SAT signed distance between two rectangles.
+    c1, c2: [B, 4, 2] corner points
+    Returns [B] — negative means overlap.
+    """
+    nv = torch.stack(
+        [c1[:, 0] - c1[:, 1], c1[:, 1] - c1[:, 2],
+         c2[:, 0] - c2[:, 1], c2[:, 1] - c2[:, 2]],
+        dim=1,
+    )  # [B, 4, 2]
+    nv = nv / torch.norm(nv, dim=2, keepdim=True).clamp(min=1e-6)
+    p1 = torch.einsum("bij,bkj->bik", nv, c1)  # [B, 4, 4]
+    p2 = torch.einsum("bij,bkj->bik", nv, c2)
+    overlap = torch.cat(
+        [p1.min(2).values - p2.max(2).values, p2.min(2).values - p1.max(2).values],
+        dim=1,
+    )  # [B, 8]
+    is_overlap = (overlap < 0).all(dim=1)
+    pos = torch.where(overlap < 0, torch.full_like(overlap, 1e5), overlap)
+    return torch.where(is_overlap, overlap.max(1).values, pos.min(1).values)
+
+
+def _segments_intersect_rect(
+    seg_start: torch.Tensor,
+    seg_end: torch.Tensor,
+    rect_corners: torch.Tensor,
+    valid: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Returns [B] bool — True if any valid segment touches the rectangle.
+
+    seg_start, seg_end: [B, N, 2]
+    rect_corners:       [B, 4, 2]
+    valid:              [B, N] bool — True for valid segments
+    """
+    hit = torch.zeros(seg_start.shape[:2], dtype=torch.bool, device=seg_start.device)
+    edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+
+    # Proper segment–edge crossing: both pairs straddle each other's line
+    for i, j in edges:
+        C = rect_corners[:, i, :].unsqueeze(1)  # [B, 1, 2]
+        D = rect_corners[:, j, :].unsqueeze(1)  # [B, 1, 2]
+        AB = seg_end - seg_start                # [B, N, 2]
+        CD = D - C                              # [B, 1, 2]
+        hit = hit | (
+            (_cross2d(AB, C - seg_start) * _cross2d(AB, D - seg_start) < 0)
+            & (_cross2d(CD, seg_start - C) * _cross2d(CD, seg_end - C) < 0)
+        )
+
+    # Endpoint inside polygon: all edge cross products share the same sign
+    for pt in (seg_start, seg_end):
+        crosses = torch.stack(
+            [
+                _cross2d(
+                    (rect_corners[:, j, :] - rect_corners[:, i, :]).unsqueeze(1),
+                    pt - rect_corners[:, i, :].unsqueeze(1),
+                )
+                for i, j in edges
+            ],
+            dim=-1,
+        )  # [B, N, 4]
+        hit = hit | (crosses > 0).all(-1) | (crosses < 0).all(-1)
+
+    if valid is not None:
+        hit = hit & valid
+    return hit.any(dim=1)  # [B]
+
+
 class StatePerturbation:
     """
     Data augmentation that perturbs the current ego position and generates a feasible trajectory that
@@ -47,28 +134,33 @@ class StatePerturbation:
 
     def __init__(
         self,
-        augment_prob: float = 0.5,
-        wheel_base: float = 2.75,
-        device: torch.device | str = "cpu",
+        augment_prob: float,
+        num_refine: int,
+        device: torch.device | str,
+        ego_past_noise_std: float,
+        use_smoothing_future_trajectory: bool,
     ) -> None:
         """
         Initialize the augmentor,
-        :param low: Parameter to set lower bound vector of the Uniform noise on [x, y, yaw, vx, vy, ax, ay, steering angle, yaw rate].
-        :param high: Parameter to set upper bound vector of the Uniform noise on [x, y, yaw, vx, vy, ax, ay, steering angle, yaw rate].
         :param augment_prob: probability between 0 and 1 of applying the data augmentation
+        :param num_refine: number of refinement steps for quintic interpolation
+        :param device: torch device
+        :param ego_past_noise_std: std of noise applied to ego past trajectory
+        :param use_smoothing_future_trajectory: whether to apply smoothing to future trajectory
         """
         self._augment_prob = augment_prob
         self._device = torch.device(device)
+        self._ego_past_noise_std = ego_past_noise_std
+        self._use_smoothing_future_trajectory = use_smoothing_future_trajectory
         lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
         hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
         self._high = torch.tensor(hi).to(self._device)
-        self._wheel_base = wheel_base
 
-        self.num_refine = NUM_REFINE
+        self.num_refine = num_refine
         self.time_interval = TIME_INTERVAL
 
-        REFINE_HORIZON = NUM_REFINE * TIME_INTERVAL
+        REFINE_HORIZON = num_refine * TIME_INTERVAL
 
         T = REFINE_HORIZON + TIME_INTERVAL
         self.coeff_matrix = torch.linalg.inv(
@@ -86,7 +178,7 @@ class StatePerturbation:
             )
         )
         self.t_matrix = torch.pow(
-            torch.linspace(TIME_INTERVAL, REFINE_HORIZON, NUM_REFINE).unsqueeze(1),
+            torch.linspace(TIME_INTERVAL, REFINE_HORIZON, num_refine).unsqueeze(1),
             torch.arange(6).unsqueeze(0),
         ).to(device=device)  # shape (B, N+1)
 
@@ -101,11 +193,29 @@ class StatePerturbation:
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
 
+        # Scale past trajectory and current state velocity/acceleration
+        B_aug = aug_flag.sum().item()
+        if B_aug > 0:
+            W = self._ego_past_noise_std
+            scale = torch.normal(mean=1.0, std=W, size=(B_aug, 1, 1)).to(
+                inputs["ego_agent_past"].device
+            )
+            scale = torch.clamp(scale, 1.0 - 2 * W, 1.0 + 2 * W)
+
+            ego_past_aug = inputs["ego_agent_past"][aug_flag].clone()
+            ego_past_aug[..., :2] = ego_past_aug[..., :2] * scale
+            inputs["ego_agent_past"][aug_flag] = ego_past_aug
+
+            scale_1d = scale.squeeze(-1)  # (B_aug, 1)
+            inputs["ego_current_state"][aug_flag, 4:6] *= scale_1d  # vx, vy
+            inputs["ego_current_state"][aug_flag, 6:8] *= scale_1d  # ax, ay
+
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
     def augment(self, inputs):
         # Only aug current state
         ego_current_state = inputs["ego_current_state"].clone()
+        wheel_base = inputs["ego_shape"][:, 0]  # (B,)
 
         B = ego_current_state.shape[0]
         aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
@@ -139,7 +249,7 @@ class StatePerturbation:
         mask = torch.abs(cur_velocity) < 0.2
         not_mask = ~mask
         steering_angle[not_mask] = torch.atan(
-            yaw_rate[not_mask] * self._wheel_base / torch.abs(cur_velocity[not_mask])
+            yaw_rate[not_mask] * wheel_base[not_mask] / torch.abs(cur_velocity[not_mask])
         )
         steering_angle[not_mask] = torch.clamp(
             steering_angle[not_mask], -2 / 3 * np.pi, 2 / 3 * np.pi
@@ -149,7 +259,89 @@ class StatePerturbation:
         ego_current_state[:, 8] = steering_angle
         ego_current_state[:, 9] = new_yaw_rate
 
+        # Discard augmentations that cause collisions
+        collision = self._check_aug_validity(ego_current_state, inputs)
+        aug_flag = aug_flag & ~collision
+
         return aug_flag, ego_current_state
+
+    def _check_aug_validity(
+        self, aug_ego_state: torch.Tensor, inputs: dict
+    ) -> torch.Tensor:
+        """
+        Returns [B] bool — True where the augmented ego position is invalid.
+
+        Invalid conditions:
+          1. Ego polygon overlaps with a neighbour agent polygon.
+          2. Ego polygon intersects a lane left or right boundary segment.
+        """
+        B = aug_ego_state.shape[0]
+        device = aug_ego_state.device
+        dtype = aug_ego_state.dtype
+
+        # ego_shape: [B, 3] = (wheelbase, length, width)
+        ego_shape = inputs["ego_shape"].to(device=device, dtype=dtype)
+        ego_length = ego_shape[:, 1:2]  # [B, 1]
+        ego_width = ego_shape[:, 2:3]   # [B, 1]
+
+        ego_rect = torch.cat(
+            [aug_ego_state[:, :4], ego_length, ego_width],
+            dim=-1,
+        )  # [B, 6]
+        ego_corners = _rect_corners(ego_rect)  # [B, 4, 2]
+
+        collision = torch.zeros(B, dtype=torch.bool, device=device)
+
+        # ── 1. Neighbour agent polygon collision ──────────────────────────────
+        if "neighbor_agents_past" in inputs:
+            nbr = inputs["neighbor_agents_past"][:, :, -1, :]  # [B, N, 11]
+            N = nbr.shape[1]
+            valid = torch.sum(torch.ne(nbr[:, :, :4], 0), dim=-1) > 0  # [B, N]
+            if valid.any():
+                # neighbor_agents_past layout: x,y,cos,sin (0:4), width (6), length (7)
+                nbr_rect = torch.cat(
+                    [nbr[:, :, :4], nbr[:, :, 7:8], nbr[:, :, 6:7]], dim=-1
+                )  # [B, N, 6]  — (x,y,cos,sin,length,width)
+                dists = _sat_signed_distance(
+                    _rect_corners(ego_rect.unsqueeze(1).expand(-1, N, -1).reshape(B * N, 6)),
+                    _rect_corners(nbr_rect.reshape(B * N, 6)),
+                ).reshape(B, N)
+                collision = collision | ((dists < 0) & valid).any(dim=1)
+
+        # ── 2. Lane boundary segment collision ───────────────────────────────
+        if "lanes" in inputs:
+            lanes = inputs["lanes"]  # [B, L, P, 33]
+            left_offset = lanes[..., 4:6]  # [B, L, P, 2]
+            right_offset = lanes[..., 6:8]  # [B, L, P, 2]
+
+            # Absolute boundary positions
+            left_pts = lanes[..., :2] + left_offset   # [B, L, P, 2]
+            right_pts = lanes[..., :2] + right_offset  # [B, L, P, 2]
+
+            # A waypoint is valid when its first 8 features are not all zero.
+            # Additionally, only include a boundary side when its offset is
+            # non-trivial; a near-zero offset means no boundary data.
+            lane_valid = torch.sum(torch.ne(lanes[..., :8], 0), dim=-1) > 0  # [B, L, P]
+            left_bound_valid = (torch.norm(left_offset, dim=-1) > 0.01) & lane_valid
+            right_bound_valid = (torch.norm(right_offset, dim=-1) > 0.01) & lane_valid
+
+            def _boundary_segs(pts, point_valid):
+                s = pts[:, :, :-1, :].reshape(B, -1, 2)
+                e = pts[:, :, 1:, :].reshape(B, -1, 2)
+                v = (point_valid[:, :, :-1] & point_valid[:, :, 1:]).reshape(B, -1)
+                return s, e, v
+
+            ls, le, lv = _boundary_segs(left_pts, left_bound_valid)
+            rs, re, rv = _boundary_segs(right_pts, right_bound_valid)
+
+            collision = collision | _segments_intersect_rect(
+                torch.cat([ls, rs], dim=1),
+                torch.cat([le, re], dim=1),
+                ego_corners,
+                torch.cat([lv, rv], dim=1),
+            )
+
+        return collision
 
     def normalize_angle(self, angle: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
         return (angle + np.pi) % (2 * np.pi) - np.pi
@@ -227,9 +419,10 @@ class StatePerturbation:
             dim=-1,
         )
 
-        ego_future4d = smoothing_future_trajectory(
-            ego_past4d, inputs["ego_current_state"], ego_future4d
-        )
+        if self._use_smoothing_future_trajectory:
+            ego_future4d = smoothing_future_trajectory(
+                ego_past4d, inputs["ego_current_state"], ego_future4d
+            )
 
         ego_future = torch.cat(
             [
@@ -412,102 +605,3 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
-
-
-if __name__ == "__main__":
-    import argparse
-    from copy import deepcopy
-    from pathlib import Path
-
-    import matplotlib.patches as patches
-    import matplotlib.pyplot as plt
-
-    from diffusion_planner.train_epoch import heading_to_cos_sin
-    from diffusion_planner.utils.visualize_input import visualize_inputs
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("target_npz", type=Path)
-    args = parser.parse_args()
-
-    target_npz = args.target_npz
-
-    save_dir = target_npz.parent.parent / "augmented"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    loaded = np.load(target_npz)
-    data = {}
-    for key, value in loaded.items():
-        if key == "token":
-            continue
-        data[key] = torch.tensor(value).unsqueeze(0)
-        if key == "goal_pose" or key == "ego_agent_past":
-            data[key] = heading_to_cos_sin(data[key])
-
-    # Load future trajectories separately
-    ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
-    neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
-
-    aug = StatePerturbation(augment_prob=1.0, device="cpu")
-
-    # Save original data visualization with augmentation range rectangle
-    original_save_path = save_dir / "original.png"
-    fig, ax = plt.subplots(figsize=(10, 10))
-
-    # Visualize inputs on the ax
-    view_range = 20
-    visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
-
-    # Get augmentation ranges from the aug object
-    lo = aug._low.cpu().numpy()[0]  # Extract from tuple
-    hi = aug._high.cpu().numpy()[0]  # Extract from tuple
-    x_min, y_min = lo[0], lo[1]
-    x_max, y_max = hi[0], hi[1]
-
-    # Draw the augmentation range rectangle
-    rect = patches.Rectangle(
-        (x_min, y_min),
-        x_max - x_min,
-        y_max - y_min,
-        linewidth=2,
-        edgecolor="red",
-        facecolor="none",
-        linestyle="--",
-        label="Augmentation Range",
-    )
-    ax.add_patch(rect)
-    ax.legend()
-
-    plt.tight_layout()
-    plt.savefig(original_save_path, dpi=100)
-    plt.close()
-
-    trial_num = 10
-    for i in range(trial_num):
-        aug_data, aug_ego_future, aug_neighbors_future = aug(
-            deepcopy(data), ego_future.clone(), neighbors_future.clone()
-        )
-
-        # Save augmented data to npz file
-        data_dict = {}
-        for key, value in aug_data.items():
-            if isinstance(value, torch.Tensor):
-                data_dict[key] = value.squeeze(0).detach().cpu().numpy()
-            else:
-                data_dict[key] = value
-
-        # Add future trajectories with consistent naming
-        data_dict["ego_agent_future"] = aug_ego_future.squeeze(0).detach().cpu().numpy()
-        data_dict["neighbor_agents_future"] = aug_neighbors_future.squeeze(0).detach().cpu().numpy()
-        aug_data["ego_agent_future"] = aug_ego_future
-        aug_data["neighbor_agents_future"] = aug_neighbors_future
-
-        # Save to npz file
-        output_path = save_dir / f"augmented_{i:08d}.npz"
-        np.savez(output_path, **data_dict)
-
-        # Use deepcopy to avoid side effects from visualize_inputs
-        visualize_inputs(
-            deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[view_range]
-        )
-
-    print(f"Augmented data saved: {trial_num} files to {save_dir}")

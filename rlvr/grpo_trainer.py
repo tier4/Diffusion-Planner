@@ -22,9 +22,10 @@ from tqdm import tqdm
 from preference_optimization.utils import (
     calculate_ade,
     generate_deterministic_trajectory,
+)
+from preference_optimization.utils import (
     load_npz_data as _load_npz_data_raw,
 )
-
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_loss import compute_direct_best_loss, compute_grpo_loss, compute_log_probs
 from rlvr.grpo_sampler import SamplerConfig, generate_diverse_group
@@ -101,9 +102,15 @@ class GRPOTrainer:
             w_smooth=config.w_smooth,
             w_feasibility=config.w_feasibility,
             w_centerline=config.w_centerline,
-            near_edge_scale=config.near_edge_scale,
-            wide_edge_scale=config.wide_edge_scale,
-            cont_edge_scale=config.cont_edge_scale,
+            rb_near_scale=config.rb_near_scale,
+            rb_wide_scale=config.rb_wide_scale,
+            rb_cont_scale=config.rb_cont_scale,
+            rb_gate_enabled=config.rb_gate_enabled,
+            rb_penalty_mode=config.rb_penalty_mode,
+            rb_cross_thresh=config.rb_cross_thresh,
+            rb_near_thresh=config.rb_near_thresh,
+            rb_wide_thresh=config.rb_wide_thresh,
+            rb_cont_thresh=config.rb_cont_thresh,
             max_lat_accel=config.max_lat_accel,
             lat_accel_scale=config.lat_accel_scale,
             enable_overprogress=config.enable_overprogress,
@@ -111,6 +118,21 @@ class GRPOTrainer:
             overprogress_penalty=config.overprogress_penalty,
             stopped_penalty=config.stopped_penalty,
             reward_mode=config.reward_mode,
+            enable_lane_departure=config.enable_lane_departure,
+            lane_gate_enabled=config.lane_gate_enabled,
+            lane_near_scale=config.lane_near_scale,
+            lane_wide_scale=config.lane_wide_scale,
+            lane_cont_scale=config.lane_cont_scale,
+            lane_cross_thresh=config.lane_cross_thresh,
+            lane_near_thresh=config.lane_near_thresh,
+            lane_wide_thresh=config.lane_wide_thresh,
+            lane_cont_thresh=config.lane_cont_thresh,
+            max_yaw_rate=config.max_yaw_rate,
+            max_steer=config.max_steer,
+            kinematic_margin=config.kinematic_margin,
+            underprogress_penalty=config.underprogress_penalty,
+            underprogress_threshold=config.underprogress_threshold,
+            underprogress_reference=config.underprogress_reference,
         )
 
         # Evaluation: fixed scene subset from validation set, sampled once
@@ -202,20 +224,17 @@ class GRPOTrainer:
 
         self.policy_model.eval()
         with torch.no_grad():
-            sampled = generate_diverse_group(
+            # Use batched generation (~3 forward passes instead of K sequential)
+            from rlvr.grpo_sampler_batched import generate_diverse_group_batched
+            traj_batch = generate_diverse_group_batched(
                 model=self.policy_model,
                 model_args=self.model_args,
                 data=data,
                 config=self.sampler_config,
                 device=self.device,
-            )
+            )  # [K, T, 4]
 
-        trajectories = [st.trajectory for st in sampled]
-
-        # Score with rewards
-        traj_batch = torch.tensor(
-            np.stack(trajectories), device=self.device, dtype=torch.float32,
-        )
+        trajectories = [traj_batch[k].cpu().numpy() for k in range(traj_batch.shape[0])]
         reward_breakdowns = compute_reward_batch(
             traj_batch, data, self.reward_config,
         )
@@ -239,11 +258,27 @@ class GRPOTrainer:
         # Store old log-probs and the (noise, t) used to compute them.
         # Reusing the same (noise, t) during training ensures a consistent
         # importance sampling ratio.
-        old_log_probs, old_noise, old_t = compute_log_probs(
-            self.policy_model, trajectories, data, self.model_args, self.device,
-        )
+        # Use batched log-prob computation (1 forward pass for all K trajs)
+        from rlvr.grpo_loss import compute_batched_trajectory_losses
+        B = data["ego_current_state"].shape[0]
+        P = 1 + self.model_args.predicted_neighbor_num
+        future_len = self.model_args.future_len
+        eps = 1e-3
+        old_noise = torch.randn(1, P, future_len, 4, device=self.device)
+        old_t = torch.rand(1, device=self.device) * (1 - eps) + eps
 
-        return {
+        was_training = self.policy_model.training
+        self.policy_model.train()
+        with torch.no_grad():
+            losses = compute_batched_trajectory_losses(
+                self.policy_model, data, traj_batch, self.model_args,
+                old_noise, old_t, self.device,
+            )
+            old_log_probs = -losses  # (K,)
+        if not was_training:
+            self.policy_model.eval()
+
+        result = {
             "npz_path": npz_path,
             "data": data,
             "trajectories": trajectories,
@@ -253,6 +288,25 @@ class GRPOTrainer:
             "old_noise": old_noise,
             "old_t": old_t,
         }
+
+        # For logprob loss: also collect the denoising rollout chain
+        if self.config.grpo_loss_type == "advantage_logprob":
+            from rlvr.grpo_logprob_loss import collect_logprob_rollout
+            was_training = self.policy_model.training
+            self.policy_model.eval()
+            rollout = collect_logprob_rollout(
+                model=self.policy_model,
+                data=data,
+                trajectories=traj_batch,
+                model_args=self.model_args,
+                config=self.config,
+                device=self.device,
+            )
+            if was_training:
+                self.policy_model.train()
+            result["rollout"] = rollout
+
+        return result
 
     def train_on_groups(
         self,
@@ -269,6 +323,11 @@ class GRPOTrainer:
             return _empty_metrics()
 
         M = self.config.inner_epochs
+        if M > 1 and self.config.grpo_loss_type == "advantage_logprob":
+            raise ValueError(
+                "inner_epochs > 1 is not supported with grpo_loss_type='advantage_logprob'. "
+                "Logprob GRPO uses on-policy REINFORCE without importance sampling."
+            )
         all_metrics: dict[str, float] = {}
         total_inner_steps = 0
 
@@ -287,7 +346,22 @@ class GRPOTrainer:
                 if np.all(advantages == 0):
                     continue
 
-                if self.config.loss_mode == "direct_best":
+                if self.config.grpo_loss_type == "advantage_logprob":
+                    # DDV2-style log-probability GRPO loss
+                    from rlvr.grpo_logprob_loss import compute_logprob_grpo_loss
+                    rollout = group.get("rollout")
+                    if rollout is None:
+                        continue
+                    loss, metrics = compute_logprob_grpo_loss(
+                        model=self.policy_model,
+                        rollout=rollout,
+                        advantages=advantages,
+                        data=group["data"],
+                        model_args=self.model_args,
+                        config=self.config,
+                        device=self.device,
+                    )
+                elif self.config.loss_mode == "direct_best":
                     # Direct regression: find best trajectory, regress det output toward it
                     rewards = group["reward_breakdowns"]
                     best_idx = int(np.argmax([r.total for r in rewards]))
@@ -302,24 +376,39 @@ class GRPOTrainer:
                         config=self.config,
                     )
                 else:
-                    # Standard diffusion-based GRPO loss (diffusion, diffusion_low_t, diffusion_multistep)
-                    # For M=1, old_log_probs is ignored inside compute_grpo_loss
-                    old_lp = group.get("old_log_probs") if M > 1 else None
-                    old_noise = group.get("old_noise") if M > 1 else None
-                    old_t = group.get("old_t") if M > 1 else None
-
-                    loss, metrics = compute_grpo_loss(
-                        policy_model=self.policy_model,
-                        trajectories=group["trajectories"],
-                        advantages=advantages,
-                        data=group["data"],
-                        model_args=self.model_args,
-                        config=self.config,
-                        device=self.device,
-                        old_log_probs=old_lp,
-                        old_noise=old_noise,
-                        old_t=old_t,
-                    )
+                    if M == 1:
+                        # Batched GRPO loss: all K trajectories in ONE forward pass
+                        from rlvr.grpo_loss import compute_batched_grpo_loss
+                        traj_tensor = torch.tensor(
+                            np.stack(group["trajectories"]),
+                            device=self.device, dtype=torch.float32,
+                        )
+                        loss, metrics = compute_batched_grpo_loss(
+                            policy_model=self.policy_model,
+                            trajectories_tensor=traj_tensor,
+                            advantages=advantages,
+                            data=group["data"],
+                            model_args=self.model_args,
+                            config=self.config,
+                            device=self.device,
+                        )
+                    else:
+                        # Sequential GRPO loss for inner_epochs > 1 (importance sampling)
+                        old_lp = group.get("old_log_probs")
+                        old_noise = group.get("old_noise")
+                        old_t = group.get("old_t")
+                        loss, metrics = compute_grpo_loss(
+                            policy_model=self.policy_model,
+                            trajectories=group["trajectories"],
+                            advantages=advantages,
+                            data=group["data"],
+                            model_args=self.model_args,
+                            config=self.config,
+                            device=self.device,
+                            old_log_probs=old_lp,
+                            old_noise=old_noise,
+                            old_t=old_t,
+                        )
 
                 scaled_loss = loss / self.config.grad_accum_groups
                 scaled_loss.backward()
@@ -386,6 +475,17 @@ class GRPOTrainer:
         print(f"  Generated {len(groups)} valid groups")
         if not groups:
             return _empty_metrics()
+
+        # Scene-level reward trimming: drop top and bottom X% of scenes by mean reward
+        trim = self.config.reward_trim_pct
+        if trim > 0 and len(groups) >= 10:
+            n = len(groups)
+            n_trim = max(1, int(n * trim))
+            mean_rewards = [np.mean([r.total for r in g["reward_breakdowns"]]) for g in groups]
+            sorted_idx = sorted(range(n), key=lambda i: mean_rewards[i])
+            keep_idx = sorted_idx[n_trim:n - n_trim]
+            groups = [groups[i] for i in keep_idx]
+            print(f"  Trimmed {2*n_trim} scenes ({trim*100:.0f}% each end), keeping {len(groups)}/{n}")
 
         return self.train_on_groups(groups, epoch, progress_callback)
 
@@ -474,7 +574,7 @@ class GRPOTrainer:
                 det_offroad.append(det_reward.off_road_fraction)
                 if det_reward.rb_crossing:
                     det_rb_crossings += 1
-                det_rb_near.append(det_reward.rb_near_frac)
+                det_rb_near.append(det_reward.rb_near_penalty)
                 det_components["safety"].append(det_reward.safety)
                 det_components["progress"].append(det_reward.progress)
                 det_components["smoothness"].append(det_reward.smoothness)
@@ -688,18 +788,41 @@ class GRPOTrainer:
                 return f"{v:.2e}"
             return f"{v:.6f}"
 
-        loss = _fmt(metrics.get("loss", 0))
-        ploss = _fmt(metrics.get("policy_loss", 0))
-        kl = _fmt(metrics.get("kl_loss", 0))
-        logp = _fmt(metrics.get("mean_policy_logprob", 0))
-        print(
-            f"  Epoch {epoch} [{mode_str}]: "
-            f"Loss={loss}, PolicyLoss={ploss}, KL={kl}, "
-            f"MeanLogProb={logp}{clip_str}"
-        )
+        # Ranked SFT uses sft_-prefixed keys; GRPO uses unprefixed.
+        is_sft = "sft_total_loss" in metrics
+        loss_val = metrics.get("sft_total_loss" if is_sft else "loss", None)
+        if loss_val is None:
+            raise KeyError(
+                f"Neither 'loss' nor 'sft_total_loss' found in metrics. "
+                f"Available keys: {sorted(metrics.keys())}"
+            )
+        loss = _fmt(loss_val)
+        kl = _fmt(metrics.get("sft_kl_loss" if is_sft else "kl_loss", 0))
+        if is_sft:
+            ego_l = _fmt(metrics.get("sft_ego_loss", 0))
+            nreg = _fmt(metrics.get("sft_neighbor_reg_loss", 0))
+            print(
+                f"  Epoch {epoch} [{mode_str}]: "
+                f"Loss={loss}, EgoLoss={ego_l}, NeighReg={nreg}, KL={kl}{clip_str}"
+            )
+        else:
+            ploss = _fmt(metrics.get("policy_loss", 0))
+            logp = _fmt(metrics.get("mean_policy_logprob", 0))
+            print(
+                f"  Epoch {epoch} [{mode_str}]: "
+                f"Loss={loss}, PolicyLoss={ploss}, KL={kl}, "
+                f"MeanLogProb={logp}{clip_str}"
+            )
 
     def save_epoch1_baselines(self, npz_paths: list[str]) -> None:
-        """Save deterministic trajectories as epoch-1 reference for drift tracking."""
+        """Save deterministic trajectories as epoch-1 reference for drift tracking.
+
+        Saves ALL scenes — downstream consumers include
+        `underprogress_reference="baseline"` path-length lookup
+        (rlvr/grpo_sft_trainer.py), which needs every training scene to have
+        an anchor; subsampling causes unfixed scenes to fall back to the "det"
+        reference and mask path-collapse behavior.
+        """
         baseline_path = self.run_dir / "epoch1_baselines.npz"
         if baseline_path.exists():
             return
@@ -708,7 +831,7 @@ class GRPOTrainer:
         paths_list: list[str] = []
         trajs_list: list[np.ndarray] = []
 
-        for npz_path in npz_paths[:100]:
+        for npz_path in npz_paths:
             try:
                 obs = load_npz_data(npz_path, self.device)
                 traj = generate_deterministic_trajectory(

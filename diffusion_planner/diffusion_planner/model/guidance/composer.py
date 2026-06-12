@@ -69,9 +69,13 @@ class GuidanceComposer:
         else:
             grad_phys = torch.zeros_like(x_phys_grad)
 
-        # Transform gradient from physical space back to normalized space
-        # and reshape to match x_in's shape for the surrogate dot product.
-        grad_flat = grad_phys.detach().reshape(x_in.shape)
+        # Transform gradient from physical space back to normalized space.
+        # Chain rule: dE/dx_norm = dE/dx_phys * dx_phys/dx_norm = dE/dx_phys * std
+        # Without this, position gradients (x,y) are ~20x too weak.
+        # See: https://github.com/tier4/Diffusion-Planner/issues/42
+        std = state_normalizer.std.to(grad_phys.device)
+        grad_norm = grad_phys * std
+        grad_flat = grad_norm.detach().reshape(x_in.shape)
 
         # Surrogate energy: autograd.grad(dot(grad, x_in), x_in) = grad
         surrogate = (grad_flat * x_in).sum()
