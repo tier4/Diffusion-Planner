@@ -46,23 +46,23 @@ def find_upward(start_file: str, target_name: str) -> Path:
 
 
 def log_dataset_artifact(run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str) -> None:
-    artifact = wandb.Artifact(
-        name=f"dataset_{exp_name}",
-        type="dataset",
-        metadata={"train_set_list": train_set_list, "valid_set_list": valid_set_list},
-    )
-    train_path = Path(train_set_list)
-    valid_path = Path(valid_set_list)
-    artifact.add_file(str(train_path), name=train_path.name)
-    artifact.add_file(str(valid_path), name=valid_path.name)
-    summary_csv = find_upward(train_set_list, "summary.csv")
-    artifact.add_file(str(summary_csv), name="summary.csv")
-    try:
-        rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
-        artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
-    except FileNotFoundError:
-        print("rosbag_summary.csv not found, skipping.")
-    run.use_artifact(artifact)
+        artifact = wandb.Artifact(
+            name=f"dataset_{exp_name}",
+            type="dataset",
+            metadata={"train_set_list": train_set_list, "valid_set_list": valid_set_list},
+        )
+        train_path = Path(train_set_list)
+        valid_path = Path(valid_set_list)
+        artifact.add_file(str(train_path), name=train_path.name)
+        artifact.add_file(str(valid_path), name=valid_path.name)
+        summary_csv = find_upward(train_set_list, "summary.csv")
+        artifact.add_file(str(summary_csv), name="summary.csv")
+        try:
+            rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
+            artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
+        except FileNotFoundError:
+            print("rosbag_summary.csv not found, skipping.")
+        run.use_artifact(artifact)
 
 
 def get_args():
@@ -190,11 +190,14 @@ def get_args():
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
 
     parser.add_argument("--use_wandb", default=False, type=boolean)
+    parser.add_argument("--wandb_run_id", type=str, default=None, help="Existing wandb run ID to attach to")
+    parser.add_argument("--wandb_project_name", type=str, default="Diffusion-Planner", help="Weights & Biases project name")
     parser.add_argument("--notes", default="", type=str)
 
     # distributed training parameters
     parser.add_argument("--ddp", default=True, type=boolean, help="use ddp or not")
     parser.add_argument("--port", default="22323", type=str, help="port")
+
 
     args = parser.parse_args()
 
@@ -351,11 +354,15 @@ def model_training(args):
         init_epoch = 0
         wandb_id = None
 
+
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
+        if args.resume_model_path is None and args.wandb_run_id is not None:
+            wandb_id = args.wandb_run_id
+        
         wandb.init(
-            project="Diffusion-Planner",
+            project=args.wandb_project_name,
             name=args.exp_name,
             notes=args.notes,
             resume="allow",
@@ -363,7 +370,9 @@ def model_training(args):
             dir=f"{save_path}",
         )
         wandb.config.update(args)
-        log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
+
+        if args.wandb_run_id is not None and wandb_id != args.wandb_run_id:
+            log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
 
     if args.ddp:
         torch.distributed.barrier()
@@ -505,9 +514,40 @@ def model_training(args):
         train_sampler.set_epoch(epoch + 1)
 
 
+    # Associate generated model checkpoints with the wandb run
+    if global_rank == 0 and wandb.run is not None:
+        model_artifact = wandb.Artifact(
+            name=f"model_{args.exp_name}",
+            type="model",
+            metadata={"result_path": save_path},
+        )
+
+        added = False
+
+        # Always attach the latest checkpoint so the artifact is non-empty.
+        latest_ckpt = os.path.join(save_path, "latest.pth")
+        if os.path.exists(latest_ckpt):
+            model_artifact.add_file(latest_ckpt, name="latest.pth")
+            added = True
+
+        # Optionally reference the most recent epoch directory (if any were saved).
+        epoch_dirs = sorted(Path(save_path).glob("epoch[0-9][0-9][0-9][0-9]"))
+        if epoch_dirs:
+            latest_epoch_dir = epoch_dirs[-1].resolve()
+            model_artifact.add_reference(
+                f"file://{latest_epoch_dir}/", name=latest_epoch_dir.name
+            )
+            added = True
+
+        if added:
+            wandb.run.log_artifact(model_artifact)
+        else:
+            print("No checkpoint files found; skipping wandb model artifact logging.")
+
+        wandb.finish()
+
 if __name__ == "__main__":
     args = get_args()
-
     assert len(args.coeff_timestep) == 4
 
     # Run
