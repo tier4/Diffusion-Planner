@@ -31,8 +31,10 @@ def add_class_type(x, class_type):
     """
     B, T, D = x.shape
     assert D == 4, "Input tensor must have 4 features (x, y, cos, sin)"
-    class_type_tensor = torch.zeros((B, T, CLASS_TYPE_NUM), device=x.device)
-    class_type_tensor[..., class_type] = 1.0
+    class_type_tensor = F.one_hot(
+        torch.full((B, T), class_type, device=x.device, dtype=torch.long),
+        num_classes=CLASS_TYPE_NUM,
+    ).to(dtype=x.dtype)
     return torch.cat([x, class_type_tensor], dim=-1)
 
 
@@ -162,14 +164,20 @@ class Encoder(nn.Module):
 
     def forward(self, inputs):
         # ego agent
-        ego = inputs["ego_agent_past"]  # (B, T=INPUT_T + 1, D=4)
+        ego = inputs["ego_agent_past"].clone()  # (B, T=INPUT_T + 1, D=4)
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
-        ego[:, 6:] *= 0.0  # Only keep the current + first 5 steps of ego history
+        ego = torch.cat(
+            [ego[:, :6], torch.zeros_like(ego[:, 6:])],
+            dim=1,
+        )  # Only keep the current + first 5 steps of ego history
 
         # agents
-        neighbors = inputs["neighbor_agents_past"]  # (B, N=32, T=21, D=11)
-        neighbors[:, :, :-6] *= 0.0  # Only keep the current + first 5 steps of history
+        neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=11)
+        neighbors = torch.cat(
+            [torch.zeros_like(neighbors[:, :, :-6]), neighbors[:, :, -6:]],
+            dim=2,
+        )  # Only keep the current + first 5 steps of history
 
         # static objects
         static = inputs["static_objects"]  # (B, P=5, D=10)
@@ -286,11 +294,12 @@ class Encoder(nn.Module):
             ],
             dim=1,
         ).view(B * self.token_num, -1)
-        encoding_pos = self.pos_emb(encoding_pos[~encoding_mask])
-        encoding_pos_result = torch.zeros(
-            (B * self.token_num, self.hidden_dim), device=encoding_pos.device
+        encoding_pos_result = self.pos_emb(encoding_pos)
+        encoding_pos_result = torch.where(
+            (~encoding_mask).unsqueeze(-1),
+            encoding_pos_result,
+            torch.zeros_like(encoding_pos_result),
         )
-        encoding_pos_result[~encoding_mask] = encoding_pos  # Fill in valid parts
 
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
@@ -438,10 +447,10 @@ class NeighborEncoder(nn.Module):
         mask_p = torch.sum(~mask_v, dim=-1) == 0
         x = torch.cat([x, (~mask_v).float().unsqueeze(-1)], dim=-1)
         x = x.view(B * P, V, -1)
-        x[..., 4:6] *= 0.0  # Zero out velocity features
+        x = torch.cat([x[..., :4], torch.zeros_like(x[..., 4:6]), x[..., 6:]], dim=-1)
 
         valid_indices = ~mask_p.view(-1)
-        x = x[valid_indices]
+        x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
 
         x = self.channel_pre_project(x)
         x = x.permute(0, 2, 1)
@@ -454,14 +463,11 @@ class NeighborEncoder(nn.Module):
         x = torch.mean(x, dim=1)
 
         neighbor_type = neighbor_type.view(B * P, -1)
-        neighbor_type = neighbor_type[valid_indices]
-        type_embedding = self.type_emb(neighbor_type)  # Type embedding for valid data
+        type_embedding = self.type_emb(neighbor_type)
         x = x + type_embedding
 
         x = self.emb_project(self.norm(x))
-
-        x_result = torch.zeros((B * P, x.shape[-1]), device=x.device)
-        x_result[valid_indices] = x  # Fill in valid parts
+        x_result = x * valid_indices.float().unsqueeze(-1)
 
         return x_result.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
 
@@ -489,17 +495,13 @@ class StaticEncoder(nn.Module):
         pos = x[:, :, :4].clone()  # x, y, cos, sin
         pos = add_class_type(pos, CLASS_TYPE_STATIC)
 
-        x_result = torch.zeros((B * P, self._hidden_dim), device=x.device)
-
         mask_p = torch.sum(torch.ne(x[..., :10], 0), dim=-1).to(x.device) == 0
-
         valid_indices = ~mask_p.view(-1)
 
-        if valid_indices.sum() > 0:
-            x = x.view(B * P, -1)
-            x = x[valid_indices]
-            x = self.projection(x)
-            x_result[valid_indices] = x
+        x = x.view(B * P, -1)
+        x = torch.where(valid_indices.view(-1, 1), x, torch.zeros_like(x))
+        x_result = self.projection(x)
+        x_result = x_result * valid_indices.float().unsqueeze(-1)
 
         return x_result.view(B, P, -1), mask_p.view(B, P), pos.view(B, P, -1)
 
@@ -560,8 +562,7 @@ class LaneEncoder(nn.Module):
 
         pos = x[:, :, int(self._lane_len / 2), :4].clone()  # x, y, x'-x, y'-y
         heading = torch.atan2(pos[..., 3], pos[..., 2])
-        pos[..., 2] = torch.cos(heading)
-        pos[..., 3] = torch.sin(heading)
+        pos = torch.stack([pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1)
         pos = add_class_type(pos, self._class_type)
 
         B, P, V, _ = x.shape
@@ -660,8 +661,7 @@ class LineEncoder(nn.Module):
 
         pos = x[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
         heading = torch.atan2(pos[..., 3], pos[..., 2])
-        pos[..., 2] = torch.cos(heading)
-        pos[..., 3] = torch.sin(heading)
+        pos = torch.stack([pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1)
         pos = add_class_type(pos, self._class_type)
 
         B, P, V, _ = x.shape
@@ -763,8 +763,14 @@ class FloatsEncoder(nn.Module):
         x: B, D
         """
         B, D = x.shape
-        pos = torch.zeros((B, 4), device=x.device)  # (B, D=4[x, y, cos, sin])
-        pos[:, 2] = 1.0  # cos(0) = 1
+        pos = torch.cat(
+            [
+                torch.zeros((B, 2), device=x.device),
+                torch.ones((B, 1), device=x.device),
+                torch.zeros((B, 1), device=x.device),
+            ],
+            dim=-1,
+        )
         pos = pos.unsqueeze(1)  # (B, 1, D=4)
         pos = add_class_type(pos, CLASS_TYPE_EGO_SHAPE)
 
@@ -791,7 +797,7 @@ class FusionEncoder(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, x, mask):
-        mask[:, 0] = False
+        mask = torch.cat([torch.zeros_like(mask[:, :1]), mask[:, 1:]], dim=1)
 
         for b in self.blocks:
             x = b(x, mask)

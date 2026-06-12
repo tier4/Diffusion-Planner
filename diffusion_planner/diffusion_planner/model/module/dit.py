@@ -152,8 +152,8 @@ class DiT(nn.Module):
         x_embedding = x_embedding[None, :, :].expand(B, -1, -1)  # (B, P, hidden_dim)
         x = x + x_embedding
 
-        attn_mask = torch.zeros((B, P), dtype=torch.bool, device=x.device)
-        attn_mask[:, 1:] = neighbor_current_mask
+        ego_mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
+        attn_mask = torch.cat([ego_mask, neighbor_current_mask], dim=1)
 
         for block in self.blocks:
             x = block(x, cross_c, t, attn_mask)
