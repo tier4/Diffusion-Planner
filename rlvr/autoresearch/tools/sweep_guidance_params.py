@@ -319,6 +319,7 @@ def main():
             "col_scale": args.col_scale, "col_range": args.col_range,
             "stretch_scale": args.stretch_scale,
             "guidance_scale": args.guidance_scale,
+            "envelope": args.envelope, "lambda_col": args.lambda_col,
         },
     }
     with open(out_dir / "sweep_labels.json", "w") as f:

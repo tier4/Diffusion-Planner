@@ -165,7 +165,7 @@ def batched_closed_loop(
 def _render_one(job):
     """Worker: render one scene's ghost PNGs + webm from precomputed rollouts."""
     (scene_path, rollout_a, rollout_b, eta_log, out_dir,
-     label_a, label_b, steps, hist_steps, webm_fps) = job
+     label_a, label_b, steps, hist_steps, webm_fps, lambda_spd) = job
     import matplotlib
     matplotlib.use("Agg")
     from rlvr.autoresearch.tools.ghost_sim_common import (
@@ -188,7 +188,7 @@ def _render_one(job):
         for h, v in eta_log[step].items():
             if h == "stretch":
                 # show the actual factor (1 + lambda_spd * eta), not raw eta
-                parts.append(f"str×{1.0 + 0.2 * v:.2f}")
+                parts.append(f"str×{1.0 + lambda_spd * v:.2f}")
             else:
                 parts.append(f"{h[:3]}={v:+.2f}")
         return "  explorer η: " + " ".join(parts)
@@ -271,7 +271,7 @@ def main():
 
     jobs = [(paths[i], ro_base[i], ro_gui[i], eta_logs[i], str(out_dir),
              args.label_a, args.label_b, args.steps, args.hist_steps,
-             args.webm_fps) for i in range(len(paths))]
+             args.webm_fps, args.lambda_spd) for i in range(len(paths))]
     print(f"[phase2] rendering {len(jobs)} scenes with {args.workers} workers")
     ctx = mp.get_context("spawn")
     with ctx.Pool(args.workers) as pool:

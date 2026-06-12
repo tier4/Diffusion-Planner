@@ -279,14 +279,23 @@ class BatchedRolloutManager:
         """
         if self.heads is not None:
             from rlvr.guidance_batched import build_head_composer
+            _passthrough = ("lat_scale", "col_scale", "col_range",
+                            "lambda_spd", "stretch_scale", "lambda_lon",
+                            "envelope", "lambda_col", "ramp_steps",
+                            "head_protect", "fast")
+            unknown = (set(self.head_params) - set(_passthrough)
+                       - {"lambda_lat", "guidance_scale"})
+            if unknown:
+                raise ValueError(
+                    f"unrecognized head_params keys {sorted(unknown)} — "
+                    "refusing to silently drop guidance config")
             return build_head_composer(
                 etas,
                 lambda_lat=self.head_params.get("lambda_lat", self.lambda_lat),
                 guidance_scale=self.head_params.get(
                     "guidance_scale", self.guidance_scale),
                 **{k: v for k, v in self.head_params.items()
-                   if k in ("lat_scale", "col_scale", "col_range",
-                            "lambda_spd", "stretch_scale", "lambda_lon")},
+                   if k in _passthrough},
             )
         guidance_fns = [
             GuidanceConfig(

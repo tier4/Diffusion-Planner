@@ -2,12 +2,12 @@
 
 import pytest
 import torch
-
-import guidance_gui.custom_guidance  # noqa: F401 -- registers collision_swerve
-import rlvr.guidance_batched  # noqa: F401 -- registers the batched variants
 from diffusion_planner.model.guidance.config import GuidanceConfig
 from diffusion_planner.model.guidance.registry import build
 from diffusion_planner.model.guidance.speed_guidance import SpeedGuidance
+
+import guidance_gui.custom_guidance  # noqa: F401 -- registers collision_swerve
+import rlvr.guidance_batched  # noqa: F401 -- registers the batched variants
 
 B, T, PN, HIST = 3, 10, 4, 5
 
@@ -159,3 +159,34 @@ def test_head_protect_zeroes_early_gradient():
     grad = torch.autograd.grad(out.sum(), x)[0]
     assert torch.all(grad[:, 0, 1:6, :] == 0), "first 5 future steps must carry no gradient"
     assert grad[:, 0, 6:, :].abs().sum() > 0
+
+
+# ---------------------------------------------------------------------------
+# FastGuidanceComposer._all_inert
+# ---------------------------------------------------------------------------
+
+def test_fast_composer_inert_detection():
+    from rlvr.guidance_batched import build_head_composer
+
+    # truly inert: every head at its inert point
+    comp = build_head_composer(
+        {"lateral": 0.0, "collision": 0.0, "stretch": 0.0})
+    assert comp._all_inert()
+
+    # legacy longitudinal head ALONE must count as active (regression:
+    # _eta_lon was unchecked, silently disabling guidance)
+    comp = build_head_composer({"lateral": 0.0, "longitudinal": 0.7})
+    assert not comp._all_inert()
+    comp = build_head_composer({"lateral": 0.0, "longitudinal": 0.0})
+    assert comp._all_inert()
+
+    # a function exposing NO recognized eta attribute (e.g. a stock speed
+    # band appended by a caller) must force the composer active
+    comp = build_head_composer({"lateral": 0.0, "collision": 0.0})
+    assert comp._all_inert()
+
+    class _NoEtaFn:
+        pass
+
+    comp._functions.append(_NoEtaFn())
+    assert not comp._all_inert()

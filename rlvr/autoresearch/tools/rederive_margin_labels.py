@@ -77,14 +77,6 @@ def relabel_scene(r: dict, margin: float, min_gain: float,
     if at_margin:
         out["status"] = "solved"
         out["best"] = pick(at_margin)
-        # Cliffy-scene exclusion: a "solution" whose eta-neighbourhood
-        # contains a crossing is unlearnable by regression (the policy's
-        # eta error lands on the cliff) — exclude from training like
-        # unsolved scenes instead of teaching a target it cannot hit.
-        if (robust_radius > 0 and robust_min_required > 0
-                and out.get("robust_min_clr", 0.0) < robust_min_required):
-            out["status"] = "unsolved"
-            out["best"] = None
     else:
         improved = [c for c in clean
                     if c["sc_min_dist"] >= det["sc_min_dist"] + min_gain]
@@ -98,6 +90,15 @@ def relabel_scene(r: dict, margin: float, min_gain: float,
         else:
             out["status"] = "unsolved"
             out["best"] = None
+    # Cliffy-scene exclusion (BOTH solved branches): a "solution" whose
+    # eta-neighbourhood contains a crossing is unlearnable by regression
+    # (the policy's eta error lands on the cliff) — exclude from training
+    # like unsolved scenes instead of teaching a target it cannot hit.
+    if (out["status"] == "solved"
+            and robust_radius > 0 and robust_min_required > 0
+            and out.get("robust_min_clr", 0.0) < robust_min_required):
+        out["status"] = "unsolved"
+        out["best"] = None
     return out
 
 

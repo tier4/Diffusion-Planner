@@ -419,9 +419,11 @@ class GRPOConfig:
     # model. Only honored by GRPOExplorationTrainer; validated in __post_init__.
     train_dit: bool = True
     # Pin generation slot 0 to η=0 for all guidance heads. With
-    # noise_scale_range=[0,0] this makes slot 0 the exact unguided
-    # deterministic trajectory, giving the group a true no-guidance reference
-    # so advantages compare "guided" vs "do nothing" (slot 0 is excluded from
+    # noise_scale_range=[0,0] slot 0 approximates the unguided deterministic
+    # trajectory (exact for collision/stretch heads, which are inert at η=0;
+    # the legacy v1 lateral head still applies a small centering pull toward
+    # the reference at η=0), giving the group a no-guidance reference so
+    # advantages compare "guided" vs "do nothing" (slot 0 is excluded from
     # the policy log-prob gradient since it is a forced, not sampled, action).
     # Set False to reproduce older runs where slot 0's η was sampled.
     exploration_pin_zero_eta: bool = True

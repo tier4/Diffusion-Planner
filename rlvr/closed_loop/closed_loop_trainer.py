@@ -418,6 +418,12 @@ class ClosedLoopExplorationTrainer:
 
         # Use batched rollout for GPU parallelism
         use_batched = self.config.closed_loop_batch_size > 1
+        if not use_batched and self.heads != ["lateral", "longitudinal"]:
+            raise ValueError(
+                "sequential rollout (closed_loop_batch_size<=1) only drives "
+                "the legacy lateral+longitudinal guidance — it would train "
+                f"different heads than configured ({self.heads}). Use "
+                "closed_loop_batch_size>1 for custom head specs.")
         if use_batched:
             print(f"  Batched rollout: {len(scene_paths)} scenes, batch_size={self.config.closed_loop_batch_size}")
             rollout_buffers = self.batched_rollout_manager.run_rollouts(scene_paths)
@@ -580,7 +586,9 @@ class ClosedLoopExplorationTrainer:
             **head_stats,
         }
 
-        self.train_log.append(metrics)
+        # NOTE: do not append to train_log here — log_metrics() (the TSV
+        # writer, called by the experiment driver) appends the prefixed
+        # entry; appending the raw dict too duplicated every epoch row.
 
         # --- Free rollout data from GPU before GRPO to avoid OOM ---
         # (eta stats already collected above from rollout_buffers)

@@ -59,11 +59,23 @@ def main():
                 np.linalg.norm(nb[i, -1, :2] - nb[i, -11, :2])) < args.stop_disp
             fut_valid = (np.abs(nf[i, :, :2]).sum(axis=1) > 0.1).sum()
             if stopped and fut_valid == 0:
-                # Future of a parked car = current pose, repeated. Copy the
-                # state columns the future format shares with the past frame
-                # (x, y, heading components ...), zero-velocity by identity.
+                # Future of a parked car = current pose, repeated,
+                # zero-velocity by identity. Past frames are
+                # (x, y, cos, sin, ...); the future is either 4-col
+                # (x, y, cos, sin) — copy directly — or 3-col
+                # (x, y, heading_rad) — recover the angle, NEVER copy
+                # the past's cos into the radians slot.
                 T, F = nf.shape[1], nf.shape[2]
-                nf[i, :, :] = np.tile(last[i, :F], (T, 1))
+                if F == 4:
+                    row = last[i, :4]
+                elif F == 3:
+                    row = np.array([last[i, 0], last[i, 1],
+                                    np.arctan2(last[i, 3], last[i, 2])])
+                else:
+                    raise ValueError(
+                        f"{sp}: unsupported neighbor_agents_future width {F} "
+                        "(expected 3 or 4)")
+                nf[i, :, :] = np.tile(row, (T, 1))
                 n_padded += 1
         if n_padded:
             raw["neighbor_agents_future"] = nf.astype(

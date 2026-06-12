@@ -19,7 +19,6 @@ Provided:
 """
 
 import torch
-
 from diffusion_planner.model.guidance.base import BaseGuidance
 from diffusion_planner.model.guidance.registry import register
 
@@ -226,9 +225,12 @@ def build_head_composer(
 
     Single source of truth for the head-name -> guidance-function mapping
     (lateral / collision / stretch / legacy longitudinal), shared by the
-    eval tools and the closed-loop rollout managers. Defaults are
-    envelope-v2; a legacy lateral+longitudinal trainer config reproduces
-    exactly with lat_scale=1.0, lambda_lat=2.5, lambda_lon=0.25.
+    eval tools and the closed-loop rollout managers. The scale defaults are
+    the v1-envelope calibration (lambda_lat 5.0 / lat_scale 2.0 /
+    col_scale 9.0), matching envelope="v1"; pass envelope="v2" (+ lambda_col,
+    ramp_steps) for the ramped v2 functions. A legacy lateral+longitudinal
+    trainer config reproduces exactly with lat_scale=1.0, lambda_lat=2.5,
+    lambda_lon=0.25.
     """
     from diffusion_planner.model.guidance.composer import GuidanceComposer
     from diffusion_planner.model.guidance.config import (
@@ -479,10 +481,12 @@ class FastGuidanceComposer:
 
     def _all_inert(self) -> bool:
         for fn in self._functions:
-            for attr in ("_eta_lat", "_eta_col"):
+            recognized = False
+            for attr in ("_eta_lat", "_eta_col", "_eta_lon"):
                 v = getattr(fn, attr, None)
                 if v is None:
                     continue
+                recognized = True
                 if isinstance(v, torch.Tensor):
                     if v.abs().max().item() > self._eta_eps:
                         return False
@@ -490,11 +494,17 @@ class FastGuidanceComposer:
                     return False
             stretch = getattr(fn, "_stretch", None)
             if stretch is not None:
+                recognized = True
                 if isinstance(stretch, torch.Tensor):
                     if (stretch - 1.0).abs().max().item() > self._eta_eps:
                         return False
                 elif abs(float(stretch) - 1.0) > self._eta_eps:
                     return False
+            if not recognized:
+                # A function exposing no known eta attribute (e.g. a stock
+                # speed band appended by a caller) must be treated as
+                # active — short-circuiting would silently drop it.
+                return False
         return True
 
     def __call__(self, x_in, t_input, cond, *args, **kwargs):

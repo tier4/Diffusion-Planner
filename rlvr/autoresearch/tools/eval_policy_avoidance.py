@@ -316,7 +316,8 @@ def main():
     report = {
         "guidance_args": {k: getattr(args, k) for k in (
             "lambda_lat", "lat_scale", "col_scale", "col_range",
-            "lambda_spd", "stretch_scale", "guidance_scale")},
+            "lambda_spd", "stretch_scale", "guidance_scale",
+            "envelope", "lambda_col")},
         "avoid": {
             "n": len(avoid_rows),
             "guided": summarize(avoid_rows, "guided") if avoid_rows else {},

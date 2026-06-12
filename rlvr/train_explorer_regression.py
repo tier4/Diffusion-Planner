@@ -88,14 +88,22 @@ def build_entries(labels_paths: list[str], normal_paths: list[str], heads: list[
 
 
 @torch.no_grad()
-def precompute_features(model, model_args, entries, device, cache_path: Path):
+def precompute_features(model, model_args, entries, device, cache_path: Path,
+                        model_path: str = ""):
     """Cache scene_encoding + x_ref per scene (one det pass each)."""
     if cache_path.exists():
         cache = torch.load(cache_path, map_location="cpu", weights_only=False)
-        if set(cache.keys()) >= {e[0] for e in entries}:
+        cached_model = cache.get("__model_path__", "")
+        if model_path and cached_model and cached_model != model_path:
+            raise ValueError(
+                f"feature cache {cache_path} was built with model "
+                f"{cached_model}, not {model_path} — delete the cache or use "
+                "a fresh --output_dir (stale encodings would be silently "
+                "served otherwise)")
+        if set(cache.keys()) - {"__model_path__"} >= {e[0] for e in entries}:
             print(f"[cache] loaded {len(cache)} features from {cache_path}")
             return cache
-    cache = {}
+    cache = {"__model_path__": model_path}
     for i, (sp, _, _) in enumerate(entries):
         data = load_npz_data(sp, device)
         norm_data = {
@@ -159,6 +167,7 @@ def main():
     model, model_args = load_model(args.model_path, device)
     cache = precompute_features(
         model, model_args, entries, device, run_dir / "feature_cache.pt",
+        model_path=args.model_path,
     )
     del model
     torch.cuda.empty_cache()

@@ -102,7 +102,8 @@ def main():
     parser.add_argument("--trim_backward", action="store_true",
                         help="trim leading behind-ego plan points before "
                              "tracking (see recovery_sim rollout docstring)")
-    parser.add_argument("--ego_shape", default="4.76,7.24,2.29")
+    parser.add_argument("--ego_shape", required=True,
+                        help="WB,L,W — no default, must match the platform")
     parser.add_argument("--lambda_lat", type=float, default=5.0)
     parser.add_argument("--lat_scale", type=float, default=2.0)
     parser.add_argument("--col_scale", type=float, default=9.0)

@@ -51,7 +51,8 @@ def main():
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--out_list", required=True)
-    parser.add_argument("--ego_shape", default="4.76,7.24,2.29")
+    parser.add_argument("--ego_shape", required=True,
+                        help="WB,L,W — no default, must match the platform")
     parser.add_argument("--min_clearance", type=float, default=0.2)
     parser.add_argument("--keep_inert", action="store_true")
     parser.add_argument("--lambda_lat", type=float, default=5.0)

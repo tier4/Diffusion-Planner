@@ -252,7 +252,8 @@ class SpawnConfig:
     # assessment; the gated mode above is the conservative deployment flavor.
     explorer_always_on: bool = False
     # Guidance envelope for the explorer — MUST match the envelope the policy
-    # was trained against (stage1_reg_v4_env2 = envelope-v2: 5.0/2.0/9.0).
+    # was trained against (defaults = the v1-envelope calibration
+    # lambda_lat 5.0 / lat_scale 2.0 / col_scale 9.0).
     explorer_lambda_lat: float = 5.0
     explorer_lat_scale: float = 2.0
     explorer_col_scale: float = 9.0

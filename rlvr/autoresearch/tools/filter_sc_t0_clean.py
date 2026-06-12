@@ -53,8 +53,10 @@ def main():
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--require_stopped", action="store_true", default=True,
-                        help="Drop scenes with no stopped neighbor (default on)")
+    parser.add_argument("--require_stopped",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Drop scenes with no stopped neighbor "
+                             "(--no-require_stopped to keep them)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
