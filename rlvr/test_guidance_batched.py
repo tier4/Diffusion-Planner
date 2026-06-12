@@ -140,7 +140,7 @@ def test_stretch_batched_per_sample():
 def test_lateral_batched_matches_stock_when_unprotected():
     from diffusion_planner.model.guidance.lateral_guidance import LateralGuidance
     x = _make_x()
-    ref = torch.zeros(2 if False else B, T, 4); ref[..., 2] = 1.0
+    ref = torch.zeros(B, T, 4); ref[..., 2] = 1.0
     inputs = {"reference_trajectory": ref}
     for eta in (0.0, 0.5, torch.tensor([0.3, -0.7, 1.0])):
         stock = LateralGuidance(GuidanceConfig(name="lateral",

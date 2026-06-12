@@ -89,6 +89,8 @@ class ClosedLoopExplorationTrainer:
             "stretch_scale": config.exploration_stretch_scale,
             "guidance_scale": config.exploration_guidance_scale,
             "lambda_lon": config.exploration_lambda_lon,
+            "envelope": config.exploration_envelope,
+            "lambda_col": config.exploration_lambda_col,
         }
         self.exploration_policy = ExplorationPolicy(
             ep_config, ref_seq_len=model_args.future_len,

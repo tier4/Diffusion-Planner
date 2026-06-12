@@ -455,6 +455,12 @@ class FastGuidanceComposer:
          no x0-correction model forward, no energy autograd. With an inert
          policy (the common case on a route) the guided generation cost
          collapses to the unguided baseline.
+         CAVEAT: the v1 ``lateral`` head is not mathematically inert at
+         eta=0 — its quadratic energy still pulls toward the reference
+         trajectory. The short-circuit is exact when the reference IS the
+         model's own det trajectory (the standard explorer setup, pull ~ 0);
+         with any other reference the slow composer would apply a residual
+         centering pull this fast path skips.
       3. optional skip_x0_correction: evaluate energies on the solver's
          current x directly instead of running an EXTRA full model forward
          to refine x0 first. Off by default (changes results slightly —

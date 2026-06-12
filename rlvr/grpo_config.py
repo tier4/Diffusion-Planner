@@ -345,6 +345,11 @@ class GRPOConfig:
     exploration_lambda_lat: float = 2.5   # max lateral offset in metres
     exploration_lambda_lon: float = 0.25  # max speed deviation fraction
     exploration_guidance_scale: float = 0.5  # global guidance scale for policy-guided trajectories
+    # Guidance envelope (must match the sweep that produced the policy's
+    # training labels): "v1" = stock lateral + bounded swerve, "v2" = ramped
+    # variants (lambda_col = v2 swerve target magnitude).
+    exploration_envelope: str = "v1"
+    exploration_lambda_col: float = 3.0
     # Guidance heads for the exploration policy. Default reproduces the
     # original 2-head layout. Supported: "lateral" (lateral offset, existing
     # guidance), "longitudinal" (legacy, weak), "collision"

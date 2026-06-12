@@ -59,6 +59,10 @@ def main():
     parser.add_argument("--lambda_spd", type=float, default=0.2)
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
+    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1",
+                        help="guidance envelope — must match the policy's "
+                             "training labels")
+    parser.add_argument("--lambda_col", type=float, default=3.0)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

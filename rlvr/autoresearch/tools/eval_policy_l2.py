@@ -39,6 +39,12 @@ from preference_optimization.utils import load_npz_data
 
 
 def make_composer(etas, args):
+    unmapped = set(etas) - {"lateral", "collision"}
+    if unmapped:
+        raise ValueError(
+            f"policy heads {sorted(unmapped)} have no guidance mapping in "
+            "this tool — evaluating without them would misrepresent the "
+            "deployed config")
     fns = []
     if "lateral" in etas:
         fns.append(GuidanceConfig(
@@ -69,7 +75,6 @@ def main():
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--policy_dir", required=True)
     parser.add_argument("--scenes", required=True)
-    parser.add_argument("--ego_shape", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--lambda_lat", type=float, default=5.0)
     parser.add_argument("--lat_scale", type=float, default=2.0)

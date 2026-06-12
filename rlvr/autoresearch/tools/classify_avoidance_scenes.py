@@ -184,6 +184,10 @@ def main():
         raise ValueError(
             f"policy heads {heads} contain neither 'lateral' nor 'collision' "
             "— this classifier keys on the avoidance heads")
+    if args.rule == "both" and not ("lateral" in heads and "collision" in heads):
+        raise ValueError(
+            f"--rule both requires BOTH avoidance heads; policy has {heads} "
+            "— no scene could ever be flagged")
 
     with open(args.scenes) as f:
         paths = json.load(f)

@@ -100,6 +100,10 @@ def precompute_features(model, model_args, entries, device, cache_path: Path,
                 f"{cached_model}, not {model_path} — delete the cache or use "
                 "a fresh --output_dir (stale encodings would be silently "
                 "served otherwise)")
+        if model_path and not cached_model:
+            print(f"[cache] WARNING: {cache_path} predates the model-path "
+                  "stamp — cannot verify it was built with "
+                  f"{model_path}. Delete it if in doubt.")
         if set(cache.keys()) - {"__model_path__"} >= {e[0] for e in entries}:
             print(f"[cache] loaded {len(cache)} features from {cache_path}")
             return cache

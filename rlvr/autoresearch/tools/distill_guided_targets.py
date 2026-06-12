@@ -121,8 +121,12 @@ def main():
             # (x, y, yaw) format
             new = np.stack([guided[:T, 0], guided[:T, 1],
                             np.arctan2(guided[:T, 3], guided[:T, 2])], axis=-1)
+        elif fut.shape[-1] == 4:
+            new = guided[:T, :4]
         else:
-            new = guided[:T, : fut.shape[-1]]
+            raise ValueError(
+                f"{sp}: unsupported ego_agent_future width {fut.shape[-1]} "
+                "(expected 3 or 4) — refusing to silently truncate")
         raw["ego_agent_future"] = new.astype(fut.dtype)
 
         pool = Path(sp).parent.name

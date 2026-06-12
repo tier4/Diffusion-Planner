@@ -200,6 +200,12 @@ def main() -> None:
     parser.add_argument("--webm_fps", type=int, default=10)
     parser.add_argument("--baseline_label", type=str, default="baseline (LoRA-less)")
     parser.add_argument("--trained_label", type=str, default="PRiSM")
+    # closed_loop_rollout_with_plans now SG-smooths every per-step plan by
+    # default (matches the perfect-tracker sim convention). Older renders
+    # from this tool consumed raw plans — pass --no_sg_smooth to reproduce.
+    parser.add_argument("--no_sg_smooth", action="store_true",
+                        help="track raw per-step plans (pre-SG-default "
+                             "behaviour of this tool)")
     args = parser.parse_args()
 
     out = Path(args.output_dir)
@@ -228,11 +234,13 @@ def main() -> None:
     bl = closed_loop_rollout_with_plans(
         bl_model, bl_args, perturbed,
         n_steps=args.steps, advance_k=args.advance_k,
+        sg_smooth=not args.no_sg_smooth,
     )
     print(f"[ghost-sim] rollout (PRiSM)...")
     pr = closed_loop_rollout_with_plans(
         pr_model, pr_args, perturbed,
         n_steps=args.steps, advance_k=args.advance_k,
+        sg_smooth=not args.no_sg_smooth,
     )
 
     # Pre-compute scene polylines from perturbed (matches recovery_sim)

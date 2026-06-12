@@ -66,7 +66,9 @@ def main():
     print(f"[split] {len(groups)} base-scene groups -> {len(hold)} held out "
           f"({sorted(hold)})")
 
-    held_rows = []
+    # Compute the full split FIRST; only write files after validation so a
+    # failed run doesn't leave truncated *_train.json next to the originals.
+    held_rows, pending = [], []
     for lp, d in loaded:
         tr = [r for r in d["scenes"] if base_id(r["scene_path"]) not in hold]
         hd = [r for r in d["scenes"] if base_id(r["scene_path"]) in hold]
@@ -78,6 +80,15 @@ def main():
                                   n_scenes=len(tr),
                                   holdout_removed=len(hd))
         out_path = str(Path(lp).with_name(Path(lp).stem + "_train.json"))
+        pending.append((lp, out_path, out, tr, hd))
+
+    n_solved = sum(1 for r in held_rows if r["status"] == "solved")
+    if n_solved == 0:
+        raise SystemExit("holdout contains NO solved avoidance rows — "
+                         "useless for overfit detection; re-seed or raise "
+                         "frac (no files written)")
+
+    for lp, out_path, out, tr, hd in pending:
         with open(out_path, "w") as f:
             json.dump(out, f, indent=1)
 
@@ -91,10 +102,6 @@ def main():
         json.dump({"summary": {"n_scenes": len(held_rows),
                                "holdout_groups": sorted(hold)},
                    "scenes": held_rows}, f, indent=1)
-    n_solved = sum(1 for r in held_rows if r["status"] == "solved")
-    if n_solved == 0:
-        raise SystemExit("holdout contains NO solved avoidance rows — "
-                         "useless for overfit detection; re-seed or raise frac")
     print(f"[split] holdout: {len(held_rows)} rows, {n_solved} solved -> "
           f"{args.out_holdout}")
 

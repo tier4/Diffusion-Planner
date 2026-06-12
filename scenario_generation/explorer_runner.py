@@ -22,10 +22,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-import rlvr.guidance_batched  # noqa: F401 -- registers batched guidance
 from diffusion_planner.model.guidance.composer import GuidanceComposer
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+
+import rlvr.guidance_batched  # noqa: F401 -- registers batched guidance
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
 from exploration_policy.utils import run_frozen_encoder
 
@@ -123,6 +123,12 @@ class ExplorerGuidanceRunner:
 
     def _composer(self, etas: dict[str, torch.Tensor]) -> GuidanceComposer:
         env = self.envelope
+        unmapped = set(etas) - {"lateral", "collision", "stretch"}
+        if unmapped:
+            raise ValueError(
+                f"policy heads {sorted(unmapped)} have no guidance mapping "
+                "in explorer_runner — running without them would silently "
+                "change the deployed behaviour")
         fns = []
         if "lateral" in etas:
             fns.append(GuidanceConfig(

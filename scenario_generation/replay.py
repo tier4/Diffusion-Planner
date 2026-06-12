@@ -2353,23 +2353,6 @@ def run_route_replay(
                 _eid = scene.ego_agent.id
                 if _eid in agent_predictions:
                     from scenario_generation.explorer_runner import plan_static_clearance
-                    _ego = scene.ego_agent
-                    _ex, _ey = float(_ego.current_position[0]), float(_ego.current_position[1])
-                    _eyaw = float(_ego.current_heading)
-                    _c, _s = math.cos(-_eyaw), math.sin(-_eyaw)
-                    _boxes = []
-                    for _a in scene.agents:
-                        if _a.id == _eid or not SceneNPCManager.is_static_npc(_a.id):
-                            continue
-                        _dx = float(_a.current_position[0]) - _ex
-                        _dy = float(_a.current_position[1]) - _ey
-                        _boxes.append((
-                            _c * _dx - _s * _dy, _s * _dx + _c * _dy,
-                            float(_a.current_heading) - _eyaw,
-                            float(_a.length), float(_a.width),
-                        ))
-                    _eshape = (spawn_config.ego_wheelbase,
-                               spawn_config.ego_length, spawn_config.ego_width)
                     _det_plan = agent_predictions[_eid]
                     if spawn_config.explorer_always_on:
                         from scenario_generation.tensor_converter import to_model_tensors
@@ -2382,6 +2365,25 @@ def run_route_replay(
                         )
                         agent_predictions[_eid] = _guided
                     else:
+                        # Static-NPC OBBs in the ego frame — only the gated
+                        # path needs them (clearance check).
+                        _ego = scene.ego_agent
+                        _ex, _ey = float(_ego.current_position[0]), float(_ego.current_position[1])
+                        _eyaw = float(_ego.current_heading)
+                        _c, _s = math.cos(-_eyaw), math.sin(-_eyaw)
+                        _boxes = []
+                        for _a in scene.agents:
+                            if _a.id == _eid or not SceneNPCManager.is_static_npc(_a.id):
+                                continue
+                            _dx = float(_a.current_position[0]) - _ex
+                            _dy = float(_a.current_position[1]) - _ey
+                            _boxes.append((
+                                _c * _dx - _s * _dy, _s * _dx + _c * _dy,
+                                float(_a.current_heading) - _eyaw,
+                                float(_a.length), float(_a.width),
+                            ))
+                        _eshape = (spawn_config.ego_wheelbase,
+                                   spawn_config.ego_length, spawn_config.ego_width)
                         _det_min = plan_static_clearance(_det_plan, _boxes, _eshape, device)
                         if _det_min < spawn_config.explorer_activate_clearance:
                             from scenario_generation.tensor_converter import to_model_tensors
