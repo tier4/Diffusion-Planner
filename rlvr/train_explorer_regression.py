@@ -56,8 +56,16 @@ def label_target(head: str, best: dict) -> float:
     return v
 
 
-def build_entries(labels_paths: list[str], normal_paths: list[str], heads: list[str]):
-    """Assemble (scene_path, target_dict, weight_class) tuples."""
+def build_entries(labels_paths: list[str], normal_paths: list[str],
+                  heads: list[str],
+                  counterfactual_paths: list[str] | None = None):
+    """Assemble (scene_path, target_dict, weight_class) tuples.
+
+    counterfactual_paths: zero-target scenes that form PAIRS with solved
+    scenes (e.g. neighbor-stripped twins). They get their own weight class
+    so the pair's discrimination signal can be weighted symmetrically
+    instead of drowning at generic-normal weight.
+    """
     entries = []
     n_solved = n_clean = n_unsolved = 0
     seen = set()
@@ -84,8 +92,14 @@ def build_entries(labels_paths: list[str], normal_paths: list[str], heads: list[
             seen.add(sp)
             entries.append((sp, {h: 0.0 for h in heads}, "normal"))
             n_normal += 1
+    n_cf = 0
+    for sp in (counterfactual_paths or []):
+        if sp not in seen:
+            seen.add(sp)
+            entries.append((sp, {h: 0.0 for h in heads}, "counterfactual"))
+            n_cf += 1
     print(f"[entries] solved={n_solved} clean={n_clean} "
-          f"normal-added={n_normal} "
+          f"normal-added={n_normal} counterfactual={n_cf} "
           f"unsolved-excluded={n_unsolved} total={len(entries)}")
     return entries
 
@@ -145,6 +159,12 @@ def main():
     parser.add_argument("--val_frac", type=float, default=0.15)
     parser.add_argument("--avoid_weight", type=float, default=5.0,
                         help="loss weight for solved avoidance scenes vs zero-target scenes")
+    parser.add_argument("--counterfactual_scenes", default=None,
+                        help="JSON list of zero-target counterfactual twins "
+                             "of solved scenes (e.g. neighbor-stripped); "
+                             "weighted by --counterfactual_weight instead "
+                             "of 1.0")
+    parser.add_argument("--counterfactual_weight", type=float, default=1.0)
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--head_raw_scale", type=float, default=10.0)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -167,7 +187,13 @@ def main():
         with open(args.normal_scenes) as f:
             normal_paths = json.load(f)
 
-    entries = build_entries(args.labels, normal_paths, heads)
+    cf_paths = []
+    if args.counterfactual_scenes:
+        with open(args.counterfactual_scenes) as f:
+            cf_paths = json.load(f)
+
+    entries = build_entries(args.labels, normal_paths, heads,
+                            counterfactual_paths=cf_paths)
     if not entries:
         raise SystemExit("no training entries")
 
@@ -186,7 +212,9 @@ def main():
         [[t[h] for h in heads] for _, t, _ in entries], device=device,
     )  # [M, H]
     weights = torch.tensor(
-        [args.avoid_weight if cls == "avoid" else 1.0 for _, _, cls in entries],
+        [args.avoid_weight if cls == "avoid"
+         else args.counterfactual_weight if cls == "counterfactual"
+         else 1.0 for _, _, cls in entries],
         device=device,
     )
     is_avoid = torch.tensor([cls == "avoid" for _, _, cls in entries], device=device)
