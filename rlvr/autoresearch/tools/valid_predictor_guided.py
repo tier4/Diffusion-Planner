@@ -6,7 +6,7 @@ Replicates the EXACT loss computation of diffusion_planner/valid_predictor.py
 validity masking) for BOTH the plain det trajectory and the explorer-guided
 one, computed in the same batch — the det numbers double as the baseline
 column AND as a validation that this loop reproduces the canonical script
-(full 12k det ego must come out ~=1.920 / neighbor ~=3.435).
+(the det column must match a plain valid_predictor run on the same list).
 
 Usage:
     python -m rlvr.autoresearch.tools.valid_predictor_guided \

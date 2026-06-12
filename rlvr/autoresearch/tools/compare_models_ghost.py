@@ -104,17 +104,15 @@ def main() -> None:
     else:
         raise SystemExit("pass either --model_b or --policy_dir")
 
-    def make_predict_fns(eta_log):
-        """(predict_a, predict_b): plain vs explorer-guided (SG happens in
-        the rollout itself, on whatever the predict fn returns)."""
+    def make_predict_fn(eta_log):
+        """predict_b: explorer-guided prediction for leg B (SG happens in
+        the rollout itself, on whatever the predict fn returns). Leg A uses
+        run_ghost_sim's built-in det path (predict_fn_a=None)."""
         from exploration_policy.utils import run_frozen_encoder
         from rlvr.autoresearch.tools.eval_policy_avoidance import make_composer
         from rlvr.autoresearch.tools.recovery_sim import deterministic_predict
         from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
         from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
-
-        def predict_a(model, model_args, data):
-            return deterministic_predict(model, model_args, data)
 
         def predict_b(model, model_args, data):
             det = deterministic_predict(model, model_args, data)
@@ -167,7 +165,7 @@ def main() -> None:
                 return guided, [trajs[i] for i in range(1, B)]
             return guided
 
-        return predict_a, predict_b
+        return predict_b
 
     cfg = GhostSimConfig(
         model_a_label=args.label_a,
@@ -196,7 +194,7 @@ def main() -> None:
         cfg.subtitle = scene_name
 
         eta_log: list[dict] = []
-        predict_a, predict_b = make_predict_fns(eta_log)
+        predict_b = make_predict_fn(eta_log)
 
         def eta_title(step, a_pose, b_pose):
             if not eta_log or step >= len(eta_log):

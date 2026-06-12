@@ -238,6 +238,11 @@ def build_head_composer(
         GuidanceSetConfig,
     )
 
+    unknown = set(etas) - {"lateral", "collision", "stretch", "longitudinal"}
+    if unknown:
+        raise ValueError(
+            f"unknown guidance head(s) {sorted(unknown)} — a head with no "
+            "function mapping would train/act as a dead head silently")
     hp = int(head_protect)
     fns = []
     if envelope == "v2":
@@ -292,8 +297,8 @@ def build_head_composer(
         ))
     set_cfg = GuidanceSetConfig(functions=fns, global_scale=guidance_scale)
     if fast:
-        # Equivalence-certified (fan battery worst |dtraj| = 0.00000 m both
-        # envelopes; bench: active 2.1x bit-identical, inert ~baseline).
+        # Equivalence-certified against GuidanceComposer (bit-identical
+        # active trajectories; inert frames short-circuit to ~unguided cost).
         return FastGuidanceComposer(set_cfg)
     return GuidanceComposer(set_cfg)
 
@@ -446,7 +451,7 @@ class FastGuidanceComposer:
     """Drop-in faster GuidanceComposer (same classifier_fn interface).
 
     Three measured wins over diffusion_planner's GuidanceComposer, with
-    identical math (see TODO_guidance_latency.md):
+    identical math:
       1. inputs inverse-normalisation cached ONCE per generation (the base
          composer inverse-normalises the full observation dict — lanes,
          neighbours — at EVERY denoise step although it never changes).
@@ -455,11 +460,12 @@ class FastGuidanceComposer:
          no x0-correction model forward, no energy autograd. With an inert
          policy (the common case on a route) the guided generation cost
          collapses to the unguided baseline.
-         CAVEAT: the v1 ``lateral`` head is not mathematically inert at
-         eta=0 — its quadratic energy still pulls toward the reference
-         trajectory. The short-circuit is exact when the reference IS the
-         model's own det trajectory (the standard explorer setup, pull ~ 0);
-         with any other reference the slow composer would apply a residual
+         CAVEAT: the v1 ``lateral`` head AND the v2 ``lateral_ramp``
+         variant are not mathematically inert at eta=0 — their quadratic
+         energies still pull toward the reference trajectory. The
+         short-circuit is exact when the reference IS the model's own det
+         trajectory (the standard explorer setup, pull ~ 0); with any
+         other reference the slow composer would apply a residual
          centering pull this fast path skips.
       3. optional skip_x0_correction: evaluate energies on the solver's
          current x directly instead of running an EXTRA full model forward

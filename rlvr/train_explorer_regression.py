@@ -121,10 +121,20 @@ def precompute_features(model, model_args, entries, device, cache_path: Path,
             print(f"[cache] WARNING: {cache_path} predates the model-path "
                   "stamp — cannot verify it was built with "
                   f"{model_path}. Delete it if in doubt.")
-        if set(cache.keys()) - {"__model_path__"} >= {e[0] for e in entries}:
+        have = set(cache.keys()) - {"__model_path__"}
+        need = {e[0] for e in entries}
+        if have >= need:
             print(f"[cache] loaded {len(cache)} features from {cache_path}")
             return cache
-    cache = {"__model_path__": model_path}
+        # Partial hit: top up only the missing scenes instead of a full
+        # rebuild, then re-save.
+        missing = [e for e in entries if e[0] not in have]
+        print(f"[cache] topping up {len(missing)} missing of {len(need)} "
+              f"entries in {cache_path}")
+        cache.setdefault("__model_path__", model_path)
+        entries = missing
+    else:
+        cache = {"__model_path__": model_path}
     for i, (sp, _, _) in enumerate(entries):
         data = load_npz_data(sp, device)
         norm_data = {
