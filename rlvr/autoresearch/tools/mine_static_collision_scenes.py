@@ -55,12 +55,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.audit_static_collision import (
     _ZONE_COLORS,
     _draw_audit_figure,
     _zone_for,
 )
+from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import (
     _build_ego_bbox_corners,
     compute_static_collision_penalty,
@@ -125,9 +125,9 @@ def _score_scene(
     nb_fut_raw = nb_fut_raw[:, :T, :]
     # Convert to (N_nb, T, 4) [x, y, cos, sin] for the primitive.
     yaw = nb_fut_raw[..., 2:3]
-    nb_fut_4 = np.concatenate(
-        [nb_fut_raw[..., :2], np.cos(yaw), np.sin(yaw)], axis=-1
-    ).astype(np.float32)
+    nb_fut_4 = np.concatenate([nb_fut_raw[..., :2], np.cos(yaw), np.sin(yaw)], axis=-1).astype(
+        np.float32
+    )
 
     neighbor_futures = torch.from_numpy(nb_fut_4).to(device)
     slot_valid = neighbor_futures[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6
@@ -147,7 +147,11 @@ def _score_scene(
         neighbor_shapes[zero] = torch.tensor([2.0, 4.5], device=device)
 
     sc = compute_static_collision_penalty(
-        ego_traj, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid,
+        ego_traj,
+        ego_shape,
+        neighbor_futures,
+        neighbor_shapes,
+        neighbor_valid,
         reward_cfg,
     )
 
@@ -193,8 +197,11 @@ def _score_scene(
             "per_ts_min": per_ts_min,
             "ego_traj": ego_pred,
             "ego_corners": _build_ego_bbox_corners(
-                ego_traj, ego_shape,
-            )[0].cpu().numpy(),
+                ego_traj,
+                ego_shape,
+            )[0]
+            .cpu()
+            .numpy(),
             "nb_fut_4": nb_fut_4,
             "neighbor_shapes_all": nb_past[:, -1, [6, 7]],
         },
@@ -203,46 +210,67 @@ def _score_scene(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenes", type=Path, required=True,
-                        help="JSON list of NPZ paths.")
+    parser.add_argument("--scenes", type=Path, required=True, help="JSON list of NPZ paths.")
     parser.add_argument("--model_path", type=Path, required=True)
-    parser.add_argument("--config", type=Path, required=True,
-                        help="Reward config JSON with "
-                             "static_collision_enabled=true.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="Reward config JSON with static_collision_enabled=true.",
+    )
     parser.add_argument("--output_dir", type=Path, required=True)
-    parser.add_argument("--target_per_zone", type=int, default=12,
-                        help="Aim for N scenes per zone (cross/near/wide/"
-                             "cont). Default 12 → ~48 total.")
-    parser.add_argument("--max_scan", type=int, default=5000,
-                        help="Stop scanning after this many scenes even "
-                             "if zone targets aren't met. Default 5000.")
-    parser.add_argument("--shuffle_seed", type=int, default=42,
-                        help="Shuffle the scene list (with this seed) "
-                             "before scanning so we don't bias toward "
-                             "the head of the list.")
+    parser.add_argument(
+        "--target_per_zone",
+        type=int,
+        default=12,
+        help="Aim for N scenes per zone (cross/near/wide/cont). Default 12 → ~48 total.",
+    )
+    parser.add_argument(
+        "--max_scan",
+        type=int,
+        default=5000,
+        help="Stop scanning after this many scenes even if zone targets aren't met. Default 5000.",
+    )
+    parser.add_argument(
+        "--shuffle_seed",
+        type=int,
+        default=42,
+        help="Shuffle the scene list (with this seed) "
+        "before scanning so we don't bias toward "
+        "the head of the list.",
+    )
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--vel_thresh", type=float, default=0.1,
-                        help="Past-velocity threshold for the cheap "
-                             "stopped-neighbour pre-filter. Keep aligned "
-                             "with sc_neighbor_vel_thresh in the reward "
-                             "config.")
-    parser.add_argument("--disp_thresh", type=float, default=0.5,
-                        help="Past-displacement threshold for the "
-                             "cheap pre-filter.")
-    parser.add_argument("--ego_min_speed", type=float, default=0.1,
-                        help="Reject scenes where the ego's current "
-                             "speed is below this (m/s). Default 0.1 "
-                             "— a stationary ego at a red light or in "
-                             "a jam is not an interesting collision "
-                             "candidate because there's no actual "
-                             "motion risk.")
+    parser.add_argument(
+        "--vel_thresh",
+        type=float,
+        default=0.1,
+        help="Past-velocity threshold for the cheap "
+        "stopped-neighbour pre-filter. Keep aligned "
+        "with sc_neighbor_vel_thresh in the reward "
+        "config.",
+    )
+    parser.add_argument(
+        "--disp_thresh",
+        type=float,
+        default=0.5,
+        help="Past-displacement threshold for the cheap pre-filter.",
+    )
+    parser.add_argument(
+        "--ego_min_speed",
+        type=float,
+        default=0.1,
+        help="Reject scenes where the ego's current "
+        "speed is below this (m/s). Default 0.1 "
+        "— a stationary ego at a red light or in "
+        "a jam is not an interesting collision "
+        "candidate because there's no actual "
+        "motion risk.",
+    )
     args = parser.parse_args()
 
     reward_cfg = load_reward_config(args.config)
     if not getattr(reward_cfg, "static_collision_enabled", False):
-        raise SystemExit(
-            f"{args.config} must set static_collision_enabled=true"
-        )
+        raise SystemExit(f"{args.config} must set static_collision_enabled=true")
 
     cross_t = float(reward_cfg.sc_cross_thresh)
     near_t = float(reward_cfg.sc_near_thresh)
@@ -317,7 +345,11 @@ def main() -> None:
         try:
             scene = from_npz(str(path))
             preds = _predict_batch(
-                model, model_args, scene, [scene.ego_agent_id], device,
+                model,
+                model_args,
+                scene,
+                [scene.ego_agent_id],
+                device,
             )
             ego_pred = preds.get(scene.ego_agent_id)
         except Exception:
@@ -349,8 +381,9 @@ def main() -> None:
             if d >= worst_in_zone:
                 continue
             # Replace the least-severe entry.
-            worst_idx = max(range(len(zone_hits[zone])),
-                            key=lambda i: zone_hits[zone][i]["sc_min_dist"])
+            worst_idx = max(
+                range(len(zone_hits[zone])), key=lambda i: zone_hits[zone][i]["sc_min_dist"]
+            )
             del zone_hits[zone][worst_idx]
 
         result["npz_path"] = str(path)
@@ -359,10 +392,12 @@ def main() -> None:
 
         if n_inferred % 50 == 0:
             counts = {z: len(zone_hits[z]) for z in zone_hits}
-            print(f"  scan {n_scanned}/{len(scenes)}  "
-                  f"ego_stopped_rej={n_ego_stopped_rejected}  "
-                  f"stopped={n_with_stopped}  "
-                  f"inferred={n_inferred}  zones={counts}")
+            print(
+                f"  scan {n_scanned}/{len(scenes)}  "
+                f"ego_stopped_rej={n_ego_stopped_rejected}  "
+                f"stopped={n_with_stopped}  "
+                f"inferred={n_inferred}  zones={counts}"
+            )
 
         # Stop early if all zones are filled.
         if all(len(zone_hits[z]) >= args.target_per_zone for z in zone_hits):
@@ -394,8 +429,11 @@ def main() -> None:
                 data_np = {k: raw[k] for k in raw.files if k != "version"}
 
             _draw_audit_figure(
-                data_np, step=rank, arrays=r["_arrays"],
-                sc_min_dist=viz_d, argmin_t=viz_t,
+                data_np,
+                step=rank,
+                arrays=r["_arrays"],
+                sc_min_dist=viz_d,
+                argmin_t=viz_t,
                 argmin_nb_global=nb_idx,
                 output_path=png_path,
                 viz_threshold_m=2.0,
@@ -408,25 +446,32 @@ def main() -> None:
 
     summary_path = args.output_dir / "summary.json"
     with open(summary_path, "w") as f:
-        json.dump({
-            "scenes_list": str(args.scenes),
-            "model_path": str(args.model_path),
-            "reward_config_path": str(args.config),
-            "zone_thresholds": {
-                "cross": cross_t, "near": near_t,
-                "wide": wide_t, "cont": cont_t,
+        json.dump(
+            {
+                "scenes_list": str(args.scenes),
+                "model_path": str(args.model_path),
+                "reward_config_path": str(args.config),
+                "zone_thresholds": {
+                    "cross": cross_t,
+                    "near": near_t,
+                    "wide": wide_t,
+                    "cont": cont_t,
+                },
+                "n_scanned": n_scanned,
+                "n_ego_stopped_rejected": n_ego_stopped_rejected,
+                "n_with_stopped": n_with_stopped,
+                "n_inferred": n_inferred,
+                "ego_min_speed": float(args.ego_min_speed),
+                "n_selected": len(summary),
+                "zone_counts": {z: len(zone_hits[z]) for z in zone_hits},
+                "scenes": summary,
             },
-            "n_scanned": n_scanned,
-            "n_ego_stopped_rejected": n_ego_stopped_rejected,
-            "n_with_stopped": n_with_stopped,
-            "n_inferred": n_inferred,
-            "ego_min_speed": float(args.ego_min_speed),
-            "n_selected": len(summary),
-            "zone_counts": {z: len(zone_hits[z]) for z in zone_hits},
-            "scenes": summary,
-        }, f)
-    print(f"Wrote {summary_path} ({len(summary)} selected scenes, "
-          f"{n_inferred} inferences across {n_scanned} scans)")
+            f,
+        )
+    print(
+        f"Wrote {summary_path} ({len(summary)} selected scenes, "
+        f"{n_inferred} inferences across {n_scanned} scans)"
+    )
     # Scene list for downstream re-use.
     list_path = args.output_dir / "scene_list.json"
     with open(list_path, "w") as f:

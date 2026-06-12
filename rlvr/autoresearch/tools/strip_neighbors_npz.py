@@ -16,6 +16,7 @@ Usage:
     python -m rlvr.autoresearch.tools.strip_neighbors_npz \
         --scenes <scenes.json> --out_dir <dir> --out_list <list.json>
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,7 +28,8 @@ import numpy as np
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--scenes", required=True, help="JSON list of NPZ paths")
     parser.add_argument("--out_dir", required=True)
@@ -46,8 +48,7 @@ def main():
             raise ValueError(f"{sp}: missing neighbor_agents_past")
         raw["neighbor_agents_past"] = np.zeros_like(raw["neighbor_agents_past"])
         if "neighbor_agents_future" in raw:
-            raw["neighbor_agents_future"] = np.zeros_like(
-                raw["neighbor_agents_future"])
+            raw["neighbor_agents_future"] = np.zeros_like(raw["neighbor_agents_future"])
         pool = Path(sp).parent.name
         out_path = out_dir / f"{pool}__{Path(sp).stem}_nonbr.npz"
         np.savez(out_path, **raw)

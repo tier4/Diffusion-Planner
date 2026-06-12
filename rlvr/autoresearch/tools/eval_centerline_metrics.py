@@ -51,7 +51,9 @@ def generate_trajectory(model, model_args, data, device):
 
 @torch.no_grad()
 def lat_offset_and_naive_score(
-    traj: torch.Tensor, data: dict, ego_half_w: float,
+    traj: torch.Tensor,
+    data: dict,
+    ego_half_w: float,
     usage_mode: str = "baselink",
 ):
     """Per-scene per-timestep quantities used for sanity-compare + lat_offset stats.
@@ -109,11 +111,9 @@ def lat_offset_and_naive_score(
     elif usage_mode == "body":
         lane_usage = (ego_lat.abs() + ego_half_w) / side_hw
     else:
-        raise ValueError(
-            f"Unknown usage_mode={usage_mode!r}; expected 'baselink' or 'body'."
-        )
+        raise ValueError(f"Unknown usage_mode={usage_mode!r}; expected 'baselink' or 'body'.")
 
-    naive_score = -(lane_usage ** 2).mean().item()  # uniform-weight, no route-dev
+    naive_score = -(lane_usage**2).mean().item()  # uniform-weight, no route-dev
     any_off_route = bool(((min_dist > 5.0).cummax(dim=0).values & (min_dist > 5.0)).any().item())
     return {
         "lat_offset_m": ego_lat.abs().cpu().numpy(),  # [T]
@@ -124,7 +124,8 @@ def lat_offset_and_naive_score(
     }
 
 
-def _q(a, p): return float(np.percentile(a, p))
+def _q(a, p):
+    return float(np.percentile(a, p))
 
 
 def report(tag, cl_scores, lat_offset_means, lat_offset_maxes, off_route_count):
@@ -135,27 +136,41 @@ def report(tag, cl_scores, lat_offset_means, lat_offset_maxes, off_route_count):
 
     print(f"\n=== Centerline — {tag} ({n} scenes) ===")
     print(f"centerline_score (from compute_centerline_score_batch; negative, 0=best):")
-    print(f"  mean={cl.mean():+.3f}  p5={_q(cl,5):+.3f}  p25={_q(cl,25):+.3f}  "
-          f"p50={_q(cl,50):+.3f}  p75={_q(cl,75):+.3f}  p95={_q(cl,95):+.3f}  min={cl.min():+.3f}")
+    print(
+        f"  mean={cl.mean():+.3f}  p5={_q(cl, 5):+.3f}  p25={_q(cl, 25):+.3f}  "
+        f"p50={_q(cl, 50):+.3f}  p75={_q(cl, 75):+.3f}  p95={_q(cl, 95):+.3f}  min={cl.min():+.3f}"
+    )
     print(f"  (p5 and p25 are worst-case tails; min = worst scene)")
 
     print(f"|lat_offset|_mean-per-scene (baselink → nearest route-lane centerline point, m):")
-    print(f"  mean={lom.mean():.2f}  p25={_q(lom,25):.2f}  p50={_q(lom,50):.2f}  "
-          f"p75={_q(lom,75):.2f}  p95={_q(lom,95):.2f}  max={lom.max():.2f}")
+    print(
+        f"  mean={lom.mean():.2f}  p25={_q(lom, 25):.2f}  p50={_q(lom, 50):.2f}  "
+        f"p75={_q(lom, 75):.2f}  p95={_q(lom, 95):.2f}  max={lom.max():.2f}"
+    )
     print(f"|lat_offset|_max-per-scene (worst timestep in each scene, m):")
-    print(f"  mean={lomx.mean():.2f}  p25={_q(lomx,25):.2f}  p50={_q(lomx,50):.2f}  "
-          f"p75={_q(lomx,75):.2f}  p95={_q(lomx,95):.2f}  max={lomx.max():.2f}")
-    print(f"off-route scenes: {off_route_count}/{n} ({100*off_route_count/n:.1f}%)")
+    print(
+        f"  mean={lomx.mean():.2f}  p25={_q(lomx, 25):.2f}  p50={_q(lomx, 50):.2f}  "
+        f"p75={_q(lomx, 75):.2f}  p95={_q(lomx, 95):.2f}  max={lomx.max():.2f}"
+    )
+    print(f"off-route scenes: {off_route_count}/{n} ({100 * off_route_count / n:.1f}%)")
 
     return {
-        "tag": tag, "n_scenes": n,
+        "tag": tag,
+        "n_scenes": n,
         "cl_score_mean": float(cl.mean()),
-        "cl_score_p5": _q(cl, 5), "cl_score_p25": _q(cl, 25), "cl_score_p50": _q(cl, 50),
-        "cl_score_p75": _q(cl, 75), "cl_score_p95": _q(cl, 95), "cl_score_min": float(cl.min()),
+        "cl_score_p5": _q(cl, 5),
+        "cl_score_p25": _q(cl, 25),
+        "cl_score_p50": _q(cl, 50),
+        "cl_score_p75": _q(cl, 75),
+        "cl_score_p95": _q(cl, 95),
+        "cl_score_min": float(cl.min()),
         "lat_off_mean_mean_m": float(lom.mean()),
-        "lat_off_mean_p25_m": _q(lom, 25), "lat_off_mean_p50_m": _q(lom, 50),
-        "lat_off_mean_p75_m": _q(lom, 75), "lat_off_mean_p95_m": _q(lom, 95),
-        "lat_off_max_mean_m": float(lomx.mean()), "lat_off_max_p95_m": _q(lomx, 95),
+        "lat_off_mean_p25_m": _q(lom, 25),
+        "lat_off_mean_p50_m": _q(lom, 50),
+        "lat_off_mean_p75_m": _q(lom, 75),
+        "lat_off_mean_p95_m": _q(lom, 95),
+        "lat_off_max_mean_m": float(lomx.mean()),
+        "lat_off_max_p95_m": _q(lomx, 95),
         "off_route_frac": float(off_route_count / n),
     }
 
@@ -170,9 +185,15 @@ def sanity_compare(cl_scores_reward, naive_scores):
     naive = np.asarray(naive_scores)
     diff = reward - naive  # reward is typically less negative than naive (cap + time-weight)
     print(f"\n=== Sanity: reward vs. naive (uniform-weight, uncapped, no route-dev) ===")
-    print(f"reward (from compute_centerline_score_batch): mean={reward.mean():+.3f}  min={reward.min():+.3f}")
-    print(f"naive  (uniform-mean(lane_usage²), uncapped): mean={naive.mean():+.3f}  min={naive.min():+.3f}")
-    print(f"diff=(reward - naive): mean={diff.mean():+.3f}  p5={_q(diff, 5):+.3f}  p95={_q(diff, 95):+.3f}")
+    print(
+        f"reward (from compute_centerline_score_batch): mean={reward.mean():+.3f}  min={reward.min():+.3f}"
+    )
+    print(
+        f"naive  (uniform-mean(lane_usage²), uncapped): mean={naive.mean():+.3f}  min={naive.min():+.3f}"
+    )
+    print(
+        f"diff=(reward - naive): mean={diff.mean():+.3f}  p5={_q(diff, 5):+.3f}  p95={_q(diff, 95):+.3f}"
+    )
     # scenes where reward is much LESS negative than naive → reward is hiding the pain
     hidden = int((diff > 1.0).sum())
     print(f"scenes where reward >> naive (diff > 1.0, reward hiding pain): {hidden}/{len(reward)}")
@@ -186,10 +207,17 @@ def main():
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--tag", type=str, default="model")
     parser.add_argument("--out_json", type=str, default=None)
-    parser.add_argument("--sanity_compare", action="store_true",
-                        help="Also compute naive score and report divergence vs reward")
-    parser.add_argument("--time_weight_min", type=float, default=None,
-                        help="Override centerline time_weight_min (1.0 = flat; default: 0.3)")
+    parser.add_argument(
+        "--sanity_compare",
+        action="store_true",
+        help="Also compute naive score and report divergence vs reward",
+    )
+    parser.add_argument(
+        "--time_weight_min",
+        type=float,
+        default=None,
+        help="Override centerline time_weight_min (1.0 = flat; default: 0.3)",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -197,6 +225,7 @@ def main():
     model.eval()
     if args.lora_path:
         from preference_optimization.lora_utils import load_lora_checkpoint
+
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
         print(f"Loaded LoRA from {args.lora_path}")
@@ -208,8 +237,10 @@ def main():
     cfg = RewardConfig()  # defaults: usage_mode="baselink", time_weight_min=0.3
     if args.time_weight_min is not None:
         cfg.centerline_time_weight_min = args.time_weight_min
-    print(f"Reward: usage_mode={cfg.centerline_usage_mode}, "
-          f"time_weight_min={cfg.centerline_time_weight_min}")
+    print(
+        f"Reward: usage_mode={cfg.centerline_usage_mode}, "
+        f"time_weight_min={cfg.centerline_time_weight_min}"
+    )
     cl_scores, naive_scores = [], []
     lat_off_means, lat_off_maxes = [], []
     off_route = 0
@@ -222,8 +253,8 @@ def main():
 
         # OFFICIAL: the reward function the training sees.
         score = compute_centerline_score_batch(
-            traj.unsqueeze(0),              # (N=1, T, 4)
-            ego_shape,                      # (3,)
+            traj.unsqueeze(0),  # (N=1, T, 4)
+            ego_shape,  # (3,)
             data,
             usage_mode=cfg.centerline_usage_mode,
             time_weight_min=cfg.centerline_time_weight_min,
@@ -242,7 +273,7 @@ def main():
                 off_route += 1
 
         if (i + 1) % 50 == 0:
-            print(f"  processed {i+1}/{len(scene_paths)}")
+            print(f"  processed {i + 1}/{len(scene_paths)}")
 
     summary = report(args.tag, cl_scores, lat_off_means, lat_off_maxes, off_route)
 

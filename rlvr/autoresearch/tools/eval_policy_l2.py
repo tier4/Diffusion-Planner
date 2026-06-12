@@ -17,6 +17,7 @@ Usage:
         [--lambda_lat 5.0] [--lat_scale 2.0] [--col_scale 9.0] \
         [--batch_size 32] [--limit 0]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,25 +45,33 @@ def make_composer(etas, args):
         raise ValueError(
             f"policy heads {sorted(unmapped)} have no guidance mapping in "
             "this tool — evaluating without them would misrepresent the "
-            "deployed config")
+            "deployed config"
+        )
     fns = []
     if "lateral" in etas:
-        fns.append(GuidanceConfig(
-            name="lateral", enabled=True, scale=args.lat_scale,
-            params={"lambda_lat": args.lambda_lat, "eta_lat": etas["lateral"]},
-        ))
+        fns.append(
+            GuidanceConfig(
+                name="lateral",
+                enabled=True,
+                scale=args.lat_scale,
+                params={"lambda_lat": args.lambda_lat, "eta_lat": etas["lateral"]},
+            )
+        )
     if "collision" in etas:
-        fns.append(GuidanceConfig(
-            name="collision_swerve_batched", enabled=True, scale=args.col_scale,
-            params={"eta_col": etas["collision"], "range": args.col_range},
-        ))
-    return GuidanceComposer(GuidanceSetConfig(functions=fns,
-                                              global_scale=args.guidance_scale))
+        fns.append(
+            GuidanceConfig(
+                name="collision_swerve_batched",
+                enabled=True,
+                scale=args.col_scale,
+                params={"eta_col": etas["collision"], "range": args.col_range},
+            )
+        )
+    return GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=args.guidance_scale))
 
 
 def ade(pred_xy: torch.Tensor, gt_xy: torch.Tensor, gt_valid: torch.Tensor) -> torch.Tensor:
     """Mean displacement over valid GT steps, per scene. [B, T, 2] -> [B]."""
-    d = (pred_xy - gt_xy).norm(dim=-1)            # [B, T]
+    d = (pred_xy - gt_xy).norm(dim=-1)  # [B, T]
     d = d * gt_valid
     return d.sum(dim=1) / gt_valid.sum(dim=1).clamp_min(1)
 
@@ -70,7 +79,8 @@ def ade(pred_xy: torch.Tensor, gt_xy: torch.Tensor, gt_valid: torch.Tensor) -> t
 @torch.no_grad()
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--policy_dir", required=True)
@@ -114,8 +124,9 @@ def main():
         norm_batch = _normalize_batch(batch, model_args)
 
         # 1. det generation (plain planner)
-        det = det_inference_batched(model, model_args, datas, device,
-                                    norm_batch=norm_batch)  # [B, T, 4]
+        det = det_inference_batched(
+            model, model_args, datas, device, norm_batch=norm_batch
+        )  # [B, T, 4]
 
         # 2. policy forward + guided generation (the online path)
         t0 = time.perf_counter()
@@ -126,9 +137,14 @@ def main():
         etas = {h: (2.0 * out.dists[h].mean - 1.0) for h in heads}  # [B]
         composer = make_composer(etas, args)
         guided = _batched_generate_varied_noise(
-            model, model_args, norm_batch_g,
-            noise_min=0.0, noise_max=0.0, first_deterministic=False,
-            composer=composer, device=device,
+            model,
+            model_args,
+            norm_batch_g,
+            noise_min=0.0,
+            noise_max=0.0,
+            first_deterministic=False,
+            composer=composer,
+            device=device,
         )  # [B, T, 4]
         if device.type == "cuda":
             torch.cuda.synchronize()
@@ -142,34 +158,44 @@ def main():
         gt_valid = (gt_xy.abs().sum(dim=-1) > 1e-6).float()
         det_ades.append(ade(det[..., :2], gt_xy, gt_valid).cpu())
         guided_ades.append(ade(guided[..., :2], gt_xy, gt_valid).cpu())
-        eta_abs.append(torch.stack(
-            [etas[h].abs().cpu() for h in heads], dim=-1).max(dim=-1).values)
+        eta_abs.append(torch.stack([etas[h].abs().cpu() for h in heads], dim=-1).max(dim=-1).values)
 
         done = start + B
         if done % (args.batch_size * 20) < args.batch_size:
-            d = torch.cat(det_ades); g = torch.cat(guided_ades)
-            print(f"  [{done}/{len(scene_paths)}] det ADE={d.mean():.4f} "
-                  f"guided ADE={g.mean():.4f} Δ={(g.mean()-d.mean())/d.mean()*100:+.2f}%")
+            d = torch.cat(det_ades)
+            g = torch.cat(guided_ades)
+            print(
+                f"  [{done}/{len(scene_paths)}] det ADE={d.mean():.4f} "
+                f"guided ADE={g.mean():.4f} Δ={(g.mean() - d.mean()) / d.mean() * 100:+.2f}%"
+            )
 
     det_a = torch.cat(det_ades).numpy()
     g_a = torch.cat(guided_ades).numpy()
     e_a = torch.cat(eta_abs).numpy()
 
     def dist(a):
-        return {"mean": float(a.mean()), "p50": float(np.median(a)),
-                "p95": float(np.percentile(a, 95)), "max": float(a.max())}
+        return {
+            "mean": float(a.mean()),
+            "p50": float(np.median(a)),
+            "p95": float(np.percentile(a, 95)),
+            "max": float(a.max()),
+        }
 
     acting = e_a > 0.1
     report = {
-        "n_scenes": int(len(det_a)), "n_skipped": n_skipped,
-        "det_ade": dist(det_a), "guided_ade": dist(g_a),
+        "n_scenes": int(len(det_a)),
+        "n_skipped": n_skipped,
+        "det_ade": dist(det_a),
+        "guided_ade": dist(g_a),
         "delta_pct_mean": float((g_a.mean() - det_a.mean()) / det_a.mean() * 100),
         "per_scene_delta": dist(g_a - det_a),
         "n_acting_scenes": int(acting.sum()),
         "acting_delta_mean": float((g_a - det_a)[acting].mean()) if acting.any() else 0.0,
         "policy_path_sec_per_scene": float(np.mean(t_policy)),
-        "guidance_args": {k: getattr(args, k) for k in (
-            "lambda_lat", "lat_scale", "col_scale", "col_range", "guidance_scale")},
+        "guidance_args": {
+            k: getattr(args, k)
+            for k in ("lambda_lat", "lat_scale", "col_scale", "col_range", "guidance_scale")
+        },
     }
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

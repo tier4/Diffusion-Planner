@@ -41,9 +41,9 @@ DT = 0.1  # 10 Hz
 # ---------------------------------------------------------------------------
 def lat_accel_current(positions: np.ndarray) -> np.ndarray:
     """positions: [T, 2] -> lat_accel: [T-2]"""
-    vel = np.diff(positions, axis=0) / DT          # (T-1, 2)
-    acc_vec = np.diff(vel, axis=0) / DT            # (T-2, 2)
-    heading = vel[:-1]                              # (T-2, 2)
+    vel = np.diff(positions, axis=0) / DT  # (T-1, 2)
+    acc_vec = np.diff(vel, axis=0) / DT  # (T-2, 2)
+    heading = vel[:-1]  # (T-2, 2)
     heading_norm = heading / (np.linalg.norm(heading, axis=-1, keepdims=True) + 1e-6)
     lat_dir = np.stack([-heading_norm[:, 1], heading_norm[:, 0]], axis=-1)
     lat_accel = np.sum(acc_vec * lat_dir, axis=-1)  # (T-2,)
@@ -60,13 +60,18 @@ def lat_accel_smoothed(positions: np.ndarray, window: int = 7, order: int = 3) -
     # SG smoothing (deriv=0) via numpy convolution
     smooth_kernel = _build_sg_diff_kernel(window, order, deriv=0, delta=1.0).numpy()
     pad = window // 2
+
     def _sg_smooth(signal):
-        padded = np.pad(signal, pad, mode='edge')
-        return np.convolve(padded, smooth_kernel, mode='valid')
-    smoothed = np.stack([
-        _sg_smooth(positions[:, 0]),
-        _sg_smooth(positions[:, 1]),
-    ], axis=-1)
+        padded = np.pad(signal, pad, mode="edge")
+        return np.convolve(padded, smooth_kernel, mode="valid")
+
+    smoothed = np.stack(
+        [
+            _sg_smooth(positions[:, 0]),
+            _sg_smooth(positions[:, 1]),
+        ],
+        axis=-1,
+    )
     return lat_accel_current(smoothed)
 
 
@@ -159,7 +164,7 @@ def main():
     }
 
     for i, npz_path in enumerate(scene_paths):
-        print(f"--- Scene {i+1}: {Path(npz_path).stem} ---")
+        print(f"--- Scene {i + 1}: {Path(npz_path).stem} ---")
         data = load_npz_data(npz_path, device)
 
         # Generate deterministic trajectory
@@ -169,9 +174,7 @@ def main():
 
         norm_data = {k: v.clone() for k, v in data.items()}
         norm_data = model_args.observation_normalizer(norm_data)
-        norm_data["sampled_trajectories"] = torch.zeros(
-            B, P, future_len + 1, 4, device=device
-        )
+        norm_data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4, device=device)
 
         _orig_gfn = model.decoder._guidance_fn
         model.decoder._guidance_fn = None
@@ -195,9 +198,15 @@ def main():
         all_results["model"]["curvature"].append(mk)
 
         mc_s, ms_s, mk_s = compute_stats(mc), compute_stats(ms), compute_stats(mk)
-        print(f"  MODEL  current:   max={mc_s['max']:6.2f}  mean={mc_s['mean']:5.2f}  p95={mc_s['p95']:5.2f}")
-        print(f"  MODEL  smoothed:  max={ms_s['max']:6.2f}  mean={ms_s['mean']:5.2f}  p95={ms_s['p95']:5.2f}")
-        print(f"  MODEL  curvature: max={mk_s['max']:6.2f}  mean={mk_s['mean']:5.2f}  p95={mk_s['p95']:5.2f}")
+        print(
+            f"  MODEL  current:   max={mc_s['max']:6.2f}  mean={mc_s['mean']:5.2f}  p95={mc_s['p95']:5.2f}"
+        )
+        print(
+            f"  MODEL  smoothed:  max={ms_s['max']:6.2f}  mean={ms_s['mean']:5.2f}  p95={ms_s['p95']:5.2f}"
+        )
+        print(
+            f"  MODEL  curvature: max={mk_s['max']:6.2f}  mean={mk_s['mean']:5.2f}  p95={mk_s['p95']:5.2f}"
+        )
 
         # --- GT ---
         gt_pos = gt_future[:, :2]
@@ -210,9 +219,15 @@ def main():
         all_results["gt"]["curvature"].append(gk)
 
         gc_s, gs_s, gk_s = compute_stats(gc), compute_stats(gs), compute_stats(gk)
-        print(f"  GT     current:   max={gc_s['max']:6.2f}  mean={gc_s['mean']:5.2f}  p95={gc_s['p95']:5.2f}")
-        print(f"  GT     smoothed:  max={gs_s['max']:6.2f}  mean={gs_s['mean']:5.2f}  p95={gs_s['p95']:5.2f}")
-        print(f"  GT     curvature: max={gk_s['max']:6.2f}  mean={gk_s['mean']:5.2f}  p95={gk_s['p95']:5.2f}")
+        print(
+            f"  GT     current:   max={gc_s['max']:6.2f}  mean={gc_s['mean']:5.2f}  p95={gc_s['p95']:5.2f}"
+        )
+        print(
+            f"  GT     smoothed:  max={gs_s['max']:6.2f}  mean={gs_s['mean']:5.2f}  p95={gs_s['p95']:5.2f}"
+        )
+        print(
+            f"  GT     curvature: max={gk_s['max']:6.2f}  mean={gk_s['mean']:5.2f}  p95={gk_s['p95']:5.2f}"
+        )
         print()
 
     # ---------------------------------------------------------------------------

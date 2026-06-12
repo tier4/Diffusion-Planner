@@ -39,9 +39,7 @@ def _read_route_msg(db_path: Path):
 
     con = sqlite3.connect(str(db_path))
     cur = con.cursor()
-    row = cur.execute(
-        "SELECT id, type FROM topics WHERE name='/planning/route'"
-    ).fetchone()
+    row = cur.execute("SELECT id, type FROM topics WHERE name='/planning/route'").fetchone()
     if row is None:
         raise SystemExit(f"/planning/route topic not found in {db_path}")
     tid, typ = row
@@ -51,8 +49,7 @@ def _read_route_msg(db_path: Path):
         (tid,),
     ).fetchone()[0]
     last = cur.execute(
-        "SELECT timestamp, data FROM messages "
-        "WHERE topic_id=? ORDER BY timestamp DESC LIMIT 1",
+        "SELECT timestamp, data FROM messages WHERE topic_id=? ORDER BY timestamp DESC LIMIT 1",
         (tid,),
     ).fetchone()
     con.close()
@@ -73,9 +70,7 @@ def _resolve_db3(bag_arg: Path) -> Path:
             return cands[0]
         if len(cands) == 0:
             raise SystemExit(f"No .db3 in {bag_arg}")
-        raise SystemExit(
-            f"Multiple .db3 in {bag_arg}; pass one explicitly: {cands}"
-        )
+        raise SystemExit(f"Multiple .db3 in {bag_arg}; pass one explicitly: {cands}")
     raise SystemExit(f"--bag must be a .db3 or a directory containing one, got {bag_arg}")
 
 
@@ -97,13 +92,21 @@ def _assert_ids_in_map(lanelet_ids, map_path: Path) -> None:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--bag", type=Path, required=True,
-                   help="Path to rosbag .db3 (or directory containing one)")
-    p.add_argument("--map", type=Path, required=True,
-                   help="Path to lanelet2_map.osm the Route will reference at replay time")
+    p.add_argument(
+        "--bag", type=Path, required=True, help="Path to rosbag .db3 (or directory containing one)"
+    )
+    p.add_argument(
+        "--map",
+        type=Path,
+        required=True,
+        help="Path to lanelet2_map.osm the Route will reference at replay time",
+    )
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--skip_map_check", action="store_true",
-                   help="Don't validate that every bag segment id exists in --map")
+    p.add_argument(
+        "--skip_map_check",
+        action="store_true",
+        help="Don't validate that every bag segment id exists in --map",
+    )
     args = p.parse_args()
 
     db_path = _resolve_db3(args.bag)

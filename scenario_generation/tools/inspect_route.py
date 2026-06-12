@@ -37,10 +37,10 @@ def main() -> None:
 
     print(f"Route from {args.route}")
     print(f"  map_path:          {route.map_path}")
-    print(f"  start_pose:        {_fmt_pose(route.start_pose)}  "
-          f"lanelet_id={route.start_lanelet_id}")
-    print(f"  goal_pose:         {_fmt_pose(route.goal_pose)}  "
-          f"lanelet_id={route.goal_lanelet_id}")
+    print(
+        f"  start_pose:        {_fmt_pose(route.start_pose)}  lanelet_id={route.start_lanelet_id}"
+    )
+    print(f"  goal_pose:         {_fmt_pose(route.goal_pose)}  lanelet_id={route.goal_lanelet_id}")
     print(f"  waypoints:         {route.num_waypoints()}")
     for i, (wp, wl) in enumerate(zip(route.waypoint_poses, route.waypoint_lanelet_ids), 1):
         print(f"    #{i}: {_fmt_pose(wp)}  lanelet_id={wl}")
@@ -53,8 +53,7 @@ def main() -> None:
         if tail and tail != head:
             print(f"    last 5:  {tail}")
     else:
-        print("  route_lanelet_ids: *unresolved* "
-              "(replay will fall back to find_route)")
+        print("  route_lanelet_ids: *unresolved* (replay will fall back to find_route)")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ Usage:
         --config <reward_config.json> --ego_shape WB,L,W --output_dir <dir> \
         [--render] [--lambda_lat 4.0] [--col_scale 6.0] [--lat_scale 1.5]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,8 +43,7 @@ def load_policy(policy_dir: str, model_args, device) -> tuple[ExplorationPolicy,
     pdir = Path(policy_dir)
     cfg = ExplorationPolicyConfig.from_json(pdir / "exploration_policy_config.json")
     policy = ExplorationPolicy(cfg, ref_seq_len=model_args.future_len).to(device)
-    state = torch.load(pdir / "exploration_policy.pth", map_location=device,
-                       weights_only=False)
+    state = torch.load(pdir / "exploration_policy.pth", map_location=device, weights_only=False)
     policy.load_state_dict(state, strict=True)
     policy.eval()
     return policy, cfg.heads
@@ -53,6 +53,7 @@ def make_composer(etas: dict[str, torch.Tensor], args) -> GuidanceComposer:
     # Thin wrapper over the shared head mapping; head_protect > 0 zeroes
     # guidance on the first N plan steps.
     from rlvr.guidance_batched import build_head_composer
+
     return build_head_composer(
         etas,
         lambda_lat=args.lambda_lat,
@@ -82,9 +83,7 @@ def _new_violation(g, d) -> bool:
 @torch.no_grad()
 def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
     data = load_npz_data(npz_path, device)
-    norm_data = {
-        k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
-    }
+    norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm_data = model_args.observation_normalizer(norm_data)
 
     x_ref_np = generate_reference_trajectory(model, model_args, norm_data, device)
@@ -100,10 +99,12 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
         # Candidate 0 = the deterministic mean; the rest sampled from the
         # policy's Beta distributions (its own uncertainty = search width).
         cand = {
-            h: torch.cat([
-                mean_etas[h],
-                (2.0 * out.dists[h].rsample((K - 1,)).reshape(-1) - 1.0),
-            ])
+            h: torch.cat(
+                [
+                    mean_etas[h],
+                    (2.0 * out.dists[h].rsample((K - 1,)).reshape(-1) - 1.0),
+                ]
+            )
             for h in heads
         }
         K_data = {}
@@ -114,20 +115,39 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
                 K_data[k] = v
         composer = make_composer(cand, args)
         from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
-        cands = _batched_generate_varied_noise(
-            model, model_args, K_data, noise_min=0.0, noise_max=0.0,
-            first_deterministic=False, composer=composer, device=device,
-        ).cpu().numpy()
+
+        cands = (
+            _batched_generate_varied_noise(
+                model,
+                model_args,
+                K_data,
+                noise_min=0.0,
+                noise_max=0.0,
+                first_deterministic=False,
+                composer=composer,
+                device=device,
+            )
+            .cpu()
+            .numpy()
+        )
     else:
         cand = mean_etas
         composer = make_composer(cand, args)
-        cands = generate_samples(model=model, model_args=model_args, data=norm_data,
-                                 noise_scale=0.0, n_samples=1, composer=composer,
-                                 device=device)[None, 0]
+        cands = generate_samples(
+            model=model,
+            model_args=model_args,
+            data=norm_data,
+            noise_scale=0.0,
+            n_samples=1,
+            composer=composer,
+            device=device,
+        )[None, 0]
 
     det = x_ref_np  # x_ref IS the unguided det trajectory
     traj_batch = torch.tensor(
-        np.concatenate([cands, det[None]]), device=device, dtype=torch.float32,
+        np.concatenate([cands, det[None]]),
+        device=device,
+        dtype=torch.float32,
     )
     bds = compute_reward_batch(traj_batch, data, rcfg)
     cand_bds, d_bd = bds[:-1], bds[-1]
@@ -150,32 +170,38 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
 
     guided = det if pick == -1 else cands[pick]
     etas = (
-        {h: 0.0 for h in heads} if pick == -1
-        else {h: float(cand[h][pick].item()) for h in heads}
+        {h: 0.0 for h in heads} if pick == -1 else {h: float(cand[h][pick].item()) for h in heads}
     )
     etas = {h: torch.tensor([v], device=device) for h, v in etas.items()}
     deviation = float(np.linalg.norm(guided[:, :2] - det[:, :2], axis=-1).mean())
 
     def _row(r):
         return {
-            "sc_min_dist": float(r.sc_min_dist), "rb_min_dist": float(getattr(r, "rb_min_dist", 99.0)),
-            "cl": float(r.centerline), "total": float(r.total),
-            "static_crossing": bool(r.static_crossing), "rb_cross": bool(r.rb_crossing),
-            "lane_cross": bool(r.lane_crossing), "kin_violated": bool(r.kinematic_violated),
+            "sc_min_dist": float(r.sc_min_dist),
+            "rb_min_dist": float(getattr(r, "rb_min_dist", 99.0)),
+            "cl": float(r.centerline),
+            "total": float(r.total),
+            "static_crossing": bool(r.static_crossing),
+            "rb_cross": bool(r.rb_crossing),
+            "lane_cross": bool(r.lane_crossing),
+            "kin_violated": bool(r.kinematic_violated),
             "sc_n_stopped": int(r.sc_n_stopped),
         }
 
     return {
-        "scene": Path(npz_path).name, "scene_path": str(npz_path),
+        "scene": Path(npz_path).name,
+        "scene_path": str(npz_path),
         "etas": {h: float(v.item()) for h, v in etas.items()},
         "deviation": deviation,
-        "guided": _row(g_bd), "baseline": _row(d_bd),
+        "guided": _row(g_bd),
+        "baseline": _row(d_bd),
         "_trajs": (guided, det),
     }
 
 
 def render_scene(row, out_png):
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -186,12 +212,24 @@ def render_scene(row, out_png):
     guided, det = row["_trajs"]
     fig, ax = plt.subplots(figsize=(10, 10))
     draw_scene_base(ax, row["scene_path"])
-    for (x, y, h, length, w) in extract_stopped_neighbors(row["scene_path"]):
+    for x, y, h, length, w in extract_stopped_neighbors(row["scene_path"]):
         draw_agent_box(ax, x, y, h, length, w, color="crimson", alpha=0.5)
-    ax.plot(det[:, 0], det[:, 1], "-", color="black", lw=2.2,
-            label=f"baseline det sc={row['baseline']['sc_min_dist']:+.2f}m")
-    ax.plot(guided[:, 0], guided[:, 1], "-", color="lime", lw=2.2,
-            label=f"policy-guided sc={row['guided']['sc_min_dist']:+.2f}m")
+    ax.plot(
+        det[:, 0],
+        det[:, 1],
+        "-",
+        color="black",
+        lw=2.2,
+        label=f"baseline det sc={row['baseline']['sc_min_dist']:+.2f}m",
+    )
+    ax.plot(
+        guided[:, 0],
+        guided[:, 1],
+        "-",
+        color="lime",
+        lw=2.2,
+        label=f"policy-guided sc={row['guided']['sc_min_dist']:+.2f}m",
+    )
     eta_str = " ".join(f"{h}={v:+.2f}" for h, v in row["etas"].items())
     ax.set_title(f"{row['scene']}  η: {eta_str}  dev={row['deviation']:.2f}m")
     ax.legend(loc="upper right", fontsize=9)
@@ -205,6 +243,7 @@ def render_scene(row, out_png):
 
 def make_collage(png_paths: list[Path], out_path: Path, cols: int = 4):
     from PIL import Image
+
     if not png_paths:
         return
     ims = [Image.open(p) for p in png_paths]
@@ -220,17 +259,25 @@ def make_collage(png_paths: list[Path], out_path: Path, cols: int = 4):
 
 def summarize(rows: list[dict], which: str) -> dict:
     sub = [dict(r[which], scene=r["scene"]) for r in rows]
-    agg = aggregate_stats([
-        {**s, "static_crossing": s["static_crossing"], "rb_cross": s["rb_cross"],
-         "lane_cross": s["lane_cross"], "kin_violated": s["kin_violated"]}
-        for s in sub
-    ])
+    agg = aggregate_stats(
+        [
+            {
+                **s,
+                "static_crossing": s["static_crossing"],
+                "rb_cross": s["rb_cross"],
+                "lane_cross": s["lane_cross"],
+                "kin_violated": s["kin_violated"],
+            }
+            for s in sub
+        ]
+    )
     return agg
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--policy_dir", required=True)
@@ -240,15 +287,22 @@ def main():
     parser.add_argument("--ego_shape", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--render", action="store_true")
-    parser.add_argument("--certify", action="store_true",
-                        help="Fall back to the unguided det trajectory whenever "
-                             "the guided one introduces a NEW violation (or "
-                             "lowers total reward on an already-clean scene). "
-                             "Guarantees no regressions by construction.")
-    parser.add_argument("--refine_k", type=int, default=1,
-                        help="Sample K-1 extra eta candidates from the policy "
-                             "distribution, score all, pick the best clean one "
-                             "(policy = prior, reward = judge). 1 = mean only.")
+    parser.add_argument(
+        "--certify",
+        action="store_true",
+        help="Fall back to the unguided det trajectory whenever "
+        "the guided one introduces a NEW violation (or "
+        "lowers total reward on an already-clean scene). "
+        "Guarantees no regressions by construction.",
+    )
+    parser.add_argument(
+        "--refine_k",
+        type=int,
+        default=1,
+        help="Sample K-1 extra eta candidates from the policy "
+        "distribution, score all, pick the best clean one "
+        "(policy = prior, reward = judge). 1 = mean only.",
+    )
     # Guidance envelope (must match the sweep that produced the training labels)
     parser.add_argument("--lambda_lat", type=float, default=4.0)
     parser.add_argument("--lat_scale", type=float, default=1.5)
@@ -259,10 +313,13 @@ def main():
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
     parser.add_argument("--lambda_col", type=float, default=3.0)
-    parser.add_argument("--slow_composer", action="store_true",
-                        help="use the original GuidanceComposer (FastGuidance"
-                             "Composer is the default: 288/288 active "
-                             "generations bit-identical, inert short-circuit)")
+    parser.add_argument(
+        "--slow_composer",
+        action="store_true",
+        help="use the original GuidanceComposer (FastGuidance"
+        "Composer is the default: 288/288 active "
+        "generations bit-identical, inert short-circuit)",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -299,12 +356,20 @@ def main():
             row.pop("_trajs")
             rows.append(row)
             g, b = row["guided"], row["baseline"]
-            flag = ("FIX " if b["static_crossing"] and not g["static_crossing"] else
-                    "BRK " if g["static_crossing"] and not b["static_crossing"] else
-                    "COL " if g["static_crossing"] else "    ")
+            flag = (
+                "FIX "
+                if b["static_crossing"] and not g["static_crossing"]
+                else "BRK "
+                if g["static_crossing"] and not b["static_crossing"]
+                else "COL "
+                if g["static_crossing"]
+                else "    "
+            )
             eta_str = " ".join(f"{h[0]}={v:+.2f}" for h, v in row["etas"].items())
-            print(f"  [{tag}] {flag} sc {b['sc_min_dist']:+.2f}->{g['sc_min_dist']:+.2f} "
-                  f"dev={row['deviation']:.2f} η[{eta_str}]  {row['scene']}")
+            print(
+                f"  [{tag}] {flag} sc {b['sc_min_dist']:+.2f}->{g['sc_min_dist']:+.2f} "
+                f"dev={row['deviation']:.2f} η[{eta_str}]  {row['scene']}"
+            )
         if args.render and rows:
             pngs = sorted(render_dir.glob("*.png"))
             make_collage(pngs, out_dir / f"collage_{tag}.png")
@@ -314,30 +379,48 @@ def main():
     normal_rows = run_set(args.normal_scenes, "normal") if args.normal_scenes else []
 
     report = {
-        "guidance_args": {k: getattr(args, k) for k in (
-            "lambda_lat", "lat_scale", "col_scale", "col_range",
-            "lambda_spd", "stretch_scale", "guidance_scale",
-            "envelope", "lambda_col")},
+        "guidance_args": {
+            k: getattr(args, k)
+            for k in (
+                "lambda_lat",
+                "lat_scale",
+                "col_scale",
+                "col_range",
+                "lambda_spd",
+                "stretch_scale",
+                "guidance_scale",
+                "envelope",
+                "lambda_col",
+            )
+        },
         "avoid": {
             "n": len(avoid_rows),
             "guided": summarize(avoid_rows, "guided") if avoid_rows else {},
             "baseline": summarize(avoid_rows, "baseline") if avoid_rows else {},
-            "deviation_mean": float(np.mean([r["deviation"] for r in avoid_rows])) if avoid_rows else 0.0,
+            "deviation_mean": float(np.mean([r["deviation"] for r in avoid_rows]))
+            if avoid_rows
+            else 0.0,
             "eta_abs_mean": {
-                h: float(np.mean([abs(r["etas"][h]) for r in avoid_rows]))
-                for h in heads
-            } if avoid_rows else {},
+                h: float(np.mean([abs(r["etas"][h]) for r in avoid_rows])) for h in heads
+            }
+            if avoid_rows
+            else {},
         },
         "normal": {
             "n": len(normal_rows),
             "guided": summarize(normal_rows, "guided") if normal_rows else {},
             "baseline": summarize(normal_rows, "baseline") if normal_rows else {},
-            "deviation_mean": float(np.mean([r["deviation"] for r in normal_rows])) if normal_rows else 0.0,
-            "deviation_max": float(np.max([r["deviation"] for r in normal_rows])) if normal_rows else 0.0,
+            "deviation_mean": float(np.mean([r["deviation"] for r in normal_rows]))
+            if normal_rows
+            else 0.0,
+            "deviation_max": float(np.max([r["deviation"] for r in normal_rows]))
+            if normal_rows
+            else 0.0,
             "eta_abs_mean": {
-                h: float(np.mean([abs(r["etas"][h]) for r in normal_rows]))
-                for h in heads
-            } if normal_rows else {},
+                h: float(np.mean([abs(r["etas"][h]) for r in normal_rows])) for h in heads
+            }
+            if normal_rows
+            else {},
         },
         "scenes_avoid": avoid_rows,
         "scenes_normal": normal_rows,
@@ -351,10 +434,14 @@ def main():
         g = report[tag]["guided"]
         b = report[tag]["baseline"]
         print(f"\n== {tag} ({len(rows)} scenes) ==")
-        print(f"  static crossings: baseline {b['static_crossings']} -> guided {g['static_crossings']}")
+        print(
+            f"  static crossings: baseline {b['static_crossings']} -> guided {g['static_crossings']}"
+        )
         print(f"  rb crossings:     baseline {b['rb_crossings']} -> guided {g['rb_crossings']}")
         print(f"  lane crossings:   baseline {b['lane_crossings']} -> guided {g['lane_crossings']}")
-        print(f"  sc_min_dist p5:   baseline {b['sc_min_dist']['p5']:+.3f} -> guided {g['sc_min_dist']['p5']:+.3f}")
+        print(
+            f"  sc_min_dist p5:   baseline {b['sc_min_dist']['p5']:+.3f} -> guided {g['sc_min_dist']['p5']:+.3f}"
+        )
         print(f"  deviation mean:   {report[tag]['deviation_mean']:.3f} m")
         print(f"  |eta| mean:       {report[tag]['eta_abs_mean']}")
     print(f"\nWrote {out_dir / 'policy_eval.json'}")

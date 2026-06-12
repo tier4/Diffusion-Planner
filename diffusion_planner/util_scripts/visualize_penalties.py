@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--road_border_n_interp", type=int, default=0)
     return parser.parse_args()
 
+
 def compute_min_edge_to_road_border_distance(
     ego_edge_points: torch.Tensor,
     line_strings_xy: torch.Tensor,
@@ -96,7 +97,9 @@ def compute_min_edge_to_road_border_distance(
     return min_per_point.min(dim=-1).values  # [T]
 
 
-def process_sample(idx, valid_data_path, prediction_path, save_dir, road_border_margin, road_border_n_interp):
+def process_sample(
+    idx, valid_data_path, prediction_path, save_dir, road_border_margin, road_border_n_interp
+):
     valid_data_path = Path(valid_data_path)
     prediction_path = Path(prediction_path)
 
@@ -120,19 +123,21 @@ def process_sample(idx, valid_data_path, prediction_path, save_dir, road_border_
     timesteps = np.arange(T) * 0.1  # seconds (10 Hz)
 
     # Compute ego edge points [1, T, K, 2]
-    ego_edge_points = compute_ego_edge_points(ego_traj[None], ego_shape[None], n_interp=road_border_n_interp)
+    ego_edge_points = compute_ego_edge_points(
+        ego_traj[None], ego_shape[None], n_interp=road_border_n_interp
+    )
 
     # 1. Neighbor collision penalty
     neighbors_future = inputs["neighbor_agents_future"]
-    neighbor_future_mask = (
-        torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
-    )
+    neighbor_future_mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
     neighbors_future = heading_to_cos_sin(neighbors_future)
     neighbors_future[neighbor_future_mask] = 0.0
     neighbors_future_valid = ~neighbor_future_mask
 
     neighbor_pen = compute_neighbor_collision_penalty(
-        ego_edge_points, neighbors_future, neighbors_future_valid,
+        ego_edge_points,
+        neighbors_future,
+        neighbors_future_valid,
         inputs["neighbor_agents_past"],
         margin=2.0,
     )
@@ -140,7 +145,9 @@ def process_sample(idx, valid_data_path, prediction_path, save_dir, road_border_
     # 2. Road border penalty and distance
     ls = inputs["line_strings"]  # [1, N, P, D]
     rb_pen = compute_road_border_penalty(
-        ego_edge_points, ls, margin=road_border_margin,
+        ego_edge_points,
+        ls,
+        margin=road_border_margin,
     )  # [1, T]
     ls_xy = ls[0, ..., :2]  # [N, P, 2]
     rb_mask = (ls[0, ..., 3] > 0.5).any(dim=-1)  # [N]
@@ -192,12 +199,8 @@ def process_sample(idx, valid_data_path, prediction_path, save_dir, road_border_
 
     # Bottom-left: Time-series of penalties
     ax_pen = fig.add_subplot(gs[1, 0])
-    ax_pen.plot(
-        timesteps, neighbor_pen_np, label="neighbor", alpha=0.8, linewidth=1.5
-    )
-    ax_pen.plot(
-        timesteps, rb_pen_np, label="road_border", alpha=0.8, linewidth=1.5
-    )
+    ax_pen.plot(timesteps, neighbor_pen_np, label="neighbor", alpha=0.8, linewidth=1.5)
+    ax_pen.plot(timesteps, rb_pen_np, label="road_border", alpha=0.8, linewidth=1.5)
     ax_pen.set_xlabel("Time [s]")
     ax_pen.set_ylabel("Penalty [m]")
     ax_pen.legend(loc="upper right", fontsize=8)
@@ -260,8 +263,7 @@ def main():
 
     prediction_path_list = sorted(predictions_dir.glob("**/*.npz"))
     assert len(prediction_path_list) == len(valid_data_path_list), (
-        f"Mismatch: {len(prediction_path_list)} predictions vs "
-        f"{len(valid_data_path_list)} data"
+        f"Mismatch: {len(prediction_path_list)} predictions vs {len(valid_data_path_list)} data"
     )
 
     if args.sample_indices is not None:

@@ -45,8 +45,12 @@ def main():
     parser.add_argument("--npz_list", required=True, help="Path to path_list.json")
     parser.add_argument("--k", type=int, default=16, help="Number of clusters")
     parser.add_argument("--output", required=True, help="Output path, e.g. prototypes_k16.npy")
-    parser.add_argument("--max_samples", type=int, default=50000,
-                        help="Maximum number of samples to load (random subset)")
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=50000,
+        help="Maximum number of samples to load (random subset)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -78,7 +82,7 @@ def main():
     # Flatten to (N, 160) for KMeans
     X = np.stack(trajectories, axis=0)  # (N, 80, 2)
     N = X.shape[0]
-    X_flat = X.reshape(N, -1)           # (N, 160)
+    X_flat = X.reshape(N, -1)  # (N, 160)
 
     print(f"Running KMeans(k={args.k}) on {N} samples of shape {X_flat.shape}…")
     # Whitening normalises each feature dimension; we undo it after clustering

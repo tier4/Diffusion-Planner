@@ -87,14 +87,22 @@ def compute_step_reward(
         nb_valid = neighbor_valid.unsqueeze(1).expand(-1, 2)  # [N_nb, 2]
 
         safety_scores, collision_steps = compute_safety_score_batch(
-            ego_mini, ego_shape, nb_mini, neighbor_shapes, nb_valid, reward_config,
+            ego_mini,
+            ego_shape,
+            nb_mini,
+            neighbor_shapes,
+            nb_valid,
+            reward_config,
         )
         collision = collision_steps[0] is not None
 
     # --- Road border check ---
     rb_crossing = False
     crossing_gate, _, _, rb_steps, _, _ = compute_road_border_penalty(
-        ego_mini, ego_shape, data, config=reward_config,
+        ego_mini,
+        ego_shape,
+        data,
+        config=reward_config,
     )
     if crossing_gate[0].item() < 0.5:
         rb_crossing = True

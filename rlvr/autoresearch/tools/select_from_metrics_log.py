@@ -40,7 +40,9 @@ from pathlib import Path
 
 
 def _trigger_reasons(
-    rec: dict, rb_min_dist: float, cl_min_abs: float,
+    rec: dict,
+    rb_min_dist: float,
+    cl_min_abs: float,
 ) -> list[str]:
     reasons: list[str] = []
     if rec.get("lane_gate", 1.0) < 0.5:
@@ -56,23 +58,36 @@ def _trigger_reasons(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--metrics_log", type=str, required=True,
-                        help="metrics_log.json written by scenario_generation.replay")
-    parser.add_argument("--npz_dir", type=str, required=True,
-                        help="Directory containing replay_step_NNNN.npz files")
-    parser.add_argument("--output", type=str, required=True,
-                        help="JSON list of kept (pre-trigger) NPZ paths")
-    parser.add_argument("--diagnostics", type=str, default=None,
-                        help="Optional per-step trigger/keep dump")
-    parser.add_argument("--rb_min_dist", type=float, required=True,
-                        help="Trigger if rb_min_dist < this (metres)")
-    parser.add_argument("--cl_min_abs", type=float, required=True,
-                        help="Trigger if |cl_score| > this")
-    parser.add_argument("--lookback", type=int, required=True,
-                        help="Number of pre-trigger scenes to keep")
-    parser.add_argument("--include_trigger", action="store_true",
-                        help="Also keep the trigger scenes (default: drop — "
-                             "the lookback is the preventable window)")
+    parser.add_argument(
+        "--metrics_log",
+        type=str,
+        required=True,
+        help="metrics_log.json written by scenario_generation.replay",
+    )
+    parser.add_argument(
+        "--npz_dir", type=str, required=True, help="Directory containing replay_step_NNNN.npz files"
+    )
+    parser.add_argument(
+        "--output", type=str, required=True, help="JSON list of kept (pre-trigger) NPZ paths"
+    )
+    parser.add_argument(
+        "--diagnostics", type=str, default=None, help="Optional per-step trigger/keep dump"
+    )
+    parser.add_argument(
+        "--rb_min_dist", type=float, required=True, help="Trigger if rb_min_dist < this (metres)"
+    )
+    parser.add_argument(
+        "--cl_min_abs", type=float, required=True, help="Trigger if |cl_score| > this"
+    )
+    parser.add_argument(
+        "--lookback", type=int, required=True, help="Number of pre-trigger scenes to keep"
+    )
+    parser.add_argument(
+        "--include_trigger",
+        action="store_true",
+        help="Also keep the trigger scenes (default: drop — "
+        "the lookback is the preventable window)",
+    )
     args = parser.parse_args()
 
     with open(args.metrics_log) as f:

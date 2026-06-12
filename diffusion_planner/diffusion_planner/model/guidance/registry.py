@@ -37,8 +37,7 @@ def build(config: "GuidanceConfig", **kwargs) -> "BaseGuidance":
     """Instantiate a guidance function from its GuidanceConfig."""
     if config.name not in _REGISTRY:
         raise KeyError(
-            f"Guidance '{config.name}' not registered. "
-            f"Available: {sorted(_REGISTRY.keys())}"
+            f"Guidance '{config.name}' not registered. Available: {sorted(_REGISTRY.keys())}"
         )
     return _REGISTRY[config.name](config, **kwargs)
 

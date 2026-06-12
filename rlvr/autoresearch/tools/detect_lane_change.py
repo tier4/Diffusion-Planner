@@ -66,6 +66,7 @@ import numpy as np
 #  Polyline helpers
 # ---------------------------------------------------------------------------
 
+
 def _valid_lane_indices(lanes: np.ndarray) -> np.ndarray:
     """Return indices of non-zero lane channels (each lane is (P, F))."""
     norms = np.linalg.norm(lanes, axis=(1, 2))
@@ -129,12 +130,15 @@ def _closest_lane(pt: np.ndarray, lane_block: np.ndarray) -> tuple[int, float]:
 #  Lane-change PREDICTOR (route_lanes only)
 # ---------------------------------------------------------------------------
 
-def predict_lane_change(npz_path: str | Path,
-                        lookahead_m: float = 50.0,
-                        lane_change_thresh_m: float = 1.0,
-                        ego_off_route_thresh_m: float = 2.5,
-                        speed_lookahead_horizon_s: float = 8.0,
-                        speed_lookahead_buffer_m: float = 5.0) -> dict:
+
+def predict_lane_change(
+    npz_path: str | Path,
+    lookahead_m: float = 50.0,
+    lane_change_thresh_m: float = 1.0,
+    ego_off_route_thresh_m: float = 2.5,
+    speed_lookahead_horizon_s: float = 8.0,
+    speed_lookahead_buffer_m: float = 5.0,
+) -> dict:
     """Predict lane-change from ego_current_state + route_lanes geometry.
 
     A lane change is flagged iff EITHER:
@@ -188,22 +192,19 @@ def predict_lane_change(npz_path: str | Path,
     ego_lat_to_first_route = 0.0
     if first_pts.shape[0] >= 2:
         d_perp, seg_i, t = _point_to_polyline_dist(ego_xy, first_pts[:, :2])
-        endpoint_hit = (
-            (seg_i == 0 and t <= 1e-3)
-            or (seg_i == first_pts.shape[0] - 2 and t >= 1.0 - 1e-3)
+        endpoint_hit = (seg_i == 0 and t <= 1e-3) or (
+            seg_i == first_pts.shape[0] - 2 and t >= 1.0 - 1e-3
         )
         if not endpoint_hit:
             p0 = first_pts[seg_i, :2]
-            p1 = (first_pts[seg_i + 1, :2]
-                  if seg_i + 1 < first_pts.shape[0] else p0)
+            p1 = first_pts[seg_i + 1, :2] if seg_i + 1 < first_pts.shape[0] else p0
             tan = p1 - p0
             n = np.linalg.norm(tan)
             if n > 1e-6:
                 tan = tan / n
                 normal = np.array([-tan[1], tan[0]])
                 base = p0 + t * (p1 - p0)
-                ego_lat_to_first_route = float(
-                    abs(np.dot(ego_xy - base, normal)))
+                ego_lat_to_first_route = float(abs(np.dot(ego_xy - base, normal)))
             else:
                 ego_lat_to_first_route = float(d_perp)
 
@@ -222,8 +223,7 @@ def predict_lane_change(npz_path: str | Path,
                 "effective_lookahead_m": effective_lookahead_m,
                 "speed_m_s": speed,
                 "lane_change_thresh_m": lane_change_thresh_m,
-                "reason": ("single_route_lane_offset" if predicted
-                           else "single_route_lane"),
+                "reason": ("single_route_lane_offset" if predicted else "single_route_lane"),
             },
         }
 
@@ -254,12 +254,13 @@ def predict_lane_change(npz_path: str | Path,
     if first.shape[0] >= 2:
         d0, seg0, t0 = _point_to_polyline_dist(ego_xy, first[:, :2])
         # arc from ego projection forward along lane to its last pt
-        arc_remaining = (1.0 - t0) * float(np.linalg.norm(
-            first[seg0 + 1, :2] - first[seg0, :2]
-        )) if seg0 + 1 < first.shape[0] else 0.0
+        arc_remaining = (
+            (1.0 - t0) * float(np.linalg.norm(first[seg0 + 1, :2] - first[seg0, :2]))
+            if seg0 + 1 < first.shape[0]
+            else 0.0
+        )
         for j in range(seg0 + 1, first.shape[0] - 1):
-            arc_remaining += float(np.linalg.norm(
-                first[j + 1, :2] - first[j, :2]))
+            arc_remaining += float(np.linalg.norm(first[j + 1, :2] - first[j, :2]))
     else:
         arc_remaining = 0.0
 
@@ -286,15 +287,13 @@ def predict_lane_change(npz_path: str | Path,
 
         # Arc to THIS gap = arc remaining on first lane (if k == 0) +
         # full lengths of intermediate lanes.
-        arc_to_gap = arc_used + (arc_remaining if k == 0
-                                 else _polyline_arc_length(a_pts))
+        arc_to_gap = arc_used + (arc_remaining if k == 0 else _polyline_arc_length(a_pts))
 
         if lat > max_lat_gap:
             max_lat_gap = lat
         if lat >= lane_change_thresh_m and triggering_pair is None:
             if arc_to_gap <= effective_lookahead_m:
-                triggering_pair = (int(a_idx), int(b_idx),
-                                   lat, lon, float(arc_to_gap))
+                triggering_pair = (int(a_idx), int(b_idx), lat, lon, float(arc_to_gap))
 
         # Advance budget.
         if k == 0:
@@ -325,12 +324,17 @@ def predict_lane_change(npz_path: str | Path,
             "speed_m_s": speed,
             "lane_change_thresh_m": lane_change_thresh_m,
             "ego_off_route_trigger": bool(ego_off_route),
-            "trigger": (None if triggering_pair is None
-                        else {"from_lane": triggering_pair[0],
-                              "to_lane": triggering_pair[1],
-                              "lateral_gap_m": triggering_pair[2],
-                              "longitudinal_gap_m": triggering_pair[3],
-                              "arc_to_trigger_m": triggering_pair[4]}),
+            "trigger": (
+                None
+                if triggering_pair is None
+                else {
+                    "from_lane": triggering_pair[0],
+                    "to_lane": triggering_pair[1],
+                    "lateral_gap_m": triggering_pair[2],
+                    "longitudinal_gap_m": triggering_pair[3],
+                    "arc_to_trigger_m": triggering_pair[4],
+                }
+            ),
         },
     }
 
@@ -339,8 +343,10 @@ def predict_lane_change(npz_path: str | Path,
 #  Lane-change GROUND TRUTH (ego_agent_future vs. lanes)
 # ---------------------------------------------------------------------------
 
-def _lanes_share_endpoint(lane_a: np.ndarray, lane_b: np.ndarray,
-                          chain_thresh_m: float = 1.0) -> bool:
+
+def _lanes_share_endpoint(
+    lane_a: np.ndarray, lane_b: np.ndarray, chain_thresh_m: float = 1.0
+) -> bool:
     """Return True iff lanes a and b are longitudinally chained.
 
     Two segments chain when an endpoint of one is essentially equal to
@@ -357,15 +363,15 @@ def _lanes_share_endpoint(lane_a: np.ndarray, lane_b: np.ndarray,
     a_last = a[-1, :2]
     b_first = b[0, :2]
     b_last = b[-1, :2]
-    for p, q in ((a_last, b_first), (a_first, b_last),
-                 (a_last, b_last), (a_first, b_first)):
+    for p, q in ((a_last, b_first), (a_first, b_last), (a_last, b_last), (a_first, b_first)):
         if float(np.linalg.norm(p - q)) <= chain_thresh_m:
             return True
     return False
 
 
-def _lateral_offset_between_lanes(lane_a: np.ndarray, lane_b: np.ndarray,
-                                  pivot_xy: np.ndarray) -> float:
+def _lateral_offset_between_lanes(
+    lane_a: np.ndarray, lane_b: np.ndarray, pivot_xy: np.ndarray
+) -> float:
     """Approximate the perpendicular offset between two lanes, measured
     at ``pivot_xy``. Returns the absolute lateral distance from the
     closest point of lane_a to the closest point of lane_b at the same
@@ -400,13 +406,15 @@ def _lateral_offset_between_lanes(lane_a: np.ndarray, lane_b: np.ndarray,
     return float(abs(np.dot(delta, normal)))
 
 
-def actual_lane_change(npz_path: str | Path,
-                       move_thresh_m: float = 5.0,
-                       lane_lateral_offset_m: float = 1.5,
-                       endpoint_chain_thresh_m: float = 1.0,
-                       commit_dwell_steps: int = 15,
-                       commit_dist_diff_m: float = 0.6,
-                       ego_lateral_drift_m: float = 1.5) -> dict:
+def actual_lane_change(
+    npz_path: str | Path,
+    move_thresh_m: float = 5.0,
+    lane_lateral_offset_m: float = 1.5,
+    endpoint_chain_thresh_m: float = 1.0,
+    commit_dwell_steps: int = 15,
+    commit_dist_diff_m: float = 0.6,
+    ego_lateral_drift_m: float = 1.5,
+) -> dict:
     """Reconstruct whether the ego actually changed lanes during the
     recorded future.
 
@@ -435,7 +443,7 @@ def actual_lane_change(npz_path: str | Path,
     """
     d = np.load(npz_path, allow_pickle=True)
     fut = d["ego_agent_future"]  # (80, 3)
-    lanes = d["lanes"]            # (140, 20, 33)
+    lanes = d["lanes"]  # (140, 20, 33)
 
     total_move = float(np.linalg.norm(fut[-1, :2] - fut[0, :2]))
     if total_move < move_thresh_m:
@@ -484,11 +492,11 @@ def actual_lane_change(npz_path: str | Path,
         a_idx = seq[k]
         b_idx = seq[k + 1]
         t_at_b = seq_t[k + 1]
-        chained = _lanes_share_endpoint(lanes[a_idx], lanes[b_idx],
-                                        chain_thresh_m=endpoint_chain_thresh_m)
+        chained = _lanes_share_endpoint(
+            lanes[a_idx], lanes[b_idx], chain_thresh_m=endpoint_chain_thresh_m
+        )
         pivot = fut[t_at_b, :2].astype(np.float32)
-        offset = _lateral_offset_between_lanes(lanes[a_idx], lanes[b_idx],
-                                               pivot)
+        offset = _lateral_offset_between_lanes(lanes[a_idx], lanes[b_idx], pivot)
 
         # "Committed" check: ego must EVENTUALLY drift more strongly
         # toward b than toward a. We measure the maximum value of
@@ -507,21 +515,25 @@ def actual_lane_change(npz_path: str | Path,
             diff = d_a - d_b
             if diff > max_diff:
                 max_diff = diff
-        committed = (max_diff >= commit_dist_diff_m)
+        committed = max_diff >= commit_dist_diff_m
 
-        is_lc = ((not chained)
-                 and (offset >= lane_lateral_offset_m)
-                 and committed
-                 and (max_ego_lateral_drift >= ego_lateral_drift_m))
-        transitions.append({
-            "t": t_at_b,
-            "from_lane": a_idx,
-            "to_lane": b_idx,
-            "chained": bool(chained),
-            "lateral_offset_m": offset,
-            "committed": bool(committed),
-            "qualifies_as_lane_change": bool(is_lc),
-        })
+        is_lc = (
+            (not chained)
+            and (offset >= lane_lateral_offset_m)
+            and committed
+            and (max_ego_lateral_drift >= ego_lateral_drift_m)
+        )
+        transitions.append(
+            {
+                "t": t_at_b,
+                "from_lane": a_idx,
+                "to_lane": b_idx,
+                "chained": bool(chained),
+                "lateral_offset_m": offset,
+                "committed": bool(committed),
+                "qualifies_as_lane_change": bool(is_lc),
+            }
+        )
         if is_lc:
             actual = True
 
@@ -545,27 +557,34 @@ def actual_lane_change(npz_path: str | Path,
 #  Driver
 # ---------------------------------------------------------------------------
 
-def evaluate_scene(npz_path: str | Path,
-                   lookahead_m: float,
-                   lane_change_thresh_m: float,
-                   ego_off_route_thresh_m: float,
-                   move_thresh_m: float,
-                   lane_lateral_offset_m: float,
-                   endpoint_chain_thresh_m: float) -> dict:
+
+def evaluate_scene(
+    npz_path: str | Path,
+    lookahead_m: float,
+    lane_change_thresh_m: float,
+    ego_off_route_thresh_m: float,
+    move_thresh_m: float,
+    lane_lateral_offset_m: float,
+    endpoint_chain_thresh_m: float,
+) -> dict:
     out = {"scene": str(npz_path)}
     try:
-        out.update(predict_lane_change(
-            npz_path,
-            lookahead_m=lookahead_m,
-            lane_change_thresh_m=lane_change_thresh_m,
-            ego_off_route_thresh_m=ego_off_route_thresh_m,
-        ))
-        out.update(actual_lane_change(
-            npz_path,
-            move_thresh_m=move_thresh_m,
-            lane_lateral_offset_m=lane_lateral_offset_m,
-            endpoint_chain_thresh_m=endpoint_chain_thresh_m,
-        ))
+        out.update(
+            predict_lane_change(
+                npz_path,
+                lookahead_m=lookahead_m,
+                lane_change_thresh_m=lane_change_thresh_m,
+                ego_off_route_thresh_m=ego_off_route_thresh_m,
+            )
+        )
+        out.update(
+            actual_lane_change(
+                npz_path,
+                move_thresh_m=move_thresh_m,
+                lane_lateral_offset_m=lane_lateral_offset_m,
+                endpoint_chain_thresh_m=endpoint_chain_thresh_m,
+            )
+        )
     except Exception as e:
         out["error"] = repr(e)
     return out
@@ -604,7 +623,10 @@ def confusion(rows: list[dict]) -> dict:
         "n_skipped_stopped": skipped_stopped,
         "n_skipped_error": skipped_error,
         "n_evaluated": n_eval,
-        "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+        "tp": tp,
+        "fp": fp,
+        "tn": tn,
+        "fn": fn,
         "accuracy": acc,
         "precision": prec,
         "recall": rec,
@@ -613,36 +635,60 @@ def confusion(rows: list[dict]) -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--scenes", required=True,
-                   help="JSON file containing list of NPZ paths.")
-    p.add_argument("--output", required=True,
-                   help="Output JSON file with per-scene predictions + summary.")
-    p.add_argument("--n_random", type=int, default=100,
-                   help="Sample N random scenes from --scenes (0 = use all).")
+    p.add_argument("--scenes", required=True, help="JSON file containing list of NPZ paths.")
+    p.add_argument(
+        "--output", required=True, help="Output JSON file with per-scene predictions + summary."
+    )
+    p.add_argument(
+        "--n_random",
+        type=int,
+        default=100,
+        help="Sample N random scenes from --scenes (0 = use all).",
+    )
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--lookahead_m", type=float, default=50.0,
-                   help="Predict only lane changes scheduled within this arc-length.")
-    p.add_argument("--lane_change_thresh_m", type=float, default=1.0,
-                   help="Consecutive route lanes with lateral gap >= this "
-                        "trigger a lane-change prediction.")
-    p.add_argument("--ego_off_route_thresh_m", type=float, default=2.5,
-                   help="If ego is laterally offset from the route's "
-                        "first lane by at least this much (and the "
-                        "projection is interior, not at an endpoint), "
-                        "predict a lane change. Stricter than "
-                        "lane_change_thresh_m because curving merges "
-                        "naturally close a small offset.")
-    p.add_argument("--move_thresh_m", type=float, default=5.0,
-                   help="GT skips scenes where ego barely moved.")
-    p.add_argument("--lane_lateral_offset_m", type=float, default=1.5,
-                   help="GT lane change requires the new closest-lane to "
-                        "be at least this far perpendicular from the "
-                        "previous closest-lane at the transition point.")
-    p.add_argument("--endpoint_chain_thresh_m", type=float, default=1.0,
-                   help="If two consecutive closest-lanes share an "
-                        "endpoint within this radius, the transition is "
-                        "treated as a longitudinal continuation, not a "
-                        "lane change.")
+    p.add_argument(
+        "--lookahead_m",
+        type=float,
+        default=50.0,
+        help="Predict only lane changes scheduled within this arc-length.",
+    )
+    p.add_argument(
+        "--lane_change_thresh_m",
+        type=float,
+        default=1.0,
+        help="Consecutive route lanes with lateral gap >= this trigger a lane-change prediction.",
+    )
+    p.add_argument(
+        "--ego_off_route_thresh_m",
+        type=float,
+        default=2.5,
+        help="If ego is laterally offset from the route's "
+        "first lane by at least this much (and the "
+        "projection is interior, not at an endpoint), "
+        "predict a lane change. Stricter than "
+        "lane_change_thresh_m because curving merges "
+        "naturally close a small offset.",
+    )
+    p.add_argument(
+        "--move_thresh_m", type=float, default=5.0, help="GT skips scenes where ego barely moved."
+    )
+    p.add_argument(
+        "--lane_lateral_offset_m",
+        type=float,
+        default=1.5,
+        help="GT lane change requires the new closest-lane to "
+        "be at least this far perpendicular from the "
+        "previous closest-lane at the transition point.",
+    )
+    p.add_argument(
+        "--endpoint_chain_thresh_m",
+        type=float,
+        default=1.0,
+        help="If two consecutive closest-lanes share an "
+        "endpoint within this radius, the transition is "
+        "treated as a longitudinal continuation, not a "
+        "lane change.",
+    )
     args = p.parse_args()
 
     with open(args.scenes) as f:
@@ -670,37 +716,45 @@ def main() -> None:
         )
         rows.append(row)
         if (i + 1) % 25 == 0:
-            print(f"  {i+1}/{len(scenes)}")
+            print(f"  {i + 1}/{len(scenes)}")
 
     summary = confusion(rows)
     print("\nConfusion matrix (excluding stopped & errored scenes):")
     print(f"  TP={summary['tp']:3d}  FP={summary['fp']:3d}")
     print(f"  FN={summary['fn']:3d}  TN={summary['tn']:3d}")
-    print(f"  evaluated={summary['n_evaluated']} "
-          f"(skipped {summary['n_skipped_stopped']} stopped, "
-          f"{summary['n_skipped_error']} errored)")
-    print(f"  accuracy={summary['accuracy']:.3f}  "
-          f"precision={summary['precision']:.3f}  "
-          f"recall={summary['recall']:.3f}")
+    print(
+        f"  evaluated={summary['n_evaluated']} "
+        f"(skipped {summary['n_skipped_stopped']} stopped, "
+        f"{summary['n_skipped_error']} errored)"
+    )
+    print(
+        f"  accuracy={summary['accuracy']:.3f}  "
+        f"precision={summary['precision']:.3f}  "
+        f"recall={summary['recall']:.3f}"
+    )
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
-        json.dump({
-            "config": {
-                "scenes": args.scenes,
-                "n_random": args.n_random,
-                "seed": args.seed,
-                "lookahead_m": args.lookahead_m,
-                "lane_change_thresh_m": args.lane_change_thresh_m,
-                "ego_off_route_thresh_m": args.ego_off_route_thresh_m,
-                "move_thresh_m": args.move_thresh_m,
-                "lane_lateral_offset_m": args.lane_lateral_offset_m,
-                "endpoint_chain_thresh_m": args.endpoint_chain_thresh_m,
+        json.dump(
+            {
+                "config": {
+                    "scenes": args.scenes,
+                    "n_random": args.n_random,
+                    "seed": args.seed,
+                    "lookahead_m": args.lookahead_m,
+                    "lane_change_thresh_m": args.lane_change_thresh_m,
+                    "ego_off_route_thresh_m": args.ego_off_route_thresh_m,
+                    "move_thresh_m": args.move_thresh_m,
+                    "lane_lateral_offset_m": args.lane_lateral_offset_m,
+                    "endpoint_chain_thresh_m": args.endpoint_chain_thresh_m,
+                },
+                "summary": summary,
+                "rows": rows,
             },
-            "summary": summary,
-            "rows": rows,
-        }, f, indent=2)
+            f,
+            indent=2,
+        )
     print(f"\nWrote {out}")
 
 

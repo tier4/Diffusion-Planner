@@ -11,6 +11,7 @@ _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
 # Velocity (delta) representation utilities  (HDP paper, Section IV-B)
 # ---------------------------------------------------------------------------
 
+
 def waypoints_to_velocity(waypoints: torch.Tensor) -> torch.Tensor:
     """Convert absolute waypoints to per-frame displacement (velocity).
 
@@ -60,12 +61,12 @@ def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
         waypoints: [..., T, 2] integrated positions.
     """
     # Fully-detached cumsum shifted by W
-    wpt_sg = torch.cumsum(v.detach(), dim=-2)               # [..., T, 2]
+    wpt_sg = torch.cumsum(v.detach(), dim=-2)  # [..., T, 2]
     shift_sg = torch.roll(wpt_sg, shifts=W, dims=-2)
     shift_sg[..., :W, :] = 0.0
 
     # Live cumsum (gradients flow)
-    wpt = torch.cumsum(v, dim=-2)                            # [..., T, 2]
+    wpt = torch.cumsum(v, dim=-2)  # [..., T, 2]
     shift = torch.roll(wpt, shifts=W, dims=-2)
     shift[..., :W, :] = 0.0
 
@@ -96,9 +97,9 @@ def hybrid_loss(
         return l_v
 
     # Waypoint loss only on position channels
-    pred_pos = _detached_integral(pred_v[..., :2], W)       # [..., T, 2]
-    gt_pos = torch.cumsum(gt_v[..., :2], dim=-2)            # [..., T, 2]
-    l_wpt = torch.sum((pred_pos - gt_pos) ** 2, dim=-1)     # [..., T]
+    pred_pos = _detached_integral(pred_v[..., :2], W)  # [..., T, 2]
+    gt_pos = torch.cumsum(gt_v[..., :2], dim=-2)  # [..., T, 2]
+    l_wpt = torch.sum((pred_pos - gt_pos) ** 2, dim=-1)  # [..., T]
 
     return l_v + omega * l_wpt
 
@@ -376,7 +377,7 @@ def sat_penetration_depth(ego_corners: torch.Tensor, nbr_corners: torch.Tensor) 
     ego = ego_corners[:, :, None].expand(B, S, Pn, 4, 2)
     # candidate separating axes: edge normals of both boxes.
     axes = torch.cat([_box_outward_normals(ego), _box_outward_normals(nbr_corners)], dim=-2)
-    pe = torch.einsum("bspax,bspcx->bspac", axes, ego)          # [B, S, Pn, 8, 4]
+    pe = torch.einsum("bspax,bspcx->bspac", axes, ego)  # [B, S, Pn, 8, 4]
     pn = torch.einsum("bspax,bspcx->bspac", axes, nbr_corners)  # [B, S, Pn, 8, 4]
     overlap = torch.minimum(pe.amax(-1), pn.amax(-1)) - torch.maximum(pe.amin(-1), pn.amin(-1))
     # disjoint <=> some axis has non-positive overlap -> min over axes <= 0 -> relu = 0.

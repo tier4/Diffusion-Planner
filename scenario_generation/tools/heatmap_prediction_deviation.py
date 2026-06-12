@@ -26,6 +26,7 @@ Usage:
         --model_path /path/to/best_model.pth \\
         --output  /path/to/heatmap.png
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,14 +34,15 @@ import math
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-
-from preference_optimization.utils import load_npz_data
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
+
+from preference_optimization.utils import load_npz_data
 from rlvr.grpo_trainer_batched import (
     _normalize_batch,
     _stack_scene_data,
@@ -76,9 +78,7 @@ def _predicted_future_for_one(model, model_args, data: dict, device) -> np.ndarr
         P = 1 + model_args.predicted_neighbor_num
         future_len = model_args.future_len
         norm_batch_d = {k: v for k, v in norm_batch.items()}
-        norm_batch_d["sampled_trajectories"] = torch.zeros(
-            1, P, future_len + 1, 4, device=device
-        )
+        norm_batch_d["sampled_trajectories"] = torch.zeros(1, P, future_len + 1, 4, device=device)
         with torch.no_grad():
             _, det_out = model(norm_batch_d)
         det = det_out["prediction"][0, 0].detach().cpu().numpy()
@@ -102,8 +102,12 @@ def _gt_future(data: dict) -> np.ndarray | None:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--route", type=Path, required=True)
-    p.add_argument("--npz_dir", type=Path, required=True,
-                   help="Directory of sequential NPZ frames from one bag/session.")
+    p.add_argument(
+        "--npz_dir",
+        type=Path,
+        required=True,
+        help="Directory of sequential NPZ frames from one bag/session.",
+    )
     p.add_argument("--model_path", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--label_gt", default="GT (bag future)")
@@ -111,8 +115,9 @@ def main():
     p.add_argument("--bin_m", type=float, default=5.0)
     p.add_argument("--clip_max_m", type=float, default=None)
     p.add_argument("--max_frames", type=int, default=None)
-    p.add_argument("--stride", type=int, default=1,
-                   help="Sub-sample frames: use every Nth NPZ. Default 1.")
+    p.add_argument(
+        "--stride", type=int, default=1, help="Sub-sample frames: use every Nth NPZ. Default 1."
+    )
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -176,7 +181,7 @@ def main():
         ego_arcs.append(deviation_series(np.array([[ex, ey]]), pts, s)[0, 0])
 
         if (fi + 1) % 25 == 0:
-            print(f"  {fi+1}/{len(npzs)}  ego_arc={ego_arcs[-1]:.1f}m")
+            print(f"  {fi + 1}/{len(npzs)}  ego_arc={ego_arcs[-1]:.1f}m")
 
     print(f"Done. Skipped {skipped} frames.")
 
@@ -197,9 +202,7 @@ def main():
     if args.clip_max_m is not None:
         vmax = float(args.clip_max_m)
     else:
-        concat = np.concatenate([
-            mean_gt[~np.isnan(mean_gt)], mean_det[~np.isnan(mean_det)]
-        ])
+        concat = np.concatenate([mean_gt[~np.isnan(mean_gt)], mean_det[~np.isnan(mean_det)]])
         vmax = float(np.percentile(concat, 95)) if len(concat) else 1.0
         vmax = max(vmax, 0.25)
     print(f"Color scale: 0 → {vmax:.2f} m")
@@ -215,18 +218,36 @@ def main():
     ax_d = fig.add_subplot(gs[2], sharex=ax_a, sharey=ax_a)
     ax_line = fig.add_subplot(gs[3])
 
-    plot_route_heatmap(ax_a, pts, bin_segments, mean_gt,
-                       f"{args.label_gt}: mean |lat| of 80-step predictions per "
-                       f"{bin_m:.0f} m bin",
-                       0.0, vmax, "viridis")
-    plot_route_heatmap(ax_b, pts, bin_segments, mean_det,
-                       f"{args.label_det}: mean |lat| of 80-step predictions per "
-                       f"{bin_m:.0f} m bin",
-                       0.0, vmax, "viridis")
-    plot_route_heatmap(ax_d, pts, bin_segments, diff,
-                       f"{args.label_det} − {args.label_gt}  "
-                       f"(positive = model worse than GT)",
-                       -diff_abs, diff_abs, "RdBu_r")
+    plot_route_heatmap(
+        ax_a,
+        pts,
+        bin_segments,
+        mean_gt,
+        f"{args.label_gt}: mean |lat| of 80-step predictions per {bin_m:.0f} m bin",
+        0.0,
+        vmax,
+        "viridis",
+    )
+    plot_route_heatmap(
+        ax_b,
+        pts,
+        bin_segments,
+        mean_det,
+        f"{args.label_det}: mean |lat| of 80-step predictions per {bin_m:.0f} m bin",
+        0.0,
+        vmax,
+        "viridis",
+    )
+    plot_route_heatmap(
+        ax_d,
+        pts,
+        bin_segments,
+        diff,
+        f"{args.label_det} − {args.label_gt}  (positive = model worse than GT)",
+        -diff_abs,
+        diff_abs,
+        "RdBu_r",
+    )
 
     for ax, vmin_, vmax_, cm in [
         (ax_a, 0.0, vmax, "viridis"),
@@ -242,7 +263,9 @@ def main():
     ax_line.plot(bs_mid, mean_gt, label=f"{args.label_gt} mean |lat|", color="C0", lw=1.4)
     ax_line.plot(bs_mid, mean_det, label=f"{args.label_det} mean |lat|", color="C1", lw=1.4)
     ax_line.plot(bs_mid, max_gt, label=f"{args.label_gt} max |lat|", color="C0", lw=0.8, alpha=0.5)
-    ax_line.plot(bs_mid, max_det, label=f"{args.label_det} max |lat|", color="C1", lw=0.8, alpha=0.5)
+    ax_line.plot(
+        bs_mid, max_det, label=f"{args.label_det} max |lat|", color="C1", lw=0.8, alpha=0.5
+    )
     ax_line.axhline(0.25, color="#888", lw=0.5, ls="--")
     ax_line.set_xlabel("Route arc length (m)")
     ax_line.set_ylabel("Prediction deviation from centerline (m)")
@@ -260,12 +283,20 @@ def main():
     fig.savefig(args.output, dpi=140, bbox_inches="tight")
     print(f"saved {args.output}")
 
-    np.savez(args.output.with_suffix(".npz"),
-             route_pts=pts, route_s=s, bin_m=bin_m, bin_s_mid=bs_mid,
-             mean_abs_gt=mean_gt, mean_abs_det=mean_det,
-             max_abs_gt=max_gt, max_abs_det=max_det,
-             dev_series_gt=dev_gt, dev_series_det=dev_det,
-             ego_arc_per_frame=np.array(ego_arcs))
+    np.savez(
+        args.output.with_suffix(".npz"),
+        route_pts=pts,
+        route_s=s,
+        bin_m=bin_m,
+        bin_s_mid=bs_mid,
+        mean_abs_gt=mean_gt,
+        mean_abs_det=mean_det,
+        max_abs_gt=max_gt,
+        max_abs_det=max_det,
+        dev_series_gt=dev_gt,
+        dev_series_det=dev_det,
+        ego_arc_per_frame=np.array(ego_arcs),
+    )
     print(f"saved {args.output.with_suffix('.npz')}")
 
 

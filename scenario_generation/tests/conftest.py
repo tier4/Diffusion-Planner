@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Select Agg backend before any pyplot import in the test session (headless CI).
 import matplotlib
+
 matplotlib.use("Agg")
 
 from pathlib import Path
@@ -21,15 +22,21 @@ def synthetic_scene() -> SceneContext:
     T_past = 31
 
     def _make_agent(
-        agent_id: str, x: float, y: float, heading: float, speed: float,
+        agent_id: str,
+        x: float,
+        y: float,
+        heading: float,
+        speed: float,
     ) -> Agent:
         traj = np.zeros((T_past, 3), dtype=np.float32)
         vels = np.zeros((T_past, 2), dtype=np.float32)
         for t in range(T_past):
             frac = t / (T_past - 1)
-            traj[t] = [x - (1 - frac) * speed * 3.0 * np.cos(heading),
-                        y - (1 - frac) * speed * 3.0 * np.sin(heading),
-                        heading]
+            traj[t] = [
+                x - (1 - frac) * speed * 3.0 * np.cos(heading),
+                y - (1 - frac) * speed * 3.0 * np.sin(heading),
+                heading,
+            ]
             vels[t] = [speed * np.cos(heading), speed * np.sin(heading)]
 
         route = np.zeros((25, 20, 33), dtype=np.float32)
@@ -40,13 +47,15 @@ def synthetic_scene() -> SceneContext:
         return Agent(
             id=agent_id,
             agent_type=AgentType.VEHICLE,
-            length=4.5, width=1.8, wheelbase=2.9,
+            length=4.5,
+            width=1.8,
+            wheelbase=2.9,
             past_trajectory=traj,
             past_velocities=vels,
             acceleration=np.zeros(2, dtype=np.float32),
-            goal_pose=np.array([x + 50 * np.cos(heading),
-                                y + 50 * np.sin(heading),
-                                heading], dtype=np.float32),
+            goal_pose=np.array(
+                [x + 50 * np.cos(heading), y + 50 * np.sin(heading), heading], dtype=np.float32
+            ),
             route_lanes=route,
             route_speed_limit=np.zeros((25, 1), dtype=np.float32),
             route_has_speed_limit=np.zeros((25, 1), dtype=bool),

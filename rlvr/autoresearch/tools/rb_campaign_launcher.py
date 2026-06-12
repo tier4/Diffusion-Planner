@@ -77,10 +77,7 @@ def is_running(name):
     if not os.path.exists(log_path):
         return False
     # Check if process with this name is alive
-    result = subprocess.run(
-        ["pgrep", "-f", f"--name {name}"],
-        capture_output=True, text=True
-    )
+    result = subprocess.run(["pgrep", "-f", f"--name {name}"], capture_output=True, text=True)
     return result.returncode == 0
 
 
@@ -90,11 +87,29 @@ def launch(name, config_suffix, train_file):
     log = os.path.join(EXP_DIR, f"{name}.log")
     with open(log, "ab") as log_file:
         subprocess.Popen(
-            [sys.executable, "-m", "rlvr.autoresearch.run_experiment",
-             "--config", config, "--name", name, "--model_path", MODEL,
-             "--prob_scenes", train_file, "--normal_scenes", train_file,
-             "--val_scenes", VAL, "--output_dir", EXP_DIR, "--skip_baseline"],
-            stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True,
+            [
+                sys.executable,
+                "-m",
+                "rlvr.autoresearch.run_experiment",
+                "--config",
+                config,
+                "--name",
+                name,
+                "--model_path",
+                MODEL,
+                "--prob_scenes",
+                train_file,
+                "--normal_scenes",
+                train_file,
+                "--val_scenes",
+                VAL,
+                "--output_dir",
+                EXP_DIR,
+                "--skip_baseline",
+            ],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
     # Tell watchdog about new experiment
     with open("/tmp/watchdog_add.txt", "a") as f:

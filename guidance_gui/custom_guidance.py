@@ -17,7 +17,6 @@ Currently provides:
 """
 
 import torch
-
 from diffusion_planner.model.guidance.base import BaseGuidance
 from diffusion_planner.model.guidance.registry import register
 
@@ -68,20 +67,20 @@ class CollisionSwerveGuidance(BaseGuidance):
         T = ego_xy.shape[1]
 
         # Static neighbour current positions + validity mask.
-        nb_cur = nb[:, :, -1, :4].detach()        # [B, Pn, 4]
-        nb_xy = nb_cur[..., :2]                    # [B, Pn, 2]
-        nb_valid = nb_cur.abs().sum(dim=-1) > 0    # [B, Pn]
+        nb_cur = nb[:, :, -1, :4].detach()  # [B, Pn, 4]
+        nb_xy = nb_cur[..., :2]  # [B, Pn, 2]
+        nb_valid = nb_cur.abs().sum(dim=-1) > 0  # [B, Pn]
 
         if nb_valid.sum().item() == 0:
             return torch.zeros(B, device=device)
 
         # Centroid gap ego_t <-> neighbour (detached -> proximity gate only).
-        d = torch.cdist(ego_xy.detach(), nb_xy)    # [B, T, Pn]
+        d = torch.cdist(ego_xy.detach(), nb_xy)  # [B, T, Pn]
         big = torch.full_like(d, 1e6)
         d = torch.where(nb_valid[:, None, :], d, big)
         w = torch.clamp(1.0 - d / self._range, min=0.0)  # [B, T, Pn]
-        w = w.max(dim=-1).values                          # [B, T] nearest-neighbour proximity
+        w = w.max(dim=-1).values  # [B, T] nearest-neighbour proximity
 
-        y = ego_xy[..., 1]                                # [B, T] lateral, +y = left
+        y = ego_xy[..., 1]  # [B, T] lateral, +y = left
         reward = (self._side * w.detach() * y).sum(dim=-1)  # [B]
         return reward

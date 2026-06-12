@@ -40,8 +40,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-
 # ── I/O ──────────────────────────────────────────────────────────────────────
+
 
 def load_cluster_json(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -57,7 +57,10 @@ def load_trajectory(npz_path: str) -> np.ndarray:
 
 # ── plotting ─────────────────────────────────────────────────────────────────
 
-def _draw_cluster(ax: plt.Axes, paths: list, max_samples: int, color: str, rng: random.Random) -> None:
+
+def _draw_cluster(
+    ax: plt.Axes, paths: list, max_samples: int, color: str, rng: random.Random
+) -> None:
     sampled = rng.sample(paths, min(max_samples, len(paths)))
 
     for npz_path in sampled:
@@ -84,7 +87,8 @@ def visualize(cluster_json: str, output: str | None, max_samples: int, seed: int
     rng = random.Random(seed)
 
     fig, axes = plt.subplots(
-        n_rows, n_cols,
+        n_rows,
+        n_cols,
         figsize=(4 * n_cols, 4 * n_rows),
         squeeze=False,
     )
@@ -125,6 +129,7 @@ def visualize(cluster_json: str, output: str | None, max_samples: int, seed: int
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
+
 
 def get_args():
     parser = argparse.ArgumentParser(

@@ -562,7 +562,9 @@ class LaneEncoder(nn.Module):
 
         pos = x[:, :, int(self._lane_len / 2), :4].clone()  # x, y, x'-x, y'-y
         heading = torch.atan2(pos[..., 3], pos[..., 2])
-        pos = torch.stack([pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1)
+        pos = torch.stack(
+            [pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1
+        )
         pos = add_class_type(pos, self._class_type)
 
         B, P, V, _ = x.shape
@@ -661,7 +663,9 @@ class LineEncoder(nn.Module):
 
         pos = x[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
         heading = torch.atan2(pos[..., 3], pos[..., 2])
-        pos = torch.stack([pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1)
+        pos = torch.stack(
+            [pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1
+        )
         pos = add_class_type(pos, self._class_type)
 
         B, P, V, _ = x.shape

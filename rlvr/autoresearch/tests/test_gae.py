@@ -13,7 +13,11 @@ from rlvr.closed_loop.gae import compute_gae
 def test_single_step():
     """One step: advantage = r + gamma*V_terminal - V(s_0)."""
     advantages, targets = compute_gae(
-        rewards=[1.0], values=[0.5], terminal_value=0.0, gamma=0.99, lam=0.95,
+        rewards=[1.0],
+        values=[0.5],
+        terminal_value=0.0,
+        gamma=0.99,
+        lam=0.95,
     )
     assert advantages.shape == (1,)
     expected_adv = 1.0 + 0.99 * 0.0 - 0.5  # = 0.5
@@ -25,8 +29,11 @@ def test_constant_reward():
     """Constant reward with zero values => advantages should be positive."""
     T = 10
     advantages, targets = compute_gae(
-        rewards=[1.0] * T, values=[0.0] * T, terminal_value=0.0,
-        gamma=0.99, lam=0.95,
+        rewards=[1.0] * T,
+        values=[0.0] * T,
+        terminal_value=0.0,
+        gamma=0.99,
+        lam=0.95,
     )
     assert advantages.shape == (T,)
     # All advantages should be positive (reward > 0, value = 0)
@@ -51,7 +58,11 @@ def test_terminal_episode():
     rewards = [0.5, 0.5, -10.0]
     values = [1.0, 1.0, 1.0]
     advantages, targets = compute_gae(
-        rewards, values, terminal_value=0.0, gamma=0.99, lam=0.95,
+        rewards,
+        values,
+        terminal_value=0.0,
+        gamma=0.99,
+        lam=0.95,
     )
     # Last step should have very negative advantage
     assert advantages[-1] < -5, f"Last advantage should be very negative: {advantages[-1]}"

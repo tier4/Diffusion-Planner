@@ -73,31 +73,41 @@ class Viewport:
         new_w = self.width * factor
         new_h = self.height * factor
         return Viewport(
-            xmin=cx - new_w / 2, ymin=cy - new_h / 2,
-            xmax=cx + new_w / 2, ymax=cy + new_h / 2,
-            canvas_w=self.canvas_w, canvas_h=self.canvas_h,
+            xmin=cx - new_w / 2,
+            ymin=cy - new_h / 2,
+            xmax=cx + new_w / 2,
+            ymax=cy + new_h / 2,
+            canvas_w=self.canvas_w,
+            canvas_h=self.canvas_h,
         )
 
     def pan(self, dx_px: float, dy_px: float):
         dx_world = (dx_px / self.canvas_w) * self.width
         dy_world = -(dy_px / self.canvas_h) * self.height
         return Viewport(
-            xmin=self.xmin - dx_world, ymin=self.ymin - dy_world,
-            xmax=self.xmax - dx_world, ymax=self.ymax - dy_world,
-            canvas_w=self.canvas_w, canvas_h=self.canvas_h,
+            xmin=self.xmin - dx_world,
+            ymin=self.ymin - dy_world,
+            xmax=self.xmax - dx_world,
+            ymax=self.ymax - dy_world,
+            canvas_w=self.canvas_w,
+            canvas_h=self.canvas_h,
         )
 
     def to_json(self) -> dict:
         return {
-            "xmin": self.xmin, "ymin": self.ymin,
-            "xmax": self.xmax, "ymax": self.ymax,
-            "canvas_w": self.canvas_w, "canvas_h": self.canvas_h,
+            "xmin": self.xmin,
+            "ymin": self.ymin,
+            "xmax": self.xmax,
+            "ymax": self.ymax,
+            "canvas_w": self.canvas_w,
+            "canvas_h": self.canvas_h,
         }
 
     @staticmethod
     def from_json(d: dict) -> "Viewport":
-        return Viewport(**{k: d[k] for k in ("xmin", "ymin", "xmax", "ymax", "canvas_w", "canvas_h")
-                          if k in d})
+        return Viewport(
+            **{k: d[k] for k in ("xmin", "ymin", "xmax", "ymax", "canvas_w", "canvas_h") if k in d}
+        )
 
 
 class MapRenderer:
@@ -142,11 +152,15 @@ class MapRenderer:
             ymax=float(all_pts[:, 1].max()) + margin,
         )
 
-        print(f"MapRenderer: loaded {len(self.vehicle_segments)} vehicle lanes, "
-              f"{len(self.pedestrian_segments)} pedestrian lanes, "
-              f"{len(self.boundary_segments)} boundary segments")
-        print(f"  Map bounds: x=[{self.full_bounds.xmin:.0f}, {self.full_bounds.xmax:.0f}] "
-              f"y=[{self.full_bounds.ymin:.0f}, {self.full_bounds.ymax:.0f}]")
+        print(
+            f"MapRenderer: loaded {len(self.vehicle_segments)} vehicle lanes, "
+            f"{len(self.pedestrian_segments)} pedestrian lanes, "
+            f"{len(self.boundary_segments)} boundary segments"
+        )
+        print(
+            f"  Map bounds: x=[{self.full_bounds.xmin:.0f}, {self.full_bounds.xmax:.0f}] "
+            f"y=[{self.full_bounds.ymin:.0f}, {self.full_bounds.ymax:.0f}]"
+        )
 
     def _crop_segments(self, segments: list[np.ndarray], vp: Viewport) -> list[np.ndarray]:
         margin = max(vp.width, vp.height) * 0.05
@@ -156,8 +170,12 @@ class MapRenderer:
         for seg in segments:
             if seg.size == 0:
                 continue
-            if (seg[:, 0].max() < xmin or seg[:, 0].min() > xmax or
-                    seg[:, 1].max() < ymin or seg[:, 1].min() > ymax):
+            if (
+                seg[:, 0].max() < xmin
+                or seg[:, 0].min() > xmax
+                or seg[:, 1].max() < ymin
+                or seg[:, 1].min() > ymax
+            ):
                 continue
             result.append(seg)
         return result
@@ -207,7 +225,10 @@ class MapRenderer:
             w = h * canvas_aspect
         cx, cy = bounds.center
         return Viewport(
-            xmin=cx - w / 2, ymin=cy - h / 2,
-            xmax=cx + w / 2, ymax=cy + h / 2,
-            canvas_w=canvas_w, canvas_h=canvas_h,
+            xmin=cx - w / 2,
+            ymin=cy - h / 2,
+            xmax=cx + w / 2,
+            ymax=cy + h / 2,
+            canvas_w=canvas_w,
+            canvas_h=canvas_h,
         )

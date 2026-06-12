@@ -98,6 +98,7 @@ def _make_group(advantages, heads=("lateral", "longitudinal")):
 # 0a. reward config field propagation
 # ---------------------------------------------------------------------------
 
+
 def test_reward_config_from_grpo_propagates_all_shared_fields():
     cfg = _make_config(
         static_collision_enabled=True,
@@ -144,6 +145,7 @@ def test_trainer_uses_full_reward_config(tmp_path):
 # 0b. train_dit flag
 # ---------------------------------------------------------------------------
 
+
 def test_train_dit_false_requires_exploration_policy():
     with pytest.raises(ValueError, match="train_dit=False"):
         _make_config(use_exploration_policy=False)
@@ -187,11 +189,19 @@ def test_frozen_dit_unchanged_policy_updates(tmp_path):
 # 0d. pinned zero-eta sample excluded from policy gradient
 # ---------------------------------------------------------------------------
 
+
 def _capture_loss_args(monkeypatch, calls):
     import rlvr.grpo_exploration_trainer as get_mod
 
-    def fake_loss(advantages, log_probs, dists=None, entropy_coef=0.05,
-                  kl_coef=0.01, action_cost_coef=0.0, **kwargs):
+    def fake_loss(
+        advantages,
+        log_probs,
+        dists=None,
+        entropy_coef=0.05,
+        kl_coef=0.01,
+        action_cost_coef=0.0,
+        **kwargs,
+    ):
         calls["advantages"] = advantages.detach().clone()
         calls["n_log_probs"] = log_probs.shape[0]
         anchor = sum(d.mean.sum() for d in dists.values()) if dists else 0.0
@@ -227,6 +237,7 @@ def test_no_pin_uses_all_samples(tmp_path, monkeypatch):
 # 0e. policy-only checkpointing
 # ---------------------------------------------------------------------------
 
+
 def test_policy_only_checkpoint_roundtrip(tmp_path):
     trainer = _make_trainer(tmp_path)
     trainer.save_checkpoint(epoch=3, args_dict={})
@@ -243,7 +254,9 @@ def test_policy_only_checkpoint_roundtrip(tmp_path):
     state = torch.load(epoch_path, map_location=DEVICE)
     fresh = ExplorationPolicy(
         ExplorationPolicyConfig(
-            hidden_dim=HIDDEN, n_attn_heads=2, encoder_hidden_dim=ENC_DIM,
+            hidden_dim=HIDDEN,
+            n_attn_heads=2,
+            encoder_hidden_dim=ENC_DIM,
         ),
         ref_seq_len=FUTURE_LEN,
     )
@@ -254,22 +267,36 @@ def test_policy_only_checkpoint_roundtrip(tmp_path):
 # 0c. eval aggregation helper
 # ---------------------------------------------------------------------------
 
-def _row(sc_n_stopped, eta_lat, static_crossing=False, det_static_crossing=True,
-         deviation=0.1, sc_min_dist=0.5):
+
+def _row(
+    sc_n_stopped,
+    eta_lat,
+    static_crossing=False,
+    det_static_crossing=True,
+    deviation=0.1,
+    sc_min_dist=0.5,
+):
     return {
-        "npz_path": "x.npz", "eta_lat": eta_lat, "eta_lon": 0.0,
-        "reward": 1.0, "det_reward": 0.0,
-        "static_crossing": static_crossing, "det_static_crossing": det_static_crossing,
-        "sc_min_dist": sc_min_dist, "det_sc_min_dist": 0.1,
-        "rb_crossing": False, "collision": False,
-        "sc_n_stopped": sc_n_stopped, "deviation": deviation,
+        "npz_path": "x.npz",
+        "eta_lat": eta_lat,
+        "eta_lon": 0.0,
+        "reward": 1.0,
+        "det_reward": 0.0,
+        "static_crossing": static_crossing,
+        "det_static_crossing": det_static_crossing,
+        "sc_min_dist": sc_min_dist,
+        "det_sc_min_dist": 0.1,
+        "rb_crossing": False,
+        "collision": False,
+        "sc_n_stopped": sc_n_stopped,
+        "deviation": deviation,
     }
 
 
 def test_aggregate_policy_eval_splits_scene_types():
     rows = [
-        _row(sc_n_stopped=2, eta_lat=0.8),                          # avoidance
-        _row(sc_n_stopped=1, eta_lat=-0.6, static_crossing=True),   # avoidance
+        _row(sc_n_stopped=2, eta_lat=0.8),  # avoidance
+        _row(sc_n_stopped=1, eta_lat=-0.6, static_crossing=True),  # avoidance
         _row(sc_n_stopped=0, eta_lat=0.05, det_static_crossing=False),  # normal
         _row(sc_n_stopped=0, eta_lat=-0.01, det_static_crossing=False, deviation=0.02),
     ]
@@ -294,17 +321,24 @@ def test_aggregate_policy_eval_empty():
 # Head-spec composer (multi-head trainer path)
 # ---------------------------------------------------------------------------
 
+
 def test_collision_head_trainer(tmp_path):
     """Trainer with heads=['lateral','collision'] trains the policy and
     builds collision_swerve_batched guidance configs."""
-    cfg = _make_config(exploration_heads=["lateral", "collision"],
-                       exploration_col_scale=6.0, exploration_lat_scale=1.5)
+    cfg = _make_config(
+        exploration_heads=["lateral", "collision"],
+        exploration_col_scale=6.0,
+        exploration_lat_scale=1.5,
+    )
     trainer = _make_trainer(tmp_path, cfg)
     assert trainer.heads == ["lateral", "collision"]
 
-    fns = trainer._build_guidance_fns({
-        "lateral": torch.zeros(K), "collision": torch.zeros(K),
-    })
+    fns = trainer._build_guidance_fns(
+        {
+            "lateral": torch.zeros(K),
+            "collision": torch.zeros(K),
+        }
+    )
     assert [f.name for f in fns] == ["lateral", "collision_swerve_batched"]
     assert fns[0].scale == 1.5 and fns[1].scale == 6.0
 
@@ -320,8 +354,6 @@ def test_collision_head_trainer(tmp_path):
 
 
 def test_unknown_head_raises(tmp_path):
-    trainer = _make_trainer(tmp_path, _make_config(
-        exploration_heads=["lateral", "warp_drive"]))
+    trainer = _make_trainer(tmp_path, _make_config(exploration_heads=["lateral", "warp_drive"]))
     with pytest.raises(ValueError, match="unknown exploration head"):
-        trainer._build_guidance_fns({"lateral": torch.zeros(K),
-                                     "warp_drive": torch.zeros(K)})
+        trainer._build_guidance_fns({"lateral": torch.zeros(K), "warp_drive": torch.zeros(K)})

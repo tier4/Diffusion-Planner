@@ -13,10 +13,10 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-
 
 # Category colors. Includes the experimental categories emitted by
 # rlvr.rank_analytics.get_category() so they don't get dropped from plots.
@@ -33,8 +33,14 @@ _CAT_COLORS = {
 }
 
 _CAT_ORDER = [
-    "det_pure", "guided_det", "guided_noisy",
-    "noise_only_exp", "stretched_exp", "lateral_exp", "decoupled_exp", "collision_exp",
+    "det_pure",
+    "guided_det",
+    "guided_noisy",
+    "noise_only_exp",
+    "stretched_exp",
+    "lateral_exp",
+    "decoupled_exp",
+    "collision_exp",
     "random",
 ]
 
@@ -72,7 +78,8 @@ def plot_category_stacked_area(summary: dict, output_dir: Path) -> None:
 
     y_arrays = [np.array(y_stacks[cat]) for cat in _CAT_ORDER]
     ax.stackplot(
-        epochs, *y_arrays,
+        epochs,
+        *y_arrays,
         labels=[cat.replace("_", " ").title() for cat in _CAT_ORDER],
         colors=[_CAT_COLORS[cat] for cat in _CAT_ORDER],
         alpha=0.85,
@@ -131,8 +138,7 @@ def plot_config_heatmap(summary: dict, output_dir: Path) -> None:
             val = matrix[i, j]
             if val > 0:
                 color = "white" if val > 20 else "black"
-                ax.text(j, i, f"{val:.0f}", ha="center", va="center",
-                        fontsize=8, color=color)
+                ax.text(j, i, f"{val:.0f}", ha="center", va="center", fontsize=8, color=color)
 
     fig.colorbar(im, ax=ax, label="Win Rate (%)", shrink=0.8)
     fig.tight_layout()
@@ -220,7 +226,8 @@ def plot_scene_heatmap(summary: dict, output_dir: Path) -> None:
                 continue
             matrix[i, epoch_to_col[ep]] = cat_to_int.get(entry["category"], unknown_idx)
 
-    from matplotlib.colors import ListedColormap, BoundaryNorm
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+
     cmap = ListedColormap([_CAT_COLORS[c] for c in _CAT_ORDER])
     bounds = [-0.5] + [i + 0.5 for i in range(len(_CAT_ORDER))]
     norm = BoundaryNorm(bounds, cmap.N)
@@ -238,9 +245,9 @@ def plot_scene_heatmap(summary: dict, output_dir: Path) -> None:
 
     # Legend
     from matplotlib.patches import Patch
+
     legend_elements = [
-        Patch(facecolor=_CAT_COLORS[cat], label=cat.replace("_", " ").title())
-        for cat in _CAT_ORDER
+        Patch(facecolor=_CAT_COLORS[cat], label=cat.replace("_", " ").title()) for cat in _CAT_ORDER
     ]
     ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
@@ -253,8 +260,12 @@ def plot_scene_heatmap(summary: dict, output_dir: Path) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Visualize rank analytics")
     parser.add_argument("--run_dir", type=Path, required=True)
-    parser.add_argument("--output_dir", type=Path, default=None,
-                        help="Output dir for plots (default: run_dir/plots)")
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=None,
+        help="Output dir for plots (default: run_dir/plots)",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir or args.run_dir / "plots"

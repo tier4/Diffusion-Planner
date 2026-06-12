@@ -23,8 +23,14 @@ from scenario_generation.scene_context import AgentType, SceneContext
 # Colors (same palette as visualize.py)
 _EGO_COLOR = "#3366cc"
 _NEIGHBOR_COLORS = [
-    "#e67300", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
+    "#e67300",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
 ]
 _UNFOCUSED_COLOR = "#aaaaaa"
 _LANE_COLOR = "#bbbbbb"
@@ -42,8 +48,15 @@ def _draw_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, zorder
     rear_overhang = (length - length * 0.65) / 2.0
     t_rot = mtransforms.Affine2D().rotate(heading).translate(x, y) + ax.transData
     rect = Rectangle(
-        (-rear_overhang, -width / 2), length, width,
-        lw=lw, ec=color, fc=color, alpha=alpha, zorder=zorder, transform=t_rot,
+        (-rear_overhang, -width / 2),
+        length,
+        width,
+        lw=lw,
+        ec=color,
+        fc=color,
+        alpha=alpha,
+        zorder=zorder,
+        transform=t_rot,
     )
     ax.add_patch(rect)
 
@@ -53,20 +66,36 @@ def _draw_heading_arrow(ax, x, y, heading, length, color, lw=2.0, zorder=11):
     dx = arrow_len * math.cos(heading)
     dy = arrow_len * math.sin(heading)
     ax.annotate(
-        "", xy=(x + dx, y + dy), xytext=(x, y),
+        "",
+        xy=(x + dx, y + dy),
+        xytext=(x, y),
         arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, mutation_scale=12),
         zorder=zorder,
     )
 
 
 def _draw_goal_marker(ax, gx, gy, color, size=12, zorder=15, label=None):
-    ax.plot(gx, gy, "X", color=color, ms=size, zorder=zorder,
-            markeredgecolor="black", markeredgewidth=0.8)
+    ax.plot(
+        gx,
+        gy,
+        "X",
+        color=color,
+        ms=size,
+        zorder=zorder,
+        markeredgecolor="black",
+        markeredgewidth=0.8,
+    )
     if label:
         ax.annotate(
-            label, (gx, gy), fontsize=6, color=color,
-            ha="center", va="bottom", zorder=zorder + 1,
-            xytext=(0, 8), textcoords="offset points",
+            label,
+            (gx, gy),
+            fontsize=6,
+            color=color,
+            ha="center",
+            va="bottom",
+            zorder=zorder + 1,
+            xytext=(0, 8),
+            textcoords="offset points",
             bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.7, lw=0.5),
         )
 
@@ -76,8 +105,16 @@ def _draw_footprint_history(ax, past_traj, length, width, color, alpha=0.12, zor
     valid_indices = np.where(valid)[0]
     for idx in valid_indices[::5]:
         _draw_box(
-            ax, past_traj[idx, 0], past_traj[idx, 1], past_traj[idx, 2],
-            length, width, color, alpha=alpha, lw=0.3, zorder=zorder,
+            ax,
+            past_traj[idx, 0],
+            past_traj[idx, 1],
+            past_traj[idx, 2],
+            length,
+            width,
+            color,
+            alpha=alpha,
+            lw=0.3,
+            zorder=zorder,
         )
 
 
@@ -163,7 +200,7 @@ def render_scene_figure(
 
     nb_idx = 0
     for agent in scene.agents:
-        is_ego = (agent.id == scene.ego_agent_id)
+        is_ego = agent.id == scene.ego_agent_id
         is_focused = show_all or (agent.id == focus_agent_id)
 
         if is_ego:
@@ -178,42 +215,86 @@ def render_scene_figure(
         if is_focused:
             _draw_route(ax, agent.route_lanes, color=color, alpha=0.5, lw=2.5, zorder=3)
             _draw_footprint_history(
-                ax, agent.past_trajectory, agent.length, agent.width, color,
-                alpha=0.15, zorder=5,
+                ax,
+                agent.past_trajectory,
+                agent.length,
+                agent.width,
+                color,
+                alpha=0.15,
+                zorder=5,
             )
             _draw_past_trail(ax, agent.past_trajectory, color, alpha=0.5, lw=1.2, zorder=4)
             _draw_box(
-                ax, pos[0], pos[1], heading, agent.length, agent.width,
-                color, alpha=0.8 if is_ego else 0.6, lw=2.5 if is_ego else 2.0, zorder=10,
+                ax,
+                pos[0],
+                pos[1],
+                heading,
+                agent.length,
+                agent.width,
+                color,
+                alpha=0.8 if is_ego else 0.6,
+                lw=2.5 if is_ego else 2.0,
+                zorder=10,
             )
             _draw_heading_arrow(ax, pos[0], pos[1], heading, agent.length, color, lw=2.5, zorder=11)
 
             if agent.goal_pose is not None:
                 _draw_goal_marker(
-                    ax, agent.goal_pose[0], agent.goal_pose[1],
-                    color, size=14, label=f"{agent.id} goal", zorder=15,
+                    ax,
+                    agent.goal_pose[0],
+                    agent.goal_pose[1],
+                    color,
+                    size=14,
+                    label=f"{agent.id} goal",
+                    zorder=15,
                 )
 
             speed = float(np.linalg.norm(agent.current_velocity))
             ax.annotate(
-                f"{agent.id} ({speed:.1f} m/s)", (pos[0], pos[1]),
-                fontsize=7, color=color, ha="center", va="bottom", zorder=12,
-                xytext=(0, 8), textcoords="offset points",
+                f"{agent.id} ({speed:.1f} m/s)",
+                (pos[0], pos[1]),
+                fontsize=7,
+                color=color,
+                ha="center",
+                va="bottom",
+                zorder=12,
+                xytext=(0, 8),
+                textcoords="offset points",
                 bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.8, lw=0.5),
             )
         else:
             _draw_past_trail(ax, agent.past_trajectory, _UNFOCUSED_COLOR, alpha=0.2, lw=0.6)
             _draw_box(
-                ax, pos[0], pos[1], heading, agent.length, agent.width,
-                _UNFOCUSED_COLOR, alpha=0.3, lw=0.8, zorder=8,
+                ax,
+                pos[0],
+                pos[1],
+                heading,
+                agent.length,
+                agent.width,
+                _UNFOCUSED_COLOR,
+                alpha=0.3,
+                lw=0.8,
+                zorder=8,
             )
             _draw_heading_arrow(
-                ax, pos[0], pos[1], heading, agent.length, _UNFOCUSED_COLOR, lw=1.0, zorder=9,
+                ax,
+                pos[0],
+                pos[1],
+                heading,
+                agent.length,
+                _UNFOCUSED_COLOR,
+                lw=1.0,
+                zorder=9,
             )
             if agent.goal_pose is not None:
                 ax.plot(
-                    agent.goal_pose[0], agent.goal_pose[1], "x",
-                    color=_UNFOCUSED_COLOR, ms=6, zorder=8, mew=1.0,
+                    agent.goal_pose[0],
+                    agent.goal_pose[1],
+                    "x",
+                    color=_UNFOCUSED_COLOR,
+                    ms=6,
+                    zorder=8,
+                    mew=1.0,
                 )
 
     # Auto-zoom to full extent (agents + goals + lane geometry)
@@ -271,6 +352,7 @@ def render_scene_figure(
         ax.tick_params(labelbottom=False, labelleft=False)
         # Rotate the entire axes view around its center
         import matplotlib.transforms as mtrans
+
         center_x = (ax.get_xlim()[0] + ax.get_xlim()[1]) / 2
         center_y = (ax.get_ylim()[0] + ax.get_ylim()[1]) / 2
         rot_transform = mtrans.Affine2D().rotate_around(center_x, center_y, -rotation)
@@ -294,10 +376,11 @@ def render_scene_figure(
 
     # Legend
     from matplotlib.lines import Line2D
+
     handles = []
     nb_idx = 0
     for agent in scene.agents:
-        is_ego = (agent.id == scene.ego_agent_id)
+        is_ego = agent.id == scene.ego_agent_id
         if is_ego:
             color = _EGO_COLOR
         else:

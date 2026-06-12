@@ -28,8 +28,7 @@ import json
 from pathlib import Path
 
 
-def is_scene_eligible(top1: dict, t0_cl: float = -999.0,
-                      eligible_t0_max: float = 0.0) -> bool:
+def is_scene_eligible(top1: dict, t0_cl: float = -999.0, eligible_t0_max: float = 0.0) -> bool:
     """Check if a rank-1 result passes all safety gates for training.
 
     This is the single source of truth — used by both this filter script
@@ -54,34 +53,66 @@ def is_scene_eligible(top1: dict, t0_cl: float = -999.0,
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--summary", type=Path, required=True,
-                   help="Path to viz_p4_recovery output dir's summary.json.")
-    p.add_argument("--output_scenes", type=Path, required=True,
-                   help="Where to write filtered scene list (JSON list of NPZ paths).")
-    p.add_argument("--output_report", type=Path, default=None,
-                   help="Where to write filter decision report. Defaults to "
-                        "alongside output_scenes with suffix '_report.json'.")
-    p.add_argument("--percentile", type=float, default=50.0,
-                   help="Keep top P %% by top1_cl. Default 50. Ignored when "
-                        "--det_cl_max / --top1_cl_min are set.")
-    p.add_argument("--det_cl_max", type=float, default=None,
-                   help="Two-threshold filter: keep scenes where det_cl < "
-                        "this value (model's deterministic is meaningfully "
-                        "off-CL) AND top1_cl >= --top1_cl_min (rank-1 is "
-                        "near-perfect). The actual PRiSM training signal: "
-                        "scenes the model handles BADLY where K=N produces "
-                        "a clean SFT target. Use e.g. -0.10 / -0.05.")
-    p.add_argument("--top1_cl_min", type=float, default=None,
-                   help="See --det_cl_max. Floor on top1_cl. e.g. -0.05.")
-    p.add_argument("--min_top1_vs_det", type=float, default=0.0,
-                   help="Reject scenes where top1_cl - det_cl <= this value. "
-                        "Both top1_cl and det_cl are full-80-frame trajectory "
-                        "cl scores (apples-to-apples). Default 0.0 = strict "
-                        "improvement over deterministic. Set negative to "
-                        "relax (e.g. -0.05 allows ties / mild regressions).")
-    p.add_argument("--eligible_t0_max", type=float, default=0.0,
-                   help="Drop scenes with t0_cl > this value as already-fine. "
-                        "Set to 0 (default) to disable this exclusion.")
+    p.add_argument(
+        "--summary",
+        type=Path,
+        required=True,
+        help="Path to viz_p4_recovery output dir's summary.json.",
+    )
+    p.add_argument(
+        "--output_scenes",
+        type=Path,
+        required=True,
+        help="Where to write filtered scene list (JSON list of NPZ paths).",
+    )
+    p.add_argument(
+        "--output_report",
+        type=Path,
+        default=None,
+        help="Where to write filter decision report. Defaults to "
+        "alongside output_scenes with suffix '_report.json'.",
+    )
+    p.add_argument(
+        "--percentile",
+        type=float,
+        default=50.0,
+        help="Keep top P %% by top1_cl. Default 50. Ignored when "
+        "--det_cl_max / --top1_cl_min are set.",
+    )
+    p.add_argument(
+        "--det_cl_max",
+        type=float,
+        default=None,
+        help="Two-threshold filter: keep scenes where det_cl < "
+        "this value (model's deterministic is meaningfully "
+        "off-CL) AND top1_cl >= --top1_cl_min (rank-1 is "
+        "near-perfect). The actual PRiSM training signal: "
+        "scenes the model handles BADLY where K=N produces "
+        "a clean SFT target. Use e.g. -0.10 / -0.05.",
+    )
+    p.add_argument(
+        "--top1_cl_min",
+        type=float,
+        default=None,
+        help="See --det_cl_max. Floor on top1_cl. e.g. -0.05.",
+    )
+    p.add_argument(
+        "--min_top1_vs_det",
+        type=float,
+        default=0.0,
+        help="Reject scenes where top1_cl - det_cl <= this value. "
+        "Both top1_cl and det_cl are full-80-frame trajectory "
+        "cl scores (apples-to-apples). Default 0.0 = strict "
+        "improvement over deterministic. Set negative to "
+        "relax (e.g. -0.05 allows ties / mild regressions).",
+    )
+    p.add_argument(
+        "--eligible_t0_max",
+        type=float,
+        default=0.0,
+        help="Drop scenes with t0_cl > this value as already-fine. "
+        "Set to 0 (default) to disable this exclusion.",
+    )
     # No kin flag — the check is unconditional. A scene whose rank-1
     # trajectory has top1_kin_violated == True (infeasible) is poison for
     # SFT: training the model to imitate undriveable physics is unsafe.
@@ -111,8 +142,7 @@ def main() -> None:
             "static_crossing": s.get("top1_static_crossing", False),
             "kin_violated": s["top1_kin_violated"],
         }
-        if not is_scene_eligible(top1_dict, t0_cl=s["t0_cl"],
-                                 eligible_t0_max=args.eligible_t0_max):
+        if not is_scene_eligible(top1_dict, t0_cl=s["t0_cl"], eligible_t0_max=args.eligible_t0_max):
             if s["t0_cl"] > args.eligible_t0_max:
                 rejected["already_fine_t0"] += 1
             elif s["top1_rb_cross"]:
@@ -150,7 +180,8 @@ def main() -> None:
     if args.det_cl_max is not None and args.top1_cl_min is not None:
         # Two-threshold mode: real training signal (det bad + rank-1 good).
         kept = [
-            s for s in eligible
+            s
+            for s in eligible
             if s["det_cl"] < args.det_cl_max and s["top1_cl"] >= args.top1_cl_min
         ]
         kept.sort(key=lambda s: s["top1_cl"], reverse=True)

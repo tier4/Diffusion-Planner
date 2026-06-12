@@ -43,10 +43,10 @@ LABEL_TO_CATEGORY: dict[int, str] = {
 }
 
 CATEGORY_COLORS: dict[str, str] = {
-    "vehicle": "#1E90FF",      # dodger blue
-    "pedestrian": "#FF69B4",   # hot pink
-    "bicycle": "#32CD32",      # lime green
-    "unknown": "#AAAAAA",      # gray
+    "vehicle": "#1E90FF",  # dodger blue
+    "pedestrian": "#FF69B4",  # hot pink
+    "bicycle": "#32CD32",  # lime green
+    "unknown": "#AAAAAA",  # gray
 }
 
 CATEGORY_ORDER = ["vehicle", "pedestrian", "bicycle", "unknown"]
@@ -55,11 +55,12 @@ CATEGORY_ORDER = ["vehicle", "pedestrian", "bicycle", "unknown"]
 @dataclass
 class ObjectBox:
     """1つのTrackedObjectの位置・姿勢・サイズ・カテゴリ。"""
+
     x: float
     y: float
     yaw: float  # [rad]
     length: float  # shape.dimensions.x
-    width: float   # shape.dimensions.y
+    width: float  # shape.dimensions.y
     category: str
 
 
@@ -82,10 +83,22 @@ def parse_args() -> argparse.Namespace:
         description="Rosbagを解析して自車周囲のTrackedObjectの数をクラス別に計算・可視化する"
     )
     parser.add_argument("rosbag_path", type=Path)
-    parser.add_argument("--range_m", type=float, default=200.0, help="周囲の範囲 [m] (正方形の一辺)")
-    parser.add_argument("--save_dir", type=Path, default=None, help="保存先ディレクトリ（指定しない場合はrosbagと同階層）")
+    parser.add_argument(
+        "--range_m", type=float, default=200.0, help="周囲の範囲 [m] (正方形の一辺)"
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=Path,
+        default=None,
+        help="保存先ディレクトリ（指定しない場合はrosbagと同階層）",
+    )
     parser.add_argument("--fps", type=int, default=10, help="動画のFPS")
-    parser.add_argument("--frame_step", type=int, default=10, help="フレーム画像を何フレームおきに出力するか (デフォルト10=1秒おき)")
+    parser.add_argument(
+        "--frame_step",
+        type=int,
+        default=10,
+        help="フレーム画像を何フレームおきに出力するか (デフォルト10=1秒おき)",
+    )
     parser.add_argument("--no_video", action="store_true", help="動画生成をスキップ")
     parser.add_argument("--ego_length", type=float, default=4.89, help="自車の長さ [m]")
     parser.add_argument("--ego_width", type=float, default=1.84, help="自車の幅 [m]")
@@ -141,12 +154,14 @@ def make_box_corners(x: float, y: float, yaw: float, length: float, width: float
     # ローカル座標での4隅 (前右, 前左, 後左, 後右)
     hl = length / 2.0
     hw = width / 2.0
-    local_corners = np.array([
-        [hl, -hw],
-        [hl, hw],
-        [-hl, hw],
-        [-hl, -hw],
-    ])
+    local_corners = np.array(
+        [
+            [hl, -hw],
+            [hl, hw],
+            [-hl, hw],
+            [-hl, -hw],
+        ]
+    )
     rot = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
     return (rot @ local_corners.T).T + np.array([x, y])
 
@@ -164,8 +179,12 @@ def process_frame(
     ego_yaw = quaternion_to_yaw(kin_msg.pose.pose.orientation)
 
     result = FrameResult(
-        t_sec=t_sec, ego_x=ego_x, ego_y=ego_y,
-        ego_yaw=ego_yaw, ego_length=ego_length, ego_width=ego_width,
+        t_sec=t_sec,
+        ego_x=ego_x,
+        ego_y=ego_y,
+        ego_yaw=ego_yaw,
+        ego_length=ego_length,
+        ego_width=ego_width,
     )
     result.total_all = len(tracking_msg.objects)
 
@@ -181,10 +200,16 @@ def process_frame(
         obj_length = max(obj.shape.dimensions.x, 0.5)
         obj_width = max(obj.shape.dimensions.y, 0.5)
 
-        result.objects.append(ObjectBox(
-            x=ox, y=oy, yaw=obj_yaw,
-            length=obj_length, width=obj_width, category=cat,
-        ))
+        result.objects.append(
+            ObjectBox(
+                x=ox,
+                y=oy,
+                yaw=obj_yaw,
+                length=obj_length,
+                width=obj_width,
+                category=cat,
+            )
+        )
         result.category_counts[cat] += 1
         result.total_in_range += 1
 
@@ -203,8 +228,12 @@ def draw_frame(
     # 範囲の四角
     rect = plt.Rectangle(
         (frame.ego_x - half_range, frame.ego_y - half_range),
-        range_m, range_m,
-        linewidth=1, edgecolor="blue", facecolor="lightblue", alpha=0.15,
+        range_m,
+        range_m,
+        linewidth=1,
+        edgecolor="blue",
+        facecolor="lightblue",
+        alpha=0.15,
     )
     ax.add_patch(rect)
 
@@ -213,22 +242,33 @@ def draw_frame(
     for obj in frame.objects:
         corners = make_box_corners(obj.x, obj.y, obj.yaw, obj.length, obj.width)
         polygon = MplPolygon(
-            corners, closed=True,
-            facecolor=CATEGORY_COLORS[obj.category], edgecolor="black",
-            linewidth=0.5, alpha=0.6, zorder=3,
+            corners,
+            closed=True,
+            facecolor=CATEGORY_COLORS[obj.category],
+            edgecolor="black",
+            linewidth=0.5,
+            alpha=0.6,
+            zorder=3,
         )
         ax.add_patch(polygon)
         drawn_categories.add(obj.category)
 
     # 自車を長方形で描画
     ego_corners = make_box_corners(
-        frame.ego_x, frame.ego_y, frame.ego_yaw,
-        frame.ego_length, frame.ego_width,
+        frame.ego_x,
+        frame.ego_y,
+        frame.ego_yaw,
+        frame.ego_length,
+        frame.ego_width,
     )
     ego_polygon = MplPolygon(
-        ego_corners, closed=True,
-        facecolor="red", edgecolor="black",
-        linewidth=1.0, alpha=0.8, zorder=4,
+        ego_corners,
+        closed=True,
+        facecolor="red",
+        edgecolor="black",
+        linewidth=1.0,
+        alpha=0.8,
+        zorder=4,
     )
     ax.add_patch(ego_polygon)
 
@@ -241,7 +281,9 @@ def draw_frame(
             continue
         cnt = frame.category_counts[cat]
         legend_handles.append(
-            mpatches.Patch(facecolor=CATEGORY_COLORS[cat], edgecolor="black", label=f"{cat} ({cnt})")
+            mpatches.Patch(
+                facecolor=CATEGORY_COLORS[cat], edgecolor="black", label=f"{cat} ({cnt})"
+            )
         )
     ax.legend(handles=legend_handles, loc="upper right", fontsize=7)
 
@@ -252,7 +294,9 @@ def draw_frame(
     ax.set_ylabel("Y [m]")
 
     count_text = ", ".join(
-        f"{cat}: {frame.category_counts[cat]}" for cat in CATEGORY_ORDER if frame.category_counts[cat] > 0
+        f"{cat}: {frame.category_counts[cat]}"
+        for cat in CATEGORY_ORDER
+        if frame.category_counts[cat] > 0
     )
     ax.set_title(f"t={frame.t_sec:.1f}s | total={frame.total_in_range} ({count_text})")
 
@@ -333,8 +377,12 @@ def main():
         t_sec = (t_ns - first_timestamp_ns) / 1e9
 
         frame = process_frame(
-            tracking_msg, kin_msg, half_range, t_sec,
-            ego_length=args.ego_length, ego_width=args.ego_width,
+            tracking_msg,
+            kin_msg,
+            half_range,
+            t_sec,
+            ego_length=args.ego_length,
+            ego_width=args.ego_width,
         )
         frames.append(frame)
 
@@ -350,14 +398,18 @@ def main():
 
     print(f"\n=== 範囲 {range_m}m 正方形内の TrackedObject 統計 ===")
     print(f"  フレーム数: {len(frames)}")
-    print(f"  合計: min={total_counts.min()}, max={total_counts.max()}, "
-          f"mean={total_counts.mean():.1f}, median={np.median(total_counts):.1f}")
+    print(
+        f"  合計: min={total_counts.min()}, max={total_counts.max()}, "
+        f"mean={total_counts.mean():.1f}, median={np.median(total_counts):.1f}"
+    )
     for cat in CATEGORY_ORDER:
         arr = cat_counts_dict[cat]
         if arr.sum() == 0:
             continue
-        print(f"  {cat:12s}: min={arr.min()}, max={arr.max()}, "
-              f"mean={arr.mean():.1f}, median={np.median(arr):.1f}")
+        print(
+            f"  {cat:12s}: min={arr.min()}, max={arr.max()}, "
+            f"mean={arr.mean():.1f}, median={np.median(arr):.1f}"
+        )
 
     # --- 静的な可視化 (時系列 + ヒストグラム) ---
     timestamps = [f.t_sec for f in frames]
@@ -371,8 +423,9 @@ def main():
         arr = cat_counts_dict[cat]
         if arr.sum() == 0:
             continue
-        ax.fill_between(timestamps, bottom, bottom + arr, alpha=0.6,
-                        color=CATEGORY_COLORS[cat], label=cat)
+        ax.fill_between(
+            timestamps, bottom, bottom + arr, alpha=0.6, color=CATEGORY_COLORS[cat], label=cat
+        )
         bottom = bottom + arr
     ax.plot(timestamps, total_counts, color="black", linewidth=0.8, label="total", alpha=0.7)
     ax.set_xlabel("Time [s]")
@@ -394,8 +447,15 @@ def main():
         hist_labels.append(cat)
         hist_colors.append(CATEGORY_COLORS[cat])
     bin_max = int(total_counts.max()) + 2
-    ax.hist(hist_data, bins=range(0, bin_max), stacked=True,
-            label=hist_labels, color=hist_colors, edgecolor="black", alpha=0.7)
+    ax.hist(
+        hist_data,
+        bins=range(0, bin_max),
+        stacked=True,
+        label=hist_labels,
+        color=hist_colors,
+        edgecolor="black",
+        alpha=0.7,
+    )
     ax.set_xlabel(f"Number of TrackedObjects (in {range_m}m)")
     ax.set_ylabel("Frequency")
     ax.set_title("Distribution of TrackedObject count")
@@ -417,7 +477,9 @@ def main():
     frames_dir.mkdir(parents=True, exist_ok=True)
     step = args.frame_step
     selected_frames = frames[::step]
-    print(f"\nGenerating {len(selected_frames)} frame images (step={step}, {len(frames)} total) to {frames_dir} ...")
+    print(
+        f"\nGenerating {len(selected_frames)} frame images (step={step}, {len(frames)} total) to {frames_dir} ..."
+    )
 
     for i, frame in enumerate(tqdm(selected_frames, desc="Rendering frames")):
         fig, ax = plt.subplots(1, 1, figsize=(8, 8))
@@ -431,12 +493,18 @@ def main():
     # ffmpegで動画生成
     video_path = save_dir / f"tracked_objects_video_{bag_name}.mp4"
     ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-framerate", str(args.fps),
-        "-i", str(frames_dir / "frame_%06d.png"),
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-crf", "23",
+        "ffmpeg",
+        "-y",
+        "-framerate",
+        str(args.fps),
+        "-i",
+        str(frames_dir / "frame_%06d.png"),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        "23",
         str(video_path),
     ]
     print(f"Running: {' '.join(ffmpeg_cmd)}")

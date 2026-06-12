@@ -8,7 +8,6 @@ from diffusion_planner.model.guidance.guidance_wrapper import GuidanceWrapper
 from diffusion_planner.utils.config import Config
 
 
-
 def load_model(
     model_path: Path,
     device: torch.device,
@@ -50,7 +49,9 @@ def load_model(
     if not args_path.exists():
         raise FileNotFoundError(f"args.json not found in model directory: {args_path}")
 
-    use_any_guidance = use_collision or use_route_following or use_lane_keeping or use_centerline_following
+    use_any_guidance = (
+        use_collision or use_route_following or use_lane_keeping or use_centerline_following
+    )
     guidance_fn = (
         GuidanceWrapper(
             use_collision=use_collision,

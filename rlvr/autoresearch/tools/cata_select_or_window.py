@@ -22,7 +22,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--npz_dir", type=Path, required=True)
     p.add_argument(
-        "--or_jst", required=True,
+        "--or_jst",
+        required=True,
         help="Override moment in ISO-8601 format (e.g. 2026-01-01T00:00:00+09:00).",
     )
     p.add_argument("--pre_s", type=float, default=3.0)
@@ -47,7 +48,9 @@ def main() -> None:
             skipped += 1
             continue
         try:
-            ts = int(json.loads(sidecar.read_text())["timestamp"])  # str or num; raises loudly on garbage
+            ts = int(
+                json.loads(sidecar.read_text())["timestamp"]
+            )  # str or num; raises loudly on garbage
         except (KeyError, json.JSONDecodeError, ValueError, TypeError):
             skipped += 1
             continue

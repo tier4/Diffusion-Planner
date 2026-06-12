@@ -1,7 +1,7 @@
 """Unit tests for SpeedGuidance stretch mode."""
 
-import torch
 import pytest
+import torch
 
 
 def _make_trajectory(B=1, T=20, speed=2.0, dt=0.1):
@@ -19,7 +19,9 @@ def _build_guidance(stretch=1.0, v_low=0.0, v_high=14.0):
     from diffusion_planner.model.guidance.speed_guidance import SpeedGuidance
 
     cfg = GuidanceConfig(
-        name="speed", enabled=True, scale=1.0,
+        name="speed",
+        enabled=True,
+        scale=1.0,
         params={"stretch": stretch, "v_low": v_low, "v_high": v_high},
     )
     return SpeedGuidance(cfg)

@@ -17,6 +17,7 @@ Usage:
         --model_a <baseline.pth> --model_b <trained.pth> \
         --scenes scene_0038.npz --output_dir /path/out --make_webm
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,7 +37,8 @@ from rlvr.autoresearch.tools.ghost_sim_common import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--model_a", required=True, help="First model (e.g. baseline)")
     parser.add_argument("--lora_a", default=None)
     parser.add_argument("--label_a", default="baseline")
@@ -48,24 +50,43 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--advance_k", type=int, default=0)
     parser.add_argument("--view_half_m", type=float, default=30.0)
-    parser.add_argument("--ego_wheelbase", type=float, default=4.76,
-                        help="Ego wheelbase (m); ego footprint is rear-axle offset by (length-wheelbase)/2")
+    parser.add_argument(
+        "--ego_wheelbase",
+        type=float,
+        default=4.76,
+        help="Ego wheelbase (m); ego footprint is rear-axle offset by (length-wheelbase)/2",
+    )
     parser.add_argument("--make_webm", action="store_true")
-    parser.add_argument("--hist_steps", type=int, default=0,
-                        help="render N recorded-history frames (gray ego) before the sim")
-    parser.add_argument("--n_candidates", type=int, default=0,
-                        help="per step, also sample N etas from the policy "
-                             "distribution and render their plans as a faint fan")
+    parser.add_argument(
+        "--hist_steps",
+        type=int,
+        default=0,
+        help="render N recorded-history frames (gray ego) before the sim",
+    )
+    parser.add_argument(
+        "--n_candidates",
+        type=int,
+        default=0,
+        help="per step, also sample N etas from the policy "
+        "distribution and render their plans as a faint fan",
+    )
     parser.add_argument("--webm_fps", type=int, default=10)
-    parser.add_argument("--show_lateral", action="store_true",
-                        help="Show lateral offset to route centerline")
-    parser.add_argument("--policy_dir", default=None,
-                        help="exploration-policy dir: model B = model A + guidance "
-                             "(per-step policy etas via composer); --model_b ignored")
-    parser.add_argument("--no_sg_smooth", action="store_true",
-                        help="disable the default SG plan filtering (11/3, "
-                             "grpo_sft_trainer._smooth_trajectory) applied by "
-                             "the rollout — matches scenario_generation.replay")
+    parser.add_argument(
+        "--show_lateral", action="store_true", help="Show lateral offset to route centerline"
+    )
+    parser.add_argument(
+        "--policy_dir",
+        default=None,
+        help="exploration-policy dir: model B = model A + guidance "
+        "(per-step policy etas via composer); --model_b ignored",
+    )
+    parser.add_argument(
+        "--no_sg_smooth",
+        action="store_true",
+        help="disable the default SG plan filtering (11/3, "
+        "grpo_sft_trainer._smooth_trajectory) applied by "
+        "the rollout — matches scenario_generation.replay",
+    )
     parser.add_argument("--lambda_lat", type=float, default=5.0)
     parser.add_argument("--lat_scale", type=float, default=2.0)
     parser.add_argument("--col_scale", type=float, default=9.0)
@@ -73,19 +94,29 @@ def main() -> None:
     parser.add_argument("--lambda_spd", type=float, default=0.2)
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
-    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1",
-                        help="guidance envelope — must match the policy's "
-                             "training labels")
+    parser.add_argument(
+        "--envelope",
+        choices=["v1", "v2"],
+        default="v1",
+        help="guidance envelope — must match the policy's training labels",
+    )
     parser.add_argument("--lambda_col", type=float, default=3.0)
-    parser.add_argument("--head_protect", type=int, default=0,
-                        help="zero guidance on the first N plan steps "
-                             "(closed-loop stall fix; 0 = off)")
-    parser.add_argument("--speed_floor", type=float, default=0.0,
-                        help="add stock band speed guidance with v_low = this "
-                             "fraction of current ego speed (e.g. 0.85) to the "
-                             "guided leg — prevents the closed-loop speed-decay "
-                             "spiral (the Branch Editor pairs swerve with speed "
-                             "guidance the same way). 0 = off")
+    parser.add_argument(
+        "--head_protect",
+        type=int,
+        default=0,
+        help="zero guidance on the first N plan steps (closed-loop stall fix; 0 = off)",
+    )
+    parser.add_argument(
+        "--speed_floor",
+        type=float,
+        default=0.0,
+        help="add stock band speed guidance with v_low = this "
+        "fraction of current ego speed (e.g. 0.85) to the "
+        "guided leg — prevents the closed-loop speed-decay "
+        "spiral (the Branch Editor pairs swerve with speed "
+        "guidance the same way). 0 = off",
+    )
     parser.add_argument("--speed_scale", type=float, default=2.0)
     args = parser.parse_args()
 
@@ -95,6 +126,7 @@ def main() -> None:
     policy = None
     if args.policy_dir:
         from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
+
         policy, policy_heads = load_policy(args.policy_dir, args_a, device)
         model_b, args_b = model_a, args_a
         print(f"[compare] model B = model A + explorer ({args.policy_dir})")
@@ -127,10 +159,14 @@ def main() -> None:
             out = policy(enc, x_ref, deterministic=True)
             N = max(0, args.n_candidates)
             etas = {
-                h: torch.cat([
-                    (2.0 * out.dists[h].mean - 1.0).reshape(1),
-                    (2.0 * out.dists[h].rsample((N,)).reshape(-1) - 1.0),
-                ]) if N else (2.0 * out.dists[h].mean - 1.0).reshape(1)
+                h: torch.cat(
+                    [
+                        (2.0 * out.dists[h].mean - 1.0).reshape(1),
+                        (2.0 * out.dists[h].rsample((N,)).reshape(-1) - 1.0),
+                    ]
+                )
+                if N
+                else (2.0 * out.dists[h].mean - 1.0).reshape(1)
                 for h in policy_heads
             }
             eta_log.append({h: float(v[0].item()) for h, v in etas.items()})
@@ -144,22 +180,38 @@ def main() -> None:
             if args.speed_floor > 0:
                 from diffusion_planner.model.guidance.config import GuidanceConfig
                 from diffusion_planner.model.guidance.registry import build as _build_g
+
                 # Anchor the floor to the scene's INITIAL speed — anchoring to
                 # the current speed lets the floor decay with the stall spiral.
                 if not hasattr(predict_b, "_v_init"):
                     ecs = data["ego_current_state"]
                     ecs = ecs[0] if ecs.dim() == 2 else ecs
-                    predict_b._v_init = max(
-                        float(torch.linalg.vector_norm(ecs[4:6]).item()), 2.0)
+                    predict_b._v_init = max(float(torch.linalg.vector_norm(ecs[4:6]).item()), 2.0)
                 v0 = predict_b._v_init
-                composer._functions.append(_build_g(GuidanceConfig(
-                    name="speed", enabled=True, scale=args.speed_scale,
-                    params={"v_low": args.speed_floor * v0,
-                            "v_high": max(1.3 * v0, 8.0)})))
-            trajs = _batched_generate_varied_noise(
-                model, model_args, gen, noise_min=0.0, noise_max=0.0,
-                first_deterministic=False, composer=composer, device=device,
-            ).cpu().numpy()
+                composer._functions.append(
+                    _build_g(
+                        GuidanceConfig(
+                            name="speed",
+                            enabled=True,
+                            scale=args.speed_scale,
+                            params={"v_low": args.speed_floor * v0, "v_high": max(1.3 * v0, 8.0)},
+                        )
+                    )
+                )
+            trajs = (
+                _batched_generate_varied_noise(
+                    model,
+                    model_args,
+                    gen,
+                    noise_min=0.0,
+                    noise_max=0.0,
+                    first_deterministic=False,
+                    composer=composer,
+                    device=device,
+                )
+                .cpu()
+                .numpy()
+            )
             guided = trajs[0]
             if N:
                 return guided, [trajs[i] for i in range(1, B)]
@@ -204,8 +256,10 @@ def main() -> None:
 
         run_ghost_sim(
             scene_path=scene_path,
-            model_a=model_a, model_a_args=args_a,
-            model_b=model_b, model_b_args=args_b,
+            model_a=model_a,
+            model_a_args=args_a,
+            model_b=model_b,
+            model_b_args=args_b,
             scene_data=data,
             output_dir=scene_out,
             cfg=cfg,

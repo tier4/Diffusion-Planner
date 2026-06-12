@@ -456,7 +456,9 @@ def build_export_specs(
     ]
 
 
-def build_dynamic_axes(input_names: list[str], output_names: list[str]) -> dict[str, dict[int, str]]:
+def build_dynamic_axes(
+    input_names: list[str], output_names: list[str]
+) -> dict[str, dict[int, str]]:
     return {name: {0: "batch"} for name in [*input_names, *output_names]}
 
 

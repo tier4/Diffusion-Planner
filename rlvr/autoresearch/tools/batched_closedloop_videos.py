@@ -17,6 +17,7 @@ Usage:
         --output_dir <dir> [--steps 80] [--chunk 25] [--workers 10] \
         [--lambda_lat 5.0] [--lat_scale 2.0] [--col_scale 9.0]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -40,17 +41,26 @@ from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 
 @torch.no_grad()
 def batched_closed_loop(
-    model, margs, scene_datas, device,
-    policy=None, heads=None, gargs=None,
-    n_steps: int = 80, dt: float = 0.1, chunk: int = 25,
+    model,
+    margs,
+    scene_datas,
+    device,
+    policy=None,
+    heads=None,
+    gargs=None,
+    n_steps: int = 80,
+    dt: float = 0.1,
+    chunk: int = 25,
 ):
     """Roll all scenes forward in lockstep. Returns (rollouts, eta_logs);
     rollouts match closed_loop_rollout_with_plans output per scene."""
     from rlvr.autoresearch.tools.eval_policy_avoidance import make_composer
 
     N = len(scene_datas)
-    datas = [{k: v.clone() if isinstance(v, torch.Tensor) else v
-              for k, v in d.items()} for d in scene_datas]
+    datas = [
+        {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in d.items()}
+        for d in scene_datas
+    ]
     cum = [[0.0, 0.0, 1.0, 0.0] for _ in range(N)]  # x, y, cos, sin
     positions = [[np.array([0.0, 0.0, 0.0])] for _ in range(N)]
     plans_world = [[] for _ in range(N)]
@@ -68,8 +78,14 @@ def batched_closed_loop(
             batch = _stack_scene_data([datas[i] for i in idx], device)
             norm = _normalize_batch(batch, margs)
             det = _batched_generate_varied_noise(
-                model, margs, norm, noise_min=0.0, noise_max=0.0,
-                first_deterministic=False, composer=None, device=device,
+                model,
+                margs,
+                norm,
+                noise_min=0.0,
+                noise_max=0.0,
+                first_deterministic=False,
+                composer=None,
+                device=device,
             )  # [B, T, 4]
             if policy is None:
                 out = det.cpu().numpy()
@@ -77,16 +93,23 @@ def batched_closed_loop(
                 norm["reference_trajectory"] = det
                 enc = run_frozen_encoder(model, norm)
                 pout = policy(enc, det, deterministic=True)
-                etas = {h: (2.0 * pout.dists[h].mean - 1.0).reshape(-1)
-                        for h in heads}
-                out = _batched_generate_varied_noise(
-                    model, margs, norm, noise_min=0.0, noise_max=0.0,
-                    first_deterministic=False,
-                    composer=make_composer(etas, gargs), device=device,
-                ).cpu().numpy()
+                etas = {h: (2.0 * pout.dists[h].mean - 1.0).reshape(-1) for h in heads}
+                out = (
+                    _batched_generate_varied_noise(
+                        model,
+                        margs,
+                        norm,
+                        noise_min=0.0,
+                        noise_max=0.0,
+                        first_deterministic=False,
+                        composer=make_composer(etas, gargs),
+                        device=device,
+                    )
+                    .cpu()
+                    .numpy()
+                )
                 for j, i in enumerate(idx):
-                    eta_logs[i].append(
-                        {h: float(etas[h][j].item()) for h in heads})
+                    eta_logs[i].append({h: float(etas[h][j].item()) for h in heads})
             for j, i in enumerate(idx):
                 preds[i] = out[j]
 
@@ -119,25 +142,22 @@ def batched_closed_loop(
             new_cum_cos = cum_cos * ncos_loc - cum_sin * nsin_loc
             new_cum_sin = cum_sin * ncos_loc + cum_cos * nsin_loc
 
-            positions[i].append(np.array(
-                [new_world_x, new_world_y,
-                 math.atan2(new_cum_sin, new_cum_cos)]))
+            positions[i].append(
+                np.array([new_world_x, new_world_y, math.atan2(new_cum_sin, new_cum_cos)])
+            )
             velocities[i].append(float(np.hypot(new_vx, new_vy)))
             cum[i] = [new_world_x, new_world_y, new_cum_cos, new_cum_sin]
 
             data = datas[i]
             if "ego_agent_past" in data:
                 eap = data["ego_agent_past"].clone()
-                old_origin = torch.tensor([0.0, 0.0, 1.0, 0.0],
-                                          dtype=eap.dtype, device=eap.device)
+                old_origin = torch.tensor([0.0, 0.0, 1.0, 0.0], dtype=eap.dtype, device=eap.device)
                 T = eap.shape[1]
                 eap = torch.cat(
-                    [eap[:, 1:T],
-                     old_origin.view(1, 1, 4).expand(eap.shape[0], 1, 4)],
-                    dim=1)
+                    [eap[:, 1:T], old_origin.view(1, 1, 4).expand(eap.shape[0], 1, 4)], dim=1
+                )
                 data["ego_agent_past"] = eap
-            data = transform_to_new_ego_frame(
-                data, nx_loc, ny_loc, ncos_loc, nsin_loc)
+            data = transform_to_new_ego_frame(data, nx_loc, ny_loc, ncos_loc, nsin_loc)
             if "ego_current_state" in data:
                 ecs = data["ego_current_state"]
                 ecs[..., 0] = 0.0
@@ -153,32 +173,50 @@ def batched_closed_loop(
 
     rollouts = []
     for i in range(N):
-        rollouts.append({
-            "positions": np.stack(positions[i], axis=0),
-            "plans_world": plans_world[i],
-            "extra_plans_world": [[] for _ in range(n_steps)],
-            "velocities": np.array(velocities[i]),
-        })
+        rollouts.append(
+            {
+                "positions": np.stack(positions[i], axis=0),
+                "plans_world": plans_world[i],
+                "extra_plans_world": [[] for _ in range(n_steps)],
+                "velocities": np.array(velocities[i]),
+            }
+        )
     return rollouts, eta_logs
 
 
 def _render_one(job):
     """Worker: render one scene's ghost PNGs + webm from precomputed rollouts."""
-    (scene_path, rollout_a, rollout_b, eta_log, out_dir,
-     label_a, label_b, steps, hist_steps, webm_fps, lambda_spd) = job
+    (
+        scene_path,
+        rollout_a,
+        rollout_b,
+        eta_log,
+        out_dir,
+        label_a,
+        label_b,
+        steps,
+        hist_steps,
+        webm_fps,
+        lambda_spd,
+    ) = job
     import matplotlib
+
     matplotlib.use("Agg")
     from rlvr.autoresearch.tools.ghost_sim_common import (
         GhostSimConfig,
         extract_stopped_neighbors,
         run_ghost_sim,
     )
+
     # Disambiguate same-basename scenes from different perturbation pools
     # (e.g. train_parallel/ and train_yaw/ both holding scene_0008_var02.npz).
     scene_name = f"{Path(scene_path).parent.name}__{Path(scene_path).stem}"
     cfg = GhostSimConfig(
-        model_a_label=label_a, model_b_label=label_b,
-        steps=steps, hist_steps=hist_steps, webm_fps=webm_fps,
+        model_a_label=label_a,
+        model_b_label=label_b,
+        steps=steps,
+        hist_steps=hist_steps,
+        webm_fps=webm_fps,
     )
     cfg.subtitle = scene_name
     data = load_npz_data(scene_path, "cpu")
@@ -197,14 +235,18 @@ def _render_one(job):
 
     run_ghost_sim(
         scene_path=scene_path,
-        model_a=None, model_a_args=None, model_b=None, model_b_args=None,
+        model_a=None,
+        model_a_args=None,
+        model_b=None,
+        model_b_args=None,
         scene_data=data,
         output_dir=Path(out_dir) / scene_name,
         cfg=cfg,
         neighbor_boxes=extract_stopped_neighbors(scene_path),
         make_webm=True,
         extra_title_fn=eta_title,
-        rollout_a=rollout_a, rollout_b=rollout_b,
+        rollout_a=rollout_a,
+        rollout_b=rollout_b,
     )
     return scene_name
 
@@ -225,8 +267,9 @@ def main():
     parser.add_argument("--webm_fps", type=int, default=10)
     parser.add_argument("--label_a", default="baseline")
     parser.add_argument("--label_b", default="explorer")
-    parser.add_argument("--render_only", action="store_true",
-                        help="skip phase 1, render from saved rollouts.pkl")
+    parser.add_argument(
+        "--render_only", action="store_true", help="skip phase 1, render from saved rollouts.pkl"
+    )
     parser.add_argument("--lambda_lat", type=float, default=5.0)
     parser.add_argument("--lat_scale", type=float, default=2.0)
     parser.add_argument("--col_scale", type=float, default=9.0)
@@ -234,9 +277,12 @@ def main():
     parser.add_argument("--lambda_spd", type=float, default=0.2)
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
-    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1",
-                        help="guidance envelope — must match the policy's "
-                             "training labels")
+    parser.add_argument(
+        "--envelope",
+        choices=["v1", "v2"],
+        default="v1",
+        help="guidance envelope — must match the policy's training labels",
+    )
     parser.add_argument("--lambda_col", type=float, default=3.0)
     args = parser.parse_args()
 
@@ -250,22 +296,29 @@ def main():
     if not args.render_only:
         from rlvr.autoresearch.tools.eval_det_avoidance import load_model
         from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model, margs = load_model(args.model_path, device)
         policy, heads = load_policy(args.policy_dir, margs, device)
         datas = [load_npz_data(p, device) for p in paths]
         print(f"[phase1] baseline leg: {len(paths)} scenes x {args.steps} steps")
         ro_base, _ = batched_closed_loop(
-            model, margs, datas, device,
-            n_steps=args.steps, chunk=args.chunk)
+            model, margs, datas, device, n_steps=args.steps, chunk=args.chunk
+        )
         print(f"[phase1] explorer leg")
         ro_gui, eta_logs = batched_closed_loop(
-            model, margs, datas, device,
-            policy=policy, heads=heads, gargs=args,
-            n_steps=args.steps, chunk=args.chunk)
+            model,
+            margs,
+            datas,
+            device,
+            policy=policy,
+            heads=heads,
+            gargs=args,
+            n_steps=args.steps,
+            chunk=args.chunk,
+        )
         with open(pkl, "wb") as f:
-            pickle.dump({"paths": paths, "base": ro_base, "gui": ro_gui,
-                         "etas": eta_logs}, f)
+            pickle.dump({"paths": paths, "base": ro_base, "gui": ro_gui, "etas": eta_logs}, f)
         print(f"[phase1] saved {pkl}")
         del model, policy, datas
         torch.cuda.empty_cache()
@@ -273,11 +326,28 @@ def main():
         with open(pkl, "rb") as f:
             saved = pickle.load(f)
         paths, ro_base, ro_gui, eta_logs = (
-            saved["paths"], saved["base"], saved["gui"], saved["etas"])
+            saved["paths"],
+            saved["base"],
+            saved["gui"],
+            saved["etas"],
+        )
 
-    jobs = [(paths[i], ro_base[i], ro_gui[i], eta_logs[i], str(out_dir),
-             args.label_a, args.label_b, args.steps, args.hist_steps,
-             args.webm_fps, args.lambda_spd) for i in range(len(paths))]
+    jobs = [
+        (
+            paths[i],
+            ro_base[i],
+            ro_gui[i],
+            eta_logs[i],
+            str(out_dir),
+            args.label_a,
+            args.label_b,
+            args.steps,
+            args.hist_steps,
+            args.webm_fps,
+            args.lambda_spd,
+        )
+        for i in range(len(paths))
+    ]
     print(f"[phase2] rendering {len(jobs)} scenes with {args.workers} workers")
     ctx = mp.get_context("spawn")
     with ctx.Pool(args.workers) as pool:

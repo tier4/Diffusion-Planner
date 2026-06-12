@@ -15,6 +15,7 @@ Usage:
         --output_dir <dir> [--limit 500] [--batch_size 64] \
         [--lambda_lat 5.0] [--lat_scale 2.0] [--col_scale 9.0]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -60,7 +61,8 @@ class _LossAccum:
 @torch.no_grad()
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--policy_dir", required=True)
@@ -89,8 +91,13 @@ def main():
     valid_set = DiffusionPlannerData(args.valid_set_list)
     if args.limit:
         valid_set = Subset(valid_set, range(min(args.limit, len(valid_set))))
-    loader = DataLoader(valid_set, batch_size=args.batch_size, shuffle=False,
-                        num_workers=args.num_workers, pin_memory=True)
+    loader = DataLoader(
+        valid_set,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
     print(f"[valid_guided] {len(valid_set)} scenes, batch {args.batch_size}, heads={heads}")
 
     decoder = model.module.decoder if hasattr(model, "module") else model.decoder
@@ -101,8 +108,12 @@ def main():
         inputs = {k: v.to(device) for k, v in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
         inputs["sampled_trajectories"] = torch.zeros(
-            B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM,
-            dtype=torch.float32, device=device,
+            B,
+            MAX_NUM_AGENTS,
+            OUTPUT_T + 1,
+            POSE_DIM,
+            dtype=torch.float32,
+            device=device,
         )
         inputs["delay"] = torch.full((B,), 0, dtype=torch.float32, device=device)
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
@@ -110,9 +121,7 @@ def main():
 
         ego_future = heading_to_cos_sin(inputs["ego_agent_future"])
         neighbors_future = inputs["neighbor_agents_future"]
-        neighbor_future_mask = (
-            torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
-        )
+        neighbor_future_mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
         neighbors_future = heading_to_cos_sin(neighbors_future)
         neighbors_future[neighbor_future_mask] = 0.0
         B, Pn, T, _ = neighbors_future.shape
@@ -120,9 +129,7 @@ def main():
         neighbors_current = inputs["neighbor_agents_past"][:, :Pn, -1, :4]
         inputs = cfg.observation_normalizer(inputs)
 
-        neighbor_current_mask = (
-            torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
-        )
+        neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
         neighbor_mask = torch.cat(
             (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
         )
@@ -162,12 +169,19 @@ def main():
         "n_scenes": len(valid_set),
         "det": det_r,
         "guided": gui_r,
-        "delta_pct": {
-            k: (gui_r[k] - det_r[k]) / det_r[k] * 100 for k in det_r
+        "delta_pct": {k: (gui_r[k] - det_r[k]) / det_r[k] * 100 for k in det_r},
+        "guidance_args": {
+            k: getattr(args, k)
+            for k in (
+                "lambda_lat",
+                "lat_scale",
+                "col_scale",
+                "col_range",
+                "lambda_spd",
+                "stretch_scale",
+                "guidance_scale",
+            )
         },
-        "guidance_args": {k: getattr(args, k) for k in (
-            "lambda_lat", "lat_scale", "col_scale", "col_range",
-            "lambda_spd", "stretch_scale", "guidance_scale")},
         "policy_dir": args.policy_dir,
     }
     out = Path(args.output_dir)

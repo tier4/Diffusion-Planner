@@ -16,9 +16,9 @@ def _make_x(requires_grad=False):
     torch.manual_seed(0)
     # Forward-moving ego with slight lateral variation per batch element.
     x = torch.zeros(B, 1, T + 1, 4)
-    x[:, 0, :, 0] = torch.linspace(0, 20, T + 1)          # x forward
-    x[:, 0, :, 1] = torch.randn(B, 1) * 0.3                # constant lateral offset
-    x[:, 0, :, 2] = 1.0                                    # cos(0)
+    x[:, 0, :, 0] = torch.linspace(0, 20, T + 1)  # x forward
+    x[:, 0, :, 1] = torch.randn(B, 1) * 0.3  # constant lateral offset
+    x[:, 0, :, 2] = 1.0  # cos(0)
     x.requires_grad_(requires_grad)
     return x
 
@@ -40,6 +40,7 @@ def _swerve(name, **params):
 # ---------------------------------------------------------------------------
 # collision_swerve_batched
 # ---------------------------------------------------------------------------
+
 
 def test_swerve_batched_matches_scalar_original():
     x = _make_x()
@@ -98,7 +99,7 @@ def test_swerve_batched_shape_mismatch_raises():
 def test_swerve_batched_energy_time_gated():
     x = _make_x(requires_grad=True)
     fn = _swerve("collision_swerve_batched", eta_col=1.0, range=8.0)
-    t_in = torch.full((B,), 0.05)   # inside (t_min, t_max) window
+    t_in = torch.full((B,), 0.05)  # inside (t_min, t_max) window
     e = fn.energy(x, t_in, _make_inputs())
     grad = torch.autograd.grad(e.sum(), x)[0]
     assert grad.abs().sum() > 0
@@ -107,6 +108,7 @@ def test_swerve_batched_energy_time_gated():
 # ---------------------------------------------------------------------------
 # speed_stretch_batched
 # ---------------------------------------------------------------------------
+
 
 def test_stretch_batched_matches_scalar_speed_guidance():
     x = _make_x()
@@ -132,26 +134,30 @@ def test_stretch_batched_per_sample():
     out = fn._compute(x, {})
     grad = torch.autograd.grad(out.sum(), x)[0]
     fwd_grad = grad[:, 0, 1:, 0]  # gradient along travel (+x) direction
-    assert (fwd_grad[0] <= 0).all() and fwd_grad[0].sum() < 0   # slow down
-    assert torch.all(grad[1] == 0)                              # inert
-    assert (fwd_grad[2] >= 0).all() and fwd_grad[2].sum() > 0   # speed up
+    assert (fwd_grad[0] <= 0).all() and fwd_grad[0].sum() < 0  # slow down
+    assert torch.all(grad[1] == 0)  # inert
+    assert (fwd_grad[2] >= 0).all() and fwd_grad[2].sum() > 0  # speed up
 
 
 def test_lateral_batched_matches_stock_when_unprotected():
     from diffusion_planner.model.guidance.lateral_guidance import LateralGuidance
+
     x = _make_x()
-    ref = torch.zeros(B, T, 4); ref[..., 2] = 1.0
+    ref = torch.zeros(B, T, 4)
+    ref[..., 2] = 1.0
     inputs = {"reference_trajectory": ref}
     for eta in (0.0, 0.5, torch.tensor([0.3, -0.7, 1.0])):
-        stock = LateralGuidance(GuidanceConfig(name="lateral",
-                                params={"lambda_lat": 4.0, "eta_lat": eta}))
+        stock = LateralGuidance(
+            GuidanceConfig(name="lateral", params={"lambda_lat": 4.0, "eta_lat": eta})
+        )
         mine = _swerve("lateral_batched", lambda_lat=4.0, eta_lat=eta, head_protect=0)
         assert torch.allclose(stock._compute(x, inputs), mine._compute(x, inputs), atol=1e-6)
 
 
 def test_head_protect_zeroes_early_gradient():
     x = _make_x(requires_grad=True)
-    ref = torch.zeros(B, T, 4); ref[..., 2] = 1.0
+    ref = torch.zeros(B, T, 4)
+    ref[..., 2] = 1.0
     inputs = {"reference_trajectory": ref, **_make_inputs()}
     lat = _swerve("lateral_batched", lambda_lat=4.0, eta_lat=1.0, head_protect=5)
     col = _swerve("collision_swerve_batched", eta_col=1.0, range=8.0, head_protect=5)
@@ -165,12 +171,12 @@ def test_head_protect_zeroes_early_gradient():
 # FastGuidanceComposer._all_inert
 # ---------------------------------------------------------------------------
 
+
 def test_fast_composer_inert_detection():
     from rlvr.guidance_batched import build_head_composer
 
     # truly inert: every head at its inert point
-    comp = build_head_composer(
-        {"lateral": 0.0, "collision": 0.0, "stretch": 0.0})
+    comp = build_head_composer({"lateral": 0.0, "collision": 0.0, "stretch": 0.0})
     assert comp._all_inert()
 
     # legacy longitudinal head ALONE must count as active (regression:
@@ -193,8 +199,9 @@ def test_fast_composer_inert_detection():
 
     # a REAL stock SpeedGuidance band fn (stretch==1.0 but v_low/v_high
     # clamping active — the --speed_floor pattern) must force active too
-    band = build(GuidanceConfig(name="speed", enabled=True, scale=1.0,
-                                params={"v_low": 2.0, "v_high": 14.0}))
+    band = build(
+        GuidanceConfig(name="speed", enabled=True, scale=1.0, params={"v_low": 2.0, "v_high": 14.0})
+    )
     assert getattr(band, "_stretch", None) == 1.0  # the trap: looks inert
     comp = build_head_composer({"lateral": 0.0, "collision": 0.0})
     comp._functions.append(band)

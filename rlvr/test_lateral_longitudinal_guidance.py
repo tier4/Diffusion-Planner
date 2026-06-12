@@ -70,11 +70,15 @@ def _straight_trajectory(speed: float = 5.0, heading: float = 0.0) -> torch.Tens
     sin_h = float(np.sin(heading))
     x = t * speed * cos_h
     y = t * speed * sin_h
-    return torch.stack([
-        x, y,
-        torch.full((T,), cos_h),
-        torch.full((T,), sin_h),
-    ], dim=-1)
+    return torch.stack(
+        [
+            x,
+            y,
+            torch.full((T,), cos_h),
+            torch.full((T,), sin_h),
+        ],
+        dim=-1,
+    )
 
 
 def _curved_trajectory(speed: float = 5.0, curvature: float = 0.02) -> torch.Tensor:
@@ -127,6 +131,7 @@ def _build_guidance_input(
 # ======================================================================
 # Tier 1: Standalone unit tests
 # ======================================================================
+
 
 def test_registration():
     """Both guidances appear in the registry."""
@@ -253,7 +258,9 @@ def test_lateral_reward_scales_with_distance():
         assert rewards[i] <= rewards[i - 1], (
             f"Reward should decrease with distance: offsets={offsets}, rewards={rewards}"
         )
-    print(f"  PASS  test_lateral_reward_scales_with_distance: {list(zip(offsets, [f'{r:.1f}' for r in rewards]))}")
+    print(
+        f"  PASS  test_lateral_reward_scales_with_distance: {list(zip(offsets, [f'{r:.1f}' for r in rewards]))}"
+    )
 
 
 def test_longitudinal_zero_shift():
@@ -288,9 +295,15 @@ def test_longitudinal_shift_direction():
     r_fast = fn._compute(x_fast, inp_fast).item()
     r_slow = fn._compute(x_slow, inp_slow).item()
 
-    assert r_match > r_fast, f"Ego at target speed should beat faster: r_match={r_match:.2f}, r_fast={r_fast:.2f}"
-    assert r_match > r_slow, f"Ego at target speed should beat slower: r_match={r_match:.2f}, r_slow={r_slow:.2f}"
-    print(f"  PASS  test_longitudinal_shift_direction: r_match={r_match:.4f}, r_fast={r_fast:.2f}, r_slow={r_slow:.2f}")
+    assert r_match > r_fast, (
+        f"Ego at target speed should beat faster: r_match={r_match:.2f}, r_fast={r_fast:.2f}"
+    )
+    assert r_match > r_slow, (
+        f"Ego at target speed should beat slower: r_match={r_match:.2f}, r_slow={r_slow:.2f}"
+    )
+    print(
+        f"  PASS  test_longitudinal_shift_direction: r_match={r_match:.4f}, r_fast={r_fast:.2f}, r_slow={r_slow:.2f}"
+    )
 
 
 def test_lateral_negative_eta():
@@ -309,7 +322,9 @@ def test_lateral_negative_eta():
     x_left, inp_left = _build_guidance_input(ego_left, ref_traj=ref)
     r_right = fn._compute(x_right, inp_right).item()
     r_left = fn._compute(x_left, inp_left).item()
-    assert r_right > r_left, f"Negative eta should prefer right: r_right={r_right:.2f} vs r_left={r_left:.2f}"
+    assert r_right > r_left, (
+        f"Negative eta should prefer right: r_right={r_right:.2f} vs r_left={r_left:.2f}"
+    )
     print(f"  PASS  test_lateral_negative_eta: r_right={r_right:.4f}, r_left={r_left:.2f}")
 
 
@@ -350,8 +365,12 @@ def test_longitudinal_positive_eta_prefers_faster():
     x_far, inp_far = _build_guidance_input(ego_far, ref_traj=ref)
     r_match = fn._compute(x_match, inp_match).item()
     r_far = fn._compute(x_far, inp_far).item()
-    assert r_match > r_far, f"Ego at target speed should score better: r_match={r_match:.2f} vs r_far={r_far:.2f}"
-    print(f"  PASS  test_longitudinal_positive_eta_prefers_faster: r_match={r_match:.4f}, r_far={r_far:.2f}")
+    assert r_match > r_far, (
+        f"Ego at target speed should score better: r_match={r_match:.2f} vs r_far={r_far:.2f}"
+    )
+    print(
+        f"  PASS  test_longitudinal_positive_eta_prefers_faster: r_match={r_match:.4f}, r_far={r_far:.2f}"
+    )
 
 
 def test_lateral_on_curve():
@@ -398,7 +417,9 @@ def test_longitudinal_on_curve():
     fn2 = build(cfg2)
     r_opposite = fn2._compute(x_on_ref, inputs).item()
     assert r_opposite < r_on_ref, f"Opposite target should have more penalty"
-    print(f"  PASS  test_longitudinal_on_curve: r_match={r_on_ref:.4f}, r_opposite={r_opposite:.2f}")
+    print(
+        f"  PASS  test_longitudinal_on_curve: r_match={r_on_ref:.4f}, r_opposite={r_opposite:.2f}"
+    )
 
 
 def test_energy_method_time_gating():
@@ -476,6 +497,7 @@ def test_composer_integration():
 # Tier 2: Model-dependent visualization tests
 # ======================================================================
 
+
 def load_model_and_data(model_path, npz_path, device):
     """Load model and NPZ using the existing utilities."""
     from preference_optimization.model_utils import load_model
@@ -489,10 +511,7 @@ def load_model_and_data(model_path, npz_path, device):
 
     # Load as tensor batch and normalize
     data = load_npz_data(npz_path, device)
-    norm_data = {
-        k: v.clone() if isinstance(v, torch.Tensor) else v
-        for k, v in data.items()
-    }
+    norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm_data = model_args.observation_normalizer(norm_data)
 
     return model, model_args, norm_data, d
@@ -515,7 +534,11 @@ def generate_with_guidance(model, model_args, norm_data, composer, device):
 
 
 def visualize_lateral_test(
-    npz_data, det_traj, guided_trajs, save_path, view_range=40,
+    npz_data,
+    det_traj,
+    guided_trajs,
+    save_path,
+    view_range=40,
 ):
     """Visualize deterministic vs lateral-guided trajectories."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
@@ -536,15 +559,20 @@ def visualize_lateral_test(
         traj = guided_trajs[offset]
         color = cmap(i / max(len(offsets) - 1, 1))
         ax.plot(
-            traj[:, 0], traj[:, 1],
-            color=color, linewidth=2, alpha=0.85,
+            traj[:, 0],
+            traj[:, 1],
+            color=color,
+            linewidth=2,
+            alpha=0.85,
             label=f"lateral={offset:+.1f}m",
             zorder=9,
         )
         ax.plot(traj[-1, 0], traj[-1, 1], "o", color=color, markersize=4, zorder=10)
 
     ax.legend(loc="upper left", fontsize=7, framealpha=0.8)
-    ax.set_title("Lateral Guidance Test: perpendicular offsets from deterministic reference", fontsize=10)
+    ax.set_title(
+        "Lateral Guidance Test: perpendicular offsets from deterministic reference", fontsize=10
+    )
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -552,7 +580,11 @@ def visualize_lateral_test(
 
 
 def visualize_longitudinal_test(
-    npz_data, det_traj, guided_trajs, save_path, view_range=40,
+    npz_data,
+    det_traj,
+    guided_trajs,
+    save_path,
+    view_range=40,
 ):
     """Visualize deterministic vs longitudinal-guided trajectories."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
@@ -574,15 +606,21 @@ def visualize_longitudinal_test(
         color = cmap(i / max(len(shifts) - 1, 1))
         _eta = max(-1.0, min(1.0, float(shift) / 8.0))
         ax.plot(
-            traj[:, 0], traj[:, 1],
-            color=color, linewidth=2, alpha=0.85,
+            traj[:, 0],
+            traj[:, 1],
+            color=color,
+            linewidth=2,
+            alpha=0.85,
             label=f"η_lon={_eta:+.2f}",
             zorder=9,
         )
         ax.plot(traj[-1, 0], traj[-1, 1], "o", color=color, markersize=4, zorder=10)
 
     ax.legend(loc="upper left", fontsize=7, framealpha=0.8)
-    ax.set_title("Longitudinal Guidance Test: velocity scaling (Eq. 3) from deterministic reference", fontsize=10)
+    ax.set_title(
+        "Longitudinal Guidance Test: velocity scaling (Eq. 3) from deterministic reference",
+        fontsize=10,
+    )
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -590,7 +628,11 @@ def visualize_longitudinal_test(
 
 
 def visualize_combined_test(
-    npz_data, det_traj, combined_trajs, save_path, view_range=40,
+    npz_data,
+    det_traj,
+    combined_trajs,
+    save_path,
+    view_range=40,
 ):
     """Visualize combined lateral+longitudinal guidance."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
@@ -604,9 +646,13 @@ def visualize_combined_test(
     colors = plt.cm.Set1(np.linspace(0, 1, len(combined_trajs)))
     for i, (label, traj) in enumerate(combined_trajs.items()):
         ax.plot(
-            traj[:, 0], traj[:, 1],
-            color=colors[i], linewidth=2, alpha=0.85,
-            label=label, zorder=9,
+            traj[:, 0],
+            traj[:, 1],
+            color=colors[i],
+            linewidth=2,
+            alpha=0.85,
+            label=label,
+            zorder=9,
         )
         ax.plot(traj[-1, 0], traj[-1, 1], "o", color=colors[i], markersize=4, zorder=10)
 
@@ -679,10 +725,15 @@ def _draw_scene(ax, npz_data, view_range):
     if ego_shape is not None and len(ego_shape) >= 3:
         wb, length, width = ego_shape[0], ego_shape[1], ego_shape[2]
         ro = (length - wb) / 2
-        corners = np.array([
-            [-ro, -width / 2], [length - ro, -width / 2],
-            [length - ro, width / 2], [-ro, width / 2], [-ro, -width / 2],
-        ])
+        corners = np.array(
+            [
+                [-ro, -width / 2],
+                [length - ro, -width / 2],
+                [length - ro, width / 2],
+                [-ro, width / 2],
+                [-ro, -width / 2],
+            ]
+        )
         ax.fill(corners[:, 0], corners[:, 1], color="blue", alpha=0.6, zorder=12)
     else:
         ax.plot(0, 0, "bs", markersize=8, zorder=12)
@@ -723,9 +774,7 @@ def run_model_tests(model_path, npz_path, save_dir, device):
     print("Tier 2: Model-dependent visualization tests")
     print("=" * 60)
 
-    model, model_args, norm_data, npz_data = load_model_and_data(
-        model_path, npz_path, device
-    )
+    model, model_args, norm_data, npz_data = load_model_and_data(model_path, npz_path, device)
     print(f"  Model loaded on {device}")
 
     scene_name = Path(npz_path).stem
@@ -747,8 +796,7 @@ def run_model_tests(model_path, npz_path, save_dir, device):
 
     for offset in lateral_offsets:
         norm_data_copy = {
-            k: v.clone() if isinstance(v, torch.Tensor) else v
-            for k, v in norm_data.items()
+            k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in norm_data.items()
         }
         norm_data_copy["reference_trajectory"] = ref_tensor
         # η_lat = offset / λ_lat, clamped to [-1, 1]
@@ -756,8 +804,11 @@ def run_model_tests(model_path, npz_path, save_dir, device):
         eta_lat = max(-1.0, min(1.0, offset / lambda_lat))
         set_cfg = GuidanceSetConfig(
             global_scale=1.0,
-            functions=[GuidanceConfig("lateral", scale=50.0,
-                                      params={"lambda_lat": lambda_lat, "eta_lat": eta_lat})],
+            functions=[
+                GuidanceConfig(
+                    "lateral", scale=50.0, params={"lambda_lat": lambda_lat, "eta_lat": eta_lat}
+                )
+            ],
         )
         composer = GuidanceComposer(set_cfg)
         traj = generate_with_guidance(model, model_args, norm_data_copy, composer, device)
@@ -774,7 +825,9 @@ def run_model_tests(model_path, npz_path, save_dir, device):
     for offset in [1.0, 2.0, 3.0]:
         mean_lat, _, _ = compute_lateral_displacement(det_traj, lateral_trajs[offset])
         if mean_lat <= 0:
-            print(f"  WARN  lateral offset={offset:+.1f}m produced mean_lat={mean_lat:.3f}m (expected >0)")
+            print(
+                f"  WARN  lateral offset={offset:+.1f}m produced mean_lat={mean_lat:.3f}m (expected >0)"
+            )
             failed += 1
         else:
             print(f"  CHECK lateral offset={offset:+.1f}m: mean_lat={mean_lat:.3f}m > 0 ✓")
@@ -782,19 +835,24 @@ def run_model_tests(model_path, npz_path, save_dir, device):
     for offset in [-1.0, -2.0, -3.0]:
         mean_lat, _, _ = compute_lateral_displacement(det_traj, lateral_trajs[offset])
         if mean_lat >= 0:
-            print(f"  WARN  lateral offset={offset:+.1f}m produced mean_lat={mean_lat:.3f}m (expected <0)")
+            print(
+                f"  WARN  lateral offset={offset:+.1f}m produced mean_lat={mean_lat:.3f}m (expected <0)"
+            )
             failed += 1
         else:
             print(f"  CHECK lateral offset={offset:+.1f}m: mean_lat={mean_lat:.3f}m < 0 ✓")
 
     # Monotonicity check: larger offset → larger displacement
-    lats_pos = [(o, compute_lateral_displacement(det_traj, lateral_trajs[o])[0]) for o in [0.5, 1.0, 2.0, 3.0]]
+    lats_pos = [
+        (o, compute_lateral_displacement(det_traj, lateral_trajs[o])[0])
+        for o in [0.5, 1.0, 2.0, 3.0]
+    ]
     for i in range(1, len(lats_pos)):
         if lats_pos[i][1] <= lats_pos[i - 1][1]:
             print(
                 f"  WARN  lateral monotonicity: "
                 f"offset={lats_pos[i][0]}→{lats_pos[i][1]:.3f} <= "
-                f"offset={lats_pos[i-1][0]}→{lats_pos[i-1][1]:.3f}"
+                f"offset={lats_pos[i - 1][0]}→{lats_pos[i - 1][1]:.3f}"
             )
 
     save_lat = os.path.join(save_dir, f"{scene_name}_lateral_sweep.png")
@@ -807,16 +865,18 @@ def run_model_tests(model_path, npz_path, save_dir, device):
 
     for shift in time_shifts:
         norm_data_copy = {
-            k: v.clone() if isinstance(v, torch.Tensor) else v
-            for k, v in norm_data.items()
+            k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in norm_data.items()
         }
         norm_data_copy["reference_trajectory"] = ref_tensor
         eta_lon = float(shift) / 8.0  # normalize to ~[-1, 1]
         eta_lon = max(-1.0, min(1.0, eta_lon))
         set_cfg = GuidanceSetConfig(
             global_scale=1.0,
-            functions=[GuidanceConfig("longitudinal", scale=50.0,
-                                      params={"lambda_lon": 0.5, "eta_lon": eta_lon})],
+            functions=[
+                GuidanceConfig(
+                    "longitudinal", scale=50.0, params={"lambda_lon": 0.5, "eta_lon": eta_lon}
+                )
+            ],
         )
         composer = GuidanceComposer(set_cfg)
         traj = generate_with_guidance(model, model_args, norm_data_copy, composer, device)
@@ -841,7 +901,9 @@ def run_model_tests(model_path, npz_path, save_dir, device):
         guided_travel = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
         _eta = max(-1.0, min(1.0, float(shift) / 8.0))
         if guided_travel > det_travel:
-            print(f"  CHECK η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m > det={det_travel:.1f}m ✓")
+            print(
+                f"  CHECK η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m > det={det_travel:.1f}m ✓"
+            )
         else:
             print(
                 f"  WARN  η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m <= det={det_travel:.1f}m "
@@ -853,7 +915,9 @@ def run_model_tests(model_path, npz_path, save_dir, device):
         guided_travel = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
         _eta = max(-1.0, min(1.0, float(shift) / 8.0))
         if guided_travel < det_travel:
-            print(f"  CHECK η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m < det={det_travel:.1f}m ✓")
+            print(
+                f"  CHECK η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m < det={det_travel:.1f}m ✓"
+            )
         else:
             print(
                 f"  WARN  η_lon={_eta:+.2f}: guided_travel={guided_travel:.1f}m >= det={det_travel:.1f}m "
@@ -876,8 +940,7 @@ def run_model_tests(model_path, npz_path, save_dir, device):
     ]
     for label, lat_off, lon_shift in combos:
         norm_data_copy = {
-            k: v.clone() if isinstance(v, torch.Tensor) else v
-            for k, v in norm_data.items()
+            k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in norm_data.items()
         }
         norm_data_copy["reference_trajectory"] = ref_tensor
         eta_lat = max(-1.0, min(1.0, lat_off / 3.0))
@@ -885,10 +948,12 @@ def run_model_tests(model_path, npz_path, save_dir, device):
         set_cfg = GuidanceSetConfig(
             global_scale=1.0,
             functions=[
-                GuidanceConfig("lateral", scale=50.0,
-                               params={"lambda_lat": 3.0, "eta_lat": eta_lat}),
-                GuidanceConfig("longitudinal", scale=50.0,
-                               params={"lambda_lon": 0.5, "eta_lon": eta_lon}),
+                GuidanceConfig(
+                    "lateral", scale=50.0, params={"lambda_lat": 3.0, "eta_lat": eta_lat}
+                ),
+                GuidanceConfig(
+                    "longitudinal", scale=50.0, params={"lambda_lon": 0.5, "eta_lon": eta_lon}
+                ),
             ],
         )
         composer = GuidanceComposer(set_cfg)
@@ -948,6 +1013,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  ERROR {t.__name__}: {e}")
             import traceback
+
             traceback.print_exc()
             failed += 1
 
@@ -956,7 +1022,8 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--npz_path", type=str, default=None)
     parser.add_argument(
-        "--save_dir", type=str,
+        "--save_dir",
+        type=str,
         default=os.path.expanduser("~/Pictures/guidance_tests"),
     )
     args, _ = parser.parse_known_args()
@@ -967,13 +1034,12 @@ if __name__ == "__main__":
         print("\n  SKIP  Tier 2 model tests (provide --model_path and --npz_path)")
     else:
         try:
-            tier2_fails = run_model_tests(
-                args.model_path, args.npz_path, args.save_dir, device
-            )
+            tier2_fails = run_model_tests(args.model_path, args.npz_path, args.save_dir, device)
             failed += tier2_fails
         except Exception as e:
             print(f"  ERROR Tier 2: {e}")
             import traceback
+
             traceback.print_exc()
             failed += 1
 

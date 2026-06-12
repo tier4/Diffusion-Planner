@@ -21,13 +21,13 @@ Usage:
         --clearance_thresh 0.5 \
         --variant rsft_v2_col4
 """
+
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
-
-import copy
 
 import numpy as np
 import torch
@@ -93,7 +93,8 @@ def _compute_moving_clearance(
         # scoring against an invented box.
         raise ValueError(
             f"neighbor slot {neighbor_slot} has degenerate shape (w={w:.3f}, l={l:.3f}); "
-            f"skipping — cannot assess avoidance fittability without true obstacle size")
+            f"skipping — cannot assess avoidance fittability without true obstacle size"
+        )
     neighbor_shapes = torch.tensor([[w, l]], device=device)
 
     # Override velocity thresholds so the moving neighbor is treated as 'stopped'
@@ -102,7 +103,12 @@ def _compute_moving_clearance(
     rcfg_mov.sc_neighbor_disp_thresh = 1000.0
 
     sc = compute_static_collision_penalty(
-        ego_traj, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid, rcfg_mov,
+        ego_traj,
+        ego_shape,
+        neighbor_futures,
+        neighbor_shapes,
+        neighbor_valid,
+        rcfg_mov,
     )
     per_ts = sc["per_timestep_min"][0].cpu().numpy()  # (T,)
     if T > 1:
@@ -120,11 +126,7 @@ def _passes_common_gates(r) -> bool:
 
 
 def _passes_stopped_filter(r, thresh: float) -> bool:
-    return (
-        _passes_common_gates(r)
-        and not r.static_crossing
-        and r.sc_min_dist >= thresh
-    )
+    return _passes_common_gates(r) and not r.static_crossing and r.sc_min_dist >= thresh
 
 
 def _passes_moving_common(r) -> bool:
@@ -175,8 +177,12 @@ def filter_scenes(
         norm_batch = _normalize_batch(batch, model_args)
 
         all_trajs = generate_all_scenes_batched(
-            model, model_args, norm_batch, K,
-            noise_range=noise_range, device=device,
+            model,
+            model_args,
+            norm_batch,
+            K,
+            noise_range=noise_range,
+            device=device,
             generation_variant=variant,
             use_route_cl_guidance=True,
         )  # (N, K, T, 4)
@@ -187,8 +193,15 @@ def filter_scenes(
             best_reward = -1e9
             best_k = -1
             best_clearance = 0.0
-            gate_failures = {"rb": 0, "lane": 0, "kin": 0, "sc": 0,
-                             "collision": 0, "stopped": 0, "clearance": 0}
+            gate_failures = {
+                "rb": 0,
+                "lane": 0,
+                "kin": 0,
+                "sc": 0,
+                "collision": 0,
+                "stopped": 0,
+                "clearance": 0,
+            }
             n_passing = 0
 
             for k in range(K):
@@ -225,7 +238,11 @@ def filter_scenes(
                         gate_failures["clearance"] += 1
                         continue
                     mov_clr = _compute_moving_clearance(
-                        scene_trajs[k:k+1], datas[bi], mov_slot, rcfg, device,
+                        scene_trajs[k : k + 1],
+                        datas[bi],
+                        mov_slot,
+                        rcfg,
+                        device,
                     )
                     if mov_clr < clearance_thresh:
                         gate_failures["clearance"] += 1
@@ -264,10 +281,7 @@ def filter_scenes(
             else:
                 result["reason"] = "no_passing_generation"
                 dropped.append(result)
-                print(
-                    f"  [DROP] {scene_name} class={scene_class} "
-                    f"gates={gate_failures}"
-                )
+                print(f"  [DROP] {scene_name} class={scene_class} gates={gate_failures}")
 
     return kept, dropped
 
@@ -278,17 +292,26 @@ def main():
     parser.add_argument("--model_path", required=True, help="Champion model path")
     parser.add_argument("--config", required=True, help="Reward config JSON (reward_sc.json)")
     parser.add_argument("--output_dir", required=True, help="Output directory")
-    parser.add_argument("--clearance_thresh", type=float, required=True,
-                        help="Minimum clearance in metres (e.g. 0.5)")
-    parser.add_argument("--variant", default="rsft_v2_col4",
-                        help="Generation variant (default: rsft_v2_col4)")
+    parser.add_argument(
+        "--clearance_thresh",
+        type=float,
+        required=True,
+        help="Minimum clearance in metres (e.g. 0.5)",
+    )
+    parser.add_argument(
+        "--variant", default="rsft_v2_col4", help="Generation variant (default: rsft_v2_col4)"
+    )
     parser.add_argument("--K", type=int, default=16, help="Number of generations per scene")
-    parser.add_argument("--noise_range", default="0.5,2.0",
-                        help="Noise scale range (default: 0.5,2.0)")
-    parser.add_argument("--scene_batch_size", type=int, default=8,
-                        help="Scenes per GPU batch")
-    parser.add_argument("--save_curated_dir", type=str, default=None,
-                        help="If set, save kept NPZs with best-of-K as ego_agent_future")
+    parser.add_argument(
+        "--noise_range", default="0.5,2.0", help="Noise scale range (default: 0.5,2.0)"
+    )
+    parser.add_argument("--scene_batch_size", type=int, default=8, help="Scenes per GPU batch")
+    parser.add_argument(
+        "--save_curated_dir",
+        type=str,
+        default=None,
+        help="If set, save kept NPZs with best-of-K as ego_agent_future",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -314,7 +337,11 @@ def main():
         curated_dir.mkdir(parents=True, exist_ok=True)
 
     kept, dropped = filter_scenes(
-        model, model_args, candidates, rcfg, device,
+        model,
+        model_args,
+        candidates,
+        rcfg,
+        device,
         clearance_thresh=args.clearance_thresh,
         variant=args.variant,
         K=args.K,
@@ -349,7 +376,8 @@ def main():
     if kept:
         clrs = [s["best_clearance"] for s in kept]
         summary["kept_clearance_stats"] = {
-            "min": min(clrs), "max": max(clrs),
+            "min": min(clrs),
+            "max": max(clrs),
             "mean": round(sum(clrs) / len(clrs), 4),
         }
 

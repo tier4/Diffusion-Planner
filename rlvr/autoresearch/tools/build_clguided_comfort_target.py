@@ -28,14 +28,27 @@ grpo_trainer_batched.{_stack_scene_data,_normalize_batch,generate_all_scenes_bat
 reward.{compute_centerline_score_batch,compute_kinematic_gate,RewardConfig},
 eval_driving_metrics.lat_accel_smoothed, reward._build_sg_diff_kernel.
 """
-import argparse, json, os
+
+import argparse
+import json
+import os
+
 import numpy as np
 import torch
 
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model, load_npz_data
-from rlvr.grpo_trainer_batched import _stack_scene_data, _normalize_batch, generate_all_scenes_batched
-from rlvr.reward import compute_centerline_score_batch, compute_kinematic_gate, RewardConfig, _build_sg_diff_kernel
 from rlvr.autoresearch.tools.eval_driving_metrics import lat_accel_smoothed
+from rlvr.grpo_trainer_batched import (
+    _normalize_batch,
+    _stack_scene_data,
+    generate_all_scenes_batched,
+)
+from rlvr.reward import (
+    RewardConfig,
+    _build_sg_diff_kernel,
+    compute_centerline_score_batch,
+    compute_kinematic_gate,
+)
 
 DT = 0.1
 
@@ -52,8 +65,14 @@ def _jerk_mag(xy: np.ndarray, window: int) -> np.ndarray:
     return np.sqrt(j[0] ** 2 + j[1] ** 2)
 
 
-def _comfort_cost(past_xy: np.ndarray, fut_xy: np.ndarray, jerk_weight: float,
-                  peak_weight: float, window: int, mean_weight: float = 1.0) -> float:
+def _comfort_cost(
+    past_xy: np.ndarray,
+    fut_xy: np.ndarray,
+    jerk_weight: float,
+    peak_weight: float,
+    window: int,
+    mean_weight: float = 1.0,
+) -> float:
     """Comfort cost over past⊕future positions (continuity-aware).
 
     cost = mean_weight*mean|lat_accel| + peak_weight*max|lat_accel|
@@ -69,12 +88,17 @@ def _comfort_cost(past_xy: np.ndarray, fut_xy: np.ndarray, jerk_weight: float,
     cat = np.concatenate([past_xy, fut_xy], axis=0)  # (Tp+T, 2)
     la = np.abs(lat_accel_smoothed(cat, window=window))
     jk = _jerk_mag(cat, window)
-    return float(mean_weight * la.mean() + peak_weight * la.max()
-                 + jerk_weight * (jk.mean() + jk.max() / 10.0))
+    return float(
+        mean_weight * la.mean()
+        + peak_weight * la.max()
+        + jerk_weight * (jk.mean() + jk.max() / 10.0)
+    )
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--model", required=True, help="centered source model (.pth)")
     ap.add_argument("--scenes", required=True)
     ap.add_argument("--ego_shape", required=True, help="WB,L,W")
@@ -83,14 +107,30 @@ def main():
     ap.add_argument("--K", type=int, default=16)
     ap.add_argument("--variant", default="rl_cl_soft_sweep_stretch")
     ap.add_argument("--gt_max_speed", type=float, default=9.0)
-    ap.add_argument("--cl_margin", type=float, default=0.08,
-                    help="keep candidates with centerline_score >= max_cl - cl_margin (centered enough)")
-    ap.add_argument("--jerk_weight", type=float, default=0.1,
-                    help="weight of jerk (mean+max/10) in comfort cost")
-    ap.add_argument("--peak_weight", type=float, default=0.5,
-                    help="weight of max|lat_accel| (the 'violence' peak) in comfort cost")
-    ap.add_argument("--mean_weight", type=float, default=1.0,
-                    help="weight of mean|lat_accel|; set 0 to target ONLY peak+jerk (keeps mean GT-like → low ego-L2 cost)")
+    ap.add_argument(
+        "--cl_margin",
+        type=float,
+        default=0.08,
+        help="keep candidates with centerline_score >= max_cl - cl_margin (centered enough)",
+    )
+    ap.add_argument(
+        "--jerk_weight",
+        type=float,
+        default=0.1,
+        help="weight of jerk (mean+max/10) in comfort cost",
+    )
+    ap.add_argument(
+        "--peak_weight",
+        type=float,
+        default=0.5,
+        help="weight of max|lat_accel| (the 'violence' peak) in comfort cost",
+    )
+    ap.add_argument(
+        "--mean_weight",
+        type=float,
+        default=1.0,
+        help="weight of mean|lat_accel|; set 0 to target ONLY peak+jerk (keeps mean GT-like → low ego-L2 cost)",
+    )
     ap.add_argument("--comfort_window", type=int, default=11, help="SG window for lat_accel/jerk")
     ap.add_argument("--report", default=None, help="optional JSON report of per-scene selection")
     args = ap.parse_args()
@@ -106,12 +146,21 @@ def main():
     n_cen = 0
     for p in paths:
         d = load_npz_data(p, dev)
-        es = d["ego_shape"]; es_one = es[0] if es.dim() > 1 else es
+        es = d["ego_shape"]
+        es_one = es[0] if es.dim() > 1 else es
         nb = _normalize_batch(_stack_scene_data([d], dev), margs)
         trajs = generate_all_scenes_batched(
-            model, margs, nb, K=args.K, noise_range=(0.5, 2.0), device=dev,
-            gen_chunk_size=args.K, gt_max_speed=args.gt_max_speed,
-            generation_variant=args.variant, use_route_cl_guidance=True)[0]  # (K,T,4)
+            model,
+            margs,
+            nb,
+            K=args.K,
+            noise_range=(0.5, 2.0),
+            device=dev,
+            gen_chunk_size=args.K,
+            gt_max_speed=args.gt_max_speed,
+            generation_variant=args.variant,
+            use_route_cl_guidance=True,
+        )[0]  # (K,T,4)
 
         cl = compute_centerline_score_batch(trajs, es_one, d, usage_mode="baselink")  # (K,)
         gate = compute_kinematic_gate(trajs, cfg, es_one)  # (K,) 1/0
@@ -123,27 +172,56 @@ def main():
         idxs = torch.nonzero(feasible, as_tuple=False).flatten().tolist()
         if not idxs:
             dropped.append(p)
-            report.append({"scene": os.path.basename(p), "kept": 0, "cl_max": cl_max,
-                           "n_feasible_gate": int((gate > 0.5).sum()), "reason": "no feasible+centered candidate"})
+            report.append(
+                {
+                    "scene": os.path.basename(p),
+                    "kept": 0,
+                    "cl_max": cl_max,
+                    "n_feasible_gate": int((gate > 0.5).sum()),
+                    "reason": "no feasible+centered candidate",
+                }
+            )
             continue
 
-        costs = [(_comfort_cost(past_xy, trajs[i, :, :2].detach().cpu().numpy(),
-                                args.jerk_weight, args.peak_weight, args.comfort_window,
-                                args.mean_weight), i) for i in idxs]
+        costs = [
+            (
+                _comfort_cost(
+                    past_xy,
+                    trajs[i, :, :2].detach().cpu().numpy(),
+                    args.jerk_weight,
+                    args.peak_weight,
+                    args.comfort_window,
+                    args.mean_weight,
+                ),
+                i,
+            )
+            for i in idxs
+        ]
         best_cost, best = min(costs)
         if float(cl[best]) > -0.05:
             n_cen += 1
         raw["ego_agent_future"] = trajs[best].detach().cpu().numpy().astype(np.float32)
         out_p = os.path.join(args.out_dir, os.path.basename(p))
-        np.savez(out_p, **raw); written.append(out_p)
-        report.append({"scene": os.path.basename(p), "kept": len(idxs), "best_slot": int(best),
-                       "best_cl": float(cl[best]), "cl_max": cl_max, "comfort_cost": round(best_cost, 4)})
+        np.savez(out_p, **raw)
+        written.append(out_p)
+        report.append(
+            {
+                "scene": os.path.basename(p),
+                "kept": len(idxs),
+                "best_slot": int(best),
+                "best_cl": float(cl[best]),
+                "cl_max": cl_max,
+                "comfort_cost": round(best_cost, 4),
+            }
+        )
 
     json.dump(written, open(args.out_list, "w"), indent=1)
     if args.report:
         json.dump(report, open(args.report, "w"), indent=1)
-    print(f"wrote {len(written)} comfort+centered targets -> {args.out_dir} "
-          f"(centerline>-0.05: {n_cen}/{len(written)}; dropped {len(dropped)}/{len(paths)} no-feasible)")
+    print(
+        f"wrote {len(written)} comfort+centered targets -> {args.out_dir} "
+        f"(centerline>-0.05: {n_cen}/{len(written)}; dropped {len(dropped)}/{len(paths)} no-feasible)"
+    )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ accumulated into `clamped_progress`, which got multiplied by `w_progress`
 in `quality_score`. When `w_progress=0` (CL-only configs), the penalties
 silently evaporated and path collapsed unchecked.
 """
+
 from __future__ import annotations
 
 import math
@@ -95,8 +96,7 @@ def test_underprogress_fires_with_w_progress_zero():
     # Expected gap: totals[1] - totals[0] ≈ -17.5
     gap = totals[1] - totals[0]
     assert gap == pytest.approx(-17.5, abs=0.5), (
-        f"underprogress did not fire with w_progress=0. "
-        f"totals={totals}, gap={gap}, expected ~-17.5"
+        f"underprogress did not fire with w_progress=0. totals={totals}, gap={gap}, expected ~-17.5"
     )
 
 
@@ -305,9 +305,7 @@ def test_stopped_does_not_fire_without_gt_or_baseline_anchor():
     )
     totals = _totals(cfg, trajs, data)
     gap = totals[1] - totals[0]
-    assert abs(gap) < 1.0, (
-        f"stopped leaked without an anchor. totals={totals}, gap={gap}"
-    )
+    assert abs(gap) < 1.0, f"stopped leaked without an anchor. totals={totals}, gap={gap}"
 
 
 if __name__ == "__main__":

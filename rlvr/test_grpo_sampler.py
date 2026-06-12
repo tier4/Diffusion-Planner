@@ -77,7 +77,9 @@ def test_labels_descriptive(model, model_args, data, device):
 
 
 def test_no_prototypes_disables_anchor(model, model_args, data, device):
-    config = SamplerConfig(n_trajectories=8, enable_anchor=True, guidance_prob=1.0, prototypes_path=None)
+    config = SamplerConfig(
+        n_trajectories=8, enable_anchor=True, guidance_prob=1.0, prototypes_path=None
+    )
     results = generate_diverse_group(model, model_args, data, config, device)
     for st in results[1:]:
         if st.guidance_config is not None:
@@ -137,6 +139,7 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"  ERROR {t.__name__}: {e}")
                 import traceback
+
                 traceback.print_exc()
                 failed += 1
 

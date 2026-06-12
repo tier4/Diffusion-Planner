@@ -21,8 +21,8 @@ _ROAD_BORDER_TYPE_IDX = 3
 _MIN_LINE_STRING_DIM = 4
 
 # Distance thresholds (metres) from ego EDGE to road border.
-_DIST_HARD = 0.25   # within 25cm of edge: full penalty
-_DIST_SOFT = 0.60   # within 60cm: decaying penalty
+_DIST_HARD = 0.25  # within 25cm of edge: full penalty
+_DIST_SOFT = 0.60  # within 60cm: decaying penalty
 
 _MAX_BORDER_DIST = 30.0
 _PTS_PER_SIDE = 20  # 20 per side × 4 sides = 80 perimeter points
@@ -43,10 +43,10 @@ def _build_ego_perimeter(ego_shape_params):
     pts = []
     for j in range(_PTS_PER_SIDE):
         f = j / (_PTS_PER_SIDE - 1)
-        pts.append((-ro + f * length, -half_w))         # bottom edge
-        pts.append((-ro + f * length,  half_w))          # top edge
-        pts.append((-ro, -half_w + f * width))            # left edge
-        pts.append((length - ro, -half_w + f * width))    # right edge
+        pts.append((-ro + f * length, -half_w))  # bottom edge
+        pts.append((-ro + f * length, half_w))  # top edge
+        pts.append((-ro, -half_w + f * width))  # left edge
+        pts.append((length - ro, -half_w + f * width))  # right edge
     return torch.tensor(pts, dtype=torch.float32)  # (80, 2)
 
 
@@ -92,8 +92,8 @@ class RoadBorderGuidance(BaseGuidance):
         valid = is_border & has_coords
 
         N_flat = line_strings.shape[1] * line_strings.shape[2]
-        border_pts = border_xy.reshape(B, N_flat, 2)     # [B, K, 2]
-        valid_flat = valid.reshape(B, N_flat)             # [B, K]
+        border_pts = border_xy.reshape(B, N_flat, 2)  # [B, K, 2]
+        valid_flat = valid.reshape(B, N_flat)  # [B, K]
 
         if not valid_flat.any():
             return torch.zeros(B, device=device)
@@ -107,7 +107,7 @@ class RoadBorderGuidance(BaseGuidance):
         # Transform perimeter to world frame at each timestep
         cos_h = ego_traj[..., 2]  # [B, T]
         sin_h = ego_traj[..., 3]  # [B, T]
-        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
         cos_h = cos_h / h_norm
         sin_h = sin_h / h_norm
 
@@ -148,5 +148,6 @@ class RoadBorderGuidance(BaseGuidance):
 def road_border_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     """Deprecated. Use RoadBorderGuidance via GuidanceComposer."""
     from .config import GuidanceConfig
+
     fn = RoadBorderGuidance(GuidanceConfig(name="road_border"))
     return fn.energy(x, t, inputs)

@@ -39,8 +39,9 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @torch.no_grad()
-def check_scene_t0(npz_path: str, device: torch.device, threshold: float = 0.15,
-                    check_road_border: bool = False) -> tuple[bool, float, float]:
+def check_scene_t0(
+    npz_path: str, device: torch.device, threshold: float = 0.15, check_road_border: bool = False
+) -> tuple[bool, float, float]:
     """Check if ego is in-lane at t=0.
 
     Returns: (is_clean, lane_clearance, rb_clearance)
@@ -78,9 +79,7 @@ def check_scene_t0(npz_path: str, device: torch.device, threshold: float = 0.15,
     # Road border check
     rb_clearance = 1.0
     if check_road_border:
-        rb_gate, rb_near, rb_wide, _, _, _ = compute_road_border_penalty(
-            traj_t0, ego_shape, data
-        )
+        rb_gate, rb_near, rb_wide, _, _, _ = compute_road_border_penalty(traj_t0, ego_shape, data)
         if rb_gate.item() < 0.5:
             rb_clearance = 0.0
         elif rb_near.item() > 0:
@@ -100,9 +99,9 @@ def check_scene_t0(npz_path: str, device: torch.device, threshold: float = 0.15,
 
 
 @torch.no_grad()
-def check_gt_lane_departure(npz_path: str, device: torch.device,
-                             gt_max_t: int = 20, min_gt_path: float = 5.0
-                             ) -> tuple[bool, float, bool]:
+def check_gt_lane_departure(
+    npz_path: str, device: torch.device, gt_max_t: int = 20, min_gt_path: float = 5.0
+) -> tuple[bool, float, bool]:
     """Check if GT trajectory stays in lane for first gt_max_t timesteps
     and has sufficient path length.
 
@@ -116,7 +115,7 @@ def check_gt_lane_departure(npz_path: str, device: torch.device,
     valid_mask = np.abs(gt_xy).sum(axis=-1) > 0.1
     valid_xy = gt_xy[valid_mask]
     if len(valid_xy) >= 2:
-        gt_path = float(np.sqrt(np.diff(valid_xy[:, 0])**2 + np.diff(valid_xy[:, 1])**2).sum())
+        gt_path = float(np.sqrt(np.diff(valid_xy[:, 0]) ** 2 + np.diff(valid_xy[:, 1]) ** 2).sum())
     else:
         gt_path = 0.0
     gt_path_ok = gt_path >= min_gt_path
@@ -143,9 +142,9 @@ def check_gt_lane_departure(npz_path: str, device: torch.device,
 
 
 @torch.no_grad()
-def check_rb_future_margin(npz_path: str, device: torch.device,
-                            rb_thresh: float = 0.4, rb_max_t: int = 10
-                            ) -> tuple[bool, float]:
+def check_rb_future_margin(
+    npz_path: str, device: torch.device, rb_thresh: float = 0.4, rb_max_t: int = 10
+) -> tuple[bool, float]:
     """Check min ego-to-road-border distance across [t=0 .. t=rb_max_t] of GT.
 
     Builds a (rb_max_t + 1)-step trajectory from GT positions and calls
@@ -168,11 +167,11 @@ def check_rb_future_margin(npz_path: str, device: torch.device,
     traj = np.zeros((T_full, 4), dtype=np.float32)
     traj[0, 2] = 1.0  # cos_yaw = 1 (heading = 0) at origin
     n_gt = min(rb_max_t, gt.shape[0])
-    traj[1:1 + n_gt, :2] = gt[:n_gt, :2]
-    traj[1:1 + n_gt, 2] = np.cos(gt[:n_gt, 2])
-    traj[1:1 + n_gt, 3] = np.sin(gt[:n_gt, 2])
+    traj[1 : 1 + n_gt, :2] = gt[:n_gt, :2]
+    traj[1 : 1 + n_gt, 2] = np.cos(gt[:n_gt, 2])
+    traj[1 : 1 + n_gt, 3] = np.sin(gt[:n_gt, 2])
     if n_gt < rb_max_t:
-        traj[1 + n_gt:, 2] = 1.0
+        traj[1 + n_gt :, 2] = 1.0
 
     traj_t = torch.tensor(traj[None], device=device)
     _, _, _, _, _, per_ts_min = compute_road_border_penalty(traj_t, ego_shape, data)
@@ -184,23 +183,45 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--output", type=str, required=True)
-    parser.add_argument("--threshold", type=float, default=0.15,
-                        help="Min clearance to lane edge at t=0 (meters)")
+    parser.add_argument(
+        "--threshold", type=float, default=0.15, help="Min clearance to lane edge at t=0 (meters)"
+    )
     parser.add_argument("--also_check_road_border", action="store_true")
-    parser.add_argument("--check_gt_lane", action="store_true",
-                        help="Also check that GT stays in lane for first --gt_max_t steps")
-    parser.add_argument("--gt_max_t", type=int, default=20,
-                        help="Number of GT timesteps to check for lane departure (default: 20)")
-    parser.add_argument("--min_gt_path", type=float, default=5.0,
-                        help="Minimum GT path length in meters (default: 5.0)")
-    parser.add_argument("--check_rb_future", action="store_true",
-                        help="Also drop scenes where ego is within --rb_thresh of a road "
-                             "border at any of the first --rb_max_t GT timesteps.")
-    parser.add_argument("--rb_thresh", type=float, default=0.4,
-                        help="Min ego-to-border distance required at every checked "
-                             "timestep (default: 0.4 m)")
-    parser.add_argument("--rb_max_t", type=int, default=10,
-                        help="Number of timesteps to check (default: 10, i.e. t=0..10)")
+    parser.add_argument(
+        "--check_gt_lane",
+        action="store_true",
+        help="Also check that GT stays in lane for first --gt_max_t steps",
+    )
+    parser.add_argument(
+        "--gt_max_t",
+        type=int,
+        default=20,
+        help="Number of GT timesteps to check for lane departure (default: 20)",
+    )
+    parser.add_argument(
+        "--min_gt_path",
+        type=float,
+        default=5.0,
+        help="Minimum GT path length in meters (default: 5.0)",
+    )
+    parser.add_argument(
+        "--check_rb_future",
+        action="store_true",
+        help="Also drop scenes where ego is within --rb_thresh of a road "
+        "border at any of the first --rb_max_t GT timesteps.",
+    )
+    parser.add_argument(
+        "--rb_thresh",
+        type=float,
+        default=0.4,
+        help="Min ego-to-border distance required at every checked timestep (default: 0.4 m)",
+    )
+    parser.add_argument(
+        "--rb_max_t",
+        type=int,
+        default=10,
+        help="Number of timesteps to check (default: 10, i.e. t=0..10)",
+    )
     args = parser.parse_args()
 
     device = torch.device(DEVICE)
@@ -236,9 +257,7 @@ def main():
 
         # Optional rb-future margin check
         if args.check_rb_future:
-            is_safe, min_dist = check_rb_future_margin(
-                path, device, args.rb_thresh, args.rb_max_t
-            )
+            is_safe, min_dist = check_rb_future_margin(path, device, args.rb_thresh, args.rb_max_t)
             if not is_safe:
                 rb_future_bad.append((i, min_dist, path))
                 continue
@@ -247,7 +266,7 @@ def main():
 
         if (i + 1) % 20 == 0:
             n_removed = len(bad) + len(gt_bad) + len(gt_short_path) + len(rb_future_bad)
-            print(f"  Processed {i+1}/{len(scenes)} ({n_removed} removed)")
+            print(f"  Processed {i + 1}/{len(scenes)} ({n_removed} removed)")
 
     print(f"\nTotal: {len(scenes)} scenes")
     print(f"Clean: {len(good)}")
@@ -256,7 +275,9 @@ def main():
         print(f"Bad GT lane (first {args.gt_max_t} steps): {len(gt_bad)}")
         print(f"Bad GT path (<{args.min_gt_path}m): {len(gt_short_path)}")
     if args.check_rb_future:
-        print(f"Bad rb-future margin (<{args.rb_thresh}m within t=0..{args.rb_max_t}): {len(rb_future_bad)}")
+        print(
+            f"Bad rb-future margin (<{args.rb_thresh}m within t=0..{args.rb_max_t}): {len(rb_future_bad)}"
+        )
 
     if bad:
         print(f"\nBad t=0 scenes (first 10):")
@@ -271,7 +292,7 @@ def main():
         for i, min_dist, path in rb_future_bad[:10]:
             print(f"  scene {i}: rb_min={min_dist:.3f}m — {Path(path).stem[-30:]}")
 
-    with open(args.output, 'w') as f:
+    with open(args.output, "w") as f:
         json.dump(good, f, indent=2)
     print(f"\nSaved {len(good)} clean scenes to {args.output}")
 

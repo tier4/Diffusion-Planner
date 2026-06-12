@@ -1,4 +1,3 @@
-
 def verify_lora_loaded(model, model_args, scene_path, device, label=""):
     """Verify LoRA adapter is active and changes model output.
 
@@ -37,12 +36,14 @@ def verify_lora_loaded(model, model_args, scene_path, device, label=""):
 
     with torch.no_grad():
         norm1 = copy.deepcopy(model_args.observation_normalizer)(
-            {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()})
+            {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()}
+        )
         traj_lora = generate_samples(model, model_args, norm1, 0.0, 1, None, device)[0]
 
         with inner.disable_adapter():
             norm2 = copy.deepcopy(model_args.observation_normalizer)(
-                {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()})
+                {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in data.items()}
+            )
             traj_base = generate_samples(model, model_args, norm2, 0.0, 1, None, device)[0]
 
     diff = np.abs(traj_lora - traj_base).max()

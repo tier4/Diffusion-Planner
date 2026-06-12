@@ -12,12 +12,19 @@ are copied verbatim. Reuses existing geometry only — no hand-rolled border mat
 After this, viz_p4_recovery / compute_reward_batch RB scoring AND road_border
 guidance both operate on the true curb.
 """
+
 from __future__ import annotations
-import argparse, json, math, os
+
+import argparse
+import json
+import math
+import os
 from pathlib import Path
+
 import numpy as np
-from scenario_generation.tools._heatmap_common import load_route, recover_ego_world_pose_from_goal
+
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
+from scenario_generation.tools._heatmap_common import load_route, recover_ego_world_pose_from_goal
 
 
 def main():
@@ -32,15 +39,17 @@ def main():
     ego_shape = np.array([float(x) for x in args.ego_shape.split(",")], dtype=np.float32)
     route = load_route(Path(args.route))
     b = LaneletSceneBuilder(str(route.map_path))
-    out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     scenes = json.load(open(args.scenes))
     written = []
     for sp in scenes:
         with np.load(sp, allow_pickle=True) as _z:  # close fd promptly on large scene lists
             d = dict(_z)
         ex, ey, eyaw = recover_ego_world_pose_from_goal(np.asarray(d["goal_pose"]), route)
-        ls_w = np.asarray(b.build_line_strings_tensor(np.array([ex, ey], dtype=float)),
-                          dtype=np.float32)  # (60,20,4) world: x,y,stop_line,road_border
+        ls_w = np.asarray(
+            b.build_line_strings_tensor(np.array([ex, ey], dtype=float)), dtype=np.float32
+        )  # (60,20,4) world: x,y,stop_line,road_border
         c, s = math.cos(eyaw), math.sin(eyaw)
         ls = ls_w.copy()
         valid = (ls_w[..., 2] > 0.5) | (ls_w[..., 3] > 0.5)  # type-flagged points only

@@ -103,8 +103,14 @@ def plot_prototypes(prototypes, counts, output_png):
     fig, (ax_xy, ax_end) = plt.subplots(1, 2, figsize=(15, 7.5))
     for k in range(K):
         c = cmap(norm(end_y[k]))
-        ax_xy.plot(prototypes[k, :, 0], prototypes[k, :, 1], "-", color=c,
-                   lw=0.6 + 2.4 * frac[k], alpha=0.85)
+        ax_xy.plot(
+            prototypes[k, :, 0],
+            prototypes[k, :, 1],
+            "-",
+            color=c,
+            lw=0.6 + 2.4 * frac[k],
+            alpha=0.85,
+        )
         ax_xy.plot(end_x[k], end_y[k], "o", color=c, ms=2 + 4 * frac[k])
     ax_xy.plot(0, 0, "k*", ms=14, zorder=5, label="ego t=0")
     ax_xy.set_title(f"{K} trajectory-mode prototypes (ego frame; width ~ #members)")
@@ -113,8 +119,13 @@ def plot_prototypes(prototypes, counts, output_png):
     ax_xy.set_aspect("equal", adjustable="box")
     ax_xy.grid(True, alpha=0.3)
     ax_xy.legend(loc="upper left")
-    fig.colorbar(ScalarMappable(norm=norm, cmap=cmap), ax=ax_xy,
-                 fraction=0.046, pad=0.04, label="endpoint y (left +) [m]")
+    fig.colorbar(
+        ScalarMappable(norm=norm, cmap=cmap),
+        ax=ax_xy,
+        fraction=0.046,
+        pad=0.04,
+        label="endpoint y (left +) [m]",
+    )
 
     ax_end.scatter(end_x, end_y, c=end_y, cmap=cmap, norm=norm, s=20 + 180 * frac)
     for k in range(K):
@@ -134,12 +145,20 @@ def plot_prototypes(prototypes, counts, output_png):
 
 def get_args():
     p = argparse.ArgumentParser(description="Build KMeans trajectory prototypes from GT futures")
-    p.add_argument("--data_list", type=str, required=True,
-                   help="JSON list of NPZ paths (same format as train_predictor.py)")
+    p.add_argument(
+        "--data_list",
+        type=str,
+        required=True,
+        help="JSON list of NPZ paths (same format as train_predictor.py)",
+    )
     p.add_argument("--output", type=str, required=True, help="output path for prototypes .npy")
     p.add_argument("--num_clusters", type=int, default=64, help="number of trajectory modes K")
-    p.add_argument("--max_samples", type=int, default=0,
-                   help="if >0, randomly subsample this many trajectories before clustering")
+    p.add_argument(
+        "--max_samples",
+        type=int,
+        default=0,
+        help="if >0, randomly subsample this many trajectories before clustering",
+    )
     p.add_argument("--iters", type=int, default=100, help="max Lloyd iterations")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", type=str, default="cuda")
@@ -176,11 +195,14 @@ def main():
         paths = json.load(f)
 
     features, T = load_xy_futures(paths, args.max_samples, args.seed)
-    print(f"Clustering {features.shape[0]} trajectories (T={T}) into K={args.num_clusters} modes...")
+    print(
+        f"Clustering {features.shape[0]} trajectories (T={T}) into K={args.num_clusters} modes..."
+    )
 
     device = args.device if torch.cuda.is_available() else "cpu"
     centers, labels = torch_kmeans(
-        torch.from_numpy(features), args.num_clusters, args.iters, args.seed, device)
+        torch.from_numpy(features), args.num_clusters, args.iters, args.seed, device
+    )
     prototypes = centers.cpu().numpy().reshape(args.num_clusters, T, 2).astype(np.float32)
     labels = labels.cpu().numpy()
 
@@ -188,9 +210,11 @@ def main():
     counts = np.bincount(labels, minlength=args.num_clusters)
     print(f"Saved prototypes {prototypes.shape} to {args.output}")
     print(f"  cluster sizes: min={counts.min()} max={counts.max()} mean={counts.mean():.0f}")
-    print(f"  endpoint spread (x,y range over modes): "
-          f"x[{prototypes[:, -1, 0].min():.1f},{prototypes[:, -1, 0].max():.1f}] "
-          f"y[{prototypes[:, -1, 1].min():.1f},{prototypes[:, -1, 1].max():.1f}]")
+    print(
+        f"  endpoint spread (x,y range over modes): "
+        f"x[{prototypes[:, -1, 0].min():.1f},{prototypes[:, -1, 0].max():.1f}] "
+        f"y[{prototypes[:, -1, 1].min():.1f},{prototypes[:, -1, 1].max():.1f}]"
+    )
 
     # Visualize the modes right after building them.
     plot_png = os.path.splitext(args.output)[0] + ".png"

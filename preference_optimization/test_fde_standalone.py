@@ -24,12 +24,14 @@ def calculate_fde(trajectory_1: np.ndarray, trajectory_2: np.ndarray) -> float:
 
 def test_fde_identical_trajectories():
     """Test FDE with identical trajectories - should return 0."""
-    traj = np.array([
-        [0.0, 0.0, 0.0, 5.0],
-        [1.0, 1.0, 0.1, 5.0],
-        [2.0, 2.0, 0.2, 5.0],
-        [3.0, 3.0, 0.3, 5.0],
-    ])
+    traj = np.array(
+        [
+            [0.0, 0.0, 0.0, 5.0],
+            [1.0, 1.0, 0.1, 5.0],
+            [2.0, 2.0, 0.2, 5.0],
+            [3.0, 3.0, 0.3, 5.0],
+        ]
+    )
 
     fde = calculate_fde(traj, traj)
     print(f"Test 1 - Identical trajectories: FDE = {fde:.4f} (expected: 0.0000)")
@@ -39,19 +41,23 @@ def test_fde_identical_trajectories():
 
 def test_fde_known_distance():
     """Test FDE with known final position distance."""
-    traj_1 = np.array([
-        [0.0, 0.0, 0.0, 5.0],
-        [1.0, 0.0, 0.0, 5.0],
-        [2.0, 0.0, 0.0, 5.0],
-        [3.0, 0.0, 0.0, 5.0],  # Final position: (3, 0)
-    ])
+    traj_1 = np.array(
+        [
+            [0.0, 0.0, 0.0, 5.0],
+            [1.0, 0.0, 0.0, 5.0],
+            [2.0, 0.0, 0.0, 5.0],
+            [3.0, 0.0, 0.0, 5.0],  # Final position: (3, 0)
+        ]
+    )
 
-    traj_2 = np.array([
-        [0.0, 0.0, 0.0, 5.0],
-        [1.0, 1.0, 0.1, 5.0],
-        [2.0, 2.0, 0.2, 5.0],
-        [3.0, 4.0, 0.3, 5.0],  # Final position: (3, 4)
-    ])
+    traj_2 = np.array(
+        [
+            [0.0, 0.0, 0.0, 5.0],
+            [1.0, 1.0, 0.1, 5.0],
+            [2.0, 2.0, 0.2, 5.0],
+            [3.0, 4.0, 0.3, 5.0],  # Final position: (3, 4)
+        ]
+    )
 
     # Expected FDE: sqrt((3-3)^2 + (0-4)^2) = 4.0
     fde = calculate_fde(traj_1, traj_2)
@@ -63,15 +69,19 @@ def test_fde_known_distance():
 
 def test_fde_diagonal_distance():
     """Test FDE with diagonal distance (3-4-5 triangle)."""
-    traj_1 = np.array([
-        [0.0, 0.0, 0.0, 5.0],
-        [5.0, 5.0, 0.5, 5.0],  # Final position: (5, 5)
-    ])
+    traj_1 = np.array(
+        [
+            [0.0, 0.0, 0.0, 5.0],
+            [5.0, 5.0, 0.5, 5.0],  # Final position: (5, 5)
+        ]
+    )
 
-    traj_2 = np.array([
-        [0.0, 0.0, 0.0, 5.0],
-        [8.0, 9.0, 0.8, 5.0],  # Final position: (8, 9)
-    ])
+    traj_2 = np.array(
+        [
+            [0.0, 0.0, 0.0, 5.0],
+            [8.0, 9.0, 0.8, 5.0],  # Final position: (8, 9)
+        ]
+    )
 
     # Expected FDE: sqrt((8-5)^2 + (9-5)^2) = sqrt(9 + 16) = 5.0
     fde = calculate_fde(traj_1, traj_2)
@@ -98,29 +108,33 @@ def test_fde_symmetry():
 def test_fde_only_final_position_matters():
     """Test that only final position matters, not the path taken."""
     # Two different paths to the same endpoint
-    traj_1 = np.array([
-        [0.0, 0.0, 0.0, 5.0],
-        [1.0, 0.0, 0.0, 5.0],  # Go along x-axis
-        [2.0, 0.0, 0.0, 5.0],
-        [3.0, 0.0, 0.0, 5.0],
-        [4.0, 0.0, 0.0, 5.0],
-        [5.0, 0.0, 0.0, 5.0],  # Then along y-axis
-        [5.0, 1.0, 0.5, 5.0],
-        [5.0, 2.0, 0.5, 5.0],
-        [5.0, 3.0, 0.5, 5.0],  # Final: (5, 3)
-    ])
+    traj_1 = np.array(
+        [
+            [0.0, 0.0, 0.0, 5.0],
+            [1.0, 0.0, 0.0, 5.0],  # Go along x-axis
+            [2.0, 0.0, 0.0, 5.0],
+            [3.0, 0.0, 0.0, 5.0],
+            [4.0, 0.0, 0.0, 5.0],
+            [5.0, 0.0, 0.0, 5.0],  # Then along y-axis
+            [5.0, 1.0, 0.5, 5.0],
+            [5.0, 2.0, 0.5, 5.0],
+            [5.0, 3.0, 0.5, 5.0],  # Final: (5, 3)
+        ]
+    )
 
-    traj_2 = np.array([
-        [0.0, 0.0, 0.0, 5.0],
-        [0.0, 1.0, 0.5, 5.0],  # Go along y-axis first
-        [0.0, 2.0, 0.5, 5.0],
-        [0.0, 3.0, 0.5, 5.0],
-        [1.0, 3.0, 0.0, 5.0],  # Then along x-axis
-        [2.0, 3.0, 0.0, 5.0],
-        [3.0, 3.0, 0.0, 5.0],
-        [4.0, 3.0, 0.0, 5.0],
-        [5.0, 3.0, 0.0, 5.0],  # Final: (5, 3)
-    ])
+    traj_2 = np.array(
+        [
+            [0.0, 0.0, 0.0, 5.0],
+            [0.0, 1.0, 0.5, 5.0],  # Go along y-axis first
+            [0.0, 2.0, 0.5, 5.0],
+            [0.0, 3.0, 0.5, 5.0],
+            [1.0, 3.0, 0.0, 5.0],  # Then along x-axis
+            [2.0, 3.0, 0.0, 5.0],
+            [3.0, 3.0, 0.0, 5.0],
+            [4.0, 3.0, 0.0, 5.0],
+            [5.0, 3.0, 0.0, 5.0],  # Final: (5, 3)
+        ]
+    )
 
     fde = calculate_fde(traj_1, traj_2)
     print(f"Test 5 - Same endpoint, different paths: FDE = {fde:.4f} (expected: 0.0000)")
@@ -151,5 +165,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ ERROR: {e}")
         import traceback
+
         traceback.print_exc()
         exit(1)

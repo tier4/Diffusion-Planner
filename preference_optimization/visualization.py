@@ -49,9 +49,7 @@ def visualize_validation(
                 break
 
             # Clone and prepare data
-            data = {
-                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in sample.items()
-            }
+            data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in sample.items()}
 
             B = data["ego_current_state"].shape[0]
             P = 1 + model_args.predicted_neighbor_num

@@ -390,7 +390,13 @@ class Decoder(nn.Module):
         }
 
     def _inference_flow_matching(
-        self, encoding, inputs, current_states, neighbor_current_mask, encoding_pooled, sampled_trajectories
+        self,
+        encoding,
+        inputs,
+        current_states,
+        neighbor_current_mask,
+        encoding_pooled,
+        sampled_trajectories,
     ):
         """Inference using Flow Matching approach.
 
@@ -536,7 +542,12 @@ class Decoder(nn.Module):
 
         if self._model_type == "flow_matching":
             return self._inference_flow_matching(
-                encoding, inputs, current_states, neighbor_current_mask, encoding_pooled, sampled_trajectories
+                encoding,
+                inputs,
+                current_states,
+                neighbor_current_mask,
+                encoding_pooled,
+                sampled_trajectories,
             )
         elif self._model_type == "x_start":
             return self._inference_x_start(

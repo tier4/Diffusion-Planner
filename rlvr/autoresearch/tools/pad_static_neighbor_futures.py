@@ -19,6 +19,7 @@ Usage:
     python -m rlvr.autoresearch.tools.pad_static_neighbor_futures \
         --scenes <list.json> --out_dir <dir> --out_list <json>
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,14 +31,18 @@ import numpy as np
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--out_list", required=True)
-    parser.add_argument("--stop_disp", type=float, default=0.5,
-                        help="max displacement (m) over the last 1 s of past "
-                             "to classify a neighbour as stopped")
+    parser.add_argument(
+        "--stop_disp",
+        type=float,
+        default=0.5,
+        help="max displacement (m) over the last 1 s of past to classify a neighbour as stopped",
+    )
     args = parser.parse_args()
 
     with open(args.scenes) as f:
@@ -55,8 +60,9 @@ def main():
         valid = np.abs(last[:, :2]).sum(axis=1) > 0.1
         for i in np.nonzero(valid)[0]:
             past_ok = np.abs(nb[i, -11, :2]).sum() > 0
-            stopped = past_ok and float(
-                np.linalg.norm(nb[i, -1, :2] - nb[i, -11, :2])) < args.stop_disp
+            stopped = (
+                past_ok and float(np.linalg.norm(nb[i, -1, :2] - nb[i, -11, :2])) < args.stop_disp
+            )
             fut_valid = (np.abs(nf[i, :, :2]).sum(axis=1) > 0.1).sum()
             if stopped and fut_valid == 0:
                 # Future of a parked car = current pose, repeated,
@@ -69,17 +75,15 @@ def main():
                 if F == 4:
                     row = last[i, :4]
                 elif F == 3:
-                    row = np.array([last[i, 0], last[i, 1],
-                                    np.arctan2(last[i, 3], last[i, 2])])
+                    row = np.array([last[i, 0], last[i, 1], np.arctan2(last[i, 3], last[i, 2])])
                 else:
                     raise ValueError(
-                        f"{sp}: unsupported neighbor_agents_future width {F} "
-                        "(expected 3 or 4)")
+                        f"{sp}: unsupported neighbor_agents_future width {F} (expected 3 or 4)"
+                    )
                 nf[i, :, :] = np.tile(row, (T, 1))
                 n_padded += 1
         if n_padded:
-            raw["neighbor_agents_future"] = nf.astype(
-                np.array(raw["neighbor_agents_future"]).dtype)
+            raw["neighbor_agents_future"] = nf.astype(np.array(raw["neighbor_agents_future"]).dtype)
         pool = Path(sp).parent.name
         out_path = out_dir / f"{pool}__{Path(sp).stem}.npz"
         np.savez(out_path, **raw)
@@ -90,8 +94,7 @@ def main():
 
     with open(args.out_list, "w") as f:
         json.dump(written, f, indent=1)
-    print(f"\nWrote {len(written)} scenes ({n_padded_total} futures padded) "
-          f"-> {args.out_list}")
+    print(f"\nWrote {len(written)} scenes ({n_padded_total} futures padded) -> {args.out_list}")
 
 
 if __name__ == "__main__":

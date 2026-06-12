@@ -33,16 +33,14 @@ def create_block_ablation(lora_dir: Path, block: int) -> Path:
     out.mkdir(exist_ok=True)
     state = load_file(str(lora_dir / "adapter_model.safetensors"))
     filtered = {
-        k: (torch.zeros_like(v) if f"blocks.{block}." in k else v)
-        for k, v in state.items()
+        k: (torch.zeros_like(v) if f"blocks.{block}." in k else v) for k, v in state.items()
     }
     save_file(filtered, str(out / "adapter_model.safetensors"))
     shutil.copy2(lora_dir / "adapter_config.json", out / "adapter_config.json")
     return out
 
 
-def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str],
-                    config=None) -> dict:
+def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str], config=None) -> dict:
     """Evaluate a single checkpoint. Returns metrics dict."""
     from rlvr.autoresearch.tools.eval_lane_border_distance import load_model
     from rlvr.grpo_sampler import generate_samples
@@ -103,21 +101,34 @@ def eval_checkpoint(model_path: str, lora_path: str, scenes: list[str],
 def main():
     parser = argparse.ArgumentParser(description="Sweep LoRA checkpoints with block ablation")
     parser.add_argument("--model_path", type=str, required=True)
-    parser.add_argument("--lora_dir", type=str, required=True, help="Experiment dir containing lora_epoch_NNN/")
+    parser.add_argument(
+        "--lora_dir", type=str, required=True, help="Experiment dir containing lora_epoch_NNN/"
+    )
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--epochs", type=int, nargs="+", required=True, help="Epochs to evaluate")
-    parser.add_argument("--block_ablations", type=int, nargs="*", default=[], help="Block indices to ablate (e.g. 0 1)")
+    parser.add_argument(
+        "--block_ablations",
+        type=int,
+        nargs="*",
+        default=[],
+        help="Block indices to ablate (e.g. 0 1)",
+    )
     parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--config", type=Path, required=True,
-                        help="GRPO training config JSON. Reward thresholds "
-                             "and weights match the live run (enable_lane_departure "
-                             "is always forced on).")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="GRPO training config JSON. Reward thresholds "
+        "and weights match the live run (enable_lane_departure "
+        "is always forced on).",
+    )
     args = parser.parse_args()
 
     with open(args.scenes) as f:
         scenes = json.load(f)
 
     from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+
     eval_config = load_reward_config(args.config)
     eval_config.enable_lane_departure = True
     print(f"Using reward thresholds from {args.config}")

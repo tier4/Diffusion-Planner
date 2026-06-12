@@ -69,7 +69,8 @@ class _StubExternalBase(nn.Module):
         self.forwarded_in_training = self.training  # capture mode at forward time
         self.n_forward += 1
         out = torch.full(
-            (B, self.P, self.T + 1, 4), self.const,
+            (B, self.P, self.T + 1, 4),
+            self.const,
             device=inputs["ego_current_state"].device,
         )
         return None, {"model_output": out}
@@ -130,10 +131,16 @@ class TestRankedSFTNeighborReg:
         neighbor_mask = torch.zeros(1, 4, 80, dtype=torch.bool)
 
         loss, metrics = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
-            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=1.0, neighbor_reg_only=False,
+            model=model,
+            model_args=model_args,
+            data=data,
+            ego_gt=ego_gt,
+            neighbor_gt=neighbor_gt,
+            neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=1.0,
+            neighbor_reg_only=False,
         )
         assert metrics["sft_neighbor_reg_loss"] > 0, "Reg loss should be non-zero"
         assert loss.requires_grad, "Loss should have gradients"
@@ -151,13 +158,20 @@ class TestRankedSFTNeighborReg:
         neighbor_mask = torch.zeros(1, 4, 80, dtype=torch.bool)
 
         _, metrics = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
-            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=1.0, neighbor_reg_only=True,
+            model=model,
+            model_args=model_args,
+            data=data,
+            ego_gt=ego_gt,
+            neighbor_gt=neighbor_gt,
+            neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=1.0,
+            neighbor_reg_only=True,
         )
-        assert metrics["sft_neighbor_loss"] == 0.0, \
+        assert metrics["sft_neighbor_loss"] == 0.0, (
             "Neighbor SFT loss should be 0 when reg_only=True and reg is active"
+        )
 
     def test_reg_only_fallback_without_adapter(self):
         """When model lacks disable_adapter, reg_only should fall back to neighbor SFT."""
@@ -184,15 +198,22 @@ class TestRankedSFTNeighborReg:
         neighbor_mask = torch.zeros(1, P - 1, T, dtype=torch.bool)
 
         _, metrics = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
-            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=1.0, neighbor_reg_only=True,
+            model=model,
+            model_args=model_args,
+            data=data,
+            ego_gt=ego_gt,
+            neighbor_gt=neighbor_gt,
+            neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=1.0,
+            neighbor_reg_only=True,
         )
         # Should fall back: reg is 0 (can't run), but neighbor SFT should be non-zero
         assert metrics["sft_neighbor_reg_loss"] == 0.0, "Reg should be 0 without adapter"
-        assert metrics["sft_neighbor_loss"] > 0, \
+        assert metrics["sft_neighbor_loss"] > 0, (
             "Should fall back to neighbor SFT when reg can't run"
+        )
 
     def test_gradients_only_through_lora(self):
         """Base model forward (disable_adapter) should be no_grad."""
@@ -208,10 +229,16 @@ class TestRankedSFTNeighborReg:
 
         model.zero_grad()
         loss, _ = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
-            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=1.0, neighbor_reg_only=True,
+            model=model,
+            model_args=model_args,
+            data=data,
+            ego_gt=ego_gt,
+            neighbor_gt=neighbor_gt,
+            neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=1.0,
+            neighbor_reg_only=True,
         )
         loss.backward()
         # lora_delta should have a gradient (it's in the LoRA forward path)
@@ -224,9 +251,9 @@ class TestRankedSFTNeighborReg:
         returns 'model_output'), and restores its original eval mode afterward."""
         from rlvr.grpo_sft_trainer import _compute_sft_diffusion_loss
 
-        model = _StubDiT(P=5, T=80)            # LoRA policy (has disable_adapter)
+        model = _StubDiT(P=5, T=80)  # LoRA policy (has disable_adapter)
         base = _StubExternalBase(P=5, T=80)
-        base.eval()                            # frozen baseline starts in eval mode
+        base.eval()  # frozen baseline starts in eval mode
         model_args = _make_model_args(P=5, T=80)
         data = _make_scene_data(B=1, P=5, T=80)
 
@@ -235,17 +262,26 @@ class TestRankedSFTNeighborReg:
         neighbor_mask = torch.zeros(1, 4, 80, dtype=torch.bool)
 
         _, metrics = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
-            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=1.0, neighbor_reg_only=True,
-            base_model=base, prefer_external_base=True,
+            model=model,
+            model_args=model_args,
+            data=data,
+            ego_gt=ego_gt,
+            neighbor_gt=neighbor_gt,
+            neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=1.0,
+            neighbor_reg_only=True,
+            base_model=base,
+            prefer_external_base=True,
         )
         assert base.n_forward > 0, "External base must be used for the base pass"
-        assert base.forwarded_in_training is True, \
+        assert base.forwarded_in_training is True, (
             "Decoder dispatches on self.training; base must forward in train mode for 'model_output'"
-        assert base.training is False, \
+        )
+        assert base.training is False, (
             "External base train/eval mode must be restored (it started in eval)"
+        )
         assert metrics["sft_neighbor_reg_loss"] > 0, "Reg loss should be non-zero"
 
     def test_default_does_not_use_external_base(self):
@@ -264,14 +300,20 @@ class TestRankedSFTNeighborReg:
         neighbor_mask = torch.zeros(1, 4, 80, dtype=torch.bool)
 
         _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
-            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=1.0, neighbor_reg_only=True,
-            base_model=base, prefer_external_base=False,
+            model=model,
+            model_args=model_args,
+            data=data,
+            ego_gt=ego_gt,
+            neighbor_gt=neighbor_gt,
+            neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=1.0,
+            neighbor_reg_only=True,
+            base_model=base,
+            prefer_external_base=False,
         )
-        assert base.n_forward == 0, \
-            "Default must use disable_adapter, not the external base_model"
+        assert base.n_forward == 0, "Default must use disable_adapter, not the external base_model"
 
     def test_prefer_external_base_requires_base_model(self):
         """prefer_external_base=True with base_model=None must fail loudly."""
@@ -287,11 +329,18 @@ class TestRankedSFTNeighborReg:
 
         with pytest.raises(ValueError, match="requires an external base_model"):
             _compute_sft_diffusion_loss(
-                model=model, model_args=model_args, data=data,
-                ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-                device=torch.device("cpu"), K=1,
-                neighbor_reg_weight=1.0, neighbor_reg_only=True,
-                base_model=None, prefer_external_base=True,
+                model=model,
+                model_args=model_args,
+                data=data,
+                ego_gt=ego_gt,
+                neighbor_gt=neighbor_gt,
+                neighbor_mask=neighbor_mask,
+                device=torch.device("cpu"),
+                K=1,
+                neighbor_reg_weight=1.0,
+                neighbor_reg_only=True,
+                base_model=None,
+                prefer_external_base=True,
             )
 
 
@@ -308,13 +357,20 @@ class TestGRPONeighborReg:
         model = _StubDiT(P=5, T=80)
         # Build B=1 data then expand to B=4 (same scene repeated)
         data_b1 = _make_scene_data(B=1, P=5, T=80)
-        data = {k: v.expand(4, *v.shape[1:]).contiguous() if isinstance(v, torch.Tensor) else v
-                for k, v in data_b1.items()}
+        data = {
+            k: v.expand(4, *v.shape[1:]).contiguous() if isinstance(v, torch.Tensor) else v
+            for k, v in data_b1.items()
+        }
         model_args = _make_model_args(P=5, T=80)
 
         loss = _compute_neighbor_reg_loss(
-            model, data, model_args, torch.device("cpu"),
-            K=1, P=5, future_len=80,
+            model,
+            data,
+            model_args,
+            torch.device("cpu"),
+            K=1,
+            P=5,
+            future_len=80,
         )
         assert isinstance(loss, torch.Tensor)
 
@@ -328,8 +384,13 @@ class TestGRPONeighborReg:
 
         with pytest.raises(ValueError, match="mixed scenes"):
             _compute_neighbor_reg_loss(
-                model, data, model_args, torch.device("cpu"),
-                K=1, P=5, future_len=80,
+                model,
+                data,
+                model_args,
+                torch.device("cpu"),
+                K=1,
+                P=5,
+                future_len=80,
             )
 
     def test_reg_loss_nonzero(self):
@@ -341,8 +402,13 @@ class TestGRPONeighborReg:
         model_args = _make_model_args(P=5, T=80)
 
         loss = _compute_neighbor_reg_loss(
-            model, data, model_args, torch.device("cpu"),
-            K=1, P=5, future_len=80,
+            model,
+            data,
+            model_args,
+            torch.device("cpu"),
+            K=1,
+            P=5,
+            future_len=80,
         )
         assert isinstance(loss, torch.Tensor)
         assert loss.item() > 0, "Reg loss should be non-zero when LoRA changes output"
@@ -356,8 +422,13 @@ class TestGRPONeighborReg:
         model_args = _make_model_args(P=5, T=80)
 
         loss = _compute_neighbor_reg_loss(
-            model, data, model_args, torch.device("cpu"),
-            K=1, P=5, future_len=80,
+            model,
+            data,
+            model_args,
+            torch.device("cpu"),
+            K=1,
+            P=5,
+            future_len=80,
         )
         assert loss.item() == 0.0
 
@@ -380,10 +451,14 @@ class TestBatchedTrajectoryLossesValidation:
 
         with pytest.raises(ValueError, match="expected 1 or N=4"):
             compute_batched_trajectory_losses(
-                model, data, trajectories, model_args, noise, t,
+                model,
+                data,
+                trajectories,
+                model_args,
+                noise,
+                t,
                 torch.device("cpu"),
             )
-
 
     def test_non_batched_metadata_tensors_are_allowed(self):
         """Non-batched metadata tensors should not be rejected or reshaped."""
@@ -401,7 +476,12 @@ class TestBatchedTrajectoryLossesValidation:
         data["lane_geometry"] = torch.randn(8, 20, 2)
 
         losses = compute_batched_trajectory_losses(
-            model, data, trajectories, model_args, noise, t,
+            model,
+            data,
+            trajectories,
+            model_args,
+            noise,
+            t,
             torch.device("cpu"),
         )
         assert losses is not None
@@ -427,11 +507,19 @@ class TestEgoIL:
         ego_gt_real = torch.randn(1, 80, 4)  # different from ego_gt
 
         loss, metrics = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
-            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=0.0, neighbor_reg_only=False,
-            ego_il_weight=1.0, ego_il_mode="gt", ego_gt_real=ego_gt_real,
+            model=model,
+            model_args=model_args,
+            data=data,
+            ego_gt=ego_gt,
+            neighbor_gt=neighbor_gt,
+            neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=0.0,
+            neighbor_reg_only=False,
+            ego_il_weight=1.0,
+            ego_il_mode="gt",
+            ego_gt_real=ego_gt_real,
         )
         assert metrics["sft_ego_il_loss"] > 0, "GT ego IL loss should be non-zero"
         assert loss.requires_grad
@@ -449,11 +537,18 @@ class TestEgoIL:
         neighbor_mask = torch.zeros(1, 4, 80, dtype=torch.bool)
 
         loss, metrics = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
-            ego_gt=ego_gt, neighbor_gt=neighbor_gt, neighbor_mask=neighbor_mask,
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=0.0, neighbor_reg_only=False,
-            ego_il_weight=1.0, ego_il_mode="baseline",
+            model=model,
+            model_args=model_args,
+            data=data,
+            ego_gt=ego_gt,
+            neighbor_gt=neighbor_gt,
+            neighbor_mask=neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=0.0,
+            neighbor_reg_only=False,
+            ego_il_weight=1.0,
+            ego_il_mode="baseline",
         )
         assert metrics["sft_ego_il_loss"] > 0, "Baseline ego IL loss should be non-zero"
 
@@ -467,12 +562,17 @@ class TestEgoIL:
 
         with pytest.raises(ValueError, match="ego_gt_real is required"):
             _compute_sft_diffusion_loss(
-                model=model, model_args=model_args, data=data,
+                model=model,
+                model_args=model_args,
+                data=data,
                 ego_gt=torch.randn(1, 80, 4),
                 neighbor_gt=torch.randn(1, 4, 80, 4),
                 neighbor_mask=torch.zeros(1, 4, 80, dtype=torch.bool),
-                device=torch.device("cpu"), K=1,
-                ego_il_weight=1.0, ego_il_mode="gt", ego_gt_real=None,
+                device=torch.device("cpu"),
+                K=1,
+                ego_il_weight=1.0,
+                ego_il_mode="gt",
+                ego_gt_real=None,
             )
 
     def test_invalid_mode_raises(self):
@@ -485,12 +585,16 @@ class TestEgoIL:
 
         with pytest.raises(ValueError, match="ego_il_mode must be"):
             _compute_sft_diffusion_loss(
-                model=model, model_args=model_args, data=data,
+                model=model,
+                model_args=model_args,
+                data=data,
                 ego_gt=torch.randn(1, 80, 4),
                 neighbor_gt=torch.randn(1, 4, 80, 4),
                 neighbor_mask=torch.zeros(1, 4, 80, dtype=torch.bool),
-                device=torch.device("cpu"), K=1,
-                ego_il_weight=1.0, ego_il_mode="invalid",
+                device=torch.device("cpu"),
+                K=1,
+                ego_il_weight=1.0,
+                ego_il_mode="invalid",
             )
 
     def test_il_disabled_when_weight_zero(self):
@@ -502,12 +606,16 @@ class TestEgoIL:
         data = _make_scene_data(B=1, P=5, T=80)
 
         _, metrics = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
+            model=model,
+            model_args=model_args,
+            data=data,
             ego_gt=torch.randn(1, 80, 4),
             neighbor_gt=torch.randn(1, 4, 80, 4),
             neighbor_mask=torch.zeros(1, 4, 80, dtype=torch.bool),
-            device=torch.device("cpu"), K=1,
-            ego_il_weight=0.0, ego_il_mode="gt",
+            device=torch.device("cpu"),
+            K=1,
+            ego_il_weight=0.0,
+            ego_il_mode="gt",
         )
         assert metrics["sft_ego_il_loss"] == 0.0
 
@@ -520,16 +628,23 @@ class TestEgoIL:
         data = _make_scene_data(B=1, P=5, T=80)
 
         loss, metrics = _compute_sft_diffusion_loss(
-            model=model, model_args=model_args, data=data,
+            model=model,
+            model_args=model_args,
+            data=data,
             ego_gt=torch.randn(1, 80, 4),
             neighbor_gt=torch.randn(1, 4, 80, 4),
             neighbor_mask=torch.zeros(1, 4, 80, dtype=torch.bool),
-            device=torch.device("cpu"), K=1,
-            neighbor_reg_weight=1.0, neighbor_reg_only=True,
-            ego_il_weight=0.5, ego_il_mode="baseline",
+            device=torch.device("cpu"),
+            K=1,
+            neighbor_reg_weight=1.0,
+            neighbor_reg_only=True,
+            ego_il_weight=0.5,
+            ego_il_mode="baseline",
         )
         assert metrics["sft_ego_il_loss"] > 0, "Baseline IL should work alongside neighbor reg"
-        assert metrics["sft_neighbor_reg_loss"] > 0, "Neighbor reg should work alongside baseline IL"
+        assert metrics["sft_neighbor_reg_loss"] > 0, (
+            "Neighbor reg should work alongside baseline IL"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -540,35 +655,44 @@ class TestConfigValidation:
 
     def test_invalid_ego_il_mode(self):
         from rlvr.grpo_config import GRPOConfig
+
         with pytest.raises(ValueError, match="ego_il_mode"):
             GRPOConfig(ego_il_mode="bad")
 
     def test_invalid_selective_mode(self):
         from rlvr.grpo_config import GRPOConfig
+
         with pytest.raises(ValueError, match="selective_mode"):
             GRPOConfig(selective_mode="bad")
 
     def test_invalid_neighbor_reg_anchor(self):
         from rlvr.grpo_config import GRPOConfig
+
         with pytest.raises(ValueError, match="neighbor_reg_anchor"):
-            GRPOConfig(neighbor_reg_anchor="basline")  # typo must fail loudly, not silently warmstart
+            GRPOConfig(
+                neighbor_reg_anchor="basline"
+            )  # typo must fail loudly, not silently warmstart
 
     def test_valid_modes_pass(self):
         from rlvr.grpo_config import GRPOConfig
-        c = GRPOConfig(ego_il_mode="baseline", selective_mode="advantage",
-                       neighbor_reg_anchor="baseline")
+
+        c = GRPOConfig(
+            ego_il_mode="baseline", selective_mode="advantage", neighbor_reg_anchor="baseline"
+        )
         assert c.ego_il_mode == "baseline"
         assert c.selective_mode == "advantage"
         assert c.neighbor_reg_anchor == "baseline"
 
     def test_schedule_constant_no_end(self):
         from rlvr.grpo_config import GRPOConfig
+
         c = GRPOConfig(schedules={"speed_stretch": {"type": "constant", "start": 1.1}})
         val = c.get_scheduled_value("speed_stretch", 5, 30)
         assert val == 1.1
 
     def test_schedule_linear_requires_end(self):
         from rlvr.grpo_config import GRPOConfig
+
         c = GRPOConfig(schedules={"w_progress": {"type": "linear", "start": 0.0}})
         with pytest.raises(ValueError, match="requires 'end'"):
             c.get_scheduled_value("w_progress", 5, 30)

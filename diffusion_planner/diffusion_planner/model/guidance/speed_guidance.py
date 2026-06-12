@@ -75,7 +75,7 @@ class SpeedGuidance(BaseGuidance):
 
         # v_low / v_high mode: clamp speed to [v_low, v_high] band.
         direction = disp / dist  # [B, T-1, 2] unit direction
-        target_dist = (self._v_high * self._dt)  # scalar
+        target_dist = self._v_high * self._dt  # scalar
         overspeed = (v > self._v_high).float().unsqueeze(-1)  # [B, T-1, 1]
         correction = (direction * target_dist - disp) * overspeed  # [B, T-1, 2]
 

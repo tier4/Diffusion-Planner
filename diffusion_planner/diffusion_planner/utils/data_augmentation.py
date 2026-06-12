@@ -53,7 +53,7 @@ def _rect_corners(rect: torch.Tensor) -> torch.Tensor:
     rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=1).reshape(B, 2, 2)
     signs = torch.tensor([[1.0, 1], [-1, 1], [-1, -1], [1, -1]], device=lw.device)
     local = torch.einsum("bj,ij->bij", lw / 2, signs)  # [B, 4, 2]
-    local = torch.einsum("bij,bkj->bik", local, rot)   # [B, 4, 2]
+    local = torch.einsum("bij,bkj->bik", local, rot)  # [B, 4, 2]
     return xy[:, None, :] + local
 
 
@@ -64,8 +64,7 @@ def _sat_signed_distance(c1: torch.Tensor, c2: torch.Tensor) -> torch.Tensor:
     Returns [B] — negative means overlap.
     """
     nv = torch.stack(
-        [c1[:, 0] - c1[:, 1], c1[:, 1] - c1[:, 2],
-         c2[:, 0] - c2[:, 1], c2[:, 1] - c2[:, 2]],
+        [c1[:, 0] - c1[:, 1], c1[:, 1] - c1[:, 2], c2[:, 0] - c2[:, 1], c2[:, 1] - c2[:, 2]],
         dim=1,
     )  # [B, 4, 2]
     nv = nv / torch.norm(nv, dim=2, keepdim=True).clamp(min=1e-6)
@@ -100,8 +99,8 @@ def _segments_intersect_rect(
     for i, j in edges:
         C = rect_corners[:, i, :].unsqueeze(1)  # [B, 1, 2]
         D = rect_corners[:, j, :].unsqueeze(1)  # [B, 1, 2]
-        AB = seg_end - seg_start                # [B, N, 2]
-        CD = D - C                              # [B, 1, 2]
+        AB = seg_end - seg_start  # [B, N, 2]
+        CD = D - C  # [B, 1, 2]
         hit = hit | (
             (_cross2d(AB, C - seg_start) * _cross2d(AB, D - seg_start) < 0)
             & (_cross2d(CD, seg_start - C) * _cross2d(CD, seg_end - C) < 0)
@@ -265,9 +264,7 @@ class StatePerturbation:
 
         return aug_flag, ego_current_state
 
-    def _check_aug_validity(
-        self, aug_ego_state: torch.Tensor, inputs: dict
-    ) -> torch.Tensor:
+    def _check_aug_validity(self, aug_ego_state: torch.Tensor, inputs: dict) -> torch.Tensor:
         """
         Returns [B] bool — True where the augmented ego position is invalid.
 
@@ -282,7 +279,7 @@ class StatePerturbation:
         # ego_shape: [B, 3] = (wheelbase, length, width)
         ego_shape = inputs["ego_shape"].to(device=device, dtype=dtype)
         ego_length = ego_shape[:, 1:2]  # [B, 1]
-        ego_width = ego_shape[:, 2:3]   # [B, 1]
+        ego_width = ego_shape[:, 2:3]  # [B, 1]
 
         ego_rect = torch.cat(
             [aug_ego_state[:, :4], ego_length, ego_width],
@@ -315,7 +312,7 @@ class StatePerturbation:
             right_offset = lanes[..., 6:8]  # [B, L, P, 2]
 
             # Absolute boundary positions
-            left_pts = lanes[..., :2] + left_offset   # [B, L, P, 2]
+            left_pts = lanes[..., :2] + left_offset  # [B, L, P, 2]
             right_pts = lanes[..., :2] + right_offset  # [B, L, P, 2]
 
             # A waypoint is valid when its first 8 features are not all zero.

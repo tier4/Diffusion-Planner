@@ -60,7 +60,7 @@ class SamplerConfig:
 
 @dataclass
 class SampledTrajectory:
-    trajectory: np.ndarray               # (T, 4)
+    trajectory: np.ndarray  # (T, 4)
     noise_scale: float
     guidance_config: GuidanceSetConfig | None
     is_deterministic: bool
@@ -75,9 +75,14 @@ class PolicyGroupMetadata:
     reconstructs distributions and recomputes log-probs from model inputs
     (scene_encoding, x_ref) during training to maintain gradient flow.
     """
-    log_probs: torch.Tensor     # [K] placeholder (recomputed during training with grad)
-    lat_dist_params: tuple[torch.Tensor, torch.Tensor]  # (concentration1, concentration0) for monitoring
-    lon_dist_params: tuple[torch.Tensor, torch.Tensor]  # (concentration1, concentration0) for monitoring
+
+    log_probs: torch.Tensor  # [K] placeholder (recomputed during training with grad)
+    lat_dist_params: tuple[
+        torch.Tensor, torch.Tensor
+    ]  # (concentration1, concentration0) for monitoring
+    lon_dist_params: tuple[
+        torch.Tensor, torch.Tensor
+    ]  # (concentration1, concentration0) for monitoring
     eta_lat_samples: torch.Tensor  # [K] sampled η_lat values in [-1, 1]
     eta_lon_samples: torch.Tensor  # [K] sampled η_lon values in [-1, 1]
 
@@ -125,10 +130,7 @@ def generate_diverse_group(
                 f"{config.prototypes_path} -- anchor guidance disabled"
             )
 
-    norm_data = {
-        k: v.clone() if isinstance(v, torch.Tensor) else v
-        for k, v in data.items()
-    }
+    norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm_data = model_args.observation_normalizer(norm_data)
 
     results: list[SampledTrajectory] = []
@@ -143,13 +145,15 @@ def generate_diverse_group(
         composer=None,
         device=device,
     )
-    results.append(SampledTrajectory(
-        trajectory=samples[0],
-        noise_scale=0.0,
-        guidance_config=None,
-        is_deterministic=True,
-        label="det",
-    ))
+    results.append(
+        SampledTrajectory(
+            trajectory=samples[0],
+            noise_scale=0.0,
+            guidance_config=None,
+            is_deterministic=True,
+            label="det",
+        )
+    )
 
     # Store deterministic trajectory as reference for PlannerRFT Eq. 2-3 guidance.
     # Injected into norm_data so it reaches the guidance functions via the
@@ -187,10 +191,14 @@ def generate_diverse_group(
         GuidanceConfig("route_following", enabled=True, scale=1.0),
     ]
     if gt_max_speed is not None:
-        guided_fns.append(GuidanceConfig(
-            name="speed", enabled=True, scale=5.0,
-            params={"v_high": gt_max_speed, "v_low": gt_min_speed},
-        ))
+        guided_fns.append(
+            GuidanceConfig(
+                name="speed",
+                enabled=True,
+                scale=5.0,
+                params={"v_high": gt_max_speed, "v_low": gt_min_speed},
+            )
+        )
     guided_composer = None
     guided_set_cfg = None
     if guided_fns:
@@ -198,34 +206,47 @@ def generate_diverse_group(
         guided_composer = GuidanceComposer(guided_set_cfg)
     # Generate multiple guided trajectories with varying scales to provide
     # more on-road examples. Each uses zero noise + different guidance strength.
-    for g_idx, (lk_s, rb_s, gs_val) in enumerate([
-        (5.0, 1.0, 1.0),   # strong guidance
-        (3.0, 0.5, 0.5),   # medium guidance
-        (2.0, 0.2, 0.3),   # light guidance
-    ]):
+    for g_idx, (lk_s, rb_s, gs_val) in enumerate(
+        [
+            (5.0, 1.0, 1.0),  # strong guidance
+            (3.0, 0.5, 0.5),  # medium guidance
+            (2.0, 0.2, 0.3),  # light guidance
+        ]
+    ):
         g_fns = [
             GuidanceConfig("lane_keeping", enabled=True, scale=lk_s),
             GuidanceConfig("road_border", enabled=True, scale=rb_s),
             GuidanceConfig("route_following", enabled=True, scale=1.0),
         ]
         if gt_max_speed is not None:
-            g_fns.append(GuidanceConfig(
-                name="speed", enabled=True, scale=5.0,
-                params={"v_high": gt_max_speed, "v_low": gt_min_speed},
-            ))
+            g_fns.append(
+                GuidanceConfig(
+                    name="speed",
+                    enabled=True,
+                    scale=5.0,
+                    params={"v_high": gt_max_speed, "v_low": gt_min_speed},
+                )
+            )
         g_set = GuidanceSetConfig(functions=g_fns, global_scale=gs_val)
         g_comp = GuidanceComposer(g_set)
         g_samples = generate_samples(
-            model=model, model_args=model_args, data=norm_data,
-            noise_scale=0.0, n_samples=1, composer=g_comp, device=device,
-        )
-        results.append(SampledTrajectory(
-            trajectory=g_samples[0],
+            model=model,
+            model_args=model_args,
+            data=norm_data,
             noise_scale=0.0,
-            guidance_config=g_set,
-            is_deterministic=False,
-            label=f"guided_{g_idx}",
-        ))
+            n_samples=1,
+            composer=g_comp,
+            device=device,
+        )
+        results.append(
+            SampledTrajectory(
+                trajectory=g_samples[0],
+                noise_scale=0.0,
+                guidance_config=g_set,
+                is_deterministic=False,
+                label=f"guided_{g_idx}",
+            )
+        )
 
     # Remaining trajectories: diverse random configs
     # Account for det(1) + gt_seed(0-1) + guided_det(1) already added
@@ -241,9 +262,13 @@ def generate_diverse_group(
             # Each enabled type independently coin-flipped
             if config.enable_centerline and random.random() < config.guidance_prob:
                 cl_scale = random.uniform(*config.centerline_scale_range)
-                guidance_fns.append(GuidanceConfig(
-                    name="centerline_following", enabled=True, scale=cl_scale,
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="centerline_following",
+                        enabled=True,
+                        scale=cl_scale,
+                    )
+                )
                 label_parts.append(f"cl={cl_scale:.1f}")
 
             if (
@@ -254,50 +279,74 @@ def generate_diverse_group(
             ):
                 anchor_idx = random.randint(0, num_protos - 1)
                 anc_scale = random.uniform(*config.anchor_scale_range)
-                guidance_fns.append(GuidanceConfig(
-                    name="anchor_following", enabled=True, scale=anc_scale,
-                    params={
-                        "prototypes_path": config.prototypes_path,
-                        "anchor_index": anchor_idx,
-                    },
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="anchor_following",
+                        enabled=True,
+                        scale=anc_scale,
+                        params={
+                            "prototypes_path": config.prototypes_path,
+                            "anchor_index": anchor_idx,
+                        },
+                    )
+                )
                 label_parts.append(f"anchor#{anchor_idx}")
 
             if config.enable_collision and random.random() < config.guidance_prob:
                 col_scale = random.uniform(*config.collision_scale_range)
-                guidance_fns.append(GuidanceConfig(
-                    name="collision", enabled=True, scale=col_scale,
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="collision",
+                        enabled=True,
+                        scale=col_scale,
+                    )
+                )
                 label_parts.append(f"col={col_scale:.1f}")
 
             if config.enable_route_following and random.random() < config.guidance_prob:
                 rf_scale = random.uniform(*config.route_following_scale_range)
-                guidance_fns.append(GuidanceConfig(
-                    name="route_following", enabled=True, scale=rf_scale,
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="route_following",
+                        enabled=True,
+                        scale=rf_scale,
+                    )
+                )
                 label_parts.append(f"rf={rf_scale:.1f}")
 
             if config.enable_lane_keeping and random.random() < config.guidance_prob:
                 lk_scale = random.uniform(*config.lane_keeping_scale_range)
-                guidance_fns.append(GuidanceConfig(
-                    name="lane_keeping", enabled=True, scale=lk_scale,
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="lane_keeping",
+                        enabled=True,
+                        scale=lk_scale,
+                    )
+                )
                 label_parts.append(f"lk={lk_scale:.1f}")
 
             if config.enable_road_border and random.random() < config.guidance_prob:
                 rb_scale = random.uniform(*config.road_border_scale_range)
-                guidance_fns.append(GuidanceConfig(
-                    name="road_border", enabled=True, scale=rb_scale,
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="road_border",
+                        enabled=True,
+                        scale=rb_scale,
+                    )
+                )
                 label_parts.append(f"rb={rb_scale:.1f}")
 
             # Speed guidance caps speed at GT max when enabled and GT available
             if config.enable_speed and gt_max_speed is not None:
                 spd_scale = random.uniform(3.0, 8.0)
-                guidance_fns.append(GuidanceConfig(
-                    name="speed", enabled=True, scale=spd_scale,
-                    params={"v_high": gt_max_speed, "v_low": gt_min_speed},
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="speed",
+                        enabled=True,
+                        scale=spd_scale,
+                        params={"v_high": gt_max_speed, "v_low": gt_min_speed},
+                    )
+                )
                 label_parts.append(f"spd={spd_scale:.1f}")
 
             # PlannerRFT lateral/longitudinal guidance (Eq. 2-3, arxiv 2601.12901).
@@ -305,19 +354,27 @@ def generate_diverse_group(
             if config.enable_lateral and random.random() < config.guidance_prob:
                 eta_lat = random.uniform(-1.0, 1.0)
                 lat_scale = random.uniform(*config.lateral_scale_range)
-                guidance_fns.append(GuidanceConfig(
-                    name="lateral", enabled=True, scale=lat_scale,
-                    params={"lambda_lat": config.lambda_lat, "eta_lat": eta_lat},
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="lateral",
+                        enabled=True,
+                        scale=lat_scale,
+                        params={"lambda_lat": config.lambda_lat, "eta_lat": eta_lat},
+                    )
+                )
                 label_parts.append(f"ηlat={eta_lat:+.2f}")
 
             if config.enable_longitudinal and random.random() < config.guidance_prob:
                 eta_lon = random.uniform(-1.0, 1.0)
                 lon_scale = random.uniform(*config.longitudinal_scale_range)
-                guidance_fns.append(GuidanceConfig(
-                    name="longitudinal", enabled=True, scale=lon_scale,
-                    params={"lambda_lon": config.lambda_lon, "eta_lon": eta_lon},
-                ))
+                guidance_fns.append(
+                    GuidanceConfig(
+                        name="longitudinal",
+                        enabled=True,
+                        scale=lon_scale,
+                        params={"lambda_lon": config.lambda_lon, "eta_lon": eta_lon},
+                    )
+                )
                 label_parts.append(f"ηlon={eta_lon:+.2f}")
 
         composer = None
@@ -339,12 +396,14 @@ def generate_diverse_group(
             device=device,
         )
 
-        results.append(SampledTrajectory(
-            trajectory=samples[0],
-            noise_scale=ns,
-            guidance_config=set_config,
-            is_deterministic=False,
-            label="+".join(label_parts),
-        ))
+        results.append(
+            SampledTrajectory(
+                trajectory=samples[0],
+                noise_scale=ns,
+                guidance_config=set_config,
+                is_deterministic=False,
+                label="+".join(label_parts),
+            )
+        )
 
     return results

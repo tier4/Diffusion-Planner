@@ -65,7 +65,11 @@ def generate_samples(
     try:
         for _ in range(n_samples):
             data["sampled_trajectories"] = make_initial_latent(
-                B, P, future_len, device, noise_scale,
+                B,
+                P,
+                future_len,
+                device,
+                noise_scale,
             )
 
             _, decoder_output = model(data)
