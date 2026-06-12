@@ -123,6 +123,13 @@ Findings to expect and fix:
   frozen-planner+policy combo as a data engine (guided trajectories as
   curated targets) and bake the behavior into the planner via standard
   fine-tuning, removing inference-time guidance entirely.
+- A trained explorer doubles as a scene CLASSIFIER: run it deterministically
+  over any scene list and threshold the per-head |eta| — a strong lateral or
+  collision request means the policy sees something to avoid, near-zero means
+  a normal scene (`rlvr/autoresearch/tools/classify_avoidance_scenes.py`,
+  `--lat_thresh`/`--col_thresh`, rule any/both). Useful for mining avoidance
+  scenes from large unlabeled pools and for auditing dataset composition; the
+  inertness contract makes the signal bimodal, so the threshold is forgiving.
 
 ## 8. Failure modes checklist
 
