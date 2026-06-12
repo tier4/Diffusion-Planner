@@ -356,7 +356,10 @@ list. Per scene it runs the frozen planner's deterministic inference (the
 policy's `x_ref` input), the frozen encoder, and the policy head
 (deterministic = Beta means), then flags the scene as avoidance when the
 requested guidance exceeds per-head thresholds — a weak signal below
-threshold is treated as not-really-avoidance.
+threshold is treated as not-really-avoidance. All three passes are BATCHED
+across scenes (`--batch_size`, default 32 — bit-identical to per-scene,
+~15x faster); NPZs must be shape-homogeneous (e.g. 320 neighbor slots).
+GT-future fields are ignored, so 3-col and 4-col pools mix freely.
 
 **Semantics caveat:** the etas judge *the baseline's plan*, not the scene in
 isolation. A scene whose obstacle the frozen planner already avoids unaided
@@ -372,8 +375,9 @@ python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
   --scenes <scenes.json> --out <report.json> \
   [--lat_thresh 0.15] [--col_thresh 0.15] [--rule any|both] \
   [--out_avoidance_list <a.json>] [--out_normal_list <n.json>] \
+  [--batch_size 32] \
   [--verify_clearance 1.5 --ego_shape WB,L,W] \
-  [--render_dir <dir> --ego_shape WB,L,W]
+  [--render_dir <dir> --ego_shape WB,L,W [--render_only_avoidance]]
 ```
 
 - `--model_path` must be the planner the policy was trained against (the
@@ -392,8 +396,11 @@ python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
 - `--render_dir`: per-scene verdict PNGs for human audit — ego footprint at
   t0 (blue, requires `--ego_shape WB,L,W`, no default) + det trajectory
   (black) + stopped-neighbor OBBs (crimson) + the policy-guided trajectory
-  (green, dashed) on flagged scenes — and `collage_avoid.png` /
-  `collage_normal.png`. The guidance envelope flags (`--lambda_lat`,
+  (green, dashed) on flagged scenes — and per-class collages
+  (`collage_avoid` / `collage_demoted` / `collage_normal`).
+  `--render_only_avoidance` skips normal scenes (for large sweeps);
+  clearance-demoted scenes always render with a DEMOTED title carrying the
+  measured clearance. The guidance envelope flags (`--lambda_lat`,
   `--lat_scale`, `--col_scale`, `--envelope`, ...) only affect these
   renders and must match the policy's training envelope.
 
