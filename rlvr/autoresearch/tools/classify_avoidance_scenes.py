@@ -168,8 +168,15 @@ def main():
                              "scenes also show the policy-guided trajectory) "
                              "+ collages")
     parser.add_argument("--ego_shape", default=None,
-                        help="WB,L,W — required with --render_dir (ego "
-                             "footprint), no default")
+                        help="WB,L,W — required with --render_dir or "
+                             "--verify_clearance, no default")
+    parser.add_argument("--verify_clearance", type=float, default=0.0,
+                        help="if > 0: cross-check flagged scenes with the "
+                             "canonical det-plan OBB clearance vs stopped "
+                             "neighbors and DEMOTE to normal when clearance "
+                             ">= this value (the baseline plan was already "
+                             "safe — policy false positive). Suggested: 1.5. "
+                             "Mirrors the deployment activation gate.")
     # Guidance envelope — only used for the guided trajectory in renders;
     # must match what the policy was trained against.
     parser.add_argument("--lambda_lat", type=float, default=5.0)
@@ -201,11 +208,12 @@ def main():
         paths = json.load(f)
 
     render_dir = Path(args.render_dir) if args.render_dir else None
-    if render_dir:
+    if render_dir or args.verify_clearance > 0:
         if not args.ego_shape:
-            raise ValueError("--render_dir requires --ego_shape WB,L,W "
-                             "(ego footprint) — no default")
+            raise ValueError("--render_dir / --verify_clearance require "
+                             "--ego_shape WB,L,W — no default")
         args.ego_shape_t = tuple(float(x) for x in args.ego_shape.split(","))
+    if render_dir:
         render_dir.mkdir(parents=True, exist_ok=True)
 
     rows, per_head_abs = [], {h: [] for h in heads}
@@ -214,12 +222,27 @@ def main():
             model, model_args, policy, heads, sp, device)
         is_avoid, triggers = classify(
             etas, args.lat_thresh, args.col_thresh, args.rule)
-        rows.append({
+        row = {
             "scene": sp,
             "etas": {h: round(v, 4) for h, v in etas.items()},
             "avoidance": is_avoid,
             "triggered": triggers,
-        })
+        }
+        if is_avoid and args.verify_clearance > 0:
+            from rlvr.autoresearch.tools.ghost_sim_common import (
+                extract_stopped_neighbors,
+            )
+            from scenario_generation.explorer_runner import plan_static_clearance
+            boxes = extract_stopped_neighbors(sp)
+            det_clr = (plan_static_clearance(det, boxes, args.ego_shape_t,
+                                             device) if boxes else float("inf"))
+            row["det_clearance"] = round(float(det_clr), 3)
+            if det_clr >= args.verify_clearance:
+                # baseline plan already safe — policy false positive
+                is_avoid = False
+                row["avoidance"] = False
+                row["demoted"] = True
+        rows.append(row)
         for h, v in etas.items():
             per_head_abs[h].append(v)
         if render_dir:
@@ -233,12 +256,15 @@ def main():
             print(f"  [classify] {i + 1}/{len(paths)}")
 
     n_avoid = sum(r["avoidance"] for r in rows)
+    n_demoted = sum(r.get("demoted", False) for r in rows)
     summary = {
         "n_scenes": len(rows),
         "n_avoidance": n_avoid,
         "n_normal": len(rows) - n_avoid,
+        "n_demoted_by_clearance": n_demoted,
         "thresholds": {"lat": args.lat_thresh, "col": args.col_thresh,
-                       "rule": args.rule},
+                       "rule": args.rule,
+                       "verify_clearance": args.verify_clearance},
         "policy_dir": args.policy_dir,
         "model_path": args.model_path,
         "abs_eta_distribution": {h: _pct(v) for h, v in per_head_abs.items()},
@@ -265,7 +291,10 @@ def main():
     print(f"\n[classify] {len(rows)} scenes: {n_avoid} avoidance, "
           f"{len(rows) - n_avoid} normal "
           f"(|eta_lat|>={args.lat_thresh} {args.rule} "
-          f"|eta_col|>={args.col_thresh})")
+          f"|eta_col|>={args.col_thresh})"
+          + (f", {n_demoted} demoted by det clearance "
+             f">={args.verify_clearance}m" if args.verify_clearance > 0
+             else ""))
     for h, st in summary["abs_eta_distribution"].items():
         if st:
             print(f"  |eta_{h}|: mean {st['mean']} p50 {st['p50']} "

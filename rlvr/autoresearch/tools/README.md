@@ -372,6 +372,7 @@ python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
   --scenes <scenes.json> --out <report.json> \
   [--lat_thresh 0.15] [--col_thresh 0.15] [--rule any|both] \
   [--out_avoidance_list <a.json>] [--out_normal_list <n.json>] \
+  [--verify_clearance 1.5 --ego_shape WB,L,W] \
   [--render_dir <dir> --ego_shape WB,L,W]
 ```
 
@@ -381,6 +382,13 @@ python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
   counts and |eta| distribution percentiles per head.
 - `--out_avoidance_list` / `--out_normal_list`: plain NPZ path lists,
   directly usable as dataset lists.
+- `--verify_clearance <m>` (recommended: 1.5): cross-check every flagged
+  scene with the canonical det-plan OBB clearance vs stopped neighbors and
+  DEMOTE it to normal when the baseline plan was already safe by that
+  margin — kills policy false positives (inertness leaks on unfamiliar
+  normals) without touching true positives, mirroring the deployment
+  activation gate. Demotions are recorded per scene (`demoted: true`,
+  `det_clearance`).
 - `--render_dir`: per-scene verdict PNGs for human audit — ego footprint at
   t0 (blue, requires `--ego_shape WB,L,W`, no default) + det trajectory
   (black) + stopped-neighbor OBBs (crimson) + the policy-guided trajectory
