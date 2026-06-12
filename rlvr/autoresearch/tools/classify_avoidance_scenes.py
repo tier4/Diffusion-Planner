@@ -234,7 +234,25 @@ def main():
     done = 0
     for start in range(0, len(paths), args.batch_size):
         batch_paths = paths[start:start + args.batch_size]
-        datas = [load_npz_data(p, device) for p in batch_paths]
+        ego_override = getattr(args, "ego_shape_t", None)
+        datas = [load_npz_data(p, device, ego_shape_override=ego_override)
+                 for p in batch_paths]
+        # Raw NPZs may carry fewer neighbor slots than the model's
+        # agent_num (e.g. 32 vs 320) — zero-pad up (zero rows ARE empty
+        # slots, identical to pad_neighbors_320.py). More slots than the
+        # model expects would drop real agents — fail loudly.
+        agent_num = int(model_args.agent_num)
+        for d in datas:
+            nb = d["neighbor_agents_past"]
+            if nb.shape[1] > agent_num:
+                raise ValueError(
+                    f"scene has {nb.shape[1]} neighbor slots but the model "
+                    f"expects {agent_num} — truncating would drop agents")
+            if nb.shape[1] < agent_num:
+                pad = torch.zeros(nb.shape[0], agent_num - nb.shape[1],
+                                  *nb.shape[2:], dtype=nb.dtype,
+                                  device=nb.device)
+                d["neighbor_agents_past"] = torch.cat([nb, pad], dim=1)
         # GT futures are not model inputs and may differ in width across
         # pools (3-col raw vs 4-col) — drop them so mixed lists stack.
         stack_in = [{k: v for k, v in d.items()
