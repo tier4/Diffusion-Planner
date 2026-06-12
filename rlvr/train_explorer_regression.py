@@ -78,11 +78,14 @@ def build_entries(labels_paths: list[str], normal_paths: list[str], heads: list[
                 n_clean += 1
             else:
                 n_unsolved += 1
+    n_normal = 0
     for sp in normal_paths:
         if sp not in seen:
             seen.add(sp)
             entries.append((sp, {h: 0.0 for h in heads}, "normal"))
-    print(f"[entries] solved={n_solved} clean={n_clean} normal-added "
+            n_normal += 1
+    print(f"[entries] solved={n_solved} clean={n_clean} "
+          f"normal-added={n_normal} "
           f"unsolved-excluded={n_unsolved} total={len(entries)}")
     return entries
 

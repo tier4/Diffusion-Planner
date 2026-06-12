@@ -116,6 +116,10 @@ class ExplorerGuidanceRunner:
         # flip-flop when the policy sits near a decision boundary mid-pass.
         # 0.0 = no smoothing (use raw per-step eta), 1.0 = frozen first eta.
         self.eta_smooth = float(eta_smooth)
+        if not 0.0 <= self.eta_smooth <= 1.0:
+            raise ValueError(
+                f"eta_smooth must be in [0, 1], got {self.eta_smooth} — "
+                "values outside invert/overshoot the EMA")
         self._eta_prev: dict[str, float] | None = None
 
     def reset(self) -> None:

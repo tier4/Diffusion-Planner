@@ -43,7 +43,9 @@ from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 
 
 @torch.no_grad()
-def guided_trajectory(model, margs, policy, heads, data, args, device) -> np.ndarray:
+def guided_trajectory(
+    model, margs, policy, heads, data, args, device,
+) -> tuple[np.ndarray, dict[str, float]]:
     det = deterministic_predict(model, margs, data)
     batch = _stack_scene_data([data], device)
     norm = _normalize_batch(batch, margs)
