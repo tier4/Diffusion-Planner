@@ -22,6 +22,7 @@ def generate_samples(
     n_samples: int,
     composer: GuidanceComposer | None,
     device: torch.device,
+    use_dit_memo: bool = True,
 ) -> np.ndarray:
     """
     Generate n_samples independent ego trajectories under a shared configuration.
@@ -73,7 +74,7 @@ def generate_samples(
                 noise_scale,
             )
 
-            if composer is not None:
+            if composer is not None and use_dit_memo:
                 # dit_memo: the solver reuses the composer's x0-refinement
                 # forward at the same (x, t) — ~25% off guided frames.
                 with dit_memo(model.decoder):

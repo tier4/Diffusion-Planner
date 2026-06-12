@@ -66,6 +66,7 @@ def make_guided_predict(policy, heads, args, device):
                 first_deterministic=False,
                 composer=make_composer(etas, args),
                 device=device,
+                use_dit_memo=not args.no_dit_memo,
             )[0]
             .cpu()
             .numpy()
@@ -130,6 +131,11 @@ def main():
     parser.add_argument("--lambda_spd", type=float, default=0.2)
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
+    parser.add_argument(
+        "--no_dit_memo",
+        action="store_true",
+        help="disable the guided-frame DiT forward memo (A/B escape hatch; memo is the default)",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
