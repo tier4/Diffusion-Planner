@@ -106,10 +106,10 @@ def get_args():
                         help="weight on the neighbor-collision penalty in the reward")
     parser.add_argument("--w_road_border", type=float, default=1.0,
                         help="weight on the road-border penalty in the reward (0 disables)")
-    parser.add_argument("--w_gt_l2", type=float, default=0.02,
+    parser.add_argument("--w_gt_l2", type=float, default=0.03,
                         help="weight on the realism penalty: ADE (mean L2) between the generated "
                              "ego trajectory and the scene's own GT ego future (0 disables)")
-    parser.add_argument("--sft_prob", type=float, default=0.4,
+    parser.add_argument("--sft_prob", type=float, default=0.5,
                         help="probability of running a normal supervised step instead of a "
                              "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)")
 
