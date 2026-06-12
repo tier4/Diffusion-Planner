@@ -52,7 +52,8 @@ def _neighborhood_min_clearance(c: dict, combos: list[dict],
 
 def relabel_scene(r: dict, margin: float, min_gain: float,
                   robust_radius: float = 0.0,
-                  robust_min_required: float = 0.0) -> dict:
+                  robust_min_required: float = 0.0,
+                  eta_cap: float = 0.0) -> dict:
     out = dict(r)
     det = r["det"]
     combos = r["combos"]
@@ -73,6 +74,14 @@ def relabel_scene(r: dict, margin: float, min_gain: float,
 
     clean = [c for c in combos
              if not c["static_crossing"] and not c["rb_cross"] and not c["stopped"]]
+    if eta_cap > 0:
+        # Grid-edge labels (|eta| = 1) are UNREACHABLE by Beta-mean heads
+        # (the original cliff lesson) and their one-sided neighborhoods
+        # look spuriously robust — exclude edge combos from CANDIDATES.
+        # Neighborhood scoring still sees all combos (plateau check intact).
+        clean = [c for c in clean
+                 if abs(c["eta_lat"]) <= eta_cap + 1e-6
+                 and abs(c["eta_col"]) <= eta_cap + 1e-6]
     at_margin = [c for c in clean if c["sc_min_dist"] >= margin]
     if at_margin:
         out["status"] = "solved"
@@ -119,6 +128,11 @@ def main():
                              "best label's neighbourhood-min clearance is "
                              "below this — cliff-edge scenes are unlearnable "
                              "by regression")
+    parser.add_argument("--eta_cap", type=float, default=0.0,
+                        help="exclude grid-edge combos (|eta| > cap) from "
+                             "label CANDIDATES — edge labels are unreachable "
+                             "by Beta-mean heads and spuriously robust. "
+                             "0 = off (original behaviour). Suggested 0.75.")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -132,7 +146,8 @@ def main():
             seen.add(r["scene_path"])
             scenes.append(relabel_scene(r, args.margin, args.min_gain,
                                         args.robust_radius,
-                                        args.robust_min_required))
+                                        args.robust_min_required,
+                                        eta_cap=args.eta_cap))
 
     n = {"solved": 0, "already_clean": 0, "unsolved": 0}
     for r in scenes:
