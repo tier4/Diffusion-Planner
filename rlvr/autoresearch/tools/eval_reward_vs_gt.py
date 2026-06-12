@@ -39,19 +39,30 @@ def main():
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--tag", type=str, default="model")
-    parser.add_argument("--indices", type=int, nargs="*", default=None,
-                        help="Scene indices (default: all)")
-    parser.add_argument("--worst_n", type=int, default=None,
-                        help="Show only N worst scenes by reward gap")
-    parser.add_argument("--sort_by", type=str, default="gap",
-                        choices=["gap", "centerline", "lane_dep", "model_total"],
-                        help="Sort order for results (worst first)")
-    parser.add_argument("--dump_json", type=str, default=None,
-                        help="Write per-scene results (sorted) to JSON file")
-    parser.add_argument("--config", type=Path, required=True,
-                        help="GRPO training config JSON. Reward thresholds and "
-                             "weights start from here; the per-field overrides "
-                             "below still win on top.")
+    parser.add_argument(
+        "--indices", type=int, nargs="*", default=None, help="Scene indices (default: all)"
+    )
+    parser.add_argument(
+        "--worst_n", type=int, default=None, help="Show only N worst scenes by reward gap"
+    )
+    parser.add_argument(
+        "--sort_by",
+        type=str,
+        default="gap",
+        choices=["gap", "centerline", "lane_dep", "model_total"],
+        help="Sort order for results (worst first)",
+    )
+    parser.add_argument(
+        "--dump_json", type=str, default=None, help="Write per-scene results (sorted) to JSON file"
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="GRPO training config JSON. Reward thresholds and "
+        "weights start from here; the per-field overrides "
+        "below still win on top.",
+    )
     # Reward config overrides
     parser.add_argument("--w_progress", type=float, default=None)
     parser.add_argument("--rb_near_scale", type=float, default=None)
@@ -106,7 +117,7 @@ def main():
         r_m = compute_reward_batch(traj_mt, data, rcfg)[0]
 
         # GT trajectory
-        gt = data['ego_agent_future']
+        gt = data["ego_agent_future"]
         if gt.dim() == 2:
             gt = gt.unsqueeze(0)
         if gt.shape[-1] == 3:
@@ -114,25 +125,27 @@ def main():
             gt = torch.stack([x, y, torch.cos(h), torch.sin(h)], dim=-1)
         r_gt = compute_reward_batch(gt, data, rcfg)[0]
 
-        results.append({
-            "scene_idx": si,
-            "scene_name": Path(scenes[si]).stem[-30:],
-            "model_total": r_m.total,
-            "gt_total": r_gt.total,
-            "gap": r_m.total - r_gt.total,
-            "model_progress": r_m.progress,
-            "gt_progress": r_gt.progress,
-            "model_smoothness": r_m.smoothness,
-            "gt_smoothness": r_gt.smoothness,
-            "model_rb_cross": r_m.rb_crossing,
-            "gt_rb_cross": r_gt.rb_crossing,
-            "model_rb_near": r_m.rb_near_penalty,
-            "gt_rb_near": r_gt.rb_near_penalty,
-            "model_centerline": r_m.centerline,
-            "gt_centerline": r_gt.centerline,
-            "model_lane_dep": bool(r_m.lane_crossing),
-            "model_lane_near_frac": r_m.lane_near_frac,
-        })
+        results.append(
+            {
+                "scene_idx": si,
+                "scene_name": Path(scenes[si]).stem[-30:],
+                "model_total": r_m.total,
+                "gt_total": r_gt.total,
+                "gap": r_m.total - r_gt.total,
+                "model_progress": r_m.progress,
+                "gt_progress": r_gt.progress,
+                "model_smoothness": r_m.smoothness,
+                "gt_smoothness": r_gt.smoothness,
+                "model_rb_cross": r_m.rb_crossing,
+                "gt_rb_cross": r_gt.rb_crossing,
+                "model_rb_near": r_m.rb_near_penalty,
+                "gt_rb_near": r_gt.rb_near_penalty,
+                "model_centerline": r_m.centerline,
+                "gt_centerline": r_gt.centerline,
+                "model_lane_dep": bool(r_m.lane_crossing),
+                "model_lane_near_frac": r_m.lane_near_frac,
+            }
+        )
 
     sort_keys = {
         "gap": lambda x: x["gap"],
@@ -143,15 +156,19 @@ def main():
     results.sort(key=sort_keys[args.sort_by])
 
     if args.worst_n:
-        results = results[:args.worst_n]
+        results = results[: args.worst_n]
 
-    print(f"\n{'='*100}")
+    print(f"\n{'=' * 100}")
     print(f"Reward vs GT — {args.tag} ({len(scene_indices)} scenes)")
-    print(f"{'='*100}")
-    print(f"{'Sc':>4} | {'M_rwd':>7} | {'GT_rwd':>7} | {'Gap':>7} | {'M_rb':>4} | {'M_cl':>6} | {'GT_cl':>6} | {'LD':>3} | {'M_prog':>7} | {'GT_prog':>8}")
+    print(f"{'=' * 100}")
+    print(
+        f"{'Sc':>4} | {'M_rwd':>7} | {'GT_rwd':>7} | {'Gap':>7} | {'M_rb':>4} | {'M_cl':>6} | {'GT_cl':>6} | {'LD':>3} | {'M_prog':>7} | {'GT_prog':>8}"
+    )
     print("-" * 100)
     for r in results:
-        print(f"{r['scene_idx']:>4} | {r['model_total']:>+7.1f} | {r['gt_total']:>+7.1f} | {r['gap']:>+7.1f} | {r['model_rb_cross']:>4} | {r['model_centerline']:>+6.2f} | {r['gt_centerline']:>+6.2f} | {'Y' if r['model_lane_dep'] else ' ':>3} | {r['model_progress']:>7.1f} | {r['gt_progress']:>8.1f}")
+        print(
+            f"{r['scene_idx']:>4} | {r['model_total']:>+7.1f} | {r['gt_total']:>+7.1f} | {r['gap']:>+7.1f} | {r['model_rb_cross']:>4} | {r['model_centerline']:>+6.2f} | {r['gt_centerline']:>+6.2f} | {'Y' if r['model_lane_dep'] else ' ':>3} | {r['model_progress']:>7.1f} | {r['gt_progress']:>8.1f}"
+        )
 
     # Aggregates
     m_totals = [r["model_total"] for r in results]

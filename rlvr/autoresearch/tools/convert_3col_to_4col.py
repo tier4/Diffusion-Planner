@@ -9,6 +9,7 @@ with 4-col branch-editor scenes and pass the reward-based in-training eval.
 cos = cos(heading), sin = sin(heading), masked to (0,0) on padded steps (xy≈0) to match
 the validity convention used by grpo_sft_trainer's 3-col curated path. 4-col passes through.
 """
+
 import argparse
 import json
 import os

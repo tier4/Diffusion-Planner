@@ -140,7 +140,9 @@ def draw_map(ax, npz_path):
     # GT
     gt = npz["ego_agent_future"]
     ax.plot(gt[:, 0], gt[:, 1], "-", color=GT_COLOR, lw=2.5, alpha=0.4, zorder=5)
-    ax.plot(gt[::5, 0], gt[::5, 1], "o", color=GT_COLOR, ms=3, alpha=0.6, mew=0, zorder=6, label="GT")
+    ax.plot(
+        gt[::5, 0], gt[::5, 1], "o", color=GT_COLOR, ms=3, alpha=0.6, mew=0, zorder=6, label="GT"
+    )
 
     # Ego box at t=0
     wb, length, width = 2.75, 4.34, 1.70
@@ -148,8 +150,11 @@ def draw_map(ax, npz_path):
     if es is not None and len(es) >= 3:
         wb, length, width = float(es[0]), float(es[1]), float(es[2])
     ro = (length - wb) / 2
-    ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc",
-                            alpha=0.9, zorder=20))
+    ax.add_patch(
+        Rectangle(
+            (-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20
+        )
+    )
     return npz
 
 
@@ -163,31 +168,62 @@ def draw_trajectory(ax, traj, label, color, npz, show_footprints=True):
 
     pl = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
     ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=2.5, alpha=0.6, zorder=10)
-    ax.plot(traj[::5, 0], traj[::5, 1], "o", color=color, ms=3, alpha=0.8, mew=0, zorder=11,
-            label=f"{label}")
+    ax.plot(
+        traj[::5, 0],
+        traj[::5, 1],
+        "o",
+        color=color,
+        ms=3,
+        alpha=0.8,
+        mew=0,
+        zorder=11,
+        label=f"{label}",
+    )
 
     if show_footprints:
         # Footprints every 20 steps
         for ts in range(10, len(traj), 20):
             cx, cy = traj[ts, 0], traj[ts, 1]
             cos_h, sin_h = traj[ts, 2], traj[ts, 3]
-            hn = np.sqrt(cos_h ** 2 + sin_h ** 2)
+            hn = np.sqrt(cos_h**2 + sin_h**2)
             if hn > 0.01:
                 heading = np.arctan2(sin_h / hn, cos_h / hn)
                 t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-                ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=0.5, ec=color, fc=color,
-                                       alpha=0.12, zorder=8, transform=t_rot))
+                ax.add_patch(
+                    Rectangle(
+                        (-ro, -width / 2),
+                        length,
+                        width,
+                        lw=0.5,
+                        ec=color,
+                        fc=color,
+                        alpha=0.12,
+                        zorder=8,
+                        transform=t_rot,
+                    )
+                )
 
         # Endpoint footprint
         t_end = len(traj) - 1
         cx, cy = traj[t_end, 0], traj[t_end, 1]
         cos_h, sin_h = traj[t_end, 2], traj[t_end, 3]
-        hn = np.sqrt(cos_h ** 2 + sin_h ** 2)
+        hn = np.sqrt(cos_h**2 + sin_h**2)
         if hn > 0.01:
             heading = np.arctan2(sin_h / hn, cos_h / hn)
             t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-            ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=1.5, ec=color, fc=color,
-                                    alpha=0.35, zorder=9, transform=t_rot))
+            ax.add_patch(
+                Rectangle(
+                    (-ro, -width / 2),
+                    length,
+                    width,
+                    lw=1.5,
+                    ec=color,
+                    fc=color,
+                    alpha=0.35,
+                    zorder=9,
+                    transform=t_rot,
+                )
+            )
 
 
 def auto_zoom(ax, all_trajs, npz):
@@ -209,19 +245,33 @@ def main():
     parser = argparse.ArgumentParser(description="Multi-model comparison on scenes")
     parser.add_argument("--base_model", type=str, required=True, help="Baseline model .pth")
     parser.add_argument("--base_args", type=str, default=None, help="Baseline args.json (optional)")
-    parser.add_argument("--models", type=str, nargs="+", required=True,
-                        help="name:path pairs for merged models, e.g. p6m_ep3:/path/to/merged.pth")
-    parser.add_argument("--args_jsons", type=str, nargs="*", default=None,
-                        help="args.json paths for each model (same order as --models)")
+    parser.add_argument(
+        "--models",
+        type=str,
+        nargs="+",
+        required=True,
+        help="name:path pairs for merged models, e.g. p6m_ep3:/path/to/merged.pth",
+    )
+    parser.add_argument(
+        "--args_jsons",
+        type=str,
+        nargs="*",
+        default=None,
+        help="args.json paths for each model (same order as --models)",
+    )
     parser.add_argument("--scenes", type=str, required=True, help="JSON list of NPZ paths")
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--indices", type=int, nargs="*", default=None)
     parser.add_argument("--n_scenes", type=int, default=8)
     parser.add_argument("--cols", type=int, default=2)
-    parser.add_argument("--config", type=Path, required=True,
-                        help="GRPO training config JSON. CROSS / rb_crossing "
-                             "labels match the training run's rb_cross_thresh "
-                             "and gate settings.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="GRPO training config JSON. CROSS / rb_crossing "
+        "labels match the training run's rb_cross_thresh "
+        "and gate settings.",
+    )
     args = parser.parse_args()
 
     reward_config = load_reward_config(args.config)
@@ -236,7 +286,7 @@ def main():
         indices = args.indices
     else:
         step = max(1, len(scenes) // args.n_scenes)
-        indices = list(range(0, len(scenes), step))[:args.n_scenes]
+        indices = list(range(0, len(scenes), step))[: args.n_scenes]
 
     # Parse model specs
     model_specs = []
@@ -283,8 +333,9 @@ def main():
         # Baseline trajectory
         traj_b, data_b, r_b = infer_deterministic(base_model, base_args, npz_path, reward_config)
         min_d_b = compute_min_border_dist(traj_b, data_b)
-        draw_trajectory(ax, traj_b, f"Base (d={min_d_b:.2f}m)", BASELINE_COLOR, npz,
-                       show_footprints=False)
+        draw_trajectory(
+            ax, traj_b, f"Base (d={min_d_b:.2f}m)", BASELINE_COLOR, npz, show_footprints=False
+        )
 
         # Each trained model
         all_trajs = [traj_b]
@@ -307,9 +358,13 @@ def main():
         axes_flat[j].set_visible(False)
 
     # Color legend in suptitle
-    model_names = ["Baseline (gray)"] + [f"{n} ({MODEL_COLORS[i]})" for i, (n, _, _) in enumerate(model_specs)]
-    fig.suptitle("Multi-model comparison — " + ", ".join(model_names) + f"\nGT (green), Road borders (red)",
-                 fontsize=12)
+    model_names = ["Baseline (gray)"] + [
+        f"{n} ({MODEL_COLORS[i]})" for i, (n, _, _) in enumerate(model_specs)
+    ]
+    fig.suptitle(
+        "Multi-model comparison — " + ", ".join(model_names) + f"\nGT (green), Road borders (red)",
+        fontsize=12,
+    )
     fig.tight_layout()
     out = out_dir / "model_comparison.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")

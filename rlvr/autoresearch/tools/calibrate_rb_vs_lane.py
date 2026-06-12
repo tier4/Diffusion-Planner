@@ -80,10 +80,16 @@ def generate_for_all_scenes(model, model_args, scene_paths, config, device):
             gt_speeds.append(3.0)
     median_gt_speed = float(np.median(gt_speeds))
 
-    print(f"  Generating K={config.num_generations} trajs x {len(all_data)} scenes (variant={config.generation_variant})...")
+    print(
+        f"  Generating K={config.num_generations} trajs x {len(all_data)} scenes (variant={config.generation_variant})..."
+    )
     trajs = generate_all_scenes_batched(
-        model, model_args, norm, config.num_generations,
-        config.noise_scale_range, device,
+        model,
+        model_args,
+        norm,
+        config.num_generations,
+        config.noise_scale_range,
+        device,
         gt_max_speed=median_gt_speed,
         speed_stretch=1.0,
         generation_variant=config.generation_variant,
@@ -121,10 +127,14 @@ def summarize(breakdowns, reward_cfg, label: str) -> dict:
             lane_wide[i, k] = r.lane_wide_frac
             rb_near[i, k] = r.rb_near_penalty
             rb_wide[i, k] = r.rb_wide_penalty
-            lane_pen[i, k] = (reward_cfg.lane_near_scale * r.lane_near_frac
-                              + reward_cfg.lane_wide_scale * r.lane_wide_frac)
-            rb_pen[i, k] = (reward_cfg.rb_near_scale * r.rb_near_penalty
-                            + reward_cfg.rb_wide_scale * r.rb_wide_penalty)
+            lane_pen[i, k] = (
+                reward_cfg.lane_near_scale * r.lane_near_frac
+                + reward_cfg.lane_wide_scale * r.lane_wide_frac
+            )
+            rb_pen[i, k] = (
+                reward_cfg.rb_near_scale * r.rb_near_penalty
+                + reward_cfg.rb_wide_scale * r.rb_wide_penalty
+            )
             totals[i, k] = r.total
             progress[i, k] = r.progress
             lane_cross[i, k] = float(r.lane_crossing)
@@ -144,7 +154,8 @@ def summarize(breakdowns, reward_cfg, label: str) -> dict:
 
     return {
         "label": label,
-        "N_scenes": N, "K_trajs": K,
+        "N_scenes": N,
+        "K_trajs": K,
         "scales_used": {
             "lane_near_scale": reward_cfg.lane_near_scale,
             "lane_wide_scale": reward_cfg.lane_wide_scale,
@@ -178,15 +189,20 @@ def summarize(breakdowns, reward_cfg, label: str) -> dict:
         "winner_idx_per_scene": winner_idx.tolist(),
     }, {
         "totals": totals,
-        "lane_near": lane_near, "lane_wide": lane_wide,
-        "rb_near": rb_near, "rb_wide": rb_wide,
+        "lane_near": lane_near,
+        "lane_wide": lane_wide,
+        "rb_near": rb_near,
+        "rb_wide": rb_wide,
         "progress": progress,
-        "lane_cross": lane_cross, "rb_cross": rb_cross,
+        "lane_cross": lane_cross,
+        "rb_cross": rb_cross,
         "breakdowns": breakdowns,
     }
 
 
-def score_with_variant_config(trajs, all_data, base_cfg: RewardConfig, **overrides) -> tuple[np.ndarray, list]:
+def score_with_variant_config(
+    trajs, all_data, base_cfg: RewardConfig, **overrides
+) -> tuple[np.ndarray, list]:
     """Re-score pre-generated trajectories with a modified reward config.
 
     This re-runs compute_reward_batch with a fresh config (enable_lane_departure,
@@ -195,6 +211,7 @@ def score_with_variant_config(trajs, all_data, base_cfg: RewardConfig, **overrid
     Returns: (totals [N, K], list of list of RewardBreakdown).
     """
     import copy
+
     cfg = copy.deepcopy(base_cfg)
     for k, v in overrides.items():
         setattr(cfg, k, v)
@@ -214,10 +231,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--scenes", required=True, help="JSON list of scene NPZ paths")
-    parser.add_argument("--reference_config", required=True,
-                        help="grpo_config.json from the run we want to replicate")
-    parser.add_argument("--n_scenes", type=int, default=None,
-                        help="Limit to first N scenes for faster iteration")
+    parser.add_argument(
+        "--reference_config",
+        required=True,
+        help="grpo_config.json from the run we want to replicate",
+    )
+    parser.add_argument(
+        "--n_scenes", type=int, default=None, help="Limit to first N scenes for faster iteration"
+    )
     parser.add_argument("--output", default="/tmp/calibration.json")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -230,10 +251,14 @@ def main():
     # Load reference GRPOConfig
     cfg = GRPOConfig.from_json(args.reference_config)
     print(f"Reference config: variant={cfg.generation_variant}, K={cfg.num_generations}")
-    print(f"  lane: enable={cfg.enable_lane_departure}, near_scale={cfg.lane_near_scale}, "
-          f"wide_scale={cfg.lane_wide_scale}")
-    print(f"  rb:   gate={cfg.rb_gate_enabled}, near_scale={cfg.rb_near_scale}, "
-          f"wide_scale={cfg.rb_wide_scale}, cont_scale={cfg.rb_cont_scale}")
+    print(
+        f"  lane: enable={cfg.enable_lane_departure}, near_scale={cfg.lane_near_scale}, "
+        f"wide_scale={cfg.lane_wide_scale}"
+    )
+    print(
+        f"  rb:   gate={cfg.rb_gate_enabled}, near_scale={cfg.rb_near_scale}, "
+        f"wide_scale={cfg.rb_wide_scale}, cont_scale={cfg.rb_cont_scale}"
+    )
 
     # Build model
     model_dir = Path(args.model_path).parent
@@ -252,18 +277,22 @@ def main():
     with open(args.scenes) as f:
         scene_paths = json.load(f)
     if args.n_scenes:
-        scene_paths = scene_paths[:args.n_scenes]
+        scene_paths = scene_paths[: args.n_scenes]
     print(f"Running on {len(scene_paths)} scenes")
 
     # Generate trajectories (single pass)
-    trajs, all_data, valid_paths = generate_for_all_scenes(model, model_args, scene_paths, cfg, device)
+    trajs, all_data, valid_paths = generate_for_all_scenes(
+        model, model_args, scene_paths, cfg, device
+    )
     print(f"Trajectories shape: {trajs.shape}")  # [N, K, T, 4]
 
     # Score with reference config (survival + lane on + ep5 scales)
     ref_reward_cfg = build_reward_config_from_grpo(cfg)
     print(f"\nScoring with reference config...")
     ref_breakdowns = score_all(trajs, all_data, ref_reward_cfg)
-    ref_summary, ref_data = summarize(ref_breakdowns, ref_reward_cfg, "reference (ep5_no_blk2 config)")
+    ref_summary, ref_data = summarize(
+        ref_breakdowns, ref_reward_cfg, "reference (ep5_no_blk2 config)"
+    )
 
     # Score with lane fully off + various RB boosts.
     # Each variant re-runs compute_reward_batch, so survival_frac is correctly recomputed.
@@ -279,61 +308,84 @@ def main():
     ref_winners = ref_totals.argmax(axis=1)
     for near_s, wide_s, cont_s, tag in rb_grid:
         new_totals, new_bds = score_with_variant_config(
-            trajs, all_data, ref_reward_cfg,
-            enable_lane_departure=False, lane_gate_enabled=False,
-            lane_near_scale=0.0, lane_wide_scale=0.0, lane_cont_scale=0.0,
-            rb_near_scale=near_s, rb_wide_scale=wide_s, rb_cont_scale=cont_s,
+            trajs,
+            all_data,
+            ref_reward_cfg,
+            enable_lane_departure=False,
+            lane_gate_enabled=False,
+            lane_near_scale=0.0,
+            lane_wide_scale=0.0,
+            lane_cont_scale=0.0,
+            rb_near_scale=near_s,
+            rb_wide_scale=wide_s,
+            rb_cont_scale=cont_s,
         )
         new_winners = new_totals.argmax(axis=1)
         top1_agreement = float((new_winners == ref_winners).mean())
-        winner_total_delta = float((new_totals[np.arange(len(ref_winners)), new_winners]
-                                    - ref_totals[np.arange(len(ref_winners)), ref_winners]).mean())
+        winner_total_delta = float(
+            (
+                new_totals[np.arange(len(ref_winners)), new_winners]
+                - ref_totals[np.arange(len(ref_winners)), ref_winners]
+            ).mean()
+        )
         # Variance preservation: how close are the top-1 new totals to reference top-1 totals
         # in absolute magnitude — we want RB penalty to contribute enough to discriminate.
-        new_rb_pens = np.array([[near_s * b.rb_near_penalty + wide_s * b.rb_wide_penalty
-                                  for b in scene] for scene in new_bds])
+        new_rb_pens = np.array(
+            [
+                [near_s * b.rb_near_penalty + wide_s * b.rb_wide_penalty for b in scene]
+                for scene in new_bds
+            ]
+        )
         mean_rb_spread = float((new_rb_pens.max(axis=1) - new_rb_pens.min(axis=1)).mean())
         # Safety of new winners: rb_crossing rate and lane_crossing rate among new winners
-        new_winner_rb_cross = float(np.mean([
-            new_bds[i][new_winners[i]].rb_crossing for i in range(len(new_winners))
-        ]))
-        new_winner_lane_cross = float(np.mean([
-            new_bds[i][new_winners[i]].lane_crossing for i in range(len(new_winners))
-        ]))
-        new_winner_rb_min_dist = float(np.mean([
-            new_bds[i][new_winners[i]].rb_min_dist for i in range(len(new_winners))
-        ]))
-        grid_results.append({
-            "tag": tag,
-            "rb_near_scale": near_s, "rb_wide_scale": wide_s, "rb_cont_scale": cont_s,
-            "top1_agreement_vs_reference": top1_agreement,
-            "mean_new_winner_total_delta": winner_total_delta,
-            "mean_new_rb_pen_spread": mean_rb_spread,
-            "new_winner_rb_cross_rate": new_winner_rb_cross,
-            "new_winner_lane_cross_rate": new_winner_lane_cross,
-            "new_winner_mean_rb_min_dist": new_winner_rb_min_dist,
-            "new_winner_idx_per_scene": new_winners.tolist(),
-        })
-        print(f"  [{tag}] rb_near={near_s}, rb_wide={wide_s}, rb_cont={cont_s} → "
-              f"top-1 agreement={top1_agreement:.2%}, winner Δ={winner_total_delta:+.2f}, "
-              f"RB spread={mean_rb_spread:.2f}, new-winner rb_cross={new_winner_rb_cross:.2%}, "
-              f"lane_cross={new_winner_lane_cross:.2%}, rb_min_dist={new_winner_rb_min_dist:.3f}")
+        new_winner_rb_cross = float(
+            np.mean([new_bds[i][new_winners[i]].rb_crossing for i in range(len(new_winners))])
+        )
+        new_winner_lane_cross = float(
+            np.mean([new_bds[i][new_winners[i]].lane_crossing for i in range(len(new_winners))])
+        )
+        new_winner_rb_min_dist = float(
+            np.mean([new_bds[i][new_winners[i]].rb_min_dist for i in range(len(new_winners))])
+        )
+        grid_results.append(
+            {
+                "tag": tag,
+                "rb_near_scale": near_s,
+                "rb_wide_scale": wide_s,
+                "rb_cont_scale": cont_s,
+                "top1_agreement_vs_reference": top1_agreement,
+                "mean_new_winner_total_delta": winner_total_delta,
+                "mean_new_rb_pen_spread": mean_rb_spread,
+                "new_winner_rb_cross_rate": new_winner_rb_cross,
+                "new_winner_lane_cross_rate": new_winner_lane_cross,
+                "new_winner_mean_rb_min_dist": new_winner_rb_min_dist,
+                "new_winner_idx_per_scene": new_winners.tolist(),
+            }
+        )
+        print(
+            f"  [{tag}] rb_near={near_s}, rb_wide={wide_s}, rb_cont={cont_s} → "
+            f"top-1 agreement={top1_agreement:.2%}, winner Δ={winner_total_delta:+.2f}, "
+            f"RB spread={mean_rb_spread:.2f}, new-winner rb_cross={new_winner_rb_cross:.2%}, "
+            f"lane_cross={new_winner_lane_cross:.2%}, rb_min_dist={new_winner_rb_min_dist:.3f}"
+        )
 
     # Also score reference winners for safety baseline
-    ref_winner_rb_cross = float(np.mean([
-        ref_breakdowns[i][ref_winners[i]].rb_crossing for i in range(len(ref_winners))
-    ]))
-    ref_winner_lane_cross = float(np.mean([
-        ref_breakdowns[i][ref_winners[i]].lane_crossing for i in range(len(ref_winners))
-    ]))
-    ref_winner_rb_min_dist = float(np.mean([
-        ref_breakdowns[i][ref_winners[i]].rb_min_dist for i in range(len(ref_winners))
-    ]))
+    ref_winner_rb_cross = float(
+        np.mean([ref_breakdowns[i][ref_winners[i]].rb_crossing for i in range(len(ref_winners))])
+    )
+    ref_winner_lane_cross = float(
+        np.mean([ref_breakdowns[i][ref_winners[i]].lane_crossing for i in range(len(ref_winners))])
+    )
+    ref_winner_rb_min_dist = float(
+        np.mean([ref_breakdowns[i][ref_winners[i]].rb_min_dist for i in range(len(ref_winners))])
+    )
     ref_summary["winner"]["rb_cross_rate"] = ref_winner_rb_cross
     ref_summary["winner"]["lane_cross_rate"] = ref_winner_lane_cross
     ref_summary["winner"]["mean_rb_min_dist"] = ref_winner_rb_min_dist
-    print(f"  [REFERENCE] winner rb_cross={ref_winner_rb_cross:.2%}, lane_cross={ref_winner_lane_cross:.2%}, "
-          f"rb_min_dist={ref_winner_rb_min_dist:.3f}")
+    print(
+        f"  [REFERENCE] winner rb_cross={ref_winner_rb_cross:.2%}, lane_cross={ref_winner_lane_cross:.2%}, "
+        f"rb_min_dist={ref_winner_rb_min_dist:.3f}"
+    )
 
     # Save
     out = {
@@ -352,20 +404,34 @@ def main():
     with open(args.output, "w") as f:
         json.dump(out, f, indent=2)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Saved: {args.output}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"\nReference summary:")
     ref_s = ref_summary
-    print(f"  Mean per-traj lane_penalty (scaled): {ref_s['mean_per_traj']['lane_penalty_scaled']:.3f}")
-    print(f"  Mean per-traj rb_penalty (scaled):   {ref_s['mean_per_traj']['rb_penalty_scaled']:.3f}")
+    print(
+        f"  Mean per-traj lane_penalty (scaled): {ref_s['mean_per_traj']['lane_penalty_scaled']:.3f}"
+    )
+    print(
+        f"  Mean per-traj rb_penalty (scaled):   {ref_s['mean_per_traj']['rb_penalty_scaled']:.3f}"
+    )
     print(f"  Mean per-traj lane_near_frac:        {ref_s['mean_per_traj']['lane_near_frac']:.4f}")
     print(f"  Mean per-traj lane_wide_frac:        {ref_s['mean_per_traj']['lane_wide_frac']:.4f}")
-    print(f"  Mean per-traj rb_near_pen_unscaled:  {ref_s['mean_per_traj']['rb_near_pen_unscaled']:.4f}")
-    print(f"  Mean per-traj rb_wide_pen_unscaled:  {ref_s['mean_per_traj']['rb_wide_pen_unscaled']:.4f}")
-    print(f"  Per-scene lane_pen spread (max-min): {ref_s['per_scene_spread']['mean_lane_pen_spread']:.3f}")
-    print(f"  Per-scene rb_pen spread   (max-min): {ref_s['per_scene_spread']['mean_rb_pen_spread']:.3f}")
-    print(f"  Per-scene total spread:              {ref_s['per_scene_spread']['mean_total_spread']:.3f}")
+    print(
+        f"  Mean per-traj rb_near_pen_unscaled:  {ref_s['mean_per_traj']['rb_near_pen_unscaled']:.4f}"
+    )
+    print(
+        f"  Mean per-traj rb_wide_pen_unscaled:  {ref_s['mean_per_traj']['rb_wide_pen_unscaled']:.4f}"
+    )
+    print(
+        f"  Per-scene lane_pen spread (max-min): {ref_s['per_scene_spread']['mean_lane_pen_spread']:.3f}"
+    )
+    print(
+        f"  Per-scene rb_pen spread   (max-min): {ref_s['per_scene_spread']['mean_rb_pen_spread']:.3f}"
+    )
+    print(
+        f"  Per-scene total spread:              {ref_s['per_scene_spread']['mean_total_spread']:.3f}"
+    )
 
 
 if __name__ == "__main__":

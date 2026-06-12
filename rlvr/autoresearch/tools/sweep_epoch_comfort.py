@@ -28,6 +28,7 @@ Outputs:
     <output_dir>/sweep_summary.json   per-epoch aggregate table
     <output_dir>/avoid_epNNN/det_avoidance_summary.json   per-epoch full detail
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +42,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from preference_optimization.utils import load_npz_data as _load_npz_comfort
 from rlvr.autoresearch.tools.eval_det_avoidance import (
     aggregate_stats,
     load_model,
@@ -52,7 +54,6 @@ from rlvr.autoresearch.tools.eval_driving_metrics import (
 )
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import _build_sg_diff_kernel
-from preference_optimization.utils import load_npz_data as _load_npz_comfort
 
 
 def _jerk_mag(xy: np.ndarray, w: int = 11) -> np.ndarray:
@@ -78,7 +79,7 @@ def comfort_for_epoch(model, model_args, scene_paths, device) -> dict:
         try:
             d = _load_npz_comfort(p, device)
             traj = generate_trajectory(model, model_args, d, device)
-        except Exception:   # one bad scene must not abort a multi-epoch sweep
+        except Exception:  # one bad scene must not abort a multi-epoch sweep
             continue
         traj = traj.detach().cpu().numpy() if hasattr(traj, "detach") else np.asarray(traj)
         xy = traj[:, :2].astype(np.float32)
@@ -90,8 +91,12 @@ def comfort_for_epoch(model, model_args, scene_paths, device) -> dict:
     jk = np.concatenate(jk_all)
     pct = lambda a, q: float(np.percentile(a, q))
     return {
-        "lat_mean": float(la.mean()), "lat_p50": pct(la, 50), "lat_p95": pct(la, 95),
-        "lat_max": float(la.max()), "jerk_mean": float(jk.mean()), "jerk_p95": pct(jk, 95),
+        "lat_mean": float(la.mean()),
+        "lat_p50": pct(la, 50),
+        "lat_p95": pct(la, 95),
+        "lat_max": float(la.max()),
+        "jerk_mean": float(jk.mean()),
+        "jerk_p95": pct(jk, 95),
     }
 
 
@@ -129,10 +134,15 @@ def merge_epoch(base_model: Path, lora_dir: Path, out_pth: Path) -> None:
     """Invoke the canonical merge_lora CLI for one epoch."""
     out_pth.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        sys.executable, "-m", "preference_optimization.merge_lora",
-        "--model_path", str(base_model),
-        "--lora_dir", str(lora_dir),
-        "--output", str(out_pth),
+        sys.executable,
+        "-m",
+        "preference_optimization.merge_lora",
+        "--model_path",
+        str(base_model),
+        "--lora_dir",
+        str(lora_dir),
+        "--output",
+        str(out_pth),
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0 or not out_pth.exists():
@@ -151,19 +161,25 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--run_dir", required=True,
-                        help="Training run dir containing lora_epoch_NNN/")
-    parser.add_argument("--base_model", required=True,
-                        help="Base .pth the LoRA was trained on (its dir must hold args.json)")
+    parser.add_argument(
+        "--run_dir", required=True, help="Training run dir containing lora_epoch_NNN/"
+    )
+    parser.add_argument(
+        "--base_model",
+        required=True,
+        help="Base .pth the LoRA was trained on (its dir must hold args.json)",
+    )
     parser.add_argument("--scenes", required=True, help="JSON list of NPZ paths")
     parser.add_argument("--config", required=True, help="Reward config JSON")
     parser.add_argument("--ego_shape", required=True, help="WB,L,W e.g. 4.76,7.24,2.29")
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--epochs", required=True,
-                        help='"all" | "1-24" | "1-24:2" | "2,4,6"')
+    parser.add_argument("--epochs", required=True, help='"all" | "1-24" | "1-24:2" | "2,4,6"')
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--keep_merged", action="store_true",
-                        help="Keep merged .pth per epoch (default: delete to save disk)")
+    parser.add_argument(
+        "--keep_merged",
+        action="store_true",
+        help="Keep merged .pth per epoch (default: delete to save disk)",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -190,8 +206,13 @@ def main() -> None:
         merge_epoch(base_model, lora_dir, merged)
         model, model_args = load_model(str(merged), device)
         results = score_det_scenes(
-            model, model_args, scene_paths, rcfg, ego_shape,
-            device, batch_size=args.batch_size,
+            model,
+            model_args,
+            scene_paths,
+            rcfg,
+            ego_shape,
+            device,
+            batch_size=args.batch_size,
         )
         comfort = comfort_for_epoch(model, model_args, scene_paths, device)
         del model
@@ -220,14 +241,16 @@ def main() -> None:
             **{f"comfort_{k}": v for k, v in comfort.items()},
         }
         rows.append(row)
-        cstr = (f"  lat[mean={comfort['lat_mean']:.3f} p95={comfort['lat_p95']:.3f} "
-                f"max={comfort['lat_max']:.3f}] jerk[mean={comfort['jerk_mean']:.2f}]"
-                if comfort else "  comfort=NA")
+        cstr = (
+            f"  lat[mean={comfort['lat_mean']:.3f} p95={comfort['lat_p95']:.3f} "
+            f"max={comfort['lat_max']:.3f}] jerk[mean={comfort['jerk_mean']:.2f}]"
+            if comfort
+            else "  comfort=NA"
+        )
         print(
             f"[sweep] ep{ep}: static={row['static_crossings']}/{row['n']}  "
             f"rb={row['rb_crossings']}  lane={row['lane_crossings']}  "
-            f"sc_min mean={scm['mean']:+.3f} p5={scm['p5']:+.3f} min={scm['min']:+.3f}"
-            + cstr
+            f"sc_min mean={scm['mean']:+.3f} p5={scm['p5']:+.3f} min={scm['min']:+.3f}" + cstr
         )
 
     with open(out_dir / "sweep_summary.json", "w") as f:
@@ -236,14 +259,18 @@ def main() -> None:
     print(f"\n{'=' * 72}")
     print(f"  Sweep summary ({len(rows)} epochs)")
     print(f"{'=' * 72}")
-    print(f"  {'ep':>3}  {'static':>7}  {'rb':>4}  {'lane':>4}  "
-          f"{'sc_mean':>8}  {'sc_p5':>7}  {'sc_min':>7}  {'lat_mean':>8}  {'lat_p95':>7}  {'lat_max':>7}  {'jerk_m':>6}")
+    print(
+        f"  {'ep':>3}  {'static':>7}  {'rb':>4}  {'lane':>4}  "
+        f"{'sc_mean':>8}  {'sc_p5':>7}  {'sc_min':>7}  {'lat_mean':>8}  {'lat_p95':>7}  {'lat_max':>7}  {'jerk_m':>6}"
+    )
     for r in rows:
-        print(f"  {r['epoch']:>3}  {r['static_crossings']:>3}/{r['n']:<3}  "
-              f"{r['rb_crossings']:>4}  {r['lane_crossings']:>4}  "
-              f"{r['sc_min_mean']:>+8.3f}  {r['sc_min_p5']:>+7.3f}  {r['sc_min_min']:>+7.3f}  "
-              f"{r.get('comfort_lat_mean', float('nan')):>8.3f}  {r.get('comfort_lat_p95', float('nan')):>7.3f}  "
-              f"{r.get('comfort_lat_max', float('nan')):>7.3f}  {r.get('comfort_jerk_mean', float('nan')):>6.2f}")
+        print(
+            f"  {r['epoch']:>3}  {r['static_crossings']:>3}/{r['n']:<3}  "
+            f"{r['rb_crossings']:>4}  {r['lane_crossings']:>4}  "
+            f"{r['sc_min_mean']:>+8.3f}  {r['sc_min_p5']:>+7.3f}  {r['sc_min_min']:>+7.3f}  "
+            f"{r.get('comfort_lat_mean', float('nan')):>8.3f}  {r.get('comfort_lat_p95', float('nan')):>7.3f}  "
+            f"{r.get('comfort_lat_max', float('nan')):>7.3f}  {r.get('comfort_jerk_mean', float('nan')):>6.2f}"
+        )
     print(f"{'=' * 72}")
     print(f"Wrote {out_dir / 'sweep_summary.json'}")
 

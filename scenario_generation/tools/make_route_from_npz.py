@@ -16,11 +16,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 
-import json
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.route import Route
 
@@ -54,10 +54,13 @@ def main():
         raise ValueError("goal_pose in NPZ is zero — scene has no route goal.")
     gx, gy, gh = float(gp[0]), float(gp[1]), float(gp[2])
     c, s = np.cos(start_h), np.sin(start_h)
-    goal_xy = np.array([
-        start_xy[0] + gx * c - gy * s,
-        start_xy[1] + gx * s + gy * c,
-    ], dtype=np.float32)
+    goal_xy = np.array(
+        [
+            start_xy[0] + gx * c - gy * s,
+            start_xy[1] + gx * s + gy * c,
+        ],
+        dtype=np.float32,
+    )
     goal_h = float(start_h + gh)
 
     print(f"start: ({start_xy[0]:.2f}, {start_xy[1]:.2f}) hdg={np.degrees(start_h):+.1f}°")
@@ -71,7 +74,9 @@ def main():
     if start_id is None:
         raise SystemExit("Could not snap start pose to a drivable lanelet")
     goal_id = builder.snap_to_nearest_ll(
-        goal_xy, reachable_from=start_id, heading_rad=goal_h,
+        goal_xy,
+        reachable_from=start_id,
+        heading_rad=goal_h,
     )
     if goal_id is None:
         raise SystemExit(f"Could not snap goal (reachable from start {start_id})")

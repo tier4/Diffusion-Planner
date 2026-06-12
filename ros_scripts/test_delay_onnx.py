@@ -19,7 +19,9 @@ torch.backends.mha.set_fastpath_enabled(False)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("model_dir", type=Path, help="Directory containing model.onnx and args.json")
+    parser.add_argument(
+        "model_dir", type=Path, help="Directory containing model.onnx and args.json"
+    )
     parser.add_argument("--delay", type=int, default=10, help="Delay steps to test")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
@@ -95,9 +97,9 @@ def test_delay_mechanism_onnx(model_dir: Path, delay_steps: int, seed: int):
     input_names = [inp.name for inp in session.get_inputs()]
     print(f"ONNX input names: {input_names}")
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"Testing delay mechanism with multiple delay values (ONNX)")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     # Create test inputs ONCE (unnormalized, like C++ does)
     inputs = create_test_inputs(seed)
@@ -128,7 +130,9 @@ def test_delay_mechanism_onnx(model_dir: Path, delay_steps: int, seed: int):
 
     # Get normalized version and apply transformations for comparison
     normalized_inputs = config_obj.observation_normalizer(inputs)
-    norm_st = normalized_inputs["sampled_trajectories"].reshape(1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM)
+    norm_st = normalized_inputs["sampled_trajectories"].reshape(
+        1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM
+    )
 
     # Apply state_normalizer.inverse to get what should be in the output if copied
     expected_if_copied = config_obj.state_normalizer.inverse(norm_st)
@@ -138,9 +142,9 @@ def test_delay_mechanism_onnx(model_dir: Path, delay_steps: int, seed: int):
     results = []
 
     for delay_val in delay_values:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Testing with delay={delay_val}:")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         onnx_inputs["delay"] = np.array([[delay_val]], dtype=np.float32)
 
@@ -153,7 +157,7 @@ def test_delay_mechanism_onnx(model_dir: Path, delay_steps: int, seed: int):
         # Count how many positions are actually copied
         copied_count = 0
         for t in range(OUTPUT_T):
-            input_val = expected_if_copied[0, 0, t+1, 0].item()  # +1 because output is [:,:,1:]
+            input_val = expected_if_copied[0, 0, t + 1, 0].item()  # +1 because output is [:,:,1:]
             pred_val = prediction[0, 0, t, 0]
             diff = abs(pred_val - input_val)
 
@@ -175,17 +179,19 @@ def test_delay_mechanism_onnx(model_dir: Path, delay_steps: int, seed: int):
 
         print(f"  Status: {status}")
 
-        results.append({
-            "delay": delay_val,
-            "copied": copied_count,
-            "predicted": predicted_count,
-            "expected": delay_val,
-        })
+        results.append(
+            {
+                "delay": delay_val,
+                "copied": copied_count,
+                "predicted": predicted_count,
+                "expected": delay_val,
+            }
+        )
 
     # Summary
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Summary:")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     print(f"{'Delay':<10} {'Copied':<10} {'Predicted':<10} {'Expected':<10} {'Status':<15}")
     print("-" * 60)
@@ -209,16 +215,16 @@ def test_delay_mechanism_onnx(model_dir: Path, delay_steps: int, seed: int):
         print(f"{delay_val:<10} {copied:<10} {predicted:<10} {expected:<10} {status:<15}")
 
     # Check for success
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Verification:")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     if success:
         print("✓ TEST PASSED: Delay mechanism works correctly in ONNX!")
     else:
         print("✗ TEST FAILED: Delay mechanism is not working as expected in ONNX")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     return success
 

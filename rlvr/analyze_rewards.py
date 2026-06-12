@@ -44,6 +44,7 @@ def analyze(
     # Fix all random seeds for reproducible results across runs.
     # Same seed as GRPOTrainer.evaluate_rewards() so results are comparable.
     import random as _random
+
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
@@ -115,14 +116,16 @@ def analyze(
     spreads_arr = np.array(scene_spreads)
     adv_stds_arr = np.array(scene_advantage_stds)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"REWARD ANALYSIS: {n_valid_scenes} scenes, {n_trajs} trajectories (N={n_trajectories})")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     print(f"\nTotal reward:")
     print(f"  mean={totals_arr.mean():8.1f}  std={totals_arr.std():7.1f}")
     print(f"  min ={totals_arr.min():8.1f}  max={totals_arr.max():7.1f}")
-    print(f"  median={np.median(totals_arr):7.1f}  IQR=[{np.percentile(totals_arr,25):.1f}, {np.percentile(totals_arr,75):.1f}]")
+    print(
+        f"  median={np.median(totals_arr):7.1f}  IQR=[{np.percentile(totals_arr, 25):.1f}, {np.percentile(totals_arr, 75):.1f}]"
+    )
 
     print(f"\nPer-scene spread (max - min reward within each group):")
     print(f"  mean={spreads_arr.mean():7.1f}  std={spreads_arr.std():6.1f}")
@@ -133,18 +136,25 @@ def analyze(
     print(f"  zero-advantage scenes: {zero_advantage_scenes}/{n_valid_scenes}")
 
     print(f"\nSafety:")
-    print(f"  collision rate: {all_collisions}/{n_trajs} ({all_collisions/n_trajs:.1%})")
-    print(f"  off-road: mean={offroad_arr.mean():.1%}  >10%: {(offroad_arr>0.1).sum()}/{n_trajs}")
+    print(f"  collision rate: {all_collisions}/{n_trajs} ({all_collisions / n_trajs:.1%})")
+    print(f"  off-road: mean={offroad_arr.mean():.1%}  >10%: {(offroad_arr > 0.1).sum()}/{n_trajs}")
 
     print(f"\nWeighted component breakdown:")
     cfg = reward_config
-    weights = {"safety": cfg.w_safety, "progress": cfg.w_progress, "smoothness": cfg.w_smooth,
-               "feasibility": cfg.w_feasibility, "centerline": cfg.w_centerline}
+    weights = {
+        "safety": cfg.w_safety,
+        "progress": cfg.w_progress,
+        "smoothness": cfg.w_smooth,
+        "feasibility": cfg.w_feasibility,
+        "centerline": cfg.w_centerline,
+    }
     for name in ["safety", "progress", "smoothness", "feasibility", "centerline"]:
         vals = np.array(components[name]) * weights[name]
-        print(f"  w*{name:12s}: mean={vals.mean():8.1f}  std={vals.std():7.1f}  [{vals.min():8.1f}, {vals.max():7.1f}]")
+        print(
+            f"  w*{name:12s}: mean={vals.mean():8.1f}  std={vals.std():7.1f}  [{vals.min():8.1f}, {vals.max():7.1f}]"
+        )
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("DIAGNOSIS:")
     issues = []
     if spreads_arr.mean() < 5:
@@ -160,14 +170,14 @@ def analyze(
 
     if all_collisions / n_trajs > 0.5:
         issues.append(
-            f"  HIGH COLLISION RATE: {all_collisions/n_trajs:.0%}. "
+            f"  HIGH COLLISION RATE: {all_collisions / n_trajs:.0%}. "
             f"Most trajectories collide, dominating the reward.\n"
             f"    -> Check if the model is fundamentally poor on these scenes."
         )
 
     if (offroad_arr > 0.1).sum() / n_trajs > 0.3:
         issues.append(
-            f"  HIGH OFF-ROAD RATE: {(offroad_arr>0.1).sum()/n_trajs:.0%} of trajectories >10% off-road.\n"
+            f"  HIGH OFF-ROAD RATE: {(offroad_arr > 0.1).sum() / n_trajs:.0%} of trajectories >10% off-road.\n"
             f"    -> Model may be producing poor lane-following trajectories."
         )
 
@@ -182,21 +192,26 @@ def analyze(
     else:
         for issue in issues:
             print(issue)
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="GRPO Reward Distribution Analyzer")
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--npz_list", type=Path, required=True)
-    parser.add_argument("--lora_path", type=Path, default=None,
-                        help="Path to LoRA adapter directory (e.g. lora_epoch_002/)")
-    parser.add_argument("--n_scenes", type=int, default=20,
-                        help="Number of scenes to sample for analysis")
-    parser.add_argument("--n_trajectories", type=int, default=8,
-                        help="Trajectories per scene")
-    parser.add_argument("--verbose_scenes", type=int, default=3,
-                        help="Number of scenes to print in detail")
+    parser.add_argument(
+        "--lora_path",
+        type=Path,
+        default=None,
+        help="Path to LoRA adapter directory (e.g. lora_epoch_002/)",
+    )
+    parser.add_argument(
+        "--n_scenes", type=int, default=20, help="Number of scenes to sample for analysis"
+    )
+    parser.add_argument("--n_trajectories", type=int, default=8, help="Trajectories per scene")
+    parser.add_argument(
+        "--verbose_scenes", type=int, default=3, help="Number of scenes to print in detail"
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -204,6 +219,7 @@ def main():
 
     if args.lora_path is not None:
         from preference_optimization.lora_utils import load_lora_checkpoint
+
         model = load_lora_checkpoint(model, str(args.lora_path), is_trainable=False)
         print(f"Loaded LoRA adapter from {args.lora_path}")
 
@@ -213,9 +229,15 @@ def main():
         npz_paths = json.load(f)
 
     print(f"Dataset: {len(npz_paths)} scenes, sampling {args.n_scenes}")
-    analyze(model, model_args, npz_paths, device,
-            n_scenes=args.n_scenes, n_trajectories=args.n_trajectories,
-            verbose_scenes=args.verbose_scenes)
+    analyze(
+        model,
+        model_args,
+        npz_paths,
+        device,
+        n_scenes=args.n_scenes,
+        n_trajectories=args.n_trajectories,
+        verbose_scenes=args.verbose_scenes,
+    )
 
 
 if __name__ == "__main__":

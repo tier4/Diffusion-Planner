@@ -1,7 +1,7 @@
 """Serializable configuration dataclasses for the guidance framework."""
 
-from dataclasses import dataclass, field
 import json
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -23,13 +23,11 @@ class GuidanceSetConfig:
 
     def __post_init__(self):
         # Ensure elements are GuidanceConfig instances when deserialised from dict
-        self.functions = [
-            GuidanceConfig(**f) if isinstance(f, dict) else f
-            for f in self.functions
-        ]
+        self.functions = [GuidanceConfig(**f) if isinstance(f, dict) else f for f in self.functions]
 
     def to_json(self) -> str:
         import dataclasses
+
         return json.dumps(dataclasses.asdict(self), indent=2)
 
     @classmethod

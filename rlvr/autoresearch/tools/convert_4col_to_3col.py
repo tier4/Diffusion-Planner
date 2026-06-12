@@ -14,6 +14,7 @@ scenes and fed through the well-tested 3-col curated path.
 heading = atan2(sin, cos); padded steps (cos=sin=0 or cos=1,sin=0) map to ~0, matching
 the canonical convention. No silent fallbacks: missing fields raise.
 """
+
 import argparse
 import json
 import os

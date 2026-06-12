@@ -65,8 +65,9 @@ def _recover_ego_world_series(run_dir: Path, route) -> np.ndarray:
     npz_dir = run_dir / "npz"
     files = sorted(npz_dir.glob("replay_step_*.npz"))
     if not files:
-        files = sorted(f for f in npz_dir.glob("*.npz")
-                        if "summary" not in f.name and "heatmap" not in f.name)
+        files = sorted(
+            f for f in npz_dir.glob("*.npz") if "summary" not in f.name and "heatmap" not in f.name
+        )
     if not files:
         raise SystemExit(f"No step NPZs under {npz_dir}")
     poses = np.zeros((len(files), 4), dtype=np.float64)
@@ -81,8 +82,8 @@ def _recover_ego_world_series(run_dir: Path, route) -> np.ndarray:
 
 def _extract_poses_from_bag(bag_path: Path) -> np.ndarray:
     """Extract (T,4) [x, y, yaw, speed] from a psim rosbag .db3 file."""
-    from rclpy.serialization import deserialize_message
     from nav_msgs.msg import Odometry
+    from rclpy.serialization import deserialize_message
 
     db3 = bag_path
     if bag_path.is_dir():
@@ -105,23 +106,25 @@ def _extract_poses_from_bag(bag_path: Path) -> np.ndarray:
         msg = deserialize_message(data, Odometry)
         p = msg.pose.pose
         q = p.orientation
-        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
-                         1 - 2 * (q.y ** 2 + q.z ** 2))
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y**2 + q.z**2))
         v = msg.twist.twist.linear
-        poses[i] = [p.position.x, p.position.y, yaw,
-                    math.sqrt(v.x ** 2 + v.y ** 2)]
+        poses[i] = [p.position.x, p.position.y, yaw, math.sqrt(v.x**2 + v.y**2)]
     return poses
 
 
-def _print_stats(dev_a: np.ndarray, dev_b: np.ndarray,
-                 label_a: str, label_b: str,
-                 arc_ranges: list[tuple[float, float]] | None = None) -> None:
+def _print_stats(
+    dev_a: np.ndarray,
+    dev_b: np.ndarray,
+    label_a: str,
+    label_b: str,
+    arc_ranges: list[tuple[float, float]] | None = None,
+) -> None:
     """Print overall and per-arc deviation statistics."""
     lat_a, lat_b = dev_a[:, 2], dev_b[:, 2]
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Overall statistics")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  {'Metric':>8s}  {label_a:>12s}  {label_b:>12s}  {'Delta':>8s}")
     for name, fa, fb in [
         ("Mean", np.mean(lat_a), np.mean(lat_b)),
@@ -133,9 +136,9 @@ def _print_stats(dev_a: np.ndarray, dev_b: np.ndarray,
         print(f"  {name:>8s}  {fa:12.3f}m  {fb:12.3f}m  {pct:+7.1f}%")
 
     if arc_ranges:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  Per-arc breakdown (mean |lateral|)")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"  {'Arc':>14s}  {label_a:>10s}  {label_b:>10s}  {'Delta':>8s}  {'Abs Δ':>8s}")
         for lo, hi in arc_ranges:
             ma = lat_a[(dev_a[:, 0] >= lo) & (dev_a[:, 0] <= hi)]
@@ -145,7 +148,9 @@ def _print_stats(dev_a: np.ndarray, dev_b: np.ndarray,
                 mean_b_arc = np.mean(mb)
                 pct = (mean_b_arc - mean_a_arc) / mean_a_arc * 100 if mean_a_arc > 1e-9 else 0.0
                 abs_d = mean_b_arc - mean_a_arc
-                print(f"  {lo:>6.0f}-{hi:<6.0f}  {mean_a_arc:10.3f}m  {mean_b_arc:10.3f}m  {pct:+7.1f}%  {abs_d:+7.3f}m")
+                print(
+                    f"  {lo:>6.0f}-{hi:<6.0f}  {mean_a_arc:10.3f}m  {mean_b_arc:10.3f}m  {pct:+7.1f}%  {abs_d:+7.3f}m"
+                )
 
         print(f"\n  Per-arc breakdown (max |lateral|)")
         print(f"  {'Arc':>14s}  {label_a:>10s}  {label_b:>10s}  {'Delta':>8s}  {'Abs Δ':>8s}")
@@ -157,54 +162,85 @@ def _print_stats(dev_a: np.ndarray, dev_b: np.ndarray,
                 max_b_arc = np.max(mb)
                 pct = (max_b_arc - max_a_arc) / max_a_arc * 100 if max_a_arc > 1e-9 else 0.0
                 abs_d = max_b_arc - max_a_arc
-                print(f"  {lo:>6.0f}-{hi:<6.0f}  {max_a_arc:10.3f}m  {max_b_arc:10.3f}m  {pct:+7.1f}%  {abs_d:+7.3f}m")
+                print(
+                    f"  {lo:>6.0f}-{hi:<6.0f}  {max_a_arc:10.3f}m  {max_b_arc:10.3f}m  {pct:+7.1f}%  {abs_d:+7.3f}m"
+                )
     print()
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--route", type=Path, required=True)
-    p.add_argument("--run_a", type=Path, default=None,
-                   help="NPZ dir for run A (goal_pose recovery mode)")
-    p.add_argument("--run_b", type=Path, default=None,
-                   help="NPZ dir for run B (goal_pose recovery mode)")
-    p.add_argument("--bag_a", type=Path, default=None,
-                   help="Rosbag .db3 or dir for run A (direct extraction)")
-    p.add_argument("--bag_b", type=Path, default=None,
-                   help="Rosbag .db3 or dir for run B (direct extraction)")
+    p.add_argument(
+        "--run_a", type=Path, default=None, help="NPZ dir for run A (goal_pose recovery mode)"
+    )
+    p.add_argument(
+        "--run_b", type=Path, default=None, help="NPZ dir for run B (goal_pose recovery mode)"
+    )
+    p.add_argument(
+        "--bag_a", type=Path, default=None, help="Rosbag .db3 or dir for run A (direct extraction)"
+    )
+    p.add_argument(
+        "--bag_b", type=Path, default=None, help="Rosbag .db3 or dir for run B (direct extraction)"
+    )
     p.add_argument("--label_a", default="A")
     p.add_argument("--label_b", default="B")
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--arc_ranges", type=str, default=None,
-                   help="Comma-separated arc ranges for per-arc stats, "
-                        "e.g. '450,510;728,768;1400,1442'")
+    p.add_argument(
+        "--arc_ranges",
+        type=str,
+        default=None,
+        help="Comma-separated arc ranges for per-arc stats, e.g. '450,510;728,768;1400,1442'",
+    )
     p.add_argument("--bin_m", type=float, default=5.0)
-    p.add_argument("--clip_max_m", type=float, default=None,
-                   help="Clamp the color scale to this many metres of |lateral|. "
-                        "Default: 95th percentile across both runs.")
-    p.add_argument("--n_steps", type=int, default=None,
-                   help="Truncate both runs to the first N steps. Default: "
-                        "min(len(run_a), len(run_b)) — so the comparison "
-                        "covers the same temporal window.")
-    p.add_argument("--min_arc_m", type=float, default=None,
-                   help="Exclude route before this arc-length (metres). "
-                        "Useful to trim the initial convergence from a "
-                        "misplaced starting pose.")
-    p.add_argument("--max_arc_m", type=float, default=None,
-                   help="Exclude route beyond this arc-length (metres). "
-                        "Useful to trim the last N metres where the goal is "
-                        "far from the centerline.")
-    p.add_argument("--min_speed_mps", type=float, default=0.5,
-                   help="Exclude steps where ego speed is below this (m/s). "
-                        "Filters out stopped / crawling frames so they don't "
-                        "pollute the deviation signal. Default: 0.5 m/s.")
+    p.add_argument(
+        "--clip_max_m",
+        type=float,
+        default=None,
+        help="Clamp the color scale to this many metres of |lateral|. "
+        "Default: 95th percentile across both runs.",
+    )
+    p.add_argument(
+        "--n_steps",
+        type=int,
+        default=None,
+        help="Truncate both runs to the first N steps. Default: "
+        "min(len(run_a), len(run_b)) — so the comparison "
+        "covers the same temporal window.",
+    )
+    p.add_argument(
+        "--min_arc_m",
+        type=float,
+        default=None,
+        help="Exclude route before this arc-length (metres). "
+        "Useful to trim the initial convergence from a "
+        "misplaced starting pose.",
+    )
+    p.add_argument(
+        "--max_arc_m",
+        type=float,
+        default=None,
+        help="Exclude route beyond this arc-length (metres). "
+        "Useful to trim the last N metres where the goal is "
+        "far from the centerline.",
+    )
+    p.add_argument(
+        "--min_speed_mps",
+        type=float,
+        default=0.5,
+        help="Exclude steps where ego speed is below this (m/s). "
+        "Filters out stopped / crawling frames so they don't "
+        "pollute the deviation signal. Default: 0.5 m/s.",
+    )
     args = p.parse_args()
 
     print(f"Loading route {args.route}")
     route = load_route(args.route)
-    print(f"  segments: {len(route.route_lanelet_ids)}  "
-          f"start=({route.start_pose[0]:.1f},{route.start_pose[1]:.1f}) "
-          f"goal=({route.goal_pose[0]:.1f},{route.goal_pose[1]:.1f})")
+    print(
+        f"  segments: {len(route.route_lanelet_ids)}  "
+        f"start=({route.start_pose[0]:.1f},{route.start_pose[1]:.1f}) "
+        f"goal=({route.goal_pose[0]:.1f},{route.goal_pose[1]:.1f})"
+    )
 
     pts, s = build_route_polyline(route)
     s_max = float(s[-1])
@@ -221,8 +257,10 @@ def main():
     else:
         print(f"[{args.label_a}] recovering ego world poses from {args.run_a}")
         poses_a = _recover_ego_world_series(args.run_a, route)
-    print(f"  {len(poses_a)} steps. ego start=({poses_a[0,0]:.1f},{poses_a[0,1]:.1f}) "
-          f"end=({poses_a[-1,0]:.1f},{poses_a[-1,1]:.1f})")
+    print(
+        f"  {len(poses_a)} steps. ego start=({poses_a[0, 0]:.1f},{poses_a[0, 1]:.1f}) "
+        f"end=({poses_a[-1, 0]:.1f},{poses_a[-1, 1]:.1f})"
+    )
 
     if args.bag_b:
         print(f"[{args.label_b}] extracting poses from rosbag {args.bag_b}")
@@ -230,8 +268,10 @@ def main():
     else:
         print(f"[{args.label_b}] recovering ego world poses from {args.run_b}")
         poses_b = _recover_ego_world_series(args.run_b, route)
-    print(f"  {len(poses_b)} steps. ego start=({poses_b[0,0]:.1f},{poses_b[0,1]:.1f}) "
-          f"end=({poses_b[-1,0]:.1f},{poses_b[-1,1]:.1f})")
+    print(
+        f"  {len(poses_b)} steps. ego start=({poses_b[0, 0]:.1f},{poses_b[0, 1]:.1f}) "
+        f"end=({poses_b[-1, 0]:.1f},{poses_b[-1, 1]:.1f})"
+    )
 
     n_steps = args.n_steps if args.n_steps is not None else min(len(poses_a), len(poses_b))
     if n_steps < min(len(poses_a), len(poses_b)):
@@ -248,8 +288,10 @@ def main():
         n_drop_b = int((~mask_b).sum())
         poses_a = poses_a[mask_a]
         poses_b = poses_b[mask_b]
-        print(f"Speed filter >= {args.min_speed_mps:.1f} m/s: "
-              f"dropped {n_drop_a}/{n_steps} A, {n_drop_b}/{n_steps} B")
+        print(
+            f"Speed filter >= {args.min_speed_mps:.1f} m/s: "
+            f"dropped {n_drop_a}/{n_steps} A, {n_drop_b}/{n_steps} B"
+        )
 
     dev_a = deviation_series(poses_a[:, :2], pts, s)
     dev_b = deviation_series(poses_b[:, :2], pts, s)
@@ -257,15 +299,17 @@ def main():
     if args.min_arc_m is not None:
         dev_a = dev_a[dev_a[:, 0] >= args.min_arc_m]
         dev_b = dev_b[dev_b[:, 0] >= args.min_arc_m]
-        print(f"Trimmed to arc >= {args.min_arc_m:.1f} m  "
-              f"(A: {len(dev_a)} pts, B: {len(dev_b)} pts)")
+        print(
+            f"Trimmed to arc >= {args.min_arc_m:.1f} m  (A: {len(dev_a)} pts, B: {len(dev_b)} pts)"
+        )
 
     if args.max_arc_m is not None:
         dev_a = dev_a[dev_a[:, 0] <= args.max_arc_m]
         dev_b = dev_b[dev_b[:, 0] <= args.max_arc_m]
         s_max = min(s_max, args.max_arc_m)
-        print(f"Trimmed to arc <= {args.max_arc_m:.1f} m  "
-              f"(A: {len(dev_a)} pts, B: {len(dev_b)} pts)")
+        print(
+            f"Trimmed to arc <= {args.max_arc_m:.1f} m  (A: {len(dev_a)} pts, B: {len(dev_b)} pts)"
+        )
 
     arc_ranges = None
     if args.arc_ranges:
@@ -286,9 +330,7 @@ def main():
     if args.clip_max_m is not None:
         vmax = float(args.clip_max_m)
     else:
-        concat = np.concatenate([
-            mean_a[~np.isnan(mean_a)], mean_b[~np.isnan(mean_b)]
-        ])
+        concat = np.concatenate([mean_a[~np.isnan(mean_a)], mean_b[~np.isnan(mean_b)]])
         vmax = float(np.percentile(concat, 95)) if len(concat) else 1.0
         vmax = max(vmax, 0.25)
     print(f"Color scale: 0 → {vmax:.2f} m")
@@ -299,22 +341,44 @@ def main():
     diff_abs = max(float(diff_abs), 0.1)
 
     fig = plt.figure(figsize=(22, 12))
-    gs = fig.add_gridspec(2, 3, height_ratios=[1.8, 1.0],
-                          width_ratios=[1, 1, 1], hspace=0.25, wspace=0.15)
+    gs = fig.add_gridspec(
+        2, 3, height_ratios=[1.8, 1.0], width_ratios=[1, 1, 1], hspace=0.25, wspace=0.15
+    )
     ax_a = fig.add_subplot(gs[0, 0])
     ax_b = fig.add_subplot(gs[0, 1], sharex=ax_a, sharey=ax_a)
     ax_d = fig.add_subplot(gs[0, 2], sharex=ax_a, sharey=ax_a)
     ax_line = fig.add_subplot(gs[1, :])
 
-    plot_route_heatmap(ax_a, pts, bin_segments, mean_a,
-                  f"{args.label_a}: |deviation| per {bin_m:.0f} m bin",
-                  0.0, vmax, "viridis")
-    plot_route_heatmap(ax_b, pts, bin_segments, mean_b,
-                  f"{args.label_b}: |deviation| per {bin_m:.0f} m bin",
-                  0.0, vmax, "viridis")
-    plot_route_heatmap(ax_d, pts, bin_segments, diff,
-                  f"A − B  (red = A worse, blue = B worse)",
-                  -diff_abs, diff_abs, "RdBu_r")
+    plot_route_heatmap(
+        ax_a,
+        pts,
+        bin_segments,
+        mean_a,
+        f"{args.label_a}: |deviation| per {bin_m:.0f} m bin",
+        0.0,
+        vmax,
+        "viridis",
+    )
+    plot_route_heatmap(
+        ax_b,
+        pts,
+        bin_segments,
+        mean_b,
+        f"{args.label_b}: |deviation| per {bin_m:.0f} m bin",
+        0.0,
+        vmax,
+        "viridis",
+    )
+    plot_route_heatmap(
+        ax_d,
+        pts,
+        bin_segments,
+        diff,
+        f"A − B  (red = A worse, blue = B worse)",
+        -diff_abs,
+        diff_abs,
+        "RdBu_r",
+    )
 
     for ax, vmin_, vmax_, cm in [
         (ax_a, 0.0, vmax, "viridis"),
@@ -349,11 +413,21 @@ def main():
     print(f"saved {args.output}")
 
     # also dump the numeric series for downstream analysis
-    np.savez(args.output.with_suffix(".npz"),
-             route_pts=pts, route_s=s, bin_m=bin_m, bin_s_mid=bs_mid,
-             mean_abs_a=mean_a, mean_abs_b=mean_b, max_abs_a=max_a, max_abs_b=max_b,
-             dev_series_a=dev_a, dev_series_b=dev_b,
-             poses_a=poses_a, poses_b=poses_b)
+    np.savez(
+        args.output.with_suffix(".npz"),
+        route_pts=pts,
+        route_s=s,
+        bin_m=bin_m,
+        bin_s_mid=bs_mid,
+        mean_abs_a=mean_a,
+        mean_abs_b=mean_b,
+        max_abs_a=max_a,
+        max_abs_b=max_b,
+        dev_series_a=dev_a,
+        dev_series_b=dev_b,
+        poses_a=poses_a,
+        poses_b=poses_b,
+    )
     print(f"saved {args.output.with_suffix('.npz')}")
 
 

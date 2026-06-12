@@ -21,8 +21,8 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
-from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from timm.utils import ModelEma
 from torch import optim
@@ -94,36 +94,80 @@ def get_args():
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
 
     # ----- GRPO-specific -----
-    parser.add_argument("--num_generations", type=int, default=8,
-                        help="N: trajectories sampled per scene (the GRPO group size)")
-    parser.add_argument("--grpo_noise_scale", type=float, default=3.0,
-                        help="multiplier on the initial diffusion noise during sampling")
+    parser.add_argument(
+        "--num_generations",
+        type=int,
+        default=8,
+        help="N: trajectories sampled per scene (the GRPO group size)",
+    )
+    parser.add_argument(
+        "--grpo_noise_scale",
+        type=float,
+        default=3.0,
+        help="multiplier on the initial diffusion noise during sampling",
+    )
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
-    parser.add_argument("--w_collision", type=float, default=1.0,
-                        help="weight on the neighbor-collision penalty in the reward")
-    parser.add_argument("--w_road_border", type=float, default=1.0,
-                        help="weight on the road-border penalty in the reward (0 disables)")
-    parser.add_argument("--w_gt_l2", type=float, default=0.1,
-                        help="weight on the realism penalty: ADE (mean L2) between the generated "
-                             "ego trajectory and the scene's own GT ego future (0 disables)")
-    parser.add_argument("--sft_prob", type=float, default=0.5,
-                        help="probability of running a normal supervised step instead of a "
-                             "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)")
+    parser.add_argument(
+        "--w_collision",
+        type=float,
+        default=1.0,
+        help="weight on the neighbor-collision penalty in the reward",
+    )
+    parser.add_argument(
+        "--w_road_border",
+        type=float,
+        default=1.0,
+        help="weight on the road-border penalty in the reward (0 disables)",
+    )
+    parser.add_argument(
+        "--w_gt_l2",
+        type=float,
+        default=0.1,
+        help="weight on the realism penalty: ADE (mean L2) between the generated "
+        "ego trajectory and the scene's own GT ego future (0 disables)",
+    )
+    parser.add_argument(
+        "--sft_prob",
+        type=float,
+        default=0.5,
+        help="probability of running a normal supervised step instead of a "
+        "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)",
+    )
 
     # Synthetic adversarial neighbor augmentation (see utils/synthetic_neighbors.py):
     # spawn constant-acceleration neighbors that are guaranteed to collide with the ego GT
     # (but avoidable -- they keep clear of the ego's t=0 pose), to drive the collision reward.
-    parser.add_argument("--neighbor_inject_max", type=int, default=1,
-                        help="max synthetic colliders injected per scene (count ~ U[1, max])")
-    parser.add_argument("--neighbor_inject_prob", type=float, default=0.5,
-                        help="per-scene probability of injecting any synthetic colliders")
-    parser.add_argument("--pedestrian_prob", type=float, default=0.3,
-                        help="fraction of injected colliders that are pedestrians")
-    parser.add_argument("--bicycle_prob", type=float, default=0.2,
-                        help="fraction of injected colliders that are bicycles (rest: vehicles)")
-    parser.add_argument("--collider_keep_clear_radius", type=float, default=3.0,
-                        help="min distance the collider path keeps from the ego t=0 pose "
-                             "(guarantees the forced collision is avoidable)")
+    parser.add_argument(
+        "--neighbor_inject_max",
+        type=int,
+        default=1,
+        help="max synthetic colliders injected per scene (count ~ U[1, max])",
+    )
+    parser.add_argument(
+        "--neighbor_inject_prob",
+        type=float,
+        default=0.5,
+        help="per-scene probability of injecting any synthetic colliders",
+    )
+    parser.add_argument(
+        "--pedestrian_prob",
+        type=float,
+        default=0.3,
+        help="fraction of injected colliders that are pedestrians",
+    )
+    parser.add_argument(
+        "--bicycle_prob",
+        type=float,
+        default=0.2,
+        help="fraction of injected colliders that are bicycles (rest: vehicles)",
+    )
+    parser.add_argument(
+        "--collider_keep_clear_radius",
+        type=float,
+        default=3.0,
+        help="min distance the collider path keeps from the ego t=0 pose "
+        "(guarantees the forced collision is avoidable)",
+    )
 
     # Loss coefficients (shared with the supervised trainer / loss machinery)
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
@@ -157,12 +201,17 @@ def get_args():
     parser.add_argument("--decoder_depth", type=int, default=3)
     parser.add_argument("--num_heads", type=int, default=8)
     parser.add_argument("--hidden_dim", type=int, default=256)
-    parser.add_argument("--diffusion_model_type", type=str,
-                        choices=["x_start", "flow_matching"], default="x_start")
+    parser.add_argument(
+        "--diffusion_model_type", type=str, choices=["x_start", "flow_matching"], default="x_start"
+    )
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
-    parser.add_argument("--resume_model_path", type=str, default=None,
-                        help="pretrained checkpoint to start GRPO from (recommended)")
+    parser.add_argument(
+        "--resume_model_path",
+        type=str,
+        default=None,
+        help="pretrained checkpoint to start GRPO from (recommended)",
+    )
 
     parser.add_argument("--use_wandb", default=False, type=boolean)
     parser.add_argument("--notes", default="", type=str)
@@ -227,8 +276,10 @@ def model_training(args):
         keep_clear_radius=args.collider_keep_clear_radius,
     )
     if global_rank == 0:
-        print(f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
-              f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m")
+        print(
+            f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
+            f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m"
+        )
 
     if global_rank == 0 and args.w_gt_l2 > 0.0:
         print(f"GT-L2 realism reward enabled: w_gt_l2={args.w_gt_l2}")
@@ -273,9 +324,11 @@ def model_training(args):
     model_ema = ModelEma(diffusion_planner, decay=0.999, device=args.device)
 
     if global_rank == 0:
-        print("Model Params: {}".format(
-            sum(p.numel() for p in ddp.get_model(diffusion_planner, args.ddp).parameters())
-        ))
+        print(
+            "Model Params: {}".format(
+                sum(p.numel() for p in ddp.get_model(diffusion_planner, args.ddp).parameters())
+            )
+        )
 
     params = [
         {
@@ -323,7 +376,12 @@ def model_training(args):
             torch.distributed.barrier()
 
         train_loss, train_total_loss = train_grpo_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, collider_injector,
+            train_loader,
+            diffusion_planner,
+            optimizer,
+            args,
+            model_ema,
+            collider_injector,
         )
 
         if global_rank == 0:

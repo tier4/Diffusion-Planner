@@ -28,6 +28,7 @@ Outputs:
     <output_dir>/sweep_labels.json   per-scene combo table + best params + summary
     <output_dir>/audit/<scene>.png   trajectory-fan renders (first --audit_scenes)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,12 +51,7 @@ from rlvr.reward import compute_reward_batch
 
 def build_grid(eta_lat_grid, eta_col_grid, stretch_grid):
     """Cartesian grid -> three [K] float lists. Asserts the zero combo exists."""
-    combos = [
-        (el, ec, st)
-        for el in eta_lat_grid
-        for ec in eta_col_grid
-        for st in stretch_grid
-    ]
+    combos = [(el, ec, st) for el in eta_lat_grid for ec in eta_col_grid for st in stretch_grid]
     zero = (0.0, 0.0, 1.0)
     if zero not in combos:
         raise SystemExit(
@@ -72,33 +68,42 @@ def make_composer(eta_lat, eta_col, stretch, args) -> GuidanceComposer:
         # (new opt-in registry names; v1 labels/policies are untouched).
         fns = [
             GuidanceConfig(
-                name="lateral_ramp_batched", enabled=True, scale=args.lat_scale,
-                params={"lambda_lat": args.lambda_lat, "eta_lat": eta_lat,
-                        "ramp_steps": 20},
+                name="lateral_ramp_batched",
+                enabled=True,
+                scale=args.lat_scale,
+                params={"lambda_lat": args.lambda_lat, "eta_lat": eta_lat, "ramp_steps": 20},
             ),
             GuidanceConfig(
-                name="collision_swerve_v2_batched", enabled=True,
+                name="collision_swerve_v2_batched",
+                enabled=True,
                 scale=args.col_scale,
-                params={"eta_col": eta_col, "lambda_col": args.lambda_col,
-                        "range": args.col_range},
+                params={"eta_col": eta_col, "lambda_col": args.lambda_col, "range": args.col_range},
             ),
         ]
     else:
         fns = [
             GuidanceConfig(
-                name="lateral", enabled=True, scale=args.lat_scale,
+                name="lateral",
+                enabled=True,
+                scale=args.lat_scale,
                 params={"lambda_lat": args.lambda_lat, "eta_lat": eta_lat},
             ),
             GuidanceConfig(
-                name="collision_swerve_batched", enabled=True, scale=args.col_scale,
+                name="collision_swerve_batched",
+                enabled=True,
+                scale=args.col_scale,
                 params={"eta_col": eta_col, "range": args.col_range},
             ),
         ]
     if bool((stretch != 1.0).any()):
-        fns.append(GuidanceConfig(
-            name="speed_stretch_batched", enabled=True, scale=args.stretch_scale,
-            params={"stretch": stretch},
-        ))
+        fns.append(
+            GuidanceConfig(
+                name="speed_stretch_batched",
+                enabled=True,
+                scale=args.stretch_scale,
+                params={"stretch": stretch},
+            )
+        )
     set_cfg = GuidanceSetConfig(functions=fns, global_scale=args.guidance_scale)
     return GuidanceComposer(set_cfg)
 
@@ -107,9 +112,7 @@ def make_composer(eta_lat, eta_col, stretch, args) -> GuidanceComposer:
 def sweep_scene(model, model_args, npz_path, combos, zero_idx, rcfg, args, device):
     """Run the full grid on one scene. Returns per-scene result dict."""
     data = load_npz_data(npz_path, device)
-    norm_data = {
-        k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
-    }
+    norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     norm_data = model_args.observation_normalizer(norm_data)
 
     x_ref_np = generate_reference_trajectory(model, model_args, norm_data, device)
@@ -130,9 +133,14 @@ def sweep_scene(model, model_args, npz_path, combos, zero_idx, rcfg, args, devic
 
     composer = make_composer(eta_lat, eta_col, stretch, args)
     trajs = _batched_generate_varied_noise(
-        model, model_args, K_data,
-        noise_min=0.0, noise_max=0.0, first_deterministic=False,
-        composer=composer, device=device,
+        model,
+        model_args,
+        K_data,
+        noise_min=0.0,
+        noise_max=0.0,
+        first_deterministic=False,
+        composer=composer,
+        device=device,
     )  # [K, T, 4]
 
     breakdowns = compute_reward_batch(trajs.float(), data, rcfg)
@@ -140,21 +148,26 @@ def sweep_scene(model, model_args, npz_path, combos, zero_idx, rcfg, args, devic
     combo_rows = []
     for i, (el, ec, st) in enumerate(combos):
         r = breakdowns[i]
-        combo_rows.append({
-            "eta_lat": el, "eta_col": ec, "stretch": st,
-            "total": float(r.total),
-            "static_crossing": bool(r.static_crossing),
-            "sc_min_dist": float(r.sc_min_dist),
-            "rb_cross": bool(r.rb_crossing),
-            "lane_cross": bool(r.lane_crossing),
-            "cl": float(r.centerline),
-            "stopped": bool(getattr(r, "stopped", False)),
-        })
+        combo_rows.append(
+            {
+                "eta_lat": el,
+                "eta_col": ec,
+                "stretch": st,
+                "total": float(r.total),
+                "static_crossing": bool(r.static_crossing),
+                "sc_min_dist": float(r.sc_min_dist),
+                "rb_cross": bool(r.rb_crossing),
+                "lane_cross": bool(r.lane_crossing),
+                "cl": float(r.centerline),
+                "stopped": bool(getattr(r, "stopped", False)),
+            }
+        )
 
     det = combo_rows[zero_idx]
     # Best = clean (no sc crossing, no rb crossing, not stopped) with max total.
-    clean = [c for c in combo_rows
-             if not c["static_crossing"] and not c["rb_cross"] and not c["stopped"]]
+    clean = [
+        c for c in combo_rows if not c["static_crossing"] and not c["rb_cross"] and not c["stopped"]
+    ]
     best = max(clean, key=lambda c: c["total"]) if clean else None
 
     sc_n_stopped = int(breakdowns[zero_idx].sc_n_stopped)
@@ -180,6 +193,7 @@ def sweep_scene(model, model_args, npz_path, combos, zero_idx, rcfg, args, devic
 def render_audit(result, combos, zero_idx, out_png):
     """Trajectory-fan render: all combos colored by eta_col, det in black."""
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -190,7 +204,7 @@ def render_audit(result, combos, zero_idx, out_png):
     trajs = result["_trajs"]
     fig, ax = plt.subplots(figsize=(11, 11))
     draw_scene_base(ax, result["scene_path"])
-    for (x, y, h, length, w) in extract_stopped_neighbors(result["scene_path"]):
+    for x, y, h, length, w in extract_stopped_neighbors(result["scene_path"]):
         draw_agent_box(ax, x, y, h, length, w, color="crimson", alpha=0.5)
 
     cmap = plt.get_cmap("coolwarm")
@@ -199,16 +213,31 @@ def render_audit(result, combos, zero_idx, out_png):
             continue
         color = cmap(0.5 * (ec + 1.0))
         crossed = result["combos"][i]["static_crossing"]
-        ax.plot(trajs[i, :, 0], trajs[i, :, 1], "-", color=color,
-                lw=0.9, alpha=0.35 if crossed else 0.8)
-    ax.plot(trajs[zero_idx, :, 0], trajs[zero_idx, :, 1], "-", color="black",
-            lw=2.2, label="det (no guidance)")
+        ax.plot(
+            trajs[i, :, 0], trajs[i, :, 1], "-", color=color, lw=0.9, alpha=0.35 if crossed else 0.8
+        )
+    ax.plot(
+        trajs[zero_idx, :, 0],
+        trajs[zero_idx, :, 1],
+        "-",
+        color="black",
+        lw=2.2,
+        label="det (no guidance)",
+    )
     if result["best"] is not None:
         b = result["best"]
         bi = result["combos"].index(b)
-        ax.plot(trajs[bi, :, 0], trajs[bi, :, 1], "-", color="lime", lw=2.2,
-                label=(f"best lat={b['eta_lat']:+.2f} col={b['eta_col']:+.2f} "
-                       f"st={b['stretch']:.2f} sc={b['sc_min_dist']:+.2f}m"))
+        ax.plot(
+            trajs[bi, :, 0],
+            trajs[bi, :, 1],
+            "-",
+            color="lime",
+            lw=2.2,
+            label=(
+                f"best lat={b['eta_lat']:+.2f} col={b['eta_col']:+.2f} "
+                f"st={b['stretch']:.2f} sc={b['sc_min_dist']:+.2f}m"
+            ),
+        )
     ax.set_title(
         f"{result['scene']}  [{result['status']}]  "
         f"det sc={result['det']['sc_min_dist']:+.2f}m  stopped={result['sc_n_stopped']}"
@@ -224,7 +253,8 @@ def render_audit(result, combos, zero_idx, out_png):
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--scenes", required=True)
@@ -238,16 +268,22 @@ def main():
     parser.add_argument("--lat_scale", type=float, default=1.0)
     parser.add_argument("--col_scale", type=float, default=2.0)
     parser.add_argument("--col_range", type=float, default=8.0)
-    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1",
-                        help="guidance set: v1 = stock lateral + linear "
-                             "collision_swerve; v2 = lateral_ramp + bounded "
-                             "ramp-and-hold collision_swerve_v2")
-    parser.add_argument("--lambda_col", type=float, default=3.0,
-                        help="v2 swerve max target offset in metres")
+    parser.add_argument(
+        "--envelope",
+        choices=["v1", "v2"],
+        default="v1",
+        help="guidance set: v1 = stock lateral + linear "
+        "collision_swerve; v2 = lateral_ramp + bounded "
+        "ramp-and-hold collision_swerve_v2",
+    )
+    parser.add_argument(
+        "--lambda_col", type=float, default=3.0, help="v2 swerve max target offset in metres"
+    )
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
-    parser.add_argument("--audit_scenes", type=int, default=0,
-                        help="Render trajectory fans for the first N scenes")
+    parser.add_argument(
+        "--audit_scenes", type=int, default=0, help="Render trajectory fans for the first N scenes"
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -260,8 +296,10 @@ def main():
     eta_col_grid = [float(x) for x in args.eta_col_grid.split(",")]
     stretch_grid = [float(x) for x in args.stretch_grid.split(",")]
     combos, zero_idx = build_grid(eta_lat_grid, eta_col_grid, stretch_grid)
-    print(f"[sweep] {len(combos)} combos/scene "
-          f"(lat {eta_lat_grid} x col {eta_col_grid} x stretch {stretch_grid})")
+    print(
+        f"[sweep] {len(combos)} combos/scene "
+        f"(lat {eta_lat_grid} x col {eta_col_grid} x stretch {stretch_grid})"
+    )
 
     with open(args.scenes) as f:
         scene_paths = json.load(f)
@@ -296,10 +334,18 @@ def main():
         results.append(res)
 
         b = res["best"]
-        best_str = (f"best(lat={b['eta_lat']:+.2f} col={b['eta_col']:+.2f} "
-                    f"st={b['stretch']:.2f} sc={b['sc_min_dist']:+.2f})") if b else "NO CLEAN COMBO"
-        print(f"  [{si:3d}] {res['status']:13s} det_sc={res['det']['sc_min_dist']:+.3f} "
-              f"{best_str}  {Path(p).name}")
+        best_str = (
+            (
+                f"best(lat={b['eta_lat']:+.2f} col={b['eta_col']:+.2f} "
+                f"st={b['stretch']:.2f} sc={b['sc_min_dist']:+.2f})"
+            )
+            if b
+            else "NO CLEAN COMBO"
+        )
+        print(
+            f"  [{si:3d}] {res['status']:13s} det_sc={res['det']['sc_min_dist']:+.3f} "
+            f"{best_str}  {Path(p).name}"
+        )
 
     n = len(results)
     n_avoid = sum(r["status"] != "already_clean" for r in results)
@@ -312,21 +358,25 @@ def main():
         "n_solved": n_solved,
         "n_unsolved": n_unsolved,
         "solve_rate": (n_solved / n_avoid) if n_avoid else None,
-        "grid": {"eta_lat": eta_lat_grid, "eta_col": eta_col_grid,
-                 "stretch": stretch_grid},
+        "grid": {"eta_lat": eta_lat_grid, "eta_col": eta_col_grid, "stretch": stretch_grid},
         "guidance_args": {
-            "lambda_lat": args.lambda_lat, "lat_scale": args.lat_scale,
-            "col_scale": args.col_scale, "col_range": args.col_range,
+            "lambda_lat": args.lambda_lat,
+            "lat_scale": args.lat_scale,
+            "col_scale": args.col_scale,
+            "col_range": args.col_range,
             "stretch_scale": args.stretch_scale,
             "guidance_scale": args.guidance_scale,
-            "envelope": args.envelope, "lambda_col": args.lambda_col,
+            "envelope": args.envelope,
+            "lambda_col": args.lambda_col,
         },
     }
     with open(out_dir / "sweep_labels.json", "w") as f:
         json.dump({"summary": summary, "scenes": results}, f, indent=1)
 
-    print(f"\n[sweep] {n} scenes: {summary['n_already_clean']} already clean, "
-          f"{n_solved}/{n_avoid} solved by guidance, {n_unsolved} unsolved")
+    print(
+        f"\n[sweep] {n} scenes: {summary['n_already_clean']} already clean, "
+        f"{n_solved}/{n_avoid} solved by guidance, {n_unsolved} unsolved"
+    )
     print(f"Wrote {out_dir / 'sweep_labels.json'}")
 
 

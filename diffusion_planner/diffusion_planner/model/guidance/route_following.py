@@ -39,8 +39,8 @@ class RouteFollowingGuidance(BaseGuidance):
         predictions = x[:, 0, :, :2]  # [B, T+1, 2]
         pred_points = predictions[:, 1:]  # [B, T, 2]  (exclude pinned current state)
 
-        expanded_routes = route_lanes.unsqueeze(1)   # [B, 1, 500, 2]
-        expanded_preds = pred_points.unsqueeze(2)     # [B, T, 1, 2]
+        expanded_routes = route_lanes.unsqueeze(1)  # [B, 1, 500, 2]
+        expanded_preds = pred_points.unsqueeze(2)  # [B, T, 1, 2]
         distances = torch.norm(expanded_preds - expanded_routes, dim=-1)  # [B, T, 500]
         min_distances = torch.min(distances, dim=2)[0]  # [B, T]
 
@@ -52,8 +52,10 @@ class RouteFollowingGuidance(BaseGuidance):
 # Backward-compatible module-level function alias
 # ---------------------------------------------------------------------------
 
+
 def route_following_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     """Deprecated. Use RouteFollowingGuidance via GuidanceComposer."""
     from .config import GuidanceConfig
+
     fn = RouteFollowingGuidance(GuidanceConfig(name="route_following"))
     return fn.energy(x, t, inputs)

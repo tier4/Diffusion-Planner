@@ -54,8 +54,8 @@ class AnchorFollowingGuidance(BaseGuidance):
         Returns [B] unscaled reward (higher = closer to anchor shape).
         """
         B = x.shape[0]
-        T = x.shape[2] - 1           # number of future timesteps
-        ego_pred = x[:, 0, 1:, :2]   # [B, T, 2]
+        T = x.shape[2] - 1  # number of future timesteps
+        ego_pred = x[:, 0, 1:, :2]  # [B, T, 2]
         anchor = self._anchor.to(x.device)[:T]  # [T, 2]
         sq_dist = ((ego_pred - anchor.unsqueeze(0)) ** 2).sum(dim=-1)  # [B, T]
-        return -sq_dist.sum(dim=-1)   # [B]
+        return -sq_dist.sum(dim=-1)  # [B]

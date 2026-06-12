@@ -116,7 +116,7 @@ def assign_gt_goals_and_routes(
         if not valid.any():
             continue
         last_valid_idx = int(np.where(valid)[0][-1])
-        gt_trimmed = gt[:last_valid_idx + 1]
+        gt_trimmed = gt[: last_valid_idx + 1]
 
         needs_goal = agent.goal_pose is None or overwrite_existing
         needs_route = agent.route_lanes is None or overwrite_existing
@@ -142,9 +142,12 @@ def assign_gt_goals_and_routes(
 
     if remove_ids:
         import logging
+
         logging.getLogger(__name__).info(
             "Removing %d short-lived agents (<%d GT steps): %s",
-            len(remove_ids), min_gt_timesteps, remove_ids,
+            len(remove_ids),
+            min_gt_timesteps,
+            remove_ids,
         )
         scene.agents = [a for a in scene.agents if a.id not in remove_ids]
 

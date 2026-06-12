@@ -33,8 +33,12 @@ _EDGE_SAMPLES_PER_SIDE = 8
 
 
 def _compute_ego_corners(
-    x: float, y: float, heading: float,
-    half_length: float, half_width: float, wheelbase: float,
+    x: float,
+    y: float,
+    heading: float,
+    half_length: float,
+    half_width: float,
+    wheelbase: float,
 ) -> list[tuple[float, float]]:
     """Compute 4 corners of the ego bounding box in world frame.
 
@@ -61,8 +65,12 @@ def _compute_ego_corners(
 
 
 def _compute_ego_perimeter(
-    x: float, y: float, heading: float,
-    half_length: float, half_width: float, wheelbase: float,
+    x: float,
+    y: float,
+    heading: float,
+    half_length: float,
+    half_width: float,
+    wheelbase: float,
     samples_per_side: int = _EDGE_SAMPLES_PER_SIDE,
 ) -> np.ndarray:
     """Sample points along the 4 OBB edges in world frame.
@@ -83,12 +91,15 @@ def _compute_ego_perimeter(
     front = wheelbase + rear_overhang
     rear = -rear_overhang
     # Local-frame corners in rectangle order (front-right, front-left, rear-left, rear-right).
-    corners_local = np.array([
-        [front, -half_width],
-        [front,  half_width],
-        [rear,   half_width],
-        [rear,  -half_width],
-    ], dtype=np.float64)
+    corners_local = np.array(
+        [
+            [front, -half_width],
+            [front, half_width],
+            [rear, half_width],
+            [rear, -half_width],
+        ],
+        dtype=np.float64,
+    )
 
     ts = np.linspace(0.0, 1.0, samples_per_side, endpoint=False)  # drop duplicate end
     edge_pts = []
@@ -144,12 +155,12 @@ def _min_dist_vectorized(
         ab_len2 = (ab * ab).sum(axis=1)
         ab_len2_safe = np.where(ab_len2 < 1e-12, 1.0, ab_len2)
 
-        ap = points[:, None, :] - s_starts[None, :, :]                    # (K, B, 2)
-        dot = (ap * ab[None, :, :]).sum(axis=2)                           # (K, B)
+        ap = points[:, None, :] - s_starts[None, :, :]  # (K, B, 2)
+        dot = (ap * ab[None, :, :]).sum(axis=2)  # (K, B)
         t = np.clip(dot / ab_len2_safe[None, :], 0.0, 1.0)
-        proj = s_starts[None, :, :] + t[:, :, None] * ab[None, :, :]      # (K, B, 2)
+        proj = s_starts[None, :, :] + t[:, :, None] * ab[None, :, :]  # (K, B, 2)
         delta = points[:, None, :] - proj
-        dist = np.sqrt((delta * delta).sum(axis=2))                       # (K, B)
+        dist = np.sqrt((delta * delta).sum(axis=2))  # (K, B)
         # Degenerate (zero-length) segments fall back to point distance.
         dist_deg = np.linalg.norm(points[:, None, :] - s_starts[None, :, :], axis=2)
         dist = np.where(ab_len2[None, :] < 1e-12, dist_deg, dist)
@@ -191,7 +202,12 @@ def evaluate_trajectory(
             # pierces the middle of a vehicle edge can leave every corner
             # outside rb_cross_thresh but still be a true crossing.
             perimeter = _compute_ego_perimeter(
-                x, y, h, half_l, half_w, ego_wheelbase,
+                x,
+                y,
+                h,
+                half_l,
+                half_w,
+                ego_wheelbase,
             )
             rb_dists.append(_min_dist_vectorized(perimeter, seg_starts, seg_ends))
 
@@ -280,23 +296,38 @@ def _positive_float(value: str) -> float:
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate CL replay trajectories")
-    parser.add_argument("--run_dirs", nargs="+", required=True,
-                        help="Replay output directories (each must contain trajectory_log.json)")
+    parser.add_argument(
+        "--run_dirs",
+        nargs="+",
+        required=True,
+        help="Replay output directories (each must contain trajectory_log.json)",
+    )
     parser.add_argument("--map_path", required=True, help="Lanelet2 map OSM file")
-    parser.add_argument("--ego_length", type=_positive_float, required=True,
-                        help="Ego length (m) — must match the vehicle used for replay")
-    parser.add_argument("--ego_width", type=_positive_float, required=True,
-                        help="Ego width (m) — must match the vehicle used for replay")
-    parser.add_argument("--ego_wheelbase", type=_positive_float, required=True,
-                        help="Ego wheelbase (m) — must match the vehicle used for replay")
+    parser.add_argument(
+        "--ego_length",
+        type=_positive_float,
+        required=True,
+        help="Ego length (m) — must match the vehicle used for replay",
+    )
+    parser.add_argument(
+        "--ego_width",
+        type=_positive_float,
+        required=True,
+        help="Ego width (m) — must match the vehicle used for replay",
+    )
+    parser.add_argument(
+        "--ego_wheelbase",
+        type=_positive_float,
+        required=True,
+        help="Ego wheelbase (m) — must match the vehicle used for replay",
+    )
     parser.add_argument("--rb_cross_thresh", type=float, default=0.20)
     parser.add_argument("--output", type=str, default=None, help="Save results JSON")
     args = parser.parse_args()
 
     if args.ego_wheelbase > args.ego_length:
         parser.error(
-            f"--ego_wheelbase ({args.ego_wheelbase}) must be <= "
-            f"--ego_length ({args.ego_length})"
+            f"--ego_wheelbase ({args.ego_wheelbase}) must be <= --ego_length ({args.ego_length})"
         )
 
     border_segments = load_border_segments(args.map_path)
@@ -313,21 +344,30 @@ def main():
             continue
 
         metrics = evaluate_trajectory(
-            traj, border_segments,
-            args.ego_length, args.ego_width, args.ego_wheelbase,
+            traj,
+            border_segments,
+            args.ego_length,
+            args.ego_width,
+            args.ego_wheelbase,
             args.rb_cross_thresh,
         )
         results[name] = metrics
 
         print(f"  Steps: {metrics['n_steps']}, Duration: {metrics['duration_s']:.1f}s")
         print(f"  Path: {metrics['path_length_m']:.1f}m, Progress: {metrics['progress_m']:.1f}m")
-        print(f"  Speed: mean={metrics['mean_speed_mps']:.2f} max={metrics['max_speed_mps']:.2f} m/s")
-        print(f"  RB dist: min={metrics['rb_dist_min']:.3f} p5={metrics['rb_dist_p5']:.3f} "
-              f"p25={metrics['rb_dist_p25']:.3f} med={metrics['rb_dist_med']:.3f}")
+        print(
+            f"  Speed: mean={metrics['mean_speed_mps']:.2f} max={metrics['max_speed_mps']:.2f} m/s"
+        )
+        print(
+            f"  RB dist: min={metrics['rb_dist_min']:.3f} p5={metrics['rb_dist_p5']:.3f} "
+            f"p25={metrics['rb_dist_p25']:.3f} med={metrics['rb_dist_med']:.3f}"
+        )
         print(f"  RB crossings: {metrics['rb_cross_steps']} steps ({metrics['rb_cross_frac']:.1%})")
-        if metrics['first_rb_cross_step'] >= 0:
-            print(f"    First crossing at step {metrics['first_rb_cross_step']} "
-                  f"({metrics['first_rb_cross_step'] * 0.1:.1f}s)")
+        if metrics["first_rb_cross_step"] >= 0:
+            print(
+                f"    First crossing at step {metrics['first_rb_cross_step']} "
+                f"({metrics['first_rb_cross_step'] * 0.1:.1f}s)"
+            )
         print(f"  Stopped: {metrics['stopped_steps']} steps ({metrics['stopped_frac']:.1%})")
         print(f"  Goal: {metrics['start_goal_d']:.0f}m -> {metrics['end_goal_d']:.0f}m")
 
@@ -337,8 +377,15 @@ def main():
         for name in results:
             header += f" {name:>15s}"
         print(header)
-        for key in ["path_length_m", "mean_speed_mps", "rb_dist_min", "rb_dist_med",
-                     "rb_cross_steps", "stopped_frac", "progress_m"]:
+        for key in [
+            "path_length_m",
+            "mean_speed_mps",
+            "rb_dist_min",
+            "rb_dist_med",
+            "rb_cross_steps",
+            "stopped_frac",
+            "progress_m",
+        ]:
             row = f"{key:<20s}"
             for name in results:
                 v = results[name][key]

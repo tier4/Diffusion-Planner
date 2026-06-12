@@ -27,7 +27,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-
 from diffusion_planner.grpo_epoch import _neighbor_future_world  # noqa: E402
 from diffusion_planner.grpo_utils import compute_collision_reward, sample_group  # noqa: E402
 from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
@@ -57,8 +56,12 @@ def parse_viz_args():
     p = argparse.ArgumentParser(description="Compare two checkpoints at temperature 0")
     p.add_argument("--model_path_a", type=str, required=True, help="checkpoint A (.pth)")
     p.add_argument("--model_path_b", type=str, required=True, help="checkpoint B (.pth)")
-    p.add_argument("--data_list", type=str, required=True,
-                   help="dataset path-list JSON (e.g. path_list_train.json)")
+    p.add_argument(
+        "--data_list",
+        type=str,
+        required=True,
+        help="dataset path-list JSON (e.g. path_list_train.json)",
+    )
     p.add_argument("--label_a", type=str, default="A")
     p.add_argument("--label_b", type=str, default="B")
     p.add_argument("--num_scenes", type=int, default=12)
@@ -71,24 +74,34 @@ def parse_viz_args():
     p.add_argument("--bicycle_prob", type=float, default=0.2)
     p.add_argument("--keep_clear_radius", type=float, default=3.0)
     p.add_argument("--use_ema", type=boolean, default=False)
-    p.add_argument("--noise_scale", type=float, default=0.0,
-                   help="initial-diffusion-noise scale for the single sample (0 = temperature 0)")
+    p.add_argument(
+        "--noise_scale",
+        type=float,
+        default=0.0,
+        help="initial-diffusion-noise scale for the single sample (0 = temperature 0)",
+    )
     p.add_argument("--output_path", type=str, default="model_compare.png")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--zoom_margin", type=float, default=15.0,
-                   help="metres of padding around the trajectories+GT; <=0 disables zoom")
+    p.add_argument(
+        "--zoom_margin",
+        type=float,
+        default=15.0,
+        help="metres of padding around the trajectories+GT; <=0 disables zoom",
+    )
     return p.parse_known_args()
 
 
 @torch.no_grad()
-def sample_once(model, norm_exp, args, noise_scale, neighbors_future, neighbors_future_valid,
-                device, seed):
+def sample_once(
+    model, norm_exp, args, noise_scale, neighbors_future, neighbors_future_valid, device, seed
+):
     """One trajectory per scene from a fixed-seed initial noise, plus its collision reward."""
     torch.manual_seed(seed)  # both models share this seed -> identical initial latent
     ego_world = sample_group(model, norm_exp, noise_scale, device)  # [S, T, 4]
     reward, _, _ = compute_collision_reward(
-        ego_world, norm_exp, neighbors_future, neighbors_future_valid, args)
+        ego_world, norm_exp, neighbors_future, neighbors_future_valid, args
+    )
     return ego_world.cpu().numpy(), reward.cpu().numpy()
 
 
@@ -114,8 +127,10 @@ def main():
     injected_mask = np.zeros((S, raw["neighbor_agents_past"].shape[1]), dtype=bool)
     if v.aug_mode != "none":
         injector = SyntheticColliderInjector(
-            pedestrian_prob=v.pedestrian_prob, bicycle_prob=v.bicycle_prob,
-            keep_clear_radius=v.keep_clear_radius)
+            pedestrian_prob=v.pedestrian_prob,
+            bicycle_prob=v.bicycle_prob,
+            keep_clear_radius=v.keep_clear_radius,
+        )
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
         injected_mask = injector.last_injected_mask.cpu().numpy()
         print(f"Injected {int(injected_mask.sum())} synthetic colliders across {S} scenes")
@@ -135,11 +150,25 @@ def main():
     norm_exp = args.observation_normalizer(exp)
 
     ego_a, reward_a = sample_once(
-        model_a, norm_exp, args, v.noise_scale, neighbors_future, neighbors_future_valid,
-        device, v.seed)
+        model_a,
+        norm_exp,
+        args,
+        v.noise_scale,
+        neighbors_future,
+        neighbors_future_valid,
+        device,
+        v.seed,
+    )
     ego_b, reward_b = sample_once(
-        model_b, norm_exp, args, v.noise_scale, neighbors_future, neighbors_future_valid,
-        device, v.seed)
+        model_b,
+        norm_exp,
+        args,
+        v.noise_scale,
+        neighbors_future,
+        neighbors_future_valid,
+        device,
+        v.seed,
+    )
 
     cols = min(4, S)
     rows = int(np.ceil(S / cols))
@@ -159,34 +188,66 @@ def main():
             is_inj = injected_mask[s, p]
             box_c = "magenta" if is_inj else "0.5"
             cur = past[-1]
-            corners = _bbox_corners(cur[_PAST_X], cur[_PAST_Y], cur[_PAST_COS], cur[_PAST_SIN],
-                                    cur[_PAST_LENGTH], cur[_PAST_WIDTH])
-            ax.plot(corners[:, 0], corners[:, 1], "-", color=box_c,
-                    lw=1.4 if is_inj else 0.8, alpha=0.9 if is_inj else 0.7,
-                    zorder=3.5 if is_inj else 2)
+            corners = _bbox_corners(
+                cur[_PAST_X],
+                cur[_PAST_Y],
+                cur[_PAST_COS],
+                cur[_PAST_SIN],
+                cur[_PAST_LENGTH],
+                cur[_PAST_WIDTH],
+            )
+            ax.plot(
+                corners[:, 0],
+                corners[:, 1],
+                "-",
+                color=box_c,
+                lw=1.4 if is_inj else 0.8,
+                alpha=0.9 if is_inj else 0.7,
+                zorder=3.5 if is_inj else 2,
+            )
             # past / history trajectory (model input): dashed, to distinguish from solid future
             hist = _nonzero_rows(past[:, :2])
             if hist.shape[0] > 0:
-                ax.plot(hist[:, 0], hist[:, 1], "--", color=box_c,
-                        lw=1.0 if is_inj else 0.7, alpha=0.7 if is_inj else 0.4, zorder=2)
+                ax.plot(
+                    hist[:, 0],
+                    hist[:, 1],
+                    "--",
+                    color=box_c,
+                    lw=1.0 if is_inj else 0.7,
+                    alpha=0.7 if is_inj else 0.4,
+                    zorder=2,
+                )
             fut = _nonzero_rows(neigh_future[s, p, :, :2])
             if fut.shape[0] > 0:
-                ax.plot(fut[:, 0], fut[:, 1], "-", color=box_c,
-                        lw=1.0 if is_inj else 0.8, alpha=0.8 if is_inj else 0.5, zorder=2)
+                ax.plot(
+                    fut[:, 0],
+                    fut[:, 1],
+                    "-",
+                    color=box_c,
+                    lw=1.0 if is_inj else 0.8,
+                    alpha=0.8 if is_inj else 0.5,
+                    zorder=2,
+                )
 
         ego_len, ego_wid = float(ego_shape[s, 1]), float(ego_shape[s, 2])
 
         # GT ego future
         gt = _nonzero_rows(ego_future_gt[s, :, :2])
         if gt.shape[0] > 0:
-            ax.plot(gt[:, 0], gt[:, 1], "k--", lw=1.8,
-                    label="GT" if s == 0 else None, zorder=4)
+            ax.plot(gt[:, 0], gt[:, 1], "k--", lw=1.8, label="GT" if s == 0 else None, zorder=4)
 
         # the two models' deterministic trajectories
         for ego, color, lbl in ((ego_a, _COLOR_A, v.label_a), (ego_b, _COLOR_B, v.label_b)):
             traj = ego[s]  # [T, 4]
-            ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=2.0,
-                    label=lbl if s == 0 else None, zorder=5)
+            ax.plot(
+                traj[:, 0],
+                traj[:, 1],
+                "-",
+                color=color,
+                lw=2.0,
+                label=lbl if s == 0 else None,
+                zorder=5,
+            )
             if v.show_footprint:
                 draw_footprints(ax, traj, ego_len, ego_wid, color, 20, alpha=0.4, mode="tail")
 
@@ -196,8 +257,10 @@ def main():
         ax.plot(ego_box[:, 0], ego_box[:, 1], "-", color="black", lw=2.0, zorder=6)
         ax.plot(0, 0, "k*", ms=10, zorder=6)
 
-        ax.set_title(f"scene #{idx[s]}   {v.label_a} r={reward_a[s]:.2f}   "
-                     f"{v.label_b} r={reward_b[s]:.2f}", fontsize=10)
+        ax.set_title(
+            f"scene #{idx[s]}   {v.label_a} r={reward_a[s]:.2f}   {v.label_b} r={reward_b[s]:.2f}",
+            fontsize=10,
+        )
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.3)
 
@@ -218,12 +281,15 @@ def main():
     fig.suptitle(
         f"Temperature-0 trajectory comparison on synthetic scenes  |  "
         f"{v.label_a} mean r={reward_a.mean():.2f}, {v.label_b} mean r={reward_b.mean():.2f}",
-        fontsize=12)
+        fontsize=12,
+    )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(v.output_path, dpi=120)
     print(f"Saved {S} scenes to {v.output_path}")
-    print(f"  {v.label_a} mean reward={reward_a.mean():.3f}  "
-          f"{v.label_b} mean reward={reward_b.mean():.3f}")
+    print(
+        f"  {v.label_a} mean reward={reward_a.mean():.3f}  "
+        f"{v.label_b} mean reward={reward_b.mean():.3f}"
+    )
 
 
 if __name__ == "__main__":

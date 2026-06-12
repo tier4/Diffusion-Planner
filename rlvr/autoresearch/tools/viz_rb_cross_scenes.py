@@ -18,6 +18,7 @@ Usage:
         [--max_scenes 16] \
         [--cols 4]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,8 +49,7 @@ def _draw_ego_obb(ax, xy_yaw_4, ego_shape, color="red", lw=2.0, label=None):
     traj = torch.tensor(xy_yaw_4, dtype=torch.float32).reshape(1, 1, 4)
     corners = _build_ego_bbox_corners(traj, ego_shape)[0, 0].cpu().numpy()
     corners_closed = np.vstack([corners, corners[:1]])
-    ax.plot(corners_closed[:, 0], corners_closed[:, 1],
-            color=color, lw=lw, label=label, zorder=15)
+    ax.plot(corners_closed[:, 0], corners_closed[:, 1], color=color, lw=lw, label=label, zorder=15)
 
 
 def _draw_gt(ax, path):
@@ -57,8 +57,7 @@ def _draw_gt(ax, path):
     gt = d["ego_agent_future"][:, :2]
     valid = ~((gt[:, 0] == 0) & (gt[:, 1] == 0))
     if valid.sum() >= 2:
-        ax.plot(gt[valid, 0], gt[valid, 1], "--",
-                color="black", lw=1.2, alpha=0.6, label="GT")
+        ax.plot(gt[valid, 0], gt[valid, 1], "--", color="black", lw=1.2, alpha=0.6, label="GT")
 
 
 def _draw_traj(ax, traj, label, color):
@@ -72,8 +71,12 @@ def main():
     p.add_argument("--scenes", type=Path, required=True)
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--output_dir", type=Path, required=True)
-    p.add_argument("--max_scenes", type=int, default=16,
-                   help="Plot at most N rb-cross scenes (worst by rb_min_dist first)")
+    p.add_argument(
+        "--max_scenes",
+        type=int,
+        default=16,
+        help="Plot at most N rb-cross scenes (worst by rb_min_dist first)",
+    )
     p.add_argument("--cols", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
@@ -119,14 +122,16 @@ def main():
             # recomputed later via compute_road_border_penalty when plotting.
             offenders.append((si, float(r.rb_min_dist), det_traj, path))
         if (si + 1) % 50 == 0:
-            print(f"  ... scanned {si+1}/{len(scenes)}, offenders so far: {len(offenders)}")
+            print(f"  ... scanned {si + 1}/{len(scenes)}, offenders so far: {len(offenders)}")
 
-    print(f"Total rb_crossing scenes: {len(offenders)}/{len(scenes)} "
-          f"({100*len(offenders)/len(scenes):.1f}%)")
+    print(
+        f"Total rb_crossing scenes: {len(offenders)}/{len(scenes)} "
+        f"({100 * len(offenders) / len(scenes):.1f}%)"
+    )
 
     # Sort by rb_min_dist ascending (worst first — min distance is most negative/zero)
     offenders.sort(key=lambda x: x[1])
-    offenders = offenders[:args.max_scenes]
+    offenders = offenders[: args.max_scenes]
     if not offenders:
         print("No rb_crossing scenes found. Exiting.")
         return
@@ -137,9 +142,12 @@ def main():
     cols = min(args.cols, n)
     rows = (n + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 7 * rows))
-    if rows == 1 and cols == 1: axes = np.array([[axes]])
-    elif rows == 1: axes = axes[None, :]
-    elif cols == 1: axes = axes[:, None]
+    if rows == 1 and cols == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes[None, :]
+    elif cols == 1:
+        axes = axes[:, None]
     axes_flat = axes.flatten()
 
     # Ego shape from first scene (consistent across all scenes)
@@ -154,8 +162,7 @@ def main():
         _draw_gt(ax, path)
         _draw_traj(ax, det_traj, f"DET (scene {si})", "#d62728")
         # Ego OBB at t=0 (start)
-        _draw_ego_obb(ax, [0.0, 0.0, 1.0, 0.0], ego_shape, color="blue", lw=1.5,
-                      label="ego t=0")
+        _draw_ego_obb(ax, [0.0, 0.0, 1.0, 0.0], ego_shape, color="blue", lw=1.5, label="ego t=0")
         # Ego OBB at the worst step (min rb_dist) — approximate by finding step in
         # det_traj where the ego-to-border distance is smallest. Compute per-step
         # using compute_reward_batch once more with the single traj.
@@ -168,22 +175,27 @@ def main():
         # OR: evaluate per-step using direct call.
         try:
             from rlvr.reward import compute_road_border_penalty
+
             _, _, _, _, _, per_ts_min = compute_road_border_penalty(
-                det_t, ego_shape.to(device), data,
+                det_t,
+                ego_shape.to(device),
+                data,
             )
             worst_t = int(per_ts_min[0].argmin().item())
         except Exception:
             worst_t = 40
         if 0 < worst_t < det_traj.shape[0]:
             pose = det_traj[worst_t]  # [x, y, cos, sin]
-            _draw_ego_obb(ax, pose.tolist(), ego_shape, color="red", lw=2.2,
-                          label=f"ego t={worst_t} (worst)")
+            _draw_ego_obb(
+                ax, pose.tolist(), ego_shape, color="red", lw=2.2, label=f"ego t={worst_t} (worst)"
+            )
 
         # Frame
         pts = np.vstack([det_traj[:, :2], [[0, 0]]])
         cx, cy = np.mean(pts[:, 0]), np.mean(pts[:, 1])
         half = max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])) * 0.6 + 8
-        ax.set_xlim(cx - half, cx + half); ax.set_ylim(cy - half, cy + half)
+        ax.set_xlim(cx - half, cx + half)
+        ax.set_ylim(cy - half, cy + half)
         ax.set_aspect("equal")
         ax.legend(fontsize=6, loc="upper left")
         ax.set_title(

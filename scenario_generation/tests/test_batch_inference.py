@@ -115,12 +115,15 @@ class TestPredictBatch:
         sequential = {}
         for aid in ids:
             from scenario_generation.simulate import _predict_as_ego
+
             sequential[aid] = _predict_as_ego(model, args, synthetic_scene, aid, "cpu")
 
         batched = _predict_batch(model, args, synthetic_scene, ids, "cpu")
 
         for aid in ids:
             np.testing.assert_allclose(
-                batched[aid], sequential[aid], atol=1e-5,
+                batched[aid],
+                sequential[aid],
+                atol=1e-5,
                 err_msg=f"Mismatch for agent {aid}",
             )

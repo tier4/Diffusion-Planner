@@ -10,13 +10,15 @@ or:
     pytest preference_optimization/test_initial_pruning.py
 """
 
-import numpy as np
 import sys
+
+import numpy as np
 
 
 def _import_utils():
     """Import utils, adding repo root to path if needed."""
     from pathlib import Path
+
     repo_root = Path(__file__).resolve().parent.parent
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
@@ -25,7 +27,12 @@ def _import_utils():
         calculate_initial_yaw_difference,
         should_prune_by_initial_pose,
     )
-    return calculate_initial_position_displacement, calculate_initial_yaw_difference, should_prune_by_initial_pose
+
+    return (
+        calculate_initial_position_displacement,
+        calculate_initial_yaw_difference,
+        should_prune_by_initial_pose,
+    )
 
 
 _calc_disp, _calc_yaw, _should_prune = _import_utils()
@@ -53,6 +60,7 @@ def _make_traj(x0: float, y0: float, yaw_deg: float, T: int = 80) -> np.ndarray:
 
 
 # --- calculate_initial_position_displacement ---
+
 
 def test_displacement_identical():
     """Displacement between a trajectory and itself is zero."""
@@ -90,6 +98,7 @@ def test_displacement_symmetric():
 
 # --- calculate_initial_yaw_difference ---
 
+
 def test_yaw_identical():
     """Same heading gives zero yaw difference."""
     traj = _make_traj(0.0, 0.0, 45.0)
@@ -114,7 +123,9 @@ def test_yaw_known_negative_symmetry():
     t_neg = _make_traj(0.0, 0.0, -0.5)
     result_pos = _calc_yaw(t1, t_pos)
     result_neg = _calc_yaw(t1, t_neg)
-    assert abs(result_pos - result_neg) < 1e-9, f"Expected symmetry, got {result_pos}° vs {result_neg}°"
+    assert abs(result_pos - result_neg) < 1e-9, (
+        f"Expected symmetry, got {result_pos}° vs {result_neg}°"
+    )
     print(f"  PASS  yaw_known_negative_symmetry: {result_pos:.6f}°")
 
 
@@ -147,6 +158,7 @@ def test_yaw_180_degrees():
 
 # --- should_prune_by_initial_pose ---
 
+
 def test_prune_both_under_threshold():
     """Both metrics under threshold: should NOT prune."""
     t1 = _make_traj(0.0, 0.0, 0.0)
@@ -163,7 +175,9 @@ def test_prune_position_over_only():
     t2 = _make_traj(0.08, 0.0, 0.2)  # 0.08m > 0.055 threshold, yaw fine
     should_prune, disp, yaw = _should_prune(t1, t2, pos_threshold_m=0.055, yaw_threshold_deg=0.55)
     assert should_prune, f"Should prune due to position, disp={disp:.4f}"
-    print(f"  PASS  prune_position_over_only: prune={should_prune}, disp={disp:.4f}m, yaw={yaw:.4f}°")
+    print(
+        f"  PASS  prune_position_over_only: prune={should_prune}, disp={disp:.4f}m, yaw={yaw:.4f}°"
+    )
 
 
 def test_prune_yaw_over_only():
@@ -190,7 +204,9 @@ def test_prune_exactly_at_threshold():
     t2 = _make_traj(0.055, 0.0, 0.55)  # exactly at threshold
     should_prune, disp, yaw = _should_prune(t1, t2, pos_threshold_m=0.055, yaw_threshold_deg=0.55)
     assert not should_prune, f"Should not prune at exact threshold, disp={disp:.4f}, yaw={yaw:.4f}"
-    print(f"  PASS  prune_exactly_at_threshold: prune={should_prune}, disp={disp:.4f}m, yaw={yaw:.4f}°")
+    print(
+        f"  PASS  prune_exactly_at_threshold: prune={should_prune}, disp={disp:.4f}m, yaw={yaw:.4f}°"
+    )
 
 
 def test_prune_returns_correct_metrics():
@@ -202,6 +218,7 @@ def test_prune_returns_correct_metrics():
         calculate_initial_position_displacement,
         calculate_initial_yaw_difference,
     )
+
     expected_disp = calculate_initial_position_displacement(t1, t2)
     expected_yaw = calculate_initial_yaw_difference(t1, t2)
 
@@ -248,6 +265,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  ERROR {t.__name__}: {e}")
             import traceback
+
             traceback.print_exc()
             failed += 1
 

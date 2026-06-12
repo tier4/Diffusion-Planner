@@ -1,6 +1,6 @@
 /**
  * Annotation GUI Styles
- * 
+ *
  * Custom CSS for the Trajectory Preference Annotation interface.
  * Provides fixed sidebar layout and responsive design.
  */
@@ -30,4 +30,3 @@
 #keyboard_capture {
     display: none !important;
 }
-

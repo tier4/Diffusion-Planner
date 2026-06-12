@@ -47,10 +47,11 @@ def _load_npz(npz_path: str, device: torch.device) -> dict[str, torch.Tensor]:
 @dataclass
 class RolloutStep:
     """Data collected at one simulation step (all detached, no grad graph)."""
-    scene_encoding: torch.Tensor   # [1, N, D]
-    x_ref: torch.Tensor            # [1, T, 4]
-    eta_lat_01: float              # sampled value in (0, 1) — legacy 2-head API
-    eta_lon_01: float              # sampled value in (0, 1) — legacy 2-head API
+
+    scene_encoding: torch.Tensor  # [1, N, D]
+    x_ref: torch.Tensor  # [1, T, 4]
+    eta_lat_01: float  # sampled value in (0, 1) — legacy 2-head API
+    eta_lon_01: float  # sampled value in (0, 1) — legacy 2-head API
     log_prob: float
     value: float
     reward: float
@@ -63,6 +64,7 @@ class RolloutStep:
 @dataclass
 class RolloutBuffer:
     """Complete rollout data for one scene, ready for training."""
+
     steps: list[RolloutStep] = field(default_factory=list)
     advantages: torch.Tensor | None = None
     value_targets: torch.Tensor | None = None
@@ -120,11 +122,15 @@ class RolloutManager:
         """Build GuidanceComposer for a given eta pair."""
         guidance_fns = [
             GuidanceConfig(
-                name="lateral", enabled=True, scale=1.0,
+                name="lateral",
+                enabled=True,
+                scale=1.0,
                 params={"lambda_lat": self.lambda_lat, "eta_lat": eta_lat},
             ),
             GuidanceConfig(
-                name="longitudinal", enabled=True, scale=1.0,
+                name="longitudinal",
+                enabled=True,
+                scale=1.0,
                 params={"lambda_lon": self.lambda_lon, "eta_lon": eta_lon},
             ),
         ]
@@ -202,7 +208,10 @@ class RolloutManager:
 
             # 2. Generate reference trajectory
             x_ref_np = generate_reference_trajectory(
-                self.policy_model, self.model_args, norm_data, self.device,
+                self.policy_model,
+                self.model_args,
+                norm_data,
+                self.device,
             )
             x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)  # [1, T, 4]
             norm_data["x_ref"] = x_ref
@@ -215,7 +224,7 @@ class RolloutManager:
             # Convert back to (0,1) for log_prob storage
             eta_lat_01_raw = (eta_lat_01 + 1.0) / 2.0
             eta_lon_01_raw = (eta_lon_01 + 1.0) / 2.0
-            log_prob = (policy_out.log_prob_lat.item() + policy_out.log_prob_lon.item())
+            log_prob = policy_out.log_prob_lat.item() + policy_out.log_prob_lon.item()
             value = policy_out.value.item()
 
             # 4. Generate 1 guided trajectory with noise
@@ -225,9 +234,13 @@ class RolloutManager:
             noise = random.uniform(*self.noise_range)
 
             traj_np = generate_samples(
-                model=self.policy_model, model_args=self.model_args,
-                data=norm_data, noise_scale=noise, n_samples=1,
-                composer=composer, device=self.device,
+                model=self.policy_model,
+                model_args=self.model_args,
+                data=norm_data,
+                noise_scale=noise,
+                n_samples=1,
+                composer=composer,
+                device=self.device,
             )[0]  # (T, 4)
             trajectory = torch.from_numpy(traj_np).to(self.device)
 
@@ -249,7 +262,11 @@ class RolloutManager:
                 if neighbor_futures is not None and step_t < neighbor_futures.shape[1]:
                     nb_gt_orig = neighbor_futures[:, step_t, :]  # [N_nb, 3] in original frame
                     nb_curr_4d = transform_positions_to_ego_frame(
-                        nb_gt_orig, ego_abs_x, ego_abs_y, ego_abs_heading, self.device,
+                        nb_gt_orig,
+                        ego_abs_x,
+                        ego_abs_y,
+                        ego_abs_heading,
+                        self.device,
                     )
                     nb_curr = nb_curr_4d  # [N_nb, 4] in current ego frame
                 else:
@@ -275,16 +292,18 @@ class RolloutManager:
             )
 
             # 7. Store step
-            buffer.steps.append(RolloutStep(
-                scene_encoding=scene_encoding.detach().cpu(),
-                x_ref=x_ref.detach().cpu(),
-                eta_lat_01=eta_lat_01_raw,
-                eta_lon_01=eta_lon_01_raw,
-                log_prob=log_prob,
-                value=value,
-                reward=step_reward.total,
-                terminal=step_reward.terminal,
-            ))
+            buffer.steps.append(
+                RolloutStep(
+                    scene_encoding=scene_encoding.detach().cpu(),
+                    x_ref=x_ref.detach().cpu(),
+                    eta_lat_01=eta_lat_01_raw,
+                    eta_lon_01=eta_lon_01_raw,
+                    log_prob=log_prob,
+                    value=value,
+                    reward=step_reward.total,
+                    terminal=step_reward.terminal,
+                )
+            )
 
             buffer.total_return += step_reward.total
             buffer.episode_length = step_t + 1
@@ -327,8 +346,11 @@ class RolloutManager:
             terminal_value = 0.0 if buffer.steps[-1].terminal else values[-1]
 
             advantages, value_targets = compute_gae(
-                rewards, values, terminal_value,
-                gamma=self.gamma, lam=self.gae_lambda,
+                rewards,
+                values,
+                terminal_value,
+                gamma=self.gamma,
+                lam=self.gae_lambda,
             )
             buffer.advantages = advantages
             buffer.value_targets = value_targets

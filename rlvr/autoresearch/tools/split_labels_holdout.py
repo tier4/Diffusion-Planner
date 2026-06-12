@@ -18,6 +18,7 @@ Usage:
         --labels <labels1.json> <labels2.json> ... \
         --holdout_frac 0.15 --out_holdout <holdout.json> [--seed 0]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,7 +39,8 @@ def base_id(scene_path: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--labels", required=True, nargs="+")
     parser.add_argument("--holdout_frac", type=float, default=0.15)
@@ -63,8 +65,7 @@ def main():
     ordered = sorted(groups, key=rank)
     n_hold = max(1, int(len(ordered) * args.holdout_frac))
     hold = set(ordered[:n_hold])
-    print(f"[split] {len(groups)} base-scene groups -> {len(hold)} held out "
-          f"({sorted(hold)})")
+    print(f"[split] {len(groups)} base-scene groups -> {len(hold)} held out ({sorted(hold)})")
 
     # Compute the full split FIRST; only write files after validation so a
     # failed run doesn't leave truncated *_train.json next to the originals.
@@ -76,17 +77,17 @@ def main():
         out = dict(d)
         out["scenes"] = tr
         if "summary" in out:
-            out["summary"] = dict(out["summary"],
-                                  n_scenes=len(tr),
-                                  holdout_removed=len(hd))
+            out["summary"] = dict(out["summary"], n_scenes=len(tr), holdout_removed=len(hd))
         out_path = str(Path(lp).with_name(Path(lp).stem + "_train.json"))
         pending.append((lp, out_path, out, tr, hd))
 
     n_solved = sum(1 for r in held_rows if r["status"] == "solved")
     if n_solved == 0:
-        raise SystemExit("holdout contains NO solved avoidance rows — "
-                         "useless for overfit detection; re-seed or raise "
-                         "frac (no files written)")
+        raise SystemExit(
+            "holdout contains NO solved avoidance rows — "
+            "useless for overfit detection; re-seed or raise "
+            "frac (no files written)"
+        )
 
     for lp, out_path, out, tr, hd in pending:
         with open(out_path, "w") as f:
@@ -96,14 +97,19 @@ def main():
             s = sum(1 for r in rows if r["status"] == "solved")
             c = sum(1 for r in rows if r["status"] == "already_clean")
             return f"{len(rows)} rows ({s} solved / {c} clean)"
+
         print(f"  {Path(lp).name}: train {comp(tr)} | holdout {comp(hd)}")
 
     with open(args.out_holdout, "w") as f:
-        json.dump({"summary": {"n_scenes": len(held_rows),
-                               "holdout_groups": sorted(hold)},
-                   "scenes": held_rows}, f, indent=1)
-    print(f"[split] holdout: {len(held_rows)} rows, {n_solved} solved -> "
-          f"{args.out_holdout}")
+        json.dump(
+            {
+                "summary": {"n_scenes": len(held_rows), "holdout_groups": sorted(hold)},
+                "scenes": held_rows,
+            },
+            f,
+            indent=1,
+        )
+    print(f"[split] holdout: {len(held_rows)} rows, {n_solved} solved -> {args.out_holdout}")
 
 
 if __name__ == "__main__":

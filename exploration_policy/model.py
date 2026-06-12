@@ -84,10 +84,10 @@ class ExplorationPolicyOutput:
     head is not configured).
     """
 
-    etas: dict[str, torch.Tensor]       # head -> [B] sampled eta in [-1, 1]
+    etas: dict[str, torch.Tensor]  # head -> [B] sampled eta in [-1, 1]
     log_probs: dict[str, torch.Tensor]  # head -> [B] log prob of sampled eta
-    value: torch.Tensor                 # [B] state value estimate (Phase 2)
-    dists: dict[str, Beta]              # head -> Beta distribution object
+    value: torch.Tensor  # [B] state value estimate (Phase 2)
+    dists: dict[str, Beta]  # head -> Beta distribution object
 
     @property
     def eta_lat(self) -> torch.Tensor:

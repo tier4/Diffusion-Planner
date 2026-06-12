@@ -35,15 +35,21 @@ DEFAULT_NPZ_LIST = Path(_ENV_NPZ) if _ENV_NPZ else None
 def main():
     parser = argparse.ArgumentParser(description="Exploration policy integration test")
     parser.add_argument(
-        "--model_path", type=Path, default=DEFAULT_MODEL,
+        "--model_path",
+        type=Path,
+        default=DEFAULT_MODEL,
         help="Path to model .pth (or set EXPLORATION_POLICY_MODEL_PATH env var)",
     )
     parser.add_argument(
-        "--npz_list", type=Path, default=DEFAULT_NPZ_LIST,
+        "--npz_list",
+        type=Path,
+        default=DEFAULT_NPZ_LIST,
         help="Path to JSON scene list (or set EXPLORATION_POLICY_NPZ_LIST env var)",
     )
     parser.add_argument("--n_scenes", type=int, default=3, help="Number of scenes to test")
-    parser.add_argument("--n_trajectories", type=int, default=4, help="Policy-guided trajectories per scene")
+    parser.add_argument(
+        "--n_trajectories", type=int, default=4, help="Policy-guided trajectories per scene"
+    )
     args = parser.parse_args()
 
     if args.model_path is None or args.npz_list is None:
@@ -58,6 +64,7 @@ def main():
     # --- Load model ---
     print(f"\nLoading model from {args.model_path}...")
     from preference_optimization.model_utils import load_model
+
     model, model_args = load_model(args.model_path, device)
     model.eval()
     print(f"  Model loaded. hidden_dim={model_args.hidden_dim}, future_len={model_args.future_len}")
@@ -65,12 +72,12 @@ def main():
     # --- Load scenes ---
     with open(args.npz_list) as f:
         npz_paths = json.load(f)
-    npz_paths = [p for p in npz_paths[:args.n_scenes] if Path(p).exists()]
+    npz_paths = [p for p in npz_paths[: args.n_scenes] if Path(p).exists()]
     print(f"  Testing on {len(npz_paths)} scenes")
 
     # --- Create exploration policy ---
     from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
-    from exploration_policy.utils import run_frozen_encoder, generate_reference_trajectory
+    from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
 
     ep_config = ExplorationPolicyConfig(
         hidden_dim=128,
@@ -89,18 +96,21 @@ def main():
     with torch.no_grad():
         zero_fused = torch.zeros(1, ep_config.hidden_dim, device=device)
         lat_dist, lon_dist = policy.guidance_head(zero_fused)
-        print(f"  Zero-init check: alpha_lat={lat_dist.concentration1.item():.4f}, "
-              f"beta_lat={lat_dist.concentration0.item():.4f} "
-              f"(mean_eta={2*lat_dist.mean.item()-1:.6f})")
+        print(
+            f"  Zero-init check: alpha_lat={lat_dist.concentration1.item():.4f}, "
+            f"beta_lat={lat_dist.concentration0.item():.4f} "
+            f"(mean_eta={2 * lat_dist.mean.item() - 1:.6f})"
+        )
 
     # --- Run per scene ---
-    from preference_optimization.utils import load_npz_data
-    from guidance_gui.generate_samples import generate_samples
     from diffusion_planner.model.guidance.composer import GuidanceComposer
     from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 
+    from guidance_gui.generate_samples import generate_samples
+    from preference_optimization.utils import load_npz_data
+
     for scene_idx, npz_path in enumerate(npz_paths):
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Scene {scene_idx}: {Path(npz_path).stem}")
 
         # Load data
@@ -115,16 +125,21 @@ def main():
         # 1. Deterministic trajectory (no guidance)
         with torch.no_grad():
             det_traj = generate_samples(
-                model, model_args, norm_data,
-                noise_scale=0.0, n_samples=1, composer=None, device=device,
+                model,
+                model_args,
+                norm_data,
+                noise_scale=0.0,
+                n_samples=1,
+                composer=None,
+                device=device,
             )[0]  # (T, 4)
-        print(f"  Deterministic: endpoint=({det_traj[-1,0]:.2f}, {det_traj[-1,1]:.2f})")
+        print(f"  Deterministic: endpoint=({det_traj[-1, 0]:.2f}, {det_traj[-1, 1]:.2f})")
 
         # 2. Generate reference trajectory (LoRA-disabled, same as det for base model)
         with torch.no_grad():
             x_ref = generate_reference_trajectory(model, model_args, norm_data, device)
         x_ref_t = torch.from_numpy(x_ref).unsqueeze(0).to(device)  # [1, T, 4]
-        print(f"  Reference:     endpoint=({x_ref[-1,0]:.2f}, {x_ref[-1,1]:.2f})")
+        print(f"  Reference:     endpoint=({x_ref[-1, 0]:.2f}, {x_ref[-1, 1]:.2f})")
 
         # 3. Get frozen encoder output
         with torch.no_grad():
@@ -147,11 +162,15 @@ def main():
             # Build lateral+longitudinal guidance with policy's eta
             guidance_fns = [
                 GuidanceConfig(
-                    name="lateral", enabled=True, scale=1.0,
+                    name="lateral",
+                    enabled=True,
+                    scale=1.0,
                     params={"lambda_lat": 2.5, "eta_lat": eta_lat},
                 ),
                 GuidanceConfig(
-                    name="longitudinal", enabled=True, scale=1.0,
+                    name="longitudinal",
+                    enabled=True,
+                    scale=1.0,
                     params={"lambda_lon": 0.25, "eta_lon": eta_lon},
                 ),
             ]
@@ -160,8 +179,13 @@ def main():
 
             with torch.no_grad():
                 guided = generate_samples(
-                    model, model_args, norm_data,
-                    noise_scale=0.5, n_samples=1, composer=composer, device=device,
+                    model,
+                    model_args,
+                    norm_data,
+                    noise_scale=0.5,
+                    n_samples=1,
+                    composer=composer,
+                    device=device,
                 )[0]  # (T, 4)
 
             # Compute displacement from deterministic
@@ -170,16 +194,18 @@ def main():
             fde = disp[-1]
 
             mode = "det_policy" if k == 0 else f"sample_{k}"
-            print(f"  [{mode}] η_lat={eta_lat:+.3f}, η_lon={eta_lon:+.3f}, "
-                  f"V={value:+.3f}, ADE={ade:.2f}m, FDE={fde:.2f}m, "
-                  f"endpoint=({guided[-1,0]:.2f}, {guided[-1,1]:.2f})")
+            print(
+                f"  [{mode}] η_lat={eta_lat:+.3f}, η_lon={eta_lon:+.3f}, "
+                f"V={value:+.3f}, ADE={ade:.2f}m, FDE={fde:.2f}m, "
+                f"endpoint=({guided[-1, 0]:.2f}, {guided[-1, 1]:.2f})"
+            )
             guided_trajs.append(guided)
 
         # 5. Verify trajectories are actually different
         if len(guided_trajs) >= 2:
             pairwise_diffs = []
             for i in range(len(guided_trajs)):
-                for j in range(i+1, len(guided_trajs)):
+                for j in range(i + 1, len(guided_trajs)):
                     d = np.linalg.norm(
                         guided_trajs[i][:, :2] - guided_trajs[j][:, :2], axis=-1
                     ).mean()
@@ -187,7 +213,7 @@ def main():
             mean_diversity = np.mean(pairwise_diffs)
             print(f"  Trajectory diversity (mean pairwise ADE): {mean_diversity:.2f}m")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Integration test complete!")
 
 

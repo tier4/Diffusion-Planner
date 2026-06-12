@@ -16,6 +16,7 @@ Usage:
         [--n_scenes 10] [--repeats 5] \
         [--lambda_lat 5.0] [--lat_scale 2.0] [--col_scale 9.0]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,7 +44,8 @@ def _sync():
 @torch.no_grad()
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--policy_dir", required=True)
@@ -67,8 +69,7 @@ def main():
         paths = json.load(f)[: args.n_scenes]
     datas = [load_npz_data(p, device) for p in paths]
 
-    t = {"baseline": [], "k1_det": [], "k1_policy": [], "k1_guided": [],
-         "k8_guided": []}
+    t = {"baseline": [], "k1_det": [], "k1_policy": [], "k1_guided": [], "k8_guided": []}
 
     # warmup
     for d in datas[:2]:
@@ -78,14 +79,18 @@ def main():
     for rep in range(args.repeats):
         for d in datas:
             # --- baseline: plain det generation ---
-            _sync(); t0 = time.perf_counter()
+            _sync()
+            t0 = time.perf_counter()
             det = deterministic_predict(model, model_args, d)
-            _sync(); t["baseline"].append(time.perf_counter() - t0)
+            _sync()
+            t["baseline"].append(time.perf_counter() - t0)
 
             # --- k1: det (reference) + encoder+policy + 1 guided gen ---
-            _sync(); t0 = time.perf_counter()
+            _sync()
+            t0 = time.perf_counter()
             det = deterministic_predict(model, model_args, d)
-            _sync(); t1 = time.perf_counter()
+            _sync()
+            t1 = time.perf_counter()
             batch = _stack_scene_data([d], device)
             norm = _normalize_batch(batch, model_args)
             x_ref = torch.from_numpy(np.ascontiguousarray(det)).float()
@@ -94,58 +99,91 @@ def main():
             enc = run_frozen_encoder(model, norm)
             out = policy(enc, x_ref, deterministic=True)
             etas1 = {h: (2.0 * out.dists[h].mean - 1.0).reshape(1) for h in heads}
-            _sync(); t2 = time.perf_counter()
+            _sync()
+            t2 = time.perf_counter()
             _ = _batched_generate_varied_noise(
-                model, model_args, norm, noise_min=0.0, noise_max=0.0,
+                model,
+                model_args,
+                norm,
+                noise_min=0.0,
+                noise_max=0.0,
                 first_deterministic=False,
-                composer=make_composer(etas1, args), device=device,
+                composer=make_composer(etas1, args),
+                device=device,
             )
-            _sync(); t3 = time.perf_counter()
+            _sync()
+            t3 = time.perf_counter()
             t["k1_det"].append(t1 - t0)
             t["k1_policy"].append(t2 - t1)
             t["k1_guided"].append(t3 - t2)
 
             # --- k8: 1 mean + 8 sampled candidates, one batched gen ---
             etas9 = {
-                h: torch.cat([
-                    (2.0 * out.dists[h].mean - 1.0).reshape(1),
-                    (2.0 * out.dists[h].rsample((8,)).reshape(-1) - 1.0),
-                ]) for h in heads
+                h: torch.cat(
+                    [
+                        (2.0 * out.dists[h].mean - 1.0).reshape(1),
+                        (2.0 * out.dists[h].rsample((8,)).reshape(-1) - 1.0),
+                    ]
+                )
+                for h in heads
             }
-            gen = {k: (v.expand(9, *v.shape[1:]).contiguous()
-                       if isinstance(v, torch.Tensor) and v.shape[0] == 1 else v)
-                   for k, v in norm.items()}
-            _sync(); t0 = time.perf_counter()
+            gen = {
+                k: (
+                    v.expand(9, *v.shape[1:]).contiguous()
+                    if isinstance(v, torch.Tensor) and v.shape[0] == 1
+                    else v
+                )
+                for k, v in norm.items()
+            }
+            _sync()
+            t0 = time.perf_counter()
             _ = _batched_generate_varied_noise(
-                model, model_args, gen, noise_min=0.0, noise_max=0.0,
+                model,
+                model_args,
+                gen,
+                noise_min=0.0,
+                noise_max=0.0,
                 first_deterministic=False,
-                composer=make_composer(etas9, args), device=device,
+                composer=make_composer(etas9, args),
+                device=device,
             )
-            _sync(); t["k8_guided"].append(time.perf_counter() - t0)
+            _sync()
+            t["k8_guided"].append(time.perf_counter() - t0)
 
     def ms(v):
         a = np.array(v) * 1000
-        return {"mean_ms": round(float(a.mean()), 2),
-                "p95_ms": round(float(np.percentile(a, 95)), 2)}
+        return {
+            "mean_ms": round(float(a.mean()), 2),
+            "p95_ms": round(float(np.percentile(a, 95)), 2),
+        }
 
     stages = {k: ms(v) for k, v in t.items()}
     report = {
-        "n_scenes": len(datas), "repeats": args.repeats,
+        "n_scenes": len(datas),
+        "repeats": args.repeats,
         "stages": stages,
         "totals": {
             "baseline": stages["baseline"]["mean_ms"],
-            "k1_total": round(stages["k1_det"]["mean_ms"]
-                              + stages["k1_policy"]["mean_ms"]
-                              + stages["k1_guided"]["mean_ms"], 2),
-            "k8_total": round(stages["k1_det"]["mean_ms"]
-                              + stages["k1_policy"]["mean_ms"]
-                              + stages["k8_guided"]["mean_ms"], 2),
+            "k1_total": round(
+                stages["k1_det"]["mean_ms"]
+                + stages["k1_policy"]["mean_ms"]
+                + stages["k1_guided"]["mean_ms"],
+                2,
+            ),
+            "k8_total": round(
+                stages["k1_det"]["mean_ms"]
+                + stages["k1_policy"]["mean_ms"]
+                + stages["k8_guided"]["mean_ms"],
+                2,
+            ),
         },
     }
     report["totals"]["k1_overhead_x"] = round(
-        report["totals"]["k1_total"] / report["totals"]["baseline"], 2)
+        report["totals"]["k1_total"] / report["totals"]["baseline"], 2
+    )
     report["totals"]["k8_overhead_x"] = round(
-        report["totals"]["k8_total"] / report["totals"]["baseline"], 2)
+        report["totals"]["k8_total"] / report["totals"]["baseline"], 2
+    )
     print(json.dumps(report, indent=1))
     if args.output:
         with open(args.output, "w") as f:

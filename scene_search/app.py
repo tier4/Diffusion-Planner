@@ -51,8 +51,13 @@ from scene_search.scene_previewer import (
 # these substrings are treated as "higher = worse". Everything else is
 # assumed "higher = better" (distance-, reward-, and score-style fields).
 _HIGHER_IS_WORSE_SUBSTRINGS = (
-    "penalty", "crossing", "collision", "off_road", "red_light",
-    "near_frac", "wide_frac",
+    "penalty",
+    "crossing",
+    "collision",
+    "off_road",
+    "red_light",
+    "near_frac",
+    "wide_frac",
 )
 
 
@@ -64,9 +69,11 @@ def _metric_polarity(name: str) -> int:
             return -1
     return +1
 
+
 MAX_VISIBLE_BATCHES = 10
 
 MAP_CANVAS_JS = build_map_canvas_js(tool="arrow")
+
 
 def _heatmap_points(index: list[dict]) -> list[dict]:
     """Pick entries that carry per-step metrics (replay runs) and project to
@@ -147,16 +154,18 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
     print("Pre-rendering full map image...")
     full_map_b64 = renderer.render_viewport_base64(full_vp, dpi=100)
     full_bounds = full_vp.to_json()
-    print(f"  Map image: {len(full_map_b64)//1024}KB base64")
+    print(f"  Map image: {len(full_map_b64) // 1024}KB base64")
 
     heatmap_points = _heatmap_points(index)
     heatmap_meta = _heatmap_metadata(heatmap_points)
     heatmap_json = json.dumps(heatmap_points)
     heatmap_meta_json = json.dumps(heatmap_meta)
     if heatmap_points:
-        print(f"  Heatmap: {len(heatmap_points)} scored points across "
-              f"{len(heatmap_meta['metrics'])} metric(s) "
-              f"({len(heatmap_json)//1024}KB + {len(heatmap_meta_json)//1024}KB JSON)")
+        print(
+            f"  Heatmap: {len(heatmap_points)} scored points across "
+            f"{len(heatmap_meta['metrics'])} metric(s) "
+            f"({len(heatmap_json) // 1024}KB + {len(heatmap_meta_json) // 1024}KB JSON)"
+        )
 
     def render_map(viewport_json: str) -> str:
         """Server function for hi-res tile at current zoom. Called from JS (debounced)."""
@@ -164,7 +173,6 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         return renderer.render_viewport_base64(vp, dpi=100)
 
     with gr.Blocks(title="Scene Search") as demo:
-
         search_results_state = gr.State(value=[])
         kept_batches_state = gr.State(value=[])
         index_state = gr.State(value=index)
@@ -180,7 +188,9 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                     arrow_y = gr.Number(label="Y (MGRS)", value=42440, interactive=True)
                 arrow_heading = gr.Number(label="Heading (deg)", value=106, interactive=True)
                 radius_slider = gr.Slider(1, 200, value=50, step=1, label="Search radius (m)")
-                heading_tol_slider = gr.Slider(5, 180, value=30, step=5, label="Heading tolerance (deg)")
+                heading_tol_slider = gr.Slider(
+                    5, 180, value=30, step=5, label="Heading tolerance (deg)"
+                )
                 n_before_slider = gr.Slider(0, 100, value=30, step=5, label="Frames before")
                 n_after_slider = gr.Slider(0, 200, value=80, step=5, label="Frames after")
                 search_btn = gr.Button("Search", variant="primary")
@@ -209,17 +219,25 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                         for pname, pspec in spec.items():
                             if pspec["type"] == "int":
                                 param_components[pname] = gr.Number(
-                                    label=pspec["label"], value=pspec["default"],
-                                    minimum=pspec.get("min"), maximum=pspec.get("max"),
-                                    precision=0, interactive=True,
+                                    label=pspec["label"],
+                                    value=pspec["default"],
+                                    minimum=pspec.get("min"),
+                                    maximum=pspec.get("max"),
+                                    precision=0,
+                                    interactive=True,
                                 )
                             else:
                                 param_components[pname] = gr.Number(
-                                    label=pspec["label"], value=pspec["default"],
-                                    minimum=pspec.get("min"), maximum=pspec.get("max"),
+                                    label=pspec["label"],
+                                    value=pspec["default"],
+                                    minimum=pspec.get("min"),
+                                    maximum=pspec.get("max"),
                                     interactive=True,
                                 )
-                        constraint_components[cname] = {"enable": enable_cb, "params": param_components}
+                        constraint_components[cname] = {
+                            "enable": enable_cb,
+                            "params": param_components,
+                        }
 
                 gr.Markdown("### Kept Batches")
                 kept_summary = gr.Markdown("No batches kept yet")
@@ -248,8 +266,12 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
 
                 gr.Markdown("### Search Results")
                 with gr.Row():
-                    results_info = gr.Markdown("Shift+drag on the map to place an arrow, then click Search")
-                    keep_all_btn = gr.Button("Keep All Batches", size="sm", variant="primary", visible=False)
+                    results_info = gr.Markdown(
+                        "Shift+drag on the map to place an arrow, then click Search"
+                    )
+                    keep_all_btn = gr.Button(
+                        "Keep All Batches", size="sm", variant="primary", visible=False
+                    )
 
                 batch_groups = []
                 batch_labels = []
@@ -257,12 +279,17 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 batch_keep_btns = []
                 for i in range(MAX_VISIBLE_BATCHES):
                     with gr.Group(visible=False) as grp:
-                        lbl = gr.Markdown(f"Batch {i+1}")
-                        gal = gr.Gallery(label=f"Batch {i+1}", columns=6, rows=2,
-                                         height=220, object_fit="contain",
-                                         preview=True)
+                        lbl = gr.Markdown(f"Batch {i + 1}")
+                        gal = gr.Gallery(
+                            label=f"Batch {i + 1}",
+                            columns=6,
+                            rows=2,
+                            height=220,
+                            object_fit="contain",
+                            preview=True,
+                        )
                         with gr.Row():
-                            keep_b = gr.Button(f"Keep Batch {i+1}", size="sm", variant="primary")
+                            keep_b = gr.Button(f"Keep Batch {i + 1}", size="sm", variant="primary")
                     batch_groups.append(grp)
                     batch_labels.append(lbl)
                     batch_galleries.append(gal)
@@ -282,18 +309,24 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         # Update canvas props when sliders change
         def on_radius_change(val):
             return gr.update(radius=val)
+
         radius_slider.release(on_radius_change, inputs=[radius_slider], outputs=[map_canvas])
 
         def on_heading_tol_change(val):
             return gr.update(heading_tol=val)
-        heading_tol_slider.release(on_heading_tol_change, inputs=[heading_tol_slider], outputs=[map_canvas])
+
+        heading_tol_slider.release(
+            on_heading_tol_change, inputs=[heading_tol_slider], outputs=[map_canvas]
+        )
 
         if heatmap_metric_dd is not None:
+
             def on_heatmap_metric_change(val):
                 return gr.update(heatmap_metric=val)
-            heatmap_metric_dd.change(on_heatmap_metric_change,
-                                     inputs=[heatmap_metric_dd],
-                                     outputs=[map_canvas])
+
+            heatmap_metric_dd.change(
+                on_heatmap_metric_change, inputs=[heatmap_metric_dd], outputs=[map_canvas]
+            )
 
         # --- Build constraint input list for search ---
         # Order: [enable_1, param_1a, param_1b, ..., enable_2, param_2a, ...]
@@ -330,19 +363,32 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                     active_filters.append((c, params))
 
             batches = find_batches(
-                index=idx, center_x=x, center_y=y, heading_deg=heading,
-                radius=radius, heading_tolerance=heading_tol,
-                n_before=int(n_before), n_after=int(n_after),
+                index=idx,
+                center_x=x,
+                center_y=y,
+                heading_deg=heading,
+                radius=radius,
+                heading_tolerance=heading_tol,
+                n_before=int(n_before),
+                n_after=int(n_after),
                 constraint_filters=active_filters if active_filters else None,
             )
             batch_dicts = [
-                {"bag_prefix": b.bag_prefix, "scenes": b.scenes,
-                 "central_indices": b.central_indices, "metadata": b.metadata}
+                {
+                    "bag_prefix": b.bag_prefix,
+                    "scenes": b.scenes,
+                    "central_indices": b.central_indices,
+                    "metadata": b.metadata,
+                }
                 for b in batches
             ]
             total = sum(b.n_scenes for b in batches)
             n_constraints = len(active_filters)
-            constraint_info = f" ({n_constraints} constraint{'s' if n_constraints != 1 else ''} active)" if active_filters else ""
+            constraint_info = (
+                f" ({n_constraints} constraint{'s' if n_constraints != 1 else ''} active)"
+                if active_filters
+                else ""
+            )
 
             # Phase 1: show batch info instantly, no thumbnail rendering
             outputs = [
@@ -351,7 +397,13 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             ]
             for i in range(MAX_VISIBLE_BATCHES):
                 if i < len(batches):
-                    outputs.extend([gr.update(visible=True), f"**Batch {i+1}**: {batches[i].summary()}", gr.update(value=None)])
+                    outputs.extend(
+                        [
+                            gr.update(visible=True),
+                            f"**Batch {i + 1}**: {batches[i].summary()}",
+                            gr.update(value=None),
+                        ]
+                    )
                 else:
                     outputs.extend([gr.update(visible=False), gr.update(), gr.update(value=None)])
             outputs.append(batch_dicts)
@@ -372,12 +424,17 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             from scene_search.batch_search import Batch
 
             def _render_one(bd):
-                b = Batch(bag_prefix=bd["bag_prefix"], scenes=bd["scenes"],
-                          central_indices=bd["central_indices"], metadata=bd["metadata"])
+                b = Batch(
+                    bag_prefix=bd["bag_prefix"],
+                    scenes=bd["scenes"],
+                    central_indices=bd["central_indices"],
+                    metadata=bd["metadata"],
+                )
                 thumbs = render_batch_thumbnails(b, every_nth=10, max_workers=4)
                 return thumbnails_to_pil_images(thumbs)
 
             from concurrent.futures import as_completed as _as_completed
+
             all_pils = [None] * len(batch_dicts)
             with ThreadPoolExecutor(max_workers=min(len(batch_dicts), 6)) as tex:
                 futures = {tex.submit(_render_one, bd): i for i, bd in enumerate(batch_dicts)}
@@ -400,8 +457,17 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
 
         search_btn.click(
             on_search,
-            inputs=[arrow_x, arrow_y, arrow_heading, radius_slider, heading_tol_slider,
-                    n_before_slider, n_after_slider, index_state] + constraint_input_list,
+            inputs=[
+                arrow_x,
+                arrow_y,
+                arrow_heading,
+                radius_slider,
+                heading_tol_slider,
+                n_before_slider,
+                n_after_slider,
+                index_state,
+            ]
+            + constraint_input_list,
             outputs=search_outputs,
         ).then(
             on_search_fill,
@@ -418,7 +484,10 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         def _kept_summary(kept):
             total = sum(len(k["scenes"]) for k in kept)
             summary = f"**{len(kept)} batches** kept ({total} scenes)"
-            detail = "\n".join(f"- {k['bag_prefix'].split('/')[-1][:25]}... ({len(k['scenes'])} scenes)" for k in kept)
+            detail = "\n".join(
+                f"- {k['bag_prefix'].split('/')[-1][:25]}... ({len(k['scenes'])} scenes)"
+                for k in kept
+            )
             return summary, detail
 
         def make_keep_handler(idx):
@@ -431,6 +500,7 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                     kept = kept + [b]
                 summary, detail = _kept_summary(kept)
                 return kept, summary, detail
+
             return fn
 
         # --- Keep All ---
@@ -460,7 +530,10 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
         # --- Clear ---
         def on_clear():
             return [], "No batches kept yet", "No batches kept", ""
-        clear_kept_btn.click(on_clear, outputs=[kept_batches_state, kept_summary, kept_display, save_status])
+
+        clear_kept_btn.click(
+            on_clear, outputs=[kept_batches_state, kept_summary, kept_display, save_status]
+        )
 
         # --- Save ---
         def _next_available_path(base_path: str) -> str:
@@ -484,7 +557,8 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
             for k in kept:
                 for s in k["scenes"]:
                     if s not in seen:
-                        seen.add(s); scenes.append(s)
+                        seen.add(s)
+                        scenes.append(s)
             if ds and int(ds) > 0 and int(ds) < len(scenes):
                 scenes = sorted(random.sample(scenes, int(ds)))
             actual_path = _next_available_path(path)
@@ -493,8 +567,11 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
                 json.dump(scenes, f, indent=4)
             return f"Saved **{len(scenes)}** scenes to `{actual_path}`"
 
-        save_btn.click(on_save, inputs=[kept_batches_state, save_path_input, downsample_n],
-                       outputs=[save_status])
+        save_btn.click(
+            on_save,
+            inputs=[kept_batches_state, save_path_input, downsample_n],
+            outputs=[save_status],
+        )
 
     return demo
 
@@ -502,27 +579,46 @@ def build_interface(renderer: MapRenderer, index: list[dict], index_path: str | 
 def main():
     parser = argparse.ArgumentParser(description="Scene Search GUI")
     parser.add_argument("--map_path", type=Path, required=True, help="Path to lanelet2 map (.osm)")
-    parser.add_argument("--npz_list", type=str, default=None,
-                        help="path_list.json or NPZ directory (sidecar-backed scenes)")
-    parser.add_argument("--replay_runs", type=str, nargs="+", default=None,
-                        help="One or more scenario_generation.replay output "
-                             "directories. Uses trajectory_log.json + "
-                             "metrics_log.json instead of per-NPZ sidecars; "
-                             "enables the drift heatmap overlay.")
-    parser.add_argument("--index", type=str, default=None,
-                        help="Cached parquet index (requires pyarrow). Valid as "
-                             "a standalone scene source when the parquet already "
-                             "contains every scene you want to browse. If the "
-                             "parquet exists it is loaded verbatim — passing "
-                             "--npz_list alongside an existing parquet does NOT "
-                             "refresh it; delete the parquet to force rebuild.")
+    parser.add_argument(
+        "--npz_list",
+        type=str,
+        default=None,
+        help="path_list.json or NPZ directory (sidecar-backed scenes)",
+    )
+    parser.add_argument(
+        "--replay_runs",
+        type=str,
+        nargs="+",
+        default=None,
+        help="One or more scenario_generation.replay output "
+        "directories. Uses trajectory_log.json + "
+        "metrics_log.json instead of per-NPZ sidecars; "
+        "enables the drift heatmap overlay.",
+    )
+    parser.add_argument(
+        "--index",
+        type=str,
+        default=None,
+        help="Cached parquet index (requires pyarrow). Valid as "
+        "a standalone scene source when the parquet already "
+        "contains every scene you want to browse. If the "
+        "parquet exists it is loaded verbatim — passing "
+        "--npz_list alongside an existing parquet does NOT "
+        "refresh it; delete the parquet to force rebuild.",
+    )
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     args = parser.parse_args()
 
-    if not args.npz_list and not args.replay_runs and not (args.index and Path(args.index).exists()):
-        parser.error("supply at least one scene source: --npz_list, --replay_runs, "
-                     "or an existing --index parquet.")
+    if (
+        not args.npz_list
+        and not args.replay_runs
+        and not (args.index and Path(args.index).exists())
+    ):
+        parser.error(
+            "supply at least one scene source: --npz_list, --replay_runs, "
+            "or an existing --index parquet."
+        )
 
     print("Loading lanelet2 map...")
     renderer = MapRenderer(str(args.map_path))
@@ -543,7 +639,8 @@ def main():
             print("Building spatial index from NPZ sidecars...")
             p = Path(args.npz_list)
             if p.is_file() and p.suffix == ".json":
-                with open(p) as f: npz_paths = json.load(f)
+                with open(p) as f:
+                    npz_paths = json.load(f)
             elif p.is_dir():
                 npz_paths = sorted(str(f) for f in p.rglob("*.npz"))
             else:

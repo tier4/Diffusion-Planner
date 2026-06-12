@@ -16,14 +16,14 @@ from pathlib import Path
 
 import numpy as np
 
-
 TARGET_NEIGHBORS = 320
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--scenes_json", type=Path, required=True,
-                   help="JSON list of NPZ paths to pad in place.")
+    p.add_argument(
+        "--scenes_json", type=Path, required=True, help="JSON list of NPZ paths to pad in place."
+    )
     p.add_argument("--dry_run", action="store_true")
     return p.parse_args()
 
@@ -59,7 +59,9 @@ def main() -> None:
             continue
 
         data["neighbor_agents_past"] = pad(data["neighbor_agents_past"], TARGET_NEIGHBORS, axis=0)
-        data["neighbor_agents_future"] = pad(data["neighbor_agents_future"], TARGET_NEIGHBORS, axis=0)
+        data["neighbor_agents_future"] = pad(
+            data["neighbor_agents_future"], TARGET_NEIGHBORS, axis=0
+        )
 
         if not args.dry_run:
             np.savez(str(npz_path), **data)

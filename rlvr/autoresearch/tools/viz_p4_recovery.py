@@ -105,38 +105,58 @@ def _t0_centerline(data: dict, ego_shape, device) -> float:
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model_path", type=str, required=True,
-                        help="Base model checkpoint (.pth). May already have "
-                             "LoRA merged in (in which case omit --lora_path).")
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        required=True,
+        help="Base model checkpoint (.pth). May already have "
+        "LoRA merged in (in which case omit --lora_path).",
+    )
     parser.add_argument("--lora_path", type=str, default=None)
-    parser.add_argument("--scenes", type=str, required=True,
-                        help="JSON list of NPZ paths (perturbed warm scenes).")
-    parser.add_argument("--config", type=str, required=True,
-                        help="Reward + generation config JSON. MUST set "
-                             "centerline_usage_mode=baselink.")
+    parser.add_argument(
+        "--scenes", type=str, required=True, help="JSON list of NPZ paths (perturbed warm scenes)."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Reward + generation config JSON. MUST set centerline_usage_mode=baselink.",
+    )
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--manifest", type=str, default=None,
-                        help="disturb_and_replay manifest.json — used to "
-                             "annotate each PNG with the per-NPZ "
-                             "perturbation (kind, lateral offset, yaw, dv).")
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default=None,
+        help="disturb_and_replay manifest.json — used to "
+        "annotate each PNG with the per-NPZ "
+        "perturbation (kind, lateral offset, yaw, dv).",
+    )
     parser.add_argument("--K", type=int, default=8)
     parser.add_argument("--noise_min", type=float, default=0.5)
     parser.add_argument("--noise_max", type=float, default=2.0)
-    parser.add_argument("--max_scenes", type=int, default=None,
-                        help="Process only the first N scenes (sanity).")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--no_viz", action="store_true",
-                        help="Skip PNG plot (only write summary.json).")
-    parser.add_argument("--scene_batch_size", type=int, default=1,
-                        help="Scenes batched through K-generation + det forward "
-                             "per call. K × scene_batch_size trajectories in "
-                             "parallel through the diffusion loop. Requires "
-                             "--no_viz when > 1.")
     parser.add_argument(
-        "--ego_shape", type=str, required=True,
+        "--max_scenes", type=int, default=None, help="Process only the first N scenes (sanity)."
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--no_viz", action="store_true", help="Skip PNG plot (only write summary.json)."
+    )
+    parser.add_argument(
+        "--scene_batch_size",
+        type=int,
+        default=1,
+        help="Scenes batched through K-generation + det forward "
+        "per call. K × scene_batch_size trajectories in "
+        "parallel through the diffusion loop. Requires "
+        "--no_viz when > 1.",
+    )
+    parser.add_argument(
+        "--ego_shape",
+        type=str,
+        required=True,
         help="Ego dimensions as 'WHEEL_BASE,LENGTH,WIDTH' in metres. REQUIRED. "
-             "Asserted against every NPZ's ego_shape; mismatch is a hard fail "
-             "(prevents silent footprint undersizing in the safety gates).",
+        "Asserted against every NPZ's ego_shape; mismatch is a hard fail "
+        "(prevents silent footprint undersizing in the safety gates).",
     )
     args = parser.parse_args()
     if args.scene_batch_size > 1 and not args.no_viz:
@@ -146,8 +166,7 @@ def main() -> None:
     _ego_parts = [float(x) for x in args.ego_shape.split(",")]
     if len(_ego_parts) != 3 or any(v <= 0 for v in _ego_parts):
         raise SystemExit(
-            f"--ego_shape must be 'WB,LEN,WIDTH' with 3 positive values; "
-            f"got {args.ego_shape!r}"
+            f"--ego_shape must be 'WB,LEN,WIDTH' with 3 positive values; got {args.ego_shape!r}"
         )
     cli_ego_shape = np.array(_ego_parts, dtype=np.float32)
 
@@ -215,8 +234,7 @@ def main() -> None:
         paths_ok: list = []
         datas_ok: list = []
         orig_indices: list[int] = []
-        for gi, p in enumerate(scene_paths[batch_start : batch_start + SBS],
-                               start=batch_start):
+        for gi, p in enumerate(scene_paths[batch_start : batch_start + SBS], start=batch_start):
             try:
                 # Check raw NPZ before load_npz_data injects defaults.
                 with np.load(p, allow_pickle=True) as f:
@@ -262,15 +280,24 @@ def main() -> None:
         batch = _stack_scene_data(datas_ok, device)
         norm_batch = _normalize_batch(batch, model_args)
         trajs_BKT4 = generate_all_scenes_batched(
-            model, model_args, norm_batch,
-            K=args.K, noise_range=(args.noise_min, args.noise_max),
-            device=device, gen_chunk_size=args.K,
-            gt_max_speed=v_batch, generation_variant=variant,
+            model,
+            model_args,
+            norm_batch,
+            K=args.K,
+            noise_range=(args.noise_min, args.noise_max),
+            device=device,
+            gen_chunk_size=args.K,
+            gt_max_speed=v_batch,
+            generation_variant=variant,
             use_route_cl_guidance=use_route_cl,
         )  # [B, K, T, 4]
 
         det_trajs_BT4 = det_inference_batched(
-            model, model_args, datas_ok, device, norm_batch=norm_batch,
+            model,
+            model_args,
+            datas_ok,
+            device,
+            norm_batch=norm_batch,
         )
 
         for bi in range(B):
@@ -279,7 +306,7 @@ def main() -> None:
             data = datas_ok[bi]
             t0_cl = t0_cls[bi]
             trajs = trajs_BKT4[bi]  # [K, T, 4]
-            det_traj_t = det_trajs_BT4[bi:bi + 1]  # [1, T, 4]
+            det_traj_t = det_trajs_BT4[bi : bi + 1]  # [1, T, 4]
 
             all_rewards = compute_reward_batch(trajs, data, rcfg)
             per_k = [
@@ -290,8 +317,7 @@ def main() -> None:
                     "rb_cross": bool(r.rb_crossing),
                     "lane_cross": bool(r.lane_crossing),
                     "kin_violated": bool(r.kinematic_violated),
-                    "coll_step": (None if r.collision_step is None
-                                  else int(r.collision_step)),
+                    "coll_step": (None if r.collision_step is None else int(r.collision_step)),
                     "static_crossing": bool(r.static_crossing),
                 }
                 for ki, r in enumerate(all_rewards)
@@ -307,8 +333,9 @@ def main() -> None:
             delta = top1["cl"] - float(det_r.centerline)
             top1_better_reward = top1["total"] > float(det_r.total)
             top1_is_different = top1["k"] != 0  # k=0 is deterministic
-            improves = (top1_better_reward and top1_is_different
-                        and is_scene_eligible(top1, t0_cl=t0_cl))
+            improves = (
+                top1_better_reward and top1_is_different and is_scene_eligible(top1, t0_cl=t0_cl)
+            )
 
             if args.no_viz:
                 entry = {
@@ -369,23 +396,28 @@ def main() -> None:
             # Ego pose is the rear axle; symmetric overhang is (length-wheelbase)/2.
             ro = (elen - wb) / 2
             # Perturbed ego (now-current) is at origin in the new frame.
-            t_rot_pert = (mtransforms.Affine2D()
-                          .rotate(0.0)
-                          .translate(0.0, 0.0)
-                          + ax.transData)
-            ax.add_patch(Rectangle(
-                (-ro, -ewid / 2), elen, ewid, lw=1.6,
-                ec="#7a6500", fc="#ffe066", alpha=0.35, zorder=20,
-                transform=t_rot_pert,
-            ))
-            ax.plot([0.0], [0.0], "x", color="#7a6500",
-                    ms=9, mew=2.2, zorder=21)
+            t_rot_pert = mtransforms.Affine2D().rotate(0.0).translate(0.0, 0.0) + ax.transData
+            ax.add_patch(
+                Rectangle(
+                    (-ro, -ewid / 2),
+                    elen,
+                    ewid,
+                    lw=1.6,
+                    ec="#7a6500",
+                    fc="#ffe066",
+                    alpha=0.35,
+                    zorder=20,
+                    transform=t_rot_pert,
+                )
+            )
+            ax.plot([0.0], [0.0], "x", color="#7a6500", ms=9, mew=2.2, zorder=21)
 
             for ki in range(trajs.shape[0]):
                 tr = trajs[ki].cpu().numpy()
                 tr_full = np.concatenate([anchor, tr], axis=0)
-                ax.plot(tr_full[:, 0], tr_full[:, 1], "-", color="#888888", lw=0.7,
-                        alpha=0.45, zorder=6)
+                ax.plot(
+                    tr_full[:, 0], tr_full[:, 1], "-", color="#888888", lw=0.7, alpha=0.45, zorder=6
+                )
             # Ground truth from NPZ (ego_agent_future, 3-channel x,y,yaw at
             # load time → 4-channel after heading_to_cos_sin). Drawn in green
             # so the user can compare Det / Rank-1 / K=8 candidates against
@@ -404,17 +436,22 @@ def main() -> None:
                         gt_4[:, 3] = np.sin(gt_np[:, 2])
                         gt_np = gt_4
                     gt_full = np.concatenate([anchor, gt_np.astype(det_traj.dtype)], axis=0)
-                    draw_traj(ax, gt_full, "GT (bag future)",
-                              "#2ca02c", npz_path, with_footprints=False)
-            draw_traj(ax, det_full,
-                      f"Det (cl={det_r.centerline:+.2f}  total={det_r.total:+.1f})",
-                      "#1f77b4", npz_path, with_footprints=True)
+                    draw_traj(
+                        ax, gt_full, "GT (bag future)", "#2ca02c", npz_path, with_footprints=False
+                    )
+            draw_traj(
+                ax,
+                det_full,
+                f"Det (cl={det_r.centerline:+.2f}  total={det_r.total:+.1f})",
+                "#1f77b4",
+                npz_path,
+                with_footprints=True,
+            )
             rank1_label = (
                 f"Rank-1 k={top1['k']} {slot_labels[top1['k']][:18]} "
                 f"(tot={top1['total']:+.1f}  cl={top1['cl']:+.2f})"
             )
-            draw_traj(ax, top1_full, rank1_label, "#d62728", npz_path,
-                      with_footprints=True)
+            draw_traj(ax, top1_full, rank1_label, "#d62728", npz_path, with_footprints=True)
 
             perturb_str = ""
             if meta is not None:
@@ -428,19 +465,38 @@ def main() -> None:
                 )
                 # Arrow from source pose to perturbed-now ego at origin.
                 ax.annotate(
-                    "", xy=(0.0, 0.0), xytext=source_pose_xy,
+                    "",
+                    xy=(0.0, 0.0),
+                    xytext=source_pose_xy,
                     arrowprops=dict(arrowstyle="->", color="#2ca02c", lw=2.2),
                     zorder=22,
                 )
-                ax.plot([source_pose_xy[0]], [source_pose_xy[1]],
-                        "o", color="#2ca02c", ms=8, mew=0, zorder=22)
-                ax.text(source_pose_xy[0], source_pose_xy[1] - 0.4, "source pose",
-                        color="#2ca02c", fontsize=9, ha="center", zorder=22)
+                ax.plot(
+                    [source_pose_xy[0]],
+                    [source_pose_xy[1]],
+                    "o",
+                    color="#2ca02c",
+                    ms=8,
+                    mew=0,
+                    zorder=22,
+                )
+                ax.text(
+                    source_pose_xy[0],
+                    source_pose_xy[1] - 0.4,
+                    "source pose",
+                    color="#2ca02c",
+                    fontsize=9,
+                    ha="center",
+                    zorder=22,
+                )
 
-            all_pts = np.vstack([
-                top1_full[:, :2], det_full[:, :2],
-                np.array([list(source_pose_xy)]),
-            ])
+            all_pts = np.vstack(
+                [
+                    top1_full[:, :2],
+                    det_full[:, :2],
+                    np.array([list(source_pose_xy)]),
+                ]
+            )
             cx, cy = float(np.mean(all_pts[:, 0])), float(np.mean(all_pts[:, 1]))
             half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8.0
             ax.set_xlim(cx - half, cx + half)
@@ -465,23 +521,25 @@ def main() -> None:
             if improves:
                 improve_paths.append(str(npz_path))
 
-            summary.append({
-                "scene": str(npz_path),
-                "scene_idx": si,
-                "t0_cl": t0_cl,
-                "top1_cl": top1["cl"],
-                "delta_cl": delta,
-                "improves": improves,
-                "top1_k": top1["k"],
-                "top1_slot": slot_labels[top1["k"]],
-                "top1_total": top1["total"],
-                "top1_rb_cross": top1["rb_cross"],
-                "top1_lane_cross": top1["lane_cross"],
-                "top1_kin_violated": top1["kin_violated"],
-                "top1_coll_step": top1["coll_step"],
-                "top1_static_crossing": top1["static_crossing"],
-                "png": str(out_path),
-            })
+            summary.append(
+                {
+                    "scene": str(npz_path),
+                    "scene_idx": si,
+                    "t0_cl": t0_cl,
+                    "top1_cl": top1["cl"],
+                    "delta_cl": delta,
+                    "improves": improves,
+                    "top1_k": top1["k"],
+                    "top1_slot": slot_labels[top1["k"]],
+                    "top1_total": top1["total"],
+                    "top1_rb_cross": top1["rb_cross"],
+                    "top1_lane_cross": top1["lane_cross"],
+                    "top1_kin_violated": top1["kin_violated"],
+                    "top1_coll_step": top1["coll_step"],
+                    "top1_static_crossing": top1["static_crossing"],
+                    "png": str(out_path),
+                }
+            )
             summary[-1].update(reward_breakdown_to_det_dict(det_r))
             flag = "IMPROVE" if improves else "       "
             print(
@@ -494,16 +552,20 @@ def main() -> None:
     print(f"\n[viz_p4_recovery] {n_imp} / {len(summary)} scenes improve under rank-1")
 
     with open(out_root / "summary.json", "w") as f:
-        json.dump({
-            "model_path": args.model_path,
-            "lora_path": args.lora_path,
-            "config": args.config,
-            "variant": variant,
-            "K": args.K,
-            "n_total": len(summary),
-            "n_improve": n_imp,
-            "scenes": summary,
-        }, f, indent=2)
+        json.dump(
+            {
+                "model_path": args.model_path,
+                "lora_path": args.lora_path,
+                "config": args.config,
+                "variant": variant,
+                "K": args.K,
+                "n_total": len(summary),
+                "n_improve": n_imp,
+                "scenes": summary,
+            },
+            f,
+            indent=2,
+        )
     with open(out_root / "improve_scenes.json", "w") as f:
         json.dump(improve_paths, f, indent=2)
     print(f"  Wrote {out_root}/summary.json")

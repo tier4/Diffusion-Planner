@@ -30,8 +30,7 @@ def _as_batch_param(value, B: int, device) -> torch.Tensor:
             return value.reshape(1).expand(B).to(device)
         if value.shape[0] != B:
             raise ValueError(
-                f"batched guidance param has shape {tuple(value.shape)}, "
-                f"expected scalar or [{B}]"
+                f"batched guidance param has shape {tuple(value.shape)}, expected scalar or [{B}]"
             )
         return value.to(device)
     return torch.full((B,), float(value), device=device)
@@ -90,24 +89,24 @@ class CollisionSwerveBatchedGuidance(BaseGuidance):
         ego_xy = x[:, 0, 1:, :2]  # [B, T, 2]
 
         # Static neighbour current positions + validity mask.
-        nb_cur = nb[:, :, -1, :4].detach()         # [B, Pn, 4]
-        nb_xy = nb_cur[..., :2]                    # [B, Pn, 2]
-        nb_valid = nb_cur.abs().sum(dim=-1) > 0    # [B, Pn]
+        nb_cur = nb[:, :, -1, :4].detach()  # [B, Pn, 4]
+        nb_xy = nb_cur[..., :2]  # [B, Pn, 2]
+        nb_valid = nb_cur.abs().sum(dim=-1) > 0  # [B, Pn]
 
         if nb_valid.sum().item() == 0:
             return torch.zeros(B, device=device)
 
         # Centroid gap ego_t <-> neighbour (detached -> proximity gate only).
-        d = torch.cdist(ego_xy.detach(), nb_xy)    # [B, T, Pn]
+        d = torch.cdist(ego_xy.detach(), nb_xy)  # [B, T, Pn]
         big = torch.full_like(d, 1e6)
         d = torch.where(nb_valid[:, None, :], d, big)
-        w = torch.clamp(1.0 - d / self._range, min=0.0)   # [B, T, Pn]
-        w = w.max(dim=-1).values                          # [B, T]
+        w = torch.clamp(1.0 - d / self._range, min=0.0)  # [B, T, Pn]
+        w = w.max(dim=-1).values  # [B, T]
         if self._head_protect > 0:
             w = w.clone()
             w[:, : self._head_protect] = 0.0
 
-        y = ego_xy[..., 1]                                # [B, T] lateral, +y = left
+        y = ego_xy[..., 1]  # [B, T] lateral, +y = left
         reward = (eta[:, None] * w.detach() * y).sum(dim=-1)  # [B]
         return reward
 
@@ -143,8 +142,8 @@ class SpeedStretchBatchedGuidance(BaseGuidance):
         B = x.shape[0]
         stretch = _as_batch_param(self._stretch, B, x.device)
 
-        pos = x[:, 0, 1:, :2]                    # [B, T, 2]
-        disp = pos[:, 1:, :] - pos[:, :-1, :]    # [B, T-1, 2]
+        pos = x[:, 0, 1:, :2]  # [B, T, 2]
+        disp = pos[:, 1:, :] - pos[:, :-1, :]  # [B, T-1, 2]
         correction = disp * (stretch[:, None, None] - 1.0)
         reward = torch.sum(correction.detach() * pos[:, 1:, :2], dim=(1, 2))
         return reward
@@ -183,7 +182,7 @@ class LateralBatchedGuidance(BaseGuidance):
 
         cos_h = ref[..., 2]
         sin_h = ref[..., 3]
-        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
         n_perp_x = -sin_h / h_norm
         n_perp_y = cos_h / h_norm
 
@@ -242,7 +241,8 @@ def build_head_composer(
     if unknown:
         raise ValueError(
             f"unknown guidance head(s) {sorted(unknown)} — a head with no "
-            "function mapping would train/act as a dead head silently")
+            "function mapping would train/act as a dead head silently"
+        )
     hp = int(head_protect)
     fns = []
     if envelope == "v2":
@@ -252,49 +252,84 @@ def build_head_composer(
         if hp > 0:
             raise ValueError("head_protect is a v1-envelope option")
         if "lateral" in etas:
-            fns.append(GuidanceConfig(
-                name="lateral_ramp_batched", enabled=True, scale=lat_scale,
-                params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"],
-                        "ramp_steps": ramp_steps},
-            ))
+            fns.append(
+                GuidanceConfig(
+                    name="lateral_ramp_batched",
+                    enabled=True,
+                    scale=lat_scale,
+                    params={
+                        "lambda_lat": lambda_lat,
+                        "eta_lat": etas["lateral"],
+                        "ramp_steps": ramp_steps,
+                    },
+                )
+            )
         if "collision" in etas:
-            fns.append(GuidanceConfig(
-                name="collision_swerve_v2_batched", enabled=True,
-                scale=col_scale,
-                params={"eta_col": etas["collision"], "lambda_col": lambda_col,
-                        "range": col_range},
-            ))
+            fns.append(
+                GuidanceConfig(
+                    name="collision_swerve_v2_batched",
+                    enabled=True,
+                    scale=col_scale,
+                    params={
+                        "eta_col": etas["collision"],
+                        "lambda_col": lambda_col,
+                        "range": col_range,
+                    },
+                )
+            )
     else:
         if "lateral" in etas:
             if hp > 0:
-                fns.append(GuidanceConfig(
-                    name="lateral_batched", enabled=True, scale=lat_scale,
-                    params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"],
-                            "head_protect": hp},
-                ))
+                fns.append(
+                    GuidanceConfig(
+                        name="lateral_batched",
+                        enabled=True,
+                        scale=lat_scale,
+                        params={
+                            "lambda_lat": lambda_lat,
+                            "eta_lat": etas["lateral"],
+                            "head_protect": hp,
+                        },
+                    )
+                )
             else:
-                fns.append(GuidanceConfig(
-                    name="lateral", enabled=True, scale=lat_scale,
-                    params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"]},
-                ))
+                fns.append(
+                    GuidanceConfig(
+                        name="lateral",
+                        enabled=True,
+                        scale=lat_scale,
+                        params={"lambda_lat": lambda_lat, "eta_lat": etas["lateral"]},
+                    )
+                )
         if "collision" in etas:
-            fns.append(GuidanceConfig(
-                name="collision_swerve_batched", enabled=True, scale=col_scale,
-                params={"eta_col": etas["collision"], "range": col_range,
-                        "head_protect": hp},
-            ))
+            fns.append(
+                GuidanceConfig(
+                    name="collision_swerve_batched",
+                    enabled=True,
+                    scale=col_scale,
+                    params={"eta_col": etas["collision"], "range": col_range, "head_protect": hp},
+                )
+            )
     if "stretch" in etas:
-        fns.append(GuidanceConfig(
-            name="speed_stretch_batched", enabled=True, scale=stretch_scale,
-            params={"stretch": 1.0 + lambda_spd * etas["stretch"]},
-        ))
+        fns.append(
+            GuidanceConfig(
+                name="speed_stretch_batched",
+                enabled=True,
+                scale=stretch_scale,
+                params={"stretch": 1.0 + lambda_spd * etas["stretch"]},
+            )
+        )
     if "longitudinal" in etas:
         # Legacy head (known-broken for speed control; kept so old
         # lateral+longitudinal configs reproduce bit-for-bit).
-        fns.append(GuidanceConfig(
-            name="longitudinal", enabled=True, scale=1.0,
-            params={"lambda_lon": lambda_lon, "eta_lon": etas["longitudinal"]},
-        ))
+        fns.append(
+            GuidanceConfig(
+                name="longitudinal",
+                enabled=True,
+                scale=1.0,
+                params={"lambda_lon": lambda_lon, "eta_lon": etas["longitudinal"]},
+            )
+        )
     set_cfg = GuidanceSetConfig(functions=fns, global_scale=guidance_scale)
     if fast:
         # Equivalence-certified against GuidanceComposer (bit-identical
@@ -348,7 +383,7 @@ class CollisionSwerveV2BatchedGuidance(BaseGuidance):
 
         eta = _as_batch_param(self._eta_col, B, device)
 
-        ego_xy = x[:, 0, 1:, :2]                   # [B, T, 2] (grad kept)
+        ego_xy = x[:, 0, 1:, :2]  # [B, T, 2] (grad kept)
         T = ego_xy.shape[1]
         nb_cur = nb[:, :, -1, :4].detach()
         nb_xy = nb_cur[..., :2]
@@ -359,24 +394,24 @@ class CollisionSwerveV2BatchedGuidance(BaseGuidance):
         # Proximity bump from the (detached) REFERENCE trajectory — using the
         # current noisy x here would gate on garbage early in denoising.
         ref = ref[:, :T, :].detach()
-        d = torch.cdist(ref[..., :2], nb_xy)       # [B, T, Pn]
+        d = torch.cdist(ref[..., :2], nb_xy)  # [B, T, Pn]
         big = torch.full_like(d, 1e6)
         d = torch.where(nb_valid[:, None, :], d, big)
         w = torch.clamp(1.0 - d / self._range, min=0.0).max(dim=-1).values  # [B, T]
         if self._head_protect > 0:
             w = w.clone()
             w[:, : self._head_protect] = 0.0
-        support = w.sum(dim=-1)                    # [B]
+        support = w.sum(dim=-1)  # [B]
 
         # Lateral deviation from the reference (handles curved routes),
         # identical machinery to the stock lateral energy.
         cos_h = ref[..., 2]
         sin_h = ref[..., 3]
-        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
         n_perp_x, n_perp_y = -sin_h / h_norm, cos_h / h_norm
         dx = ego_xy[..., 0] - ref[..., 0]
         dy = ego_xy[..., 1] - ref[..., 1]
-        lateral_proj = n_perp_x * dx + n_perp_y * dy            # [B, T]
+        lateral_proj = n_perp_x * dx + n_perp_y * dy  # [B, T]
 
         # Ramp-up-and-HOLD target profile: cummax of the proximity gate
         # rises on approach and holds its peak after passing — the offset is
@@ -384,8 +419,8 @@ class CollisionSwerveV2BatchedGuidance(BaseGuidance):
         # lateral target, instead of a bump that forces return-to-zero
         # mid-pass (bump variants needed unstable scales to act at all:
         # weak at scale 8, sign-inverting/divergent at 16).
-        s = torch.cummax(w, dim=-1).values                      # [B, T]
-        target = (self._lambda_col * eta)[:, None] * s          # [B, T]
+        s = torch.cummax(w, dim=-1).values  # [B, T]
+        target = (self._lambda_col * eta)[:, None] * s  # [B, T]
         psi = ((lateral_proj - target) ** 2).mean(dim=-1)
         # eta == 0 -> exactly inert; negligible support -> exactly inert
         gate = (eta.abs() > 1e-6).float() * (support > 0.05).float()
@@ -429,14 +464,14 @@ class LateralRampBatchedGuidance(BaseGuidance):
 
         cos_h = ref[..., 2]
         sin_h = ref[..., 3]
-        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
         cos_h, sin_h = cos_h / h_norm, sin_h / h_norm
         n_perp_x, n_perp_y = -sin_h, cos_h
 
         ego_pos = x[:, 0, 1:, :2]
         dx = ego_pos[..., 0] - ref[..., 0]
         dy = ego_pos[..., 1] - ref[..., 1]
-        lateral_proj = n_perp_x * dx + n_perp_y * dy        # [B, T]
+        lateral_proj = n_perp_x * dx + n_perp_y * dy  # [B, T]
 
         eta = _as_batch_param(self._eta_lat, B, device)
         ramp = torch.arange(1, T + 1, device=device, dtype=torch.float32)
@@ -476,13 +511,14 @@ class FastGuidanceComposer:
     build_head_composer can emit either.
     """
 
-    def __init__(self, set_config, eta_eps: float = 1e-3,
-                 skip_x0_correction: bool = False, **build_kwargs):
+    def __init__(
+        self, set_config, eta_eps: float = 1e-3, skip_x0_correction: bool = False, **build_kwargs
+    ):
         from diffusion_planner.model.guidance.registry import build as _build
+
         self._set_config = set_config
         self._functions = [
-            _build(fn_cfg, **build_kwargs)
-            for fn_cfg in set_config.active_functions()
+            _build(fn_cfg, **build_kwargs) for fn_cfg in set_config.active_functions()
         ]
         self._eta_eps = float(eta_eps)
         self._skip_x0 = bool(skip_x0_correction)
@@ -510,8 +546,10 @@ class FastGuidanceComposer:
                 # stretch==1.0 runs in BAND mode (speed clamping — active
                 # regardless of stretch). Only the dedicated stretch-mode
                 # variants (no band attrs) are inert at 1.0.
-                if (getattr(fn, "_v_low", None) is not None
-                        or getattr(fn, "_v_high", None) is not None):
+                if (
+                    getattr(fn, "_v_low", None) is not None
+                    or getattr(fn, "_v_high", None) is not None
+                ):
                     return False
                 recognized = True
                 if isinstance(stretch, torch.Tensor):
@@ -546,8 +584,7 @@ class FastGuidanceComposer:
 
         x_phys = state_normalizer.inverse(x_corrected.detach())
         if self._inputs_phys is None:
-            self._inputs_phys = kwargs["observation_normalizer"].inverse(
-                kwargs["inputs"])
+            self._inputs_phys = kwargs["observation_normalizer"].inverse(kwargs["inputs"])
         inputs = self._inputs_phys
 
         t_scalar = t_input.reshape(B, -1)[:, 0] if t_input.dim() > 1 else t_input

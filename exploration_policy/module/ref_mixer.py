@@ -19,13 +19,17 @@ class _MixerBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(channels_dim)
         self.tokens_mlp = Mlp(
-            in_features=tokens_dim, hidden_features=tokens_dim,
-            act_layer=nn.GELU, drop=dropout,
+            in_features=tokens_dim,
+            hidden_features=tokens_dim,
+            act_layer=nn.GELU,
+            drop=dropout,
         )
         self.norm2 = nn.LayerNorm(channels_dim)
         self.channels_mlp = Mlp(
-            in_features=channels_dim, hidden_features=channels_dim,
-            act_layer=nn.GELU, drop=dropout,
+            in_features=channels_dim,
+            hidden_features=channels_dim,
+            act_layer=nn.GELU,
+            drop=dropout,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -52,10 +56,9 @@ class RefTrajectoryMixer(nn.Module):
         super().__init__()
         self.input_proj = nn.Linear(4, hidden_dim)
 
-        self.layers = nn.ModuleList([
-            _MixerBlock(seq_len, hidden_dim, dropout)
-            for _ in range(n_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [_MixerBlock(seq_len, hidden_dim, dropout) for _ in range(n_layers)]
+        )
 
         self.norm = nn.LayerNorm(hidden_dim)
 

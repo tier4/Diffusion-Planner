@@ -18,9 +18,9 @@ import torch
 
 from rlvr.reward import (
     RewardConfig,
+    _closest_points_between_rects,
     compute_reward_batch,
     compute_static_collision_penalty,
-    _closest_points_between_rects,
 )
 
 T = 80
@@ -32,7 +32,9 @@ def _ego_shape() -> torch.Tensor:
     return torch.tensor([2.79, 4.34, 1.70])
 
 
-def _straight_ego(speed: float = 5.0, heading: float = 0.0, start: tuple[float, float] = (0.0, 0.0)) -> torch.Tensor:
+def _straight_ego(
+    speed: float = 5.0, heading: float = 0.0, start: tuple[float, float] = (0.0, 0.0)
+) -> torch.Tensor:
     """(1, T, 4) ego traj moving at constant speed along `heading` (rad)."""
     t = torch.arange(T, dtype=torch.float32) * DT
     cos_h = float(torch.cos(torch.tensor(heading)))
@@ -44,7 +46,9 @@ def _straight_ego(speed: float = 5.0, heading: float = 0.0, start: tuple[float, 
     return torch.stack([x, y, cos, sin], dim=-1).unsqueeze(0)
 
 
-def _stopped_neighbor(center: tuple[float, float], heading: float = 0.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _stopped_neighbor(
+    center: tuple[float, float], heading: float = 0.0
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single stopped NPC parked at `center` with heading (rad).
 
     Returns (future (1,T,4), shapes (1,2) [w,l], valid (1,T))."""
@@ -58,7 +62,9 @@ def _stopped_neighbor(center: tuple[float, float], heading: float = 0.0) -> tupl
     return fut, shapes, valid
 
 
-def _moving_neighbor(start: tuple[float, float], speed: float = 10.0, heading: float = 0.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _moving_neighbor(
+    start: tuple[float, float], speed: float = 10.0, heading: float = 0.0
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     t = torch.arange(T, dtype=torch.float32) * DT
     cos_h = float(torch.cos(torch.tensor(heading)))
     sin_h = float(torch.sin(torch.tensor(heading)))
@@ -282,4 +288,5 @@ def test_kinematic_gate_field_exposed():
 
 if __name__ == "__main__":
     import subprocess
+
     sys.exit(subprocess.call([sys.executable, "-m", "pytest", __file__, "-q"]))

@@ -158,6 +158,6 @@ class DiT(nn.Module):
         for block in self.blocks:
             x = block(x, cross_c, t, attn_mask)
 
-        x = self.final_layer(x, t) # (B, P, output_dim)
+        x = self.final_layer(x, t)  # (B, P, output_dim)
         x = x.reshape(B, P, T, D)
         return x

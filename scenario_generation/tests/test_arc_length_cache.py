@@ -68,6 +68,7 @@ class TestCachedLaneletArc:
         """Load a LaneletSceneBuilder from the first available map."""
         # Find the map path from the snippets
         import pickle
+
         snip = next(map_snippets_dir.glob("*.pkl"))
         with open(snip, "rb") as f:
             data = pickle.load(f)
@@ -78,6 +79,7 @@ class TestCachedLaneletArc:
     def test_all_cached_arc_lengths_valid(self, map_snippets_dir):
         """Verify snippets contain lanelet IDs (smoke check that data loads)."""
         import pickle
+
         for snip_path in map_snippets_dir.glob("*.pkl"):
             with open(snip_path, "rb") as f:
                 data = pickle.load(f)

@@ -22,7 +22,6 @@ from scenario_generation.traffic_light import (
     _opposite_color,
 )
 
-
 # ── _opposite_color ─────────────────────────────────────────────────────────
 
 
@@ -103,28 +102,34 @@ class TestSignalGroupMerge:
         return signal_groups
 
     def test_no_overlap_separate_groups(self):
-        result = self._merge({
-            1: frozenset({10, 11}),
-            2: frozenset({20, 21}),
-        })
+        result = self._merge(
+            {
+                1: frozenset({10, 11}),
+                2: frozenset({20, 21}),
+            }
+        )
         assert len(result) == 2
 
     def test_direct_overlap_merges(self):
-        result = self._merge({
-            1: frozenset({10, 11}),
-            2: frozenset({11, 12}),
-        })
+        result = self._merge(
+            {
+                1: frozenset({10, 11}),
+                2: frozenset({11, 12}),
+            }
+        )
         assert len(result) == 1
         group = list(result.values())[0]
         assert group == {1, 2}
 
     def test_transitive_overlap_merges_all(self):
         """A shares with B, B shares with C → all three merge."""
-        result = self._merge({
-            1: frozenset({10, 11}),
-            2: frozenset({20, 21}),
-            3: frozenset({11, 20}),  # bridges group 1 and 2
-        })
+        result = self._merge(
+            {
+                1: frozenset({10, 11}),
+                2: frozenset({20, 21}),
+                3: frozenset({11, 20}),  # bridges group 1 and 2
+            }
+        )
         assert len(result) == 1
         group = list(result.values())[0]
         assert group == {1, 2, 3}
@@ -132,21 +137,25 @@ class TestSignalGroupMerge:
         assert bulbs == frozenset({10, 11, 20, 21})
 
     def test_empty_bulbs_skipped(self):
-        result = self._merge({
-            1: frozenset(),
-            2: frozenset({10}),
-        })
+        result = self._merge(
+            {
+                1: frozenset(),
+                2: frozenset({10}),
+            }
+        )
         assert len(result) == 1
         assert list(result.values())[0] == {2}
 
     def test_chain_of_three(self):
         """A-B, B-C, C-D chain should all merge into one group."""
-        result = self._merge({
-            1: frozenset({1, 2}),
-            2: frozenset({2, 3}),
-            3: frozenset({3, 4}),
-            4: frozenset({4, 5}),
-        })
+        result = self._merge(
+            {
+                1: frozenset({1, 2}),
+                2: frozenset({2, 3}),
+                3: frozenset({3, 4}),
+                4: frozenset({4, 5}),
+            }
+        )
         assert len(result) == 1
         assert list(result.values())[0] == {1, 2, 3, 4}
 
@@ -160,7 +169,9 @@ class TestLaneTensorEncoding:
     def test_one_hot_channels(self):
         """Each TL color should set exactly one of the 5 channels [8:13]."""
         for color, expected_idx in [
-            (TL_GREEN, 0), (TL_YELLOW, 1), (TL_RED, 2),
+            (TL_GREEN, 0),
+            (TL_YELLOW, 1),
+            (TL_RED, 2),
         ]:
             one_hot = np.zeros(5, dtype=np.float32)
             one_hot[color] = 1.0

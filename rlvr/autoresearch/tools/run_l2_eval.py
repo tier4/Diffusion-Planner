@@ -32,13 +32,23 @@ def run_eval(model_pth: Path, args_json: Path, val_set: Path, port: int) -> dict
     logfile = model_pth.parent / f"l2_{stem}.log"
 
     cmd = [
-        "torchrun", "--nproc_per_node=1", "--standalone", f"--master_port={port}",
+        "torchrun",
+        "--nproc_per_node=1",
+        "--standalone",
+        f"--master_port={port}",
         "diffusion_planner/valid_predictor.py",
-        "--resume_model_path", str(model_pth),
-        "--args_json_path", str(args_json),
-        "--valid_set_list", str(val_set),
-        "--batch_size", "32", "--ddp", "true",
-        "--save_predictions_dir", str(outdir),
+        "--resume_model_path",
+        str(model_pth),
+        "--args_json_path",
+        str(args_json),
+        "--valid_set_list",
+        str(val_set),
+        "--batch_size",
+        "32",
+        "--ddp",
+        "true",
+        "--save_predictions_dir",
+        str(outdir),
     ]
 
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="0")
@@ -88,7 +98,9 @@ def main():
         if result:
             ego_pct = fmt_pct(result["ego"], args.baseline_ego)
             neigh_pct = fmt_pct(result["neigh"], args.baseline_neigh)
-            print(f"  ego={result['ego']:.4f} ({ego_pct})  neigh={result['neigh']:.4f} ({neigh_pct})")
+            print(
+                f"  ego={result['ego']:.4f} ({ego_pct})  neigh={result['neigh']:.4f} ({neigh_pct})"
+            )
         else:
             logfile = model_pth.parent / f"l2_{stem}.log"
             print(f"  ERROR: could not parse results from {logfile}")

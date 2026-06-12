@@ -98,8 +98,7 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
     es = npz.get("ego_shape", None)
     if es is None or len(es) < 3:
         raise ValueError(
-            f"NPZ at '{npz_path}' is missing 'ego_shape'. "
-            "Inject it upstream before visualizing."
+            f"NPZ at '{npz_path}' is missing 'ego_shape'. Inject it upstream before visualizing."
         )
     wb, length, width = float(es[0]), float(es[1]), float(es[2])
     ro = (length - wb) / 2
@@ -137,7 +136,11 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
         ax.plot(gt[::3, 0], gt[::3, 1], "go", ms=3, alpha=0.7, mew=0, zorder=6, label="GT")
 
     # Ego box at t=0
-    ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20))
+    ax.add_patch(
+        Rectangle(
+            (-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20
+        )
+    )
 
     # Neighbors at t=0
     nb_past = npz["neighbor_agents_past"]  # (N, 31, 11)
@@ -153,36 +156,78 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
         nro = nl / 2  # neighbors are centroid-referenced (perception convention), not rear-axle
         nh = np.arctan2(nsin, ncos)
         t_rot = mtransforms.Affine2D().rotate(nh).translate(nx, ny) + ax.transData
-        ax.add_patch(Rectangle((-nro, -nw / 2), nl, nw, lw=1.5, ec="#cc4400",
-                               fc="#ff8844", alpha=0.7, zorder=15, transform=t_rot))
+        ax.add_patch(
+            Rectangle(
+                (-nro, -nw / 2),
+                nl,
+                nw,
+                lw=1.5,
+                ec="#cc4400",
+                fc="#ff8844",
+                alpha=0.7,
+                zorder=15,
+                transform=t_rot,
+            )
+        )
 
     # Trajectory + footprints
     pl = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1).sum()
     ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=2, alpha=0.5, zorder=10)
-    ax.plot(traj[::3, 0], traj[::3, 1], "o", color=color, ms=3.5, alpha=0.9, mew=0, zorder=11,
-            label=f"{label} ({pl:.1f}m)")
+    ax.plot(
+        traj[::3, 0],
+        traj[::3, 1],
+        "o",
+        color=color,
+        ms=3.5,
+        alpha=0.9,
+        mew=0,
+        zorder=11,
+        label=f"{label} ({pl:.1f}m)",
+    )
 
     # Footprints every 10 steps
     for ts in range(5, len(traj), 10):
         cx, cy = traj[ts, 0], traj[ts, 1]
         cos_h, sin_h = traj[ts, 2], traj[ts, 3]
-        hn = np.sqrt(cos_h ** 2 + sin_h ** 2)
+        hn = np.sqrt(cos_h**2 + sin_h**2)
         if hn > 0.01:
             heading = np.arctan2(sin_h / hn, cos_h / hn)
             t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-            ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=0.5, ec=color, fc=color,
-                                   alpha=0.15, zorder=8, transform=t_rot))
+            ax.add_patch(
+                Rectangle(
+                    (-ro, -width / 2),
+                    length,
+                    width,
+                    lw=0.5,
+                    ec=color,
+                    fc=color,
+                    alpha=0.15,
+                    zorder=8,
+                    transform=t_rot,
+                )
+            )
 
     # Endpoint footprint
     t_end = len(traj) - 1
     cx, cy = traj[t_end, 0], traj[t_end, 1]
     cos_h, sin_h = traj[t_end, 2], traj[t_end, 3]
-    hn = np.sqrt(cos_h ** 2 + sin_h ** 2)
+    hn = np.sqrt(cos_h**2 + sin_h**2)
     if hn > 0.01:
         heading = np.arctan2(sin_h / hn, cos_h / hn)
         t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-        ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=1.5, ec=color, fc=color,
-                                alpha=0.4, zorder=9, transform=t_rot))
+        ax.add_patch(
+            Rectangle(
+                (-ro, -width / 2),
+                length,
+                width,
+                lw=1.5,
+                ec=color,
+                fc=color,
+                alpha=0.4,
+                zorder=9,
+                transform=t_rot,
+            )
+        )
 
     # Auto-zoom
     gt_pts = npz["ego_agent_future"][:, :2] if show_gt else np.zeros((1, 2))
@@ -203,15 +248,25 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize trajectories with road borders")
     parser.add_argument("--model_path", type=Path, required=True, help="Base model .pth")
     parser.add_argument("--scenes", type=Path, required=True, help="JSON list of NPZ paths")
-    parser.add_argument("--lora_path", type=Path, default=None, help="LoRA checkpoint dir (optional)")
+    parser.add_argument(
+        "--lora_path", type=Path, default=None, help="LoRA checkpoint dir (optional)"
+    )
     parser.add_argument("--output_dir", type=Path, required=True, help="Save images here")
-    parser.add_argument("--indices", type=int, nargs="*", default=None, help="Scene indices to visualize")
-    parser.add_argument("--n_scenes", type=int, default=12, help="Number of scenes if --indices not given")
+    parser.add_argument(
+        "--indices", type=int, nargs="*", default=None, help="Scene indices to visualize"
+    )
+    parser.add_argument(
+        "--n_scenes", type=int, default=12, help="Number of scenes if --indices not given"
+    )
     parser.add_argument("--cols", type=int, default=3, help="Columns in grid")
-    parser.add_argument("--config", type=Path, required=True,
-                        help="GRPO training config JSON. Reward flags in titles "
-                             "(rb_crossing, lane_crossing) use the training run's "
-                             "thresholds/gate settings.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="GRPO training config JSON. Reward flags in titles "
+        "(rb_crossing, lane_crossing) use the training run's "
+        "thresholds/gate settings.",
+    )
     args = parser.parse_args()
 
     reward_config = load_reward_config(args.config)
@@ -261,37 +316,68 @@ def main():
             npz = np.load(scenes[si], allow_pickle=True)
             es = npz.get("ego_shape", None)
             if es is None or len(es) < 3:
-                raise ValueError(
-                    f"NPZ at '{scenes[si]}' is missing 'ego_shape'."
-                )
+                raise ValueError(f"NPZ at '{scenes[si]}' is missing 'ego_shape'.")
             wb, length, width = float(es[0]), float(es[1]), float(es[2])
             ro = (length - wb) / 2
             pl_l = np.linalg.norm(np.diff(traj_l[:, :2], axis=0), axis=1).sum()
             ax.plot(traj_l[:, 0], traj_l[:, 1], "-", color="orange", lw=2, alpha=0.6, zorder=12)
-            ax.plot(traj_l[::3, 0], traj_l[::3, 1], "o", color="orange", ms=3.5, alpha=0.9, mew=0,
-                    zorder=13, label=f"LoRA ({pl_l:.1f}m)")
+            ax.plot(
+                traj_l[::3, 0],
+                traj_l[::3, 1],
+                "o",
+                color="orange",
+                ms=3.5,
+                alpha=0.9,
+                mew=0,
+                zorder=13,
+                label=f"LoRA ({pl_l:.1f}m)",
+            )
             # LoRA footprints every 10 steps
             for ts in range(5, len(traj_l), 10):
                 cx, cy = traj_l[ts, 0], traj_l[ts, 1]
                 cos_h, sin_h = traj_l[ts, 2], traj_l[ts, 3]
-                hn = np.sqrt(cos_h ** 2 + sin_h ** 2)
+                hn = np.sqrt(cos_h**2 + sin_h**2)
                 if hn > 0.01:
                     heading = np.arctan2(sin_h / hn, cos_h / hn)
                     t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-                    ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=0.5,
-                                           ec="orange", fc="orange", alpha=0.15, zorder=12, transform=t_rot))
+                    ax.add_patch(
+                        Rectangle(
+                            (-ro, -width / 2),
+                            length,
+                            width,
+                            lw=0.5,
+                            ec="orange",
+                            fc="orange",
+                            alpha=0.15,
+                            zorder=12,
+                            transform=t_rot,
+                        )
+                    )
             # LoRA endpoint footprint
             t_end = len(traj_l) - 1
             cx, cy = traj_l[t_end, 0], traj_l[t_end, 1]
             cos_h, sin_h = traj_l[t_end, 2], traj_l[t_end, 3]
-            hn = np.sqrt(cos_h ** 2 + sin_h ** 2)
+            hn = np.sqrt(cos_h**2 + sin_h**2)
             if hn > 0.01:
                 heading = np.arctan2(sin_h / hn, cos_h / hn)
                 t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
-                ax.add_patch(Rectangle((-ro, -width / 2), length, width, lw=1.5,
-                                       ec="orange", fc="orange", alpha=0.4, zorder=12, transform=t_rot))
+                ax.add_patch(
+                    Rectangle(
+                        (-ro, -width / 2),
+                        length,
+                        width,
+                        lw=1.5,
+                        ec="orange",
+                        fc="orange",
+                        alpha=0.4,
+                        zorder=12,
+                        transform=t_rot,
+                    )
+                )
             # Expand view to include LoRA trajectory
-            all_pts = np.vstack([traj_b[:, :2], traj_l[:, :2], npz["ego_agent_future"][:, :2], [[0, 0]]])
+            all_pts = np.vstack(
+                [traj_b[:, :2], traj_l[:, :2], npz["ego_agent_future"][:, :2], [[0, 0]]]
+            )
             cx_v, cy_v = np.mean(all_pts[:, 0]), np.mean(all_pts[:, 1])
             half = max(np.ptp(all_pts[:, 0]), np.ptp(all_pts[:, 1])) * 0.6 + 8
             ax.set_xlim(cx_v - half, cx_v + half)
@@ -330,8 +416,11 @@ def main():
             ax = axes_flat[plot_idx]
             traj, data, r = infer(model_base, model_args, scenes[si], reward_config)
             draw_scene(ax, scenes[si], traj, "Det", "blue", r)
-            ax.set_title(f"[{si}] rb_x={'Y' if r.rb_crossing else 'N'} "
-                         f"rb_n={r.rb_near_penalty:.2f} rw={r.total:.1f}", fontsize=8)
+            ax.set_title(
+                f"[{si}] rb_x={'Y' if r.rb_crossing else 'N'} "
+                f"rb_n={r.rb_near_penalty:.2f} rw={r.total:.1f}",
+                fontsize=8,
+            )
 
         for j in range(len(indices), len(axes_flat)):
             axes_flat[j].set_visible(False)

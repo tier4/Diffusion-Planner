@@ -65,6 +65,7 @@ Usage::
         [--n_per_scene 5] [--offsets 0.3,0.5,0.8] \
         [--reject_out_of_lane] [--seed 0]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -76,17 +77,17 @@ from typing import Iterable
 
 import numpy as np
 import torch
-
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
+
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 from rlvr.reward import compute_lane_departure_penalty
 
-
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
+
 
 def _wrap_angle(rad: float) -> float:
     """Wrap radians to (-pi, pi]."""
@@ -107,9 +108,7 @@ def _rotate_past_about_pivot(
     y_off = out[:, 1] - pivot_y
     out[:, 0] = pivot_x + c * x_off - s * y_off
     out[:, 1] = pivot_y + s * x_off + c * y_off
-    out[:, 2] = np.array(
-        [_wrap_angle(float(h) + yaw_rad) for h in out[:, 2]], dtype=np.float32
-    )
+    out[:, 2] = np.array([_wrap_angle(float(h) + yaw_rad) for h in out[:, 2]], dtype=np.float32)
     return out
 
 
@@ -217,9 +216,7 @@ def _point_to_segments_dist(points: np.ndarray, segs: np.ndarray) -> np.ndarray:
     return dist.min(axis=-1)
 
 
-def _apply_rigid_to_past(
-    past: np.ndarray, dx: float, dy: float, dtheta: float
-) -> np.ndarray:
+def _apply_rigid_to_past(past: np.ndarray, dx: float, dy: float, dtheta: float) -> np.ndarray:
     """Shift ``ego_agent_past`` so past steps lead into the perturbed current pose.
 
     Past stays rigidly attached to the ego: every (px, py, ph) gets rotated by
@@ -238,9 +235,7 @@ def _apply_rigid_to_past(
     xy[:, 0] += dx
     xy[:, 1] += dy
     out[:, :2] = xy
-    out[:, 2] = np.array(
-        [_wrap_angle(float(h) + dtheta) for h in out[:, 2]], dtype=np.float32
-    )
+    out[:, 2] = np.array([_wrap_angle(float(h) + dtheta) for h in out[:, 2]], dtype=np.float32)
     return out
 
 
@@ -266,6 +261,7 @@ def _set_ego_current_state(
 # Variant generation
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Variant:
     name: str  # short tag, e.g. "base", "subtle_L", "parallel_R_0.5", "yaw_L_10"
@@ -290,8 +286,11 @@ class Variant:
 
 
 def _make_subtle_variant(
-    rng: np.random.Generator, sign: float, side: str,
-    perp: np.ndarray, tangent: np.ndarray,
+    rng: np.random.Generator,
+    sign: float,
+    side: str,
+    perp: np.ndarray,
+    tangent: np.ndarray,
 ) -> Variant:
     trans_mag = float(rng.uniform(0.5, 1.5))
     yaw_mag = float(rng.uniform(5.0, 10.0))
@@ -309,8 +308,11 @@ def _make_subtle_variant(
 
 
 def _make_parallel_variant(
-    rng: np.random.Generator, sign: float, side: str,
-    perp: np.ndarray, offset_choices: list[float],
+    rng: np.random.Generator,
+    sign: float,
+    side: str,
+    perp: np.ndarray,
+    offset_choices: list[float],
 ) -> Variant:
     mag = float(rng.choice(offset_choices))
     d = sign * mag * perp
@@ -324,7 +326,9 @@ def _make_parallel_variant(
 
 
 def _make_yaw_variant(
-    rng: np.random.Generator, sign: float, side: str,
+    rng: np.random.Generator,
+    sign: float,
+    side: str,
     yaw_choices: list[float],
 ) -> Variant:
     yaw_mag = float(rng.choice(yaw_choices))
@@ -338,8 +342,12 @@ def _make_yaw_variant(
 
 
 def _make_combined_variant(
-    rng: np.random.Generator, sign: float, side: str,
-    perp: np.ndarray, offset_choices: list[float], yaw_choices: list[float],
+    rng: np.random.Generator,
+    sign: float,
+    side: str,
+    perp: np.ndarray,
+    offset_choices: list[float],
+    yaw_choices: list[float],
 ) -> Variant:
     mag = float(rng.choice(offset_choices))
     yaw_mag = float(rng.choice(yaw_choices))
@@ -354,8 +362,11 @@ def _make_combined_variant(
 
 
 def _build_variants(
-    rng: np.random.Generator, offsets: list[float], n_per_scene: int,
-    tangent: np.ndarray, kind: str = "default",
+    rng: np.random.Generator,
+    offsets: list[float],
+    n_per_scene: int,
+    tangent: np.ndarray,
+    kind: str = "default",
     yaw_degs: list[float] | None = None,
 ) -> list[Variant]:
     """Return a fixed-order list of variants for one scene.
@@ -569,7 +580,12 @@ def _apply_inverse_rigid_to_spatial(
     # --- lanes (S, P, 33): [x, y, dx, dy, ...other features] per point ---
     if "lanes" in out:
         lanes = out["lanes"]
-        valid = (lanes[..., 0] != 0) | (lanes[..., 1] != 0) | (lanes[..., 2] != 0) | (lanes[..., 3] != 0)
+        valid = (
+            (lanes[..., 0] != 0)
+            | (lanes[..., 1] != 0)
+            | (lanes[..., 2] != 0)
+            | (lanes[..., 3] != 0)
+        )
         _xy_inv(lanes, 0, 1)
         _dir_inv(lanes, 2, 3)
         # Zero invalid points to preserve "valid = nonzero" convention
@@ -622,7 +638,9 @@ def _apply_inverse_rigid_to_spatial(
 
 
 def _apply_variant(
-    npz: dict[str, np.ndarray], variant: Variant, rng: np.random.Generator,
+    npz: dict[str, np.ndarray],
+    variant: Variant,
+    rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
     """Return a perturbed copy of ``npz`` per ``variant``.
 
@@ -644,9 +662,7 @@ def _apply_variant(
 
     if mode == "yaw":
         if variant.dx != 0.0 or variant.dy != 0.0:
-            raise ValueError(
-                f"yaw mode requires dx=dy=0, got dx={variant.dx}, dy={variant.dy}"
-            )
+            raise ValueError(f"yaw mode requires dx=dy=0, got dx={variant.dx}, dy={variant.dy}")
     # mode "shift" and "combo" both encode the new ego pose in (variant.dx,
     # variant.dy, dtheta) — same downstream transform.
 
@@ -687,10 +703,15 @@ def _apply_variant(
 # Lane membership filter
 # ---------------------------------------------------------------------------
 
+
 @torch.no_grad()
 def _is_in_lane(
-    perturbed_npz_path: Path, dx: float, dy: float, dtheta: float,
-    device: torch.device, threshold: float = 0.15,
+    perturbed_npz_path: Path,
+    dx: float,
+    dy: float,
+    dtheta: float,
+    device: torch.device,
+    threshold: float = 0.15,
 ) -> tuple[bool, float]:
     """Run ``compute_lane_departure_penalty`` on a 2-step traj at the perturbed pose."""
     data = load_npz_data(str(perturbed_npz_path), device)
@@ -721,8 +742,10 @@ def _is_in_lane(
 # Baseline model inference
 # ---------------------------------------------------------------------------
 
+
 def _load_base_model(
-    base_model_path: Path, device: torch.device,
+    base_model_path: Path,
+    device: torch.device,
 ) -> tuple[Diffusion_Planner, Config]:
     """Load the LoRA-less base model + its training config.
 
@@ -733,9 +756,7 @@ def _load_base_model(
     if not args_path.exists():
         args_path = model_dir.parent / "args.json"
     if not args_path.exists():
-        raise FileNotFoundError(
-            f"Could not locate args.json next to {base_model_path}"
-        )
+        raise FileNotFoundError(f"Could not locate args.json next to {base_model_path}")
 
     model_args = Config(str(args_path))
     model_args.device = device
@@ -768,9 +789,7 @@ def _baseline_predict_future(
     B = norm_batch["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
-    norm_batch["sampled_trajectories"] = torch.zeros(
-        B, P, future_len + 1, 4, device=device
-    )
+    norm_batch["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4, device=device)
 
     decoder = model.module.decoder if hasattr(model, "module") else model.decoder
     saved_fn = getattr(decoder, "_guidance_fn", None)
@@ -801,6 +820,7 @@ def _baseline_predict_future(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _parse_offsets(s: str) -> list[float]:
     return [float(x.strip()) for x in s.split(",") if x.strip()]
 
@@ -818,10 +838,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         "--base_model",
         default=None,
         help="(Optional, BUGGY) baseline model. When provided, runs forward "
-             "inference and overwrites ego_agent_future — ranked-SFT IGNORES "
-             "ego_agent_future, so this codepath is dead weight (per handoff). "
-             "Leave unset to dump perturbed NPZs as-is for K=8 winner-recovery "
-             "filtering downstream.",
+        "inference and overwrites ego_agent_future — ranked-SFT IGNORES "
+        "ego_agent_future, so this codepath is dead weight (per handoff). "
+        "Leave unset to dump perturbed NPZs as-is for K=8 winner-recovery "
+        "filtering downstream.",
     )
     parser.add_argument("--n_per_scene", type=int, default=5)
     parser.add_argument(
@@ -830,10 +850,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         default="default",
         choices=["default", "parallel_only", "yaw_only", "combined"],
         help="Recipe for variants per scene. 'default' = 1 base + 2 subtle + "
-             "2 parallel (existing). 'parallel_only' = 1 base + (n-1) parallel "
-             "split L/R cycling --offsets. 'yaw_only' = 1 base + (n-1) yaw "
-             "perturbations cycling --yaw_degs. 'combined' = 1 base + 2 subtle "
-             "+ 2 parallel + 2 yaw + 2 (parallel+yaw).",
+        "2 parallel (existing). 'parallel_only' = 1 base + (n-1) parallel "
+        "split L/R cycling --offsets. 'yaw_only' = 1 base + (n-1) yaw "
+        "perturbations cycling --yaw_degs. 'combined' = 1 base + 2 subtle "
+        "+ 2 parallel + 2 yaw + 2 (parallel+yaw).",
     )
     parser.add_argument(
         "--offsets",
@@ -852,24 +872,25 @@ def main(argv: Iterable[str] | None = None) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Drop variants whose perturbed pose is outside (or within "
-             "--reject_threshold of) the lane boundary.",
+        "--reject_threshold of) the lane boundary.",
     )
     parser.add_argument("--reject_threshold", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--ego_shape", type=str, required=True,
+        "--ego_shape",
+        type=str,
+        required=True,
         help="Ego dimensions as 'WHEEL_BASE,LENGTH,WIDTH' in metres. REQUIRED "
-             "— there is no default to fall back to. The values are written "
-             "into every output NPZ's `ego_shape` field so downstream "
-             "reward.py sees the correct footprint (the previous silent "
-             "default undersized the gate by ~3 m on larger platforms).",
+        "— there is no default to fall back to. The values are written "
+        "into every output NPZ's `ego_shape` field so downstream "
+        "reward.py sees the correct footprint (the previous silent "
+        "default undersized the gate by ~3 m on larger platforms).",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     _ego_shape_parts = [float(x) for x in args.ego_shape.split(",")]
     if len(_ego_shape_parts) != 3 or any(v <= 0 for v in _ego_shape_parts):
         raise SystemExit(
-            f"--ego_shape must be 'WB,LEN,WIDTH' with 3 positive values; "
-            f"got {args.ego_shape!r}"
+            f"--ego_shape must be 'WB,LEN,WIDTH' with 3 positive values; got {args.ego_shape!r}"
         )
     ego_shape_np = np.array(_ego_shape_parts, dtype=np.float32)
 
@@ -899,7 +920,9 @@ def main(argv: Iterable[str] | None = None) -> None:
         )
 
     written: list[str] = []
-    manifest: list[dict] = []  # per-output {npz, source_scene, variant_name, dx, dy, dtheta_deg, dv, kind}
+    manifest: list[
+        dict
+    ] = []  # per-output {npz, source_scene, variant_name, dx, dy, dtheta_deg, dv, kind}
     n_attempted = 0
     n_rejected = 0
     n_inference_failed = 0
@@ -941,8 +964,12 @@ def main(argv: Iterable[str] | None = None) -> None:
 
         scene_stem = Path(scene_path).stem
         variants = _build_variants(
-            rng, offsets, args.n_per_scene, tangent,
-            kind=args.kind, yaw_degs=yaw_degs,
+            rng,
+            offsets,
+            args.n_per_scene,
+            tangent,
+            kind=args.kind,
+            yaw_degs=yaw_degs,
         )
 
         for var_idx, variant in enumerate(variants):
@@ -991,10 +1018,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                 try:
                     fut = _baseline_predict_future(base_model, base_args, out_path, device)
                 except Exception as e:  # noqa: BLE001
-                    print(
-                        f"[infer-fail] {scene_idx} {variant.name}: {e}; "
-                        f"dropping variant."
-                    )
+                    print(f"[infer-fail] {scene_idx} {variant.name}: {e}; dropping variant.")
                     n_inference_failed += 1
                     by_kind[kind]["rejected"] += 1
                     out_path.unlink(missing_ok=True)
@@ -1006,13 +1030,15 @@ def main(argv: Iterable[str] | None = None) -> None:
                     d0 = float(_point_to_segments_dist(pt0, scene_segs)[0])
                     pt79 = np.array([fut[-1, :2]], dtype=np.float64)
                     d79 = float(_point_to_segments_dist(pt79, scene_segs)[0])
-                    recovery_diag.append({
-                        "scene": Path(scene_path).stem,
-                        "variant": variant.name,
-                        "lat_t0": d0,
-                        "lat_t79": d79,
-                        "delta": d0 - d79,
-                    })
+                    recovery_diag.append(
+                        {
+                            "scene": Path(scene_path).stem,
+                            "variant": variant.name,
+                            "lat_t0": d0,
+                            "lat_t79": d79,
+                            "delta": d0 - d79,
+                        }
+                    )
                 except Exception:
                     pass
 
@@ -1024,21 +1050,25 @@ def main(argv: Iterable[str] | None = None) -> None:
                 np.savez(out_path, **perturbed)
 
             written.append(str(out_path))
-            manifest.append({
-                "npz": str(out_path),
-                "source_scene": scene_path,
-                "variant_name": variant.name,
-                "kind": kind,
-                "dx": float(variant.dx),
-                "dy": float(variant.dy),
-                "dtheta_deg": float(variant.dtheta_deg),
-                "dv": float(variant.dv),
-                # Lateral offset magnitude (signed, m). Positive = left of tangent
-                # (perp = (-ty, tx)), negative = right. Computed by projecting
-                # (dx, dy) onto the centerline normal at the source pose.
-                "lateral_offset_m": float(variant.dx * (-tangent[1]) + variant.dy * tangent[0]),
-                "longitudinal_offset_m": float(variant.dx * tangent[0] + variant.dy * tangent[1]),
-            })
+            manifest.append(
+                {
+                    "npz": str(out_path),
+                    "source_scene": scene_path,
+                    "variant_name": variant.name,
+                    "kind": kind,
+                    "dx": float(variant.dx),
+                    "dy": float(variant.dy),
+                    "dtheta_deg": float(variant.dtheta_deg),
+                    "dv": float(variant.dv),
+                    # Lateral offset magnitude (signed, m). Positive = left of tangent
+                    # (perp = (-ty, tx)), negative = right. Computed by projecting
+                    # (dx, dy) onto the centerline normal at the source pose.
+                    "lateral_offset_m": float(variant.dx * (-tangent[1]) + variant.dy * tangent[0]),
+                    "longitudinal_offset_m": float(
+                        variant.dx * tangent[0] + variant.dy * tangent[1]
+                    ),
+                }
+            )
             by_kind[kind]["kept"] += 1
 
         if (scene_idx + 1) % 10 == 0:

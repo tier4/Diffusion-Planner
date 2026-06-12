@@ -21,6 +21,7 @@ Usage:
         --heads lateral,collision [--epochs 200] [--lr 1e-3] \
         [--avoid_weight 5.0] [--val_frac 0.15]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,7 +40,7 @@ from rlvr.autoresearch.tools.eval_det_avoidance import load_model
 HEAD_TO_LABEL_KEY = {"lateral": "eta_lat", "collision": "eta_col", "stretch": "stretch"}
 
 LAMBDA_SPD = 0.2  # stretch = 1 + LAMBDA_SPD * eta — must match the
-                  # inference envelope's lambda_spd (build_head_composer)
+# inference envelope's lambda_spd (build_head_composer)
 
 
 def label_target(head: str, best: dict) -> float:
@@ -56,9 +57,12 @@ def label_target(head: str, best: dict) -> float:
     return v
 
 
-def build_entries(labels_paths: list[str], normal_paths: list[str],
-                  heads: list[str],
-                  counterfactual_paths: list[str] | None = None):
+def build_entries(
+    labels_paths: list[str],
+    normal_paths: list[str],
+    heads: list[str],
+    counterfactual_paths: list[str] | None = None,
+):
     """Assemble (scene_path, target_dict, weight_class) tuples.
 
     counterfactual_paths: zero-target scenes that form PAIRS with solved
@@ -93,20 +97,21 @@ def build_entries(labels_paths: list[str], normal_paths: list[str],
             entries.append((sp, {h: 0.0 for h in heads}, "normal"))
             n_normal += 1
     n_cf = 0
-    for sp in (counterfactual_paths or []):
+    for sp in counterfactual_paths or []:
         if sp not in seen:
             seen.add(sp)
             entries.append((sp, {h: 0.0 for h in heads}, "counterfactual"))
             n_cf += 1
-    print(f"[entries] solved={n_solved} clean={n_clean} "
-          f"normal-added={n_normal} counterfactual={n_cf} "
-          f"unsolved-excluded={n_unsolved} total={len(entries)}")
+    print(
+        f"[entries] solved={n_solved} clean={n_clean} "
+        f"normal-added={n_normal} counterfactual={n_cf} "
+        f"unsolved-excluded={n_unsolved} total={len(entries)}"
+    )
     return entries
 
 
 @torch.no_grad()
-def precompute_features(model, model_args, entries, device, cache_path: Path,
-                        model_path: str = ""):
+def precompute_features(model, model_args, entries, device, cache_path: Path, model_path: str = ""):
     """Cache scene_encoding + x_ref per scene (one det pass each)."""
     if cache_path.exists():
         cache = torch.load(cache_path, map_location="cpu", weights_only=False)
@@ -116,11 +121,14 @@ def precompute_features(model, model_args, entries, device, cache_path: Path,
                 f"feature cache {cache_path} was built with model "
                 f"{cached_model}, not {model_path} — delete the cache or use "
                 "a fresh --output_dir (stale encodings would be silently "
-                "served otherwise)")
+                "served otherwise)"
+            )
         if model_path and not cached_model:
-            print(f"[cache] WARNING: {cache_path} predates the model-path "
-                  "stamp — cannot verify it was built with "
-                  f"{model_path}. Delete it if in doubt.")
+            print(
+                f"[cache] WARNING: {cache_path} predates the model-path "
+                "stamp — cannot verify it was built with "
+                f"{model_path}. Delete it if in doubt."
+            )
         have = set(cache.keys()) - {"__model_path__"}
         need = {e[0] for e in entries}
         if have >= need:
@@ -129,17 +137,14 @@ def precompute_features(model, model_args, entries, device, cache_path: Path,
         # Partial hit: top up only the missing scenes instead of a full
         # rebuild, then re-save.
         missing = [e for e in entries if e[0] not in have]
-        print(f"[cache] topping up {len(missing)} missing of {len(need)} "
-              f"entries in {cache_path}")
+        print(f"[cache] topping up {len(missing)} missing of {len(need)} entries in {cache_path}")
         cache.setdefault("__model_path__", model_path)
         entries = missing
     else:
         cache = {"__model_path__": model_path}
     for i, (sp, _, _) in enumerate(entries):
         data = load_npz_data(sp, device)
-        norm_data = {
-            k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
-        }
+        norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
         norm_data = model_args.observation_normalizer(norm_data)
         x_ref_np = generate_reference_trajectory(model, model_args, norm_data, device)
         x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(device)
@@ -155,11 +160,11 @@ def precompute_features(model, model_args, entries, device, cache_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
-    parser.add_argument("--labels", required=True, nargs="+",
-                        help="sweep_labels.json file(s)")
+    parser.add_argument("--labels", required=True, nargs="+", help="sweep_labels.json file(s)")
     parser.add_argument("--normal_scenes", default=None)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--heads", default="lateral,collision")
@@ -167,21 +172,30 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--val_frac", type=float, default=0.15)
-    parser.add_argument("--avoid_weight", type=float, default=5.0,
-                        help="loss weight for solved avoidance scenes vs zero-target scenes")
-    parser.add_argument("--counterfactual_scenes", default=None,
-                        help="JSON list of zero-target counterfactual twins "
-                             "of solved scenes (e.g. neighbor-stripped); "
-                             "weighted by --counterfactual_weight instead "
-                             "of 1.0")
+    parser.add_argument(
+        "--avoid_weight",
+        type=float,
+        default=5.0,
+        help="loss weight for solved avoidance scenes vs zero-target scenes",
+    )
+    parser.add_argument(
+        "--counterfactual_scenes",
+        default=None,
+        help="JSON list of zero-target counterfactual twins "
+        "of solved scenes (e.g. neighbor-stripped); "
+        "weighted by --counterfactual_weight instead "
+        "of 1.0",
+    )
     parser.add_argument("--counterfactual_weight", type=float, default=1.0)
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--head_raw_scale", type=float, default=10.0)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--patience", type=int, default=50)
-    parser.add_argument("--init_from", default=None,
-                        help="warm-start: load this exploration_policy.pth "
-                             "before training (heads/arch must match)")
+    parser.add_argument(
+        "--init_from",
+        default=None,
+        help="warm-start: load this exploration_policy.pth before training (heads/arch must match)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -202,14 +216,17 @@ def main():
         with open(args.counterfactual_scenes) as f:
             cf_paths = json.load(f)
 
-    entries = build_entries(args.labels, normal_paths, heads,
-                            counterfactual_paths=cf_paths)
+    entries = build_entries(args.labels, normal_paths, heads, counterfactual_paths=cf_paths)
     if not entries:
         raise SystemExit("no training entries")
 
     model, model_args = load_model(args.model_path, device)
     cache = precompute_features(
-        model, model_args, entries, device, run_dir / "feature_cache.pt",
+        model,
+        model_args,
+        entries,
+        device,
+        run_dir / "feature_cache.pt",
         model_path=args.model_path,
     )
     del model
@@ -219,12 +236,18 @@ def main():
     enc = torch.stack([cache[sp]["scene_encoding"] for sp, _, _ in entries]).to(device)
     xref = torch.stack([cache[sp]["x_ref"] for sp, _, _ in entries]).to(device)
     targets = torch.tensor(
-        [[t[h] for h in heads] for _, t, _ in entries], device=device,
+        [[t[h] for h in heads] for _, t, _ in entries],
+        device=device,
     )  # [M, H]
     weights = torch.tensor(
-        [args.avoid_weight if cls == "avoid"
-         else args.counterfactual_weight if cls == "counterfactual"
-         else 1.0 for _, _, cls in entries],
+        [
+            args.avoid_weight
+            if cls == "avoid"
+            else args.counterfactual_weight
+            if cls == "counterfactual"
+            else 1.0
+            for _, _, cls in entries
+        ],
         device=device,
     )
     is_avoid = torch.tensor([cls == "avoid" for _, _, cls in entries], device=device)
@@ -239,8 +262,10 @@ def main():
         val_mask[perm[:n_val]] = True
     train_idx = torch.nonzero(~val_mask).squeeze(-1).to(device)
     val_idx = torch.nonzero(val_mask).squeeze(-1).to(device)
-    print(f"[split] train={len(train_idx)} val={len(val_idx)} "
-          f"(val avoid={int(is_avoid[val_idx].sum())})")
+    print(
+        f"[split] train={len(train_idx)} val={len(val_idx)} "
+        f"(val avoid={int(is_avoid[val_idx].sum())})"
+    )
 
     ep_config = ExplorationPolicyConfig(
         hidden_dim=args.hidden_dim,
@@ -258,13 +283,17 @@ def main():
             # Head-spec change (e.g. 2-head -> 3-head: the shared guidance
             # head's Linear changes shape). Transfer everything that fits,
             # report what restarts fresh — loud, not silent.
-            compat = {k: v for k, v in state.items()
-                      if k in policy.state_dict()
-                      and policy.state_dict()[k].shape == v.shape}
+            compat = {
+                k: v
+                for k, v in state.items()
+                if k in policy.state_dict() and policy.state_dict()[k].shape == v.shape
+            }
             missing = [k for k in policy.state_dict() if k not in compat]
             policy.load_state_dict(compat, strict=False)
-            print(f"[warm-start] PARTIAL: {len(compat)}/{len(policy.state_dict())} "
-                  f"tensors transferred; fresh: {missing}")
+            print(
+                f"[warm-start] PARTIAL: {len(compat)}/{len(policy.state_dict())} "
+                f"tensors transferred; fresh: {missing}"
+            )
         print(f"[warm-start] loaded {args.init_from}")
     optimizer = optim.AdamW(policy.parameters(), lr=args.lr)
 
@@ -314,16 +343,21 @@ def main():
 
         val_m = eval_split(val_idx)
         train_m = eval_split(train_idx)
-        row = {"epoch": epoch, "train_loss": ep_loss / max(n_b, 1),
-               **{f"val_{k}": v for k, v in val_m.items()},
-               **{f"train_{k}": v for k, v in train_m.items()}}
+        row = {
+            "epoch": epoch,
+            "train_loss": ep_loss / max(n_b, 1),
+            **{f"val_{k}": v for k, v in val_m.items()},
+            **{f"train_{k}": v for k, v in train_m.items()},
+        }
         log_rows.append(row)
         if epoch % 10 == 0 or epoch == 1:
-            print(f"  ep{epoch:3d} train={row['train_loss']:.4f} "
-                  f"val_mse={val_m['weighted_mse']:.4f} "
-                  f"avoid_sign={val_m.get('avoid_sign_acc', -1):.2f} "
-                  f"avoid_|p|={val_m.get('avoid_pred_absmean', -1):.3f} "
-                  f"inert_|p|={val_m.get('inert_pred_absmean', -1):.4f}")
+            print(
+                f"  ep{epoch:3d} train={row['train_loss']:.4f} "
+                f"val_mse={val_m['weighted_mse']:.4f} "
+                f"avoid_sign={val_m.get('avoid_sign_acc', -1):.2f} "
+                f"avoid_|p|={val_m.get('avoid_pred_absmean', -1):.3f} "
+                f"inert_|p|={val_m.get('inert_pred_absmean', -1):.4f}"
+            )
 
         if val_m["weighted_mse"] < best_val - 1e-5:
             best_val = val_m["weighted_mse"]
@@ -338,8 +372,10 @@ def main():
         json.dump(log_rows, f, indent=1)
     with open(run_dir / "train_args.json", "w") as f:
         json.dump(vars(args), f, indent=1)
-    print(f"[done] best val_mse={best_val:.4f} @ ep{best_epoch}; "
-          f"saved {run_dir / 'exploration_policy.pth'}")
+    print(
+        f"[done] best val_mse={best_val:.4f} @ ep{best_epoch}; "
+        f"saved {run_dir / 'exploration_policy.pth'}"
+    )
 
 
 if __name__ == "__main__":

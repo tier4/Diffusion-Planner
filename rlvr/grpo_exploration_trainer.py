@@ -65,11 +65,7 @@ def reward_config_from_grpo(config: GRPOConfig) -> RewardConfig:
     from dataclasses import fields as _dc_fields
 
     reward_field_names = {f.name for f in _dc_fields(RewardConfig)}
-    kwargs = {
-        name: getattr(config, name)
-        for name in reward_field_names
-        if hasattr(config, name)
-    }
+    kwargs = {name: getattr(config, name) for name in reward_field_names if hasattr(config, name)}
     return RewardConfig(**kwargs)
 
 
@@ -166,20 +162,25 @@ class GRPOExplorationTrainer:
                 heads=self.heads,
             )
             self.exploration_policy = ExplorationPolicy(
-                ep_config, ref_seq_len=model_args.future_len,
+                ep_config,
+                ref_seq_len=model_args.future_len,
             ).to(device)
 
             if config.exploration_checkpoint_path:
                 ckpt_path = Path(config.exploration_checkpoint_path)
                 if ckpt_path.exists():
                     state = torch.load(ckpt_path, map_location=device)
-                    missing, unexpected = self.exploration_policy.load_state_dict(state, strict=False)
+                    missing, unexpected = self.exploration_policy.load_state_dict(
+                        state, strict=False
+                    )
                     if missing or unexpected:
                         print(f"  Warning: missing={missing}, unexpected={unexpected}")
                     print(f"  Loaded exploration policy from {ckpt_path}")
 
             n_params = sum(p.numel() for p in self.exploration_policy.parameters())
-            print(f"  Exploration policy: {n_params:,} params (hidden={config.exploration_hidden_dim})")
+            print(
+                f"  Exploration policy: {n_params:,} params (hidden={config.exploration_hidden_dim})"
+            )
 
             self.policy_optimizer = optim.AdamW(
                 self.exploration_policy.parameters(),
@@ -213,27 +214,41 @@ class GRPOExplorationTrainer:
         for head in self.heads:
             eta = eta_vals[head]
             if head == "lateral":
-                fns.append(GuidanceConfig(
-                    name="lateral", enabled=True, scale=cfg.exploration_lat_scale,
-                    params={"lambda_lat": self.lambda_lat, "eta_lat": eta},
-                ))
+                fns.append(
+                    GuidanceConfig(
+                        name="lateral",
+                        enabled=True,
+                        scale=cfg.exploration_lat_scale,
+                        params={"lambda_lat": self.lambda_lat, "eta_lat": eta},
+                    )
+                )
             elif head == "longitudinal":
-                fns.append(GuidanceConfig(
-                    name="longitudinal", enabled=True, scale=1.0,
-                    params={"lambda_lon": self.lambda_lon, "eta_lon": eta},
-                ))
+                fns.append(
+                    GuidanceConfig(
+                        name="longitudinal",
+                        enabled=True,
+                        scale=1.0,
+                        params={"lambda_lon": self.lambda_lon, "eta_lon": eta},
+                    )
+                )
             elif head == "collision":
-                fns.append(GuidanceConfig(
-                    name="collision_swerve_batched", enabled=True,
-                    scale=cfg.exploration_col_scale,
-                    params={"eta_col": eta, "range": cfg.exploration_col_range},
-                ))
+                fns.append(
+                    GuidanceConfig(
+                        name="collision_swerve_batched",
+                        enabled=True,
+                        scale=cfg.exploration_col_scale,
+                        params={"eta_col": eta, "range": cfg.exploration_col_range},
+                    )
+                )
             elif head == "stretch":
-                fns.append(GuidanceConfig(
-                    name="speed_stretch_batched", enabled=True,
-                    scale=cfg.exploration_stretch_scale,
-                    params={"stretch": 1.0 + cfg.exploration_lambda_spd * eta},
-                ))
+                fns.append(
+                    GuidanceConfig(
+                        name="speed_stretch_batched",
+                        enabled=True,
+                        scale=cfg.exploration_stretch_scale,
+                        params={"stretch": 1.0 + cfg.exploration_lambda_spd * eta},
+                    )
+                )
             else:
                 raise ValueError(f"unknown exploration head {head!r}")
         return fns
@@ -284,10 +299,7 @@ class GRPOExplorationTrainer:
                 return None
 
         # Normalize data
-        norm_data = {
-            k: v.clone() if isinstance(v, torch.Tensor) else v
-            for k, v in data.items()
-        }
+        norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
         norm_data = self.model_args.observation_normalizer(norm_data)
 
         self.policy_model.eval()
@@ -297,9 +309,13 @@ class GRPOExplorationTrainer:
         with torch.no_grad():
             # 1. Deterministic trajectory (eval only, outside training group)
             det_traj = generate_samples(
-                model=self.policy_model, model_args=self.model_args,
-                data=norm_data, noise_scale=0.0, n_samples=1,
-                composer=None, device=self.device,
+                model=self.policy_model,
+                model_args=self.model_args,
+                data=norm_data,
+                noise_scale=0.0,
+                n_samples=1,
+                composer=None,
+                device=self.device,
             )[0]  # (T, 4)
 
             K = self.config.num_generations
@@ -307,7 +323,10 @@ class GRPOExplorationTrainer:
             if self.use_explorer:
                 # Explorer path: Beta distributions → η sampling
                 x_ref_np = generate_reference_trajectory(
-                    self.policy_model, self.model_args, norm_data, self.device,
+                    self.policy_model,
+                    self.model_args,
+                    norm_data,
+                    self.device,
                 )
                 x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)
                 norm_data["reference_trajectory"] = x_ref
@@ -316,9 +335,7 @@ class GRPOExplorationTrainer:
                 policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
                 dists = policy_output.dists
 
-                eta_01 = {
-                    h: dists[h].rsample((K,)).squeeze(-1) for h in self.heads
-                }
+                eta_01 = {h: dists[h].rsample((K,)).squeeze(-1) for h in self.heads}
                 if self.config.exploration_pin_zero_eta:
                     # Slot 0 = forced η=0 (0.5 in Beta space): the unguided
                     # reference the group advantages compare against. Excluded
@@ -333,7 +350,10 @@ class GRPOExplorationTrainer:
 
                 # Generate reference trajectory (needed by lateral/longitudinal guidance)
                 x_ref_np = generate_reference_trajectory(
-                    self.policy_model, self.model_args, norm_data, self.device,
+                    self.policy_model,
+                    self.model_args,
+                    norm_data,
+                    self.device,
                 )
                 x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)
                 norm_data["reference_trajectory"] = x_ref
@@ -345,6 +365,7 @@ class GRPOExplorationTrainer:
 
             # 6. Generate K trajectories — batched with per-trajectory varied noise
             from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+
             noise_min, noise_max = self.config.noise_scale_range
 
             # Expand scene data from B=1 to B=K
@@ -361,16 +382,22 @@ class GRPOExplorationTrainer:
             composer = GuidanceComposer(set_cfg)
 
             traj_tensor = _batched_generate_varied_noise(
-                self.policy_model, self.model_args, K_data,
-                noise_min=noise_min, noise_max=noise_max,
+                self.policy_model,
+                self.model_args,
+                K_data,
+                noise_min=noise_min,
+                noise_max=noise_max,
                 first_deterministic=True,
-                composer=composer, device=self.device,
+                composer=composer,
+                device=self.device,
             )  # [K, T, 4]
             trajectories = [traj_tensor[k].cpu().numpy() for k in range(K)]
 
         # 7. Score all K trajectories
         traj_batch = torch.tensor(
-            np.stack(trajectories), device=self.device, dtype=torch.float32,
+            np.stack(trajectories),
+            device=self.device,
+            dtype=torch.float32,
         )
         reward_breakdowns = compute_reward_batch(traj_batch, data, self.reward_config)
         advantages = compute_group_advantages(
@@ -385,10 +412,14 @@ class GRPOExplorationTrainer:
         if self.use_explorer and self.heads == ["lateral", "longitudinal"]:
             policy_meta = PolicyGroupMetadata(
                 log_probs=torch.zeros(K, device=self.device),
-                lat_dist_params=(dists["lateral"].concentration1.detach(),
-                                 dists["lateral"].concentration0.detach()),
-                lon_dist_params=(dists["longitudinal"].concentration1.detach(),
-                                 dists["longitudinal"].concentration0.detach()),
+                lat_dist_params=(
+                    dists["lateral"].concentration1.detach(),
+                    dists["lateral"].concentration0.detach(),
+                ),
+                lon_dist_params=(
+                    dists["longitudinal"].concentration1.detach(),
+                    dists["longitudinal"].concentration0.detach(),
+                ),
                 eta_lat_samples=eta_vals["lateral"].detach(),
                 eta_lon_samples=eta_vals["longitudinal"].detach(),
             )
@@ -459,10 +490,12 @@ class GRPOExplorationTrainer:
             # --- DiT GRPO loss (batched) — skipped entirely when the DiT is frozen ---
             if self.train_dit:
                 from rlvr.grpo_loss import compute_batched_grpo_loss
+
                 traj_list = group["trajectories"]
                 traj_tensor = torch.tensor(
                     np.stack(traj_list) if isinstance(traj_list[0], np.ndarray) else traj_list,
-                    device=self.device, dtype=torch.float32,
+                    device=self.device,
+                    dtype=torch.float32,
                 )
                 dit_loss, dit_metrics = compute_batched_grpo_loss(
                     policy_model=self.policy_model,
@@ -507,12 +540,16 @@ class GRPOExplorationTrainer:
 
                 if inner_epochs > 1:
                     with torch.no_grad():
-                        old_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+                        old_output = self.exploration_policy(
+                            scene_encoding, x_ref, deterministic=True
+                        )
                         old_log_probs = _sum_log_probs(old_output.dists).detach()
 
                 for inner_ep in range(inner_epochs):
                     with torch.set_grad_enabled(grad_enabled):
-                        policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
+                        policy_output = self.exploration_policy(
+                            scene_encoding, x_ref, deterministic=True
+                        )
                     dists = policy_output.dists
 
                     log_probs = _sum_log_probs(dists)
@@ -555,14 +592,19 @@ class GRPOExplorationTrainer:
                             "exploration_total_loss": policy_loss.item(),
                         }
                         for h, d in dists.items():
-                            policy_metrics[f"exploration_eta_{h}_mean"] = d.mean.mean().item() * 2 - 1
-                            policy_metrics[f"exploration_eta_{h}_std"] = (d.variance.mean().item() * 4) ** 0.5
+                            policy_metrics[f"exploration_eta_{h}_mean"] = (
+                                d.mean.mean().item() * 2 - 1
+                            )
+                            policy_metrics[f"exploration_eta_{h}_std"] = (
+                                d.variance.mean().item() * 4
+                            ) ** 0.5
 
                         if not policy_frozen:
                             self.policy_optimizer.zero_grad()
                             policy_loss.backward()
                             torch.nn.utils.clip_grad_norm_(
-                                self.exploration_policy.parameters(), max_norm=1.0,
+                                self.exploration_policy.parameters(),
+                                max_norm=1.0,
                             )
                             self.policy_optimizer.step()
                     elif self.config.exploration_loss_type == "best_sample_mse":
@@ -578,13 +620,19 @@ class GRPOExplorationTrainer:
                         policy_loss = rsft_loss
                         policy_metrics = {
                             "exploration_policy_loss": rsft_loss.item(),
-                            "exploration_entropy": float(sum(d.entropy().mean() for d in dists.values())),
+                            "exploration_entropy": float(
+                                sum(d.entropy().mean() for d in dists.values())
+                            ),
                             "exploration_kl": 0.0,
                             "exploration_total_loss": rsft_loss.item(),
                         }
                         for h, d in dists.items():
-                            policy_metrics[f"exploration_eta_{h}_mean"] = d.mean.mean().item() * 2 - 1
-                            policy_metrics[f"exploration_eta_{h}_std"] = (d.variance.mean().item() * 4) ** 0.5
+                            policy_metrics[f"exploration_eta_{h}_mean"] = (
+                                d.mean.mean().item() * 2 - 1
+                            )
+                            policy_metrics[f"exploration_eta_{h}_std"] = (
+                                d.variance.mean().item() * 4
+                            ) ** 0.5
                     else:
                         policy_loss, policy_metrics = compute_exploration_loss(
                             advantages=pg_advantages,
@@ -602,7 +650,8 @@ class GRPOExplorationTrainer:
                             n_policy_accum += 1
                             if n_policy_accum >= self.config.exploration_grad_accum_groups:
                                 torch.nn.utils.clip_grad_norm_(
-                                    self.exploration_policy.parameters(), max_norm=1.0,
+                                    self.exploration_policy.parameters(),
+                                    max_norm=1.0,
                                 )
                                 self.policy_optimizer.step()
                                 self.policy_optimizer.zero_grad()
@@ -612,8 +661,7 @@ class GRPOExplorationTrainer:
                     n_policy_accum += 1
 
                 for h in self.heads:
-                    per_scene_eta[h].append(
-                        dists[h].mean.mean().item() * 2 - 1)
+                    per_scene_eta[h].append(dists[h].mean.mean().item() * 2 - 1)
             else:
                 # Random guidance: no policy to train, just track η stats
                 eta_lat_01 = group["eta_01"]["lateral"]
@@ -641,12 +689,15 @@ class GRPOExplorationTrainer:
             num_groups += 1
 
             if progress_callback is not None:
-                progress_callback({
-                    "epoch": epoch,
-                    "group": group_idx + 1,
-                    "total_groups": len(groups),
-                    **dit_metrics, **policy_metrics,
-                })
+                progress_callback(
+                    {
+                        "epoch": epoch,
+                        "group": group_idx + 1,
+                        "total_groups": len(groups),
+                        **dit_metrics,
+                        **policy_metrics,
+                    }
+                )
 
         # Flush remaining DiT gradients
         if self.train_dit and dit_accum > 0:
@@ -659,12 +710,18 @@ class GRPOExplorationTrainer:
 
         # Policy optimizer step: only needed for non-PPO (inner_epochs=1)
         # without per-group stepping. PPO and per-group both step above.
-        if self.use_explorer and n_policy_accum > 0 and self.config.exploration_inner_epochs <= 1 and not policy_frozen:
+        if (
+            self.use_explorer
+            and n_policy_accum > 0
+            and self.config.exploration_inner_epochs <= 1
+            and not policy_frozen
+        ):
             for p in self.exploration_policy.parameters():
                 if p.grad is not None:
                     p.grad.div_(n_policy_accum)
             torch.nn.utils.clip_grad_norm_(
-                self.exploration_policy.parameters(), max_norm=1.0,
+                self.exploration_policy.parameters(),
+                max_norm=1.0,
             )
             self.policy_optimizer.step()
             self.policy_optimizer.zero_grad()
@@ -677,6 +734,7 @@ class GRPOExplorationTrainer:
         # output), keyed by the ACTUAL head name (previously heads[0]/[-1]
         # were logged as lat/lon regardless of the head spec).
         import numpy as _np
+
         for h, vals in per_scene_eta.items():
             if vals:
                 result[f"exploration_eta_{h}_scene_std"] = float(_np.std(vals))
@@ -693,16 +751,22 @@ class GRPOExplorationTrainer:
         # DiT KL decays (high→low): keep planner stable early, let it adapt later
         scheduled_dit_kl = self.config.get_kl_coef(epoch, self.config.train_epochs)
         if scheduled_dit_kl != self.config.kl_coef:
-            print(f"  [kl_schedule] epoch {epoch}: dit_kl {self.config.kl_coef:.4f} -> {scheduled_dit_kl:.4f}")
+            print(
+                f"  [kl_schedule] epoch {epoch}: dit_kl {self.config.kl_coef:.4f} -> {scheduled_dit_kl:.4f}"
+            )
             self.config.kl_coef = scheduled_dit_kl
 
         # Policy KL ramps (low→high): free exploration early, anchor learned policy later
         scheduled_policy_kl = self.config.get_exploration_kl_coef(epoch, self.config.train_epochs)
         if scheduled_policy_kl != self.config.exploration_kl_coef:
-            print(f"  [kl_schedule] epoch {epoch}: policy_kl {self.config.exploration_kl_coef:.4f} -> {scheduled_policy_kl:.4f}")
+            print(
+                f"  [kl_schedule] epoch {epoch}: policy_kl {self.config.exploration_kl_coef:.4f} -> {scheduled_policy_kl:.4f}"
+            )
             self.config.exploration_kl_coef = scheduled_policy_kl
 
-        print(f"  Generating policy-guided groups for {len(npz_paths)} scenes (K={self.config.num_generations})...")
+        print(
+            f"  Generating policy-guided groups for {len(npz_paths)} scenes (K={self.config.num_generations})..."
+        )
         groups = []
         for npz_path in tqdm(npz_paths, desc="Generating groups"):
             group = self.generate_policy_guided_group(npz_path)
@@ -720,9 +784,11 @@ class GRPOExplorationTrainer:
             n_trim = max(1, int(n * trim))
             mean_rewards = [np.mean([r.total for r in g["reward_breakdowns"]]) for g in groups]
             sorted_idx = sorted(range(n), key=lambda i: mean_rewards[i])
-            keep_idx = sorted_idx[n_trim:n - n_trim]
+            keep_idx = sorted_idx[n_trim : n - n_trim]
             groups = [groups[i] for i in keep_idx]
-            print(f"  Trimmed {2*n_trim} scenes ({trim*100:.0f}% each end), keeping {len(groups)}/{n}")
+            print(
+                f"  Trimmed {2 * n_trim} scenes ({trim * 100:.0f}% each end), keeping {len(groups)}/{n}"
+            )
 
         random.shuffle(groups)
         return self.train_on_groups(groups, epoch, progress_callback)
@@ -798,42 +864,50 @@ class GRPOExplorationTrainer:
                 print(f"  [{label}] skipping {npz_path}: {e}")
                 continue
             norm_data = {
-                k: v.clone() if isinstance(v, torch.Tensor) else v
-                for k, v in data.items()
+                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
             }
             norm_data = self.model_args.observation_normalizer(norm_data)
 
             x_ref_np = generate_reference_trajectory(
-                self.policy_model, self.model_args, norm_data, self.device,
+                self.policy_model,
+                self.model_args,
+                norm_data,
+                self.device,
             )
             x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(self.device)
             norm_data["reference_trajectory"] = x_ref
             scene_encoding = run_frozen_encoder(self.policy_model, norm_data)
 
             policy_output = self.exploration_policy(scene_encoding, x_ref, deterministic=True)
-            etas = {
-                h: (2.0 * policy_output.dists[h].mean - 1.0).reshape(1)
-                for h in self.heads
-            }
+            etas = {h: (2.0 * policy_output.dists[h].mean - 1.0).reshape(1) for h in self.heads}
 
             guidance_fns = self._build_guidance_fns(etas)
             set_cfg = GuidanceSetConfig(functions=guidance_fns, global_scale=self.guidance_scale)
             composer = GuidanceComposer(set_cfg)
 
             guided_traj = generate_samples(
-                model=self.policy_model, model_args=self.model_args,
-                data=norm_data, noise_scale=0.0, n_samples=1,
-                composer=composer, device=self.device,
+                model=self.policy_model,
+                model_args=self.model_args,
+                data=norm_data,
+                noise_scale=0.0,
+                n_samples=1,
+                composer=composer,
+                device=self.device,
             )[0]
             det_traj = generate_samples(
-                model=self.policy_model, model_args=self.model_args,
-                data=norm_data, noise_scale=0.0, n_samples=1,
-                composer=None, device=self.device,
+                model=self.policy_model,
+                model_args=self.model_args,
+                data=norm_data,
+                noise_scale=0.0,
+                n_samples=1,
+                composer=None,
+                device=self.device,
             )[0]
 
             traj_batch = torch.tensor(
                 np.stack([guided_traj, det_traj]),
-                device=self.device, dtype=torch.float32,
+                device=self.device,
+                dtype=torch.float32,
             )
             guided_bd, det_bd = compute_reward_batch(traj_batch, data, reward_config)
             deviation = float(
@@ -841,20 +915,22 @@ class GRPOExplorationTrainer:
                     np.asarray(guided_traj)[:, :2] - np.asarray(det_traj)[:, :2], axis=-1
                 ).mean()
             )
-            rows.append({
-                "npz_path": npz_path,
-                **{f"eta_{h}": float(v.item()) for h, v in etas.items()},
-                "reward": guided_bd.total,
-                "det_reward": det_bd.total,
-                "static_crossing": bool(guided_bd.static_crossing),
-                "det_static_crossing": bool(det_bd.static_crossing),
-                "sc_min_dist": float(guided_bd.sc_min_dist),
-                "det_sc_min_dist": float(det_bd.sc_min_dist),
-                "rb_crossing": bool(guided_bd.rb_crossing),
-                "collision": guided_bd.collision_step is not None,
-                "sc_n_stopped": int(guided_bd.sc_n_stopped),
-                "deviation": deviation,
-            })
+            rows.append(
+                {
+                    "npz_path": npz_path,
+                    **{f"eta_{h}": float(v.item()) for h, v in etas.items()},
+                    "reward": guided_bd.total,
+                    "det_reward": det_bd.total,
+                    "static_crossing": bool(guided_bd.static_crossing),
+                    "det_static_crossing": bool(det_bd.static_crossing),
+                    "sc_min_dist": float(guided_bd.sc_min_dist),
+                    "det_sc_min_dist": float(det_bd.sc_min_dist),
+                    "rb_crossing": bool(guided_bd.rb_crossing),
+                    "collision": guided_bd.collision_step is not None,
+                    "sc_n_stopped": int(guided_bd.sc_n_stopped),
+                    "deviation": deviation,
+                }
+            )
 
         self.last_eval_rows = rows  # per-scene detail for eval/viz tools
         return aggregate_policy_eval(rows)
@@ -878,9 +954,7 @@ class GRPOExplorationTrainer:
                 self.policy_optimizer.state_dict(),
                 self.run_dir / "policy_optimizer.pth",
             )
-            self.exploration_policy.config.to_json(
-                self.run_dir / "exploration_policy_config.json"
-            )
+            self.exploration_policy.config.to_json(self.run_dir / "exploration_policy_config.json")
             self.config.to_json(self.run_dir / "grpo_config.json")
             return
         if self.use_lora:
@@ -949,8 +1023,10 @@ def aggregate_policy_eval(rows: list[dict]) -> dict[str, float]:
     """
     if not rows:
         return {
-            "reward_mean": float("-inf"), "rb_crossings": 999,
-            "collision_rate": 1.0, "n_scenes": 0,
+            "reward_mean": float("-inf"),
+            "rb_crossings": 999,
+            "collision_rate": 1.0,
+            "n_scenes": 0,
         }
     avoid = [r for r in rows if r["sc_n_stopped"] > 0]
     normal = [r for r in rows if r["sc_n_stopped"] == 0]
@@ -975,7 +1051,7 @@ def aggregate_policy_eval(rows: list[dict]) -> dict[str, float]:
     }
     eta_keys = [k for k in rows[0] if k.startswith("eta_")]
     for k in eta_keys:
-        suffix = k[len("eta_"):]
+        suffix = k[len("eta_") :]
         # Short aliases for the original layout: lateral->lat, longitudinal->lon
         suffix = {"lateral": "lat", "longitudinal": "lon"}.get(suffix, suffix)
         out[f"eta_{suffix}_abs_avoid"] = _mean([abs(r[k]) for r in avoid])
@@ -985,8 +1061,12 @@ def aggregate_policy_eval(rows: list[dict]) -> dict[str, float]:
 
 def _empty_metrics() -> dict[str, float]:
     return {
-        "loss": 0.0, "policy_loss": 0.0, "kl_loss": 0.0,
-        "mean_advantage": 0.0, "advantage_std": 0.0,
-        "exploration_total_loss": 0.0, "exploration_entropy": 0.0,
+        "loss": 0.0,
+        "policy_loss": 0.0,
+        "kl_loss": 0.0,
+        "mean_advantage": 0.0,
+        "advantage_std": 0.0,
+        "exploration_total_loss": 0.0,
+        "exploration_entropy": 0.0,
         "exploration_kl": 0.0,
     }

@@ -94,11 +94,14 @@ def _get_baseline_neighbor_prediction(
     future_len = model_args.future_len
     B = norm_data["ego_current_state"].shape[0]
 
-    data_copy = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                 for k, v in norm_data.items()}
+    data_copy = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in norm_data.items()}
     from rlvr.closed_loop.batched_rollout import make_initial_latent
+
     data_copy["sampled_trajectories"] = make_initial_latent(
-        B, P, future_len, norm_data["ego_current_state"].device,
+        B,
+        P,
+        future_len,
+        norm_data["ego_current_state"].device,
     )
 
     ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
@@ -210,10 +213,14 @@ def _compute_sft_diffusion_loss(
     neighbors_current = data["neighbor_agents_past"][:, :Pn, -1, :4]
     ego_current_norm = (ego_current - ego_mean) / ego_std
     neighbors_current_norm = (neighbors_current - ego_mean) / ego_std
-    current_states = torch.cat([ego_current_norm[:, None], neighbors_current_norm], dim=1)  # [B, P, 4]
+    current_states = torch.cat(
+        [ego_current_norm[:, None], neighbors_current_norm], dim=1
+    )  # [B, P, 4]
 
     # Neighbor current validity mask
-    neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0  # [B, Pn]
+    neighbor_current_mask = (
+        torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
+    )  # [B, Pn]
     # Full neighbor mask: [B, Pn, T+1] (current + future)
     full_neighbor_mask = torch.cat(
         (neighbor_current_mask.unsqueeze(-1), neighbor_mask), dim=-1
@@ -236,7 +243,9 @@ def _compute_sft_diffusion_loss(
         if ego_il_mode not in ("gt", "baseline"):
             raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {ego_il_mode!r}")
         if ego_il_mode == "gt" and ego_gt_real is None:
-            raise ValueError("ego_gt_real is required when ego_il_weight > 0 and ego_il_mode == 'gt'.")
+            raise ValueError(
+                "ego_gt_real is required when ego_il_weight > 0 and ego_il_mode == 'gt'."
+            )
     if use_ego_il and ego_il_mode == "gt":
         ego_gt_real_norm = (ego_gt_real - ego_mean) / ego_std  # [B, T, 4]
 
@@ -249,7 +258,9 @@ def _compute_sft_diffusion_loss(
     # Combine future padding mask with current-timestep validity:
     # a neighbor absent at the current timestep should not contribute to loss.
     neighbors_future_valid = ~neighbor_mask  # [B, Pn, T]
-    neighbors_future_valid = neighbors_future_valid & (~neighbor_current_mask.unsqueeze(-1))  # [B, Pn, T]
+    neighbors_future_valid = neighbors_future_valid & (
+        ~neighbor_current_mask.unsqueeze(-1)
+    )  # [B, Pn, T]
 
     # Check if model supports LoRA disable (needed for neighbor regularization)
     inner = model.module if hasattr(model, "module") else model
@@ -275,8 +286,9 @@ def _compute_sft_diffusion_loss(
         xT_full = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         xT_full = torch.where(prefix_mask, all_gt, xT_full)
 
-        merged_inputs = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                         for k, v in data_normalized.items()}
+        merged_inputs = {
+            k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_normalized.items()
+        }
         merged_inputs["gt_trajectories"] = all_gt
         merged_inputs["sampled_trajectories"] = xT_full
         merged_inputs["diffusion_time"] = t_4d
@@ -390,10 +402,26 @@ def _compute_sft_diffusion_loss(
                 total_kl_loss += kl_loss
 
     ego_loss_avg = total_ego_loss / K
-    neighbor_loss_avg = total_neighbor_loss / K if isinstance(total_neighbor_loss, torch.Tensor) else torch.tensor(0.0, device=device)
-    neighbor_reg_avg = total_neighbor_reg_loss / K if isinstance(total_neighbor_reg_loss, torch.Tensor) else torch.tensor(0.0, device=device)
-    ego_il_avg = total_ego_il_loss / K if isinstance(total_ego_il_loss, torch.Tensor) else torch.tensor(0.0, device=device)
-    kl_loss_avg = total_kl_loss / K if isinstance(total_kl_loss, torch.Tensor) else torch.tensor(0.0, device=device)
+    neighbor_loss_avg = (
+        total_neighbor_loss / K
+        if isinstance(total_neighbor_loss, torch.Tensor)
+        else torch.tensor(0.0, device=device)
+    )
+    neighbor_reg_avg = (
+        total_neighbor_reg_loss / K
+        if isinstance(total_neighbor_reg_loss, torch.Tensor)
+        else torch.tensor(0.0, device=device)
+    )
+    ego_il_avg = (
+        total_ego_il_loss / K
+        if isinstance(total_ego_il_loss, torch.Tensor)
+        else torch.tensor(0.0, device=device)
+    )
+    kl_loss_avg = (
+        total_kl_loss / K
+        if isinstance(total_kl_loss, torch.Tensor)
+        else torch.tensor(0.0, device=device)
+    )
 
     # Combined loss: ego + neighbor (weight from config.neighbor_loss_weight,
     # default 0.1 to match original SFT alpha_neighbor_loss; set to 0 to disable)
@@ -407,9 +435,13 @@ def _compute_sft_diffusion_loss(
 
     metrics = {
         "sft_ego_loss": ego_loss_avg.item(),
-        "sft_neighbor_loss": neighbor_loss_avg.item() if isinstance(neighbor_loss_avg, torch.Tensor) else 0.0,
+        "sft_neighbor_loss": neighbor_loss_avg.item()
+        if isinstance(neighbor_loss_avg, torch.Tensor)
+        else 0.0,
         "sft_total_loss": loss.item(),
-        "sft_neighbor_reg_loss": neighbor_reg_avg.item() if isinstance(neighbor_reg_avg, torch.Tensor) else 0.0,
+        "sft_neighbor_reg_loss": neighbor_reg_avg.item()
+        if isinstance(neighbor_reg_avg, torch.Tensor)
+        else 0.0,
         "sft_ego_il_loss": ego_il_avg.item() if isinstance(ego_il_avg, torch.Tensor) else 0.0,
         "sft_kl_loss": kl_loss_avg.item() if isinstance(kl_loss_avg, torch.Tensor) else 0.0,
     }
@@ -462,10 +494,12 @@ def train_epoch_ranked_sft(
     )
 
     if epoch == 1:
-        print(f"  [ranked-sft] mode={mode}, K={K}, "
-              f"sg_window={config.sg_filter_window}, sg_order={config.sg_filter_order}, "
-              f"neighbor_reg={config.neighbor_reg_weight}, reg_only={config.neighbor_reg_only}, "
-              f"ego_il={config.ego_il_weight}")
+        print(
+            f"  [ranked-sft] mode={mode}, K={K}, "
+            f"sg_window={config.sg_filter_window}, sg_order={config.sg_filter_order}, "
+            f"neighbor_reg={config.neighbor_reg_weight}, reg_only={config.neighbor_reg_only}, "
+            f"ego_il={config.ego_il_weight}"
+        )
 
     # 1. Load all scenes
     print(f"  Loading {len(scene_paths)} scenes...")
@@ -478,6 +512,7 @@ def train_epoch_ranked_sft(
             valid_paths.append(path)
         except Exception as e:
             from pathlib import Path as _Path
+
             print(f"  [skip] {_Path(path).name}: {e}")
 
     N = len(all_data)
@@ -488,6 +523,7 @@ def train_epoch_ranked_sft(
     # for use as the underprogress reference. Only loaded if the config asks
     # for "baseline" reference; otherwise skipped (det reference is adaptive).
     from pathlib import Path as _PathCls
+
     baseline_path_lens: dict[str, float] = {}
     if getattr(config, "underprogress_reference", "det") == "baseline" and run_dir is not None:
         bpath = _PathCls(run_dir) / "epoch1_baselines.npz"
@@ -495,15 +531,12 @@ def train_epoch_ranked_sft(
             try:
                 with np.load(bpath, allow_pickle=False) as saved:
                     if "paths" not in saved or "trajectories" not in saved:
-                        raise ValueError(
-                            "missing required arrays: 'paths' and/or 'trajectories'"
-                        )
+                        raise ValueError("missing required arrays: 'paths' and/or 'trajectories'")
                     saved_paths = saved["paths"]
                     saved_trajs = saved["trajectories"]  # (M, T, 4)
                     if saved_paths.dtype == np.dtype("O"):
                         raise ValueError(
-                            "unsafe object-dtype 'paths' array; "
-                            "re-save with a fixed unicode dtype"
+                            "unsafe object-dtype 'paths' array; re-save with a fixed unicode dtype"
                         )
                     if saved_trajs.ndim < 3 or saved_trajs.shape[-1] < 2:
                         raise ValueError(
@@ -522,7 +555,9 @@ def train_epoch_ranked_sft(
             except (OSError, ValueError, KeyError) as e:
                 print(f"  [underprogress] skipping {bpath.name}: {e}")
             if epoch == 1 and baseline_path_lens:
-                print(f"  [underprogress] loaded {len(baseline_path_lens)} baseline path lens from {bpath.name}")
+                print(
+                    f"  [underprogress] loaded {len(baseline_path_lens)} baseline path lens from {bpath.name}"
+                )
 
     # 2. Stack and normalize for batched generation
     print(f"  Stacking {N} scenes into batch...")
@@ -550,8 +585,14 @@ def train_epoch_ranked_sft(
     # 2b. Apply per-epoch schedules to reward weights and guidance params
     scheduled = config.get_all_scheduled_values(epoch, config.train_epochs)
     reward_weight_names = {
-        "w_progress", "w_safety", "w_smooth", "w_feasibility", "w_centerline",
-        "stopped_penalty", "underprogress_penalty", "progress_norm_scale",
+        "w_progress",
+        "w_safety",
+        "w_smooth",
+        "w_feasibility",
+        "w_centerline",
+        "stopped_penalty",
+        "underprogress_penalty",
+        "progress_norm_scale",
     }
     for name, value in scheduled.items():
         if name in reward_weight_names and hasattr(reward_config, name):
@@ -596,9 +637,13 @@ def train_epoch_ranked_sft(
                 valid = np.abs(gt_np[:, :2]).sum(axis=-1) > 0.1
                 cos_h = np.where(valid, np.cos(gt_np[:, 2]), 0.0)
                 sin_h = np.where(valid, np.sin(gt_np[:, 2]), 0.0)
-                traj_4col = np.column_stack([
-                    gt_np[:, :2], cos_h, sin_h,
-                ]).astype(np.float32)
+                traj_4col = np.column_stack(
+                    [
+                        gt_np[:, :2],
+                        cos_h,
+                        sin_h,
+                    ]
+                ).astype(np.float32)
             else:
                 traj_4col = gt_np[:, :4].astype(np.float32)
             best_traj_smooth = _smooth_trajectory(
@@ -617,6 +662,7 @@ def train_epoch_ranked_sft(
 
         from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
         from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+
         # NOTE: per-scene loop matches grpo_exploration_trainer's generate_policy_guided_group.
         # Batching across scenes would require handling per-scene Beta distributions in a single
         # forward pass, which is complex. For 50-500 scenes this takes ~3 min, acceptable.
@@ -635,12 +681,18 @@ def train_epoch_ranked_sft(
         _explorer_scenes = []  # list of dicts with distributions and sampled etas
 
         for i in range(N):
-            norm_i = {k: v[i:i+1] if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == N else v
-                      for k, v in norm_batch.items()}
+            norm_i = {
+                k: v[i : i + 1]
+                if isinstance(v, torch.Tensor) and v.dim() > 0 and v.shape[0] == N
+                else v
+                for k, v in norm_batch.items()
+            }
             with torch.no_grad():
                 scene_enc = run_frozen_encoder(model, norm_i)
                 x_ref_np = generate_reference_trajectory(model, model_args, norm_i, device)
-                x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(device=device, dtype=torch.float32)
+                x_ref = (
+                    torch.from_numpy(x_ref_np).unsqueeze(0).to(device=device, dtype=torch.float32)
+                )
                 norm_i["reference_trajectory"] = x_ref
 
                 # Get Beta distributions and sample K etas
@@ -651,12 +703,14 @@ def train_epoch_ranked_sft(
                 eta_lon_vals = 2.0 * eta_lon_01 - 1.0
 
                 if _train_explorer:
-                    _explorer_scenes.append({
-                        "scene_enc": scene_enc.detach(),
-                        "x_ref": x_ref.detach(),
-                        "eta_lat_01": eta_lat_01.detach(),
-                        "eta_lon_01": eta_lon_01.detach(),
-                    })
+                    _explorer_scenes.append(
+                        {
+                            "scene_enc": scene_enc.detach(),
+                            "x_ref": x_ref.detach(),
+                            "eta_lat_01": eta_lat_01.detach(),
+                            "eta_lon_01": eta_lon_01.detach(),
+                        }
+                    )
 
                 # Expand scene data from B=1 to B=K
                 K_data = {}
@@ -668,20 +722,33 @@ def train_epoch_ranked_sft(
 
                 # Build batched guidance with K different etas
                 guidance_fns = [
-                    _GC("lateral", enabled=True, scale=1.0,
-                         params={"lambda_lat": _lat_lambda, "eta_lat": eta_lat_vals}),
-                    _GC("longitudinal", enabled=True, scale=1.0,
-                         params={"lambda_lon": _lon_lambda, "eta_lon": eta_lon_vals}),
+                    _GC(
+                        "lateral",
+                        enabled=True,
+                        scale=1.0,
+                        params={"lambda_lat": _lat_lambda, "eta_lat": eta_lat_vals},
+                    ),
+                    _GC(
+                        "longitudinal",
+                        enabled=True,
+                        scale=1.0,
+                        params={"lambda_lon": _lon_lambda, "eta_lon": eta_lon_vals},
+                    ),
                 ]
-                composer = GuidanceComposer(GuidanceSetConfig(
-                    functions=guidance_fns, global_scale=_guide_scale))
+                composer = GuidanceComposer(
+                    GuidanceSetConfig(functions=guidance_fns, global_scale=_guide_scale)
+                )
 
                 # Generate K trajectories (first deterministic, rest with varied noise)
                 traj_tensor = _batched_generate_varied_noise(
-                    model, model_args, K_data,
-                    noise_min=noise_min, noise_max=noise_max,
+                    model,
+                    model_args,
+                    K_data,
+                    noise_min=noise_min,
+                    noise_max=noise_max,
                     first_deterministic=True,
-                    composer=composer, device=device,
+                    composer=composer,
+                    device=device,
                 )  # [K, T, 4]
                 all_scene_trajs.append(traj_tensor)
 
@@ -695,7 +762,12 @@ def train_epoch_ranked_sft(
         model.eval()
         with torch.no_grad():
             all_trajs = generate_all_scenes_batched(
-                model, model_args, norm_batch, K, config.noise_scale_range, device,
+                model,
+                model_args,
+                norm_batch,
+                K,
+                config.noise_scale_range,
+                device,
                 gt_max_speed=median_gt_speed,
                 longitudinal_eta=lon_eta,
                 longitudinal_lambda=lon_lambda,
@@ -728,7 +800,7 @@ def train_epoch_ranked_sft(
         scene_train_mask = []  # True = train on this scene, False = skip
         scene_improvements = []  # improvement value per scene for advantage weighting
         _gt_fallback_count = 0  # scenes where best-of-K < GT reward by margin
-        _gt_scored_count = 0   # scenes where GT was scored
+        _gt_scored_count = 0  # scenes where GT was scored
         # Per-scene record of GT vs best-of-K — let us inspect which scenes are
         # "hard" (GT clean but all K fail) and tune gt_fallback_margin.
         _gt_scene_log: list[dict] = []
@@ -746,6 +818,7 @@ def train_epoch_ranked_sft(
             print_epoch_summary,
             save_epoch_analytics,
         )
+
         _ra_variant = getattr(config, "generation_variant", "default")
         _ra_labels = get_generation_config_labels_for_variant(_ra_variant, K)
         if exploration_policy is not None:
@@ -764,7 +837,9 @@ def train_epoch_ranked_sft(
                 key = str(valid_paths[i])
                 if key in baseline_path_lens:
                     data_i["baseline_path_len"] = torch.tensor(
-                        baseline_path_lens[key], device=device, dtype=torch.float32,
+                        baseline_path_lens[key],
+                        device=device,
+                        dtype=torch.float32,
                     )
 
             # Optionally append GT trajectory as extra candidate in ranking pool
@@ -787,7 +862,9 @@ def train_epoch_ranked_sft(
                     elif _g.shape[0] < T_gen:
                         _pad = torch.zeros(T_gen - _g.shape[0], 4, device=_g.device, dtype=_g.dtype)
                         _g = torch.cat([_g, _pad], dim=0)
-                    traj_K = torch.cat([traj_K, _g.unsqueeze(0).to(traj_K.device, dtype=traj_K.dtype)], dim=0)
+                    traj_K = torch.cat(
+                        [traj_K, _g.unsqueeze(0).to(traj_K.device, dtype=traj_K.dtype)], dim=0
+                    )
                     _gt_appended = True
                     _gt_cand_count += 1
 
@@ -834,7 +911,9 @@ def train_epoch_ranked_sft(
                         _g = torch.cat([_g, _pad], dim=0)
                     gt_traj_4col = _g.to(traj_K.device, dtype=traj_K.dtype)
                     _gt_rewards = compute_reward_batch(
-                        gt_traj_4col.unsqueeze(0), data_i, reward_config,
+                        gt_traj_4col.unsqueeze(0),
+                        data_i,
+                        reward_config,
                     )
                     gt_reward = float(_gt_rewards[0].total)
                 if gt_traj_4col is not None:
@@ -842,18 +921,20 @@ def train_epoch_ranked_sft(
                     if best_reward < gt_reward - _gt_margin:
                         _used_gt_fallback = True
                         _gt_fallback_count += 1
-                    _gt_scene_log.append({
-                        "scene": Path(valid_paths[i]).stem,
-                        "gt_reward": gt_reward,
-                        "best_reward": float(best_reward),
-                        "det_reward": float(det_reward),
-                        "gap_best_minus_gt": float(best_reward - gt_reward),
-                        "best_idx": int(best_idx),
-                        "fallback": bool(_used_gt_fallback),
-                        "gt_rb_crossing": bool(_gt_rewards[0].rb_crossing),
-                        "gt_lane_crossing": bool(_gt_rewards[0].lane_crossing),
-                        "gt_collision_step": _gt_rewards[0].collision_step,
-                    })
+                    _gt_scene_log.append(
+                        {
+                            "scene": Path(valid_paths[i]).stem,
+                            "gt_reward": gt_reward,
+                            "best_reward": float(best_reward),
+                            "det_reward": float(det_reward),
+                            "gap_best_minus_gt": float(best_reward - gt_reward),
+                            "best_idx": int(best_idx),
+                            "fallback": bool(_used_gt_fallback),
+                            "gt_rb_crossing": bool(_gt_rewards[0].rb_crossing),
+                            "gt_lane_crossing": bool(_gt_rewards[0].lane_crossing),
+                            "gt_collision_step": _gt_rewards[0].collision_step,
+                        }
+                    )
 
             # "effective" reward captures what we actually train on:
             # best-of-K by default, GT when the il fallback fires. Downstream
@@ -880,28 +961,34 @@ def train_epoch_ranked_sft(
             else:
                 scene_improvements.append(max(0.0, improvement))
             if selective_thresh > 0 and epoch <= 2 and should_train:
-                print(f"    SEL [{Path(valid_paths[i]).stem[:30]}] "
-                      f"det={det_reward:.1f} best={best_reward:.1f} "
-                      f"eff={effective_reward:.1f} imp={improvement:.1f}")
+                print(
+                    f"    SEL [{Path(valid_paths[i]).stem[:30]}] "
+                    f"det={det_reward:.1f} best={best_reward:.1f} "
+                    f"eff={effective_reward:.1f} imp={improvement:.1f}"
+                )
 
             # Rank analytics: record which config won and why
             _ra_mean_bd = mean_breakdown_dict(rewards)
             _ra_winner = rewards[best_idx]
             _ra_dom_comp, _ra_dom_delta = compute_dominant_component(
-                _ra_winner, _ra_mean_bd, reward_config,
+                _ra_winner,
+                _ra_mean_bd,
+                reward_config,
             )
-            _ra.records.append(SceneRankRecord(
-                scene_path=Path(valid_paths[i]).stem,
-                winner_idx=best_idx,
-                winner_label=_scene_ra_labels[best_idx],
-                winner_reward=float(reward_vals[best_idx]),
-                mean_reward=float(reward_vals.mean()),
-                det_reward=float(reward_vals[0]),
-                winner_breakdown=breakdown_to_dict(_ra_winner),
-                mean_breakdown=_ra_mean_bd,
-                dominant_component=_ra_dom_comp,
-                dominant_delta=_ra_dom_delta,
-            ))
+            _ra.records.append(
+                SceneRankRecord(
+                    scene_path=Path(valid_paths[i]).stem,
+                    winner_idx=best_idx,
+                    winner_label=_scene_ra_labels[best_idx],
+                    winner_reward=float(reward_vals[best_idx]),
+                    mean_reward=float(reward_vals.mean()),
+                    det_reward=float(reward_vals[0]),
+                    winner_breakdown=breakdown_to_dict(_ra_winner),
+                    mean_breakdown=_ra_mean_bd,
+                    dominant_component=_ra_dom_comp,
+                    dominant_delta=_ra_dom_delta,
+                )
+            )
 
             # Get best trajectory and smooth it
             if _gt_mode == "il" and _used_gt_fallback and gt_traj_4col is not None:
@@ -921,8 +1008,10 @@ def train_epoch_ranked_sft(
         mean_best_reward = float(np.mean(best_rewards_list))
         if _include_gt_cand and _gt_cand_count > 0:
             _gt_wins = sum(1 for r in _ra.records if r.winner_label == "gt_candidate")
-            print(f"  [GT candidate] {_gt_cand_count}/{N} scenes had GT, "
-                  f"{_gt_wins}/{_gt_cand_count} GT won rank-1")
+            print(
+                f"  [GT candidate] {_gt_cand_count}/{N} scenes had GT, "
+                f"{_gt_wins}/{_gt_cand_count} GT won rank-1"
+            )
 
         # Rank analytics: aggregate and print/save
         _ra_labels_final = _ra_labels + (["gt_candidate"] if _include_gt_cand else [])
@@ -936,7 +1025,9 @@ def train_epoch_ranked_sft(
         if use_frozen:
             if not hasattr(config, "_frozen_mask"):
                 config._frozen_mask = list(scene_train_mask)
-                print(f"  [frozen] Saving first scene selection ({sum(scene_train_mask)}/{N} scenes)")
+                print(
+                    f"  [frozen] Saving first scene selection ({sum(scene_train_mask)}/{N} scenes)"
+                )
             else:
                 scene_train_mask = list(config._frozen_mask)
                 print(f"  [frozen] Reusing frozen selection ({sum(scene_train_mask)}/{N} scenes)")
@@ -952,39 +1043,64 @@ def train_epoch_ranked_sft(
         )
         print(f"  {_reward_label}: {mean_best_reward:.2f}")
         if selective_thresh > 0:
-            print(f"  Selective training: {n_selected}/{N} scenes selected "
-                  f"(threshold={selective_thresh:g}, skipped {N - n_selected})")
+            print(
+                f"  Selective training: {n_selected}/{N} scenes selected "
+                f"(threshold={selective_thresh:g}, skipped {N - n_selected})"
+            )
         if _gt_scored_count > 0:
             _gt_mode_str = getattr(config, "gt_fallback_mode", "none")
-            print(f"  GT fallback ({_gt_mode_str}): {_gt_fallback_count}/{_gt_scored_count} scenes "
-                  f"had best-of-{K} < GT reward (margin={getattr(config, 'gt_fallback_margin', 0.0):.2f})")
+            print(
+                f"  GT fallback ({_gt_mode_str}): {_gt_fallback_count}/{_gt_scored_count} scenes "
+                f"had best-of-{K} < GT reward (margin={getattr(config, 'gt_fallback_margin', 0.0):.2f})"
+            )
             # Print gap histogram — useful for picking a margin
             if _gt_scene_log:
                 import numpy as _np
+
                 gaps = _np.array([r["gap_best_minus_gt"] for r in _gt_scene_log])
-                print(f"  best-GT gap: min={gaps.min():.1f} p10={_np.percentile(gaps, 10):.1f} "
-                      f"p50={_np.percentile(gaps, 50):.1f} p90={_np.percentile(gaps, 90):.1f} "
-                      f"max={gaps.max():.1f}")
+                print(
+                    f"  best-GT gap: min={gaps.min():.1f} p10={_np.percentile(gaps, 10):.1f} "
+                    f"p50={_np.percentile(gaps, 50):.1f} p90={_np.percentile(gaps, 90):.1f} "
+                    f"max={gaps.max():.1f}"
+                )
                 for thr in (0.0, 2.0, 5.0, 10.0, 20.0):
                     n_below = int((gaps < -thr).sum())
-                    print(f"    scenes with best < GT - {thr:>5.1f} : {n_below}/{len(gaps)} "
-                          f"({100*n_below/len(gaps):.1f}%)")
+                    print(
+                        f"    scenes with best < GT - {thr:>5.1f} : {n_below}/{len(gaps)} "
+                        f"({100 * n_below / len(gaps):.1f}%)"
+                    )
                 # Save per-scene log (sorted worst-gap-first) for offline analysis
                 if run_dir is not None:
                     import json as _json
+
                     log_path = Path(run_dir) / f"gt_fallback_epoch_{epoch:03d}.json"
                     sorted_log = sorted(_gt_scene_log, key=lambda r: r["gap_best_minus_gt"])
                     with open(log_path, "w") as _lf:
-                        _json.dump({"epoch": epoch, "margin": _gt_margin,
-                                    "mode": _gt_mode_str, "scenes": sorted_log}, _lf, indent=2)
-                    print(f"  [gt_log] saved per-scene comparison to {log_path.name} "
-                          f"(sorted worst-gap-first; N={len(sorted_log)})")
+                        _json.dump(
+                            {
+                                "epoch": epoch,
+                                "margin": _gt_margin,
+                                "mode": _gt_mode_str,
+                                "scenes": sorted_log,
+                            },
+                            _lf,
+                            indent=2,
+                        )
+                    print(
+                        f"  [gt_log] saved per-scene comparison to {log_path.name} "
+                        f"(sorted worst-gap-first; N={len(sorted_log)})"
+                    )
 
         # --- Train explorer on trajectory rewards (if optimizer provided) ---
         explorer_metrics = {}
-        if exploration_policy is not None and exploration_optimizer is not None and _explorer_scenes:
+        if (
+            exploration_policy is not None
+            and exploration_optimizer is not None
+            and _explorer_scenes
+        ):
             from exploration_policy.loss import compute_exploration_loss
             from rlvr.reward import compute_group_advantages
+
             print(f"  Training explorer on {len(_explorer_scenes)} scenes...")
             exploration_policy.train()
             exploration_optimizer.zero_grad()
@@ -1007,8 +1123,9 @@ def train_epoch_ranked_sft(
 
                 # Recompute explorer distributions (with grad)
                 policy_output = exploration_policy(es["scene_enc"], es["x_ref"], deterministic=True)
-                log_probs = (policy_output.lat_dist.log_prob(es["eta_lat_01"])
-                             + policy_output.lon_dist.log_prob(es["eta_lon_01"]))
+                log_probs = policy_output.lat_dist.log_prob(
+                    es["eta_lat_01"]
+                ) + policy_output.lon_dist.log_prob(es["eta_lon_01"])
                 if log_probs.dim() > 1:
                     log_probs = log_probs.squeeze(-1)
 
@@ -1018,12 +1135,15 @@ def train_epoch_ranked_sft(
                     best_idx = advantages_t.argmax()
                     pred_lat = policy_output.lat_dist.mean.squeeze()
                     pred_lon = policy_output.lon_dist.mean.squeeze()
-                    policy_loss = (pred_lat - es["eta_lat_01"][best_idx].detach()) ** 2 \
-                                + (pred_lon - es["eta_lon_01"][best_idx].detach()) ** 2
+                    policy_loss = (pred_lat - es["eta_lat_01"][best_idx].detach()) ** 2 + (
+                        pred_lon - es["eta_lon_01"][best_idx].detach()
+                    ) ** 2
                 else:
                     policy_loss, _ = compute_exploration_loss(
-                        advantages=advantages_t, log_probs=log_probs,
-                        lat_dist=policy_output.lat_dist, lon_dist=policy_output.lon_dist,
+                        advantages=advantages_t,
+                        log_probs=log_probs,
+                        lat_dist=policy_output.lat_dist,
+                        lon_dist=policy_output.lon_dist,
                         entropy_coef=config.exploration_entropy_coef,
                         kl_coef=config.exploration_kl_coef,
                     )
@@ -1037,7 +1157,9 @@ def train_epoch_ranked_sft(
                 exploration_optimizer.step()
                 exploration_optimizer.zero_grad()
                 explorer_metrics["explorer_loss"] = total_policy_loss / n_explorer
-                print(f"  Explorer loss: {explorer_metrics['explorer_loss']:.4f} ({n_explorer} scenes)")
+                print(
+                    f"  Explorer loss: {explorer_metrics['explorer_loss']:.4f} ({n_explorer} scenes)"
+                )
 
             exploration_policy.eval()
             del _explorer_scenes
@@ -1054,7 +1176,7 @@ def train_epoch_ranked_sft(
         model.eval()
         for i in tqdm(range(N), desc="Baseline neighbors"):
             norm_i = {
-                k: v[i:i + 1] if isinstance(v, torch.Tensor) and v.shape[0] == N else v
+                k: v[i : i + 1] if isinstance(v, torch.Tensor) and v.shape[0] == N else v
                 for k, v in norm_batch.items()
             }
             neighbor_pred = _get_baseline_neighbor_prediction(
@@ -1069,7 +1191,7 @@ def train_epoch_ranked_sft(
 
     use_ego_il = config.ego_il_weight > 0.0 and config.ego_il_mode == "gt"
     print(f"  Preparing training targets for {N} scenes...")
-    all_ego_gt = []       # list of [1, T, 4]
+    all_ego_gt = []  # list of [1, T, 4]
     all_ego_gt_real = []  # list of [1, T, 4] — real GT for IL reg
     all_neighbor_gt = []  # list of [1, Pn, T, 4]
     all_neighbor_mask = []  # list of [1, Pn, T]
@@ -1077,7 +1199,9 @@ def train_epoch_ranked_sft(
     for i in range(N):
         # Ego GT: the filtered best trajectory
         ego_gt_np = best_ego_trajs[i]  # [T, 4]
-        ego_gt = torch.tensor(ego_gt_np, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T, 4]
+        ego_gt = torch.tensor(ego_gt_np, dtype=torch.float32, device=device).unsqueeze(
+            0
+        )  # [1, T, 4]
         T_actual = ego_gt.shape[1]
         if T_actual > future_len:
             ego_gt = ego_gt[:, :future_len, :]
@@ -1097,11 +1221,14 @@ def train_epoch_ranked_sft(
                     real_gt = real_gt.unsqueeze(0)  # [1, T, C]
                 # Convert heading if needed (angle -> cos/sin)
                 if real_gt.shape[-1] == 3:
-                    real_gt = torch.cat([
-                        real_gt[..., :2],
-                        real_gt[..., 2:3].cos(),
-                        real_gt[..., 2:3].sin(),
-                    ], dim=-1)
+                    real_gt = torch.cat(
+                        [
+                            real_gt[..., :2],
+                            real_gt[..., 2:3].cos(),
+                            real_gt[..., 2:3].sin(),
+                        ],
+                        dim=-1,
+                    )
                 real_gt = real_gt[..., :4]
                 T_r = real_gt.shape[1]
                 if T_r > future_len:
@@ -1125,11 +1252,14 @@ def train_epoch_ranked_sft(
                     neighbors_future = neighbors_future.unsqueeze(0)
                 neighbors_future = neighbors_future[:, :Pn, :, :]
                 if neighbors_future.shape[-1] == 3:
-                    neighbors_future = torch.cat([
-                        neighbors_future[..., :2],
-                        neighbors_future[..., 2:3].cos(),
-                        neighbors_future[..., 2:3].sin(),
-                    ], dim=-1)
+                    neighbors_future = torch.cat(
+                        [
+                            neighbors_future[..., :2],
+                            neighbors_future[..., 2:3].cos(),
+                            neighbors_future[..., 2:3].sin(),
+                        ],
+                        dim=-1,
+                    )
                 neighbor_mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0
                 T_n = neighbors_future.shape[2]
                 if T_n < future_len:
@@ -1144,7 +1274,9 @@ def train_epoch_ranked_sft(
                 if actual_pn < Pn:
                     pad_pn = torch.zeros(1, Pn - actual_pn, future_len, 4, device=device)
                     neighbors_future = torch.cat([neighbors_future, pad_pn], dim=1)
-                    pad_mask_pn = torch.ones(1, Pn - actual_pn, future_len, dtype=torch.bool, device=device)
+                    pad_mask_pn = torch.ones(
+                        1, Pn - actual_pn, future_len, dtype=torch.bool, device=device
+                    )
                     neighbor_mask = torch.cat([neighbor_mask, pad_mask_pn], dim=1)
                 neighbors_future = neighbors_future[:, :Pn, :future_len, :4]
                 neighbor_mask = neighbor_mask[:, :Pn, :future_len]
@@ -1204,11 +1336,14 @@ def train_epoch_ranked_sft(
     _random.shuffle(indices)
     N_train = len(indices)
 
-    print(f"  Training on {N_train}/{N} scenes (ranked SFT, mode={mode}, "
-          f"sft_batch_size={sft_bs}, accum_steps={accum_steps})...")
+    print(
+        f"  Training on {N_train}/{N} scenes (ranked SFT, mode={mode}, "
+        f"sft_batch_size={sft_bs}, accum_steps={accum_steps})..."
+    )
     _base_model_ref = base_model
     if config.kl_coef > 0.0 and exploration_policy is not None:
         import warnings
+
         warnings.warn(
             "kl_coef > 0 with exploration_policy: KL regularization is only applied "
             "in the SFT loss, not in the explorer's GRPO loss. The explorer gradient "
@@ -1235,15 +1370,16 @@ def train_epoch_ranked_sft(
     accum_count = 0
 
     for batch_start in range(0, N_train, sft_bs):
-        batch_idx = indices[batch_start:batch_start + sft_bs]
+        batch_idx = indices[batch_start : batch_start + sft_bs]
         bs = len(batch_idx)
 
         mini_data = {
-            k: v[batch_idx].clone() if isinstance(v, torch.Tensor) and v.shape[0] == N else
-               (v.clone() if isinstance(v, torch.Tensor) else v)
+            k: v[batch_idx].clone()
+            if isinstance(v, torch.Tensor) and v.shape[0] == N
+            else (v.clone() if isinstance(v, torch.Tensor) else v)
             for k, v in batch_data.items()
         }
-        mini_ego_gt = ego_gt_all[batch_idx]           # [bs, T, 4]
+        mini_ego_gt = ego_gt_all[batch_idx]  # [bs, T, 4]
         mini_neighbor_gt = neighbor_gt_all[batch_idx]  # [bs, Pn, T, 4]
         mini_neighbor_mask = neighbor_mask_all[batch_idx]  # [bs, Pn, T]
         mini_ego_gt_real = ego_gt_real_all[batch_idx] if ego_gt_real_all is not None else None
@@ -1259,7 +1395,9 @@ def train_epoch_ranked_sft(
             K=config.diffusion_k_steps,
             # None (the dataclass default) means "ranked-SFT neighbor term = 0.1"
             # (matches original SFT alpha_neighbor_loss); an explicit float (incl. 0.0) is honored.
-            neighbor_loss_weight=(0.1 if config.neighbor_loss_weight is None else config.neighbor_loss_weight),
+            neighbor_loss_weight=(
+                0.1 if config.neighbor_loss_weight is None else config.neighbor_loss_weight
+            ),
             neighbor_reg_weight=config.neighbor_reg_weight,
             neighbor_reg_only=config.neighbor_reg_only,
             ego_il_weight=config.ego_il_weight,

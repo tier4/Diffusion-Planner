@@ -77,9 +77,9 @@ def _ego_speed(run_dir: Path, step: int) -> float:
     return float(state[4])
 
 
-def _detect_lane_change_runs(cl_scores: np.ndarray,
-                             saturated_thresh: float,
-                             min_steps: int) -> set[int]:
+def _detect_lane_change_runs(
+    cl_scores: np.ndarray, saturated_thresh: float, min_steps: int
+) -> set[int]:
     """Return the set of step indices that fall inside a saturated-CL run
     of at least ``min_steps`` consecutive samples."""
     sat = cl_scores <= saturated_thresh
@@ -112,20 +112,33 @@ def _decluster(idx: list[int], window: int) -> list[int]:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--run", type=Path, required=True,
-                   help="Replay output dir (contains metrics_log.json + npz/)")
+    p.add_argument(
+        "--run",
+        type=Path,
+        required=True,
+        help="Replay output dir (contains metrics_log.json + npz/)",
+    )
     p.add_argument("--output_dir", type=Path, required=True)
-    p.add_argument("--bands_config", type=Path, required=True,
-                   help="Path to JSON with bands + stopped_filter + "
-                        "lane_change_detection + decluster_window. See "
-                        "scenario_generation/configs/classify_bands_default.json "
-                        "— this is REQUIRED (no silent defaults).")
+    p.add_argument(
+        "--bands_config",
+        type=Path,
+        required=True,
+        help="Path to JSON with bands + stopped_filter + "
+        "lane_change_detection + decluster_window. See "
+        "scenario_generation/configs/classify_bands_default.json "
+        "— this is REQUIRED (no silent defaults).",
+    )
     args = p.parse_args()
 
     with open(args.bands_config) as f:
         cfg = json.load(f)
-    for key in ("bands", "stopped_filter", "lane_change_detection",
-                "decluster_window", "gate_filters"):
+    for key in (
+        "bands",
+        "stopped_filter",
+        "lane_change_detection",
+        "decluster_window",
+        "gate_filters",
+    ):
         if key not in cfg:
             raise SystemExit(
                 f"bands_config missing required key '{key}'. "
@@ -143,17 +156,23 @@ def main():
     pred_coll_first_n = int(gates.get("pred_collision_first_n_steps", 0))
     print(f"Config: {args.bands_config}")
     print(f"  bands: {bands}")
-    print(f"  min_speed={min_speed} m/s  decluster={decluster_window}  "
-          f"lane_change_sat={lc_sat}  lane_change_min_steps={lc_min}")
-    print(f"  gates: rb_cross_excl={rb_x_excl} rb_min>={rb_min_thresh}  "
-          f"lane_cross_excl={lane_x_excl}  pred_coll_first_n={pred_coll_first_n}")
+    print(
+        f"  min_speed={min_speed} m/s  decluster={decluster_window}  "
+        f"lane_change_sat={lc_sat}  lane_change_min_steps={lc_min}"
+    )
+    print(
+        f"  gates: rb_cross_excl={rb_x_excl} rb_min>={rb_min_thresh}  "
+        f"lane_cross_excl={lane_x_excl}  pred_coll_first_n={pred_coll_first_n}"
+    )
 
     steps = _load_metrics(args.run)
     cl_scores = np.array([float(s.get("cl_score", 0.0)) for s in steps])
     n = len(steps)
     print(f"Loaded {n} steps from {args.run}")
-    print(f"  cl_score: min={cl_scores.min():.3f} p5={np.percentile(cl_scores, 5):.3f} "
-          f"p50={np.percentile(cl_scores, 50):.3f} p95={np.percentile(cl_scores, 95):.3f} max={cl_scores.max():.3f}")
+    print(
+        f"  cl_score: min={cl_scores.min():.3f} p5={np.percentile(cl_scores, 5):.3f} "
+        f"p50={np.percentile(cl_scores, 50):.3f} p95={np.percentile(cl_scores, 95):.3f} max={cl_scores.max():.3f}"
+    )
 
     # 1. Lane-change detection before banding so lane-change steps don't
     #    pollute very_hot.
@@ -168,7 +187,7 @@ def main():
         v = _ego_speed(args.run, i)
         if v < min_speed:
             stopped_steps.add(i)
-    print(f"  stopped: {len(stopped_steps)} / {n} ({100*len(stopped_steps)/n:.1f}%)")
+    print(f"  stopped: {len(stopped_steps)} / {n} ({100 * len(stopped_steps) / n:.1f}%)")
 
     # 3. Gate-violation filters (reward.py fields in metrics_log, no re-derive).
     #    Drop scenes where the CURRENT ego pose is already over a gate, or
@@ -176,17 +195,20 @@ def main():
     gated_steps: set[int] = set()
     for i, s in enumerate(steps):
         if rb_x_excl and s.get("rb_crossing"):
-            gated_steps.add(i); continue
+            gated_steps.add(i)
+            continue
         if rb_min_thresh > 0 and float(s.get("rb_min_dist", 1.0)) < rb_min_thresh:
-            gated_steps.add(i); continue
+            gated_steps.add(i)
+            continue
         if lane_x_excl and s.get("lane_crossing"):
-            gated_steps.add(i); continue
+            gated_steps.add(i)
+            continue
         if pred_coll_first_n > 0:
             pcs = s.get("pred_collision_step")
             if pcs is not None and int(pcs) < pred_coll_first_n:
-                gated_steps.add(i); continue
-    print(f"  gate-filtered: {len(gated_steps)} / {n} "
-          f"({100*len(gated_steps)/n:.1f}%)")
+                gated_steps.add(i)
+                continue
+    print(f"  gate-filtered: {len(gated_steps)} / {n} ({100 * len(gated_steps) / n:.1f}%)")
 
     # 4. Band the remaining steps (drop stopped, gated, and lane-change
     #    from banded training sets; lane-change keeps its own bucket).

@@ -35,7 +35,6 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 from elbow import elbow_kmeans
 
-
 # ──────────────────────────── Strategy interface ─────────────────────────────
 
 
@@ -153,6 +152,5 @@ def cluster_trajectories(
         clusters[f"cluster_id{label}"].append(path)
 
     return {
-        k: clusters[k]
-        for k in sorted(clusters, key=lambda x: int(x.replace("cluster_id", "")))
+        k: clusters[k] for k in sorted(clusters, key=lambda x: int(x.replace("cluster_id", "")))
     }

@@ -19,6 +19,7 @@ Usage:
         --model_path <base.pth> --policy_dir <dir> --scenes <list.json> \
         --out_dir <dir> --out_list <json> [--envelope v1] [--min_clearance 0.2]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,15 +45,17 @@ from scenario_generation.explorer_runner import plan_static_clearance
 @torch.no_grad()
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--policy_dir", required=True)
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--out_list", required=True)
-    parser.add_argument("--ego_shape", required=True,
-                        help="WB,L,W — no default, must match the platform")
+    parser.add_argument(
+        "--ego_shape", required=True, help="WB,L,W — no default, must match the platform"
+    )
     parser.add_argument("--min_clearance", type=float, default=0.2)
     parser.add_argument("--keep_inert", action="store_true")
     parser.add_argument("--lambda_lat", type=float, default=5.0)
@@ -95,15 +98,25 @@ def main():
             if not args.keep_inert and all(abs(v) < 0.05 for v in eta_f.values()):
                 n_inert += 1
                 continue
-            guided = _batched_generate_varied_noise(
-                model, margs, norm, noise_min=0.0, noise_max=0.0,
-                first_deterministic=False, composer=make_composer(etas, args),
-                device=device,
-            )[0].cpu().numpy()
+            guided = (
+                _batched_generate_varied_noise(
+                    model,
+                    margs,
+                    norm,
+                    noise_min=0.0,
+                    noise_max=0.0,
+                    first_deterministic=False,
+                    composer=make_composer(etas, args),
+                    device=device,
+                )[0]
+                .cpu()
+                .numpy()
+            )
             guided = _smooth_trajectory(guided, 11, 3)
             if boxes:
-                clr = float(plan_static_clearance(
-                    guided.astype(np.float32), boxes, ego_shape, device))
+                clr = float(
+                    plan_static_clearance(guided.astype(np.float32), boxes, ego_shape, device)
+                )
                 if clr < args.min_clearance:
                     n_unsafe += 1
                     continue
@@ -119,30 +132,34 @@ def main():
         T = min(fut.shape[0], guided.shape[0])
         if fut.shape[-1] == 3:
             # (x, y, yaw) format
-            new = np.stack([guided[:T, 0], guided[:T, 1],
-                            np.arctan2(guided[:T, 3], guided[:T, 2])], axis=-1)
+            new = np.stack(
+                [guided[:T, 0], guided[:T, 1], np.arctan2(guided[:T, 3], guided[:T, 2])], axis=-1
+            )
         elif fut.shape[-1] == 4:
             new = guided[:T, :4]
         else:
             raise ValueError(
                 f"{sp}: unsupported ego_agent_future width {fut.shape[-1]} "
-                "(expected 3 or 4) — refusing to silently truncate")
+                "(expected 3 or 4) — refusing to silently truncate"
+            )
         raw["ego_agent_future"] = new.astype(fut.dtype)
 
         pool = Path(sp).parent.name
         out_path = out_dir / f"{pool}__{Path(sp).stem}_distilled.npz"
         np.savez(out_path, **raw)
         written.append(str(out_path))
-        manifest.append({"source": sp, "etas": eta_f,
-                         "guided_clearance": round(clr, 3),
-                         "out": str(out_path)})
+        manifest.append(
+            {"source": sp, "etas": eta_f, "guided_clearance": round(clr, 3), "out": str(out_path)}
+        )
 
     with open(args.out_list, "w") as f:
         json.dump(written, f, indent=1)
     with open(out_dir / "manifest.json", "w") as f:
         json.dump(manifest, f, indent=1)
-    print(f"\nDistilled {len(written)} targets (skipped: {n_inert} inert, "
-          f"{n_unsafe} unsafe-guided, {n_err} errors) -> {args.out_list}")
+    print(
+        f"\nDistilled {len(written)} targets (skipped: {n_inert} inert, "
+        f"{n_unsafe} unsafe-guided, {n_err} errors) -> {args.out_list}"
+    )
 
 
 if __name__ == "__main__":

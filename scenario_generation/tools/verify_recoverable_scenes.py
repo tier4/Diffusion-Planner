@@ -38,35 +38,50 @@ import torch
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model_path", type=Path, required=True)
-    p.add_argument("--config", type=Path, required=True,
-                   help="GRPO config JSON (same one used for training)")
-    p.add_argument("--scenes", type=Path, required=True,
-                   help="JSON list of NPZ paths to verify")
-    p.add_argument("--output", type=Path, required=True,
-                   help="Filtered JSON list of recoverable scene NPZ paths")
-    p.add_argument("--improvement_threshold", type=float, default=0.2,
-                   help="Min best_of_K-det reward improvement to keep a scene")
-    p.add_argument("--max_scenes", type=int, default=None,
-                   help="Cap on # scenes to test (randomly sub-sampled if set)")
-    p.add_argument("--device",
-                   default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--args_json", type=Path, default=None,
-                   help="Override path to the model's args.json. Defaults to "
-                        "<model_path>/../args.json (or its parent's args.json).")
+    p.add_argument(
+        "--config", type=Path, required=True, help="GRPO config JSON (same one used for training)"
+    )
+    p.add_argument("--scenes", type=Path, required=True, help="JSON list of NPZ paths to verify")
+    p.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Filtered JSON list of recoverable scene NPZ paths",
+    )
+    p.add_argument(
+        "--improvement_threshold",
+        type=float,
+        default=0.2,
+        help="Min best_of_K-det reward improvement to keep a scene",
+    )
+    p.add_argument(
+        "--max_scenes",
+        type=int,
+        default=None,
+        help="Cap on # scenes to test (randomly sub-sampled if set)",
+    )
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument(
+        "--args_json",
+        type=Path,
+        default=None,
+        help="Override path to the model's args.json. Defaults to "
+        "<model_path>/../args.json (or its parent's args.json).",
+    )
     args = p.parse_args()
     if str(args.device).startswith("cuda") and not torch.cuda.is_available():
-        print("Requested CUDA device, but CUDA is not available; "
-              "falling back to CPU.")
+        print("Requested CUDA device, but CUDA is not available; falling back to CPU.")
         args.device = "cpu"
 
-    from rlvr.grpo_config import GRPOConfig
-    from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
-    from rlvr.reward import compute_reward_batch
-    from preference_optimization.utils import load_npz_data
-    from diffusion_planner.utils.config import Config
     from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-    from rlvr.grpo_trainer_batched import _build_cl_spd_configs
+    from diffusion_planner.utils.config import Config
+
     from guidance_gui.generate_samples import generate_samples
+    from preference_optimization.utils import load_npz_data
+    from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+    from rlvr.grpo_config import GRPOConfig
+    from rlvr.grpo_trainer_batched import _build_cl_spd_configs
+    from rlvr.reward import compute_reward_batch
 
     grpo = GRPOConfig.from_json(str(args.config))
     reward_cfg = load_reward_config(str(args.config))
@@ -96,7 +111,9 @@ def main():
 
     scenes = json.load(open(args.scenes))
     if args.max_scenes and len(scenes) > args.max_scenes:
-        import random; random.seed(42)
+        import random
+
+        random.seed(42)
         scenes = random.sample(scenes, args.max_scenes)
     print(f"Verifying {len(scenes)} scenes  threshold >= {args.improvement_threshold}")
 
@@ -104,8 +121,10 @@ def main():
     # Noise-only slots are intentionally skipped here (no centerline guidance
     # to score against). Filter is det + min(4, len(cl_spd_configs)).
     n_eval_slots = 1 + min(4, len(cl_spd_configs))
-    print(f"  evaluating det + {n_eval_slots - 1} cl_spd guided slots  "
-          f"variant={grpo.generation_variant}  use_route_cl={grpo.use_route_cl_guidance}")
+    print(
+        f"  evaluating det + {n_eval_slots - 1} cl_spd guided slots  "
+        f"variant={grpo.generation_variant}  use_route_cl={grpo.use_route_cl_guidance}"
+    )
 
     kept = []
     rejected_no_gain: list[str] = []  # evaluated but improvement < threshold
@@ -124,8 +143,9 @@ def main():
         normalizer = model_args.observation_normalizer
         norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
         norm = normalizer(norm)
-        det = generate_samples(model, model_args, norm, noise_scale=0.0,
-                               n_samples=1, composer=None, device=args.device)
+        det = generate_samples(
+            model, model_args, norm, noise_scale=0.0, n_samples=1, composer=None, device=args.device
+        )
         det_t = torch.tensor(det, device=args.device, dtype=torch.float32)
         det_reward = compute_reward_batch(det_t, data, reward_cfg)[0]
         if det_reward.rb_crossing or det_reward.collision_step is not None:
@@ -137,16 +157,23 @@ def main():
         # This is slower than batched but sufficient for pre-filtering
         best_cl = det_reward.centerline
         slot_skipped = 0
-        for slot in cl_spd_configs[:min(4, len(cl_spd_configs))]:  # top 4 slots suffice for recoverability test
+        for slot in cl_spd_configs[
+            : min(4, len(cl_spd_configs))
+        ]:  # top 4 slots suffice for recoverability test
             try:
                 from guidance_gui.compose import compose_guidance
+
                 gsamples = generate_samples(
-                    model, model_args, norm,
+                    model,
+                    model_args,
+                    norm,
                     noise_scale=slot["noise"][1],
                     n_samples=1,
                     composer=compose_guidance(
-                        model_args, norm,
-                        cl_scale=slot["cl"], spd_scale=slot["spd"],
+                        model_args,
+                        norm,
+                        cl_scale=slot["cl"],
+                        spd_scale=slot["spd"],
                         stretch=slot.get("stretch", 1.0),
                         use_route_cl=grpo.use_route_cl_guidance,
                     ),
@@ -160,14 +187,18 @@ def main():
                 # Real breakages in compose_guidance / generate_samples / reward
                 # would otherwise hide as silent skips. Log them and count.
                 slot_skipped += 1
-                print(f"  [slot-skip] {Path(path).name} slot={slot.get('label', '?')}: "
-                      f"{type(e).__name__}: {e}")
+                print(
+                    f"  [slot-skip] {Path(path).name} slot={slot.get('label', '?')}: "
+                    f"{type(e).__name__}: {e}"
+                )
                 continue
         if slot_skipped > 0 and slot_skipped == min(4, len(cl_spd_configs)):
             # Every guided slot crashed — improvement is meaningless; drop scene
             # by treating the det-only score as best_cl.
-            print(f"  [warn] {Path(path).name}: all {slot_skipped} guided slots crashed; "
-                  f"falling back to det-only best_cl")
+            print(
+                f"  [warn] {Path(path).name}: all {slot_skipped} guided slots crashed; "
+                f"falling back to det-only best_cl"
+            )
 
         improvement = best_cl - det_reward.centerline
         improvements.append(improvement)
@@ -176,9 +207,11 @@ def main():
         else:
             rejected_no_gain.append(path)
         if (i + 1) % 25 == 0:
-            print(f"  [{i+1}/{len(scenes)}] kept={len(kept)}  "
-                  f"dropped_gate={dropped_gate}  dropped_no_gain={len(rejected_no_gain)}  "
-                  f"dropped_load={dropped_load}  mean_imp={np.mean(improvements):.3f}")
+            print(
+                f"  [{i + 1}/{len(scenes)}] kept={len(kept)}  "
+                f"dropped_gate={dropped_gate}  dropped_no_gain={len(rejected_no_gain)}  "
+                f"dropped_load={dropped_load}  mean_imp={np.mean(improvements):.3f}"
+            )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     json.dump(kept, open(args.output, "w"), indent=2)
@@ -193,12 +226,16 @@ def main():
     rejected_path = args.output.with_name(args.output.stem + ".rejected_no_gain.json")
     json.dump(rejected_no_gain, open(rejected_path, "w"), indent=2)
     imp_arr = np.array(improvements) if improvements else np.array([0.0])
-    print(f"\nKept {len(kept)} / {len(scenes)} scenes ({100*len(kept)/max(len(scenes),1):.1f}%)")
+    print(
+        f"\nKept {len(kept)} / {len(scenes)} scenes ({100 * len(kept) / max(len(scenes), 1):.1f}%)"
+    )
     print(f"  dropped by gate:    {dropped_gate}  (unrecoverable, don't retry)")
     print(f"  dropped by load:    {dropped_load}  (NPZ unreadable)")
     print(f"  dropped by no gain: {len(rejected_no_gain)}  (re-check after next warm-start)")
-    print(f"  improvement dist: mean={imp_arr.mean():+.3f} p50={np.median(imp_arr):+.3f} "
-          f"p75={np.percentile(imp_arr, 75):+.3f} p95={np.percentile(imp_arr, 95):+.3f}")
+    print(
+        f"  improvement dist: mean={imp_arr.mean():+.3f} p50={np.median(imp_arr):+.3f} "
+        f"p75={np.percentile(imp_arr, 75):+.3f} p95={np.percentile(imp_arr, 95):+.3f}"
+    )
     print(f"saved {args.output}")
     print(f"saved rejected-no-gain list (for later warm-start retest): {rejected_path}")
 

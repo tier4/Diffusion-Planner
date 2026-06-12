@@ -207,21 +207,34 @@ def main():
         print(f"\nCleaning with threshold={args.clean_threshold}m...")
         clean_output = args.output.replace(".json", "_clean.json")
         import subprocess
-        subprocess.run([
-            "python", "-m", "rlvr.autoresearch.tools.cleanse_lane_scenes",
-            "--scenes", args.output,
-            "--output", clean_output,
-            "--threshold", str(args.clean_threshold),
-            "--also_check_road_border",
-        ], check=True)
+
+        subprocess.run(
+            [
+                "python",
+                "-m",
+                "rlvr.autoresearch.tools.cleanse_lane_scenes",
+                "--scenes",
+                args.output,
+                "--output",
+                clean_output,
+                "--threshold",
+                str(args.clean_threshold),
+                "--also_check_road_border",
+            ],
+            check=True,
+        )
 
     # Summary stats
     bags = defaultdict(int)
     for s in selected:
         bags[s["bag"]] += 1
     print(f"\n{len(selected)} scenes from {len(bags)} recording bags")
-    print(f"Yaw range: {min(s['yaw_deg'] for s in selected):.0f}° - {max(s['yaw_deg'] for s in selected):.0f}°")
-    print(f"Path range: {min(s['path_m'] for s in selected):.0f}m - {max(s['path_m'] for s in selected):.0f}m")
+    print(
+        f"Yaw range: {min(s['yaw_deg'] for s in selected):.0f}° - {max(s['yaw_deg'] for s in selected):.0f}°"
+    )
+    print(
+        f"Path range: {min(s['path_m'] for s in selected):.0f}m - {max(s['path_m'] for s in selected):.0f}m"
+    )
 
 
 if __name__ == "__main__":

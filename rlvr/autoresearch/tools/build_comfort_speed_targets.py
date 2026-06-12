@@ -21,7 +21,11 @@ For each curated target NPZ this:
 Path geometry is unchanged → centering / RB / lane preserved by construction.
 Only the speed/timing changes. No model, no GPU.
 """
-import argparse, json, os
+
+import argparse
+import json
+import os
+
 import numpy as np
 
 DT = 0.1
@@ -32,9 +36,9 @@ def _retime(fut: np.ndarray, a_lat_max: float, a_long_max: float, v_min: float) 
     T = fut.shape[0]
     P = fut[:, :2].astype(np.float64)
     nodes = np.concatenate([np.zeros((1, 2)), P], axis=0)  # [T+1,2], origin + path
-    seg = np.diff(nodes, axis=0)                            # [T,2]
-    seg_len = np.linalg.norm(seg, axis=1)                   # [T]
-    S = np.concatenate([[0.0], np.cumsum(seg_len)])         # [T+1] arc at each node
+    seg = np.diff(nodes, axis=0)  # [T,2]
+    seg_len = np.linalg.norm(seg, axis=1)  # [T]
+    S = np.concatenate([[0.0], np.cumsum(seg_len)])  # [T+1] arc at each node
     # Zero-length segments (duplicate consecutive path points) make S non-strictly-increasing,
     # which gives np.interp implementation-defined values at the ties. Nudge to strictly
     # increasing (≤ ~1e-4 m total over 80 nodes — negligible vs the meter-scale arc).
@@ -44,17 +48,17 @@ def _retime(fut: np.ndarray, a_lat_max: float, a_long_max: float, v_min: float) 
         return fut  # degenerate / stopped target — leave as-is
 
     # Heading per segment, curvature per interior node.
-    theta = np.arctan2(seg[:, 1], seg[:, 0])               # [T]
-    dtheta = np.diff(np.unwrap(theta))                     # [T-1]
+    theta = np.arctan2(seg[:, 1], seg[:, 0])  # [T]
+    dtheta = np.diff(np.unwrap(theta))  # [T-1]
     mid_len = 0.5 * (seg_len[:-1] + seg_len[1:]) + 1e-6
-    kappa = np.abs(dtheta) / mid_len                       # [T-1] curvature at nodes 1..T-1
-    kappa = np.concatenate([kappa[:1], kappa, kappa[-1:]]) # pad to [T+1] per node
-    kappa = np.maximum(kappa[:T], 1e-4)                    # per-segment, [T]
+    kappa = np.abs(dtheta) / mid_len  # [T-1] curvature at nodes 1..T-1
+    kappa = np.concatenate([kappa[:1], kappa, kappa[-1:]])  # pad to [T+1] per node
+    kappa = np.maximum(kappa[:T], 1e-4)  # per-segment, [T]
 
-    v_orig = seg_len / DT                                  # [T] original speed per segment
-    v_cap = np.minimum(v_orig, np.sqrt(a_lat_max / kappa)) # comfort cap in curves
+    v_orig = seg_len / DT  # [T] original speed per segment
+    v_cap = np.minimum(v_orig, np.sqrt(a_lat_max / kappa))  # comfort cap in curves
     v_cap = np.maximum(v_cap, v_min)
-    v_cap = np.minimum(v_cap, v_orig)                      # never speed UP vs original
+    v_cap = np.minimum(v_cap, v_orig)  # never speed UP vs original
 
     # Accel/decel limits: forward (limit acceleration), backward (brake early).
     v = v_cap.copy()
@@ -68,7 +72,7 @@ def _retime(fut: np.ndarray, a_lat_max: float, a_long_max: float, v_min: float) 
     v = np.minimum(np.maximum(v, v_min), v_orig)
 
     # New arc positions over T steps (start one step in, like the original future[0]).
-    s_new = np.cumsum(v * DT)                              # [T] arc reached at each step
+    s_new = np.cumsum(v * DT)  # [T] arc reached at each step
     s_new = np.clip(s_new, 0.0, L)
 
     # Re-sample the original path (nodes, S) at s_new → new xy.
@@ -78,10 +82,10 @@ def _retime(fut: np.ndarray, a_lat_max: float, a_long_max: float, v_min: float) 
     # Headings: interpolate the ORIGINAL smooth headings (cos/sin) at the new arc
     # positions, NOT from re-sampled point diffs (those jitter at low speed, which
     # aliased into lat-accel spikes). The original future point i sits at arc S[i+1].
-    arc_fut = S[1:]                                        # [T] arc of each original future point
+    arc_fut = S[1:]  # [T] arc of each original future point
     cos_i = np.interp(s_new, arc_fut, fut[:, 2].astype(np.float64))
     sin_i = np.interp(s_new, arc_fut, fut[:, 3].astype(np.float64))
-    nrm = np.sqrt(cos_i ** 2 + sin_i ** 2) + 1e-9
+    nrm = np.sqrt(cos_i**2 + sin_i**2) + 1e-9
     out = fut.copy()
     out[:, 0] = xs
     out[:, 1] = ys
@@ -100,20 +104,29 @@ def _lat_peak(fut: np.ndarray) -> float:
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--scenes", required=True, help="JSON list of curated-target NPZs")
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--out_list", required=True)
     ap.add_argument("--a_lat_max", type=float, default=1.5, help="comfort lateral-accel cap (m/s²)")
-    ap.add_argument("--a_long_max", type=float, default=1.5, help="accel/decel limit for the speed profile (m/s²)")
-    ap.add_argument("--v_min", type=float, default=2.0, help="floor speed so it never crawls to a stop")
+    ap.add_argument(
+        "--a_long_max",
+        type=float,
+        default=1.5,
+        help="accel/decel limit for the speed profile (m/s²)",
+    )
+    ap.add_argument(
+        "--v_min", type=float, default=2.0, help="floor speed so it never crawls to a stop"
+    )
     args = ap.parse_args()
 
     paths = json.load(open(args.scenes))
     os.makedirs(args.out_dir, exist_ok=True)
     written, before, after = [], [], []
     for p in paths:
-        with np.load(p, allow_pickle=True) as z:   # close each NPZ's FD promptly (long lists)
+        with np.load(p, allow_pickle=True) as z:  # close each NPZ's FD promptly (long lists)
             raw = dict(z)
         fut = np.asarray(raw["ego_agent_future"]).astype(np.float32)
         before.append(_lat_peak(fut))
@@ -121,16 +134,22 @@ def main():
         after.append(_lat_peak(fut2))
         raw["ego_agent_future"] = fut2
         out_p = os.path.join(args.out_dir, os.path.basename(p))
-        if out_p in written:   # two inputs share a basename → would silently overwrite
-            raise SystemExit(f"output basename collision: {out_p} (input {p}); "
-                             f"inputs must have unique basenames")
-        np.savez(out_p, **raw); written.append(out_p)
+        if out_p in written:  # two inputs share a basename → would silently overwrite
+            raise SystemExit(
+                f"output basename collision: {out_p} (input {p}); inputs must have unique basenames"
+            )
+        np.savez(out_p, **raw)
+        written.append(out_p)
     json.dump(written, open(args.out_list, "w"), indent=1)
     before, after = np.array(before), np.array(after)
     print(f"wrote {len(written)} re-timed targets -> {args.out_dir}")
-    print(f"  lat_peak BEFORE: mean={before.mean():.2f} p95={np.percentile(before,95):.2f} max={before.max():.2f}")
-    print(f"  lat_peak AFTER : mean={after.mean():.2f} p95={np.percentile(after,95):.2f} max={after.max():.2f} "
-          f"(cap {args.a_lat_max}); reduced {int((after<before-0.05).sum())}/{len(written)}")
+    print(
+        f"  lat_peak BEFORE: mean={before.mean():.2f} p95={np.percentile(before, 95):.2f} max={before.max():.2f}"
+    )
+    print(
+        f"  lat_peak AFTER : mean={after.mean():.2f} p95={np.percentile(after, 95):.2f} max={after.max():.2f} "
+        f"(cap {args.a_lat_max}); reduced {int((after < before - 0.05).sum())}/{len(written)}"
+    )
 
 
 if __name__ == "__main__":

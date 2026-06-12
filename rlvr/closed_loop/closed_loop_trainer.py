@@ -64,6 +64,7 @@ class ClosedLoopExplorationTrainer:
         # Reward config — field-intersection builder so sc_* / future fields
         # are never silently dropped (same fix as GRPOExplorationTrainer).
         from rlvr.grpo_exploration_trainer import reward_config_from_grpo
+
         self.reward_config = reward_config_from_grpo(config)
 
         # --- Exploration policy ---
@@ -93,7 +94,8 @@ class ClosedLoopExplorationTrainer:
             "lambda_col": config.exploration_lambda_col,
         }
         self.exploration_policy = ExplorationPolicy(
-            ep_config, ref_seq_len=model_args.future_len,
+            ep_config,
+            ref_seq_len=model_args.future_len,
         ).to(device)
 
         if config.exploration_checkpoint_path:
@@ -124,6 +126,7 @@ class ClosedLoopExplorationTrainer:
 
         # Rollout manager — batched version for GPU parallelism
         from rlvr.closed_loop.batched_rollout import BatchedRolloutManager
+
         self.batched_rollout_manager = BatchedRolloutManager(
             policy_model=policy_model,
             model_args=model_args,
@@ -149,7 +152,9 @@ class ClosedLoopExplorationTrainer:
             self.batched_rollout_manager.online_lr = config.exploration_lr
             self.batched_rollout_manager.online_entropy_coef = config.exploration_entropy_coef
             self.batched_rollout_manager.online_value_coef = config.closed_loop_value_coef
-            self.batched_rollout_manager.explorer_mini_batch = config.closed_loop_explorer_mini_batch
+            self.batched_rollout_manager.explorer_mini_batch = (
+                config.closed_loop_explorer_mini_batch
+            )
         # Keep sequential rollout as fallback
         self.rollout_manager = RolloutManager(
             policy_model=policy_model,
@@ -218,7 +223,8 @@ class ClosedLoopExplorationTrainer:
                 # Skip stationary scenes
                 if "ego_agent_future" in data:
                     gt = data["ego_agent_future"]
-                    if gt.dim() == 3: gt = gt[0]
+                    if gt.dim() == 3:
+                        gt = gt[0]
                     if torch.diff(gt[:, :2], dim=0).norm(dim=-1).sum() < 1.0:
                         continue
                 norm = copy.deepcopy(self.model_args.observation_normalizer)(
@@ -236,8 +242,8 @@ class ClosedLoopExplorationTrainer:
         pbar = tqdm(total=N_total, desc=f"Epoch {epoch} DiT GRPO")
 
         for chunk_start in range(0, N_total, grpo_batch):
-            chunk_data = all_data[chunk_start:chunk_start + grpo_batch]
-            chunk_norm = all_norm[chunk_start:chunk_start + grpo_batch]
+            chunk_data = all_data[chunk_start : chunk_start + grpo_batch]
+            chunk_norm = all_norm[chunk_start : chunk_start + grpo_batch]
             N_chunk = len(chunk_data)
 
             # Stack into batch
@@ -255,45 +261,66 @@ class ClosedLoopExplorationTrainer:
                 scene_encoding = _batched_encoder(self.policy_model, batch_norm)
 
                 import contextlib
-                inner = self.policy_model.module if hasattr(self.policy_model, "module") else self.policy_model
-                disable_ctx = inner.disable_adapter() if hasattr(inner, "disable_adapter") else contextlib.nullcontext()
+
+                inner = (
+                    self.policy_model.module
+                    if hasattr(self.policy_model, "module")
+                    else self.policy_model
+                )
+                disable_ctx = (
+                    inner.disable_adapter()
+                    if hasattr(inner, "disable_adapter")
+                    else contextlib.nullcontext()
+                )
                 with disable_ctx:
                     ref_trajs = _batched_generate(
-                        self.policy_model, self.model_args, batch_norm,
-                        noise_scale=0.0, composer=None, device=self.device,
+                        self.policy_model,
+                        self.model_args,
+                        batch_norm,
+                        noise_scale=0.0,
+                        composer=None,
+                        device=self.device,
                     )
                 batch_norm["x_ref"] = ref_trajs
-                batch_norm["reference_trajectory"] = ref_trajs  # Required by lateral/longitudinal guidance
+                batch_norm["reference_trajectory"] = (
+                    ref_trajs  # Required by lateral/longitudinal guidance
+                )
 
                 # Explorer etas — K samples per head, flattened to [N*K]
                 if self.exploration_policy is not None:
-                    policy_out = self.exploration_policy(scene_encoding, ref_trajs, deterministic=False)
+                    policy_out = self.exploration_policy(
+                        scene_encoding, ref_trajs, deterministic=False
+                    )
                     etas_NK = {
-                        h: (2.0 * policy_out.dists[h].rsample((K,)).squeeze(-1)
-                            - 1.0).T.reshape(-1)
+                        h: (2.0 * policy_out.dists[h].rsample((K,)).squeeze(-1) - 1.0).T.reshape(-1)
                         for h in self.heads
                     }
                 else:
-                    etas_NK = {h: torch.zeros(N_chunk * K, device=self.device)
-                               for h in self.heads}
+                    etas_NK = {h: torch.zeros(N_chunk * K, device=self.device) for h in self.heads}
 
                 # Expand to N×K
                 NK_data = {}
                 for k_key, v in batch_norm.items():
                     if isinstance(v, torch.Tensor) and v.shape[0] == N_chunk:
-                        NK_data[k_key] = v.unsqueeze(1).expand(
-                            -1, K, *v.shape[1:]
-                        ).reshape(N_chunk * K, *v.shape[1:])
+                        NK_data[k_key] = (
+                            v.unsqueeze(1)
+                            .expand(-1, K, *v.shape[1:])
+                            .reshape(N_chunk * K, *v.shape[1:])
+                        )
                     else:
                         NK_data[k_key] = v
 
-                composer = self.batched_rollout_manager._build_batched_composer(
-                    etas_NK)
+                composer = self.batched_rollout_manager._build_batched_composer(etas_NK)
 
                 all_trajs = _batched_generate_varied_noise(
-                    self.policy_model, self.model_args, NK_data,
-                    noise_min=noise_min, noise_max=noise_max,
-                    first_deterministic=False, composer=composer, device=self.device,
+                    self.policy_model,
+                    self.model_args,
+                    NK_data,
+                    noise_min=noise_min,
+                    noise_max=noise_max,
+                    first_deterministic=False,
+                    composer=composer,
+                    device=self.device,
                 )
                 T_len = all_trajs.shape[1]
                 all_trajs = all_trajs.reshape(N_chunk, K, T_len, 4)
@@ -316,7 +343,8 @@ class ClosedLoopExplorationTrainer:
                     rewards = [rewards[i] for i in top_idx]
 
                 advantages = compute_group_advantages(
-                    rewards, mode=self.config.advantage_mode,
+                    rewards,
+                    mode=self.config.advantage_mode,
                     fixed_scale=self.config.advantage_fixed_scale,
                 )
 
@@ -326,7 +354,14 @@ class ClosedLoopExplorationTrainer:
 
                 kept_trajs.append(traj_K)
                 kept_advantages.append(advantages)
-                norm_i = {k: (v[local_i:local_i+1] if isinstance(v, torch.Tensor) and v.shape[0] == N_chunk else v) for k, v in batch_norm.items()}
+                norm_i = {
+                    k: (
+                        v[local_i : local_i + 1]
+                        if isinstance(v, torch.Tensor) and v.shape[0] == N_chunk
+                        else v
+                    )
+                    for k, v in batch_norm.items()
+                }
                 kept_norm_data.append(norm_i)
                 pbar.update(1)
 
@@ -369,7 +404,8 @@ class ClosedLoopExplorationTrainer:
 
                 if dit_accum >= self.config.grad_accum_groups:
                     torch.nn.utils.clip_grad_norm_(
-                        [p for p in self.policy_model.parameters() if p.requires_grad], max_norm=5.0)
+                        [p for p in self.policy_model.parameters() if p.requires_grad], max_norm=5.0
+                    )
                     self.dit_optimizer.step()
                     self.dit_optimizer.zero_grad()
                     dit_accum = 0
@@ -378,7 +414,8 @@ class ClosedLoopExplorationTrainer:
 
         if dit_accum > 0:
             torch.nn.utils.clip_grad_norm_(
-                [p for p in self.policy_model.parameters() if p.requires_grad], max_norm=5.0)
+                [p for p in self.policy_model.parameters() if p.requires_grad], max_norm=5.0
+            )
             self.dit_optimizer.step()
             self.dit_optimizer.zero_grad()
 
@@ -425,9 +462,12 @@ class ClosedLoopExplorationTrainer:
                 "sequential rollout (closed_loop_batch_size<=1) only drives "
                 "the legacy lateral+longitudinal guidance — it would train "
                 f"different heads than configured ({self.heads}). Use "
-                "closed_loop_batch_size>1 for custom head specs.")
+                "closed_loop_batch_size>1 for custom head specs."
+            )
         if use_batched:
-            print(f"  Batched rollout: {len(scene_paths)} scenes, batch_size={self.config.closed_loop_batch_size}")
+            print(
+                f"  Batched rollout: {len(scene_paths)} scenes, batch_size={self.config.closed_loop_batch_size}"
+            )
             rollout_buffers = self.batched_rollout_manager.run_rollouts(scene_paths)
             for buf in rollout_buffers:
                 total_steps += buf.episode_length
@@ -495,12 +535,18 @@ class ClosedLoopExplorationTrainer:
                 policy_out = self.exploration_policy(scene_enc, x_ref, deterministic=False)
 
                 # Recompute log_prob for the SAME sampled eta values
-                step_etas = step.etas_01 or {"lateral": step.eta_lat_01,
-                                             "longitudinal": step.eta_lon_01}
+                step_etas = step.etas_01 or {
+                    "lateral": step.eta_lat_01,
+                    "longitudinal": step.eta_lon_01,
+                }
                 log_prob = sum(
-                    policy_out.dists[h].log_prob(torch.tensor(
-                        v, dtype=torch.float32, device=self.device,
-                    ).clamp(1e-6, 1 - 1e-6))
+                    policy_out.dists[h].log_prob(
+                        torch.tensor(
+                            v,
+                            dtype=torch.float32,
+                            device=self.device,
+                        ).clamp(1e-6, 1 - 1e-6)
+                    )
                     for h, v in step_etas.items()
                 )
 
@@ -548,19 +594,22 @@ class ClosedLoopExplorationTrainer:
 
         # --- Collect eta statistics (per configured head) ---
         def _step_etas(s):
-            return s.etas_01 or {"lateral": s.eta_lat_01,
-                                 "longitudinal": s.eta_lon_01}
+            return s.etas_01 or {"lateral": s.eta_lat_01, "longitudinal": s.eta_lon_01}
 
         head_stats: dict[str, float] = {}
         for h in self.heads:
-            vals = [_step_etas(s)[h] * 2 - 1
-                    for buf in rollout_buffers for s in buf.steps
-                    if h in _step_etas(s)]
+            vals = [
+                _step_etas(s)[h] * 2 - 1
+                for buf in rollout_buffers
+                for s in buf.steps
+                if h in _step_etas(s)
+            ]
             mean = sum(vals) / len(vals) if vals else 0.0
             std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5 if vals else 0.0
             per_scene = [
                 sum(_step_etas(s)[h] * 2 - 1 for s in buf.steps) / len(buf.steps)
-                for buf in rollout_buffers if buf.steps
+                for buf in rollout_buffers
+                if buf.steps
             ]
             svar = 0.0
             if len(per_scene) > 1:
@@ -601,6 +650,7 @@ class ClosedLoopExplorationTrainer:
         # (eta stats already collected above from rollout_buffers)
         del rollout_buffers
         import gc
+
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -616,7 +666,6 @@ class ClosedLoopExplorationTrainer:
             dit_metrics = self._run_dit_grpo(scene_paths, epoch)
             metrics.update(dit_metrics)
 
-
         print(
             f"  Epoch {epoch}: "
             f"scenes={n_scenes}, "
@@ -630,7 +679,8 @@ class ClosedLoopExplorationTrainer:
                 f"η_{h}={head_stats[f'eta_{h}_mean']:+.4f}"
                 f"±{head_stats[f'eta_{h}_std']:.4f}"
                 f" (scene_var {head_stats[f'scene_var_{h}']:.4f})"
-                for h in self.heads)
+                for h in self.heads
+            )
         )
         if "dit_loss" in metrics:
             print(f"  DiT GRPO loss: {metrics['dit_loss']:.4f}")
@@ -683,10 +733,8 @@ class ClosedLoopExplorationTrainer:
             # gigabytes and loses the per-epoch history needed for sweeps).
             ep_dir = self.run_dir / f"policy_epoch_{epoch:03d}"
             ep_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(self.exploration_policy.state_dict(),
-                       ep_dir / "exploration_policy.pth")
-            torch.save(self.policy_optimizer.state_dict(),
-                       ep_dir / "policy_optimizer.pth")
+            torch.save(self.exploration_policy.state_dict(), ep_dir / "exploration_policy.pth")
+            torch.save(self.policy_optimizer.state_dict(), ep_dir / "policy_optimizer.pth")
             self.config.to_json(ep_dir / "grpo_config.json")
         else:
             checkpoint_data = {

@@ -10,6 +10,7 @@ Usage:
     python -m rlvr.autoresearch.tools.eval_labels_holdout \
         --model_path <base.pth> --policy_dir <dir> --holdout <holdout.json>
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,7 +29,8 @@ from rlvr.train_explorer_regression import label_target
 @torch.no_grad()
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--policy_dir", required=True)
@@ -51,12 +53,13 @@ def main():
         else:
             continue
         data = load_npz_data(r["scene_path"], device)
-        norm = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                for k, v in data.items()}
+        norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
         norm = margs.observation_normalizer(norm)
-        x_ref = torch.from_numpy(
-            generate_reference_trajectory(model, margs, norm, device)
-        ).unsqueeze(0).to(device)
+        x_ref = (
+            torch.from_numpy(generate_reference_trajectory(model, margs, norm, device))
+            .unsqueeze(0)
+            .to(device)
+        )
         norm["reference_trajectory"] = x_ref
         enc = run_frozen_encoder(model, norm)
         out = policy(enc, x_ref, deterministic=True)
@@ -74,8 +77,7 @@ def main():
         dom = np.abs(ts).argmax(axis=1)
         idx = np.arange(len(ts))
         res["solved_mse"] = round(float(((ps - ts) ** 2).mean()), 4)
-        res["sign_acc"] = round(float(
-            (np.sign(ps[idx, dom]) == np.sign(ts[idx, dom])).mean()), 3)
+        res["sign_acc"] = round(float((np.sign(ps[idx, dom]) == np.sign(ts[idx, dom])).mean()), 3)
     if (~solved).any():
         res["clean_pred_absmean"] = round(float(np.abs(p[~solved]).mean()), 4)
     print(json.dumps(res))

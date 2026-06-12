@@ -23,7 +23,7 @@ import matplotlib
 import numpy as np
 import torch
 
-matplotlib.use('Agg')
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -41,39 +41,50 @@ from exploration_policy.utils import generate_reference_trajectory, get_frozen_e
 def draw_road_borders(ax, data_raw, max_dist=25):
     """Draw lane boundaries from NPZ lane data."""
     # All lanes (orange, thin)
-    if 'lanes' in data_raw:
-        lanes = data_raw['lanes']
+    if "lanes" in data_raw:
+        lanes = data_raw["lanes"]
         for s in range(lanes.shape[0]):
-            for side, (bx_idx, by_idx) in [('left', (4, 5)), ('right', (6, 7))]:
+            for side, (bx_idx, by_idx) in [("left", (4, 5)), ("right", (6, 7))]:
                 pts = []
                 for p in range(lanes.shape[1]):
                     cx, cy = lanes[s, p, 0], lanes[s, p, 1]
                     bx, by = lanes[s, p, bx_idx], lanes[s, p, by_idx]
-                    if abs(cx) > max_dist or abs(cy) > max_dist: continue
-                    if abs(cx) < 0.01 and abs(cy) < 0.01: continue
+                    if abs(cx) > max_dist or abs(cy) > max_dist:
+                        continue
+                    if abs(cx) < 0.01 and abs(cy) < 0.01:
+                        continue
                     if abs(bx) > 0.01 or abs(by) > 0.01:
                         pts.append([cx + bx, cy + by])
                 if pts:
                     pts = np.array(pts)
-                    ax.plot(pts[:, 0], pts[:, 1], '-', color='orange', linewidth=0.8, alpha=0.4)
+                    ax.plot(pts[:, 0], pts[:, 1], "-", color="orange", linewidth=0.8, alpha=0.4)
 
     # Route lanes (red, thicker)
-    if 'route_lanes' in data_raw:
-        rl = data_raw['route_lanes']
+    if "route_lanes" in data_raw:
+        rl = data_raw["route_lanes"]
         for s in range(rl.shape[0]):
-            for side, (bx_idx, by_idx) in [('left', (4, 5)), ('right', (6, 7))]:
+            for side, (bx_idx, by_idx) in [("left", (4, 5)), ("right", (6, 7))]:
                 pts = []
                 for p in range(rl.shape[1]):
                     cx, cy = rl[s, p, 0], rl[s, p, 1]
                     bx, by = rl[s, p, bx_idx], rl[s, p, by_idx]
-                    if abs(cx) > max_dist or abs(cy) > max_dist: continue
-                    if abs(cx) < 0.01 and abs(cy) < 0.01: continue
+                    if abs(cx) > max_dist or abs(cy) > max_dist:
+                        continue
+                    if abs(cx) < 0.01 and abs(cy) < 0.01:
+                        continue
                     if abs(bx) > 0.01 or abs(by) > 0.01:
                         pts.append([cx + bx, cy + by])
                 if pts:
                     pts = np.array(pts)
-                    ax.plot(pts[:, 0], pts[:, 1], '-', color='red', linewidth=1.5, alpha=0.6,
-                            label='road border' if s == 0 and side == 'left' else '')
+                    ax.plot(
+                        pts[:, 0],
+                        pts[:, 1],
+                        "-",
+                        color="red",
+                        linewidth=1.5,
+                        alpha=0.6,
+                        label="road border" if s == 0 and side == "left" else "",
+                    )
 
 
 def shift_trajectory(ref, eta_lat, lambda_lat):
@@ -98,8 +109,13 @@ def main():
     parser.add_argument("--raw_scale", type=float, default=10.0)
     parser.add_argument("--lambda_lat", type=float, default=2.5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--indices", type=int, nargs="+", default=None,
-                        help="Specific scene indices instead of random")
+    parser.add_argument(
+        "--indices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Specific scene indices instead of random",
+    )
     parser.add_argument("--T", type=int, default=50, help="Timesteps to plot")
     args = parser.parse_args()
 
@@ -108,7 +124,7 @@ def main():
     model.eval()
 
     policy_config = ExplorationPolicyConfig(
-        hidden_dim=128, head_init='zeros', head_raw_scale=args.raw_scale
+        hidden_dim=128, head_init="zeros", head_raw_scale=args.raw_scale
     )
     policy = ExplorationPolicy(policy_config).to(device)
     ckpt = torch.load(args.policy_path, map_location=device)
@@ -156,33 +172,45 @@ def main():
         eta_lon = output.lon_dist.mean.item() * 2 - 1
 
         ref = x_ref if isinstance(x_ref, np.ndarray) else x_ref.cpu().numpy()
-        if ref.ndim == 3: ref = ref[0]
+        if ref.ndim == 3:
+            ref = ref[0]
 
         shifted, offset_m = shift_trajectory(ref, eta_lat, args.lambda_lat)
-        gt = data_raw['ego_agent_future']
-        ego_past = data_raw['ego_agent_past']
+        gt = data_raw["ego_agent_future"]
+        ego_past = data_raw["ego_agent_past"]
         T = min(args.T, ref.shape[0])
 
         ax = axes[idx]
         draw_road_borders(ax, data_raw)
 
-        ax.plot(ego_past[:, 0], ego_past[:, 1], 'k-', linewidth=3, label='ego past', zorder=5)
-        ax.plot(gt[:T, 0], gt[:T, 1], 'g-', linewidth=2.5, label='GT', zorder=4)
-        ax.plot(ref[:T, 0], ref[:T, 1], 'b-', linewidth=2.5, label='ref (no guidance)', zorder=3)
-        ax.plot(shifted[:T, 0], shifted[:T, 1], 'm--', linewidth=2.5,
-                label=f'guided ({offset_m*100:.0f}cm)', zorder=6)
+        ax.plot(ego_past[:, 0], ego_past[:, 1], "k-", linewidth=3, label="ego past", zorder=5)
+        ax.plot(gt[:T, 0], gt[:T, 1], "g-", linewidth=2.5, label="GT", zorder=4)
+        ax.plot(ref[:T, 0], ref[:T, 1], "b-", linewidth=2.5, label="ref (no guidance)", zorder=3)
+        ax.plot(
+            shifted[:T, 0],
+            shifted[:T, 1],
+            "m--",
+            linewidth=2.5,
+            label=f"guided ({offset_m * 100:.0f}cm)",
+            zorder=6,
+        )
 
         for t in [10, 20, 30]:
             if t < T:
-                ax.annotate('', xy=(shifted[t, 0], shifted[t, 1]),
-                            xytext=(ref[t, 0], ref[t, 1]),
-                            arrowprops=dict(arrowstyle='->', color='magenta', lw=2))
+                ax.annotate(
+                    "",
+                    xy=(shifted[t, 0], shifted[t, 1]),
+                    xytext=(ref[t, 0], ref[t, 1]),
+                    arrowprops=dict(arrowstyle="->", color="magenta", lw=2),
+                )
 
         name = Path(npz_path).stem[-25:]
-        ax.set_title(f'{name}\nη_lat={eta_lat:.4f} ({offset_m*100:.1f}cm), η_lon={eta_lon:.4f}',
-                     fontsize=10)
-        ax.legend(fontsize=7, loc='upper left')
-        ax.set_aspect('equal')
+        ax.set_title(
+            f"{name}\nη_lat={eta_lat:.4f} ({offset_m * 100:.1f}cm), η_lon={eta_lon:.4f}",
+            fontsize=10,
+        )
+        ax.legend(fontsize=7, loc="upper left")
+        ax.set_aspect("equal")
         ax.grid(True, alpha=0.2)
 
         all_x = np.concatenate([ref[:T, 0], gt[:T, 0], ego_past[:, 0]])
@@ -195,11 +223,13 @@ def main():
     for i in range(n, len(axes)):
         axes[i].set_visible(False)
 
-    plt.suptitle(f'Policy Guidance Visualization\nBlue=ref, Magenta=guided, Green=GT, Red=road borders',
-                 fontsize=13)
+    plt.suptitle(
+        f"Policy Guidance Visualization\nBlue=ref, Magenta=guided, Green=GT, Red=road borders",
+        fontsize=13,
+    )
     plt.tight_layout()
     plt.savefig(args.output, dpi=150)
-    print(f'Saved to {args.output}')
+    print(f"Saved to {args.output}")
 
 
 if __name__ == "__main__":

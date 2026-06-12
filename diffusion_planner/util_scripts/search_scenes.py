@@ -54,10 +54,10 @@ from typing import Optional
 import numpy as np
 from tqdm import tqdm
 
-
 # ---------------------------------------------------------------------------
 # Core data structures
 # ---------------------------------------------------------------------------
+
 
 def _quat_to_heading_deg(qz: float, qw: float) -> float:
     """Convert quaternion (z, w components) to heading in degrees [-180, 180).
@@ -100,7 +100,7 @@ def build_index(npz_paths: list[str], workers: int = 8, batch_size: int = 500) -
     Scenes without valid sidecars are silently skipped.
     """
     # Split into batches for multiprocessing
-    batches = [npz_paths[i:i + batch_size] for i in range(0, len(npz_paths), batch_size)]
+    batches = [npz_paths[i : i + batch_size] for i in range(0, len(npz_paths), batch_size)]
     results = []
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -121,13 +121,15 @@ def save_index_parquet(index: list[dict], path: str) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    table = pa.table({
-        "npz_path": [r["npz_path"] for r in index],
-        "x": [r["x"] for r in index],
-        "y": [r["y"] for r in index],
-        "heading_deg": [r["heading_deg"] for r in index],
-        "timestamp": [r["timestamp"] for r in index],
-    })
+    table = pa.table(
+        {
+            "npz_path": [r["npz_path"] for r in index],
+            "x": [r["x"] for r in index],
+            "y": [r["y"] for r in index],
+            "heading_deg": [r["heading_deg"] for r in index],
+            "timestamp": [r["timestamp"] for r in index],
+        }
+    )
     pq.write_table(table, path)
 
 
@@ -153,7 +155,10 @@ def load_index_parquet(path: str) -> list[dict]:
 # Filters
 # ---------------------------------------------------------------------------
 
-def filter_bbox(index: list[dict], xmin: float, ymin: float, xmax: float, ymax: float) -> list[dict]:
+
+def filter_bbox(
+    index: list[dict], xmin: float, ymin: float, xmax: float, ymax: float
+) -> list[dict]:
     """Filter scenes by axis-aligned bounding box in world coordinates."""
     return [r for r in index if xmin <= r["x"] <= xmax and ymin <= r["y"] <= ymax]
 
@@ -194,7 +199,7 @@ def _compute_trajectory_props(npz_path: str) -> Optional[dict]:
         # Total travel distance along the trajectory
         dx = np.diff(fut[:, 0])
         dy = np.diff(fut[:, 1])
-        travel_dist = float(np.sqrt(dx ** 2 + dy ** 2).sum())
+        travel_dist = float(np.sqrt(dx**2 + dy**2).sum())
         # Endpoint in ego frame
         ex, ey = float(fut[-1, 0]), float(fut[-1, 1])
         # Direction from ego to endpoint
@@ -214,14 +219,16 @@ def _compute_trajectory_batch(npz_paths: list[str]) -> list[tuple[str, Optional[
     return [(p, _compute_trajectory_props(p)) for p in npz_paths]
 
 
-def enrich_with_trajectory(index: list[dict], workers: int = 8, batch_size: int = 200) -> list[dict]:
+def enrich_with_trajectory(
+    index: list[dict], workers: int = 8, batch_size: int = 200
+) -> list[dict]:
     """Add trajectory properties (travel_dist, endpoint, trajectory_heading) to index entries.
 
     Loads the NPZ files to read ego_agent_future. Entries where NPZ can't be read are dropped.
     """
     path_to_entry = {r["npz_path"]: r for r in index}
     paths = [r["npz_path"] for r in index]
-    batches = [paths[i:i + batch_size] for i in range(0, len(paths), batch_size)]
+    batches = [paths[i : i + batch_size] for i in range(0, len(paths), batch_size)]
     enriched = []
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -249,11 +256,13 @@ def enrich_with_trajectory(index: list[dict], workers: int = 8, batch_size: int 
     return enriched
 
 
-def enrich_with_trajectory_simple(index: list[dict], workers: int = 8, batch_size: int = 200) -> list[dict]:
+def enrich_with_trajectory_simple(
+    index: list[dict], workers: int = 8, batch_size: int = 200
+) -> list[dict]:
     """Add trajectory properties to index entries using multiprocessing."""
     path_to_entry = {r["npz_path"]: r for r in index}
     paths = [r["npz_path"] for r in index]
-    batches = [paths[i:i + batch_size] for i in range(0, len(paths), batch_size)]
+    batches = [paths[i : i + batch_size] for i in range(0, len(paths), batch_size)]
     enriched = []
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -273,7 +282,9 @@ def enrich_with_trajectory_simple(index: list[dict], workers: int = 8, batch_siz
     return enriched
 
 
-def filter_travel_distance(index: list[dict], min_dist: Optional[float] = None, max_dist: Optional[float] = None) -> list[dict]:
+def filter_travel_distance(
+    index: list[dict], min_dist: Optional[float] = None, max_dist: Optional[float] = None
+) -> list[dict]:
     """Filter by total GT trajectory travel distance (meters)."""
     result = index
     if min_dist is not None:
@@ -285,12 +296,18 @@ def filter_travel_distance(index: list[dict], min_dist: Optional[float] = None, 
 
 def filter_trajectory_heading(index: list[dict], hmin: float, hmax: float) -> list[dict]:
     """Filter by trajectory endpoint direction in ego frame (degrees, handles wraparound)."""
-    return [r for r in index if "trajectory_heading_deg" in r and _heading_in_range(r["trajectory_heading_deg"], hmin, hmax)]
+    return [
+        r
+        for r in index
+        if "trajectory_heading_deg" in r
+        and _heading_in_range(r["trajectory_heading_deg"], hmin, hmax)
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Sequence grouping
 # ---------------------------------------------------------------------------
+
 
 def _bag_prefix(npz_path: str) -> str:
     """Extract bag/sequence prefix from NPZ path (everything before the last _NNNNN.npz)."""
@@ -303,8 +320,8 @@ def group_sequences(entries: list[dict], max_gap_frames: int = 5) -> list[list[d
     Entries from the same bag prefix with frame numbers within max_gap_frames
     of each other are grouped together. Returns list of groups, sorted by frame number.
     """
-    from collections import defaultdict
     import re
+    from collections import defaultdict
 
     bags = defaultdict(list)
     for entry in entries:
@@ -334,6 +351,7 @@ def group_sequences(entries: list[dict], max_gap_frames: int = 5) -> list[list[d
 # Statistics
 # ---------------------------------------------------------------------------
 
+
 def print_stats(entries: list[dict]) -> None:
     """Print summary statistics for a set of scene entries."""
     if not entries:
@@ -345,8 +363,8 @@ def print_stats(entries: list[dict]) -> None:
     headings = [r["heading_deg"] for r in entries]
 
     print(f"Matched scenes: {len(entries)}")
-    print(f"  X range: {min(xs):.1f} - {max(xs):.1f} (span: {max(xs)-min(xs):.1f}m)")
-    print(f"  Y range: {min(ys):.1f} - {max(ys):.1f} (span: {max(ys)-min(ys):.1f}m)")
+    print(f"  X range: {min(xs):.1f} - {max(xs):.1f} (span: {max(xs) - min(xs):.1f}m)")
+    print(f"  Y range: {min(ys):.1f} - {max(ys):.1f} (span: {max(ys) - min(ys):.1f}m)")
     print(f"  Heading range: {min(headings):.1f} - {max(headings):.1f} deg")
 
     # Sequence info
@@ -355,7 +373,9 @@ def print_stats(entries: list[dict]) -> None:
 
     if "travel_dist" in entries[0]:
         dists = [r["travel_dist"] for r in entries]
-        print(f"  Travel distance: {min(dists):.1f} - {max(dists):.1f}m (mean: {sum(dists)/len(dists):.1f}m)")
+        print(
+            f"  Travel distance: {min(dists):.1f} - {max(dists):.1f}m (mean: {sum(dists) / len(dists):.1f}m)"
+        )
     if "trajectory_heading_deg" in entries[0]:
         th = [r["trajectory_heading_deg"] for r in entries]
         print(f"  Trajectory heading: {min(th):.1f} - {max(th):.1f} deg")
@@ -364,6 +384,7 @@ def print_stats(entries: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -377,7 +398,8 @@ def parse_args() -> argparse.Namespace:
         help="Path to path_list.json or directory containing NPZ files",
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         type=str,
         default=None,
         help="Output JSON path (default: auto-generated from input name + filters)",
@@ -568,13 +590,15 @@ def main():
 
         if args.group_sequences:
             groups = group_sequences(index)
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Sequences: {len(groups)}")
             for i, group in enumerate(groups):
                 prefix = _bag_prefix(group[0]["npz_path"]).split("/")[-1]
                 dists = [r.get("travel_dist", 0) for r in group]
-                print(f"  [{i}] {prefix}: {len(group)} scenes, "
-                      f"travel {min(dists):.1f}-{max(dists):.1f}m")
+                print(
+                    f"  [{i}] {prefix}: {len(group)} scenes, "
+                    f"travel {min(dists):.1f}-{max(dists):.1f}m"
+                )
 
     if not args.stats:
         # Sort by path for deterministic output

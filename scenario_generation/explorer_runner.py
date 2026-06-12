@@ -67,7 +67,12 @@ def plan_static_clearance(
     valid = torch.ones(S, T, dtype=torch.bool, device=device)
     ego_shape = torch.tensor(ego_shape_wlw, device=device, dtype=torch.float32)
     res = compute_static_collision_penalty(
-        ego_trajs, ego_shape, nb, shapes, valid, RewardConfig(),
+        ego_trajs,
+        ego_shape,
+        nb,
+        shapes,
+        valid,
+        RewardConfig(),
     )
     return float(res["per_timestep_min"][0, 1:].min().item())
 
@@ -119,7 +124,8 @@ class ExplorerGuidanceRunner:
         if not 0.0 <= self.eta_smooth <= 1.0:
             raise ValueError(
                 f"eta_smooth must be in [0, 1], got {self.eta_smooth} — "
-                "values outside invert/overshoot the EMA")
+                "values outside invert/overshoot the EMA"
+            )
         self._eta_prev: dict[str, float] | None = None
 
     def reset(self) -> None:
@@ -132,26 +138,42 @@ class ExplorerGuidanceRunner:
             raise ValueError(
                 f"policy heads {sorted(unmapped)} have no guidance mapping "
                 "in explorer_runner — running without them would silently "
-                "change the deployed behaviour")
+                "change the deployed behaviour"
+            )
         fns = []
         if "lateral" in etas:
-            fns.append(GuidanceConfig(
-                name="lateral", enabled=True, scale=env.lat_scale,
-                params={"lambda_lat": env.lambda_lat, "eta_lat": etas["lateral"]},
-            ))
+            fns.append(
+                GuidanceConfig(
+                    name="lateral",
+                    enabled=True,
+                    scale=env.lat_scale,
+                    params={"lambda_lat": env.lambda_lat, "eta_lat": etas["lateral"]},
+                )
+            )
         if "collision" in etas:
-            fns.append(GuidanceConfig(
-                name="collision_swerve_batched", enabled=True, scale=env.col_scale,
-                params={"eta_col": etas["collision"], "range": env.col_range},
-            ))
+            fns.append(
+                GuidanceConfig(
+                    name="collision_swerve_batched",
+                    enabled=True,
+                    scale=env.col_scale,
+                    params={"eta_col": etas["collision"], "range": env.col_range},
+                )
+            )
         if "stretch" in etas:
-            fns.append(GuidanceConfig(
-                name="speed_stretch_batched", enabled=True, scale=env.stretch_scale,
-                params={"stretch": 1.0 + env.lambda_spd * etas["stretch"]},
-            ))
-        return GuidanceComposer(GuidanceSetConfig(
-            functions=fns, global_scale=env.guidance_scale,
-        ))
+            fns.append(
+                GuidanceConfig(
+                    name="speed_stretch_batched",
+                    enabled=True,
+                    scale=env.stretch_scale,
+                    params={"stretch": 1.0 + env.lambda_spd * etas["stretch"]},
+                )
+            )
+        return GuidanceComposer(
+            GuidanceSetConfig(
+                functions=fns,
+                global_scale=env.guidance_scale,
+            )
+        )
 
     @torch.no_grad()
     def guided_ego_prediction(

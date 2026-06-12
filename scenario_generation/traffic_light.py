@@ -25,7 +25,6 @@ import numpy as np
 
 from scenario_generation.scene_context import MapData, SceneContext
 
-
 # Channel indices inside the 5-dim traffic-light one-hot block at lane dims
 # [8:13] per ``scene_context.MapData``.
 TL_GREEN = 0
@@ -68,6 +67,7 @@ PERP_GREEN_AFTER_DELAY = 2.0
 @dataclass
 class _GroupState:
     """Per-TL-group independent state machine (mirrors route_traffic_light_publisher.py)."""
+
     color: int
     last_change_time: float
     duration: float
@@ -211,9 +211,7 @@ class TrafficLightController:
         self._route_ll_centers: list[np.ndarray] = []
         for ll_id in self._route_ll_ids:
             if ll_id in builder._cache:
-                self._route_ll_centers.append(
-                    builder._cache[ll_id].raw_centerline.mean(axis=0)
-                )
+                self._route_ll_centers.append(builder._cache[ll_id].raw_centerline.mean(axis=0))
             else:
                 self._route_ll_centers.append(np.zeros(2, dtype=np.float32))
         self._forward_idx: int = 0

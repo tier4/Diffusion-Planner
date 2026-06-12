@@ -81,10 +81,7 @@ class GuidanceHead(nn.Module):
         # Clamp to max_conc to prevent distribution collapse (alpha=10 → high concentration)
         max_conc = 10.0
         params = torch.clamp(F.softplus(scaled) + 1.0, max=max_conc)
-        return [
-            Beta(params[:, 2 * i], params[:, 2 * i + 1])
-            for i in range(self.n_heads)
-        ]
+        return [Beta(params[:, 2 * i], params[:, 2 * i + 1]) for i in range(self.n_heads)]
 
 
 class ValueHead(nn.Module):

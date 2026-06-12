@@ -19,6 +19,7 @@ Usage:
 
 Outputs <out> (kept scene list) and <out>.report.json (kept / dropped lists).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,15 +49,18 @@ def t0_sc_clearance(data: dict, rcfg, device: torch.device) -> tuple[float, int]
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--require_stopped",
-                        action=argparse.BooleanOptionalAction, default=True,
-                        help="Drop scenes with no stopped neighbor "
-                             "(--no-require_stopped to keep them)")
+    parser.add_argument(
+        "--require_stopped",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Drop scenes with no stopped neighbor (--no-require_stopped to keep them)",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -84,30 +88,37 @@ def main():
             print(f"  [drop] {Path(p).name}: no stopped neighbor")
         elif clearance < rcfg.sc_cross_thresh:
             dropped_t0.append({"scene": p, "t0_clearance": clearance})
-            print(f"  [drop] {Path(p).name}: t0 clearance {clearance:+.3f}m "
-                  f"< {rcfg.sc_cross_thresh}m")
+            print(
+                f"  [drop] {Path(p).name}: t0 clearance {clearance:+.3f}m < {rcfg.sc_cross_thresh}m"
+            )
         else:
             kept.append(p)
-            print(f"  [keep] {Path(p).name}: t0 clearance {clearance:+.3f}m, "
-                  f"{n_stopped} stopped")
+            print(f"  [keep] {Path(p).name}: t0 clearance {clearance:+.3f}m, {n_stopped} stopped")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         json.dump(kept, f, indent=1)
     with open(str(out) + ".report.json", "w") as f:
-        json.dump({
-            "n_input": len(scene_paths), "n_kept": len(kept),
-            "n_dropped_t0": len(dropped_t0),
-            "n_dropped_no_stopped": len(dropped_no_stopped),
-            "n_errors": len(errors),
-            "dropped_t0": dropped_t0,
-            "dropped_no_stopped": dropped_no_stopped,
-            "errors": errors,
-        }, f, indent=1)
-    print(f"\nKept {len(kept)}/{len(scene_paths)} "
-          f"(dropped {len(dropped_t0)} t0-violating, "
-          f"{len(dropped_no_stopped)} no-stopped, {len(errors)} errors)")
+        json.dump(
+            {
+                "n_input": len(scene_paths),
+                "n_kept": len(kept),
+                "n_dropped_t0": len(dropped_t0),
+                "n_dropped_no_stopped": len(dropped_no_stopped),
+                "n_errors": len(errors),
+                "dropped_t0": dropped_t0,
+                "dropped_no_stopped": dropped_no_stopped,
+                "errors": errors,
+            },
+            f,
+            indent=1,
+        )
+    print(
+        f"\nKept {len(kept)}/{len(scene_paths)} "
+        f"(dropped {len(dropped_t0)} t0-violating, "
+        f"{len(dropped_no_stopped)} no-stopped, {len(errors)} errors)"
+    )
     print(f"Wrote {out}")
 
 

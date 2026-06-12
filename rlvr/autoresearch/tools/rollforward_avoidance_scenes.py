@@ -21,6 +21,7 @@ Usage:
         --out_dir <dir> --out_list <json> \
         [--lambda_lat 5.0] [--lat_scale 2.0] [--col_scale 9.0]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,7 +45,13 @@ from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 
 @torch.no_grad()
 def guided_trajectory(
-    model, margs, policy, heads, data, args, device,
+    model,
+    margs,
+    policy,
+    heads,
+    data,
+    args,
+    device,
 ) -> tuple[np.ndarray, dict[str, float]]:
     det = deterministic_predict(model, margs, data)
     batch = _stack_scene_data([data], device)
@@ -54,11 +61,20 @@ def guided_trajectory(
     enc = run_frozen_encoder(model, norm)
     out = policy(enc, x_ref, deterministic=True)
     etas = {h: (2.0 * out.dists[h].mean - 1.0).reshape(1) for h in heads}
-    g = _batched_generate_varied_noise(
-        model, margs, norm, noise_min=0.0, noise_max=0.0,
-        first_deterministic=False, composer=make_composer(etas, args),
-        device=device,
-    )[0].cpu().numpy()
+    g = (
+        _batched_generate_varied_noise(
+            model,
+            margs,
+            norm,
+            noise_min=0.0,
+            noise_max=0.0,
+            first_deterministic=False,
+            composer=make_composer(etas, args),
+            device=device,
+        )[0]
+        .cpu()
+        .numpy()
+    )
     return g, {h: float(v.item()) for h, v in etas.items()}
 
 
@@ -76,7 +92,7 @@ def rollforward_scene(raw: dict, guided: np.ndarray, k: int, dt: float = 0.1) ->
     g_yaw = np.arctan2(guided[: k + 1, 3], guided[: k + 1, 2])
     g_rows = np.stack([guided[: k + 1, 0], guided[: k + 1, 1], g_yaw], axis=-1)
     combined = np.concatenate([past, g_rows.astype(past.dtype)], axis=0)
-    out["ego_agent_past"] = np.ascontiguousarray(combined[-past.shape[0]:])
+    out["ego_agent_past"] = np.ascontiguousarray(combined[-past.shape[0] :])
 
     # Drop the GT future — these scenes are for label sweeps, which never use
     # it; keep shape with zeros so loaders stay happy.
@@ -108,7 +124,8 @@ def rollforward_scene(raw: dict, guided: np.ndarray, k: int, dt: float = 0.1) ->
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--model_path", required=True)
@@ -123,9 +140,12 @@ def main():
     parser.add_argument("--lambda_spd", type=float, default=0.2)
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
-    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1",
-                        help="guidance envelope — must match the policy's "
-                             "training labels")
+    parser.add_argument(
+        "--envelope",
+        choices=["v1", "v2"],
+        default="v1",
+        help="guidance envelope — must match the policy's training labels",
+    )
     parser.add_argument("--lambda_col", type=float, default=3.0)
     args = parser.parse_args()
 
@@ -143,8 +163,7 @@ def main():
     for sp in scene_paths:
         try:
             data = load_npz_data(sp, device)
-            guided, etas = guided_trajectory(model, margs, policy, heads, data,
-                                             args, device)
+            guided, etas = guided_trajectory(model, margs, policy, heads, data, args, device)
             raw = dict(np.load(sp, allow_pickle=True))
         except Exception as e:  # noqa: BLE001
             print(f"  [err ] {Path(sp).name}: {e}")
@@ -162,10 +181,8 @@ def main():
             out_path = out_dir / f"{stem}_roll{k:02d}.npz"
             np.savez(out_path, **rolled)
             written.append(str(out_path))
-            manifest.append({"source": sp, "k": k, "t0_etas": etas,
-                             "out": str(out_path)})
-        print(f"  [ok  ] {stem}: {len(steps)} rolled states "
-              f"(t0 etas {etas})")
+            manifest.append({"source": sp, "k": k, "t0_etas": etas, "out": str(out_path)})
+        print(f"  [ok  ] {stem}: {len(steps)} rolled states (t0 etas {etas})")
 
     with open(args.out_list, "w") as f:
         json.dump(written, f, indent=1)

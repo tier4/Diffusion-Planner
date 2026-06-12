@@ -62,7 +62,7 @@ def generate_and_score(model, model_args, npz_path, K, reward_config, sampler_co
 
     results = []
     for k_i in range(trajs.shape[0]):
-        traj_t = trajs[k_i:k_i + 1]
+        traj_t = trajs[k_i : k_i + 1]
         r = compute_reward_batch(traj_t, data, reward_config)[0]
         gate, near, _, _, _ = compute_lane_departure_penalty(traj_t, ego_shape, data)
 
@@ -70,20 +70,22 @@ def generate_and_score(model, model_args, npz_path, K, reward_config, sampler_co
         traj_np = trajs[k_i].cpu().numpy()
         path_len = float(np.linalg.norm(np.diff(traj_np[:, :2], axis=0), axis=1).sum())
 
-        results.append({
-            "k": k_i,
-            "traj": traj_np,
-            "total": r.total,
-            "progress": r.progress,
-            "smoothness": r.smoothness,
-            "centerline": r.centerline,
-            "safety": r.safety,
-            "lane_crossing": r.lane_crossing,
-            "lane_near": r.lane_near_frac,
-            "rb_crossing": r.rb_crossing,
-            "rb_near": r.rb_near_penalty,
-            "path_len": path_len,
-        })
+        results.append(
+            {
+                "k": k_i,
+                "traj": traj_np,
+                "total": r.total,
+                "progress": r.progress,
+                "smoothness": r.smoothness,
+                "centerline": r.centerline,
+                "safety": r.safety,
+                "lane_crossing": r.lane_crossing,
+                "lane_near": r.lane_near_frac,
+                "rb_crossing": r.rb_crossing,
+                "rb_near": r.rb_near_penalty,
+                "path_len": path_len,
+            }
+        )
 
     results.sort(key=lambda x: -x["total"])
     return results, data, gt_path_len
@@ -116,8 +118,12 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
             lb, rb = lane[:, 4:6], lane[:, 6:8]
             v = np.abs(pts).sum(axis=1) > 0.1
             if v.sum() > 1:
-                ax_map.plot((pts + lb)[v, 0], (pts + lb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7)
-                ax_map.plot((pts + rb)[v, 0], (pts + rb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7)
+                ax_map.plot(
+                    (pts + lb)[v, 0], (pts + lb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7
+                )
+                ax_map.plot(
+                    (pts + rb)[v, 0], (pts + rb)[v, 1], "-", color="#bbb", alpha=0.5, lw=0.7
+                )
 
     # Draw road borders (red)
     ls = npz["line_strings"]
@@ -132,11 +138,16 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
 
     # Draw GT (green dashed)
     gt = npz["ego_agent_future"]
-    ax_map.plot(gt[:, 0], gt[:, 1], "g--", lw=2.5, alpha=0.6, zorder=5, label=f"GT ({gt_path_len:.1f}m)")
+    ax_map.plot(
+        gt[:, 0], gt[:, 1], "g--", lw=2.5, alpha=0.6, zorder=5, label=f"GT ({gt_path_len:.1f}m)"
+    )
 
     # Ego box at origin
-    ax_map.add_patch(Rectangle((-ro, -width / 2), length, width,
-                                lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20))
+    ax_map.add_patch(
+        Rectangle(
+            (-ro, -width / 2), length, width, lw=2, ec="black", fc="#3366cc", alpha=0.9, zorder=20
+        )
+    )
 
     # Color map: rank 1=dark green, rank K=dark red
     cmap = plt.cm.RdYlGn_r  # reversed: green=low index=best rank
@@ -150,11 +161,15 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
 
         lc = "OUT" if r["lane_crossing"] else "IN"
         rb = "RB!" if r["rb_crossing"] else ""
-        label = f"#{rank+1} {r['total']:+.0f} {lc}{rb}" if rank < 5 else None
+        label = f"#{rank + 1} {r['total']:+.0f} {lc}{rb}" if rank < 5 else None
 
-        ax_map.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=lw, alpha=alpha, zorder=10 - rank * 0.1)
+        ax_map.plot(
+            traj[:, 0], traj[:, 1], "-", color=color, lw=lw, alpha=alpha, zorder=10 - rank * 0.1
+        )
         if rank < 5:
-            ax_map.plot(traj[-1, 0], traj[-1, 1], "o", color=color, ms=6, alpha=0.9, zorder=15, label=label)
+            ax_map.plot(
+                traj[-1, 0], traj[-1, 1], "o", color=color, ms=6, alpha=0.9, zorder=15, label=label
+            )
 
         # Endpoint footprint for top 3
         if rank < 3:
@@ -165,8 +180,19 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
             if hn > 0.01:
                 heading = np.arctan2(sin_h / hn, cos_h / hn)
                 t_rot = mtransforms.Affine2D().rotate(heading).translate(cx, cy) + ax_map.transData
-                ax_map.add_patch(Rectangle((-ro, -width / 2), length, width,
-                                           lw=1, ec=color, fc=color, alpha=0.25, zorder=8, transform=t_rot))
+                ax_map.add_patch(
+                    Rectangle(
+                        (-ro, -width / 2),
+                        length,
+                        width,
+                        lw=1,
+                        ec=color,
+                        fc=color,
+                        alpha=0.25,
+                        zorder=8,
+                        transform=t_rot,
+                    )
+                )
 
         all_pts.append(traj[:, :2])
 
@@ -202,8 +228,16 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
     y = 0.97
     for j, h in enumerate(headers):
         x = sum(col_widths[:j]) + col_widths[j] / 2
-        ax_tbl.text(x, y, h, fontsize=7, fontweight="bold", ha="center", va="top",
-                    transform=ax_tbl.transAxes)
+        ax_tbl.text(
+            x,
+            y,
+            h,
+            fontsize=7,
+            fontweight="bold",
+            ha="center",
+            va="top",
+            transform=ax_tbl.transAxes,
+        )
     y -= 0.02
     ax_tbl.plot([0, 1], [y, y], color="black", lw=0.5, transform=ax_tbl.transAxes, clip_on=False)
 
@@ -218,7 +252,7 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
         stopped = r["path_len"] < 1.0
 
         row = [
-            f"{rank+1}",
+            f"{rank + 1}",
             f"{r['total']:+.1f}",
             f"{r['progress']:.1f}",
             f"{r['smoothness']:.2f}",
@@ -239,24 +273,47 @@ def draw_grpo_scene(fig, results, npz_path, scene_idx, gt_path_len, tag):
             bg_color = "#fff3cc"  # light yellow for out-of-lane
 
         # Draw background row highlight
-        ax_tbl.fill_between([0, 1], y - 0.025, y + 0.03, color=bg_color, alpha=0.5,
-                            transform=ax_tbl.transAxes, clip_on=False)
+        ax_tbl.fill_between(
+            [0, 1],
+            y - 0.025,
+            y + 0.03,
+            color=bg_color,
+            alpha=0.5,
+            transform=ax_tbl.transAxes,
+            clip_on=False,
+        )
 
         for j, val in enumerate(row):
             x = sum(col_widths[:j]) + col_widths[j] / 2
             fw = "bold" if rank < 3 else "normal"
-            ax_tbl.text(x, y, val, fontsize=6.5, ha="center", va="center",
-                        fontweight=fw, color=color if rank < 5 else "#555",
-                        transform=ax_tbl.transAxes)
+            ax_tbl.text(
+                x,
+                y,
+                val,
+                fontsize=6.5,
+                ha="center",
+                va="center",
+                fontweight=fw,
+                color=color if rank < 5 else "#555",
+                transform=ax_tbl.transAxes,
+            )
 
     # Legend at bottom of table
     y_leg = max(y - 0.06, 0.01)
-    ax_tbl.text(0.0, y_leg, "Green=in-lane  Yellow=out-of-lane  Red=stopped (<1m)",
-                fontsize=6, color="#666", transform=ax_tbl.transAxes)
+    ax_tbl.text(
+        0.0,
+        y_leg,
+        "Green=in-lane  Yellow=out-of-lane  Red=stopped (<1m)",
+        fontsize=6,
+        color="#666",
+        transform=ax_tbl.transAxes,
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GRPO trajectory visualization with reward breakdown")
+    parser = argparse.ArgumentParser(
+        description="GRPO trajectory visualization with reward breakdown"
+    )
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--lora_path", type=str, default=None)
@@ -356,8 +413,10 @@ def main():
         # Print quick summary
         n_in = sum(1 for r in results if not r["lane_crossing"])
         n_stopped = sum(1 for r in results if r["path_len"] < 1.0)
-        print(f"  {n_in}/{args.K} in-lane, {n_stopped} stopped, "
-              f"best={results[0]['total']:+.1f}, worst={results[-1]['total']:+.1f}")
+        print(
+            f"  {n_in}/{args.K} in-lane, {n_stopped} stopped, "
+            f"best={results[0]['total']:+.1f}, worst={results[-1]['total']:+.1f}"
+        )
 
     print(f"\nDone. {len(scene_indices)} figures saved to {out}")
 
