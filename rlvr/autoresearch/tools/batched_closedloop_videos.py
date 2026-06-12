@@ -184,8 +184,14 @@ def _render_one(job):
     def eta_title(step, a_pose, b_pose):
         if not eta_log or step >= len(eta_log):
             return ""
-        return "  explorer η: " + " ".join(
-            f"{h[:3]}={v:+.2f}" for h, v in eta_log[step].items())
+        parts = []
+        for h, v in eta_log[step].items():
+            if h == "stretch":
+                # show the actual factor (1 + lambda_spd * eta), not raw eta
+                parts.append(f"str×{1.0 + 0.2 * v:.2f}")
+            else:
+                parts.append(f"{h[:3]}={v:+.2f}")
+        return "  explorer η: " + " ".join(parts)
 
     run_ghost_sim(
         scene_path=scene_path,
