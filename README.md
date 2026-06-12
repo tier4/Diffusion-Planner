@@ -11,8 +11,17 @@ uv sync
 # Activate the virtual environment
 source .venv/bin/activate
 
+# Install git hooks
+uv run pre-commit install
+
 # check torch
 python3 -c "import torch; print(torch.cuda.is_available())"
+```
+
+Run all configured hooks manually with:
+
+```bash
+uv run pre-commit run --all-files
 ```
 
 ## 2. Create dataset
