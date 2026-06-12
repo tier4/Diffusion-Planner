@@ -11,7 +11,9 @@ treated as not-really-avoidance.
 
 No guided generation and no reward scoring happen here: per scene this is
 one deterministic planner pass (for the reference trajectory), one frozen
-encoder pass, and the policy head.
+encoder pass, and the policy head — all BATCHED across scenes
+(--batch_size, default 32; requires shape-homogeneous NPZs, e.g. 320
+neighbor slots).
 
 Outputs a JSON report (per-scene etas + flag + which head(s) triggered,
 plus summary counts and |eta| distributions) and, optionally, plain NPZ
@@ -35,7 +37,10 @@ import torch
 
 from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
 from preference_optimization.utils import load_npz_data
-from rlvr.autoresearch.tools.eval_det_avoidance import load_model
+from rlvr.autoresearch.tools.eval_det_avoidance import (
+    det_inference_batched,
+    load_model,
+)
 from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer
 
 
@@ -63,7 +68,8 @@ def scene_etas(model, model_args, policy, heads, npz_path, device):
 
 @torch.no_grad()
 def render_verdict(model, model_args, scene_path, etas, det, norm_data,
-                   is_avoid, triggers, args, device, out_png):
+                   is_avoid, triggers, args, device, out_png,
+                   verdict_label: str | None = None):
     """Scene render for human judgment: det trajectory + stopped-neighbor
     OBBs + verdict; flagged scenes also show the policy-guided trajectory
     (what the policy wants to do instead)."""
@@ -96,7 +102,8 @@ def render_verdict(model, model_args, scene_path, etas, det, norm_data,
     if guided is not None:
         ax.plot(guided[:, 0], guided[:, 1], "--", color="lime", lw=2.2,
                 label="policy-guided")
-    verdict = ("AVOIDANCE [" + "+".join(triggers) + "]") if is_avoid else "normal"
+    verdict = verdict_label or (
+        ("AVOIDANCE [" + "+".join(triggers) + "]") if is_avoid else "normal")
     eta_str = " ".join(f"{h[:3]}={v:+.2f}" for h, v in etas.items())
     ax.set_title(f"{Path(scene_path).stem}\n{verdict}  η: {eta_str}",
                  color=("darkred" if is_avoid else "darkgreen"))
@@ -158,6 +165,11 @@ def main():
     parser.add_argument("--rule", choices=["any", "both"], default="any",
                         help="'any': either head over threshold flags the "
                              "scene; 'both': require both heads")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="scenes per batched det+encoder+policy pass")
+    parser.add_argument("--render_only_avoidance", action="store_true",
+                        help="with --render_dir: render only flagged (and "
+                             "clearance-demoted) scenes, skip normals")
     parser.add_argument("--out_avoidance_list", default=None,
                         help="optional JSON list of flagged NPZ paths")
     parser.add_argument("--out_normal_list", default=None,
@@ -216,44 +228,80 @@ def main():
     if render_dir:
         render_dir.mkdir(parents=True, exist_ok=True)
 
+    from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
+
     rows, per_head_abs = [], {h: [] for h in heads}
-    for i, sp in enumerate(paths):
-        etas, det, norm_data = scene_etas(
-            model, model_args, policy, heads, sp, device)
-        is_avoid, triggers = classify(
-            etas, args.lat_thresh, args.col_thresh, args.rule)
-        row = {
-            "scene": sp,
-            "etas": {h: round(v, 4) for h, v in etas.items()},
-            "avoidance": is_avoid,
-            "triggered": triggers,
-        }
-        if is_avoid and args.verify_clearance > 0:
-            from rlvr.autoresearch.tools.ghost_sim_common import (
-                extract_stopped_neighbors,
-            )
-            from scenario_generation.explorer_runner import plan_static_clearance
-            boxes = extract_stopped_neighbors(sp)
-            det_clr = (plan_static_clearance(det, boxes, args.ego_shape_t,
-                                             device) if boxes else float("inf"))
-            row["det_clearance"] = round(float(det_clr), 3)
-            if det_clr >= args.verify_clearance:
-                # baseline plan already safe — policy false positive
-                is_avoid = False
-                row["avoidance"] = False
-                row["demoted"] = True
-        rows.append(row)
-        for h, v in etas.items():
-            per_head_abs[h].append(v)
-        if render_dir:
-            # pool-prefix the PNG name (same-basename scenes across pools)
-            png = render_dir / (
-                f"{'avoid' if is_avoid else 'normal'}__"
-                f"{Path(sp).parent.name}__{Path(sp).stem}.png")
-            render_verdict(model, model_args, sp, etas, det, norm_data,
-                           is_avoid, triggers, args, device, png)
-        if (i + 1) % 50 == 0:
-            print(f"  [classify] {i + 1}/{len(paths)}")
+    done = 0
+    for start in range(0, len(paths), args.batch_size):
+        batch_paths = paths[start:start + args.batch_size]
+        datas = [load_npz_data(p, device) for p in batch_paths]
+        # GT futures are not model inputs and may differ in width across
+        # pools (3-col raw vs 4-col) — drop them so mixed lists stack.
+        stack_in = [{k: v for k, v in d.items()
+                     if k not in ("ego_agent_future", "neighbor_agents_future")}
+                    for d in datas]
+        batch = _stack_scene_data(stack_in, device)
+        norm_batch = _normalize_batch(batch, model_args)
+        det_b = det_inference_batched(model, model_args, datas, device,
+                                      norm_batch=norm_batch)  # [B, T, 4]
+        norm_batch["reference_trajectory"] = det_b
+        enc = run_frozen_encoder(model, norm_batch)
+        out = policy(enc, det_b, deterministic=True)
+        etas_b = {h: (2.0 * out.dists[h].mean - 1.0).cpu() for h in heads}
+        det_np = det_b.cpu().numpy()
+
+        for i, sp in enumerate(batch_paths):
+            etas = {h: float(etas_b[h][i]) for h in heads}
+            det = det_np[i]
+            is_avoid, triggers = classify(
+                etas, args.lat_thresh, args.col_thresh, args.rule)
+            row = {
+                "scene": sp,
+                "etas": {h: round(v, 4) for h, v in etas.items()},
+                "avoidance": is_avoid,
+                "triggered": triggers,
+            }
+            if is_avoid and args.verify_clearance > 0:
+                from rlvr.autoresearch.tools.ghost_sim_common import (
+                    extract_stopped_neighbors,
+                )
+                from scenario_generation.explorer_runner import (
+                    plan_static_clearance,
+                )
+                boxes = extract_stopped_neighbors(sp)
+                det_clr = (plan_static_clearance(det, boxes, args.ego_shape_t,
+                                                 device)
+                           if boxes else float("inf"))
+                row["det_clearance"] = round(float(det_clr), 3)
+                if det_clr >= args.verify_clearance:
+                    # baseline plan already safe — policy false positive
+                    is_avoid = False
+                    row["avoidance"] = False
+                    row["demoted"] = True
+            rows.append(row)
+            for h, v in etas.items():
+                per_head_abs[h].append(v)
+            if render_dir and (is_avoid or row.get("demoted")
+                               or not args.render_only_avoidance):
+                # pool-prefix the PNG name (same-basename scenes across pools)
+                cls = ("avoid" if is_avoid
+                       else "demoted" if row.get("demoted") else "normal")
+                png = render_dir / (
+                    f"{cls}__{Path(sp).parent.name}__{Path(sp).stem}.png")
+                label = (f"DEMOTED (det clearance "
+                         f"{row['det_clearance']}m)" if cls == "demoted"
+                         else None)
+                # per-scene norm_data for the guided-trajectory render
+                nd = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                      for k, v in datas[i].items()}
+                nd = model_args.observation_normalizer(nd)
+                nd["reference_trajectory"] = det_b[i:i + 1]
+                render_verdict(model, model_args, sp, etas, det, nd,
+                               is_avoid or bool(row.get("demoted")), triggers,
+                               args, device, png, verdict_label=label)
+        done += len(batch_paths)
+        if done % (args.batch_size * 4) < args.batch_size or done == len(paths):
+            print(f"  [classify] {done}/{len(paths)}")
 
     n_avoid = sum(r["avoidance"] for r in rows)
     n_demoted = sum(r.get("demoted", False) for r in rows)
@@ -282,7 +330,7 @@ def main():
 
     if render_dir:
         from rlvr.autoresearch.tools.eval_policy_avoidance import make_collage
-        for cls in ("avoid", "normal"):
+        for cls in ("avoid", "demoted", "normal"):
             pngs = sorted(render_dir.glob(f"{cls}__*.png"))
             make_collage(pngs, render_dir / f"collage_{cls}.png")
         print(f"[render] {len(list(render_dir.glob('*__*.png')))} PNGs + "
