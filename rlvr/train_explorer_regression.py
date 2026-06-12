@@ -198,7 +198,19 @@ def main():
     policy = ExplorationPolicy(ep_config, ref_seq_len=model_args.future_len).to(device)
     if args.init_from:
         state = torch.load(args.init_from, map_location=device, weights_only=False)
-        policy.load_state_dict(state, strict=True)
+        try:
+            policy.load_state_dict(state, strict=True)
+        except RuntimeError:
+            # Head-spec change (e.g. 2-head -> 3-head: the shared guidance
+            # head's Linear changes shape). Transfer everything that fits,
+            # report what restarts fresh — loud, not silent.
+            compat = {k: v for k, v in state.items()
+                      if k in policy.state_dict()
+                      and policy.state_dict()[k].shape == v.shape}
+            missing = [k for k in policy.state_dict() if k not in compat]
+            policy.load_state_dict(compat, strict=False)
+            print(f"[warm-start] PARTIAL: {len(compat)}/{len(policy.state_dict())} "
+                  f"tensors transferred; fresh: {missing}")
         print(f"[warm-start] loaded {args.init_from}")
     optimizer = optim.AdamW(policy.parameters(), lr=args.lr)
 
