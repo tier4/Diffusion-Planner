@@ -523,6 +523,11 @@ class ClosedLoopExplorationTrainer:
                     # warmup ep3 checkpoint diverged from the warm-start).
                     # The epoch loop freezes non-value params during warmup.
                     step_loss = self.config.closed_loop_value_coef * value_loss
+                    # Keep logged metrics honest: REINFORCE/entropy are NOT
+                    # optimized during warmup — report them as zero rather
+                    # than as if they contributed to the step.
+                    reinforce_loss = torch.zeros_like(reinforce_loss)
+                    entropy = torch.zeros_like(entropy)
                 else:
                     step_loss = (
                         reinforce_loss

@@ -2754,6 +2754,10 @@ def main() -> None:
     if args.explorer_dir is not None:
         cfg.explorer_dir = args.explorer_dir
     if args.explorer_eta_smooth is not None:
+        if not 0.0 <= args.explorer_eta_smooth <= 1.0:
+            raise SystemExit(
+                f"--explorer_eta_smooth must be in [0, 1], got "
+                f"{args.explorer_eta_smooth}")
         cfg.explorer_eta_smooth = args.explorer_eta_smooth
     # Re-run validation after CLI overrides so bad values (e.g. --steps 0)
     # are rejected at startup instead of much later.
