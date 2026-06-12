@@ -553,11 +553,11 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             else:
                 from preference_optimization.lora_utils import (
                     LORA_TARGET_BLOCKS_01_REGEX,
+                    LORA_TARGET_BLOCKS_02_REGEX,
                     LORA_TARGET_FIRST_BLOCK_REGEX,
                     LORA_TARGET_LAST_BLOCK_REGEX,
                     apply_lora,
                 )
-                from preference_optimization.lora_utils import LORA_TARGET_BLOCKS_02_REGEX
                 target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX, "blocks02": LORA_TARGET_BLOCKS_02_REGEX}.get(grpo_config.lora_target)
                 kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
                              lora_dropout=grpo_config.lora_dropout)
@@ -565,8 +565,18 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                     kwargs["target_modules"] = target
                 policy_model = apply_lora(policy_model, **kwargs)
 
-        trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
+        if not grpo_config.train_dit:
+            # Frozen-DiT policy-only training (exploration trainer): freeze the
+            # whole planner; only the exploration policy gets an optimizer
+            # (created inside GRPOExplorationTrainer).
+            for p in policy_model.parameters():
+                p.requires_grad_(False)
+            policy_model.eval()
+            optimizer = None
+            print("train_dit=False: DiT frozen, training exploration policy only")
+        else:
+            trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
 
         # Load frozen base model for full-model (non-LoRA) training when features
         # need a base reference: KL reg or baseline ego IL.
@@ -727,7 +737,10 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                     if grpo_config.ranked_sft_use_explorer and grpo_config.exploration_checkpoint_path:
                         from pathlib import Path as _P
 
-                        from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
+                        from exploration_policy.model import (
+                            ExplorationPolicy,
+                            ExplorationPolicyConfig,
+                        )
                         _ckpt = _P(grpo_config.exploration_checkpoint_path)
                         if not _ckpt.exists():
                             print(f"  WARNING: exploration_checkpoint_path not found: {_ckpt}")
@@ -783,8 +796,25 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             trainer.log_metrics(epoch, metrics)
             trainer.save_checkpoint(epoch, args_dict)
 
-            prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob", baseline_cache=baseline_cache)
-            val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val", baseline_cache=baseline_cache)
+            if grpo_config.use_exploration_policy and not grpo_config.train_dit:
+                # Frozen DiT: evaluate_checkpoint ignores the policy and would
+                # return identical numbers every epoch. Score what the explorer
+                # actually does: deterministic policy-guided trajectories.
+                prob_result = trainer.evaluate_policy_guided(
+                    prob_eval, eval_reward_config, f"epoch{epoch}-prob")
+                _dump_rows = getattr(trainer, "last_eval_rows", None)
+                if _dump_rows is not None:
+                    with open(run_dir / f"policy_eval_prob_epoch_{epoch:03d}.json", "w") as _pf:
+                        json.dump(_dump_rows, _pf, indent=1)
+                val_eval = trainer.evaluate_policy_guided(
+                    val_50, eval_reward_config, f"epoch{epoch}-val")
+                _dump_rows = getattr(trainer, "last_eval_rows", None)
+                if _dump_rows is not None:
+                    with open(run_dir / f"policy_eval_val_epoch_{epoch:03d}.json", "w") as _pf:
+                        json.dump(_dump_rows, _pf, indent=1)
+            else:
+                prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob", baseline_cache=baseline_cache)
+                val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val", baseline_cache=baseline_cache)
 
             # Log to wandb
             wandb_log.log_training(epoch, metrics)
@@ -804,7 +834,9 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                 best_val_reward = val_eval["reward_mean"]
                 best_val_collision = val_eval["collision_rate"]
                 best_epoch = epoch
-                if grpo_config.use_lora:
+                if not grpo_config.train_dit:
+                    best_checkpoint = str(run_dir / f"exploration_policy_epoch_{epoch:03d}.pth")
+                elif grpo_config.use_lora:
                     best_checkpoint = str(run_dir / f"lora_epoch_{epoch:03d}")
                 else:
                     best_checkpoint = str(run_dir / "latest.pth")

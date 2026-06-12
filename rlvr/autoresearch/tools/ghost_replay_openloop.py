@@ -22,6 +22,7 @@ import subprocess
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import numpy as np
 import torch
@@ -31,16 +32,16 @@ from matplotlib.figure import Figure
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
 from rlvr.autoresearch.tools.ghost_sim_common import (
+    _NB_COLOR,
     extract_scene_polylines,
     extract_stopped_neighbors,
-    _NB_COLOR,
 )
 from rlvr.autoresearch.tools.recovery_sim import (
-    _draw_agent_box,
     _LANE_BORDER_COLOR,
     _LANE_COLOR,
     _ROAD_BORDER_COLOR,
     _ROUTE_COLOR,
+    _draw_agent_box,
 )
 
 BASELINE_COLOR = "#1f77b4"  # blue
@@ -76,8 +77,9 @@ def _scene_base(ax, polylines, cx, cy, view_half):
 
 
 def _render_frame(out_png, egos, polylines, neighbor_boxes, show_nb, title,
-                  view_half, ego_shape):
+                  view_half, ego_shape, extra_lines=None):
     # egos: list of dicts {pose:[x,y,h], trail:(N,2), color, label, lw}
+    # extra_lines: optional list of (xy:(N,2), color, alpha, label|None) static lines
     cx = float(np.mean([e["pose"][0] for e in egos]))
     cy = float(np.mean([e["pose"][1] for e in egos]))
     fig = Figure(figsize=(11, 11))
@@ -87,6 +89,12 @@ def _render_frame(out_png, egos, polylines, neighbor_boxes, show_nb, title,
     if show_nb and neighbor_boxes:
         for nx, ny, nh, nl, nw in neighbor_boxes:
             _draw_agent_box(ax, nx, ny, nh, nl, nw, _NB_COLOR, alpha=0.8, lw=1.5, zorder=14)
+    if extra_lines:
+        labeled = False
+        for xy, color, alpha, lab in extra_lines:
+            ax.plot(xy[:, 0], xy[:, 1], "-", color=color, lw=1.0, alpha=alpha,
+                    zorder=16, label=(lab if not labeled and lab else None))
+            labeled = labeled or bool(lab)
     for e in egos:
         tr = e["trail"]
         if tr.shape[0] > 1:
@@ -115,7 +123,11 @@ def _render_frame(out_png, egos, polylines, neighbor_boxes, show_nb, title,
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model_baseline", required=True)
-    p.add_argument("--model_best", required=True)
+    p.add_argument("--model_best", default=None,
+                   help="second model .pth; omit when using --policy_dir")
+    p.add_argument("--policy_dir", default=None,
+                   help="exploration-policy dir: 'best' = baseline + guidance "
+                        "(same frozen model, policy-chosen etas via composer)")
     p.add_argument("--label_baseline", default="baseline")
     p.add_argument("--label_best", default="best")
     p.add_argument("--scenes", required=True)
@@ -128,12 +140,33 @@ def main():
                    help="stopped neighbors with t0 longitudinal x >= this are AHEAD "
                         "(ego approaching) -> appear at t=0; x < this are beside/behind "
                         "(post-avoidance/branch, were visible) -> shown during history too")
+    # Guidance envelope (must match the policy's training labels)
+    p.add_argument("--lambda_lat", type=float, default=5.0)
+    p.add_argument("--lat_scale", type=float, default=2.0)
+    p.add_argument("--col_scale", type=float, default=9.0)
+    p.add_argument("--col_range", type=float, default=8.0)
+    p.add_argument("--lambda_spd", type=float, default=0.2)
+    p.add_argument("--stretch_scale", type=float, default=1.0)
+    p.add_argument("--guidance_scale", type=float, default=0.5)
+    p.add_argument("--n_candidates", type=int, default=0,
+                   help="additionally sample N etas from the policy distribution "
+                        "and draw their guided trajectories as a faint candidate fan")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ego_shape = [float(x) for x in args.ego_shape.split(",")]
     m_base, a_base = load_model(args.model_baseline, device)
-    m_best, a_best = load_model(args.model_best, device)
+    policy = None
+    if args.policy_dir:
+        from exploration_policy.utils import run_frozen_encoder
+        from guidance_gui.generate_samples import generate_samples
+        from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer
+        policy, heads = load_policy(args.policy_dir, a_base, device)
+        m_best, a_best = m_base, a_base
+    elif args.model_best:
+        m_best, a_best = load_model(args.model_best, device)
+    else:
+        raise SystemExit("pass either --model_best or --policy_dir")
     scenes = json.load(open(args.scenes))
     out_root = Path(args.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -142,7 +175,49 @@ def main():
         name = Path(sp).stem
         data = load_npz_data(sp, device)
         traj_base = det_inference_batched(m_base, a_base, [data], device)[0].cpu().numpy()
-        traj_best = det_inference_batched(m_best, a_best, [data], device)[0].cpu().numpy()
+        label_best = args.label_best
+        cand_lines = []
+        if policy is not None:
+            norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                         for k, v in data.items()}
+            norm_data = a_base.observation_normalizer(norm_data)
+            x_ref = torch.from_numpy(np.ascontiguousarray(traj_base)).float()
+            x_ref = x_ref.unsqueeze(0).to(device)
+            norm_data["reference_trajectory"] = x_ref
+            enc = run_frozen_encoder(m_base, norm_data)
+            pout = policy(enc, x_ref, deterministic=True)
+            etas = {h: (2.0 * pout.dists[h].mean - 1.0).reshape(1) for h in heads}
+            composer = make_composer(etas, args)
+            traj_best = generate_samples(
+                model=m_base, model_args=a_base, data=norm_data,
+                noise_scale=0.0, n_samples=1, composer=composer, device=device,
+            )[0]
+            eta_str = " ".join(f"{h[:3]}={float(v.item()):+.2f}" for h, v in etas.items())
+            label_best = f"{args.label_best} ({eta_str})"
+            cand_lines = []
+            if args.n_candidates > 0:
+                from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
+                N = args.n_candidates
+                cand = {h: (2.0 * pout.dists[h].rsample((N,)).reshape(-1) - 1.0)
+                        for h in heads}
+                N_data = {}
+                for k, v in norm_data.items():
+                    if isinstance(v, torch.Tensor) and v.shape[0] == 1:
+                        N_data[k] = v.expand(N, *v.shape[1:]).contiguous()
+                    else:
+                        N_data[k] = v
+                cand_trajs = _batched_generate_varied_noise(
+                    m_base, a_base, N_data, noise_min=0.0, noise_max=0.0,
+                    first_deterministic=False, composer=make_composer(cand, args),
+                    device=device,
+                ).cpu().numpy()
+                cand_lines = [
+                    (cand_trajs[i, :, :2], BEST_COLOR, 0.22,
+                     f"{N} candidates from policy distribution" if i == 0 else None)
+                    for i in range(N)
+                ]
+        else:
+            traj_best = det_inference_batched(m_best, a_best, [data], device)[0].cpu().numpy()
         past = np.load(sp, allow_pickle=True)["ego_agent_past"].astype(np.float32)
         nb_boxes = extract_stopped_neighbors(sp)
         polylines = extract_scene_polylines(data)
@@ -179,11 +254,11 @@ def main():
             tb.append(pb[:2]); tk.append(pk[:2])
             egos = [
                 dict(pose=pb, trail=np.array(tb), color=BASELINE_COLOR, label=args.label_baseline, lw=2),
-                dict(pose=pk, trail=np.array(tk), color=BEST_COLOR, label=args.label_best, lw=2),
+                dict(pose=pk, trail=np.array(tk), color=BEST_COLOR, label=label_best, lw=2),
             ]
             _render_frame(sc_dir / f"f{fi:04d}.png", egos, polylines, nb_boxes,
                           True, f"{name}   t={i*0.1:+.1f}s   PERFECT-TRACK (baseline vs best)",
-                          args.view_half, ego_shape)
+                          args.view_half, ego_shape, extra_lines=cand_lines)
             fi += 1
 
         webm = out_root / f"{name}.webm"

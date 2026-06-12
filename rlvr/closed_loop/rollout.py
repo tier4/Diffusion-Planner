@@ -49,12 +49,15 @@ class RolloutStep:
     """Data collected at one simulation step (all detached, no grad graph)."""
     scene_encoding: torch.Tensor   # [1, N, D]
     x_ref: torch.Tensor            # [1, T, 4]
-    eta_lat_01: float              # sampled value in (0, 1)
-    eta_lon_01: float              # sampled value in (0, 1)
+    eta_lat_01: float              # sampled value in (0, 1) — legacy 2-head API
+    eta_lon_01: float              # sampled value in (0, 1) — legacy 2-head API
     log_prob: float
     value: float
     reward: float
     terminal: bool
+    # head -> sampled eta in (0, 1); generalizes the two legacy fields for
+    # arbitrary head specs (e.g. lateral+collision). None on old buffers.
+    etas_01: dict[str, float] | None = None
 
 
 @dataclass

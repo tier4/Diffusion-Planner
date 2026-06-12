@@ -340,6 +340,70 @@ Per-epoch L2-to-target distribution (+ per-arc) tracker for a HEAL/curated run, 
 ### build_baseline_det_target.py
 Build curated GRAFT-CL targets = a competent model's deterministic trajectory. Runs `--model`'s det inference (`eval_det_avoidance.det_inference_batched`) on a scene list, unit-normalizes the (cos,sin) heading columns, and writes the result into each NPZ's `ego_agent_future` (the curated SFT target) — for HEAL Mechanism B (train the wounded model toward a known-good line instead of ranking its own samples). `--model` is the TARGET source (e.g. the baseline that keeps the line where the grafted model drifted), NOT the model being trained; train curated (lr 5e-5) warm-started from the wounded model. Usage: `--model <competent.pth> --scenes <json> --ego_shape WB,L,W --out_dir <dir> --out_list <json>`.
 
+## Guidance-explorer tools
+
+Tools around the exploration policy (small Beta-head network that outputs
+per-scene guidance etas steering the FROZEN planner — see
+`docs/guidance_explorer_framework.md` for the training method). The training
+chain is `sweep_guidance_params` → `rederive_margin_labels` →
+`split_labels_holdout` → `rlvr.train_explorer_regression`; eval via
+`eval_policy_avoidance` (open-loop + inertness) and
+`batched_closedloop_videos` (lockstep closed-loop + renders).
+
+### classify_avoidance_scenes.py
+Use a trained explorer as an **avoidance-scene detector** over any NPZ scene
+list. Per scene it runs the frozen planner's deterministic inference (the
+policy's `x_ref` input), the frozen encoder, and the policy head
+(deterministic = Beta means), then flags the scene as avoidance when the
+requested guidance exceeds per-head thresholds — a weak signal below
+threshold is treated as not-really-avoidance. All three passes are BATCHED
+across scenes (`--batch_size`, default 32 — bit-identical to per-scene,
+~15x faster); NPZs must be shape-homogeneous (e.g. 320 neighbor slots).
+GT-future fields are ignored, so 3-col and 4-col pools mix freely.
+
+**Semantics caveat:** the etas judge *the baseline's plan*, not the scene in
+isolation. A scene whose obstacle the frozen planner already avoids unaided
+reads as "normal" (the policy's inertness contract) — usually what you want
+when mining training data, but not a "does this scene contain a parked car"
+detector. The signal is strongly bimodal (flagged scenes cluster at high
+|eta|, normals at ~0), so the threshold has wide margin; lower it to ~0.05
+to also catch borderline scenes, raise it for high-precision curation.
+
+```bash
+python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
+  --model_path <base.pth> --policy_dir <dir with exploration_policy.pth + config> \
+  --scenes <scenes.json> --out <report.json> \
+  [--lat_thresh 0.15] [--col_thresh 0.15] [--rule any|both] \
+  [--out_avoidance_list <a.json>] [--out_normal_list <n.json>] \
+  [--batch_size 32] \
+  [--verify_clearance 1.5 --ego_shape WB,L,W] \
+  [--render_dir <dir> --ego_shape WB,L,W [--render_only_avoidance]]
+```
+
+- `--model_path` must be the planner the policy was trained against (the
+  etas are conditional on that model's det trajectory).
+- Report JSON: per-scene etas + verdict + triggered head(s), plus summary
+  counts and |eta| distribution percentiles per head.
+- `--out_avoidance_list` / `--out_normal_list`: plain NPZ path lists,
+  directly usable as dataset lists.
+- `--verify_clearance <m>` (recommended: 1.5): cross-check every flagged
+  scene with the canonical det-plan OBB clearance vs stopped neighbors and
+  DEMOTE it to normal when the baseline plan was already safe by that
+  margin — kills policy false positives (inertness leaks on unfamiliar
+  normals) without touching true positives, mirroring the deployment
+  activation gate. Demotions are recorded per scene (`demoted: true`,
+  `det_clearance`).
+- `--render_dir`: per-scene verdict PNGs for human audit — ego footprint at
+  t0 (blue, requires `--ego_shape WB,L,W`, no default) + det trajectory
+  (black) + stopped-neighbor OBBs (crimson) + the policy-guided trajectory
+  (green, dashed) on flagged scenes — and per-class collages
+  (`collage_avoid` / `collage_demoted` / `collage_normal`).
+  `--render_only_avoidance` skips normal scenes (for large sweeps);
+  clearance-demoted scenes always render with a DEMOTED title carrying the
+  measured clearance. The guidance envelope flags (`--lambda_lat`,
+  `--lat_scale`, `--col_scale`, `--envelope`, ...) only affect these
+  renders and must match the policy's training envelope.
+
 ## Data preparation (NPZ format / mining)
 
 ### convert_3col_to_4col.py / convert_4col_to_3col.py

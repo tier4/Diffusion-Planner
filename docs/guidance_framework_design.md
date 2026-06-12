@@ -627,3 +627,31 @@ from . import my_guidance   # triggers @register
 ```
 
 That's it. The playground UI, DPO pipeline, and GRPO reward loop can immediately use `"my_guidance"` as a string key in their `GuidanceSetConfig`. No other files need to change.
+
+## Batched guidance v2 set (rlvr/guidance_batched.py)
+
+Opt-in registry names (the v1 functions are unchanged; select via
+`--envelope v2` in `sweep_guidance_params` / `eval_policy_avoidance` /
+`valid_predictor_guided`, or `envelope="v2"` in
+`guidance_batched.build_head_composer`):
+
+- `lateral_ramp_batched` — Eq.2 lateral energy with a linear feasibility
+  ramp on the target (0 -> lambda*eta over `ramp_steps`, default 20). The
+  un-ramped target demands the full offset at the first future step, which
+  concentrates gradient on the plan head and distorts it.
+- `collision_swerve_v2_batched` — bounded-target swerve. Proximity gate is
+  computed from the (detached) reference trajectory (the current noisy x is
+  garbage early in denoising); the target profile is the cummax of the gate
+  (ramps up on approach, HOLDS after passing); energy is a plain mean-over-T
+  quadratic. Design notes from probe iterations: the v1 linear energy has a
+  scene-dependent endpoint gain (it pushes forever, scaled by in-range step
+  count); support-normalized quadratics concentrate curvature on few steps
+  and diverge under DPM guidance steps; bump-shaped targets (return-to-zero
+  mid-pass) fight themselves and sign-invert at useful scales. Full-horizon
+  / held targets with mean-over-T energies are the stable family.
+
+Calibration guidance: response-curve probes (eta sweep -> realized lateral
+displacement and clearance) are the acceptance test for any new guidance —
+require monotonic, side-symmetric, scene-consistent curves before use.
+Larger lambda is not "stronger avoidance": past the corridor width it
+trades obstacle clearance for road-border violations.

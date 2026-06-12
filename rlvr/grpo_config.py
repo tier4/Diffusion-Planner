@@ -345,6 +345,29 @@ class GRPOConfig:
     exploration_lambda_lat: float = 2.5   # max lateral offset in metres
     exploration_lambda_lon: float = 0.25  # max speed deviation fraction
     exploration_guidance_scale: float = 0.5  # global guidance scale for policy-guided trajectories
+    # Guidance envelope (must match the sweep that produced the policy's
+    # training labels): "v1" = stock lateral + bounded swerve, "v2" = ramped
+    # variants (lambda_col = v2 swerve target magnitude).
+    exploration_envelope: str = "v1"
+    exploration_lambda_col: float = 3.0
+    # Guidance heads for the exploration policy. Default reproduces the
+    # original 2-head layout. Supported: "lateral" (lateral offset, existing
+    # guidance), "longitudinal" (legacy, weak), "collision"
+    # (collision_swerve_batched: sign = side, |eta| = strength), "stretch"
+    # (speed_stretch_batched: stretch = 1 + lambda_spd * eta).
+    exploration_heads: list[str] = field(default_factory=lambda: ["lateral", "longitudinal"])
+    # Per-function energy scales (multiply each guidance fn's energy; the
+    # campaign avoidance envelope uses lat_scale=1.5, col_scale=6.0,
+    # lambda_lat=4.0, col_range=8.0 — must match the sweep that produced any
+    # warm-start labels).
+    exploration_lat_scale: float = 1.0
+    exploration_col_scale: float = 2.0
+    exploration_col_range: float = 8.0
+    exploration_lambda_spd: float = 0.2
+    exploration_stretch_scale: float = 1.0
+    # Action-cost coefficient: pulls each head's deterministic action (Beta
+    # mean) toward 0 — inertness tie-breaker on reward-indifferent scenes.
+    exploration_action_cost: float = 0.0
     # GuidanceHead init mode: "zeros" (recommended) or "normal"
     exploration_head_init: str = "zeros"
     exploration_head_init_std: float = 0.01
@@ -395,6 +418,21 @@ class GRPOConfig:
     # "none": η=0 always (no guidance, pure noise diversity).
     random_guidance_mode: str = "explorer"
 
+    # Train the DiT planner alongside the exploration policy. When False, the
+    # DiT is fully frozen (no GRPO loss, no DiT optimizer step) and ONLY the
+    # exploration policy trains — i.e. learn guidance params for a fixed base
+    # model. Only honored by GRPOExplorationTrainer; validated in __post_init__.
+    train_dit: bool = True
+    # Pin generation slot 0 to η=0 for all guidance heads. With
+    # noise_scale_range=[0,0] slot 0 approximates the unguided deterministic
+    # trajectory (exact for collision/stretch heads, which are inert at η=0;
+    # the legacy v1 lateral head still applies a small centering pull toward
+    # the reference at η=0), giving the group a no-guidance reference so
+    # advantages compare "guided" vs "do nothing" (slot 0 is excluded from
+    # the policy log-prob gradient since it is a forced, not sampled, action).
+    # Set False to reproduce older runs where slot 0's η was sampled.
+    exploration_pin_zero_eta: bool = True
+
     # --- Closed-loop training ---
     # When True, uses ClosedLoopExplorationTrainer instead of GRPOExplorationTrainer.
     # The explorer operates per-step (0.1s) with GAE temporal credit assignment.
@@ -403,6 +441,10 @@ class GRPOConfig:
     closed_loop_gamma: float = 0.99         # GAE discount factor
     closed_loop_gae_lambda: float = 0.95    # GAE lambda
     closed_loop_value_coef: float = 0.5     # value loss coefficient
+    # Train ONLY the value head for the first N epochs (policy/entropy terms
+    # skipped) so REINFORCE advantages aren't driven by a cold critic —
+    # counters the early-epoch policy drift seen with warm-started policies.
+    closed_loop_value_warmup_epochs: int = 0
     closed_loop_alive_bonus: float = 0.5    # per-step alive reward
     closed_loop_freeze_dit: bool = True     # freeze DiT during explorer training
     closed_loop_batch_size: int = 8        # scenes per batch in rollout (8 fits ~24GB VRAM)
@@ -683,6 +725,26 @@ class GRPOConfig:
             raise ValueError(
                 f"neighbor_reg_anchor must be 'warmstart' or 'baseline', got {self.neighbor_reg_anchor!r}"
             )
+        if not self.train_dit:
+            if not self.use_exploration_policy or self.use_closed_loop:
+                raise ValueError(
+                    "train_dit=False (frozen-DiT, policy-only training) is only "
+                    "supported by GRPOExplorationTrainer; requires "
+                    "use_exploration_policy=True and use_closed_loop=False, got "
+                    f"use_exploration_policy={self.use_exploration_policy}, "
+                    f"use_closed_loop={self.use_closed_loop}."
+                )
+            if self.use_lora:
+                raise ValueError(
+                    "train_dit=False is incompatible with use_lora=True: a frozen "
+                    "DiT must not carry trainable LoRA adapters."
+                )
+            if self.random_guidance_mode != "explorer":
+                raise ValueError(
+                    "train_dit=False trains ONLY the exploration policy, so "
+                    f"random_guidance_mode must be 'explorer', got "
+                    f"{self.random_guidance_mode!r} (nothing would train)."
+                )
 
     @property
     def uses_importance_sampling(self) -> bool:

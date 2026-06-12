@@ -36,10 +36,23 @@ import numpy as np
 import torch
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
+
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.ghost_sim_common import (
+    extract_stopped_neighbors,
+)
+from rlvr.autoresearch.tools.ghost_sim_common import (
+    load_model as _load_model,
+)
 
 # Reuse all the heavy lifting from recovery_sim
 from rlvr.autoresearch.tools.recovery_sim import (
+    _LANE_BORDER_COLOR,
+    _LANE_COLOR,
+    _ROAD_BORDER_COLOR,
+    _ROUTE_COLOR,
+    _VIEW_HALF_M,
+    _apply_perturbation,
     _build_segments,
     _draw_agent_box,
     _ego_obb_corners,
@@ -48,20 +61,9 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _point_to_segments_dist,
     _road_border_polylines,
     _route_polylines,
-    _apply_perturbation,
-    _LANE_BORDER_COLOR,
-    _LANE_COLOR,
-    _ROAD_BORDER_COLOR,
-    _ROUTE_COLOR,
-    _VIEW_HALF_M,
     closed_loop_rollout_with_plans,
 )
-from rlvr.autoresearch.tools.ghost_sim_common import (
-    extract_stopped_neighbors,
-    load_model as _load_model,
-)
 from rlvr.autoresearch.tools.recovery_test import get_tangent_at_origin
-
 
 _BASELINE_COLOR = "#1f77b4"   # blue
 _PRISM_COLOR    = "#d62728"   # red
@@ -200,6 +202,12 @@ def main() -> None:
     parser.add_argument("--webm_fps", type=int, default=10)
     parser.add_argument("--baseline_label", type=str, default="baseline (LoRA-less)")
     parser.add_argument("--trained_label", type=str, default="PRiSM")
+    # closed_loop_rollout_with_plans now SG-smooths every per-step plan by
+    # default (matches the perfect-tracker sim convention). Older renders
+    # from this tool consumed raw plans — pass --no_sg_smooth to reproduce.
+    parser.add_argument("--no_sg_smooth", action="store_true",
+                        help="track raw per-step plans (pre-SG-default "
+                             "behaviour of this tool)")
     args = parser.parse_args()
 
     out = Path(args.output_dir)
@@ -228,11 +236,13 @@ def main() -> None:
     bl = closed_loop_rollout_with_plans(
         bl_model, bl_args, perturbed,
         n_steps=args.steps, advance_k=args.advance_k,
+        sg_smooth=not args.no_sg_smooth,
     )
     print(f"[ghost-sim] rollout (PRiSM)...")
     pr = closed_loop_rollout_with_plans(
         pr_model, pr_args, perturbed,
         n_steps=args.steps, advance_k=args.advance_k,
+        sg_smooth=not args.no_sg_smooth,
     )
 
     # Pre-compute scene polylines from perturbed (matches recovery_sim)

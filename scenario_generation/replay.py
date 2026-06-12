@@ -230,6 +230,35 @@ class SpawnConfig:
     # Model inference delay: number of initial timesteps kept fixed as prefix.
     # Matches the "delay" input tensor to the diffusion decoder.
     inference_delay: int = 0
+    # Exploration-policy guidance for the EGO (frozen planner + learned
+    # per-step guidance etas). Directory must contain exploration_policy.pth
+    # + exploration_policy_config.json (rlvr.train_explorer_regression
+    # output). None = disabled (plain forward for everyone). Other agents
+    # always use the plain forward. The guidance-envelope strengths live in
+    # scenario_generation.explorer_runner.ExplorerEnvelope and must match
+    # the sweep envelope the policy was trained against.
+    explorer_dir: str | None = None
+    # Exponential smoothing factor on per-step etas (0 = raw, ->1 = frozen).
+    # Damps left/right flip-flop near decision boundaries mid-avoidance.
+    explorer_eta_smooth: float = 0.5
+    # Strict-certify activation: the explorer only acts when the det plan's
+    # min OBB clearance to a static NPC is below this (metres). 0.3 = act
+    # slightly before the 0.2 m crossing threshold. Plans clear of statics
+    # pass through untouched (inertness in closed loop).
+    explorer_activate_clearance: float = 0.3
+    # ALWAYS-ON mode: bypass the activation gate AND the keep-only-if-improves
+    # certify rule — the policy runs every step and its guided plan is always
+    # used. This is the honest "does always-on guidance work closed-loop"
+    # assessment; the gated mode above is the conservative deployment flavor.
+    explorer_always_on: bool = False
+    # Guidance envelope for the explorer — MUST match the envelope the policy
+    # was trained against (defaults = the v1-envelope calibration
+    # lambda_lat 5.0 / lat_scale 2.0 / col_scale 9.0).
+    explorer_lambda_lat: float = 5.0
+    explorer_lat_scale: float = 2.0
+    explorer_col_scale: float = 9.0
+    explorer_col_range: float = 8.0
+    explorer_guidance_scale: float = 0.5
     # Skip traffic-light state propagation entirely. Useful for MPC-gen
     # data runs where TL-driven speed drops would bias the replay ego
     # toward stop-and-go behaviour we don't want in training.
@@ -1960,6 +1989,28 @@ def run_route_replay(
         spawn_config = SpawnConfig()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Optional exploration-policy guidance for the ego (frozen planner +
+    # learned guidance etas). Fails loudly if the dir is missing/incomplete.
+    explorer_runner = None
+    if spawn_config.explorer_dir:
+        from scenario_generation.explorer_runner import (
+            ExplorerEnvelope,
+            ExplorerGuidanceRunner,
+        )
+        explorer_runner = ExplorerGuidanceRunner(
+            spawn_config.explorer_dir, model_args, device,
+            envelope=ExplorerEnvelope(
+                lambda_lat=spawn_config.explorer_lambda_lat,
+                lat_scale=spawn_config.explorer_lat_scale,
+                col_scale=spawn_config.explorer_col_scale,
+                col_range=spawn_config.explorer_col_range,
+                guidance_scale=spawn_config.explorer_guidance_scale,
+            ),
+            eta_smooth=spawn_config.explorer_eta_smooth,
+        )
+        print(f"  [explorer] guidance policy loaded from {spawn_config.explorer_dir} "
+              f"(heads={explorer_runner.heads}, eta_smooth={spawn_config.explorer_eta_smooth})")
+
     # Seed ALL random sources for full reproducibility across runs.
     if spawn_config.seed is not None:
         torch.manual_seed(spawn_config.seed)
@@ -2289,6 +2340,68 @@ def run_route_replay(
                     turn_indicator_keep_bias=spawn_config.turn_indicator_keep_bias,
                 )
 
+            # Explorer guidance: regenerate the EGO trajectory through the
+            # guidance composer, using its plain det prediction (just
+            # computed in the shared batch) as the reference. STRICT-CERTIFY
+            # semantics matching the offline eval: the explorer activates
+            # ONLY when the det plan actually conflicts with a static NPC
+            # (clearance below explorer_activate_clearance), and the guided
+            # plan is kept only when it improves that clearance. Runs BEFORE
+            # SG smoothing so the guided trajectory gets the same smoothing.
+            step_explorer_etas: dict[str, float] | None = None
+            if explorer_runner is not None:
+                _eid = scene.ego_agent.id
+                if _eid in agent_predictions:
+                    from scenario_generation.explorer_runner import plan_static_clearance
+                    _det_plan = agent_predictions[_eid]
+                    if spawn_config.explorer_always_on:
+                        from scenario_generation.tensor_converter import to_model_tensors
+                        _ego_dict = to_model_tensors(
+                            scene, _eid, model_args, device, map_cache=map_cache,
+                            inference_delay=spawn_config.inference_delay,
+                        )
+                        _guided, step_explorer_etas = explorer_runner.guided_ego_prediction(
+                            model, _ego_dict, _det_plan,
+                        )
+                        agent_predictions[_eid] = _guided
+                    else:
+                        # Static-NPC OBBs in the ego frame — only the gated
+                        # path needs them (clearance check).
+                        _ego = scene.ego_agent
+                        _ex, _ey = float(_ego.current_position[0]), float(_ego.current_position[1])
+                        _eyaw = float(_ego.current_heading)
+                        _c, _s = math.cos(-_eyaw), math.sin(-_eyaw)
+                        _boxes = []
+                        for _a in scene.agents:
+                            if _a.id == _eid or not SceneNPCManager.is_static_npc(_a.id):
+                                continue
+                            _dx = float(_a.current_position[0]) - _ex
+                            _dy = float(_a.current_position[1]) - _ey
+                            _boxes.append((
+                                _c * _dx - _s * _dy, _s * _dx + _c * _dy,
+                                float(_a.current_heading) - _eyaw,
+                                float(_a.length), float(_a.width),
+                            ))
+                        _eshape = (spawn_config.ego_wheelbase,
+                                   spawn_config.ego_length, spawn_config.ego_width)
+                        _det_min = plan_static_clearance(_det_plan, _boxes, _eshape, device)
+                        if _det_min < spawn_config.explorer_activate_clearance:
+                            from scenario_generation.tensor_converter import to_model_tensors
+                            _ego_dict = to_model_tensors(
+                                scene, _eid, model_args, device, map_cache=map_cache,
+                                inference_delay=spawn_config.inference_delay,
+                            )
+                            _guided, _etas = explorer_runner.guided_ego_prediction(
+                                model, _ego_dict, _det_plan,
+                            )
+                            _g_min = plan_static_clearance(_guided, _boxes, _eshape, device)
+                            if _g_min > _det_min:
+                                agent_predictions[_eid] = _guided
+                                step_explorer_etas = _etas
+                            # else: keep det (certified fallback), smoothing state stays
+                        else:
+                            explorer_runner.reset()  # inert stretch: clear eta smoothing
+
             # Optional Savitzky-Golay smoothing on each agent's predicted
             # trajectory. Reuses the same smoother the RL ranked-SFT
             # pipeline applies before its SFT loss (rlvr/grpo_sft_trainer.
@@ -2396,6 +2509,7 @@ def run_route_replay(
                     "stopped_id": sc_pair[3] if sc_pair is not None else None,
                     "moving_dist": float(mv_pair[2]) if mv_pair is not None else None,
                     "moving_id": mv_pair[3] if mv_pair is not None else None,
+                    "explorer_etas": step_explorer_etas,
                     "png": out_path.name,
                 })
 
@@ -2615,6 +2729,12 @@ def main() -> None:
                              "a config per run.")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--explorer_dir", type=str, default=None,
+                        help="Exploration-policy dir (exploration_policy.pth + "
+                             "config json) for guided EGO generation. Overrides "
+                             "SpawnConfig.explorer_dir.")
+    parser.add_argument("--explorer_eta_smooth", type=float, default=None,
+                        help="Override SpawnConfig.explorer_eta_smooth (0=raw etas)")
     args = parser.parse_args()
 
     route = Route.load(args.route)
@@ -2631,6 +2751,14 @@ def main() -> None:
         cfg.spawn_probability = args.spawn_probability
     if args.seed is not None:
         cfg.seed = args.seed
+    if args.explorer_dir is not None:
+        cfg.explorer_dir = args.explorer_dir
+    if args.explorer_eta_smooth is not None:
+        if not 0.0 <= args.explorer_eta_smooth <= 1.0:
+            raise SystemExit(
+                f"--explorer_eta_smooth must be in [0, 1], got "
+                f"{args.explorer_eta_smooth}")
+        cfg.explorer_eta_smooth = args.explorer_eta_smooth
     # Re-run validation after CLI overrides so bad values (e.g. --steps 0)
     # are rejected at startup instead of much later.
     cfg.validate()
