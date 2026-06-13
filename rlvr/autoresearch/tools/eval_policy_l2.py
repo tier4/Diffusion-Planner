@@ -39,7 +39,18 @@ from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 
 
-def make_composer(etas, args):
+def make_composer(etas, args, envelope=None):
+    # Resolve each envelope knob explicit-arg -> persisted-envelope -> v1
+    # constant, so a policy trained at a non-v1 envelope is scored for L2 at the
+    # calibration its etas are bound to, not a hardcoded default.
+    from exploration_policy.model import V1_GUIDANCE_ENVELOPE
+
+    def knob(name):
+        v = getattr(args, name, None)
+        if v is None and envelope is not None:
+            v = envelope.get(name)
+        return V1_GUIDANCE_ENVELOPE[name] if v is None else v
+
     unmapped = set(etas) - {"lateral", "collision"}
     if unmapped:
         raise ValueError(
@@ -53,8 +64,8 @@ def make_composer(etas, args):
             GuidanceConfig(
                 name="lateral",
                 enabled=True,
-                scale=args.lat_scale,
-                params={"lambda_lat": args.lambda_lat, "eta_lat": etas["lateral"]},
+                scale=knob("lat_scale"),
+                params={"lambda_lat": knob("lambda_lat"), "eta_lat": etas["lateral"]},
             )
         )
     if "collision" in etas:
@@ -62,11 +73,11 @@ def make_composer(etas, args):
             GuidanceConfig(
                 name="collision_swerve_batched",
                 enabled=True,
-                scale=args.col_scale,
-                params={"eta_col": etas["collision"], "range": args.col_range},
+                scale=knob("col_scale"),
+                params={"eta_col": etas["collision"], "range": knob("col_range")},
             )
         )
-    return GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=args.guidance_scale))
+    return GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=knob("guidance_scale")))
 
 
 def ade(pred_xy: torch.Tensor, gt_xy: torch.Tensor, gt_valid: torch.Tensor) -> torch.Tensor:
@@ -86,11 +97,16 @@ def main():
     parser.add_argument("--policy_dir", required=True)
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--lambda_lat", type=float, default=5.0)
-    parser.add_argument("--lat_scale", type=float, default=2.0)
-    parser.add_argument("--col_scale", type=float, default=9.0)
-    parser.add_argument("--col_range", type=float, default=8.0)
-    parser.add_argument("--guidance_scale", type=float, default=0.5)
+    parser.add_argument(
+        "--lambda_lat",
+        type=float,
+        default=None,
+        help="override the policy's persisted guidance envelope",
+    )
+    parser.add_argument("--lat_scale", type=float, default=None)
+    parser.add_argument("--col_scale", type=float, default=None)
+    parser.add_argument("--col_range", type=float, default=None)
+    parser.add_argument("--guidance_scale", type=float, default=None)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--limit", type=int, default=0, help="0 = all scenes")
     args = parser.parse_args()
@@ -135,7 +151,7 @@ def main():
         enc = run_frozen_encoder(model, norm_batch_g)
         out = policy(enc, det, deterministic=True)
         etas = {h: (2.0 * out.dists[h].mean - 1.0) for h in heads}  # [B]
-        composer = make_composer(etas, args)
+        composer = make_composer(etas, args, envelope=getattr(policy, "guidance_envelope", None))
         guided = _batched_generate_varied_noise(
             model,
             model_args,
