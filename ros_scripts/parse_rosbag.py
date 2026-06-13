@@ -325,7 +325,7 @@ def get_relative_goal_pose(goal_pose, map2bl_matrix_4x4):
     pose_in_bl = map2bl_matrix_4x4 @ pose_in_map
     x = pose_in_bl[0, 3]
     y = pose_in_bl[1, 3]
-    yaw = Rotation.from_matrix(pose_in_bl[0:3, 0:3]).as_euler("xyz")[2]
+    yaw = np.arctan2(pose_in_bl[1, 0], pose_in_bl[0, 0])
     return np.array([x, y, yaw], dtype=np.float32)
 
 
@@ -513,6 +513,12 @@ def main(
         n = len(data_list)
         logger.info(f"Total {n} frames")
 
+        if n == 0:
+            continue
+        # Match the C++ converter: use the sequence's last frame ego pose as the goal pose
+        # (FreeSpacePlanner only updates goal_pose, so the route's own goal is unreliable).
+        goal_pose = data_list[-1].kinematic_state.pose.pose
+
         # if less than min_frames (default 3 min), skip this sequence
         if n < min_frames:
             logger.info(
@@ -563,7 +569,6 @@ def main(
                 dev="cpu",
                 do_sort=False,
             )
-            goal_pose = data_list[i].route.goal_pose
             goal_pose_bl = get_relative_goal_pose(goal_pose, map2bl_matrix_4x4)
 
             # ego (time-based interpolation, matching the C++ converter)
