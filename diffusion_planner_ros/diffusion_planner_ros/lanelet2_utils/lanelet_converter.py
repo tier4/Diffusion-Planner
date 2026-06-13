@@ -159,7 +159,16 @@ def convert_lanelet(filename: str) -> LaneletMap:
     lanelets: dict[int, Lanelet] = {}
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
-        if lanelet_subtype not in ("road", "highway", "road_shoulder", "bicycle_lane"):
+        # Match the C++ converter's ACCEPTABLE_LANE_SUBTYPES (conversion/lanelet.hpp).
+        if lanelet_subtype not in (
+            "bicycle_lane",
+            "crosswalk",
+            "highway",
+            "pedestrian_lane",
+            "road",
+            "road_shoulder",
+            "walkway",
+        ):
             continue
 
         centerline = _interpolate_lane(
@@ -224,7 +233,7 @@ def convert_lanelet(filename: str) -> LaneletMap:
     for line_string in lanelet_map.lineStringLayer:
         line_string_type = _get_attribute(line_string.attributes, "type", "")
         line_string_subtype = _get_attribute(line_string.attributes, "subtype", "")
-        if line_string_type not in ("stop_line",):
+        if line_string_type not in ("stop_line", "road_border"):
             continue
         line_string_points = np.array([(point.x, point.y, point.z) for point in line_string])
         line_string_points = _interpolate_lane(line_string_points, POINTS_PER_LINE_STRING)
@@ -278,10 +287,13 @@ def process_lanelet(
     left_boundary = lanelet.left_boundary
     right_boundary = lanelet.right_boundary
 
-    inside_center = judge_inside(center_x, center_y, lanelet.center[0], lanelet.center[1])
-    inside_first = judge_inside(center_x, center_y, centerline[0, 0], centerline[0, 1])
-    inside_last = judge_inside(center_x, center_y, centerline[-1, 0], centerline[-1, 1])
-    if (not inside_center) and (not inside_first) and (not inside_last):
+    # Match the C++ is_segment_inside: a segment is inside if ANY centerline point is within
+    # the square mask range (inclusive), not just the center/first/last points.
+    inside = np.any(
+        (np.abs(centerline[:, 0] - center_x) <= LANE_MASK_RANGE_M)
+        & (np.abs(centerline[:, 1] - center_y) <= LANE_MASK_RANGE_M)
+    )
+    if not inside:
         return None
 
     # Convert to base_link
@@ -416,6 +428,16 @@ def create_lane_tensor(
     return lanes_tensor, lanes_speed_limit, lanes_has_speed_limit
 
 
+# Mask range for selecting nearby lane segments (matches C++ constants::LANE_MASK_RANGE_M).
+LANE_MASK_RANGE_M = 100.0
+
+# Type one-hot encodings, matching the C++ converter (conversion/lanelet.hpp).
+POLYGON_TYPE_MAP = {"intersection_area": 0}
+POLYGON_TYPE_NUM = 1
+LINE_STRING_TYPE_MAP = {"stop_line": 0, "road_border": 1}
+LINE_STRING_TYPE_NUM = 2
+
+
 def create_line_tensor(
     polygons: dict[int, Polygon],
     map2bl_mat4x4: NDArray,
@@ -424,8 +446,11 @@ def create_line_tensor(
     num_elements: int,
     num_points: int,
     dev: torch.device,
+    type_map: dict[str, int],
+    num_types: int,
 ) -> list[np.ndarray]:
-    result_list = []
+    point_dim = 2 + num_types
+    result_list = []  # (xy (num_points, 2), type_id, min_distance)
     for polygon in polygons:
         polyline = polygon.polyline
         inside_at_least_one = False
@@ -435,20 +460,25 @@ def create_line_tensor(
                 break
         if not inside_at_least_one:
             continue
-        polyline = transform(map2bl_mat4x4, polyline)
-        result_list.append(polyline[:, 0:2])
+        type_id = type_map.get(polygon.type)
+        if type_id is None:
+            continue
+        polyline = transform(map2bl_mat4x4, polyline)[:, 0:2]
+        min_distance = np.linalg.norm(polyline, axis=1).min()
+        result_list.append((polyline, type_id, min_distance))
 
-    # sort by distance from the first and last point
-    def key_func(item):
-        return np.linalg.norm(item[:, 0:2], axis=1).min()
-
-    result_list = sorted(result_list, key=key_func)
+    # sort by nearest point distance (matches C++ ElementWithDistance ordering)
+    result_list = sorted(result_list, key=lambda item: item[2])
     result_list = result_list[0:num_elements]
-    result_list += [np.zeros((num_points, 2), dtype=np.float32)] * (num_elements - len(result_list))
-    result_list = np.array(result_list, dtype=np.float32)
+
+    out = np.zeros((num_elements, num_points, point_dim), dtype=np.float32)
+    for i, (polyline, type_id, _) in enumerate(result_list):
+        m = min(num_points, polyline.shape[0])
+        out[i, :m, 0:2] = polyline[:m]
+        out[i, :m, 2 + type_id] = 1.0
     tensor_data = (
-        torch.from_numpy(result_list)
-        .reshape((1, num_elements, num_points, 2))
+        torch.from_numpy(out)
+        .reshape((1, num_elements, num_points, point_dim))
         .to(torch.float32)
         .to(dev)
     )

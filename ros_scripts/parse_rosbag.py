@@ -18,6 +18,10 @@ from autoware_planning_msgs.msg import LaneletRoute
 from autoware_vehicle_msgs.msg import TurnIndicatorsReport
 from diffusion_planner.dimensions import *
 from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
+    LINE_STRING_TYPE_MAP,
+    LINE_STRING_TYPE_NUM,
+    POLYGON_TYPE_MAP,
+    POLYGON_TYPE_NUM,
     convert_lanelet,
     create_lane_tensor,
     create_line_tensor,
@@ -661,6 +665,8 @@ def main(
                 num_elements=NUM_POLYGONS,
                 num_points=POINTS_PER_POLYGON,
                 dev="cpu",
+                type_map=POLYGON_TYPE_MAP,
+                num_types=POLYGON_TYPE_NUM,
             )
 
             # line_string
@@ -672,6 +678,8 @@ def main(
                 num_elements=NUM_LINE_STRINGS,
                 num_points=POINTS_PER_LINE_STRING,
                 dev="cpu",
+                type_map=LINE_STRING_TYPE_MAP,
+                num_types=LINE_STRING_TYPE_NUM,
             )
 
             # turn_indicators
@@ -691,6 +699,8 @@ def main(
                 "neighbor_agents_past": neighbor_past_tensor.numpy(),
                 "neighbor_agents_future": neighbor_future_tensor.numpy(),
                 "static_objects": np.zeros((5, 10), dtype=np.float32),
+                # (wheel_base, length, width); matches the C++ converter's ego_shape option
+                "ego_shape": np.array([2.75, 4.34, 1.70], dtype=np.float32),
                 "lanes": lanes_tensor.squeeze(0).numpy(),
                 "lanes_speed_limit": lanes_speed_limit.squeeze(0).numpy(),
                 "lanes_has_speed_limit": lanes_has_speed_limit.squeeze(0).numpy(),
