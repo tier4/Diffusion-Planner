@@ -172,6 +172,18 @@ def main():
             "p95_ms": round(float(np.percentile(a, 95)), 2),
         }
 
+    # Guard against a false "equivalent" verdict from a memo that never fired:
+    # if hits == 0 everywhere, memo_vs_fast would be 0.0 simply because the memo
+    # did nothing. A real run hits once per guided solver step.
+    total_hits = sum(m["hits"] for m in memo_stats)
+    if total_hits == 0:
+        raise RuntimeError(
+            "DiT memo recorded 0 hits across all instrumented scenes — the "
+            "optimization never fired, so the equivalence numbers are vacuous. "
+            "Check that the composer is active (non-inert) and dit_memo is "
+            f"installed. memo_stats={memo_stats}"
+        )
+
     report = {
         "n_scenes": len(paths),
         "etas": etas_grid,
@@ -180,6 +192,7 @@ def main():
         "max_dtraj_m": {k: max(v) for k, v in diffs.items()},
         "active_frame_latency": {leg: ms(v) for leg, v in times.items()},
         "memo_stats": memo_stats,
+        "total_memo_hits": total_hits,
         "cases": cases,
     }
     print(json.dumps({k: v for k, v in report.items() if k != "cases"}, indent=1))
