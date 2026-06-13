@@ -86,6 +86,117 @@ def _interpolate_lane(waypoints: NDArray, num_points: int):
     return new_waypoints
 
 
+class _AkimaSpline:
+    """Port of autoware::experimental::trajectory::interpolator::AkimaSpline (needs >= 5 pts)."""
+
+    def build(self, bases: NDArray, values: NDArray) -> None:
+        self.bases = np.asarray(bases, dtype=np.float64)
+        v = np.asarray(values, dtype=np.float64)
+        n = len(self.bases)
+        h = self.bases[1:] - self.bases[:-1]
+        m = (v[1:] - v[:-1]) / h
+        s = np.empty(n, dtype=np.float64)
+        s[0] = m[0]
+        s[1] = (m[0] + m[1]) / 2
+        for i in range(2, n - 2):
+            w1 = abs(m[i + 1] - m[i])
+            w2 = abs(m[i - 1] - m[i - 2])
+            if (w1 + w2) == 0:
+                s[i] = (m[i] + m[i - 1]) / 2
+            else:
+                s[i] = (w1 * m[i - 1] + w2 * m[i]) / (w1 + w2)
+        s[n - 2] = (m[n - 2] + m[n - 3]) / 2
+        s[n - 1] = m[n - 2]
+        self.a = v[:-1].copy()
+        self.b = s[:-1].copy()
+        self.c = (3 * m - 2 * s[:-1] - s[1:]) / h
+        self.d = (s[:-1] + s[1:] - 2 * m) / (h * h)
+
+    def _index(self, s: float) -> int:
+        if s == self.bases[-1]:
+            return len(self.bases) - 2
+        distance = int(np.searchsorted(self.bases, s, side="right"))
+        idx = distance - 1 if distance != 0 else 0
+        return int(np.clip(idx, 0, len(self.bases) - 1))
+
+    def compute(self, s: float) -> float:
+        i = self._index(s)
+        dx = s - self.bases[i]
+        return self.a[i] + self.b[i] * dx + self.c[i] * dx * dx + self.d[i] * dx * dx * dx
+
+
+class _LinearSpline:
+    """Port of autoware::experimental::trajectory::interpolator::Linear (needs >= 2 pts)."""
+
+    def build(self, bases: NDArray, values: NDArray) -> None:
+        self.bases = np.asarray(bases, dtype=np.float64)
+        self.values = np.asarray(values, dtype=np.float64)
+
+    def _index(self, s: float) -> int:
+        if s == self.bases[-1]:
+            return len(self.bases) - 2
+        distance = int(np.searchsorted(self.bases, s, side="right"))
+        idx = distance - 1 if distance != 0 else 0
+        return int(np.clip(idx, 0, len(self.bases) - 1))
+
+    def compute(self, s: float) -> float:
+        i = self._index(s)
+        x0 = self.bases[i]
+        x1 = self.bases[i + 1]
+        y0 = self.values[i]
+        y1 = self.values[i + 1]
+        return y0 + (y1 - y0) * (s - x0) / (x1 - x0)
+
+
+def _resample_line_string(points: NDArray, num_points: int, max_step_m: float = 5.0):
+    """Port of the C++ resample_line_string: arc-length resampling with Akima/Linear splines,
+    splitting one line string into one or more segments of num_points each."""
+    points = np.asarray(points, dtype=np.float64)
+    if len(points) < 2 or num_points < 2:
+        return [points]
+
+    arc_lengths = np.zeros(len(points), dtype=np.float64)
+    for i in range(1, len(points)):
+        arc_lengths[i] = arc_lengths[i - 1] + np.linalg.norm(points[i] - points[i - 1])
+    total_length = arc_lengths[-1]
+
+    k_epsilon = 1e-6
+    if total_length < k_epsilon:
+        return [np.repeat(points[0:1], num_points, axis=0)]
+
+    step_m = total_length / (num_points - 1)
+    safe_max_step_m = max(max_step_m, k_epsilon)
+    n_segments = int(max(1.0, np.ceil(step_m / safe_max_step_m)))
+
+    # Akima needs >= 5 input points; otherwise fall back to linear (matches C++).
+    use_akima = len(points) >= 5
+    splines = []
+    for axis in range(3):
+        sp = _AkimaSpline() if use_akima else _LinearSpline()
+        sp.build(arc_lengths, points[:, axis])
+        splines.append(sp)
+
+    def compute_point(s):
+        return np.array([splines[0].compute(s), splines[1].compute(s), splines[2].compute(s)])
+
+    segment_length = total_length / n_segments
+    result = []
+    for i in range(n_segments):
+        s_start = i * segment_length
+        inner_step = segment_length / (num_points - 1)
+        lane_points = []
+        for j in range(num_points):
+            if i == 0 and j == 0:
+                lane_points.append(points[0])
+            elif i == n_segments - 1 and j == num_points - 1:
+                lane_points.append(points[-1])
+            else:
+                s = min(max(s_start + j * inner_step, 0.0), total_length)
+                lane_points.append(compute_point(s))
+        result.append(np.array(lane_points))
+    return result
+
+
 def _identify_current_light_status(turn_direction: int, traffic_light_elements: list) -> int:
     """
     Identify the current traffic light status based on turn direction and traffic light elements.
@@ -235,14 +346,18 @@ def convert_lanelet(filename: str) -> LaneletMap:
         line_string_subtype = _get_attribute(line_string.attributes, "subtype", "")
         if line_string_type not in ("stop_line", "road_border"):
             continue
-        line_string_points = np.array([(point.x, point.y, point.z) for point in line_string])
-        line_string_points = _interpolate_lane(line_string_points, POINTS_PER_LINE_STRING)
-        line_strings[line_string.id] = LineString(
-            id=line_string.id,
-            polyline=line_string_points,
-            type=line_string_type,
-            subtype=line_string_subtype,
-        )
+        raw_points = np.array([(point.x, point.y, point.z) for point in line_string])
+        # The C++ converter resamples each line string into one or more fixed-resolution
+        # segments (Akima/linear spline), so a single line string may yield several entries.
+        for seg_idx, seg_points in enumerate(
+            _resample_line_string(raw_points, POINTS_PER_LINE_STRING)
+        ):
+            line_strings[(line_string.id, seg_idx)] = LineString(
+                id=line_string.id,
+                polyline=seg_points,
+                type=line_string_type,
+                subtype=line_string_subtype,
+            )
 
     print(f"{len(lanelets)} lanelets are loaded.")
     print(f"{len(polygons)} polygons are loaded.")
