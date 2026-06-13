@@ -15,7 +15,10 @@ Usage:
         --model_path <base.pth> --policy_dir <run_dir with exploration_policy.pth> \
         --scenes <avoidance_val.json> [--normal_scenes <normal_val.json>] \
         --config <reward_config.json> --ego_shape WB,L,W --output_dir <dir> \
-        [--render] [--lambda_lat 4.0] [--col_scale 6.0] [--lat_scale 1.5]
+        [--render]
+
+The guidance envelope (lambda_lat / lat_scale / col_scale / ...) defaults to the
+calibration persisted in the policy's config; pass the flags only to OVERRIDE it.
 """
 
 from __future__ import annotations

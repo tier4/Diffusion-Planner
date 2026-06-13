@@ -73,15 +73,20 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--limit", type=int, default=0, help="0 = all scenes")
-    parser.add_argument("--lambda_lat", type=float, default=5.0)
-    parser.add_argument("--lat_scale", type=float, default=2.0)
-    parser.add_argument("--col_scale", type=float, default=9.0)
-    parser.add_argument("--col_range", type=float, default=8.0)
-    parser.add_argument("--lambda_spd", type=float, default=0.2)
-    parser.add_argument("--stretch_scale", type=float, default=1.0)
-    parser.add_argument("--guidance_scale", type=float, default=0.5)
-    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
-    parser.add_argument("--lambda_col", type=float, default=3.0)
+    parser.add_argument(
+        "--lambda_lat",
+        type=float,
+        default=None,
+        help="override the policy's persisted guidance envelope",
+    )
+    parser.add_argument("--lat_scale", type=float, default=None)
+    parser.add_argument("--col_scale", type=float, default=None)
+    parser.add_argument("--col_range", type=float, default=None)
+    parser.add_argument("--lambda_spd", type=float, default=None)
+    parser.add_argument("--stretch_scale", type=float, default=None)
+    parser.add_argument("--guidance_scale", type=float, default=None)
+    parser.add_argument("--envelope", choices=["v1", "v2"], default=None)
+    parser.add_argument("--lambda_col", type=float, default=None)
     parser.add_argument(
         "--no_dit_memo",
         action="store_true",
@@ -160,7 +165,7 @@ def main():
         enc = run_frozen_encoder(model, data)
         pout = policy(enc, det_ego, deterministic=True)
         etas = {h: (2.0 * pout.dists[h].mean - 1.0) for h in heads}
-        composer = make_composer(etas, args)
+        composer = make_composer(etas, args, envelope=getattr(policy, "guidance_envelope", None))
         decoder._guidance_fn = composer
         decoder._guidance_scale = composer._set_config.global_scale
         try:

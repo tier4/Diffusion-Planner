@@ -52,11 +52,13 @@ def test_make_composer_prefers_persisted_envelope_over_missing_arg():
         head_protect=0,
         slow_composer=False,
     )
-    env = dict(V1_GUIDANCE_ENVELOPE, lambda_lat=5.0, lat_scale=2.0, col_scale=9.0)
+    # Use a NON-v1 lambda_lat so the assertion distinguishes "read the persisted
+    # envelope" from "fell through to the v1 constant" (v1 lambda_lat is 5.0).
+    env = dict(V1_GUIDANCE_ENVELOPE, lambda_lat=7.0)
     comp = make_composer({"lateral": 0.5, "collision": 0.5}, args, envelope=env)
-    # the lateral head carries lambda_lat * scale from the persisted envelope
+    # the lateral head carries lambda_lat from the persisted envelope
     lat = next(f for f in comp._functions if hasattr(f, "_lambda_lat"))
-    assert abs(float(lat._lambda_lat) - 5.0) < 1e-9
+    assert abs(float(lat._lambda_lat) - 7.0) < 1e-9
 
 
 def test_make_composer_explicit_arg_overrides_envelope():
