@@ -99,6 +99,93 @@ class SequenceData:
     route: LaneletRoute
 
 
+def _stamp_to_sec(stamp) -> float:
+    return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+
+def _slerp_quat(q0: np.ndarray, q1: np.ndarray, ratio: float) -> np.ndarray:
+    """Shortest-arc quaternion slerp ([x, y, z, w]), matching tf2::slerp."""
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    if dot > 0.9995:
+        res = q0 + ratio * (q1 - q0)
+        return res / np.linalg.norm(res)
+    theta0 = np.arccos(dot)
+    sin0 = np.sin(theta0)
+    s0 = np.sin((1.0 - ratio) * theta0) / sin0
+    s1 = np.sin(ratio * theta0) / sin0
+    return s0 * q0 + s1 * q1
+
+
+def _interpolated_pose_mat4x4(pose0, pose1, ratio: float) -> np.ndarray:
+    """Linear position + slerp orientation, matching calc_interpolated_pose(..., false)."""
+    ratio = min(max(ratio, 0.0), 1.0)
+    p0 = np.array([pose0.position.x, pose0.position.y, pose0.position.z])
+    p1 = np.array([pose1.position.x, pose1.position.y, pose1.position.z])
+    q0 = np.array(
+        [pose0.orientation.x, pose0.orientation.y, pose0.orientation.z, pose0.orientation.w]
+    )
+    q1 = np.array(
+        [pose1.orientation.x, pose1.orientation.y, pose1.orientation.z, pose1.orientation.w]
+    )
+    mat = np.eye(4)
+    mat[:3, :3] = Rotation.from_quat(_slerp_quat(q0, q1, ratio)).as_matrix()
+    mat[:3, 3] = p0 + ratio * (p1 - p0)
+    return mat
+
+
+def create_ego_sequence_interp(
+    data_list, start_idx, num_timesteps, map2bl_matrix_4x4, reference_time_sec
+):
+    """Time-based ego sequence matching C++ create_ego_sequence + create_ego_agent_past.
+
+    Collects odom from start_idx until its header stamp reaches reference_time, then samples
+    num_timesteps poses at PREDICTION_TIME_STEP_S (0.1 s) spacing ending at reference_time,
+    linearly interpolating by header stamp. Returns (num_timesteps, 3) of [x, y, yaw] in ego
+    frame, or None if the data does not cover reference_time.
+    """
+    odoms = []
+    for j in range(max(0, start_idx), len(data_list)):
+        odoms.append(data_list[j].kinematic_state)
+        if _stamp_to_sec(data_list[j].kinematic_state.header.stamp) >= reference_time_sec:
+            break
+    if len(odoms) == 0 or _stamp_to_sec(odoms[-1].header.stamp) < reference_time_sec:
+        return None
+
+    dt = 0.1  # PREDICTION_TIME_STEP_S
+    first_sec = _stamp_to_sec(odoms[0].header.stamp)
+    last_sec = _stamp_to_sec(odoms[-1].header.stamp)
+
+    out = np.zeros((num_timesteps, 3), dtype=np.float64)
+    search_start = 0
+    for t in range(num_timesteps):
+        # t=0 is the oldest, t=num_timesteps-1 is the reference time.
+        target_sec = reference_time_sec - (num_timesteps - 1 - t) * dt
+        if target_sec <= first_sec:
+            pose_mat = pose_to_mat4x4(odoms[0].pose.pose)
+        elif target_sec >= last_sec:
+            pose_mat = pose_to_mat4x4(odoms[-1].pose.pose)
+        else:
+            while search_start + 1 < len(odoms):
+                t_next = _stamp_to_sec(odoms[search_start + 1].header.stamp)
+                if target_sec <= t_next:
+                    break
+                search_start += 1
+            t0 = _stamp_to_sec(odoms[search_start].header.stamp)
+            t1 = _stamp_to_sec(odoms[search_start + 1].header.stamp)
+            ratio = (target_sec - t0) / (t1 - t0) if t1 > t0 else 0.0
+            pose_mat = _interpolated_pose_mat4x4(
+                odoms[search_start].pose.pose, odoms[search_start + 1].pose.pose, ratio
+            )
+        pose_ego = map2bl_matrix_4x4 @ pose_mat
+        out[t, 0] = pose_ego[0, 3]
+        out[t, 1] = pose_ego[1, 3]
+        out[t, 2] = np.arctan2(pose_ego[1, 0], pose_ego[0, 0])
+    return out
+
+
 def create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4):
     ego_future_x = []
     ego_future_y = []
@@ -479,14 +566,28 @@ def main(
             goal_pose = data_list[i].route.goal_pose
             goal_pose_bl = get_relative_goal_pose(goal_pose, map2bl_matrix_4x4)
 
-            # ego
-            ego_past_np = create_ego_sequence(
-                data_list, i - PAST_TIME_STEPS, PAST_TIME_STEPS, map2bl_matrix_4x4
+            # ego (time-based interpolation, matching the C++ converter)
+            past_reference_sec = _stamp_to_sec(data_list[i].kinematic_state.header.stamp)
+            ego_past_np = create_ego_sequence_interp(
+                data_list,
+                i - PAST_TIME_STEPS + 1,
+                PAST_TIME_STEPS,
+                map2bl_matrix_4x4,
+                past_reference_sec,
             )
+            if ego_past_np is None:
+                logger.info(f"Failed to create ego past at frame {i}")
+                break
             ego_tensor = create_current_ego_state(
                 data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.75
             ).squeeze(0)
-            ego_future_np = create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4)
+            future_reference_sec = past_reference_sec + OUTPUT_T * 0.1
+            ego_future_np = create_ego_sequence_interp(
+                data_list, i + 1, OUTPUT_T, map2bl_matrix_4x4, future_reference_sec
+            )
+            if ego_future_np is None:
+                logger.info(f"Reached end of sequence at frame {i}")
+                break
 
             # (1)自車が止まっている
             # (2)目の前のlanelet segmentが赤信号である
