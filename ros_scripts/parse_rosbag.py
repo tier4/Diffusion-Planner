@@ -61,6 +61,9 @@ turn_indicators             int32   (INPUT_T + 1)
 """
 PAST_TIME_STEPS = INPUT_T + 1
 
+# Synthetic clock period for frame assembly (10 Hz), matching the C++ build_sequences.
+CLOCK_PERIOD_NS = 100_000_000
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -289,126 +292,128 @@ def main(
     storage_filter = rosbag2_py.StorageFilter(topics=target_topic_list)
     reader.set_filter(storage_filter)
 
-    topic_name_to_data = defaultdict(list)
+    # Read all messages, keeping each message's rosbag (recording) time `t`.
+    # The C++ build_sequences keys every topic off the rosbag time, NOT the header stamp.
+    topic_name_to_timed = {topic: [] for topic in target_topic_list}
     parse_num = 0
     while reader.has_next():
         (topic, data, t) = reader.read_next()
+        if topic not in target_topic_list:
+            continue
         msg_type = get_message(type_map[topic])
         msg = deserialize_message(data, msg_type)
-        if topic in target_topic_list:
-            topic_name_to_data[topic].append(msg)
-            parse_num += 1
-            if limit > 0 and parse_num >= limit:
-                break
+        topic_name_to_timed[topic].append((t, msg))
+        parse_num += 1
+        if limit > 0 and parse_num >= limit:
+            break
 
-    for key, value in topic_name_to_data.items():
+    for key, value in topic_name_to_timed.items():
         logger.info(f"{key}: {len(value)} msgs")
 
-    route_msgs = topic_name_to_data["/planning/mission_planning/route"]
-    sequence_data_list = [SequenceData([], route_msg) for route_msg in route_msgs]
+    kinematic_states = topic_name_to_timed["/localization/kinematic_state"]
+    accelerations = topic_name_to_timed["/localization/acceleration"]
+    tracked_objects_msgs = topic_name_to_timed[
+        "/perception/object_recognition/tracking/objects"
+    ]
+    turn_indicators = topic_name_to_timed["/vehicle/status/turn_indicators_status"]
+    traffic_signals = topic_name_to_timed[
+        "/perception/traffic_light_recognition/traffic_signals"
+    ]
+    route_entries = topic_name_to_timed["/planning/mission_planning/route"]
 
-    # convert to FrameData
-    # The base topic is "/perception/object_recognition/tracking/objects" (10Hz)
-    n = len(topic_name_to_data["/perception/object_recognition/tracking/objects"])
-    logger.info(f"{n=}")
-    progress_bar = tqdm(total=n)
-    for i in range(n):
-        tracking = topic_name_to_data["/perception/object_recognition/tracking/objects"][i]
-        timestamp = parse_timestamp(tracking.header.stamp)
-        latest_msgs = {
-            "/localization/kinematic_state": None,
-            "/localization/acceleration": None,
-            "/perception/traffic_light_recognition/traffic_signals": None,
-            "/vehicle/status/turn_indicators_status": None,
-        }
+    if len(route_entries) == 0:
+        logger.info("No route messages; nothing to build.")
+        return
 
-        ok = True
-        for key in latest_msgs.keys():
-            curr_msg, curr_index = get_nearest_msg(topic_name_to_data[key], tracking.header.stamp)
-            if curr_msg is None:
-                logger.info(f"Cannot find {key} msg")
-                ok = False
-                break
-            topic_name_to_data[key] = topic_name_to_data[key][curr_index:]
-            latest_msgs[key] = curr_msg
-            msg_stamp = curr_msg.header.stamp if hasattr(curr_msg, "header") else curr_msg.stamp
-            msg_stamp_int = parse_timestamp(msg_stamp)
-            diff = abs(timestamp - msg_stamp_int)
-            if diff > int(0.2 * 1e9):
-                logger.info(f"Over 200 msec: {key} {len(topic_name_to_data[key])=}, {diff=:,}")
-                ok = False
+    required_topics = [kinematic_states, accelerations, tracked_objects_msgs, turn_indicators]
+    if any(len(timed) == 0 for timed in required_topics):
+        logger.info("A required topic has no messages; nothing to build.")
+        return
 
-        # check kinematic_state
-        if ok:
-            kinematic_state = latest_msgs["/localization/kinematic_state"]
-            covariance = kinematic_state.pose.covariance
-            covariance_xx = covariance[0]
-            covariance_yy = covariance[7]
-            if covariance_xx > 1e-1 or covariance_yy > 1e-1:
-                logger.info(f"Invalid kinematic_state {covariance_xx=:.5f}, {covariance_yy=:.5f}")
-                ok = False
-
-        # check route
-        if search_nearest_route:
-            # find the latest route msg
-            max_route_index = -1
-            max_route_timestamp = 0
-            for j in range(len(route_msgs)):
-                route_msg = route_msgs[j]
-                route_stamp = parse_timestamp(route_msg.header.stamp)
-                if max_route_timestamp <= route_stamp <= timestamp:
-                    max_route_timestamp = route_stamp
-                    max_route_index = j
-            if max_route_index == -1:
-                logger.info(f"Cannot find route msg at {i}")
-                continue
+    # Merge consecutive routes that share a start_pose (FreeSpacePlanner sometimes only
+    # changes goal_pose, so such routes belong to one sequence). route_to_group maps a
+    # route index -> its merged-sequence index.
+    sequence_data_list = []
+    route_to_group = [0] * len(route_entries)
+    for j in range(len(route_entries)):
+        if j > 0 and route_entries[j][1].start_pose == route_entries[j - 1][1].start_pose:
+            route_to_group[j] = len(sequence_data_list) - 1
         else:
-            # use the first route msg
-            max_route_index = 0
+            route_to_group[j] = len(sequence_data_list)
+            sequence_data_list.append(SequenceData([], route_entries[j][1]))
 
-        sequence = sequence_data_list[max_route_index]
+    # Build per-route sequences of fixed-rate (10 Hz) frames. Pure assembly: every tick
+    # produces exactly one frame carrying the latest message at-or-before the tick for each
+    # topic (zero-order hold). Skip decisions happen later in the per-frame loop.
+    earliest_route = min(t for t, _ in route_entries)
+    clock_start = max(
+        kinematic_states[0][0],
+        accelerations[0][0],
+        tracked_objects_msgs[0][0],
+        turn_indicators[0][0],
+        earliest_route,
+    )
+    # End once any required topic is exhausted; beyond its last message we could only carry
+    # stale data forward. Traffic is drop-tolerated and does not gate the clock.
+    clock_end = min(
+        kinematic_states[-1][0],
+        accelerations[-1][0],
+        tracked_objects_msgs[-1][0],
+        turn_indicators[-1][0],
+    )
+    logger.info(f"clock_start={clock_start} clock_end={clock_end} period_ns={CLOCK_PERIOD_NS}")
 
-        if not ok:
-            if len(sequence.data_list) == 0:
-                # At the beginning of recording, some msgs may be missing
-                # Skip this frame
-                logger.info(f"Skip this frame {i=}/{n=}")
-                continue
-            else:
-                # If the msg is missing in the middle of recording, we can use the msgs to this point
-                logger.info(f"Finish at this frame {i=}/{n=}")
-                break
+    def advance_cursor(timed, cursor, tick):
+        # Advance to the largest index whose rosbag_time is <= tick.
+        while cursor + 1 < len(timed) and timed[cursor + 1][0] <= tick:
+            cursor += 1
+        return cursor
 
-        sequence.data_list.append(
+    kin_cursor = accel_cursor = tracked_cursor = turn_ind_cursor = traffic_cursor = -1
+    empty_traffic = TrafficLightGroupArray()
+    tick = clock_start
+    while tick <= clock_end:
+        kin_cursor = advance_cursor(kinematic_states, kin_cursor, tick)
+        accel_cursor = advance_cursor(accelerations, accel_cursor, tick)
+        tracked_cursor = advance_cursor(tracked_objects_msgs, tracked_cursor, tick)
+        turn_ind_cursor = advance_cursor(turn_indicators, turn_ind_cursor, tick)
+        traffic_cursor = advance_cursor(traffic_signals, traffic_cursor, tick)
+
+        kinematic = kinematic_states[kin_cursor][1]
+        accel = accelerations[accel_cursor][1]
+        tracked = tracked_objects_msgs[tracked_cursor][1]
+        turn_ind = turn_indicators[turn_ind_cursor][1]
+        traffic = traffic_signals[traffic_cursor][1] if traffic_cursor >= 0 else empty_traffic
+
+        # Resolve the route for this tick (latest route with rosbag_time <= tick).
+        max_route_index = 0
+        if search_nearest_route:
+            best_route_time = None
+            for j in range(len(route_entries)):
+                route_time = route_entries[j][0]
+                if route_time <= tick and (
+                    best_route_time is None or route_time >= best_route_time
+                ):
+                    best_route_time = route_time
+                    max_route_index = j
+
+        group = route_to_group[max_route_index]
+        sequence_data_list[group].data_list.append(
             FrameData(
-                timestamp=timestamp,
-                route=sequence.route,
-                tracked_objects=tracking,
-                kinematic_state=latest_msgs["/localization/kinematic_state"],
-                acceleration=latest_msgs["/localization/acceleration"],
-                traffic_signals=latest_msgs[
-                    "/perception/traffic_light_recognition/traffic_signals"
-                ],
-                turn_indicator=latest_msgs["/vehicle/status/turn_indicators_status"],
+                timestamp=tick,
+                route=sequence_data_list[group].route,
+                tracked_objects=tracked,
+                kinematic_state=kinematic,
+                acceleration=accel,
+                traffic_signals=traffic,
+                turn_indicator=turn_ind,
             )
         )
-        progress_bar.update(1)
+        tick += CLOCK_PERIOD_NS
 
-    # FreeSpacePlannerの影響で、最後の方でgoal_poseだけ微妙に変わることがある
-    # そういうものは結合する
-    for i in range(len(sequence_data_list) - 2, -1, -1):
-        route_msg_l = sequence_data_list[i].route
-        route_msg_r = sequence_data_list[i + 1].route
-        if route_msg_l.start_pose != route_msg_r.start_pose:
-            logger.info(
-                f"Route start pose mismatch: {route_msg_l.start_pose} != {route_msg_r.start_pose}"
-            )
-            continue
-        logger.info(f"Concatenate sequence {i} and {i + 1}")
-        logger.info(f"Before {len(sequence_data_list[i].data_list)=} frames")
-        sequence_data_list[i].data_list.extend(sequence_data_list[i + 1].data_list)
-        logger.info(f"After {len(sequence_data_list[i].data_list)=} frames")
-        sequence_data_list.pop(i + 1)
+    # Frames are pushed in tick order; keep each sequence ascending by timestamp.
+    for seq in sequence_data_list:
+        seq.data_list.sort(key=lambda fd: fd.timestamp)
 
     map_name = rosbag_path.stem
     sequence_num = len(sequence_data_list)
@@ -479,7 +484,7 @@ def main(
                 data_list, i - PAST_TIME_STEPS, PAST_TIME_STEPS, map2bl_matrix_4x4
             )
             ego_tensor = create_current_ego_state(
-                data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.79
+                data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.75
             ).squeeze(0)
             ego_future_np = create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4)
 
