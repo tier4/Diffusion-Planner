@@ -613,8 +613,10 @@ class DiTForwardMemo(torch.nn.Module):
     then again in ``noise_pred_fn`` for the same ``(x, t)``. Both call sites
     reshape x to ``[B, P, -1, 4]`` and pass the solver's time tensor straight
     through, so the computations are value-identical — the second call can
-    return the first call's output. That removes one full DiT forward per
-    guided solver evaluation (~2x on the active guided path).
+    return the first call's output. That removes one of the two DiT forwards
+    per guided solver evaluation: the DiT work per guided step roughly halves,
+    which measures as ~25% off the whole active guided frame (the frame also
+    pays the encoder, policy and energy autograd).
 
     Matching is exact: positional tensor args must be value-equal
     (``torch.equal`` against a detached CLONE — a plain detached view would
