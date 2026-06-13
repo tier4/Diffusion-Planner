@@ -46,27 +46,58 @@ def load_policy(policy_dir: str, model_args, device) -> tuple[ExplorationPolicy,
     state = torch.load(pdir / "exploration_policy.pth", map_location=device, weights_only=False)
     policy.load_state_dict(state, strict=True)
     policy.eval()
+    # Attach the calibration the policy's etas are bound to so make_composer can
+    # reuse it instead of trusting per-tool CLI defaults. Non-breaking: callers
+    # still unpack (policy, heads).
+    policy.guidance_envelope = dict(cfg.guidance_envelope)
     return policy, cfg.heads
 
 
-def make_composer(etas: dict[str, torch.Tensor], args) -> GuidanceComposer:
-    # Thin wrapper over the shared head mapping; head_protect > 0 zeroes
-    # guidance on the first N plan steps.
+# The calibrated guidance envelope: knobs the policy's etas are bound to.
+# head_protect / slow_composer are runtime toggles, not part of the envelope.
+_ENVELOPE_KEYS = (
+    "lambda_lat",
+    "lat_scale",
+    "col_scale",
+    "col_range",
+    "lambda_spd",
+    "stretch_scale",
+    "guidance_scale",
+    "envelope",
+    "lambda_col",
+)
+
+
+def make_composer(
+    etas: dict[str, torch.Tensor], args, envelope: dict | None = None
+) -> GuidanceComposer:
+    """Build a guidance composer for one set of etas.
+
+    The guidance envelope (lambda_lat / lat_scale / col_scale / ...) is the
+    calibration the policy's etas were swept against; applying the etas at a
+    different envelope silently mis-scales the guidance. Per-knob resolution:
+    an explicitly-set CLI arg wins, else the policy's persisted ``envelope``
+    (pass ``policy.guidance_envelope``), else the canonical v1 calibration.
+    There is no divergent per-tool default — that mismatch is the bug this
+    guards against. head_protect > 0 zeroes guidance on the first N plan steps.
+    """
+    from exploration_policy.model import V1_GUIDANCE_ENVELOPE
     from rlvr.guidance_batched import build_head_composer
+
+    resolved = {}
+    for key in _ENVELOPE_KEYS:
+        val = getattr(args, key, None)
+        if val is None and envelope is not None:
+            val = envelope.get(key)
+        if val is None:
+            val = V1_GUIDANCE_ENVELOPE[key]
+        resolved[key] = val
 
     return build_head_composer(
         etas,
-        lambda_lat=args.lambda_lat,
-        lat_scale=args.lat_scale,
-        col_scale=args.col_scale,
-        col_range=args.col_range,
-        lambda_spd=args.lambda_spd,
-        stretch_scale=args.stretch_scale,
-        guidance_scale=args.guidance_scale,
         head_protect=int(getattr(args, "head_protect", 0)),
-        envelope=getattr(args, "envelope", "v1"),
-        lambda_col=getattr(args, "lambda_col", 3.0),
         fast=not bool(getattr(args, "slow_composer", False)),
+        **resolved,
     )
 
 
@@ -113,7 +144,7 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
                 K_data[k] = v.expand(K, *v.shape[1:]).contiguous()
             else:
                 K_data[k] = v
-        composer = make_composer(cand, args)
+        composer = make_composer(cand, args, envelope=getattr(policy, "guidance_envelope", None))
         from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
 
         cands = (
@@ -133,7 +164,7 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
         )
     else:
         cand = mean_etas
-        composer = make_composer(cand, args)
+        composer = make_composer(cand, args, envelope=getattr(policy, "guidance_envelope", None))
         cands = generate_samples(
             model=model,
             model_args=model_args,
@@ -306,15 +337,20 @@ def main():
         "(policy = prior, reward = judge). 1 = mean only.",
     )
     # Guidance envelope (must match the sweep that produced the training labels)
-    parser.add_argument("--lambda_lat", type=float, default=4.0)
-    parser.add_argument("--lat_scale", type=float, default=1.5)
-    parser.add_argument("--col_scale", type=float, default=6.0)
-    parser.add_argument("--col_range", type=float, default=8.0)
-    parser.add_argument("--lambda_spd", type=float, default=0.2)
-    parser.add_argument("--stretch_scale", type=float, default=1.0)
-    parser.add_argument("--guidance_scale", type=float, default=0.5)
-    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
-    parser.add_argument("--lambda_col", type=float, default=3.0)
+    parser.add_argument(
+        "--lambda_lat",
+        type=float,
+        default=None,
+        help="override the policy's persisted guidance envelope",
+    )
+    parser.add_argument("--lat_scale", type=float, default=None)
+    parser.add_argument("--col_scale", type=float, default=None)
+    parser.add_argument("--col_range", type=float, default=None)
+    parser.add_argument("--lambda_spd", type=float, default=None)
+    parser.add_argument("--stretch_scale", type=float, default=None)
+    parser.add_argument("--guidance_scale", type=float, default=None)
+    parser.add_argument("--envelope", choices=["v1", "v2"], default=None)
+    parser.add_argument("--lambda_col", type=float, default=None)
     parser.add_argument(
         "--no_dit_memo",
         action="store_true",

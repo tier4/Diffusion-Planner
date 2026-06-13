@@ -189,6 +189,13 @@ def main():
     parser.add_argument("--counterfactual_weight", type=float, default=1.0)
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--head_raw_scale", type=float, default=10.0)
+    parser.add_argument(
+        "--guidance_envelope",
+        default=None,
+        help="JSON file with the guidance envelope the --labels were swept at "
+        "(lambda_lat/lat_scale/col_scale/...). Persisted into the policy config "
+        "so eval/deploy reuse it. Omit to record the canonical v1 calibration.",
+    )
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--patience", type=int, default=50)
     parser.add_argument(
@@ -267,12 +274,28 @@ def main():
         f"(val avoid={int(is_avoid[val_idx].sum())})"
     )
 
+    from exploration_policy.model import V1_GUIDANCE_ENVELOPE
+
+    guidance_envelope = dict(V1_GUIDANCE_ENVELOPE)
+    if args.guidance_envelope:
+        with open(args.guidance_envelope) as f:
+            user_env = json.load(f)
+        unknown = set(user_env) - set(V1_GUIDANCE_ENVELOPE)
+        if unknown:
+            raise ValueError(
+                f"--guidance_envelope has unknown knob(s) {sorted(unknown)}; "
+                f"valid keys: {sorted(V1_GUIDANCE_ENVELOPE)}"
+            )
+        guidance_envelope.update(user_env)
+    print(f"[envelope] persisting guidance envelope into policy config: {guidance_envelope}")
+
     ep_config = ExplorationPolicyConfig(
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
         encoder_hidden_dim=model_args.hidden_dim,
         head_raw_scale=args.head_raw_scale,
         heads=heads,
+        guidance_envelope=guidance_envelope,
     )
     policy = ExplorationPolicy(ep_config, ref_seq_len=model_args.future_len).to(device)
     if args.init_from:

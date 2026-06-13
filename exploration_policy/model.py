@@ -35,6 +35,25 @@ from exploration_policy.module.heads import GuidanceHead, ValueHead
 from exploration_policy.module.ref_fusion import RefFusionAttention
 from exploration_policy.module.ref_mixer import RefTrajectoryMixer
 
+# The v1 guidance calibration the explorer's eta labels were swept against.
+# The policy's eta outputs are ONLY meaningful at the envelope its labels were
+# generated with (the trainer is pure eta-regression — the network never sees
+# the envelope), so it MUST be persisted with the policy and reused verbatim at
+# eval/deploy. Historically this lived only in CLI flags whose defaults differed
+# across tools (the open-loop eval defaulted to a WEAKER 4.0/1.5/6.0), which
+# silently halved the applied guidance and made a certified policy look broken.
+V1_GUIDANCE_ENVELOPE = {
+    "lambda_lat": 5.0,
+    "lat_scale": 2.0,
+    "col_scale": 9.0,
+    "col_range": 8.0,
+    "lambda_spd": 0.2,
+    "stretch_scale": 1.0,
+    "guidance_scale": 0.5,
+    "envelope": "v1",
+    "lambda_col": 3.0,
+}
+
 
 @dataclass
 class ExplorationPolicyConfig:
@@ -62,6 +81,12 @@ class ExplorationPolicyConfig:
     # is the caller's job. Default matches the original 2-head layout, so old
     # checkpoints (fc2 [4, H]) load unchanged.
     heads: list[str] = field(default_factory=lambda: ["lateral", "longitudinal"])
+    # Guidance envelope the eta labels were swept against — the calibration the
+    # policy's outputs are bound to. Persisted here so eval/deploy load it
+    # instead of relying on (divergent) per-tool CLI defaults. Defaults to the
+    # v1 calibration, which is also what every pre-2026-06-14 policy was trained
+    # at, so older configs lacking this key are correct on load.
+    guidance_envelope: dict = field(default_factory=lambda: dict(V1_GUIDANCE_ENVELOPE))
 
     def to_json(self, path: str | Path) -> None:
         with open(path, "w") as f:
