@@ -2,10 +2,50 @@
 etas are bound to, and make_composer resolves from it (not divergent per-tool
 CLI defaults). Guards the v23 "non-reproduction" footgun."""
 
+import ast
 import json
 from argparse import Namespace
+from pathlib import Path
+
+import pytest
 
 from exploration_policy.model import V1_GUIDANCE_ENVELOPE, ExplorationPolicyConfig
+
+# Guided eval/deploy tools that score or bake a policy and so MUST resolve the
+# envelope from the policy's persisted calibration (CLI = override-only). Their
+# envelope argparse defaults must be None — a non-None default silently shadows
+# the persisted value and reintroduces the cross-tool drift bug.
+_CERT_DEPLOY_TOOLS = [
+    "rlvr/autoresearch/tools/eval_policy_avoidance.py",
+    "rlvr/autoresearch/tools/eval_closedloop_avoidance.py",
+    "rlvr/autoresearch/tools/valid_predictor_guided.py",
+    "rlvr/autoresearch/tools/eval_policy_l2.py",
+    "rlvr/autoresearch/tools/distill_guided_targets.py",
+    "rlvr/autoresearch/tools/rollforward_avoidance_scenes.py",
+]
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("rel", _CERT_DEPLOY_TOOLS)
+def test_cert_deploy_tools_envelope_args_default_none(rel):
+    """No envelope knob may carry a non-None argparse default in these tools."""
+    tree = ast.parse((_REPO_ROOT / rel).read_text())
+    offenders = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and getattr(node.func, "attr", None) == "add_argument"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            name = str(node.args[0].value).lstrip("-")
+            if name not in V1_GUIDANCE_ENVELOPE:
+                continue
+            default = next((kw.value for kw in node.keywords if kw.arg == "default"), None)
+            # missing default kw == argparse None; only a non-None Constant is a bug.
+            if isinstance(default, ast.Constant) and default.value is not None:
+                offenders.append((name, default.value))
+    assert not offenders, f"{rel}: envelope args with non-None default: {offenders}"
 
 
 def test_config_default_envelope_is_v1():

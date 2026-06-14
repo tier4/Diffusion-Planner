@@ -148,8 +148,8 @@ def main():
     parser.add_argument(
         "--envelope",
         choices=["v1", "v2"],
-        default="v1",
-        help="guidance envelope — must match the policy's training labels",
+        default=None,
+        help="override the policy's persisted guidance envelope family (v1/v2)",
     )
     parser.add_argument("--lambda_col", type=float, default=None)
     args = parser.parse_args()
