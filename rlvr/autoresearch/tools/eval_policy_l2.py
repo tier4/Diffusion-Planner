@@ -44,12 +44,18 @@ def make_composer(etas, args, envelope=None):
     # constant, so a policy trained at a non-v1 envelope is scored for L2 at the
     # calibration its etas are bound to, not a hardcoded default.
     from exploration_policy.model import V1_GUIDANCE_ENVELOPE
+    from rlvr.autoresearch.tools.eval_policy_avoidance import warn_guidance_envelope_override
+
+    overrides = []
 
     def knob(name):
-        v = getattr(args, name, None)
-        if v is None and envelope is not None:
-            v = envelope.get(name)
-        return V1_GUIDANCE_ENVELOPE[name] if v is None else v
+        cli = getattr(args, name, None)
+        persisted = envelope.get(name) if envelope is not None else None
+        if cli is not None:
+            if persisted is not None and cli != persisted:
+                overrides.append(f"{name}: CLI={cli} overrides persisted={persisted}")
+            return cli
+        return persisted if persisted is not None else V1_GUIDANCE_ENVELOPE[name]
 
     unmapped = set(etas) - {"lateral", "collision"}
     if unmapped:
@@ -77,7 +83,12 @@ def make_composer(etas, args, envelope=None):
                 params={"eta_col": etas["collision"], "range": knob("col_range")},
             )
         )
-    return GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=knob("guidance_scale")))
+    composer = GuidanceComposer(
+        GuidanceSetConfig(functions=fns, global_scale=knob("guidance_scale"))
+    )
+    if overrides:
+        warn_guidance_envelope_override(overrides)
+    return composer
 
 
 def ade(pred_xy: torch.Tensor, gt_xy: torch.Tensor, gt_valid: torch.Tensor) -> torch.Tensor:

@@ -71,6 +71,29 @@ _ENVELOPE_KEYS = (
 )
 
 
+_envelope_override_warned = False
+
+
+def warn_guidance_envelope_override(overrides: list[str]) -> None:
+    """Loudly flag (once) that explicit CLI envelope flags are overriding the
+    policy's persisted calibration. Doesn't block — sweeps / v2 experiments are
+    legitimate — but makes a stale copy-pasted flag impossible to miss in logs."""
+    global _envelope_override_warned
+    if _envelope_override_warned:
+        return
+    _envelope_override_warned = True
+    import sys
+
+    print(
+        "\n[GUIDANCE-ENVELOPE OVERRIDE WARNING] explicit CLI flags disagree with "
+        "the policy's persisted calibration — the etas are bound to the persisted "
+        "envelope; overriding mis-scales guidance unless you mean to sweep:\n  "
+        + "\n  ".join(overrides)
+        + "\nOmit the envelope flags to use the policy's persisted calibration.\n",
+        file=sys.stderr,
+    )
+
+
 def make_composer(
     etas: dict[str, torch.Tensor], args, envelope: dict | None = None
 ) -> GuidanceComposer:
@@ -88,13 +111,24 @@ def make_composer(
     from rlvr.guidance_batched import build_head_composer
 
     resolved = {}
+    overrides = []
     for key in _ENVELOPE_KEYS:
-        val = getattr(args, key, None)
-        if val is None and envelope is not None:
-            val = envelope.get(key)
-        if val is None:
+        cli = getattr(args, key, None)
+        persisted = envelope.get(key) if envelope is not None else None
+        if cli is not None:
+            # An explicit CLI value wins, but if it disagrees with the policy's
+            # persisted calibration, say so loudly — a stale copy-pasted flag
+            # mis-scales the etas exactly like the bug this guards against.
+            if persisted is not None and cli != persisted:
+                overrides.append(f"{key}: CLI={cli} overrides persisted={persisted}")
+            val = cli
+        elif persisted is not None:
+            val = persisted
+        else:
             val = V1_GUIDANCE_ENVELOPE[key]
         resolved[key] = val
+    if overrides:
+        warn_guidance_envelope_override(overrides)
 
     return build_head_composer(
         etas,
