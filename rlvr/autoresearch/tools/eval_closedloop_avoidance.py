@@ -143,6 +143,12 @@ def main():
         action="store_true",
         help="disable the guided-frame DiT forward memo (A/B escape hatch; memo is the default)",
     )
+    parser.add_argument(
+        "--force_envelope_override",
+        action="store_true",
+        help="allow explicit envelope flags to override the policy's persisted "
+        "calibration (otherwise a disagreeing flag hard-fails)",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

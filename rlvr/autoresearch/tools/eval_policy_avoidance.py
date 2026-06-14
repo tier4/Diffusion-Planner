@@ -71,26 +71,34 @@ _ENVELOPE_KEYS = (
 )
 
 
-_envelope_override_warned = False
-
-
-def warn_guidance_envelope_override(overrides: list[str]) -> None:
-    """Loudly flag (once) that explicit CLI envelope flags are overriding the
-    policy's persisted calibration. Doesn't block — sweeps / v2 experiments are
-    legitimate — but makes a stale copy-pasted flag impossible to miss in logs."""
-    global _envelope_override_warned
-    if _envelope_override_warned:
+def check_guidance_envelope_override(overrides: list[str], force: bool) -> None:
+    """Enforce that explicit CLI envelope flags may not silently disagree with
+    the policy's persisted calibration. The etas are bound to the persisted
+    envelope, so a stale copy-pasted flag mis-scales guidance exactly like the
+    bug this guards against. HARD-FAIL by default; ``force`` (the tools'
+    ``--force_envelope_override``) downgrades to a loud warning for legitimate
+    sweeps / v2 experiments."""
+    if not overrides:
         return
-    _envelope_override_warned = True
-    import sys
+    detail = "\n  ".join(overrides)
+    if force:
+        import sys
 
-    print(
-        "\n[GUIDANCE-ENVELOPE OVERRIDE WARNING] explicit CLI flags disagree with "
-        "the policy's persisted calibration — the etas are bound to the persisted "
-        "envelope; overriding mis-scales guidance unless you mean to sweep:\n  "
-        + "\n  ".join(overrides)
-        + "\nOmit the envelope flags to use the policy's persisted calibration.\n",
-        file=sys.stderr,
+        print(
+            "\n[GUIDANCE-ENVELOPE OVERRIDE] --force_envelope_override set; "
+            "explicit CLI flags override the policy's persisted calibration:\n  "
+            + detail
+            + "\n",
+            file=sys.stderr,
+        )
+        return
+    raise RuntimeError(
+        "explicit CLI envelope flags disagree with the policy's persisted "
+        "calibration — the policy's etas are bound to the persisted envelope, so "
+        "overriding mis-scales guidance:\n  "
+        + detail
+        + "\nOmit the envelope flags to use the policy's persisted calibration, "
+        "or pass --force_envelope_override to override deliberately (e.g. a sweep)."
     )
 
 
@@ -105,7 +113,9 @@ def make_composer(
     an explicitly-set CLI arg wins, else the policy's persisted ``envelope``
     (pass ``policy.guidance_envelope``), else the canonical v1 calibration.
     There is no divergent per-tool default — that mismatch is the bug this
-    guards against. head_protect > 0 zeroes guidance on the first N plan steps.
+    guards against. An explicit CLI value that DISAGREES with the persisted
+    envelope hard-fails unless ``args.force_envelope_override`` is set.
+    head_protect > 0 zeroes guidance on the first N plan steps.
     """
     from exploration_policy.model import V1_GUIDANCE_ENVELOPE
     from rlvr.guidance_batched import build_head_composer
@@ -117,8 +127,7 @@ def make_composer(
         persisted = envelope.get(key) if envelope is not None else None
         if cli is not None:
             # An explicit CLI value wins, but if it disagrees with the policy's
-            # persisted calibration, say so loudly — a stale copy-pasted flag
-            # mis-scales the etas exactly like the bug this guards against.
+            # persisted calibration, that is the stale-flag mis-scaling case.
             if persisted is not None and cli != persisted:
                 overrides.append(f"{key}: CLI={cli} overrides persisted={persisted}")
             val = cli
@@ -127,8 +136,9 @@ def make_composer(
         else:
             val = V1_GUIDANCE_ENVELOPE[key]
         resolved[key] = val
-    if overrides:
-        warn_guidance_envelope_override(overrides)
+    check_guidance_envelope_override(
+        overrides, bool(getattr(args, "force_envelope_override", False))
+    )
 
     return build_head_composer(
         etas,
@@ -386,6 +396,12 @@ def main():
     parser.add_argument("--lambda_spd", type=float, default=None)
     parser.add_argument("--stretch_scale", type=float, default=None)
     parser.add_argument("--guidance_scale", type=float, default=None)
+    parser.add_argument(
+        "--force_envelope_override",
+        action="store_true",
+        help="allow explicit envelope flags to override the policy's persisted "
+        "calibration (otherwise a disagreeing flag hard-fails)",
+    )
     parser.add_argument("--envelope", choices=["v1", "v2"], default=None)
     parser.add_argument("--lambda_col", type=float, default=None)
     parser.add_argument(

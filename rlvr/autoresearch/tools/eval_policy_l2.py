@@ -44,7 +44,7 @@ def make_composer(etas, args, envelope=None):
     # constant, so a policy trained at a non-v1 envelope is scored for L2 at the
     # calibration its etas are bound to, not a hardcoded default.
     from exploration_policy.model import V1_GUIDANCE_ENVELOPE
-    from rlvr.autoresearch.tools.eval_policy_avoidance import warn_guidance_envelope_override
+    from rlvr.autoresearch.tools.eval_policy_avoidance import check_guidance_envelope_override
 
     overrides = []
 
@@ -86,8 +86,9 @@ def make_composer(etas, args, envelope=None):
     composer = GuidanceComposer(
         GuidanceSetConfig(functions=fns, global_scale=knob("guidance_scale"))
     )
-    if overrides:
-        warn_guidance_envelope_override(overrides)
+    check_guidance_envelope_override(
+        overrides, bool(getattr(args, "force_envelope_override", False))
+    )
     return composer
 
 
@@ -118,6 +119,12 @@ def main():
     parser.add_argument("--col_scale", type=float, default=None)
     parser.add_argument("--col_range", type=float, default=None)
     parser.add_argument("--guidance_scale", type=float, default=None)
+    parser.add_argument(
+        "--force_envelope_override",
+        action="store_true",
+        help="allow explicit envelope flags to override the policy's persisted "
+        "calibration (otherwise a disagreeing flag hard-fails)",
+    )
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--limit", type=int, default=0, help="0 = all scenes")
     args = parser.parse_args()

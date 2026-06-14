@@ -146,6 +146,12 @@ def main():
     parser.add_argument("--stretch_scale", type=float, default=None)
     parser.add_argument("--guidance_scale", type=float, default=None)
     parser.add_argument(
+        "--force_envelope_override",
+        action="store_true",
+        help="allow explicit envelope flags to override the policy's persisted "
+        "calibration (otherwise a disagreeing flag hard-fails)",
+    )
+    parser.add_argument(
         "--envelope",
         choices=["v1", "v2"],
         default=None,
