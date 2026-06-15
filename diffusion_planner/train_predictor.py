@@ -372,7 +372,8 @@ def model_training(args):
             dir=f"{save_path}",
         )
         wandb.config.update(args)
-        log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
+        if args.use_wandb:
+            log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
 
     if args.ddp:
         torch.distributed.barrier()
