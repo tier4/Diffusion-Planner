@@ -42,9 +42,15 @@ def test_cert_deploy_tools_envelope_args_default_none(rel):
             if name not in V1_GUIDANCE_ENVELOPE:
                 continue
             default = next((kw.value for kw in node.keywords if kw.arg == "default"), None)
-            # missing default kw == argparse None; only a non-None Constant is a bug.
-            if isinstance(default, ast.Constant) and default.value is not None:
-                offenders.append((name, default.value))
+            # No default kwarg => argparse default is None => OK. Any EXPLICIT
+            # default= is an offender unless it is the literal None — including a
+            # non-literal expression (e.g. default=V1_GUIDANCE_ENVELOPE["..."]),
+            # which would silently reintroduce the drift the None default prevents.
+            if default is None:
+                continue
+            is_none_literal = isinstance(default, ast.Constant) and default.value is None
+            if not is_none_literal:
+                offenders.append((name, ast.unparse(default)))
     assert not offenders, f"{rel}: envelope args with non-None default: {offenders}"
 
 
