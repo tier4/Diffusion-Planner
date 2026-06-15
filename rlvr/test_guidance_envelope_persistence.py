@@ -60,7 +60,8 @@ def test_config_roundtrip_preserves_envelope(tmp_path):
     cfg = ExplorationPolicyConfig(heads=["lateral", "collision"], guidance_envelope=env)
     p = tmp_path / "exploration_policy_config.json"
     cfg.to_json(p)
-    assert json.load(open(p))["guidance_envelope"]["lambda_lat"] == 7.0
+    with open(p) as f:
+        assert json.load(f)["guidance_envelope"]["lambda_lat"] == 7.0
     back = ExplorationPolicyConfig.from_json(p)
     assert back.guidance_envelope == env
 
@@ -69,7 +70,8 @@ def test_old_config_without_key_loads_as_v1(tmp_path):
     # Pre-2026-06-14 configs have no guidance_envelope key; they were trained at
     # v1, so the default must backfill to v1 (not crash, not a weak default).
     p = tmp_path / "exploration_policy_config.json"
-    json.dump({"hidden_dim": 128, "heads": ["lateral", "collision"]}, open(p, "w"))
+    with open(p, "w") as f:
+        json.dump({"hidden_dim": 128, "heads": ["lateral", "collision"]}, f)
     cfg = ExplorationPolicyConfig.from_json(p)
     assert cfg.guidance_envelope == V1_GUIDANCE_ENVELOPE
 
@@ -164,3 +166,32 @@ def test_make_composer_falls_back_to_v1_when_nothing_provided():
     comp = make_composer({"lateral": 0.5, "collision": 0.5}, args, envelope=None)
     lat = next(f for f in comp._functions if hasattr(f, "_lambda_lat"))
     assert abs(float(lat._lambda_lat) - V1_GUIDANCE_ENVELOPE["lambda_lat"]) < 1e-9
+
+
+def test_resolve_training_envelope_stretch_lambda_spd_guard(tmp_path):
+    # A stretch head decodes its labels with the module LAMBDA_SPD; persisting a
+    # different lambda_spd would mis-scale it at inference, so the trainer's
+    # resolver must reject it (the envelope/label mismatch this change prevents).
+    from rlvr.train_explorer_regression import LAMBDA_SPD, resolve_training_envelope
+
+    bad = tmp_path / "bad.json"
+    with open(bad, "w") as f:
+        json.dump({"lambda_spd": LAMBDA_SPD + 0.1}, f)
+
+    # stretch head + mismatched lambda_spd -> hard fail
+    with pytest.raises(ValueError, match="mis-scale the stretch head"):
+        resolve_training_envelope(str(bad), ["lateral", "collision", "stretch"])
+
+    # same mismatch but NO stretch head -> lambda_spd is inert, accepted
+    env = resolve_training_envelope(str(bad), ["lateral", "collision"])
+    assert env["lambda_spd"] == LAMBDA_SPD + 0.1
+
+    # stretch head + matching lambda_spd -> accepted; no override path -> v1
+    assert resolve_training_envelope(None, ["lateral", "stretch"]) == V1_GUIDANCE_ENVELOPE
+
+    # unknown knob -> rejected loudly
+    junk = tmp_path / "junk.json"
+    with open(junk, "w") as f:
+        json.dump({"not_a_knob": 1.0}, f)
+    with pytest.raises(ValueError, match="unknown knob"):
+        resolve_training_envelope(str(junk), ["lateral"])

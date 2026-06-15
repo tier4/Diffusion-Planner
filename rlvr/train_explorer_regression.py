@@ -57,6 +57,40 @@ def label_target(head: str, best: dict) -> float:
     return v
 
 
+def resolve_training_envelope(envelope_path: str | None, heads: list[str]) -> dict:
+    """Build the guidance envelope to persist into the policy config.
+
+    Starts from the v1 calibration, optionally overlays a user JSON (rejecting
+    unknown knobs), and enforces that a trained ``stretch`` head's ``lambda_spd``
+    matches the module ``LAMBDA_SPD`` used by ``label_target`` to decode its
+    labels — otherwise the persisted envelope would apply a different lambda_spd
+    at inference than the labels were built with (a silent envelope/label
+    mismatch, the exact failure this persistence guards against).
+    """
+    from exploration_policy.model import V1_GUIDANCE_ENVELOPE
+
+    envelope = dict(V1_GUIDANCE_ENVELOPE)
+    if envelope_path:
+        with open(envelope_path) as f:
+            user_env = json.load(f)
+        unknown = set(user_env) - set(V1_GUIDANCE_ENVELOPE)
+        if unknown:
+            raise ValueError(
+                f"--guidance_envelope has unknown knob(s) {sorted(unknown)}; "
+                f"valid keys: {sorted(V1_GUIDANCE_ENVELOPE)}"
+            )
+        envelope.update(user_env)
+    if "stretch" in heads and envelope["lambda_spd"] != LAMBDA_SPD:
+        raise ValueError(
+            f"guidance_envelope lambda_spd={envelope['lambda_spd']} disagrees "
+            f"with LAMBDA_SPD={LAMBDA_SPD} used to decode the stretch labels — "
+            "the persisted envelope would mis-scale the stretch head at "
+            f"inference. Use lambda_spd={LAMBDA_SPD}, drop the stretch head, or "
+            "wire label_target to the envelope value first."
+        )
+    return envelope
+
+
 def build_entries(
     labels_paths: list[str],
     normal_paths: list[str],
@@ -274,19 +308,7 @@ def main():
         f"(val avoid={int(is_avoid[val_idx].sum())})"
     )
 
-    from exploration_policy.model import V1_GUIDANCE_ENVELOPE
-
-    guidance_envelope = dict(V1_GUIDANCE_ENVELOPE)
-    if args.guidance_envelope:
-        with open(args.guidance_envelope) as f:
-            user_env = json.load(f)
-        unknown = set(user_env) - set(V1_GUIDANCE_ENVELOPE)
-        if unknown:
-            raise ValueError(
-                f"--guidance_envelope has unknown knob(s) {sorted(unknown)}; "
-                f"valid keys: {sorted(V1_GUIDANCE_ENVELOPE)}"
-            )
-        guidance_envelope.update(user_env)
+    guidance_envelope = resolve_training_envelope(args.guidance_envelope, heads)
     print(f"[envelope] persisting guidance envelope into policy config: {guidance_envelope}")
 
     ep_config = ExplorationPolicyConfig(
