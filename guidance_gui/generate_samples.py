@@ -38,6 +38,11 @@ def generate_samples(
         composer: GuidanceComposer instance to inject for this call, or None for
                   unguided sampling.
         device: Torch device.
+        use_dit_memo: When a composer is active, reuse its x0-refinement DiT
+                      forward for the solver's noise prediction at the same
+                      (x, t) (numerically equivalent, ~halves the guided step).
+                      False = escape hatch for A/B verification. No effect when
+                      composer is None.
 
     Returns:
         (n_samples, OUTPUT_T, 4) float32 numpy array.
