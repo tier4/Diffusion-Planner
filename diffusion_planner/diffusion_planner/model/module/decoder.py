@@ -284,6 +284,7 @@ class Decoder(nn.Module):
             hidden_dim=config.hidden_dim,
             heads=config.num_heads,
             dropout=dpr,
+            use_activation_checkpointing=getattr(config, "use_activation_checkpointing", True),
         )
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM

@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import DropPath
 from timm.models.layers import Mlp
+from torch.utils.checkpoint import checkpoint
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.module.mixer import MixerBlock
@@ -47,6 +48,7 @@ class Encoder(nn.Module):
         self.use_ego_history = config.use_ego_history
         self.ego_history_dropout_rate = config.ego_history_dropout_rate
         self.use_turn_indicators = config.use_turn_indicators
+        self.use_activation_checkpointing = getattr(config, "use_activation_checkpointing", True)
 
         ego_num = 1
         goal_pose_num = 1
@@ -804,6 +806,9 @@ class FusionEncoder(nn.Module):
         mask = torch.cat([torch.zeros_like(mask[:, :1]), mask[:, 1:]], dim=1)
 
         for b in self.blocks:
-            x = b(x, mask)
+            if self.training and self.use_activation_checkpointing:
+                x = checkpoint(b, x, mask, use_reentrant=False)
+            else:
+                x = b(x, mask)
 
         return self.norm(x)

@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 from timm.models.layers import Mlp
+from torch.utils.checkpoint import checkpoint
 
 
 def modulate(x, shift, scale):
@@ -99,6 +100,7 @@ class DiT(nn.Module):
         heads=6,
         dropout=0.1,
         mlp_ratio=4.0,
+        use_activation_checkpointing=True,
     ):
         super().__init__()
 
@@ -123,6 +125,7 @@ class DiT(nn.Module):
             [DiTBlock(hidden_dim, heads, dropout, mlp_ratio) for i in range(depth)]
         )
         self.final_layer = FinalLayer(hidden_dim, output_dim)
+        self.use_activation_checkpointing = use_activation_checkpointing
 
     def forward(self, x, t, cross_c, neighbor_current_mask):
         """
@@ -156,7 +159,10 @@ class DiT(nn.Module):
         attn_mask = torch.cat([ego_mask, neighbor_current_mask], dim=1)
 
         for block in self.blocks:
-            x = block(x, cross_c, t, attn_mask)
+            if self.training and self.use_activation_checkpointing:
+                x = checkpoint(block, x, cross_c, t, attn_mask, use_reentrant=False)
+            else:
+                x = block(x, cross_c, t, attn_mask)
 
         x = self.final_layer(x, t)  # (B, P, output_dim)
         x = x.reshape(B, P, T, D)

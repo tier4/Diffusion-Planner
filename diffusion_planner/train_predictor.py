@@ -184,6 +184,18 @@ def get_args():
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
     parser.add_argument("--use_ema", default=True, type=boolean)
+    parser.add_argument(
+        "--use_bf16",
+        default=True,
+        type=boolean,
+        help="Enable bfloat16 autocast during training when supported by the GPU",
+    )
+    parser.add_argument(
+        "--use_activation_checkpointing",
+        default=True,
+        type=boolean,
+        help="Recompute encoder/decoder activations during backward to reduce GPU memory",
+    )
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
@@ -333,7 +345,7 @@ def model_training(args):
         model_ema = ModelEma(
             diffusion_planner,
             decay=0.999,
-            device=args.device,
+            device="cpu",
         )
 
     if global_rank == 0:
