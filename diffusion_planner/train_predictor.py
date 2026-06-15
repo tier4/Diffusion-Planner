@@ -372,6 +372,8 @@ def model_training(args):
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
+        # if resume_model_path is none, this is pretraining
+        # if wandb_run_id is not none, the wandb run is injected from outside
         if args.resume_model_path is None and args.wandb_run_id is not None:
             wandb_id = args.wandb_run_id
 
@@ -385,7 +387,9 @@ def model_training(args):
         )
         wandb.config.update(args)
 
-        if wandb_id is None:
+        # this function creates dataset artifacts and associate them with wandb run
+        # if wandb_run_id is given, the input artifact is assumed to be created externally and will not be executed
+        if args.use_wandb and args.wandb_run_id is None:
             log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
 
     if args.ddp:
