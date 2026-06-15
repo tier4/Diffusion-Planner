@@ -513,39 +513,6 @@ def model_training(args):
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
 
-
-    # Associate generated model checkpoints with the wandb run
-    if global_rank == 0 and wandb.run is not None:
-        model_artifact = wandb.Artifact(
-            name=f"model_{args.exp_name}",
-            type="model",
-            metadata={"result_path": save_path},
-        )
-
-        added = False
-
-        # Always attach the latest checkpoint so the artifact is non-empty.
-        latest_ckpt = os.path.join(save_path, "latest.pth")
-        if os.path.exists(latest_ckpt):
-            model_artifact.add_file(latest_ckpt, name="latest.pth")
-            added = True
-
-        # Optionally reference the most recent epoch directory (if any were saved).
-        epoch_dirs = sorted(Path(save_path).glob("epoch[0-9][0-9][0-9][0-9]"))
-        if epoch_dirs:
-            latest_epoch_dir = epoch_dirs[-1].resolve()
-            model_artifact.add_reference(
-                f"file://{latest_epoch_dir}/", name=latest_epoch_dir.name
-            )
-            added = True
-
-        if added:
-            wandb.run.log_artifact(model_artifact)
-        else:
-            print("No checkpoint files found; skipping wandb model artifact logging.")
-
-        wandb.finish()
-
 if __name__ == "__main__":
     args = get_args()
     assert len(args.coeff_timestep) == 4
