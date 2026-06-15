@@ -206,3 +206,113 @@ def test_fast_composer_inert_detection():
     comp = build_head_composer({"lateral": 0.0, "collision": 0.0})
     comp._functions.append(band)
     assert not comp._all_inert()
+
+
+# ---------------------------------------------------------------------------
+# DiTForwardMemo / dit_memo
+# ---------------------------------------------------------------------------
+
+
+class _CountingNet(torch.nn.Module):
+    """Stand-in DiT: deterministic fn of (x, t, cross_c), counts forwards."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def forward(self, x, t, cross_c=None, neighbor_current_mask=None):
+        self.calls += 1
+        out = x * 2.0 + t.reshape(-1, *([1] * (x.dim() - 1)))
+        if cross_c is not None:
+            out = out + cross_c.mean()
+        return out
+
+
+def test_dit_memo_hit_on_equal_values_miss_on_change():
+    from rlvr.guidance_batched import DiTForwardMemo
+
+    net = _CountingNet()
+    memo = DiTForwardMemo(net)
+    x = torch.randn(2, 3, 11, 4)
+    t = torch.tensor([0.5, 0.5])
+    cond = torch.randn(2, 8)
+
+    out1 = memo(x, t, cross_c=cond)
+    assert net.calls == 1 and memo.misses == 1 and memo.hits == 0
+
+    # value-equal x in a DIFFERENT tensor (the composer detaches/reshapes)
+    # + same conditioning object -> hit, no extra forward
+    out2 = memo(x.detach().clone().requires_grad_(True), t, cross_c=cond)
+    assert net.calls == 1 and memo.hits == 1
+    assert out2 is out1
+
+    # changed x values -> miss
+    memo(x + 1e-6, t, cross_c=cond)
+    assert net.calls == 2
+
+    # same x values but a DIFFERENT conditioning tensor object -> miss
+    memo(x + 1e-6, t, cross_c=cond.clone())
+    assert net.calls == 3
+
+
+def test_dit_memo_inplace_mutation_cannot_false_hit():
+    from rlvr.guidance_batched import DiTForwardMemo
+
+    net = _CountingNet()
+    memo = DiTForwardMemo(net)
+    x = torch.randn(2, 3, 11, 4)
+    t = torch.tensor([0.5, 0.5])
+
+    out1 = memo(x, t)
+    x.add_(1.0)  # caller mutates its tensor in place after the cached call
+    out2 = memo(x, t)
+    # the cached key was cloned, so the mutated x must NOT match the stale
+    # entry — a fresh forward is required
+    assert net.calls == 2
+    assert not torch.equal(out1, out2)
+
+
+def test_dit_memo_output_matches_unwrapped_and_is_detached():
+    from rlvr.guidance_batched import DiTForwardMemo
+
+    net = _CountingNet()
+    memo = DiTForwardMemo(net)
+    x = torch.randn(2, 3, 11, 4)
+    t = torch.tensor([0.3, 0.3])
+    expected = net(x, t)
+
+    with torch.enable_grad():
+        out = memo(x.clone().requires_grad_(True), t)
+    assert torch.equal(out, expected)
+    assert not out.requires_grad  # forward runs under no_grad
+
+
+def test_dit_memo_context_manager_installs_and_restores():
+    from rlvr.guidance_batched import DiTForwardMemo, dit_memo
+
+    class _Decoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dit = _CountingNet()
+
+    dec = _Decoder()
+    orig = dec.dit
+    with dit_memo(dec) as memo:
+        assert isinstance(dec.dit, DiTForwardMemo)
+        # wrapped module hidden from state_dict while installed
+        assert all(not k.startswith("dit.") for k in dec.state_dict())
+        x = torch.randn(1, 2, 11, 4)
+        t = torch.tensor([0.1])
+        dec.dit(x, t)
+        dec.dit(x.clone(), t.clone())
+        assert memo.hits == 1 and memo.misses == 1
+    assert dec.dit is orig
+    assert "dit.calls" not in dec.state_dict()  # plain restore
+
+    # exception inside the block must still restore
+    try:
+        with dit_memo(dec):
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert dec.dit is orig

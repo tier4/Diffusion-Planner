@@ -130,6 +130,24 @@ python -m rlvr.autoresearch.tools.grpo_viz \
   --w_progress 1.0 --lane_near_scale 50.0
 ```
 
+### verify_dit_memo.py
+Equivalence + latency check for the guided-sampling **DiT forward memo**. During
+classifier-guided DPM-solver sampling the DiT runs twice on the same `(x, t)` —
+once for the composer's x̂₀ refinement, once for the solver's noise prediction —
+so `rlvr.guidance_batched.dit_memo` (a scoped single-slot memo around
+`decoder.dit`) serves the second from the first. It is **default-on** at every
+guided-generation entry point (`--no_dit_memo` / `use_dit_memo=False` is the A/B
+escape hatch). This tool generates each scene three ways (slow composer / fast
+composer / fast+memo) and reports pairwise max `|dtraj|` + per-leg latency:
+`fast-vs-slow` is exactly 0, `memo-vs-fast` is ~0 (one float quantum — the shared
+forward runs under `no_grad`, numerically equivalent, not bit-identical). Raises
+if the memo never fires (so a no-op can't report false equivalence).
+```bash
+python -m rlvr.autoresearch.tools.verify_dit_memo \
+  --model_path <base.pth> --scenes <json> --n_scenes 3 \
+  --etas=-0.75,0.3,0.75 --envelopes v1,v2 --repeats 2
+```
+
 ## Diagnostic Tools
 
 ### diagnose_grpo_signal.py
@@ -401,8 +419,32 @@ python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
   `--render_only_avoidance` skips normal scenes (for large sweeps);
   clearance-demoted scenes always render with a DEMOTED title carrying the
   measured clearance. The guidance envelope flags (`--lambda_lat`,
-  `--lat_scale`, `--col_scale`, `--envelope`, ...) only affect these
-  renders and must match the policy's training envelope.
+  `--lat_scale`, `--col_scale`, `--envelope`, ...) only affect these renders
+  in this tool; they default to the policy's persisted calibration (see
+  "Guidance envelope" below) and pass through to the render composer.
+
+## Guidance envelope (persisted in the policy config)
+
+The exploration policy's `eta` outputs are calibrated to a fixed **guidance
+envelope** (`lambda_lat` / `lat_scale` / `col_scale` / `col_range` /
+`lambda_spd` / `stretch_scale` / `guidance_scale` / `envelope` / `lambda_col`)
+— the one its labels were swept against. The trainer is pure eta-regression and
+never sees the envelope, so applying the etas at a different envelope silently
+mis-scales guidance. The envelope is therefore **persisted in
+`exploration_policy_config.json`** (`ExplorationPolicyConfig.guidance_envelope`,
+defaulting to the canonical v1 calibration `5.0/2.0/9.0/8.0/...`; configs
+predating this backfill to v1 on load), and `--guidance_envelope <json>` lets
+the trainer record a non-v1 calibration.
+
+The guided eval/deploy tools (`eval_policy_avoidance`, `eval_closedloop_avoidance`,
+`valid_predictor_guided`, `eval_policy_l2`, `distill_guided_targets`,
+`rollforward_avoidance_scenes`) **load the envelope from the policy** — their
+envelope CLI flags default to `None` (override-only). Per knob: an explicit flag
+wins, else the policy's persisted envelope, else v1. **A flag that DISAGREES with
+the persisted envelope hard-fails** (the etas are bound to the persisted
+envelope) unless you pass `--force_envelope_override` (a loud-warning escape
+hatch for deliberate sweeps / v2 experiments). So: omit the flags to run at the
+policy's calibration; you cannot silently mis-scale it.
 
 ## Data preparation (NPZ format / mining)
 

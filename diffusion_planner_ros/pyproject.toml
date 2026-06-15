@@ -1,0 +1,10 @@
+[project]
+name = "diffusion_planner_ros"
+version = "0.0.0"
+description = "diffusion_planner_ros"
+requires-python = ">=3.10,<3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
