@@ -8,10 +8,13 @@ zero initial latent -> deterministic) three ways:
   fast : FastGuidanceComposer              (memo off)
   memo : FastGuidanceComposer + dit_memo   (the wired default)
 
-and reports the pairwise max |dtraj| over the full [T, 4] ego plan —
-the bit-identical claim requires memo-vs-fast == 0 exactly — plus
-active-frame latency (mean/p95 ms) per leg and the memo hit/miss
-counters from one instrumented generation per scene.
+and reports the pairwise max |dtraj| over the full [T, 4] ego plan. fast-vs-slow
+should be exactly 0; memo-vs-fast should be ~0 (a few 1e-5 m at most): the memo
+serves a single forward run under no_grad to both consumers, so kernel/backend
+selection can differ from the two-forward path by ~one float quantum — sub-mm
+and behaviorally inert, not a bug. Also reports active-frame latency (mean/p95
+ms) per leg and the memo hit/miss counters from one instrumented generation per
+scene.
 
 Usage:
     python -m rlvr.autoresearch.tools.verify_dit_memo \

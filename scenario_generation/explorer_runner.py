@@ -101,6 +101,7 @@ class ExplorerGuidanceRunner:
         device,
         envelope: ExplorerEnvelope | None = None,
         eta_smooth: float = 0.5,
+        use_dit_memo: bool = True,
     ):
         pdir = Path(policy_dir)
         cfg_path = pdir / "exploration_policy_config.json"
@@ -117,6 +118,11 @@ class ExplorerGuidanceRunner:
         self.policy.load_state_dict(state, strict=True)
         self.policy.eval()
         self.device = device
+        # Reuse the composer's x0-refinement DiT forward in the solver
+        # (numerically equivalent, ~halves the guided step). Toggle for A/B
+        # verification, mirroring the --no_dit_memo escape hatch on the eval
+        # tools.
+        self.use_dit_memo = bool(use_dit_memo)
         self.envelope = envelope or ExplorerEnvelope()
         # Exponential smoothing on etas across steps: damps left/right
         # flip-flop when the policy sits near a decision boundary mid-pass.
@@ -225,9 +231,12 @@ class ExplorerGuidanceRunner:
         decoder._guidance_fn = composer
         decoder._guidance_scale = composer._set_config.global_scale
         try:
-            # dit_memo lets the solver reuse the composer's x0-refinement
-            # forward at the same (x, t) — ~25% off active guided frames.
-            with dit_memo(decoder):
+            if self.use_dit_memo:
+                # dit_memo lets the solver reuse the composer's x0-refinement
+                # forward at the same (x, t) — ~25% off active guided frames.
+                with dit_memo(decoder):
+                    _, outputs = model(data)
+            else:
                 _, outputs = model(data)
             guided = outputs["prediction"][0, 0].cpu().numpy()
         finally:

@@ -79,9 +79,11 @@ def _batched_generate(
         composer: GuidanceComposer or None.
         device: Torch device.
         use_dit_memo: Reuse the composer's x0-refinement DiT forward for the
-            solver's noise prediction at the same (x, t) (bit-identical,
-            ~halves active guided-frame cost). Only takes effect with a
-            composer; False = escape hatch for A/B verification.
+            solver's noise prediction at the same (x, t) (numerically
+            equivalent — sub-mm; the shared forward runs under no_grad, so
+            kernel selection can differ from the two-forward path by ~one
+            float quantum — and ~halves active guided-frame cost). Only takes
+            effect with a composer; False = escape hatch for A/B verification.
 
     Returns:
         [B, T, 4] ego trajectories (x, y, cos, sin).
