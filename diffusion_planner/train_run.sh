@@ -4,6 +4,8 @@ exp_name=${1}
 TRAIN_SET_LIST=${2}
 VALID_SET_LIST=${3}
 MODEL_PATH=${4:-}  # optional: resume from this .pth if given
+WANDB_RUN_ID=${5:-}     # optional: wandb run id
+WANDB_PROJECT_NAME=${6:-}  # optional: wandb project name, default is Diffusion-Planner
 
 # to convert full paths
 TRAIN_SET_LIST=$(readlink -f $TRAIN_SET_LIST)
@@ -32,11 +34,20 @@ git show -s > ${SAVE_PATH}/git_show.txt
 git diff > ${SAVE_PATH}/git_diff.txt
 
 # Build optional resume argument
-RESUME_ARGS=()
+OPTIONAL_ARGS=()
 if [ -n "$MODEL_PATH" ]; then
     MODEL_PATH=$(readlink -f $MODEL_PATH)
-    RESUME_ARGS=(--resume_model_path $MODEL_PATH)
+    OPTIONAL_ARGS+=(--resume_model_path $MODEL_PATH)
 fi
+
+if [ -n "$WANDB_RUN_ID" ]; then
+    OPTIONAL_ARGS+=(--wandb_run_id "$WANDB_RUN_ID")
+fi
+
+if [ -n "$WANDB_PROJECT_NAME" ]; then
+    OPTIONAL_ARGS+=(--wandb_project_name "$WANDB_PROJECT_NAME")
+fi
+
 
 python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone train_predictor.py \
 --exp_name ${exp_name} \
@@ -47,7 +58,7 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --save_dir ${SAVE_PATH} \
 --train_epochs 80 \
 --save_utd 10 \
-"${RESUME_ARGS[@]}" \
+"${OPTIONAL_ARGS[@]}" \
 2>&1 | tee ${SAVE_PATH}/train_log.txt
 
 # Convert the trained PyTorch model to ONNX format

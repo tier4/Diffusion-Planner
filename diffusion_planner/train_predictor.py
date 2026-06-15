@@ -202,6 +202,15 @@ def get_args():
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
 
     parser.add_argument("--use_wandb", default=False, type=boolean)
+    parser.add_argument(
+        "--wandb_run_id", type=str, default=None, help="Existing wandb run ID to attach to"
+    )
+    parser.add_argument(
+        "--wandb_project_name",
+        type=str,
+        default="Diffusion-Planner",
+        help="Weights & Biases project name",
+    )
     parser.add_argument("--notes", default="", type=str)
 
     # distributed training parameters
@@ -363,8 +372,11 @@ def model_training(args):
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
+        if args.resume_model_path is None and args.wandb_run_id is not None:
+            wandb_id = args.wandb_run_id
+
         wandb.init(
-            project="Diffusion-Planner",
+            project=args.wandb_project_name,
             name=args.exp_name,
             notes=args.notes,
             resume="allow",
@@ -372,7 +384,8 @@ def model_training(args):
             dir=f"{save_path}",
         )
         wandb.config.update(args)
-        if args.use_wandb:
+
+        if wandb_id is None:
             log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
 
     if args.ddp:
@@ -517,7 +530,6 @@ def model_training(args):
 
 if __name__ == "__main__":
     args = get_args()
-
     assert len(args.coeff_timestep) == 4
 
     # Run

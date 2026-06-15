@@ -34,7 +34,9 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="rosbag directory (the one that contains metadata.yaml / log_file_info.json)",
     )
-    parser.add_argument("--vector_map_path", type=Path, default=None, help="override auto-resolved map")
+    parser.add_argument(
+        "--vector_map_path", type=Path, default=None, help="override auto-resolved map"
+    )
     parser.add_argument("--result_dir", type=Path, default=None, help="override output directory")
     parser.add_argument("--cpp_binary_path", type=Path, default=DEFAULT_CPP_BINARY)
     parser.add_argument("--step", type=int, default=30)
