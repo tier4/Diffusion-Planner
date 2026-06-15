@@ -130,6 +130,24 @@ python -m rlvr.autoresearch.tools.grpo_viz \
   --w_progress 1.0 --lane_near_scale 50.0
 ```
 
+### verify_dit_memo.py
+Equivalence + latency check for the guided-sampling **DiT forward memo**. During
+classifier-guided DPM-solver sampling the DiT runs twice on the same `(x, t)` —
+once for the composer's x̂₀ refinement, once for the solver's noise prediction —
+so `rlvr.guidance_batched.dit_memo` (a scoped single-slot memo around
+`decoder.dit`) serves the second from the first. It is **default-on** at every
+guided-generation entry point (`--no_dit_memo` / `use_dit_memo=False` is the A/B
+escape hatch). This tool generates each scene three ways (slow composer / fast
+composer / fast+memo) and reports pairwise max `|dtraj|` + per-leg latency:
+`fast-vs-slow` is exactly 0, `memo-vs-fast` is ~0 (one float quantum — the shared
+forward runs under `no_grad`, numerically equivalent, not bit-identical). Raises
+if the memo never fires (so a no-op can't report false equivalence).
+```bash
+python -m rlvr.autoresearch.tools.verify_dit_memo \
+  --model_path <base.pth> --scenes <json> --n_scenes 3 \
+  --etas=-0.75,0.3,0.75 --envelopes v1,v2 --repeats 2
+```
+
 ## Diagnostic Tools
 
 ### diagnose_grpo_signal.py
