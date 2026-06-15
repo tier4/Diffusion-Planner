@@ -86,9 +86,7 @@ def check_guidance_envelope_override(overrides: list[str], force: bool) -> None:
 
         print(
             "\n[GUIDANCE-ENVELOPE OVERRIDE] --force_envelope_override set; "
-            "explicit CLI flags override the policy's persisted calibration:\n  "
-            + detail
-            + "\n",
+            "explicit CLI flags override the policy's persisted calibration:\n  " + detail + "\n",
             file=sys.stderr,
         )
         return
