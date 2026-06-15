@@ -34,6 +34,7 @@ from perception_reproducer import (  # noqa: E402
     DEFAULT_MAX_STUCK_STEPS,
     DEFAULT_OFFROUTE_THRESHOLD,
     DEFAULT_TRAJ_STEP,
+    DEFAULT_VIDEO_FPS,
     DEFAULT_WHEEL_BASE,
     run_reproducer,
 )
@@ -64,6 +65,9 @@ def parse_args() -> argparse.Namespace:
         help="end after this many consecutive no-progress steps (0 disables)",
     )
     parser.add_argument(
+        "--video_fps", type=int, default=DEFAULT_VIDEO_FPS, help="playback fps of the output mp4"
+    )
+    parser.add_argument(
         "--scene", type=Path, default=None, help="default: ~/data/closed_loop/scene_<tag>.pkl"
     )
     parser.add_argument(
@@ -85,13 +89,13 @@ def main() -> None:
     if args.scene is not None:
         scene = args.scene
     else:
-        scene = Path.home() / "data" / "closed_loop" / f"scene_{tag}.pkl"
+        scene = Path.home() / "data" / f"cl_scene_{tag}.pkl"
     if args.result_dir is not None:
         result_dir = args.result_dir
     else:
         # Results live with the model (closed-loop evaluation of that checkpoint).
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_dir = args.model_dir.resolve() / "closed_loop" / f"{tag}_{stamp}"
+        result_dir = args.model_dir.resolve() / f"cl_{tag}_{stamp}"
 
     print(f"BAG       : {bag}")
     print(f"MODEL_DIR : {args.model_dir}")
@@ -122,6 +126,7 @@ def main() -> None:
         DEFAULT_EGO_WIDTH,
         DEFAULT_OFFROUTE_THRESHOLD,
         args.max_stuck_steps,
+        args.video_fps,
     )
 
     print(f"=== done. result: {result_dir} ===")

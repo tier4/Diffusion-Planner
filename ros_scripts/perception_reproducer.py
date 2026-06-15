@@ -91,7 +91,11 @@ GOAL_REACH_DIST_M = 5.0
 
 # End the episode after this many consecutive steps with no route progress (the ego is stuck and
 # not just waiting out a cool-down replay). 0 disables the check.
-DEFAULT_MAX_STUCK_STEPS = 50
+DEFAULT_MAX_STUCK_STEPS = 100
+
+# Playback frame rate of the output mp4 (one video frame per sim step). Decoupled from traj_step so
+# the video stays watchable; real-time playback would be round(1 / (traj_step * 0.1)) instead.
+DEFAULT_VIDEO_FPS = 10
 
 
 # --------------------------------------------------------------------------------------------
@@ -380,6 +384,7 @@ def run_closed_loop(
     make_video: bool,
     offroute_threshold: float,
     max_stuck_steps: int,
+    video_fps: int,
 ) -> ReproducerResult:
     """Run a closed-loop Perception Reproducer on one route sequence; return metrics + per-step log."""
     recorded_frames = sequence.data_list
@@ -566,8 +571,7 @@ def run_closed_loop(
     result = ReproducerResult(metrics=metrics, steps=steps)
 
     if save_video:
-        fps = max(1, round(1.0 / dt_eff))
-        _write_mp4(result_dir / "closed_loop.mp4", frames_dir, fps)
+        _write_mp4(result_dir / "closed_loop.mp4", frames_dir, video_fps)
     return result
 
 
@@ -726,6 +730,9 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MAX_STUCK_STEPS,
         help="end after this many consecutive no-progress steps (0 disables)",
     )
+    parser.add_argument(
+        "--video_fps", type=int, default=DEFAULT_VIDEO_FPS, help="playback fps of the output mp4"
+    )
     return parser.parse_args()
 
 
@@ -743,6 +750,7 @@ def run_reproducer(
     ego_width,
     offroute_threshold,
     max_stuck_steps,
+    video_fps,
 ) -> ReproducerResult:
     print(f"model : {model_dir}")
     print(f"scene : {scene_path}")
@@ -785,6 +793,7 @@ def run_reproducer(
         make_video,
         offroute_threshold,
         max_stuck_steps,
+        video_fps,
     )
     metrics_path = result_dir / "metrics.json"
     with open(metrics_path, "w") as f:
@@ -814,6 +823,7 @@ def main() -> None:
         args.ego_width,
         args.offroute_threshold,
         args.max_stuck_steps,
+        args.video_fps,
     )
 
 
