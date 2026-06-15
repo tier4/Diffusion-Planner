@@ -22,6 +22,7 @@
   <depend>yaml-cpp</depend>
 
   <exec_depend>rosbag2_storage_mcap</exec_depend>
+  <exec_depend>autoware_lanelet2_extension_python</exec_depend>
 
   <test_depend>ament_cmake_ros</test_depend>
   <test_depend>ament_lint_auto</test_depend>
