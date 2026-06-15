@@ -58,7 +58,6 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --save_dir ${SAVE_PATH} \
 --train_epochs 80 \
 --save_utd 10 \
---batch_size 8 \
 "${OPTIONAL_ARGS[@]}" \
 2>&1 | tee ${SAVE_PATH}/train_log.txt
 
