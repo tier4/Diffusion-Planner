@@ -31,6 +31,7 @@ from extract_scene import build_scene_pkl  # noqa: E402
 from perception_reproducer import (  # noqa: E402
     DEFAULT_EGO_LENGTH,
     DEFAULT_EGO_WIDTH,
+    DEFAULT_MAX_STUCK_STEPS,
     DEFAULT_OFFROUTE_THRESHOLD,
     DEFAULT_TRAJ_STEP,
     DEFAULT_WHEEL_BASE,
@@ -55,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_TRAJ_STEP,
         help="advance to the n-th predicted waypoint per iteration (1 = +0.1 s)",
+    )
+    parser.add_argument(
+        "--max_stuck_steps",
+        type=int,
+        default=DEFAULT_MAX_STUCK_STEPS,
+        help="end after this many consecutive no-progress steps (0 disables)",
     )
     parser.add_argument(
         "--scene", type=Path, default=None, help="default: ~/data/closed_loop/scene_<tag>.pkl"
@@ -113,6 +120,7 @@ def main() -> None:
         DEFAULT_EGO_LENGTH,
         DEFAULT_EGO_WIDTH,
         DEFAULT_OFFROUTE_THRESHOLD,
+        args.max_stuck_steps,
     )
 
     print(f"=== done. result: {result_dir} ===")

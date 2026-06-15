@@ -89,6 +89,10 @@ REPRODUCE_COOL_DOWN_SEC = 80.0  # Autoware default (-c); must exceed the ego's s
 # so it does not idle there burning the remaining steps after arriving.
 GOAL_REACH_DIST_M = 5.0
 
+# End the episode after this many consecutive steps with no route progress (the ego is stuck and
+# not just waiting out a cool-down replay). 0 disables the check.
+DEFAULT_MAX_STUCK_STEPS = 50
+
 
 # --------------------------------------------------------------------------------------------
 # Small geometry helpers
@@ -375,6 +379,7 @@ def run_closed_loop(
     result_dir: Path | None,
     make_video: bool,
     offroute_threshold: float,
+    max_stuck_steps: int,
 ) -> ReproducerResult:
     """Run a closed-loop Perception Reproducer on one route sequence; return metrics + per-step log."""
     recorded_frames = sequence.data_list
@@ -426,7 +431,8 @@ def run_closed_loop(
     last_seq_pos = None
     last_idx = 0
     sim_time = 0.0
-    terminated = "max_steps"  # why the loop ended: "goal" once the route end is reached
+    stuck_steps = 0  # consecutive steps without route progress
+    terminated = "max_steps"  # why the loop ended: "goal" / "stuck" / "max_steps"
 
     steps = []
     import matplotlib
@@ -482,8 +488,15 @@ def run_closed_loop(
             last_idx = idx
             cool_down.append((idx, sim_time))
 
-        cursor = max(cursor, idx)
+        if idx > cursor:
+            cursor = idx
+            stuck_steps = 0
+        else:
+            stuck_steps += 1
         pbar.update(cursor - pbar.n)
+        if max_stuck_steps > 0 and stuck_steps >= max_stuck_steps:
+            terminated = "stuck"
+            break
 
         input_dict, bl2map, map2bl = build_input_dict(
             sim_history,
@@ -707,6 +720,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ego_length", type=float, default=DEFAULT_EGO_LENGTH)
     parser.add_argument("--ego_width", type=float, default=DEFAULT_EGO_WIDTH)
     parser.add_argument("--offroute_threshold", type=float, default=DEFAULT_OFFROUTE_THRESHOLD)
+    parser.add_argument(
+        "--max_stuck_steps",
+        type=int,
+        default=DEFAULT_MAX_STUCK_STEPS,
+        help="end after this many consecutive no-progress steps (0 disables)",
+    )
     return parser.parse_args()
 
 
@@ -723,6 +742,7 @@ def run_reproducer(
     ego_length,
     ego_width,
     offroute_threshold,
+    max_stuck_steps,
 ) -> ReproducerResult:
     print(f"model : {model_dir}")
     print(f"scene : {scene_path}")
@@ -764,6 +784,7 @@ def run_reproducer(
         result_dir,
         make_video,
         offroute_threshold,
+        max_stuck_steps,
     )
     metrics_path = result_dir / "metrics.json"
     with open(metrics_path, "w") as f:
@@ -792,6 +813,7 @@ def main() -> None:
         args.ego_length,
         args.ego_width,
         args.offroute_threshold,
+        args.max_stuck_steps,
     )
 
 
