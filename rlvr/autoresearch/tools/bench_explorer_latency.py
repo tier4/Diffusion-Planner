@@ -59,6 +59,11 @@ def main():
     parser.add_argument("--lambda_spd", type=float, default=0.2)
     parser.add_argument("--stretch_scale", type=float, default=1.0)
     parser.add_argument("--guidance_scale", type=float, default=0.5)
+    parser.add_argument(
+        "--no_dit_memo",
+        action="store_true",
+        help="disable the guided-frame DiT forward memo (A/B escape hatch; memo is the default)",
+    )
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -110,6 +115,7 @@ def main():
                 first_deterministic=False,
                 composer=make_composer(etas1, args),
                 device=device,
+                use_dit_memo=not args.no_dit_memo,
             )
             _sync()
             t3 = time.perf_counter()
@@ -146,6 +152,7 @@ def main():
                 first_deterministic=False,
                 composer=make_composer(etas9, args),
                 device=device,
+                use_dit_memo=not args.no_dit_memo,
             )
             _sync()
             t["k8_guided"].append(time.perf_counter() - t0)

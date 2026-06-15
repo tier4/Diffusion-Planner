@@ -31,6 +31,7 @@ from rlvr.closed_loop.state_update import (
     transform_positions_to_ego_frame,
     update_scene_state,
 )
+from rlvr.guidance_batched import dit_memo
 from rlvr.reward import RewardConfig
 
 
@@ -66,6 +67,7 @@ def _batched_generate(
     noise_scale: float,
     composer: GuidanceComposer | None,
     device: torch.device,
+    use_dit_memo: bool = True,
 ) -> torch.Tensor:
     """Generate one trajectory per scene in a batch.
 
@@ -76,6 +78,12 @@ def _batched_generate(
         noise_scale: Noise for initial latent.
         composer: GuidanceComposer or None.
         device: Torch device.
+        use_dit_memo: Reuse the composer's x0-refinement DiT forward for the
+            solver's noise prediction at the same (x, t) (numerically
+            equivalent — sub-mm; the shared forward runs under no_grad, so
+            kernel selection can differ from the two-forward path by ~one
+            float quantum — and ~halves active guided-frame cost). Only takes
+            effect with a composer; False = escape hatch for A/B verification.
 
     Returns:
         [B, T, 4] ego trajectories (x, y, cos, sin).
@@ -104,7 +112,11 @@ def _batched_generate(
     )
 
     try:
-        _, decoder_output = model(batch_data)
+        if composer is not None and use_dit_memo:
+            with dit_memo(model.decoder):
+                _, decoder_output = model(batch_data)
+        else:
+            _, decoder_output = model(batch_data)
         # [B, P, T, 4] -> [B, T, 4] (ego only, index 0)
         ego_trajs = decoder_output["prediction"][:, 0].detach()
     finally:
@@ -143,6 +155,7 @@ def _batched_generate_varied_noise(
     first_deterministic: bool,
     composer: GuidanceComposer | None,
     device: torch.device,
+    use_dit_memo: bool = True,
 ) -> torch.Tensor:
     """Generate trajectories with per-element independent noise scales.
 
@@ -153,6 +166,7 @@ def _batched_generate_varied_noise(
     Args:
         noise_min, noise_max: Range for uniform random noise scale per trajectory.
         first_deterministic: If True, element 0 gets noise=0 (deterministic).
+        use_dit_memo: See _batched_generate.
 
     Returns:
         [B, T, 4] ego trajectories.
@@ -184,7 +198,11 @@ def _batched_generate_varied_noise(
     batch_data["sampled_trajectories"] = xT
 
     try:
-        _, decoder_output = model(batch_data)
+        if composer is not None and use_dit_memo:
+            with dit_memo(model.decoder):
+                _, decoder_output = model(batch_data)
+        else:
+            _, decoder_output = model(batch_data)
         ego_trajs = decoder_output["prediction"][:, 0].detach()
     finally:
         model.decoder._guidance_fn = _orig_fn

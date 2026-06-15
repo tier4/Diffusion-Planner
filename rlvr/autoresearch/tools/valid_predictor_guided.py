@@ -34,6 +34,7 @@ import rlvr.guidance_batched  # noqa: F401
 from exploration_policy.utils import run_frozen_encoder
 from rlvr.autoresearch.tools.eval_det_avoidance import load_model
 from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy, make_composer
+from rlvr.guidance_batched import dit_memo
 
 
 class _LossAccum:
@@ -81,6 +82,11 @@ def main():
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
     parser.add_argument("--lambda_col", type=float, default=3.0)
+    parser.add_argument(
+        "--no_dit_memo",
+        action="store_true",
+        help="disable the guided-frame DiT forward memo (A/B escape hatch; memo is the default)",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -158,7 +164,13 @@ def main():
         decoder._guidance_fn = composer
         decoder._guidance_scale = composer._set_config.global_scale
         try:
-            _, gui_out = model(data)
+            if args.no_dit_memo:
+                _, gui_out = model(data)
+            else:
+                # dit_memo: solver reuses the composer's x0-refinement
+                # forward (same deployment optimization as explorer_runner).
+                with dit_memo(decoder):
+                    _, gui_out = model(data)
         finally:
             decoder._guidance_fn = saved_fn
             decoder._guidance_scale = saved_scale

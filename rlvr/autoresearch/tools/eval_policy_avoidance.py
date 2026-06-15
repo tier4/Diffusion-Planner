@@ -126,6 +126,7 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
                 first_deterministic=False,
                 composer=composer,
                 device=device,
+                use_dit_memo=not getattr(args, "no_dit_memo", False),
             )
             .cpu()
             .numpy()
@@ -141,6 +142,7 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
             n_samples=1,
             composer=composer,
             device=device,
+            use_dit_memo=not getattr(args, "no_dit_memo", False),
         )[None, 0]
 
     det = x_ref_np  # x_ref IS the unguided det trajectory
@@ -313,6 +315,11 @@ def main():
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
     parser.add_argument("--lambda_col", type=float, default=3.0)
+    parser.add_argument(
+        "--no_dit_memo",
+        action="store_true",
+        help="disable the guided-frame DiT forward memo (A/B escape hatch; memo is the default)",
+    )
     parser.add_argument(
         "--slow_composer",
         action="store_true",
