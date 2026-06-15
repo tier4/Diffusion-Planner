@@ -30,6 +30,8 @@ from extract_scene import build_scene_pkl  # noqa: E402
 from perception_reproducer import (  # noqa: E402
     DEFAULT_EGO_LENGTH,
     DEFAULT_EGO_WIDTH,
+    DEFAULT_OFFROUTE_THRESHOLD,
+    DEFAULT_TRAJ_STEP,
     DEFAULT_WHEEL_BASE,
     run_reproducer,
 )
@@ -47,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         help="directory containing args.json + best_model.pth",
     )
     parser.add_argument("--num_steps", type=int, default=None, help="default: all frames")
+    parser.add_argument(
+        "--traj_step",
+        type=int,
+        default=DEFAULT_TRAJ_STEP,
+        help="advance to the n-th predicted waypoint per iteration (1 = +0.1 s)",
+    )
     parser.add_argument(
         "--scene", type=Path, default=None, help="default: ~/data/closed_loop/scene_<tag>.pkl"
     )
@@ -93,11 +101,13 @@ def main() -> None:
         scene,
         result_dir,
         args.num_steps,
+        args.traj_step,
         device,
         not args.no_video,
         DEFAULT_WHEEL_BASE,
         DEFAULT_EGO_LENGTH,
         DEFAULT_EGO_WIDTH,
+        DEFAULT_OFFROUTE_THRESHOLD,
     )
 
     print(f"=== done. result: {result_dir} ===")

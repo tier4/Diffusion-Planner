@@ -25,8 +25,6 @@ sourced and diffusion_planner + diffusion_planner_ros on PYTHONPATH (same as par
 import argparse
 import json
 import pickle
-import shutil
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -71,11 +69,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from reproducer_inputs import PAST_TIME_STEPS, build_neighbor_past  # noqa: E402
 
 DT = 0.1  # sim step (10 Hz)
-MAKE_MP4 = Path.home() / "misc" / "ffmpeg_lib" / "make_mp4_from_unsequential_png.sh"
 
 DEFAULT_WHEEL_BASE = 2.75
 DEFAULT_EGO_LENGTH = 4.34
 DEFAULT_EGO_WIDTH = 1.70
+DEFAULT_TRAJ_STEP = 1
+DEFAULT_OFFROUTE_THRESHOLD = 5.0
 
 
 # --------------------------------------------------------------------------------------------
@@ -355,13 +354,14 @@ def run_closed_loop(
     vector_map,
     sequence,
     device,
-    num_steps: int | None = None,
-    wheel_base: float = 2.75,
-    ego_length: float = 4.34,
-    ego_width: float = 1.70,
-    result_dir: Path | None = None,
-    make_video: bool = True,
-    offroute_threshold: float = 5.0,
+    num_steps: int | None,
+    traj_step: int,
+    wheel_base: float,
+    ego_length: float,
+    ego_width: float,
+    result_dir: Path | None,
+    make_video: bool,
+    offroute_threshold: float,
 ) -> ReproducerResult:
     """Run a closed-loop Perception Reproducer on one route sequence; return metrics + per-step log."""
     recorded_frames = sequence.data_list
@@ -377,10 +377,11 @@ def run_closed_loop(
     num_steps = min(num_steps, n_rec)
 
     ego_shape_vec = [wheel_base, ego_length, ego_width]
-    frame_dir = None
-    if make_video and result_dir is not None:
-        frame_dir = result_dir / "frames"
-        frame_dir.mkdir(parents=True, exist_ok=True)
+    # Each iteration jumps to the (traj_step)-th predicted waypoint instead of only +0.1 s.
+    step_idx = max(0, min(traj_step, OUTPUT_T) - 1)
+    dt_eff = (step_idx + 1) * DT
+    save_video = make_video and result_dir is not None
+    video_frames = []
 
     # Initialize the simulated ego from the first recorded frame.
     init = recorded_frames[0].kinematic_state
@@ -395,8 +396,9 @@ def run_closed_loop(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from tqdm import tqdm
 
-    for k in range(num_steps):
+    for k in tqdm(range(num_steps), desc="closed-loop"):
         bl2map = sim_history[-1]
         sim_pos = np.array([bl2map[0, 3], bl2map[1, 3]])
 
@@ -432,8 +434,8 @@ def run_closed_loop(
         deviation = float(np.linalg.norm(sim_pos - recorded_xy[nearest_idx]))
         steps.append(StepRecord(sim_pos.copy(), nearest_idx, deviation, collision, offroute))
 
-        # --- visualization ---
-        if frame_dir is not None:
+        # --- visualization (collect uniform-size RGB frames in memory for the mp4) ---
+        if save_video:
             fig, ax = plt.subplots(figsize=(10, 10))
             visualize_inputs(raw_input, ax=ax)
             ax.plot(
@@ -449,29 +451,33 @@ def run_closed_loop(
                 f"step {k:04d}  rec_idx={nearest_idx}  dev={deviation:.2f}m"
                 f"  {'COLLISION' if collision else ''}"
             )
-            fig.savefig(frame_dir / f"{k:08d}.png", bbox_inches="tight", dpi=80)
+            fig.canvas.draw()
+            w, h = fig.canvas.get_width_height()
+            rgba = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
+            video_frames.append(rgba[:, :, :3].copy())
             plt.close(fig)
 
-        # --- advance ego (perfect tracking of the +0.1 s predicted pose) ---
-        pose_ego = pose_4x4_from_xy_cos_sin(*ego_pred[0])
+        # --- advance ego: jump to the step_idx-th predicted waypoint (perfect tracking) ---
+        pose_ego = pose_4x4_from_xy_cos_sin(*ego_pred[step_idx])
         new_bl2map = bl2map @ pose_ego
         sim_history.append(new_bl2map)
 
-        # Update velocity / acceleration from the followed step (body frame).
+        # Update velocity / acceleration over the followed interval (body frame).
         disp_map = new_bl2map[:3, 3] - bl2map[:3, 3]
         disp_body = rigid_inverse(bl2map)[:3, :3] @ disp_map
-        vx, vy = disp_body[0] / DT, disp_body[1] / DT
-        yaw_rate = float(np.arctan2(ego_pred[0, 3], ego_pred[0, 2])) / DT
+        vx, vy = disp_body[0] / dt_eff, disp_body[1] / dt_eff
+        yaw_rate = float(np.arctan2(ego_pred[step_idx, 3], ego_pred[step_idx, 2])) / dt_eff
         sim_vel = [vx, vy, yaw_rate]
         speed = float(np.hypot(vx, vy))
-        sim_accel = [(speed - prev_speed) / DT, 0.0]
+        sim_accel = [(speed - prev_speed) / dt_eff, 0.0]
         prev_speed = speed
 
     metrics = _summarize_metrics(steps, sim_history, recorded_frames, offroute_threshold)
     result = ReproducerResult(metrics=metrics, steps=steps)
 
-    if frame_dir is not None and make_video:
-        _make_mp4(frame_dir)
+    if save_video and video_frames:
+        fps = max(1, round(1.0 / dt_eff))
+        _write_mp4(result_dir / "closed_loop.mp4", video_frames, fps)
     return result
 
 
@@ -523,17 +529,16 @@ def _summarize_metrics(steps, sim_history, recorded_frames, offroute_threshold) 
     }
 
 
-def _make_mp4(frame_dir: Path):
-    if not MAKE_MP4.is_file():
-        print(f"Skip mp4: helper not found at {MAKE_MP4}")
-        return
-    if shutil.which("ffmpeg") is None:
-        print("Skip mp4: ffmpeg not installed (PNGs are in frames/)")
-        return
-    try:
-        subprocess.run([str(MAKE_MP4), str(frame_dir)], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Skip mp4: ffmpeg failed ({e})")
+def _write_mp4(path: Path, frames: list, fps: int):
+    """Encode RGB frames to an mp4 with OpenCV (no external ffmpeg / shell script)."""
+    import cv2
+
+    h, w = frames[0].shape[:2]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    for frame in frames:
+        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    writer.release()
+    print(f"Saved video ({len(frames)} frames @ {fps} fps) to {path}")
 
 
 # --------------------------------------------------------------------------------------------
@@ -609,11 +614,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--args_json", type=Path, default=None)
     parser.add_argument("--result_dir", type=Path, default=None)
     parser.add_argument("--num_steps", type=int, default=None, help="default: full sequence")
+    parser.add_argument(
+        "--traj_step",
+        type=int,
+        default=DEFAULT_TRAJ_STEP,
+        help="advance to the n-th predicted waypoint per iteration (1 = +0.1 s)",
+    )
     parser.add_argument("--device", type=str, default=None, help="cuda / cpu (auto if unset)")
     parser.add_argument("--no_video", action="store_true")
     parser.add_argument("--wheel_base", type=float, default=DEFAULT_WHEEL_BASE)
     parser.add_argument("--ego_length", type=float, default=DEFAULT_EGO_LENGTH)
     parser.add_argument("--ego_width", type=float, default=DEFAULT_EGO_WIDTH)
+    parser.add_argument("--offroute_threshold", type=float, default=DEFAULT_OFFROUTE_THRESHOLD)
     return parser.parse_args()
 
 
@@ -623,11 +635,13 @@ def run_reproducer(
     scene_path,
     result_dir,
     num_steps,
+    traj_step,
     device,
     make_video,
     wheel_base,
     ego_length,
     ego_width,
+    offroute_threshold,
 ) -> ReproducerResult:
     print(f"model : {model_dir}")
     print(f"scene : {scene_path}")
@@ -661,12 +675,14 @@ def run_reproducer(
         vector_map,
         sequence,
         device,
-        num_steps=num_steps,
-        wheel_base=wheel_base,
-        ego_length=ego_length,
-        ego_width=ego_width,
-        result_dir=result_dir,
-        make_video=make_video,
+        num_steps,
+        traj_step,
+        wheel_base,
+        ego_length,
+        ego_width,
+        result_dir,
+        make_video,
+        offroute_threshold,
     )
     metrics_path = result_dir / "metrics.json"
     with open(metrics_path, "w") as f:
@@ -688,11 +704,13 @@ def main() -> None:
         args.scene,
         args.result_dir,
         args.num_steps,
+        args.traj_step,
         device,
         not args.no_video,
         args.wheel_base,
         args.ego_length,
         args.ego_width,
+        args.offroute_threshold,
     )
 
 
