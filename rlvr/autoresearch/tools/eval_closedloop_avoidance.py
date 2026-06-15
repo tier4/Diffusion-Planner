@@ -64,7 +64,9 @@ def make_guided_predict(policy, heads, args, device):
                 noise_min=0.0,
                 noise_max=0.0,
                 first_deterministic=False,
-                composer=make_composer(etas, args),
+                composer=make_composer(
+                    etas, args, envelope=getattr(policy, "guidance_envelope", None)
+                ),
                 device=device,
                 use_dit_memo=not args.no_dit_memo,
             )[0]
@@ -124,17 +126,28 @@ def main():
     parser.add_argument(
         "--ego_shape", required=True, help="WB,L,W — no default, must match the platform"
     )
-    parser.add_argument("--lambda_lat", type=float, default=5.0)
-    parser.add_argument("--lat_scale", type=float, default=2.0)
-    parser.add_argument("--col_scale", type=float, default=9.0)
-    parser.add_argument("--col_range", type=float, default=8.0)
-    parser.add_argument("--lambda_spd", type=float, default=0.2)
-    parser.add_argument("--stretch_scale", type=float, default=1.0)
-    parser.add_argument("--guidance_scale", type=float, default=0.5)
+    parser.add_argument(
+        "--lambda_lat",
+        type=float,
+        default=None,
+        help="override the policy's persisted guidance envelope",
+    )
+    parser.add_argument("--lat_scale", type=float, default=None)
+    parser.add_argument("--col_scale", type=float, default=None)
+    parser.add_argument("--col_range", type=float, default=None)
+    parser.add_argument("--lambda_spd", type=float, default=None)
+    parser.add_argument("--stretch_scale", type=float, default=None)
+    parser.add_argument("--guidance_scale", type=float, default=None)
     parser.add_argument(
         "--no_dit_memo",
         action="store_true",
         help="disable the guided-frame DiT forward memo (A/B escape hatch; memo is the default)",
+    )
+    parser.add_argument(
+        "--force_envelope_override",
+        action="store_true",
+        help="allow explicit envelope flags to override the policy's persisted "
+        "calibration (otherwise a disagreeing flag hard-fails)",
     )
     args = parser.parse_args()
 

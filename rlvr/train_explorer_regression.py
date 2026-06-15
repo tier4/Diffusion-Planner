@@ -57,6 +57,40 @@ def label_target(head: str, best: dict) -> float:
     return v
 
 
+def resolve_training_envelope(envelope_path: str | None, heads: list[str]) -> dict:
+    """Build the guidance envelope to persist into the policy config.
+
+    Starts from the v1 calibration, optionally overlays a user JSON (rejecting
+    unknown knobs), and enforces that a trained ``stretch`` head's ``lambda_spd``
+    matches the module ``LAMBDA_SPD`` used by ``label_target`` to decode its
+    labels — otherwise the persisted envelope would apply a different lambda_spd
+    at inference than the labels were built with (a silent envelope/label
+    mismatch, the exact failure this persistence guards against).
+    """
+    from exploration_policy.model import V1_GUIDANCE_ENVELOPE
+
+    envelope = dict(V1_GUIDANCE_ENVELOPE)
+    if envelope_path:
+        with open(envelope_path) as f:
+            user_env = json.load(f)
+        unknown = set(user_env) - set(V1_GUIDANCE_ENVELOPE)
+        if unknown:
+            raise ValueError(
+                f"--guidance_envelope has unknown knob(s) {sorted(unknown)}; "
+                f"valid keys: {sorted(V1_GUIDANCE_ENVELOPE)}"
+            )
+        envelope.update(user_env)
+    if "stretch" in heads and envelope["lambda_spd"] != LAMBDA_SPD:
+        raise ValueError(
+            f"guidance_envelope lambda_spd={envelope['lambda_spd']} disagrees "
+            f"with LAMBDA_SPD={LAMBDA_SPD} used to decode the stretch labels — "
+            "the persisted envelope would mis-scale the stretch head at "
+            f"inference. Use lambda_spd={LAMBDA_SPD}, drop the stretch head, or "
+            "wire label_target to the envelope value first."
+        )
+    return envelope
+
+
 def build_entries(
     labels_paths: list[str],
     normal_paths: list[str],
@@ -189,6 +223,13 @@ def main():
     parser.add_argument("--counterfactual_weight", type=float, default=1.0)
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--head_raw_scale", type=float, default=10.0)
+    parser.add_argument(
+        "--guidance_envelope",
+        default=None,
+        help="JSON file with the guidance envelope the --labels were swept at "
+        "(lambda_lat/lat_scale/col_scale/...). Persisted into the policy config "
+        "so eval/deploy reuse it. Omit to record the canonical v1 calibration.",
+    )
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--patience", type=int, default=50)
     parser.add_argument(
@@ -267,12 +308,16 @@ def main():
         f"(val avoid={int(is_avoid[val_idx].sum())})"
     )
 
+    guidance_envelope = resolve_training_envelope(args.guidance_envelope, heads)
+    print(f"[envelope] persisting guidance envelope into policy config: {guidance_envelope}")
+
     ep_config = ExplorationPolicyConfig(
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
         encoder_hidden_dim=model_args.hidden_dim,
         head_raw_scale=args.head_raw_scale,
         heads=heads,
+        guidance_envelope=guidance_envelope,
     )
     policy = ExplorationPolicy(ep_config, ref_seq_len=model_args.future_len).to(device)
     if args.init_from:

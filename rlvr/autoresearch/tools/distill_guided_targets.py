@@ -58,15 +58,26 @@ def main():
     )
     parser.add_argument("--min_clearance", type=float, default=0.2)
     parser.add_argument("--keep_inert", action="store_true")
-    parser.add_argument("--lambda_lat", type=float, default=5.0)
-    parser.add_argument("--lat_scale", type=float, default=2.0)
-    parser.add_argument("--col_scale", type=float, default=9.0)
-    parser.add_argument("--col_range", type=float, default=8.0)
-    parser.add_argument("--lambda_spd", type=float, default=0.2)
-    parser.add_argument("--stretch_scale", type=float, default=1.0)
-    parser.add_argument("--guidance_scale", type=float, default=0.5)
-    parser.add_argument("--envelope", choices=["v1", "v2"], default="v1")
-    parser.add_argument("--lambda_col", type=float, default=3.0)
+    parser.add_argument(
+        "--lambda_lat",
+        type=float,
+        default=None,
+        help="override the policy's persisted guidance envelope",
+    )
+    parser.add_argument("--lat_scale", type=float, default=None)
+    parser.add_argument("--col_scale", type=float, default=None)
+    parser.add_argument("--col_range", type=float, default=None)
+    parser.add_argument("--lambda_spd", type=float, default=None)
+    parser.add_argument("--stretch_scale", type=float, default=None)
+    parser.add_argument("--guidance_scale", type=float, default=None)
+    parser.add_argument(
+        "--force_envelope_override",
+        action="store_true",
+        help="allow explicit envelope flags to override the policy's persisted "
+        "calibration (otherwise a disagreeing flag hard-fails)",
+    )
+    parser.add_argument("--envelope", choices=["v1", "v2"], default=None)
+    parser.add_argument("--lambda_col", type=float, default=None)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -106,7 +117,9 @@ def main():
                     noise_min=0.0,
                     noise_max=0.0,
                     first_deterministic=False,
-                    composer=make_composer(etas, args),
+                    composer=make_composer(
+                        etas, args, envelope=getattr(policy, "guidance_envelope", None)
+                    ),
                     device=device,
                 )[0]
                 .cpu()
