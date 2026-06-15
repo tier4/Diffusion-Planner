@@ -365,9 +365,7 @@ def build_neighbor_future(data_list, i, map2bl_matrix_4x4, agent_ids, max_num_ob
     state, then walk future frames appending the same id until it disappears. Returns
     (max_num_objects, out_t, 3) of [x, y, heading] in ego frame.
     """
-    current_objs = {
-        bytes(o.object_id.uuid): o for o in data_list[i].tracked_objects.objects
-    }
+    current_objs = {bytes(o.object_id.uuid): o for o in data_list[i].tracked_objects.objects}
     # Pre-index future frames by object id.
     future_maps = []
     for t in range(1, out_t + 1):
@@ -577,13 +575,9 @@ def main(
 
     kinematic_states = topic_name_to_timed["/localization/kinematic_state"]
     accelerations = topic_name_to_timed["/localization/acceleration"]
-    tracked_objects_msgs = topic_name_to_timed[
-        "/perception/object_recognition/tracking/objects"
-    ]
+    tracked_objects_msgs = topic_name_to_timed["/perception/object_recognition/tracking/objects"]
     turn_indicators = topic_name_to_timed["/vehicle/status/turn_indicators_status"]
-    traffic_signals = topic_name_to_timed[
-        "/perception/traffic_light_recognition/traffic_signals"
-    ]
+    traffic_signals = topic_name_to_timed["/perception/traffic_light_recognition/traffic_signals"]
     route_entries = topic_name_to_timed["/planning/mission_planning/route"]
 
     if len(route_entries) == 0:
