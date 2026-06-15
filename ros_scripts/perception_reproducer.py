@@ -26,6 +26,7 @@ import argparse
 import json
 import pickle
 import sys
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -75,6 +76,18 @@ DEFAULT_EGO_LENGTH = 4.34
 DEFAULT_EGO_WIDTH = 1.70
 DEFAULT_TRAJ_STEP = 1
 DEFAULT_OFFROUTE_THRESHOLD = 5.0
+
+# Perception replay (ported from Autoware planning_debug_tools/perception_reproducer):
+# instead of always publishing the single nearest recorded frame (which freezes dynamic objects
+# and traffic lights when the ego stops), gather the recorded frames within SEARCH_RADIUS_M of the
+# ego and play them forward in time, putting each used frame on a cool-down. This lets the recorded
+# scene keep evolving (lead car drives away, light turns green) even while the ego is stopped.
+SEARCH_RADIUS_M = 1.5  # Autoware default (-r); 0 would reproduce the old single-nearest behavior
+REPRODUCE_COOL_DOWN_SEC = 80.0  # Autoware default (-c); must exceed the ego's stopping time
+
+# Stop the episode once the ego reaches the end of the recorded route (its final logged pose),
+# so it does not idle there burning the remaining steps after arriving.
+GOAL_REACH_DIST_M = 5.0
 
 
 # --------------------------------------------------------------------------------------------
@@ -381,7 +394,22 @@ def run_closed_loop(
     step_idx = max(0, min(traj_step, OUTPUT_T) - 1)
     dt_eff = (step_idx + 1) * DT
     save_video = make_video and result_dir is not None
-    video_frames = []
+    frames_dir = None
+    if save_video:
+        frames_dir = result_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+    # Recorded ego speed per frame (for the speed-gap guard below).
+    recorded_speed = np.array(
+        [
+            float(
+                np.hypot(
+                    f.kinematic_state.twist.twist.linear.x, f.kinematic_state.twist.twist.linear.y
+                )
+            )
+            for f in recorded_frames
+        ]
+    )
 
     # Initialize the simulated ego from the first recorded frame.
     init = recorded_frames[0].kinematic_state
@@ -389,7 +417,16 @@ def run_closed_loop(
     sim_vel = [init.twist.twist.linear.x, init.twist.twist.linear.y, init.twist.twist.angular.z]
     prev_speed = float(np.hypot(sim_vel[0], sim_vel[1]))
     sim_accel = [0.0, 0.0]
-    cursor = 0  # monotonic nearest-recorded-frame cursor
+    cursor = 0  # max recorded-frame index reached (for the progress bar)
+
+    # Perception replay state (Autoware-style): a time-ordered queue of nearby recorded frames plus
+    # a cool-down so each is consumed once per window -> the scene advances even while ego is stopped.
+    reproduce_seq: deque = deque()
+    cool_down: deque = deque()  # (frame_idx, sim_time_when_used)
+    last_seq_pos = None
+    last_idx = 0
+    sim_time = 0.0
+    terminated = "max_steps"  # why the loop ended: "goal" once the route end is reached
 
     steps = []
     import matplotlib
@@ -398,22 +435,62 @@ def run_closed_loop(
     import matplotlib.pyplot as plt
     from tqdm import tqdm
 
-    for k in tqdm(range(num_steps), desc="closed-loop"):
+    # Progress reflects route progress (nearest recorded frame reached), not the iteration count.
+    pbar = tqdm(total=n_rec, desc="route progress", unit="frame")
+    for k in range(num_steps):
         bl2map = sim_history[-1]
         sim_pos = np.array([bl2map[0, 3], bl2map[1, 3]])
 
-        # Nearest recorded ego (search forward from the cursor; allow a small backward window).
-        lo = max(0, cursor - 5)
-        d = np.linalg.norm(recorded_xy[lo:] - sim_pos, axis=1)
-        nearest_idx = lo + int(np.argmin(d))
-        cursor = max(cursor, nearest_idx)
+        # Stop once the ego has reached the end of the recorded route.
+        if float(np.linalg.norm(sim_pos - recorded_xy[-1])) < GOAL_REACH_DIST_M:
+            terminated = "goal"
+            break
+
+        # --- pick the recorded frame to reproduce (Autoware-style sequence + cool-down) ---
+        # Rebuild the queue only after the ego has moved more than the search radius; otherwise keep
+        # consuming the queue so the recorded scene plays forward in time even when the ego is stopped.
+        dist_moved = (
+            np.inf if last_seq_pos is None else float(np.linalg.norm(sim_pos - last_seq_pos))
+        )
+        if dist_moved > SEARCH_RADIUS_M:
+            last_seq_pos = sim_pos.copy()
+            dists = np.linalg.norm(recorded_xy - sim_pos, axis=1)
+            nearby = list(np.where(dists <= SEARCH_RADIUS_M)[0])
+            if not nearby:
+                nearby = [int(np.argmin(dists))]
+            while cool_down and (sim_time - cool_down[0][1]) > REPRODUCE_COOL_DOWN_SEC:
+                cool_down.popleft()
+            cooling = {i for i, _ in cool_down}
+            reproduce_seq = deque(sorted(i for i in nearby if i not in cooling))
+
+        # speed-gap guard: if the recorded ego was much faster here, repeat the last frame instead of
+        # teleporting objects (matches Autoware).
+        repeat = len(reproduce_seq) == 0
+        if not repeat:
+            front = reproduce_seq[0]
+            ego_speed = float(np.hypot(sim_vel[0], sim_vel[1]))
+            rec_dist = float(np.linalg.norm(sim_pos - recorded_xy[front]))
+            repeat = (
+                recorded_speed[front] > ego_speed * 2.0
+                and recorded_speed[front] > 3.0
+                and rec_dist > SEARCH_RADIUS_M
+            )
+        if repeat:
+            idx = last_idx
+        else:
+            idx = reproduce_seq.popleft()
+            last_idx = idx
+            cool_down.append((idx, sim_time))
+
+        cursor = max(cursor, idx)
+        pbar.update(cursor - pbar.n)
 
         input_dict, bl2map, map2bl = build_input_dict(
             sim_history,
             sim_vel,
             sim_accel,
             recorded_frames,
-            nearest_idx,
+            idx,
             vector_map,
             ego_shape_vec,
             wheel_base,
@@ -431,10 +508,10 @@ def run_closed_loop(
         # --- metrics for this step ---
         collision = _check_collision(raw_input, ego_length, ego_width)
         offroute = _offroute_lateral(raw_input)
-        deviation = float(np.linalg.norm(sim_pos - recorded_xy[nearest_idx]))
-        steps.append(StepRecord(sim_pos.copy(), nearest_idx, deviation, collision, offroute))
+        deviation = float(np.linalg.norm(sim_pos - recorded_xy[idx]))
+        steps.append(StepRecord(sim_pos.copy(), idx, deviation, collision, offroute))
 
-        # --- visualization (collect uniform-size RGB frames in memory for the mp4) ---
+        # --- visualization: save a uniform-size PNG per step (incremental, survives a crash) ---
         if save_video:
             fig, ax = plt.subplots(figsize=(10, 10))
             visualize_inputs(raw_input, ax=ax)
@@ -448,13 +525,10 @@ def run_closed_loop(
                 zorder=10,
             )
             ax.set_title(
-                f"step {k:04d}  rec_idx={nearest_idx}  dev={deviation:.2f}m"
+                f"step {k:04d}  rec_idx={idx}  dev={deviation:.2f}m"
                 f"  {'COLLISION' if collision else ''}"
             )
-            fig.canvas.draw()
-            w, h = fig.canvas.get_width_height()
-            rgba = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
-            video_frames.append(rgba[:, :, :3].copy())
+            fig.savefig(frames_dir / f"{k:08d}.png", dpi=fig.dpi)
             plt.close(fig)
 
         # --- advance ego: jump to the step_idx-th predicted waypoint (perfect tracking) ---
@@ -471,13 +545,16 @@ def run_closed_loop(
         speed = float(np.hypot(vx, vy))
         sim_accel = [(speed - prev_speed) / dt_eff, 0.0]
         prev_speed = speed
+        sim_time += dt_eff
 
+    pbar.close()
     metrics = _summarize_metrics(steps, sim_history, recorded_frames, offroute_threshold)
+    metrics["terminated"] = terminated
     result = ReproducerResult(metrics=metrics, steps=steps)
 
-    if save_video and video_frames:
+    if save_video:
         fps = max(1, round(1.0 / dt_eff))
-        _write_mp4(result_dir / "closed_loop.mp4", video_frames, fps)
+        _write_mp4(result_dir / "closed_loop.mp4", frames_dir, fps)
     return result
 
 
@@ -529,16 +606,20 @@ def _summarize_metrics(steps, sim_history, recorded_frames, offroute_threshold) 
     }
 
 
-def _write_mp4(path: Path, frames: list, fps: int):
-    """Encode RGB frames to an mp4 with OpenCV (no external ffmpeg / shell script)."""
-    import cv2
+def _write_mp4(path: Path, frame_dir: Path, fps: int):
+    """Encode the per-step PNG frames to an H.264 mp4 via imageio-ffmpeg (widely playable)."""
+    import imageio.v2 as imageio
 
-    h, w = frames[0].shape[:2]
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    for frame in frames:
-        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    writer.release()
-    print(f"Saved video ({len(frames)} frames @ {fps} fps) to {path}")
+    pngs = sorted(frame_dir.glob("*.png"))
+    if not pngs:
+        return
+    writer = imageio.get_writer(
+        str(path), fps=fps, codec="libx264", macro_block_size=1, pixelformat="yuv420p"
+    )
+    for png in pngs:
+        writer.append_data(imageio.imread(str(png)))
+    writer.close()
+    print(f"Saved video ({len(pngs)} frames @ {fps} fps) to {path}")
 
 
 # --------------------------------------------------------------------------------------------
@@ -589,7 +670,7 @@ def reconstruct_sequence(scene) -> SimpleNamespace:
             ),
         )
         traffic = {
-            gid: [SimpleNamespace(color=c, shape=s) for c, s in elems]
+            gid: [SimpleNamespace(color=c, shape=s, confidence=conf) for c, s, conf in elems]
             for gid, elems in fr["traffic"].items()
         }
         frames.append(

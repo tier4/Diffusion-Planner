@@ -110,8 +110,9 @@ def serialize_frame(fd) -> dict:
             }
         )
     # traffic_signals is the persistent recognition snapshot {group_id: [elements]}.
+    # Keep confidence too: lanelet_converter picks the highest-confidence element per lanelet.
     traffic = {
-        gid: [(el.color, el.shape) for el in elements]
+        gid: [(el.color, el.shape, el.confidence) for el in elements]
         for gid, elements in fd.traffic_signals.items()
     }
     return {

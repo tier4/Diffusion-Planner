@@ -20,6 +20,7 @@ Do not embed site-specific paths here (this file is public). To reuse default pa
 import argparse
 import sys
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 # Make the sibling ros_scripts modules importable (same approach as parse_rosbag, etc.).
@@ -59,7 +60,10 @@ def parse_args() -> argparse.Namespace:
         "--scene", type=Path, default=None, help="default: ~/data/closed_loop/scene_<tag>.pkl"
     )
     parser.add_argument(
-        "--result_dir", type=Path, default=None, help="default: ~/data/closed_loop/result_<tag>"
+        "--result_dir",
+        type=Path,
+        default=None,
+        help="default: ~/data/closed_loop/result_<tag>_<timestamp> (new dir per run)",
     )
     parser.add_argument("--no_video", action="store_true")
     return parser.parse_args()
@@ -78,7 +82,8 @@ def main() -> None:
     if args.result_dir is not None:
         result_dir = args.result_dir
     else:
-        result_dir = Path.home() / "data" / "closed_loop" / f"result_{tag}"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_dir = Path.home() / "data" / "closed_loop" / f"result_{tag}_{stamp}"
 
     print(f"BAG       : {bag}")
     print(f"MODEL_DIR : {args.model_dir}")
