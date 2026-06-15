@@ -16,7 +16,11 @@ from tqdm import tqdm
 
 from preference_optimization.datasets import DPODataset, NPZDataset
 from preference_optimization.dpo_loss import compute_dpo_loss
-from preference_optimization.utils import calculate_ade, generate_deterministic_trajectory, load_npz_data
+from preference_optimization.utils import (
+    calculate_ade,
+    generate_deterministic_trajectory,
+    load_npz_data,
+)
 from preference_optimization.visualization import visualize_validation
 
 
@@ -177,6 +181,7 @@ class DPOTrainer:
         """
         if self.use_lora:
             from preference_optimization.lora_utils import save_lora_checkpoint
+
             lora_dir = str(self.run_dir / f"lora_epoch_{epoch:03d}")
             save_lora_checkpoint(self.policy_model, lora_dir)
             # Save optimizer state so resumed runs continue with warm AdamW moments.
@@ -231,9 +236,7 @@ class DPOTrainer:
             f"Reward Margin={metrics['reward_margin']:.4f}"
         )
 
-    def visualize_epoch(
-        self, valid_loader: DataLoader, epoch: int, max_samples: int = 50
-    ) -> None:
+    def visualize_epoch(self, valid_loader: DataLoader, epoch: int, max_samples: int = 50) -> None:
         """Visualize validation predictions for current epoch.
 
         Args:
@@ -295,7 +298,9 @@ class DPOTrainer:
                 continue
             try:
                 obs = load_npz_data(npz_path, self.device)
-                traj = generate_deterministic_trajectory(self.policy_model, self.model_args, obs, self.device)
+                traj = generate_deterministic_trajectory(
+                    self.policy_model, self.model_args, obs, self.device
+                )
                 paths_list.append(str(npz_path))
                 trajs_list.append(traj)
                 seen.add(npz_path)
@@ -330,7 +335,9 @@ class DPOTrainer:
         for npz_path, baseline_traj in zip(paths_list, baselines):
             try:
                 obs = load_npz_data(npz_path, self.device)
-                current_traj = generate_deterministic_trajectory(self.policy_model, self.model_args, obs, self.device)
+                current_traj = generate_deterministic_trajectory(
+                    self.policy_model, self.model_args, obs, self.device
+                )
                 ades.append(calculate_ade(current_traj, baseline_traj))
             except Exception as e:
                 print(f"  [drift] skipping {npz_path}: {e}")

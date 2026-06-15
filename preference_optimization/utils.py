@@ -40,12 +40,13 @@ def load_npz_data(
     if "ego_shape" not in data:
         if ego_shape_override is not None:
             data["ego_shape"] = torch.tensor(
-                [list(ego_shape_override)], dtype=torch.float32, device=device,
+                [list(ego_shape_override)],
+                dtype=torch.float32,
+                device=device,
             )
         else:
             raise ValueError(
-                f"load_npz_data: '{npz_path}' is missing 'ego_shape' "
-                "(wheel_base, length, width)."
+                f"load_npz_data: '{npz_path}' is missing 'ego_shape' (wheel_base, length, width)."
             )
 
     # v4 decoder requires delay (always 0 at inference, training uses random delay)
@@ -119,9 +120,7 @@ def calculate_initial_position_displacement(
     return float(np.linalg.norm(trajectory_1[0, :2] - trajectory_2[0, :2]))
 
 
-def calculate_initial_yaw_difference(
-    trajectory_1: np.ndarray, trajectory_2: np.ndarray
-) -> float:
+def calculate_initial_yaw_difference(trajectory_1: np.ndarray, trajectory_2: np.ndarray) -> float:
     """Calculate the absolute yaw difference at the first pose of two trajectories.
 
     Yaw is extracted from cos/sin encoding (columns 2 and 3) using atan2.
@@ -258,8 +257,10 @@ def generate_trajectory_pair(
     import warnings
 
     # Build GuidanceSetConfig from legacy boolean params if new-style config not provided.
-    if guidance is None and enable_guidance and (
-        use_collision or use_route_following or use_lane_keeping or use_centerline_following
+    if (
+        guidance is None
+        and enable_guidance
+        and (use_collision or use_route_following or use_lane_keeping or use_centerline_following)
     ):
         warnings.warn(
             "Boolean guidance flags are deprecated. Use guidance=GuidanceSetConfig(...).",
@@ -269,9 +270,9 @@ def generate_trajectory_pair(
         guidance = GuidanceSetConfig(
             global_scale=guidance_scale if guidance_scale is not None else 0.5,
             functions=[
-                GuidanceConfig("collision",            enabled=use_collision),
-                GuidanceConfig("route_following",      enabled=use_route_following),
-                GuidanceConfig("lane_keeping",         enabled=use_lane_keeping),
+                GuidanceConfig("collision", enabled=use_collision),
+                GuidanceConfig("route_following", enabled=use_route_following),
+                GuidanceConfig("lane_keeping", enabled=use_lane_keeping),
                 GuidanceConfig("centerline_following", enabled=use_centerline_following),
             ],
         )
@@ -297,6 +298,7 @@ def generate_trajectory_pair(
                 stacklevel=2,
             )
         from diffusion_planner.model.guidance.composer import GuidanceComposer
+
         policy_model.decoder._guidance_fn = GuidanceComposer(guidance)
         policy_model.decoder._guidance_scale = guidance.global_scale
     else:
@@ -364,7 +366,16 @@ def generate_trajectory_pair(
             if ade <= ade_threshold:
                 policy_model.decoder._guidance_fn = _original_guidance_fn
                 policy_model.decoder._guidance_scale = _original_guidance_scale
-                return traj_1, traj_2, ade, attempt + 1, ego_shape, disp, yaw_diff, is_pruned_candidate
+                return (
+                    traj_1,
+                    traj_2,
+                    ade,
+                    attempt + 1,
+                    ego_shape,
+                    disp,
+                    yaw_diff,
+                    is_pruned_candidate,
+                )
         else:
             fde = calculate_fde(traj_1, traj_2)
 
@@ -374,7 +385,16 @@ def generate_trajectory_pair(
             if fde >= fde_threshold:
                 policy_model.decoder._guidance_fn = _original_guidance_fn
                 policy_model.decoder._guidance_scale = _original_guidance_scale
-                return traj_1, traj_2, fde, attempt + 1, ego_shape, disp, yaw_diff, is_pruned_candidate
+                return (
+                    traj_1,
+                    traj_2,
+                    fde,
+                    attempt + 1,
+                    ego_shape,
+                    disp,
+                    yaw_diff,
+                    is_pruned_candidate,
+                )
 
     # Max retries reached — restore guidance configuration before returning.
     policy_model.decoder._guidance_fn = _original_guidance_fn
@@ -383,8 +403,19 @@ def generate_trajectory_pair(
     if best_traj_2 is not None:
         # At least one candidate passed the initial pose check (if pruning was enabled)
         # or best by FDE/ADE metric (if pruning was disabled)
-        is_pruned_final = best_disp > initial_pos_threshold or best_yaw_diff > initial_yaw_threshold_deg
-        return traj_1, best_traj_2, best_metric, max_retries, ego_shape, best_disp, best_yaw_diff, is_pruned_final
+        is_pruned_final = (
+            best_disp > initial_pos_threshold or best_yaw_diff > initial_yaw_threshold_deg
+        )
+        return (
+            traj_1,
+            best_traj_2,
+            best_metric,
+            max_retries,
+            ego_shape,
+            best_disp,
+            best_yaw_diff,
+            is_pruned_final,
+        )
     else:
         # All max_retries candidates were pruned (only reachable when enable_initial_pruning=True)
         return traj_1, last_traj_2, 0.0, max_retries, ego_shape, last_disp, last_yaw_diff, True

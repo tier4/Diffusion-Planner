@@ -140,14 +140,14 @@ def _build_ego_current_state(
         ax_long = float(accel_ego[0])
 
     state = np.zeros(10, dtype=np.float32)
-    state[0] = 0.0           # x
-    state[1] = 0.0           # y
-    state[2] = 1.0           # cos(0)
-    state[3] = 0.0           # sin(0)
-    state[4] = speed         # vx = |v| = ds/dt
-    state[5] = 0.0           # vy = 0 (base_link: no lateral velocity)
-    state[6] = ax_long       # ax = d(vx)/dt (tangential accel)
-    state[7] = 0.0           # ay = 0 (base_link: no lateral accel)
+    state[0] = 0.0  # x
+    state[1] = 0.0  # y
+    state[2] = 1.0  # cos(0)
+    state[3] = 0.0  # sin(0)
+    state[4] = speed  # vx = |v| = ds/dt
+    state[5] = 0.0  # vy = 0 (base_link: no lateral velocity)
+    state[6] = ax_long  # ax = d(vx)/dt (tangential accel)
+    state[7] = 0.0  # ay = 0 (base_link: no lateral accel)
     state[8] = ego.steering_angle
     state[9] = ego.yaw_rate
     return state[np.newaxis]  # [1, 10]
@@ -214,7 +214,8 @@ def _build_neighbor_agents_past(
         cos_hw = np.cos(traj[:, 2]).astype(np.float32)
         sin_hw = np.sin(traj[:, 2]).astype(np.float32)
         vel_world_canonical = np.stack(
-            [speed * cos_hw, speed * sin_hw], axis=1,
+            [speed * cos_hw, speed * sin_hw],
+            axis=1,
         )
         vel = transform_directions(vel_world_canonical, R)
 
@@ -248,7 +249,7 @@ def _build_neighbor_agents_past(
         # row) is real; age_steps>=T_agent means the full history is valid.
         if hasattr(agent, "age_steps") and agent.age_steps < T_agent:
             n_valid = max(1, agent.age_steps + 1)  # at least current frame
-            feats[:T_agent - n_valid] = 0.0
+            feats[: T_agent - n_valid] = 0.0
 
         feats = _pad_or_truncate(feats, T_needed, axis=0)
         out[0, slot_idx] = feats
@@ -435,8 +436,8 @@ class MapTensorCache:
         self._all_lanes = map_data.lanes.astype(np.float32)  # (N_all, 20, 33)
         # Pre-compute representative point per lane for distance sorting.
         # cpp uses min(dist(first_pt), dist(second_to_last_pt)).
-        first_pts = self._all_lanes[:, 0, :2]   # (N_all, 2)
-        last_pts = self._all_lanes[:, -2, :2]    # (N_all, 2) second to last like cpp
+        first_pts = self._all_lanes[:, 0, :2]  # (N_all, 2)
+        last_pts = self._all_lanes[:, -2, :2]  # (N_all, 2) second to last like cpp
         self._lane_ref_a = first_pts
         self._lane_ref_b = last_pts
         self._lane_valid = np.abs(self._all_lanes[:, :, :2]).sum(axis=(1, 2)) > 0.1
@@ -467,7 +468,9 @@ class MapTensorCache:
 
         # -- line strings: (n, 20, 4) --
         n_ls = min(map_data.line_strings.shape[0], _NUM_LINE_STRINGS)
-        self._line_strings = np.zeros((_NUM_LINE_STRINGS, _POINTS_PER_LINE_STRING, 4), dtype=np.float32)
+        self._line_strings = np.zeros(
+            (_NUM_LINE_STRINGS, _POINTS_PER_LINE_STRING, 4), dtype=np.float32
+        )
         if n_ls > 0:
             src_in = map_data.line_strings[:n_ls].astype(np.float32)
             D_in = min(src_in.shape[-1], 4) if src_in.ndim >= 3 else 2
@@ -643,7 +646,11 @@ def to_model_tensors(
     data_np["ego_agent_past"] = _build_ego_agent_past(ego, R, ego_xy, ego_heading)
     data_np["ego_current_state"] = _build_ego_current_state(ego, R)
     data_np["neighbor_agents_past"] = _build_neighbor_agents_past(
-        scene, ego_agent_id, R, ego_xy, ego_heading,
+        scene,
+        ego_agent_id,
+        R,
+        ego_xy,
+        ego_heading,
     )
     if map_cache is not None:
         data_np["static_objects"] = map_cache.get_static_objects_ego(R, ego_xy)
@@ -658,8 +665,12 @@ def to_model_tensors(
         data_np["lanes_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
         data_np["lanes_has_speed_limit"] = np.zeros((1, _NUM_LANES, 1), dtype=bool)
         n_sl = min(scene.map_data.lanes_speed_limit.shape[0], _NUM_LANES)
-        data_np["lanes_speed_limit"][0, :n_sl] = scene.map_data.lanes_speed_limit[:n_sl].astype(np.float32)
-        data_np["lanes_has_speed_limit"][0, :n_sl] = scene.map_data.lanes_has_speed_limit[:n_sl].astype(bool)
+        data_np["lanes_speed_limit"][0, :n_sl] = scene.map_data.lanes_speed_limit[:n_sl].astype(
+            np.float32
+        )
+        data_np["lanes_has_speed_limit"][0, :n_sl] = scene.map_data.lanes_has_speed_limit[
+            :n_sl
+        ].astype(bool)
         data_np["polygons"] = _build_polygons(scene.map_data.polygons, R, ego_xy)
         data_np["line_strings"] = _build_line_strings(scene.map_data.line_strings, R, ego_xy)
 
@@ -691,7 +702,12 @@ def to_model_tensors(
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
     data_torch["sampled_trajectories"] = torch.zeros(
-        1, P, future_len + 1, _POSE_DIM, dtype=torch.float32, device=device,
+        1,
+        P,
+        future_len + 1,
+        _POSE_DIM,
+        dtype=torch.float32,
+        device=device,
     )
 
     # Apply observation normalization
@@ -733,9 +749,7 @@ def dump_step_npz(
         NPZ loader.
     """
     if predicted_neighbor_num < 1:
-        raise ValueError(
-            f"predicted_neighbor_num must be >= 1; got {predicted_neighbor_num}"
-        )
+        raise ValueError(f"predicted_neighbor_num must be >= 1; got {predicted_neighbor_num}")
     ego = scene.get_agent(scene.ego_agent_id)
     ego_xy = ego.current_position.astype(np.float64)
     ego_h = ego.current_heading
@@ -745,7 +759,11 @@ def dump_step_npz(
     data["ego_agent_past"] = _build_ego_agent_past(ego, R, ego_xy, ego_h)
     data["ego_current_state"] = _build_ego_current_state(ego, R)
     data["neighbor_agents_past"] = _build_neighbor_agents_past(
-        scene, scene.ego_agent_id, R, ego_xy, ego_h,
+        scene,
+        scene.ego_agent_id,
+        R,
+        ego_xy,
+        ego_h,
         num_neighbors=predicted_neighbor_num,
     )
     data["static_objects"] = map_cache.get_static_objects_ego(R, ego_xy)
@@ -782,13 +800,15 @@ def dump_step_npz(
     if data["goal_pose"].shape[-1] == 4:
         gp = data["goal_pose"]
         data["goal_pose"] = np.array(
-            [gp[0], gp[1], float(np.arctan2(gp[3], gp[2]))], dtype=np.float32,
+            [gp[0], gp[1], float(np.arctan2(gp[3], gp[2]))],
+            dtype=np.float32,
         )
 
     # GT-future placeholders (caller fills if desired; ranked-SFT ignores).
     data["ego_agent_future"] = np.zeros((future_len, 3), dtype=np.float32)
     nb_future = np.zeros(
-        (predicted_neighbor_num, future_len, 4), dtype=np.float32,
+        (predicted_neighbor_num, future_len, 4),
+        dtype=np.float32,
     )
     # Fill stopped-neighbor futures with their current pose held constant
     # as (x, y, cos_heading, sin_heading) — matching the 4-column format

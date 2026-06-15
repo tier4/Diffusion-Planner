@@ -36,9 +36,7 @@ def test_rl_loss_gradient_is_advantage_weighted():
     t_prev = torch.tensor(0.05).view(1, 1)
 
     # Collection pass: sample
-    sample, _, _ = vpsde_denoising_step_with_logprob(
-        x0_pred.detach(), t_prev, sde, min_std=0.1
-    )
+    sample, _, _ = vpsde_denoising_step_with_logprob(x0_pred.detach(), t_prev, sde, min_std=0.1)
 
     # Optimization pass: compute log_prob with gradient
     _, log_prob, mean = vpsde_denoising_step_with_logprob(
@@ -92,9 +90,7 @@ def test_chain_consistency():
     t_prev = torch.tensor(0.05).view(1, 1).expand(B, 1)
 
     # Collection: get sample and log_prob
-    sample, lp_collect, _ = vpsde_denoising_step_with_logprob(
-        x0, t_prev, sde, min_std=0.1
-    )
+    sample, lp_collect, _ = vpsde_denoising_step_with_logprob(x0, t_prev, sde, min_std=0.1)
 
     # Optimization: recompute log_prob for same sample
     _, lp_optimize, _ = vpsde_denoising_step_with_logprob(
@@ -114,12 +110,12 @@ def test_il_loss_basic():
     pred = torch.randn(B, T, D)
     gt = torch.randn(B, T, D)
 
-    il_loss = F.mse_loss(pred, gt, reduction='none').mean(dim=(1, 2))
+    il_loss = F.mse_loss(pred, gt, reduction="none").mean(dim=(1, 2))
     assert il_loss.shape == (B,), f"IL loss shape should be (B,): {il_loss.shape}"
     assert (il_loss > 0).all(), "IL loss should be positive"
 
     # When pred == gt, loss should be 0
-    il_zero = F.mse_loss(gt, gt, reduction='none').mean(dim=(1, 2))
+    il_zero = F.mse_loss(gt, gt, reduction="none").mean(dim=(1, 2))
     assert (il_zero == 0).all(), "IL loss should be 0 when pred == gt"
     print("PASS: IL loss basic")
 
@@ -146,12 +142,14 @@ def test_masking_zero_advantages():
     """Verify that zero-advantage entries are masked in RL loss."""
     N, S = 4, 3
     log_probs = torch.randn(N, S)
-    advantages = torch.tensor([
-        [1.0, 1.0, 1.0],   # positive
-        [0.0, 0.0, 0.0],   # zero (should be masked)
-        [-1.0, -1.0, -1.0],  # negative
-        [0.0, 0.0, 0.0],   # zero (should be masked)
-    ])
+    advantages = torch.tensor(
+        [
+            [1.0, 1.0, 1.0],  # positive
+            [0.0, 0.0, 0.0],  # zero (should be masked)
+            [-1.0, -1.0, -1.0],  # negative
+            [0.0, 0.0, 0.0],  # zero (should be masked)
+        ]
+    )
 
     per_step_loss = -torch.exp(log_probs - log_probs.detach()) * advantages
     mask_nz = advantages != 0
@@ -204,9 +202,7 @@ def test_multistep_logprob_accumulation():
     for i in range(num_steps):
         t_prev = torch.tensor(schedule[i + 1].item()).view(1, 1)
         # Pretend model perfectly predicts x0
-        x_t, lp, _ = vpsde_denoising_step_with_logprob(
-            x0_true, t_prev, sde, min_std=0.1
-        )
+        x_t, lp, _ = vpsde_denoising_step_with_logprob(x0_true, t_prev, sde, min_std=0.1)
         all_log_probs.append(lp)
 
     log_probs = torch.stack(all_log_probs, dim=-1)  # [B, num_steps]

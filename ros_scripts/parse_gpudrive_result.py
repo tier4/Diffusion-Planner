@@ -332,14 +332,10 @@ def save_sequences(
                 anchor_yaw,
             )
             future_yaw = wrap_angle(yaw_series[future_idx] - anchor_yaw).astype(np.float32)
-            ego_future = np.concatenate([future_xy, future_yaw[:, None]], axis=1).astype(
-                np.float32
-            )
+            ego_future = np.concatenate([future_xy, future_yaw[:, None]], axis=1).astype(np.float32)
 
             goal_pose = compute_goal_pose(goal_x_series[center_idx], goal_y_series[center_idx])
-            ego_current_state = build_current_state(
-                x_series, y_series, yaw_series, center_idx, dt
-            )
+            ego_current_state = build_current_state(x_series, y_series, yaw_series, center_idx, dt)
 
             _, map2bl_matrix = create_transform_matrices(anchor_x, anchor_y, anchor_z, anchor_yaw)
             traffic_light_recognition: dict = {}
@@ -353,9 +349,7 @@ def save_sequences(
                 dev=MAP_DEVICE,
                 do_sort=True,
             )
-            route_reference_idx = np.concatenate(
-                (np.array([center_idx], dtype=int), future_idx)
-            )
+            route_reference_idx = np.concatenate((np.array([center_idx], dtype=int), future_idx))
             future_points_map = np.column_stack(
                 (x_series[route_reference_idx], y_series[route_reference_idx])
             )
@@ -402,12 +396,8 @@ def save_sequences(
             polygons_np = tensor_to_numpy(polygon_tensor)
             line_strings_np = tensor_to_numpy(line_string_tensor)
 
-            neighbor_past = np.zeros(
-                (MAX_NUM_NEIGHBORS, past_steps, 11), dtype=np.float32
-            )
-            neighbor_future = np.zeros(
-                (MAX_NUM_NEIGHBORS, output_t, 3), dtype=np.float32
-            )
+            neighbor_past = np.zeros((MAX_NUM_NEIGHBORS, past_steps, 11), dtype=np.float32)
+            neighbor_future = np.zeros((MAX_NUM_NEIGHBORS, output_t, 3), dtype=np.float32)
             other_candidates = []
             for other_idx in range(simulation.num_agents):
                 if other_idx == agent_idx:

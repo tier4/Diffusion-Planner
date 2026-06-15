@@ -1,6 +1,6 @@
 import argparse
-from pathlib import Path
 import hashlib
+from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:

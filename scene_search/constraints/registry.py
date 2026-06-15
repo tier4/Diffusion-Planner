@@ -13,11 +13,13 @@ _REGISTRY: dict[str, type["BaseConstraint"]] = {}
 
 def register(name: str):
     """Decorator to register a constraint class by name."""
+
     def decorator(cls):
         if name in _REGISTRY:
             raise ValueError(f"Constraint '{name}' already registered")
         _REGISTRY[name] = cls
         return cls
+
     return decorator
 
 

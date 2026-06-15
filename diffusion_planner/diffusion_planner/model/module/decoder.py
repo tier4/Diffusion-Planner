@@ -44,14 +44,22 @@ def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> 
     reshaped_delay = delay.reshape(delay.shape[0], 1, 1, 1)
     # Perform the comparison, result is (B, 1, max_len, 1)
     mask = steps <= reshaped_delay
-    # Expand to include the num_agents dimension
-    mask = mask.expand(-1, num_agents, -1, -1)  # (B, num_agents, max_len, 1)
+    ego_mask = mask.expand(-1, 1, -1, -1)
+    neighbor_mask = torch.zeros(
+        (delay.shape[0], num_agents - 1, max_len, 1), dtype=torch.bool, device=delay.device
+    )
+    return torch.cat([ego_mask, neighbor_mask], dim=1)
 
-    # Always predict for neighbors by setting their mask to False
-    result = torch.zeros_like(mask, dtype=torch.bool)
-    result[:, 0, :, :] = mask[:, 0, :, :]
 
-    return result
+def replace_current_state(x: torch.Tensor, current_states: torch.Tensor) -> torch.Tensor:
+    """Return a trajectory tensor with the first timestep replaced."""
+    return torch.cat([current_states[:, :, None, :], x[:, :, 1:, :]], dim=2)
+
+
+def add_current_xy(future: torch.Tensor, current_states: torch.Tensor) -> torch.Tensor:
+    """Add current xy position to future xy channels without mutating the input."""
+    xy = future[..., :2] + current_states[:, :, None, :2]
+    return torch.cat([xy, future[..., 2:]], dim=-1)
 
 
 def compute_training_loss(
@@ -382,7 +390,13 @@ class Decoder(nn.Module):
         }
 
     def _inference_flow_matching(
-        self, encoding, inputs, current_states, neighbor_current_mask, encoding_pooled, sampled_trajectories
+        self,
+        encoding,
+        inputs,
+        current_states,
+        neighbor_current_mask,
+        encoding_pooled,
+        sampled_trajectories,
     ):
         """Inference using Flow Matching approach.
 
@@ -414,7 +428,7 @@ class Decoder(nn.Module):
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
         if self._use_velocity:
             future = velocity_to_waypoints(x[:, :, 1:, :])
-            future[..., :2] = future[..., :2] + current_states[:, :, None, :2]
+            future = add_current_xy(future, current_states)
             x = future  # [B, P, T, 4]
         else:
             x = self._state_normalizer.inverse(x)[:, :, 1:]
@@ -445,9 +459,9 @@ class Decoder(nn.Module):
         B = encoding.shape[0]
         P = 1 + self._predicted_neighbor_num
 
-        xT = sampled_trajectories
-        action_prefix = sampled_trajectories.reshape(B, P, -1, 4)
-        action_prefix[:, :, 0, :] = current_states
+        action_prefix = sampled_trajectories.reshape(B, P, 1 + self._future_len, 4)
+        action_prefix = replace_current_state(action_prefix, current_states)
+        xT = action_prefix.reshape(B, P, (1 + self._future_len) * 4)
 
         B, P, T_plus_1, D = action_prefix.shape
 
@@ -455,9 +469,9 @@ class Decoder(nn.Module):
         mask = generate_prefix_mask(delay, P, T_plus_1)  # (B, P, T_plus_1, 1)
 
         def prefix_constraint(xt, t, step):
-            xt = xt.reshape(B, P, -1, 4)
-            xt[:, :, 0, :] = current_states
-            return xt.reshape(B, P, -1)
+            xt = xt.reshape(B, P, 1 + self._future_len, 4)
+            xt = replace_current_state(xt, current_states)
+            return xt
 
         model_wrapper_params = {
             "classifier_fn": self._guidance_fn,
@@ -497,7 +511,7 @@ class Decoder(nn.Module):
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
         if self._use_velocity:
             future = velocity_to_waypoints(x0[:, :, 1:, :])
-            future[..., :2] = future[..., :2] + current_states[:, :, None, :2]
+            future = add_current_xy(future, current_states)
             x0 = future  # [B, P, T, 4]
         else:
             x0 = self._state_normalizer.inverse(x0)[:, :, 1:]
@@ -528,7 +542,12 @@ class Decoder(nn.Module):
 
         if self._model_type == "flow_matching":
             return self._inference_flow_matching(
-                encoding, inputs, current_states, neighbor_current_mask, encoding_pooled, sampled_trajectories
+                encoding,
+                inputs,
+                current_states,
+                neighbor_current_mask,
+                encoding_pooled,
+                sampled_trajectories,
             )
         elif self._model_type == "x_start":
             return self._inference_x_start(

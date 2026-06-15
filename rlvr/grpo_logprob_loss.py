@@ -74,13 +74,13 @@ def _build_model_inputs(
             nf_4d[..., 2] = torch.cos(heading)
             nf_4d[..., 3] = torch.sin(heading)
         nf_4d_norm = (nf_4d - ego_mean) / ego_std
-        gt_future[:, 1:1 + nf_pn, :, :] = nf_4d_norm
+        gt_future[:, 1 : 1 + nf_pn, :, :] = nf_4d_norm
 
     # Current states
     ego_current = data["ego_current_state"][:, :4]
     ego_current_norm = (ego_current - ego_mean) / ego_std
     if P > 1:
-        neighbors_current = data["neighbor_agents_past"][:, :P - 1, -1, :4]
+        neighbors_current = data["neighbor_agents_past"][:, : P - 1, -1, :4]
         neighbors_current_norm = (neighbors_current - ego_mean) / ego_std
     else:
         neighbors_current_norm = torch.zeros(N, 0, 4, device=device)
@@ -92,16 +92,14 @@ def _build_model_inputs(
     if Pn > 0 and "neighbor_agents_future" in data:
         nf = data["neighbor_agents_future"]
         nf_pn = min(nf.shape[1], Pn)
-        neighbor_current_mask = (data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0)
-        nf_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)
+        neighbor_current_mask = data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0
+        nf_valid = nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1
         nf_mask = ~nf_valid
         full_neighbor_mask = torch.cat(
             [neighbor_current_mask[:, :nf_pn].unsqueeze(-1), nf_mask], dim=-1
         )
-        neighbor_slice = all_gt[:, 1:1 + nf_pn]
-        neighbor_slice.masked_fill_(
-            full_neighbor_mask.unsqueeze(-1).expand_as(neighbor_slice), 0.0
-        )
+        neighbor_slice = all_gt[:, 1 : 1 + nf_pn]
+        neighbor_slice.masked_fill_(full_neighbor_mask.unsqueeze(-1).expand_as(neighbor_slice), 0.0)
 
     # Build t tensor [N, P, T+1, 1]
     t_4d = torch.full((N, P, future_len + 1, 1), t_value, device=device)
@@ -197,12 +195,12 @@ def collect_logprob_rollout(
             nf_4d[..., 2] = torch.cos(heading)
             nf_4d[..., 3] = torch.sin(heading)
         nf_4d_norm = (nf_4d - ego_mean) / ego_std
-        gt_future[:, 1:1 + nf_pn, :, :] = nf_4d_norm
+        gt_future[:, 1 : 1 + nf_pn, :, :] = nf_4d_norm
 
     ego_current = batch_data["ego_current_state"][:, :4]
     ego_current_norm = (ego_current - ego_mean) / ego_std
     if P > 1:
-        neighbors_current = batch_data["neighbor_agents_past"][:, :P - 1, -1, :4]
+        neighbors_current = batch_data["neighbor_agents_past"][:, : P - 1, -1, :4]
         neighbors_current_norm = (neighbors_current - ego_mean) / ego_std
     else:
         neighbors_current_norm = torch.zeros(N, 0, 4, device=device)
@@ -214,16 +212,16 @@ def collect_logprob_rollout(
     if Pn > 0 and "neighbor_agents_future" in batch_data:
         nf = batch_data["neighbor_agents_future"]
         nf_pn = min(nf.shape[1], Pn)
-        neighbor_current_mask = (batch_data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0)
-        nf_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)
+        neighbor_current_mask = (
+            batch_data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0
+        )
+        nf_valid = nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1
         nf_mask = ~nf_valid
         full_neighbor_mask = torch.cat(
             [neighbor_current_mask[:, :nf_pn].unsqueeze(-1), nf_mask], dim=-1
         )
-        neighbor_slice = all_gt[:, 1:1 + nf_pn]
-        neighbor_slice.masked_fill_(
-            full_neighbor_mask.unsqueeze(-1).expand_as(neighbor_slice), 0.0
-        )
+        neighbor_slice = all_gt[:, 1 : 1 + nf_pn]
+        neighbor_slice.masked_fill_(full_neighbor_mask.unsqueeze(-1).expand_as(neighbor_slice), 0.0)
 
     # Add noise at t_start to get x_{t_start}
     # Only noise the future part (index 1:), keep current state clean
@@ -273,7 +271,7 @@ def collect_logprob_rollout(
         ego_std = std_all.view(-1).mean().clamp(min=min_std)  # scalar std from VPSDE
 
         log_prob = (
-            -((ego_sample.detach() - ego_mean) ** 2) / (2 * ego_std ** 2)
+            -((ego_sample.detach() - ego_mean) ** 2) / (2 * ego_std**2)
             - torch.log(ego_std)
             - 0.5 * math.log(2 * math.pi)
         )
@@ -383,7 +381,7 @@ def compute_logprob_grpo_loss(
         ego_std = std_all.view(-1).mean().clamp(min=min_std)  # scalar std from VPSDE
 
         log_prob = (
-            -((ego_sample - ego_mean) ** 2) / (2 * ego_std ** 2)
+            -((ego_sample - ego_mean) ** 2) / (2 * ego_std**2)
             - torch.log(ego_std)
             - 0.5 * math.log(2 * math.pi)
         )
@@ -395,19 +393,21 @@ def compute_logprob_grpo_loss(
         # all_gt: [N, P, T+1, 4], x0_pred: [N, P, T, 4]
         full_gt = all_gt[:, :, 1:, :]  # [N, P, T, 4] — skip current state
         # Ego IL (agent 0)
-        ego_il = F.mse_loss(x0_pred[:, 0], full_gt[:, 0], reduction='none').mean(dim=(1, 2))  # [N]
+        ego_il = F.mse_loss(x0_pred[:, 0], full_gt[:, 0], reduction="none").mean(dim=(1, 2))  # [N]
         # Neighbor IL (agents 1+) — preserves neighbor prediction quality
         # Mask out padded/invalid neighbors (zeroed out in all_gt) to avoid
         # training toward zero targets.
         if x0_pred.shape[1] > 1:
-            neigh_pred = x0_pred[:, 1:]   # [N, Pn, T, 4]
-            neigh_gt = full_gt[:, 1:]     # [N, Pn, T, 4]
-            neigh_mse = F.mse_loss(neigh_pred, neigh_gt, reduction='none')  # [N, Pn, T, 4]
+            neigh_pred = x0_pred[:, 1:]  # [N, Pn, T, 4]
+            neigh_gt = full_gt[:, 1:]  # [N, Pn, T, 4]
+            neigh_mse = F.mse_loss(neigh_pred, neigh_gt, reduction="none")  # [N, Pn, T, 4]
             # Valid mask: neighbor timestep is valid if GT has non-zero xy
             neigh_valid = neigh_gt[..., :2].abs().sum(dim=-1) > 0.1  # [N, Pn, T]
             neigh_valid_4d = neigh_valid.unsqueeze(-1).expand_as(neigh_mse)  # [N, Pn, T, 4]
             if neigh_valid_4d.any():
-                neigh_il = (neigh_mse * neigh_valid_4d).sum(dim=(1, 2, 3)) / neigh_valid_4d.sum(dim=(1, 2, 3)).clamp(min=1)  # [N]
+                neigh_il = (neigh_mse * neigh_valid_4d).sum(dim=(1, 2, 3)) / neigh_valid_4d.sum(
+                    dim=(1, 2, 3)
+                ).clamp(min=1)  # [N]
             else:
                 neigh_il = torch.zeros_like(ego_il)
         else:
@@ -450,7 +450,7 @@ def compute_logprob_grpo_loss(
     # This avoids the chain-based KL magnitude bug where both policy and ref log-probs
     # are huge negative numbers on stored chain samples.
     kl_loss = torch.tensor(0.0, device=device)
-    if config.kl_coef > 0 and hasattr(model, 'disable_adapter_layers'):
+    if config.kl_coef > 0 and hasattr(model, "disable_adapter_layers"):
         ref_ego_means = []
         model.disable_adapter_layers()
         try:
@@ -504,7 +504,7 @@ def compute_logprob_grpo_loss(
             ref_ego_mean = ref_ego_means[step_idx]
 
             # KL between N(μ_pol, σ) and N(μ_ref, σ) = (μ_pol - μ_ref)² / (2σ²)
-            step_kl = ((pol_ego_mean - ref_ego_mean) ** 2 / (2 * pol_std_val ** 2)).mean()
+            step_kl = ((pol_ego_mean - ref_ego_mean) ** 2 / (2 * pol_std_val**2)).mean()
             policy_ego_means.append(step_kl)
 
         kl_loss = torch.stack(policy_ego_means).mean()

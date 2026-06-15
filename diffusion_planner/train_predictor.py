@@ -45,7 +45,9 @@ def find_upward(start_file: str, target_name: str) -> Path:
     raise FileNotFoundError(f"{target_name} up {directory}")
 
 
-def log_dataset_artifact(run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str) -> None:
+def log_dataset_artifact(
+    run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str
+) -> None:
     artifact = wandb.Artifact(
         name=f"dataset_{exp_name}",
         type="dataset",
@@ -106,8 +108,18 @@ def get_args():
     parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
-    parser.add_argument("--ego_past_noise_std", type=float, default=0.1, help="std of noise applied to ego past trajectory during augmentation")
-    parser.add_argument("--use_smoothing_future_trajectory", default=True, type=boolean, help="whether to apply smoothing to future trajectory")
+    parser.add_argument(
+        "--ego_past_noise_std",
+        type=float,
+        default=0.1,
+        help="std of noise applied to ego past trajectory during augmentation",
+    )
+    parser.add_argument(
+        "--use_smoothing_future_trajectory",
+        default=True,
+        type=boolean,
+        help="whether to apply smoothing to future trajectory",
+    )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
@@ -227,11 +239,8 @@ def model_training(args):
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
 
-        if args.resume_model_path is not None:
-            save_path = os.path.dirname(args.resume_model_path)
-        else:
-            save_path = args.save_dir
-            os.makedirs(save_path, exist_ok=True)
+        save_path = args.save_dir
+        os.makedirs(save_path, exist_ok=True)
 
         # Save args
         args_dict = vars(args)

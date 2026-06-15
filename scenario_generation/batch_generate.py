@@ -91,9 +91,12 @@ def _save_scene(scene: SceneContext, scene_dir: Path, snippet_name: str) -> None
         "n_agents": len(scene.agents),
         "n_lanes": int(scene.map_data.lanes.shape[0]),
         "agents": [
-            {"id": a.id, "pos": a.current_position.tolist(),
-             "heading_deg": float(np.degrees(a.current_heading)),
-             "speed": float(np.linalg.norm(a.current_velocity))}
+            {
+                "id": a.id,
+                "pos": a.current_position.tolist(),
+                "heading_deg": float(np.degrees(a.current_heading)),
+                "speed": float(np.linalg.norm(a.current_velocity)),
+            }
             for a in scene.agents
         ],
     }
@@ -105,8 +108,13 @@ def _save_scene(scene: SceneContext, scene_dir: Path, snippet_name: str) -> None
     plt.close(fig)
 
 
-def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
-              model_path: str | None = None, device: str = "cuda"):
+def run_batch(
+    config: dict,
+    builder: LaneletSceneBuilder,
+    output_dir: Path,
+    model_path: str | None = None,
+    device: str = "cuda",
+):
     from concurrent.futures import ThreadPoolExecutor
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +135,7 @@ def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
     model, model_args = None, None
     if sim_enabled:
         from scenario_generation.simulate import load_model
+
         print(f"Loading model from {model_path}...")
         model, model_args = load_model(model_path, device=device)
 
@@ -155,14 +164,20 @@ def run_batch(config: dict, builder: LaneletSceneBuilder, output_dir: Path,
 
                 if sim_enabled:
                     from scenario_generation.simulate import run_simulation
+
                     for sim_mode in sim_modes:
                         sim_out = scene_dir / sim_mode
                         print(f"  Scene {i}: {sim_mode} ({sim_steps} steps)...")
                         t1 = time.time()
                         run_simulation(
-                            model, model_args, scene, sim_steps,
-                            sim_out, device=device,
-                            per_agent=per_agent, mode=sim_mode,
+                            model,
+                            model_args,
+                            scene,
+                            sim_steps,
+                            sim_out,
+                            device=device,
+                            per_agent=per_agent,
+                            mode=sim_mode,
                         )
                         print(f"  Scene {i}: {sim_mode} done in {time.time() - t1:.1f}s")
 
@@ -195,8 +210,12 @@ def main():
     parser.add_argument("--config", type=Path, required=True, help="Config JSON path")
     parser.add_argument("--map_path", type=str, required=True, help="Lanelet2 map .osm")
     parser.add_argument("--output_dir", type=Path, required=True, help="Output directory")
-    parser.add_argument("--model_path", type=str, default=None,
-                        help="Model path for simulation (skip if not provided)")
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Model path for simulation (skip if not provided)",
+    )
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -206,8 +225,7 @@ def main():
     builder = LaneletSceneBuilder(args.map_path)
 
     config = load_config(args.config)
-    run_batch(config, builder, args.output_dir,
-              model_path=args.model_path, device=device)
+    run_batch(config, builder, args.output_dir, model_path=args.model_path, device=device)
 
 
 if __name__ == "__main__":

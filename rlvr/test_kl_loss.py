@@ -70,8 +70,15 @@ def test_kl_zero_by_default():
     data, ego_gt, neighbor_gt, neighbor_mask = _make_batch(B, Pn, T)
 
     loss, metrics = _compute_sft_diffusion_loss(
-        model, model_args, data, ego_gt, neighbor_gt, neighbor_mask,
-        device=torch.device("cpu"), K=1, kl_coef=0.0,
+        model,
+        model_args,
+        data,
+        ego_gt,
+        neighbor_gt,
+        neighbor_mask,
+        device=torch.device("cpu"),
+        K=1,
+        kl_coef=0.0,
     )
     assert metrics["sft_kl_loss"] == 0.0
 
@@ -87,8 +94,16 @@ def test_kl_nonzero_with_base_model():
     data, ego_gt, neighbor_gt, neighbor_mask = _make_batch(B, Pn, T)
 
     loss, metrics = _compute_sft_diffusion_loss(
-        model, model_args, data, ego_gt, neighbor_gt, neighbor_mask,
-        device=torch.device("cpu"), K=1, kl_coef=0.1, base_model=base_model,
+        model,
+        model_args,
+        data,
+        ego_gt,
+        neighbor_gt,
+        neighbor_mask,
+        device=torch.device("cpu"),
+        K=1,
+        kl_coef=0.1,
+        base_model=base_model,
     )
     assert metrics["sft_kl_loss"] > 0.0
 
@@ -104,6 +119,14 @@ def test_kl_no_base_model_raises():
 
     with pytest.raises(ValueError, match="kl_coef"):
         _compute_sft_diffusion_loss(
-            model, model_args, data, ego_gt, neighbor_gt, neighbor_mask,
-            device=torch.device("cpu"), K=1, kl_coef=0.1, base_model=None,
+            model,
+            model_args,
+            data,
+            ego_gt,
+            neighbor_gt,
+            neighbor_mask,
+            device=torch.device("cpu"),
+            K=1,
+            kl_coef=0.1,
+            base_model=None,
         )

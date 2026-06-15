@@ -67,21 +67,15 @@ import argparse
 import csv
 import dataclasses
 import json
-from pathlib import Path
 import subprocess
 import webbrowser
-from typing import Dict
-from typing import Any
-from typing import List
-from typing import Mapping
-from typing import Optional
-from typing import Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from jinja2 import Environment
-from jinja2 import FileSystemLoader
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from jinja2 import Environment, FileSystemLoader
 
 
 @dataclasses.dataclass
@@ -92,6 +86,7 @@ class ErrorMaps:
     - lane: keyed by semantic lane ID (int) from the 'id' field in JSON
     - line/poly: keyed by positional index (int) in the list, NOT by semantic ID
     """
+
     lane: Dict[int, float]
     line: Dict[int, float]
     poly: Dict[int, float]
@@ -132,9 +127,14 @@ def build_error_maps(
     keyed by internal list index extracted from `match_index`.
     """
     return ErrorMaps(
-        lane={int(r["entity_id"]): max(float(r["center_sym_hausdorff_like"]), 
-                                       float(r["left_sym_hausdorff_like"]),
-                                       float(r["right_sym_hausdorff_like"])) for r in lane_rows},
+        lane={
+            int(r["entity_id"]): max(
+                float(r["center_sym_hausdorff_like"]),
+                float(r["left_sym_hausdorff_like"]),
+                float(r["right_sym_hausdorff_like"]),
+            )
+            for r in lane_rows
+        },
         line={
             pair[0]: float(r["sym_hausdorff_like"])
             for r in line_rows
@@ -156,15 +156,33 @@ def build_worst_k(
 ) -> List[Dict]:
     """Build combined worst-K entities list from all entity types."""
     combined = (
-        [{"entity_type": "lane_segment", "entity_id": r["entity_id"],
-          "match_index": -1, "sym_hausdorff_like": r["center_sym_hausdorff_like"]}
-         for r in lane_rows]
-        + [{"entity_type": "line_string", "entity_id": -1,
-            "match_index": r["match_index"], "sym_hausdorff_like": r["sym_hausdorff_like"]}
-           for r in line_rows]
-        + [{"entity_type": "polygon", "entity_id": -1,
-            "match_index": r["match_index"], "sym_hausdorff_like": r["sym_hausdorff_like"]}
-           for r in poly_rows]
+        [
+            {
+                "entity_type": "lane_segment",
+                "entity_id": r["entity_id"],
+                "match_index": -1,
+                "sym_hausdorff_like": r["center_sym_hausdorff_like"],
+            }
+            for r in lane_rows
+        ]
+        + [
+            {
+                "entity_type": "line_string",
+                "entity_id": -1,
+                "match_index": r["match_index"],
+                "sym_hausdorff_like": r["sym_hausdorff_like"],
+            }
+            for r in line_rows
+        ]
+        + [
+            {
+                "entity_type": "polygon",
+                "entity_id": -1,
+                "match_index": r["match_index"],
+                "sym_hausdorff_like": r["sym_hausdorff_like"],
+            }
+            for r in poly_rows
+        ]
     )
     return sorted(combined, key=lambda x: x["sym_hausdorff_like"], reverse=True)[:k]
 
@@ -179,13 +197,13 @@ def points3_to_np(points: Any) -> np.ndarray:
         return np.zeros((0, 3), dtype=np.float64)
     return np.asarray(points, dtype=np.float64)
 
+
 def points3_id_to_np(points: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
     if not points:
         return np.zeros((0, 4), dtype=np.int64), np.zeros((0, 3), dtype=np.float64)
     ids = np.asarray([int(p["id"]) for p in points], dtype=np.int64)
-    pts = np.asarray([p['points'] for p in points], dtype=np.float64)
+    pts = np.asarray([p["points"] for p in points], dtype=np.float64)
     return ids, pts
-
 
 
 def polyline_segments_xy(poly: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -291,7 +309,9 @@ def _points_to_error_dicts(
     pts_array = np.column_stack([pts[:, 1], pts[:, 0], errors])
     valid_mask = np.isfinite(pts_array[:, 2])
     valid_points = pts_array[valid_mask]
-    point_ids_valid = point_ids[valid_mask] if point_ids is not None and len(point_ids) == len(pts) else None
+    point_ids_valid = (
+        point_ids[valid_mask] if point_ids is not None and len(point_ids) == len(pts) else None
+    )
     out: List[PointErrorRecord] = []
     for idx, p in enumerate(valid_points):
         item: PointErrorRecord = {
@@ -403,10 +423,7 @@ def compute_point_errors(
 
     # Use helper function for lines only (polygons don't need point error visualization)
     line_point_errors = _compute_point_errors_for_indexed_entities(
-        internal["line_strings"],
-        reference["line_strings"],
-        line_rows,
-        "points"
+        internal["line_strings"], reference["line_strings"], line_rows, "points"
     )
 
     return lane_point_errors, line_point_errors
@@ -469,11 +486,14 @@ def compare_lane_segments(
         "right_boundary_symmetric_hausdorff_like_m": summarize(right_haus),
         "pass_rate": {
             "centerline_symmetric_hausdorff_lt_0p2m": (
-                float(np.mean(np.asarray(center_haus) < 0.2)) if center_haus else 0.0),
+                float(np.mean(np.asarray(center_haus) < 0.2)) if center_haus else 0.0
+            ),
             "left_boundary_symmetric_hausdorff_lt_0p2m": (
-                float(np.mean(np.asarray(left_haus) < 0.2)) if left_haus else 0.0),
+                float(np.mean(np.asarray(left_haus) < 0.2)) if left_haus else 0.0
+            ),
             "right_boundary_symmetric_hausdorff_lt_0p2m": (
-                float(np.mean(np.asarray(right_haus) < 0.2)) if right_haus else 0.0),
+                float(np.mean(np.asarray(right_haus) < 0.2)) if right_haus else 0.0
+            ),
         },
         "worst_k_centerline": worst,
     }
@@ -511,8 +531,7 @@ def match_geometry_only(
         last_points_int[:, None] - last_points_ref[None, :], axis=2
     )
     end_distances_mask_matrix = end_distances_matrix < 0.3
-    valid_mask_matrix = np.logical_and(
-        start_distances_mask_matrix, end_distances_mask_matrix)
+    valid_mask_matrix = np.logical_and(start_distances_mask_matrix, end_distances_mask_matrix)
     for i, item in enumerate(int_clean):
         p_i = points3_to_np(item["points"])
         best_j = -1
@@ -544,9 +563,7 @@ def compare_line_strings(
     """
     in_lines = internal["line_strings"]
     ref_lines = reference["line_strings"]
-    matches = match_geometry_only(
-        in_lines, ref_lines, max_match_distance
-    )
+    matches = match_geometry_only(in_lines, ref_lines, max_match_distance)
 
     sym, haus, orient = [], [], []
     rows = []
@@ -592,9 +609,7 @@ def compare_polygons(
     """
     in_polys = internal["polygons"]
     ref_polys = reference["polygons"]
-    matches = match_geometry_only(
-        in_polys, ref_polys, max_match_distance
-    )
+    matches = match_geometry_only(in_polys, ref_polys, max_match_distance)
 
     sym, haus = [], []
     rows = []
@@ -815,7 +830,11 @@ def render_html_dashboard(
             "left_boundary": _pts_to_coords(l),
             "right_boundary": _pts_to_coords(r),
         }
-        if lane_geometries["centerline"] or lane_geometries["left_boundary"] or lane_geometries["right_boundary"]:
+        if (
+            lane_geometries["centerline"]
+            or lane_geometries["left_boundary"]
+            or lane_geometries["right_boundary"]
+        ):
             lanes_ref.append({"id": lane_id, "geometries": lane_geometries})
     lines_ref = []
     for line_string in reference["line_strings"]:
@@ -842,14 +861,10 @@ def render_html_dashboard(
     ref_lanes_by_id = {int(x["id"]): x for x in reference["lane_segments"]}
     # Build match index maps for lines and polygons with safe parsing
     line_match_map = {
-        i: j for r in line_rows
-        if (pair := _safe_split_match(r)) is not None
-        for i, j in [pair]
+        i: j for r in line_rows if (pair := _safe_split_match(r)) is not None for i, j in [pair]
     }
     poly_match_map = {
-        i: j for r in poly_rows
-        if (pair := _safe_split_match(r)) is not None
-        for i, j in [pair]
+        i: j for r in poly_rows if (pair := _safe_split_match(r)) is not None for i, j in [pair]
     }
 
     # Update lanes_int to include reference coordinates for zoom
@@ -879,7 +894,11 @@ def render_html_dashboard(
             "left_boundary": _pts_to_coords(l_i),
             "right_boundary": _pts_to_coords(r_i),
         }
-        if int_geometries["centerline"] or int_geometries["left_boundary"] or int_geometries["right_boundary"]:
+        if (
+            int_geometries["centerline"]
+            or int_geometries["left_boundary"]
+            or int_geometries["right_boundary"]
+        ):
             lanes_int.append(
                 {
                     "geometries": int_geometries,
@@ -962,7 +981,7 @@ def write_entity_csv(
     rows = lane_rows + line_rows + poly_rows
     keys = sorted(set().union(*[r.keys() for r in rows])) if rows else []
     with (out_dir / "entity_metrics.csv").open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=keys, restval='')
+        writer = csv.DictWriter(f, fieldnames=keys, restval="")
         writer.writeheader()
         for r in rows:
             writer.writerow(r)

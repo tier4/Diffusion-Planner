@@ -33,32 +33,32 @@ def _make_scene_data(device: torch.device = torch.device("cpu")) -> dict[str, to
     for i in range(31):
         t = (i - 30) * 0.1  # -3.0s to 0.0s
         past[0, i, 0] = t * 5.0  # x = speed * time (going backward)
-        past[0, i, 2] = 1.0      # cos(0)
+        past[0, i, 2] = 1.0  # cos(0)
     data["ego_agent_past"] = past
 
     # One neighbor at (10, 3) heading forward, speed 5 m/s
     nb = torch.zeros(1, 1, 31, 11, device=device)
-    nb[0, 0, -1, 0] = 10.0   # x
-    nb[0, 0, -1, 1] = 3.0    # y
-    nb[0, 0, -1, 2] = 1.0    # cos(0)
-    nb[0, 0, -1, 3] = 0.0    # sin(0)
-    nb[0, 0, -1, 4] = 5.0    # vx
-    nb[0, 0, -1, 5] = 0.0    # vy
-    nb[0, 0, -1, 6] = 2.0    # width
-    nb[0, 0, -1, 7] = 4.5    # length
+    nb[0, 0, -1, 0] = 10.0  # x
+    nb[0, 0, -1, 1] = 3.0  # y
+    nb[0, 0, -1, 2] = 1.0  # cos(0)
+    nb[0, 0, -1, 3] = 0.0  # sin(0)
+    nb[0, 0, -1, 4] = 5.0  # vx
+    nb[0, 0, -1, 5] = 0.0  # vy
+    nb[0, 0, -1, 6] = 2.0  # width
+    nb[0, 0, -1, 7] = 4.5  # length
     data["neighbor_agents_past"] = nb
 
     # Lanes: one lane segment going straight ahead
     lanes = torch.zeros(1, 140, 20, 33, device=device)
     for pt in range(20):
         x = pt * 2.0
-        lanes[0, 0, pt, 0] = x       # center X
-        lanes[0, 0, pt, 1] = 0.0     # center Y
-        lanes[0, 0, pt, 2] = 1.0     # direction dX
-        lanes[0, 0, pt, 4] = 0.0     # left boundary dX (offset from center)
-        lanes[0, 0, pt, 5] = 1.75    # left boundary dY (offset from center)
-        lanes[0, 0, pt, 6] = 0.0     # right boundary dX (offset from center)
-        lanes[0, 0, pt, 7] = -1.75   # right boundary dY (offset from center)
+        lanes[0, 0, pt, 0] = x  # center X
+        lanes[0, 0, pt, 1] = 0.0  # center Y
+        lanes[0, 0, pt, 2] = 1.0  # direction dX
+        lanes[0, 0, pt, 4] = 0.0  # left boundary dX (offset from center)
+        lanes[0, 0, pt, 5] = 1.75  # left boundary dY (offset from center)
+        lanes[0, 0, pt, 6] = 0.0  # right boundary dX (offset from center)
+        lanes[0, 0, pt, 7] = -1.75  # right boundary dY (offset from center)
     data["lanes"] = lanes
 
     # Route lanes (same structure)
@@ -68,12 +68,12 @@ def _make_scene_data(device: torch.device = torch.device("cpu")) -> dict[str, to
     ls = torch.zeros(1, 60, 20, 4, device=device)
     for pt in range(20):
         x = pt * 2.0
-        ls[0, 0, pt, 0] = x       # x
-        ls[0, 0, pt, 1] = 3.0     # y (left border)
-        ls[0, 0, pt, 3] = 1.0     # road_border flag
-        ls[0, 1, pt, 0] = x       # x
-        ls[0, 1, pt, 1] = -3.0    # y (right border)
-        ls[0, 1, pt, 3] = 1.0     # road_border flag
+        ls[0, 0, pt, 0] = x  # x
+        ls[0, 0, pt, 1] = 3.0  # y (left border)
+        ls[0, 0, pt, 3] = 1.0  # road_border flag
+        ls[0, 1, pt, 0] = x  # x
+        ls[0, 1, pt, 1] = -3.0  # y (right border)
+        ls[0, 1, pt, 3] = 1.0  # road_border flag
     data["line_strings"] = ls
 
     # Polygons, static objects
@@ -111,7 +111,7 @@ def test_straight_forward_step():
     trajectory = torch.zeros(80, 4)
     for t in range(80):
         trajectory[t, 0] = (t + 1) * 0.5  # x
-        trajectory[t, 2] = 1.0             # cos(0)
+        trajectory[t, 2] = 1.0  # cos(0)
 
     new_data, (dx, dy, dh) = update_scene_state(data, trajectory, step_idx=0)
 
@@ -205,7 +205,9 @@ def test_ego_past_roll():
     # The last entry should be the old [0, 0, 1, 0] (transformed to new frame)
     # After straight forward step: old [0,0,1,0] transforms to [-0.5, 0, 1, 0]
     new_last = new_data["ego_agent_past"][0, -1]
-    assert abs(new_last[0].item() - (-0.5)) < 1e-4, f"past last x={new_last[0].item()}, expected -0.5"
+    assert abs(new_last[0].item() - (-0.5)) < 1e-4, (
+        f"past last x={new_last[0].item()}, expected -0.5"
+    )
     assert abs(new_last[1].item()) < 1e-4
     assert abs(new_last[2].item() - 1.0) < 1e-4  # cos(0)
     assert abs(new_last[3].item()) < 1e-4  # sin(0)
@@ -239,7 +241,10 @@ def test_transform_positions_to_ego_frame():
     # Point at (10, 3) in original frame -> (5, 3) in ego frame
     positions = torch.tensor([[10.0, 3.0, 0.0]])  # (x, y, heading_rad)
     result = transform_positions_to_ego_frame(
-        positions, ego_x=5.0, ego_y=0.0, ego_heading=0.0,
+        positions,
+        ego_x=5.0,
+        ego_y=0.0,
+        ego_heading=0.0,
         device=torch.device("cpu"),
     )
     assert abs(result[0, 0].item() - 5.0) < 1e-4
@@ -249,7 +254,9 @@ def test_transform_positions_to_ego_frame():
     # Point at (0, 5) in original frame -> (5, 0) in ego frame (rotated)
     result = transform_positions_to_ego_frame(
         torch.tensor([[0.0, 5.0, math.pi / 2]]),
-        ego_x=0.0, ego_y=0.0, ego_heading=math.pi / 2,
+        ego_x=0.0,
+        ego_y=0.0,
+        ego_heading=math.pi / 2,
         device=torch.device("cpu"),
     )
     assert abs(result[0, 0].item() - 5.0) < 1e-4, f"x={result[0, 0].item()}"
@@ -272,7 +279,9 @@ def test_no_original_mutation():
 
     # Original should be unchanged
     assert data["ego_current_state"][0, 0].item() == orig_ego_x, "Original ego mutated!"
-    assert data["neighbor_agents_past"][0, 0, -1, 0].item() == orig_nb_x, "Original neighbor mutated!"
+    assert data["neighbor_agents_past"][0, 0, -1, 0].item() == orig_nb_x, (
+        "Original neighbor mutated!"
+    )
 
     print("  PASS: no_original_mutation")
 

@@ -36,10 +36,23 @@ import numpy as np
 import torch
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
+
 from preference_optimization.utils import load_npz_data
+from rlvr.autoresearch.tools.ghost_sim_common import (
+    extract_stopped_neighbors,
+)
+from rlvr.autoresearch.tools.ghost_sim_common import (
+    load_model as _load_model,
+)
 
 # Reuse all the heavy lifting from recovery_sim
 from rlvr.autoresearch.tools.recovery_sim import (
+    _LANE_BORDER_COLOR,
+    _LANE_COLOR,
+    _ROAD_BORDER_COLOR,
+    _ROUTE_COLOR,
+    _VIEW_HALF_M,
+    _apply_perturbation,
     _build_segments,
     _draw_agent_box,
     _ego_obb_corners,
@@ -48,33 +61,34 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _point_to_segments_dist,
     _road_border_polylines,
     _route_polylines,
-    _apply_perturbation,
-    _LANE_BORDER_COLOR,
-    _LANE_COLOR,
-    _ROAD_BORDER_COLOR,
-    _ROUTE_COLOR,
-    _VIEW_HALF_M,
     closed_loop_rollout_with_plans,
-)
-from rlvr.autoresearch.tools.ghost_sim_common import (
-    extract_stopped_neighbors,
-    load_model as _load_model,
 )
 from rlvr.autoresearch.tools.recovery_test import get_tangent_at_origin
 
-
-_BASELINE_COLOR = "#1f77b4"   # blue
-_PRISM_COLOR    = "#d62728"   # red
+_BASELINE_COLOR = "#1f77b4"  # blue
+_PRISM_COLOR = "#d62728"  # red
 
 
 def _render_ghost_step(
-    output_path: Path, step: int, n_steps: int,
-    bl_pose: np.ndarray, bl_speed: float, bl_plan: np.ndarray | None,
-    pr_pose: np.ndarray, pr_speed: float, pr_plan: np.ndarray | None,
-    centerlines, lefts, rights, border_polylines, route_polylines,
+    output_path: Path,
+    step: int,
+    n_steps: int,
+    bl_pose: np.ndarray,
+    bl_speed: float,
+    bl_plan: np.ndarray | None,
+    pr_pose: np.ndarray,
+    pr_speed: float,
+    pr_plan: np.ndarray | None,
+    centerlines,
+    lefts,
+    rights,
+    border_polylines,
+    route_polylines,
     centerline_segments,
-    ego_length: float, ego_width: float,
-    perturbation_label: str, init_lateral: float,
+    ego_length: float,
+    ego_width: float,
+    perturbation_label: str,
+    init_lateral: float,
     ego_wheelbase: float = 4.76,
     view_half_m: float = _VIEW_HALF_M,
     neighbor_boxes: list[tuple[float, float, float, float, float]] | None = None,
@@ -91,73 +105,130 @@ def _render_ghost_step(
 
     # Lane network
     if centerlines:
-        ax.add_collection(LineCollection(
-            centerlines, colors=_LANE_COLOR, linewidths=0.6, alpha=0.28, zorder=1))
+        ax.add_collection(
+            LineCollection(centerlines, colors=_LANE_COLOR, linewidths=0.6, alpha=0.28, zorder=1)
+        )
     if lefts:
-        ax.add_collection(LineCollection(
-            lefts, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2))
+        ax.add_collection(
+            LineCollection(lefts, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2)
+        )
     if rights:
-        ax.add_collection(LineCollection(
-            rights, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2))
+        ax.add_collection(
+            LineCollection(rights, colors=_LANE_BORDER_COLOR, linewidths=1.1, alpha=0.7, zorder=2)
+        )
 
     # Road borders (AABB-filtered)
     half = view_half_m * 1.5
-    flt_borders = [pl for pl in border_polylines
-                   if pl.shape[0] >= 2 and (
-                       (pl[:, 0] >= cx - half) & (pl[:, 0] <= cx + half)
-                       & (pl[:, 1] >= cy - half) & (pl[:, 1] <= cy + half)).any()]
+    flt_borders = [
+        pl
+        for pl in border_polylines
+        if pl.shape[0] >= 2
+        and (
+            (pl[:, 0] >= cx - half)
+            & (pl[:, 0] <= cx + half)
+            & (pl[:, 1] >= cy - half)
+            & (pl[:, 1] <= cy + half)
+        ).any()
+    ]
     if flt_borders:
-        ax.add_collection(LineCollection(
-            flt_borders, colors=_ROAD_BORDER_COLOR, linewidths=2.0, alpha=0.9, zorder=5))
+        ax.add_collection(
+            LineCollection(
+                flt_borders, colors=_ROAD_BORDER_COLOR, linewidths=2.0, alpha=0.9, zorder=5
+            )
+        )
 
     # Route polylines
     for pl in route_polylines:
         if pl.shape[0] >= 2:
-            ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR,
-                    lw=2.5, alpha=0.55, zorder=3)
+            ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR, lw=2.5, alpha=0.55, zorder=3)
 
     # Stopped neighbor OBBs
     if neighbor_boxes:
         for nx, ny, nh, nl, nw in neighbor_boxes:
-            _draw_agent_box(ax, nx, ny, nh, nl, nw,
-                            "#cc6600", alpha=0.75, lw=1.5, zorder=14)
+            _draw_agent_box(ax, nx, ny, nh, nl, nw, "#cc6600", alpha=0.75, lw=1.5, zorder=14)
 
     # Plans (faded thin)
     if bl_plan is not None and bl_plan.shape[0] > 1:
-        ax.plot(bl_plan[:, 0], bl_plan[:, 1], "-",
-                color=_BASELINE_COLOR, lw=1.4, alpha=0.45, zorder=24)
+        ax.plot(
+            bl_plan[:, 0], bl_plan[:, 1], "-", color=_BASELINE_COLOR, lw=1.4, alpha=0.45, zorder=24
+        )
     if pr_plan is not None and pr_plan.shape[0] > 1:
-        ax.plot(pr_plan[:, 0], pr_plan[:, 1], "-",
-                color=_PRISM_COLOR, lw=1.4, alpha=0.45, zorder=24)
+        ax.plot(
+            pr_plan[:, 0], pr_plan[:, 1], "-", color=_PRISM_COLOR, lw=1.4, alpha=0.45, zorder=24
+        )
 
     # Ego footprints + arrows (ego is rear-axle referenced)
-    _draw_agent_box(ax, bx, by, bh, ego_length, ego_width,
-                    _BASELINE_COLOR, alpha=0.78, lw=2, zorder=20,
-                    wheelbase=ego_wheelbase)
-    _draw_agent_box(ax, px, py, ph, ego_length, ego_width,
-                    _PRISM_COLOR, alpha=0.78, lw=2, zorder=21,
-                    wheelbase=ego_wheelbase)
+    _draw_agent_box(
+        ax,
+        bx,
+        by,
+        bh,
+        ego_length,
+        ego_width,
+        _BASELINE_COLOR,
+        alpha=0.78,
+        lw=2,
+        zorder=20,
+        wheelbase=ego_wheelbase,
+    )
+    _draw_agent_box(
+        ax,
+        px,
+        py,
+        ph,
+        ego_length,
+        ego_width,
+        _PRISM_COLOR,
+        alpha=0.78,
+        lw=2,
+        zorder=21,
+        wheelbase=ego_wheelbase,
+    )
     al = max(ego_length, 2.5)
-    ax.annotate("", xy=(bx + al * math.cos(bh), by + al * math.sin(bh)),
-                xytext=(bx, by),
-                arrowprops=dict(arrowstyle="-|>", color=_BASELINE_COLOR,
-                                lw=1.2, mutation_scale=10), zorder=22)
-    ax.annotate("", xy=(px + al * math.cos(ph), py + al * math.sin(ph)),
-                xytext=(px, py),
-                arrowprops=dict(arrowstyle="-|>", color=_PRISM_COLOR,
-                                lw=1.2, mutation_scale=10), zorder=23)
+    ax.annotate(
+        "",
+        xy=(bx + al * math.cos(bh), by + al * math.sin(bh)),
+        xytext=(bx, by),
+        arrowprops=dict(arrowstyle="-|>", color=_BASELINE_COLOR, lw=1.2, mutation_scale=10),
+        zorder=22,
+    )
+    ax.annotate(
+        "",
+        xy=(px + al * math.cos(ph), py + al * math.sin(ph)),
+        xytext=(px, py),
+        arrowprops=dict(arrowstyle="-|>", color=_PRISM_COLOR, lw=1.2, mutation_scale=10),
+        zorder=23,
+    )
 
     # Per-model lateral offsets
-    cur_lat_b = float(_point_to_segments_dist(
-        np.array([[bx, by]]), centerline_segments)[0]) if centerline_segments.shape[0] else float("nan")
-    cur_lat_p = float(_point_to_segments_dist(
-        np.array([[px, py]]), centerline_segments)[0]) if centerline_segments.shape[0] else float("nan")
+    cur_lat_b = (
+        float(_point_to_segments_dist(np.array([[bx, by]]), centerline_segments)[0])
+        if centerline_segments.shape[0]
+        else float("nan")
+    )
+    cur_lat_p = (
+        float(_point_to_segments_dist(np.array([[px, py]]), centerline_segments)[0])
+        if centerline_segments.shape[0]
+        else float("nan")
+    )
 
     # Legend
-    ax.plot([], [], "-", color=_BASELINE_COLOR, lw=2,
-            label=f"{baseline_label}  v={bl_speed:.1f} m/s  lat={cur_lat_b:.2f}m")
-    ax.plot([], [], "-", color=_PRISM_COLOR, lw=2,
-            label=f"{trained_label}  v={pr_speed:.1f} m/s  lat={cur_lat_p:.2f}m")
+    ax.plot(
+        [],
+        [],
+        "-",
+        color=_BASELINE_COLOR,
+        lw=2,
+        label=f"{baseline_label}  v={bl_speed:.1f} m/s  lat={cur_lat_b:.2f}m",
+    )
+    ax.plot(
+        [],
+        [],
+        "-",
+        color=_PRISM_COLOR,
+        lw=2,
+        label=f"{trained_label}  v={pr_speed:.1f} m/s  lat={cur_lat_p:.2f}m",
+    )
     ax.legend(fontsize=9, loc="upper left")
 
     ax.set_xlim(cx - view_half_m, cx + view_half_m)
@@ -180,8 +251,9 @@ def _render_ghost_step(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scene", type=str, required=True)
-    parser.add_argument("--kind", type=str, default="parallel",
-                        choices=["parallel", "yaw", "velocity", "combined"])
+    parser.add_argument(
+        "--kind", type=str, default="parallel", choices=["parallel", "yaw", "velocity", "combined"]
+    )
     parser.add_argument("--magnitude", type=float, default=1.0)
     parser.add_argument("--side", type=str, default="-", choices=["+", "-"])
     parser.add_argument("--combined_yaw_deg", type=float, default=5.0)
@@ -200,6 +272,14 @@ def main() -> None:
     parser.add_argument("--webm_fps", type=int, default=10)
     parser.add_argument("--baseline_label", type=str, default="baseline (LoRA-less)")
     parser.add_argument("--trained_label", type=str, default="PRiSM")
+    # closed_loop_rollout_with_plans now SG-smooths every per-step plan by
+    # default (matches the perfect-tracker sim convention). Older renders
+    # from this tool consumed raw plans — pass --no_sg_smooth to reproduce.
+    parser.add_argument(
+        "--no_sg_smooth",
+        action="store_true",
+        help="track raw per-step plans (pre-SG-default behaviour of this tool)",
+    )
     args = parser.parse_args()
 
     out = Path(args.output_dir)
@@ -208,42 +288,62 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[ghost-sim] loading 2 models...")
     bl_model, bl_args = _load_model(args.baseline_model, args.baseline_lora, device)
-    pr_model, pr_args = _load_model(args.prism_model,    args.prism_lora,    device)
+    pr_model, pr_args = _load_model(args.prism_model, args.prism_lora, device)
 
     # Load + perturb
     data = load_npz_data(args.scene, device)
     t_unit, n_unit = get_tangent_at_origin(data["route_lanes"])
     side_val = +1.0 if args.side == "+" else -1.0
     perturbed, label = _apply_perturbation(
-        data, n_unit, args.kind, args.magnitude, side_val,
+        data,
+        n_unit,
+        args.kind,
+        args.magnitude,
+        side_val,
         combined_yaw_deg=args.combined_yaw_deg,
     )
-    init_lat = float(_point_to_segments_dist(
-        np.array([[0.0, 0.0]]), _build_segments(perturbed["route_lanes"]))[0])
+    init_lat = float(
+        _point_to_segments_dist(np.array([[0.0, 0.0]]), _build_segments(perturbed["route_lanes"]))[
+            0
+        ]
+    )
     perturb_label = label
     print(f"  perturbation: {perturb_label}  init_lat={init_lat:.2f}m")
 
     # Two rollouts
     print(f"[ghost-sim] rollout (baseline)...")
     bl = closed_loop_rollout_with_plans(
-        bl_model, bl_args, perturbed,
-        n_steps=args.steps, advance_k=args.advance_k,
+        bl_model,
+        bl_args,
+        perturbed,
+        n_steps=args.steps,
+        advance_k=args.advance_k,
+        sg_smooth=not args.no_sg_smooth,
     )
     print(f"[ghost-sim] rollout (PRiSM)...")
     pr = closed_loop_rollout_with_plans(
-        pr_model, pr_args, perturbed,
-        n_steps=args.steps, advance_k=args.advance_k,
+        pr_model,
+        pr_args,
+        perturbed,
+        n_steps=args.steps,
+        advance_k=args.advance_k,
+        sg_smooth=not args.no_sg_smooth,
     )
 
     # Pre-compute scene polylines from perturbed (matches recovery_sim)
     rl = perturbed["route_lanes"]
-    if rl.dim() == 4: rl = rl[0]
+    if rl.dim() == 4:
+        rl = rl[0]
     lanes = perturbed.get("lanes")
-    if lanes is not None and lanes.dim() == 4: lanes = lanes[0]
+    if lanes is not None and lanes.dim() == 4:
+        lanes = lanes[0]
     line_strings = perturbed.get("line_strings")
-    if line_strings is not None and line_strings.dim() == 4: line_strings = line_strings[0]
+    if line_strings is not None and line_strings.dim() == 4:
+        line_strings = line_strings[0]
     centerlines, lefts, rights = _lane_polylines(lanes.cpu().numpy() if lanes is not None else None)
-    border_polylines = _road_border_polylines(line_strings.cpu().numpy() if line_strings is not None else None)
+    border_polylines = _road_border_polylines(
+        line_strings.cpu().numpy() if line_strings is not None else None
+    )
     route_polylines = _route_polylines(rl.cpu().numpy())
     centerline_segments = _build_segments(perturbed["route_lanes"])
 
@@ -257,17 +357,25 @@ def main() -> None:
         pr_plan = pr["plans_world"][step_i] if step_i < len(pr["plans_world"]) else None
         _render_ghost_step(
             out / f"ghost_step_{step_i:04d}.png",
-            step=step_i, n_steps=n,
-            bl_pose=bl["positions"][step_i],   bl_speed=float(bl["velocities"][step_i]),
+            step=step_i,
+            n_steps=n,
+            bl_pose=bl["positions"][step_i],
+            bl_speed=float(bl["velocities"][step_i]),
             bl_plan=bl_plan,
-            pr_pose=pr["positions"][step_i],   pr_speed=float(pr["velocities"][step_i]),
+            pr_pose=pr["positions"][step_i],
+            pr_speed=float(pr["velocities"][step_i]),
             pr_plan=pr_plan,
-            centerlines=centerlines, lefts=lefts, rights=rights,
-            border_polylines=border_polylines, route_polylines=route_polylines,
+            centerlines=centerlines,
+            lefts=lefts,
+            rights=rights,
+            border_polylines=border_polylines,
+            route_polylines=route_polylines,
             centerline_segments=centerline_segments,
-            ego_length=args.ego_length, ego_width=args.ego_width,
+            ego_length=args.ego_length,
+            ego_width=args.ego_width,
             ego_wheelbase=args.ego_wheelbase,
-            perturbation_label=perturb_label, init_lateral=init_lat,
+            perturbation_label=perturb_label,
+            init_lateral=init_lat,
             view_half_m=args.view_half_m,
             neighbor_boxes=nb_boxes,
             baseline_label=args.baseline_label,
@@ -277,10 +385,20 @@ def main() -> None:
     if args.make_webm:
         webm = out / "ghost_sim.webm"
         cmd = [
-            "ffmpeg", "-y", "-framerate", str(args.webm_fps),
-            "-i", str(out / "ghost_step_%04d.png"),
-            "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p",
-            "-b:v", "0", "-crf", "30",
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(args.webm_fps),
+            "-i",
+            str(out / "ghost_step_%04d.png"),
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            "0",
+            "-crf",
+            "30",
             str(webm),
         ]
         try:

@@ -13,6 +13,7 @@ Usage:
         [--route_pkl <route>.pkl] \\
         [--workers 8] [--limit 100] [--stride 1]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -100,9 +101,7 @@ def _ego_future_to_predictions(scene):
     if fut is None or len(fut) == 0:
         return {}
     if fut.shape[-1] == 3:
-        fut4 = np.concatenate(
-            [fut[:, :2], np.cos(fut[:, 2:3]), np.sin(fut[:, 2:3])], axis=-1
-        )
+        fut4 = np.concatenate([fut[:, :2], np.cos(fut[:, 2:3]), np.sin(fut[:, 2:3])], axis=-1)
     elif fut.shape[-1] >= 4:
         fut4 = fut[:, :4]
     else:
@@ -166,16 +165,21 @@ def _render_one(args):
         ego_xy_yaw = (0.0, 0.0, 0.0)
         if sidecar.exists():
             import json as _json
+
             j = _json.loads(sidecar.read_text())
             ego_xy_yaw = (
-                float(j["x"]), float(j["y"]),
+                float(j["x"]),
+                float(j["y"]),
                 yaw_from_quat(j["qx"], j["qy"], j["qz"], j["qw"]),
             )
         route_polylines = _world_to_ego_polylines(
-            _WORKER_ROUTE_POLYLINES, ego_xy_yaw,
+            _WORKER_ROUTE_POLYLINES,
+            ego_xy_yaw,
         )
         road_border_polylines = _world_to_ego_polylines(
-            _WORKER_ROAD_BORDER_POLYLINES, ego_xy_yaw, crop_radius_m=80.0,
+            _WORKER_ROAD_BORDER_POLYLINES,
+            ego_xy_yaw,
+            crop_radius_m=80.0,
         )
         agent_predictions = _ego_future_to_predictions(scene)
         save_step_figure(
@@ -197,20 +201,28 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--npz_dir", type=Path, required=True)
     ap.add_argument("--output_dir", type=Path, required=True)
-    ap.add_argument("--route_pkl", type=Path, default=None,
-                    help="Optional Route pickle. Provides both the route "
-                         "polyline overlay and the road-border line strings "
-                         "(loaded once from the lanelet2 map referenced by the "
-                         "Route). Without it neither overlay is drawn — "
-                         "everything else (lane network, agents, predicted "
-                         "trajectory, HUD) still appears.")
+    ap.add_argument(
+        "--route_pkl",
+        type=Path,
+        default=None,
+        help="Optional Route pickle. Provides both the route "
+        "polyline overlay and the road-border line strings "
+        "(loaded once from the lanelet2 map referenced by the "
+        "Route). Without it neither overlay is drawn — "
+        "everything else (lane network, agents, predicted "
+        "trajectory, HUD) still appears.",
+    )
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=-1)
     ap.add_argument("--stride", type=int, default=1)
-    ap.add_argument("--ego_length", type=float, default=None,
-                    help="Override ego length (m). Defaults to whatever's in "
-                         "the npz (the data_converter writes its --ego_length "
-                         "default unless overridden at convert time).")
+    ap.add_argument(
+        "--ego_length",
+        type=float,
+        default=None,
+        help="Override ego length (m). Defaults to whatever's in "
+        "the npz (the data_converter writes its --ego_length "
+        "default unless overridden at convert time).",
+    )
     ap.add_argument("--ego_width", type=float, default=None)
     ap.add_argument("--ego_wheelbase", type=float, default=None)
     args = ap.parse_args()
@@ -218,8 +230,10 @@ def main():
     given = [args.ego_length, args.ego_width, args.ego_wheelbase]
     if any(v is not None for v in given):
         if not all(v is not None for v in given):
-            ap.error("--ego_length / --ego_width / --ego_wheelbase must all be "
-                     "set together, or all be omitted (defaults from npz).")
+            ap.error(
+                "--ego_length / --ego_width / --ego_wheelbase must all be "
+                "set together, or all be omitted (defaults from npz)."
+            )
         ego_dims = (args.ego_length, args.ego_width, args.ego_wheelbase)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -229,8 +243,10 @@ def main():
     if args.limit > 0:
         files = files[: args.limit]
     n_steps = len(files)
-    print(f"Rendering {n_steps} files from {args.npz_dir} -> {args.output_dir} "
-          f"with {args.workers} workers")
+    print(
+        f"Rendering {n_steps} files from {args.npz_dir} -> {args.output_dir} "
+        f"with {args.workers} workers"
+    )
 
     # Building the route polylines + road borders pulls in lanelet2 (heavy);
     # do it once in the parent and ship to workers via a Pool initializer
@@ -241,13 +257,12 @@ def main():
     if road_border_polylines:
         print(f"  loaded {len(road_border_polylines)} road-border polylines")
     if ego_dims:
-        print(f"  overriding ego dims: length={ego_dims[0]} width={ego_dims[1]} "
-              f"wheelbase={ego_dims[2]}")
+        print(
+            f"  overriding ego dims: length={ego_dims[0]} width={ego_dims[1]} "
+            f"wheelbase={ego_dims[2]}"
+        )
 
-    tasks = [
-        (i, f, args.output_dir / f"step_{i:04d}.png")
-        for i, f in enumerate(files)
-    ]
+    tasks = [(i, f, args.output_dir / f"step_{i:04d}.png") for i, f in enumerate(files)]
 
     with mp.Pool(
         args.workers,
@@ -258,7 +273,7 @@ def main():
             if err:
                 print(err)
             if (j + 1) % 100 == 0:
-                print(f"  {j+1}/{n_steps}")
+                print(f"  {j + 1}/{n_steps}")
     print("Done.")
 
 

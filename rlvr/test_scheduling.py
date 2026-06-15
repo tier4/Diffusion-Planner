@@ -25,9 +25,11 @@ def test_cosine_schedule():
 
 
 def test_step_schedule():
-    c = GRPOConfig(schedules={
-        "w_progress": {"type": "step", "start": 3.0, "end": 10.0, "warmup_fraction": 0.5},
-    })
+    c = GRPOConfig(
+        schedules={
+            "w_progress": {"type": "step", "start": 3.0, "end": 10.0, "warmup_fraction": 0.5},
+        }
+    )
     # Before warmup: start
     assert c.get_scheduled_value("w_progress", 1, 20) == 3.0
     assert c.get_scheduled_value("w_progress", 10, 20) == 3.0
@@ -53,10 +55,12 @@ def test_no_schedule_returns_none():
 
 
 def test_get_all_scheduled_values():
-    c = GRPOConfig(schedules={
-        "w_progress": {"type": "linear", "start": 3.0, "end": 10.0},
-        "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 1.0},
-    })
+    c = GRPOConfig(
+        schedules={
+            "w_progress": {"type": "linear", "start": 3.0, "end": 10.0},
+            "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 1.0},
+        }
+    )
     vals = c.get_all_scheduled_values(1, 20)
     assert "w_progress" in vals
     assert "longitudinal_eta" in vals
@@ -65,9 +69,11 @@ def test_get_all_scheduled_values():
 
 
 def test_step_warmup_boundary():
-    c = GRPOConfig(schedules={
-        "x": {"type": "step", "start": 1.0, "end": 2.0, "warmup_fraction": 0.3},
-    })
+    c = GRPOConfig(
+        schedules={
+            "x": {"type": "step", "start": 1.0, "end": 2.0, "warmup_fraction": 0.3},
+        }
+    )
     # progress at ep7/20 = 6/19 ≈ 0.316 > 0.3 → end
     assert c.get_scheduled_value("x", 7, 20) == 2.0
     # progress at ep6/20 = 5/19 ≈ 0.263 < 0.3 → start
@@ -75,17 +81,21 @@ def test_step_warmup_boundary():
 
 
 def test_invalid_warmup_fraction():
-    c = GRPOConfig(schedules={
-        "x": {"type": "step", "start": 1.0, "end": 2.0, "warmup_fraction": 1.5},
-    })
+    c = GRPOConfig(
+        schedules={
+            "x": {"type": "step", "start": 1.0, "end": 2.0, "warmup_fraction": 1.5},
+        }
+    )
     with pytest.raises(ValueError, match="warmup_fraction"):
         c.get_scheduled_value("x", 1, 20)
 
 
 def test_peak_schedule():
-    c = GRPOConfig(schedules={
-        "x": {"type": "peak", "start": 0.0, "end": 0.0, "peak": 0.3, "peak_fraction": 0.5},
-    })
+    c = GRPOConfig(
+        schedules={
+            "x": {"type": "peak", "start": 0.0, "end": 0.0, "peak": 0.3, "peak_fraction": 0.5},
+        }
+    )
     # Endpoints
     assert c.get_scheduled_value("x", 1, 20) == pytest.approx(0.0)
     assert c.get_scheduled_value("x", 20, 20) == pytest.approx(0.0)
@@ -99,9 +109,11 @@ def test_peak_schedule():
 
 
 def test_peak_asymmetric():
-    c = GRPOConfig(schedules={
-        "x": {"type": "peak", "start": 0.0, "end": 0.1, "peak": 0.5, "peak_fraction": 0.3},
-    })
+    c = GRPOConfig(
+        schedules={
+            "x": {"type": "peak", "start": 0.0, "end": 0.1, "peak": 0.5, "peak_fraction": 0.3},
+        }
+    )
     assert c.get_scheduled_value("x", 1, 20) == pytest.approx(0.0)
     assert c.get_scheduled_value("x", 20, 20) == pytest.approx(0.1)
     # Early peak means fast ramp up, slow ramp down
@@ -110,9 +122,11 @@ def test_peak_asymmetric():
 
 
 def test_peak_invalid_fraction():
-    c = GRPOConfig(schedules={
-        "x": {"type": "peak", "start": 0.0, "end": 0.0, "peak": 0.3, "peak_fraction": 0.0},
-    })
+    c = GRPOConfig(
+        schedules={
+            "x": {"type": "peak", "start": 0.0, "end": 0.0, "peak": 0.3, "peak_fraction": 0.0},
+        }
+    )
     with pytest.raises(ValueError, match="peak_fraction"):
         c.get_scheduled_value("x", 1, 20)
 
@@ -124,10 +138,12 @@ def test_invalid_schedule_type():
 
 
 def test_json_roundtrip(tmp_path):
-    c = GRPOConfig(schedules={
-        "w_progress": {"type": "cosine", "start": 3.0, "end": 10.0},
-        "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 0.5},
-    })
+    c = GRPOConfig(
+        schedules={
+            "w_progress": {"type": "cosine", "start": 3.0, "end": 10.0},
+            "longitudinal_eta": {"type": "linear", "start": 0.0, "end": 0.5},
+        }
+    )
     path = tmp_path / "test_sched_roundtrip.json"
     c.to_json(str(path))
     c2 = GRPOConfig.from_json(str(path))
@@ -136,9 +152,11 @@ def test_json_roundtrip(tmp_path):
 
 
 def test_linear_end_epoch():
-    c = GRPOConfig(schedules={
-        "speed_stretch": {"type": "linear", "start": 1.2, "end": 1.0, "end_epoch": 8},
-    })
+    c = GRPOConfig(
+        schedules={
+            "speed_stretch": {"type": "linear", "start": 1.2, "end": 1.0, "end_epoch": 8},
+        }
+    )
     # ep1: start
     assert c.get_scheduled_value("speed_stretch", 1, 20) == pytest.approx(1.2)
     # ep8: reaches end
@@ -152,24 +170,30 @@ def test_linear_end_epoch():
 
 
 def test_linear_end_epoch_rampup():
-    c = GRPOConfig(schedules={
-        "speed_stretch": {"type": "linear", "start": 1.0, "end": 1.2, "end_epoch": 8},
-    })
+    c = GRPOConfig(
+        schedules={
+            "speed_stretch": {"type": "linear", "start": 1.0, "end": 1.2, "end_epoch": 8},
+        }
+    )
     assert c.get_scheduled_value("speed_stretch", 1, 20) == pytest.approx(1.0)
     assert c.get_scheduled_value("speed_stretch", 8, 20) == pytest.approx(1.2)
     assert c.get_scheduled_value("speed_stretch", 15, 20) == pytest.approx(1.2)
 
 
 def test_linear_end_epoch_invalid():
-    c = GRPOConfig(schedules={
-        "x": {"type": "linear", "start": 1.0, "end": 2.0, "end_epoch": 0},
-    })
+    c = GRPOConfig(
+        schedules={
+            "x": {"type": "linear", "start": 1.0, "end": 2.0, "end_epoch": 0},
+        }
+    )
     with pytest.raises(ValueError, match="end_epoch"):
         c.get_scheduled_value("x", 1, 20)
 
-    c2 = GRPOConfig(schedules={
-        "x": {"type": "linear", "start": 1.0, "end": 2.0, "end_epoch": 25},
-    })
+    c2 = GRPOConfig(
+        schedules={
+            "x": {"type": "linear", "start": 1.0, "end": 2.0, "end_epoch": 25},
+        }
+    )
     with pytest.raises(ValueError, match="end_epoch"):
         c2.get_scheduled_value("x", 1, 20)
 

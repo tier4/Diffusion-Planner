@@ -39,7 +39,9 @@ def compute_trajectory_loss(
     future_len = model_args.future_len
 
     # Convert trajectory to tensor and normalize
-    gt_trajectory = torch.tensor(trajectory, dtype=torch.float32, device=device).unsqueeze(0)  # [1, T, 4]
+    gt_trajectory = torch.tensor(trajectory, dtype=torch.float32, device=device).unsqueeze(
+        0
+    )  # [1, T, 4]
 
     # Normalize using ego stats only
     ego_mean = model_args.state_normalizer.mean[0].to(device)
@@ -64,7 +66,9 @@ def compute_trajectory_loss(
     else:
         neighbors_current_norm = torch.zeros(B, 0, 4, device=device)
     ego_current_norm = (ego_current - ego_mean) / ego_std  # [B, 4]
-    current_states = torch.cat([ego_current_norm[:, None], neighbors_current_norm], dim=1)  # [B, P, 4]
+    current_states = torch.cat(
+        [ego_current_norm[:, None], neighbors_current_norm], dim=1
+    )  # [B, P, 4]
 
     # Concatenate current state with future
     all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, 1+T, 4]
@@ -195,17 +199,35 @@ def compute_dpo_loss(
             noise = torch.randn(B, P, future_len, 4, device=device)
             t = torch.rand(B, device=device) * (1 - eps) + eps
 
-            data_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
-            data_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
-            l_w_sum = l_w_sum + compute_trajectory_loss(policy_model, data_w, traj_w, model_args, noise, t, device)
-            l_l_sum = l_l_sum + compute_trajectory_loss(policy_model, data_l, traj_l, model_args, noise, t, device)
+            data_w = {
+                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()
+            }
+            data_l = {
+                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()
+            }
+            l_w_sum = l_w_sum + compute_trajectory_loss(
+                policy_model, data_w, traj_w, model_args, noise, t, device
+            )
+            l_l_sum = l_l_sum + compute_trajectory_loss(
+                policy_model, data_l, traj_l, model_args, noise, t, device
+            )
 
-            disable_ctx = inner_ref.disable_adapter() if use_lora_disable else contextlib.nullcontext()
+            disable_ctx = (
+                inner_ref.disable_adapter() if use_lora_disable else contextlib.nullcontext()
+            )
             with disable_ctx, torch.no_grad():
-                data_ref_w = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
-                data_ref_l = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()}
-                l_ref_w_sum = l_ref_w_sum + compute_trajectory_loss(ref_model, data_ref_w, traj_w, model_args, noise.clone(), t, device)
-                l_ref_l_sum = l_ref_l_sum + compute_trajectory_loss(ref_model, data_ref_l, traj_l, model_args, noise.clone(), t, device)
+                data_ref_w = {
+                    k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()
+                }
+                data_ref_l = {
+                    k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data_raw.items()
+                }
+                l_ref_w_sum = l_ref_w_sum + compute_trajectory_loss(
+                    ref_model, data_ref_w, traj_w, model_args, noise.clone(), t, device
+                )
+                l_ref_l_sum = l_ref_l_sum + compute_trajectory_loss(
+                    ref_model, data_ref_l, traj_l, model_args, noise.clone(), t, device
+                )
 
         l_w = l_w_sum / K
         l_l = l_l_sum / K

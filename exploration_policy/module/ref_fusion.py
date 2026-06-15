@@ -60,17 +60,17 @@ class RefFusionAttention(nn.Module):
         q = self.norm_q(ref_token).unsqueeze(1)  # [B, 1, H]
         kv = self.norm_kv(scene_encoding)  # [B, N, D_enc]
 
-        q = self.q_proj(q)   # [B, 1, H]
+        q = self.q_proj(q)  # [B, 1, H]
         k = self.k_proj(kv)  # [B, N, H]
         v = self.v_proj(kv)  # [B, N, H]
 
         # Reshape for multi-head attention
-        q = q.view(B, 1, self.n_heads, self.head_dim).transpose(1, 2)   # [B, h, 1, d]
+        q = q.view(B, 1, self.n_heads, self.head_dim).transpose(1, 2)  # [B, h, 1, d]
         k = k.view(B, -1, self.n_heads, self.head_dim).transpose(1, 2)  # [B, h, N, d]
         v = v.view(B, -1, self.n_heads, self.head_dim).transpose(1, 2)  # [B, h, N, d]
 
         # Scaled dot-product attention
-        scale = self.head_dim ** -0.5
+        scale = self.head_dim**-0.5
         attn = torch.matmul(q, k.transpose(-2, -1)) * scale  # [B, h, 1, N]
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)

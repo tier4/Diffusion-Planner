@@ -9,21 +9,20 @@ from pathlib import Path
 
 from rlvr.reward import RewardBreakdown, RewardConfig
 
-
 # ---------------------------------------------------------------------------
 # Generation config labels
 # ---------------------------------------------------------------------------
 
 _FIXED_LABELS = [
-    "det_pure",            # 0: no guidance, no noise
-    "CL5_SPD5_det",        # 1
-    "CL8_SPD5_det",        # 2
-    "CL10_SPD8_det",       # 3
-    "CL10_SPD10_det",      # 4
-    "CL5_SPD5_noisy",      # 5
-    "CL8_SPD8_noisy",      # 6
-    "CL10_SPD8_noisy",     # 7
-    "CL10_SPD10_noisy",    # 8
+    "det_pure",  # 0: no guidance, no noise
+    "CL5_SPD5_det",  # 1
+    "CL8_SPD5_det",  # 2
+    "CL10_SPD8_det",  # 3
+    "CL10_SPD10_det",  # 4
+    "CL5_SPD5_noisy",  # 5
+    "CL8_SPD8_noisy",  # 6
+    "CL10_SPD8_noisy",  # 7
+    "CL10_SPD10_noisy",  # 8
 ]
 
 _CATEGORY_MAP = {
@@ -84,9 +83,15 @@ def get_category(label: str) -> str:
 # ---------------------------------------------------------------------------
 
 _NUMERIC_BREAKDOWN_FIELDS = (
-    "safety", "progress", "smoothness", "feasibility",
-    "centerline", "red_light", "total",
-    "rb_near_penalty", "rb_wide_penalty",
+    "safety",
+    "progress",
+    "smoothness",
+    "feasibility",
+    "centerline",
+    "red_light",
+    "total",
+    "rb_near_penalty",
+    "rb_wide_penalty",
 )
 # Keep gate flags in sync with the fields consumed by mean_breakdown_dict() and
 # compute_dominant_component() — otherwise those helpers see False by default.
@@ -117,8 +122,14 @@ def mean_breakdown_dict(rewards: list[RewardBreakdown]) -> dict[str, float]:
     gate" via mean > some threshold.
     """
     numeric_fields = [
-        "safety", "progress", "smoothness", "feasibility",
-        "centerline", "red_light", "rb_near_penalty", "rb_wide_penalty",
+        "safety",
+        "progress",
+        "smoothness",
+        "feasibility",
+        "centerline",
+        "red_light",
+        "rb_near_penalty",
+        "rb_wide_penalty",
     ]
     gate_fields = ["rb_crossing", "lane_crossing"]
     K = len(rewards)
@@ -193,6 +204,7 @@ def compute_dominant_component(
 # Per-scene record
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SceneRankRecord:
     scene_path: str
@@ -213,6 +225,7 @@ class SceneRankRecord:
         def _round_breakdown(bd: dict) -> dict:
             # Preserve booleans as bools; only round numeric values.
             return {k: (v if isinstance(v, bool) else round(float(v), 4)) for k, v in bd.items()}
+
         return {
             "scene": self.scene_path,
             "winner_idx": self.winner_idx,
@@ -230,6 +243,7 @@ class SceneRankRecord:
 # ---------------------------------------------------------------------------
 # Epoch-level analytics
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class EpochRankAnalytics:
@@ -260,9 +274,18 @@ class EpochRankAnalytics:
         # Category rates
         cat_counter = Counter(get_category(r.winner_label) for r in self.records)
         # Include both standard and experimental categories
-        all_cats = ["det_pure", "guided_det", "guided_noisy", "random",
-                    "lateral_exp", "stretched_exp", "decoupled_exp", "noise_only_exp",
-                    "collision_exp", "gt_candidate"]
+        all_cats = [
+            "det_pure",
+            "guided_det",
+            "guided_noisy",
+            "random",
+            "lateral_exp",
+            "stretched_exp",
+            "decoupled_exp",
+            "noise_only_exp",
+            "collision_exp",
+            "gt_candidate",
+        ]
         for cat in all_cats:
             self.category_rates[cat] = cat_counter.get(cat, 0) / n
 
@@ -299,6 +322,7 @@ class EpochRankAnalytics:
 # Print / save
 # ---------------------------------------------------------------------------
 
+
 def print_epoch_summary(analytics: EpochRankAnalytics) -> None:
     """Print formatted rank analytics summary to stdout."""
     n = len(analytics.records)
@@ -309,19 +333,22 @@ def print_epoch_summary(analytics: EpochRankAnalytics) -> None:
     for lbl, rate in sorted_labels:
         cnt = analytics.win_counts[lbl]
         if cnt > 0:
-            print(f"    {lbl:<22s}: {rate*100:5.1f}% ({cnt} wins)")
+            print(f"    {lbl:<22s}: {rate * 100:5.1f}% ({cnt} wins)")
     if analytics.never_won:
         print(f"  Never won: {', '.join(analytics.never_won)}")
 
     # Category rates
     cats = analytics.category_rates
-    parts = [f"{cat} {rate*100:.0f}%" for cat, rate in sorted(cats.items(), key=lambda x: -x[1])]
+    parts = [f"{cat} {rate * 100:.0f}%" for cat, rate in sorted(cats.items(), key=lambda x: -x[1])]
     print(f"  Category Rates: {' | '.join(parts)}")
 
     # Dominant components
     dom = analytics.dominant_component_counts
     total_dom = sum(dom.values()) or 1
-    dom_parts = [f"{comp} {cnt/total_dom*100:.0f}%" for comp, cnt in sorted(dom.items(), key=lambda x: -x[1])]
+    dom_parts = [
+        f"{comp} {cnt / total_dom * 100:.0f}%"
+        for comp, cnt in sorted(dom.items(), key=lambda x: -x[1])
+    ]
     print(f"  Dominant Components: {' | '.join(dom_parts)}")
 
     print(f"  Mean improvement over det: {analytics.mean_improvement:+.2f}")
@@ -339,6 +366,7 @@ def save_epoch_analytics(analytics: EpochRankAnalytics, run_dir: Path, epoch: in
 # ---------------------------------------------------------------------------
 # Cross-epoch summary (called once at end of training)
 # ---------------------------------------------------------------------------
+
 
 def save_cross_epoch_summary(run_dir: Path) -> None:
     """Read all per-epoch JSONs and produce a cross-epoch summary."""
@@ -368,12 +396,14 @@ def save_cross_epoch_summary(run_dir: Path) -> None:
             scene = rec["scene"]
             if scene not in scene_evolution:
                 scene_evolution[scene] = []
-            scene_evolution[scene].append({
-                "epoch": ep,
-                "winner_label": rec["winner_label"],
-                "category": get_category(rec["winner_label"]),
-                "winner_reward": rec["winner_reward"],
-            })
+            scene_evolution[scene].append(
+                {
+                    "epoch": ep,
+                    "winner_label": rec["winner_label"],
+                    "category": get_category(rec["winner_label"]),
+                    "winner_reward": rec["winner_reward"],
+                }
+            )
 
     # Redundancy report: configs winning <5% across ALL epochs
     all_config_rates: dict[str, list[float]] = {}
@@ -406,8 +436,12 @@ def save_cross_epoch_summary(run_dir: Path) -> None:
 
     # Print category trend table
     print(f"\n  Category rates by epoch:")
-    print(f"  {'Epoch':>6s}  {'det_pure':>9s}  {'guided_det':>10s}  {'guided_noisy':>12s}  {'random':>7s}")
+    print(
+        f"  {'Epoch':>6s}  {'det_pure':>9s}  {'guided_det':>10s}  {'guided_noisy':>12s}  {'random':>7s}"
+    )
     for ep in sorted(category_trends.keys()):
         cats = category_trends[ep]
-        print(f"  {ep:>6d}  {cats.get('det_pure',0)*100:>8.1f}%  {cats.get('guided_det',0)*100:>9.1f}%  {cats.get('guided_noisy',0)*100:>11.1f}%  {cats.get('random',0)*100:>6.1f}%")
+        print(
+            f"  {ep:>6d}  {cats.get('det_pure', 0) * 100:>8.1f}%  {cats.get('guided_det', 0) * 100:>9.1f}%  {cats.get('guided_noisy', 0) * 100:>11.1f}%  {cats.get('random', 0) * 100:>6.1f}%"
+        )
     print()

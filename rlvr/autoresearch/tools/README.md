@@ -112,6 +112,13 @@ python -m rlvr.autoresearch.tools.eval_reward_vs_gt \
   --model_path <model.pth> --scenes <scenes.json> --tag <name>
 ```
 
+### eval_plan_comfort.py
+Fast OPEN-LOOP **plan** gentleness metric (deterministic inference only — no psim/ROS), cheap enough to run every epoch alongside the avoidance/L2 evals. Computes planned lateral-accel = `|yaw_rate·speed|` and lateral jerk = `|d(lat_accel)/dt|` from the model's `[80,4]` plan at the KNOWN plan timestep (`dt`=0.1s, `RewardConfig.dt`), and reports the across-scene distribution of per-plan p95 values plus a `curve_speed` column (mean planned speed at steps where lat-accel exceeds `--curve_lat`, default 1.0 m/s² — the signal a slow-in-curves re-timing is meant to drop). Catches a comfort regression at training time — the blind spot the geometric (cl/RB) metrics miss. Point it at a curve scene-list to score curve behavior specifically. NOTE: open-loop is an optimistic proxy (the realized closed-loop drive is rougher), so use it as a *relative-improvement* signal on route/cruise scenes; the closed-loop `psim_comfort_heatmap` (post-hoc, ≥3 runs) is the ground-truth gate. Reuses `load_model`/`det_inference_batched` from `eval_det_avoidance.py`.
+```bash
+python -m rlvr.autoresearch.tools.eval_plan_comfort \
+  --model_path <merged.pth> --scenes <route_scenes.json> --output_dir <dir>
+```
+
 ### grpo_viz.py
 Visualizes all K GRPO trajectories per scene with reward breakdown. Each scene gets one figure:
 left panel shows trajectories colored by rank (green=best, red=worst) with road borders and lane
@@ -121,6 +128,24 @@ python -m rlvr.autoresearch.tools.grpo_viz \
   --model_path <model.pth> --scenes <scenes.json> --output_dir <dir> \
   --indices 0 4 8 --K 16 --enable_lane --survival \
   --w_progress 1.0 --lane_near_scale 50.0
+```
+
+### verify_dit_memo.py
+Equivalence + latency check for the guided-sampling **DiT forward memo**. During
+classifier-guided DPM-solver sampling the DiT runs twice on the same `(x, t)` —
+once for the composer's x̂₀ refinement, once for the solver's noise prediction —
+so `rlvr.guidance_batched.dit_memo` (a scoped single-slot memo around
+`decoder.dit`) serves the second from the first. It is **default-on** at every
+guided-generation entry point (`--no_dit_memo` / `use_dit_memo=False` is the A/B
+escape hatch). This tool generates each scene three ways (slow composer / fast
+composer / fast+memo) and reports pairwise max `|dtraj|` + per-leg latency:
+`fast-vs-slow` is exactly 0, `memo-vs-fast` is ~0 (one float quantum — the shared
+forward runs under `no_grad`, numerically equivalent, not bit-identical). Raises
+if the memo never fires (so a no-op can't report false equivalence).
+```bash
+python -m rlvr.autoresearch.tools.verify_dit_memo \
+  --model_path <base.pth> --scenes <json> --n_scenes 3 \
+  --etas=-0.75,0.3,0.75 --envelopes v1,v2 --repeats 2
 ```
 
 ## Diagnostic Tools
@@ -233,6 +258,15 @@ python -m rlvr.autoresearch.tools.cleanse_lane_scenes \
   --scenes <input.json> --output <cleaned.json> --min_clearance 0.2
 ```
 
+### build_comfort_speed_targets.py
+Re-times curated cl-guided **curve** targets to cap curve lateral-accel by *slowing where curvature is high* (`lat = v²·κ`), re-sampling along the SAME path polyline (the geometry/trace is preserved — waypoints move *along* the unchanged line, so centering / road-border are kept) and interpolating the original headings — only the curve speed drops, straights are unchanged. Produces curated SFT targets for a slow-in-curves leg (curated `ranked_sft_mode`). Keep `--a_long_max ≥ 1.5`: lower over-slows the ego and blows up ego-L2. Usage: `python -m rlvr.autoresearch.tools.build_comfort_speed_targets --scenes <json> --out_dir <dir> --out_list <json> [--a_lat_max 1.5 --a_long_max 1.5 --v_min 2.0]`.
+
+### build_clguided_comfort_target.py
+Comfort-aware variant of `build_clguided_target` (target *selection*, not re-timing): among the K cl-guided candidates per scene, keeps those that are kinematically feasible (`compute_kinematic_gate==1`) AND centered-enough (`cl ≥ max_cl − cl_margin`), then picks the one with the lowest comfort cost (`mean_weight·mean|lat_accel| + peak_weight·max|lat_accel| + jerk_weight·(mean|jerk| + max|jerk|/10)`; defaults `mean_weight=1.0, peak_weight=0.5, jerk_weight=0.1` — set `mean_weight=0` to target only peak+jerk and keep the mean lat-accel GT-like) over `ego_agent_past ⊕ candidate_future` (continuity-aware). Drops scenes with no feasible+centered candidate (no poison). An *alternative* comfort lever to `build_comfort_speed_targets` (which keeps the path and re-times speed); the re-timing approach is the one in the curve-comfort recipe, this selection approach is kept for experiments. Usage: `python -m rlvr.autoresearch.tools.build_clguided_comfort_target --model <model.pth> --scenes <json> --ego_shape WB,L,W --out_dir <dir> --out_list <json> [--cl_margin 0.08 --jerk_weight 0.1 --peak_weight 0.5 --mean_weight 1.0]`.
+
+### sweep_epoch_comfort.py
+Per-epoch sweep that merges each LoRA epoch and scores it on BOTH avoidance (via `eval_det_avoidance.score_det_scenes`) and open-loop comfort (lat-accel/jerk percentiles via `eval_driving_metrics.lat_accel_smoothed`), so you can pick the epoch on the comfort↔avoidance↔L2 frontier. Pair with `valid_predictor` for L2. Usage: `python -m rlvr.autoresearch.tools.sweep_epoch_comfort --run_dir <lora_run_dir> --base_model <warmstart.pth> --scenes <json> --config <reward.json> --ego_shape WB,L,W --output_dir <dir> --epochs all`.
+
 ## PRiSM — Perturbation-Recovery iterative Self-Mining
 
 Tools for the self-improvement loop described in `rlvr/README.md` (see "PRiSM" section). Per round: sim NPZ pool → mine warm scenes → perturb → K=N + reward.py rank → filter → ranked-SFT warmstarted → iterate.
@@ -303,6 +337,9 @@ Check whether a scene's target `ego_agent_future` crosses the road border, using
 ### psim_realized_rb.py
 Road-border crossings of the REALIZED closed-loop ego (from a psim `.db3` bag's `/localization/kinematic_state`), scored vs real map borders. `--stride 10` subsamples ~100Hz localization to ~10Hz; `--front_cut`/`--tail_cut` skip route ends; `--localize` bins crossings by arc. Reports full distribution (min/p5/p50/mean) + crossings. Usage: `--route <pkl> --bag <bag_dir> --ego_shape WB,L,W --stride 10 --front_cut 50 --tail_cut 50 --localize`.
 
+### psim_comfort_heatmap.py
+COMFORT/dynamics of the REALIZED closed-loop ego from a psim `.db3` bag, arc-binned (the RB-heatmap analog for dynamics). Per-arc lateral-accel, lateral jerk, curvature, speed + centerline-offset, all from MEASURED signals — NO position derivatives — with **dt derived from the message timestamps** (psim localization is ~40Hz, NOT 100Hz; assuming a fixed dt inflates speed ~2.5×/lat-accel ~6×/jerk ~16× — a real bug this avoids). The PRIMARY lateral signal is measured `|accel.y|` from `/localization/acceleration` (base_link EKF, the felt accel; first msg dropped, interpolated onto pose timestamps), with kinematic `|yaw_rate·speed|` reported as a SECONDARY sanity column — in psim there's no IMU so the EKF derives `accel.y` as `v·ω` and the two are identical (the tool prints their `corr`/`max|Δ|`; on a REAL-vehicle bag the gap is diagnostic of slip/noise). Jerk = `|d(accel.y)/dt|` (one derivative, never 3rd-deriv of position). Pass `--baseline_bag` for a side-by-side table + heatmaps + a v-vs-κ decomposition. Reports p95 as the primary statistic (not mean/max). Run under a ROS env (reads `/localization/{kinematic_state,acceleration}`; reuses `_heatmap_common` arc-binning). Usage: `python -m rlvr.autoresearch.tools.psim_comfort_heatmap --route <pkl> --bag <bag_dir> [--baseline_bag <bag_dir>] --ego_shape WB,L,W --out_dir <dir> [--stride 10 --bin_m 100 --front_cut 50 --tail_cut 50]`.
+
 ### psim_per_arc_metrics.py
 Per-arc CL + road-border table for one-or-more psim bags side by side. Per pose: arc + |lateral| from route centerline (CL) via `project_to_polyline`, and border distance via the reward OBB (RB). Bins by arc and prints per-bin clμ (mean |lat|), clmx (max |lat|), rb min-dist, X (crossings) + an in-bounds total. Usage: `python -m rlvr.autoresearch.tools.psim_per_arc_metrics --route <pkl> --ego_shape WB,L,W [--bin_m 250 --front_cut 50 --tail_cut 50 --stride 10] --models LABEL1 BAG1 LABEL2 BAG2 ...`.
 
@@ -320,6 +357,94 @@ Per-epoch L2-to-target distribution (+ per-arc) tracker for a HEAL/curated run, 
 
 ### build_baseline_det_target.py
 Build curated GRAFT-CL targets = a competent model's deterministic trajectory. Runs `--model`'s det inference (`eval_det_avoidance.det_inference_batched`) on a scene list, unit-normalizes the (cos,sin) heading columns, and writes the result into each NPZ's `ego_agent_future` (the curated SFT target) — for HEAL Mechanism B (train the wounded model toward a known-good line instead of ranking its own samples). `--model` is the TARGET source (e.g. the baseline that keeps the line where the grafted model drifted), NOT the model being trained; train curated (lr 5e-5) warm-started from the wounded model. Usage: `--model <competent.pth> --scenes <json> --ego_shape WB,L,W --out_dir <dir> --out_list <json>`.
+
+## Guidance-explorer tools
+
+Tools around the exploration policy (small Beta-head network that outputs
+per-scene guidance etas steering the FROZEN planner — see
+`docs/guidance_explorer_framework.md` for the training method). The training
+chain is `sweep_guidance_params` → `rederive_margin_labels` →
+`split_labels_holdout` → `rlvr.train_explorer_regression`; eval via
+`eval_policy_avoidance` (open-loop + inertness) and
+`batched_closedloop_videos` (lockstep closed-loop + renders).
+
+### classify_avoidance_scenes.py
+Use a trained explorer as an **avoidance-scene detector** over any NPZ scene
+list. Per scene it runs the frozen planner's deterministic inference (the
+policy's `x_ref` input), the frozen encoder, and the policy head
+(deterministic = Beta means), then flags the scene as avoidance when the
+requested guidance exceeds per-head thresholds — a weak signal below
+threshold is treated as not-really-avoidance. All three passes are BATCHED
+across scenes (`--batch_size`, default 32 — bit-identical to per-scene,
+~15x faster); NPZs must be shape-homogeneous (e.g. 320 neighbor slots).
+GT-future fields are ignored, so 3-col and 4-col pools mix freely.
+
+**Semantics caveat:** the etas judge *the baseline's plan*, not the scene in
+isolation. A scene whose obstacle the frozen planner already avoids unaided
+reads as "normal" (the policy's inertness contract) — usually what you want
+when mining training data, but not a "does this scene contain a parked car"
+detector. The signal is strongly bimodal (flagged scenes cluster at high
+|eta|, normals at ~0), so the threshold has wide margin; lower it to ~0.05
+to also catch borderline scenes, raise it for high-precision curation.
+
+```bash
+python -m rlvr.autoresearch.tools.classify_avoidance_scenes \
+  --model_path <base.pth> --policy_dir <dir with exploration_policy.pth + config> \
+  --scenes <scenes.json> --out <report.json> \
+  [--lat_thresh 0.15] [--col_thresh 0.15] [--rule any|both] \
+  [--out_avoidance_list <a.json>] [--out_normal_list <n.json>] \
+  [--batch_size 32] \
+  [--verify_clearance 1.5 --ego_shape WB,L,W] \
+  [--render_dir <dir> --ego_shape WB,L,W [--render_only_avoidance]]
+```
+
+- `--model_path` must be the planner the policy was trained against (the
+  etas are conditional on that model's det trajectory).
+- Report JSON: per-scene etas + verdict + triggered head(s), plus summary
+  counts and |eta| distribution percentiles per head.
+- `--out_avoidance_list` / `--out_normal_list`: plain NPZ path lists,
+  directly usable as dataset lists.
+- `--verify_clearance <m>` (recommended: 1.5): cross-check every flagged
+  scene with the canonical det-plan OBB clearance vs stopped neighbors and
+  DEMOTE it to normal when the baseline plan was already safe by that
+  margin — kills policy false positives (inertness leaks on unfamiliar
+  normals) without touching true positives, mirroring the deployment
+  activation gate. Demotions are recorded per scene (`demoted: true`,
+  `det_clearance`).
+- `--render_dir`: per-scene verdict PNGs for human audit — ego footprint at
+  t0 (blue, requires `--ego_shape WB,L,W`, no default) + det trajectory
+  (black) + stopped-neighbor OBBs (crimson) + the policy-guided trajectory
+  (green, dashed) on flagged scenes — and per-class collages
+  (`collage_avoid` / `collage_demoted` / `collage_normal`).
+  `--render_only_avoidance` skips normal scenes (for large sweeps);
+  clearance-demoted scenes always render with a DEMOTED title carrying the
+  measured clearance. The guidance envelope flags (`--lambda_lat`,
+  `--lat_scale`, `--col_scale`, `--envelope`, ...) only affect these renders
+  in this tool; they default to the policy's persisted calibration (see
+  "Guidance envelope" below) and pass through to the render composer.
+
+## Guidance envelope (persisted in the policy config)
+
+The exploration policy's `eta` outputs are calibrated to a fixed **guidance
+envelope** (`lambda_lat` / `lat_scale` / `col_scale` / `col_range` /
+`lambda_spd` / `stretch_scale` / `guidance_scale` / `envelope` / `lambda_col`)
+— the one its labels were swept against. The trainer is pure eta-regression and
+never sees the envelope, so applying the etas at a different envelope silently
+mis-scales guidance. The envelope is therefore **persisted in
+`exploration_policy_config.json`** (`ExplorationPolicyConfig.guidance_envelope`,
+defaulting to the canonical v1 calibration `5.0/2.0/9.0/8.0/...`; configs
+predating this backfill to v1 on load), and `--guidance_envelope <json>` lets
+the trainer record a non-v1 calibration.
+
+The guided eval/deploy tools (`eval_policy_avoidance`, `eval_closedloop_avoidance`,
+`valid_predictor_guided`, `eval_policy_l2`, `distill_guided_targets`,
+`rollforward_avoidance_scenes`) **load the envelope from the policy** — their
+envelope CLI flags default to `None` (override-only). Per knob: an explicit flag
+wins, else the policy's persisted envelope, else v1. **A flag that DISAGREES with
+the persisted envelope hard-fails** (the etas are bound to the persisted
+envelope) unless you pass `--force_envelope_override` (a loud-warning escape
+hatch for deliberate sweeps / v2 experiments). So: omit the flags to run at the
+policy's calibration; you cannot silently mis-scale it.
 
 ## Data preparation (NPZ format / mining)
 

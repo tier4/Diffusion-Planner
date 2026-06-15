@@ -58,7 +58,6 @@ import torch
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from scenario_generation.replay import SpawnConfig, _score_step
 
-
 _NPZ_RE = re.compile(r"replay_step_(\d+)\.npz$")
 
 
@@ -73,7 +72,7 @@ def _score_instant(npz_paths, device, reward_cfg, spawn_cfg) -> list[dict]:
             data = {k: raw[k] for k in raw.files if k != "version"}
         steps.append(_score_step(data, step, device, reward_cfg, spawn_cfg))
         if (i + 1) % 100 == 0:
-            print(f"  Scored {i+1}/{len(npz_paths)} (instant)")
+            print(f"  Scored {i + 1}/{len(npz_paths)} (instant)")
     return steps
 
 
@@ -96,7 +95,11 @@ def _score_full(npz_paths, device, reward_cfg, spawn_cfg, model_path) -> list[di
 
         scene = from_npz(str(path))
         preds = _predict_batch(
-            model, model_args, scene, [scene.ego_agent_id], device,
+            model,
+            model_args,
+            scene,
+            [scene.ego_agent_id],
+            device,
             inference_delay=spawn_cfg.inference_delay,
         )
         ego_pred = preds.get(scene.ego_agent_id)
@@ -106,39 +109,63 @@ def _score_full(npz_paths, device, reward_cfg, spawn_cfg, model_path) -> list[di
                 f"to emit a partial metrics_log. Check that the NPZ has a valid "
                 f"ego_agent_past."
             )
-        steps.append(_score_step(
-            data, step, device, reward_cfg, spawn_cfg, prediction=ego_pred,
-        ))
+        steps.append(
+            _score_step(
+                data,
+                step,
+                device,
+                reward_cfg,
+                spawn_cfg,
+                prediction=ego_pred,
+            )
+        )
         if (i + 1) % 50 == 0:
-            print(f"  Scored {i+1}/{len(npz_paths)} (full)")
+            print(f"  Scored {i + 1}/{len(npz_paths)} (full)")
     return steps
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run_dir", type=Path, required=True,
-                        help="Replay output directory (must contain npz/).")
-    parser.add_argument("--config", type=Path, required=True,
-                        help="Reward config JSON (no silent defaults).")
-    parser.add_argument("--mode", choices=["instant", "full"], required=True,
-                        help="'instant' = current-pose metrics only (no model "
-                             "needed). 'full' = instantaneous + pred_* from a "
-                             "specified model (inference per NPZ).")
-    parser.add_argument("--model_path", type=Path, default=None,
-                        help="Model checkpoint. REQUIRED when --mode full; "
-                             "MUST NOT be supplied when --mode instant.")
-    parser.add_argument("--output", type=Path, default=None,
-                        help="Output metrics log path "
-                             "(default: <run_dir>/metrics_log.json).")
+    parser.add_argument(
+        "--run_dir", type=Path, required=True, help="Replay output directory (must contain npz/)."
+    )
+    parser.add_argument(
+        "--config", type=Path, required=True, help="Reward config JSON (no silent defaults)."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["instant", "full"],
+        required=True,
+        help="'instant' = current-pose metrics only (no model "
+        "needed). 'full' = instantaneous + pred_* from a "
+        "specified model (inference per NPZ).",
+    )
+    parser.add_argument(
+        "--model_path",
+        type=Path,
+        default=None,
+        help="Model checkpoint. REQUIRED when --mode full; "
+        "MUST NOT be supplied when --mode instant.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output metrics log path (default: <run_dir>/metrics_log.json).",
+    )
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--seed", type=int, default=None,
-                        help="Seed torch / numpy / random before loading the "
-                             "model (full mode only). Match the sim's seed to "
-                             "make post-hoc predictions as close as possible "
-                             "to the live run — still not bit-identical "
-                             "because the live process advanced RNG state "
-                             "through map builds / MPC solves / etc. between "
-                             "inferences, which this tool doesn't replay.")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed torch / numpy / random before loading the "
+        "model (full mode only). Match the sim's seed to "
+        "make post-hoc predictions as close as possible "
+        "to the live run — still not bit-identical "
+        "because the live process advanced RNG state "
+        "through map builds / MPC solves / etc. between "
+        "inferences, which this tool doesn't replay.",
+    )
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -189,7 +216,9 @@ def main() -> None:
         "reward_config_path": str(args.config),
         "dump_npz_dir": str(npz_dir),
         "ego_shape": [
-            spawn_cfg.ego_wheelbase, spawn_cfg.ego_length, spawn_cfg.ego_width,
+            spawn_cfg.ego_wheelbase,
+            spawn_cfg.ego_length,
+            spawn_cfg.ego_width,
         ],
         "mode": args.mode,
         "model_path": str(args.model_path) if args.model_path else None,

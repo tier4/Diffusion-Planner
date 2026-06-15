@@ -13,6 +13,7 @@ Usage::
         --inject_ego_shape 4.76,7.24,2.29 \
         --output selected.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -103,7 +104,9 @@ def main() -> None:
     if args.inject_ego_shape:
         vals = [float(x) for x in args.inject_ego_shape.split(",")]
         if len(vals) != 3:
-            raise ValueError(f"--inject_ego_shape must be WB,L,W (3 values); got {args.inject_ego_shape!r}")
+            raise ValueError(
+                f"--inject_ego_shape must be WB,L,W (3 values); got {args.inject_ego_shape!r}"
+            )
         ego_shape_np = np.array(vals, dtype=np.float32)
 
     matched: list[dict] = []
@@ -117,9 +120,7 @@ def main() -> None:
             skipped_speed += 1
             continue
         ex, ey, eyaw = recover_ego_world_pose_from_goal(goal_pose, route)
-        arc, lat_signed, lat_abs = project_to_polyline(
-            np.array([ex, ey]), pts, s
-        )
+        arc, lat_signed, lat_abs = project_to_polyline(np.array([ex, ey]), pts, s)
         if _in_any_range(arc, arc_ranges):
             matched.append(
                 {
@@ -130,11 +131,9 @@ def main() -> None:
                 }
             )
         if (i + 1) % 500 == 0:
-            print(f"  {i+1}/{len(npz_files)} scanned, {len(matched)} matched")
+            print(f"  {i + 1}/{len(npz_files)} scanned, {len(matched)} matched")
 
-    print(
-        f"Scan complete: {len(matched)} matched, {skipped_speed} skipped (low speed)"
-    )
+    print(f"Scan complete: {len(matched)} matched, {skipped_speed} skipped (low speed)")
 
     kept = _declutter(matched, args.min_spacing_m)
     print(f"After declutter (spacing {args.min_spacing_m}m): {len(kept)} scenes")
@@ -154,9 +153,7 @@ def main() -> None:
             p_path = Path(e["path"])
             with np.load(p_path) as _z:  # close fd promptly when modifying many files
                 d = dict(_z)
-            if "ego_shape" not in d or not np.allclose(
-                d["ego_shape"], ego_shape_np, atol=1e-4
-            ):
+            if "ego_shape" not in d or not np.allclose(d["ego_shape"], ego_shape_np, atol=1e-4):
                 d["ego_shape"] = ego_shape_np
                 np.savez(p_path, **d)
 

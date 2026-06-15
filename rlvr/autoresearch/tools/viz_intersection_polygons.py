@@ -57,9 +57,13 @@ def plot_scene(data, out_path, scene_name):
         ly = lanes_np[s, v, 1] + lanes_np[s, v, 5]
         rx = lanes_np[s, v, 0] + lanes_np[s, v, 6]
         ry = lanes_np[s, v, 1] + lanes_np[s, v, 7]
-        ax.fill(np.concatenate([lx, rx[::-1]]),
-                np.concatenate([ly, ry[::-1]]),
-                color="lightgray", alpha=0.25, zorder=1)
+        ax.fill(
+            np.concatenate([lx, rx[::-1]]),
+            np.concatenate([ly, ry[::-1]]),
+            color="lightgray",
+            alpha=0.25,
+            zorder=1,
+        )
 
     # Intersection-area polygons from NPZ
     n_intersect = 0
@@ -79,11 +83,17 @@ def plot_scene(data, out_path, scene_name):
             if not (type_col[valid].max() > 0.5):
                 continue
             poly_pts = pts[valid, :2]
-            ax.fill(poly_pts[:, 0], poly_pts[:, 1],
-                    color="purple", alpha=0.25, zorder=2,
-                    label="intersection_area polygon" if n_intersect == 0 else None)
-            ax.plot(poly_pts[:, 0], poly_pts[:, 1],
-                    color="purple", linewidth=1.8, alpha=0.7, zorder=3)
+            ax.fill(
+                poly_pts[:, 0],
+                poly_pts[:, 1],
+                color="purple",
+                alpha=0.25,
+                zorder=2,
+                label="intersection_area polygon" if n_intersect == 0 else None,
+            )
+            ax.plot(
+                poly_pts[:, 0], poly_pts[:, 1], color="purple", linewidth=1.8, alpha=0.7, zorder=3
+            )
             n_intersect += 1
 
     # Road borders
@@ -94,11 +104,13 @@ def plot_scene(data, out_path, scene_name):
         ls_np = ls_d.cpu().numpy()
         for j in range(ls_np.shape[0]):
             pts = ls_np[j]
-            v = ((pts[:, 3] > 0.5) if ls_np.shape[-1] >= 4
-                 else (np.abs(pts[:, :2]).sum(axis=-1) > 0.01))
+            v = (
+                (pts[:, 3] > 0.5)
+                if ls_np.shape[-1] >= 4
+                else (np.abs(pts[:, :2]).sum(axis=-1) > 0.01)
+            )
             if v.sum() > 1:
-                ax.plot(pts[v, 0], pts[v, 1], color="red", linewidth=2.5,
-                        alpha=0.75, zorder=4)
+                ax.plot(pts[v, 0], pts[v, 1], color="red", linewidth=2.5, alpha=0.75, zorder=4)
 
     # Boundary segments classified
     p1 = seg_p1.cpu().numpy()
@@ -113,9 +125,14 @@ def plot_scene(data, out_path, scene_name):
             c, lw, alpha = "darkorange", 3.0, 0.95
         else:
             continue
-        ax.plot([p1[i, 0], p2[i, 0]], [p1[i, 1], p2[i, 1]],
-                color=c, linewidth=lw, alpha=alpha,
-                zorder=6 if c == "darkorange" else 5)
+        ax.plot(
+            [p1[i, 0], p2[i, 0]],
+            [p1[i, 1], p2[i, 1]],
+            color=c,
+            linewidth=lw,
+            alpha=alpha,
+            zorder=6 if c == "darkorange" else 5,
+        )
 
     # GT trajectory
     gt = data.get("ego_agent_future")
@@ -125,8 +142,15 @@ def plot_scene(data, out_path, scene_name):
         gt_np = gt.cpu().numpy()
         gt_v = ~((gt_np[:, 0] == 0) & (gt_np[:, 1] == 0))
         if gt_v.sum() > 1:
-            ax.plot(gt_np[gt_v, 0], gt_np[gt_v, 1], color="gold",
-                    linestyle="--", linewidth=2.2, alpha=0.9, zorder=7)
+            ax.plot(
+                gt_np[gt_v, 0],
+                gt_np[gt_v, 1],
+                color="gold",
+                linestyle="--",
+                linewidth=2.2,
+                alpha=0.9,
+                zorder=7,
+            )
 
     # Ego start
     ego_cur = data.get("ego_current_state")
@@ -135,18 +159,32 @@ def plot_scene(data, out_path, scene_name):
         if ec.dim() == 2:
             ec = ec[0]
         ec_np = ec.cpu().numpy()
-        ax.plot(ec_np[0], ec_np[1], marker="*", markersize=18,
-                markerfacecolor="darkred", markeredgecolor="black",
-                linestyle="None", zorder=10)
+        ax.plot(
+            ec_np[0],
+            ec_np[1],
+            marker="*",
+            markersize=18,
+            markerfacecolor="darkred",
+            markeredgecolor="black",
+            linestyle="None",
+            zorder=10,
+        )
 
     n_outer = int(outer_mask.sum())
     n_junction = int(junction_mask.sum())
     legend = [
-        Patch(facecolor="purple", alpha=0.25, edgecolor="purple",
-              label=f"intersection_area polygon  ({n_intersect})"),
+        Patch(
+            facecolor="purple",
+            alpha=0.25,
+            edgecolor="purple",
+            label=f"intersection_area polygon  ({n_intersect})",
+        ),
         Patch(facecolor="black", edgecolor="black", label=f"OUTER road edge  ({n_outer})"),
-        Patch(facecolor="darkorange", edgecolor="darkorange",
-              label=f"JUNCTION GAP segment  ({n_junction})"),
+        Patch(
+            facecolor="darkorange",
+            edgecolor="darkorange",
+            label=f"JUNCTION GAP segment  ({n_junction})",
+        ),
         Patch(facecolor="red", edgecolor="red", label="road border (line_strings)"),
         Patch(facecolor="gold", edgecolor="gold", label="GT trajectory"),
     ]
@@ -171,8 +209,7 @@ def plot_scene(data, out_path, scene_name):
     ax.set_ylim(cy - span, cy + span)
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.25)
-    ax.set_title(f"Intersection-area polygons vs junction-gap segments — {scene_name}",
-                 fontsize=11)
+    ax.set_title(f"Intersection-area polygons vs junction-gap segments — {scene_name}", fontsize=11)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=110, bbox_inches="tight")

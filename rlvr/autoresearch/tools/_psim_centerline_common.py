@@ -6,6 +6,7 @@ Lateral-offset metric is computed by ``lat_offset_and_naive_score`` in
 uses). These helpers handle aggregation, cropping, and arc-length binning
 on top of the metric.
 """
+
 from __future__ import annotations
 
 import math
@@ -14,10 +15,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-
 # ---------------------------------------------------------------------------
 # Reference-centerline construction (route.json + lanelet2 map).
 # ---------------------------------------------------------------------------
+
 
 def parse_lanelet_centerlines(
     osm_path: Path, wanted_ids: list[int], n_resample: int = 20
@@ -125,6 +126,7 @@ def build_route_polyline(osm_path: Path, route_json_path: Path) -> np.ndarray:
 # World→ego synthetic route_lanes tensor for the lateral-offset helper.
 # ---------------------------------------------------------------------------
 
+
 def world_polyline_to_ego_route_lanes(
     polyline_world: np.ndarray,
     ego_xy: tuple[float, float],
@@ -189,6 +191,7 @@ def world_polyline_to_ego_route_lanes(
 # Run aggregation + cropping + summary stats.
 # ---------------------------------------------------------------------------
 
+
 def polyline_cumulative_arclength(
     polyline: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -202,7 +205,9 @@ def polyline_cumulative_arclength(
 
 
 def project_point_to_polyline_arclength(
-    polyline: np.ndarray, x: float, y: float,
+    polyline: np.ndarray,
+    x: float,
+    y: float,
     cum: np.ndarray | None = None,
 ) -> float:
     """Return the arc-length on ``polyline`` of the point closest to ``(x, y)``.
@@ -269,7 +274,7 @@ def stats_line(name: str, d: dict, all_d: dict) -> str:
         f"{name:>14s}  kept={kept:4d}/{total:4d}  "
         f"|lat| mean={np.mean(abs_lat):.3f}m  "
         f"median={np.median(abs_lat):.3f}m  "
-        f"p95={np.percentile(abs_lat,95):.3f}m  "
+        f"p95={np.percentile(abs_lat, 95):.3f}m  "
         f"max={np.max(abs_lat):.3f}m  "
         f"std(lat)={np.std(lat):.3f}m  "
         f"mean(lat)={np.mean(lat):+.3f}m"

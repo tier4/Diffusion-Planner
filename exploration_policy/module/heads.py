@@ -11,15 +11,19 @@ from torch.distributions import Beta
 
 
 class GuidanceHead(nn.Module):
-    """Outputs Beta distribution parameters for lateral and longitudinal eta.
+    """Outputs Beta distribution parameters for n_heads guidance etas.
 
-    Produces 4 values: (alpha_lat, beta_lat, alpha_lon, beta_lon).
+    Produces 2*n_heads values: (alpha_0, beta_0, alpha_1, beta_1, ...), one
+    (alpha, beta) pair per head. The default n_heads=2 reproduces the original
+    (lateral, longitudinal) layout exactly — fc2 stays [4, H] and old
+    checkpoints load unchanged.
+
     Beta params constrained >= 1.0 via softplus + 1.0, ensuring unimodal
     distributions.
 
     Zero-initialization: The last linear layer is zero-initialized so that
-    raw output = [0,0,0,0] at init. Through softplus(0)+1 = ln(2)+1 ≈ 1.693,
-    this gives alpha=beta for both distributions, meaning:
+    raw output = 0 at init. Through softplus(0)+1 = ln(2)+1 ≈ 1.693,
+    this gives alpha=beta for every distribution, meaning:
       - Beta mean = 0.5 in (0,1) → eta mean = 0.0 in (-1,1)
       - Beta std ≈ 0.24 in (0,1) → eta std ≈ 0.48 in (-1,1)
     This ensures unbiased exploration around the reference trajectory and
@@ -29,11 +33,13 @@ class GuidanceHead(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
+        n_heads: int = 2,
         init_mode: str = "zeros",
         init_std: float = 0.01,
         raw_scale: float = 1.0,
     ):
         super().__init__()
+        self.n_heads = n_heads
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.act = nn.GELU()
         # bias=False removes a direct global offset at the output layer:
@@ -43,7 +49,7 @@ class GuidanceHead(nn.Module):
         # scene-dependence — but empirically it significantly improves per-scene
         # variation vs having bias=True on fc2.
         # Zero-init still works: zero weights → output=0 → softplus(0)+1 ≈ 1.693.
-        self.fc2 = nn.Linear(hidden_dim, 4, bias=False)
+        self.fc2 = nn.Linear(hidden_dim, 2 * n_heads, bias=False)
         self.raw_scale = raw_scale
 
         # Output layer initialization controls the initial exploration behavior:
@@ -56,15 +62,15 @@ class GuidanceHead(nn.Module):
         else:
             raise ValueError(f"Unknown init_mode: {init_mode!r} (expected 'zeros' or 'normal')")
 
-    def forward(self, fused: torch.Tensor) -> tuple[Beta, Beta]:
+    def forward(self, fused: torch.Tensor) -> list[Beta]:
         """
         Args:
             fused: [B, H] fused scene + reference representation.
 
         Returns:
-            (lat_dist, lon_dist): Beta distributions with batch_shape=[B].
+            list of n_heads Beta distributions with batch_shape=[B].
         """
-        raw = self.fc2(self.act(self.fc1(fused)))  # [B, 4]
+        raw = self.fc2(self.act(self.fc1(fused)))  # [B, 2*n_heads]
 
         # raw_scale amplifies gradients through softplus to overcome compression.
         # Without scaling (raw_scale=1): raw=0.03 → softplus(0.03)+1=1.72, eta≈0.004
@@ -74,12 +80,8 @@ class GuidanceHead(nn.Module):
         # softplus + 1.0 ensures params >= 1.0 (unimodal Beta)
         # Clamp to max_conc to prevent distribution collapse (alpha=10 → high concentration)
         max_conc = 10.0
-        alpha_lat = torch.clamp(F.softplus(scaled[:, 0]) + 1.0, max=max_conc)
-        beta_lat = torch.clamp(F.softplus(scaled[:, 1]) + 1.0, max=max_conc)
-        alpha_lon = torch.clamp(F.softplus(scaled[:, 2]) + 1.0, max=max_conc)
-        beta_lon = torch.clamp(F.softplus(scaled[:, 3]) + 1.0, max=max_conc)
-
-        return Beta(alpha_lat, beta_lat), Beta(alpha_lon, beta_lon)
+        params = torch.clamp(F.softplus(scaled) + 1.0, max=max_conc)
+        return [Beta(params[:, 2 * i], params[:, 2 * i + 1]) for i in range(self.n_heads)]
 
 
 class ValueHead(nn.Module):

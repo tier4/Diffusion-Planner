@@ -15,18 +15,21 @@ Usage:
         [--front_cut 50] [--tail_cut 50] [--stride 10] \
         --models LABEL1 BAG1 LABEL2 BAG2 ...
 """
+
 import argparse
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from scenario_generation.tools._heatmap_common import (
-    build_route_polyline, load_route, project_to_polyline,
-)
+from rlvr.reward import RewardConfig, _point_to_segments_min_dist
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder, _obb_corners
+from scenario_generation.tools._heatmap_common import (
+    build_route_polyline,
+    load_route,
+    project_to_polyline,
+)
 from scenario_generation.tools.heatmap_route_deviation import _extract_poses_from_bag
-from rlvr.reward import _point_to_segments_min_dist, RewardConfig
 
 
 def _peri(corners, n=8):
@@ -55,17 +58,29 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--route", required=True)
     ap.add_argument("--ego_shape", required=True, help="WB,L,W (no default — fail loudly)")
-    ap.add_argument("--bin_m", type=int, default=250, help="arc bin width in m (int — used as a range step)")
-    ap.add_argument("--front_cut", type=float, default=50.0, help="skip first N m (ends not in-bounds)")
+    ap.add_argument(
+        "--bin_m", type=int, default=250, help="arc bin width in m (int — used as a range step)"
+    )
+    ap.add_argument(
+        "--front_cut", type=float, default=50.0, help="skip first N m (ends not in-bounds)"
+    )
     ap.add_argument("--tail_cut", type=float, default=50.0, help="skip last N m")
-    ap.add_argument("--stride", type=int, default=10, help="subsample ~100Hz localization to planning rate")
-    ap.add_argument("--models", nargs="+", required=True,
-                    help="alternating LABEL BAG LABEL BAG ... (even count)")
+    ap.add_argument(
+        "--stride", type=int, default=10, help="subsample ~100Hz localization to planning rate"
+    )
+    ap.add_argument(
+        "--models",
+        nargs="+",
+        required=True,
+        help="alternating LABEL BAG LABEL BAG ... (even count)",
+    )
     args = ap.parse_args()
 
     parts = [float(v) for v in args.ego_shape.split(",")]
     if len(parts) != 3 or any(v <= 0 for v in parts):
-        raise ValueError(f"--ego_shape must be 'WB,L,W' with 3 positive values; got {args.ego_shape!r}")
+        raise ValueError(
+            f"--ego_shape must be 'WB,L,W' with 3 positive values; got {args.ego_shape!r}"
+        )
     wb, length, width = parts
     if len(args.models) % 2 != 0:
         raise ValueError("--models must be alternating LABEL BAG pairs (even count)")
@@ -82,14 +97,19 @@ def main():
     for pl in b.road_border_polylines():
         pl = np.asarray(pl)[:, :2]
         if pl.shape[0] >= 2:
-            s1.append(pl[:-1]); s2.append(pl[1:])
+            s1.append(pl[:-1])
+            s2.append(pl[1:])
     if not s1:
-        raise SystemExit(f"map {route.map_path} has no road-border polylines (>=2 points) — cannot score RB")
+        raise SystemExit(
+            f"map {route.map_path} has no road-border polylines (>=2 points) — cannot score RB"
+        )
     seg1 = torch.tensor(np.concatenate(s1), dtype=torch.float32)
     seg2 = torch.tensor(np.concatenate(s2), dtype=torch.float32)
 
-    data = {lab: _series(bg, pts, arc, seg1, seg2, wb, length, width, args.stride)
-            for lab, bg in zip(labels, bags)}
+    data = {
+        lab: _series(bg, pts, arc, seg1, seg2, wb, length, width, args.stride)
+        for lab, bg in zip(labels, bags)
+    }
 
     print("arc-bin     " + "".join(f"| {lab:>22} " for lab in labels))
     print("            " + "".join("|  clμ  clmx  rbmin  X  " for _ in labels))
@@ -102,7 +122,8 @@ def main():
             d = data[lab]
             m = (d[:, 0] >= lo) & (d[:, 0] < hi) & (d[:, 0] >= fc) & (d[:, 0] <= amax - tc)
             if m.sum() == 0:
-                row += "|   -     -     -    - "; continue
+                row += "|   -     -     -    - "
+                continue
             cl, rb = d[m, 1], d[m, 2]
             row += f"| {cl.mean():4.2f} {cl.max():5.2f} {rb.min():5.2f} {int((rb < thr).sum()):>2} "
         print(row)

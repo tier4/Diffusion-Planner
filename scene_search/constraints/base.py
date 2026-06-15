@@ -12,6 +12,7 @@ class BaseConstraint(ABC):
     - UI components for parameter input (Gradio widgets)
     - A filter function that checks if a scene passes the constraint
     """
+
     name: str = ""
     description: str = ""
 

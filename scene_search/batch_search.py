@@ -6,15 +6,16 @@ matches into contiguous batches of n_before + 1 + n_after frames.
 
 import os
 import re
-from dataclasses import dataclass, field
-
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 # search_scenes.py lives in diffusion_planner/util_scripts/ which is not a pip package
-_UTIL_SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent / "diffusion_planner" / "util_scripts")
+_UTIL_SCRIPTS_DIR = str(
+    Path(__file__).resolve().parent.parent / "diffusion_planner" / "util_scripts"
+)
 if _UTIL_SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _UTIL_SCRIPTS_DIR)
 
@@ -32,9 +33,10 @@ from search_scenes import (
 @dataclass
 class Batch:
     """A contiguous sequence of NPZ scenes centered around a search match."""
-    bag_prefix: str                    # bag/sequence identifier (path prefix before frame number)
-    scenes: list[str]                  # ordered NPZ paths (full batch)
-    central_indices: list[int]         # indices within scenes that were actual search matches
+
+    bag_prefix: str  # bag/sequence identifier (path prefix before frame number)
+    scenes: list[str]  # ordered NPZ paths (full batch)
+    central_indices: list[int]  # indices within scenes that were actual search matches
     metadata: dict = field(default_factory=dict)
 
     @property
@@ -67,7 +69,9 @@ def _frame_path(prefix: str, frame: int, pad: int = 19) -> str:
     return f"{prefix}_{frame:0{pad}d}.npz"
 
 
-def _expand_contiguous(prefix: str, central_frame: int, n_before: int, n_after: int, pad: int = 19) -> list[str]:
+def _expand_contiguous(
+    prefix: str, central_frame: int, n_before: int, n_after: int, pad: int = 19
+) -> list[str]:
     """Expand outward from central_frame, stopping when frames don't exist.
 
     This ensures we only include scenes from a continuous recording segment —
@@ -148,8 +152,7 @@ def find_batches(
             with np.load(entry["npz_path"]) as npz_data:
                 passes_all = True
                 for constraint, params in constraint_filters:
-                    if not constraint.filter(entry["npz_path"], npz_data,
-                                             params, entry=entry):
+                    if not constraint.filter(entry["npz_path"], npz_data, params, entry=entry):
                         passes_all = False
                         break
             if passes_all:
@@ -213,11 +216,13 @@ def find_batches(
             "heading_deg": entry["heading_deg"],
         }
 
-        batches.append(Batch(
-            bag_prefix=prefix,
-            scenes=scenes,
-            central_indices=[central_idx],
-            metadata=meta,
-        ))
+        batches.append(
+            Batch(
+                bag_prefix=prefix,
+                scenes=scenes,
+                central_indices=[central_idx],
+                metadata=meta,
+            )
+        )
 
     return batches

@@ -21,6 +21,7 @@ Usage:
         --primary_label model_a --ghost_label baseline \
         --view_half_m 40 --webm
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,17 +35,17 @@ import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
-
 # Fixed colours for the two egos. RGB hex.
 PRIMARY_COLOR = "#1f77b4"  # blue, fully opaque box for the primary sim
-GHOST_COLOR = "#d62728"    # red, semi-transparent for the ghost overlay
+GHOST_COLOR = "#d62728"  # red, semi-transparent for the ghost overlay
 ROUTE_COLOR = "#ffaa00"
 LANE_COLOR = "#888888"
 BORDER_COLOR = "#cc0000"
 
 
-def _world_from_ego(ego_pts: np.ndarray, world_x: float, world_y: float,
-                    world_heading: float) -> np.ndarray:
+def _world_from_ego(
+    ego_pts: np.ndarray, world_x: float, world_y: float, world_heading: float
+) -> np.ndarray:
     """ego_pts: (N, 2) in ego frame -> (N, 2) in world frame."""
     c = math.cos(world_heading)
     s = math.sin(world_heading)
@@ -52,45 +53,72 @@ def _world_from_ego(ego_pts: np.ndarray, world_x: float, world_y: float,
     return ego_pts @ rot.T + np.array([world_x, world_y], dtype=np.float64)
 
 
-def _draw_oriented_box(ax, x: float, y: float, heading: float,
-                        length: float, width: float, color: str,
-                        alpha: float = 1.0, lw: float = 2.0,
-                        zorder: int = 20, label: str | None = None) -> None:
+def _draw_oriented_box(
+    ax,
+    x: float,
+    y: float,
+    heading: float,
+    length: float,
+    width: float,
+    color: str,
+    alpha: float = 1.0,
+    lw: float = 2.0,
+    zorder: int = 20,
+    label: str | None = None,
+) -> None:
     """Draw an oriented rectangle centered on (x, y) (NOT rear axle)."""
     c = math.cos(heading)
     s = math.sin(heading)
     half_l = length / 2
     half_w = width / 2
-    corners_local = np.array([
-        [-half_l, -half_w], [half_l, -half_w],
-        [half_l, half_w], [-half_l, half_w], [-half_l, -half_w],
-    ])
+    corners_local = np.array(
+        [
+            [-half_l, -half_w],
+            [half_l, -half_w],
+            [half_l, half_w],
+            [-half_l, half_w],
+            [-half_l, -half_w],
+        ]
+    )
     rot = np.array([[c, -s], [s, c]])
     corners = corners_local @ rot.T + np.array([x, y])
-    ax.fill(corners[:, 0], corners[:, 1], color=color, alpha=alpha * 0.35,
-            zorder=zorder)
-    ax.plot(corners[:, 0], corners[:, 1], color=color, lw=lw, alpha=alpha,
-            zorder=zorder + 1, label=label)
+    ax.fill(corners[:, 0], corners[:, 1], color=color, alpha=alpha * 0.35, zorder=zorder)
+    ax.plot(
+        corners[:, 0],
+        corners[:, 1],
+        color=color,
+        lw=lw,
+        alpha=alpha,
+        zorder=zorder + 1,
+        label=label,
+    )
     arrow_len = max(length * 0.6, 2.0)
-    ax.annotate("",
-        xy=(x + arrow_len * c, y + arrow_len * s), xytext=(x, y),
-        arrowprops=dict(arrowstyle="-|>", color=color, lw=lw,
-                        mutation_scale=12, alpha=alpha),
-        zorder=zorder + 2)
+    ax.annotate(
+        "",
+        xy=(x + arrow_len * c, y + arrow_len * s),
+        xytext=(x, y),
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=lw, mutation_scale=12, alpha=alpha),
+        zorder=zorder + 2,
+    )
 
 
-def _draw_polylines(ax, polys_world: list[np.ndarray], color: str,
-                    lw: float = 1.0, alpha: float = 0.7,
-                    zorder: int = 4) -> None:
+def _draw_polylines(
+    ax,
+    polys_world: list[np.ndarray],
+    color: str,
+    lw: float = 1.0,
+    alpha: float = 0.7,
+    zorder: int = 4,
+) -> None:
     for pl in polys_world:
         if pl.shape[0] < 2:
             continue
-        ax.plot(pl[:, 0], pl[:, 1], "-", color=color, lw=lw, alpha=alpha,
-                zorder=zorder)
+        ax.plot(pl[:, 0], pl[:, 1], "-", color=color, lw=lw, alpha=alpha, zorder=zorder)
 
 
-def _extract_polylines_from_tensor(tensor: np.ndarray, valid_ch: int = 3,
-                                    xy_cols=(0, 1)) -> list[np.ndarray]:
+def _extract_polylines_from_tensor(
+    tensor: np.ndarray, valid_ch: int = 3, xy_cols=(0, 1)
+) -> list[np.ndarray]:
     """tensor: (N, 20, C). Returns list of (M, 2) ego-frame polylines."""
     polys = []
     for i in range(tensor.shape[0]):
@@ -181,14 +209,10 @@ def _render_one_step(
     # Transform ego-frame polylines to world frame using PRIMARY ego pose.
     lane_polys_ego, lane_tl_states = _polyline_route_with_tl(lanes_ego)
     route_polys_ego, route_tl_states = _polyline_route_with_tl(route_ego)
-    border_polys_ego = _extract_polylines_from_tensor(
-        line_strings_ego, valid_ch=3, xy_cols=(0, 1)
-    )
+    border_polys_ego = _extract_polylines_from_tensor(line_strings_ego, valid_ch=3, xy_cols=(0, 1))
     lane_polys_world = [_world_from_ego(p, px, py, ph) for p in lane_polys_ego]
     route_polys_world = [_world_from_ego(p, px, py, ph) for p in route_polys_ego]
-    border_polys_world = [
-        _world_from_ego(p, px, py, ph) for p in border_polys_ego
-    ]
+    border_polys_world = [_world_from_ego(p, px, py, ph) for p in border_polys_ego]
 
     # Fixed-size figure with FIXED axes margins (NOT tight_layout) to avoid
     # per-frame grid-size jitter. Figure size in inches × dpi = pixel size.
@@ -197,12 +221,9 @@ def _render_one_step(
     fig.subplots_adjust(left=0.06, right=0.98, bottom=0.06, top=0.92)
     ax = fig.add_subplot(1, 1, 1)
 
-    _draw_polylines(ax, lane_polys_world, color=LANE_COLOR, lw=0.7,
-                    alpha=0.55, zorder=2)
-    _draw_polylines(ax, border_polys_world, color=BORDER_COLOR, lw=1.6,
-                    alpha=0.85, zorder=3)
-    _draw_polylines(ax, route_polys_world, color=ROUTE_COLOR, lw=2.4,
-                    alpha=0.55, zorder=4)
+    _draw_polylines(ax, lane_polys_world, color=LANE_COLOR, lw=0.7, alpha=0.55, zorder=2)
+    _draw_polylines(ax, border_polys_world, color=BORDER_COLOR, lw=1.6, alpha=0.85, zorder=3)
+    _draw_polylines(ax, route_polys_world, color=ROUTE_COLOR, lw=2.4, alpha=0.55, zorder=4)
 
     # Overlay TL state on lanes that carry one (dominant channel != NONE).
     # Tinted segment + filled circle at lane mid for a clear signal marker.
@@ -212,8 +233,7 @@ def _render_one_step(
             continue
         ax.plot(poly[:, 0], poly[:, 1], "-", color=col, lw=2.2, alpha=0.85, zorder=6)
         mid = poly[len(poly) // 2]
-        ax.scatter([mid[0]], [mid[1]], s=70, c=col, edgecolors="black",
-                    linewidths=0.6, zorder=7)
+        ax.scatter([mid[0]], [mid[1]], s=70, c=col, edgecolors="black", linewidths=0.6, zorder=7)
     # Same for the route (signals along the ego's planned path).
     for poly, tl in zip(route_polys_world, route_tl_states):
         col = _TL_COLOUR.get(tl)
@@ -227,20 +247,38 @@ def _render_one_step(
     ghost_trail = ghost_pose.get("trail")
     if primary_trail is not None and len(primary_trail) > 1:
         pt = np.asarray(primary_trail)
-        ax.plot(pt[:, 0], pt[:, 1], "-", color=PRIMARY_COLOR,
-                lw=1.4, alpha=0.5, zorder=5)
+        ax.plot(pt[:, 0], pt[:, 1], "-", color=PRIMARY_COLOR, lw=1.4, alpha=0.5, zorder=5)
     if ghost_trail is not None and len(ghost_trail) > 1:
         gt = np.asarray(ghost_trail)
-        ax.plot(gt[:, 0], gt[:, 1], "--", color=GHOST_COLOR,
-                lw=1.4, alpha=0.5, zorder=5)
+        ax.plot(gt[:, 0], gt[:, 1], "--", color=GHOST_COLOR, lw=1.4, alpha=0.5, zorder=5)
 
     # Both ego boxes.
-    _draw_oriented_box(ax, px, py, ph, ego_length, ego_width,
-                       color=PRIMARY_COLOR, alpha=0.95, lw=2.2,
-                       zorder=20, label=primary_label)
-    _draw_oriented_box(ax, gx, gy, gh, ego_length, ego_width,
-                       color=GHOST_COLOR, alpha=0.55, lw=1.8,
-                       zorder=19, label=ghost_label)
+    _draw_oriented_box(
+        ax,
+        px,
+        py,
+        ph,
+        ego_length,
+        ego_width,
+        color=PRIMARY_COLOR,
+        alpha=0.95,
+        lw=2.2,
+        zorder=20,
+        label=primary_label,
+    )
+    _draw_oriented_box(
+        ax,
+        gx,
+        gy,
+        gh,
+        ego_length,
+        ego_width,
+        color=GHOST_COLOR,
+        alpha=0.55,
+        lw=1.8,
+        zorder=19,
+        label=ghost_label,
+    )
 
     # Connecting line between the two ego centers.
     ax.plot([px, gx], [py, gy], "k:", lw=1.0, alpha=0.55, zorder=18)
@@ -301,40 +339,60 @@ def _render_one_step(
         "sep_m": dist,
         "lat_m": lateral,
         "lon_m": longitudinal,
-        "p_x": px, "p_y": py, "p_h": ph, "p_v": speed_p,
-        "g_x": gx, "g_y": gy, "g_h": gh, "g_v": speed_g,
+        "p_x": px,
+        "p_y": py,
+        "p_h": ph,
+        "p_v": speed_p,
+        "g_x": gx,
+        "g_y": gy,
+        "g_h": gh,
+        "g_v": speed_g,
     }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--primary_dir", type=Path, required=True,
-                    help="Path to the primary route_sim dir (must contain "
-                         "trajectory_log.json + npz/replay_step_*.npz)")
-    ap.add_argument("--ghost_dir", type=Path, required=True,
-                    help="Path to the ghost route_sim dir (only "
-                         "trajectory_log.json is needed)")
+    ap.add_argument(
+        "--primary_dir",
+        type=Path,
+        required=True,
+        help="Path to the primary route_sim dir (must contain "
+        "trajectory_log.json + npz/replay_step_*.npz)",
+    )
+    ap.add_argument(
+        "--ghost_dir",
+        type=Path,
+        required=True,
+        help="Path to the ghost route_sim dir (only trajectory_log.json is needed)",
+    )
     ap.add_argument("--output_dir", type=Path, required=True)
     ap.add_argument("--primary_label", type=str, default="primary")
     ap.add_argument("--ghost_label", type=str, default="ghost")
     ap.add_argument("--view_half_m", type=float, default=40.0)
-    ap.add_argument("--center", type=str, default="midpoint",
-                    choices=["primary", "ghost", "midpoint"],
-                    help="Where to center the camera. 'midpoint' adapts the "
-                         "viewport so both egos stay visible.")
-    ap.add_argument("--adaptive_view", action="store_true",
-                    help="Grow viewport from --view_half_m up to --max_view_half_m "
-                         "in discrete 20m steps to keep both egos in frame.")
+    ap.add_argument(
+        "--center",
+        type=str,
+        default="midpoint",
+        choices=["primary", "ghost", "midpoint"],
+        help="Where to center the camera. 'midpoint' adapts the "
+        "viewport so both egos stay visible.",
+    )
+    ap.add_argument(
+        "--adaptive_view",
+        action="store_true",
+        help="Grow viewport from --view_half_m up to --max_view_half_m "
+        "in discrete 20m steps to keep both egos in frame.",
+    )
     ap.add_argument("--max_view_half_m", type=float, default=120.0)
     ap.add_argument("--start_step", type=int, default=0)
     ap.add_argument("--end_step", type=int, default=None)
-    ap.add_argument("--stride", type=int, default=1,
-                    help="Render every Nth frame (default 1).")
+    ap.add_argument("--stride", type=int, default=1, help="Render every Nth frame (default 1).")
     ap.add_argument("--ego_length", type=float, default=7.2369)
     ap.add_argument("--ego_width", type=float, default=2.29156)
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--webm", action="store_true",
-                    help="Encode dual_ego.webm via ffmpeg after rendering.")
+    ap.add_argument(
+        "--webm", action="store_true", help="Encode dual_ego.webm via ffmpeg after rendering."
+    )
     args = ap.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -349,13 +407,15 @@ def main() -> None:
     if args.end_step is not None:
         common_steps = [s for s in common_steps if s <= args.end_step]
     common_steps = [s for s in common_steps if s >= args.start_step]
-    common_steps = common_steps[::args.stride]
+    common_steps = common_steps[:: args.stride]
     if not common_steps:
         raise RuntimeError("No common steps between primary and ghost.")
     n_steps = max(common_steps) + 1
-    print(f"Rendering {len(common_steps)} steps "
-          f"(primary={len(p_traj)}, ghost={len(g_traj)}, "
-          f"common range=[{common_steps[0]}, {common_steps[-1]}])")
+    print(
+        f"Rendering {len(common_steps)} steps "
+        f"(primary={len(p_traj)}, ghost={len(g_traj)}, "
+        f"common range=[{common_steps[0]}, {common_steps[-1]}])"
+    )
 
     # Build trail arrays once.
     p_world = np.array([[e["x"], e["y"]] for e in p_traj], dtype=np.float64)
@@ -375,17 +435,24 @@ def main() -> None:
         # Trails (last 30 steps).
         pi = p_step_idx[step]
         gi = g_step_idx[step]
-        primary_pose["trail"] = p_world[max(0, pi - 30):pi + 1]
-        ghost_pose["trail"] = g_world[max(0, gi - 30):gi + 1]
+        primary_pose["trail"] = p_world[max(0, pi - 30) : pi + 1]
+        ghost_pose["trail"] = g_world[max(0, gi - 30) : gi + 1]
         npz_path = npz_dir / f"replay_step_{step:04d}.npz"
         if not npz_path.exists():
             return None
         out_path = args.output_dir / f"step_{step:04d}.png"
         return _render_one_step(
-            npz_path, primary_pose, ghost_pose, out_path,
-            step, n_steps, args.view_half_m,
-            args.primary_label, args.ghost_label,
-            args.ego_length, args.ego_width,
+            npz_path,
+            primary_pose,
+            ghost_pose,
+            out_path,
+            step,
+            n_steps,
+            args.view_half_m,
+            args.primary_label,
+            args.ghost_label,
+            args.ego_length,
+            args.ego_width,
             center_mode=args.center,
             adaptive_view=args.adaptive_view,
             max_view_half_m=args.max_view_half_m,
@@ -404,17 +471,32 @@ def main() -> None:
     if diff_log:
         sep = np.array([e["sep_m"] for e in diff_log])
         lat = np.array([e["lat_m"] for e in diff_log])
-        print(f"  sep_m  mean={sep.mean():.2f}  p50={np.percentile(sep,50):.2f}  "
-              f"p95={np.percentile(sep,95):.2f}  max={sep.max():.2f}")
-        print(f"  lat_m  mean={lat.mean():+.2f}  p5={np.percentile(lat,5):+.2f}  "
-              f"p95={np.percentile(lat,95):+.2f}  abs_max={np.abs(lat).max():.2f}")
+        print(
+            f"  sep_m  mean={sep.mean():.2f}  p50={np.percentile(sep, 50):.2f}  "
+            f"p95={np.percentile(sep, 95):.2f}  max={sep.max():.2f}"
+        )
+        print(
+            f"  lat_m  mean={lat.mean():+.2f}  p5={np.percentile(lat, 5):+.2f}  "
+            f"p95={np.percentile(lat, 95):+.2f}  abs_max={np.abs(lat).max():.2f}"
+        )
 
     if args.webm:
         webm_path = args.output_dir / "dual_ego.webm"
         cmd = [
-            "ffmpeg", "-y", "-framerate", "10",
-            "-i", str(args.output_dir / "step_%04d.png"),
-            "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-pix_fmt", "yuv420p",
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            "10",
+            "-i",
+            str(args.output_dir / "step_%04d.png"),
+            "-c:v",
+            "libvpx-vp9",
+            "-crf",
+            "32",
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
             str(webm_path),
         ]
         print("Encoding WebM:", " ".join(cmd))

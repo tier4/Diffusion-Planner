@@ -14,13 +14,20 @@ map at the ego world pos (`LaneletSceneBuilder.build_line_strings_tensor`, chann
 = road_border), then `reward.compute_road_border_penalty` (same frame, geometry is
 frame-agnostic). Crossing = its t>=1 gate fires at `RewardConfig.rb_cross_thresh`.
 """
+
 from __future__ import annotations
-import argparse, json, math
+
+import argparse
+import json
+import math
 from pathlib import Path
-import numpy as np, torch
-from scenario_generation.tools._heatmap_common import load_route, recover_ego_world_pose_from_goal
+
+import numpy as np
+import torch
+
+from rlvr.reward import RewardConfig, compute_road_border_penalty
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
-from rlvr.reward import compute_road_border_penalty, RewardConfig
+from scenario_generation.tools._heatmap_common import load_route, recover_ego_world_pose_from_goal
 
 
 def main():
@@ -54,12 +61,20 @@ def main():
         wy = ey + s * x + c * y
         wcos = c * fut[:, 2] - s * fut[:, 3]
         wsin = s * fut[:, 2] + c * fut[:, 3]
-        world_traj = torch.tensor(np.stack([wx, wy, wcos, wsin], -1), dtype=torch.float32).unsqueeze(0)  # (1,T,4)
-        ls = b.build_line_strings_tensor(np.array([ex, ey], dtype=float))  # (60,20,4) world, ch3=road_border
-        data = {"line_strings": torch.tensor(np.asarray(ls), dtype=torch.float32).unsqueeze(0)}  # (1,60,20,4)
+        world_traj = torch.tensor(
+            np.stack([wx, wy, wcos, wsin], -1), dtype=torch.float32
+        ).unsqueeze(0)  # (1,T,4)
+        ls = b.build_line_strings_tensor(
+            np.array([ex, ey], dtype=float)
+        )  # (60,20,4) world, ch3=road_border
+        data = {
+            "line_strings": torch.tensor(np.asarray(ls), dtype=torch.float32).unsqueeze(0)
+        }  # (1,60,20,4)
         out = compute_road_border_penalty(world_traj, ego_shape, data, cfg)
-        crossing_gate = out[0]            # (N,) 1.0 safe, 0.0 crossing
-        per_ts_min = out[5]               # (N,T) min border dist (return order: gate,near,wide,first_steps,cont,per_ts_min)
+        crossing_gate = out[0]  # (N,) 1.0 safe, 0.0 crossing
+        per_ts_min = out[
+            5
+        ]  # (N,T) min border dist (return order: gate,near,wide,first_steps,cont,per_ts_min)
         is_cross = bool(crossing_gate[0].item() < 0.5)
         mind.append(float(per_ts_min[0, 1:].min().item()))  # exclude t=0 like the gate
         if is_cross:
@@ -68,9 +83,13 @@ def main():
             clean.append(sp)
     mind = np.array(mind)
     print(f"ROAD-BORDER target check (reward.compute_road_border_penalty, real map borders):")
-    print(f"  {len(scenes)} scenes | target min-border(t>=1): min={mind.min():.2f} p5={np.percentile(mind,5):.2f} "
-          f"p25={np.percentile(mind,25):.2f} p50={np.percentile(mind,50):.2f}")
-    print(f"  target CROSSES road border: {crossed}/{len(scenes)}  |  CLEAN (usable target): {len(clean)}/{len(scenes)}")
+    print(
+        f"  {len(scenes)} scenes | target min-border(t>=1): min={mind.min():.2f} p5={np.percentile(mind, 5):.2f} "
+        f"p25={np.percentile(mind, 25):.2f} p50={np.percentile(mind, 50):.2f}"
+    )
+    print(
+        f"  target CROSSES road border: {crossed}/{len(scenes)}  |  CLEAN (usable target): {len(clean)}/{len(scenes)}"
+    )
     if args.out_clean:
         json.dump(clean, open(args.out_clean, "w"), indent=2)
         print(f"  wrote {len(clean)} target-clean scenes -> {args.out_clean}")

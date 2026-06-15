@@ -15,14 +15,17 @@ import rosbag2_py
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 
-
 ROUTE_TOPIC = "/planning/mission_planning/route"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("rosbag_path", type=Path, help="Session-0 chunk dir (containing metadata.yaml).")
-    parser.add_argument("output_pickle", type=Path, help="Where to write the pickled LaneletRoute msg.")
+    parser.add_argument(
+        "rosbag_path", type=Path, help="Session-0 chunk dir (containing metadata.yaml)."
+    )
+    parser.add_argument(
+        "output_pickle", type=Path, help="Where to write the pickled LaneletRoute msg."
+    )
     parser.add_argument("--index", type=int, default=0, help="Which route msg to pick if multiple.")
     return parser.parse_args()
 
@@ -64,7 +67,9 @@ def main() -> None:
     with open(args.output_pickle, "wb") as f:
         pickle.dump(selected, f)
 
-    print(f"Wrote {args.output_pickle} (segments={len(selected.segments)}, msgs_in_bag={len(msgs)}).")
+    print(
+        f"Wrote {args.output_pickle} (segments={len(selected.segments)}, msgs_in_bag={len(msgs)})."
+    )
 
 
 if __name__ == "__main__":

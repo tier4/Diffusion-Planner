@@ -13,7 +13,6 @@ import pytest
 
 from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
-
 # ── MPCTracker.last_* telemetry ────────────────────────────────────────────
 
 
@@ -186,8 +185,7 @@ class TestPerfectTrackerPush:
         # Without push: v_target = 0.01 / 0.1 = 0.1 m/s → ego creeps.
         # With push: v_target = tail_reach / horizon_time ≈ 10/2 = 5 m/s.
         assert v_new > 1.0, (
-            f"expected push to override trivial first-step v_target, "
-            f"got v_new={v_new}"
+            f"expected push to override trivial first-step v_target, got v_new={v_new}"
         )
 
 
@@ -215,6 +213,7 @@ class TestPerfectTrackerTelemetry:
 class _StubAgent:
     """Minimal agent stub for _advance_agent — matches the attributes the
     function touches; past_velocities is the critical one we're validating."""
+
     def __init__(self):
         self.past_trajectory = np.zeros((21, 3), dtype=np.float32)
         self.past_velocities = np.zeros((21, 2), dtype=np.float32)
@@ -255,8 +254,13 @@ class TestAdvanceAgentTelemetry:
 
         new_pos = np.array([15.5, 0.0, 0.0], dtype=np.float32)
         _advance_agent(
-            agent, new_pos, dt=0.1,
-            new_speed=5.0, new_accel=-2.0, new_yaw_rate=0.0, new_steering=0.0,
+            agent,
+            new_pos,
+            dt=0.1,
+            new_speed=5.0,
+            new_accel=-2.0,
+            new_yaw_rate=0.0,
+            new_steering=0.0,
         )
         # agent.acceleration = new_accel * (cos(new_yaw), sin(new_yaw))
         ax, ay = agent.acceleration
@@ -273,7 +277,9 @@ class TestAdvanceAgentTelemetry:
 
         new_pos = np.array([10.5, 0.0, 0.1], dtype=np.float32)
         _advance_agent(
-            agent, new_pos, dt=0.1,
+            agent,
+            new_pos,
+            dt=0.1,
             new_speed=5.0,
             new_accel=0.0,
             new_yaw_rate=0.4,

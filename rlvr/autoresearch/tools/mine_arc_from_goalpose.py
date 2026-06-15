@@ -8,6 +8,7 @@ route polyline (project_to_polyline), and keep frames whose arc s falls in
 
 Input NPZs must already be in trainable format (this only selects, does not convert).
 """
+
 import argparse
 import glob
 import json
@@ -53,8 +54,10 @@ def main():
         json.dump(kept, f, indent=2)
     if arcs:
         a = np.array(arcs)
-        print(f"kept {len(kept)}/{len(files)} in arc [{args.arc_lo},{args.arc_hi}]m "
-              f"-> {args.out_list}  (arc min={a.min():.0f} p50={np.median(a):.0f} max={a.max():.0f})")
+        print(
+            f"kept {len(kept)}/{len(files)} in arc [{args.arc_lo},{args.arc_hi}]m "
+            f"-> {args.out_list}  (arc min={a.min():.0f} p50={np.median(a):.0f} max={a.max():.0f})"
+        )
     else:
         print(f"kept 0/{len(files)} in arc [{args.arc_lo},{args.arc_hi}]m — check route/band")
 

@@ -22,6 +22,7 @@ def generate_samples(
     n_samples: int,
     composer: GuidanceComposer | None,
     device: torch.device,
+    use_dit_memo: bool = True,
 ) -> np.ndarray:
     """
     Generate n_samples independent ego trajectories under a shared configuration.
@@ -37,6 +38,11 @@ def generate_samples(
         composer: GuidanceComposer instance to inject for this call, or None for
                   unguided sampling.
         device: Torch device.
+        use_dit_memo: When a composer is active, reuse its x0-refinement DiT
+                      forward for the solver's noise prediction at the same
+                      (x, t) (numerically equivalent, ~halves the guided step).
+                      False = escape hatch for A/B verification. No effect when
+                      composer is None.
 
     Returns:
         (n_samples, OUTPUT_T, 4) float32 numpy array.
@@ -56,6 +62,7 @@ def generate_samples(
     # pulls in modules that import back here, so a top-level import would create
     # an import cycle. Imported once per call here (not per loop iteration).
     from rlvr.closed_loop.batched_rollout import make_initial_latent
+    from rlvr.guidance_batched import dit_memo
 
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
@@ -65,10 +72,20 @@ def generate_samples(
     try:
         for _ in range(n_samples):
             data["sampled_trajectories"] = make_initial_latent(
-                B, P, future_len, device, noise_scale,
+                B,
+                P,
+                future_len,
+                device,
+                noise_scale,
             )
 
-            _, decoder_output = model(data)
+            if composer is not None and use_dit_memo:
+                # dit_memo: the solver reuses the composer's x0-refinement
+                # forward at the same (x, t) — ~25% off guided frames.
+                with dit_memo(model.decoder):
+                    _, decoder_output = model(data)
+            else:
+                _, decoder_output = model(data)
             ego_trajectory = decoder_output["prediction"][0, 0].cpu().numpy()  # (OUTPUT_T, 4)
             results.append(ego_trajectory)
     finally:

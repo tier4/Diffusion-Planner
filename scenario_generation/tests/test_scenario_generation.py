@@ -331,7 +331,12 @@ class TestTensorConverter:
 
         # A smaller explicit count sizes the slot dim accordingly.
         nb16 = _build_neighbor_agents_past(
-            scene, "ego", R, ego_xy, ego.current_heading, num_neighbors=16,
+            scene,
+            "ego",
+            R,
+            ego_xy,
+            ego.current_heading,
+            num_neighbors=16,
         )
         assert nb16.shape == (1, 16, 31, 11)
 

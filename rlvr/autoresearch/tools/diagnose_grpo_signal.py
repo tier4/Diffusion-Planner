@@ -39,19 +39,27 @@ def diagnose_scene(model, model_args, npz_path, K, reward_config, sampler_config
     ego_shape = es[0] if es is not None and es.dim() > 1 else es
 
     # Use batched CL sampler (same as training)
-    trajs = generate_diverse_group_batched(model, model_args, data, sampler_config, device)  # [K, T, 4]
+    trajs = generate_diverse_group_batched(
+        model, model_args, data, sampler_config, device
+    )  # [K, T, 4]
 
     results = []
     for k_i in range(trajs.shape[0]):
-        traj_t = trajs[k_i:k_i+1]
+        traj_t = trajs[k_i : k_i + 1]
         r = compute_reward_batch(traj_t, data, reward_config)[0]
         gate, near, _, _, _ = compute_lane_departure_penalty(traj_t, ego_shape, data)
-        results.append({
-            "k": k_i, "total": r.total, "progress": r.progress,
-            "smoothness": r.smoothness, "lane_crossing": r.lane_crossing,
-            "lane_near": r.lane_near_frac, "rb_crossing": r.rb_crossing,
-            "rb_near": r.rb_near_penalty,
-        })
+        results.append(
+            {
+                "k": k_i,
+                "total": r.total,
+                "progress": r.progress,
+                "smoothness": r.smoothness,
+                "lane_crossing": r.lane_crossing,
+                "lane_near": r.lane_near_frac,
+                "rb_crossing": r.rb_crossing,
+                "rb_near": r.rb_near_penalty,
+            }
+        )
 
     results.sort(key=lambda x: -x["total"])
     return results
@@ -161,31 +169,39 @@ def main():
                 signal = "BAD"
 
         if not args.summary_only:
-            print(f"\n{'='*80}")
-            print(f"Scene {si} [{args.tag}] — {n_in}/{args.K} in-lane, {n_rb}/{args.K} rb_cross, "
-                  f"mean={mean_total:+.1f}, spread={spread:.1f}, signal={signal}")
-            print(f"{'='*80}")
+            print(f"\n{'=' * 80}")
+            print(
+                f"Scene {si} [{args.tag}] — {n_in}/{args.K} in-lane, {n_rb}/{args.K} rb_cross, "
+                f"mean={mean_total:+.1f}, spread={spread:.1f}, signal={signal}"
+            )
+            print(f"{'=' * 80}")
             print(f" Rk | total   | prog  | smth  | lane | l_near | rb  ")
             print(f"----|---------|-------|-------|------|--------|-----")
             for rank, r in enumerate(results):
                 lc = "OUT" if r["lane_crossing"] else " IN"
                 rb = "OUT" if r["rb_crossing"] else " ok"
-                print(f" {rank+1:>2} | {r['total']:>+7.1f} | {r['progress']:>5.1f} | {r['smoothness']:>5.2f} | "
-                      f"{lc:>4} | {r['lane_near']:>6.3f} | {rb:>3}")
+                print(
+                    f" {rank + 1:>2} | {r['total']:>+7.1f} | {r['progress']:>5.1f} | {r['smoothness']:>5.2f} | "
+                    f"{lc:>4} | {r['lane_near']:>6.3f} | {rb:>3}"
+                )
 
             if n_in > 0 and n_in < args.K:
                 in_mean = np.mean([r["total"] for r in results if not r["lane_crossing"]])
-                out_vals = [r["total"] for r in results if r["lane_crossing"] and not r["rb_crossing"]]
+                out_vals = [
+                    r["total"] for r in results if r["lane_crossing"] and not r["rb_crossing"]
+                ]
                 out_mean = np.mean(out_vals) if out_vals else -50.0
-                print(f"\n  IN={in_mean:+.1f} vs OUT={out_mean:+.1f}, gap={in_mean - out_mean:+.1f}")
+                print(
+                    f"\n  IN={in_mean:+.1f} vs OUT={out_mean:+.1f}, gap={in_mean - out_mean:+.1f}"
+                )
 
         if (si + 1) % 10 == 0 and args.summary_only:
-            print(f"  Processed {si+1}/{len(scene_indices)}...")
+            print(f"  Processed {si + 1}/{len(scene_indices)}...")
 
     total_usable = n_good + n_easy + n_none
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Signal summary [{args.tag}] — {reward_mode} mode, {len(scene_indices)} scenes")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  GOOD (IN > OUT):        {n_good}/{len(scene_indices)}")
     print(f"  EASY (all in-lane):     {n_easy}/{len(scene_indices)}")
     print(f"  RANKED (survival):      {n_none}/{len(scene_indices)}")
