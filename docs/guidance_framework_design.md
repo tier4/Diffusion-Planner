@@ -630,6 +630,15 @@ That's it. The playground UI, DPO pipeline, and GRPO reward loop can immediately
 
 ## Batched guidance v2 set (rlvr/guidance_batched.py)
 
+> **Envelope is persisted with the policy.** The guidance envelope (the
+> `lambda_lat` / `lat_scale` / `col_scale` / ... knobs + the `v1`/`v2` family)
+> is the calibration the explorer's eta labels were swept against, so it is
+> stored in `ExplorationPolicyConfig.guidance_envelope` and the guided
+> eval/deploy tools load it from the policy (CLI flags are override-only and
+> hard-fail on a disagreeing value unless `--force_envelope_override`). See
+> "Guidance envelope" in `rlvr/autoresearch/tools/README.md`. The `--envelope`
+> selection below is one such knob; a v2 policy persists `envelope: "v2"`.
+
 Opt-in registry names (the v1 functions are unchanged; select via
 `--envelope v2` in `sweep_guidance_params` / `eval_policy_avoidance` /
 `valid_predictor_guided`, or `envelope="v2"` in
