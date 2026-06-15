@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         "--result_dir",
         type=Path,
         default=None,
-        help="default: ~/data/closed_loop/result_<tag>_<timestamp> (new dir per run)",
+        help="default: <model_dir>/closed_loop/<tag>_<timestamp> (new dir per run)",
     )
     parser.add_argument("--no_video", action="store_true")
     return parser.parse_args()
@@ -89,8 +89,9 @@ def main() -> None:
     if args.result_dir is not None:
         result_dir = args.result_dir
     else:
+        # Results live with the model (closed-loop evaluation of that checkpoint).
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_dir = Path.home() / "data" / "closed_loop" / f"result_{tag}_{stamp}"
+        result_dir = args.model_dir.resolve() / "closed_loop" / f"{tag}_{stamp}"
 
     print(f"BAG       : {bag}")
     print(f"MODEL_DIR : {args.model_dir}")
