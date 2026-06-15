@@ -8,8 +8,6 @@ from autoware_perception_msgs.msg import (
     TrackedObjects,
     TrafficLightGroupArray,
 )
-from autoware_planning_msgs.msg import Trajectory, TrajectoryPoint
-from builtin_interfaces.msg import Duration
 from nav_msgs.msg import Odometry
 from scipy.spatial.transform import Rotation
 
@@ -311,7 +309,12 @@ def create_ego_agent_past(
     return ego_agent_past
 
 
-def convert_prediction_to_msg(pred: torch.Tensor, bl2map_matrix_4x4: np.array, stamp) -> Trajectory:
+def convert_prediction_to_msg(pred: torch.Tensor, bl2map_matrix_4x4: np.array, stamp):
+    # Lazy import: these ROS msgs are only needed inside the node (Python 3.10 / ROS env),
+    # so importing them lazily keeps this module importable in a plain venv.
+    from autoware_planning_msgs.msg import Trajectory, TrajectoryPoint
+    from builtin_interfaces.msg import Duration
+
     # Convert to Trajectory message
     trajectory_msg = Trajectory()
     trajectory_msg.header.stamp = stamp

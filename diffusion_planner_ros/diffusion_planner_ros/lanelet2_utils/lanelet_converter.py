@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import lanelet2
 import numpy as np
 import torch
-from autoware_lanelet2_extension_python.projection import MGRSProjector
 from diffusion_planner.dimensions import (
     POINTS_PER_LANELET,
     POINTS_PER_LINE_STRING,
@@ -264,6 +262,11 @@ def convert_lanelet(filename: str) -> LaneletMap:
         LaneletMap: Map data.
 
     """
+    # Lazy import: lanelet2 / autoware bindings are Python 3.10 / ROS only, so importing them
+    # lazily keeps the tensor builders in this module importable in a plain venv.
+    import lanelet2
+    from autoware_lanelet2_extension_python.projection import MGRSProjector
+
     projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
     lanelet_map = lanelet2.io.load(filename, projection)
 
