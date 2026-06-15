@@ -35,13 +35,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation
-
 from diffusion_planner.dimensions import (
     INPUT_T,
     MAX_NUM_AGENTS,
     MAX_NUM_NEIGHBORS,
-    POSE_DIM,
     NUM_LINE_STRINGS,
     NUM_POLYGONS,
     NUM_SEGMENTS_IN_LANE,
@@ -49,6 +46,7 @@ from diffusion_planner.dimensions import (
     OUTPUT_T,
     POINTS_PER_LINE_STRING,
     POINTS_PER_POLYGON,
+    POSE_DIM,
 )
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
@@ -66,6 +64,7 @@ from diffusion_planner_ros.utils import (
     filter_route_lanelets,
     rot3x3_to_heading_cos_sin,
 )
+from scipy.spatial.transform import Rotation
 
 # venv-safe builder (no rosbag2_py); shares the parity-matched code with parse_rosbag.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -73,6 +72,10 @@ from reproducer_inputs import PAST_TIME_STEPS, build_neighbor_past  # noqa: E402
 
 DT = 0.1  # sim step (10 Hz)
 MAKE_MP4 = Path.home() / "misc" / "ffmpeg_lib" / "make_mp4_from_unsequential_png.sh"
+
+DEFAULT_WHEEL_BASE = 2.75
+DEFAULT_EGO_LENGTH = 4.34
+DEFAULT_EGO_WIDTH = 1.70
 
 
 # --------------------------------------------------------------------------------------------
@@ -278,12 +281,26 @@ def build_input_dict(
     )
 
     polygons = create_line_tensor(
-        vector_map.polygons.values(), map2bl, center_x, center_y,
-        NUM_POLYGONS, POINTS_PER_POLYGON, dev, POLYGON_TYPE_MAP, POLYGON_TYPE_NUM,
+        vector_map.polygons.values(),
+        map2bl,
+        center_x,
+        center_y,
+        NUM_POLYGONS,
+        POINTS_PER_POLYGON,
+        dev,
+        POLYGON_TYPE_MAP,
+        POLYGON_TYPE_NUM,
     )
     line_strings = create_line_tensor(
-        vector_map.line_strings.values(), map2bl, center_x, center_y,
-        NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, dev, LINE_STRING_TYPE_MAP, LINE_STRING_TYPE_NUM,
+        vector_map.line_strings.values(),
+        map2bl,
+        center_x,
+        center_y,
+        NUM_LINE_STRINGS,
+        POINTS_PER_LINE_STRING,
+        dev,
+        LINE_STRING_TYPE_MAP,
+        LINE_STRING_TYPE_NUM,
     )
 
     # Goal pose from the route (deployment convention), in ego frame, [x, y, cos, sin].
@@ -309,7 +326,7 @@ def build_input_dict(
         "goal_pose": goal_pose,
         "ego_shape": torch.tensor([ego_shape_vec], dtype=torch.float32, device=dev),
         "turn_indicators": turn_indicators,
-        # Diffusion sampling seeds (zeros → model samples internally); not normalized.
+        # Diffusion sampling seeds (zeros -> model samples internally); not normalized.
         "sampled_trajectories": torch.zeros(
             (1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM), dtype=torch.float32, device=dev
         ),
@@ -349,8 +366,10 @@ def run_closed_loop(
     """Run a closed-loop Perception Reproducer on one route sequence; return metrics + per-step log."""
     recorded_frames = sequence.data_list
     recorded_xy = np.array(
-        [[f.kinematic_state.pose.pose.position.x, f.kinematic_state.pose.pose.position.y]
-         for f in recorded_frames]
+        [
+            [f.kinematic_state.pose.pose.position.x, f.kinematic_state.pose.pose.position.y]
+            for f in recorded_frames
+        ]
     )
     n_rec = len(recorded_frames)
     if num_steps is None:
@@ -388,8 +407,15 @@ def run_closed_loop(
         cursor = max(cursor, nearest_idx)
 
         input_dict, bl2map, map2bl = build_input_dict(
-            sim_history, sim_vel, sim_accel, recorded_frames, nearest_idx,
-            vector_map, ego_shape_vec, wheel_base, device,
+            sim_history,
+            sim_vel,
+            sim_accel,
+            recorded_frames,
+            nearest_idx,
+            vector_map,
+            ego_shape_vec,
+            wheel_base,
+            device,
         )
         raw_input = {key: val.detach().clone() for key, val in input_dict.items()}
 
@@ -404,18 +430,25 @@ def run_closed_loop(
         collision = _check_collision(raw_input, ego_length, ego_width)
         offroute = _offroute_lateral(raw_input)
         deviation = float(np.linalg.norm(sim_pos - recorded_xy[nearest_idx]))
-        steps.append(
-            StepRecord(sim_pos.copy(), nearest_idx, deviation, collision, offroute)
-        )
+        steps.append(StepRecord(sim_pos.copy(), nearest_idx, deviation, collision, offroute))
 
         # --- visualization ---
         if frame_dir is not None:
             fig, ax = plt.subplots(figsize=(10, 10))
             visualize_inputs(raw_input, ax=ax)
-            ax.plot(ego_pred[:, 0], ego_pred[:, 1], "-", color="magenta", lw=2,
-                    label="planned", zorder=10)
-            ax.set_title(f"step {k:04d}  rec_idx={nearest_idx}  dev={deviation:.2f}m"
-                         f"  {'COLLISION' if collision else ''}")
+            ax.plot(
+                ego_pred[:, 0],
+                ego_pred[:, 1],
+                "-",
+                color="magenta",
+                lw=2,
+                label="planned",
+                zorder=10,
+            )
+            ax.set_title(
+                f"step {k:04d}  rec_idx={nearest_idx}  dev={deviation:.2f}m"
+                f"  {'COLLISION' if collision else ''}"
+            )
             fig.savefig(frame_dir / f"{k:08d}.png", bbox_inches="tight", dpi=80)
             plt.close(fig)
 
@@ -578,43 +611,62 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_steps", type=int, default=None, help="default: full sequence")
     parser.add_argument("--device", type=str, default=None, help="cuda / cpu (auto if unset)")
     parser.add_argument("--no_video", action="store_true")
-    parser.add_argument("--wheel_base", type=float, default=2.75)
-    parser.add_argument("--ego_length", type=float, default=4.34)
-    parser.add_argument("--ego_width", type=float, default=1.70)
+    parser.add_argument("--wheel_base", type=float, default=DEFAULT_WHEEL_BASE)
+    parser.add_argument("--ego_length", type=float, default=DEFAULT_EGO_LENGTH)
+    parser.add_argument("--ego_width", type=float, default=DEFAULT_EGO_WIDTH)
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    device = torch.device(
-        args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
-    )
-    print(f"model : {args.model_dir}")
-    print(f"scene : {args.scene}")
+def run_reproducer(
+    model_dir,
+    args_json,
+    scene_path,
+    result_dir,
+    num_steps,
+    device,
+    make_video,
+    wheel_base,
+    ego_length,
+    ego_width,
+) -> ReproducerResult:
+    print(f"model : {model_dir}")
+    print(f"scene : {scene_path}")
     print(f"device: {device}")
 
-    with open(args.scene, "rb") as f:
+    with open(scene_path, "rb") as f:
         scene = pickle.load(f)
     vector_map = scene["map"]
     sequence = reconstruct_sequence(scene)
     print(f"sequence frames: {len(sequence.data_list)}")
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = (
-        args.result_dir.resolve()
-        if args.result_dir is not None
-        else Path("/mnt/nvme/test") / f"{stamp}_reproducer_{scene['meta']['map_name']}"
-    )
+    if "ego_shape" in scene["meta"]:
+        ego_shape = scene["meta"]["ego_shape"]
+        wheel_base = ego_shape["wheel_base"]
+        ego_length = ego_shape["ego_length"]
+        ego_width = ego_shape["ego_width"]
+    print(f"ego_shape : wb={wheel_base} length={ego_length} width={ego_width}")
+
+    if result_dir is None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_dir = Path("/mnt/nvme/test") / f"{stamp}_reproducer_{scene['meta']['map_name']}"
+    result_dir = result_dir.resolve()
     result_dir.mkdir(parents=True, exist_ok=True)
     print(f"result dir : {result_dir}")
 
-    model, config = load_model(args.model_dir, args.args_json, device)
+    model, config = load_model(model_dir, args_json, device)
 
     result = run_closed_loop(
-        model, config, vector_map, sequence, device,
-        num_steps=args.num_steps,
-        wheel_base=args.wheel_base, ego_length=args.ego_length, ego_width=args.ego_width,
-        result_dir=result_dir, make_video=not args.no_video,
+        model,
+        config,
+        vector_map,
+        sequence,
+        device,
+        num_steps=num_steps,
+        wheel_base=wheel_base,
+        ego_length=ego_length,
+        ego_width=ego_width,
+        result_dir=result_dir,
+        make_video=make_video,
     )
     metrics_path = result_dir / "metrics.json"
     with open(metrics_path, "w") as f:
@@ -622,6 +674,26 @@ def main() -> None:
     print("=== metrics ===")
     print(json.dumps(result.metrics, indent=2))
     print(f"Saved metrics to {metrics_path}")
+    return result
+
+
+def main() -> None:
+    args = parse_args()
+    device = torch.device(
+        args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    run_reproducer(
+        args.model_dir,
+        args.args_json,
+        args.scene,
+        args.result_dir,
+        args.num_steps,
+        device,
+        not args.no_video,
+        args.wheel_base,
+        args.ego_length,
+        args.ego_width,
+    )
 
 
 if __name__ == "__main__":

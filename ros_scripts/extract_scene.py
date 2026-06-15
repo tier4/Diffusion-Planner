@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 1 of the Perception Reproducer: read a rosbag + map and serialize a plain "scene".
 
-This is the ONLY ROS-dependent stage (rosbag2_py + lanelet2 → Python 3.10 / ROS env). It writes
+This is the ONLY ROS-dependent stage (rosbag2_py + lanelet2 -> Python 3.10 / ROS env). It writes
 a pickle with no ROS / lanelet2 objects so the closed-loop stage (perception_reproducer.py) can
 run in a plain venv. Run it like parse_rosbag.py (source ROS + cpp_tools/install + PYTHONPATH).
 
@@ -20,18 +20,18 @@ The scene dict:
 import argparse
 import json
 import pickle
+
+# parse_rosbag holds the (parity-matched) bag reader + frame assembly.
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import attr
-
 from diffusion_planner_ros.lanelet2_utils.lanelet_converter import convert_lanelet
 from diffusion_planner_ros.lanelet2_utils.lanelet_map import LaneletMap
 
-# parse_rosbag holds the (parity-matched) bag reader + frame assembly.
-import sys
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ego_shapes import lookup_ego_shape, read_vehicle_id  # noqa: E402
 from parse_rosbag import build_sequences_from_rosbag  # noqa: E402
 
 DT = 0.1
@@ -43,7 +43,9 @@ def resolve_vector_map_path(bag_path: Path) -> Path:
     bag_time = bag_path.name
     map_version_id = None
     if info_path.is_file():
-        map_version_id = json.loads(info_path.read_text(encoding="utf-8")).get("area_map_version_id")
+        map_version_id = json.loads(info_path.read_text(encoding="utf-8")).get(
+            "area_map_version_id"
+        )
     candidates = []
     for i in range(1, min(len(bag_path.parents), 6)):
         map_dir = bag_path.parents[i] / "map"
@@ -136,24 +138,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    bag_path = args.rosbag_dir.resolve()
-    vector_map_path = (
-        args.vector_map_path.resolve()
-        if args.vector_map_path is not None
-        else resolve_vector_map_path(bag_path)
-    )
+def build_scene_pkl(rosbag_dir, out, vector_map_path, limit) -> None:
+    """Read a rosbag + map and serialize the longest route sequence to a plain scene pickle."""
+    bag_path = rosbag_dir.resolve()
+    if vector_map_path is not None:
+        resolved_map_path = vector_map_path.resolve()
+    else:
+        resolved_map_path = resolve_vector_map_path(bag_path)
+    vehicle_id = read_vehicle_id(bag_path)
+    wheel_base, ego_length, ego_width = lookup_ego_shape(vehicle_id)
     print(f"rosbag     : {bag_path}")
-    print(f"vector map : {vector_map_path}")
+    print(f"vector map : {resolved_map_path}")
+    print(
+        f"vehicle_id : {vehicle_id}  ego_shape (wb,l,w)=({wheel_base}, {ego_length}, {ego_width})"
+    )
 
-    sequences = build_sequences_from_rosbag(bag_path, limit=args.limit, search_nearest_route=1)
+    sequences = build_sequences_from_rosbag(bag_path, limit=limit, search_nearest_route=1)
     if not sequences:
         raise RuntimeError("No sequences built from rosbag")
     sequence = max(sequences, key=lambda s: len(s.data_list))
     print(f"sequence frames: {len(sequence.data_list)} (of {len(sequences)} sequences)")
 
-    vector_map = convert_lanelet(str(vector_map_path))
+    vector_map = convert_lanelet(str(resolved_map_path))
 
     scene = {
         "map": serialize_map(vector_map),
@@ -161,16 +167,27 @@ def main() -> None:
         "route": serialize_route(sequence.route),
         "meta": {
             "map_name": bag_path.stem,
-            "vector_map_path": str(vector_map_path),
+            "vector_map_path": str(resolved_map_path),
             "dt": DT,
+            "vehicle_id": vehicle_id,
+            "ego_shape": {
+                "wheel_base": wheel_base,
+                "ego_length": ego_length,
+                "ego_width": ego_width,
+            },
         },
     }
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.out, "wb") as f:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "wb") as f:
         pickle.dump(scene, f, protocol=pickle.HIGHEST_PROTOCOL)
-    size_mb = args.out.stat().st_size / 1e6
-    print(f"Saved scene ({len(scene['frames'])} frames, {size_mb:.1f} MB) to {args.out}")
+    size_mb = out.stat().st_size / 1e6
+    print(f"Saved scene ({len(scene['frames'])} frames, {size_mb:.1f} MB) to {out}")
+
+
+def main() -> None:
+    args = parse_args()
+    build_scene_pkl(args.rosbag_dir, args.out, args.vector_map_path, args.limit)
 
 
 if __name__ == "__main__":
