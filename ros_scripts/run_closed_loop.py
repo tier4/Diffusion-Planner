@@ -35,6 +35,7 @@ from perception_reproducer import (  # noqa: E402
     DEFAULT_OFFROUTE_THRESHOLD,
     DEFAULT_TRAJ_STEP,
     DEFAULT_VIDEO_FPS,
+    DEFAULT_WARMUP_STEPS,
     DEFAULT_WHEEL_BASE,
     run_reproducer,
 )
@@ -66,6 +67,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--video_fps", type=int, default=DEFAULT_VIDEO_FPS, help="playback fps of the output mp4"
+    )
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=DEFAULT_WARMUP_STEPS,
+        help="follow the recorded ego for the first N steps to kickstart departure (0 disables)",
     )
     parser.add_argument(
         "--scene", type=Path, default=None, help="default: ~/data/closed_loop/scene_<tag>.pkl"
@@ -127,6 +134,7 @@ def main() -> None:
         DEFAULT_OFFROUTE_THRESHOLD,
         args.max_stuck_steps,
         args.video_fps,
+        args.warmup_steps,
     )
 
     print(f"=== done. result: {result_dir} ===")

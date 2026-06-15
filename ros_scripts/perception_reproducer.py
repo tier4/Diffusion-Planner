@@ -93,6 +93,10 @@ GOAL_REACH_DIST_M = 5.0
 # not just waiting out a cool-down replay). 0 disables the check.
 DEFAULT_MAX_STUCK_STEPS = 100
 
+# Kickstart: for the first this-many steps, follow the recorded ego instead of the planner output,
+# so the ego departs from a standstill (the planner often predicts no motion from a dead stop).
+DEFAULT_WARMUP_STEPS = 160
+
 # Playback frame rate of the output mp4 (one video frame per sim step). Decoupled from traj_step so
 # the video stays watchable; real-time playback would be round(1 / (traj_step * 0.1)) instead.
 DEFAULT_VIDEO_FPS = 10
@@ -385,6 +389,7 @@ def run_closed_loop(
     offroute_threshold: float,
     max_stuck_steps: int,
     video_fps: int,
+    warmup_steps: int,
 ) -> ReproducerResult:
     """Run a closed-loop Perception Reproducer on one route sequence; return metrics + per-step log."""
     recorded_frames = sequence.data_list
@@ -516,12 +521,16 @@ def run_closed_loop(
         )
         raw_input = {key: val.detach().clone() for key, val in input_dict.items()}
 
-        normed = config.observation_normalizer(
-            {key: val.clone() for key, val in input_dict.items()}
-        )
-        out = model(normed)[1]
-        pred = out["prediction"].detach().cpu().numpy()  # [1, P, T, 4] ego frame, metres
-        ego_pred = pred[0, 0]  # (T, 4)
+        # During warmup the planner output is ignored, so skip the (expensive) model inference.
+        if k < warmup_steps:
+            ego_pred = None
+        else:
+            normed = config.observation_normalizer(
+                {key: val.clone() for key, val in input_dict.items()}
+            )
+            out = model(normed)[1]
+            pred = out["prediction"].detach().cpu().numpy()  # [1, P, T, 4] ego frame, metres
+            ego_pred = pred[0, 0]  # (T, 4)
 
         # --- metrics for this step ---
         collision = _check_collision(raw_input, ego_length, ego_width)
@@ -533,32 +542,40 @@ def run_closed_loop(
         if save_video:
             fig, ax = plt.subplots(figsize=(10, 10))
             visualize_inputs(raw_input, ax=ax)
-            ax.plot(
-                ego_pred[:, 0],
-                ego_pred[:, 1],
-                "-",
-                color="magenta",
-                lw=2,
-                label="planned",
-                zorder=10,
-            )
+            if ego_pred is not None:
+                ax.plot(
+                    ego_pred[:, 0],
+                    ego_pred[:, 1],
+                    "-",
+                    color="magenta",
+                    lw=2,
+                    label="planned",
+                    zorder=10,
+                )
+            phase = "warmup" if k < warmup_steps else "planner"
             ax.set_title(
-                f"step {k:04d}  rec_idx={idx}  dev={deviation:.2f}m"
+                f"step {k:04d} [{phase}]  rec_idx={idx}  dev={deviation:.2f}m"
                 f"  {'COLLISION' if collision else ''}"
             )
             fig.savefig(frames_dir / f"{k:08d}.png", dpi=fig.dpi)
             plt.close(fig)
 
-        # --- advance ego: jump to the step_idx-th predicted waypoint (perfect tracking) ---
-        pose_ego = pose_4x4_from_xy_cos_sin(*ego_pred[step_idx])
-        new_bl2map = bl2map @ pose_ego
+        # --- advance ego ---
+        if k < warmup_steps:
+            # Kickstart: follow the recorded ego for the first steps (ignore the planner output) so
+            # the ego actually departs instead of predicting a standstill from a dead stop.
+            tgt = min(idx + traj_step, n_rec - 1)
+            new_bl2map = _pose_to_mat4x4(recorded_frames[tgt].kinematic_state.pose.pose)
+        else:
+            # Perfect tracking of the step_idx-th predicted waypoint.
+            new_bl2map = bl2map @ pose_4x4_from_xy_cos_sin(*ego_pred[step_idx])
         sim_history.append(new_bl2map)
 
-        # Update velocity / acceleration over the followed interval (body frame).
-        disp_map = new_bl2map[:3, 3] - bl2map[:3, 3]
-        disp_body = rigid_inverse(bl2map)[:3, :3] @ disp_map
-        vx, vy = disp_body[0] / dt_eff, disp_body[1] / dt_eff
-        yaw_rate = float(np.arctan2(ego_pred[step_idx, 3], ego_pred[step_idx, 2])) / dt_eff
+        # Velocity / acceleration over the followed interval (body frame); same for both branches.
+        rel = rigid_inverse(bl2map) @ new_bl2map
+        vx, vy = rel[0, 3] / dt_eff, rel[1, 3] / dt_eff
+        rel_cos, rel_sin = rot3x3_to_heading_cos_sin(rel[0:3, 0:3])
+        yaw_rate = float(np.arctan2(rel_sin, rel_cos)) / dt_eff
         sim_vel = [vx, vy, yaw_rate]
         speed = float(np.hypot(vx, vy))
         sim_accel = [(speed - prev_speed) / dt_eff, 0.0]
@@ -733,6 +750,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--video_fps", type=int, default=DEFAULT_VIDEO_FPS, help="playback fps of the output mp4"
     )
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=DEFAULT_WARMUP_STEPS,
+        help="follow the recorded ego for the first N steps to kickstart departure (0 disables)",
+    )
     return parser.parse_args()
 
 
@@ -751,6 +774,7 @@ def run_reproducer(
     offroute_threshold,
     max_stuck_steps,
     video_fps,
+    warmup_steps,
 ) -> ReproducerResult:
     print(f"model : {model_dir}")
     print(f"scene : {scene_path}")
@@ -794,6 +818,7 @@ def run_reproducer(
         offroute_threshold,
         max_stuck_steps,
         video_fps,
+        warmup_steps,
     )
     metrics_path = result_dir / "metrics.json"
     with open(metrics_path, "w") as f:
@@ -824,6 +849,7 @@ def main() -> None:
         args.offroute_threshold,
         args.max_stuck_steps,
         args.video_fps,
+        args.warmup_steps,
     )
 
 
