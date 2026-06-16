@@ -55,6 +55,14 @@ LORA_TARGET_BLOCKS_02_REGEX = (
     r"decoder\.dit\.blocks\.[02]\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
 )
 
+# Blocks 1+2 only (freeze block 0): forces an avoidance graft to express in blocks 1/2
+# instead of block 0. Block 0 is the subspace most coupled to neighbor-L2 damage
+# (no_blk0 ablation recovers neighbor strongly), so freezing it during a from-scratch
+# avoidance graft keeps neighbor low by construction — IF avoidance can fit in 1/2.
+LORA_TARGET_BLOCKS_12_REGEX = (
+    r"decoder\.dit\.blocks\.[12]\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
+)
+
 
 class UnfusedMHA(nn.Module):
     """nn.MultiheadAttention equivalent with separate q/k/v/out projection Linear layers.
