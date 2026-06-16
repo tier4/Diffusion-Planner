@@ -11,7 +11,14 @@ setuptools.setup(
     name="diffusion_planner",
     version="1.0.0",
     author="Zheng Yinan, Ruiming Liang, Kexin Zheng @ Tsinghua AIR",
-    packages=["diffusion_planner"],
+    # find_packages so subpackages (metrics, model, utils, ...) ship in the wheel.
+    # The previous packages=["diffusion_planner"] only shipped the top-level
+    # package, dropping every subpackage in a non-editable install — which broke
+    # `from diffusion_planner.metrics ...` (and model/utils) outside the editable
+    # workspace. include= keeps it to the diffusion_planner tree only.
+    packages=setuptools.find_packages(
+        where=".", include=["diffusion_planner", "diffusion_planner.*"]
+    ),
     package_dir={"": "."},
     classifiers=[
         "Programming Language :: Python :: 3.9",
