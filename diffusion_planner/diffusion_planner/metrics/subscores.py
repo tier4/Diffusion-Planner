@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import torch
 
 from diffusion_planner.metrics.config import RewardConfig

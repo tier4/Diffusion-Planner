@@ -7,7 +7,6 @@ functions from diffusion_planner.loss for proper vehicle-footprint-aware checks.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -19,14 +18,9 @@ import torch
 # *shaping* (RewardBreakdown, compute_reward_batch, GRPO advantages) and
 # re-exports every moved symbol so `from rlvr.reward import ...` keeps working.
 # ---------------------------------------------------------------------------
-from diffusion_planner.metrics.config import *  # noqa: F401,F403
-from diffusion_planner.metrics.config import RewardConfig  # noqa: F401
+from diffusion_planner.metrics.config import RewardConfig  # noqa: F401  (re-export)
 from diffusion_planner.metrics.geometry import *  # noqa: F401,F403
 from diffusion_planner.metrics.subscores import *  # noqa: F401,F403
-from diffusion_planner.model.guidance.collision import (
-    batch_signed_distance_rect,
-    center_rect_to_points,
-)
 
 
 @dataclass

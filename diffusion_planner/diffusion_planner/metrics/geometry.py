@@ -1,22 +1,14 @@
 """Geometry primitives for ``diffusion_planner.metrics`` subscores.
 
 Moved verbatim from ``rlvr.reward`` (issue #130). Pure math / numpy / torch
-helpers plus the neutral ``guidance.collision`` rect primitives — no dependency
-on ``rlvr``. ``rlvr.reward`` re-exports every symbol here for backward
-compatibility.
+helpers — no dependency on ``rlvr``. ``rlvr.reward`` re-exports every symbol
+here for backward compatibility.
 """
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import torch
-
-from diffusion_planner.model.guidance.collision import (
-    batch_signed_distance_rect,
-    center_rect_to_points,
-)
 
 
 def _build_ego_bbox_corners(
@@ -493,6 +485,13 @@ def _closest_points_between_rects(
     return pt1.to(dtype), pt2.to(dtype)
 
 
+# NOTE: this is the SECOND `_build_lane_polygons` in this module and it
+# intentionally shadows the earlier list-of-vertices variant above — this
+# edge-returning version is the one bound at module scope and used by
+# `compute_lane_departure_penalty`. The shadowing is preserved verbatim from the
+# original rlvr.reward (issue #130 pure move). The earlier definition is
+# effectively dead; removing it is left to a follow-up cleanup PR so this PR
+# stays a behavior-identical move.
 def _build_lane_polygons(
     lanes: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
