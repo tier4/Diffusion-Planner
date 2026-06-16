@@ -656,25 +656,26 @@ def train_epoch_ranked_sft(
 
     # 2d. Optionally use exploration policy to generate K diverse trajectories per scene
     elif exploration_policy is not None:
-        from diffusion_planner.model.guidance.composer import GuidanceComposer
-        from diffusion_planner.model.guidance.config import GuidanceConfig as _GC
-        from diffusion_planner.model.guidance.config import GuidanceSetConfig
-
         from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
         from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
-
+        from rlvr.guidance_batched import build_head_composer
         # NOTE: per-scene loop matches grpo_exploration_trainer's generate_policy_guided_group.
         # Batching across scenes would require handling per-scene Beta distributions in a single
         # forward pass, which is complex. For 50-500 scenes this takes ~3 min, acceptable.
-        print(f"  Explorer-guided generation: {K} samples from Beta distribution per scene...")
+        _heads = list(config.exploration_heads)
+        print(f"  Explorer-guided generation: {K} samples from Beta distribution per scene "
+              f"(heads: {_heads})...")
         exploration_policy.eval()
         model.eval()
 
-        _lat_lambda = config.exploration_lambda_lat
-        _lon_lambda = config.exploration_lambda_lon
         _guide_scale = config.exploration_guidance_scale
         noise_min, noise_max = config.noise_scale_range
         _train_explorer = exploration_optimizer is not None
+        if _train_explorer and _heads != ["lateral", "longitudinal"]:
+            raise NotImplementedError(
+                "joint explorer training in ranked-SFT only supports the legacy "
+                f"lateral+longitudinal heads, got {_heads} — freeze the explorer "
+                "(ranked_sft_freeze_explorer=true) for custom-head checkpoints")
 
         all_scene_trajs = []  # will be [N, K, T, 4]
         # Store per-scene explorer data for training
@@ -695,22 +696,18 @@ def train_epoch_ranked_sft(
                 )
                 norm_i["reference_trajectory"] = x_ref
 
-                # Get Beta distributions and sample K etas
+                # Get Beta distributions and sample K etas per configured head
                 output = exploration_policy(scene_enc, x_ref, deterministic=False)
-                eta_lat_01 = output.lat_dist.rsample((K,)).squeeze(-1)  # [K]
-                eta_lon_01 = output.lon_dist.rsample((K,)).squeeze(-1)  # [K]
-                eta_lat_vals = 2.0 * eta_lat_01 - 1.0  # map to [-1, 1]
-                eta_lon_vals = 2.0 * eta_lon_01 - 1.0
+                eta_01 = {h: output.dists[h].rsample((K,)).squeeze(-1) for h in _heads}
+                eta_vals = {h: 2.0 * v - 1.0 for h, v in eta_01.items()}  # map to [-1, 1]
 
                 if _train_explorer:
-                    _explorer_scenes.append(
-                        {
-                            "scene_enc": scene_enc.detach(),
-                            "x_ref": x_ref.detach(),
-                            "eta_lat_01": eta_lat_01.detach(),
-                            "eta_lon_01": eta_lon_01.detach(),
-                        }
-                    )
+                    _explorer_scenes.append({
+                        "scene_enc": scene_enc.detach(),
+                        "x_ref": x_ref.detach(),
+                        "eta_lat_01": eta_01["lateral"].detach(),
+                        "eta_lon_01": eta_01["longitudinal"].detach(),
+                    })
 
                 # Expand scene data from B=1 to B=K
                 K_data = {}
@@ -720,23 +717,23 @@ def train_epoch_ranked_sft(
                     else:
                         K_data[k_key] = v
 
-                # Build batched guidance with K different etas
-                guidance_fns = [
-                    _GC(
-                        "lateral",
-                        enabled=True,
-                        scale=1.0,
-                        params={"lambda_lat": _lat_lambda, "eta_lat": eta_lat_vals},
-                    ),
-                    _GC(
-                        "longitudinal",
-                        enabled=True,
-                        scale=1.0,
-                        params={"lambda_lon": _lon_lambda, "eta_lon": eta_lon_vals},
-                    ),
-                ]
-                composer = GuidanceComposer(
-                    GuidanceSetConfig(functions=guidance_fns, global_scale=_guide_scale)
+                # Build batched guidance with K different etas per head.
+                # build_head_composer is the single source of truth for the
+                # head-name -> guidance-fn mapping; the config defaults
+                # (lat_scale=1.0, lambda_lat=2.5, lambda_lon=0.25) reproduce
+                # the legacy lateral+longitudinal pair exactly.
+                composer = build_head_composer(
+                    eta_vals,
+                    lambda_lat=config.exploration_lambda_lat,
+                    lat_scale=config.exploration_lat_scale,
+                    col_scale=config.exploration_col_scale,
+                    col_range=config.exploration_col_range,
+                    lambda_spd=config.exploration_lambda_spd,
+                    stretch_scale=config.exploration_stretch_scale,
+                    guidance_scale=_guide_scale,
+                    lambda_lon=config.exploration_lambda_lon,
+                    envelope=config.exploration_envelope,
+                    lambda_col=config.exploration_lambda_col,
                 )
 
                 # Generate K trajectories (first deterministic, rest with varied noise)

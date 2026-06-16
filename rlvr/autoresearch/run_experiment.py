@@ -620,16 +620,17 @@ def run(
                 from preference_optimization.lora_utils import (
                     LORA_TARGET_BLOCKS_01_REGEX,
                     LORA_TARGET_BLOCKS_02_REGEX,
+                    LORA_TARGET_BLOCKS_12_REGEX,
                     LORA_TARGET_FIRST_BLOCK_REGEX,
                     LORA_TARGET_LAST_BLOCK_REGEX,
                     apply_lora,
                 )
-
                 target = {
                     "last": LORA_TARGET_LAST_BLOCK_REGEX,
                     "first": LORA_TARGET_FIRST_BLOCK_REGEX,
                     "blocks01": LORA_TARGET_BLOCKS_01_REGEX,
                     "blocks02": LORA_TARGET_BLOCKS_02_REGEX,
+                    "blocks12": LORA_TARGET_BLOCKS_12_REGEX,
                 }.get(grpo_config.lora_target)
                 kwargs = dict(
                     r=grpo_config.lora_rank,
@@ -861,6 +862,7 @@ def run(
                                 encoder_hidden_dim=model_args.hidden_dim,
                                 head_init=grpo_config.exploration_head_init,
                                 head_raw_scale=grpo_config.exploration_head_raw_scale,
+                                heads=list(grpo_config.exploration_heads),
                             )
                             run._cached_explorer = ExplorationPolicy(
                                 _ep_cfg,
