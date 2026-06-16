@@ -75,7 +75,8 @@ enum class SkippingLabel {
   InsufficientDistance,  // Traveled distance of sequence is too short
 
   // Frame processing skipping reasons
-  RedOrYellowLight,        // At red or yellow light with forward future trajectory
+  RedOrYellowLight,        // Stopped at a red/yellow light (linear.x < 0.1) with a forward
+                           // GT future — i.e. the GT pulls away from the line on red.
   StoppedAtTrafficLight,   // Sustained stop at red/yellow light (formerly VehicleStopped;
                            // contrast with NoFutureProgress for non-light stops)
 
@@ -86,6 +87,13 @@ enum class SkippingLabel {
   // Sustained-state skipping reasons
   NoFutureProgress,  // GT future trajectory has not advanced for >=3s (ego stuck beyond
                      // just red lights, e.g. stop sign / behind another vehicle / parked).
+
+  // NOTE: append new labels below to keep the integer values of the labels above stable
+  // (they are written verbatim into the per-frame JSON and read back by analysis scripts).
+  AcceleratingAtTrafficLight,  // Accelerating into a red/yellow light while NOT fully stopped
+                               // (linear.x >= 0.1). Complements RedOrYellowLight, which only
+                               // covers the fully-stopped case; counted separately so the
+                               // extra coverage of this trigger is measurable.
 };
 
 // Structure to hold detailed skipping information
@@ -152,7 +160,16 @@ struct SkippingInfo
   {
     return {
       SkippingLabel::RedOrYellowLight,
-      "At red/yellow light with forward moving future trajectory",
+      "Stopped at red/yellow light with forward moving future trajectory",
+      {},
+      {}};
+  }
+
+  static SkippingInfo accelerating_at_traffic_light()
+  {
+    return {
+      SkippingLabel::AcceleratingAtTrafficLight,
+      "Accelerating into red/yellow light while moving (linear.x >= 0.1)",
       {},
       {}};
   }
