@@ -36,14 +36,18 @@ from rlvr.reward import compute_reward_batch
 
 def score_targets(
     scene_paths: list[str], rcfg, ego_shape: np.ndarray, device: torch.device
-) -> list[dict]:
+) -> tuple[list[dict], int, int]:
+    """Returns (rows, n_skipped_ego_shape, n_errored) so dropped scenes are
+    visible to the caller — a poison census must not silently omit scenes."""
     results = []
+    n_skip = n_err = 0
     for p in scene_paths:
         try:
             d = load_npz_data(p, device)
             es = d["ego_shape"].cpu().numpy().reshape(-1)[:3]
             if not np.allclose(es, ego_shape, atol=1e-2):
                 print(f"  [skip] {Path(p).name}: ego_shape={es.tolist()}")
+                n_skip += 1
                 continue
             target = d["ego_agent_future"]
             if target.dim() == 2:
@@ -65,8 +69,9 @@ def score_targets(
                 }
             )
         except Exception as e:  # noqa: BLE001
-            print(f"  [skip] {Path(p).name}: {e}")
-    return results
+            print(f"  [err ] {Path(p).name}: {e}")
+            n_err += 1
+    return results, n_skip, n_err
 
 
 def main() -> None:
@@ -82,13 +87,20 @@ def main() -> None:
     ego_shape = np.array([float(x) for x in args.ego_shape.split(",")])
     scene_paths = json.load(open(args.scenes))
 
-    results = score_targets(scene_paths, rcfg, ego_shape, device)
+    results, n_skip, n_err = score_targets(scene_paths, rcfg, ego_shape, device)
+    if not results:
+        raise RuntimeError(
+            f"no targets scored ({n_skip} ego_shape mismatches, {n_err} errors out of "
+            f"{len(scene_paths)} scenes) — refusing to write an empty poison census"
+        )
     agg = aggregate_stats(results)
     poison = [r for r in results if r["static_crossing"]]
 
     out = {
         "scenes": args.scenes,
         "aggregate": agg,
+        "n_skipped_ego_shape": n_skip,
+        "n_errored": n_err,
         "poison": [r["scene_path"] for r in poison],
         "rows": results,
     }
@@ -97,9 +109,9 @@ def main() -> None:
 
     s = agg["sc_min_dist"]
     print(
-        f"TARGETS: {agg['n_scenes']} scored | static-crossing targets (POISON): "
-        f"{agg['static_crossings']} | rb={agg['rb_crossings']} lane={agg['lane_crossings']} "
-        f"kin={agg['kin_violated']}"
+        f"TARGETS: {agg['n_scenes']} scored ({n_skip} skipped ego_shape, {n_err} errored) | "
+        f"static-crossing targets (POISON): {agg['static_crossings']} | "
+        f"rb={agg['rb_crossings']} lane={agg['lane_crossings']} kin={agg['kin_violated']}"
     )
     print(
         f"  target sc_min: mean={s['mean']:+.3f} p5={s['p5']:+.3f} p25={s['p25']:+.3f} "

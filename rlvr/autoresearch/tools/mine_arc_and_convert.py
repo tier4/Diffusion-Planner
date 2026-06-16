@@ -26,6 +26,9 @@ from scenario_generation.tools._heatmap_common import build_route_polyline, proj
 
 def _f2to4(arr):  # (...,3)[x,y,h] -> (...,4)[x,y,cos,sin]
     x, y, h = arr[..., 0], arr[..., 1], arr[..., 2]
+    # padding rows are (0,0,0); the 0.1 m floor (vs the 1e-6 used for map
+    # arrays) matches convert_3col_to_4col so near-origin trajectory points
+    # get a zero heading instead of a spurious cos/sin.
     v = (np.abs(x) + np.abs(y)) > 0.1
     cos = np.where(v, np.cos(h), 0.0)
     sin = np.where(v, np.sin(h), 0.0)

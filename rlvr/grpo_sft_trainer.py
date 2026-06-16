@@ -727,7 +727,8 @@ def train_epoch_ranked_sft(
                 # build_head_composer is the single source of truth for the
                 # head-name -> guidance-fn mapping; the config defaults
                 # (lat_scale=1.0, lambda_lat=2.5, lambda_lon=0.25) reproduce
-                # the legacy lateral+longitudinal pair exactly.
+                # the legacy lateral+longitudinal pair (build_head_composer
+                # returns the certified-equivalent FastGuidanceComposer).
                 composer = build_head_composer(
                     eta_vals,
                     lambda_lat=config.exploration_lambda_lat,

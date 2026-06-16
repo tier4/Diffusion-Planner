@@ -66,7 +66,7 @@ def main():
                 f"{p}: --ego_shape {cli_es.tolist()} != NPZ ego_shape "
                 f"{npz_es.tolist()} (platform mismatch)"
             )
-        ex, ey, eyaw = recover_ego_world_pose_from_goal(np.asarray(d["goal_pose"]), routes[rk])
+        ex, ey, _ = recover_ego_world_pose_from_goal(np.asarray(d["goal_pose"]), routes[rk])
         pts, s = polys[rk]
         arc = project_to_polyline(np.array([ex, ey]), pts, s)[0]
         meta.append((p, rk, arc))

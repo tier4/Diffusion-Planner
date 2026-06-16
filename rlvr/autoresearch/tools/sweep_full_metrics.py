@@ -80,6 +80,11 @@ def run_l2(
         "true",
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, cwd=repo)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"valid_320 exited with code {res.returncode} for {merged}:\n"
+            f"{res.stdout[-2000:]}\n{res.stderr[-2000:]}"
+        )
     m = re.search(r"avg_loss_ego=([\d.]+) avg_loss_neighbor=([\d.]+)", res.stdout)
     if not m:
         raise RuntimeError(
