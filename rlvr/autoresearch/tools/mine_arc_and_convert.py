@@ -79,13 +79,13 @@ def main():
     kept = []
     files = sorted(glob.glob(os.path.join(args.npz_dir, "*.npz")))
     for p in files:
-        d = np.load(p, allow_pickle=True)
-        ex, ey = float(d["ego_current_state"][0]), float(d["ego_current_state"][1])
-        res = project_to_polyline(np.array([ex, ey], dtype=float), poly, arc)
-        s = float(res[0])
-        if not (args.arc_lo <= s <= args.arc_hi):
-            continue
-        out = convert(d)
+        with np.load(p, allow_pickle=True) as d:
+            ex, ey = float(d["ego_current_state"][0]), float(d["ego_current_state"][1])
+            res = project_to_polyline(np.array([ex, ey], dtype=float), poly, arc)
+            s = float(res[0])
+            if not (args.arc_lo <= s <= args.arc_hi):
+                continue
+            out = convert(d)
         op = os.path.join(args.out_dir, os.path.basename(p))
         np.savez(op, **out)
         kept.append(op)

@@ -59,14 +59,15 @@ def main():
     meta = []
     for p in paths:
         rk = "t2m" if "t2m" in os.path.basename(p) else "m2t"
-        d = np.load(p, allow_pickle=True)
-        npz_es = np.asarray(d["ego_shape"]).reshape(-1)[:3]
+        with np.load(p, allow_pickle=True) as d:
+            npz_es = np.asarray(d["ego_shape"]).reshape(-1)[:3]
+            goal_pose = np.asarray(d["goal_pose"])
         if not np.allclose(npz_es, cli_es, atol=1e-2):
             raise ValueError(
                 f"{p}: --ego_shape {cli_es.tolist()} != NPZ ego_shape "
                 f"{npz_es.tolist()} (platform mismatch)"
             )
-        ex, ey, _ = recover_ego_world_pose_from_goal(np.asarray(d["goal_pose"]), routes[rk])
+        ex, ey, _ = recover_ego_world_pose_from_goal(goal_pose, routes[rk])
         pts, s = polys[rk]
         arc = project_to_polyline(np.array([ex, ey]), pts, s)[0]
         meta.append((p, rk, arc))

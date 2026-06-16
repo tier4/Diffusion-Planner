@@ -109,7 +109,8 @@ def main():
             continue
         cands.sort(reverse=True)
         total, scm, k = cands[0]
-        raw = dict(np.load(p, allow_pickle=True))
+        with np.load(p, allow_pickle=True) as _z:
+            raw = dict(_z)
         raw["ego_agent_future"] = trajs[k].detach().cpu().numpy().astype(np.float32)
         out_p = os.path.join(args.out_dir, name)
         np.savez(out_p, **raw)

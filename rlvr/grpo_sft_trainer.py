@@ -674,7 +674,7 @@ def train_epoch_ranked_sft(
         _guide_scale = config.exploration_guidance_scale
         noise_min, noise_max = config.noise_scale_range
         _train_explorer = exploration_optimizer is not None
-        if _train_explorer and _heads != ["lateral", "longitudinal"]:
+        if _train_explorer and set(_heads) != {"lateral", "longitudinal"}:
             raise NotImplementedError(
                 "joint explorer training in ranked-SFT only supports the legacy "
                 f"lateral+longitudinal heads, got {_heads} — freeze the explorer "

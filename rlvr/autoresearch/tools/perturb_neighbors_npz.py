@@ -153,7 +153,8 @@ def main():
     # 2 identical rows: the canonical collision fn needs >=2 timesteps.
     t0_pose = np.array([[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
     for sp in paths:
-        base = dict(np.load(sp, allow_pickle=True))
+        with np.load(sp, allow_pickle=True) as _z:
+            base = dict(_z)
         if "neighbor_agents_past" not in base or "neighbor_agents_future" not in base:
             raise ValueError(f"{sp}: missing neighbor arrays")
         nb_past0 = base["neighbor_agents_past"]

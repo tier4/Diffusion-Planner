@@ -162,7 +162,8 @@ def main():
         )
         traj4 = _smooth_trajectory(traj4.astype(np.float32), 11, 3)
 
-        raw = dict(np.load(sp, allow_pickle=True))
+        with np.load(sp, allow_pickle=True) as _z:
+            raw = dict(_z)
         fut = raw["ego_agent_future"]
         if traj4.shape[0] < fut.shape[0]:
             raise ValueError(

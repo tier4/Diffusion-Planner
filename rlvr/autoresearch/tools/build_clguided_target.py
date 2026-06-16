@@ -71,7 +71,8 @@ def main():
         best = int(torch.argmax(sc).item())
         if float(sc[best]) > -0.05:
             n_cen += 1
-        raw = dict(np.load(p, allow_pickle=True))
+        with np.load(p, allow_pickle=True) as _z:
+            raw = dict(_z)
         raw["ego_agent_future"] = trajs[best].detach().cpu().numpy().astype(np.float32)
         out_p = os.path.join(args.out_dir, os.path.basename(p))
         np.savez(out_p, **raw)
