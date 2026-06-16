@@ -9,7 +9,11 @@ import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from tqdm import tqdm
 
-from preference_optimization.utils import calculate_path_length, generate_trajectory_pair, load_npz_data
+from preference_optimization.utils import (
+    calculate_path_length,
+    generate_trajectory_pair,
+    load_npz_data,
+)
 
 
 def generate_rule_based_preferences(

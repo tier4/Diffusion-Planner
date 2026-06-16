@@ -16,6 +16,7 @@ Usage:
         --output_dir <dir> \
         [--collage_cols 5]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -70,8 +71,14 @@ def main():
     p.add_argument("--output_dir", required=True)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--collage_cols", type=int, default=5)
-    p.add_argument("--no_viz", action="store_true",
-                   help="Skip per-scene PNGs and collage; only print stats.")
+    p.add_argument(
+        "--show_gt",
+        action="store_true",
+        help="overlay the scene's ego_agent_future (hand-drawn GT) as a 3rd trajectory",
+    )
+    p.add_argument(
+        "--no_viz", action="store_true", help="Skip per-scene PNGs and collage; only print stats."
+    )
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -90,7 +97,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     results_a, results_b = [], []
-    cached_trajs_a, cached_trajs_b = [], []
+    cached_trajs_a, cached_trajs_b, cached_gt = [], [], []
 
     for start in range(0, len(scene_paths), args.batch_size):
         batch_paths = scene_paths[start : start + args.batch_size]
@@ -137,9 +144,7 @@ def main():
             flag_b = "COL" if d_b["det_static_crossing"] else "   "
             si = len(results_a) - 1
             print(
-                f"  [{si:3d}] {name:30s}  "
-                f"A: {flag_a} sc={sc_a:+.2f}m  "
-                f"B: {flag_b} sc={sc_b:+.2f}m"
+                f"  [{si:3d}] {name:30s}  A: {flag_a} sc={sc_a:+.2f}m  B: {flag_b} sc={sc_b:+.2f}m"
             )
 
             traj_a_np = det_a[bi].cpu().numpy()
@@ -147,15 +152,21 @@ def main():
             cached_trajs_a.append(traj_a_np)
             cached_trajs_b.append(traj_b_np)
 
+            gt_np = None
+            if args.show_gt:
+                _gt = np.load(sp, allow_pickle=True)["ego_agent_future"]
+                gt_np = _gt[:, :4] if _gt.shape[-1] >= 4 else _gt
+            cached_gt.append(gt_np)
+
             if args.no_viz:
                 continue
 
             fig, ax = plt.subplots(1, 1, figsize=(12, 12))
             draw_scene_base(ax, sp)
-            draw_traj(ax, traj_a_np,
-                      f"{args.label_a} (sc={sc_a:.2f}m)", "#1f77b4", sp)
-            draw_traj(ax, traj_b_np,
-                      f"{args.label_b} (sc={sc_b:.2f}m)", "#d62728", sp)
+            if gt_np is not None:
+                draw_traj(ax, gt_np, "GT (hand-drawn)", "#2ca02c", sp)
+            draw_traj(ax, traj_a_np, f"{args.label_a} (sc={sc_a:.2f}m)", "#1f77b4", sp)
+            draw_traj(ax, traj_b_np, f"{args.label_b} (sc={sc_b:.2f}m)", "#d62728", sp)
 
             all_pts = np.vstack([traj_a_np[:, :2], traj_b_np[:, :2], [[0, 0]]])
             cx, cy = np.mean(all_pts[:, 0]), np.mean(all_pts[:, 1])
@@ -222,6 +233,8 @@ def main():
             ax = axes_flat[si]
 
             draw_scene_base(ax, sp)
+            if si < len(cached_gt) and cached_gt[si] is not None:
+                draw_traj(ax, cached_gt[si], "GT", "#2ca02c", sp)
             draw_traj(ax, cached_trajs_a[si], args.label_a, "#1f77b4", sp)
             draw_traj(ax, cached_trajs_b[si], args.label_b, "#d62728", sp)
 
@@ -246,12 +259,22 @@ def main():
     # --- Save JSON ---
     out_path = out_dir / "det_compare_summary.json"
     with open(out_path, "w") as f:
-        json.dump({
-            "model_a": args.model_a, "lora_a": args.lora_a, "label_a": args.label_a,
-            "model_b": args.model_b, "lora_b": args.lora_b, "label_b": args.label_b,
-            "aggregate_a": agg_a, "aggregate_b": agg_b,
-            "scenes_a": results_a, "scenes_b": results_b,
-        }, f, indent=2)
+        json.dump(
+            {
+                "model_a": args.model_a,
+                "lora_a": args.lora_a,
+                "label_a": args.label_a,
+                "model_b": args.model_b,
+                "lora_b": args.lora_b,
+                "label_b": args.label_b,
+                "aggregate_a": agg_a,
+                "aggregate_b": agg_b,
+                "scenes_a": results_a,
+                "scenes_b": results_b,
+            },
+            f,
+            indent=2,
+        )
     print(f"Wrote {out_path}")
 
 

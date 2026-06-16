@@ -16,6 +16,7 @@ Usage:
 Outputs:
     <output_dir>/det_avoidance_summary.json   per-scene + aggregate stats
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,7 +51,10 @@ def load_model(model_path: str, device: torch.device):
 
 @torch.no_grad()
 def det_inference_batched(
-    model, model_args, datas: list[dict], device: torch.device,
+    model,
+    model_args,
+    datas: list[dict],
+    device: torch.device,
     norm_batch: dict | None = None,
 ) -> torch.Tensor:
     """Run deterministic inference (noise=0) on a batch of scenes.
@@ -85,8 +89,12 @@ def det_inference_batched(
         future_len = model_args.future_len
         norm_batch_d = {k: v for k, v in norm_batch.items()}
         from rlvr.closed_loop.batched_rollout import make_initial_latent
+
         norm_batch_d["sampled_trajectories"] = make_initial_latent(
-            len(datas), P, future_len, device,
+            len(datas),
+            P,
+            future_len,
+            device,
         )
         _, det_out = model(norm_batch_d)
         return det_out["prediction"][:, 0].detach()  # (B, T, 4)
@@ -110,8 +118,13 @@ def reward_breakdown_to_det_dict(r) -> dict:
 
 
 def score_det_scenes(
-    model, model_args, scene_paths: list[str], rcfg, ego_shape: np.ndarray,
-    device: torch.device, batch_size: int = 32,
+    model,
+    model_args,
+    scene_paths: list[str],
+    rcfg,
+    ego_shape: np.ndarray,
+    device: torch.device,
+    batch_size: int = 32,
 ) -> list[dict]:
     """Run det inference + reward scoring on all scenes. Returns per-scene dicts."""
     results = []
@@ -149,19 +162,21 @@ def score_det_scenes(
         for bi, p in enumerate(valid_paths):
             traj_1T4 = det_trajs[bi : bi + 1]
             r = compute_reward_batch(traj_1T4, datas[bi], rcfg)[0]
-            results.append({
-                "scene": Path(p).name,
-                "scene_path": str(p),
-                "sc_min_dist": float(getattr(r, "sc_min_dist", 99.0)),
-                "rb_min_dist": float(getattr(r, "rb_min_dist", 99.0)),
-                "cl": float(r.centerline),
-                "total": float(r.total),
-                "static_crossing": bool(r.static_crossing),
-                "rb_cross": bool(r.rb_crossing),
-                "lane_cross": bool(r.lane_crossing),
-                "kin_violated": bool(r.kinematic_violated),
-                "sc_n_stopped": int(getattr(r, "sc_n_stopped", 0)),
-            })
+            results.append(
+                {
+                    "scene": Path(p).name,
+                    "scene_path": str(p),
+                    "sc_min_dist": float(getattr(r, "sc_min_dist", 99.0)),
+                    "rb_min_dist": float(getattr(r, "rb_min_dist", 99.0)),
+                    "cl": float(r.centerline),
+                    "total": float(r.total),
+                    "static_crossing": bool(r.static_crossing),
+                    "rb_cross": bool(r.rb_crossing),
+                    "lane_cross": bool(r.lane_crossing),
+                    "kin_violated": bool(r.kinematic_violated),
+                    "sc_n_stopped": int(getattr(r, "sc_n_stopped", 0)),
+                }
+            )
             flag = "COL" if r.static_crossing else "   "
             print(
                 f"  [{len(results) - 1:3d}] {flag}  "
@@ -264,8 +279,7 @@ def main():
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--ego_shape", required=True,
-                        help="WB,L,W e.g. 4.76,7.24,2.29")
+    parser.add_argument("--ego_shape", required=True, help="WB,L,W e.g. 4.76,7.24,2.29")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--batch_size", type=int, default=32)
     args = parser.parse_args()
@@ -281,8 +295,13 @@ def main():
     model, model_args = load_model(args.model_path, device)
 
     results = score_det_scenes(
-        model, model_args, scene_paths, rcfg, ego_shape,
-        device, batch_size=args.batch_size,
+        model,
+        model_args,
+        scene_paths,
+        rcfg,
+        ego_shape,
+        device,
+        batch_size=args.batch_size,
     )
 
     if not results:

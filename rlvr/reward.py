@@ -52,11 +52,13 @@ class RewardConfig:
     rb_wide_scale: float = 0.2
     rb_cont_scale: float = 0.0  # continuous penalty (0=disabled)
     rb_gate_enabled: bool = True  # if True, rb crossing is a hard safety gate
-    rb_penalty_mode: str = "frac"  # "frac" = fraction of timesteps, "survival" = first-violation time-decay
+    rb_penalty_mode: str = (
+        "frac"  # "frac" = fraction of timesteps, "survival" = first-violation time-decay
+    )
     rb_cross_thresh: float = 0.20  # metres — ego perimeter within this = crossing
-    rb_near_thresh: float = 0.45   # metres — near zone boundary (+20cm vs lane)
-    rb_wide_thresh: float = 0.60   # metres — wide zone boundary (+20cm vs lane)
-    rb_cont_thresh: float = 1.00   # metres — continuous penalty max distance (+20cm vs lane)
+    rb_near_thresh: float = 0.45  # metres — near zone boundary (+20cm vs lane)
+    rb_wide_thresh: float = 0.60  # metres — wide zone boundary (+20cm vs lane)
+    rb_cont_thresh: float = 1.00  # metres — continuous penalty max distance (+20cm vs lane)
 
     # Lane departure penalty scales and thresholds
     enable_lane_departure: bool = False
@@ -64,7 +66,9 @@ class RewardConfig:
     lane_near_scale: float = 3.0
     lane_wide_scale: float = 0.2
     lane_cont_scale: float = 0.0
-    lane_cross_thresh: float = 0.20  # metres — signed distance threshold for crossing (matches rb_cross_thresh)
+    lane_cross_thresh: float = (
+        0.20  # metres — signed distance threshold for crossing (matches rb_cross_thresh)
+    )
     lane_near_thresh: float = 0.25  # metres — near zone boundary
     lane_wide_thresh: float = 0.40  # metres — wide zone boundary
     lane_cont_thresh: float = 0.80  # metres — continuous penalty max distance
@@ -74,18 +78,24 @@ class RewardConfig:
     # changes training reward math, so set `static_collision_enabled=True` and
     # non-zero scales explicitly.
     static_collision_enabled: bool = False
-    sc_gate_enabled: bool = False           # hard terminator if any predicted step overlaps a stopped neighbor
-    sc_penalty_mode: str = "frac"           # "frac" or "survival" (matches rb_penalty_mode semantics)
+    sc_gate_enabled: bool = (
+        False  # hard terminator if any predicted step overlaps a stopped neighbor
+    )
+    sc_penalty_mode: str = "frac"  # "frac" or "survival" (matches rb_penalty_mode semantics)
     sc_near_scale: float = 0.0
     sc_wide_scale: float = 0.0
     sc_cont_scale: float = 0.0
-    sc_cross_thresh: float = 0.2            # clearance below this (metres) = crossing. 0.2 m matches the "visually touching" threshold observed on the bigcurve resim — below that, SAT signed distance is slightly positive but the boxes are in practice a collision.
+    sc_cross_thresh: float = 0.2  # clearance below this (metres) = crossing. 0.2 m matches the "visually touching" threshold observed on the bigcurve resim — below that, SAT signed distance is slightly positive but the boxes are in practice a collision.
     sc_near_thresh: float = 0.4
     sc_wide_thresh: float = 0.7
     sc_cont_thresh: float = 1.0
-    sc_neighbor_vel_thresh: float = 0.1     # m/s — |v0| below this counts as stationary
-    sc_neighbor_disp_thresh: float = 0.5    # m — max displacement across GT future below this counts as stationary
-    sc_ego_min_speed: float = 1.0           # m/s — timesteps below this are not scored (matches collision suppression)
+    sc_neighbor_vel_thresh: float = 0.1  # m/s — |v0| below this counts as stationary
+    sc_neighbor_disp_thresh: float = (
+        0.5  # m — max displacement across GT future below this counts as stationary
+    )
+    sc_ego_min_speed: float = (
+        1.0  # m/s — timesteps below this are not scored (matches collision suppression)
+    )
 
     # Lateral acceleration penalty
     max_lat_accel: float = 2.0  # m/s^2
@@ -110,7 +120,9 @@ class RewardConfig:
     stopped_penalty: float = 50.0  # applied in compute_reward_batch progress section
 
     # Underprogress: penalize trajectories that drive much less than a reference.
-    underprogress_penalty: float = 0.0   # scale (0=disabled). Penalty = scale * max(0, threshold - ratio)
+    underprogress_penalty: float = (
+        0.0  # scale (0=disabled). Penalty = scale * max(0, threshold - ratio)
+    )
     underprogress_threshold: float = 0.5  # fire when ratio < threshold
     # Reference for underprogress:
     #   "baseline" — (default) frozen LoRA-less baseline det path, passed via
@@ -158,8 +170,8 @@ class RewardBreakdown:
     sc_near_penalty: float = 0.0
     sc_wide_penalty: float = 0.0
     sc_cont_penalty: float = 0.0
-    sc_min_dist: float = 99.0     # min OBB clearance to any stopped neighbor (t>=1, ego moving)
-    sc_n_stopped: int = 0         # how many stopped neighbors were found in the scene
+    sc_min_dist: float = 99.0  # min OBB clearance to any stopped neighbor (t>=1, ego moving)
+    sc_n_stopped: int = 0  # how many stopped neighbors were found in the scene
     # Kinematic feasibility violation (yaw rate + bicycle-model curvature).
     # When True, the trajectory is INFEASIBLE and compute_reward_batch floors
     # ``total`` to the offroad floor. Convention matches the other gate
@@ -171,6 +183,7 @@ class RewardBreakdown:
 # ---------------------------------------------------------------------------
 # Ego bbox construction (adapted from loss.compute_safety_penalty)
 # ---------------------------------------------------------------------------
+
 
 def _build_ego_bbox_corners(
     ego_trajs: torch.Tensor,
@@ -202,20 +215,24 @@ def _build_ego_bbox_corners(
 
     half_length = ego_length / 2.0
     half_width = ego_width / 2.0
-    half_sizes = torch.tensor(
-        [half_length, half_width], device=device, dtype=dtype
-    ).expand(N, T, 2)
+    half_sizes = torch.tensor([half_length, half_width], device=device, dtype=dtype).expand(N, T, 2)
 
     corner_signs = torch.tensor(
         [[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0]],
-        device=device, dtype=dtype,
+        device=device,
+        dtype=dtype,
     )
     local_corners = corner_signs[None, None, :, :] * half_sizes[:, :, None, :]  # (N, T, 4, 2)
 
-    rot = torch.stack([
-        heading_unit[..., 0], -heading_unit[..., 1],
-        heading_unit[..., 1], heading_unit[..., 0],
-    ], dim=-1).reshape(N, T, 2, 2)
+    rot = torch.stack(
+        [
+            heading_unit[..., 0],
+            -heading_unit[..., 1],
+            heading_unit[..., 1],
+            heading_unit[..., 0],
+        ],
+        dim=-1,
+    ).reshape(N, T, 2, 2)
 
     rotated_corners = torch.einsum("btij,btkj->btki", rot, local_corners)
     return ego_center_xy[:, :, None, :] + rotated_corners  # (N, T, 4, 2)
@@ -224,6 +241,7 @@ def _build_ego_bbox_corners(
 # ---------------------------------------------------------------------------
 # Safety: batched neighbor collision using SAT from loss.py
 # ---------------------------------------------------------------------------
+
 
 @torch.no_grad()
 def compute_safety_score_batch(
@@ -272,26 +290,30 @@ def compute_safety_score_batch(
     npc_pos = neighbor_futures[:, :, :2]
     npc_cos = neighbor_futures[:, :, 2]
     npc_sin = neighbor_futures[:, :, 3]
-    npc_norm = (npc_cos ** 2 + npc_sin ** 2).sqrt().clamp_min(1e-6)
+    npc_norm = (npc_cos**2 + npc_sin**2).sqrt().clamp_min(1e-6)
     npc_cos = npc_cos / npc_norm
     npc_sin = npc_sin / npc_norm
 
-    npc_width = neighbor_shapes[:, 0].unsqueeze(1).expand(-1, T)   # (N_nb, T)
+    npc_width = neighbor_shapes[:, 0].unsqueeze(1).expand(-1, T)  # (N_nb, T)
     npc_length = neighbor_shapes[:, 1].unsqueeze(1).expand(-1, T)  # (N_nb, T)
 
-    npc_rect = torch.stack([
-        npc_pos[..., 0], npc_pos[..., 1],
-        npc_cos, npc_sin,
-        npc_length, npc_width,
-    ], dim=-1)  # (N_nb, T, 6)
-    npc_corners = center_rect_to_points(
-        npc_rect.reshape(-1, 6)
-    ).reshape(N_nb, T, 4, 2)
+    npc_rect = torch.stack(
+        [
+            npc_pos[..., 0],
+            npc_pos[..., 1],
+            npc_cos,
+            npc_sin,
+            npc_length,
+            npc_width,
+        ],
+        dim=-1,
+    )  # (N_nb, T, 6)
+    npc_corners = center_rect_to_points(npc_rect.reshape(-1, 6)).reshape(N_nb, T, 4, 2)
 
     # Cross product: ego (N, T) x NPC (N_nb, T) -> (N, N_nb, T)
     ego_exp = ego_corners.unsqueeze(1).expand(-1, N_nb, -1, -1, -1)  # (N, N_nb, T, 4, 2)
-    npc_exp = npc_corners.unsqueeze(0).expand(N, -1, -1, -1, -1)     # (N, N_nb, T, 4, 2)
-    nv_exp = neighbor_valid.unsqueeze(0).expand(N, -1, -1)            # (N, N_nb, T)
+    npc_exp = npc_corners.unsqueeze(0).expand(N, -1, -1, -1, -1)  # (N, N_nb, T, 4, 2)
+    nv_exp = neighbor_valid.unsqueeze(0).expand(N, -1, -1)  # (N, N_nb, T)
 
     # Flatten for batch_signed_distance_rect
     ego_flat = ego_exp.reshape(-1, 4, 2)
@@ -308,9 +330,9 @@ def compute_safety_score_batch(
     # Filter out rear-end collisions: only count if NPC is ahead of or beside
     # the ego (not approaching from behind). Check via dot product of ego
     # heading with the ego→NPC displacement vector.
-    ego_xy = ego_trajs[:, :, :2]                           # (N, T, 2)
-    ego_heading = ego_trajs[:, :, 2:4]                     # (N, T, 2) [cos, sin]
-    npc_xy = neighbor_futures[:, :, :2]                    # (N_nb, T, 2)
+    ego_xy = ego_trajs[:, :, :2]  # (N, T, 2)
+    ego_heading = ego_trajs[:, :, 2:4]  # (N, T, 2) [cos, sin]
+    npc_xy = neighbor_futures[:, :, :2]  # (N_nb, T, 2)
 
     # ego→NPC vector: (N, N_nb, T, 2)
     ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
@@ -333,7 +355,7 @@ def compute_safety_score_batch(
     # Only count collisions when the ego is moving faster than 1 m/s.
     _COLLISION_MIN_SPEED = 1.0  # m/s
     ego_vel = torch.diff(ego_xy, dim=1) / config.dt  # (N, T-1, 2)
-    ego_speed = ego_vel.norm(dim=-1)                  # (N, T-1)
+    ego_speed = ego_vel.norm(dim=-1)  # (N, T-1)
     # Pad last timestep
     ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)  # (N, T)
     ego_moving = ego_speed > _COLLISION_MIN_SPEED  # (N, T)
@@ -374,7 +396,8 @@ def compute_safety_score_batch(
 # ---------------------------------------------------------------------------
 
 _TTC_HORIZON = 1.0  # seconds ahead to check
-_TTC_DT = 0.1       # trajectory timestep
+_TTC_DT = 0.1  # trajectory timestep
+
 
 @torch.no_grad()
 def compute_ttc_score_batch(
@@ -406,7 +429,9 @@ def compute_ttc_score_batch(
     ego_vel = torch.cat([ego_vel, ego_vel[:, -1:]], dim=1)  # (N, T, 2)
 
     # NPC velocity
-    npc_vel = (neighbor_futures[:, 1:, :2] - neighbor_futures[:, :-1, :2]) / _TTC_DT  # (N_nb, T-1, 2)
+    npc_vel = (
+        neighbor_futures[:, 1:, :2] - neighbor_futures[:, :-1, :2]
+    ) / _TTC_DT  # (N_nb, T-1, 2)
     npc_vel = torch.cat([npc_vel, npc_vel[:, -1:]], dim=1)  # (N_nb, T, 2)
 
     # Extrapolate positions TTC_HORIZON seconds ahead
@@ -458,8 +483,8 @@ def _point_in_polygon(points: torch.Tensor, polygon: torch.Tensor) -> torch.Tens
         (M,) bool tensor — True if the point is inside the polygon.
     """
     px, py = points[:, 0:1], points[:, 1:2]  # (M, 1)
-    v1 = polygon                               # (V, 2)
-    v2 = torch.roll(polygon, -1, dims=0)       # (V, 2)
+    v1 = polygon  # (V, 2)
+    v2 = torch.roll(polygon, -1, dims=0)  # (V, 2)
 
     y1, y2 = v1[:, 1], v2[:, 1]  # (V,)
     x1, x2 = v1[:, 0], v2[:, 0]
@@ -537,7 +562,7 @@ def _build_lane_polygons(
         valid = pts.abs().sum(dim=-1) > 0.1
         if valid.sum() < 3:
             continue
-        left = (pts + lb)[valid]   # (K, 2)
+        left = (pts + lb)[valid]  # (K, 2)
         right = (pts + rb)[valid]  # (K, 2)
         poly = torch.cat([left, right.flip(0)], dim=0)  # (2K, 2)
         polys.append(poly)
@@ -564,8 +589,9 @@ def _ego_on_road_polygon(
         (N, T) bool tensor — True where the ego is fully on-road.
     """
     if not lane_polys:
-        return torch.ones(ego_trajs.shape[0], ego_trajs.shape[1],
-                          dtype=torch.bool, device=ego_trajs.device)
+        return torch.ones(
+            ego_trajs.shape[0], ego_trajs.shape[1], dtype=torch.bool, device=ego_trajs.device
+        )
 
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
@@ -602,10 +628,14 @@ def _ego_on_road_polygon(
     K = local_pts_t.shape[0]
 
     # Rotate + translate all sample points: (N, T, K, 2)
-    rx = local_pts_t[:, 0][None, None, :] * cos_h[:, :, None] \
-       - local_pts_t[:, 1][None, None, :] * sin_h[:, :, None]
-    ry = local_pts_t[:, 0][None, None, :] * sin_h[:, :, None] \
-       + local_pts_t[:, 1][None, None, :] * cos_h[:, :, None]
+    rx = (
+        local_pts_t[:, 0][None, None, :] * cos_h[:, :, None]
+        - local_pts_t[:, 1][None, None, :] * sin_h[:, :, None]
+    )
+    ry = (
+        local_pts_t[:, 0][None, None, :] * sin_h[:, :, None]
+        + local_pts_t[:, 1][None, None, :] * cos_h[:, :, None]
+    )
     pts_x = cx[:, :, None] + rx  # (N, T, K)
     pts_y = cy[:, :, None] + ry
 
@@ -621,8 +651,12 @@ def _ego_on_road_polygon(
     for poly in lane_polys:
         pmin = poly.min(dim=0).values
         pmax = poly.max(dim=0).values
-        if (pmax[0] < traj_min[0] or pmin[0] > traj_max[0] or
-                pmax[1] < traj_min[1] or pmin[1] > traj_max[1]):
+        if (
+            pmax[0] < traj_min[0]
+            or pmin[0] > traj_max[0]
+            or pmax[1] < traj_min[1]
+            or pmin[1] > traj_max[1]
+        ):
             continue
         nearby_polys.append(poly)
 
@@ -682,17 +716,24 @@ def _ego_on_road_polygon(
 
     margin_pts_t = torch.tensor(margin_pts, device=device, dtype=ego_trajs.dtype)
 
-    mrx = margin_pts_t[:, 0][None, None, :] * cos_h[:, :, None] \
+    mrx = (
+        margin_pts_t[:, 0][None, None, :] * cos_h[:, :, None]
         - margin_pts_t[:, 1][None, None, :] * sin_h[:, :, None]
-    mry = margin_pts_t[:, 0][None, None, :] * sin_h[:, :, None] \
+    )
+    mry = (
+        margin_pts_t[:, 0][None, None, :] * sin_h[:, :, None]
         + margin_pts_t[:, 1][None, None, :] * cos_h[:, :, None]
+    )
     mpts_x = cx[:, :, None] + mrx
     mpts_y = cy[:, :, None] + mry
     all_margin_pts = torch.stack([mpts_x, mpts_y], dim=-1).reshape(-1, 2)
 
     if nearby_polys:
         margin_inside_matrix = _points_in_polygons_batched(
-            all_margin_pts, padded_v1, padded_v2, poly_valid,
+            all_margin_pts,
+            padded_v1,
+            padded_v2,
+            poly_valid,
         )
         margin_outside = ~margin_inside_matrix.any(dim=1)
     else:
@@ -724,17 +765,24 @@ def _ego_on_road_polygon(
         wide_pts.append((-wide_half_l * (1 - 2 * t), wide_half_w))
 
     wide_pts_t = torch.tensor(wide_pts, device=device, dtype=ego_trajs.dtype)
-    wrx = wide_pts_t[:, 0][None, None, :] * cos_h[:, :, None] \
+    wrx = (
+        wide_pts_t[:, 0][None, None, :] * cos_h[:, :, None]
         - wide_pts_t[:, 1][None, None, :] * sin_h[:, :, None]
-    wry = wide_pts_t[:, 0][None, None, :] * sin_h[:, :, None] \
+    )
+    wry = (
+        wide_pts_t[:, 0][None, None, :] * sin_h[:, :, None]
         + wide_pts_t[:, 1][None, None, :] * cos_h[:, :, None]
+    )
     wpts_x = cx[:, :, None] + wrx
     wpts_y = cy[:, :, None] + wry
     all_wide_pts = torch.stack([wpts_x, wpts_y], dim=-1).reshape(-1, 2)
 
     if nearby_polys:
         wide_inside = _points_in_polygons_batched(
-            all_wide_pts, padded_v1, padded_v2, poly_valid,
+            all_wide_pts,
+            padded_v1,
+            padded_v2,
+            poly_valid,
         )
         wide_outside = ~wide_inside.any(dim=1)
     else:
@@ -806,7 +854,7 @@ def compute_feasibility_score_batch(
             pad = _sg_window // 2
             # pos: [N, T, 2] -> [N, 2, T] for conv1d
             pos_2d = pos.detach().permute(0, 2, 1)  # [N, 2, T]
-            pos_padded = torch.nn.functional.pad(pos_2d, (pad, pad), mode='replicate')
+            pos_padded = torch.nn.functional.pad(pos_2d, (pad, pad), mode="replicate")
 
             # Velocity via SG deriv=1
             vel_sg = torch.nn.functional.conv1d(
@@ -819,7 +867,7 @@ def compute_feasibility_score_batch(
 
             vx, vy = vel_sg[:, 0], vel_sg[:, 1]  # [N, T]
             ax_sg, ay_sg = accel_sg[:, 0], accel_sg[:, 1]  # [N, T]
-            speed_sg = (vx ** 2 + vy ** 2).sqrt()  # [N, T]
+            speed_sg = (vx**2 + vy**2).sqrt()  # [N, T]
 
             # lat_accel = |vx*ay - vy*ax| / max(|v|, 0.5)
             cross = (vx * ay_sg - vy * ax_sg).abs()
@@ -895,7 +943,7 @@ def compute_kinematic_gate(
     # Smooth (cos_h, sin_h) via SG → recover filtered heading without wrap issues
     cos_h = ego_trajs[..., 2]
     sin_h = ego_trajs[..., 3]
-    nh = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+    nh = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
     cos_h = cos_h / nh
     sin_h = sin_h / nh
     heading_2d = torch.stack([cos_h, sin_h], dim=1)  # (N, 2, T)
@@ -990,8 +1038,8 @@ def compute_centerline_score_batch(
         lanes = lanes[0]  # (S, P, 33)
 
     S_P = lanes.shape[0] * lanes.shape[1]
-    lane_centers = lanes[..., _CL_X:_CL_Y + 1].reshape(S_P, 2)
-    lane_dirs = lanes[..., _CL_DX:_CL_DY + 1].reshape(S_P, 2)
+    lane_centers = lanes[..., _CL_X : _CL_Y + 1].reshape(S_P, 2)
+    lane_dirs = lanes[..., _CL_DX : _CL_DY + 1].reshape(S_P, 2)
     lane_left = lanes[..., 4:6].reshape(S_P, 2)
     lane_right = lanes[..., 6:8].reshape(S_P, 2)
 
@@ -999,7 +1047,7 @@ def compute_centerline_score_batch(
     lane_dirs_n = lane_dirs / (lane_dirs.norm(dim=-1, keepdim=True) + 1e-6)
     lane_lat = torch.stack([-lane_dirs_n[..., 1], lane_dirs_n[..., 0]], dim=-1)  # (S_P, 2)
 
-    left_hw = (lane_left * lane_lat).sum(dim=-1)    # (S_P,)
+    left_hw = (lane_left * lane_lat).sum(dim=-1)  # (S_P,)
     right_hw = (lane_right * lane_lat).sum(dim=-1)  # (S_P,)
 
     ego_pos = ego_trajs[:, :, :2]  # (N, T, 2)
@@ -1041,6 +1089,7 @@ def compute_centerline_score_batch(
         lane_usage = ego_lat.abs() / side_hw  # (N, T)
     elif usage_mode == "body":
         import warnings
+
         warnings.warn(
             "centerline_usage_mode='body' is deprecated as of 2026-04-27. "
             "Use 'baselink' for new configs. Body adds half-vehicle-width to "
@@ -1079,10 +1128,10 @@ def compute_centerline_score_batch(
     # boundary accrue penalty proportional to (lane_usage)² with no clip.
     per_step_penalty = torch.where(
         near_route,
-        lane_usage ** 2,
+        lane_usage**2,
         torch.where(
             left_route,
-            route_deviation ** 2,
+            route_deviation**2,
             torch.zeros_like(lane_usage),  # no penalty if route never covered this area
         ),
     )  # (N, T)
@@ -1097,6 +1146,7 @@ def compute_centerline_score_batch(
 # ---------------------------------------------------------------------------
 # Progress: batched distance reduction toward goal
 # ---------------------------------------------------------------------------
+
 
 def compute_progress_score_batch(
     ego_trajs: torch.Tensor,
@@ -1140,14 +1190,17 @@ def compute_progress_score_batch(
 
     # Last resort: path length
     diffs = torch.diff(ego_trajs[:, :, :2], dim=1)
-    return torch.sqrt((diffs ** 2).sum(dim=-1)).sum(dim=-1)
+    return torch.sqrt((diffs**2).sum(dim=-1)).sum(dim=-1)
 
 
 # ---------------------------------------------------------------------------
 # Smoothness: batched jerk penalty
 # ---------------------------------------------------------------------------
 
-def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta: float = 0.1) -> torch.Tensor:
+
+def _build_sg_diff_kernel(
+    window: int = 11, poly: int = 3, deriv: int = 3, delta: float = 0.1
+) -> torch.Tensor:
     """Build Savitzky-Golay differentiation kernel (precomputed, cached).
 
     Returns a 1D convolution kernel that computes the deriv-th derivative
@@ -1163,9 +1216,11 @@ def _build_sg_diff_kernel(window: int = 11, poly: int = 3, deriv: int = 3, delta
     pinv = np.linalg.pinv(A)  # [poly+1, window]
     # The deriv-th row of pinv gives smoothing coefficients for the deriv-th derivative
     import math as _math
-    coeffs = pinv[deriv] * _math.factorial(deriv) / (delta ** deriv)
+
+    coeffs = pinv[deriv] * _math.factorial(deriv) / (delta**deriv)
     # Reverse to match convolution convention (scipy savgol_coeffs convention)
     return torch.tensor(coeffs.copy(), dtype=torch.float32).flip(0)  # flip for conv1d
+
 
 # Precompute SG jerk kernel; cache by (device, dt).
 # Safe in DDP: each process has its own Python interpreter and module-level state.
@@ -1177,6 +1232,7 @@ _SG_JERK_CACHE_KEY = None
 _SG_VEL_KERNEL = None
 _SG_ACCEL_KERNEL = None
 _SG_LAT_CACHE_KEY = None
+
 
 def compute_smoothness_score_batch(
     ego_trajs: torch.Tensor,
@@ -1203,9 +1259,9 @@ def compute_smoothness_score_batch(
     # Build kernel once, cache by (device, dt)
     _cache_key = (ego_trajs.device, config.dt)
     if _SG_JERK_KERNEL is None or _SG_JERK_CACHE_KEY != _cache_key:
-        _SG_JERK_KERNEL = _build_sg_diff_kernel(
-            window=11, poly=3, deriv=3, delta=config.dt
-        ).to(ego_trajs.device)
+        _SG_JERK_KERNEL = _build_sg_diff_kernel(window=11, poly=3, deriv=3, delta=config.dt).to(
+            ego_trajs.device
+        )
         _SG_JERK_CACHE_KEY = _cache_key
 
     kernel = _SG_JERK_KERNEL  # [11]
@@ -1215,9 +1271,10 @@ def compute_smoothness_score_batch(
     pos = ego_trajs[:, :, :2].detach().permute(0, 2, 1)  # [N, 2, T]
 
     # Pad and convolve: conv1d with kernel [1, 1, W] on [N, 2, T]
-    pos_padded = torch.nn.functional.pad(pos, (pad, pad), mode='replicate')
+    pos_padded = torch.nn.functional.pad(pos, (pad, pad), mode="replicate")
     jerk = torch.nn.functional.conv1d(
-        pos_padded, kernel.view(1, 1, -1).expand(2, 1, -1),
+        pos_padded,
+        kernel.view(1, 1, -1).expand(2, 1, -1),
         groups=2,
     )  # [N, 2, T]
 
@@ -1304,17 +1361,17 @@ def compute_red_light_score_batch(
     valid = red_xy.norm(dim=-1) > 0.1
     if not valid.any():
         return scores
-    red_xy = red_xy[valid]      # (R', 2)
-    red_dir = red_dir[valid]    # (R', 2)
+    red_xy = red_xy[valid]  # (R', 2)
+    red_dir = red_dir[valid]  # (R', 2)
     R = red_xy.shape[0]
 
     # Normalize lane directions
     red_dir_norm = red_dir / (red_dir.norm(dim=-1, keepdim=True).clamp(min=1e-6))
 
     # Ego positions and headings
-    ego_xy = ego_trajs[:, :, :2]        # (N, T, 2)
-    ego_cos = ego_trajs[:, :, 2]        # (N, T)
-    ego_sin = ego_trajs[:, :, 3]        # (N, T)
+    ego_xy = ego_trajs[:, :, :2]  # (N, T, 2)
+    ego_cos = ego_trajs[:, :, 2]  # (N, T)
+    ego_sin = ego_trajs[:, :, 3]  # (N, T)
     ego_heading = torch.stack([ego_cos, ego_sin], dim=-1)  # (N, T, 2)
 
     # Distance from each ego position to each red-light point: (N, T, R')
@@ -1333,7 +1390,7 @@ def compute_red_light_score_batch(
     ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)  # (N, T)
     is_moving = ego_speed > 0.5  # m/s threshold — ignore near-stationary
 
-    is_close = dist < _RED_LIGHT_PROXIMITY        # (N, T, R')
+    is_close = dist < _RED_LIGHT_PROXIMITY  # (N, T, R')
     is_aligned = cos_align > _RED_LIGHT_HEADING_THRESH  # (N, T, R')
 
     # Violation at timestep: close to any red point AND aligned AND moving
@@ -1357,6 +1414,7 @@ def compute_red_light_score_batch(
 # ---------------------------------------------------------------------------
 # Road border penalty: ego perimeter vs road_border line_strings
 # ---------------------------------------------------------------------------
+
 
 @torch.no_grad()
 def compute_road_border_penalty(
@@ -1394,12 +1452,14 @@ def compute_road_border_penalty(
     device = ego_trajs.device
 
     no_crossing_steps: list[int | None] = [None] * N
-    _safe_return = (torch.ones(N, device=device),
-                    torch.zeros(N, device=device),
-                    torch.zeros(N, device=device),
-                    no_crossing_steps,
-                    torch.zeros(N, device=device),
-                    torch.full((N, T), 99.0, device=device))
+    _safe_return = (
+        torch.ones(N, device=device),
+        torch.zeros(N, device=device),
+        torch.zeros(N, device=device),
+        no_crossing_steps,
+        torch.zeros(N, device=device),
+        torch.full((N, T), 99.0, device=device),
+    )
 
     if "line_strings" not in data:
         return _safe_return
@@ -1412,7 +1472,7 @@ def compute_road_border_penalty(
 
     # Build road border segments from consecutive valid points within each polyline
     border_flag = ls[..., 3]  # (num_ls, pts)
-    border_xy = ls[..., :2]   # (num_ls, pts, 2)
+    border_xy = ls[..., :2]  # (num_ls, pts, 2)
     is_border = border_flag > 0.5
     has_coords = border_xy.norm(dim=-1) > 1e-3
     valid = is_border & has_coords  # (num_ls, pts)
@@ -1425,7 +1485,7 @@ def compute_road_border_penalty(
         return _safe_return
 
     seg_p1_all = border_xy[:, :-1].reshape(-1, 2)[idx]  # (E, 2)
-    seg_p2_all = border_xy[:, 1:].reshape(-1, 2)[idx]   # (E, 2)
+    seg_p2_all = border_xy[:, 1:].reshape(-1, 2)[idx]  # (E, 2)
 
     # Build ego perimeter points (20 per side = 80 total)
     wb = ego_shape[0].item()
@@ -1436,9 +1496,9 @@ def compute_road_border_penalty(
     local_pts = []
     for j in range(_PTS_PER_SIDE):
         f = j / (_PTS_PER_SIDE - 1)
-        local_pts.append((-ro + f * length, -width / 2))    # bottom
-        local_pts.append((-ro + f * length,  width / 2))    # top
-        local_pts.append((-ro, -width / 2 + f * width))     # left
+        local_pts.append((-ro + f * length, -width / 2))  # bottom
+        local_pts.append((-ro + f * length, width / 2))  # top
+        local_pts.append((-ro, -width / 2 + f * width))  # left
         local_pts.append((length - ro, -width / 2 + f * width))  # right
     local_pts = torch.tensor(local_pts, device=device, dtype=ego_trajs.dtype)  # (80, 2)
     K_pts = local_pts.shape[0]
@@ -1446,7 +1506,7 @@ def compute_road_border_penalty(
     # For each trajectory and timestep, transform perimeter to world frame
     cos_h = ego_trajs[..., 2]  # (N, T)
     sin_h = ego_trajs[..., 3]
-    h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+    h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
     cos_h = cos_h / h_norm
     sin_h = sin_h / h_norm
 
@@ -1523,7 +1583,11 @@ def compute_road_border_penalty(
         # where T_valid = T-1 and first_violation is 0-indexed within that window.
         # Early violations are expensive, late violations are cheap.
         is_near = is_not_crossing & (per_timestep_min[:, 1:] < near_thresh)
-        is_wide = is_not_crossing & (per_timestep_min[:, 1:] >= near_thresh) & (per_timestep_min[:, 1:] < wide_thresh)
+        is_wide = (
+            is_not_crossing
+            & (per_timestep_min[:, 1:] >= near_thresh)
+            & (per_timestep_min[:, 1:] < wide_thresh)
+        )
 
         # Vectorized first-violation timestep computation across the batch.
         near_penalty = torch.zeros(N, device=device)
@@ -1542,18 +1606,35 @@ def compute_road_border_penalty(
             in_range = is_not_crossing & (per_timestep_min[:, 1:] < cont_thresh)
             cont_has = in_range.any(dim=1)
             cont_first_t = in_range.to(torch.int64).argmax(dim=1)
-            worst_dist = per_timestep_min[:, 1:].masked_fill(~in_range, float("inf")).min(dim=1).values
+            worst_dist = (
+                per_timestep_min[:, 1:].masked_fill(~in_range, float("inf")).min(dim=1).values
+            )
             cont_penalty[cont_has] = (
                 (1.0 - worst_dist[cont_has] / cont_thresh).clamp(0, 1)
-                * (T_valid - cont_first_t[cont_has].float()) / T_valid
+                * (T_valid - cont_first_t[cont_has].float())
+                / T_valid
             )
 
-        return crossing_gate, near_penalty, wide_penalty, first_crossing_steps, cont_penalty, per_timestep_min
+        return (
+            crossing_gate,
+            near_penalty,
+            wide_penalty,
+            first_crossing_steps,
+            cont_penalty,
+            per_timestep_min,
+        )
     else:
         # Original "frac" mode: fraction of timesteps in violation
         near_frac = (is_not_crossing & (per_timestep_min[:, 1:] < near_thresh)).float().mean(dim=1)
-        wide_frac = (is_not_crossing & (per_timestep_min[:, 1:] >= near_thresh)
-                     & (per_timestep_min[:, 1:] < wide_thresh)).float().mean(dim=1)
+        wide_frac = (
+            (
+                is_not_crossing
+                & (per_timestep_min[:, 1:] >= near_thresh)
+                & (per_timestep_min[:, 1:] < wide_thresh)
+            )
+            .float()
+            .mean(dim=1)
+        )
         if cont_thresh <= 0:
             cont_penalty = torch.zeros(N, device=device)
         else:
@@ -1563,7 +1644,14 @@ def compute_road_border_penalty(
                 torch.zeros_like(per_timestep_min[:, 1:]),
             ).mean(dim=1)
 
-        return crossing_gate, near_frac, wide_frac, first_crossing_steps, cont_penalty, per_timestep_min
+        return (
+            crossing_gate,
+            near_frac,
+            wide_frac,
+            first_crossing_steps,
+            cont_penalty,
+            per_timestep_min,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1615,37 +1703,37 @@ def _closest_points_between_rects(
     #   Config A (rect1 vertices → rect2 edges): 4 verts × 4 edges = 16 queries per pair.
     #   Config B (rect2 vertices → rect1 edges): 4 verts × 4 edges = 16 queries per pair.
     # Concatenated → 32 queries per pair, shaped (B, 32, 2) for q/sa/sb.
-    r1_edges_a = rect1                              # (B, 4, 2)
-    r1_edges_b = torch.roll(rect1, -1, dims=1)      # (B, 4, 2)
+    r1_edges_a = rect1  # (B, 4, 2)
+    r1_edges_b = torch.roll(rect1, -1, dims=1)  # (B, 4, 2)
     r2_edges_a = rect2
     r2_edges_b = torch.roll(rect2, -1, dims=1)
 
     # Config A flat: 4 verts × 4 edges = 16 (B, 16, 2/2/2)
-    vA_q = rect1.unsqueeze(2).expand(-1, -1, 4, -1).reshape(B, 16, 2)          # query pt
-    vA_sa = r2_edges_a.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)    # seg start
+    vA_q = rect1.unsqueeze(2).expand(-1, -1, 4, -1).reshape(B, 16, 2)  # query pt
+    vA_sa = r2_edges_a.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)  # seg start
     vA_sb = r2_edges_b.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)
     # Config B flat
     vB_q = rect2.unsqueeze(2).expand(-1, -1, 4, -1).reshape(B, 16, 2)
     vB_sa = r1_edges_a.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)
     vB_sb = r1_edges_b.unsqueeze(1).expand(-1, 4, -1, -1).reshape(B, 16, 2)
 
-    q = torch.cat([vA_q, vB_q], dim=1)        # (B, 32, 2)
+    q = torch.cat([vA_q, vB_q], dim=1)  # (B, 32, 2)
     sa = torch.cat([vA_sa, vB_sa], dim=1)
     sb = torch.cat([vA_sb, vB_sb], dim=1)
 
     # Foot of perpendicular from q onto segment (sa, sb), clamped to [0, 1].
-    seg = sb - sa                              # (B, 32, 2)
+    seg = sb - sa  # (B, 32, 2)
     seg_len2 = (seg * seg).sum(dim=-1).clamp_min(1e-12)
     t = ((q - sa) * seg).sum(dim=-1) / seg_len2
     t = t.clamp(0.0, 1.0)
-    foot = sa + t.unsqueeze(-1) * seg          # (B, 32, 2)
-    d = (q - foot).norm(dim=-1)                # (B, 32)
+    foot = sa + t.unsqueeze(-1) * seg  # (B, 32, 2)
+    d = (q - foot).norm(dim=-1)  # (B, 32)
 
     # Best index per pair; in first 16 q is on rect1, in last 16 q is on rect2.
-    best = d.argmin(dim=-1)                    # (B,)
+    best = d.argmin(dim=-1)  # (B,)
     arange = torch.arange(B, device=device)
-    q_best = q[arange, best]                   # (B, 2)
-    foot_best = foot[arange, best]             # (B, 2)
+    q_best = q[arange, best]  # (B, 2)
+    foot_best = foot[arange, best]  # (B, 2)
 
     # If best < 16, q is on rect1, foot is on rect2. Else swap.
     is_on_r1 = best < 16
@@ -1710,8 +1798,9 @@ def compute_static_collision_penalty(
             "first_crossing_steps": [None] * N,
             "per_timestep_min": torch.full((N, T), 99.0, device=device),
             "argmin_neighbor": torch.full((N, T), -1, dtype=torch.long, device=device),
-            "stopped_mask": _stopped_mask if _stopped_mask is not None
-                            else torch.zeros(N_nb, dtype=torch.bool, device=device),
+            "stopped_mask": _stopped_mask
+            if _stopped_mask is not None
+            else torch.zeros(N_nb, dtype=torch.bool, device=device),
             "ego_closest_pt": torch.zeros(N, T, 2, device=device),
             "npc_closest_pt": torch.zeros(N, T, 2, device=device),
         }
@@ -1725,7 +1814,9 @@ def compute_static_collision_penalty(
     both_valid_01 = neighbor_valid[:, 0] & neighbor_valid[:, 1]
     v0 = torch.zeros(N_nb, device=device)
     if both_valid_01.any():
-        v0[both_valid_01] = (nb_xy[both_valid_01, 1] - nb_xy[both_valid_01, 0]).norm(dim=-1) / config.dt
+        v0[both_valid_01] = (nb_xy[both_valid_01, 1] - nb_xy[both_valid_01, 0]).norm(
+            dim=-1
+        ) / config.dt
     # max displacement from t=0 over valid timesteps
     disp_all = (nb_xy - nb_xy[:, 0:1]).norm(dim=-1)  # (N_nb, T)
     disp_masked = disp_all.masked_fill(~neighbor_valid, 0.0)
@@ -1743,26 +1834,32 @@ def compute_static_collision_penalty(
         return _safe_empty(_stopped_mask=stopped_mask)
 
     # --- Ego + stopped-neighbor corners ---
-    nb_f_s = neighbor_futures[stopped_mask]       # (S, T, 4)
-    nb_shapes_s = neighbor_shapes[stopped_mask]   # (S, 2) [width, length]
-    nb_valid_s = neighbor_valid[stopped_mask]     # (S, T)
+    nb_f_s = neighbor_futures[stopped_mask]  # (S, T, 4)
+    nb_shapes_s = neighbor_shapes[stopped_mask]  # (S, 2) [width, length]
+    nb_valid_s = neighbor_valid[stopped_mask]  # (S, T)
     S = nb_f_s.shape[0]
 
     ego_corners = _build_ego_bbox_corners(ego_trajs, ego_shape)  # (N, T, 4, 2)
 
     npc_cos = nb_f_s[:, :, 2]
     npc_sin = nb_f_s[:, :, 3]
-    npc_norm = (npc_cos ** 2 + npc_sin ** 2).sqrt().clamp_min(1e-6)
+    npc_norm = (npc_cos**2 + npc_sin**2).sqrt().clamp_min(1e-6)
     npc_cos = npc_cos / npc_norm
     npc_sin = npc_sin / npc_norm
-    npc_width = nb_shapes_s[:, 0].unsqueeze(1).expand(-1, T)   # (S, T)
+    npc_width = nb_shapes_s[:, 0].unsqueeze(1).expand(-1, T)  # (S, T)
     npc_length = nb_shapes_s[:, 1].unsqueeze(1).expand(-1, T)
 
-    npc_rect = torch.stack([
-        nb_f_s[..., 0], nb_f_s[..., 1],
-        npc_cos, npc_sin,
-        npc_length, npc_width,
-    ], dim=-1)  # (S, T, 6)
+    npc_rect = torch.stack(
+        [
+            nb_f_s[..., 0],
+            nb_f_s[..., 1],
+            npc_cos,
+            npc_sin,
+            npc_length,
+            npc_width,
+        ],
+        dim=-1,
+    )  # (S, T, 6)
     npc_corners = center_rect_to_points(npc_rect.reshape(-1, 6)).reshape(S, T, 4, 2)
 
     # --- Signed distance over all ego × stopped-nb × T pairs ---
@@ -1774,7 +1871,7 @@ def compute_static_collision_penalty(
     #   * separated pairs    → use true Euclidean closest-pair distance.
     ego_exp = ego_corners.unsqueeze(1).expand(-1, S, -1, -1, -1)  # (N, S, T, 4, 2)
     npc_exp = npc_corners.unsqueeze(0).expand(N, -1, -1, -1, -1)  # (N, S, T, 4, 2)
-    nv_exp = nb_valid_s.unsqueeze(0).expand(N, -1, -1)             # (N, S, T)
+    nv_exp = nb_valid_s.unsqueeze(0).expand(N, -1, -1)  # (N, S, T)
 
     ego_flat = ego_exp.reshape(-1, 4, 2)
     npc_flat = npc_exp.reshape(-1, 4, 2)
@@ -1804,14 +1901,14 @@ def compute_static_collision_penalty(
     # --- Gather closest-point pair for the per-timestep winning neighbor ---
     arange_t = torch.arange(T, device=device)
     arange_n = torch.arange(N, device=device).unsqueeze(-1).expand(-1, T)  # (N, T)
-    t_idx = arange_t.unsqueeze(0).expand(N, -1)                            # (N, T)
+    t_idx = arange_t.unsqueeze(0).expand(N, -1)  # (N, T)
     ego_closest_pt = pt_e_nst[arange_n, argmin_s, t_idx]  # (N, T, 2)
     npc_closest_pt = pt_n_nst[arange_n, argmin_s, t_idx]  # (N, T, 2)
 
     # --- Ego-speed mask: only score timesteps where ego is moving ---
     ego_xy = ego_trajs[:, :, :2]
-    ego_vel = torch.diff(ego_xy, dim=1) / config.dt   # (N, T-1, 2)
-    ego_speed = ego_vel.norm(dim=-1)                  # (N, T-1)
+    ego_vel = torch.diff(ego_xy, dim=1) / config.dt  # (N, T-1, 2)
+    ego_speed = ego_vel.norm(dim=-1)  # (N, T-1)
     ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)  # (N, T)
     ego_moving = ego_speed > config.sc_ego_min_speed  # (N, T)
 
@@ -1868,15 +1965,16 @@ def compute_static_collision_penalty(
             worst_dist = pm_1.masked_fill(~in_range, float("inf")).min(dim=1).values
             cont_penalty[cont_has] = (
                 (1.0 - worst_dist[cont_has] / cont_thresh).clamp(0, 1)
-                * (T_valid - cont_first_t[cont_has].float()) / T_valid
+                * (T_valid - cont_first_t[cont_has].float())
+                / T_valid
             )
     else:
         # "frac" mode: fraction of scoreable timesteps in each band.
         denom = float(T_valid) if T_valid > 0 else 1.0
         near_penalty = (valid_1 & (pm_1 < near_thresh)).float().sum(dim=1) / denom
-        wide_penalty = (
-            valid_1 & (pm_1 >= near_thresh) & (pm_1 < wide_thresh)
-        ).float().sum(dim=1) / denom
+        wide_penalty = (valid_1 & (pm_1 >= near_thresh) & (pm_1 < wide_thresh)).float().sum(
+            dim=1
+        ) / denom
         if cont_thresh <= 0:
             cont_penalty = torch.zeros(N, device=device)
         else:
@@ -1970,10 +2068,9 @@ _LANE_CONT_THRESH = 0.80
 _LANE_PTS_PER_SIDE = 10  # 36 unique perimeter points (corners not duplicated)
 
 
-
-def _build_lane_polygons(lanes: torch.Tensor) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, int
-]:
+def _build_lane_polygons(
+    lanes: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Build lane polygon edges from lane tensor. Vectorized, no python loops.
 
     Each lane polygon = left boundary edges + right boundary edges (reversed winding)
@@ -2025,8 +2122,10 @@ def _build_lane_polygons(lanes: torch.Tensor) -> tuple[
     pl = torch.where(has_poly)[0]
     fv = valid.float().argmax(dim=1)[pl]
     lv = P - 1 - valid.flip(1).float().argmax(dim=1)[pl]
-    c1_v1 = left_pts[pl, lv]; c1_v2 = right_pts[pl, lv]
-    c2_v1 = right_pts[pl, fv]; c2_v2 = left_pts[pl, fv]
+    c1_v1 = left_pts[pl, lv]
+    c1_v2 = right_pts[pl, lv]
+    c2_v1 = right_pts[pl, fv]
+    c2_v2 = left_pts[pl, fv]
     c_pid = poly_id_per_lane[pl].int()
 
     all_v1 = torch.cat([l_v1, r_v1, c1_v1, c2_v1])
@@ -2067,15 +2166,19 @@ def _point_in_polygons(
     v2x, v2y = edge_v2[:, 0], edge_v2[:, 1]
 
     # Prefilter: discard edges that can't be crossed by any query point's +x ray
-    keep = ((torch.maximum(v1x, v2x) >= px.min())
-            & (torch.maximum(v1y, v2y) >= py.min())
-            & (torch.minimum(v1y, v2y) <= py.max()))
+    keep = (
+        (torch.maximum(v1x, v2x) >= px.min())
+        & (torch.maximum(v1y, v2y) >= py.min())
+        & (torch.minimum(v1y, v2y) <= py.max())
+    )
 
     if not keep.any():
         return torch.zeros(Q, dtype=torch.bool, device=device)
 
-    v1x = v1x[keep]; v1y = v1y[keep]
-    v2x = v2x[keep]; v2y = v2y[keep]
+    v1x = v1x[keep]
+    v1y = v1y[keep]
+    v2x = v2x[keep]
+    v2y = v2y[keep]
     edge_poly_id = edge_poly_id[keep]
     E = v1x.shape[0]
 
@@ -2089,18 +2192,33 @@ def _point_in_polygons(
     results = []
     for start in range(0, Q, chunk_size):
         end = min(start + chunk_size, Q)
-        results.append(_pip_core(
-            px[start:end], py[start:end],
-            v1x, v1y, v2x, v2y, edge_poly_id, E, n_polys, device,
-        ))
+        results.append(
+            _pip_core(
+                px[start:end],
+                py[start:end],
+                v1x,
+                v1y,
+                v2x,
+                v2y,
+                edge_poly_id,
+                E,
+                n_polys,
+                device,
+            )
+        )
     return torch.cat(results)
 
 
 def _pip_core(
-    px: torch.Tensor, py: torch.Tensor,
-    v1x: torch.Tensor, v1y: torch.Tensor,
-    v2x: torch.Tensor, v2y: torch.Tensor,
-    edge_poly_id: torch.Tensor, E: int, n_polys: int,
+    px: torch.Tensor,
+    py: torch.Tensor,
+    v1x: torch.Tensor,
+    v1y: torch.Tensor,
+    v2x: torch.Tensor,
+    v2y: torch.Tensor,
+    edge_poly_id: torch.Tensor,
+    E: int,
+    n_polys: int,
     device: torch.device,
 ) -> torch.Tensor:
     """Core ray-casting kernel for a chunk of query points."""
@@ -2140,7 +2258,7 @@ def _point_to_segments_dist(
         dist: (Q, E) distance matrix.
     """
     seg = seg_p2 - seg_p1
-    seg_len2 = (seg ** 2).sum(-1).clamp(min=1e-10)
+    seg_len2 = (seg**2).sum(-1).clamp(min=1e-10)
     diff = points[:, None, :] - seg_p1[None, :, :]
     t = ((diff * seg[None, :, :]).sum(-1) / seg_len2[None, :]).clamp(0, 1)
     closest = seg_p1[None, :, :] + t[:, :, None] * seg[None, :, :]
@@ -2221,8 +2339,7 @@ def _points_inside_intersection_areas(
         x2 = v2[:, 0][None, :]
         cond_y = (y1 > py) != (y2 > py)
         denom = y2 - y1
-        safe_denom = torch.where(denom.abs() < 1e-12,
-                                  torch.full_like(denom, 1e-12), denom)
+        safe_denom = torch.where(denom.abs() < 1e-12, torch.full_like(denom, 1e-12), denom)
         x_intersect = x1 + (py - y1) * (x2 - x1) / safe_denom
         cond = cond_y & (x_intersect > px)
         crossings = cond.sum(dim=-1)
@@ -2263,7 +2380,7 @@ def _point_to_segments_signed_min_dist(
         )
 
     seg = seg_p2 - seg_p1  # (E, 2)
-    seg_len2 = (seg ** 2).sum(-1).clamp(min=1e-10)  # (E,)
+    seg_len2 = (seg**2).sum(-1).clamp(min=1e-10)  # (E,)
 
     _MAX_QE = 10_000_000
     chunk_size = max(1, _MAX_QE // E)
@@ -2292,13 +2409,10 @@ def _point_to_segments_signed_min_dist(
         # only meaningful perpendicular to the segment.
         nearest_unclamped = is_unclamped.gather(1, min_idx[:, None]).squeeze(-1)
 
-        gathered_to_query = to_query.gather(
-            1, min_idx[:, None, None].expand(-1, 1, 2)
-        ).squeeze(1)
+        gathered_to_query = to_query.gather(1, min_idx[:, None, None].expand(-1, 1, 2)).squeeze(1)
         outward_for_min = seg_outward[min_idx]
         signed_raw = (gathered_to_query * outward_for_min).sum(-1)
-        signed = torch.where(nearest_unclamped, signed_raw,
-                             torch.full_like(signed_raw, -100.0))
+        signed = torch.where(nearest_unclamped, signed_raw, torch.full_like(signed_raw, -100.0))
 
         unsigned_all.append(min_dist)
         signed_all.append(signed)
@@ -2371,7 +2485,7 @@ def _classify_outer_boundaries(
         d = _point_to_segments_dist(nudged_outer, seg_p1, seg_p2)  # (n_cand, M)
         # Mask out same-lane segments
         outer_lane = seg_lane[candidate_outer]
-        same_lane_mask = (outer_lane[:, None] == seg_lane[None, :])
+        same_lane_mask = outer_lane[:, None] == seg_lane[None, :]
         d[same_lane_mask] = 999.0
         # Close to different-lane segment → junction gap
         min_d = d.min(dim=1).values
@@ -2426,8 +2540,13 @@ def compute_lane_departure_penalty(
     device = ego_trajs.device
 
     no_steps: list[int | None] = [None] * N
-    safe = (torch.ones(N, device=device), torch.zeros(N, device=device),
-            torch.zeros(N, device=device), no_steps, torch.zeros(N, device=device))
+    safe = (
+        torch.ones(N, device=device),
+        torch.zeros(N, device=device),
+        torch.zeros(N, device=device),
+        no_steps,
+        torch.zeros(N, device=device),
+    )
 
     if "lanes" not in data:
         return safe
@@ -2479,8 +2598,8 @@ def compute_lane_departure_penalty(
     valid = center.norm(dim=-1) > 1e-3
 
     # Boundary = center + offset (SFT interpretation, NOT lateral projection)
-    left_pts = center + lb_offset    # (S, P, 2)
-    right_pts = center + rb_offset   # (S, P, 2)
+    left_pts = center + lb_offset  # (S, P, 2)
+    right_pts = center + rb_offset  # (S, P, 2)
 
     # Some centerline points have zero direction; fill with lane average
     dirs = direction.clone()
@@ -2518,8 +2637,14 @@ def compute_lane_departure_penalty(
     seg_lane = torch.stack([lid_f, lid_f], dim=1).reshape(2 * M)
 
     is_outer, outward_all = _classify_outer_boundaries(
-        seg_p1, seg_p2, seg_dir, seg_lane,
-        edge_v1, edge_v2, edge_poly_id, n_polys,
+        seg_p1,
+        seg_p2,
+        seg_dir,
+        seg_lane,
+        edge_v1,
+        edge_v2,
+        edge_poly_id,
+        n_polys,
     )
 
     # Authoritative intersection filter: drop any "outer" segment that is
@@ -2541,11 +2666,14 @@ def compute_lane_departure_penalty(
         outer_p1_cand = seg_p1[outer_indices]
         outer_p2_cand = seg_p2[outer_indices]
         Nout = outer_p1_cand.shape[0]
-        sample_ts = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], device=device,
-                                  dtype=outer_p1_cand.dtype)
+        sample_ts = torch.tensor(
+            [0.0, 0.25, 0.5, 0.75, 1.0], device=device, dtype=outer_p1_cand.dtype
+        )
         # (Nout, 5, 2)
-        samples = (outer_p1_cand[:, None, :] +
-                   sample_ts[None, :, None] * (outer_p2_cand - outer_p1_cand)[:, None, :])
+        samples = (
+            outer_p1_cand[:, None, :]
+            + sample_ts[None, :, None] * (outer_p2_cand - outer_p1_cand)[:, None, :]
+        )
         inside_flat = _points_inside_intersection_areas(
             samples.reshape(-1, 2), inter_polys
         ).reshape(Nout, -1)
@@ -2569,16 +2697,18 @@ def compute_lane_departure_penalty(
     for j in range(_LANE_PTS_PER_SIDE):
         f = j / (_LANE_PTS_PER_SIDE - 1)
         lp_list.append((-ro + f * length, -width / 2))  # bottom edge
-        lp_list.append((-ro + f * length,  width / 2))  # top edge
+        lp_list.append((-ro + f * length, width / 2))  # top edge
         if 0 < f < 1:  # skip corners (already in top/bottom)
-            lp_list.append((-ro, -width / 2 + f * width))         # left edge
-            lp_list.append((length - ro, -width / 2 + f * width)) # right edge
+            lp_list.append((-ro, -width / 2 + f * width))  # left edge
+            lp_list.append((length - ro, -width / 2 + f * width))  # right edge
     local_pts = torch.tensor(lp_list, device=device, dtype=ego_trajs.dtype)
     K_pts = local_pts.shape[0]
 
-    cos_h = ego_trajs[..., 2]; sin_h = ego_trajs[..., 3]
-    h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
-    cos_h = cos_h / h_norm; sin_h = sin_h / h_norm
+    cos_h = ego_trajs[..., 2]
+    sin_h = ego_trajs[..., 3]
+    h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
+    cos_h = cos_h / h_norm
+    sin_h = sin_h / h_norm
     rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=-1).reshape(N, T, 2, 2)
     rotated = torch.einsum("btij,kj->btki", rot, local_pts)
     world_pts = ego_trajs[..., :2].unsqueeze(2) + rotated
@@ -2649,8 +2779,15 @@ def compute_lane_departure_penalty(
     lane_cont_thresh = config.lane_cont_thresh
 
     near_frac = (is_in_ts & (per_ts_min[:, 1:] < lane_near_thresh)).float().mean(dim=1)
-    wide_frac = (is_in_ts & (per_ts_min[:, 1:] >= lane_near_thresh)
-                 & (per_ts_min[:, 1:] < lane_wide_thresh)).float().mean(dim=1)
+    wide_frac = (
+        (
+            is_in_ts
+            & (per_ts_min[:, 1:] >= lane_near_thresh)
+            & (per_ts_min[:, 1:] < lane_wide_thresh)
+        )
+        .float()
+        .mean(dim=1)
+    )
     if lane_cont_thresh <= 0:
         cont_penalty = torch.zeros(N, device=device)
     else:
@@ -2666,6 +2803,7 @@ def compute_lane_departure_penalty(
 # ---------------------------------------------------------------------------
 # Top-level batched reward computation
 # ---------------------------------------------------------------------------
+
 
 @torch.no_grad()
 def compute_reward_batch(
@@ -2746,9 +2884,7 @@ def compute_reward_batch(
                             (neighbor_futures.shape[0], 2), 2.0, device=device
                         )
                 else:
-                    neighbor_shapes = torch.full(
-                        (neighbor_futures.shape[0], 2), 2.0, device=device
-                    )
+                    neighbor_shapes = torch.full((neighbor_futures.shape[0], 2), 2.0, device=device)
 
     zero_shapes = neighbor_shapes.abs().sum(dim=-1) < 1e-3
     if zero_shapes.any():
@@ -2773,7 +2909,9 @@ def compute_reward_batch(
         ego_trajs, ego_shape, data, config
     )
     centerline_scores = compute_centerline_score_batch(
-        ego_trajs, ego_shape, data,
+        ego_trajs,
+        ego_shape,
+        data,
         usage_mode=config.centerline_usage_mode,
         time_weight_min=config.centerline_time_weight_min,
     )
@@ -2784,14 +2922,33 @@ def compute_reward_batch(
 
     # Road border penalty using ego perimeter sampling
     # Returns fracs or survival penalties depending on config.rb_penalty_mode
-    rb_crossing_gate, rb_near_pen, rb_wide_pen, rb_crossing_steps, rb_cont_penalty, rb_per_ts_min = compute_road_border_penalty(
-        ego_trajs, ego_shape, data, config=config,
+    (
+        rb_crossing_gate,
+        rb_near_pen,
+        rb_wide_pen,
+        rb_crossing_steps,
+        rb_cont_penalty,
+        rb_per_ts_min,
+    ) = compute_road_border_penalty(
+        ego_trajs,
+        ego_shape,
+        data,
+        config=config,
     )
 
     # Lane departure penalty
     if config.enable_lane_departure:
-        lane_crossing_gate, lane_near_frac, lane_wide_frac, lane_crossing_steps, lane_cont_penalty = compute_lane_departure_penalty(
-            ego_trajs, ego_shape, data, config=config,
+        (
+            lane_crossing_gate,
+            lane_near_frac,
+            lane_wide_frac,
+            lane_crossing_steps,
+            lane_cont_penalty,
+        ) = compute_lane_departure_penalty(
+            ego_trajs,
+            ego_shape,
+            data,
+            config=config,
         )
     else:
         lane_crossing_gate = torch.ones(N, device=device)
@@ -2805,7 +2962,12 @@ def compute_reward_batch(
     if config.static_collision_enabled:
         # Check the predicted trajectory as usual.
         sc_result = compute_static_collision_penalty(
-            ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid, config,
+            ego_trajs,
+            ego_shape,
+            neighbor_futures,
+            neighbor_shapes,
+            neighbor_valid,
+            config,
         )
         sc_crossing_gate = sc_result["crossing_gate"]
         sc_near_pen = sc_result["near_penalty"]
@@ -2894,7 +3056,9 @@ def compute_reward_batch(
         baseline_path_len_scalar = None
         if "baseline_path_len" in data:
             bpl_t = torch.as_tensor(
-                data["baseline_path_len"], device=device, dtype=torch.float32,
+                data["baseline_path_len"],
+                device=device,
+                dtype=torch.float32,
             ).reshape(())
             baseline_path_len_scalar = float(bpl_t.clamp(min=1e-3).item())
 
@@ -2903,12 +3067,14 @@ def compute_reward_batch(
 
             # Normalize progress to [0, 1] as fraction of GT, capped at margin.
             # 100% GT = 1.0 (max), >margin% GT = capped + penalized.
-            progress_frac = (clamped_progress / gt_path_len.clamp(min=1e-3)).clamp(max=config.overprogress_margin)
+            progress_frac = (clamped_progress / gt_path_len.clamp(min=1e-3)).clamp(
+                max=config.overprogress_margin
+            )
             clamped_progress = progress_frac * config.progress_norm_scale
 
             # Compute path ratio for symmetric over/under progress penalties.
             # Both use the same ratio-based method: penalty * |deviation from threshold|.
-            path_ratio = (model_path_lens / gt_path_len.clamp(min=1e-3))
+            path_ratio = model_path_lens / gt_path_len.clamp(min=1e-3)
 
             # Overprogress: penalize path exceeding margin × GT (ratio-based).
             # NOTE: Changed from meter-based (pre-April 2026) to ratio-based.
@@ -2939,8 +3105,7 @@ def compute_reward_batch(
         # current rollout). The N>1 guard only makes sense for the legacy
         # "det" reference where traj[0] is the reference and ratio ≡ 1.0.
         _have_baseline_ref = (
-            config.underprogress_reference == "baseline"
-            and baseline_path_len_scalar is not None
+            config.underprogress_reference == "baseline" and baseline_path_len_scalar is not None
         )
         if config.underprogress_penalty > 0 and (N > 1 or _have_baseline_ref):
             # Reference selection:
@@ -2954,7 +3119,9 @@ def compute_reward_batch(
                 # Accept tensor / numpy scalar / Python float — callers may inject metadata
                 # in any of these forms when wiring custom data dicts.
                 ref_path_len = torch.as_tensor(
-                    data["baseline_path_len"], device=device, dtype=torch.float32,
+                    data["baseline_path_len"],
+                    device=device,
+                    dtype=torch.float32,
                 )
                 if ref_path_len.numel() != 1:
                     raise ValueError(
@@ -2973,10 +3140,18 @@ def compute_reward_batch(
 
     # Road border proximity penalties (soft, applied even when on-road)
     # Thresholds configurable via config.rb_near_thresh / rb_wide_thresh
-    rb_penalty = config.rb_near_scale * rb_near_pen + config.rb_wide_scale * rb_wide_pen + config.rb_cont_scale * rb_cont_penalty
+    rb_penalty = (
+        config.rb_near_scale * rb_near_pen
+        + config.rb_wide_scale * rb_wide_pen
+        + config.rb_cont_scale * rb_cont_penalty
+    )
 
     # Lane departure proximity penalties
-    lane_penalty = config.lane_near_scale * lane_near_frac + config.lane_wide_scale * lane_wide_frac + config.lane_cont_scale * lane_cont_penalty
+    lane_penalty = (
+        config.lane_near_scale * lane_near_frac
+        + config.lane_wide_scale * lane_wide_frac
+        + config.lane_cont_scale * lane_cont_penalty
+    )
 
     # Static-collision proximity penalties (stopped neighbors).
     sc_penalty = (
@@ -3020,7 +3195,11 @@ def compute_reward_batch(
                 first_terminal = min(first_terminal, rb_crossing_steps[i])
             if config.enable_lane_departure and lane_crossing_steps[i] is not None:
                 first_terminal = min(first_terminal, lane_crossing_steps[i])
-            if config.static_collision_enabled and config.sc_gate_enabled and sc_crossing_steps[i] is not None:
+            if (
+                config.static_collision_enabled
+                and config.sc_gate_enabled
+                and sc_crossing_steps[i] is not None
+            ):
                 first_terminal = min(first_terminal, sc_crossing_steps[i])
             survival_frac[i] = max(first_terminal, 1) / T  # at least 1/T to avoid 0
 
@@ -3042,7 +3221,7 @@ def compute_reward_batch(
     totals = totals * kinematic_gate + (1.0 - kinematic_gate) * _OFFROAD_FLOOR
 
     # Also compute additive total for backward compat in breakdown
-    on_road_factor = (1.0 - off_road_fractions)
+    on_road_factor = 1.0 - off_road_fractions
     adjusted_progress = progress_scores * on_road_factor
 
     # Breakdown-friendly static-collision min-distance: min across t>=1 only.
@@ -3055,31 +3234,35 @@ def compute_reward_batch(
 
     results: list[RewardBreakdown] = []
     for i in range(N):
-        results.append(RewardBreakdown(
-            safety=float(safety_scores[i]),
-            progress=float(adjusted_progress[i]),
-            smoothness=float(smoothness_scores[i]),
-            feasibility=float(feasibility_scores[i]),
-            centerline=float(centerline_scores[i]),
-            red_light=float(red_light_scores[i]),
-            total=float(totals[i]),
-            collision_step=collision_steps[i],
-            off_road_fraction=float(off_road_fractions[i]),  # always 0 (polygon disabled); use rb_crossing/rb_near_penalty instead
-            rb_crossing=bool(rb_crossing_gate[i] < 0.5),
-            rb_near_penalty=float(rb_near_pen[i]),
-            rb_wide_penalty=float(rb_wide_pen[i]),
-            rb_min_dist=float(rb_per_ts_min[i, 1:].min().item()),
-            lane_crossing=bool(lane_crossing_gate[i] < 0.5),
-            lane_near_frac=float(lane_near_frac[i]),
-            lane_wide_frac=float(lane_wide_frac[i]),
-            static_crossing=bool(sc_crossing_gate[i] < 0.5),
-            sc_near_penalty=float(sc_near_pen[i]),
-            sc_wide_penalty=float(sc_wide_pen[i]),
-            sc_cont_penalty=float(sc_cont_pen[i]),
-            sc_min_dist=float(sc_min_dist_scalar[i].item()),
-            sc_n_stopped=sc_n_stopped_scene,
-            kinematic_violated=bool(kinematic_gate[i] < 0.5),
-        ))
+        results.append(
+            RewardBreakdown(
+                safety=float(safety_scores[i]),
+                progress=float(adjusted_progress[i]),
+                smoothness=float(smoothness_scores[i]),
+                feasibility=float(feasibility_scores[i]),
+                centerline=float(centerline_scores[i]),
+                red_light=float(red_light_scores[i]),
+                total=float(totals[i]),
+                collision_step=collision_steps[i],
+                off_road_fraction=float(
+                    off_road_fractions[i]
+                ),  # always 0 (polygon disabled); use rb_crossing/rb_near_penalty instead
+                rb_crossing=bool(rb_crossing_gate[i] < 0.5),
+                rb_near_penalty=float(rb_near_pen[i]),
+                rb_wide_penalty=float(rb_wide_pen[i]),
+                rb_min_dist=float(rb_per_ts_min[i, 1:].min().item()),
+                lane_crossing=bool(lane_crossing_gate[i] < 0.5),
+                lane_near_frac=float(lane_near_frac[i]),
+                lane_wide_frac=float(lane_wide_frac[i]),
+                static_crossing=bool(sc_crossing_gate[i] < 0.5),
+                sc_near_penalty=float(sc_near_pen[i]),
+                sc_wide_penalty=float(sc_wide_pen[i]),
+                sc_cont_penalty=float(sc_cont_pen[i]),
+                sc_min_dist=float(sc_min_dist_scalar[i].item()),
+                sc_n_stopped=sc_n_stopped_scene,
+                kinematic_violated=bool(kinematic_gate[i] < 0.5),
+            )
+        )
 
     return results
 
@@ -3096,6 +3279,7 @@ def compute_reward(
 # ---------------------------------------------------------------------------
 # Group advantage computation
 # ---------------------------------------------------------------------------
+
 
 def compute_group_advantages(
     rewards: list[RewardBreakdown],

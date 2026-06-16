@@ -37,6 +37,7 @@ Usage:
         --route_json /path/to/route.json \\
         --out_dir <path>/analysis
 """
+
 from __future__ import annotations
 
 import argparse
@@ -68,10 +69,10 @@ from rlvr.autoresearch.tools.eval_centerline_metrics import (
 )
 from scenario_generation.transforms import yaw_from_quat
 
-
 # ---------------------------------------------------------------------------
 # Per-run aggregation.
 # ---------------------------------------------------------------------------
+
 
 def collect_run_trajectory_log(
     traj_log_path: Path,
@@ -114,12 +115,12 @@ def collect_run_trajectory_log(
         world_xy[i] = (x, y)
         speed[i] = float(entry.get("speed", 0.0))
 
-        route_lanes = world_polyline_to_ego_route_lanes(
-            polyline, (x, y), yaw
-        ).to(device)
+        route_lanes = world_polyline_to_ego_route_lanes(polyline, (x, y), yaw).to(device)
         out = lat_offset_and_naive_score(
-            traj=traj, data={"route_lanes": route_lanes},
-            ego_half_w=ego_half_w, usage_mode="baselink",
+            traj=traj,
+            data={"route_lanes": route_lanes},
+            ego_half_w=ego_half_w,
+            usage_mode="baselink",
         )
         if out is None:
             continue
@@ -129,9 +130,12 @@ def collect_run_trajectory_log(
 
     order = np.argsort(ts)
     return {
-        "ts": ts[order], "world_xy": world_xy[order],
-        "lat": lat_signed[order], "abs_lat": lat[order],
-        "lon": lon[order], "speed": speed[order],
+        "ts": ts[order],
+        "world_xy": world_xy[order],
+        "lat": lat_signed[order],
+        "abs_lat": lat[order],
+        "lon": lon[order],
+        "speed": speed[order],
     }
 
 
@@ -171,9 +175,7 @@ def collect_run(
             ego = d["ego_current_state"]
         speed[i] = float(np.linalg.norm(ego[4:6]))
 
-        route_lanes = world_polyline_to_ego_route_lanes(
-            polyline, (x, y), yaw
-        ).to(device)
+        route_lanes = world_polyline_to_ego_route_lanes(polyline, (x, y), yaw).to(device)
         out = lat_offset_and_naive_score(
             traj=traj,
             data={"route_lanes": route_lanes},
@@ -204,46 +206,87 @@ def collect_run(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--baseline_dir", type=Path, default=None,
-                    help="Directory of npz files (rosbag→npz pipeline). "
-                         "Mutually exclusive with --baseline_traj_log.")
-    ap.add_argument("--prism_dir", type=Path, default=None,
-                    help="Directory of npz files. Mutually exclusive with "
-                         "--prism_traj_log.")
-    ap.add_argument("--baseline_traj_log", type=Path, default=None,
-                    help="trajectory_log.json from a closed-loop replay run. "
-                         "Use this for scenario_generation.replay output.")
-    ap.add_argument("--prism_traj_log", type=Path, default=None,
-                    help="trajectory_log.json from a closed-loop replay run.")
-    ap.add_argument("--baseline_label", default="baseline",
-                    help="Label for the baseline run, used in plot titles, "
-                         "histogram legends, summary lines, and the output "
-                         "<label>_offsets.npz filename.")
-    ap.add_argument("--prism_label", default="comparison",
-                    help="Label for the comparison run. The CLI flag name "
-                         "is `--prism_label` for backward-compat with earlier "
-                         "PRiSM-vs-baseline workflows; the run does not have "
-                         "to be a PRiSM-trained checkpoint.")
-    ap.add_argument("--osm", type=Path, required=True,
-                    help="lanelet2_map.osm matching the rosbag map.")
-    ap.add_argument("--route_json", type=Path, required=True,
-                    help="LaneletRoute exported as JSON (see "
-                         "extract_route.py in the route-rosbag.)")
+    ap.add_argument(
+        "--baseline_dir",
+        type=Path,
+        default=None,
+        help="Directory of npz files (rosbag→npz pipeline). "
+        "Mutually exclusive with --baseline_traj_log.",
+    )
+    ap.add_argument(
+        "--prism_dir",
+        type=Path,
+        default=None,
+        help="Directory of npz files. Mutually exclusive with --prism_traj_log.",
+    )
+    ap.add_argument(
+        "--baseline_traj_log",
+        type=Path,
+        default=None,
+        help="trajectory_log.json from a closed-loop replay run. "
+        "Use this for scenario_generation.replay output.",
+    )
+    ap.add_argument(
+        "--prism_traj_log",
+        type=Path,
+        default=None,
+        help="trajectory_log.json from a closed-loop replay run.",
+    )
+    ap.add_argument(
+        "--baseline_label",
+        default="baseline",
+        help="Label for the baseline run, used in plot titles, "
+        "histogram legends, summary lines, and the output "
+        "<label>_offsets.npz filename.",
+    )
+    ap.add_argument(
+        "--prism_label",
+        default="comparison",
+        help="Label for the comparison run. The CLI flag name "
+        "is `--prism_label` for backward-compat with earlier "
+        "PRiSM-vs-baseline workflows; the run does not have "
+        "to be a PRiSM-trained checkpoint.",
+    )
+    ap.add_argument(
+        "--osm", type=Path, required=True, help="lanelet2_map.osm matching the rosbag map."
+    )
+    ap.add_argument(
+        "--route_json",
+        type=Path,
+        required=True,
+        help="LaneletRoute exported as JSON (see extract_route.py in the route-rosbag.)",
+    )
     ap.add_argument("--out_dir", type=Path, required=True)
-    ap.add_argument("--max_offset_m", type=float, default=10.0,
-                    help="Drop frames whose |lateral offset| exceeds this "
-                         "(off-route detours, teleport boundaries).")
-    ap.add_argument("--min_speed", type=float, default=1.0,
-                    help="Drop frames where ego speed < this (m/s). "
-                         "Prevents stopped frames from biasing stats.")
-    ap.add_argument("--trim_end_m", type=float, default=0.0,
-                    help="Trim the last N metres of the route (goal area "
-                         "where centerline may not be meaningful).")
-    ap.add_argument("--ego_half_w", type=float, default=0.85,
-                    help="Half ego width (m). Only consumed when usage_mode is "
-                         "'body'; the tool currently hardcodes 'baselink' so "
-                         "this is ignored. Kept for forward-compat in case a "
-                         "--usage_mode flag is added later.")
+    ap.add_argument(
+        "--max_offset_m",
+        type=float,
+        default=10.0,
+        help="Drop frames whose |lateral offset| exceeds this "
+        "(off-route detours, teleport boundaries).",
+    )
+    ap.add_argument(
+        "--min_speed",
+        type=float,
+        default=1.0,
+        help="Drop frames where ego speed < this (m/s). "
+        "Prevents stopped frames from biasing stats.",
+    )
+    ap.add_argument(
+        "--trim_end_m",
+        type=float,
+        default=0.0,
+        help="Trim the last N metres of the route (goal area "
+        "where centerline may not be meaningful).",
+    )
+    ap.add_argument(
+        "--ego_half_w",
+        type=float,
+        default=0.85,
+        help="Half ego width (m). Only consumed when usage_mode is "
+        "'body'; the tool currently hardcodes 'baselink' so "
+        "this is ignored. Kept for forward-compat in case a "
+        "--usage_mode flag is added later.",
+    )
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -259,14 +302,20 @@ def main():
     print(f"Loading {args.baseline_label}...")
     if args.baseline_traj_log is not None:
         base = collect_run_trajectory_log(
-            args.baseline_traj_log, polyline, args.ego_half_w, args.device,
+            args.baseline_traj_log,
+            polyline,
+            args.ego_half_w,
+            args.device,
         )
     else:
         base = collect_run(args.baseline_dir, polyline, args.ego_half_w, args.device)
     print(f"Loading {args.prism_label}...")
     if args.prism_traj_log is not None:
         prism = collect_run_trajectory_log(
-            args.prism_traj_log, polyline, args.ego_half_w, args.device,
+            args.prism_traj_log,
+            polyline,
+            args.ego_half_w,
+            args.device,
         )
     else:
         prism = collect_run(args.prism_dir, polyline, args.ego_half_w, args.device)
@@ -336,8 +385,8 @@ def main():
     for thr in (0.3, 0.5, 1.0):
         summary_lines.append(
             f"Frames with |lat| > {thr}m:  "
-            f"{args.baseline_label}={(b_abs>thr).sum()}/{len(b_abs)} ({100*(b_abs>thr).mean():.2f}%) | "
-            f"{args.prism_label}={(p_abs>thr).sum()}/{len(p_abs)} ({100*(p_abs>thr).mean():.2f}%)"
+            f"{args.baseline_label}={(b_abs > thr).sum()}/{len(b_abs)} ({100 * (b_abs > thr).mean():.2f}%) | "
+            f"{args.prism_label}={(p_abs > thr).sum()}/{len(p_abs)} ({100 * (p_abs > thr).mean():.2f}%)"
         )
     summary = "\n".join(summary_lines)
     print("\n" + summary)
@@ -351,16 +400,31 @@ def main():
     vmax = max(vmax, 0.5)
 
     def scatter_panel(ax, run, ttl):
-        ax.plot(polyline[:, 0], polyline[:, 1], "-", color="0.7", lw=2.5,
-                alpha=0.5, zorder=1, label="route centerline")
+        ax.plot(
+            polyline[:, 0],
+            polyline[:, 1],
+            "-",
+            color="0.7",
+            lw=2.5,
+            alpha=0.5,
+            zorder=1,
+            label="route centerline",
+        )
         sc = ax.scatter(
-            run["world_xy"][:, 0], run["world_xy"][:, 1],
-            c=np.abs(run["lat"]), cmap="inferno", vmin=0.0, vmax=vmax,
-            s=18, alpha=0.9, edgecolors="none", zorder=2,
+            run["world_xy"][:, 0],
+            run["world_xy"][:, 1],
+            c=np.abs(run["lat"]),
+            cmap="inferno",
+            vmin=0.0,
+            vmax=vmax,
+            s=18,
+            alpha=0.9,
+            edgecolors="none",
+            zorder=2,
         )
         ax.set_title(
             f"{ttl}\nmean|lat|={np.mean(np.abs(run['lat'])):.3f}m  "
-            f"p95={np.percentile(np.abs(run['lat']),95):.3f}m  "
+            f"p95={np.percentile(np.abs(run['lat']), 95):.3f}m  "
             f"max={np.max(np.abs(run['lat'])):.3f}m"
         )
         ax.set_xlabel("MGRS x [m]")
@@ -394,9 +458,15 @@ def main():
     fig, ax = plt.subplots(figsize=(11, 11))
     ax.plot(polyline[:, 0], polyline[:, 1], "-", color="0.85", lw=2.0, zorder=1)
     sc = ax.scatter(
-        polyline[valid_diff, 0], polyline[valid_diff, 1],
-        c=poly_diff[valid_diff], cmap="RdBu_r", vmin=-vlim, vmax=vlim,
-        s=80, edgecolors="none", zorder=2,
+        polyline[valid_diff, 0],
+        polyline[valid_diff, 1],
+        c=poly_diff[valid_diff],
+        cmap="RdBu_r",
+        vmin=-vlim,
+        vmax=vlim,
+        s=80,
+        edgecolors="none",
+        zorder=2,
     )
     ax.set_title(
         f"Δ mean |lateral offset|  ({args.prism_label} − {args.baseline_label}), "
@@ -422,9 +492,15 @@ def main():
     ax = axes[2]
     ax.plot(polyline[:, 0], polyline[:, 1], "-", color="0.85", lw=2.0, zorder=1)
     sc = ax.scatter(
-        polyline[valid_diff, 0], polyline[valid_diff, 1],
-        c=poly_diff[valid_diff], cmap="RdBu_r", vmin=-vlim, vmax=vlim,
-        s=80, edgecolors="none", zorder=2,
+        polyline[valid_diff, 0],
+        polyline[valid_diff, 1],
+        c=poly_diff[valid_diff],
+        cmap="RdBu_r",
+        vmin=-vlim,
+        vmax=vlim,
+        s=80,
+        edgecolors="none",
+        zorder=2,
     )
     ax.set_title(
         f"Δ |lat|  ({args.prism_label} − {args.baseline_label})\n"
@@ -439,7 +515,8 @@ def main():
     plt.colorbar(sc, ax=ax, fraction=0.04, pad=0.02, label="Δ |lat| [m]")
     plt.suptitle(
         f"Centerline-tracking comparison — {args.baseline_label} vs {args.prism_label} (psim)",
-        y=0.99, fontsize=14,
+        y=0.99,
+        fontsize=14,
     )
     plt.tight_layout()
     plt.savefig(args.out_dir / "heatmap_combined.png", dpi=140)
@@ -448,12 +525,24 @@ def main():
     # Histogram
     fig, ax = plt.subplots(figsize=(9, 5))
     bins = np.linspace(-2.0, 2.0, 161)
-    ax.hist(base_c["lat"], bins=bins, alpha=0.55, color="C0", density=True,
-            label=f"{args.baseline_label} (n={len(base_c['lat'])}, "
-                  f"mean|lat|={np.mean(np.abs(base_c['lat'])):.3f}m)")
-    ax.hist(prism_c["lat"], bins=bins, alpha=0.55, color="C3", density=True,
-            label=f"{args.prism_label} (n={len(prism_c['lat'])}, "
-                  f"mean|lat|={np.mean(np.abs(prism_c['lat'])):.3f}m)")
+    ax.hist(
+        base_c["lat"],
+        bins=bins,
+        alpha=0.55,
+        color="C0",
+        density=True,
+        label=f"{args.baseline_label} (n={len(base_c['lat'])}, "
+        f"mean|lat|={np.mean(np.abs(base_c['lat'])):.3f}m)",
+    )
+    ax.hist(
+        prism_c["lat"],
+        bins=bins,
+        alpha=0.55,
+        color="C3",
+        density=True,
+        label=f"{args.prism_label} (n={len(prism_c['lat'])}, "
+        f"mean|lat|={np.mean(np.abs(prism_c['lat'])):.3f}m)",
+    )
     ax.axvline(0, color="k", lw=0.7)
     ax.set_xlabel("signed lateral offset [m]   (+ left, − right)")
     ax.set_ylabel("density")
@@ -465,7 +554,10 @@ def main():
 
     # Time series
     fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
-    for run, color, label in [(base_c, "C0", args.baseline_label), (prism_c, "C3", args.prism_label)]:
+    for run, color, label in [
+        (base_c, "C0", args.baseline_label),
+        (prism_c, "C3", args.prism_label),
+    ]:
         if len(run["ts"]) == 0:
             continue
         t = (run["ts"] - run["ts"][0]) / 1e9
@@ -483,20 +575,35 @@ def main():
 
     # |lat| vs longitudinal route progress
     fig, ax = plt.subplots(figsize=(11, 5))
-    for run, color, label in [(base_c, "C0", args.baseline_label), (prism_c, "C3", args.prism_label)]:
+    for run, color, label in [
+        (base_c, "C0", args.baseline_label),
+        (prism_c, "C3", args.prism_label),
+    ]:
         order = np.argsort(run["lon"])
-        ax.plot(run["lon"][order], np.abs(run["lat"])[order], color=color, lw=0.7,
-                alpha=0.5, label=label)
+        ax.plot(
+            run["lon"][order],
+            np.abs(run["lat"])[order],
+            color=color,
+            lw=0.7,
+            alpha=0.5,
+            label=label,
+        )
     arc_max = max(base_c["lon"].max(), prism_c["lon"].max())
     bins = np.linspace(0, arc_max, 50)
-    for run, color, label in [(base_c, "C0", args.baseline_label), (prism_c, "C3", args.prism_label)]:
+    for run, color, label in [
+        (base_c, "C0", args.baseline_label),
+        (prism_c, "C3", args.prism_label),
+    ]:
         idx = np.digitize(run["lon"], bins)
-        mu = np.array([
-            np.mean(np.abs(run["lat"])[idx == i]) if (idx == i).any() else np.nan
-            for i in range(1, len(bins))
-        ])
-        ax.plot(0.5 * (bins[1:] + bins[:-1]), mu, color=color, lw=2.0,
-                label=f"{label} (binned mean)")
+        mu = np.array(
+            [
+                np.mean(np.abs(run["lat"])[idx == i]) if (idx == i).any() else np.nan
+                for i in range(1, len(bins))
+            ]
+        )
+        ax.plot(
+            0.5 * (bins[1:] + bins[:-1]), mu, color=color, lw=2.0, label=f"{label} (binned mean)"
+        )
     ax.set_xlabel("longitudinal arc-length along route centerline [m]")
     ax.set_ylabel("|lateral offset| [m]")
     ax.set_title("Lateral tracking error vs route progress")

@@ -10,4 +10,3 @@ export const TOPICS = {
   trackedObjects: "/annotation/data/tracked_objects",
   footprints: "/annotation/data/footprints",
 } as const;
-  

@@ -29,6 +29,26 @@ enum class MissingTopicType {
   TrafficSignals,  // /perception/traffic_light_recognition/traffic_signals
 };
 
+// Switch-based lookup so the compiler warns if a new enumerator is left unhandled.
+inline const char * to_topic_name(MissingTopicType t)
+{
+  switch (t) {
+    case MissingTopicType::KinematicState:
+      return "/localization/kinematic_state";
+    case MissingTopicType::Acceleration:
+      return "/localization/acceleration";
+    case MissingTopicType::TrackedObjects:
+      return "/perception/object_recognition/tracking/objects";
+    case MissingTopicType::Route:
+      return "/planning/mission_planning/route";
+    case MissingTopicType::TurnIndicators:
+      return "/vehicle/status/turn_indicators_status";
+    case MissingTopicType::TrafficSignals:
+      return "/perception/traffic_light_recognition/traffic_signals";
+  }
+  __builtin_unreachable();
+}
+
 // Detailed categorization of incomplete data at frame level
 enum class IncompleteDataType {
   KinematicState,  // Kinematic state message missing

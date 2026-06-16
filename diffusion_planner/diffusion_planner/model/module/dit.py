@@ -43,13 +43,19 @@ class DiTBlock(nn.Module):
         x = (
             x
             + gate_msa
-            * self.attn(modulated_x, modulated_x, modulated_x, key_padding_mask=attn_mask)[0]
+            * self.attn(
+                modulated_x,
+                modulated_x,
+                modulated_x,
+                key_padding_mask=attn_mask,
+                need_weights=False,
+            )[0]
         )
 
         modulated_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + gate_mlp * self.mlp1(modulated_x)
 
-        x = x + self.cross_attn(self.norm3(x), cross_c, cross_c)[0]
+        x = x + self.cross_attn(self.norm3(x), cross_c, cross_c, need_weights=False)[0]
         x = x + self.mlp2(self.norm4(x))
 
         return x
@@ -148,12 +154,12 @@ class DiT(nn.Module):
         x_embedding = x_embedding[None, :, :].expand(B, -1, -1)  # (B, P, hidden_dim)
         x = x + x_embedding
 
-        attn_mask = torch.zeros((B, P), dtype=torch.bool, device=x.device)
-        attn_mask[:, 1:] = neighbor_current_mask
+        ego_mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
+        attn_mask = torch.cat([ego_mask, neighbor_current_mask], dim=1)
 
         for block in self.blocks:
             x = block(x, cross_c, t, attn_mask)
 
-        x = self.final_layer(x, t) # (B, P, output_dim)
-        x = x.reshape(B, P, self._T, self._D)
+        x = self.final_layer(x, t)  # (B, P, output_dim)
+        x = x.reshape(B, P, T, D)
         return x

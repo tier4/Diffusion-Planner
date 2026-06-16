@@ -373,15 +373,39 @@ def filter_route_lanelets(route_lanelets, curr_kinematic_state):
     This function assumes that the target lanelets are ordered in the direction of travel.
     It finds the lanelet closest to the current kinematic state and returns all lanelets from that point onward.
     """
+    # Match the C++ select_route_segment_indices.
+    mask_range = 100.0  # constants::LANE_MASK_RANGE_M
+    cx = curr_kinematic_state.pose.pose.position.x
+    cy = curr_kinematic_state.pose.pose.position.y
+    cz = curr_kinematic_state.pose.pose.position.z
+
+    # Closest route lanelet by 3D nearest-point distance.
     closest_distance = float("inf")
-    closest_index = -1
+    closest_index = 0
     for j, lanelet in enumerate(route_lanelets):
         centerline = lanelet.centerline
-        diff_x = centerline[:, 0] - curr_kinematic_state.pose.pose.position.x
-        diff_y = centerline[:, 1] - curr_kinematic_state.pose.pose.position.y
-        diff = np.sqrt(diff_x**2 + diff_y**2)
-        distance = np.min(diff)
+        diff_x = centerline[:, 0] - cx
+        diff_y = centerline[:, 1] - cy
+        diff_z = centerline[:, 2] - cz
+        distance = np.min(np.sqrt(diff_x**2 + diff_y**2 + diff_z**2))
         if distance < closest_distance:
             closest_distance = distance
             closest_index = j
-    return route_lanelets[closest_index:]
+
+    # From the closest lanelet, take the contiguous run of in-range lanelets, breaking at the
+    # first out-of-range lanelet once we have entered the valid region.
+    selected = []
+    has_entered_valid_region = False
+    for lanelet in route_lanelets[closest_index:]:
+        centerline = lanelet.centerline
+        inside = np.any(
+            (np.abs(centerline[:, 0] - cx) <= mask_range)
+            & (np.abs(centerline[:, 1] - cy) <= mask_range)
+        )
+        if not inside:
+            if has_entered_valid_region:
+                break
+            continue
+        has_entered_valid_region = True
+        selected.append(lanelet)
+    return selected

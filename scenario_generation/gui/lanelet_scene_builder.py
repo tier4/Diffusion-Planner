@@ -43,6 +43,7 @@ LINE_STRING_TYPE_NUM = 2
 
 # ── LineType enum (local copy to avoid ROS runtime dep) ──────────────────────
 
+
 class LineType(IntEnum):
     CROSSWALK = 0
     CURBSTONE = 1
@@ -79,6 +80,7 @@ KPH_TO_MPS = 1000.0 / 3600.0
 
 # ── Placement result ─────────────────────────────────────────────────────────
 
+
 @dataclass
 class AgentPlacement:
     lanelet_id: int
@@ -93,8 +95,11 @@ class AgentPlacement:
 
 # ── Geometry helpers ─────────────────────────────────────────────────────────
 
+
 def _resample_linestring_to_tiles(
-    pts: np.ndarray, num_points: int, max_step_m: float,
+    pts: np.ndarray,
+    num_points: int,
+    max_step_m: float,
 ) -> list[np.ndarray]:
     """Mirror the C++ ``resample_line_string`` at
     ``autoware_diffusion_planner/src/conversion/lanelet.cpp:109``.
@@ -191,7 +196,11 @@ def _one_hot(class_idx: int, num_classes: int = LineType.NUM.value) -> np.ndarra
 
 
 def _obb_corners(
-    x: float, y: float, heading: float, length: float, width: float,
+    x: float,
+    y: float,
+    heading: float,
+    length: float,
+    width: float,
     wheelbase: float | None = None,
 ) -> np.ndarray:
     """Return (4, 2) corners of an oriented bounding box.
@@ -208,9 +217,14 @@ def _obb_corners(
     else:
         dx_lo, dx_hi = -length / 2.0, length / 2.0
     dy_lo, dy_hi = -width / 2.0, width / 2.0
-    local_corners = np.array([
-        [dx_lo, dy_lo], [dx_hi, dy_lo], [dx_hi, dy_hi], [dx_lo, dy_hi],
-    ])
+    local_corners = np.array(
+        [
+            [dx_lo, dy_lo],
+            [dx_hi, dy_lo],
+            [dx_hi, dy_hi],
+            [dx_lo, dy_hi],
+        ]
+    )
     rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
     return (local_corners @ rot.T) + np.array([x, y])
 
@@ -254,15 +268,16 @@ def _heading_at_point(centerline_2d: np.ndarray, idx: int) -> float:
 
 # ── Cached lanelet data ──────────────────────────────────────────────────────
 
+
 @dataclass
 class _CachedLanelet:
     ll_id: int
-    raw_centerline: np.ndarray      # (N, 2) original points
-    raw_left: np.ndarray            # (N, 2)
-    raw_right: np.ndarray           # (N, 2)
-    interp_centerline: np.ndarray   # (20, 2)
-    interp_left: np.ndarray         # (20, 2)
-    interp_right: np.ndarray        # (20, 2)
+    raw_centerline: np.ndarray  # (N, 2) original points
+    raw_left: np.ndarray  # (N, 2)
+    raw_right: np.ndarray  # (N, 2)
+    interp_centerline: np.ndarray  # (20, 2)
+    interp_left: np.ndarray  # (20, 2)
+    interp_right: np.ndarray  # (20, 2)
     left_line_type: LineType
     right_line_type: LineType
     speed_limit_mps: float
@@ -273,6 +288,7 @@ class _CachedLanelet:
 
 
 # ── Main builder class ───────────────────────────────────────────────────────
+
 
 class LaneletSceneBuilder:
     """Loads a Lanelet2 map and generates synthetic SceneContext objects."""
@@ -293,13 +309,14 @@ class LaneletSceneBuilder:
         # stay untouched.
         n_promoted = 0
         for ll in self._lanelet_map.laneletLayer:
-            if ("subtype" in ll.attributes
-                    and ll.attributes["subtype"] == "road_shoulder"):
+            if "subtype" in ll.attributes and ll.attributes["subtype"] == "road_shoulder":
                 ll.attributes["subtype"] = "road"
                 n_promoted += 1
         if n_promoted:
-            print(f"LaneletSceneBuilder: promoted {n_promoted} "
-                  f"road_shoulder→road lanelets for routing")
+            print(
+                f"LaneletSceneBuilder: promoted {n_promoted} "
+                f"road_shoulder→road lanelets for routing"
+            )
 
         traffic_rules = lanelet2.traffic_rules.create(
             lanelet2.traffic_rules.Locations.Germany,
@@ -338,8 +355,9 @@ class LaneletSceneBuilder:
             # centerline3d() handles this correctly; resampling + midpoint
             # replicates that behaviour.
             n_cl = min(max(len(raw_lb), len(raw_rb)), 50)
-            raw_cl = ((_interpolate_lane(raw_lb, n_cl)
-                       + _interpolate_lane(raw_rb, n_cl)) * 0.5).astype(np.float32)
+            raw_cl = (
+                (_interpolate_lane(raw_lb, n_cl) + _interpolate_lane(raw_rb, n_cl)) * 0.5
+            ).astype(np.float32)
 
             self._ll_by_id[ll.id] = ll
 
@@ -416,25 +434,30 @@ class LaneletSceneBuilder:
             if len(pts) < 2:
                 continue
             type_idx = (
-                LINE_STRING_TYPE_STOP_LINE if lstype == "stop_line"
+                LINE_STRING_TYPE_STOP_LINE
+                if lstype == "stop_line"
                 else LINE_STRING_TYPE_ROAD_BORDER
             )
             tiles = _resample_linestring_to_tiles(
-                pts, POINTS_PER_LINE_STRING, line_string_max_step_m,
+                pts,
+                POINTS_PER_LINE_STRING,
+                line_string_max_step_m,
             )
             for tile in tiles:
                 self._line_strings_cache.append((tile, type_idx))
 
-        print(f"LaneletSceneBuilder: cached {len(self._polygons_cache)} "
-              f"intersection polygons, {len(self._line_strings_cache)} line "
-              f"strings (stop_line + road_border)")
+        print(
+            f"LaneletSceneBuilder: cached {len(self._polygons_cache)} "
+            f"intersection polygons, {len(self._line_strings_cache)} line "
+            f"strings (stop_line + road_border)"
+        )
 
         # Pre-compute vectorised anchor arrays for fast spatial queries
         # (used by closest_lanelets). Rows align with ``self._vehicle_ll_ids``.
-        self._vehicle_ll_ids: np.ndarray = np.array([
-            ll_id for ll_id, c in self._cache.items()
-            if c.subtype in self._vehicle_subtypes
-        ], dtype=np.int64)
+        self._vehicle_ll_ids: np.ndarray = np.array(
+            [ll_id for ll_id, c in self._cache.items() if c.subtype in self._vehicle_subtypes],
+            dtype=np.int64,
+        )
         n_v = len(self._vehicle_ll_ids)
         self._vehicle_centers = np.zeros((n_v, 2), dtype=np.float32)
         self._vehicle_firsts = np.zeros((n_v, 2), dtype=np.float32)
@@ -447,8 +470,10 @@ class LaneletSceneBuilder:
             self._vehicle_lasts[i] = cl[-1]
             self._vehicle_backs[i] = cl[-2] if len(cl) >= 2 else cl[-1]
 
-        print(f"LaneletSceneBuilder: cached {len(self._cache)} lanelets "
-              f"({n_v} drivable), routing graph built")
+        print(
+            f"LaneletSceneBuilder: cached {len(self._cache)} lanelets "
+            f"({n_v} drivable), routing graph built"
+        )
 
     # ── 33-dim conversion ────────────────────────────────────────────────
 
@@ -474,9 +499,9 @@ class LaneletSceneBuilder:
         Works in world frame (no ego transform).
         """
         c = self._cache[ll_id]
-        centerline = c.interp_centerline.copy()         # (20, 2)
-        left_bound = c.interp_left.copy()               # (20, 2)
-        right_bound = c.interp_right.copy()              # (20, 2)
+        centerline = c.interp_centerline.copy()  # (20, 2)
+        left_bound = c.interp_left.copy()  # (20, 2)
+        right_bound = c.interp_right.copy()  # (20, 2)
 
         # Direction vectors
         diff = np.zeros_like(centerline)
@@ -496,15 +521,18 @@ class LaneletSceneBuilder:
         lt_left = np.tile(_one_hot(c.left_line_type.value), (POINTS_PER_LANELET, 1))
         lt_right = np.tile(_one_hot(c.right_line_type.value), (POINTS_PER_LANELET, 1))
 
-        segment = np.concatenate([
-            centerline,    # [0:2]
-            diff,          # [2:4]
-            left_offset,   # [4:6]
-            right_offset,  # [6:8]
-            traffic,       # [8:13]
-            lt_left,       # [13:23]
-            lt_right,      # [23:33]
-        ], axis=1)
+        segment = np.concatenate(
+            [
+                centerline,  # [0:2]
+                diff,  # [2:4]
+                left_offset,  # [4:6]
+                right_offset,  # [6:8]
+                traffic,  # [8:13]
+                lt_left,  # [13:23]
+                lt_right,  # [23:33]
+            ],
+            axis=1,
+        )
 
         assert segment.shape == (POINTS_PER_LANELET, 33), f"Bad shape: {segment.shape}"
         return segment, c.speed_limit_mps, c.has_speed_limit
@@ -561,7 +589,11 @@ class LaneletSceneBuilder:
     # ── Spatial query ────────────────────────────────────────────────────
 
     def lanelets_in_rect(
-        self, xmin: float, ymin: float, xmax: float, ymax: float,
+        self,
+        xmin: float,
+        ymin: float,
+        xmax: float,
+        ymax: float,
     ) -> list[int]:
         """Return lanelet IDs that overlap the rectangle (even partially).
 
@@ -577,13 +609,20 @@ class LaneletSceneBuilder:
                 continue
             cl = c.raw_centerline
             # AABB overlap test: lanelet bbox vs selection rect
-            if (cl[:, 0].max() >= xmin and cl[:, 0].min() <= xmax and
-                    cl[:, 1].max() >= ymin and cl[:, 1].min() <= ymax):
+            if (
+                cl[:, 0].max() >= xmin
+                and cl[:, 0].min() <= xmax
+                and cl[:, 1].max() >= ymin
+                and cl[:, 1].min() <= ymax
+            ):
                 result.append(ll_id)
         return result
 
     def closest_lanelets(
-        self, xy: np.ndarray, max_n: int, mask_range: float = 100.0,
+        self,
+        xy: np.ndarray,
+        max_n: int,
+        mask_range: float = 100.0,
     ) -> list[int]:
         """Return up to ``max_n`` drivable lanelet IDs around ``xy``, closest first.
 
@@ -643,7 +682,9 @@ class LaneletSceneBuilder:
         return [int(kept_ids[i]) for i in top_idx]
 
     def lanelets_near_point(
-        self, xy: np.ndarray, radius: float,
+        self,
+        xy: np.ndarray,
+        radius: float,
     ) -> list[int]:
         """Return drivable lanelet IDs whose centerline passes within ``radius``
         metres of ``xy``.
@@ -655,7 +696,10 @@ class LaneletSceneBuilder:
         """
         x, y = float(xy[0]), float(xy[1])
         candidates = self.lanelets_in_rect(
-            x - radius, y - radius, x + radius, y + radius,
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
         )
         radius_sq = radius * radius
         result = []
@@ -717,26 +761,25 @@ class LaneletSceneBuilder:
             candidate passes the filters.
         """
         pos = np.asarray(xy, dtype=np.float32)[:2]
-        allowed_subtypes = (
-            self._routable_subtypes if routable_only else self._vehicle_subtypes
-        )
+        allowed_subtypes = self._routable_subtypes if routable_only else self._vehicle_subtypes
         if candidate_ids is None:
             candidate_ids = [
-                ll_id for ll_id, c in self._cache.items()
-                if c.subtype in allowed_subtypes
+                ll_id for ll_id, c in self._cache.items() if c.subtype in allowed_subtypes
             ]
         else:
             candidate_ids = [
-                ll_id for ll_id in candidate_ids
-                if ll_id in self._cache
-                and self._cache[ll_id].subtype in allowed_subtypes
+                ll_id
+                for ll_id in candidate_ids
+                if ll_id in self._cache and self._cache[ll_id].subtype in allowed_subtypes
             ]
 
         if reachable_from is not None and reachable_from in self._ll_by_id:
             source_ll = self._ll_by_id[reachable_from]
             reachable_ids = {
-                ll.id for ll in self._routing_graph.reachableSet(
-                    source_ll, reachable_range_m,
+                ll.id
+                for ll in self._routing_graph.reachableSet(
+                    source_ll,
+                    reachable_range_m,
                 )
             }
             candidate_ids = [ll for ll in candidate_ids if ll in reachable_ids]
@@ -770,7 +813,9 @@ class LaneletSceneBuilder:
         return best_ll_id
 
     def is_lanelet_straight(
-        self, ll_id: int, curvature_threshold: float = 0.3,
+        self,
+        ll_id: int,
+        curvature_threshold: float = 0.3,
     ) -> bool:
         """Check if a lanelet is straight enough for NPC spawning.
 
@@ -804,7 +849,9 @@ class LaneletSceneBuilder:
     # ── Routing ──────────────────────────────────────────────────────────
 
     def route_between(
-        self, start_ll_id: int, goal_ll_id: int,
+        self,
+        start_ll_id: int,
+        goal_ll_id: int,
     ) -> list[int] | None:
         """Shortest path between two lanelet IDs using the lanelet2 routing graph.
 
@@ -907,7 +954,9 @@ class LaneletSceneBuilder:
             return history, {lanelet_id}
 
         # Build dense backward polyline ordered [current_pos, ..., far_behind]
-        bw_pts, traversed_ids = self._build_backward_polyline(lanelet_id, position_xy, heading, n_steps, speed, dt)
+        bw_pts, traversed_ids = self._build_backward_polyline(
+            lanelet_id, position_xy, heading, n_steps, speed, dt
+        )
 
         diffs = np.linalg.norm(np.diff(bw_pts, axis=0), axis=1)
         arc = np.concatenate([[0.0], np.cumsum(diffs)])
@@ -945,8 +994,13 @@ class LaneletSceneBuilder:
         return history, traversed_ids
 
     def _build_backward_polyline(
-        self, start_ll_id: int, start_pos: np.ndarray, heading: float,
-        n_steps: int, speed: float, dt: float,
+        self,
+        start_ll_id: int,
+        start_pos: np.ndarray,
+        heading: float,
+        n_steps: int,
+        speed: float,
+        dt: float,
     ) -> tuple[np.ndarray, set[int]]:
         """Build a polyline going backward from start position.
 
@@ -1039,7 +1093,8 @@ class LaneletSceneBuilder:
                 Snaps to the nearest lanelet centerline.
         """
         candidates = [
-            ll_id for ll_id in lanelet_ids
+            ll_id
+            for ll_id in lanelet_ids
             if ll_id in self._cache and self._cache[ll_id].arc_length > 5.0
         ]
         if not candidates:
@@ -1048,9 +1103,10 @@ class LaneletSceneBuilder:
             raise ValueError("No valid lanelets in the selected rectangle")
 
         with_successors = [
-            ll_id for ll_id in candidates
-            if ll_id in self._ll_by_id and
-            len(list(self._routing_graph.following(self._ll_by_id[ll_id]))) > 0
+            ll_id
+            for ll_id in candidates
+            if ll_id in self._ll_by_id
+            and len(list(self._routing_graph.following(self._ll_by_id[ll_id]))) > 0
         ]
         preferred = with_successors if with_successors else candidates
 
@@ -1062,13 +1118,20 @@ class LaneletSceneBuilder:
             ego_placement = self._place_ego_at_pose(ego_pose, lanelet_ids, min_speed, max_speed)
         else:
             ego_placement = self._try_place_one(
-                preferred, placed_corners, min_separation_m,
-                min_speed, max_speed, is_ego=True,
+                preferred,
+                placed_corners,
+                min_separation_m,
+                min_speed,
+                max_speed,
+                is_ego=True,
             )
         if ego_placement is not None:
             corners = _obb_corners(
-                ego_placement.position_xy[0], ego_placement.position_xy[1],
-                ego_placement.heading, ego_placement.length, ego_placement.width,
+                ego_placement.position_xy[0],
+                ego_placement.position_xy[1],
+                ego_placement.heading,
+                ego_placement.length,
+                ego_placement.width,
             )
             placed_corners.append(corners)
             placements.append(ego_placement)
@@ -1076,13 +1139,20 @@ class LaneletSceneBuilder:
         # Neighbor placements
         for _ in range(n_neighbors):
             placement = self._try_place_one(
-                candidates, placed_corners, min_separation_m,
-                min_speed, max_speed, is_ego=False,
+                candidates,
+                placed_corners,
+                min_separation_m,
+                min_speed,
+                max_speed,
+                is_ego=False,
             )
             if placement is not None:
                 corners = _obb_corners(
-                    placement.position_xy[0], placement.position_xy[1],
-                    placement.heading, placement.length, placement.width,
+                    placement.position_xy[0],
+                    placement.position_xy[1],
+                    placement.heading,
+                    placement.length,
+                    placement.width,
                 )
                 placed_corners.append(corners)
                 placements.append(placement)
@@ -1229,7 +1299,11 @@ class LaneletSceneBuilder:
             raise ValueError("No valid lanelets in the selection")
 
         placements = self.place_agents(
-            ll_ids, n_neighbors, min_separation_m, min_speed, max_speed,
+            ll_ids,
+            n_neighbors,
+            min_separation_m,
+            min_speed,
+            max_speed,
             ego_pose=ego_pose,
         )
         if not placements:
@@ -1255,7 +1329,10 @@ class LaneletSceneBuilder:
 
             # History (traces backward through predecessors)
             history, history_ll_ids = self.generate_history(
-                p.position_xy, p.heading, p.speed, p.lanelet_id,
+                p.position_xy,
+                p.heading,
+                p.speed,
+                p.lanelet_id,
             )
             all_lanelet_ids.update(history_ll_ids)
 
@@ -1310,7 +1387,9 @@ class LaneletSceneBuilder:
         return np.zeros(3, dtype=np.float32)
 
     def _route_to_33dim(
-        self, route_ll_ids: list[int], max_segments: int = 25,
+        self,
+        route_ll_ids: list[int],
+        max_segments: int = 25,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Convert route lanelet IDs to 33-dim arrays."""
         segments = []
@@ -1368,8 +1447,12 @@ class LaneletSceneBuilder:
         ``autoware_diffusion_planner/src/preprocessing/lane_segments.cpp:347``.
         """
         return self._build_line_or_polygon_tensor(
-            self._polygons_cache, center_xy, max_n,
-            POINTS_PER_POLYGON, POLYGON_TYPE_NUM, mask_range,
+            self._polygons_cache,
+            center_xy,
+            max_n,
+            POINTS_PER_POLYGON,
+            POLYGON_TYPE_NUM,
+            mask_range,
         )
 
     def road_border_polylines(self) -> list[np.ndarray]:
@@ -1381,7 +1464,8 @@ class LaneletSceneBuilder:
         ``_line_strings_cache`` directly.
         """
         return [
-            pts for pts, type_idx in self._line_strings_cache
+            pts
+            for pts, type_idx in self._line_strings_cache
             if type_idx == LINE_STRING_TYPE_ROAD_BORDER
         ]
 
@@ -1402,8 +1486,12 @@ class LaneletSceneBuilder:
             [3]: one-hot road_border
         """
         return self._build_line_or_polygon_tensor(
-            self._line_strings_cache, center_xy, max_n,
-            POINTS_PER_LINE_STRING, LINE_STRING_TYPE_NUM, mask_range,
+            self._line_strings_cache,
+            center_xy,
+            max_n,
+            POINTS_PER_LINE_STRING,
+            LINE_STRING_TYPE_NUM,
+            mask_range,
         )
 
     def _build_line_or_polygon_tensor(
@@ -1425,9 +1513,11 @@ class LaneletSceneBuilder:
         scored: list[tuple[float, np.ndarray, int]] = []
         for pts, type_idx in cache:
             inside = (
-                ((pts[:, 0] > x_min) & (pts[:, 0] < x_max)
-                 & (pts[:, 1] > y_min) & (pts[:, 1] < y_max)).any()
-            )
+                (pts[:, 0] > x_min)
+                & (pts[:, 0] < x_max)
+                & (pts[:, 1] > y_min)
+                & (pts[:, 1] < y_max)
+            ).any()
             if not inside:
                 continue
             dx = pts[:, 0] - cx
@@ -1505,9 +1595,11 @@ class LaneletSceneBuilder:
                 continue
             cl = self._cache[ll_id].raw_centerline
             inside = (
-                ((cl[:, 0] > cx - mask_range) & (cl[:, 0] < cx + mask_range)
-                 & (cl[:, 1] > cy - mask_range) & (cl[:, 1] < cy + mask_range)).any()
-            )
+                (cl[:, 0] > cx - mask_range)
+                & (cl[:, 0] < cx + mask_range)
+                & (cl[:, 1] > cy - mask_range)
+                & (cl[:, 1] < cy + mask_range)
+            ).any()
             if not inside:
                 if has_entered:
                     break
@@ -1572,7 +1664,9 @@ class LaneletSceneBuilder:
             line_strings = self.build_line_strings_tensor(center_xy)
         else:
             polygons = np.zeros((10, POINTS_PER_POLYGON, 2 + POLYGON_TYPE_NUM), dtype=np.float32)
-            line_strings = np.zeros((60, POINTS_PER_LINE_STRING, 2 + LINE_STRING_TYPE_NUM), dtype=np.float32)
+            line_strings = np.zeros(
+                (60, POINTS_PER_LINE_STRING, 2 + LINE_STRING_TYPE_NUM), dtype=np.float32
+            )
 
         return MapData(
             lanes=lanes,

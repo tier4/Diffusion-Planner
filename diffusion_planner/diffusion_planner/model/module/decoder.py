@@ -58,14 +58,11 @@ def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> 
     reshaped_delay = delay.reshape(delay.shape[0], 1, 1, 1)
     # Perform the comparison, result is (B, 1, max_len, 1)
     mask = steps <= reshaped_delay
-    # Expand to include the num_agents dimension
-    mask = mask.expand(-1, num_agents, -1, -1)  # (B, num_agents, max_len, 1)
-
-    # Always predict for neighbors by setting their mask to False
-    result = torch.zeros_like(mask, dtype=torch.bool)
-    result[:, 0, :, :] = mask[:, 0, :, :]
-
-    return result
+    ego_mask = mask.expand(-1, 1, -1, -1)
+    neighbor_mask = torch.zeros(
+        (delay.shape[0], num_agents - 1, max_len, 1), dtype=torch.bool, device=delay.device
+    )
+    return torch.cat([ego_mask, neighbor_mask], dim=1)
 
 
 def _compute_trajectory_loss(
@@ -229,7 +226,15 @@ def compute_training_loss(
 
     # Build GT in the target representation
     all_gt, all_gt_pose = build_gt_representation(
-        gt_future, current_states, inputs, output_mode, use_velocity, norm, control_norm, obs_norm, Pn
+        gt_future,
+        current_states,
+        inputs,
+        output_mode,
+        use_velocity,
+        norm,
+        control_norm,
+        obs_norm,
+        Pn,
     )
     all_gt[:, 1:][neighbor_mask] = 0.0
     all_gt_pose[:, 1:][neighbor_mask] = 0.0
@@ -277,8 +282,14 @@ def compute_training_loss(
         # --- Loss computation per output_mode ---
         if output_mode == OUTPUT_MODE_TRAJECTORY:
             dpm_loss = _compute_trajectory_loss(
-                model_output, gt_target, use_velocity, hybrid_omega, hybrid_window,
-                longitudinal_velocity, args, T,
+                model_output,
+                gt_target,
+                use_velocity,
+                hybrid_omega,
+                hybrid_window,
+                longitudinal_velocity,
+                args,
+                T,
             )
         elif output_mode == OUTPUT_MODE_CONTROL:
             dpm_loss = torch.sum((model_output - gt_target) ** 2, dim=-1)  # [B, P, T]
@@ -289,14 +300,18 @@ def compute_training_loss(
             ctrl_gt = gt_target[..., POSE_DIM:]
 
             traj_loss = _compute_trajectory_loss(
-                traj_out, traj_gt, use_velocity, hybrid_omega, hybrid_window,
-                longitudinal_velocity, args, T,
+                traj_out,
+                traj_gt,
+                use_velocity,
+                hybrid_omega,
+                hybrid_window,
+                longitudinal_velocity,
+                args,
+                T,
             )
             # Control loss for ego only — neighbor control is not well-defined
             # in ego-centric frame (position/heading offset violates unicycle assumptions).
-            ego_ctrl_loss = torch.sum(
-                (ctrl_out[:, 0] - ctrl_gt[:, 0]) ** 2, dim=-1
-            )  # [B, T]
+            ego_ctrl_loss = torch.sum((ctrl_out[:, 0] - ctrl_gt[:, 0]) ** 2, dim=-1)  # [B, T]
             coeff_ctrl = args.coeff_control_loss
             dpm_loss = traj_loss
             dpm_loss[:, 0] = dpm_loss[:, 0] + coeff_ctrl * ego_ctrl_loss
@@ -552,10 +567,9 @@ class Decoder(nn.Module):
         # observation_normalizer.inverse's boolean masking (ONNX-incompatible).
         device = current_states.device
         ego_state_norm = self._observation_normalizer._normalization_dict["ego_current_state"]
-        ego_current_state_raw = (
-            inputs["ego_current_state"] * ego_state_norm["std"].to(device)
-            + ego_state_norm["mean"].to(device)
-        )
+        ego_current_state_raw = inputs["ego_current_state"] * ego_state_norm["std"].to(
+            device
+        ) + ego_state_norm["mean"].to(device)
         ego_v0 = ego_current_state_raw[:, 4:5]  # [B, 1]
         ego_ctrl_current = self._control_normalizer(
             torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1)
@@ -609,9 +623,7 @@ class Decoder(nn.Module):
             gt_traj_pose = inputs["gt_trajectories_pose"].reshape(
                 B, P, (1 + self._future_len), POSE_DIM
             )
-            ego_trajectory = gt_traj_pose[:, 0, 1::10, :2].reshape(
-                B, 2 * (self._future_len // 10)
-            )
+            ego_trajectory = gt_traj_pose[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         else:
             ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(
                 B, 2 * (self._future_len // 10)
@@ -651,7 +663,8 @@ class Decoder(nn.Module):
             # Ego: convert control → trajectory
             ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
             ego_traj = control_to_waypoints(
-                ctrl[:, 0], raw_inputs["ego_agent_past"],
+                ctrl[:, 0],
+                raw_inputs["ego_agent_past"],
                 t0_states={"v": ego_v0.squeeze(-1)},
             )  # [B, T, 4]
 
@@ -660,7 +673,8 @@ class Decoder(nn.Module):
             # from ego-centric history directly produces ego-centric trajectories.
             neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]
             neighbor_traj = control_to_waypoints(
-                ctrl[:, 1:], neighbor_history,
+                ctrl[:, 1:],
+                neighbor_history,
             )  # [B, Pn, T, 4] in ego-centric frame
 
             return torch.cat([ego_traj[:, None], neighbor_traj], dim=1)
@@ -676,18 +690,17 @@ class Decoder(nn.Module):
                 obs_norms = self._observation_normalizer._normalization_dict
                 device = x.device
                 ego_past_norm = obs_norms["ego_agent_past"]
-                ego_agent_past_raw = (
-                    inputs["ego_agent_past"] * ego_past_norm["std"].to(device)
-                    + ego_past_norm["mean"].to(device)
-                )
+                ego_agent_past_raw = inputs["ego_agent_past"] * ego_past_norm["std"].to(
+                    device
+                ) + ego_past_norm["mean"].to(device)
                 ego_state_norm = obs_norms["ego_current_state"]
-                ego_current_state_raw = (
-                    inputs["ego_current_state"] * ego_state_norm["std"].to(device)
-                    + ego_state_norm["mean"].to(device)
-                )
+                ego_current_state_raw = inputs["ego_current_state"] * ego_state_norm["std"].to(
+                    device
+                ) + ego_state_norm["mean"].to(device)
                 ego_v0 = ego_current_state_raw[:, 4:5]  # [B, 1]
                 ego_traj = control_to_waypoints(
-                    ego_ctrl[:, 0], ego_agent_past_raw,
+                    ego_ctrl[:, 0],
+                    ego_agent_past_raw,
                     t0_states={"v": ego_v0.squeeze(-1)},
                 )  # [B, T, 4]
 
@@ -718,16 +731,20 @@ class Decoder(nn.Module):
         if self._output_mode == OUTPUT_MODE_CONTROL:
             # Control mode: first 2 channels are (accel, curvature), not (x,y).
             # Use zeros as fallback — turn indicator relies mainly on encoding_pooled.
-            ego_xy = torch.zeros(
-                B, 2 * (self._future_len // 10), device=x.device, dtype=x.dtype
-            )
+            ego_xy = torch.zeros(B, 2 * (self._future_len // 10), device=x.device, dtype=x.dtype)
         else:
             # trajectory or trajectory_and_control: first 2 channels are (x,y)
             ego_xy = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         return self._compute_turn_indicator(ego_xy, encoding_pooled)
 
     def _inference_flow_matching(
-        self, encoding, inputs, current_states, neighbor_current_mask, encoding_pooled, sampled_trajectories
+        self,
+        encoding,
+        inputs,
+        current_states,
+        neighbor_current_mask,
+        encoding_pooled,
+        sampled_trajectories,
     ):
         """Inference using Flow Matching approach."""
         B = encoding.shape[0]
@@ -747,7 +764,11 @@ class Decoder(nn.Module):
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x, encoding_pooled)
         prediction = self.denoised_to_trajectory(x, inputs, current_states)
 
-        return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit, "denoised": x}
+        return {
+            "prediction": prediction,
+            "turn_indicator_logit": turn_indicator_logit,
+            "denoised": x,
+        }
 
     def _inference_x_start(
         self,
@@ -768,7 +789,9 @@ class Decoder(nn.Module):
 
         # Build current state in D-space for prefix constraint
         current_states_D = self._build_current_states_D(inputs, current_states)  # [B, P, D]
-        action_prefix = torch.cat([current_states_D.unsqueeze(2), action_prefix[:, :, 1:, :]], dim=2)
+        action_prefix = torch.cat(
+            [current_states_D.unsqueeze(2), action_prefix[:, :, 1:, :]], dim=2
+        )
 
         B, P, T_plus_1, _ = action_prefix.shape
 
@@ -818,7 +841,9 @@ class Decoder(nn.Module):
             **model_wrapper_params,
         )
 
-        dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint, D=D)
+        dpm_solver = dpm.DPM_Solver(
+            model_fn, noise_schedule, correcting_xt_fn=prefix_constraint, D=D
+        )
 
         x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
 
@@ -827,7 +852,11 @@ class Decoder(nn.Module):
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x0, encoding_pooled)
         prediction = self.denoised_to_trajectory(x0, inputs, current_states)
 
-        return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit, "denoised": x0}
+        return {
+            "prediction": prediction,
+            "turn_indicator_logit": turn_indicator_logit,
+            "denoised": x0,
+        }
 
     def _forward_inference(
         self, encoding, inputs, current_states, neighbor_current_mask, encoding_pooled
@@ -854,7 +883,12 @@ class Decoder(nn.Module):
 
         if self._model_type == "flow_matching":
             return self._inference_flow_matching(
-                encoding, inputs, current_states, neighbor_current_mask, encoding_pooled, sampled_trajectories
+                encoding,
+                inputs,
+                current_states,
+                neighbor_current_mask,
+                encoding_pooled,
+                sampled_trajectories,
             )
         elif self._model_type == "x_start":
             return self._inference_x_start(

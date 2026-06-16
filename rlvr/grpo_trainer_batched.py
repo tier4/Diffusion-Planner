@@ -51,18 +51,27 @@ def _normalize_batch(batch_data: dict, model_args) -> dict:
     return normalizer(norm)
 
 
-def _chunked_generate(model, model_args, norm_batch, noise_min, noise_max, composer, device, chunk_size=64):
+def _chunked_generate(
+    model, model_args, norm_batch, noise_min, noise_max, composer, device, chunk_size=64
+):
     """Generate trajectories in chunks to avoid OOM."""
     N = norm_batch["ego_current_state"].shape[0]
     all_out = []
     for start in range(0, N, chunk_size):
         end = min(start + chunk_size, N)
-        chunk = {k: v[start:end] if isinstance(v, torch.Tensor) and v.shape[0] == N else v
-                 for k, v in norm_batch.items()}
+        chunk = {
+            k: v[start:end] if isinstance(v, torch.Tensor) and v.shape[0] == N else v
+            for k, v in norm_batch.items()
+        }
         out = _batched_generate_varied_noise(
-            model, model_args, chunk,
-            noise_min=noise_min, noise_max=noise_max,
-            first_deterministic=False, composer=composer, device=device,
+            model,
+            model_args,
+            chunk,
+            noise_min=noise_min,
+            noise_max=noise_max,
+            first_deterministic=False,
+            composer=composer,
+            device=device,
         )
         all_out.append(out)
     return torch.cat(all_out, dim=0)
@@ -127,7 +136,9 @@ def generate_all_scenes_batched(
     all_k_trajs = []
 
     # --- Config 1: Deterministic ---
-    det_trajs = _chunked_generate(model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size)
+    det_trajs = _chunked_generate(
+        model, model_args, norm_batch, 0.0, 0.0, None, device, gen_chunk_size
+    )
     all_k_trajs.append(det_trajs)
 
     # --- Config 2-9: CL + SPD guidance sweep for lane keeping ---
@@ -157,6 +168,16 @@ def generate_all_scenes_batched(
     if use_lon or use_lat:
         norm_batch["reference_trajectory"] = det_trajs  # no clone needed, not mutated
 
+    # Optional env-gated road_border guidance in generation (default OFF; normally
+    # skipped for OOM on large batches — safe at scene_batch_size 1). GEN_RB_SCALE>0
+    # enables road_border guidance; GEN_NO_CL=1 disables centerline guidance. Read
+    # once here so both the guided-slot and random-pool loops see them even when
+    # cl_spd_configs is empty.
+    import os as _os
+
+    _gen_rb_scale = float(_os.environ.get("GEN_RB_SCALE", "0"))
+    _gen_no_cl = _os.environ.get("GEN_NO_CL", "") not in ("", "0")
+
     for cfg in cl_spd_configs:
         cl_scale = cfg["cl"]
         spd_scale = cfg["spd"]
@@ -165,7 +186,9 @@ def generate_all_scenes_batched(
         cfg_stretch = cfg.get("stretch", speed_stretch)
         cfg_has_noise = n_max > 0
         use_stretch_here = abs(cfg_stretch - 1.0) > 1e-6 and cfg_has_noise
-        spd_params = {"stretch": cfg_stretch} if use_stretch_here else {"v_high": gt_max_speed, "v_low": 0.5}
+        spd_params = (
+            {"stretch": cfg_stretch} if use_stretch_here else {"v_high": gt_max_speed, "v_low": 0.5}
+        )
         # Per-slot lateral overrides global lateral_eta
         cfg_lat_eta = cfg.get("lat_eta", lateral_eta)
         cfg_lat_lambda = cfg.get("lat_lambda", lateral_lambda)
@@ -177,27 +200,41 @@ def generate_all_scenes_batched(
         # (cl=0, spd=0) skip lon guidance even when the global flag is on,
         # to keep them as pure stochastic exploration.
         is_guided_slot = cl_scale > 0 or spd_scale > 0
-        # Build guidance functions
+        # Build guidance functions (road_border gate read once above the loops)
         fns = []
-        if cl_scale > 0:
-            cl_name = "route_centerline_following" if use_route_cl_guidance else "centerline_following"
+        if cl_scale > 0 and not _gen_no_cl:
+            cl_name = (
+                "route_centerline_following" if use_route_cl_guidance else "centerline_following"
+            )
             fns.append(GuidanceConfig(cl_name, enabled=True, scale=cl_scale))
+        if _gen_rb_scale > 0:
+            fns.append(GuidanceConfig("road_border", enabled=True, scale=_gen_rb_scale))
         if spd_scale > 0:
             fns.append(GuidanceConfig("speed", enabled=True, scale=spd_scale, params=spd_params))
         if use_lon and is_guided_slot:
-            fns.append(GuidanceConfig(
-                "longitudinal", enabled=True, scale=longitudinal_scale,
-                params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},
-            ))
+            fns.append(
+                GuidanceConfig(
+                    "longitudinal",
+                    enabled=True,
+                    scale=longitudinal_scale,
+                    params={"eta_lon": longitudinal_eta, "lambda_lon": longitudinal_lambda},
+                )
+            )
         if cfg_use_lat:
-            fns.append(GuidanceConfig(
-                "lateral", enabled=True, scale=cfg_lat_scale,
-                params={"eta_lat": cfg_lat_eta, "lambda_lat": cfg_lat_lambda},
-            ))
+            fns.append(
+                GuidanceConfig(
+                    "lateral",
+                    enabled=True,
+                    scale=cfg_lat_scale,
+                    params={"eta_lat": cfg_lat_eta, "lambda_lat": cfg_lat_lambda},
+                )
+            )
         if cfg_col > 0:
             fns.append(GuidanceConfig("collision", enabled=True, scale=cfg_col))
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0)) if fns else None
-        trajs = _chunked_generate(model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size)
+        trajs = _chunked_generate(
+            model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size
+        )
         all_k_trajs.append(trajs)
 
     # Clean up reference_trajectory before random passes (not needed, wastes VRAM on expand)
@@ -208,7 +245,9 @@ def generate_all_scenes_batched(
     # noise ranges rather than random sampling.
     for noise_cfg in noise_configs:
         n_min_s, n_max_s = noise_cfg["noise"]
-        trajs = _chunked_generate(model, model_args, norm_batch, n_min_s, n_max_s, None, device, gen_chunk_size)
+        trajs = _chunked_generate(
+            model, model_args, norm_batch, n_min_s, n_max_s, None, device, gen_chunk_size
+        )
         all_k_trajs.append(trajs)
 
     # --- Random guidance pool (no road_border to avoid OOM) ---
@@ -224,12 +263,15 @@ def generate_all_scenes_batched(
 
     for n_pass in n_per_pass:
         fns = []
-        if random.random() < 0.7:
-            cl_name = "route_centerline_following" if use_route_cl_guidance else "centerline_following"
-            fns.append(GuidanceConfig(cl_name, enabled=True,
-                                       scale=random.uniform(2.0, 8.0)))
-        # Skip road_border guidance in generation (causes OOM with large batches)
-        # Road border avoidance is handled by the reward function instead
+        if random.random() < 0.7 and not _gen_no_cl:
+            cl_name = (
+                "route_centerline_following" if use_route_cl_guidance else "centerline_following"
+            )
+            fns.append(GuidanceConfig(cl_name, enabled=True, scale=random.uniform(2.0, 8.0)))
+        # road_border guidance is normally skipped (OOM on large batches; reward
+        # handles RB). Env-gated on for small-batch RB-focused generation.
+        if _gen_rb_scale > 0:
+            fns.append(GuidanceConfig("road_border", enabled=True, scale=_gen_rb_scale))
         gs = random.uniform(0.3, 1.5)
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=gs)) if fns else None
 
@@ -243,7 +285,9 @@ def generate_all_scenes_batched(
         else:
             expanded = norm_batch
 
-        trajs = _chunked_generate(model, model_args, expanded, noise_min, noise_max, comp, device, gen_chunk_size)
+        trajs = _chunked_generate(
+            model, model_args, expanded, noise_min, noise_max, comp, device, gen_chunk_size
+        )
 
         T_len = trajs.shape[1]
         trajs = trajs.reshape(n_pass, N, T_len, 4)
@@ -297,11 +341,13 @@ def train_epoch_batched(
 
     # Compute per-scene GT max speed for speed guidance (use raw data, not normalized)
     import numpy as _np2
+
     gt_speeds_list = []
     for d in all_data:
         gt = d.get("ego_agent_future")
         if gt is not None:
-            if gt.dim() == 3: gt = gt[0]
+            if gt.dim() == 3:
+                gt = gt[0]
             gt_np = gt.cpu().numpy()
             gt_valid = ~((gt_np[:, 0] == 0) & (gt_np[:, 1] == 0))
             if gt_valid.sum() >= 5:
@@ -317,8 +363,14 @@ def train_epoch_batched(
     # 2b. Apply per-epoch schedules to reward weights and guidance params
     scheduled = config.get_all_scheduled_values(epoch, config.train_epochs)
     reward_weight_names = {
-        "w_progress", "w_safety", "w_smooth", "w_feasibility", "w_centerline",
-        "stopped_penalty", "underprogress_penalty", "progress_norm_scale",
+        "w_progress",
+        "w_safety",
+        "w_smooth",
+        "w_feasibility",
+        "w_centerline",
+        "stopped_penalty",
+        "underprogress_penalty",
+        "progress_norm_scale",
     }
     for name, value in scheduled.items():
         if name in reward_weight_names and hasattr(reward_config, name):
@@ -340,7 +392,12 @@ def train_epoch_batched(
     model.eval()
     with torch.no_grad():
         all_trajs = generate_all_scenes_batched(
-            model, model_args, norm_batch, K, config.noise_scale_range, device,
+            model,
+            model_args,
+            norm_batch,
+            K,
+            config.noise_scale_range,
+            device,
             gt_max_speed=median_gt_speed,
             longitudinal_eta=lon_eta,
             longitudinal_lambda=lon_lambda,
@@ -383,7 +440,8 @@ def train_epoch_batched(
             rewards = [rewards[j] for j in top_idx]
 
         advantages = compute_group_advantages(
-            rewards, mode=config.advantage_mode,
+            rewards,
+            mode=config.advantage_mode,
             fixed_scale=config.advantage_fixed_scale,
         )
 
@@ -398,7 +456,7 @@ def train_epoch_batched(
         norm_i = {}
         for k, v in norm_batch.items():
             if isinstance(v, torch.Tensor) and v.shape[0] == N:
-                norm_i[k] = v[i:i+1]
+                norm_i[k] = v[i : i + 1]
             else:
                 norm_i[k] = v
         kept_norm_data.append(norm_i)
@@ -416,9 +474,9 @@ def train_epoch_batched(
     if lane_trim > 0 and N_kept > lane_trim:
         # Sort by lane_dep_frac ascending, drop the worst lane_trim scenes (highest fractions)
         sorted_idx = sorted(range(N_kept), key=lambda j: kept_lane_dep_fracs[j])
-        keep_idx = sorted_idx[:N_kept - lane_trim]
+        keep_idx = sorted_idx[: N_kept - lane_trim]
         n_dropped = N_kept - len(keep_idx)
-        avg_dep_dropped = np.mean([kept_lane_dep_fracs[j] for j in sorted_idx[len(keep_idx):]])
+        avg_dep_dropped = np.mean([kept_lane_dep_fracs[j] for j in sorted_idx[len(keep_idx) :]])
         avg_dep_kept = np.mean([kept_lane_dep_fracs[j] for j in keep_idx])
         kept_trajs = [kept_trajs[j] for j in keep_idx]
         kept_advantages = [kept_advantages[j] for j in keep_idx]
@@ -427,9 +485,11 @@ def train_epoch_batched(
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
         if config.grpo_loss_type == "advantage_logprob":
             kept_raw_data = [kept_raw_data[j] for j in keep_idx]
-        print(f"  Lane-dep trim: dropped {n_dropped} worst scenes "
-              f"(avg_dep={avg_dep_dropped:.0%}), keeping {len(kept_trajs)} "
-              f"(avg_dep={avg_dep_kept:.0%})")
+        print(
+            f"  Lane-dep trim: dropped {n_dropped} worst scenes "
+            f"(avg_dep={avg_dep_dropped:.0%}), keeping {len(kept_trajs)} "
+            f"(avg_dep={avg_dep_kept:.0%})"
+        )
         N_kept = len(kept_trajs)
 
     # Scene trimming by reward
@@ -438,14 +498,14 @@ def train_epoch_batched(
         n_trim = max(1, int(N_kept * trim))
         mean_rews = kept_mean_rewards
         sorted_idx = sorted(range(N_kept), key=lambda j: mean_rews[j])
-        keep_idx = sorted_idx[n_trim:N_kept - n_trim]
+        keep_idx = sorted_idx[n_trim : N_kept - n_trim]
         kept_trajs = [kept_trajs[j] for j in keep_idx]
         kept_advantages = [kept_advantages[j] for j in keep_idx]
         kept_mean_rewards = [kept_mean_rewards[j] for j in keep_idx]
         kept_norm_data = [kept_norm_data[j] for j in keep_idx]
         if config.grpo_loss_type == "advantage_logprob":
             kept_raw_data = [kept_raw_data[j] for j in keep_idx]
-        print(f"  Trimmed {2*n_trim} scenes, keeping {len(kept_trajs)}/{N_kept}")
+        print(f"  Trimmed {2 * n_trim} scenes, keeping {len(kept_trajs)}/{N_kept}")
         N_kept = len(kept_trajs)
 
     # 5. Apply KL scheduling (persists on config for logging/checkpointing)
@@ -457,22 +517,42 @@ def train_epoch_batched(
     # 6. Training
     if config.grpo_loss_type == "advantage_logprob":
         return _train_logprob(
-            model, model_args, optimizer, config,
-            kept_trajs, kept_advantages, kept_raw_data,
-            N, N_kept, device,
+            model,
+            model_args,
+            optimizer,
+            config,
+            kept_trajs,
+            kept_advantages,
+            kept_raw_data,
+            N,
+            N_kept,
+            device,
         )
     else:
         return _train_mse(
-            model, model_args, optimizer, config,
-            kept_trajs, kept_advantages, kept_norm_data,
-            N_kept, device,
+            model,
+            model_args,
+            optimizer,
+            config,
+            kept_trajs,
+            kept_advantages,
+            kept_norm_data,
+            N_kept,
+            device,
         )
 
 
 def _train_logprob(
-    model, model_args, optimizer, config,
-    kept_trajs, kept_advantages, kept_raw_data,
-    N_total, N_kept, device,
+    model,
+    model_args,
+    optimizer,
+    config,
+    kept_trajs,
+    kept_advantages,
+    kept_raw_data,
+    N_total,
+    N_kept,
+    device,
 ):
     """DDV2-style logprob GRPO: per-scene collect + train."""
     from rlvr.grpo_logprob_loss import collect_logprob_rollout, compute_logprob_grpo_loss
@@ -565,9 +645,15 @@ def _train_logprob(
 
 
 def _train_mse(
-    model, model_args, optimizer, config,
-    kept_trajs, kept_advantages, kept_norm_data,
-    N_kept, device,
+    model,
+    model_args,
+    optimizer,
+    config,
+    kept_trajs,
+    kept_advantages,
+    kept_norm_data,
+    N_kept,
+    device,
 ):
     """Original MSE-based batched GRPO training."""
     print(f"  Training on {N_kept} scenes (batched GRPO, kl_coef={config.kl_coef:.6f})...")
@@ -619,8 +705,8 @@ def _train_mse(
             all_metrics[k] = all_metrics.get(k, 0.0) + v * c_n
         n_scenes_total += c_n
 
-        is_accum_boundary = (c_end % (chunk_size * config.grad_accum_groups) == 0)
-        is_last = (c_end == N_kept)
+        is_accum_boundary = c_end % (chunk_size * config.grad_accum_groups) == 0
+        is_last = c_end == N_kept
         if is_accum_boundary or is_last:
             if is_last and not is_accum_boundary and accum_count < accum_count_target:
                 scale_fix = accum_count_target / accum_count

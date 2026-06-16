@@ -14,12 +14,12 @@ import numpy as np
 from matplotlib.figure import Figure
 from PIL import Image, ImageDraw
 
-
 # ---------------------------------------------------------------------------
 # Colour palette for N independent samples
 # ---------------------------------------------------------------------------
 
 _SAMPLE_CMAP = cm.get_cmap("tab10")
+
 
 def sample_color(i: int) -> tuple:
     return _SAMPLE_CMAP(i % 10)
@@ -28,6 +28,7 @@ def sample_color(i: int) -> tuple:
 # ---------------------------------------------------------------------------
 # Kinematic helpers (identical logic to annotation_gui.py helpers)
 # ---------------------------------------------------------------------------
+
 
 def _calculate_velocities(trajectory: np.ndarray, ego_state: np.ndarray) -> np.ndarray:
     """Compute per-step speed (km/h) from trajectory positions.
@@ -40,9 +41,9 @@ def _calculate_velocities(trajectory: np.ndarray, ego_state: np.ndarray) -> np.n
         (T,) speed array in km/h.
     """
     positions = np.vstack([ego_state[:2], trajectory[:, :2]])  # (T+1, 2)
-    diffs = np.diff(positions, axis=0)                          # (T, 2)
-    speed_ms = np.sqrt((diffs ** 2).sum(axis=1)) / 0.1         # m/s at dt=0.1s
-    return speed_ms * 3.6                                       # km/h
+    diffs = np.diff(positions, axis=0)  # (T, 2)
+    speed_ms = np.sqrt((diffs**2).sum(axis=1)) / 0.1  # m/s at dt=0.1s
+    return speed_ms * 3.6  # km/h
 
 
 def _calculate_accelerations(velocities_kmh: np.ndarray) -> np.ndarray:
@@ -75,7 +76,7 @@ def _calculate_curvature(trajectory: np.ndarray, ego_state: np.ndarray) -> np.nd
 
     positions = np.vstack([ego_state[:2], trajectory[:, :2]])
     diffs = np.diff(positions, axis=0)
-    arc_lengths = np.sqrt((diffs ** 2).sum(axis=1))
+    arc_lengths = np.sqrt((diffs**2).sum(axis=1))
 
     heading_diffs = np.diff(np.unwrap(headings))
 
@@ -85,9 +86,11 @@ def _calculate_curvature(trajectory: np.ndarray, ego_state: np.ndarray) -> np.nd
     return curvatures
 
 
-def _calculate_lateral_acceleration(curvatures: np.ndarray, velocities_kmh: np.ndarray) -> np.ndarray:
+def _calculate_lateral_acceleration(
+    curvatures: np.ndarray, velocities_kmh: np.ndarray
+) -> np.ndarray:
     vel_ms = velocities_kmh / 3.6
-    return vel_ms ** 2 * np.abs(curvatures)
+    return vel_ms**2 * np.abs(curvatures)
 
 
 def _gt_velocities(ego_future: np.ndarray, ego_state: np.ndarray) -> np.ndarray | None:
@@ -97,7 +100,7 @@ def _gt_velocities(ego_future: np.ndarray, ego_state: np.ndarray) -> np.ndarray 
         return None
     positions = np.vstack([ego_state[:2], ego_future[:, :2]])
     diffs = np.diff(positions, axis=0)
-    return np.sqrt((diffs ** 2).sum(axis=1)) / 0.1 * 3.6
+    return np.sqrt((diffs**2).sum(axis=1)) / 0.1 * 3.6
 
 
 def _gt_curvature(ego_future: np.ndarray, ego_state: np.ndarray) -> np.ndarray | None:
@@ -107,12 +110,10 @@ def _gt_curvature(ego_future: np.ndarray, ego_state: np.ndarray) -> np.ndarray |
         return None
     cos_ego = ego_state[2]
     sin_ego = ego_state[3]
-    headings = np.concatenate(
-        [[np.arctan2(sin_ego, cos_ego)], ego_future[:, 2]]
-    )
+    headings = np.concatenate([[np.arctan2(sin_ego, cos_ego)], ego_future[:, 2]])
     positions = np.vstack([ego_state[:2], ego_future[:, :2]])
     diffs = np.diff(positions, axis=0)
-    arc_lengths = np.sqrt((diffs ** 2).sum(axis=1))
+    arc_lengths = np.sqrt((diffs**2).sum(axis=1))
     heading_diffs = np.diff(np.unwrap(headings))
     curvatures = np.zeros(len(heading_diffs))
     valid_mask = arc_lengths > 1e-6
@@ -120,8 +121,9 @@ def _gt_curvature(ego_future: np.ndarray, ego_state: np.ndarray) -> np.ndarray |
     return curvatures
 
 
-def _draw_vehicle_footprint(ax, x: float, y: float, heading: float,
-                             ego_shape: np.ndarray, color: str, alpha: float = 0.5) -> None:
+def _draw_vehicle_footprint(
+    ax, x: float, y: float, heading: float, ego_shape: np.ndarray, color: str, alpha: float = 0.5
+) -> None:
     """Draw a rotated rectangle representing the vehicle footprint."""
     wheel_base = float(ego_shape[0])
     length = float(ego_shape[1])
@@ -132,14 +134,16 @@ def _draw_vehicle_footprint(ax, x: float, y: float, heading: float,
     cy = y + (wheel_base / 2) * np.sin(heading)
 
     rect = patches.Rectangle(
-        (-length / 2, -width / 2), length, width,
-        linewidth=1.5, edgecolor=color, facecolor=color, alpha=alpha
+        (-length / 2, -width / 2),
+        length,
+        width,
+        linewidth=1.5,
+        edgecolor=color,
+        facecolor=color,
+        alpha=alpha,
     )
     transform = (
-        patches.mpatches.mpl.transforms.Affine2D()
-        .rotate(heading)
-        .translate(cx, cy)
-        + ax.transData
+        patches.mpatches.mpl.transforms.Affine2D().rotate(heading).translate(cx, cy) + ax.transData
     )
     rect.set_transform(transform)
     ax.add_patch(rect)
@@ -148,6 +152,7 @@ def _draw_vehicle_footprint(ax, x: float, y: float, heading: float,
 # ---------------------------------------------------------------------------
 # Public plotting functions
 # ---------------------------------------------------------------------------
+
 
 def plot_trajectory(
     samples: np.ndarray,
@@ -189,22 +194,22 @@ def plot_trajectory(
     for i in range(N):
         traj = samples[i]
         color = sample_color(i)
-        ax.plot(
-            traj[:, 0], traj[:, 1],
-            color=color, linewidth=2.5, alpha=0.8,
-            label=f"Sample {i}"
-        )
+        ax.plot(traj[:, 0], traj[:, 1], color=color, linewidth=2.5, alpha=0.8, label=f"Sample {i}")
         if time_step is not None and 0 <= time_step < len(traj):
             ego_shape = data_cpu.get("ego_shape")
             if ego_shape is not None:
-                ego_shape_np = (
-                    ego_shape.numpy()[0] if hasattr(ego_shape, "numpy") else ego_shape[0]
-                )
+                ego_shape_np = ego_shape.numpy()[0] if hasattr(ego_shape, "numpy") else ego_shape[0]
                 x, y = traj[time_step, 0], traj[time_step, 1]
                 heading = np.arctan2(traj[time_step, 3], traj[time_step, 2])
                 _draw_vehicle_footprint(ax, x, y, heading, ego_shape_np, color=sample_color(i))
-            ax.scatter([traj[time_step, 0]], [traj[time_step, 1]],
-                       color=color, s=50, zorder=10, edgecolors="black")
+            ax.scatter(
+                [traj[time_step, 0]],
+                [traj[time_step, 1]],
+                color=color,
+                s=50,
+                zorder=10,
+                edgecolors="black",
+            )
 
     # Ground truth
     if "ego_agent_future" in data_cpu:
@@ -215,18 +220,26 @@ def plot_trajectory(
         valid = ~((ego_future[:, 0] == 0) & (ego_future[:, 1] == 0))
         if np.any(valid):
             ax.plot(
-                ego_future[valid, 0], ego_future[valid, 1],
-                color="gray", linewidth=2, linestyle="--", alpha=0.7,
-                label="GT"
+                ego_future[valid, 0],
+                ego_future[valid, 1],
+                color="gray",
+                linewidth=2,
+                linestyle="--",
+                alpha=0.7,
+                label="GT",
             )
 
     # Anchor prototype
     if anchor_enabled and anchor is not None:
         T = min(anchor.shape[0], samples.shape[1])
         ax.plot(
-            anchor[:T, 0], anchor[:T, 1],
-            color="orange", linewidth=2, linestyle=":", alpha=0.85,
-            label="Anchor prototype"
+            anchor[:T, 0],
+            anchor[:T, 1],
+            color="orange",
+            linewidth=2,
+            linestyle=":",
+            alpha=0.85,
+            label="Anchor prototype",
         )
 
     ax.legend(loc="upper left", fontsize=7)
@@ -272,8 +285,15 @@ def plot_velocity(
         ego_future = np.array(data_cpu["ego_agent_future"]).reshape(-1, 3)
         gt_vel = _gt_velocities(ego_future, ego_state)
         if gt_vel is not None:
-            ax_vel.plot(np.arange(len(gt_vel)), gt_vel,
-                        color="black", linewidth=2, linestyle="--", alpha=0.7, label="GT")
+            ax_vel.plot(
+                np.arange(len(gt_vel)),
+                gt_vel,
+                color="black",
+                linewidth=2,
+                linestyle="--",
+                alpha=0.7,
+                label="GT",
+            )
 
     ax_vel.set_ylabel("Speed (km/h)")
     ax_vel.set_ylim(0, 80)
@@ -328,10 +348,23 @@ def plot_lateral_curvature(
         gt_curv = _gt_curvature(ego_future, ego_state)
         if gt_vel is not None and gt_curv is not None:
             gt_lat = _calculate_lateral_acceleration(gt_curv, gt_vel)
-            ax_lat.plot(np.arange(len(gt_lat)), gt_lat,
-                        color="black", linewidth=2, linestyle="--", alpha=0.7, label="GT")
-            ax_curv.plot(np.arange(len(gt_curv)), gt_curv,
-                         color="black", linewidth=2, linestyle="--", alpha=0.7)
+            ax_lat.plot(
+                np.arange(len(gt_lat)),
+                gt_lat,
+                color="black",
+                linewidth=2,
+                linestyle="--",
+                alpha=0.7,
+                label="GT",
+            )
+            ax_curv.plot(
+                np.arange(len(gt_curv)),
+                gt_curv,
+                color="black",
+                linewidth=2,
+                linestyle="--",
+                alpha=0.7,
+            )
 
     ax_lat.set_ylabel("Lat. accel (m/s²)")
     ax_lat.set_ylim(0, 8)
@@ -381,8 +414,9 @@ def render_prototype_thumbnail(
     for i, proto in enumerate(all_protos):
         if i != index:
             ax.plot(proto[:, 0], proto[:, 1], color="#cccccc", linewidth=0.8, alpha=0.6)
-    ax.plot(all_protos[index, :, 0], all_protos[index, :, 1],
-            color="royalblue", linewidth=2.2, zorder=5)
+    ax.plot(
+        all_protos[index, :, 0], all_protos[index, :, 1], color="royalblue", linewidth=2.2, zorder=5
+    )
     ax.scatter([0], [0], c="red", s=20, zorder=6)
     ax.set_title(f"#{index}  n={count}", fontsize=8, fontweight="bold" if selected else "normal")
     ax.set_aspect("equal")
@@ -412,15 +446,18 @@ def render_prototype_gallery(
         List of (PIL Image, label) tuples for gr.Gallery, or None if path invalid.
     """
     import os
+
     if not prototypes_path or not os.path.exists(prototypes_path):
         return None
-    protos = np.load(prototypes_path)           # (K, 80, 2)
+    protos = np.load(prototypes_path)  # (K, 80, 2)
     K = protos.shape[0]
     counts_path = prototypes_path.replace(".npy", "_counts.npy")
     counts = np.load(counts_path) if os.path.exists(counts_path) else np.ones(K, dtype=int)
     return [
-        (render_prototype_thumbnail(protos, i, int(counts[i]), selected=(i == selected_index)),
-         f"#{i} (n={int(counts[i])})")
+        (
+            render_prototype_thumbnail(protos, i, int(counts[i]), selected=(i == selected_index)),
+            f"#{i} (n={int(counts[i])})",
+        )
         for i in range(K)
     ]
 

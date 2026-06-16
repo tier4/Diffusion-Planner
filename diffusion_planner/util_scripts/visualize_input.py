@@ -62,7 +62,10 @@ if __name__ == "__main__":
 
         annotation, annotation_color = build_annotation(input_path)
         visualize_inputs(
-            data, save_path, view_ranges=[60, 150], annotation=annotation,
+            data,
+            save_path,
+            view_ranges=[60, 150],
+            annotation=annotation,
             annotation_color=annotation_color,
         )
 

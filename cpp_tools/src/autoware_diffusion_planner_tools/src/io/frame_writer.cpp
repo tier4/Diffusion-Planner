@@ -14,9 +14,6 @@
 
 #include "io/frame_writer.hpp"
 
-#include "nlohmann/json.hpp"
-#include "types/training_data_binary.hpp"
-
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -34,8 +31,11 @@ inline double to_millisecond(const int64_t timestamp_ns)
 }
 }  // namespace
 
-void save_frame_data(
-  const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
+// ---------------------------------------------------------------------------
+// Pure builders
+// ---------------------------------------------------------------------------
+
+TrainingDataBinary build_training_data(
   const std::vector<float> & ego_past, const std::vector<float> & ego_current,
   const std::vector<float> & ego_future, const std::vector<float> & neighbor_past,
   const std::vector<float> & neighbor_future, const std::vector<float> & static_objects,
@@ -46,10 +46,6 @@ void save_frame_data(
   const std::vector<float> & line_strings, const std::vector<float> & goal_pose,
   const std::vector<int32_t> & turn_indicators, const std::vector<float> & ego_shape)
 {
-  namespace fs = std::filesystem;
-
-  fs::create_directories(output_path);
-
   TrainingDataBinary data;
   std::copy(ego_past.begin(), ego_past.end(), data.ego_agent_past);
   std::copy(ego_current.begin(), ego_current.end(), data.ego_current_state);
@@ -73,30 +69,13 @@ void save_frame_data(
   }
   std::copy(turn_indicators.begin(), turn_indicators.end(), data.turn_indicators);
   std::copy(ego_shape.begin(), ego_shape.end(), data.ego_shape);
-
-  const std::string binary_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".bin";
-  std::ofstream file(binary_filename, std::ios::binary);
-  if (!file.is_open()) {
-    std::cerr << "Failed to open file for writing: " << binary_filename << std::endl;
-    return;
-  }
-  file.write(reinterpret_cast<const char *>(&data), sizeof(TrainingDataBinary));
-  if (file.fail()) {
-    std::cerr << "Failed to write data to file: " << binary_filename << std::endl;
-    return;
-  }
-  file.close();
+  return data;
 }
 
-void save_frame_json(
-  const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
+nlohmann::json build_frame_json(
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
   const SkippingInfo & skipping_info)
 {
-  namespace fs = std::filesystem;
-
-  fs::create_directories(output_path);
-
   std::vector<int> incomplete_types;
   for (const auto & t : skipping_info.incomplete_data_types) {
     incomplete_types.push_back(static_cast<int>(t));
@@ -116,28 +95,14 @@ void save_frame_json(
     {"label", static_cast<int>(skipping_info.label)},
     {"details", skipping_info.details},
     {"incomplete_data_types", incomplete_types}};
-
-  const std::string json_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".json";
-  std::ofstream json_file(json_filename);
-  if (json_file.is_open()) {
-    json_file << std::setw(2) << j << std::endl;
-    json_file.close();
-  } else {
-    std::cerr << "Failed to open JSON file for writing: " << json_filename << std::endl;
-  }
+  return j;
 }
 
-void save_route_json(
-  const std::string & output_path, const std::string & rosbag_dir_name,
-  const std::string & identifier, const int64_t num_frames, const double traveled_distance_m,
-  const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info,
+nlohmann::json build_route_json(
+  const int64_t num_frames, const double traveled_distance_m, const int64_t start_timestamp,
+  const int64_t end_timestamp, const SkippingInfo & skipping_info,
   const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
 {
-  namespace fs = std::filesystem;
-
-  const std::string routes_dir = output_path + "/routes";
-  fs::create_directories(routes_dir);
-
   std::vector<int> missing_types;
   for (const auto & t : skipping_info.missing_topic_types) {
     missing_types.push_back(static_cast<int>(t));
@@ -153,6 +118,7 @@ void save_route_json(
     {"label", static_cast<int>(skipping_info.label)},
     {"details", skipping_info.details},
     {"missing_topic_types", missing_types}};
+
   nlohmann::json timestamp_stats_json;
   for (const auto & [topic, stats] : timestamp_stats_map.stats_map) {
     nlohmann::json diff_stats_json = {
@@ -178,6 +144,83 @@ void save_route_json(
       {"rosbag_diff_stats", rosbag_diff_stats_json}};
   }
   j["timestamp_stats"] = timestamp_stats_json;
+  return j;
+}
+
+// ---------------------------------------------------------------------------
+// File-writing wrappers
+// ---------------------------------------------------------------------------
+
+void save_frame_data(
+  const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
+  const std::vector<float> & ego_past, const std::vector<float> & ego_current,
+  const std::vector<float> & ego_future, const std::vector<float> & neighbor_past,
+  const std::vector<float> & neighbor_future, const std::vector<float> & static_objects,
+  const std::vector<float> & lanes, const std::vector<float> & lanes_speed_limit,
+  const std::vector<bool> & lanes_has_speed_limit, const std::vector<float> & route_lanes,
+  const std::vector<float> & route_lanes_speed_limit,
+  const std::vector<bool> & route_lanes_has_speed_limit, const std::vector<float> & polygons,
+  const std::vector<float> & line_strings, const std::vector<float> & goal_pose,
+  const std::vector<int32_t> & turn_indicators, const std::vector<float> & ego_shape)
+{
+  namespace fs = std::filesystem;
+
+  fs::create_directories(output_path);
+
+  const TrainingDataBinary data = build_training_data(
+    ego_past, ego_current, ego_future, neighbor_past, neighbor_future, static_objects, lanes,
+    lanes_speed_limit, lanes_has_speed_limit, route_lanes, route_lanes_speed_limit,
+    route_lanes_has_speed_limit, polygons, line_strings, goal_pose, turn_indicators, ego_shape);
+
+  const std::string binary_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".bin";
+  std::ofstream file(binary_filename, std::ios::binary);
+  if (!file.is_open()) {
+    std::cerr << "Failed to open file for writing: " << binary_filename << std::endl;
+    return;
+  }
+  file.write(reinterpret_cast<const char *>(&data), sizeof(TrainingDataBinary));
+  if (file.fail()) {
+    std::cerr << "Failed to write data to file: " << binary_filename << std::endl;
+    return;
+  }
+  file.close();
+}
+
+void save_frame_json(
+  const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
+  const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
+  const SkippingInfo & skipping_info)
+{
+  namespace fs = std::filesystem;
+
+  fs::create_directories(output_path);
+
+  const nlohmann::json j = build_frame_json(kinematic_state, timestamp, skipping_info);
+
+  const std::string json_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".json";
+  std::ofstream json_file(json_filename);
+  if (json_file.is_open()) {
+    json_file << std::setw(2) << j << std::endl;
+    json_file.close();
+  } else {
+    std::cerr << "Failed to open JSON file for writing: " << json_filename << std::endl;
+  }
+}
+
+void save_route_json(
+  const std::string & output_path, const std::string & rosbag_dir_name,
+  const std::string & identifier, const int64_t num_frames, const double traveled_distance_m,
+  const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info,
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
+{
+  namespace fs = std::filesystem;
+
+  const std::string routes_dir = output_path + "/routes";
+  fs::create_directories(routes_dir);
+
+  const nlohmann::json j = build_route_json(
+    num_frames, traveled_distance_m, start_timestamp, end_timestamp, skipping_info,
+    timestamp_stats_map);
 
   const std::string json_filename = routes_dir + "/" + rosbag_dir_name + "_" + identifier + ".json";
   std::ofstream json_file(json_filename);

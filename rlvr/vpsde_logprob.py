@@ -114,6 +114,4 @@ def compute_discount_weights(
     Returns:
         Tensor of shape (num_steps,) with increasing weights.
     """
-    return torch.tensor(
-        [discount ** (num_steps - i - 1) for i in range(num_steps)]
-    )
+    return torch.tensor([discount ** (num_steps - i - 1) for i in range(num_steps)])

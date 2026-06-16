@@ -132,7 +132,7 @@ def _point_to_segments_dist(points: np.ndarray, segs: np.ndarray) -> np.ndarray:
         return np.full((points.shape[0],), np.nan)
     a = segs[:, 0, :]  # [N, 2]
     b = segs[:, 1, :]  # [N, 2]
-    ab = b - a          # [N, 2]
+    ab = b - a  # [N, 2]
     ab_len_sq = np.sum(ab * ab, axis=-1).clip(min=1e-9)  # [N]
     # broadcast: points [T, 1, 2] - a [1, N, 2] = [T, N, 2]
     ap = points[:, None, :] - a[None, :, :]
@@ -144,9 +144,7 @@ def _point_to_segments_dist(points: np.ndarray, segs: np.ndarray) -> np.ndarray:
     return dist.min(axis=-1)
 
 
-def per_step_lateral_distance(
-    traj_xy: np.ndarray, route_lanes: torch.Tensor
-) -> np.ndarray:
+def per_step_lateral_distance(traj_xy: np.ndarray, route_lanes: torch.Tensor) -> np.ndarray:
     """For each [T,2] trajectory point, return absolute perpendicular distance
     to the nearest route_lanes centerline (treating consecutive valid
     centerline points as polyline segments). This is more accurate than a
@@ -539,9 +537,7 @@ def closed_loop_rollout(
         new_cum_sin = cum_sin * ncos_loc + cum_cos * nsin_loc
 
         positions.append(np.array([new_world_x, new_world_y]))
-        cum_x, cum_y, cum_cos, cum_sin = (
-            new_world_x, new_world_y, new_cum_cos, new_cum_sin
-        )
+        cum_x, cum_y, cum_cos, cum_sin = (new_world_x, new_world_y, new_cum_cos, new_cum_sin)
 
         # Build the next ego_agent_past: shift the existing past by 1 slot
         # and append the OLD ego pose (which is at -pred[advance_k] expressed
@@ -549,17 +545,21 @@ def closed_loop_rollout(
         # We do this BEFORE transforming the rest of the world.
         if "ego_agent_past" in data:
             eap = data["ego_agent_past"].clone()  # [B, T, 4]
-            old_origin = torch.tensor(
-                [0.0, 0.0, 1.0, 0.0], dtype=eap.dtype, device=eap.device
-            )
+            old_origin = torch.tensor([0.0, 0.0, 1.0, 0.0], dtype=eap.dtype, device=eap.device)
             T = eap.shape[1]
             # Drop oldest, shift, append old origin (in OLD ego frame).
-            eap = torch.cat([eap[:, 1:T], old_origin.view(1, 1, 4).expand(eap.shape[0], 1, 4)], dim=1)
+            eap = torch.cat(
+                [eap[:, 1:T], old_origin.view(1, 1, 4).expand(eap.shape[0], 1, 4)], dim=1
+            )
             data["ego_agent_past"] = eap
 
         # Now transform to the new ego frame.
         data = transform_to_new_ego_frame(
-            data, nx_loc, ny_loc, ncos_loc, nsin_loc,
+            data,
+            nx_loc,
+            ny_loc,
+            ncos_loc,
+            nsin_loc,
         )
         # Force ego_current_state to be at origin facing +x in new frame, and
         # update vx/vy from the model's predicted next motion. Without this,
@@ -610,8 +610,14 @@ def deterministic_predict(model, model_args, data: dict[str, torch.Tensor]) -> n
 
 
 def k_predict(
-    model, model_args, data: dict[str, torch.Tensor], K: int, variant: str,
-    noise_range: tuple[float, float], gt_max_speed: float, use_route_cl: bool,
+    model,
+    model_args,
+    data: dict[str, torch.Tensor],
+    K: int,
+    variant: str,
+    noise_range: tuple[float, float],
+    gt_max_speed: float,
+    use_route_cl: bool,
 ) -> np.ndarray:
     """Generate K trajectories using the training variant. Returns [K, T, 4]."""
     device = next(model.parameters()).device
@@ -619,8 +625,12 @@ def k_predict(
     norm_batch = _normalize_batch(batch, model_args)
     with torch.no_grad():
         trajs = generate_all_scenes_batched(
-            model, model_args, norm_batch, K=K,
-            noise_range=noise_range, device=device,
+            model,
+            model_args,
+            norm_batch,
+            K=K,
+            noise_range=noise_range,
+            device=device,
             gen_chunk_size=K,
             gt_max_speed=gt_max_speed,
             generation_variant=variant,
@@ -669,54 +679,62 @@ def _build_trials(
         if kind == "parallel":
             for off in offsets:
                 for s in sides:
-                    out.append({
-                        "kind": "parallel",
-                        "magnitude": float(off),
-                        "side_str": "+" if s > 0 else "-",
-                        "data": apply_lateral_shift(data, n_unit, s * off),
-                        "ref_magnitude": float(abs(off)),
-                    })
+                    out.append(
+                        {
+                            "kind": "parallel",
+                            "magnitude": float(off),
+                            "side_str": "+" if s > 0 else "-",
+                            "data": apply_lateral_shift(data, n_unit, s * off),
+                            "ref_magnitude": float(abs(off)),
+                        }
+                    )
         elif kind == "yaw":
             for deg in yaw_degs:
                 for s in sides:
                     yaw_rad = np.deg2rad(s * deg)
-                    out.append({
-                        "kind": "yaw",
-                        "magnitude": float(deg),
-                        "side_str": "+" if s > 0 else "-",
-                        "data": apply_yaw_perturbation(data, yaw_rad),
-                        # Yaw has no direct lateral magnitude. Use 0.0 to
-                        # signal "fall back to t0 distance" in the caller —
-                        # recovery rate becomes (t0 - t79)/t0, i.e. the
-                        # fraction of initial lateral error that was closed.
-                        "ref_magnitude": 0.0,
-                    })
+                    out.append(
+                        {
+                            "kind": "yaw",
+                            "magnitude": float(deg),
+                            "side_str": "+" if s > 0 else "-",
+                            "data": apply_yaw_perturbation(data, yaw_rad),
+                            # Yaw has no direct lateral magnitude. Use 0.0 to
+                            # signal "fall back to t0 distance" in the caller —
+                            # recovery rate becomes (t0 - t79)/t0, i.e. the
+                            # fraction of initial lateral error that was closed.
+                            "ref_magnitude": 0.0,
+                        }
+                    )
         elif kind == "velocity":
             for pct in vel_pcts:
                 for s in sides:
                     scale = 1.0 + (s * pct / 100.0)  # +50% -> 1.5, -50% -> 0.5
-                    out.append({
-                        "kind": "velocity",
-                        "magnitude": float(pct),
-                        "side_str": "+" if s > 0 else "-",
-                        "data": apply_velocity_perturbation(data, scale),
-                        # Velocity has no direct lateral magnitude. Same
-                        # convention as yaw — fall back to t0 so the rate
-                        # is "fraction of initial lateral error closed".
-                        "ref_magnitude": 0.0,
-                    })
+                    out.append(
+                        {
+                            "kind": "velocity",
+                            "magnitude": float(pct),
+                            "side_str": "+" if s > 0 else "-",
+                            "data": apply_velocity_perturbation(data, scale),
+                            # Velocity has no direct lateral magnitude. Same
+                            # convention as yaw — fall back to t0 so the rate
+                            # is "fraction of initial lateral error closed".
+                            "ref_magnitude": 0.0,
+                        }
+                    )
         elif kind == "combined":
             for s in sides:
                 yaw_rad = np.deg2rad(s * combined_yaw_deg)
-                out.append({
-                    "kind": "combined",
-                    "magnitude": float(combined_yaw_deg),  # report yaw as primary
-                    "side_str": "+" if s > 0 else "-",
-                    "data": apply_combined_perturbation(
-                        data, n_unit, s * combined_offset, yaw_rad
-                    ),
-                    "ref_magnitude": float(abs(combined_offset)),
-                })
+                out.append(
+                    {
+                        "kind": "combined",
+                        "magnitude": float(combined_yaw_deg),  # report yaw as primary
+                        "side_str": "+" if s > 0 else "-",
+                        "data": apply_combined_perturbation(
+                            data, n_unit, s * combined_offset, yaw_rad
+                        ),
+                        "ref_magnitude": float(abs(combined_offset)),
+                    }
+                )
         else:
             print(f"  [warn] unknown perturbation kind '{kind}' — skipped")
     return out
@@ -731,37 +749,73 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--lora_path", type=str, default=None)
-    parser.add_argument("--scenes", type=str, required=True,
-                        help="JSON list of NPZ scene paths")
-    parser.add_argument("--offsets", type=str, default="0.25,0.50,0.75,1.00",
-                        help="Comma-separated lateral offsets (meters) for parallel + combined")
-    parser.add_argument("--yaw_degs", type=str, default="2,5,10",
-                        help="Comma-separated yaw perturbations in degrees (each tested + and -)")
-    parser.add_argument("--vel_pcts", type=str, default="30,50",
-                        help="Comma-separated velocity scale percentages (each tested as +pct/-pct)")
-    parser.add_argument("--combined_offset", type=float, default=0.5,
-                        help="Lateral offset (m) used for the 'combined' kind")
-    parser.add_argument("--combined_yaw_deg", type=float, default=5.0,
-                        help="Yaw perturbation (deg) used for the 'combined' kind")
-    parser.add_argument("--perturbation_kinds", type=str, default="parallel",
-                        help="Comma-separated perturbation kinds: parallel, yaw, velocity, combined")
-    parser.add_argument("--config", type=str, required=True,
-                        help="GRPO config JSON (variant + reward weights)")
+    parser.add_argument("--scenes", type=str, required=True, help="JSON list of NPZ scene paths")
+    parser.add_argument(
+        "--offsets",
+        type=str,
+        default="0.25,0.50,0.75,1.00",
+        help="Comma-separated lateral offsets (meters) for parallel + combined",
+    )
+    parser.add_argument(
+        "--yaw_degs",
+        type=str,
+        default="2,5,10",
+        help="Comma-separated yaw perturbations in degrees (each tested + and -)",
+    )
+    parser.add_argument(
+        "--vel_pcts",
+        type=str,
+        default="30,50",
+        help="Comma-separated velocity scale percentages (each tested as +pct/-pct)",
+    )
+    parser.add_argument(
+        "--combined_offset",
+        type=float,
+        default=0.5,
+        help="Lateral offset (m) used for the 'combined' kind",
+    )
+    parser.add_argument(
+        "--combined_yaw_deg",
+        type=float,
+        default=5.0,
+        help="Yaw perturbation (deg) used for the 'combined' kind",
+    )
+    parser.add_argument(
+        "--perturbation_kinds",
+        type=str,
+        default="parallel",
+        help="Comma-separated perturbation kinds: parallel, yaw, velocity, combined",
+    )
+    parser.add_argument(
+        "--config", type=str, required=True, help="GRPO config JSON (variant + reward weights)"
+    )
     parser.add_argument("--K", type=int, default=8)
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--candidate_name", type=str, default="model")
     parser.add_argument("--noise_min", type=float, default=0.5)
     parser.add_argument("--noise_max", type=float, default=2.0)
-    parser.add_argument("--closed_loop", action="store_true",
-                        help="Also run a closed-loop rollout (re-predict every step)")
-    parser.add_argument("--closed_loop_steps", type=int, default=80,
-                        help="Number of closed-loop steps (80 = 8 sec at 0.1 s)")
-    parser.add_argument("--closed_loop_advance_k", type=int, default=0,
-                        help="Which prediction step to advance to per loop. "
-                             "0 = pred[0] (0.1 s ahead), 1 = pred[1] (0.2 s), etc. "
-                             "n_steps * (advance_k+1) * 0.1 = total simulated seconds")
-    parser.add_argument("--skip_K", action="store_true",
-                        help="Skip the K-sample generation (faster diagnostics)")
+    parser.add_argument(
+        "--closed_loop",
+        action="store_true",
+        help="Also run a closed-loop rollout (re-predict every step)",
+    )
+    parser.add_argument(
+        "--closed_loop_steps",
+        type=int,
+        default=80,
+        help="Number of closed-loop steps (80 = 8 sec at 0.1 s)",
+    )
+    parser.add_argument(
+        "--closed_loop_advance_k",
+        type=int,
+        default=0,
+        help="Which prediction step to advance to per loop. "
+        "0 = pred[0] (0.1 s ahead), 1 = pred[1] (0.2 s), etc. "
+        "n_steps * (advance_k+1) * 0.1 = total simulated seconds",
+    )
+    parser.add_argument(
+        "--skip_K", action="store_true", help="Skip the K-sample generation (faster diagnostics)"
+    )
     args = parser.parse_args()
 
     device = torch.device(DEVICE)
@@ -870,7 +924,9 @@ def main():
                 "origin_dist": origin_dist,
                 "ref_magnitude": ref_mag,
                 "det": {
-                    "t0": det_t0, "t40": det_t40, "t79": det_t79,
+                    "t0": det_t0,
+                    "t40": det_t40,
+                    "t79": det_t79,
                     "recovery_rate": det_recovery,
                 },
             }
@@ -878,9 +934,14 @@ def main():
             # 2. K-sample best (skipped when --skip_K)
             if not args.skip_K:
                 k_trajs = k_predict(
-                    model, model_args, shifted, K=args.K, variant=variant,
+                    model,
+                    model_args,
+                    shifted,
+                    K=args.K,
+                    variant=variant,
                     noise_range=(args.noise_min, args.noise_max),
-                    gt_max_speed=v_high, use_route_cl=use_route_cl,
+                    gt_max_speed=v_high,
+                    use_route_cl=use_route_cl,
                 )  # [K, T, 4]
 
                 k_t79 = []
@@ -897,7 +958,9 @@ def main():
                 best_recovery = (best_t0 - best_t79) / denom
 
                 row["best_K"] = {
-                    "t0": best_t0, "t40": best_t40, "t79": best_t79,
+                    "t0": best_t0,
+                    "t40": best_t40,
+                    "t79": best_t79,
                     "recovery_rate": best_recovery,
                     "winning_slot": best_slot,
                     "winning_k": best_k,
@@ -909,7 +972,9 @@ def main():
             cl_recovery = None
             if args.closed_loop:
                 pos_cl, lat_cl = closed_loop_rollout(
-                    model, model_args, shifted,
+                    model,
+                    model_args,
+                    shifted,
                     init_route_lanes=data["route_lanes"],
                     n_steps=args.closed_loop_steps,
                     advance_k=args.closed_loop_advance_k,
@@ -919,7 +984,9 @@ def main():
                 cl_t79 = float(lat_cl[-1])
                 cl_recovery = (cl_t0 - cl_t79) / denom
                 row["closed_loop"] = {
-                    "t0": cl_t0, "t40": cl_t40, "t79": cl_t79,
+                    "t0": cl_t0,
+                    "t40": cl_t40,
+                    "t79": cl_t79,
                     "recovery_rate": cl_recovery,
                     "n_steps": int(args.closed_loop_steps),
                     "advance_k": int(args.closed_loop_advance_k),
@@ -969,13 +1036,13 @@ def main():
             "det_mean_recovery": float(np.mean([r["det"]["recovery_rate"] for r in rows])),
         }
         if any("best_K" in r for r in rows):
-            by_kind[kind]["best_K_mean_recovery"] = float(np.mean(
-                [r["best_K"]["recovery_rate"] for r in rows if "best_K" in r]
-            ))
+            by_kind[kind]["best_K_mean_recovery"] = float(
+                np.mean([r["best_K"]["recovery_rate"] for r in rows if "best_K" in r])
+            )
         if any("closed_loop" in r for r in rows):
-            by_kind[kind]["closed_loop_mean_recovery"] = float(np.mean(
-                [r["closed_loop"]["recovery_rate"] for r in rows if "closed_loop" in r]
-            ))
+            by_kind[kind]["closed_loop_mean_recovery"] = float(
+                np.mean([r["closed_loop"]["recovery_rate"] for r in rows if "closed_loop" in r])
+            )
     aggregate["by_kind"] = by_kind
 
     out = {

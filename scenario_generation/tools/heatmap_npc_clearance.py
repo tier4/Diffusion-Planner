@@ -72,7 +72,9 @@ def _collect(records: list[dict], pts: np.ndarray, s: np.ndarray, key: str):
         if d is None or not math.isfinite(d):
             continue
         s_arc, _, _ = project_to_polyline(
-            np.array([r["ego_x"], r["ego_y"]], dtype=np.float64), pts, s,
+            np.array([r["ego_x"], r["ego_y"]], dtype=np.float64),
+            pts,
+            s,
         )
         arc.append(s_arc)
         dist.append(float(d))
@@ -81,8 +83,14 @@ def _collect(records: list[dict], pts: np.ndarray, s: np.ndarray, key: str):
 
 
 def _render_heatmap(
-    out_png: Path, pts: np.ndarray, s_max: float, bin_m: float,
-    arc: np.ndarray, dist: np.ndarray, vmax: float, threshold: float,
+    out_png: Path,
+    pts: np.ndarray,
+    s_max: float,
+    bin_m: float,
+    arc: np.ndarray,
+    dist: np.ndarray,
+    vmax: float,
+    threshold: float,
     title: str,
 ):
     n_bins = max(1, int(math.ceil(s_max / bin_m)))
@@ -90,11 +98,21 @@ def _render_heatmap(
     segs = segments_from_polyline(pts, _arc_lengths(pts), bin_m, n_bins)
 
     fig, (ax_map, ax_line) = plt.subplots(
-        2, 1, figsize=(11, 9), gridspec_kw={"height_ratios": [3, 1]},
+        2,
+        1,
+        figsize=(11, 9),
+        gridspec_kw={"height_ratios": [3, 1]},
     )
     cmap = plt.get_cmap("RdYlGn")
     plot_route_heatmap(
-        ax_map, pts, segs, min_val, title, vmin=0.0, vmax=vmax, cmap=cmap,
+        ax_map,
+        pts,
+        segs,
+        min_val,
+        title,
+        vmin=0.0,
+        vmax=vmax,
+        cmap=cmap,
     )
     ax_map.autoscale_view()
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0.0, vmax))
@@ -106,12 +124,20 @@ def _render_heatmap(
 
     # Min-clearance vs arc line chart.
     valid = ~np.isnan(min_val)
-    ax_line.plot(bin_s_mid[valid], min_val[valid], "-", color="#cc0000",
-                 lw=1.5, label="min clearance / bin")
-    ax_line.plot(bin_s_mid[valid], mean_val[valid], "--", color="#888888",
-                 lw=1.0, label="mean clearance / bin")
-    ax_line.axhline(threshold, color="black", ls=":", lw=1.0,
-                    label=f"bad threshold {threshold:.1f} m")
+    ax_line.plot(
+        bin_s_mid[valid], min_val[valid], "-", color="#cc0000", lw=1.5, label="min clearance / bin"
+    )
+    ax_line.plot(
+        bin_s_mid[valid],
+        mean_val[valid],
+        "--",
+        color="#888888",
+        lw=1.0,
+        label="mean clearance / bin",
+    )
+    ax_line.axhline(
+        threshold, color="black", ls=":", lw=1.0, label=f"bad threshold {threshold:.1f} m"
+    )
     ax_line.set_xlabel("route arc-length (m)")
     ax_line.set_ylabel("clearance (m)")
     # Keep the threshold line visible even when it sits above the colour cap.
@@ -132,8 +158,14 @@ def _arc_lengths(pts: np.ndarray) -> np.ndarray:
 
 
 def _export_bad_areas(
-    out_dir: Path, png_dir: Path, bin_m: float, threshold: float,
-    arc: np.ndarray, dist: np.ndarray, recs: list[dict], n_bins: int,
+    out_dir: Path,
+    png_dir: Path,
+    bin_m: float,
+    threshold: float,
+    arc: np.ndarray,
+    dist: np.ndarray,
+    recs: list[dict],
+    n_bins: int,
     max_areas: int,
 ) -> list[dict]:
     """Copy one representative (worst) step PNG per arc bin below threshold."""
@@ -149,12 +181,14 @@ def _export_bad_areas(
             continue
         local = int(np.argmin(d_bin))
         rec = [r for r, m in zip(recs, mask) if m][local]
-        bad.append({
-            "arc_m": float((b + 0.5) * bin_m),
-            "min_clearance_m": float(d_bin.min()),
-            "step": int(rec["step"]),
-            "png": rec["png"],
-        })
+        bad.append(
+            {
+                "arc_m": float((b + 0.5) * bin_m),
+                "min_clearance_m": float(d_bin.min()),
+                "step": int(rec["step"]),
+                "png": rec["png"],
+            }
+        )
     # Worst first; cap the number of copied images.
     bad.sort(key=lambda x: x["min_clearance_m"])
     bad = bad[:max_areas]
@@ -178,17 +212,28 @@ def main():
     p.add_argument("--clearance_log", type=Path, required=True)
     p.add_argument("--route", type=Path, required=True)
     p.add_argument("--output_dir", type=Path, required=True)
-    p.add_argument("--png_dir", type=Path, default=None,
-                   help="Dir with the step_NNNN.png files. Defaults to the "
-                        "png_dir recorded in the clearance log.")
+    p.add_argument(
+        "--png_dir",
+        type=Path,
+        default=None,
+        help="Dir with the step_NNNN.png files. Defaults to the "
+        "png_dir recorded in the clearance log.",
+    )
     p.add_argument("--label", default="run")
     p.add_argument("--bin_m", type=float, default=5.0)
-    p.add_argument("--bad_thresh_stopped", type=float, default=1.0,
-                   help="Arc bins with min stopped-clearance below this are "
-                        "flagged as bad avoidance areas.")
+    p.add_argument(
+        "--bad_thresh_stopped",
+        type=float,
+        default=1.0,
+        help="Arc bins with min stopped-clearance below this are flagged as bad avoidance areas.",
+    )
     p.add_argument("--bad_thresh_moving", type=float, default=2.0)
-    p.add_argument("--max_bad_areas", type=int, default=40,
-                   help="Cap on copied representative PNGs per obstacle type.")
+    p.add_argument(
+        "--max_bad_areas",
+        type=int,
+        default=40,
+        help="Cap on copied representative PNGs per obstacle type.",
+    )
     args = p.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -222,13 +267,26 @@ def main():
             continue
         vmax = _VMAX[kind]
         bin_s_mid, mean_val, min_val = _render_heatmap(
-            args.output_dir / f"heatmap_{kind}.png", pts, s_max, args.bin_m,
-            arc, dist, vmax, thresh,
+            args.output_dir / f"heatmap_{kind}.png",
+            pts,
+            s_max,
+            args.bin_m,
+            arc,
+            dist,
+            vmax,
+            thresh,
             f"{args.label}: ego↔{kind}-NPC min clearance (m)",
         )
         bad = _export_bad_areas(
-            args.output_dir / f"bad_areas_{kind}", png_dir, args.bin_m, thresh,
-            arc, dist, recs, n_bins, args.max_bad_areas,
+            args.output_dir / f"bad_areas_{kind}",
+            png_dir,
+            args.bin_m,
+            thresh,
+            arc,
+            dist,
+            recs,
+            n_bins,
+            args.max_bad_areas,
         )
         npz_out[f"{kind}_min"] = min_val
         npz_out[f"{kind}_mean"] = mean_val
@@ -239,9 +297,11 @@ def main():
             "n_bad_areas": len(bad),
             "bad_areas": bad,
         }
-        print(f"[{kind}] {len(arc)} samples, global min {dist.min():.2f} m, "
-              f"{len(bad)} bad areas (< {thresh} m) → "
-              f"{args.output_dir / f'bad_areas_{kind}'}")
+        print(
+            f"[{kind}] {len(arc)} samples, global min {dist.min():.2f} m, "
+            f"{len(bad)} bad areas (< {thresh} m) → "
+            f"{args.output_dir / f'bad_areas_{kind}'}"
+        )
 
     np.savez(args.output_dir / "clearance_arc.npz", **npz_out)
     with open(args.output_dir / "summary.json", "w") as f:

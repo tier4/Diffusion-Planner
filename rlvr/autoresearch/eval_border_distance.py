@@ -67,6 +67,7 @@ def load_model_for_eval(args):
     model, model_args = load_model(Path(args.model_path), "cuda")
     if args.lora_path:
         from preference_optimization.lora_utils import load_lora_checkpoint
+
         model = load_lora_checkpoint(model, args.lora_path, is_trainable=False)
     return model, model_args
 
@@ -74,9 +75,13 @@ def load_model_for_eval(args):
 def generate_deterministic_trajectory(model, model_args, data, device="cuda"):
     """Generate a single deterministic trajectory (noise_scale=0)."""
     from rlvr.closed_loop.batched_rollout import make_initial_latent
+
     P = 1 + model_args.predicted_neighbor_num
     data["sampled_trajectories"] = make_initial_latent(
-        1, P, OUTPUT_T, data["ego_current_state"].device,
+        1,
+        P,
+        OUTPUT_T,
+        data["ego_current_state"].device,
     )
 
     with torch.no_grad():
@@ -113,7 +118,7 @@ def compute_border_distances(ego_traj, ego_shape, line_strings):
     T, K = ego_edge_points.shape[1], ego_edge_points.shape[2]
 
     seg_a = ls_xy[rb_mask, :-1, :]  # [M, S, 2]
-    seg_b = ls_xy[rb_mask, 1:, :]   # [M, S, 2]
+    seg_b = ls_xy[rb_mask, 1:, :]  # [M, S, 2]
     M, S, _ = seg_a.shape
     seg_valid = ((seg_a.abs().sum(-1) > 1e-6) & (seg_b.abs().sum(-1) > 1e-6)).bool()
 
@@ -135,11 +140,13 @@ def compute_border_distances(ego_traj, ego_shape, line_strings):
 def load_npz_data(path, device="cuda"):
     """Load npz and prepare for model."""
     from preference_optimization.utils import load_npz_data as _load
+
     return _load(path, device)
 
 
-def visualize_scene_border(ego_traj_np, min_dists_np, data, scene_path, save_path,
-                           tag="", rb_crossing=False):
+def visualize_scene_border(
+    ego_traj_np, min_dists_np, data, scene_path, save_path, tag="", rb_crossing=False
+):
     """Visualize a single scene with border distance annotations."""
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
 
@@ -153,42 +160,54 @@ def visualize_scene_border(ego_traj_np, min_dists_np, data, scene_path, save_pat
             continue
         is_border = ls[i, :, 3] > 0.5
         if is_border.any():
-            ax.plot(pts[valid, 0], pts[valid, 1], 'r-', linewidth=2, alpha=0.7)
+            ax.plot(pts[valid, 0], pts[valid, 1], "r-", linewidth=2, alpha=0.7)
         else:
-            ax.plot(pts[valid, 0], pts[valid, 1], '-', color='orange', linewidth=0.5, alpha=0.3)
+            ax.plot(pts[valid, 0], pts[valid, 1], "-", color="orange", linewidth=0.5, alpha=0.3)
 
     # GT trajectory
     gt = data.get("ego_agent_future")
     if gt is not None:
         gt_np = gt[0].cpu().numpy()
-        ax.plot(gt_np[:, 0], gt_np[:, 1], 'g-', linewidth=1.5, alpha=0.5, label='GT')
+        ax.plot(gt_np[:, 0], gt_np[:, 1], "g-", linewidth=1.5, alpha=0.5, label="GT")
 
     # Model trajectory colored by distance
     colors = plt.cm.RdYlGn(np.clip(min_dists_np / 1.0, 0, 1))
     for t in range(len(ego_traj_np) - 1):
-        ax.plot(ego_traj_np[t:t+2, 0], ego_traj_np[t:t+2, 1],
-                color=colors[t], linewidth=2.5)
+        ax.plot(
+            ego_traj_np[t : t + 2, 0], ego_traj_np[t : t + 2, 1], color=colors[t], linewidth=2.5
+        )
 
     # Mark t=20 (2s) with distance annotation
     if len(min_dists_np) > 20:
-        ax.plot(ego_traj_np[20, 0], ego_traj_np[20, 1], 'ko', markersize=8, zorder=5)
-        ax.annotate(f't=2s\n{min_dists_np[20]:.2f}m',
-                    xy=(ego_traj_np[20, 0], ego_traj_np[20, 1]),
-                    fontsize=8, ha='left', fontweight='bold')
+        ax.plot(ego_traj_np[20, 0], ego_traj_np[20, 1], "ko", markersize=8, zorder=5)
+        ax.annotate(
+            f"t=2s\n{min_dists_np[20]:.2f}m",
+            xy=(ego_traj_np[20, 0], ego_traj_np[20, 1]),
+            fontsize=8,
+            ha="left",
+            fontweight="bold",
+        )
 
     # Mark overall minimum
     t_min = np.argmin(min_dists_np)
-    ax.plot(ego_traj_np[t_min, 0], ego_traj_np[t_min, 1], 'r*', markersize=12, zorder=5)
-    ax.annotate(f'min={min_dists_np[t_min]:.2f}m\nt={t_min}',
-                xy=(ego_traj_np[t_min, 0], ego_traj_np[t_min, 1]),
-                fontsize=8, ha='left', color='red', fontweight='bold')
+    ax.plot(ego_traj_np[t_min, 0], ego_traj_np[t_min, 1], "r*", markersize=12, zorder=5)
+    ax.annotate(
+        f"min={min_dists_np[t_min]:.2f}m\nt={t_min}",
+        xy=(ego_traj_np[t_min, 0], ego_traj_np[t_min, 1]),
+        fontsize=8,
+        ha="left",
+        color="red",
+        fontweight="bold",
+    )
 
-    ax.set_aspect('equal')
-    title = (f'{tag} — {Path(scene_path).stem}\n'
-             f'rb_cross={"YES" if rb_crossing else "no"}  '
-             f'min_dist={min_dists_np.min():.3f}m')
+    ax.set_aspect("equal")
+    title = (
+        f"{tag} — {Path(scene_path).stem}\n"
+        f"rb_cross={'YES' if rb_crossing else 'no'}  "
+        f"min_dist={min_dists_np.min():.3f}m"
+    )
     if len(min_dists_np) > 20:
-        title += f'  border_t20={min_dists_np[20]:.3f}m'
+        title += f"  border_t20={min_dists_np[20]:.3f}m"
     ax.set_title(title)
     ax.legend(fontsize=8)
 
@@ -202,19 +221,19 @@ def visualize_scene_border(ego_traj_np, min_dists_np, data, scene_path, save_pat
     # Right: distance over time
     ax2 = axes[1]
     timesteps = np.arange(len(min_dists_np)) * 0.1
-    ax2.plot(timesteps, min_dists_np, 'b-', linewidth=2)
-    ax2.axhline(y=0.10, color='r', linestyle='--', label='crossing (10cm)')
-    ax2.axhline(y=0.25, color='orange', linestyle='--', label='near (25cm)')
-    ax2.axhline(y=0.40, color='y', linestyle='--', label='wide (40cm)')
-    ax2.set_xlabel('Time (s)')
-    ax2.set_ylabel('Min border distance (m)')
-    ax2.set_title('Distance to road border over time')
+    ax2.plot(timesteps, min_dists_np, "b-", linewidth=2)
+    ax2.axhline(y=0.10, color="r", linestyle="--", label="crossing (10cm)")
+    ax2.axhline(y=0.25, color="orange", linestyle="--", label="near (25cm)")
+    ax2.axhline(y=0.40, color="y", linestyle="--", label="wide (40cm)")
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("Min border distance (m)")
+    ax2.set_title("Distance to road border over time")
     ax2.legend(fontsize=8)
     ax2.set_ylim(bottom=0, top=max(2.0, min_dists_np.max() * 1.1))
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
 
 
@@ -249,8 +268,9 @@ def main():
     for i, path in enumerate(tqdm(scene_paths, desc=f"Border dist [{args.tag}]")):
         try:
             data = load_npz_data(path, device)
-            norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                         for k, v in data.items()}
+            norm_data = {
+                k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
+            }
             norm_data = norm_fn(norm_data)
 
             ego_traj = generate_deterministic_trajectory(model, model_args, norm_data, device)
@@ -265,17 +285,21 @@ def main():
             # Check for crossing
             rb_crossing = bool((min_dists_np < 0.10).any())
 
-            results.append({
-                "scene_idx": i,
-                "scene_path": path,
-                "min_dist_overall": float(min_dists_np.min()),
-                "mean_dist": float(min_dists_np.mean()),
-                "border_t20": float(min_dists_np[20]) if len(min_dists_np) > 20 else float("inf"),
-                "rb_crossing": rb_crossing,
-                "min_dists": min_dists_np,
-                "ego_traj": ego_traj[0].cpu().numpy(),
-                "data": data if args.visualize else None,
-            })
+            results.append(
+                {
+                    "scene_idx": i,
+                    "scene_path": path,
+                    "min_dist_overall": float(min_dists_np.min()),
+                    "mean_dist": float(min_dists_np.mean()),
+                    "border_t20": float(min_dists_np[20])
+                    if len(min_dists_np) > 20
+                    else float("inf"),
+                    "rb_crossing": rb_crossing,
+                    "min_dists": min_dists_np,
+                    "ego_traj": ego_traj[0].cpu().numpy(),
+                    "data": data if args.visualize else None,
+                }
+            )
         except Exception as e:
             print(f"  Error on scene {i}: {e}")
             continue
@@ -290,35 +314,50 @@ def main():
     border_t20_all = [r["border_t20"] for r in results]
     crossings = sum(1 for r in results if r["rb_crossing"])
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Border Distance Results — {args.tag}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Scenes evaluated: {len(results)}")
     print(f"  rb_crossings: {crossings}/{len(results)}")
-    print(f"  min_dist_overall:  mean={np.mean(min_dists_all):.3f}m  "
-          f"min={np.min(min_dists_all):.3f}m  p5={np.percentile(min_dists_all, 5):.3f}m")
-    print(f"  mean_dist:         mean={np.mean(mean_dists_all):.3f}m  "
-          f"min={np.min(mean_dists_all):.3f}m")
-    print(f"  border_t20:        mean={np.mean(border_t20_all):.3f}m  "
-          f"min={np.min(border_t20_all):.3f}m  p5={np.percentile(border_t20_all, 5):.3f}m")
+    print(
+        f"  min_dist_overall:  mean={np.mean(min_dists_all):.3f}m  "
+        f"min={np.min(min_dists_all):.3f}m  p5={np.percentile(min_dists_all, 5):.3f}m"
+    )
+    print(
+        f"  mean_dist:         mean={np.mean(mean_dists_all):.3f}m  "
+        f"min={np.min(mean_dists_all):.3f}m"
+    )
+    print(
+        f"  border_t20:        mean={np.mean(border_t20_all):.3f}m  "
+        f"min={np.min(border_t20_all):.3f}m  p5={np.percentile(border_t20_all, 5):.3f}m"
+    )
 
     # Print worst scenes
     sorted_by_min = sorted(results, key=lambda r: r["min_dist_overall"])
     print(f"\n  Worst {min(10, len(sorted_by_min))} scenes by min distance:")
     for r in sorted_by_min[:10]:
-        print(f"    scene {r['scene_idx']:4d}: min={r['min_dist_overall']:.3f}m  "
-              f"t20={r['border_t20']:.3f}m  cross={'YES' if r['rb_crossing'] else 'no'}  "
-              f"— {Path(r['scene_path']).stem}")
+        print(
+            f"    scene {r['scene_idx']:4d}: min={r['min_dist_overall']:.3f}m  "
+            f"t20={r['border_t20']:.3f}m  cross={'YES' if r['rb_crossing'] else 'no'}  "
+            f"— {Path(r['scene_path']).stem}"
+        )
 
     # Visualize worst scenes
     if args.visualize and args.output_dir:
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        for r in sorted_by_min[:args.worst_n]:
-            save_path = out_dir / f"{args.tag}_scene{r['scene_idx']:04d}_{Path(r['scene_path']).stem}.png"
+        for r in sorted_by_min[: args.worst_n]:
+            save_path = (
+                out_dir / f"{args.tag}_scene{r['scene_idx']:04d}_{Path(r['scene_path']).stem}.png"
+            )
             visualize_scene_border(
-                r["ego_traj"], r["min_dists"], r["data"], r["scene_path"],
-                save_path, tag=args.tag, rb_crossing=r["rb_crossing"]
+                r["ego_traj"],
+                r["min_dists"],
+                r["data"],
+                r["scene_path"],
+                save_path,
+                tag=args.tag,
+                rb_crossing=r["rb_crossing"],
             )
             print(f"  Saved: {save_path}")
 

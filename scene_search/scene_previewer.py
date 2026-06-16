@@ -8,14 +8,14 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import numpy as np
 import torch
-from matplotlib.figure import Figure
-from PIL import Image
-
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.visualize_input import visualize_inputs
+from matplotlib.figure import Figure
+from PIL import Image
 
 from scene_search.batch_search import Batch
 
@@ -45,7 +45,9 @@ def _load_npz_as_viz_data(npz_path: str) -> dict[str, torch.Tensor]:
     return data
 
 
-def render_single_thumbnail(npz_path: str, view_range: float = 60.0, figsize: tuple = (5, 5), dpi: int = 90) -> Figure:
+def render_single_thumbnail(
+    npz_path: str, view_range: float = 60.0, figsize: tuple = (5, 5), dpi: int = 90
+) -> Figure:
     """Render a single scene thumbnail using visualize_inputs().
 
     Returns a matplotlib Figure.
@@ -79,6 +81,7 @@ def _render_thumbnail_to_bytes(args: tuple) -> tuple[int, bytes, str]:
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
         import matplotlib.pyplot as plt
+
         plt.close(fig)
         buf.seek(0)
         return (idx, buf.read(), label)
@@ -179,7 +182,9 @@ def get_central_task_index(batch: Batch, every_nth: int = 10) -> tuple[list[tupl
     return tasks, central_task_idx
 
 
-def render_central_thumbnail(batch: Batch, every_nth: int = 10, view_range: float = 60.0) -> tuple[list[tuple], int]:
+def render_central_thumbnail(
+    batch: Batch, every_nth: int = 10, view_range: float = 60.0
+) -> tuple[list[tuple], int]:
     """Render only the central scene thumbnail immediately.
 
     Returns (pil_images_with_placeholders, n_total) where non-central entries

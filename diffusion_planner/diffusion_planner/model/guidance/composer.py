@@ -20,8 +20,7 @@ class GuidanceComposer:
     def __init__(self, set_config: GuidanceSetConfig, **build_kwargs):
         self._set_config = set_config
         self._functions = [
-            build(fn_cfg, **build_kwargs)
-            for fn_cfg in set_config.active_functions()
+            build(fn_cfg, **build_kwargs) for fn_cfg in set_config.active_functions()
         ]
 
     def __call__(self, x_in, t_input, cond, *args, **kwargs):

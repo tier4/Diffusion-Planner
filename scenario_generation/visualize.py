@@ -31,7 +31,16 @@ from scenario_generation.scene_context import AgentType, SceneContext
 
 # Colors
 _EGO_COLOR = "#3366cc"
-_NEIGHBOR_COLORS = ["#e67300", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
+_NEIGHBOR_COLORS = [
+    "#e67300",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+]
 _PED_COLOR = "#ff6699"
 _BIKE_COLOR = "#66ccff"
 _LANE_COLOR = "#888888"
@@ -64,8 +73,22 @@ def draw_lanes(ax, map_data, alpha=0.5):
         if lane.shape[1] > 7:
             lb = lane[:, 4:6]
             rb = lane[:, 6:8]
-            ax.plot((pts + lb)[valid, 0], (pts + lb)[valid, 1], "-", color=_LANE_COLOR, alpha=alpha, lw=1.0)
-            ax.plot((pts + rb)[valid, 0], (pts + rb)[valid, 1], "-", color=_LANE_COLOR, alpha=alpha, lw=1.0)
+            ax.plot(
+                (pts + lb)[valid, 0],
+                (pts + lb)[valid, 1],
+                "-",
+                color=_LANE_COLOR,
+                alpha=alpha,
+                lw=1.0,
+            )
+            ax.plot(
+                (pts + rb)[valid, 0],
+                (pts + rb)[valid, 1],
+                "-",
+                color=_LANE_COLOR,
+                alpha=alpha,
+                lw=1.0,
+            )
 
 
 def draw_road_borders(ax, map_data):
@@ -112,8 +135,19 @@ def draw_route(ax, route_lanes, color=None, alpha=0.4, lw=1.5):
         ax.plot(pts[valid, 0], pts[valid, 1], "-", color=c, alpha=alpha, lw=lw)
 
 
-def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, zorder=10,
-                   wheelbase: float | None = None):
+def draw_agent_box(
+    ax,
+    x,
+    y,
+    heading,
+    length,
+    width,
+    color,
+    alpha=0.8,
+    lw=1.5,
+    zorder=10,
+    wheelbase: float | None = None,
+):
     """Draw an oriented bounding box for an agent.
 
     When ``wheelbase`` is provided, (x, y) is treated as rear-axle midpoint
@@ -126,14 +160,31 @@ def draw_agent_box(ax, x, y, heading, length, width, color, alpha=0.8, lw=1.5, z
         rear_overhang = length / 2
     t_rot = mtransforms.Affine2D().rotate(heading).translate(x, y) + ax.transData
     rect = Rectangle(
-        (-rear_overhang, -width / 2), length, width,
-        lw=lw, ec=color, fc=color, alpha=alpha, zorder=zorder, transform=t_rot,
+        (-rear_overhang, -width / 2),
+        length,
+        width,
+        lw=lw,
+        ec=color,
+        fc=color,
+        alpha=alpha,
+        zorder=zorder,
+        transform=t_rot,
     )
     ax.add_patch(rect)
 
 
-def draw_trajectory(ax, traj, color, label=None, lw=2, zorder=10, show_footprints=False,
-                    length=4.0, width=1.8, wheelbase: float | None = None):
+def draw_trajectory(
+    ax,
+    traj,
+    color,
+    label=None,
+    lw=2,
+    zorder=10,
+    show_footprints=False,
+    length=4.0,
+    width=1.8,
+    wheelbase: float | None = None,
+):
     """Draw a trajectory line with optional footprints.
 
     Args:
@@ -143,18 +194,47 @@ def draw_trajectory(ax, traj, color, label=None, lw=2, zorder=10, show_footprint
             (x, y) is the bbox centroid (neighbor convention).
     """
     ax.plot(traj[:, 0], traj[:, 1], "-", color=color, lw=lw, alpha=0.6, zorder=zorder)
-    ax.plot(traj[::3, 0], traj[::3, 1], "o", color=color, ms=2.5, alpha=0.8,
-            mew=0, zorder=zorder + 1, label=label)
+    ax.plot(
+        traj[::3, 0],
+        traj[::3, 1],
+        "o",
+        color=color,
+        ms=2.5,
+        alpha=0.8,
+        mew=0,
+        zorder=zorder + 1,
+        label=label,
+    )
 
     if show_footprints:
         for ts in range(5, len(traj), 10):
-            draw_agent_box(ax, traj[ts, 0], traj[ts, 1], traj[ts, 2],
-                           length, width, color, alpha=0.12, lw=0.3, zorder=zorder - 1,
-                           wheelbase=wheelbase)
+            draw_agent_box(
+                ax,
+                traj[ts, 0],
+                traj[ts, 1],
+                traj[ts, 2],
+                length,
+                width,
+                color,
+                alpha=0.12,
+                lw=0.3,
+                zorder=zorder - 1,
+                wheelbase=wheelbase,
+            )
         if len(traj) > 1:
-            draw_agent_box(ax, traj[-1, 0], traj[-1, 1], traj[-1, 2],
-                           length, width, color, alpha=0.35, lw=1.0, zorder=zorder - 1,
-                           wheelbase=wheelbase)
+            draw_agent_box(
+                ax,
+                traj[-1, 0],
+                traj[-1, 1],
+                traj[-1, 2],
+                length,
+                width,
+                color,
+                alpha=0.35,
+                lw=1.0,
+                zorder=zorder - 1,
+                wheelbase=wheelbase,
+            )
 
 
 def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
@@ -189,7 +269,7 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
     # Agents
     nb_idx = 0
     for agent in scene.agents:
-        is_ego = (agent.id == ego_id)
+        is_ego = agent.id == ego_id
         pos = agent.current_position
         heading = agent.current_heading
 
@@ -204,37 +284,74 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
             nb_idx += 1
 
         # Current bounding box
-        draw_agent_box(ax, pos[0], pos[1], heading, agent.length, agent.width,
-                       color, alpha=0.8 if is_ego else 0.5, lw=2 if is_ego else 1, zorder=zorder,
-                       wheelbase=agent.wheelbase if is_ego else None)
+        draw_agent_box(
+            ax,
+            pos[0],
+            pos[1],
+            heading,
+            agent.length,
+            agent.width,
+            color,
+            alpha=0.8 if is_ego else 0.5,
+            lw=2 if is_ego else 1,
+            zorder=zorder,
+            wheelbase=agent.wheelbase if is_ego else None,
+        )
 
         # Past trajectory
         past = agent.past_trajectory
         valid = np.abs(past[:, :2]).sum(axis=1) > 1e-6
         if valid.sum() > 1:
-            ax.plot(past[valid, 0], past[valid, 1], "--", color=color, lw=0.8,
-                    alpha=0.4, zorder=zorder - 2)
+            ax.plot(
+                past[valid, 0],
+                past[valid, 1],
+                "--",
+                color=color,
+                lw=0.8,
+                alpha=0.4,
+                zorder=zorder - 2,
+            )
 
         # Heading arrow
         arrow_len = max(agent.length, 2.0)
         dx = arrow_len * math.cos(heading)
         dy = arrow_len * math.sin(heading)
-        ax.annotate("", xy=(pos[0] + dx, pos[1] + dy), xytext=(pos[0], pos[1]),
-                     arrowprops=dict(arrowstyle="->", color=color, lw=1.5),
-                     zorder=zorder + 1)
+        ax.annotate(
+            "",
+            xy=(pos[0] + dx, pos[1] + dy),
+            xytext=(pos[0], pos[1]),
+            arrowprops=dict(arrowstyle="->", color=color, lw=1.5),
+            zorder=zorder + 1,
+        )
 
         # Future trajectory (GT) and final GT pose
         if agent.future_trajectory is not None:
             gt = agent.future_trajectory
             gt_label = "GT future" if is_ego else None
-            draw_trajectory(ax, gt, _GT_COLOR, label=gt_label,
-                            lw=1.5 if is_ego else 0.8, zorder=zorder - 1,
-                            show_footprints=is_ego,
-                            length=agent.length, width=agent.width)
+            draw_trajectory(
+                ax,
+                gt,
+                _GT_COLOR,
+                label=gt_label,
+                lw=1.5 if is_ego else 0.8,
+                zorder=zorder - 1,
+                show_footprints=is_ego,
+                length=agent.length,
+                width=agent.width,
+            )
             # Ghost box at final GT pose
-            draw_agent_box(ax, gt[-1, 0], gt[-1, 1], gt[-1, 2],
-                           agent.length, agent.width, color,
-                           alpha=0.25, lw=1.0, zorder=zorder - 1)
+            draw_agent_box(
+                ax,
+                gt[-1, 0],
+                gt[-1, 1],
+                gt[-1, 2],
+                agent.length,
+                agent.width,
+                color,
+                alpha=0.25,
+                lw=1.0,
+                zorder=zorder - 1,
+            )
 
         # Route
         if agent.route_lanes is not None:
@@ -245,17 +362,41 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
             gx, gy = agent.goal_pose[0], agent.goal_pose[1]
             marker = "*" if is_ego else "D"
             ms = 15 if is_ego else 10
-            ax.plot(gx, gy, marker, color=color, ms=ms, zorder=zorder + 3,
-                    markeredgecolor="black", markeredgewidth=0.8)
-            ax.annotate(f"{agent.id} goal", (gx, gy), fontsize=5, color=color,
-                        ha="center", va="bottom", zorder=zorder + 4,
-                        xytext=(0, 8), textcoords="offset points",
-                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.7, lw=0.5))
+            ax.plot(
+                gx,
+                gy,
+                marker,
+                color=color,
+                ms=ms,
+                zorder=zorder + 3,
+                markeredgecolor="black",
+                markeredgewidth=0.8,
+            )
+            ax.annotate(
+                f"{agent.id} goal",
+                (gx, gy),
+                fontsize=5,
+                color=color,
+                ha="center",
+                va="bottom",
+                zorder=zorder + 4,
+                xytext=(0, 8),
+                textcoords="offset points",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.7, lw=0.5),
+            )
 
         # Label
-        ax.annotate(agent.id, (pos[0], pos[1]), fontsize=6, color=color,
-                    ha="center", va="bottom", zorder=zorder + 2,
-                    xytext=(0, 5), textcoords="offset points")
+        ax.annotate(
+            agent.id,
+            (pos[0], pos[1]),
+            fontsize=6,
+            color=color,
+            ha="center",
+            va="bottom",
+            zorder=zorder + 2,
+            xytext=(0, 5),
+            textcoords="offset points",
+        )
 
     # Auto-zoom
     all_pts = []
@@ -281,8 +422,12 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
         ax.legend(fontsize=6, loc="upper left")
 
 
-def visualize_scene(scene: SceneContext, ego_id: str | None = None,
-                    title: str | None = None, save_path: str | None = None):
+def visualize_scene(
+    scene: SceneContext,
+    ego_id: str | None = None,
+    title: str | None = None,
+    save_path: str | None = None,
+):
     """Visualize a single scene. Shows interactively or saves to file."""
     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
     draw_scene(ax, scene, ego_id)
@@ -296,8 +441,9 @@ def visualize_scene(scene: SceneContext, ego_id: str | None = None,
         plt.show()
 
 
-def visualize_scenes_grid(scenes: list[tuple[SceneContext, str]], cols: int = 3,
-                          save_path: str | None = None):
+def visualize_scenes_grid(
+    scenes: list[tuple[SceneContext, str]], cols: int = 3, save_path: str | None = None
+):
     """Visualize multiple scenes in a grid."""
     n = len(scenes)
     rows = (n + cols - 1) // cols
@@ -330,22 +476,26 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize SceneContext from NPZ files")
     parser.add_argument("npz_paths", nargs="+", type=Path, help="NPZ file(s) to visualize")
     parser.add_argument("--ego", type=str, default=None, help="Agent ID to highlight as ego")
-    parser.add_argument("-o", "--output", type=Path, default=None, help="Save to file instead of showing")
+    parser.add_argument(
+        "-o", "--output", type=Path, default=None, help="Save to file instead of showing"
+    )
     parser.add_argument("--cols", type=int, default=3, help="Columns in grid layout")
     args = parser.parse_args()
 
     if len(args.npz_paths) == 1:
         scene = from_npz(args.npz_paths[0])
         title = args.npz_paths[0].stem
-        visualize_scene(scene, ego_id=args.ego, title=title,
-                        save_path=str(args.output) if args.output else None)
+        visualize_scene(
+            scene, ego_id=args.ego, title=title, save_path=str(args.output) if args.output else None
+        )
     else:
         scenes = []
         for p in args.npz_paths:
             scene = from_npz(p)
             scenes.append((scene, p.stem))
-        visualize_scenes_grid(scenes, cols=args.cols,
-                              save_path=str(args.output) if args.output else None)
+        visualize_scenes_grid(
+            scenes, cols=args.cols, save_path=str(args.output) if args.output else None
+        )
 
 
 if __name__ == "__main__":

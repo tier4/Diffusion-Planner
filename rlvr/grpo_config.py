@@ -78,8 +78,8 @@ class GRPOConfig:
     enable_speed: bool = True
     enable_lateral: bool = False
     enable_longitudinal: bool = False
-    lambda_lat: float = 2.5    # max lateral offset in metres (PlannerRFT Eq. 2)
-    lambda_lon: float = 0.25   # max speed deviation fraction (PlannerRFT Eq. 3)
+    lambda_lat: float = 2.5  # max lateral offset in metres (PlannerRFT Eq. 2)
+    lambda_lon: float = 0.25  # max speed deviation fraction (PlannerRFT Eq. 3)
     guidance_prob: float = 0.5
     prototypes_path: str | None = None
 
@@ -121,12 +121,14 @@ class GRPOConfig:
     rb_near_scale: float = 3.0
     rb_wide_scale: float = 0.2
     rb_cont_scale: float = 0.0
-    rb_gate_enabled: bool = True   # if True, rb crossing is a hard safety gate
-    rb_penalty_mode: str = "frac"  # "frac" = fraction of timesteps (original), "survival" = first-violation time-decay
+    rb_gate_enabled: bool = True  # if True, rb crossing is a hard safety gate
+    rb_penalty_mode: str = (
+        "frac"  # "frac" = fraction of timesteps (original), "survival" = first-violation time-decay
+    )
     rb_cross_thresh: float = 0.20  # metres — ego perimeter within this = crossing
-    rb_near_thresh: float = 0.45   # metres — near zone boundary (+20cm vs lane)
-    rb_wide_thresh: float = 0.60   # metres — wide zone boundary (+20cm vs lane)
-    rb_cont_thresh: float = 1.00   # metres — continuous penalty max distance (+20cm vs lane)
+    rb_near_thresh: float = 0.45  # metres — near zone boundary (+20cm vs lane)
+    rb_wide_thresh: float = 0.60  # metres — wide zone boundary (+20cm vs lane)
+    rb_cont_thresh: float = 1.00  # metres — continuous penalty max distance (+20cm vs lane)
     # Lane departure penalty scales and thresholds
     enable_lane_departure: bool = False
     lane_gate_enabled: bool = False
@@ -145,7 +147,7 @@ class GRPOConfig:
     sc_near_scale: float = 0.0
     sc_wide_scale: float = 0.0
     sc_cont_scale: float = 0.0
-    sc_cross_thresh: float = 0.2    # clearance below this = crossing (matches reward.RewardConfig default; 20 cm treats visually-touching boxes as collisions)
+    sc_cross_thresh: float = 0.2  # clearance below this = crossing (matches reward.RewardConfig default; 20 cm treats visually-touching boxes as collisions)
     sc_near_thresh: float = 0.4
     sc_wide_thresh: float = 0.7
     sc_cont_thresh: float = 1.0
@@ -196,7 +198,9 @@ class GRPOConfig:
     logprob_discount: float = 0.8  # per-step advantage discount (DDV2 uses 0.8)
     logprob_min_std: float = 0.1  # minimum std for log-prob stability (DDV2 supplementary)
     il_loss_weight: float = 0.1  # IL (imitation learning) regularization weight
-    il_adaptive: bool = True  # if True: IL weight=1.0 when no positive advantages, else il_loss_weight
+    il_adaptive: bool = (
+        True  # if True: IL weight=1.0 when no positive advantages, else il_loss_weight
+    )
 
     # Advantage computation mode:
     # "normalized" (default): standard GRPO per-group normalization (mean=0, std=1).
@@ -214,7 +218,9 @@ class GRPOConfig:
     kl_schedule: str = "constant"
     kl_coef_initial: float | None = None  # set automatically from kl_coef at first call
     kl_coef_final: float = 0.01
-    kl_warmup_fraction: float = 0.5  # fraction of epochs to hold initial kl_coef (for "step" schedule)
+    kl_warmup_fraction: float = (
+        0.5  # fraction of epochs to hold initial kl_coef (for "step" schedule)
+    )
 
     # Rejection sampling: generate num_generations trajectories but keep only
     # the top rejection_keep by reward. Set to 0 or None to disable (keep all).
@@ -224,7 +230,23 @@ class GRPOConfig:
     # high-progress lane-departing scenes at top, heavily crashed scenes at bottom).
     reward_trim_pct: float = 0.0  # 0.05 = trim 5% of scenes from each end
     lane_dep_trim_n: int = 0  # drop N scenes with highest lane departure fraction (0=disabled)
-    neighbor_loss_weight: float = 0.0  # weight for neighbor prediction regularization (0=disabled)
+    # Weight for the neighbor loss term, consumed by BOTH the ranked-SFT path
+    # (grpo_sft_trainer: neighbor SFT loss) and the GRPO path (grpo_loss: neighbor
+    # MSE on trajectories). None = use each path's own default: ranked-SFT → 0.1
+    # (matches original SFT alpha_neighbor_loss), GRPO → 0.0 (neighbor term off,
+    # preserving prior behavior). An explicit float (including 0.0 to disable) is
+    # honored verbatim by both paths. (Sentinel None avoids silently enabling the
+    # GRPO neighbor term for configs that never set this field.)
+    neighbor_loss_weight: float | None = None
+    # Anchor source for the base pass used by neighbor_reg / baseline ego-IL / KL,
+    # in the RANKED-SFT path only (the fully-batched GRPO trainer does not read it).
+    # "warmstart" (default): forward the LoRA model with adapters disabled
+    #   (disable_adapter) — i.e. the merged warmstart's predictions (current behavior).
+    # "baseline": forward an EXTERNAL frozen base model (the true original baseline)
+    #   loaded from neighbor_reg_anchor_path instead of disable_adapter.
+    neighbor_reg_anchor: str = "warmstart"
+    # Path to the external baseline .pth. REQUIRED when neighbor_reg_anchor=="baseline".
+    neighbor_reg_anchor_path: str | None = None
 
     # Ranked SFT mode: generate N trajectories, pick best by reward, SFT on it.
     # "none": standard GRPO training (default).
@@ -232,8 +254,10 @@ class GRPOConfig:
     # "baseline_neighbor": use baseline (no-LoRA) model prediction as neighbor target.
     ranked_sft_mode: str = "none"
     sg_filter_window: int = 11  # Savitzky-Golay filter window length (must be odd)
-    sg_filter_order: int = 3    # Savitzky-Golay filter polynomial order
-    sft_velocity_weight: bool = True  # divide lon_err by clamp(|ego_speed|, min=1) — matches original SFT
+    sg_filter_order: int = 3  # Savitzky-Golay filter polynomial order
+    sft_velocity_weight: bool = (
+        True  # divide lon_err by clamp(|ego_speed|, min=1) — matches original SFT
+    )
     # Neighbor regularization: penalize LoRA neighbor outputs diverging from base model.
     # Computes MSE(lora_neighbor_pred, base_neighbor_pred) at the same (noise, timestep)
     # by running a second forward pass with LoRA disabled. Adds ~2x training cost.
@@ -289,7 +313,9 @@ class GRPOConfig:
     #                   accidentally filtered out by selective_threshold.
     gt_fallback_mode: str = "none"
     gt_fallback_margin: float = 0.0  # reward units. 0 = any GT advantage > 0 triggers fallback.
-    include_gt_candidate: bool = False  # append GT (ego_agent_future) as extra candidate in K+1 ranking pool
+    include_gt_candidate: bool = (
+        False  # append GT (ego_agent_future) as extra candidate in K+1 ranking pool
+    )
 
     # Ranked SFT batching: how many scenes per forward pass (default 1 = sequential).
     # With sft_batch_size=B, each forward pass processes B scenes. Grad accumulation
@@ -326,9 +352,32 @@ class GRPOConfig:
     exploration_kl_schedule: str = "constant"  # "constant", "linear", "cosine"
     exploration_kl_coef_final: float = 0.05
     # Lateral/longitudinal guidance parameters for exploration policy
-    exploration_lambda_lat: float = 2.5   # max lateral offset in metres
+    exploration_lambda_lat: float = 2.5  # max lateral offset in metres
     exploration_lambda_lon: float = 0.25  # max speed deviation fraction
     exploration_guidance_scale: float = 0.5  # global guidance scale for policy-guided trajectories
+    # Guidance envelope (must match the sweep that produced the policy's
+    # training labels): "v1" = stock lateral + bounded swerve, "v2" = ramped
+    # variants (lambda_col = v2 swerve target magnitude).
+    exploration_envelope: str = "v1"
+    exploration_lambda_col: float = 3.0
+    # Guidance heads for the exploration policy. Default reproduces the
+    # original 2-head layout. Supported: "lateral" (lateral offset, existing
+    # guidance), "longitudinal" (legacy, weak), "collision"
+    # (collision_swerve_batched: sign = side, |eta| = strength), "stretch"
+    # (speed_stretch_batched: stretch = 1 + lambda_spd * eta).
+    exploration_heads: list[str] = field(default_factory=lambda: ["lateral", "longitudinal"])
+    # Per-function energy scales (multiply each guidance fn's energy; the
+    # campaign avoidance envelope uses lat_scale=1.5, col_scale=6.0,
+    # lambda_lat=4.0, col_range=8.0 — must match the sweep that produced any
+    # warm-start labels).
+    exploration_lat_scale: float = 1.0
+    exploration_col_scale: float = 2.0
+    exploration_col_range: float = 8.0
+    exploration_lambda_spd: float = 0.2
+    exploration_stretch_scale: float = 1.0
+    # Action-cost coefficient: pulls each head's deterministic action (Beta
+    # mean) toward 0 — inertness tie-breaker on reward-indifferent scenes.
+    exploration_action_cost: float = 0.0
     # GuidanceHead init mode: "zeros" (recommended) or "normal"
     exploration_head_init: str = "zeros"
     exploration_head_init_std: float = 0.01
@@ -379,20 +428,43 @@ class GRPOConfig:
     # "none": η=0 always (no guidance, pure noise diversity).
     random_guidance_mode: str = "explorer"
 
+    # Train the DiT planner alongside the exploration policy. When False, the
+    # DiT is fully frozen (no GRPO loss, no DiT optimizer step) and ONLY the
+    # exploration policy trains — i.e. learn guidance params for a fixed base
+    # model. Only honored by GRPOExplorationTrainer; validated in __post_init__.
+    train_dit: bool = True
+    # Pin generation slot 0 to η=0 for all guidance heads. With
+    # noise_scale_range=[0,0] slot 0 approximates the unguided deterministic
+    # trajectory (exact for collision/stretch heads, which are inert at η=0;
+    # the legacy v1 lateral head still applies a small centering pull toward
+    # the reference at η=0), giving the group a no-guidance reference so
+    # advantages compare "guided" vs "do nothing" (slot 0 is excluded from
+    # the policy log-prob gradient since it is a forced, not sampled, action).
+    # Set False to reproduce older runs where slot 0's η was sampled.
+    exploration_pin_zero_eta: bool = True
+
     # --- Closed-loop training ---
     # When True, uses ClosedLoopExplorationTrainer instead of GRPOExplorationTrainer.
     # The explorer operates per-step (0.1s) with GAE temporal credit assignment.
     use_closed_loop: bool = False
-    closed_loop_rollout_steps: int = 40     # 4s at 10Hz
-    closed_loop_gamma: float = 0.99         # GAE discount factor
-    closed_loop_gae_lambda: float = 0.95    # GAE lambda
-    closed_loop_value_coef: float = 0.5     # value loss coefficient
-    closed_loop_alive_bonus: float = 0.5    # per-step alive reward
-    closed_loop_freeze_dit: bool = True     # freeze DiT during explorer training
-    closed_loop_batch_size: int = 8        # scenes per batch in rollout (8 fits ~24GB VRAM)
-    closed_loop_drop_last: bool = True     # drop incomplete last batch
-    closed_loop_online_interval: int = 0   # online explorer update every N steps (0=off, 10=PlannerRFT-style)
-    closed_loop_explorer_mini_batch: int = 0  # step explorer optimizer every N scenes (0=all scenes at once)
+    closed_loop_rollout_steps: int = 40  # 4s at 10Hz
+    closed_loop_gamma: float = 0.99  # GAE discount factor
+    closed_loop_gae_lambda: float = 0.95  # GAE lambda
+    closed_loop_value_coef: float = 0.5  # value loss coefficient
+    # Train ONLY the value head for the first N epochs (policy/entropy terms
+    # skipped) so REINFORCE advantages aren't driven by a cold critic —
+    # counters the early-epoch policy drift seen with warm-started policies.
+    closed_loop_value_warmup_epochs: int = 0
+    closed_loop_alive_bonus: float = 0.5  # per-step alive reward
+    closed_loop_freeze_dit: bool = True  # freeze DiT during explorer training
+    closed_loop_batch_size: int = 8  # scenes per batch in rollout (8 fits ~24GB VRAM)
+    closed_loop_drop_last: bool = True  # drop incomplete last batch
+    closed_loop_online_interval: int = (
+        0  # online explorer update every N steps (0=off, 10=PlannerRFT-style)
+    )
+    closed_loop_explorer_mini_batch: int = (
+        0  # step explorer optimizer every N scenes (0=all scenes at once)
+    )
 
     # --- Per-epoch scheduling for arbitrary parameters ---
     # Generic scheduling system for reward weights, guidance scales, etc.
@@ -444,6 +516,7 @@ class GRPOConfig:
         # it (often as 99.0 or 1.0); accept-and-ignore so legacy configs load.
         if "centerline_usage_cap" in data:
             import warnings
+
             data.pop("centerline_usage_cap")
             warnings.warn(
                 "centerline_usage_cap is no longer supported — the cap "
@@ -538,7 +611,10 @@ class GRPOConfig:
         )
 
     def get_scheduled_value(
-        self, name: str, epoch: int, total_epochs: int,
+        self,
+        name: str,
+        epoch: int,
+        total_epochs: int,
     ) -> float | None:
         """Get the scheduled value for a parameter at the given epoch.
 
@@ -577,8 +653,7 @@ class GRPOConfig:
                 end_ep = int(end_ep)
                 if not 1 < end_ep <= total_epochs:
                     raise ValueError(
-                        f"end_epoch for '{name}' must be in (1, {total_epochs}], "
-                        f"got {end_ep}"
+                        f"end_epoch for '{name}' must be in (1, {total_epochs}], got {end_ep}"
                     )
                 if epoch >= end_ep:
                     return end
@@ -592,9 +667,7 @@ class GRPOConfig:
         if stype == "step":
             warmup = float(spec.get("warmup_fraction", 0.5))
             if not 0.0 <= warmup <= 1.0:
-                raise ValueError(
-                    f"warmup_fraction for '{name}' must be in [0, 1], got {warmup}"
-                )
+                raise ValueError(f"warmup_fraction for '{name}' must be in [0, 1], got {warmup}")
             return start if progress < warmup else end
 
         if stype == "peak":
@@ -603,9 +676,7 @@ class GRPOConfig:
             peak_val = float(spec["peak"])
             peak_frac = float(spec.get("peak_fraction", 0.5))
             if not 0.0 < peak_frac < 1.0:
-                raise ValueError(
-                    f"peak_fraction for '{name}' must be in (0, 1), got {peak_frac}"
-                )
+                raise ValueError(f"peak_fraction for '{name}' must be in (0, 1), got {peak_frac}")
             if progress <= peak_frac:
                 t = progress / peak_frac
                 return start + (peak_val - start) * t
@@ -619,7 +690,9 @@ class GRPOConfig:
         )
 
     def get_all_scheduled_values(
-        self, epoch: int, total_epochs: int,
+        self,
+        epoch: int,
+        total_epochs: int,
     ) -> dict[str, float]:
         """Get all scheduled values for the given epoch.
 
@@ -647,8 +720,7 @@ class GRPOConfig:
         if self.exploration_loss_type in _loss_renames:
             self.exploration_loss_type = _loss_renames[self.exploration_loss_type]
         # Validate: best_sample_mse is not compatible with PPO (inner_epochs > 1)
-        if (self.exploration_loss_type == "best_sample_mse"
-                and self.exploration_inner_epochs > 1):
+        if self.exploration_loss_type == "best_sample_mse" and self.exploration_inner_epochs > 1:
             raise ValueError(
                 "exploration_loss_type='best_sample_mse' is not compatible with "
                 f"exploration_inner_epochs={self.exploration_inner_epochs} (PPO). "
@@ -658,11 +730,37 @@ class GRPOConfig:
         if self.ego_il_mode not in ("gt", "baseline"):
             raise ValueError(f"ego_il_mode must be 'gt' or 'baseline', got {self.ego_il_mode!r}")
         if self.selective_mode not in ("threshold", "advantage"):
-            raise ValueError(f"selective_mode must be 'threshold' or 'advantage', got {self.selective_mode!r}")
+            raise ValueError(
+                f"selective_mode must be 'threshold' or 'advantage', got {self.selective_mode!r}"
+            )
         if self.gt_fallback_mode not in ("none", "skip", "il"):
             raise ValueError(
                 f"gt_fallback_mode must be 'none', 'skip', or 'il', got {self.gt_fallback_mode!r}"
             )
+        if self.neighbor_reg_anchor not in ("warmstart", "baseline"):
+            raise ValueError(
+                f"neighbor_reg_anchor must be 'warmstart' or 'baseline', got {self.neighbor_reg_anchor!r}"
+            )
+        if not self.train_dit:
+            if not self.use_exploration_policy or self.use_closed_loop:
+                raise ValueError(
+                    "train_dit=False (frozen-DiT, policy-only training) is only "
+                    "supported by GRPOExplorationTrainer; requires "
+                    "use_exploration_policy=True and use_closed_loop=False, got "
+                    f"use_exploration_policy={self.use_exploration_policy}, "
+                    f"use_closed_loop={self.use_closed_loop}."
+                )
+            if self.use_lora:
+                raise ValueError(
+                    "train_dit=False is incompatible with use_lora=True: a frozen "
+                    "DiT must not carry trainable LoRA adapters."
+                )
+            if self.random_guidance_mode != "explorer":
+                raise ValueError(
+                    "train_dit=False trains ONLY the exploration policy, so "
+                    f"random_guidance_mode must be 'explorer', got "
+                    f"{self.random_guidance_mode!r} (nothing would train)."
+                )
 
     @property
     def uses_importance_sampling(self) -> bool:

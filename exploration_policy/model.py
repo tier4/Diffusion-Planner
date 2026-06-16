@@ -23,8 +23,8 @@ Architecture (Figure 2):
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import torch
@@ -34,6 +34,25 @@ from torch.distributions import Beta
 from exploration_policy.module.heads import GuidanceHead, ValueHead
 from exploration_policy.module.ref_fusion import RefFusionAttention
 from exploration_policy.module.ref_mixer import RefTrajectoryMixer
+
+# The v1 guidance calibration the explorer's eta labels were swept against.
+# The policy's eta outputs are ONLY meaningful at the envelope its labels were
+# generated with (the trainer is pure eta-regression — the network never sees
+# the envelope), so it MUST be persisted with the policy and reused verbatim at
+# eval/deploy. Historically this lived only in CLI flags whose defaults differed
+# across tools (the open-loop eval defaulted to a WEAKER 4.0/1.5/6.0), which
+# silently halved the applied guidance and made a certified policy look broken.
+V1_GUIDANCE_ENVELOPE = {
+    "lambda_lat": 5.0,
+    "lat_scale": 2.0,
+    "col_scale": 9.0,
+    "col_range": 8.0,
+    "lambda_spd": 0.2,
+    "stretch_scale": 1.0,
+    "guidance_scale": 0.5,
+    "envelope": "v1",
+    "lambda_col": 3.0,
+}
 
 
 @dataclass
@@ -56,6 +75,18 @@ class ExplorationPolicyConfig:
     # flow through the softplus compression. Default 1.0 (no scaling).
     # Set to 10.0 to make the policy learn ~12x faster.
     head_raw_scale: float = 1.0
+    # Guidance heads, one Beta distribution (-> eta in [-1, 1]) each. The
+    # policy itself is head-name agnostic — names define count, ordering, and
+    # the dict keys of ExplorationPolicyOutput; mapping eta -> guidance params
+    # is the caller's job. Default matches the original 2-head layout, so old
+    # checkpoints (fc2 [4, H]) load unchanged.
+    heads: list[str] = field(default_factory=lambda: ["lateral", "longitudinal"])
+    # Guidance envelope the eta labels were swept against — the calibration the
+    # policy's outputs are bound to. Persisted here so eval/deploy load it
+    # instead of relying on (divergent) per-tool CLI defaults. Defaults to the
+    # v1 calibration, which is also what every pre-2026-06-14 policy was trained
+    # at, so older configs lacking this key are correct on load.
+    guidance_envelope: dict = field(default_factory=lambda: dict(V1_GUIDANCE_ENVELOPE))
 
     def to_json(self, path: str | Path) -> None:
         with open(path, "w") as f:
@@ -70,15 +101,42 @@ class ExplorationPolicyConfig:
 
 @dataclass
 class ExplorationPolicyOutput:
-    """Output container for a single forward pass."""
+    """Output container for a single forward pass.
 
-    eta_lat: torch.Tensor       # [B] sampled lateral eta in [-1, 1]
-    eta_lon: torch.Tensor       # [B] sampled longitudinal eta in [-1, 1]
-    log_prob_lat: torch.Tensor  # [B] log probability of sampled eta_lat
-    log_prob_lon: torch.Tensor  # [B] log probability of sampled eta_lon
-    value: torch.Tensor         # [B] state value estimate (Phase 2)
-    lat_dist: Beta              # Beta distribution object for eta_lat
-    lon_dist: Beta              # Beta distribution object for eta_lon
+    Per-head tensors are keyed by the head names from
+    ExplorationPolicyConfig.heads. The eta_lat / eta_lon / lat_dist / lon_dist
+    accessors preserve the original 2-head API (KeyError if the corresponding
+    head is not configured).
+    """
+
+    etas: dict[str, torch.Tensor]  # head -> [B] sampled eta in [-1, 1]
+    log_probs: dict[str, torch.Tensor]  # head -> [B] log prob of sampled eta
+    value: torch.Tensor  # [B] state value estimate (Phase 2)
+    dists: dict[str, Beta]  # head -> Beta distribution object
+
+    @property
+    def eta_lat(self) -> torch.Tensor:
+        return self.etas["lateral"]
+
+    @property
+    def eta_lon(self) -> torch.Tensor:
+        return self.etas["longitudinal"]
+
+    @property
+    def log_prob_lat(self) -> torch.Tensor:
+        return self.log_probs["lateral"]
+
+    @property
+    def log_prob_lon(self) -> torch.Tensor:
+        return self.log_probs["longitudinal"]
+
+    @property
+    def lat_dist(self) -> Beta:
+        return self.dists["lateral"]
+
+    @property
+    def lon_dist(self) -> Beta:
+        return self.dists["longitudinal"]
 
 
 class ExplorationPolicy(nn.Module):
@@ -113,6 +171,7 @@ class ExplorationPolicy(nn.Module):
 
         self.guidance_head = GuidanceHead(
             config.hidden_dim,
+            n_heads=len(config.heads),
             init_mode=config.head_init,
             init_std=config.head_init_std,
             raw_scale=config.head_raw_scale,
@@ -132,7 +191,8 @@ class ExplorationPolicy(nn.Module):
             deterministic: If True, use distribution mean instead of sampling.
 
         Returns:
-            ExplorationPolicyOutput with sampled eta values and log probs.
+            ExplorationPolicyOutput with sampled eta values and log probs
+            keyed by head name.
         """
         # Compress reference trajectory to a single token
         ref_token = self.ref_mixer(x_ref)  # [B, H]
@@ -140,34 +200,24 @@ class ExplorationPolicy(nn.Module):
         # Fuse with scene context via cross-attention
         fused = self.ref_fusion(ref_token, scene_encoding)  # [B, H]
 
-        # Get Beta distributions for guidance parameters
-        lat_dist, lon_dist = self.guidance_head(fused)
+        # One Beta distribution per configured head
+        head_dists = self.guidance_head(fused)
 
         # Get value estimate
         value = self.value_head(fused)  # [B]
 
-        if deterministic:
-            eta_lat_01 = lat_dist.mean
-            eta_lon_01 = lon_dist.mean
-        else:
-            # rsample() for reparameterized gradients
-            eta_lat_01 = lat_dist.rsample()  # [B] in (0, 1)
-            eta_lon_01 = lon_dist.rsample()  # [B] in (0, 1)
-
-        # Map from (0, 1) to (-1, 1)
-        eta_lat = 2.0 * eta_lat_01 - 1.0
-        eta_lon = 2.0 * eta_lon_01 - 1.0
-
-        # Log probabilities in the original (0, 1) space
-        log_prob_lat = lat_dist.log_prob(eta_lat_01)
-        log_prob_lon = lon_dist.log_prob(eta_lon_01)
+        etas: dict[str, torch.Tensor] = {}
+        log_probs: dict[str, torch.Tensor] = {}
+        dists: dict[str, Beta] = {}
+        for name, dist in zip(self.config.heads, head_dists):
+            eta_01 = dist.mean if deterministic else dist.rsample()  # [B] in (0, 1)
+            etas[name] = 2.0 * eta_01 - 1.0  # map to (-1, 1)
+            log_probs[name] = dist.log_prob(eta_01)
+            dists[name] = dist
 
         return ExplorationPolicyOutput(
-            eta_lat=eta_lat,
-            eta_lon=eta_lon,
-            log_prob_lat=log_prob_lat,
-            log_prob_lon=log_prob_lon,
+            etas=etas,
+            log_probs=log_probs,
             value=value,
-            lat_dist=lat_dist,
-            lon_dist=lon_dist,
+            dists=dists,
         )

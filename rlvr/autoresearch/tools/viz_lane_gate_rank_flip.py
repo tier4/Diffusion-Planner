@@ -79,8 +79,13 @@ def classify_all_segments(lanes: torch.Tensor, nudge: float = 0.05, gap_threshol
     idx_keep = torch.where(vp_flat)[0]
     if len(idx_keep) == 0:
         empty = torch.zeros((0,), dtype=torch.bool, device=device)
-        return (torch.zeros((0, 2), device=device), torch.zeros((0, 2), device=device),
-                empty, empty, empty)
+        return (
+            torch.zeros((0, 2), device=device),
+            torch.zeros((0, 2), device=device),
+            empty,
+            empty,
+            empty,
+        )
 
     l_p1 = left_pts[:, :-1].reshape(-1, 2)[idx_keep]
     l_p2 = left_pts[:, 1:].reshape(-1, 2)[idx_keep]
@@ -113,7 +118,7 @@ def classify_all_segments(lanes: torch.Tensor, nudge: float = 0.05, gap_threshol
         nudged_outer = nudged[candidate_outer]
         d = _point_to_segments_dist(nudged_outer, seg_p1, seg_p2)
         outer_lane = seg_lane[candidate_outer]
-        same_lane_mask = (outer_lane[:, None] == seg_lane[None, :])
+        same_lane_mask = outer_lane[:, None] == seg_lane[None, :]
         d[same_lane_mask] = 999.0
         min_d = d.min(dim=1).values
         cand_is_junction = min_d < gap_threshold
@@ -148,9 +153,13 @@ def plot_scene(data, out_path, scene_name):
         ly = lanes_np[s, v, 1] + lanes_np[s, v, 5]
         rx = lanes_np[s, v, 0] + lanes_np[s, v, 6]
         ry = lanes_np[s, v, 1] + lanes_np[s, v, 7]
-        ax.fill(np.concatenate([lx, rx[::-1]]),
-                np.concatenate([ly, ry[::-1]]),
-                color="lightgray", alpha=0.25, zorder=1)
+        ax.fill(
+            np.concatenate([lx, rx[::-1]]),
+            np.concatenate([ly, ry[::-1]]),
+            color="lightgray",
+            alpha=0.25,
+            zorder=1,
+        )
         # Centerline
         cl = lanes_np[s, v, :2]
         ax.plot(cl[:, 0], cl[:, 1], color="gray", linewidth=0.4, alpha=0.4, zorder=2)
@@ -168,8 +177,7 @@ def plot_scene(data, out_path, scene_name):
             else:
                 v = np.abs(pts[:, :2]).sum(axis=-1) > 0.01
             if v.sum() > 1:
-                ax.plot(pts[v, 0], pts[v, 1], color="red", linewidth=2.5,
-                        alpha=0.75, zorder=4)
+                ax.plot(pts[v, 0], pts[v, 1], color="red", linewidth=2.5, alpha=0.75, zorder=4)
 
     # Segments colored by category
     p1 = seg_p1.cpu().numpy()
@@ -187,9 +195,15 @@ def plot_scene(data, out_path, scene_name):
             color, ls, lw, alpha = "steelblue", "-", 0.8, 0.5
         else:
             continue
-        ax.plot([p1[i, 0], p2[i, 0]], [p1[i, 1], p2[i, 1]],
-                color=color, linestyle=ls, linewidth=lw, alpha=alpha,
-                zorder=5 if color == "darkorange" else 3)
+        ax.plot(
+            [p1[i, 0], p2[i, 0]],
+            [p1[i, 1], p2[i, 1]],
+            color=color,
+            linestyle=ls,
+            linewidth=lw,
+            alpha=alpha,
+            zorder=5 if color == "darkorange" else 3,
+        )
 
     # GT trajectory for context
     gt = data.get("ego_agent_future")
@@ -199,8 +213,15 @@ def plot_scene(data, out_path, scene_name):
         gt_np = gt.cpu().numpy()
         gt_v = ~((gt_np[:, 0] == 0) & (gt_np[:, 1] == 0))
         if gt_v.sum() > 1:
-            ax.plot(gt_np[gt_v, 0], gt_np[gt_v, 1], color="gold",
-                    linestyle="--", linewidth=2, alpha=0.9, zorder=6)
+            ax.plot(
+                gt_np[gt_v, 0],
+                gt_np[gt_v, 1],
+                color="gold",
+                linestyle="--",
+                linewidth=2,
+                alpha=0.9,
+                zorder=6,
+            )
 
     # Ego starting position
     ego_cur = data.get("ego_current_state")
@@ -211,9 +232,16 @@ def plot_scene(data, out_path, scene_name):
             ec = ec[0]
         ec_np = ec.cpu().numpy()
         ego_xy = (float(ec_np[0]), float(ec_np[1]))
-        ax.plot(ego_xy[0], ego_xy[1], marker="*", markersize=18,
-                markerfacecolor="darkred", markeredgecolor="black",
-                linestyle="None", zorder=10)
+        ax.plot(
+            ego_xy[0],
+            ego_xy[1],
+            marker="*",
+            markersize=18,
+            markerfacecolor="darkred",
+            markeredgecolor="black",
+            linestyle="None",
+            zorder=10,
+        )
 
     # Counts
     n_outer = int(outer_mask.sum())
@@ -222,10 +250,14 @@ def plot_scene(data, out_path, scene_name):
 
     legend = [
         Patch(facecolor="black", edgecolor="black", label=f"OUTER road edge  ({n_outer})"),
-        Patch(facecolor="darkorange", edgecolor="darkorange",
-              label=f"JUNCTION GAP  ({n_junction})"),
-        Patch(facecolor="steelblue", edgecolor="steelblue",
-              label=f"SHARED (between lanes)  ({n_shared})"),
+        Patch(
+            facecolor="darkorange", edgecolor="darkorange", label=f"JUNCTION GAP  ({n_junction})"
+        ),
+        Patch(
+            facecolor="steelblue",
+            edgecolor="steelblue",
+            label=f"SHARED (between lanes)  ({n_shared})",
+        ),
         Patch(facecolor="red", edgecolor="red", label="road border (line_strings)"),
         Patch(facecolor="gold", edgecolor="gold", label="GT trajectory"),
     ]
@@ -238,14 +270,15 @@ def plot_scene(data, out_path, scene_name):
         all_p = np.vstack([all_p, np.array(ego_xy)[None, :]])
     cx = (all_p[:, 0].min() + all_p[:, 0].max()) / 2
     cy = (all_p[:, 1].min() + all_p[:, 1].max()) / 2
-    span = max(all_p[:, 0].max() - all_p[:, 0].min(),
-               all_p[:, 1].max() - all_p[:, 1].min()) / 2 + 5
+    span = max(all_p[:, 0].max() - all_p[:, 0].min(), all_p[:, 1].max() - all_p[:, 1].min()) / 2 + 5
     ax.set_xlim(cx - span, cx + span)
     ax.set_ylim(cy - span, cy + span)
     ax.grid(True, alpha=0.25)
-    ax.set_title(f"Lane boundary classification — {scene_name}\n"
-                 f"orange = junction-gap segments (would be mis-classified as outer without the nudge proximity check)",
-                 fontsize=11)
+    ax.set_title(
+        f"Lane boundary classification — {scene_name}\n"
+        f"orange = junction-gap segments (would be mis-classified as outer without the nudge proximity check)",
+        fontsize=11,
+    )
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=110, bbox_inches="tight")

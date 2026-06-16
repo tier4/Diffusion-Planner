@@ -39,6 +39,8 @@ def load_npz_data(npz_path, device):
     if "delay" not in data:
         data["delay"] = torch.zeros(1, dtype=torch.long, device=device)
     return data
+
+
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_trainer import GRPOTrainer
 from rlvr.reward import RewardConfig, compute_reward_batch
@@ -78,8 +80,10 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
     normal_pool_deduped = [s for s in normal_pool if s not in prob_set]
     if len(normal_pool_deduped) < len(normal_pool):
         n_removed = len(normal_pool) - len(normal_pool_deduped)
-        print(f"  [WARNING] Removed {n_removed} prob-scene duplicates from normal pool "
-              f"({len(normal_pool)} -> {len(normal_pool_deduped)})")
+        print(
+            f"  [WARNING] Removed {n_removed} prob-scene duplicates from normal pool "
+            f"({len(normal_pool)} -> {len(normal_pool_deduped)})"
+        )
     if len(normal_pool_deduped) == 0 and n_normal > 0:
         raise ValueError(
             f"Normal pool is empty after deduplication! "
@@ -97,8 +101,9 @@ def create_training_set(prob_100, normal_pool, n_prob, n_normal, seed=42):
 
 
 @torch.no_grad()
-def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
-                        batch_size=150, baseline_cache=None):
+def evaluate_checkpoint(
+    model, model_args, scene_paths, reward_config, label="", batch_size=150, baseline_cache=None
+):
     """Evaluate model on scenes. Uses batched inference when batch_size > 1.
 
     Args:
@@ -109,8 +114,8 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
     totals, offroads, collisions, path_lengths = [], [], 0, []
     rb_crossings, rb_nears, rb_wides = 0, [], []
     rb_min_dists = []  # per-scene min distance to road border (metres)
-    gt_progress_ratios = []   # model_path / gt_path per scene
-    base_progress_ratios = [] # model_path / baseline_path per scene
+    gt_progress_ratios = []  # model_path / gt_path per scene
+    base_progress_ratios = []  # model_path / baseline_path per scene
     lane_departures, lane_nears, lane_wides = 0, [], []
     centerlines = []  # per-scene raw centerline score (see compute_centerline_score_batch)
     sc_crossings = 0
@@ -133,12 +138,13 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
 
         # Process in batches
         for chunk_start in range(0, len(all_data), batch_size):
-            chunk_data = all_data[chunk_start:chunk_start + batch_size]
-            chunk_paths = all_paths[chunk_start:chunk_start + batch_size]
+            chunk_data = all_data[chunk_start : chunk_start + batch_size]
+            chunk_paths = all_paths[chunk_start : chunk_start + batch_size]
             B_chunk = len(chunk_data)
 
             # Stack into batch
             import copy
+
             batch = {}
             for k in chunk_data[0]:
                 vals = [d[k] for d in chunk_data]
@@ -149,19 +155,25 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
 
             # Normalize
             normalizer = copy.deepcopy(model_args.observation_normalizer)
-            norm_batch = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+            norm_batch = {
+                k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in batch.items()
+            }
             norm_batch = normalizer(norm_batch)
 
             # Batched deterministic trajectory generation
             with torch.no_grad():
                 det_trajs = _batched_generate(
-                    model, model_args, norm_batch,
-                    noise_scale=0.0, composer=None, device=DEVICE,
+                    model,
+                    model_args,
+                    norm_batch,
+                    noise_scale=0.0,
+                    composer=None,
+                    device=DEVICE,
                 )  # [B_chunk, T, 4]
 
             # Per-scene reward scoring (uses per-scene neighbor data)
             for local_i in range(B_chunk):
-                traj_t = det_trajs[local_i:local_i+1]  # [1, T, 4]
+                traj_t = det_trajs[local_i : local_i + 1]  # [1, T, 4]
                 data_i = chunk_data[local_i]
                 reward = compute_reward_batch(traj_t, data_i, reward_config)[0]
                 totals.append(reward.total)
@@ -194,10 +206,19 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
         for path in scene_paths:
             try:
                 data = load_npz_data(path, DEVICE)
-                norm_data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+                norm_data = {
+                    k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
+                }
                 norm_data = model_args.observation_normalizer(norm_data)
-                det_traj = generate_samples(model, model_args, norm_data, noise_scale=0.0,
-                                            n_samples=1, composer=None, device=DEVICE)
+                det_traj = generate_samples(
+                    model,
+                    model_args,
+                    norm_data,
+                    noise_scale=0.0,
+                    n_samples=1,
+                    composer=None,
+                    device=DEVICE,
+                )
                 det_traj_t = torch.tensor(det_traj, device=DEVICE, dtype=torch.float32)
                 reward = compute_reward_batch(det_traj_t, data, reward_config)[0]
                 totals.append(reward.total)
@@ -228,8 +249,16 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
 
     n = len(totals)
     if n == 0:
-        return {"n_scenes": 0, "reward_mean": 0, "offroad_mean": 0, "collision_rate": 0,
-                "path_length_mean": 0, "stopped_count": 0, "rb_crossings": 0, "rb_near_mean": 0}
+        return {
+            "n_scenes": 0,
+            "reward_mean": 0,
+            "offroad_mean": 0,
+            "collision_rate": 0,
+            "path_length_mean": 0,
+            "stopped_count": 0,
+            "rb_crossings": 0,
+            "rb_near_mean": 0,
+        }
 
     pl_arr = np.array(path_lengths)
     rb_nears_arr = np.array(rb_nears) if rb_nears else np.zeros(1)
@@ -292,51 +321,62 @@ def evaluate_checkpoint(model, model_args, scene_paths, reward_config, label="",
     tag = f" [{label}]" if label else ""
     progress_str = ""
     if gt_pr_arr is not None:
-        progress_str = (f"prog_vs_gt=[p5={np.percentile(gt_pr_arr,5):.2f} med={np.median(gt_pr_arr):.2f}], "
-                        f"prog_vs_base=[p5={np.percentile(base_pr_arr,5):.2f} med={np.median(base_pr_arr):.2f}], ")
+        progress_str = (
+            f"prog_vs_gt=[p5={np.percentile(gt_pr_arr, 5):.2f} med={np.median(gt_pr_arr):.2f}], "
+            f"prog_vs_base=[p5={np.percentile(base_pr_arr, 5):.2f} med={np.median(base_pr_arr):.2f}], "
+        )
     cl_pct_str = ""
     cl_lk_str = ""
     if centerlines:
-        cl_pct_str = (f"cl_all=[mean={result['centerline_mean']:+.3f} "
-                      f"p5={result['centerline_p5']:+.3f} "
-                      f"p25={result['centerline_p25']:+.3f} "
-                      f"p50={result['centerline_p50']:+.3f} "
-                      f"p75={result['centerline_p75']:+.3f} "
-                      f"p95={result['centerline_p95']:+.3f} "
-                      f"min={result['centerline_min']:+.3f}]")
+        cl_pct_str = (
+            f"cl_all=[mean={result['centerline_mean']:+.3f} "
+            f"p5={result['centerline_p5']:+.3f} "
+            f"p25={result['centerline_p25']:+.3f} "
+            f"p50={result['centerline_p50']:+.3f} "
+            f"p75={result['centerline_p75']:+.3f} "
+            f"p95={result['centerline_p95']:+.3f} "
+            f"min={result['centerline_min']:+.3f}]"
+        )
         lk_n = result.get("centerline_lk_n", 0)
         lc_n = result.get("centerline_lc_n", 0)
         if lk_n > 0:
-            cl_lk_str = (f", cl_lanekeep[n={lk_n}]=[mean={result['centerline_lk_mean']:+.3f} "
-                         f"p5={result['centerline_lk_p5']:+.3f} "
-                         f"p25={result['centerline_lk_p25']:+.3f} "
-                         f"p50={result['centerline_lk_p50']:+.3f} "
-                         f"p75={result['centerline_lk_p75']:+.3f} "
-                         f"p95={result['centerline_lk_p95']:+.3f}]"
-                         f", cl_sat_n={lc_n}")
-    rb_dist_str = (f"rb_dist=[min={rb_dists_arr.min():.2f} "
-                   f"p5={np.percentile(rb_dists_arr,5):.2f} "
-                   f"p25={np.percentile(rb_dists_arr,25):.2f} "
-                   f"p50={np.median(rb_dists_arr):.2f} "
-                   f"p75={np.percentile(rb_dists_arr,75):.2f}]")
-    print(f"  Eval{tag}: {n} scenes, reward={result['reward_mean']:+.2f}, "
-          f"rb_cross={rb_crossings}/{n}, lane_dep={lane_departures}/{n}, "
-          f"rb_near={rb_nears_arr.mean():.2f}, rb_wide={rb_wides_arr.mean():.2f}, "
-          f"{rb_dist_str}, "
-          f"{progress_str}"
-          f"lane_near={result['lane_near_mean']:.2f}, lane_wide={result['lane_wide_mean']:.2f}, "
-          f"{cl_pct_str}{cl_lk_str}, "
-          f"collision={result['collision_rate']:.1%}, "
-          f"sc_cross={result['sc_crossings']}/{n}, "
-          f"sc_dist=[min={result['sc_min_dist_min']:.2f} p5={result['sc_min_dist_p5']:.2f} mean={result['sc_min_dist_mean']:.2f}], "
-          f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}")
+            cl_lk_str = (
+                f", cl_lanekeep[n={lk_n}]=[mean={result['centerline_lk_mean']:+.3f} "
+                f"p5={result['centerline_lk_p5']:+.3f} "
+                f"p25={result['centerline_lk_p25']:+.3f} "
+                f"p50={result['centerline_lk_p50']:+.3f} "
+                f"p75={result['centerline_lk_p75']:+.3f} "
+                f"p95={result['centerline_lk_p95']:+.3f}]"
+                f", cl_sat_n={lc_n}"
+            )
+    rb_dist_str = (
+        f"rb_dist=[min={rb_dists_arr.min():.2f} "
+        f"p5={np.percentile(rb_dists_arr, 5):.2f} "
+        f"p25={np.percentile(rb_dists_arr, 25):.2f} "
+        f"p50={np.median(rb_dists_arr):.2f} "
+        f"p75={np.percentile(rb_dists_arr, 75):.2f}]"
+    )
+    print(
+        f"  Eval{tag}: {n} scenes, reward={result['reward_mean']:+.2f}, "
+        f"rb_cross={rb_crossings}/{n}, lane_dep={lane_departures}/{n}, "
+        f"rb_near={rb_nears_arr.mean():.2f}, rb_wide={rb_wides_arr.mean():.2f}, "
+        f"{rb_dist_str}, "
+        f"{progress_str}"
+        f"lane_near={result['lane_near_mean']:.2f}, lane_wide={result['lane_wide_mean']:.2f}, "
+        f"{cl_pct_str}{cl_lk_str}, "
+        f"collision={result['collision_rate']:.1%}, "
+        f"sc_cross={result['sc_crossings']}/{n}, "
+        f"sc_dist=[min={result['sc_min_dist_min']:.2f} p5={result['sc_min_dist_p5']:.2f} mean={result['sc_min_dist_mean']:.2f}], "
+        f"path={result['path_length_mean']:.1f}m, stopped={result['stopped_count']}"
+    )
     return result
 
 
 def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_dir, name):
     """Generate trajectory comparison images for the worst offroad scenes."""
     import matplotlib
-    matplotlib.use('Agg')
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     model.eval()
@@ -353,8 +393,14 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
             traj_t = torch.tensor(traj, device=DEVICE, dtype=torch.float32)
             data2 = load_npz_data(path, DEVICE)
             r = compute_reward_batch(traj_t, data2, reward_config)[0]
-            offroad_indices.append((i, r.off_road_fraction, r.total,
-                                    np.linalg.norm(np.diff(traj[0,:,:2], axis=0), axis=1).sum()))
+            offroad_indices.append(
+                (
+                    i,
+                    r.off_road_fraction,
+                    r.total,
+                    np.linalg.norm(np.diff(traj[0, :, :2], axis=0), axis=1).sum(),
+                )
+            )
         except Exception:
             pass
 
@@ -369,7 +415,7 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
     n = len(selected)
     cols = min(3, n)
     rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 5*rows))
+    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
     if rows == 1 and cols == 1:
         axes = np.array([[axes]])
     elif rows == 1:
@@ -386,19 +432,19 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
         traj = generate_samples(model, model_args, norm, 0.0, 1, None, DEVICE)[0]
 
         # Plot route lanes
-        if 'route_lanes' in data:
-            rl = data['route_lanes']
+        if "route_lanes" in data:
+            rl = data["route_lanes"]
             if rl.dim() == 4:
                 rl = rl[0]
             for seg_idx in range(rl.shape[0]):
                 pts = rl[seg_idx, :, :2].cpu().numpy()
                 valid = np.abs(pts).sum(axis=1) > 0.1
                 if valid.sum() > 1:
-                    ax.plot(pts[valid, 0], pts[valid, 1], 'g-', alpha=0.4, linewidth=1)
+                    ax.plot(pts[valid, 0], pts[valid, 1], "g-", alpha=0.4, linewidth=1)
 
         # Plot lane boundaries
-        if 'lanes' in data:
-            lanes = data['lanes']
+        if "lanes" in data:
+            lanes = data["lanes"]
             if lanes.dim() == 4:
                 lanes = lanes[0]
             for seg_idx in range(min(lanes.shape[0], 60)):
@@ -407,16 +453,22 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
                 if valid.sum() > 1:
                     lb = lanes[seg_idx, :, 4:6].cpu().numpy()
                     rb = lanes[seg_idx, :, 6:8].cpu().numpy()
-                    ax.plot((pts+lb)[valid, 0], (pts+lb)[valid, 1], 'k-', alpha=0.15, linewidth=0.5)
-                    ax.plot((pts+rb)[valid, 0], (pts+rb)[valid, 1], 'k-', alpha=0.15, linewidth=0.5)
+                    ax.plot(
+                        (pts + lb)[valid, 0], (pts + lb)[valid, 1], "k-", alpha=0.15, linewidth=0.5
+                    )
+                    ax.plot(
+                        (pts + rb)[valid, 0], (pts + rb)[valid, 1], "k-", alpha=0.15, linewidth=0.5
+                    )
 
-        ax.plot(traj[:, 0], traj[:, 1], 'r-', linewidth=2.5)
-        ax.plot(0, 0, 'go', markersize=8)
-        ax.set_title(f'Scene {scene_i}: offroad={offroad_frac:.0%} path={path_len:.1f}m rew={total:.1f}')
-        ax.set_aspect('equal')
+        ax.plot(traj[:, 0], traj[:, 1], "r-", linewidth=2.5)
+        ax.plot(0, 0, "go", markersize=8)
+        ax.set_title(
+            f"Scene {scene_i}: offroad={offroad_frac:.0%} path={path_len:.1f}m rew={total:.1f}"
+        )
+        ax.set_aspect("equal")
         ax.grid(True, alpha=0.3)
 
-    plt.suptitle(f'{name}: trajectory visualization (6 worst offroad scenes)', fontsize=12)
+    plt.suptitle(f"{name}: trajectory visualization (6 worst offroad scenes)", fontsize=12)
     plt.tight_layout()
     out_path = run_dir / "trajectory_vis.png"
     plt.savefig(out_path, dpi=150)
@@ -424,7 +476,12 @@ def _visualize_trajectories(model, model_args, prob_scenes, reward_config, run_d
     print(f"  Visualization saved to {out_path}")
 
 
-def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cache_path: Path | None = None):
+def run(
+    config_path: Path,
+    name: str,
+    skip_baseline: bool = False,
+    baseline_cache_path: Path | None = None,
+):
     # Load baseline cache (precomputed baseline/GT paths per scene)
     # Auto-detect if not specified: look for baseline_cache_val50.json in output dir
     baseline_cache = None
@@ -472,9 +529,11 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
     grpo_config.__post_init__()
 
     print(f"Experiment: {name}")
-    print(f"Config: lr={grpo_config.learning_rate}, kl={grpo_config.kl_coef}, "
-          f"rank={grpo_config.lora_rank}, epochs={grpo_config.train_epochs}, "
-          f"scenes={n_prob}p+{n_normal}n, N={grpo_config.num_generations}")
+    print(
+        f"Config: lr={grpo_config.learning_rate}, kl={grpo_config.kl_coef}, "
+        f"rank={grpo_config.lora_rank}, epochs={grpo_config.train_epochs}, "
+        f"scenes={n_prob}p+{n_normal}n, N={grpo_config.num_generations}"
+    )
     print(f"Scene files: prob={PROB_SCENES_PATH}, normal={NORMAL_POOL_PATH}")
 
     # Load scenes
@@ -485,7 +544,10 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         print(f"Using custom prob scenes: {len(prob_100)} from {prob_scenes_path}")
     # Subsample prob scenes for eval (keep all for training, eval on 50)
     eval_rng = np.random.default_rng(42)
-    prob_eval = [prob_100[i] for i in eval_rng.choice(len(prob_100), size=min(50, len(prob_100)), replace=False)]
+    prob_eval = [
+        prob_100[i]
+        for i in eval_rng.choice(len(prob_100), size=min(50, len(prob_100)), replace=False)
+    ]
     if train_scenes_path and Path(train_scenes_path).exists():
         with open(train_scenes_path) as f:
             train_paths = json.load(f)
@@ -502,8 +564,10 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
     dup_msg = f" ({n_total - n_unique} DUPLICATES!)" if n_unique < n_total else ""
     print(f"Training set: {n_total} scenes ({n_unique} unique){dup_msg}")
     if n_unique < n_total:
-        print(f"  [WARNING] Duplicate scenes detected! Config: n_prob={n_prob}, n_normal={n_normal}. "
-              f"Check that --prob_scenes and --normal_scenes point to DIFFERENT files.")
+        print(
+            f"  [WARNING] Duplicate scenes detected! Config: n_prob={n_prob}, n_normal={n_normal}. "
+            f"Check that --prob_scenes and --normal_scenes point to DIFFERENT files."
+        )
 
     # Setup experiment dir
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -519,6 +583,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
 
     # Initialize wandb logging (no-op if disabled in config)
     from rlvr.wandb_logger import WandbLogger
+
     wandb_log = WandbLogger.from_config(
         grpo_config,
         run_dir=str(run_dir),
@@ -548,36 +613,91 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         if grpo_config.use_lora:
             if seed_lora_path and Path(seed_lora_path).exists():
                 from preference_optimization.lora_utils import load_lora_checkpoint
+
                 policy_model = load_lora_checkpoint(policy_model, seed_lora_path, is_trainable=True)
                 print(f"Seeded from LoRA: {seed_lora_path}")
             else:
                 from preference_optimization.lora_utils import (
                     LORA_TARGET_BLOCKS_01_REGEX,
+                    LORA_TARGET_BLOCKS_02_REGEX,
+                    LORA_TARGET_BLOCKS_12_REGEX,
                     LORA_TARGET_FIRST_BLOCK_REGEX,
                     LORA_TARGET_LAST_BLOCK_REGEX,
                     apply_lora,
                 )
-                from preference_optimization.lora_utils import LORA_TARGET_BLOCKS_02_REGEX
-                target = {"last": LORA_TARGET_LAST_BLOCK_REGEX, "first": LORA_TARGET_FIRST_BLOCK_REGEX, "blocks01": LORA_TARGET_BLOCKS_01_REGEX, "blocks02": LORA_TARGET_BLOCKS_02_REGEX}.get(grpo_config.lora_target)
-                kwargs = dict(r=grpo_config.lora_rank, lora_alpha=grpo_config.lora_alpha,
-                             lora_dropout=grpo_config.lora_dropout)
+
+                target = {
+                    "last": LORA_TARGET_LAST_BLOCK_REGEX,
+                    "first": LORA_TARGET_FIRST_BLOCK_REGEX,
+                    "blocks01": LORA_TARGET_BLOCKS_01_REGEX,
+                    "blocks02": LORA_TARGET_BLOCKS_02_REGEX,
+                    "blocks12": LORA_TARGET_BLOCKS_12_REGEX,
+                }.get(grpo_config.lora_target)
+                kwargs = dict(
+                    r=grpo_config.lora_rank,
+                    lora_alpha=grpo_config.lora_alpha,
+                    lora_dropout=grpo_config.lora_dropout,
+                )
                 if target:
                     kwargs["target_modules"] = target
                 policy_model = apply_lora(policy_model, **kwargs)
 
-        trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
+        if not grpo_config.train_dit:
+            # Frozen-DiT policy-only training (exploration trainer): freeze the
+            # whole planner; only the exploration policy gets an optimizer
+            # (created inside GRPOExplorationTrainer).
+            for p in policy_model.parameters():
+                p.requires_grad_(False)
+            policy_model.eval()
+            optimizer = None
+            print("train_dit=False: DiT frozen, training exploration policy only")
+        else:
+            trainable_params = [p for p in policy_model.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(trainable_params, lr=grpo_config.learning_rate)
 
         # Load frozen base model for full-model (non-LoRA) training when features
         # need a base reference: KL reg or baseline ego IL.
         _frozen_base_model = None
-        _needs_base = (
-            grpo_config.kl_coef > 0.0
-            or (grpo_config.ego_il_weight > 0.0 and grpo_config.ego_il_mode == "baseline")
+        _needs_base = grpo_config.kl_coef > 0.0 or (
+            grpo_config.ego_il_weight > 0.0 and grpo_config.ego_il_mode == "baseline"
         )
-        if _needs_base and not grpo_config.use_lora:
-            print(f"Loading frozen base model (kl_coef={grpo_config.kl_coef}, "
-                  f"ego_il={grpo_config.ego_il_weight}/{grpo_config.ego_il_mode})...")
+        if grpo_config.neighbor_reg_anchor == "baseline":
+            # The external anchor is consumed ONLY by the ranked-SFT trainer (it is
+            # passed as base_model + prefer_external_base to train_epoch_ranked_sft).
+            # Fail loudly rather than load-and-ignore for the other trainers.
+            if (
+                grpo_config.use_closed_loop
+                or grpo_config.use_exploration_policy
+                or grpo_config.ranked_sft_mode == "none"
+            ):
+                raise ValueError(
+                    "neighbor_reg_anchor='baseline' is only supported by the ranked-SFT "
+                    "trainer (ranked_sft_mode in gt_neighbor/baseline_neighbor/curated, with "
+                    "use_closed_loop=False and use_exploration_policy=False); got "
+                    f"ranked_sft_mode={grpo_config.ranked_sft_mode!r}, "
+                    f"use_closed_loop={grpo_config.use_closed_loop}, "
+                    f"use_exploration_policy={grpo_config.use_exploration_policy}. "
+                    "Loading the anchor for another trainer would silently have no effect."
+                )
+            anchor_path = grpo_config.neighbor_reg_anchor_path
+            if not anchor_path or not Path(anchor_path).is_file():
+                raise ValueError(
+                    "neighbor_reg_anchor='baseline' requires neighbor_reg_anchor_path "
+                    f"to point to an existing .pth file; got {anchor_path!r}"
+                )
+            print(
+                f"Loading EXTERNAL frozen baseline anchor from {anchor_path} "
+                f"(neighbor_reg_anchor='baseline')..."
+            )
+            _frozen_base_model, _ = load_model(Path(anchor_path), DEVICE)
+            _frozen_base_model.eval()
+            for p in _frozen_base_model.parameters():
+                p.requires_grad_(False)
+        elif _needs_base and not grpo_config.use_lora:
+            print(
+                f"Loading frozen base model (kl_coef={grpo_config.kl_coef}, "
+                f"ego_il={grpo_config.ego_il_weight}/{grpo_config.ego_il_mode})..."
+            )
             _frozen_base_model, _ = load_model(checkpoint_path, DEVICE)
             _frozen_base_model.eval()
             for p in _frozen_base_model.parameters():
@@ -586,8 +706,10 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         # Training reward config uses the configured weights (may boost w_progress
         # to prevent reward hacking where the model learns to stop instead of drive)
         train_reward_config = RewardConfig(
-            w_safety=grpo_config.w_safety, w_progress=grpo_config.w_progress,
-            w_smooth=grpo_config.w_smooth, w_feasibility=grpo_config.w_feasibility,
+            w_safety=grpo_config.w_safety,
+            w_progress=grpo_config.w_progress,
+            w_smooth=grpo_config.w_smooth,
+            w_feasibility=grpo_config.w_feasibility,
             w_centerline=grpo_config.w_centerline,
             centerline_usage_mode=grpo_config.centerline_usage_mode,
             centerline_time_weight_min=grpo_config.centerline_time_weight_min,
@@ -645,23 +767,37 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
 
         if grpo_config.use_closed_loop:
             from rlvr.closed_loop.closed_loop_trainer import ClosedLoopExplorationTrainer
+
             trainer = ClosedLoopExplorationTrainer(
-                policy_model=policy_model, model_args=model_args,
-                dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
-                config=grpo_config, use_lora=grpo_config.use_lora,
+                policy_model=policy_model,
+                model_args=model_args,
+                dit_optimizer=optimizer,
+                device=DEVICE,
+                run_dir=run_dir,
+                config=grpo_config,
+                use_lora=grpo_config.use_lora,
             )
         elif grpo_config.use_exploration_policy:
             from rlvr.grpo_exploration_trainer import GRPOExplorationTrainer
+
             trainer = GRPOExplorationTrainer(
-                policy_model=policy_model, model_args=model_args,
-                dit_optimizer=optimizer, device=DEVICE, run_dir=run_dir,
-                config=grpo_config, use_lora=grpo_config.use_lora,
+                policy_model=policy_model,
+                model_args=model_args,
+                dit_optimizer=optimizer,
+                device=DEVICE,
+                run_dir=run_dir,
+                config=grpo_config,
+                use_lora=grpo_config.use_lora,
             )
         else:
             trainer = GRPOTrainer(
-                policy_model=policy_model, model_args=model_args,
-                optimizer=optimizer, device=DEVICE, run_dir=run_dir,
-                config=grpo_config, use_lora=grpo_config.use_lora,
+                policy_model=policy_model,
+                model_args=model_args,
+                optimizer=optimizer,
+                device=DEVICE,
+                run_dir=run_dir,
+                config=grpo_config,
+                use_lora=grpo_config.use_lora,
             )
 
         # Evaluate base model (can skip if baseline numbers are already known)
@@ -671,8 +807,12 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             base_val = {"reward_mean": float("-inf"), "rb_crossings": 999, "collision_rate": 1.0}
         else:
             print("\nBase model evaluation:")
-            base_prob = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, "base-prob")
-            base_val = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, "base-val")
+            base_prob = evaluate_checkpoint(
+                policy_model, model_args, prob_eval, eval_reward_config, "base-prob"
+            )
+            base_val = evaluate_checkpoint(
+                policy_model, model_args, val_50, eval_reward_config, "base-val"
+            )
 
         trainer._eval_scene_paths = val_50
 
@@ -687,7 +827,7 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
         for epoch in range(1, grpo_config.train_epochs + 1):
             print(f"\n--- Epoch {epoch}/{grpo_config.train_epochs} ---")
 
-            if epoch == 1 and hasattr(trainer, 'save_epoch1_baselines'):
+            if epoch == 1 and hasattr(trainer, "save_epoch1_baselines"):
                 trainer.save_epoch1_baselines(train_paths)
 
             if not grpo_config.use_exploration_policy and not grpo_config.use_closed_loop:
@@ -697,15 +837,24 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
 
                     # Optionally load a pre-trained exploration policy for guided generation
                     _explorer = None
-                    if grpo_config.ranked_sft_use_explorer and grpo_config.exploration_checkpoint_path:
+                    if (
+                        grpo_config.ranked_sft_use_explorer
+                        and grpo_config.exploration_checkpoint_path
+                    ):
                         from pathlib import Path as _P
 
-                        from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
+                        from exploration_policy.model import (
+                            ExplorationPolicy,
+                            ExplorationPolicyConfig,
+                        )
+
                         _ckpt = _P(grpo_config.exploration_checkpoint_path)
                         if not _ckpt.exists():
                             print(f"  WARNING: exploration_checkpoint_path not found: {_ckpt}")
                             print(f"  Falling back to standard generation (no explorer)")
-                        elif not hasattr(run, '_cached_explorer') or getattr(run, '_cached_explorer_path', None) != str(_ckpt):
+                        elif not hasattr(run, "_cached_explorer") or getattr(
+                            run, "_cached_explorer_path", None
+                        ) != str(_ckpt):
                             _ep_cfg = ExplorationPolicyConfig(
                                 hidden_dim=grpo_config.exploration_hidden_dim,
                                 n_mixer_layers=grpo_config.exploration_n_mixer_layers,
@@ -714,30 +863,38 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                                 encoder_hidden_dim=model_args.hidden_dim,
                                 head_init=grpo_config.exploration_head_init,
                                 head_raw_scale=grpo_config.exploration_head_raw_scale,
+                                heads=list(grpo_config.exploration_heads),
                             )
                             run._cached_explorer = ExplorationPolicy(
-                                _ep_cfg, ref_seq_len=model_args.future_len,
+                                _ep_cfg,
+                                ref_seq_len=model_args.future_len,
                             ).to(DEVICE)
                             _state = torch.load(_ckpt, map_location=DEVICE, weights_only=False)
                             run._cached_explorer.load_state_dict(_state, strict=False)
                             run._cached_explorer.eval()
                             run._cached_explorer_path = str(_ckpt)
                             print(f"  Loaded frozen explorer from {_ckpt}")
-                        _explorer = getattr(run, '_cached_explorer', None)
+                        _explorer = getattr(run, "_cached_explorer", None)
 
                     # Create explorer optimizer if training jointly
                     _explorer_opt = None
                     if _explorer is not None and not grpo_config.ranked_sft_freeze_explorer:
-                        if not hasattr(run, '_cached_explorer_opt'):
+                        if not hasattr(run, "_cached_explorer_opt"):
                             run._cached_explorer_opt = torch.optim.AdamW(
-                                _explorer.parameters(), lr=grpo_config.exploration_lr,
+                                _explorer.parameters(),
+                                lr=grpo_config.exploration_lr,
                             )
                         _explorer_opt = run._cached_explorer_opt
 
                     metrics = train_epoch_ranked_sft(
-                        model=policy_model, model_args=model_args, optimizer=optimizer,
-                        scene_paths=train_paths, config=grpo_config,
-                        reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                        model=policy_model,
+                        model_args=model_args,
+                        optimizer=optimizer,
+                        scene_paths=train_paths,
+                        config=grpo_config,
+                        reward_config=train_reward_config,
+                        device=DEVICE,
+                        epoch=epoch,
                         exploration_policy=_explorer,
                         exploration_optimizer=_explorer_opt,
                         run_dir=run_dir,
@@ -746,18 +903,57 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                 else:
                     # Fully batched training: all scenes in ~5 forward passes
                     from rlvr.grpo_trainer_batched import train_epoch_batched
+
                     metrics = train_epoch_batched(
-                        model=policy_model, model_args=model_args, optimizer=optimizer,
-                        scene_paths=train_paths, config=grpo_config,
-                        reward_config=train_reward_config, device=DEVICE, epoch=epoch,
+                        model=policy_model,
+                        model_args=model_args,
+                        optimizer=optimizer,
+                        scene_paths=train_paths,
+                        config=grpo_config,
+                        reward_config=train_reward_config,
+                        device=DEVICE,
+                        epoch=epoch,
                     )
             else:
                 metrics = trainer.train_epoch(train_paths, epoch)
             trainer.log_metrics(epoch, metrics)
             trainer.save_checkpoint(epoch, args_dict)
 
-            prob_result = evaluate_checkpoint(policy_model, model_args, prob_eval, eval_reward_config, f"epoch{epoch}-prob", baseline_cache=baseline_cache)
-            val_eval = evaluate_checkpoint(policy_model, model_args, val_50, eval_reward_config, f"epoch{epoch}-val", baseline_cache=baseline_cache)
+            if grpo_config.use_exploration_policy and not grpo_config.train_dit:
+                # Frozen DiT: evaluate_checkpoint ignores the policy and would
+                # return identical numbers every epoch. Score what the explorer
+                # actually does: deterministic policy-guided trajectories.
+                prob_result = trainer.evaluate_policy_guided(
+                    prob_eval, eval_reward_config, f"epoch{epoch}-prob"
+                )
+                _dump_rows = getattr(trainer, "last_eval_rows", None)
+                if _dump_rows is not None:
+                    with open(run_dir / f"policy_eval_prob_epoch_{epoch:03d}.json", "w") as _pf:
+                        json.dump(_dump_rows, _pf, indent=1)
+                val_eval = trainer.evaluate_policy_guided(
+                    val_50, eval_reward_config, f"epoch{epoch}-val"
+                )
+                _dump_rows = getattr(trainer, "last_eval_rows", None)
+                if _dump_rows is not None:
+                    with open(run_dir / f"policy_eval_val_epoch_{epoch:03d}.json", "w") as _pf:
+                        json.dump(_dump_rows, _pf, indent=1)
+            else:
+                prob_result = evaluate_checkpoint(
+                    policy_model,
+                    model_args,
+                    prob_eval,
+                    eval_reward_config,
+                    f"epoch{epoch}-prob",
+                    baseline_cache=baseline_cache,
+                )
+                val_eval = evaluate_checkpoint(
+                    policy_model,
+                    model_args,
+                    val_50,
+                    eval_reward_config,
+                    f"epoch{epoch}-val",
+                    baseline_cache=baseline_cache,
+                )
 
             # Log to wandb
             wandb_log.log_training(epoch, metrics)
@@ -768,8 +964,9 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                     wandb_log.log_rank_analytics(epoch, json.load(_f))
 
             # Track best: highest prob deterministic reward (with val sanity check > -5)
-            is_better = (prob_result["reward_mean"] > best_prob_reward
-                         and val_eval["reward_mean"] > -5)
+            is_better = (
+                prob_result["reward_mean"] > best_prob_reward and val_eval["reward_mean"] > -5
+            )
 
             if is_better:
                 best_prob_reward = prob_result["reward_mean"]
@@ -777,7 +974,9 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
                 best_val_reward = val_eval["reward_mean"]
                 best_val_collision = val_eval["collision_rate"]
                 best_epoch = epoch
-                if grpo_config.use_lora:
+                if not grpo_config.train_dit:
+                    best_checkpoint = str(run_dir / f"exploration_policy_epoch_{epoch:03d}.pth")
+                elif grpo_config.use_lora:
                     best_checkpoint = str(run_dir / f"lora_epoch_{epoch:03d}")
                 else:
                     best_checkpoint = str(run_dir / "latest.pth")
@@ -790,9 +989,14 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
             _n_val = max(val_eval["n_scenes"], 1)
             _rb_cross_rate = val_eval["rb_crossings"] / _n_val
             _collision_rate = val_eval["collision_rate"]
-            if _rb_cross_rate > grpo_config.collapse_rb_threshold or _collision_rate > grpo_config.collapse_collision_threshold:
-                print(f"  Val collapsed (rb_cross={_rb_cross_rate:.1%}, "
-                      f"collision={_collision_rate:.1%}), stopping early")
+            if (
+                _rb_cross_rate > grpo_config.collapse_rb_threshold
+                or _collision_rate > grpo_config.collapse_collision_threshold
+            ):
+                print(
+                    f"  Val collapsed (rb_cross={_rb_cross_rate:.1%}, "
+                    f"collision={_collision_rate:.1%}), stopping early"
+                )
                 break
 
         # Keep ALL checkpoints — don't delete anything. Disk space is cheap,
@@ -800,23 +1004,28 @@ def run(config_path: Path, name: str, skip_baseline: bool = False, baseline_cach
 
         # Generate trajectory visualization for the best checkpoint
         if best_checkpoint and Path(best_checkpoint).exists():
-            _visualize_trajectories(policy_model, model_args, prob_100, eval_reward_config, run_dir, name)
+            _visualize_trajectories(
+                policy_model, model_args, prob_100, eval_reward_config, run_dir, name
+            )
 
         # Cross-epoch rank analytics summary
         try:
             from rlvr.rank_analytics import save_cross_epoch_summary
+
             save_cross_epoch_summary(run_dir)
         except Exception as e:
             print(f"  [rank_analytics] Cross-epoch summary failed: {e}")
     finally:
         duration = (time.time() - start_time) / 60
-        wandb_log.finish({
-            "best_epoch": best_epoch,
-            "best_prob_reward": best_prob_reward,
-            "best_prob_rb_crossings": best_prob_rb_crossings,
-            "best_val_reward": best_val_reward,
-            "duration_min": duration,
-        })
+        wandb_log.finish(
+            {
+                "best_epoch": best_epoch,
+                "best_prob_reward": best_prob_reward,
+                "best_prob_rb_crossings": best_prob_rb_crossings,
+                "best_val_reward": best_val_reward,
+                "duration_min": duration,
+            }
+        )
 
     # Print final summary (machine-parseable)
     print("\n---")
@@ -836,15 +1045,31 @@ def main():
     parser.add_argument("--config", type=Path, required=True, help="Path to experiment config JSON")
     parser.add_argument("--name", type=str, required=True, help="Experiment name")
     parser.add_argument("--model_path", type=Path, required=True, help="Path to base model .pth")
-    parser.add_argument("--prob_scenes", type=Path, required=True, help="JSON list of problem scene NPZ paths")
-    parser.add_argument("--normal_scenes", type=Path, required=True, help="JSON list of normal scene NPZ paths")
-    parser.add_argument("--val_scenes", type=Path, required=True, help="JSON list of validation scene NPZ paths")
-    parser.add_argument("--output_dir", type=Path, required=True, help="Output directory for experiment results")
-    parser.add_argument("--skip_baseline", action="store_true", help="Skip base model evaluation (reuse known baseline numbers)")
-    parser.add_argument("--baseline_cache", type=Path, default=None,
-                        help="JSON file with precomputed baseline/GT paths per scene. "
-                             "If not provided, progress ratios are not reported. "
-                             "Generate with: python -m rlvr.autoresearch.tools.compute_baseline_cache")
+    parser.add_argument(
+        "--prob_scenes", type=Path, required=True, help="JSON list of problem scene NPZ paths"
+    )
+    parser.add_argument(
+        "--normal_scenes", type=Path, required=True, help="JSON list of normal scene NPZ paths"
+    )
+    parser.add_argument(
+        "--val_scenes", type=Path, required=True, help="JSON list of validation scene NPZ paths"
+    )
+    parser.add_argument(
+        "--output_dir", type=Path, required=True, help="Output directory for experiment results"
+    )
+    parser.add_argument(
+        "--skip_baseline",
+        action="store_true",
+        help="Skip base model evaluation (reuse known baseline numbers)",
+    )
+    parser.add_argument(
+        "--baseline_cache",
+        type=Path,
+        default=None,
+        help="JSON file with precomputed baseline/GT paths per scene. "
+        "If not provided, progress ratios are not reported. "
+        "Generate with: python -m rlvr.autoresearch.tools.compute_baseline_cache",
+    )
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -860,8 +1085,12 @@ def main():
     OUTPUT_DIR = args.output_dir
 
     try:
-        run(args.config, args.name, skip_baseline=args.skip_baseline,
-            baseline_cache_path=args.baseline_cache)
+        run(
+            args.config,
+            args.name,
+            skip_baseline=args.skip_baseline,
+            baseline_cache_path=args.baseline_cache,
+        )
     except Exception as e:
         print(f"\n---")
         print(f"name:             {args.name}")

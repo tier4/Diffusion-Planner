@@ -78,7 +78,7 @@ class LongitudinalGuidance(BaseGuidance):
         # Reference heading → unit tangent
         cos_h = ref[..., 2]  # [B, T]
         sin_h = ref[..., 3]
-        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
         cos_h = cos_h / h_norm
         sin_h = sin_h / h_norm
         # n∥ = (cos, sin) — tangent direction
@@ -94,8 +94,8 @@ class LongitudinalGuidance(BaseGuidance):
         ref_vel = (ref_pos[:, 1:, :] - ref_pos[:, :-1, :]) / self._dt  # [B, T-1, 2]
 
         # Slice tangent to T-1 to match velocity dimensions
-        n_par_x = n_par_x[:, :T - 1]
-        n_par_y = n_par_y[:, :T - 1]
+        n_par_x = n_par_x[:, : T - 1]
+        n_par_y = n_par_y[:, : T - 1]
 
         # Project ego velocity onto tangent: n∥ · v
         ego_v_tangent = n_par_x * ego_vel[..., 0] + n_par_y * ego_vel[..., 1]  # [B, T-1]

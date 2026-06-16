@@ -10,6 +10,7 @@ Usage:
         --scenes /path/to/scenes.json \
         --epoch 10
 """
+
 from __future__ import annotations
 
 import argparse
@@ -45,7 +46,10 @@ def analyze_explorer(
 
             with torch.no_grad():
                 x_ref_np = generate_reference_trajectory(
-                    policy_model, model_args, norm_data, device,
+                    policy_model,
+                    model_args,
+                    norm_data,
+                    device,
                 )
                 x_ref = torch.from_numpy(x_ref_np).unsqueeze(0).to(device)
                 scene_enc = run_frozen_encoder(policy_model, norm_data)
@@ -65,7 +69,10 @@ def analyze_explorer(
 
 
 def load_explorer(
-    exp_dir: Path, epoch: int, model_args, device: torch.device,
+    exp_dir: Path,
+    epoch: int,
+    model_args,
+    device: torch.device,
 ) -> ExplorationPolicy | None:
     """Load exploration policy from experiment checkpoint."""
     config_path = exp_dir / "grpo_config.json"
@@ -117,7 +124,12 @@ def load_explorer(
 def main():
     parser = argparse.ArgumentParser(description="Visualize exploration policy per-scene outputs")
     parser.add_argument("--model_path", type=Path, required=True, help="Base model .pth")
-    parser.add_argument("--exp_dir", type=Path, required=True, help="Experiment directory (contains grpo_config.json)")
+    parser.add_argument(
+        "--exp_dir",
+        type=Path,
+        required=True,
+        help="Experiment directory (contains grpo_config.json)",
+    )
     parser.add_argument("--scenes", type=Path, required=True, help="JSON list of scene NPZ paths")
     parser.add_argument("--epoch", type=int, default=10, help="Checkpoint epoch to load")
     args = parser.parse_args()
@@ -142,16 +154,20 @@ def main():
         print("No scenes processed successfully.")
         return
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Exploration Policy Per-Scene Analysis ({n} scenes)")
-    print(f"{'='*70}")
-    print(f"  eta_lat: mean={lat.mean():.4f}, std={lat.std():.4f}, min={lat.min():.4f}, max={lat.max():.4f}")
-    print(f"  eta_lon: mean={lon.mean():.4f}, std={lon.std():.4f}, min={lon.min():.4f}, max={lon.max():.4f}")
+    print(f"{'=' * 70}")
+    print(
+        f"  eta_lat: mean={lat.mean():.4f}, std={lat.std():.4f}, min={lat.min():.4f}, max={lat.max():.4f}"
+    )
+    print(
+        f"  eta_lon: mean={lon.mean():.4f}, std={lon.std():.4f}, min={lon.min():.4f}, max={lon.max():.4f}"
+    )
     print(f"  Scene-to-scene lat range: {lat.max() - lat.min():.4f}")
     print(f"  Scene-to-scene lon range: {lon.max() - lon.min():.4f}")
 
     print(f"\n  {'Scene':<50} {'eta_lat':>8} {'eta_lon':>8}")
-    print(f"  {'-'*66}")
+    print(f"  {'-' * 66}")
     for i in range(n):
         print(f"  {result['scenes'][i]:<50} {lat[i]:>+8.4f} {lon[i]:>+8.4f}")
 

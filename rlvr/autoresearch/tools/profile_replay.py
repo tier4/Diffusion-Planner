@@ -31,10 +31,15 @@ def main() -> None:
     parser.add_argument("--model_path", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
-    parser.add_argument("--steps", type=int, default=200,
-                        help="Override spawn_config.max_steps for the profile run.")
-    parser.add_argument("--top", type=int, default=40,
-                        help="How many top consumers to print per sort order.")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=200,
+        help="Override spawn_config.max_steps for the profile run.",
+    )
+    parser.add_argument(
+        "--top", type=int, default=40, help="How many top consumers to print per sort order."
+    )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -70,8 +75,13 @@ def main() -> None:
     profiler.enable()
     try:
         run_route_replay(
-            model=model, model_args=model_args, builder=builder, route=route,
-            output_dir=args.output_dir, spawn_config=cfg, device=device,
+            model=model,
+            model_args=model_args,
+            builder=builder,
+            route=route,
+            output_dir=args.output_dir,
+            spawn_config=cfg,
+            device=device,
         )
     finally:
         profiler.disable()

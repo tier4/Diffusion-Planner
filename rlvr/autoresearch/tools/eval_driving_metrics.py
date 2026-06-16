@@ -69,11 +69,13 @@ def lat_accel_smoothed(positions: np.ndarray, window: int = 11, order: int = 3) 
     accel_kernel = _build_sg_diff_kernel(window, order, deriv=2, delta=DT)
     pad = window // 2
     pos_t = torch.from_numpy(positions).float().unsqueeze(0).permute(0, 2, 1)  # [1, 2, T]
-    pos_padded = torch.nn.functional.pad(pos_t, (pad, pad), mode='replicate')
+    pos_padded = torch.nn.functional.pad(pos_t, (pad, pad), mode="replicate")
     vel_t = torch.nn.functional.conv1d(
-        pos_padded, vel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2)
+        pos_padded, vel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2
+    )
     accel_t = torch.nn.functional.conv1d(
-        pos_padded, accel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2)
+        pos_padded, accel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2
+    )
     vx = vel_t[0, 0].numpy()
     vy = vel_t[0, 1].numpy()
     ax = accel_t[0, 0].numpy()
@@ -94,9 +96,7 @@ def generate_trajectory(model, model_args, data, device):
 
     norm_data = {k: v.clone() for k, v in data.items()}
     norm_data = model_args.observation_normalizer(norm_data)
-    norm_data["sampled_trajectories"] = torch.zeros(
-        B, P, future_len + 1, 4, device=device
-    )
+    norm_data["sampled_trajectories"] = torch.zeros(B, P, future_len + 1, 4, device=device)
 
     _orig_gfn = model.decoder._guidance_fn
     model.decoder._guidance_fn = None
@@ -122,6 +122,7 @@ def main():
     # Load LoRA if specified
     if args.lora_path:
         from preference_optimization.lora_utils import load_lora_checkpoint
+
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
         print(f"Loaded LoRA from {args.lora_path}")
@@ -171,18 +172,20 @@ def main():
         la_smooth = lat_accel_smoothed(pos)
         all_lat_accel_smooth.append(la_smooth)
 
-        scene_results.append({
-            "scene": Path(npz_path).stem,
-            "max_speed": float(speed.max()),
-            "mean_speed": float(speed.mean()),
-            "path_length": float(path_len),
-            "max_lat_accel_curv": float(np.abs(la_curv).max()),
-            "max_lat_accel_curr": float(np.abs(la_curr).max()),
-            "max_lat_accel_smooth": float(np.abs(la_smooth).max()),
-        })
+        scene_results.append(
+            {
+                "scene": Path(npz_path).stem,
+                "max_speed": float(speed.max()),
+                "mean_speed": float(speed.mean()),
+                "path_length": float(path_len),
+                "max_lat_accel_curv": float(np.abs(la_curv).max()),
+                "max_lat_accel_curr": float(np.abs(la_curr).max()),
+                "max_lat_accel_smooth": float(np.abs(la_smooth).max()),
+            }
+        )
 
         if (i + 1) % 10 == 0:
-            print(f"  Processed {i+1}/{len(scene_paths)} scenes...")
+            print(f"  Processed {i + 1}/{len(scene_paths)} scenes...")
 
     # Aggregate
     speeds_all = np.concatenate(all_speeds)
@@ -190,9 +193,9 @@ def main():
     la_curr_all = np.concatenate(all_lat_accel_curr)
     la_smooth_all = np.concatenate(all_lat_accel_smooth)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"TELEPORT METRICS — {args.tag} ({len(scene_paths)} scenes)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     print(f"\n--- Speed ---")
     print(f"  max:  {speeds_all.max():.2f} m/s")
@@ -222,7 +225,9 @@ def main():
     scene_results.sort(key=lambda x: x["max_lat_accel_curv"], reverse=True)
     print(f"\n--- Top 5 worst lat accel scenes (curvature) ---")
     for sr in scene_results[:5]:
-        print(f"  {sr['scene']}: curv={sr['max_lat_accel_curv']:.2f}  speed={sr['max_speed']:.2f}  path={sr['path_length']:.1f}m")
+        print(
+            f"  {sr['scene']}: curv={sr['max_lat_accel_curv']:.2f}  speed={sr['max_speed']:.2f}  path={sr['path_length']:.1f}m"
+        )
 
 
 if __name__ == "__main__":

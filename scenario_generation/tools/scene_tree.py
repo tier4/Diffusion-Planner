@@ -96,6 +96,7 @@ class SceneTree:
             raise ValueError(f"No replay_step_*.npz or step_*.npz files found in {npz_dir}")
 
         import numpy as np
+
         with np.load(npz_files[0]) as first:
             if "ego_shape" in first:
                 ego_shape = tuple(float(v) for v in np.asarray(first["ego_shape"]).reshape(-1)[:3])
@@ -117,7 +118,9 @@ class SceneTree:
 
     @classmethod
     def create_from_npz_dir_with_shape(
-        cls, npz_dir: str | Path, ego_shape: tuple[float, float, float],
+        cls,
+        npz_dir: str | Path,
+        ego_shape: tuple[float, float, float],
     ) -> SceneTree:
         npz_dir = str(Path(npz_dir).resolve())
         npz_files = _scan_npz_dir(npz_dir)
@@ -132,7 +135,10 @@ class SceneTree:
     # ── Tree operations ───────────────────────────────────────────────
 
     def fork_branch(
-        self, parent_id: str, timestep: int, new_id: str | None = None,
+        self,
+        parent_id: str,
+        timestep: int,
+        new_id: str | None = None,
         extra_modifications: list[ObstaclePlacement] | None = None,
     ) -> str:
         """Create a new branch forking from parent_id at the given timestep.
@@ -163,6 +169,7 @@ class SceneTree:
             raise ValueError(f"Branch '{new_id}' already exists")
 
         from copy import deepcopy
+
         inherited = deepcopy(parent.modifications)
         inherited_labels = {o.label for o in inherited}
         if extra_modifications:
@@ -241,7 +248,11 @@ class SceneTree:
         return [b.id for b in self.branches.values() if b.parent_id == branch_id]
 
     def fuse_branches(
-        self, prefix_id: str, suffix_id: str, cut_step: int, new_id: str | None = None,
+        self,
+        prefix_id: str,
+        suffix_id: str,
+        cut_step: int,
+        new_id: str | None = None,
     ) -> str:
         """Fuse two timelines: prefix[:cut_step] + all of suffix.
 
@@ -258,8 +269,7 @@ class SceneTree:
         suffix_seq = self.get_npz_sequence(suffix_id)
         if cut_step < 0 or cut_step > len(prefix_seq):
             raise IndexError(
-                f"Cut step {cut_step} out of range [0, {len(prefix_seq)}] "
-                f"for branch '{prefix_id}'"
+                f"Cut step {cut_step} out of range [0, {len(prefix_seq)}] for branch '{prefix_id}'"
             )
         if not suffix_seq:
             raise ValueError(f"Branch '{suffix_id}' has no NPZ files")
@@ -275,6 +285,7 @@ class SceneTree:
             raise ValueError(f"Branch '{new_id}' already exists")
 
         from copy import deepcopy
+
         prefix_mods = deepcopy(self.get_all_obstacles_deep(prefix_id))
         suffix_mods = deepcopy(self.get_all_obstacles_deep(suffix_id))
         seen_labels = {o.label for o in prefix_mods}
@@ -380,9 +391,7 @@ class SceneTree:
             "base_npz_dir": self.base_npz_dir,
             "ego_shape": list(self.ego_shape),
             "active_branch": self.active_branch,
-            "branches": {
-                bid: _branch_to_dict(b) for bid, b in self.branches.items()
-            },
+            "branches": {bid: _branch_to_dict(b) for bid, b in self.branches.items()},
         }
         path.write_text(json.dumps(data, indent=2))
 
@@ -405,16 +414,18 @@ class SceneTree:
                 fused = (fused[0], fused[1], int(fused[2]))
             inh = set(bdict.pop("inherited_labels", []))
             branches[bid] = BranchNode(
-                modifications=mods, crop_range=crop, fused_from=fused,
-                inherited_labels=inh, **bdict,
+                modifications=mods,
+                crop_range=crop,
+                fused_from=fused,
+                inherited_labels=inh,
+                **bdict,
             )
         active = data.get("active_branch", "root")
         if active not in branches:
             active = "root" if "root" in branches else next(iter(branches), "root")
         if "ego_shape" not in data:
             raise ValueError(
-                f"Tree JSON '{path}' is missing 'ego_shape'. "
-                "Re-save the tree with a newer editor."
+                f"Tree JSON '{path}' is missing 'ego_shape'. Re-save the tree with a newer editor."
             )
         return cls(
             version=data.get("version", 1),

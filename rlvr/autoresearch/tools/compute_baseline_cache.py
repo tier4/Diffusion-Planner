@@ -25,7 +25,9 @@ from preference_optimization.utils import load_npz_data
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Precompute baseline/GT paths for progress ratio metrics")
+    parser = argparse.ArgumentParser(
+        description="Precompute baseline/GT paths for progress ratio metrics"
+    )
     parser.add_argument("--model_path", type=Path, required=True, help="Path to base model .pth")
     parser.add_argument("--scenes", type=Path, required=True, help="JSON list of scene NPZ paths")
     parser.add_argument("--output", type=Path, required=True, help="Output JSON cache file")
@@ -57,7 +59,7 @@ def main():
         cache[path] = {"baseline_path": baseline_pl, "gt_path": gt_pl}
 
         if (i + 1) % 10 == 0:
-            print(f"  {i+1}/{len(scenes)} scenes processed")
+            print(f"  {i + 1}/{len(scenes)} scenes processed")
 
     with open(args.output, "w") as f:
         json.dump(cache, f, indent=2)
@@ -67,7 +69,9 @@ def main():
     ratios = [b / max(g, 1e-3) for b, g in zip(bpls, gpls)]
     print(f"\nSaved {len(cache)} scenes to {args.output}")
     print(f"Baseline: mean_path={np.mean(bpls):.1f}m, mean_gt={np.mean(gpls):.1f}m")
-    print(f"Progress ratio (base/GT): p5={np.percentile(ratios,5):.2f} p25={np.percentile(ratios,25):.2f} med={np.median(ratios):.2f}")
+    print(
+        f"Progress ratio (base/GT): p5={np.percentile(ratios, 5):.2f} p25={np.percentile(ratios, 25):.2f} med={np.median(ratios):.2f}"
+    )
 
 
 if __name__ == "__main__":

@@ -23,7 +23,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel, get_peft_model
 
-
 # Regex targeting q/k/v/out_proj Linear layers inside DiT decoder blocks.
 # PEFT matches this via re.fullmatch against the full dotted module path.
 # UnfusedMHA (defined below) exposes these four sub-layers; apply_lora()
@@ -54,6 +53,14 @@ LORA_TARGET_BLOCKS_01_REGEX = (
 # the harmful block 1 weights from forming, reducing L2 drift by 1/3 parameters.
 LORA_TARGET_BLOCKS_02_REGEX = (
     r"decoder\.dit\.blocks\.[02]\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
+)
+
+# Blocks 1+2 only (freeze block 0): forces an avoidance graft to express in blocks 1/2
+# instead of block 0. Block 0 is the subspace most coupled to neighbor-L2 damage
+# (no_blk0 ablation recovers neighbor strongly), so freezing it during a from-scratch
+# avoidance graft keeps neighbor low by construction — IF avoidance can fit in 1/2.
+LORA_TARGET_BLOCKS_12_REGEX = (
+    r"decoder\.dit\.blocks\.[12]\.(attn|cross_attn)\.(q_proj|k_proj|v_proj|out_proj)"
 )
 
 
@@ -156,7 +163,7 @@ class UnfusedMHA(nn.Module):
 
         # Project; LoRA delta is applied transparently inside each nn.Linear.forward
         q = self.q_proj(query)  # [T_q, B, D]
-        k = self.k_proj(key)    # [T_k, B, D]
+        k = self.k_proj(key)  # [T_k, B, D]
         v = self.v_proj(value)  # [T_k, B, D]
 
         # Split heads: [T, B, D] -> [B, H, T, Hd]
@@ -165,7 +172,7 @@ class UnfusedMHA(nn.Module):
         v = v.view(T_k, B, H, Hd).permute(1, 2, 0, 3)
 
         # Scaled dot-product attention: [B, H, T_q, T_k]
-        attn = torch.matmul(q, k.transpose(-2, -1)) * (Hd ** -0.5)
+        attn = torch.matmul(q, k.transpose(-2, -1)) * (Hd**-0.5)
 
         if key_padding_mask is not None:
             # [B, T_k] -> [B, 1, 1, T_k] for broadcasting
@@ -319,24 +326,30 @@ def fuse_unfused_mha_state_dict(state_dict: dict) -> dict:
     attn_prefixes = set()
 
     for key in state_dict:
-        if '.q_proj.weight' in key:
-            attn_prefixes.add(key.replace('.q_proj.weight', ''))
+        if ".q_proj.weight" in key:
+            attn_prefixes.add(key.replace(".q_proj.weight", ""))
 
     for prefix in attn_prefixes:
-        q_w = state_dict[f'{prefix}.q_proj.weight']
-        k_w = state_dict[f'{prefix}.k_proj.weight']
-        v_w = state_dict[f'{prefix}.v_proj.weight']
-        q_b = state_dict[f'{prefix}.q_proj.bias']
-        k_b = state_dict[f'{prefix}.k_proj.bias']
-        v_b = state_dict[f'{prefix}.v_proj.bias']
-        final[f'module.{prefix}.in_proj_weight'] = torch.cat([q_w, k_w, v_w], dim=0)
-        final[f'module.{prefix}.in_proj_bias'] = torch.cat([q_b, k_b, v_b], dim=0)
+        q_w = state_dict[f"{prefix}.q_proj.weight"]
+        k_w = state_dict[f"{prefix}.k_proj.weight"]
+        v_w = state_dict[f"{prefix}.v_proj.weight"]
+        q_b = state_dict[f"{prefix}.q_proj.bias"]
+        k_b = state_dict[f"{prefix}.k_proj.bias"]
+        v_b = state_dict[f"{prefix}.v_proj.bias"]
+        final[f"module.{prefix}.in_proj_weight"] = torch.cat([q_w, k_w, v_w], dim=0)
+        final[f"module.{prefix}.in_proj_bias"] = torch.cat([q_b, k_b, v_b], dim=0)
 
-    skip = ['.q_proj.weight', '.q_proj.bias', '.k_proj.weight', '.k_proj.bias',
-            '.v_proj.weight', '.v_proj.bias']
+    skip = [
+        ".q_proj.weight",
+        ".q_proj.bias",
+        ".k_proj.weight",
+        ".k_proj.bias",
+        ".v_proj.weight",
+        ".v_proj.bias",
+    ]
     for key, val in state_dict.items():
         if any(key.endswith(s) for s in skip):
             continue
-        final[f'module.{key}'] = val
+        final[f"module.{key}"] = val
 
     return final

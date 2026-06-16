@@ -116,16 +116,22 @@ def main() -> None:
         if ".q_proj.weight" in key:
             prefix = key.rsplit(".q_proj.weight", 1)[0]
             fused_state_dict[f"{prefix}.in_proj_weight"] = torch.cat(
-                [state_dict[f"{prefix}.q_proj.weight"],
-                 state_dict[f"{prefix}.k_proj.weight"],
-                 state_dict[f"{prefix}.v_proj.weight"]], dim=0,
+                [
+                    state_dict[f"{prefix}.q_proj.weight"],
+                    state_dict[f"{prefix}.k_proj.weight"],
+                    state_dict[f"{prefix}.v_proj.weight"],
+                ],
+                dim=0,
             )
             handled.update([f"{prefix}.{p}.weight" for p in ("q_proj", "k_proj", "v_proj")])
             if f"{prefix}.q_proj.bias" in state_dict:
                 fused_state_dict[f"{prefix}.in_proj_bias"] = torch.cat(
-                    [state_dict[f"{prefix}.q_proj.bias"],
-                     state_dict[f"{prefix}.k_proj.bias"],
-                     state_dict[f"{prefix}.v_proj.bias"]], dim=0,
+                    [
+                        state_dict[f"{prefix}.q_proj.bias"],
+                        state_dict[f"{prefix}.k_proj.bias"],
+                        state_dict[f"{prefix}.v_proj.bias"],
+                    ],
+                    dim=0,
                 )
                 handled.update([f"{prefix}.{p}.bias" for p in ("q_proj", "k_proj", "v_proj")])
     for key, val in state_dict.items():

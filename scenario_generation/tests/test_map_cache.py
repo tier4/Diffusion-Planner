@@ -35,6 +35,7 @@ class TestMapTensorCache:
         uncached = _build_lanes(synthetic_scene.map_data.lanes, R, ego_xy, _NUM_LANES)
 
         assert cached.shape == uncached.shape
+
         # Cached reorders lanes by distance to ego; compare content
         # (set of non-zero lane segments) not exact slot order.
         def _lane_set(arr):
@@ -42,6 +43,7 @@ class TestMapTensorCache:
             norms = np.linalg.norm(a.reshape(a.shape[0], -1), axis=1)
             valid = norms > 1e-6
             return sorted(norms[valid].tolist())
+
         assert _lane_set(cached) == _lane_set(uncached)
 
     def test_cache_static_objects_matches_uncached(self, synthetic_scene):
@@ -118,6 +120,7 @@ class TestMapTensorCache:
     def test_full_to_model_tensors_cached_vs_uncached(self, synthetic_scene):
         """End-to-end: to_model_tensors with and without cache match."""
         from unittest.mock import MagicMock
+
         args = MagicMock()
         args.predicted_neighbor_num = 5
         args.future_len = 80
@@ -132,7 +135,9 @@ class TestMapTensorCache:
         # exactly, lanes content order-independently.
         for key in ["static_objects", "polygons", "line_strings"]:
             np.testing.assert_allclose(
-                cached[key].numpy(), uncached[key].numpy(), atol=1e-6,
+                cached[key].numpy(),
+                uncached[key].numpy(),
+                atol=1e-6,
                 err_msg=f"Mismatch for {key}",
             )
         # Lanes: same content but potentially different order
@@ -148,6 +153,7 @@ class TestInferenceDelay:
 
     def _args(self):
         from unittest.mock import MagicMock
+
         args = MagicMock()
         args.predicted_neighbor_num = 5
         args.future_len = 80
@@ -156,6 +162,7 @@ class TestInferenceDelay:
 
     def test_delay_defaults_to_zero(self, synthetic_scene):
         import torch
+
         out = to_model_tensors(synthetic_scene, "ego", self._args(), "cpu")
         assert "delay" in out
         assert out["delay"].dtype == torch.long
@@ -164,8 +171,13 @@ class TestInferenceDelay:
 
     def test_delay_matches_inference_delay(self, synthetic_scene):
         import torch
+
         out = to_model_tensors(
-            synthetic_scene, "ego", self._args(), "cpu", inference_delay=7,
+            synthetic_scene,
+            "ego",
+            self._args(),
+            "cpu",
+            inference_delay=7,
         )
         assert out["delay"].dtype == torch.long
         assert out["delay"].shape == (1,)
@@ -175,12 +187,20 @@ class TestInferenceDelay:
         """Cache path shouldn't mutate delay — it must match the configured value."""
         cache = MapTensorCache(synthetic_scene.map_data)
         cached = to_model_tensors(
-            synthetic_scene, "ego", self._args(), "cpu",
-            map_cache=cache, inference_delay=3,
+            synthetic_scene,
+            "ego",
+            self._args(),
+            "cpu",
+            map_cache=cache,
+            inference_delay=3,
         )
         uncached = to_model_tensors(
-            synthetic_scene, "ego", self._args(), "cpu",
-            map_cache=None, inference_delay=3,
+            synthetic_scene,
+            "ego",
+            self._args(),
+            "cpu",
+            map_cache=None,
+            inference_delay=3,
         )
         assert int(cached["delay"].item()) == 3
         assert int(uncached["delay"].item()) == 3
@@ -193,7 +213,8 @@ class TestDumpStepNPZ:
     def _dump(self, scene, future_len=80, predicted_neighbor_num=_MAX_NUM_NEIGHBORS):
         cache = MapTensorCache(scene.map_data)
         return dump_step_npz(
-            scene, cache,
+            scene,
+            cache,
             future_len=future_len,
             predicted_neighbor_num=predicted_neighbor_num,
         )
@@ -201,12 +222,24 @@ class TestDumpStepNPZ:
     def test_has_all_expected_keys(self, synthetic_scene):
         data = self._dump(synthetic_scene)
         expected = {
-            "ego_agent_past", "ego_current_state", "neighbor_agents_past",
-            "static_objects", "lanes", "lanes_speed_limit",
-            "lanes_has_speed_limit", "polygons", "line_strings",
-            "route_lanes", "route_lanes_speed_limit", "route_lanes_has_speed_limit",
-            "goal_pose", "ego_shape", "turn_indicators",
-            "ego_agent_future", "neighbor_agents_future", "version",
+            "ego_agent_past",
+            "ego_current_state",
+            "neighbor_agents_past",
+            "static_objects",
+            "lanes",
+            "lanes_speed_limit",
+            "lanes_has_speed_limit",
+            "polygons",
+            "line_strings",
+            "route_lanes",
+            "route_lanes_speed_limit",
+            "route_lanes_has_speed_limit",
+            "goal_pose",
+            "ego_shape",
+            "turn_indicators",
+            "ego_agent_future",
+            "neighbor_agents_future",
+            "version",
         }
         missing = expected - set(data.keys())
         assert not missing, f"dump missing keys: {missing}"
@@ -263,9 +296,12 @@ class TestDumpStepNPZ:
     def test_zero_neighbor_count_raises(self, synthetic_scene):
         """predicted_neighbor_num must be >= 1."""
         import pytest
+
         cache = MapTensorCache(synthetic_scene.map_data)
         with pytest.raises(ValueError, match="predicted_neighbor_num"):
             dump_step_npz(
-                synthetic_scene, cache,
-                future_len=80, predicted_neighbor_num=0,
+                synthetic_scene,
+                cache,
+                future_len=80,
+                predicted_neighbor_num=0,
             )

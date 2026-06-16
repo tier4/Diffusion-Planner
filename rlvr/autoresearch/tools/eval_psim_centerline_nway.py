@@ -25,6 +25,7 @@ Usage:
         --run name=mpc,kind=trajlog,path=<replay>/trajectory_log.json \\
         --osm <map>.osm --route_json <route>.json --out_dir <out>
 """
+
 from __future__ import annotations
 
 import argparse
@@ -61,9 +62,7 @@ def _parse_run(spec: str) -> dict:
         out[k.strip()] = v.strip()
     for key in ("name", "kind", "path"):
         if key not in out or not out[key]:
-            raise SystemExit(
-                f"--run must include non-empty name=, kind=, path= (got {spec!r})"
-            )
+            raise SystemExit(f"--run must include non-empty name=, kind=, path= (got {spec!r})")
     if out["kind"] not in ("npz", "trajlog"):
         raise SystemExit(f"--run kind must be 'npz' or 'trajlog' (got {out['kind']})")
     return out
@@ -78,18 +77,26 @@ def _load(run: dict, polyline: np.ndarray, ego_half_w: float, device: str) -> di
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run", action="append", required=True,
-                    help="Repeat. Format: name=<label>,kind=<npz|trajlog>,path=<...>")
+    ap.add_argument(
+        "--run",
+        action="append",
+        required=True,
+        help="Repeat. Format: name=<label>,kind=<npz|trajlog>,path=<...>",
+    )
     ap.add_argument("--osm", type=Path, required=True)
     ap.add_argument("--route_json", type=Path, required=True)
     ap.add_argument("--out_dir", type=Path, required=True)
     ap.add_argument("--max_offset_m", type=float, default=10.0)
-    ap.add_argument("--ego_half_w", type=float, default=0.85,
-                    help="Half ego width (m). Forwarded to "
-                         "lat_offset_and_naive_score; currently consumed only "
-                         "in 'body' usage_mode and the underlying tool "
-                         "hardcodes 'baselink', so this is effectively "
-                         "ignored. Kept for forward-compat.")
+    ap.add_argument(
+        "--ego_half_w",
+        type=float,
+        default=0.85,
+        help="Half ego width (m). Forwarded to "
+        "lat_offset_and_naive_score; currently consumed only "
+        "in 'body' usage_mode and the underlying tool "
+        "hardcodes 'baselink', so this is effectively "
+        "ignored. Kept for forward-compat.",
+    )
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +175,7 @@ def main():
         line = f"Frames |lat| > {thr}m:"
         for r in runs:
             a = np.abs(cropped[r["name"]]["lat"])
-            line += f"  {r['name']}={(a>thr).sum()}/{len(a)} ({100*(a>thr).mean():.1f}%)"
+            line += f"  {r['name']}={(a > thr).sum()}/{len(a)} ({100 * (a > thr).mean():.1f}%)"
         summary_lines.append(line)
     summary = "\n".join(summary_lines)
     print("\n" + summary)
@@ -178,9 +185,9 @@ def main():
     all_xy = np.concatenate([cropped[r["name"]]["world_xy"] for r in runs], axis=0)
     x_min, x_max = all_xy[:, 0].min() - 20, all_xy[:, 0].max() + 20
     y_min, y_max = all_xy[:, 1].min() - 20, all_xy[:, 1].max() + 20
-    vmax = float(np.percentile(
-        np.concatenate([np.abs(cropped[r["name"]]["lat"]) for r in runs]), 95
-    ))
+    vmax = float(
+        np.percentile(np.concatenate([np.abs(cropped[r["name"]]["lat"]) for r in runs]), 95)
+    )
     vmax = max(vmax, 0.5)
 
     N = len(runs)
@@ -189,16 +196,31 @@ def main():
         axes = [axes]
     for ax, r in zip(axes, runs):
         d = cropped[r["name"]]
-        ax.plot(polyline[:, 0], polyline[:, 1], "-", color="0.7", lw=2.5,
-                alpha=0.5, zorder=1, label="route centerline")
+        ax.plot(
+            polyline[:, 0],
+            polyline[:, 1],
+            "-",
+            color="0.7",
+            lw=2.5,
+            alpha=0.5,
+            zorder=1,
+            label="route centerline",
+        )
         sc = ax.scatter(
-            d["world_xy"][:, 0], d["world_xy"][:, 1],
-            c=np.abs(d["lat"]), cmap="inferno", vmin=0.0, vmax=vmax,
-            s=18, alpha=0.9, edgecolors="none", zorder=2,
+            d["world_xy"][:, 0],
+            d["world_xy"][:, 1],
+            c=np.abs(d["lat"]),
+            cmap="inferno",
+            vmin=0.0,
+            vmax=vmax,
+            s=18,
+            alpha=0.9,
+            edgecolors="none",
+            zorder=2,
         )
         ax.set_title(
             f"{r['name']}\nmean|lat|={np.mean(np.abs(d['lat'])):.3f}m  "
-            f"p95={np.percentile(np.abs(d['lat']),95):.3f}m  "
+            f"p95={np.percentile(np.abs(d['lat']), 95):.3f}m  "
             f"max={np.max(np.abs(d['lat'])):.3f}m  n={len(d['lat'])}"
         )
         ax.set_xlabel("MGRS x [m]")
@@ -232,8 +254,9 @@ def main():
 
     diff_panels = [(r["name"], arcs[r["name"]] - arcs[base_name]) for r in runs[1:]]
     if diff_panels:
-        fig, axes = plt.subplots(1, len(diff_panels), figsize=(8 * len(diff_panels), 9),
-                                 sharex=True, sharey=True)
+        fig, axes = plt.subplots(
+            1, len(diff_panels), figsize=(8 * len(diff_panels), 9), sharex=True, sharey=True
+        )
         if len(diff_panels) == 1:
             axes = [axes]
         all_finite = np.concatenate([d[np.isfinite(d)] for _, d in diff_panels])
@@ -243,9 +266,15 @@ def main():
             valid = np.isfinite(poly_diff)
             ax.plot(polyline[:, 0], polyline[:, 1], "-", color="0.85", lw=2.0, zorder=1)
             sc = ax.scatter(
-                polyline[valid, 0], polyline[valid, 1],
-                c=poly_diff[valid], cmap="RdBu_r", vmin=-vlim, vmax=vlim,
-                s=80, edgecolors="none", zorder=2,
+                polyline[valid, 0],
+                polyline[valid, 1],
+                c=poly_diff[valid],
+                cmap="RdBu_r",
+                vmin=-vlim,
+                vmax=vlim,
+                s=80,
+                edgecolors="none",
+                zorder=2,
             )
             ax.set_title(
                 f"Δ |lat| ({name} − {base_name})\n"
@@ -268,9 +297,14 @@ def main():
     bins = np.linspace(-2.0, 2.0, 161)
     for i, r in enumerate(runs):
         d = cropped[r["name"]]
-        ax.hist(d["lat"], bins=bins, alpha=0.5, density=True,
-                color=colors[i % len(colors)],
-                label=f"{r['name']} (n={len(d['lat'])}, mean|lat|={np.mean(np.abs(d['lat'])):.3f}m)")
+        ax.hist(
+            d["lat"],
+            bins=bins,
+            alpha=0.5,
+            density=True,
+            color=colors[i % len(colors)],
+            label=f"{r['name']} (n={len(d['lat'])}, mean|lat|={np.mean(np.abs(d['lat'])):.3f}m)",
+        )
     ax.axvline(0, color="k", lw=0.7)
     ax.set_xlabel("signed lateral offset [m]   (+ left, − right)")
     ax.set_ylabel("density")
@@ -285,8 +319,7 @@ def main():
     for i, r in enumerate(runs):
         d = cropped[r["name"]]
         c = colors[i % len(colors)]
-        ax.plot(arc_centers, arcs[r["name"]], color=c, lw=2.0,
-                label=f"{r['name']} (binned mean)")
+        ax.plot(arc_centers, arcs[r["name"]], color=c, lw=2.0, label=f"{r['name']} (binned mean)")
     ax.set_xlabel("longitudinal arc-length along route centerline [m]")
     ax.set_ylabel("|lateral offset| [m]")
     ax.set_title("Lateral tracking error vs route progress")
