@@ -19,7 +19,7 @@ from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNorma
 @dataclass
 class TrainConfig:
     # ---------------------------------------------------------
-    # Required Arguments (必須パラメータ: デフォルト値なしのものは先頭に置くルールです)
+    # Required Arguments (Fields without default values must be declared first)
     # ---------------------------------------------------------
     exp_name: str
     save_dir: str
@@ -52,7 +52,7 @@ class TrainConfig:
     line_string_len: int = POINTS_PER_LINE_STRING
 
     # ---------------------------------------------------------
-    # DataLoader parameters
+    # DataLoader Parameters
     # ---------------------------------------------------------
     use_data_augment: bool = True
     augment_prob: float = 0.5
@@ -65,7 +65,7 @@ class TrainConfig:
     pin_mem: bool = True
 
     # ---------------------------------------------------------
-    # Training
+    # Training Parameters
     # ---------------------------------------------------------
     seed: int = 3407
     train_epochs: int = 100
@@ -84,7 +84,7 @@ class TrainConfig:
     coeff_position_lon_loss: float = 1.0
     coeff_heading_l2_loss: float = 1.0
     coeff_velocity: float = 1.0
-    # リストのようなミュータブル（変更可能）なデフォルト値は default_factory を使います
+    # Use default_factory for mutable default values like lists
     coeff_timestep: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 1.0])
 
     coeff_road_border_loss: float = 1.0
@@ -97,7 +97,7 @@ class TrainConfig:
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
 
-    # Velocity representation & hybrid loss
+    # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False
     hybrid_loss_omega: float = 0.1
     hybrid_loss_window: int = 10
@@ -119,7 +119,7 @@ class TrainConfig:
     resume_model_path: Optional[str] = None
 
     # ---------------------------------------------------------
-    # Logging & Distributed
+    # Logging & Distributed Setup
     # ---------------------------------------------------------
     use_wandb: bool = False
     wandb_run_id: Optional[str] = None
@@ -129,7 +129,7 @@ class TrainConfig:
     port: str = "22323"
 
     # ---------------------------------------------------------
-    # Normalizers (学習実行時に初期化してセットするための枠)
+    # Normalizers (Placeholders to be initialized and set during training execution)
     # ---------------------------------------------------------
     state_normalizer: Optional[StateNormalizer] = None
     observation_normalizer: Optional[ObservationNormalizer] = None
