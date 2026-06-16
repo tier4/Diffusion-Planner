@@ -197,9 +197,14 @@ def main():
     for lab in labels:
         g = geom[lab]
         inb = (g[:, 0] >= fc) & (g[:, 0] <= amax - tc)
-        nx = int((g[inb, 2] < thr).sum())
         ca, la, ja = comf[lab]
         ic = (ca >= fc) & (ca <= amax - tc)
+        if not inb.any() or not ic.any():
+            raise RuntimeError(
+                f"{lab}: no samples within the in-bounds arc window [{fc}, {amax - tc}] "
+                "(bag too short, or front_cut+tail_cut exceed the route length)"
+            )
+        nx = int((g[inb, 2] < thr).sum())
         cl_all = g[inb, 1]
         tot = {
             "rb_cross": nx,
