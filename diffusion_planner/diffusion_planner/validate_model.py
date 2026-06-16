@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tqdm import tqdm
+
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
     compute_ego_edge_points,
@@ -15,8 +17,6 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
-
-from tqdm import tqdm
 
 
 @torch.no_grad()
@@ -178,4 +178,3 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         "turn_indicator_change_total": turn_indicator_change_total,
         **total_result_dict,
     }
-

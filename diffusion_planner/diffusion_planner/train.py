@@ -5,8 +5,14 @@ from pathlib import Path
 import pandas as pd
 import torch
 import wandb
+from timm.utils import ModelEma
+from torch import optim
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
@@ -19,13 +25,6 @@ from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNorma
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.validate_model import validate_model
 
-from timm.utils import ModelEma
-from torch import optim
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
-
-
-from diffusion_planner.train_config import TrainConfig
 
 def find_upward(start_file: str, target_name: str) -> Path:
     directory = Path(start_file).resolve().parent
@@ -365,5 +364,3 @@ def model_training(args: TrainConfig):
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
-
-

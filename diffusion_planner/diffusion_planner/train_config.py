@@ -1,12 +1,18 @@
 from dataclasses import dataclass, field
 from typing import Literal, Optional
-from diffusion_planner.dimensions import (
-    OUTPUT_T, INPUT_T, MAX_NUM_NEIGHBORS, 
-    NUM_SEGMENTS_IN_LANE, POINTS_PER_LANELET, 
-    NUM_SEGMENTS_IN_ROUTE, NUM_POLYGONS, POINTS_PER_POLYGON, 
-    NUM_LINE_STRINGS, POINTS_PER_LINE_STRING
-)
 
+from diffusion_planner.dimensions import (
+    INPUT_T,
+    MAX_NUM_NEIGHBORS,
+    NUM_LINE_STRINGS,
+    NUM_POLYGONS,
+    NUM_SEGMENTS_IN_LANE,
+    NUM_SEGMENTS_IN_ROUTE,
+    OUTPUT_T,
+    POINTS_PER_LANELET,
+    POINTS_PER_LINE_STRING,
+    POINTS_PER_POLYGON,
+)
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
