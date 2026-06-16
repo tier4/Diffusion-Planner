@@ -25,7 +25,7 @@ Safety screens (canonical reward-path geometry, no hand-rolled OBB math):
 Usage:
     python -m rlvr.autoresearch.tools.perturb_neighbors_npz \
         --scenes <list.json> --out_dir <dir> --out_list <out.json> \
-        --ego_shape 4.76,7.24,2.29 --lat_range 0.3,0.8 --lon_range 2.0,5.0 \
+        --ego_shape WB,L,W --lat_range 0.3,0.8 --lon_range 2.0,5.0 \
         --n_per_scene 4 --min_t0_clearance 0.05 --seed 0
 """
 

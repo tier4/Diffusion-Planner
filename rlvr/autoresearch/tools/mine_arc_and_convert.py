@@ -8,7 +8,7 @@ onto the route within [arc_lo, arc_hi], and convert each to the full trainable f
 - line_strings (60,20,2) -> (60,20,4): col2=0, col3=valid (1 where xy nonzero) [campaign approx;
   loss.py treats col3>0.5 as the road-border mask]
 - polygons (10,40,2) -> (10,40,3): col2=presence (1 where xy nonzero)
-- everything cast float32
+- the rebuilt trajectory/map arrays are cast float32 (other passthrough fields keep their dtype)
 
 Reuses scenario_generation.tools._heatmap_common for route projection (no hand-rolled geometry).
 """

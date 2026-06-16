@@ -121,7 +121,7 @@ def main() -> None:
     )
     parser.add_argument("--scenes", required=True, help="JSON list of NPZ paths")
     parser.add_argument("--config", required=True, help="Reward config JSON")
-    parser.add_argument("--ego_shape", required=True, help="WB,L,W e.g. 4.76,7.24,2.29")
+    parser.add_argument("--ego_shape", required=True, help="WB,L,W (wheelbase,length,width)")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--epochs", required=True, help='"all" | "1-24" | "1-24:2" | "2,4,6"')
     parser.add_argument("--batch_size", type=int, default=32)

@@ -39,12 +39,15 @@ def main():
     ap.add_argument("--scenes", required=True, help="all-arc val scene list (m2t+t2m)")
     ap.add_argument("--m2t_route", required=True)
     ap.add_argument("--t2m_route", required=True)
-    ap.add_argument("--ego_shape", required=True)
+    ap.add_argument("--ego_shape", required=True, help="WB,L,W — validated against each NPZ")
     ap.add_argument("--bin_m", type=float, default=100.0)
     ap.add_argument("--models", nargs="+", required=True, help="LABEL PATH LABEL PATH ...")
     args = ap.parse_args()
+    if len(args.models) % 2:
+        ap.error("--models must be LABEL PATH pairs (even number of values)")
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cli_es = np.array([float(x) for x in args.ego_shape.split(",")])
     paths = json.load(open(args.scenes))
     routes = {}
     polys = {}
@@ -57,6 +60,12 @@ def main():
     for p in paths:
         rk = "t2m" if "t2m" in os.path.basename(p) else "m2t"
         d = np.load(p, allow_pickle=True)
+        npz_es = np.asarray(d["ego_shape"]).reshape(-1)[:3]
+        if not np.allclose(npz_es, cli_es, atol=1e-2):
+            raise ValueError(
+                f"{p}: --ego_shape {cli_es.tolist()} != NPZ ego_shape "
+                f"{npz_es.tolist()} (platform mismatch)"
+            )
         ex, ey, eyaw = recover_ego_world_pose_from_goal(np.asarray(d["goal_pose"]), routes[rk])
         pts, s = polys[rk]
         arc = project_to_polyline(np.array([ex, ey]), pts, s)[0]
@@ -83,7 +92,7 @@ def main():
     maxarc = arcs.max()
     nb = int(maxarc // args.bin_m) + 1
     print(
-        f"\nOpen-loop per-arc centerline (reward.py compute_centerline_score, baselink; closer to 0 = centered)"
+        "\nOpen-loop per-arc centerline (reward.py compute_centerline_score, baselink; closer to 0 = centered)"
     )
     print(f"scenes={len(paths)} | {' | '.join(labels)}")
     hdr = "  arc-bin  | " + " | ".join(f"{l:>8}" for l in labels)

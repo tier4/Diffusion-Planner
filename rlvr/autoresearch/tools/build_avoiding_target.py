@@ -45,7 +45,7 @@ def main():
     ap.add_argument("--model", required=True, help="generation source model")
     ap.add_argument("--scenes", required=True, help="JSON list of NPZs to repair")
     ap.add_argument("--config", required=True, help="reward config JSON")
-    ap.add_argument("--ego_shape", required=True, help="WB,L,W")
+    ap.add_argument("--ego_shape", required=True, help="WB,L,W — validated against each NPZ")
     ap.add_argument(
         "--min_margin",
         type=float,
@@ -66,12 +66,19 @@ def main():
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rcfg = load_reward_config(args.config)
     model, margs = load_model(args.model, dev)
+    cli_es = np.array([float(x) for x in args.ego_shape.split(",")])
     paths = json.load(open(args.scenes))
     os.makedirs(args.out_dir, exist_ok=True)
 
     written, unrepaired = [], []
     for p in paths:
         d = load_npz_data(p, dev)
+        npz_es = d["ego_shape"].detach().cpu().numpy().reshape(-1)[:3]
+        if not np.allclose(npz_es, cli_es, atol=1e-2):
+            raise ValueError(
+                f"{p}: --ego_shape {cli_es.tolist()} != NPZ ego_shape "
+                f"{npz_es.tolist()} (platform mismatch)"
+            )
         nb = _normalize_batch(_stack_scene_data([d], dev), margs)
         trajs = generate_all_scenes_batched(
             model,

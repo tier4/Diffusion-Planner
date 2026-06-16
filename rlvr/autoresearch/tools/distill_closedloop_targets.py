@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Distill v23 CLOSED-LOOP reactive trajectories into curated-RSFT targets.
+"""Distill a guidance policy's CLOSED-LOOP reactive trajectory into curated-SFT targets.
 
-distill_guided_targets bakes v23's ONE-SHOT guided plan (open-loop ~4/50 on
-val50) — but v23's real strength is CLOSED-LOOP (0/50): it re-plans every step
-for 8 s and the realized motion clears obstacles a single plan cannot. This
-tool captures THAT: it runs the 80-step closed-loop rollout under v23 guidance
+distill_guided_targets bakes only a guidance policy's ONE-SHOT (open-loop) plan.
+The reactive strength of such a policy is in CLOSED-LOOP: it re-plans every step
+and the realized motion can clear obstacles a single open-loop plan cannot. This
+tool captures THAT: it runs the closed-loop rollout under the policy's guidance
 (the exact rollout eval_closedloop_avoidance scores) and writes the REALIZED
 driven trajectory (positions[1:], initial ego frame) into ego_agent_future.
 
-A curated-RSFT LoRA trained on these learns to emit, in ONE plan, the reactive
-path v23 took 8 s of re-planning to produce — transferring the closed-loop
-avoidance into a deployable single-shot planner.
+A curated-SFT LoRA trained on these learns to emit, in ONE plan, the reactive
+path the policy produced over the full re-planning horizon — transferring the
+closed-loop avoidance into a deployable single-shot planner.
 
 Screens (loud in summary):
   - only scenes whose REALIZED rollout cleared with min OBB clearance >
@@ -18,19 +18,21 @@ Screens (loud in summary):
   - inert scenes (rollout barely deviates from baseline, realized arc within
     --inert_arc m of the baseline det arc) are skipped unless --keep_inert.
 
+Guidance envelope: the envelope flags default to None, meaning the policy's own
+persisted guidance_envelope (policy_eval.json) is used. Pass explicit values
+together with --force_envelope_override to override the persisted envelope.
+
 Usage:
     python -m rlvr.autoresearch.tools.distill_closedloop_targets \
-        --model_path <base.pth> --policy_dir <v23_dir> --scenes <list.json> \
+        --model_path <base.pth> --policy_dir <policy_dir> --scenes <list.json> \
         --out_dir <dir> --out_list <json> --ego_shape WB,L,W \
-        [--steps 80] [--min_clearance 0.2] \
-        [--lambda_lat 5.0 --lat_scale 2.0 --col_scale 9.0 --col_range 8.0]
+        [--steps 80] [--min_clearance 0.2]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 import numpy as np
@@ -72,18 +74,34 @@ def main():
         help="skip if realized arc within this many m of baseline det arc",
     )
     p.add_argument("--keep_inert", action="store_true")
-    # v23 certified guidance envelope (defaults = the strong cert envelope,
-    # matching policy_eval.json guidance_args — NOT the weak argparse defaults
-    # of eval_policy_avoidance).
-    p.add_argument("--lambda_lat", type=float, default=5.0)
-    p.add_argument("--lat_scale", type=float, default=2.0)
-    p.add_argument("--col_scale", type=float, default=9.0)
-    p.add_argument("--col_range", type=float, default=8.0)
-    p.add_argument("--lambda_spd", type=float, default=0.2)
-    p.add_argument("--stretch_scale", type=float, default=1.0)
-    p.add_argument("--guidance_scale", type=float, default=0.5)
-    p.add_argument("--envelope", choices=["v1", "v2"], default="v1")
-    p.add_argument("--lambda_col", type=float, default=3.0)
+    # Guidance envelope: default None -> use the policy's persisted
+    # guidance_envelope (policy_eval.json). An explicit value that disagrees
+    # with the persisted calibration hard-fails unless --force_envelope_override.
+    p.add_argument(
+        "--lambda_lat",
+        type=float,
+        default=None,
+        help="override the policy's persisted guidance envelope",
+    )
+    p.add_argument("--lat_scale", type=float, default=None)
+    p.add_argument("--col_scale", type=float, default=None)
+    p.add_argument("--col_range", type=float, default=None)
+    p.add_argument("--lambda_spd", type=float, default=None)
+    p.add_argument("--stretch_scale", type=float, default=None)
+    p.add_argument("--guidance_scale", type=float, default=None)
+    p.add_argument("--envelope", choices=["v1", "v2"], default=None)
+    p.add_argument("--lambda_col", type=float, default=None)
+    p.add_argument(
+        "--no_dit_memo",
+        action="store_true",
+        help="disable the guided-frame DiT forward memo (memo is the default)",
+    )
+    p.add_argument(
+        "--force_envelope_override",
+        action="store_true",
+        help="allow explicit envelope flags to override the policy's persisted "
+        "calibration (otherwise a disagreeing flag hard-fails)",
+    )
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -146,6 +164,13 @@ def main():
 
         raw = dict(np.load(sp, allow_pickle=True))
         fut = raw["ego_agent_future"]
+        if traj4.shape[0] < fut.shape[0]:
+            raise ValueError(
+                f"{sp}: realized trajectory has {traj4.shape[0]} steps < the "
+                f"{fut.shape[0]}-step future horizon; increase --steps (currently "
+                f"{args.steps}) so the distilled target fills the full SFT horizon "
+                "instead of silently writing a truncated ego_agent_future."
+            )
         T = min(fut.shape[0], traj4.shape[0])
         if fut.shape[-1] == 3:
             new = np.stack(
@@ -169,6 +194,13 @@ def main():
                 "cleared": sc["cleared"],
                 "out": str(out_path),
             }
+        )
+
+    if paths and n_err == len(paths):
+        raise RuntimeError(
+            f"all {n_err} scenes errored — this is a systematic failure (check "
+            "--policy_dir, the guidance envelope, or --no_dit_memo), not per-scene "
+            "noise. Refusing to write an empty target set."
         )
 
     with open(args.out_list, "w") as f:

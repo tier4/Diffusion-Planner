@@ -3,8 +3,8 @@
 For each scene: generate K trajectories with strong route-centerline guidance (the
 generation_variant's cl_spd slots), score every slot with reward.compute_centerline_score_batch
 (baselink), pick the MOST-CENTERED slot, and write it into ego_agent_future as the curated
-SFT target. Unlike plain det (build_baseline_det_target, ~0.88m from an off-center start) the
-CL-guided trajectory steers toward center (~0.33m) — a real centering signal for curated SFT.
+SFT target. Unlike plain det (build_baseline_det_target), which stays near an off-center start,
+the CL-guided trajectory steers toward the route center — a real centering signal for curated SFT.
 
 Reuses ONLY existing fns: eval_det_avoidance.{load_model,load_npz_data},
 grpo_trainer_batched.{_stack_scene_data,_normalize_batch,generate_all_scenes_batched},
@@ -31,7 +31,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, help="centered source (baseline)")
     ap.add_argument("--scenes", required=True)
-    ap.add_argument("--ego_shape", required=True)
+    ap.add_argument("--ego_shape", required=True, help="WB,L,W — validated against each NPZ")
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--out_list", required=True)
     ap.add_argument("--K", type=int, default=16)
@@ -40,6 +40,7 @@ def main():
     args = ap.parse_args()
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, margs = load_model(args.model, dev)
+    cli_es = np.array([float(x) for x in args.ego_shape.split(",")])
     paths = json.load(open(args.scenes))
     os.makedirs(args.out_dir, exist_ok=True)
     written, n_cen = [], 0
@@ -47,6 +48,12 @@ def main():
         d = load_npz_data(p, dev)
         es = d["ego_shape"]
         es_one = es[0] if es.dim() > 1 else es
+        npz_es = es_one.detach().cpu().numpy().reshape(-1)[:3]
+        if not np.allclose(npz_es, cli_es, atol=1e-2):
+            raise ValueError(
+                f"{p}: --ego_shape {cli_es.tolist()} != NPZ ego_shape "
+                f"{npz_es.tolist()} (platform mismatch)"
+            )
         nb = _normalize_batch(_stack_scene_data([d], dev), margs)
         trajs = generate_all_scenes_batched(
             model,
