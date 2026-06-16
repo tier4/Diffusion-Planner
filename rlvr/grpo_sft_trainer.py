@@ -659,12 +659,15 @@ def train_epoch_ranked_sft(
         from exploration_policy.utils import generate_reference_trajectory, run_frozen_encoder
         from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
         from rlvr.guidance_batched import build_head_composer
+
         # NOTE: per-scene loop matches grpo_exploration_trainer's generate_policy_guided_group.
         # Batching across scenes would require handling per-scene Beta distributions in a single
         # forward pass, which is complex. For 50-500 scenes this takes ~3 min, acceptable.
         _heads = list(config.exploration_heads)
-        print(f"  Explorer-guided generation: {K} samples from Beta distribution per scene "
-              f"(heads: {_heads})...")
+        print(
+            f"  Explorer-guided generation: {K} samples from Beta distribution per scene "
+            f"(heads: {_heads})..."
+        )
         exploration_policy.eval()
         model.eval()
 
@@ -675,7 +678,8 @@ def train_epoch_ranked_sft(
             raise NotImplementedError(
                 "joint explorer training in ranked-SFT only supports the legacy "
                 f"lateral+longitudinal heads, got {_heads} — freeze the explorer "
-                "(ranked_sft_freeze_explorer=true) for custom-head checkpoints")
+                "(ranked_sft_freeze_explorer=true) for custom-head checkpoints"
+            )
 
         all_scene_trajs = []  # will be [N, K, T, 4]
         # Store per-scene explorer data for training
@@ -702,12 +706,14 @@ def train_epoch_ranked_sft(
                 eta_vals = {h: 2.0 * v - 1.0 for h, v in eta_01.items()}  # map to [-1, 1]
 
                 if _train_explorer:
-                    _explorer_scenes.append({
-                        "scene_enc": scene_enc.detach(),
-                        "x_ref": x_ref.detach(),
-                        "eta_lat_01": eta_01["lateral"].detach(),
-                        "eta_lon_01": eta_01["longitudinal"].detach(),
-                    })
+                    _explorer_scenes.append(
+                        {
+                            "scene_enc": scene_enc.detach(),
+                            "x_ref": x_ref.detach(),
+                            "eta_lat_01": eta_01["lateral"].detach(),
+                            "eta_lon_01": eta_01["longitudinal"].detach(),
+                        }
+                    )
 
                 # Expand scene data from B=1 to B=K
                 K_data = {}

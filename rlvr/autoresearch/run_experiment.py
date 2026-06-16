@@ -625,6 +625,7 @@ def run(
                     LORA_TARGET_LAST_BLOCK_REGEX,
                     apply_lora,
                 )
+
                 target = {
                     "last": LORA_TARGET_LAST_BLOCK_REGEX,
                     "first": LORA_TARGET_FIRST_BLOCK_REGEX,
