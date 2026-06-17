@@ -11,25 +11,25 @@ import math
 import random
 import sys
 
-import torch
 import numpy as np
-
+import torch
 from diffusion_planner.dimensions import INPUT_T, OUTPUT_T
 from diffusion_planner.loss import control_to_waypoints, waypoints_to_control
-from diffusion_planner.utils.normalizer import ControlNormalizer
 from diffusion_planner.utils.coordinate_transform import (
-    transform_to_local_frame,
     transform_to_ego_frame,
+    transform_to_local_frame,
 )
+from diffusion_planner.utils.normalizer import ControlNormalizer
 
 T_HIST = INPUT_T + 1  # 31
-T_FUTURE = OUTPUT_T   # 80
+T_FUTURE = OUTPUT_T  # 80
 DT = 0.1
 
 
 # ---------------------------------------------------------------------------
 # Synthetic trajectory generators
 # ---------------------------------------------------------------------------
+
 
 def make_straight_line(
     v: float = 5.0,
@@ -133,6 +133,7 @@ def _place_as_neighbor(
 # Pytest tests (synthetic data)
 # ---------------------------------------------------------------------------
 
+
 class TestEgoRoundtrip:
     """trajectory -> control -> trajectory for ego."""
 
@@ -143,7 +144,7 @@ class TestEgoRoundtrip:
 
         recon = control_to_waypoints(ctrl, past, t0_states={"v": torch.tensor([v0])})
         assert torch.allclose(future[..., :2], recon[..., :2], atol=atol), (
-            f"Ego roundtrip pos error too large: max={( future[..., :2] - recon[..., :2]).abs().max().item():.6f}"
+            f"Ego roundtrip pos error too large: max={(future[..., :2] - recon[..., :2]).abs().max().item():.6f}"
         )
 
     def test_straight_line(self):
@@ -172,9 +173,9 @@ class TestNeighborLocalFrameRoundtrip:
 
         recon_local = control_to_waypoints(ctrl, hist_local)
 
-        ref_pos = n_past[..., -1, :2]     # [1, 1, 2]
-        ref_cos = n_past[..., -1, 2:3]    # [1, 1, 1]
-        ref_sin = n_past[..., -1, 3:4]    # [1, 1, 1]
+        ref_pos = n_past[..., -1, :2]  # [1, 1, 2]
+        ref_cos = n_past[..., -1, 2:3]  # [1, 1, 1]
+        ref_sin = n_past[..., -1, 3:4]  # [1, 1, 1]
         recon_ego = transform_to_ego_frame(recon_local, ref_pos, ref_cos, ref_sin)
 
         assert torch.allclose(n_future[..., :2], recon_ego[..., :2], atol=atol), (
@@ -211,7 +212,7 @@ class TestControlNormalizerRoundtrip:
         recovered = norm.inverse(normed)
 
         assert torch.allclose(ctrl, recovered, atol=1e-6), (
-            f"ControlNormalizer roundtrip error: max={( ctrl - recovered).abs().max().item():.2e}"
+            f"ControlNormalizer roundtrip error: max={(ctrl - recovered).abs().max().item():.2e}"
         )
 
     def test_zero_preserving(self):
@@ -230,24 +231,28 @@ class TestInvalidTimestepPreservation:
         n_past, n_future = _place_as_neighbor(past, future, heading=0.3, offset_x=5.0, offset_y=3.0)
 
         # Zero out second half of future (simulate invalid timesteps)
-        n_future[:, :, T_FUTURE // 2:, :] = 0.0
+        n_future[:, :, T_FUTURE // 2 :, :] = 0.0
 
         _, fut_local = transform_to_local_frame(n_past, n_future, preserve_invalid=True)
 
-        invalid_region = fut_local[:, :, T_FUTURE // 2:, :]
+        invalid_region = fut_local[:, :, T_FUTURE // 2 :, :]
         assert (invalid_region == 0.0).all(), (
             f"Invalid timesteps not preserved: max nonzero = {invalid_region.abs().max().item():.2e}"
         )
 
     def test_valid_part_unchanged(self):
         past, future, _ = make_straight_line(v=4.0, heading=0.0)
-        n_past, n_future_full = _place_as_neighbor(past, future, heading=0.3, offset_x=5.0, offset_y=3.0)
+        n_past, n_future_full = _place_as_neighbor(
+            past, future, heading=0.3, offset_x=5.0, offset_y=3.0
+        )
 
         n_future_partial = n_future_full.clone()
-        n_future_partial[:, :, T_FUTURE // 2:, :] = 0.0
+        n_future_partial[:, :, T_FUTURE // 2 :, :] = 0.0
 
         _, fut_local_full = transform_to_local_frame(n_past, n_future_full, preserve_invalid=True)
-        _, fut_local_partial = transform_to_local_frame(n_past, n_future_partial, preserve_invalid=True)
+        _, fut_local_partial = transform_to_local_frame(
+            n_past, n_future_partial, preserve_invalid=True
+        )
 
         valid_half = T_FUTURE // 2
         assert torch.allclose(
@@ -277,7 +282,9 @@ class TestNeighborLocalFrameIdentity:
     def test_identity_multiple_headings(self):
         for heading in [0.0, 0.3, -0.5, math.pi / 2, math.pi, -math.pi]:
             past, future, _ = make_straight_line(v=3.0, heading=0.0)
-            n_past, n_future = _place_as_neighbor(past, future, heading=heading, offset_x=2.0, offset_y=1.0)
+            n_past, n_future = _place_as_neighbor(
+                past, future, heading=heading, offset_x=2.0, offset_y=1.0
+            )
             hist_local, _ = transform_to_local_frame(n_past, n_future)
             ref = hist_local[0, 0, -1]
             assert torch.allclose(ref[:2], torch.zeros(2), atol=1e-6)
@@ -287,6 +294,7 @@ class TestNeighborLocalFrameIdentity:
 # ---------------------------------------------------------------------------
 # Standalone mode: test on actual npz data files
 # ---------------------------------------------------------------------------
+
 
 def _load_sample(path: str) -> dict:
     """Load a single npz file and prepare tensors for roundtrip testing."""
@@ -330,7 +338,7 @@ def _run_standalone(path_list_json: str):
     indices = sorted(random.sample(range(len(paths)), N))
 
     print(f"Testing {N} samples from {path_list_json}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     ego_errors = []
     neighbor_errors = []
@@ -373,8 +381,8 @@ def _run_standalone(path_list_json: str):
             continue
 
         for ni in valid_indices[:5].tolist():
-            ni_past = n_past[:, ni:ni+1]    # [1, 1, T_HIST, 4]
-            ni_future = n_future[:, ni:ni+1]  # [1, 1, T, 4]
+            ni_past = n_past[:, ni : ni + 1]  # [1, 1, T_HIST, 4]
+            ni_future = n_future[:, ni : ni + 1]  # [1, 1, T, 4]
 
             # Check if this neighbor has valid future data
             n_valid_count = ni_future.ne(0).any(dim=-1).sum().item()
@@ -387,8 +395,10 @@ def _run_standalone(path_list_json: str):
 
             # Verify local frame identity
             ref = hist_local[0, 0, -1]
-            id_ok = (ref[:2].abs().max().item() < 1e-6 and
-                     (ref[2:] - torch.tensor([1.0, 0.0])).abs().max().item() < 1e-6)
+            id_ok = (
+                ref[:2].abs().max().item() < 1e-6
+                and (ref[2:] - torch.tensor([1.0, 0.0])).abs().max().item() < 1e-6
+            )
 
             # Control roundtrip in local frame
             n_ctrl = waypoints_to_control(hist_local, fut_local)
@@ -423,15 +433,19 @@ def _run_standalone(path_list_json: str):
                 f"local_id={id_str}  valid={n_valid_count}/{ni_future.shape[2]}"
             )
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("SUMMARY")
-    print(f"  Ego   : {len(ego_errors)} samples, "
-          f"max_err range [{min(ego_errors):.6f}, {max(ego_errors):.6f}]m, "
-          f"all<0.01: {all(e < 0.01 for e in ego_errors)}")
+    print(
+        f"  Ego   : {len(ego_errors)} samples, "
+        f"max_err range [{min(ego_errors):.6f}, {max(ego_errors):.6f}]m, "
+        f"all<0.01: {all(e < 0.01 for e in ego_errors)}"
+    )
     if neighbor_errors:
-        print(f"  Neigh : {len(neighbor_errors)} agents, "
-              f"max_err range [{min(neighbor_errors):.6f}, {max(neighbor_errors):.6f}]m, "
-              f"all<0.05: {all(e < 0.05 for e in neighbor_errors)}")
+        print(
+            f"  Neigh : {len(neighbor_errors)} agents, "
+            f"max_err range [{min(neighbor_errors):.6f}, {max(neighbor_errors):.6f}]m, "
+            f"all<0.05: {all(e < 0.05 for e in neighbor_errors)}"
+        )
     else:
         print("  Neigh : no valid neighbors tested")
 
@@ -444,4 +458,5 @@ if __name__ == "__main__":
     else:
         # Run pytest programmatically
         import pytest
+
         sys.exit(pytest.main([__file__, "-v"]))

@@ -32,15 +32,15 @@ def transform_to_local_frame(
         future_local:  [..., T, 4] in local frame.
     """
     # Reference pose: last history timestep
-    ref_pos = history_4d[..., -1:, :2]    # [..., 1, 2]
-    ref_cos = history_4d[..., -1:, 2:3]   # [..., 1, 1]
-    ref_sin = history_4d[..., -1:, 3:4]   # [..., 1, 1]
+    ref_pos = history_4d[..., -1:, :2]  # [..., 1, 2]
+    ref_cos = history_4d[..., -1:, 2:3]  # [..., 1, 1]
+    ref_sin = history_4d[..., -1:, 3:4]  # [..., 1, 1]
 
     history_local = _inverse_transform(history_4d, ref_pos, ref_cos, ref_sin)
 
     # Detect invalid (all-zero) future timesteps BEFORE transforming
     if preserve_invalid:
-        invalid_mask = (future_4d.ne(0).sum(dim=-1, keepdim=True) == 0)  # [..., T, 1]
+        invalid_mask = future_4d.ne(0).sum(dim=-1, keepdim=True) == 0  # [..., T, 1]
 
     future_local = _inverse_transform(future_4d, ref_pos, ref_cos, ref_sin)
 
@@ -88,15 +88,19 @@ def transform_to_ego_frame(
     rot_cos = local_cos * ref_cos - local_sin * ref_sin
     rot_sin = local_cos * ref_sin + local_sin * ref_cos
 
-    return torch.cat([
-        rot_x + ref_pos[..., 0:1],
-        rot_y + ref_pos[..., 1:2],
-        rot_cos,
-        rot_sin,
-    ], dim=-1)
+    return torch.cat(
+        [
+            rot_x + ref_pos[..., 0:1],
+            rot_y + ref_pos[..., 1:2],
+            rot_cos,
+            rot_sin,
+        ],
+        dim=-1,
+    )
 
 
 # ---- internal helpers -------------------------------------------------------
+
 
 def _inverse_transform(
     traj_4d: torch.Tensor,

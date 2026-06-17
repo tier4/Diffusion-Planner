@@ -38,7 +38,7 @@ def transform_to_local_frame(history_4d, future_4d):
         future_local: [Pn, T_fut, 4]
     """
     # Reference position and heading from last history timestep
-    pos = history_4d[:, -1:, :2]   # [Pn, 1, 2]
+    pos = history_4d[:, -1:, :2]  # [Pn, 1, 2]
     cos_h = history_4d[:, -1:, 2:3]  # [Pn, 1, 1]
     sin_h = history_4d[:, -1:, 3:4]  # [Pn, 1, 1]
 
@@ -134,7 +134,7 @@ def main():
 
         # --- Neighbors ---
         try:
-            neighbor_past = d["neighbor_agents_past"]    # (Pn, T_hist, 11)
+            neighbor_past = d["neighbor_agents_past"]  # (Pn, T_hist, 11)
             neighbor_future = d["neighbor_agents_future"]  # (Pn, T_fut, 3)
 
             for ni in range(neighbor_past.shape[0]):
@@ -163,7 +163,7 @@ def main():
                 # Restore zeros for invalid timesteps
                 n_fut_local[0, ~future_valid] = 0.0
 
-                past_t = torch.from_numpy(n_hist_local)   # [1, T_hist, 4]
+                past_t = torch.from_numpy(n_hist_local)  # [1, T_hist, 4]
                 future_t = torch.from_numpy(n_fut_local)  # [1, T_fut, 4]
 
                 with torch.no_grad():
@@ -185,21 +185,21 @@ def main():
                 nei_curvatures.append(valid_actions[:, 1])
 
                 # Estimate v0 from last two history positions
-                n_v0 = np.linalg.norm(
-                    neighbor_past[ni, -1, :2] - neighbor_past[ni, -2, :2]
-                ) / 0.1
+                n_v0 = np.linalg.norm(neighbor_past[ni, -1, :2] - neighbor_past[ni, -2, :2]) / 0.1
                 nei_v0s.append(n_v0)
                 nei_valid_count += 1
 
                 # Track per-neighbor metadata for outlier analysis
-                nei_metadata.append({
-                    "file_path": p,
-                    "neighbor_idx": ni,
-                    "v0": n_v0,
-                    "valid_count": int(future_valid.sum()),
-                    "max_abs_accel": float(np.max(np.abs(valid_actions[:, 0]))),
-                    "max_abs_kappa": float(np.max(np.abs(valid_actions[:, 1]))),
-                })
+                nei_metadata.append(
+                    {
+                        "file_path": p,
+                        "neighbor_idx": ni,
+                        "v0": n_v0,
+                        "valid_count": int(future_valid.sum()),
+                        "max_abs_accel": float(np.max(np.abs(valid_actions[:, 0]))),
+                        "max_abs_kappa": float(np.max(np.abs(valid_actions[:, 1]))),
+                    }
+                )
 
         except Exception as e:
             nei_errors += 1
@@ -244,15 +244,21 @@ def main():
     print("=" * 60)
     ego_a_std = np.std(ego_accels)
     ego_k_std = np.std(ego_curvatures)
-    print(f"  Ego:      accel_mean={np.mean(ego_accels):.6f}, accel_std={ego_a_std:.6f}, "
-          f"kappa_mean={np.mean(ego_curvatures):.6f}, kappa_std={ego_k_std:.6f}")
+    print(
+        f"  Ego:      accel_mean={np.mean(ego_accels):.6f}, accel_std={ego_a_std:.6f}, "
+        f"kappa_mean={np.mean(ego_curvatures):.6f}, kappa_std={ego_k_std:.6f}"
+    )
     if nei_valid_count > 0:
         nei_a_std = np.std(nei_accels)
         nei_k_std = np.std(nei_curvatures)
-        print(f"  Neighbor: accel_mean={np.mean(nei_accels):.6f}, accel_std={nei_a_std:.6f}, "
-              f"kappa_mean={np.mean(nei_curvatures):.6f}, kappa_std={nei_k_std:.6f}")
-        print(f"  Ratio (nei/ego): accel_std={nei_a_std / ego_a_std:.2f}x, "
-              f"kappa_std={nei_k_std / ego_k_std:.2f}x")
+        print(
+            f"  Neighbor: accel_mean={np.mean(nei_accels):.6f}, accel_std={nei_a_std:.6f}, "
+            f"kappa_mean={np.mean(nei_curvatures):.6f}, kappa_std={nei_k_std:.6f}"
+        )
+        print(
+            f"  Ratio (nei/ego): accel_std={nei_a_std / ego_a_std:.2f}x, "
+            f"kappa_std={nei_k_std / ego_k_std:.2f}x"
+        )
 
     # Outlier pattern analysis
     if nei_valid_count > 0 and len(nei_metadata) > 0:
@@ -284,11 +290,13 @@ def main():
                 continue
             a = meta_max_abs_accel[mask]
             k = meta_max_abs_kappa[mask]
-            print(f"  {label:12s}: n={n:6d}  "
-                  f"accel(mean={np.mean(a):.2f}, p95={np.percentile(a, 95):.2f}, "
-                  f"p99={np.percentile(a, 99):.2f}, max={np.max(a):.2f})  "
-                  f"kappa(mean={np.mean(k):.4f}, p95={np.percentile(k, 95):.4f}, "
-                  f"p99={np.percentile(k, 99):.4f}, max={np.max(k):.4f})")
+            print(
+                f"  {label:12s}: n={n:6d}  "
+                f"accel(mean={np.mean(a):.2f}, p95={np.percentile(a, 95):.2f}, "
+                f"p99={np.percentile(a, 99):.2f}, max={np.max(a):.2f})  "
+                f"kappa(mean={np.mean(k):.4f}, p95={np.percentile(k, 95):.4f}, "
+                f"p99={np.percentile(k, 99):.4f}, max={np.max(k):.4f})"
+            )
 
         # 2. Outlier breakdown by valid future length
         print()
@@ -307,11 +315,13 @@ def main():
                 continue
             a = meta_max_abs_accel[mask]
             k = meta_max_abs_kappa[mask]
-            print(f"  {label:6s}: n={n:6d}  "
-                  f"accel(mean={np.mean(a):.2f}, p95={np.percentile(a, 95):.2f}, "
-                  f"p99={np.percentile(a, 99):.2f}, max={np.max(a):.2f})  "
-                  f"kappa(mean={np.mean(k):.4f}, p95={np.percentile(k, 95):.4f}, "
-                  f"p99={np.percentile(k, 99):.4f}, max={np.max(k):.4f})")
+            print(
+                f"  {label:6s}: n={n:6d}  "
+                f"accel(mean={np.mean(a):.2f}, p95={np.percentile(a, 95):.2f}, "
+                f"p99={np.percentile(a, 99):.2f}, max={np.max(a):.2f})  "
+                f"kappa(mean={np.mean(k):.4f}, p95={np.percentile(k, 95):.4f}, "
+                f"p99={np.percentile(k, 99):.4f}, max={np.max(k):.4f})"
+            )
 
         # 3. Top 10 most extreme outlier samples
         print()
@@ -319,20 +329,24 @@ def main():
         accel_order = np.argsort(meta_max_abs_accel)[::-1]
         for rank, idx in enumerate(accel_order[:10]):
             m = nei_metadata[idx]
-            print(f"  #{rank+1:2d}: max_abs_accel={m['max_abs_accel']:.2f}, "
-                  f"max_abs_kappa={m['max_abs_kappa']:.4f}, "
-                  f"v0={m['v0']:.3f}, valid_count={m['valid_count']}, "
-                  f"nei_idx={m['neighbor_idx']}, file={m['file_path']}")
+            print(
+                f"  #{rank + 1:2d}: max_abs_accel={m['max_abs_accel']:.2f}, "
+                f"max_abs_kappa={m['max_abs_kappa']:.4f}, "
+                f"v0={m['v0']:.3f}, valid_count={m['valid_count']}, "
+                f"nei_idx={m['neighbor_idx']}, file={m['file_path']}"
+            )
 
         print()
         print("--- Top 10 most extreme KAPPA outliers ---")
         kappa_order = np.argsort(meta_max_abs_kappa)[::-1]
         for rank, idx in enumerate(kappa_order[:10]):
             m = nei_metadata[idx]
-            print(f"  #{rank+1:2d}: max_abs_kappa={m['max_abs_kappa']:.4f}, "
-                  f"max_abs_accel={m['max_abs_accel']:.2f}, "
-                  f"v0={m['v0']:.3f}, valid_count={m['valid_count']}, "
-                  f"nei_idx={m['neighbor_idx']}, file={m['file_path']}")
+            print(
+                f"  #{rank + 1:2d}: max_abs_kappa={m['max_abs_kappa']:.4f}, "
+                f"max_abs_accel={m['max_abs_accel']:.2f}, "
+                f"v0={m['v0']:.3f}, valid_count={m['valid_count']}, "
+                f"nei_idx={m['neighbor_idx']}, file={m['file_path']}"
+            )
 
     # Suggested normalizer values
     print()
@@ -340,12 +354,12 @@ def main():
     print("SUGGESTED NORMALIZER VALUES")
     print("=" * 60)
     print(f"  ego_control_normalizer:")
-    print(f'    mean: [{np.mean(ego_accels):.6f}, {np.mean(ego_curvatures):.6f}]')
-    print(f'    std:  [{ego_a_std:.6f}, {ego_k_std:.6f}]')
+    print(f"    mean: [{np.mean(ego_accels):.6f}, {np.mean(ego_curvatures):.6f}]")
+    print(f"    std:  [{ego_a_std:.6f}, {ego_k_std:.6f}]")
     if nei_valid_count > 0:
         print(f"  neighbor_control_normalizer:")
-        print(f'    mean: [{np.mean(nei_accels):.6f}, {np.mean(nei_curvatures):.6f}]')
-        print(f'    std:  [{nei_a_std:.6f}, {nei_k_std:.6f}]')
+        print(f"    mean: [{np.mean(nei_accels):.6f}, {np.mean(nei_curvatures):.6f}]")
+        print(f"    std:  [{nei_a_std:.6f}, {nei_k_std:.6f}]")
 
 
 if __name__ == "__main__":

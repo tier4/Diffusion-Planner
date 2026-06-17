@@ -2,7 +2,11 @@ import json
 
 import torch
 
-from diffusion_planner.utils.normalizer import ControlNormalizer, ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 
 
 class Config:

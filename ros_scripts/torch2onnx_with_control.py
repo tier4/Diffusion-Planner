@@ -102,8 +102,10 @@ class ONNXWrapper(nn.Module):
         D = self.model.decoder._D
         if D > POSE_DIM:
             pad = torch.zeros(
-                *sampled_trajectories.shape[:-1], D - POSE_DIM,
-                device=sampled_trajectories.device, dtype=sampled_trajectories.dtype,
+                *sampled_trajectories.shape[:-1],
+                D - POSE_DIM,
+                device=sampled_trajectories.device,
+                dtype=sampled_trajectories.dtype,
             )
             sampled_trajectories = torch.cat([sampled_trajectories, pad], dim=-1)
         inputs = {
@@ -384,7 +386,9 @@ np.savez("{output_path}", **{{f"out_{{i}}": o for i, o in enumerate(outputs)}})
 """
             result = subprocess.run(
                 [sys.executable, "-c", script],
-                capture_output=True, text=True, timeout=300,
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"ORT subprocess failed:\n{result.stderr[-1000:]}")
