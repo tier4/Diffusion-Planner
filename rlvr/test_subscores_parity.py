@@ -21,8 +21,7 @@ repo_root = Path(__file__).resolve().parent.parent
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from diffusion_planner.metrics import compute_subscores_batch  # noqa: E402
-
+from planner_metrics import compute_subscores_batch  # noqa: E402
 from rlvr.reward import compute_reward_batch  # noqa: E402
 from rlvr.test_reward_golden import _SCENARIOS  # noqa: E402  (reuse golden scenarios)
 

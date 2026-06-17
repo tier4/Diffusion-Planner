@@ -7,6 +7,7 @@ dependencies = [
     "diffusion-planner",
     "exploration-policy",
     "guidance-gui",
+    "planner-metrics",
     "preference-optimization",
     "rlvr",
     "scenario-generation",
@@ -29,6 +30,7 @@ default = true
 members = [
     "diffusion_planner",
     "exploration_policy",
+    "planner_metrics",
     "preference_optimization",
     "rlvr",
     "scenario_generation",
@@ -39,6 +41,7 @@ members = [
 [tool.uv.sources]
 diffusion-planner = { workspace = true }
 exploration-policy = { workspace = true }
+planner-metrics = { workspace = true }
 preference-optimization = { workspace = true }
 rlvr = { workspace = true }
 scenario-generation = { workspace = true }

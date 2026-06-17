@@ -1,0 +1,17 @@
+[project]
+name = "planner-metrics"
+version = "0.1.0"
+description = "Shared planning metrics: EPDMS-style subscores + geometry primitives (no rlvr/diffusion_planner dependency)"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "numpy>=1.26,<2",
+    "torch",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["planner_metrics"]
+package-dir = { "planner_metrics" = "." }
