@@ -151,9 +151,7 @@ def build_neighbor_future(data_list, i, map2bl_matrix_4x4, agent_ids, max_num_ob
     state, then walk future frames appending the same id until it disappears. Returns
     (max_num_objects, out_t, 3) of [x, y, heading] in ego frame.
     """
-    current_objs = {
-        bytes(o.object_id.uuid): o for o in data_list[i].tracked_objects.objects
-    }
+    current_objs = {bytes(o.object_id.uuid): o for o in data_list[i].tracked_objects.objects}
     # Pre-index future frames by object id.
     future_maps = []
     for t in range(1, out_t + 1):

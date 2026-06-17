@@ -41,9 +41,13 @@ def main() -> None:
     only_cpp = sorted(set(cpp) - set(py))
     only_py = sorted(set(py) - set(cpp))
     if only_cpp:
-        print(f"  frames only in cpp ({len(only_cpp)}): {only_cpp[:10]}{' ...' if len(only_cpp) > 10 else ''}")
+        print(
+            f"  frames only in cpp ({len(only_cpp)}): {only_cpp[:10]}{' ...' if len(only_cpp) > 10 else ''}"
+        )
     if only_py:
-        print(f"  frames only in python ({len(only_py)}): {only_py[:10]}{' ...' if len(only_py) > 10 else ''}")
+        print(
+            f"  frames only in python ({len(only_py)}): {only_py[:10]}{' ...' if len(only_py) > 10 else ''}"
+        )
     if not common:
         return
 
@@ -78,7 +82,9 @@ def main() -> None:
         print(f"  {'OK ' if ok else 'NG '} {k:30s} max={max_diff[k]:.4g}")
     for k in sorted(only_in_one):
         print(f"  ONLY-IN-ONE {k}: present in only one converter")
-    print(f"\n{n_ok}/{len(set(max_diff) | set(shape_mismatch))} value-comparable keys within {args.threshold}")
+    print(
+        f"\n{n_ok}/{len(set(max_diff) | set(shape_mismatch))} value-comparable keys within {args.threshold}"
+    )
 
 
 if __name__ == "__main__":
