@@ -19,7 +19,6 @@ No rendering here (``--no_render`` is the mining default); every stage is timed.
 
 from __future__ import annotations
 
-import hashlib
 import math
 from dataclasses import dataclass, field
 
@@ -457,10 +456,18 @@ def run_segment(
     search_radius: float = 1.5,
     warmup_steps: int = 0,
     goal_reach_m: float = 5.0,
-    max_stuck_steps: int = 100,
+    max_stuck_steps: int = 0,
+    max_steps: int | None = None,
+    unstick_after: int = 300,
+    unstick_advance_m: float = 5.0,
     timers: Timers | None = None,
 ) -> SegmentResult:
-    """Single-segment closed-loop reproducer rollout over recorded frames [start, end)."""
+    """Single-segment closed-loop reproducer rollout over recorded frames [start, end).
+
+    Unstick is on by default (snap the ego forward onto the recorded GT pose after
+    ``unstick_after`` steps of no progress). The only timeout is the step cap
+    ``max_steps`` (default 3*(end-start)); the hard stuck-cutoff is off.
+    """
     timers = timers or Timers()
     s = _seed_state(
         tl,
@@ -472,6 +479,9 @@ def run_segment(
         goal_reach_m,
         max_stuck_steps,
         timers,
+        max_steps=max_steps if max_steps is not None else 3 * (end - start),
+        unstick_after=unstick_after,
+        unstick_advance_m=unstick_advance_m,
     )
     while not s.done:
         with timers("input_build"):
@@ -491,6 +501,90 @@ def run_segment(
 # --------------------------------------------------------------------------- #
 # rendering (off the mining hot path) — draw the live-ego-frame scene per step
 # --------------------------------------------------------------------------- #
+def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1) -> dict:
+    """Per-track world-trajectory anchors for temporal interpolation.
+
+    Scans recorded frames [lo, hi) and, for each track UUID, collects its world
+    pose then keeps only the *fresh* samples (drops held/stale repeats — frames
+    where the perception position didn't move > eps). Returns
+    ``{uuid: (idx_arr, xy_arr (N,2), heading_arr (N,))}``. Querying between two
+    anchors (``_interp_pose``) linearly interpolates across the held gaps, turning
+    the freeze-then-jump stutter into smooth motion. Uses the sidecar track IDs to
+    associate the same car across frames.
+    """
+    raw: dict[str, list] = {}
+    for idx in range(lo, hi):
+        ids = tl.neighbor_ids(idx)
+        if not ids:
+            continue
+        pose = tl.poses[idx]
+        c, s = math.cos(pose[2]), math.sin(pose[2])
+        nb = tl.npz(idx)["neighbor_agents_past"][:, -1]  # (320, 11) ego frame
+        for slot in range(min(len(ids), nb.shape[0])):
+            row = nb[slot]
+            if np.abs(row[:6]).sum() == 0:
+                continue
+            wx = pose[0] + row[0] * c - row[1] * s
+            wy = pose[1] + row[0] * s + row[1] * c
+            wh = math.atan2(row[3], row[2]) + pose[2]
+            raw.setdefault(ids[slot], []).append((idx, wx, wy, wh))
+    interp: dict[str, tuple] = {}
+    for u, lst in raw.items():
+        kept = [lst[0]]
+        for samp in lst[1:]:
+            if math.hypot(samp[1] - kept[-1][1], samp[2] - kept[-1][2]) > eps:
+                kept.append(samp)
+        if kept[-1][0] != lst[-1][0]:
+            kept.append(lst[-1])  # keep the final sample so interp reaches the end
+        interp[u] = (
+            np.array([k[0] for k in kept]),
+            np.array([[k[1], k[2]] for k in kept], dtype=np.float64),
+            np.unwrap(np.array([k[3] for k in kept])),
+        )
+    return interp
+
+
+def _interp_pose(anchors: tuple, idx: int) -> tuple[float, float, float]:
+    """Linear world pose (x, y, heading) at recorded-frame ``idx`` from fresh anchors."""
+    idxs, xy, hd = anchors
+    if idx <= idxs[0]:
+        return float(xy[0, 0]), float(xy[0, 1]), float(hd[0])
+    if idx >= idxs[-1]:
+        return float(xy[-1, 0]), float(xy[-1, 1]), float(hd[-1])
+    j = int(np.searchsorted(idxs, idx))  # idxs[j-1] <= idx <= idxs[j]
+    i0, i1 = j - 1, j
+    t = (idx - idxs[i0]) / (idxs[i1] - idxs[i0])
+    return (
+        float(xy[i0, 0] + t * (xy[i1, 0] - xy[i0, 0])),
+        float(xy[i0, 1] + t * (xy[i1, 1] - xy[i0, 1])),
+        float(hd[i0] + t * (hd[i1] - hd[i0])),
+    )
+
+
+def _apply_neighbor_interp(np_dict, neighbor_ids, live_pose, idx, interp):
+    """Replace each neighbor's current pose with its interpolated world pose.
+
+    Mutates ``np_dict`` neighbor current (x, y, cos, sin) in the live-ego frame.
+    """
+    nb = np_dict["neighbor_agents_past"][0]  # (320, 31, 11) live-ego frame
+    ex, ey, eyaw = float(live_pose[0]), float(live_pose[1]), float(live_pose[2])
+    c, s = math.cos(eyaw), math.sin(eyaw)
+    for slot in range(min(nb.shape[0], len(neighbor_ids))):
+        row = nb[slot, -1]
+        if np.abs(row[:6]).sum() == 0:
+            continue
+        anchors = interp.get(neighbor_ids[slot])
+        if anchors is None:
+            continue
+        wx, wy, wh = _interp_pose(anchors, idx)
+        dxw, dyw = wx - ex, wy - ey  # world -> live-ego
+        nb[slot, -1, 0] = dxw * c + dyw * s
+        nb[slot, -1, 1] = -dxw * s + dyw * c
+        lh = wh - eyaw
+        nb[slot, -1, 2] = math.cos(lh)
+        nb[slot, -1, 3] = math.sin(lh)
+
+
 def _polylines_from_tensor(t: np.ndarray, border_only: bool = False) -> list[np.ndarray]:
     """Extract (P,2) xy polylines (live-ego frame) from a lane/line_string tensor."""
     out = []
@@ -570,26 +664,26 @@ def render_segment(
     color_by_uuid: bool = True,
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
+    interpolate: bool = True,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
-    Runs until the ego reaches the segment end (within ``goal_reach_m``), or the
-    step cap. ``max_steps`` defaults to ``2*(end-start)`` so a slow ego (e.g.
-    waiting out a long red light) still has room to drive to the end. The stuck
-    *cutoff* (``max_stuck_steps``) is disabled by default; instead ``unstick_after``
-    (default 300 steps ~30 s of no progress) snaps the ego forward onto the
-    recorded GT pose ~``unstick_advance_m`` ahead — so a model that halts at a
-    yellow light is nudged past it rather than ending the render.
+    Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
+    step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
+    on: after ``unstick_after`` (~30 s) of no progress the ego is snapped onto the
+    recorded GT pose ~``unstick_advance_m`` ahead.
 
-    ``window`` = (lo, hi) step range to render (default: all). ``color_by_uuid``:
-    color neighbors by their stable track UUID from the sidecar when available
-    (falls back to slot-index colors otherwise). Returns the SegmentResult metrics.
+    ``interpolate``: smooth stale recorded neighbor positions by linearly
+    interpolating each track between its real detections (uses the sidecar track
+    UUIDs) — removes the freeze-then-jump perception stutter. ``color_by_uuid``:
+    stable per-track colors. ``window`` = (lo, hi) step range to render (all).
+    Returns the SegmentResult metrics.
     """
     from pathlib import Path
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cap = max_steps if max_steps is not None else 2 * (end - start)
+    cap = max_steps if max_steps is not None else 3 * (end - start)
     timers = Timers()
     s = _seed_state(
         tl,
@@ -605,7 +699,10 @@ def render_segment(
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
     )
-    route = out_dir.name
+    # Build per-track interpolation anchors over the frames this render visits.
+    # The cursor maps sim steps to recorded frames in ~[start, end]; a small
+    # margin covers any overrun without scanning the whole route.
+    interp = _build_neighbor_interp(tl, start, min(end + 100, len(tl))) if interpolate else {}
     while not s.done:
         k = s.k
         pre = _pre_step(s)
@@ -615,14 +712,16 @@ def render_segment(
         data = _to_torch_batch([np_dict], model_args, device)
         _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
+        nids = tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None
+        if interpolate and nids and interp:
+            _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
         if window is None or (window[0] <= k <= window[1]):
-            nids = tl.neighbor_ids(idx) if color_by_uuid else None
             _draw_step(
                 np_dict,
                 pred,
                 s.ego_shape,
                 out_dir / f"{k:05d}.png",
-                neighbor_ids=nids,
+                neighbor_ids=nids if color_by_uuid else None,
                 step=k,
                 total=cap,
             )
@@ -641,21 +740,29 @@ def run_segments_batched(
     search_radius: float = 1.5,
     warmup_steps: int = 0,
     goal_reach_m: float = 5.0,
-    max_stuck_steps: int = 100,
+    max_stuck_steps: int = 0,
+    unstick_after: int = 300,
+    unstick_advance_m: float = 5.0,
+    max_steps_mult: int = 3,
     n_build_threads: int = 8,
     timers: Timers | None = None,
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
     work_units: list of (RouteTimeline, start, end). Processed in chunks of
-    ``batch_size`` (bound GPU memory). Segments in a chunk terminate raggedly
-    (goal/stuck/max); finished ones drop out while the rest continue.
+    ``batch_size`` (bound GPU memory). Segments terminate raggedly (goal / step
+    cap); finished ones drop out while the rest continue.
+
+    Unstick is on by default (snap the ego forward onto the recorded GT pose after
+    ``unstick_after`` steps of no progress), so a segment isn't bailed out at a
+    yellow-light stall. The only timeout is the step cap = ``max_steps_mult`` *
+    segment length (default 3x → 1800 for a 600-frame segment); the hard
+    stuck-cutoff is off.
 
     Two amortizations per tick: (1) the per-segment NUMPY input build (np.load +
     world_to_ego_frame, GIL-releasing) runs across ``n_build_threads`` threads;
     (2) the torch conversion + normalization + model.forward run ONCE on the
-    stacked batch. So both the CPU build and the GPU forward are shared by the
-    whole active set instead of paid per segment.
+    stacked batch.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -676,6 +783,9 @@ def run_segments_batched(
                     goal_reach_m,
                     max_stuck_steps,
                     timers,
+                    max_steps=max_steps_mult * (end - start),
+                    unstick_after=unstick_after,
+                    unstick_advance_m=unstick_advance_m,
                 )
                 for (tl, start, end) in chunk
             ]
