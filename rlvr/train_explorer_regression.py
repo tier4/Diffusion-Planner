@@ -463,8 +463,9 @@ def main():
         json.dump(log_rows, f, indent=1)
     with open(run_dir / "train_args.json", "w") as f:
         json.dump(vars(args), f, indent=1)
+    sel_name = "sel_loss" if args.use_strength_head else "val_mse"
     print(
-        f"[done] best val_mse={best_val:.4f} @ ep{best_epoch}; "
+        f"[done] best {sel_name}={best_val:.4f} @ ep{best_epoch}; "
         f"saved {run_dir / 'exploration_policy.pth'}"
     )
 
