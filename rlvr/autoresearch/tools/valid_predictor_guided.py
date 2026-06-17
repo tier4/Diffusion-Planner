@@ -171,7 +171,12 @@ def main():
         enc = run_frozen_encoder(model, data)
         pout = policy(enc, det_ego, deterministic=True)
         etas = {h: (2.0 * pout.dists[h].mean - 1.0) for h in heads}
-        composer = make_composer(etas, args, envelope=getattr(policy, "guidance_envelope", None))
+        composer = make_composer(
+            etas,
+            args,
+            envelope=getattr(policy, "guidance_envelope", None),
+            strength=pout.strength,
+        )
         decoder._guidance_fn = composer
         decoder._guidance_scale = composer._set_config.global_scale
         try:

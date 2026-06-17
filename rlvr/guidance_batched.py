@@ -219,6 +219,7 @@ def build_head_composer(
     lambda_col: float = 3.0,
     ramp_steps: int = 20,
     fast: bool = True,
+    guidance_strength=None,
 ):
     """Build a GuidanceComposer from a head->eta dict (scalar or [B] tensor).
 
@@ -334,7 +335,14 @@ def build_head_composer(
     if fast:
         # Equivalence-certified against GuidanceComposer (bit-identical
         # active trajectories; inert frames short-circuit to ~unguided cost).
-        return FastGuidanceComposer(set_cfg)
+        return FastGuidanceComposer(set_cfg, guidance_strength=guidance_strength)
+    if guidance_strength is not None:
+        # The strength gate scales the summed energy inside FastGuidanceComposer;
+        # the read-only diffusion_planner GuidanceComposer has no such hook.
+        raise ValueError(
+            "guidance_strength requires fast=True (FastGuidanceComposer); the "
+            "slow GuidanceComposer does not support the strength gate"
+        )
     return GuidanceComposer(set_cfg)
 
 
@@ -512,7 +520,12 @@ class FastGuidanceComposer:
     """
 
     def __init__(
-        self, set_config, eta_eps: float = 1e-3, skip_x0_correction: bool = False, **build_kwargs
+        self,
+        set_config,
+        eta_eps: float = 1e-3,
+        skip_x0_correction: bool = False,
+        guidance_strength=None,
+        **build_kwargs,
     ):
         from diffusion_planner.model.guidance.registry import build as _build
 
@@ -523,6 +536,19 @@ class FastGuidanceComposer:
         self._eta_eps = float(eta_eps)
         self._skip_x0 = bool(skip_x0_correction)
         self._inputs_phys = None  # per-generation cache
+        # Learned guidance-strength gate g in (0,1): scales the summed guidance
+        # energy (hence the guidance gradient) per scene. None -> no gating
+        # (full envelope). [B] tensor (or scalar) broadcast over the batch.
+        self._strength = guidance_strength
+
+    def _strength_inert(self) -> bool:
+        """True if the strength gate forces zero guidance for the whole batch."""
+        s = self._strength
+        if s is None:
+            return False
+        if isinstance(s, torch.Tensor):
+            return bool(s.abs().max().item() <= self._eta_eps)
+        return abs(float(s)) <= self._eta_eps
 
     def reset_cache(self):
         self._inputs_phys = None
@@ -565,7 +591,7 @@ class FastGuidanceComposer:
 
     def __call__(self, x_in, t_input, cond, *args, **kwargs):
         B = x_in.shape[0]
-        if self._all_inert():
+        if self._all_inert() or self._strength_inert():
             # zero surrogate with a real graph so the solver's autograd
             # produces an (all-zero) gradient of the right shape
             return (x_in * 0.0).sum()
@@ -595,6 +621,15 @@ class FastGuidanceComposer:
             if torch.isnan(e).any():
                 continue
             raw_energy = raw_energy + e
+        if self._strength is not None:
+            # Per-scene learned gate: scale the summed energy (g is constant
+            # w.r.t. x, so the guidance gradient is scaled by g per sample).
+            s = self._strength
+            if isinstance(s, torch.Tensor):
+                s = s.to(raw_energy.device).reshape(-1)
+                if s.numel() == 1:
+                    s = s.expand(B)
+            raw_energy = raw_energy * s
         if raw_energy.requires_grad:
             grad_phys = torch.autograd.grad(raw_energy.sum(), x_phys_grad)[0]
         else:

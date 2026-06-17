@@ -101,7 +101,7 @@ def check_guidance_envelope_override(overrides: list[str], force: bool) -> None:
 
 
 def make_composer(
-    etas: dict[str, torch.Tensor], args, envelope: dict | None = None
+    etas: dict[str, torch.Tensor], args, envelope: dict | None = None, strength=None
 ) -> GuidanceComposer:
     """Build a guidance composer for one set of etas.
 
@@ -142,6 +142,7 @@ def make_composer(
         etas,
         head_protect=int(getattr(args, "head_protect", 0)),
         fast=not bool(getattr(args, "slow_composer", False)),
+        guidance_strength=strength,
         **resolved,
     )
 
@@ -169,6 +170,8 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
 
     out = policy(enc, x_ref, deterministic=True)
     mean_etas = {h: (2.0 * out.dists[h].mean - 1.0).reshape(1) for h in heads}
+    gain = float(getattr(args, "strength_gain", 1.0))
+    strength = out.strength * gain if out.strength is not None else None
 
     K = max(1, args.refine_k)
     if K > 1:
@@ -189,7 +192,12 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
                 K_data[k] = v.expand(K, *v.shape[1:]).contiguous()
             else:
                 K_data[k] = v
-        composer = make_composer(cand, args, envelope=getattr(policy, "guidance_envelope", None))
+        composer = make_composer(
+            cand,
+            args,
+            envelope=getattr(policy, "guidance_envelope", None),
+            strength=(strength.expand(K) if strength is not None else None),
+        )
         from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
 
         cands = (
@@ -209,7 +217,12 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
         )
     else:
         cand = mean_etas
-        composer = make_composer(cand, args, envelope=getattr(policy, "guidance_envelope", None))
+        composer = make_composer(
+            cand,
+            args,
+            envelope=getattr(policy, "guidance_envelope", None),
+            strength=strength,
+        )
         cands = generate_samples(
             model=model,
             model_args=model_args,
@@ -270,6 +283,7 @@ def eval_scene(model, model_args, policy, heads, npz_path, rcfg, args, device):
         "scene": Path(npz_path).name,
         "scene_path": str(npz_path),
         "etas": {h: float(v.item()) for h, v in etas.items()},
+        "strength": (float(out.strength.item()) if out.strength is not None else None),
         "deviation": deviation,
         "guided": _row(g_bd),
         "baseline": _row(d_bd),
@@ -401,6 +415,15 @@ def main():
         "calibration (otherwise a disagreeing flag hard-fails)",
     )
     parser.add_argument("--envelope", choices=["v1", "v2"], default=None)
+    parser.add_argument(
+        "--strength_gain",
+        type=float,
+        default=1.0,
+        help="deploy-time multiplier on the learned strength gate g (applied = "
+        "min(1.0*gain, ...) is NOT clamped; g is small on non-avoidance scenes "
+        "so a gain>1 amplifies guidance only where the gate is already open — "
+        "FP-safe by construction). No effect on policies without a strength head.",
+    )
     parser.add_argument("--lambda_col", type=float, default=None)
     parser.add_argument(
         "--no_dit_memo",
