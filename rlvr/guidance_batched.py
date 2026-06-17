@@ -626,9 +626,14 @@ class FastGuidanceComposer:
             # w.r.t. x, so the guidance gradient is scaled by g per sample).
             s = self._strength
             if isinstance(s, torch.Tensor):
-                s = s.to(raw_energy.device).reshape(-1)
+                # detached: only x is differentiated; s is a constant scale.
+                s = s.detach().to(raw_energy.device).reshape(-1)
                 if s.numel() == 1:
                     s = s.expand(B)
+                elif s.numel() != B:
+                    raise ValueError(
+                        f"guidance_strength has {s.numel()} elements; expected 1 or B={B}"
+                    )
             raw_energy = raw_energy * s
         if raw_energy.requires_grad:
             grad_phys = torch.autograd.grad(raw_energy.sum(), x_phys_grad)[0]

@@ -69,20 +69,6 @@ def _empty_slots(nb_past: np.ndarray) -> list[int]:
     return [int(i) for i in np.where(mask)[0]]
 
 
-def _existing_boxes(nb_past: np.ndarray) -> list[tuple[float, float, float, float, float]]:
-    """(x,y,heading,length,width) of every non-empty neighbor (any motion)."""
-    boxes = []
-    for i in range(nb_past.shape[0]):
-        xy = nb_past[i, -1, :2]
-        if abs(float(xy[0])) + abs(float(xy[1])) < 1e-6:
-            continue
-        h = math.atan2(float(nb_past[i, -1, 3]), float(nb_past[i, -1, 2]))
-        boxes.append(
-            (float(xy[0]), float(xy[1]), h, float(nb_past[i, -1, 7]), float(nb_past[i, -1, 6]))
-        )
-    return boxes
-
-
 def _valid_path_indices(plan: np.ndarray) -> np.ndarray:
     """Indices of the ego plan with a non-zero (valid) waypoint."""
     return np.where(np.abs(plan[:, :2]).sum(axis=-1) > 1e-6)[0]
@@ -169,6 +155,11 @@ def main():
     ego_shape = tuple(float(x) for x in args.ego_shape.split(","))
     lat_lo, lat_hi = (float(x) for x in args.lat_range.split(","))
     nd_lo, nd_hi = (int(x) for x in args.n_distractors.split(","))
+    # Fail loud on reversed ranges (no silent reversed-sampling / empty draw).
+    if not (0.0 <= lat_lo <= lat_hi):
+        raise SystemExit(f"--lat_range must be 0 <= min <= max; got {args.lat_range!r}")
+    if not (1 <= nd_lo <= nd_hi):
+        raise SystemExit(f"--n_distractors must be 1 <= min <= max; got {args.n_distractors!r}")
     rng = np.random.default_rng(args.seed)
 
     with open(args.scenes) as f:

@@ -419,10 +419,10 @@ def main():
         "--strength_gain",
         type=float,
         default=1.0,
-        help="deploy-time multiplier on the learned strength gate g (applied = "
-        "min(1.0*gain, ...) is NOT clamped; g is small on non-avoidance scenes "
-        "so a gain>1 amplifies guidance only where the gate is already open — "
-        "FP-safe by construction). No effect on policies without a strength head.",
+        help="deploy-time multiplier on the learned strength gate g (applied = g*gain, "
+        "NOT clamped). g is ~0 on non-avoidance scenes, so gain>1 amplifies guidance only "
+        "where the gate is already open — FP-safe by construction. No effect on policies "
+        "without a strength head.",
     )
     parser.add_argument("--lambda_col", type=float, default=None)
     parser.add_argument(
