@@ -455,11 +455,13 @@ def run_segment(
 # rendering (off the mining hot path) — draw the live-ego-frame scene per step
 # --------------------------------------------------------------------------- #
 def _draw_step(np_dict, neighbors_live, pred, ego_shape, near_miss_thresh, title, path):
-    """Save a PNG of one reproducer step in the live-ego frame (metric, un-normalized).
+    """Save a PNG of one reproducer step using the perfect-tracker sim viz style.
 
-    Draws lanes (grey), route (blue), road borders (black), the ego box at the
-    origin (blue) + its planned trajectory (magenta), and every reproduced
-    neighbor box — red if within near_miss_thresh of the ego, else grey.
+    Rebuilds a SceneContext (ego + reproduced neighbors + map) in the live-ego
+    frame from the un-normalized input dict and renders it with the shared
+    ``draw_scene`` (same look as scenario_generation.simulate), then overlays the
+    ego plan (blue) and a red line on the closest ego-neighbor pair when within
+    ``near_miss_thresh``.
     """
     import matplotlib
 
@@ -470,55 +472,58 @@ def _draw_step(np_dict, neighbors_live, pred, ego_shape, near_miss_thresh, title
         _closest_points_between_rects,
     )
     from diffusion_planner.model.guidance.collision import center_rect_to_points
-    from matplotlib.patches import Polygon as MplPoly
+
+    from scenario_generation import npz_loader as nl
+    from scenario_generation.scene_context import SceneContext
+    from scenario_generation.visualize import draw_scene, draw_trajectory
+
+    # Un-batch the [1,...] model-input dict and reuse the NPZ loader's extractors.
+    data = {k: np.asarray(v)[0] for k, v in np_dict.items()}
+    es = np.asarray(ego_shape).reshape(-1)
+    ego = nl._extract_ego_agent(data, float(es[0]), float(es[1]), float(es[2]))
+    scene = SceneContext(
+        agents=[ego] + nl._extract_neighbors(data),
+        map_data=nl._extract_map_data(data),
+        ego_agent_id="ego",
+    )
 
     fig, ax = plt.subplots(figsize=(9, 9))
+    draw_scene(ax, scene, "ego")
 
-    def _polylines(arr, color, lw, alpha):  # arr: (S,P,>=2) in live-ego frame
-        for seg in arr:
-            pts = seg[:, :2]
-            v = np.abs(pts).sum(1) > 1e-3
-            if v.sum() >= 2:
-                ax.plot(pts[v, 0], pts[v, 1], "-", color=color, lw=lw, alpha=alpha, zorder=2)
+    # Ego plan (model prediction), (T,3) [x, y, heading].
+    plan = np.column_stack([pred[:, 0], pred[:, 1], np.arctan2(pred[:, 3], pred[:, 2])])
+    draw_trajectory(ax, plan, "#3366cc", label="plan", lw=2, zorder=25)
 
-    _polylines(np_dict["lanes"][0], "#bbbbbb", 0.8, 0.7)
-    _polylines(np_dict["route_lanes"][0], "#3a7", 1.4, 0.8)
-    ls = np_dict["line_strings"][0]
-    for seg in ls:  # road borders: channel 3 > 0.5
-        pts = seg[:, :2]
-        v = np.abs(pts).sum(1) > 1e-3
-        if v.sum() >= 2 and seg[:, 3].max() > 0.5:
-            ax.plot(pts[v, 0], pts[v, 1], "-", color="k", lw=1.6, zorder=3)
-
-    # ego box at origin + plan
+    # Closest ego-neighbor pair → red line + min clearance in the title.
     et = torch.zeros((1, 1, 4))
     et[0, 0, 2] = 1.0
-    ego_c = _build_ego_bbox_corners(et, torch.tensor(ego_shape[:3]))[0, 0].numpy()
-    ax.add_patch(MplPoly(ego_c, closed=True, fill=True, color="#2255cc", alpha=0.5, zorder=10))
-    ax.plot(pred[:, 0], pred[:, 1], "-", color="magenta", lw=2, zorder=11, label="plan")
-
-    # neighbors, highlight the close ones
+    ego_c = _build_ego_bbox_corners(et, torch.tensor(es[:3]))[:, :1].reshape(1, 4, 2)
     valid = np.abs(neighbors_live[:, :6]).sum(1) > 0
     nb = neighbors_live[valid]
-    ego_t = torch.tensor(ego_c, dtype=torch.float32)[None]
     min_clr = float("inf")
-    for r in nb:
-        rect = torch.tensor([[r[0], r[1], r[2], r[3], r[7], r[6]]], dtype=torch.float32)
-        corn = center_rect_to_points(rect)
-        p1, p2 = _closest_points_between_rects(ego_t, corn)
-        d = float((p1 - p2).norm())
-        min_clr = min(min_clr, d)
-        col = "#d22" if d <= near_miss_thresh else "#e8a23a"
-        ax.add_patch(
-            MplPoly(corn[0].numpy(), closed=True, fill=True, color=col, alpha=0.6, zorder=8)
+    if len(nb):
+        rects = torch.tensor(
+            np.stack([nb[:, 0], nb[:, 1], nb[:, 2], nb[:, 3], nb[:, 7], nb[:, 6]], axis=-1),
+            dtype=torch.float32,
         )
-        if d <= near_miss_thresh:
-            ax.plot([p1[0, 0], p2[0, 0]], [p1[0, 1], p2[0, 1]], "-", color="red", lw=1.2, zorder=12)
+        corns = center_rect_to_points(rects)  # (M,4,2)
+        p1, p2 = _closest_points_between_rects(ego_c.expand(len(nb), 4, 2), corns)
+        d = (p1 - p2).norm(dim=-1)
+        j = int(d.argmin())
+        min_clr = float(d[j])
+        if min_clr <= near_miss_thresh:
+            ax.plot(
+                [float(p1[j, 0]), float(p2[j, 0])],
+                [float(p1[j, 1]), float(p2[j, 1])],
+                "-",
+                color="red",
+                lw=2,
+                zorder=30,
+            )
 
     ax.set_aspect("equal")
     ax.set_xlim(-25, 45)
     ax.set_ylim(-30, 30)
-    ax.grid(True, alpha=0.15)
     ax.set_title(f"{title}  min_clr={min_clr:.2f}m", fontsize=11)
     fig.tight_layout()
     fig.savefig(path, dpi=90)
