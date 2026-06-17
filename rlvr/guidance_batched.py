@@ -231,6 +231,12 @@ def build_head_composer(
     ramp_steps) for the ramped v2 functions. A legacy lateral+longitudinal
     trainer config reproduces exactly with lat_scale=1.0, lambda_lat=2.5,
     lambda_lon=0.25.
+
+    guidance_strength: optional learned per-scene strength gate (scalar or [B]
+    tensor) that multiplies the TOTAL guidance energy (g->0 = unguided). Only
+    supported with fast=True (FastGuidanceComposer); passing it with fast=False
+    raises, since the read-only GuidanceComposer has no scaling hook. None
+    (default) leaves behavior exactly as before.
     """
     from diffusion_planner.model.guidance.composer import GuidanceComposer
     from diffusion_planner.model.guidance.config import (

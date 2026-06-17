@@ -203,10 +203,14 @@ def main():
             raise ValueError(f"{sp}: batched neighbor array — expected unbatched NPZ")
         plan = _future_as_plan(base["ego_agent_future"])
         valid_idx = _valid_path_indices(plan)
-        if valid_idx.size == 0:
+        # ego_agent_future is zero-padded on invalid steps; those rows would put a
+        # phantom ego at the origin and skew the clearance. Use ONLY valid waypoints,
+        # and require >=2 (plan_static_clearance reads per_timestep_min[:,1:]).
+        if valid_idx.size < 2:
             n_no_path += 1
-            print(f"  [skip] {Path(sp).name}: ego_agent_future has no valid waypoints")
+            print(f"  [skip] {Path(sp).name}: ego_agent_future has <2 valid waypoints")
             continue
+        plan_valid = plan[valid_idx]
         pool = Path(sp).parent.name
         for v in range(args.n_per_scene):
             nb_past = nb_past0.copy()
@@ -223,7 +227,7 @@ def main():
                 box = None
                 for _try in range(args.max_tries):
                     cand = _sample_distractor(plan, valid_idx, lat_lo, lat_hi, rng)
-                    path_clr = float(plan_static_clearance(plan, [cand], ego_shape, device))
+                    path_clr = float(plan_static_clearance(plan_valid, [cand], ego_shape, device))
                     t0_clr = float(plan_static_clearance(t0_pose, [cand], ego_shape, device))
                     if path_clr < args.min_path_clearance or t0_clr < args.min_t0_clearance:
                         continue

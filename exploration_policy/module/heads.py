@@ -47,6 +47,11 @@ class GuidanceHead(nn.Module):
         # (|eta|=1.0) are then unreachable. Raise it to let the policy emit more
         # extreme etas on tight scenes (the gate still controls engagement).
         self.max_conc = float(max_conc)
+        # The clamp caps softplus(.)+1.0 (always >= 1.0) at max_conc; a cap below
+        # 1.0 (or NaN) would push params under 1.0 and break the unimodal-Beta
+        # invariant. Fail loudly rather than emit invalid Beta shapes.
+        if not (self.max_conc >= 1.0):
+            raise ValueError(f"max_conc must be >= 1.0 (got {max_conc!r})")
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.act = nn.GELU()
         # bias=False removes a direct global offset at the output layer:
