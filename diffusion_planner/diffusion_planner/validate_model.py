@@ -1,0 +1,208 @@
+import argparse
+import json
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+import torch
+from tqdm import tqdm
+
+from diffusion_planner.dimensions import (
+    MAX_NUM_AGENTS,
+    OUTPUT_MODE_TRAJECTORY_AND_CONTROL,
+    OUTPUT_T,
+    POSE_DIM,
+    output_dim_for_mode,
+)
+from diffusion_planner.loss import (
+    compute_ego_edge_points,
+    compute_neighbor_collision_penalty,
+    compute_road_border_penalty,
+    control_to_waypoints,
+    loss_func,
+    make_turn_indicator_gt,
+)
+from diffusion_planner.train_epoch import heading_to_cos_sin
+from diffusion_planner.utils import ddp
+
+
+@torch.no_grad()
+def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, float]:
+    """return: ave_loss_ego, ave_loss_neighbor"""
+    device = args.device
+    model.eval()
+    total_loss_ego = 0.0
+    total_loss_neighbor = 0.0
+    total_samples_ego = 0
+    total_samples_neighbor = 0
+
+    predictions = []
+    turn_indicators = []
+    loss_ego_list = []
+
+    total_result_dict = defaultdict(list)
+    turn_indicator_correct = 0.0
+    turn_indicator_total = 0
+    turn_indicator_change_correct = 0.0
+    turn_indicator_change_total = 0
+
+    delay = 0
+
+    for inputs in tqdm(val_loader, desc="validate", disable=ddp.get_rank() != 0):
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        B = inputs["ego_current_state"].shape[0]
+
+        turn_indicator_seq = inputs["turn_indicators"]
+
+        output_mode = args.output_mode
+        D = output_dim_for_mode(output_mode)
+        inputs["sampled_trajectories"] = torch.zeros(
+            B, MAX_NUM_AGENTS, OUTPUT_T + 1, D, dtype=torch.float32
+        )
+        inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
+
+        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
+        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+
+        ego_future = inputs["ego_agent_future"]
+        ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)
+        neighbors_future = inputs["neighbor_agents_future"]
+        neighbor_future_mask = (
+            torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+        )  # (B, Pn, T)
+        neighbors_future = heading_to_cos_sin(neighbors_future)  # (B, Pn, T, 4)
+        neighbors_future[neighbor_future_mask] = 0.0
+
+        B, Pn, T, _ = neighbors_future.shape
+        ego_current, neighbors_current = (
+            inputs["ego_current_state"][:, :4],
+            inputs["neighbor_agents_past"][:, :Pn, -1, :4],
+        )
+        inputs = args.observation_normalizer(inputs)
+
+        _, outputs = model(inputs)
+
+        neighbor_current_mask = (
+            torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
+        )  # (B, Pn)
+        neighbor_mask = torch.concat(
+            (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
+        )  # (B, Pn, T + 1)
+
+        gt_future = torch.cat(
+            [ego_future[:, None, :, :], neighbors_future[..., :]], dim=1
+        )  # (B, Pn + 1, T, 4)
+        current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)
+        # (B, Pn + 1, 4)
+
+        all_gt = torch.cat(
+            [current_states[:, :, None, :], gt_future], dim=2
+        )  # (B, Pn + 1, T + 1, 4)
+        all_gt[:, 1:][neighbor_mask] = 0.0
+
+        prediction = outputs["prediction"]
+        turn_indicator_logit = outputs["turn_indicator_logit"]
+        turn_indicator = turn_indicator_logit.argmax(dim=-1)
+        turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
+        correct = (turn_indicator == turn_indicator_gt).long()
+        turn_indicator_correct += correct.sum().item()
+        turn_indicator_total += correct.numel()
+        change_mask = turn_indicator_seq[:, -1] != turn_indicator_seq[:, -2]
+        change_count = change_mask.sum().item()
+        if change_count > 0:
+            turn_indicator_change_correct += correct[change_mask].sum().item()
+            turn_indicator_change_total += change_count
+        if return_pred:
+            predictions.append(prediction.cpu())
+            turn_indicators.append(turn_indicator.cpu())
+
+        # Ego loss from control prediction (trajectory_and_control mode)
+        if output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+            denoised = outputs["denoised"]  # [B, P, T+1, 6]
+            ego_ctrl_norm = denoised[:, 0, 1:, POSE_DIM:]  # [B, T, 2]
+            ego_ctrl = args.control_normalizer.inverse(ego_ctrl_norm)
+            raw_inputs = args.observation_normalizer.inverse(inputs)
+            ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1]
+            ego_traj_from_ctrl = control_to_waypoints(
+                ego_ctrl,
+                raw_inputs["ego_agent_past"],
+                t0_states={"v": ego_v0.squeeze(-1)},
+            )  # [B, T, 4]
+            # Compute detailed losses (lat, lon, l2, etc.) for control-derived trajectory
+            ctrl_pred = ego_traj_from_ctrl[:, None]  # [B, 1, T, 4]
+            ctrl_gt = ego_future[:, None]  # [B, 1, T, 4]
+            ctrl_loss_dict = loss_func(ctrl_pred, ctrl_gt)
+            for key, val in ctrl_loss_dict.items():
+                total_result_dict[f"ego_control_{key}"].append(val[:, 0, :].cpu())  # (B, T)
+
+        neighbors_future_valid = ~neighbor_future_mask
+        all_gt = all_gt[:, :, 1:, :]  # (B, Pn + 1, T, 4)
+        loss_tensor = (prediction - all_gt) ** 2
+        loss_ego = loss_tensor[:, 0, :]
+        loss_ego_list.append(loss_ego.cpu())
+        loss_nei = loss_tensor[:, 1:, :]
+        loss_nei = loss_nei[neighbors_future_valid]
+        total_loss_ego += loss_ego.mean().item() * B
+        total_samples_ego += B
+        if loss_nei.shape[0] > 0:
+            nei_B = loss_nei.shape[0]
+            total_loss_neighbor += loss_nei.mean().item() * nei_B
+            total_samples_neighbor += nei_B
+
+        loss_dict = loss_func(prediction, all_gt)
+        for key, val in loss_dict.items():
+            # val : (B, Pn + 1, T)
+            total_result_dict[f"ego_{key}"].append(val[:, 0, :].cpu())  # (B, T)
+
+        # Compute ego edge points for penalty metrics
+        ego_edge_points = compute_ego_edge_points(
+            prediction[:, 0], inputs["ego_shape"], n_interp=args.road_border_n_interp
+        )
+
+        denorm_inputs = args.observation_normalizer.inverse(inputs)
+        neighbor_penalty = compute_neighbor_collision_penalty(
+            ego_edge_points,
+            neighbors_future,
+            neighbors_future_valid,
+            denorm_inputs["neighbor_agents_past"],
+            margin=args.neighbor_collision_margin,
+        )
+        total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty.cpu())
+
+        # Road border collision metric
+        rb_penalty = compute_road_border_penalty(
+            ego_edge_points,
+            denorm_inputs["line_strings"],
+            margin=args.road_border_margin,
+        )
+        total_result_dict["ego_road_border_loss"].append(rb_penalty.cpu())
+
+    avg_loss_ego = total_loss_ego / total_samples_ego
+    avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)
+    loss_ego = torch.cat(loss_ego_list, dim=0)
+
+    for key, val in total_result_dict.items():
+        total_result_dict[key] = torch.cat(val, dim=0)  # (total_samples, T)
+
+    if return_pred:
+        predictions = torch.cat(predictions, dim=0)
+        turn_indicators = torch.cat(turn_indicators, dim=0)
+    turn_indicator_accuracy = (
+        turn_indicator_correct / turn_indicator_total if turn_indicator_total > 0 else 0.0
+    )
+    turn_indicator_change_accuracy = (
+        turn_indicator_change_correct / turn_indicator_change_total
+        if turn_indicator_change_total > 0
+        else 0.0
+    )
+    return {
+        "avg_loss_ego": avg_loss_ego,
+        "avg_loss_neighbor": avg_loss_neighbor,
+        "loss_ego": loss_ego,
+        "predictions": predictions,
+        "turn_indicators": turn_indicators,
+        "turn_indicator_accuracy": turn_indicator_accuracy,
+        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+        "turn_indicator_change_total": turn_indicator_change_total,
+        **total_result_dict,
+    }

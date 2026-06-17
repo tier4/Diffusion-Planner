@@ -267,6 +267,22 @@ Comfort-aware variant of `build_clguided_target` (target *selection*, not re-tim
 ### sweep_epoch_comfort.py
 Per-epoch sweep that merges each LoRA epoch and scores it on BOTH avoidance (via `eval_det_avoidance.score_det_scenes`) and open-loop comfort (lat-accel/jerk percentiles via `eval_driving_metrics.lat_accel_smoothed`), so you can pick the epoch on the comfort↔avoidance↔L2 frontier. Pair with `valid_predictor` for L2. Usage: `python -m rlvr.autoresearch.tools.sweep_epoch_comfort --run_dir <lora_run_dir> --base_model <warmstart.pth> --scenes <json> --config <reward.json> --ego_shape WB,L,W --output_dir <dir> --epochs all`.
 
+### add_distractor_neighbors_npz.py
+Places NEW stopped (parked) "distractor" vehicles into a scene's empty neighbor slots, beside the ego path,
+to teach proximity discrimination rather than mere presence ("avoid the close one, ignore the distant ones"
+vs "avoid iff any stopped car exists"). A placed vehicle is kept only if the whole baseline `ego_agent_future`
+plan clears it by `>= --min_path_clearance` AND the t=0 ego pose clears it by `>= --min_t0_clearance`
+(canonical `plan_static_clearance` OBB — no hand-rolled geometry), so distractors are provably non-candidates.
+Use on avoidance scenes (real obstacle stays + decoys to ignore) AND on neighbor-stripped twins
+(`strip_neighbors_npz`, decoys-only — stopped cars present but none to avoid). Emits `manifest.json` with the
+placed `(slot, x, y, heading)` per scene. Handles 3- or 4-col `neighbor_agents_future`.
+```bash
+python -m rlvr.autoresearch.tools.add_distractor_neighbors_npz \
+  --scenes <list.json> --out_dir <dir> --out_list <out.json> \
+  --ego_shape WB,L,W --n_per_scene 1 --n_distractors 1,3 \
+  --lat_range 6.0,16.0 --min_path_clearance 3.0 --min_t0_clearance 1.0 --seed 0
+```
+
 ## PRiSM — Perturbation-Recovery iterative Self-Mining
 
 Tools for the self-improvement loop described in `rlvr/README.md` (see "PRiSM" section). Per round: sim NPZ pool → mine warm scenes → perturb → K=N + reward.py rank → filter → ranked-SFT warmstarted → iterate.

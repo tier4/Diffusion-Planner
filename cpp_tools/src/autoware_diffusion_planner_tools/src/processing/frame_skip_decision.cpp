@@ -53,8 +53,18 @@ SkippingInfo decide_frame_skip(
     return SkippingInfo::invalid_covariance(inputs.cov_xx, inputs.cov_yy);
   }
 
-  if (inputs.is_stop && inputs.is_red_or_yellow && inputs.is_future_forward) {
-    return SkippingInfo::red_or_yellow_light();
+  // Red/yellow-light run. Two complementary triggers with distinct labels so the extra
+  // coverage of the second can be counted separately. The original stopped gate is checked
+  // first, so a stopped-then-pulling-away frame keeps the RedOrYellowLight label; the
+  // AcceleratingAtTrafficLight label then counts only the moving (linear.x >= 0.1) starts
+  // that the stopped-only gate leaked.
+  if (inputs.is_red_or_yellow) {
+    if (inputs.is_stop && inputs.is_future_forward) {
+      return SkippingInfo::red_or_yellow_light();
+    }
+    if (frame_filters::is_accelerating(frame_filters::compute_future_accel(ego_future))) {
+      return SkippingInfo::accelerating_at_traffic_light();
+    }
   }
 
   if (inputs.stopping_count > (INPUT_T + 5) && inputs.is_red_or_yellow) {

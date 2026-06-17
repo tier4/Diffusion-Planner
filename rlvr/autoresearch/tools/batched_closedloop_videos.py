@@ -102,7 +102,12 @@ def batched_closed_loop(
                         noise_min=0.0,
                         noise_max=0.0,
                         first_deterministic=False,
-                        composer=make_composer(etas, gargs),
+                        composer=make_composer(
+                            etas,
+                            gargs,
+                            envelope=getattr(policy, "guidance_envelope", None),
+                            strength=pout.strength,
+                        ),
                         device=device,
                     )
                     .cpu()
