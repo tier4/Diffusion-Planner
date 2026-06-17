@@ -16,6 +16,7 @@ Usage:
         --osm_path /path/to/lanelet2_map.osm \\
         --output /path/to/parked.yaml
 """
+
 from __future__ import annotations
 
 import argparse
@@ -80,15 +81,18 @@ def _circular_mean(angles: list[float]) -> float:
 
 
 def _obb_corners(
-    cx: float, cy: float, yaw: float, dx: float, dy: float,
+    cx: float,
+    cy: float,
+    yaw: float,
+    dx: float,
+    dy: float,
 ) -> list[tuple[float, float]]:
     cos_y = math.cos(yaw)
     sin_y = math.sin(yaw)
     hx, hy = dx * 0.5, dy * 0.5
     corners_local = [(+hx, +hy), (+hx, -hy), (-hx, -hy), (-hx, +hy)]
     return [
-        (cx + lx * cos_y - ly * sin_y, cy + lx * sin_y + ly * cos_y)
-        for lx, ly in corners_local
+        (cx + lx * cos_y - ly * sin_y, cy + lx * sin_y + ly * cos_y) for lx, ly in corners_local
     ]
 
 
@@ -96,7 +100,9 @@ def _obb_corners(
 # Rosbag reading
 # ---------------------------------------------------------------------------
 def collect_tracks_and_ego(
-    rosbag_path: Path, track_topic: str, kinematic_topic: str,
+    rosbag_path: Path,
+    track_topic: str,
+    kinematic_topic: str,
 ) -> tuple[dict, np.ndarray]:
     """Read a rosbag and return (tracks_by_uuid, ego_positions)."""
     import rosbag2_py
@@ -104,10 +110,13 @@ def collect_tracks_and_ego(
     from rosidl_runtime_py.utilities import get_message
 
     bag_path = Path(rosbag_path)
-    metadata = bag_path.parent / "metadata.yaml" if bag_path.is_file() else bag_path / "metadata.yaml"
+    metadata = (
+        bag_path.parent / "metadata.yaml" if bag_path.is_file() else bag_path / "metadata.yaml"
+    )
     if metadata.exists():
         with open(metadata) as mf:
             import re as _re
+
             m = _re.search(r"storage_identifier:\s*(\S+)", mf.read())
             storage_id = m.group(1) if m else "sqlite3"
     else:
@@ -133,8 +142,14 @@ def collect_tracks_and_ego(
 
     tracks: dict[str, dict] = defaultdict(
         lambda: {
-            "positions": [], "yaws": [], "dims_x": [], "dims_y": [],
-            "dims_z": [], "speeds": [], "labels": [], "shape_types": [],
+            "positions": [],
+            "yaws": [],
+            "dims_x": [],
+            "dims_y": [],
+            "dims_z": [],
+            "speeds": [],
+            "labels": [],
+            "shape_types": [],
         }
     )
     ego_positions: list[tuple[float, float]] = []
@@ -150,9 +165,7 @@ def collect_tracks_and_ego(
                 speed = math.hypot(twist.linear.x, twist.linear.y)
                 label = _primary_label(obj.classification)
                 entry = tracks[key]
-                entry["positions"].append(
-                    (pose.position.x, pose.position.y, pose.position.z)
-                )
+                entry["positions"].append((pose.position.x, pose.position.y, pose.position.z))
                 entry["yaws"].append(_quaternion_to_yaw(pose.orientation))
                 entry["dims_x"].append(obj.shape.dimensions.x)
                 entry["dims_y"].append(obj.shape.dimensions.y)
@@ -258,10 +271,8 @@ def _merge_overlapping_vehicles(parked_vehicles: list) -> list:
         for v in group:
             cx = v["pose"]["position"]["x"]
             cy = v["pose"]["position"]["y"]
-            yaw = 2.0 * math.atan2(v["pose"]["orientation"]["z"],
-                                    v["pose"]["orientation"]["w"])
-            for wx, wy in _obb_corners(cx, cy, yaw,
-                                        v["dimensions"]["x"], v["dimensions"]["y"]):
+            yaw = 2.0 * math.atan2(v["pose"]["orientation"]["z"], v["pose"]["orientation"]["w"])
+            for wx, wy in _obb_corners(cx, cy, yaw, v["dimensions"]["x"], v["dimensions"]["y"]):
                 all_local_x.append(wx * cos_my - wy * sin_my)
                 all_local_y.append(wx * sin_my + wy * cos_my)
             all_z.append(v["pose"]["position"]["z"])
@@ -280,21 +291,25 @@ def _merge_overlapping_vehicles(parked_vehicles: list) -> list:
             label_votes[v["classification"]] += v["num_frames"]
         dominant_class = label_votes.most_common(1)[0][0]
 
-        merged.append({
-            "classification": dominant_class,
-            "shape_type": group[0]["shape_type"],
-            "dimensions": {"x": x_max - x_min, "y": y_max - y_min,
-                           "z": max(v["dimensions"]["z"] for v in group)},
-            "pose": {
-                "position": {"x": new_cx, "y": new_cy,
-                             "z": float(np.mean(all_z))},
-                "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
-            },
-            "max_speed": max(v["max_speed"] for v in group),
-            "num_frames": sum(v["num_frames"] for v in group),
-            "min_ego_distance": min(v["min_ego_distance"] for v in group),
-            "merged_count": len(group),
-        })
+        merged.append(
+            {
+                "classification": dominant_class,
+                "shape_type": group[0]["shape_type"],
+                "dimensions": {
+                    "x": x_max - x_min,
+                    "y": y_max - y_min,
+                    "z": max(v["dimensions"]["z"] for v in group),
+                },
+                "pose": {
+                    "position": {"x": new_cx, "y": new_cy, "z": float(np.mean(all_z))},
+                    "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
+                },
+                "max_speed": max(v["max_speed"] for v in group),
+                "num_frames": sum(v["num_frames"] for v in group),
+                "min_ego_distance": min(v["min_ego_distance"] for v in group),
+                "merged_count": len(group),
+            }
+        )
 
     return merged
 
@@ -333,12 +348,17 @@ def _visualize(
         for bound in (ll.leftBound, ll.rightBound):
             bxs = [p.x for p in bound]
             bys = [p.y for p in bound]
-            if any(x_min <= x <= x_max and y_min <= y <= y_max
-                   for x, y in zip(bxs, bys)):
+            if any(x_min <= x <= x_max and y_min <= y <= y_max for x, y in zip(bxs, bys)):
                 ax.plot(bxs, bys, color="gray", linewidth=0.5, alpha=0.7)
 
-    ax.plot(ego_positions[:, 0], ego_positions[:, 1],
-            color="tab:green", linewidth=1.0, alpha=0.6, label="ego trajectory")
+    ax.plot(
+        ego_positions[:, 0],
+        ego_positions[:, 1],
+        color="tab:green",
+        linewidth=1.0,
+        alpha=0.6,
+        label="ego trajectory",
+    )
 
     seen_labels: set[str] = set()
     for v in parked_vehicles:
@@ -346,17 +366,20 @@ def _visualize(
         color = NAME_TO_COLOR[name]
         cx = v["pose"]["position"]["x"]
         cy = v["pose"]["position"]["y"]
-        yaw = 2.0 * math.atan2(v["pose"]["orientation"]["z"],
-                                v["pose"]["orientation"]["w"])
-        corners = _obb_corners(cx, cy, yaw, v["dimensions"]["x"],
-                               v["dimensions"]["y"])
+        yaw = 2.0 * math.atan2(v["pose"]["orientation"]["z"], v["pose"]["orientation"]["w"])
+        corners = _obb_corners(cx, cy, yaw, v["dimensions"]["x"], v["dimensions"]["y"])
         label = name if name not in seen_labels else None
         seen_labels.add(name)
         edge_color = "red" if "merged_count" in v else "black"
         lw = 1.2 if "merged_count" in v else 0.5
         polygon = mpatches.Polygon(
-            corners, closed=True, facecolor=color, edgecolor=edge_color,
-            linewidth=lw, alpha=0.7, label=label,
+            corners,
+            closed=True,
+            facecolor=color,
+            edgecolor=edge_color,
+            linewidth=lw,
+            alpha=0.7,
+            label=label,
         )
         ax.add_patch(polygon)
         head_x = cx + v["dimensions"]["x"] * 0.5 * math.cos(yaw)
@@ -382,8 +405,13 @@ def _visualize(
 # ---------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--bags", type=Path, nargs="+", required=True,
-                   help="All .db3 bag files for this route (order doesn't matter)")
+    p.add_argument(
+        "--bags",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="All .db3 bag files for this route (order doesn't matter)",
+    )
     p.add_argument("--osm_path", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--velocity_threshold", type=float, default=0.5)
@@ -396,8 +424,14 @@ def main():
 
     merged_tracks: dict[str, dict] = defaultdict(
         lambda: {
-            "positions": [], "yaws": [], "dims_x": [], "dims_y": [],
-            "dims_z": [], "speeds": [], "labels": [], "shape_types": [],
+            "positions": [],
+            "yaws": [],
+            "dims_x": [],
+            "dims_y": [],
+            "dims_z": [],
+            "speeds": [],
+            "labels": [],
+            "shape_types": [],
         }
     )
     all_ego: list[np.ndarray] = []
@@ -418,8 +452,9 @@ def main():
                 dst[field].extend(entry[field])
 
     ego_positions = np.concatenate(all_ego, axis=0)
-    print(f"\nMerged: {len(merged_tracks)} unique track UUIDs, "
-          f"{len(ego_positions)} total ego poses")
+    print(
+        f"\nMerged: {len(merged_tracks)} unique track UUIDs, {len(ego_positions)} total ego poses"
+    )
 
     parked = []
     excluded_speed = 0
@@ -470,8 +505,7 @@ def main():
     print(f"\nWritten to {args.output}")
 
     if not args.no_viz:
-        _visualize(args.osm_path, merged, ego_positions,
-                   args.output.with_suffix(".png"))
+        _visualize(args.osm_path, merged, ego_positions, args.output.with_suffix(".png"))
 
 
 if __name__ == "__main__":

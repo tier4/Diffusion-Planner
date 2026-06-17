@@ -58,9 +58,7 @@ def test_gradient_flows_through_mean_not_sample():
     t_prev = torch.tensor(0.05).view(1, 1).expand(B, 1)
 
     # Collection pass: new sample drawn
-    sample, log_prob, mean = vpsde_denoising_step_with_logprob(
-        x0, t_prev, sde, min_std=0.1
-    )
+    sample, log_prob, mean = vpsde_denoising_step_with_logprob(x0, t_prev, sde, min_std=0.1)
 
     # Backward
     loss = log_prob.sum()
@@ -84,9 +82,7 @@ def test_optimization_pass_uses_stored_sample():
     t_prev = torch.tensor(0.05).view(1, 1).expand(B, 1)
 
     # Collection pass
-    sample1, lp1, mean1 = vpsde_denoising_step_with_logprob(
-        x0, t_prev, sde, min_std=0.1
-    )
+    sample1, lp1, mean1 = vpsde_denoising_step_with_logprob(x0, t_prev, sde, min_std=0.1)
 
     # Optimization pass with stored sample
     _, lp2, mean2 = vpsde_denoising_step_with_logprob(
@@ -114,9 +110,7 @@ def test_min_std_clamp():
     assert std_raw.max() < 0.01, f"Raw std at t=1e-4 should be tiny: {std_raw.max()}"
 
     # With min_std=0.1, log_prob should be finite
-    sample, log_prob, _ = vpsde_denoising_step_with_logprob(
-        x0, t_tiny, sde, min_std=0.1
-    )
+    sample, log_prob, _ = vpsde_denoising_step_with_logprob(x0, t_tiny, sde, min_std=0.1)
     assert torch.isfinite(log_prob).all(), f"Log-prob should be finite: {log_prob}"
     assert not torch.isnan(log_prob).any(), f"Log-prob should not be NaN: {log_prob}"
     print("PASS: min_std clamp prevents explosion near t=0")
@@ -149,9 +143,7 @@ def test_timestep_schedule():
 def test_discount_weights():
     """Verify discount weights match DDV2 formula."""
     weights = compute_discount_weights(num_steps=5, discount=0.8)
-    expected = torch.tensor([
-        0.8**4, 0.8**3, 0.8**2, 0.8**1, 0.8**0
-    ])
+    expected = torch.tensor([0.8**4, 0.8**3, 0.8**2, 0.8**1, 0.8**0])
     assert torch.allclose(weights, expected, atol=1e-6), (
         f"Discount mismatch:\n  got={weights}\n  expected={expected}"
     )
@@ -170,9 +162,7 @@ def test_multidim_shapes():
     x0 = torch.randn(B, P, T, D)
     t_prev = torch.tensor(0.05).view(1, 1, 1, 1).expand(B, 1, T, 1)
 
-    sample, log_prob, mean = vpsde_denoising_step_with_logprob(
-        x0, t_prev, sde, min_std=0.1
-    )
+    sample, log_prob, mean = vpsde_denoising_step_with_logprob(x0, t_prev, sde, min_std=0.1)
 
     assert sample.shape == x0.shape, f"Sample shape mismatch: {sample.shape}"
     assert mean.shape == x0.shape, f"Mean shape mismatch: {mean.shape}"
@@ -199,9 +189,7 @@ def test_different_x0_gives_different_logprob():
         x0_b, t_prev, sde, min_std=0.1, prev_sample=sample
     )
 
-    assert not torch.allclose(lp_a, lp_b, atol=1e-3), (
-        "Different x0 should give different log-probs"
-    )
+    assert not torch.allclose(lp_a, lp_b, atol=1e-3), "Different x0 should give different log-probs"
     print("PASS: different x0 → different log-probs")
 
 

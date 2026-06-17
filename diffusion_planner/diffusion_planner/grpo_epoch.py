@@ -21,8 +21,8 @@ from tqdm import tqdm
 
 from diffusion_planner.grpo_utils import (
     compute_collision_reward,
-    compute_grpo_loss,
     compute_group_advantages,
+    compute_grpo_loss,
     compute_gt_l2_distance,
     expand_batch,
     sample_group,
@@ -48,7 +48,9 @@ def _sft_step(raw_inputs, model, optimizer, args, ema):
     inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
     ego_future = heading_to_cos_sin(inputs["ego_agent_future"])
-    neighbors_future, neighbor_future_mask = _neighbor_future_world(inputs["neighbor_agents_future"])
+    neighbors_future, neighbor_future_mask = _neighbor_future_world(
+        inputs["neighbor_agents_future"]
+    )
     inputs = args.observation_normalizer(inputs)
 
     optimizer.zero_grad()
@@ -156,8 +158,7 @@ def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector
         if step_rng.random() < args.sft_prob:
             step_loss = _sft_step(raw_inputs, model, optimizer, args, ema)
         else:
-            step_loss = _grpo_step(
-                raw_inputs, model, optimizer, args, ema, collider_injector)
+            step_loss = _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector)
 
         if args.ddp:
             torch.cuda.synchronize()

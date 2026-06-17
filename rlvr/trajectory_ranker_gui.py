@@ -30,7 +30,9 @@ import json
 import random
 import subprocess
 import sys
-from dataclasses import dataclass, field, fields as dc_fields, replace as dc_replace
+from dataclasses import dataclass, field
+from dataclasses import fields as dc_fields
+from dataclasses import replace as dc_replace
 from pathlib import Path
 
 import gradio as gr
@@ -62,7 +64,9 @@ from rlvr.reward import (
 _DIVERGING_CMAP = plt.get_cmap("RdYlGn")
 
 _DEFAULT_PROTOTYPES_PATH = str(Path(__file__).parent / "prototypes_k16.npy")
-_GENERATE_SCRIPT = Path(__file__).parent.parent / "guidance_gui" / "scripts" / "generate_prototypes.py"
+_GENERATE_SCRIPT = (
+    Path(__file__).parent.parent / "guidance_gui" / "scripts" / "generate_prototypes.py"
+)
 
 ALL_GUIDANCE_NAMES = [
     "centerline_following",
@@ -99,9 +103,11 @@ _SHORT_NAMES = {
 # Per-trajectory config data model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TrajectorySlotConfig:
     """Editable config for one trajectory slot."""
+
     noise_scale: float = 0.0
     global_guidance_scale: float = 1.0
     is_deterministic: bool = False
@@ -241,6 +247,7 @@ def generate_batched_sampler_configs(
 # Prototypes helper (unchanged)
 # ---------------------------------------------------------------------------
 
+
 def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = False) -> str | None:
     if not force and Path(prototypes_path).exists():
         print(f"Using existing prototypes: {prototypes_path}")
@@ -252,13 +259,19 @@ def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = Fa
     try:
         subprocess.run(
             [
-                sys.executable, str(_GENERATE_SCRIPT),
-                "--npz_list", npz_list_path,
-                "--output", prototypes_path,
-                "--k", "16",
-                "--max_samples", "50000",
+                sys.executable,
+                str(_GENERATE_SCRIPT),
+                "--npz_list",
+                npz_list_path,
+                "--output",
+                prototypes_path,
+                "--k",
+                "16",
+                "--max_samples",
+                "50000",
             ],
-            check=True, timeout=600,
+            check=True,
+            timeout=600,
         )
         print(f"Prototypes saved to {prototypes_path}")
     except subprocess.CalledProcessError as e:
@@ -274,6 +287,7 @@ def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = Fa
 # ---------------------------------------------------------------------------
 # TrajectoryRanker
 # ---------------------------------------------------------------------------
+
 
 class TrajectoryRanker:
     """Generates and scores N diverse trajectories per scene with per-trajectory control."""
@@ -335,19 +349,18 @@ class TrajectoryRanker:
         if not self.npz_paths or self.current_index >= len(self.npz_paths):
             return
 
-        self.current_data = load_npz_data(
-            self.npz_paths[self.current_index], self.device
-        )
+        self.current_data = load_npz_data(self.npz_paths[self.current_index], self.device)
         self._compute_gt_speed_bounds()
 
         self._norm_data = {
-            k: v.clone() if isinstance(v, torch.Tensor) else v
-            for k, v in self.current_data.items()
+            k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in self.current_data.items()
         }
         self._norm_data = self.model_args.observation_normalizer(self._norm_data)
 
         self.slot_configs = generate_batched_sampler_configs(
-            self._gt_max_speed, self._gt_min_speed, k=self.n_trajectories,
+            self._gt_max_speed,
+            self._gt_min_speed,
+            k=self.n_trajectories,
         )
 
         self.policy_model.eval()
@@ -359,19 +372,24 @@ class TrajectoryRanker:
             if i == 0 and slot.is_deterministic:
                 self._ref_trajectory = torch.from_numpy(traj).unsqueeze(0).to(self.device)
                 self._norm_data["reference_trajectory"] = self._ref_trajectory
-            self.sampled_trajectories.append(SampledTrajectory(
-                trajectory=traj,
-                noise_scale=0.0 if slot.is_deterministic else slot.noise_scale,
-                guidance_config=None,
-                is_deterministic=slot.is_deterministic,
-                label=_format_label(slot),
-            ))
+            self.sampled_trajectories.append(
+                SampledTrajectory(
+                    trajectory=traj,
+                    noise_scale=0.0 if slot.is_deterministic else slot.noise_scale,
+                    guidance_config=None,
+                    is_deterministic=slot.is_deterministic,
+                    label=_format_label(slot),
+                )
+            )
 
         self._score_trajectories()
 
     def _generate_from_slot(self, slot: TrajectorySlotConfig) -> np.ndarray:
         composer, set_cfg = slot_config_to_composer(
-            slot, self._gt_max_speed, self._gt_min_speed, self.prototypes_path,
+            slot,
+            self._gt_max_speed,
+            self._gt_min_speed,
+            self.prototypes_path,
         )
         noise = 0.0 if slot.is_deterministic else slot.noise_scale
         samples = generate_samples(
@@ -415,15 +433,21 @@ class TrajectoryRanker:
             return
         traj_batch = torch.tensor(
             np.stack([st.trajectory for st in self.sampled_trajectories]),
-            device=self.device, dtype=torch.float32,
+            device=self.device,
+            dtype=torch.float32,
         )
         self.reward_breakdowns = compute_reward_batch(
-            traj_batch, self.current_data, self.reward_config,
+            traj_batch,
+            self.current_data,
+            self.reward_config,
         )
         self.advantages = compute_group_advantages(self.reward_breakdowns)
 
     def _create_trajectory_plot(
-        self, time_step: int = 40, view_range: float = 60.0, selected_idx: int = 0,
+        self,
+        time_step: int = 40,
+        view_range: float = 60.0,
+        selected_idx: int = 0,
     ) -> Figure:
         fig = Figure(figsize=(10, 11.5))
         ax = fig.add_subplot(111)
@@ -455,8 +479,12 @@ class TrajectoryRanker:
                 if valid.sum() < 2:
                     continue
                 ax.plot(
-                    pts[valid, 0], pts[valid, 1],
-                    "-", color="#ff7f0e", lw=2.2, alpha=0.9,
+                    pts[valid, 0],
+                    pts[valid, 1],
+                    "-",
+                    color="#ff7f0e",
+                    lw=2.2,
+                    alpha=0.9,
                     label="ROUTE centerline" if not route_label_done else None,
                     zorder=8,
                 )
@@ -477,11 +505,12 @@ class TrajectoryRanker:
             traj = st.trajectory
             rank_frac = ranks[i] / max(N - 1, 1)
             display_rank = N - ranks[i]
-            is_selected = (i == selected_idx)
+            is_selected = i == selected_idx
 
             has_guidance = (
                 any(en for en, _, _ in self.slot_configs[i].guidance.values())
-                if i < len(self.slot_configs) else False
+                if i < len(self.slot_configs)
+                else False
             )
             is_det_baseline = st.is_deterministic and not has_guidance
             if is_det_baseline:
@@ -490,56 +519,82 @@ class TrajectoryRanker:
                 alpha = 1.0
                 linestyle = "--"
                 prefix = ">> " if is_selected else ""
-                label = f"{prefix}#{i+1} R={self.reward_breakdowns[i].total:.1f} [DET]"
+                label = f"{prefix}#{i + 1} R={self.reward_breakdowns[i].total:.1f} [DET]"
             else:
                 color = _DIVERGING_CMAP(rank_frac)
                 lw = 1.0 + 2.5 * rank_frac
                 alpha = 0.3 + 0.7 * rank_frac
                 linestyle = "-"
                 prefix = ">> " if is_selected else ""
-                label = f"{prefix}#{i+1} R={self.reward_breakdowns[i].total:.1f} ({st.label})"
+                label = f"{prefix}#{i + 1} R={self.reward_breakdowns[i].total:.1f} ({st.label})"
 
             # Selected trajectory: white outline underneath
             if is_selected:
                 ax.plot(
-                    traj[:, 0], traj[:, 1],
-                    color="white", linewidth=lw + 4, alpha=0.9,
-                    linestyle=linestyle, zorder=8,
+                    traj[:, 0],
+                    traj[:, 1],
+                    color="white",
+                    linewidth=lw + 4,
+                    alpha=0.9,
+                    linestyle=linestyle,
+                    zorder=8,
                 )
                 ax.plot(
-                    traj[:, 0], traj[:, 1],
-                    color="black", linewidth=lw + 2, alpha=0.7,
-                    linestyle=linestyle, zorder=9,
+                    traj[:, 0],
+                    traj[:, 1],
+                    color="black",
+                    linewidth=lw + 2,
+                    alpha=0.7,
+                    linestyle=linestyle,
+                    zorder=9,
                 )
 
             ax.plot(
-                traj[:, 0], traj[:, 1],
-                color=color, linewidth=lw, alpha=alpha,
-                linestyle=linestyle, label=label,
+                traj[:, 0],
+                traj[:, 1],
+                color=color,
+                linewidth=lw,
+                alpha=alpha,
+                linestyle=linestyle,
+                label=label,
                 zorder=10 if is_selected else 5,
             )
 
             # Selected trajectory: star marker at time_step
             if is_selected and 0 <= time_step < len(traj):
                 ax.scatter(
-                    [traj[time_step, 0]], [traj[time_step, 1]],
-                    color=color, s=200, zorder=15,
-                    edgecolors="black", linewidths=2, marker="*",
+                    [traj[time_step, 0]],
+                    [traj[time_step, 1]],
+                    color=color,
+                    s=200,
+                    zorder=15,
+                    edgecolors="black",
+                    linewidths=2,
+                    marker="*",
                 )
             elif ranks[i] >= N - 3 and 0 <= time_step < len(traj):
                 ax.scatter(
-                    [traj[time_step, 0]], [traj[time_step, 1]],
-                    color=color, s=80, zorder=10,
-                    edgecolors="black", marker="D",
+                    [traj[time_step, 0]],
+                    [traj[time_step, 1]],
+                    color=color,
+                    s=80,
+                    zorder=10,
+                    edgecolors="black",
+                    marker="D",
                 )
 
             rb = self.reward_breakdowns[i]
             if rb.collision_step is not None and 0 <= rb.collision_step < len(traj):
                 ct = rb.collision_step
                 ax.scatter(
-                    [traj[ct, 0]], [traj[ct, 1]],
-                    color="red", s=100, zorder=12,
-                    edgecolors="darkred", linewidths=1.5, marker="X",
+                    [traj[ct, 0]],
+                    [traj[ct, 1]],
+                    color="red",
+                    s=100,
+                    zorder=12,
+                    edgecolors="darkred",
+                    linewidths=1.5,
+                    marker="X",
                 )
 
         if "ego_agent_future" in data_cpu:
@@ -550,8 +605,12 @@ class TrajectoryRanker:
             valid = ~((gt[:, 0] == 0) & (gt[:, 1] == 0))
             if np.any(valid):
                 ax.plot(
-                    gt[valid, 0], gt[valid, 1],
-                    "k--", linewidth=2, alpha=0.6, label="GT",
+                    gt[valid, 0],
+                    gt[valid, 1],
+                    "k--",
+                    linewidth=2,
+                    alpha=0.6,
+                    label="GT",
                 )
 
         ax.legend(loc="upper left", fontsize=5.5, ncol=2)
@@ -575,18 +634,17 @@ class TrajectoryRanker:
             return fig
 
         data_cpu = {
-            k: v.cpu().numpy() if hasattr(v, "cpu") else v
-            for k, v in self.current_data.items()
+            k: v.cpu().numpy() if hasattr(v, "cpu") else v for k, v in self.current_data.items()
         }
         ego_state = np.array(data_cpu["ego_current_state"]).reshape(-1)
 
         N = len(self.sampled_trajectories)
         rank_order = np.argsort(self.advantages)
-        top3_indices = set(rank_order[-min(3, N):][::-1])
+        top3_indices = set(rank_order[-min(3, N) :][::-1])
 
         # Always include selected trajectory
         plot_indices = [selected_idx] if selected_idx not in top3_indices else []
-        plot_indices += [i for i in rank_order[-min(3, N):][::-1]]
+        plot_indices += [i for i in rank_order[-min(3, N) :][::-1]]
 
         all_speeds = []
         all_curvs = []
@@ -594,7 +652,7 @@ class TrajectoryRanker:
         for plot_i, idx in enumerate(plot_indices):
             st = self.sampled_trajectories[idx]
             traj = st.trajectory
-            is_sel = (idx == selected_idx)
+            is_sel = idx == selected_idx
 
             if is_sel:
                 color = "blue"
@@ -611,12 +669,19 @@ class TrajectoryRanker:
             t = np.arange(len(vel))
             sel_tag = " [SEL]" if is_sel else ""
             ax_speed.plot(
-                t, vel, color=color, linewidth=lw, alpha=0.8,
-                label=f"#{idx+1} {st.label}{sel_tag}",
+                t,
+                vel,
+                color=color,
+                linewidth=lw,
+                alpha=0.8,
+                label=f"#{idx + 1} {st.label}{sel_tag}",
             )
             ax_curv.plot(
-                np.arange(len(curv)), curv,
-                color=color, linewidth=lw, alpha=0.8,
+                np.arange(len(curv)),
+                curv,
+                color=color,
+                linewidth=lw,
+                alpha=0.8,
             )
 
         if "ego_agent_future" in data_cpu:
@@ -627,14 +692,21 @@ class TrajectoryRanker:
                 gt_vel_ms = gt_vel / 3.6  # km/h -> m/s
                 all_speeds.append(gt_vel_ms)
                 ax_speed.plot(
-                    np.arange(len(gt_vel_ms)), gt_vel_ms,
-                    "k--", linewidth=2, alpha=0.7, label="GT",
+                    np.arange(len(gt_vel_ms)),
+                    gt_vel_ms,
+                    "k--",
+                    linewidth=2,
+                    alpha=0.7,
+                    label="GT",
                 )
             if gt_curv is not None:
                 all_curvs.append(gt_curv)
                 ax_curv.plot(
-                    np.arange(len(gt_curv)), gt_curv,
-                    "k--", linewidth=2, alpha=0.7,
+                    np.arange(len(gt_curv)),
+                    gt_curv,
+                    "k--",
+                    linewidth=2,
+                    alpha=0.7,
                 )
 
         # Auto-scale y-axes with 10% padding
@@ -666,15 +738,18 @@ class TrajectoryRanker:
         if not self.reward_breakdowns:
             return ""
 
-        rows = list(zip(
-            range(len(self.reward_breakdowns)),
-            self.reward_breakdowns,
-            self.advantages,
-            self.sampled_trajectories,
-        ))
+        rows = list(
+            zip(
+                range(len(self.reward_breakdowns)),
+                self.reward_breakdowns,
+                self.advantages,
+                self.sampled_trajectories,
+            )
+        )
         rows.sort(key=lambda r: r[1].total, reverse=True)
 
         cfg = self.reward_config
+
         # UI design: the user needs to see (a) what the reward weighting
         # adds up to per component, and (b) which hard gates fired / how
         # close we are to firing them. Cramming 20 columns into markdown
@@ -710,7 +785,7 @@ class TrajectoryRanker:
             "|---|------|-----|------|-----|------|----|-------|-----|-------|------|------|--------|",
         ]
         for rank, (idx, rb, adv, st) in enumerate(rows, 1):
-            is_sel = (idx == selected_idx)
+            is_sel = idx == selected_idx
             config_col = "**[DET]**" if st.is_deterministic and st.label == "DET" else st.label
             b = "**" if is_sel else ""
             ws = cfg.w_safety * rb.safety
@@ -723,7 +798,7 @@ class TrajectoryRanker:
             sc_d = _fmt_d(getattr(rb, "sc_min_dist", 99.0))
             sel_marker = ">>" if is_sel else ""
             lines.append(
-                f"| {b}{sel_marker}#{idx+1}{b} | {b}{rank}{b} | "
+                f"| {b}{sel_marker}#{idx + 1}{b} | {b}{rank}{b} | "
                 f"{b}{ws:.1f}{b} | {b}{wp:.1f}{b} | {b}{wm:.1f}{b} | "
                 f"{b}{wf:.1f}{b} | {b}{wc:.1f}{b} | "
                 f"{b}{rb.total:.1f}{b} | {b}{adv:+.2f}{b} | "
@@ -759,7 +834,8 @@ class TrajectoryRanker:
                     "is_deterministic": s.is_deterministic,
                     "guidance": {
                         name: {"enabled": en, "scale": sc}
-                        for name, (en, sc, _) in s.guidance.items() if en
+                        for name, (en, sc, _) in s.guidance.items()
+                        if en
                     },
                 }
                 for s in self.slot_configs
@@ -788,24 +864,25 @@ class TrajectoryRanker:
         with open(dump_path, "w") as f:
             json.dump(serializable, f, indent=2)
 
-        return f"Saved scene {self.current_index} ({len(self.saved_scenes)} total) -> {img_path.name}"
+        return (
+            f"Saved scene {self.current_index} ({len(self.saved_scenes)} total) -> {img_path.name}"
+        )
 
     def accept_current_group(self) -> str:
         if not self.sampled_trajectories or self.current_data is None:
             return "Nothing to accept (no trajectories loaded)"
         if np.all(self.advantages == 0):
             return "Skipped: all advantages are zero (no gradient signal)"
-        self.accepted_groups.append({
-            "npz_path": self.npz_paths[self.current_index],
-            "data": self.current_data,
-            "trajectories": [st.trajectory for st in self.sampled_trajectories],
-            "reward_breakdowns": self.reward_breakdowns,
-            "advantages": self.advantages,
-        })
-        return (
-            f"Accepted scene {self.current_index} "
-            f"({len(self.accepted_groups)} groups queued)"
+        self.accepted_groups.append(
+            {
+                "npz_path": self.npz_paths[self.current_index],
+                "data": self.current_data,
+                "trajectories": [st.trajectory for st in self.sampled_trajectories],
+                "reward_breakdowns": self.reward_breakdowns,
+                "advantages": self.advantages,
+            }
         )
+        return f"Accepted scene {self.current_index} ({len(self.accepted_groups)} groups queued)"
 
     def clear_accepted_groups(self) -> str:
         count = len(self.accepted_groups)
@@ -816,6 +893,7 @@ class TrajectoryRanker:
 # ---------------------------------------------------------------------------
 # Gradio interface
 # ---------------------------------------------------------------------------
+
 
 def build_interface(
     ranker: TrajectoryRanker,
@@ -845,28 +923,73 @@ def build_interface(
                     btn_shuffle = gr.Button("Shuffle", size="sm")
                     btn_regen_all = gr.Button("Re-do All", size="sm")
                 jump_input = gr.Number(
-                    label="Jump to index", value=0, minimum=0, precision=0,
+                    label="Jump to index",
+                    value=0,
+                    minimum=0,
+                    precision=0,
                 )
                 n_traj_sl = gr.Slider(
-                    1, 32, value=ranker.n_trajectories, step=1, label="N trajectories",
+                    1,
+                    32,
+                    value=ranker.n_trajectories,
+                    step=1,
+                    label="N trajectories",
                 )
 
-                _rc0 = ranker.reward_config_base  # initial defaults from loaded config (or RewardConfig())
+                _rc0 = (
+                    ranker.reward_config_base
+                )  # initial defaults from loaded config (or RewardConfig())
                 gr.Markdown("### Reward Weights")
                 w_safety = gr.Slider(0.0, 20.0, value=_rc0.w_safety, step=0.5, label="w_safety")
-                w_progress = gr.Slider(0.0, 10.0, value=_rc0.w_progress, step=0.1, label="w_progress")
+                w_progress = gr.Slider(
+                    0.0, 10.0, value=_rc0.w_progress, step=0.1, label="w_progress"
+                )
                 w_smooth = gr.Slider(0.0, 10.0, value=_rc0.w_smooth, step=0.1, label="w_smooth")
-                w_feasibility = gr.Slider(0.0, 10.0, value=_rc0.w_feasibility, step=0.1, label="w_feasibility")
-                w_centerline = gr.Slider(0.0, 15.0, value=_rc0.w_centerline, step=0.1, label="w_centerline")
+                w_feasibility = gr.Slider(
+                    0.0, 10.0, value=_rc0.w_feasibility, step=0.1, label="w_feasibility"
+                )
+                w_centerline = gr.Slider(
+                    0.0, 15.0, value=_rc0.w_centerline, step=0.1, label="w_centerline"
+                )
 
                 with gr.Accordion("Reward Penalties & Options", open=False):
-                    up_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.underprogress_penalty, step=1.0, label="underprogress_penalty")
-                    up_thr_sl = gr.Slider(0.0, 1.0, value=_rc0.underprogress_threshold, step=0.05, label="underprogress_threshold")
-                    op_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.overprogress_penalty, step=1.0, label="overprogress_penalty")
-                    op_mar_sl = gr.Slider(1.0, 1.5, value=_rc0.overprogress_margin, step=0.01, label="overprogress_margin")
-                    stop_pen_sl = gr.Slider(0.0, 200.0, value=_rc0.stopped_penalty, step=1.0, label="stopped_penalty")
-                    rb_near_sl = gr.Slider(0.0, 20.0, value=_rc0.rb_near_scale, step=0.5, label="rb_near_scale")
-                    rb_wide_sl = gr.Slider(0.0, 5.0, value=_rc0.rb_wide_scale, step=0.1, label="rb_wide_scale")
+                    up_pen_sl = gr.Slider(
+                        0.0,
+                        200.0,
+                        value=_rc0.underprogress_penalty,
+                        step=1.0,
+                        label="underprogress_penalty",
+                    )
+                    up_thr_sl = gr.Slider(
+                        0.0,
+                        1.0,
+                        value=_rc0.underprogress_threshold,
+                        step=0.05,
+                        label="underprogress_threshold",
+                    )
+                    op_pen_sl = gr.Slider(
+                        0.0,
+                        200.0,
+                        value=_rc0.overprogress_penalty,
+                        step=1.0,
+                        label="overprogress_penalty",
+                    )
+                    op_mar_sl = gr.Slider(
+                        1.0,
+                        1.5,
+                        value=_rc0.overprogress_margin,
+                        step=0.01,
+                        label="overprogress_margin",
+                    )
+                    stop_pen_sl = gr.Slider(
+                        0.0, 200.0, value=_rc0.stopped_penalty, step=1.0, label="stopped_penalty"
+                    )
+                    rb_near_sl = gr.Slider(
+                        0.0, 20.0, value=_rc0.rb_near_scale, step=0.5, label="rb_near_scale"
+                    )
+                    rb_wide_sl = gr.Slider(
+                        0.0, 5.0, value=_rc0.rb_wide_scale, step=0.1, label="rb_wide_scale"
+                    )
 
                 gr.Markdown("### Display")
                 zoom_sl = gr.Slider(1, 10, value=5, step=1, label="Zoom")
@@ -888,7 +1011,8 @@ def build_interface(
                     _ts = __import__("datetime").datetime.now().strftime("%y-%m-%d-%H-%M-%S")
                     save_dir = gr.Textbox(
                         value=f".datasets/trajectory-dump-{_ts}",
-                        label="Save directory", scale=3,
+                        label="Save directory",
+                        scale=3,
                     )
                     save_status = gr.Markdown("")
                 with gr.Accordion("Speed & Curvature Plots", open=False):
@@ -906,18 +1030,22 @@ def build_interface(
                         gr.Markdown("### Training Parameters")
                         with gr.Row():
                             beta_sl = gr.Slider(0.0, 1.0, value=0.1, step=0.01, label="KL beta")
-                            lr_sl = gr.Slider(1e-6, 1e-3, value=1e-5, step=1e-6, label="Learning rate")
+                            lr_sl = gr.Slider(
+                                1e-6, 1e-3, value=1e-5, step=1e-6, label="Learning rate"
+                            )
                             accum_sl = gr.Slider(1, 16, value=4, step=1, label="Grad accum groups")
                         with gr.Row():
                             btn_train = gr.Button("Train on Queued Groups", variant="primary")
-                            epoch_display = gr.Number(value=0, label="Current epoch", interactive=False)
+                            epoch_display = gr.Number(
+                                value=0, label="Current epoch", interactive=False
+                            )
                         train_log = gr.Markdown("No training yet.")
 
             # --- Right sidebar: per-trajectory editor ---
             with gr.Column(scale=1):
                 gr.Markdown("### Trajectory Editor")
                 traj_dropdown = gr.Dropdown(
-                    choices=[f"#{i+1}" for i in range(ranker.n_trajectories)],
+                    choices=[f"#{i + 1}" for i in range(ranker.n_trajectories)],
                     value="#1",
                     label="Select trajectory",
                     interactive=True,
@@ -926,7 +1054,9 @@ def build_interface(
 
                 gr.Markdown("---")
                 noise_sl = gr.Slider(0.0, 2.0, value=0.0, step=0.05, label="Noise scale")
-                global_g_sl = gr.Slider(0.1, 5.0, value=1.0, step=0.1, label="Global guidance scale")
+                global_g_sl = gr.Slider(
+                    0.1, 5.0, value=1.0, step=0.1, label="Global guidance scale"
+                )
                 det_cb = gr.Checkbox(value=True, label="Deterministic (noise=0)")
 
                 gr.Markdown("#### Guidance Functions")
@@ -940,7 +1070,9 @@ def build_interface(
 
                 cb_spd = gr.Checkbox(value=False, label="Speed")
                 sl_spd = gr.Slider(0.1, 15.0, value=5.0, step=0.1, label="SPD scale")
-                spd_stretch = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="SPD stretch (1.0=keep, 1.3=30% faster)")
+                spd_stretch = gr.Slider(
+                    0.5, 2.0, value=1.0, step=0.05, label="SPD stretch (1.0=keep, 1.3=30% faster)"
+                )
 
                 cb_lk = gr.Checkbox(value=False, label="Lane keeping")
                 sl_lk = gr.Slider(0.1, 15.0, value=5.0, step=0.1, label="LK scale")
@@ -959,28 +1091,63 @@ def build_interface(
 
                 cb_lat = gr.Checkbox(value=False, label="Lateral")
                 sl_lat = gr.Slider(0.1, 5.0, value=1.0, step=0.1, label="LAT scale")
-                eta_lat = gr.Slider(-1.0, 1.0, value=0.0, step=0.05, label="LAT eta (offset direction)")
+                eta_lat = gr.Slider(
+                    -1.0, 1.0, value=0.0, step=0.05, label="LAT eta (offset direction)"
+                )
 
                 cb_lon = gr.Checkbox(value=False, label="Longitudinal")
                 sl_lon = gr.Slider(0.1, 5.0, value=1.0, step=0.1, label="LON scale")
-                eta_lon = gr.Slider(-1.0, 1.0, value=0.0, step=0.05, label="LON eta (speed direction)")
+                eta_lon = gr.Slider(
+                    -1.0, 1.0, value=0.0, step=0.05, label="LON eta (speed direction)"
+                )
 
                 gr.Markdown("---")
                 btn_regen_single = gr.Button(
-                    "Regenerate This Trajectory", variant="primary", size="sm",
+                    "Regenerate This Trajectory",
+                    variant="primary",
+                    size="sm",
                 )
 
         # --- Component lists for callbacks ---
         editor_guidance_components = [
-            cb_cl, sl_cl, cb_rcl, sl_rcl, cb_spd, sl_spd, spd_stretch, cb_lk, sl_lk,
-            cb_rb, sl_rb, cb_rf, sl_rf, cb_col, sl_col,
-            cb_anc, sl_anc, cb_lat, sl_lat, eta_lat, cb_lon, sl_lon, eta_lon,
+            cb_cl,
+            sl_cl,
+            cb_rcl,
+            sl_rcl,
+            cb_spd,
+            sl_spd,
+            spd_stretch,
+            cb_lk,
+            sl_lk,
+            cb_rb,
+            sl_rb,
+            cb_rf,
+            sl_rf,
+            cb_col,
+            sl_col,
+            cb_anc,
+            sl_anc,
+            cb_lat,
+            sl_lat,
+            eta_lat,
+            cb_lon,
+            sl_lon,
+            eta_lon,
         ]
         editor_components = [noise_sl, global_g_sl, det_cb] + editor_guidance_components
         reward_inputs = [
-            w_safety, w_progress, w_smooth, w_feasibility, w_centerline,
-            up_pen_sl, up_thr_sl, op_pen_sl, op_mar_sl, stop_pen_sl,
-            rb_near_sl, rb_wide_sl,
+            w_safety,
+            w_progress,
+            w_smooth,
+            w_feasibility,
+            w_centerline,
+            up_pen_sl,
+            up_thr_sl,
+            op_pen_sl,
+            op_mar_sl,
+            stop_pen_sl,
+            rb_near_sl,
+            rb_wide_sl,
         ]
         display_inputs = [zoom_sl, time_sl]
         main_outputs = [traj_plot, reward_table, speed_curv_plot, sample_info]
@@ -1028,10 +1195,32 @@ def build_interface(
 
         # --- Helper: read editor into slot config ---
         def _read_editor_into_slot(
-            noise_val, global_g_val, is_det,
-            cl_on, cl_s, rcl_on, rcl_s, spd_on, spd_s, spd_stretch_val, lk_on, lk_s,
-            rb_on, rb_s, rf_on, rf_s, col_on, col_s,
-            anc_on, anc_s, lat_on, lat_s, eta_lat_val, lon_on, lon_s, eta_lon_val,
+            noise_val,
+            global_g_val,
+            is_det,
+            cl_on,
+            cl_s,
+            rcl_on,
+            rcl_s,
+            spd_on,
+            spd_s,
+            spd_stretch_val,
+            lk_on,
+            lk_s,
+            rb_on,
+            rb_s,
+            rf_on,
+            rf_s,
+            col_on,
+            col_s,
+            anc_on,
+            anc_s,
+            lat_on,
+            lat_s,
+            eta_lat_val,
+            lon_on,
+            lon_s,
+            eta_lon_val,
         ) -> TrajectorySlotConfig:
             slot = TrajectorySlotConfig(
                 noise_scale=float(noise_val),
@@ -1040,20 +1229,34 @@ def build_interface(
             )
             slot.guidance["centerline_following"] = (bool(cl_on), float(cl_s), {})
             slot.guidance["route_centerline_following"] = (bool(rcl_on), float(rcl_s), {})
-            slot.guidance["speed"] = (bool(spd_on), float(spd_s), {
-                "stretch": float(spd_stretch_val),
-            })
+            slot.guidance["speed"] = (
+                bool(spd_on),
+                float(spd_s),
+                {
+                    "stretch": float(spd_stretch_val),
+                },
+            )
             slot.guidance["lane_keeping"] = (bool(lk_on), float(lk_s), {})
             slot.guidance["road_border"] = (bool(rb_on), float(rb_s), {})
             slot.guidance["route_following"] = (bool(rf_on), float(rf_s), {})
             slot.guidance["collision"] = (bool(col_on), float(col_s), {})
             slot.guidance["anchor_following"] = (bool(anc_on), float(anc_s), {})
-            slot.guidance["lateral"] = (bool(lat_on), float(lat_s), {
-                "eta_lat": float(eta_lat_val), "lambda_lat": 3.0,
-            })
-            slot.guidance["longitudinal"] = (bool(lon_on), float(lon_s), {
-                "eta_lon": float(eta_lon_val), "lambda_lon": 0.5,
-            })
+            slot.guidance["lateral"] = (
+                bool(lat_on),
+                float(lat_s),
+                {
+                    "eta_lat": float(eta_lat_val),
+                    "lambda_lat": 3.0,
+                },
+            )
+            slot.guidance["longitudinal"] = (
+                bool(lon_on),
+                float(lon_s),
+                {
+                    "eta_lon": float(eta_lon_val),
+                    "lambda_lon": 0.5,
+                },
+            )
             return slot
 
         # --- Helper: format config summary ---
@@ -1079,8 +1282,18 @@ def build_interface(
 
         # --- Render helpers ---
         def _apply_reward_config(
-            ws, wp, wm, wf, wc,
-            up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide,
+            ws,
+            wp,
+            wm,
+            wf,
+            wc,
+            up_pen,
+            up_thr,
+            op_pen,
+            op_mar,
+            stop_pen,
+            rb_near,
+            rb_wide,
         ):
             # Preserve all non-slider fields from the loaded base config
             # (gt_*, thresholds, modes, etc.) — only override slider-controlled ones.
@@ -1103,7 +1316,9 @@ def build_interface(
         def _render(sel_idx, zoom, ts):
             view_range = 100 - (int(zoom) - 1) * 90 / 9
             traj_fig = ranker._create_trajectory_plot(
-                time_step=int(ts), view_range=view_range, selected_idx=int(sel_idx),
+                time_step=int(ts),
+                view_range=view_range,
+                selected_idx=int(sel_idx),
             )
             table = ranker._format_reward_table(selected_idx=int(sel_idx))
             sc_fig = ranker._create_speed_curvature_plot(selected_idx=int(sel_idx))
@@ -1116,37 +1331,53 @@ def build_interface(
         # --- Full run: load scene, generate all, render ---
         def _full_run(
             n_traj,
-            ws, wp, wm, wf, wc,
-            up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide,
-            zoom, ts,
+            ws,
+            wp,
+            wm,
+            wf,
+            wc,
+            up_pen,
+            up_thr,
+            op_pen,
+            op_mar,
+            stop_pen,
+            rb_near,
+            rb_wide,
+            zoom,
+            ts,
         ):
             ranker.n_trajectories = int(n_traj)
-            _apply_reward_config(ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide)
+            _apply_reward_config(
+                ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide
+            )
             ranker.load_sample()
             sel_idx = 0
             renders = _render(sel_idx, zoom, ts)
             choices = _dropdown_choices()
-            editor_vals = _populate_editor(ranker.slot_configs[0]) if ranker.slot_configs else _populate_editor(TrajectorySlotConfig())
+            editor_vals = (
+                _populate_editor(ranker.slot_configs[0])
+                if ranker.slot_configs
+                else _populate_editor(TrajectorySlotConfig())
+            )
             summary = _config_summary_md(0)
             return (
-                sel_idx,                                    # selected_state
+                sel_idx,  # selected_state
                 gr.update(choices=choices, value=choices[0] if choices else "#1"),  # dropdown
-                summary,                                    # config_summary
-                *editor_vals,                               # editor components (21 values)
-                *renders,                                   # plot, table, speed_curv, info
+                summary,  # config_summary
+                *editor_vals,  # editor components (21 values)
+                *renders,  # plot, table, speed_curv, info
             )
 
         full_run_inputs = [n_traj_sl] + reward_inputs + display_inputs
         full_run_outputs = (
-            [selected_state, traj_dropdown, config_summary]
-            + editor_components
-            + main_outputs
+            [selected_state, traj_dropdown, config_summary] + editor_components + main_outputs
         )
 
         # --- Navigation ---
         def _nav(delta, *args):
             ranker.current_index = max(
-                0, min(len(ranker.npz_paths) - 1, ranker.current_index + delta),
+                0,
+                min(len(ranker.npz_paths) - 1, ranker.current_index + delta),
             )
             return _full_run(*args)
 
@@ -1157,22 +1388,30 @@ def build_interface(
 
         def _jump(idx, *args):
             ranker.current_index = max(
-                0, min(len(ranker.npz_paths) - 1, int(idx)),
+                0,
+                min(len(ranker.npz_paths) - 1, int(idx)),
             )
             return _full_run(*args)
 
         for delta, btn in [
-            (-30, btn_m30), (-10, btn_m10), (-1, btn_m1),
-            (1, btn_p1), (10, btn_p10), (30, btn_p30),
+            (-30, btn_m30),
+            (-10, btn_m10),
+            (-1, btn_m1),
+            (1, btn_p1),
+            (10, btn_p10),
+            (30, btn_p30),
         ]:
             btn.click(
                 functools.partial(_nav, delta),
-                inputs=full_run_inputs, outputs=full_run_outputs,
+                inputs=full_run_inputs,
+                outputs=full_run_outputs,
             )
         btn_shuffle.click(_shuffle, inputs=full_run_inputs, outputs=full_run_outputs)
         btn_regen_all.click(_full_run, inputs=full_run_inputs, outputs=full_run_outputs)
         jump_input.submit(
-            _jump, inputs=[jump_input] + full_run_inputs, outputs=full_run_outputs,
+            _jump,
+            inputs=[jump_input] + full_run_inputs,
+            outputs=full_run_outputs,
         )
 
         # N trajectories slider -> full regen
@@ -1188,11 +1427,7 @@ def build_interface(
             renders = _render(idx, zoom, ts)
             return (idx, summary, *editor_vals, *renders)
 
-        select_outputs = (
-            [selected_state, config_summary]
-            + editor_components
-            + main_outputs
-        )
+        select_outputs = [selected_state, config_summary] + editor_components + main_outputs
         traj_dropdown.change(
             _on_select,
             inputs=[traj_dropdown] + display_inputs,
@@ -1211,7 +1446,9 @@ def build_interface(
             choices = _dropdown_choices()
             summary = _config_summary_md(idx)
             return (
-                gr.update(choices=choices, value=choices[idx] if idx < len(choices) else choices[0]),
+                gr.update(
+                    choices=choices, value=choices[idx] if idx < len(choices) else choices[0]
+                ),
                 summary,
                 *renders,
             )
@@ -1226,17 +1463,33 @@ def build_interface(
         # --- Reward weight changes -> rescore only ---
         def _rescore_and_render(
             sel_idx,
-            ws, wp, wm, wf, wc,
-            up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide,
-            zoom, ts,
+            ws,
+            wp,
+            wm,
+            wf,
+            wc,
+            up_pen,
+            up_thr,
+            op_pen,
+            op_mar,
+            stop_pen,
+            rb_near,
+            rb_wide,
+            zoom,
+            ts,
         ):
-            _apply_reward_config(ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide)
+            _apply_reward_config(
+                ws, wp, wm, wf, wc, up_pen, up_thr, op_pen, op_mar, stop_pen, rb_near, rb_wide
+            )
             ranker._score_trajectories()
             renders = _render(int(sel_idx), zoom, ts)
             choices = _dropdown_choices()
             current_idx = int(sel_idx)
             return (
-                gr.update(choices=choices, value=choices[current_idx] if current_idx < len(choices) else choices[0]),
+                gr.update(
+                    choices=choices,
+                    value=choices[current_idx] if current_idx < len(choices) else choices[0],
+                ),
                 *renders,
             )
 
@@ -1263,13 +1516,21 @@ def build_interface(
             try:
                 subprocess.run(
                     [
-                        sys.executable, str(_GENERATE_SCRIPT),
-                        "--npz_list", ranker.npz_list_path,
-                        "--output", p_path,
-                        "--k", "16",
-                        "--max_samples", "50000",
+                        sys.executable,
+                        str(_GENERATE_SCRIPT),
+                        "--npz_list",
+                        ranker.npz_list_path,
+                        "--output",
+                        p_path,
+                        "--k",
+                        "16",
+                        "--max_samples",
+                        "50000",
                     ],
-                    check=True, capture_output=True, text=True, timeout=600,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
                 )
                 return f"Regenerated prototypes at {p_path}"
             except subprocess.CalledProcessError as e:
@@ -1278,12 +1539,15 @@ def build_interface(
                 return "Timeout generating prototypes"
 
         btn_regen_protos.click(
-            _regen_protos, inputs=[proto_path], outputs=[sample_info],
+            _regen_protos,
+            inputs=[proto_path],
+            outputs=[sample_info],
         )
 
         btn_save.click(
             lambda d, z, ts: ranker.save_current_scene(d, zoom=z, time_step=ts),
-            inputs=[save_dir, zoom_sl, time_sl], outputs=[save_status],
+            inputs=[save_dir, zoom_sl, time_sl],
+            outputs=[save_status],
         )
 
         # --- GRPO training event wiring ---
@@ -1294,14 +1558,16 @@ def build_interface(
                 # args = full_run_inputs
                 msg = ranker.accept_current_group()
                 ranker.current_index = min(
-                    len(ranker.npz_paths) - 1, ranker.current_index + 1,
+                    len(ranker.npz_paths) - 1,
+                    ranker.current_index + 1,
                 )
                 full_out = _full_run(*args)
                 return (msg, *full_out)
 
             def _skip_and_advance(*args):
                 ranker.current_index = min(
-                    len(ranker.npz_paths) - 1, ranker.current_index + 1,
+                    len(ranker.npz_paths) - 1,
+                    ranker.current_index + 1,
                 )
                 full_out = _full_run(*args)
                 msg = f"Skipped. {len(ranker.accepted_groups)} groups queued"
@@ -1360,7 +1626,9 @@ def build_interface(
                 outputs=[queue_status] + full_run_outputs,
             )
             btn_clear_queue.click(
-                _clear_queue, inputs=[], outputs=[queue_status],
+                _clear_queue,
+                inputs=[],
+                outputs=[queue_status],
             )
             btn_train.click(
                 _train_epoch,
@@ -1377,28 +1645,45 @@ def build_interface(
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="Trajectory Ranker GUI")
     parser.add_argument("--model_path", type=Path, required=True)
-    parser.add_argument("--npz_list", type=Path, required=True,
-                        help="JSON file listing .npz scene paths")
-    parser.add_argument("--prototypes", type=Path, default=None,
-                        help="Path to prototypes .npy (auto-generated from npz_list if omitted)")
-    parser.add_argument("--regen-prototypes", action="store_true",
-                        help="Force regenerate prototypes from npz_list even if cached file exists")
+    parser.add_argument(
+        "--npz_list", type=Path, required=True, help="JSON file listing .npz scene paths"
+    )
+    parser.add_argument(
+        "--prototypes",
+        type=Path,
+        default=None,
+        help="Path to prototypes .npy (auto-generated from npz_list if omitted)",
+    )
+    parser.add_argument(
+        "--regen-prototypes",
+        action="store_true",
+        help="Force regenerate prototypes from npz_list even if cached file exists",
+    )
     parser.add_argument("--n_trajectories", type=int, default=16)
     parser.add_argument("--port", type=int, default=7862)
     parser.add_argument("--share", action="store_true")
 
-    parser.add_argument("--no-training", action="store_true",
-                        help="Disable GRPO training controls (visualization-only mode)")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="Path to GRPO config JSON. Required unless "
-                             "--no-training is set (viz-only mode).")
-    parser.add_argument("--use_lora", action="store_true", default=False,
-                        help="Apply LoRA adapters for training")
-    parser.add_argument("--exp_name", type=str, default="grpo_gui",
-                        help="Experiment name for checkpoint directory")
+    parser.add_argument(
+        "--no-training",
+        action="store_true",
+        help="Disable GRPO training controls (visualization-only mode)",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to GRPO config JSON. Required unless --no-training is set (viz-only mode).",
+    )
+    parser.add_argument(
+        "--use_lora", action="store_true", default=False, help="Apply LoRA adapters for training"
+    )
+    parser.add_argument(
+        "--exp_name", type=str, default="grpo_gui", help="Experiment name for checkpoint directory"
+    )
 
     args = parser.parse_args()
 
@@ -1430,6 +1715,7 @@ def main():
     grpo_cfg = None
     if args.config is not None:
         from rlvr.grpo_config import GRPOConfig
+
         if not args.config.exists():
             raise FileNotFoundError(f"GRPO config not found: {args.config}")
         grpo_cfg = GRPOConfig.from_json(args.config)
@@ -1438,15 +1724,14 @@ def main():
     grpo_trainer = None
     if not args.no_training:
         if grpo_cfg is None:
-            raise SystemExit(
-                "--config is required unless --no-training is set."
-            )
+            raise SystemExit("--config is required unless --no-training is set.")
 
         if args.use_lora:
             grpo_cfg.use_lora = True
 
         if grpo_cfg.use_lora:
             from preference_optimization.lora_utils import apply_lora
+
             model = apply_lora(
                 model,
                 r=grpo_cfg.lora_rank,
@@ -1456,7 +1741,9 @@ def main():
 
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         if not trainable_params:
-            print("Warning: no trainable parameters found. Use --use_lora or ensure model is not frozen.")
+            print(
+                "Warning: no trainable parameters found. Use --use_lora or ensure model is not frozen."
+            )
         else:
             from datetime import datetime
 
@@ -1481,9 +1768,11 @@ def main():
                 use_lora=grpo_cfg.use_lora,
             )
             mode_str = "multi-epoch" if grpo_cfg.uses_importance_sampling else "on-policy"
-            print(f"GRPO training enabled [{mode_str}] "
-                  f"(N={grpo_cfg.num_generations}, M={grpo_cfg.inner_epochs}, "
-                  f"kl={grpo_cfg.kl_coef}, lr={grpo_cfg.learning_rate})")
+            print(
+                f"GRPO training enabled [{mode_str}] "
+                f"(N={grpo_cfg.num_generations}, M={grpo_cfg.inner_epochs}, "
+                f"kl={grpo_cfg.kl_coef}, lr={grpo_cfg.learning_rate})"
+            )
     else:
         model.eval()
         print("Visualization-only mode (--no-training)")
@@ -1500,14 +1789,18 @@ def main():
     # Seed reward config from the loaded training config so slider defaults
     # and the initial reward breakdown match training, not GUI defaults.
     if grpo_cfg is not None:
-        shared_fields = {f.name for f in dc_fields(RewardConfig)} & {f.name for f in dc_fields(type(grpo_cfg))}
+        shared_fields = {f.name for f in dc_fields(RewardConfig)} & {
+            f.name for f in dc_fields(type(grpo_cfg))
+        }
         loaded_rc = RewardConfig(**{name: getattr(grpo_cfg, name) for name in shared_fields})
         ranker.reward_config_base = loaded_rc
         ranker.reward_config = loaded_rc
-        print(f"Seeded reward config from training config: w_progress={loaded_rc.w_progress}, "
-              f"w_centerline={loaded_rc.w_centerline}, "
-              f"underprogress_penalty={loaded_rc.underprogress_penalty}, "
-              f"overprogress_penalty={loaded_rc.overprogress_penalty}")
+        print(
+            f"Seeded reward config from training config: w_progress={loaded_rc.w_progress}, "
+            f"w_centerline={loaded_rc.w_centerline}, "
+            f"underprogress_penalty={loaded_rc.underprogress_penalty}, "
+            f"overprogress_penalty={loaded_rc.overprogress_penalty}"
+        )
 
     demo = build_interface(ranker, trainer=grpo_trainer)
     demo.launch(server_port=args.port, share=args.share, inbrowser=True)

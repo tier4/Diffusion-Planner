@@ -25,10 +25,10 @@ if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
 import torch
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from torch import optim
 from torch.utils.data import DataLoader
 
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from preference_optimization.annotation_gui import collect_preferences
 from preference_optimization.annotation_ros_node import AnnotationRosServer
 from preference_optimization.model_utils import load_model
@@ -78,8 +78,12 @@ def parse_args() -> argparse.Namespace:
         default="rule",
         help="Preference collection mode: 'rule' for automatic, 'gui' for manual annotation",
     )
-    parser.add_argument("--lichtblick_host", type=str, default="127.0.0.1", help="Lichtblick websocket host")
-    parser.add_argument("--lichtblick_port", type=int, default=8765, help="Lichtblick websocket port")
+    parser.add_argument(
+        "--lichtblick_host", type=str, default="127.0.0.1", help="Lichtblick websocket host"
+    )
+    parser.add_argument(
+        "--lichtblick_port", type=int, default=8765, help="Lichtblick websocket port"
+    )
     parser.add_argument(
         "--train_epochs",
         type=int,
@@ -111,7 +115,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Apply LoRA adapters to DiT attention layers. Standard checkpoints load "
-             "automatically without any manual migration step.",
+        "automatically without any manual migration step.",
     )
     parser.add_argument(
         "--lora_rank",
@@ -137,7 +141,7 @@ def parse_args() -> argparse.Namespace:
         default="first",
         choices=["all", "first", "last", "blocks01"],
         help="Which DiT decoder blocks to target. 'first' (block 0 only) recommended: "
-             "preserves neighbor predictions and turn signals. 'all' targets all 3 blocks.",
+        "preserves neighbor predictions and turn signals. 'all' targets all 3 blocks.",
     )
 
     return parser.parse_args()
@@ -543,21 +547,26 @@ def main():
             # flags --lora_rank/--lora_alpha/--lora_dropout are intentionally ignored
             # in this path to avoid silently changing the adapter architecture.
             from preference_optimization.lora_utils import load_lora_checkpoint
+
             policy_model = load_lora_checkpoint(policy_model, str(seed_lora_dir), is_trainable=True)
             policy_model.print_trainable_parameters()
             print(f"Resumed LoRA adapter from {seed_lora_dir}")
         else:
             from preference_optimization.lora_utils import (
-                apply_lora,
+                LORA_TARGET_BLOCKS_01_REGEX,
                 LORA_TARGET_FIRST_BLOCK_REGEX,
                 LORA_TARGET_LAST_BLOCK_REGEX,
-                LORA_TARGET_BLOCKS_01_REGEX,
+                apply_lora,
             )
-            target_map = {"last": LORA_TARGET_LAST_BLOCK_REGEX,
-                          "first": LORA_TARGET_FIRST_BLOCK_REGEX,
-                          "blocks01": LORA_TARGET_BLOCKS_01_REGEX}
-            kwargs = dict(r=args.lora_rank, lora_alpha=args.lora_alpha,
-                         lora_dropout=args.lora_dropout)
+
+            target_map = {
+                "last": LORA_TARGET_LAST_BLOCK_REGEX,
+                "first": LORA_TARGET_FIRST_BLOCK_REGEX,
+                "blocks01": LORA_TARGET_BLOCKS_01_REGEX,
+            }
+            kwargs = dict(
+                r=args.lora_rank, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout
+            )
             lora_target = getattr(args, "lora_target", "first")
             if lora_target in target_map:
                 kwargs["target_modules"] = target_map[lora_target]
@@ -633,7 +642,11 @@ def main():
 
         # Collect preferences
         preferences = collect_epoch_preferences(
-            args, policy_model, model_args, train_npz_paths, ros_node=ros_node,
+            args,
+            policy_model,
+            model_args,
+            train_npz_paths,
+            ros_node=ros_node,
             drift_info=drift_info,
         )
 

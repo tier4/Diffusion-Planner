@@ -22,7 +22,9 @@ from rlvr.closed_loop.state_update import (
 )
 
 DEVICE = torch.device("cpu")
-SSD = os.environ.get("AUTORESEARCH_SSD", "/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/auto_research")
+SSD = os.environ.get(
+    "AUTORESEARCH_SSD", "/media/danielsanchez/2fb4af16-188c-4b7d-8ebb-4a7d0c90d207/auto_research"
+)
 VAL_SCENES = os.environ.get("VAL_SCENES", f"{SSD}/odaiba_grpo_experiments/val_v4_100.json")
 
 
@@ -39,6 +41,7 @@ def test_gt_rollout():
 
     # GT ego future: [1, 80, 3] (x, y, heading) in original frame
     import numpy as np
+
     raw = np.load(npz_path)
     ego_future = torch.from_numpy(raw["ego_agent_future"]).to(DEVICE)  # [80, 3]
     nb_future = torch.from_numpy(raw["neighbor_agents_future"]).to(DEVICE)  # [32, 80, 3]
@@ -65,7 +68,11 @@ def test_gt_rollout():
         if step_t < nb_future.shape[1]:
             nb_gt = nb_future[:, step_t, :]  # [32, 3] in original frame
             nb_curr_4d = transform_positions_to_ego_frame(
-                nb_gt, ego_abs_x, ego_abs_y, ego_abs_h, DEVICE,
+                nb_gt,
+                ego_abs_x,
+                ego_abs_y,
+                ego_abs_h,
+                DEVICE,
             )
             advance_neighbor_past(data, nb_curr_4d, dt=0.1)
 
@@ -117,12 +124,16 @@ def test_gt_rollout():
     gt_y = ego_future[n_steps - 1, 1].item()
     gt_h = ego_future[n_steps - 1, 2].item()
 
-    print(f"\n  Final absolute: ({ego_abs_x:.4f}, {ego_abs_y:.4f}, {math.degrees(ego_abs_h):.2f}deg)")
+    print(
+        f"\n  Final absolute: ({ego_abs_x:.4f}, {ego_abs_y:.4f}, {math.degrees(ego_abs_h):.2f}deg)"
+    )
     print(f"  GT position:    ({gt_x:.4f}, {gt_y:.4f}, {math.degrees(gt_h):.2f}deg)")
 
     pos_error = math.sqrt((ego_abs_x - gt_x) ** 2 + (ego_abs_y - gt_y) ** 2)
     heading_error = abs(ego_abs_h - gt_h)
-    print(f"  Position error: {pos_error:.6f}m, Heading error: {math.degrees(heading_error):.4f}deg")
+    print(
+        f"  Position error: {pos_error:.6f}m, Heading error: {math.degrees(heading_error):.4f}deg"
+    )
 
     assert pos_error < 0.01, f"Position error too large: {pos_error}m"
     assert heading_error < 0.01, f"Heading error too large: {heading_error}rad"

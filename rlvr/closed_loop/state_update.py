@@ -136,10 +136,10 @@ def update_scene_state(
     if "lanes" in new_data:
         la = new_data["lanes"]
         mask = torch.sum(torch.ne(la[..., :8], 0), dim=-1) == 0
-        la[..., :2] = vector_transform(la[..., :2], T, center_xy)    # center xy
-        la[..., 2:4] = vector_transform(la[..., 2:4], T)             # direction
-        la[..., 4:6] = vector_transform(la[..., 4:6], T)             # left boundary
-        la[..., 6:8] = vector_transform(la[..., 6:8], T)             # right boundary
+        la[..., :2] = vector_transform(la[..., :2], T, center_xy)  # center xy
+        la[..., 2:4] = vector_transform(la[..., 2:4], T)  # direction
+        la[..., 4:6] = vector_transform(la[..., 4:6], T)  # left boundary
+        la[..., 6:8] = vector_transform(la[..., 6:8], T)  # right boundary
         la[mask] = 0.0
 
     # --- Transform route_lanes [1, 25, 20, 33] ---
@@ -225,12 +225,12 @@ def advance_neighbor_past(
     # Build new timestep entry [N_nb, 11]
     new_entry = torch.zeros(N_nb, 11, dtype=torch.float32, device=device)
     new_entry[:, :4] = new_nb_positions[:, :4]  # x, y, cos_h, sin_h
-    new_entry[:, 4:6] = new_vel                  # vx, vy
+    new_entry[:, 4:6] = new_vel  # vx, vy
     # Copy static attributes (width, length, type) from last known entry
     new_entry[:, 6:] = nb[0, :, -1, 6:]
 
     # Zero out entries where new position is all zeros (invalid neighbor)
-    invalid = (new_nb_positions[:, :2].abs().sum(dim=-1) == 0)
+    invalid = new_nb_positions[:, :2].abs().sum(dim=-1) == 0
     new_entry[invalid] = 0.0
 
     # Roll: drop oldest (index 0), append new entry at end

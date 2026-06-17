@@ -26,6 +26,7 @@
 // the python filter operated on (ego_future/neighbor_future store [x,y,cos,sin]
 // here instead of [x,y,heading], so cos/sin are used directly).
 
+#include <autoware/diffusion_planner/constants.hpp>
 #include <autoware/diffusion_planner/dimensions.hpp>
 
 #include <algorithm>
@@ -320,6 +321,68 @@ inline OffLaneResult compute_offlane_score(
 inline bool is_off_lane(const OffLaneResult & r, float max_score)
 {
   return !r.has_centerline || r.mean_distance >= max_score;
+}
+
+// ---------------------------------------------------------------------------
+// "Accelerating into a red/yellow signal" detector.
+//
+// The RedOrYellowLight skip originally fired only when the ego was fully stopped
+// (linear.x < 0.1) with a forward GT future. That gate leaked every low-speed /
+// creeping start where the ego is already rolling (>= 0.1 m/s) but the GT future
+// still drives forward through a red or yellow light. Rather than loosen the speed
+// gate (which would also drop legitimate decelerate-to-stop trajectories), we look
+// at the *shape* of the GT future speed profile: a frame is flagged only when the
+// ego clearly accelerates into the signal — the peak future speed ramps well above
+// the initial speed. Pure decel-to-stop and minor creeps (peak < ~3 m/s) are kept.
+// This is meant to be OR-ed with the original stopped-at-red condition so coverage
+// only ever grows.
+// ---------------------------------------------------------------------------
+
+// Leading future steps averaged into the initial speed (0.5 s at 10 Hz).
+constexpr int64_t kAccelInitWindow = 5;
+constexpr float kAccelDeltaVThreshold = 2.0f;  // m/s gained from initial to peak
+constexpr float kAccelPeakThreshold = 3.0f;    // m/s minimum peak future speed
+constexpr float kAccelRatioThreshold = 1.3f;   // peak must exceed v_initial * this
+
+struct FutureAccelResult
+{
+  float v_initial;  // mean speed over the first kAccelInitWindow future steps (m/s)
+  float v_peak;     // max per-step speed over the future horizon (m/s)
+};
+
+// Per-step speed profile of the GT future, in the ego frame at t=0. ego_future is
+// laid out as OUTPUT_T * POSE_DIM with channels [x, y, cos, sin]; speed at step j is
+// |p_{j+1} - p_j| / dt. Matches the python analysis used to size the thresholds.
+inline FutureAccelResult compute_future_accel(const std::vector<float> & ego_future)
+{
+  using autoware::diffusion_planner::OUTPUT_T;
+  using autoware::diffusion_planner::POSE_DIM;
+  constexpr float dt =
+    static_cast<float>(autoware::diffusion_planner::constants::PREDICTION_TIME_STEP_S);
+
+  float v_peak = 0.0f;
+  double init_sum = 0.0;
+  int64_t init_count = 0;
+  for (int64_t j = 0; j + 1 < OUTPUT_T; ++j) {
+    const float dx = ego_future[(j + 1) * POSE_DIM + 0] - ego_future[j * POSE_DIM + 0];
+    const float dy = ego_future[(j + 1) * POSE_DIM + 1] - ego_future[j * POSE_DIM + 1];
+    const float speed = std::sqrt(dx * dx + dy * dy) / dt;
+    v_peak = std::max(v_peak, speed);
+    if (j < kAccelInitWindow) {
+      init_sum += speed;
+      ++init_count;
+    }
+  }
+  const float v_initial = init_count > 0 ? static_cast<float>(init_sum / init_count) : 0.0f;
+  return {v_initial, v_peak};
+}
+
+// True when the GT future clearly ramps up speed (accelerates) rather than holding
+// or decelerating — the signature of driving *into* a red/yellow light.
+inline bool is_accelerating(const FutureAccelResult & a)
+{
+  return (a.v_peak - a.v_initial > kAccelDeltaVThreshold) && (a.v_peak > kAccelPeakThreshold) &&
+         (a.v_peak > a.v_initial * kAccelRatioThreshold);
 }
 
 // Top-level: returns the list of collision reasons for one frame (empty == keep).

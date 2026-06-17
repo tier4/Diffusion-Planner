@@ -50,7 +50,6 @@ from utils.pipeline import (
     extract_features,
 )
 
-
 # ─────────────────────────────── helpers ────────────────────────────────────
 
 
@@ -152,7 +151,7 @@ def test_compute_wcss_monotone():
     wcss = compute_wcss(X, k_max=6)
     for i in range(len(wcss) - 1):
         assert wcss[i] >= wcss[i + 1] - 1e-6, (
-            f"WCSS not non-increasing at k={i+1}: {wcss[i]:.4f} > {wcss[i+1]:.4f}"
+            f"WCSS not non-increasing at k={i + 1}: {wcss[i]:.4f} > {wcss[i + 1]:.4f}"
         )
     print("  [PASS] compute_wcss monotonically non-increasing")
 
@@ -200,9 +199,7 @@ def test_find_elbow_returns_int():
 def test_elbow_kmeans_labels_shape():
     X = _synthetic_clusters(n_per_cluster=10, n_clusters=3)
     labels, _, _ = elbow_kmeans(X, k_max=6)
-    assert labels.shape == (X.shape[0],), (
-        f"Expected ({X.shape[0]},), got {labels.shape}"
-    )
+    assert labels.shape == (X.shape[0],), f"Expected ({X.shape[0]},), got {labels.shape}"
     print("  [PASS] elbow_kmeans labels shape")
 
 
@@ -210,9 +207,7 @@ def test_elbow_kmeans_labels_range():
     X = _synthetic_clusters(n_per_cluster=10, n_clusters=3)
     labels, optimal_k, _ = elbow_kmeans(X, k_max=6)
     assert labels.min() >= 0, f"Negative label: {labels.min()}"
-    assert labels.max() < optimal_k, (
-        f"Label {labels.max()} >= optimal_k {optimal_k}"
-    )
+    assert labels.max() < optimal_k, f"Label {labels.max()} >= optimal_k {optimal_k}"
     print("  [PASS] elbow_kmeans label values in [0, optimal_k)")
 
 
@@ -368,9 +363,13 @@ def _make_synthetic_dataset(tmp_dir: str, n: int = 30, seed: int = 0) -> list[st
     rng = np.random.default_rng(seed)
     paths = []
     patterns = [
-        np.column_stack([np.linspace(0, 20, 80), np.zeros(80), np.zeros(80)]),   # straight
-        np.column_stack([np.linspace(0, 10, 80), np.linspace(0, 10, 80), np.linspace(0, np.pi / 2, 80)]),  # left turn
-        np.column_stack([np.linspace(0, 10, 80), np.linspace(0, -10, 80), np.linspace(0, -np.pi / 2, 80)]),  # right turn
+        np.column_stack([np.linspace(0, 20, 80), np.zeros(80), np.zeros(80)]),  # straight
+        np.column_stack(
+            [np.linspace(0, 10, 80), np.linspace(0, 10, 80), np.linspace(0, np.pi / 2, 80)]
+        ),  # left turn
+        np.column_stack(
+            [np.linspace(0, 10, 80), np.linspace(0, -10, 80), np.linspace(0, -np.pi / 2, 80)]
+        ),  # right turn
     ]
     for i in range(n):
         pattern = patterns[i % len(patterns)].copy().astype(np.float32)
@@ -393,11 +392,16 @@ def test_main_end_to_end():
 
         argv = [
             "cluster.py",
-            "--data_list", data_list_path,
-            "--output", output_path,
-            "--k_max", "6",
-            "--pca_components", "10",
-            "--seed", "42",
+            "--data_list",
+            data_list_path,
+            "--output",
+            output_path,
+            "--k_max",
+            "6",
+            "--pca_components",
+            "10",
+            "--seed",
+            "42",
         ]
         with patch("sys.argv", argv):
             main()
@@ -432,11 +436,16 @@ def test_main_output_no_duplicates():
 
         argv = [
             "cluster.py",
-            "--data_list", data_list_path,
-            "--output", output_path,
-            "--k_max", "5",
-            "--pca_components", "10",
-            "--seed", "0",
+            "--data_list",
+            data_list_path,
+            "--output",
+            output_path,
+            "--k_max",
+            "5",
+            "--pca_components",
+            "10",
+            "--seed",
+            "0",
         ]
         with patch("sys.argv", argv):
             main()
@@ -463,11 +472,16 @@ def test_main_output_keys_sorted():
 
         argv = [
             "cluster.py",
-            "--data_list", data_list_path,
-            "--output", output_path,
-            "--k_max", "5",
-            "--pca_components", "10",
-            "--seed", "7",
+            "--data_list",
+            data_list_path,
+            "--output",
+            output_path,
+            "--k_max",
+            "5",
+            "--pca_components",
+            "10",
+            "--seed",
+            "7",
         ]
         with patch("sys.argv", argv):
             main()

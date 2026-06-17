@@ -18,8 +18,7 @@ import pytest
 from scenario_generation.route import Route
 
 MAP_PATH = Path(
-    os.environ.get("LANELET2_MAP_PATH")
-    or (Path.home() / "autoware_map" / "lanelet2_map.osm")
+    os.environ.get("LANELET2_MAP_PATH") or (Path.home() / "autoware_map" / "lanelet2_map.osm")
 )
 
 
@@ -57,7 +56,8 @@ def test_route_validates_start_pose_shape() -> None:
             map_path="x",
             start_pose=np.array([1.0, 2.0], dtype=np.float32),
             goal_pose=np.array([3.0, 4.0, 0.0], dtype=np.float32),
-            start_lanelet_id=1, goal_lanelet_id=2,
+            start_lanelet_id=1,
+            goal_lanelet_id=2,
         )
 
 
@@ -67,7 +67,8 @@ def test_route_validates_parallel_waypoint_lengths() -> None:
             map_path="x",
             start_pose=np.zeros(3, dtype=np.float32),
             goal_pose=np.zeros(3, dtype=np.float32),
-            start_lanelet_id=1, goal_lanelet_id=2,
+            start_lanelet_id=1,
+            goal_lanelet_id=2,
             waypoint_poses=[np.zeros(3, dtype=np.float32)],
             waypoint_lanelet_ids=[],  # mismatched
         )
@@ -78,7 +79,8 @@ def test_route_unresolved_is_flagged() -> None:
         map_path="x",
         start_pose=np.zeros(3, dtype=np.float32),
         goal_pose=np.zeros(3, dtype=np.float32),
-        start_lanelet_id=1, goal_lanelet_id=2,
+        start_lanelet_id=1,
+        goal_lanelet_id=2,
         route_lanelet_ids=None,
     )
     assert not r.is_resolved()
@@ -94,12 +96,11 @@ def builder():
     Scoped to the module so we pay the lanelet load cost once.
     """
     if not MAP_PATH.exists():
-        pytest.skip(
-            f"Lanelet2 map not found at {MAP_PATH} — set LANELET2_MAP_PATH"
-        )
+        pytest.skip(f"Lanelet2 map not found at {MAP_PATH} — set LANELET2_MAP_PATH")
     if os.environ.get("SKIP_LANELET_TESTS"):
         pytest.skip("SKIP_LANELET_TESTS set")
     from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
+
     return LaneletSceneBuilder(str(MAP_PATH))
 
 
@@ -211,7 +212,7 @@ def test_closest_lanelets_respects_bbox_and_cap(builder) -> None:
     tight = builder.closest_lanelets(query, max_n=50, mask_range=50.0)
     loose = builder.closest_lanelets(query, max_n=50, mask_range=200.0)
     assert len(loose) >= len(tight)  # wider bbox = at least as many hits
-    assert len(loose) <= 50            # cap respected
+    assert len(loose) <= 50  # cap respected
 
     # All returned lanelets have at least one anchor point inside the bbox.
     for lid in loose:

@@ -41,9 +41,12 @@ def load_baseline_lens(run_dir: Path) -> dict[str, float]:
     return {str(p): float(lens[i]) for i, p in enumerate(paths)}
 
 
-def compute_det_paths(model, model_args, scene_paths: list[str], cfg, device) -> tuple[np.ndarray, list[str]]:
+def compute_det_paths(
+    model, model_args, scene_paths: list[str], cfg, device
+) -> tuple[np.ndarray, list[str]]:
     """Regenerate all trajectories and return traj[0] (det slot) path lengths."""
-    torch.manual_seed(42); np.random.seed(42)
+    torch.manual_seed(42)
+    np.random.seed(42)
     trajs, all_data, valid = generate_for_all_scenes(model, model_args, scene_paths, cfg, device)
     lens = []
     for i, p in enumerate(valid):
@@ -54,20 +57,36 @@ def compute_det_paths(model, model_args, scene_paths: list[str], cfg, device) ->
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run_dir", type=Path, required=True,
-                        help="Run directory containing lora_epoch_NNN/ and epoch1_baselines.npz")
-    parser.add_argument("--model_path", type=Path, required=True,
-                        help="Base v4.0 model path")
-    parser.add_argument("--scenes", type=str, required=True,
-                        help="JSON list of scene NPZ paths (same set used for training)")
-    parser.add_argument("--epochs", type=int, nargs="+",
-                        default=[0, 1, 3, 5, 6, 7, 10, 13, 15, 20],
-                        help="Epochs to probe. 0 = LoRA-less base model.")
-    parser.add_argument("--below_threshold", type=float, default=0.7,
-                        help="Count of scenes where ratio < this")
-    parser.add_argument("--config", type=Path, default=None,
-                        help="GRPOConfig JSON. If omitted, loads run_dir/grpo_config.json. "
-                             "One of --config or a run_dir with grpo_config.json must resolve.")
+    parser.add_argument(
+        "--run_dir",
+        type=Path,
+        required=True,
+        help="Run directory containing lora_epoch_NNN/ and epoch1_baselines.npz",
+    )
+    parser.add_argument("--model_path", type=Path, required=True, help="Base v4.0 model path")
+    parser.add_argument(
+        "--scenes",
+        type=str,
+        required=True,
+        help="JSON list of scene NPZ paths (same set used for training)",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        nargs="+",
+        default=[0, 1, 3, 5, 6, 7, 10, 13, 15, 20],
+        help="Epochs to probe. 0 = LoRA-less base model.",
+    )
+    parser.add_argument(
+        "--below_threshold", type=float, default=0.7, help="Count of scenes where ratio < this"
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="GRPOConfig JSON. If omitted, loads run_dir/grpo_config.json. "
+        "One of --config or a run_dir with grpo_config.json must resolve.",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,10 +100,12 @@ def main():
     # Load baseline map once
     base_map = load_baseline_lens(args.run_dir)
     base_lens_arr = np.array(list(base_map.values()))
-    print(f"Baseline det path stats ({len(base_map)} scenes): "
-          f"mean={base_lens_arr.mean():.2f}, min={base_lens_arr.min():.2f}, "
-          f"p25={np.percentile(base_lens_arr, 25):.2f}, "
-          f"p95={np.percentile(base_lens_arr, 95):.2f}, max={base_lens_arr.max():.2f}")
+    print(
+        f"Baseline det path stats ({len(base_map)} scenes): "
+        f"mean={base_lens_arr.mean():.2f}, min={base_lens_arr.min():.2f}, "
+        f"p25={np.percentile(base_lens_arr, 25):.2f}, "
+        f"p95={np.percentile(base_lens_arr, 95):.2f}, max={base_lens_arr.max():.2f}"
+    )
 
     # Build model (base only — LoRA loaded per epoch)
     model_dir = args.model_path.parent
@@ -97,7 +118,9 @@ def main():
         scene_paths = json.load(f)
 
     print()
-    print(f"{'Epoch':>6s}  {'mean':>6s}  {'min':>6s}  {'p25':>6s}  {'med':>6s}  {'p95':>6s}  {'max':>6s}  {'<'+str(args.below_threshold):>6s}  {'det path m':>12s}")
+    print(
+        f"{'Epoch':>6s}  {'mean':>6s}  {'min':>6s}  {'p25':>6s}  {'med':>6s}  {'p95':>6s}  {'max':>6s}  {'<' + str(args.below_threshold):>6s}  {'det path m':>12s}"
+    )
     for ep in args.epochs:
         model = Diffusion_Planner(model_args)
         ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
@@ -118,11 +141,13 @@ def main():
         ratios = det_lens / np.clip(base_lens_aligned, 1e-3, None)
 
         n_below = int((ratios < args.below_threshold).sum())
-        print(f"{label:>6s}  {ratios.mean():>6.3f}  {ratios.min():>6.3f}  "
-              f"{np.percentile(ratios, 25):>6.3f}  {np.median(ratios):>6.3f}  "
-              f"{np.percentile(ratios, 95):>6.3f}  {ratios.max():>6.3f}  "
-              f"{n_below:>3d}/{len(ratios):>2d}  "
-              f"det_mean={det_lens.mean():>6.2f}")
+        print(
+            f"{label:>6s}  {ratios.mean():>6.3f}  {ratios.min():>6.3f}  "
+            f"{np.percentile(ratios, 25):>6.3f}  {np.median(ratios):>6.3f}  "
+            f"{np.percentile(ratios, 95):>6.3f}  {ratios.max():>6.3f}  "
+            f"{n_below:>3d}/{len(ratios):>2d}  "
+            f"det_mean={det_lens.mean():>6.2f}"
+        )
 
 
 if __name__ == "__main__":

@@ -46,8 +46,8 @@ class CenterlineFollowingGuidance(BaseGuidance):
         lanes = inputs["lanes"]  # [B, 140, 20, 33]
         N = lanes.shape[1] * lanes.shape[2]
 
-        lane_centers = lanes[..., _X:_Y + 1].reshape(B, N, 2)
-        lane_dirs    = lanes[..., _DX:_DY + 1].reshape(B, N, 2)
+        lane_centers = lanes[..., _X : _Y + 1].reshape(B, N, 2)
+        lane_dirs = lanes[..., _DX : _DY + 1].reshape(B, N, 2)
 
         lane_dirs_n = lane_dirs / (lane_dirs.norm(dim=-1, keepdim=True) + 1e-6)
         lane_lat = torch.stack([-lane_dirs_n[..., 1], lane_dirs_n[..., 0]], dim=-1)
@@ -56,15 +56,14 @@ class CenterlineFollowingGuidance(BaseGuidance):
 
         dist = (ego_pos.unsqueeze(2) - lane_centers.unsqueeze(1)).norm(dim=-1)
         dist = dist.masked_fill(~lane_valid.unsqueeze(1).expand(-1, T, -1), 1e6)
-        nearest   = dist.argmin(dim=-1)
-        min_dist  = dist.min(dim=-1).values
+        nearest = dist.argmin(dim=-1)
+        min_dist = dist.min(dim=-1).values
 
         def gather2(tensor):
             idx = nearest.unsqueeze(-1).expand(-1, -1, 2)
-            return tensor.unsqueeze(1).expand(-1, T, -1, -1) \
-                         .gather(2, idx.unsqueeze(2)).squeeze(2)
+            return tensor.unsqueeze(1).expand(-1, T, -1, -1).gather(2, idx.unsqueeze(2)).squeeze(2)
 
-        c   = gather2(lane_centers)
+        c = gather2(lane_centers)
         lat = gather2(lane_lat)
 
         ego_lat = ((ego_pos - c) * lat).sum(dim=-1)  # [B, T]
@@ -72,7 +71,7 @@ class CenterlineFollowingGuidance(BaseGuidance):
         no_lane = min_dist > _MAX_LANE_DIST
         ego_lat = ego_lat.masked_fill(no_lane, 0.0)
 
-        reward = -(ego_lat ** 2).sum(dim=-1)  # [B]
+        reward = -(ego_lat**2).sum(dim=-1)  # [B]
         return reward
 
 
@@ -80,8 +79,10 @@ class CenterlineFollowingGuidance(BaseGuidance):
 # Backward-compatible module-level function alias
 # ---------------------------------------------------------------------------
 
+
 def centerline_following_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     """Deprecated. Use CenterlineFollowingGuidance via GuidanceComposer."""
     from .config import GuidanceConfig
+
     fn = CenterlineFollowingGuidance(GuidanceConfig(name="centerline_following"))
     return fn.energy(x, t, inputs)

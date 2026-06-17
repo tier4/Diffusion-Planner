@@ -147,7 +147,9 @@ class CollisionGuidance(BaseGuidance):
         bbox = center_rect_to_points(bbox.reshape(-1, 6)).reshape(B, Pn + 1, T, 4, 2)
 
         ego_bbox = (
-            bbox[:, :1, :, :, :].expand(-1, Pn, -1, -1, -1)[~neighbor_current_mask].reshape(-1, 4, 2)
+            bbox[:, :1, :, :, :]
+            .expand(-1, Pn, -1, -1, -1)[~neighbor_current_mask]
+            .reshape(-1, 4, 2)
         )
         neighbor_bbox = bbox[:, 1:, :, :, :][~neighbor_current_mask].reshape(-1, 4, 2)
 
@@ -218,14 +220,16 @@ class CollisionGuidance(BaseGuidance):
 
         # Reconstruct mask: True where neighbour slot is empty (all zeros at current step).
         neighbors_current = neighbors_past[:, :, -1, :4]  # [B, Pn, 4]
-        neighbor_current_mask = (torch.sum(torch.ne(neighbors_current, 0), dim=-1) == 0)  # [B, Pn]
+        neighbor_current_mask = torch.sum(torch.ne(neighbors_current, 0), dim=-1) == 0  # [B, Pn]
 
         # Build [B, P, T+1, 4] with ego future + neighbour future (static, repeated from t=0).
         current_slot = torch.zeros(B, 1, 1, D, device=trajectory.device)
         ego_padded = torch.cat([current_slot, trajectory.unsqueeze(1)], dim=2)  # [B, 1, T+1, 4]
 
         # Neighbours are treated as stationary (hold their t=0 position for all future steps).
-        neighbor_current = neighbors_past[:, :Pn, -1:, :4].expand(-1, -1, T + 1, -1)  # [B, Pn, T+1, 4]
+        neighbor_current = neighbors_past[:, :Pn, -1:, :4].expand(
+            -1, -1, T + 1, -1
+        )  # [B, Pn, T+1, 4]
         x_padded = torch.cat([ego_padded, neighbor_current], dim=1)  # [B, 1+Pn, T+1, 4]
 
         inputs_with_mask = {**inputs, "neighbor_current_mask": neighbor_current_mask}
@@ -237,8 +241,10 @@ class CollisionGuidance(BaseGuidance):
 # Backward-compatible module-level function alias
 # ---------------------------------------------------------------------------
 
+
 def collision_guidance_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     """Deprecated. Use CollisionGuidance via GuidanceComposer."""
     from .config import GuidanceConfig
+
     fn = CollisionGuidance(GuidanceConfig(name="collision"))
     return fn.energy(x, t, inputs)

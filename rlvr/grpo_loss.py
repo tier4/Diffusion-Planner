@@ -82,7 +82,7 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
 
     ego_current = data["ego_current_state"][:, :4]
     if P > 1:
-        neighbors_current = data["neighbor_agents_past"][:, :P - 1, -1, :4]
+        neighbors_current = data["neighbor_agents_past"][:, : P - 1, -1, :4]
         neighbors_current_norm = (neighbors_current - ego_mean) / ego_std
     else:
         neighbors_current_norm = torch.zeros(B, 0, 4, device=device)
@@ -195,7 +195,13 @@ def compute_direct_best_loss(
         # Policy loss (with grad)
         data_p = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
         l_policy = compute_trajectory_loss(
-            policy_model, data_p, best_trajectory, model_args, noise, t, device,
+            policy_model,
+            data_p,
+            best_trajectory,
+            model_args,
+            noise,
+            t,
+            device,
         )
         policy_losses.append(l_policy)
 
@@ -203,9 +209,17 @@ def compute_direct_best_loss(
         if config.kl_coef > 0:
             disable_ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
             with disable_ctx, torch.no_grad():
-                data_r = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+                data_r = {
+                    k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
+                }
                 l_ref = compute_trajectory_loss(
-                    policy_model, data_r, best_trajectory, model_args, noise.clone(), t, device,
+                    policy_model,
+                    data_r,
+                    best_trajectory,
+                    model_args,
+                    noise.clone(),
+                    t,
+                    device,
                 )
             ref_losses.append(l_ref)
 
@@ -236,7 +250,13 @@ def compute_direct_best_loss(
 
 
 def compute_batched_trajectory_losses(
-    model, data, trajectories_tensor, model_args, noise, t, device,
+    model,
+    data,
+    trajectories_tensor,
+    model_args,
+    noise,
+    t,
+    device,
     neighbor_loss_weight: float = 0.0,
 ):
     """Compute diffusion losses for N trajectories in ONE forward pass.
@@ -278,9 +298,7 @@ def compute_batched_trajectory_losses(
             elif B_scene == N:
                 batch_data[k] = v
             else:
-                raise ValueError(
-                    f"data['{k}'] has B={B_scene}, expected 1 or N={N}"
-                )
+                raise ValueError(f"data['{k}'] has B={B_scene}, expected 1 or N={N}")
         else:
             batch_data[k] = v
 
@@ -332,15 +350,17 @@ def compute_batched_trajectory_losses(
             nf_4d[..., 2] = torch.cos(heading)  # cos_yaw
             nf_4d[..., 3] = torch.sin(heading)  # sin_yaw
         nf_4d_norm = (nf_4d - ego_mean) / ego_std
-        gt_future[:, 1:1 + nf_pn, :, :] = nf_4d_norm
+        gt_future[:, 1 : 1 + nf_pn, :, :] = nf_4d_norm
         # Track validity for neighbor loss
         if nf.shape[-1] >= 3:
-            neighbor_future_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)  # [N, Pn', T]
+            neighbor_future_valid = (
+                nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1
+            )  # [N, Pn', T]
 
     # Current states — normalized (matches SFT decoder.py line 60-67)
     ego_current = batch_data["ego_current_state"][:, :4]  # [N, 4]
     if P > 1:
-        neighbors_current = batch_data["neighbor_agents_past"][:, :P - 1, -1, :4]
+        neighbors_current = batch_data["neighbor_agents_past"][:, : P - 1, -1, :4]
         neighbors_current_norm = (neighbors_current - ego_mean) / ego_std
     else:
         neighbors_current_norm = torch.zeros(N, 0, 4, device=device)
@@ -351,16 +371,22 @@ def compute_batched_trajectory_losses(
 
     # Zero out invalid neighbor entries in all_gt (matches SFT decoder.py line 108)
     if Pn > 0:
-        neighbor_current_mask_final = (batch_data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0)  # [N, Pn]
+        neighbor_current_mask_final = (
+            batch_data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0
+        )  # [N, Pn]
         if "neighbor_agents_future" in batch_data:
             nf = batch_data["neighbor_agents_future"]
             nf_pn = min(nf.shape[1], Pn)
-            nf_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)
+            nf_valid = nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1
             nf_mask = ~nf_valid  # [N, Pn', T]
-            full_neighbor_mask = torch.cat([neighbor_current_mask_final[:, :nf_pn].unsqueeze(-1), nf_mask], dim=-1)  # [N, Pn', T+1]
+            full_neighbor_mask = torch.cat(
+                [neighbor_current_mask_final[:, :nf_pn].unsqueeze(-1), nf_mask], dim=-1
+            )  # [N, Pn', T+1]
             # Use named slice + masked_fill_ to avoid chained indexing issues
-            neighbor_slice = all_gt[:, 1:1 + nf_pn]  # view into all_gt
-            neighbor_slice.masked_fill_(full_neighbor_mask.unsqueeze(-1).expand_as(neighbor_slice), 0.0)
+            neighbor_slice = all_gt[:, 1 : 1 + nf_pn]  # view into all_gt
+            neighbor_slice.masked_fill_(
+                full_neighbor_mask.unsqueeze(-1).expand_as(neighbor_slice), 0.0
+            )
 
     # Diffusion noise with prefix masking — matches SFT (decoder.py line 111-116)
     mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_4d[..., 1:, :])
@@ -370,7 +396,9 @@ def compute_batched_trajectory_losses(
     xT_full = torch.where(prefix_mask, all_gt, xT_full)
 
     # Normalize observation data
-    data_for_norm = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in batch_data.items()}
+    data_for_norm = {
+        k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in batch_data.items()
+    }
     data_normalized = model_args.observation_normalizer(data_for_norm)
 
     merged = {**data_normalized}
@@ -393,7 +421,7 @@ def compute_batched_trajectory_losses(
     # Ego loss: [N]
     ego_output = full_output[:, 0]  # [N, T, 4]
     ego_gt = full_gt[:, 0]  # [N, T, 4]
-    per_traj_ego_loss = F.mse_loss(ego_output, ego_gt, reduction='none').mean(dim=(1, 2))
+    per_traj_ego_loss = F.mse_loss(ego_output, ego_gt, reduction="none").mean(dim=(1, 2))
 
     # Neighbor regularization loss: per-trajectory MSE on valid neighbor predictions.
     # This prevents the LoRA from distorting neighbor predictions, which feeds back
@@ -401,9 +429,9 @@ def compute_batched_trajectory_losses(
     # Disabled by default (neighbor_loss_weight=0). Set >0 to enable.
     _NEIGHBOR_LOSS_WEIGHT = neighbor_loss_weight
     if _NEIGHBOR_LOSS_WEIGHT > 0 and P > 1 and neighbor_future_valid is not None:
-        neighbor_output = full_output[:, 1:1 + nf_pn]  # [N, Pn', T, 4]
-        neighbor_gt = full_gt[:, 1:1 + nf_pn]  # [N, Pn', T, 4]
-        neighbor_mse = F.mse_loss(neighbor_output, neighbor_gt, reduction='none')  # [N, Pn', T, 4]
+        neighbor_output = full_output[:, 1 : 1 + nf_pn]  # [N, Pn', T, 4]
+        neighbor_gt = full_gt[:, 1 : 1 + nf_pn]  # [N, Pn', T, 4]
+        neighbor_mse = F.mse_loss(neighbor_output, neighbor_gt, reduction="none")  # [N, Pn', T, 4]
         # Mask invalid neighbors to zero
         valid_mask = neighbor_future_valid.unsqueeze(-1).expand_as(neighbor_mse)  # [N, Pn', T, 4]
         neighbor_mse = neighbor_mse * valid_mask.float()
@@ -443,22 +471,32 @@ def _compute_losses_and_ref(
     ref_losses = []
 
     for i in range(len(trajectories)):
-        data_p = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                  for k, v in data.items()}
+        data_p = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
         l_policy = compute_trajectory_loss(
-            policy_model, data_p, trajectories[i],
-            model_args, noise, t, device,
+            policy_model,
+            data_p,
+            trajectories[i],
+            model_args,
+            noise,
+            t,
+            device,
         )
         policy_losses.append(l_policy)
 
         if compute_ref:
             disable_ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
             with disable_ctx, torch.no_grad():
-                data_r = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                          for k, v in data.items()}
+                data_r = {
+                    k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()
+                }
                 l_ref = compute_trajectory_loss(
-                    policy_model, data_r, trajectories[i],
-                    model_args, noise.clone(), t, device,
+                    policy_model,
+                    data_r,
+                    trajectories[i],
+                    model_args,
+                    noise.clone(),
+                    t,
+                    device,
                 )
             ref_losses.append(l_ref)
 
@@ -486,7 +524,13 @@ def _compute_batched_losses_and_ref(
 
     # Policy losses: one batched forward pass for all N trajectories
     policy_losses = compute_batched_trajectory_losses(
-        policy_model, data, trajectories_tensor, model_args, noise, t, device,
+        policy_model,
+        data,
+        trajectories_tensor,
+        model_args,
+        noise,
+        t,
+        device,
         neighbor_loss_weight=neighbor_loss_weight,
     )  # [N]
 
@@ -495,8 +539,13 @@ def _compute_batched_losses_and_ref(
         disable_ctx = inner.disable_adapter() if use_lora_disable else contextlib.nullcontext()
         with disable_ctx, torch.no_grad():
             ref_losses = compute_batched_trajectory_losses(
-                policy_model, data, trajectories_tensor, model_args,
-                noise.clone(), t, device,
+                policy_model,
+                data,
+                trajectories_tensor,
+                model_args,
+                noise.clone(),
+                t,
+                device,
                 neighbor_loss_weight=neighbor_loss_weight,
             )  # [N]
 
@@ -504,7 +553,13 @@ def _compute_batched_losses_and_ref(
 
 
 def _compute_neighbor_reg_loss(
-    policy_model, data, model_args, device, K, P, future_len,
+    policy_model,
+    data,
+    model_args,
+    device,
+    K,
+    P,
+    future_len,
 ):
     """Compute MSE between LoRA and base model neighbor outputs.
 
@@ -567,8 +622,8 @@ def _compute_neighbor_reg_loss(
             nf_4d[..., 2] = torch.cos(heading)
             nf_4d[..., 3] = torch.sin(heading)
         nf_4d_norm = (nf_4d - ego_mean) / ego_std
-        gt_future[:, 1:1 + nf_pn, :, :] = nf_4d_norm
-        neighbor_future_valid = (nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1)
+        gt_future[:, 1 : 1 + nf_pn, :, :] = nf_4d_norm
+        neighbor_future_valid = nf[:, :nf_pn, :future_len, :2].abs().sum(dim=-1) > 0.1
 
     # Also need ego GT for the noise target
     if "ego_agent_future" in data:
@@ -576,7 +631,7 @@ def _compute_neighbor_reg_loss(
         if ego_gt.dim() == 3:
             ego_gt = ego_gt[:, :future_len, :4]
         ego_gt_norm = (ego_gt - ego_mean) / ego_std
-        gt_future[:, 0, :ego_gt_norm.shape[1], :] = ego_gt_norm
+        gt_future[:, 0, : ego_gt_norm.shape[1], :] = ego_gt_norm
 
     all_gt = torch.cat([current_states[:, :, None, :], gt_future], dim=2)
 
@@ -589,8 +644,10 @@ def _compute_neighbor_reg_loss(
         return torch.tensor(0.0, device=device)
 
     # Also exclude neighbors absent at current timestep
-    neighbor_current_mask = (data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0)
-    neighbor_future_valid = neighbor_future_valid & (~neighbor_current_mask[:, :nf_pn].unsqueeze(-1))
+    neighbor_current_mask = data["neighbor_agents_past"][:, :Pn, -1, :4].abs().sum(dim=-1) == 0
+    neighbor_future_valid = neighbor_future_valid & (
+        ~neighbor_current_mask[:, :nf_pn].unsqueeze(-1)
+    )
 
     total_reg = torch.tensor(0.0, device=device)
     for _ in range(K):
@@ -620,12 +677,12 @@ def _compute_neighbor_reg_loss(
 
         # LoRA forward (with grad)
         _, lora_out = policy_model(merged)
-        lora_neighbor = lora_out["model_output"][:, 1:1 + nf_pn, 1:, :]  # [1, Pn', T, 4]
+        lora_neighbor = lora_out["model_output"][:, 1 : 1 + nf_pn, 1:, :]  # [1, Pn', T, 4]
 
         # Base forward (no grad)
         with inner.disable_adapter(), torch.no_grad():
             _, base_out = policy_model(merged)
-        base_neighbor = base_out["model_output"][:, 1:1 + nf_pn, 1:, :]
+        base_neighbor = base_out["model_output"][:, 1 : 1 + nf_pn, 1:, :]
 
         reg_mse = ((lora_neighbor - base_neighbor.detach()) ** 2).mean(dim=-1)  # [1, Pn', T]
         masked_reg = reg_mse[:, :nf_pn][neighbor_future_valid[:, :nf_pn]]
@@ -678,11 +735,17 @@ def compute_batched_grpo_loss(
         t = _sample_t_for_mode(config, 1, device)
 
         policy_losses_k, ref_losses_k = _compute_batched_losses_and_ref(
-            policy_model, trajectories_tensor, data, model_args, device, noise, t,
+            policy_model,
+            trajectories_tensor,
+            data,
+            model_args,
+            device,
+            noise,
+            t,
             compute_ref=True,
             # None (the dataclass default) means "GRPO neighbor term off" → 0.0,
             # preserving prior behavior for configs that never set this field.
-            neighbor_loss_weight=(getattr(config, 'neighbor_loss_weight', None) or 0.0),
+            neighbor_loss_weight=(getattr(config, "neighbor_loss_weight", None) or 0.0),
         )
         policy_losses_sum = policy_losses_sum + policy_losses_k
         ref_losses_sum = ref_losses_sum + ref_losses_k
@@ -701,11 +764,17 @@ def compute_batched_grpo_loss(
 
     # Neighbor regularization: MSE(lora_neighbor, base_neighbor) at same inputs.
     # Prevents LoRA from distorting neighbor predictions through shared attention.
-    neighbor_reg_w = getattr(config, 'neighbor_reg_weight', 0.0)
+    neighbor_reg_w = getattr(config, "neighbor_reg_weight", 0.0)
     neighbor_reg_loss_val = 0.0
     if neighbor_reg_w > 0 and P > 1:
         neighbor_reg_loss_val = _compute_neighbor_reg_loss(
-            policy_model, data, model_args, device, K, P, future_len,
+            policy_model,
+            data,
+            model_args,
+            device,
+            K,
+            P,
+            future_len,
         )
         total_loss = total_loss + neighbor_reg_w * neighbor_reg_loss_val
 
@@ -715,7 +784,9 @@ def compute_batched_grpo_loss(
         "ref_loss_mean": ref_losses.mean().item(),
         "kl": kl_loss.item(),
         "weighted_loss": weighted_loss.item(),
-        "neighbor_reg_loss": neighbor_reg_loss_val.item() if isinstance(neighbor_reg_loss_val, torch.Tensor) else 0.0,
+        "neighbor_reg_loss": neighbor_reg_loss_val.item()
+        if isinstance(neighbor_reg_loss_val, torch.Tensor)
+        else 0.0,
     }
 
     return total_loss, metrics
@@ -758,11 +829,15 @@ def compute_log_probs(
     log_probs = []
     with torch.no_grad():
         for i in range(N):
-            data_c = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                      for k, v in data.items()}
+            data_c = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
             loss = compute_trajectory_loss(
-                policy_model, data_c, trajectories[i],
-                model_args, noise, t, device,
+                policy_model,
+                data_c,
+                trajectories[i],
+                model_args,
+                noise,
+                t,
+                device,
             )
             log_probs.append(-loss)
 
@@ -841,21 +916,33 @@ def compute_grpo_loss(
             t_k = _sample_t_for_mode(config, B, device)
             noise_k = torch.randn(B, P, future_len, 4, device=device)
             p_losses, r_losses = _compute_losses_and_ref(
-                policy_model, trajectories, data, model_args, device, noise_k, t_k,
+                policy_model,
+                trajectories,
+                data,
+                model_args,
+                device,
+                noise_k,
+                t_k,
                 compute_ref=True,
             )
             all_policy.append(torch.stack(p_losses))
             all_ref.append(torch.stack(r_losses))
         policy_loss_stack = torch.stack(all_policy).mean(dim=0)  # (N,)
-        ref_loss_stack = torch.stack(all_ref).mean(dim=0)        # (N,)
+        ref_loss_stack = torch.stack(all_ref).mean(dim=0)  # (N,)
     else:
         # Standard single-sample: diffusion or diffusion_low_t
         policy_losses, ref_losses = _compute_losses_and_ref(
-            policy_model, trajectories, data, model_args, device, noise, t,
+            policy_model,
+            trajectories,
+            data,
+            model_args,
+            device,
+            noise,
+            t,
             compute_ref=True,
         )
         policy_loss_stack = torch.stack(policy_losses)  # (N,)
-        ref_loss_stack = torch.stack(ref_losses)         # (N,)
+        ref_loss_stack = torch.stack(ref_losses)  # (N,)
 
     # KL divergence against fixed SFT reference (always computed)
     kl_loss = (policy_loss_stack - ref_loss_stack).mean()
@@ -899,7 +986,7 @@ def compute_grpo_loss(
 
         # Fraction of ratios that were clipped (diagnostic)
         clip_frac = float(((ratio - 1.0).abs() > eps_clip).float().mean().item())
-        approx_kl_behavior = float((log_ratio ** 2).mean().item() * 0.5)
+        approx_kl_behavior = float((log_ratio**2).mean().item() * 0.5)
     else:
         # On-policy mode: direct advantage-weighted loss
         policy_loss = (advantages_t * policy_loss_stack).mean()
@@ -932,8 +1019,13 @@ def compute_grpo_loss(
 
 def _empty_metrics() -> dict[str, float]:
     return {
-        "loss": 0.0, "policy_loss": 0.0, "kl_loss": 0.0,
-        "mean_advantage": 0.0, "advantage_std": 0.0,
-        "mean_policy_logprob": 0.0, "mean_ref_logprob": 0.0,
-        "clip_fraction": 0.0, "approx_kl_behavior": 0.0,
+        "loss": 0.0,
+        "policy_loss": 0.0,
+        "kl_loss": 0.0,
+        "mean_advantage": 0.0,
+        "advantage_std": 0.0,
+        "mean_policy_logprob": 0.0,
+        "mean_ref_logprob": 0.0,
+        "clip_fraction": 0.0,
+        "approx_kl_behavior": 0.0,
     }

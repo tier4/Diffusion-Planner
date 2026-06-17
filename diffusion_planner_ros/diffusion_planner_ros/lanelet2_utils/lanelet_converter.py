@@ -86,6 +86,117 @@ def _interpolate_lane(waypoints: NDArray, num_points: int):
     return new_waypoints
 
 
+class _AkimaSpline:
+    """Port of autoware::experimental::trajectory::interpolator::AkimaSpline (needs >= 5 pts)."""
+
+    def build(self, bases: NDArray, values: NDArray) -> None:
+        self.bases = np.asarray(bases, dtype=np.float64)
+        v = np.asarray(values, dtype=np.float64)
+        n = len(self.bases)
+        h = self.bases[1:] - self.bases[:-1]
+        m = (v[1:] - v[:-1]) / h
+        s = np.empty(n, dtype=np.float64)
+        s[0] = m[0]
+        s[1] = (m[0] + m[1]) / 2
+        for i in range(2, n - 2):
+            w1 = abs(m[i + 1] - m[i])
+            w2 = abs(m[i - 1] - m[i - 2])
+            if (w1 + w2) == 0:
+                s[i] = (m[i] + m[i - 1]) / 2
+            else:
+                s[i] = (w1 * m[i - 1] + w2 * m[i]) / (w1 + w2)
+        s[n - 2] = (m[n - 2] + m[n - 3]) / 2
+        s[n - 1] = m[n - 2]
+        self.a = v[:-1].copy()
+        self.b = s[:-1].copy()
+        self.c = (3 * m - 2 * s[:-1] - s[1:]) / h
+        self.d = (s[:-1] + s[1:] - 2 * m) / (h * h)
+
+    def _index(self, s: float) -> int:
+        if s == self.bases[-1]:
+            return len(self.bases) - 2
+        distance = int(np.searchsorted(self.bases, s, side="right"))
+        idx = distance - 1 if distance != 0 else 0
+        return int(np.clip(idx, 0, len(self.bases) - 1))
+
+    def compute(self, s: float) -> float:
+        i = self._index(s)
+        dx = s - self.bases[i]
+        return self.a[i] + self.b[i] * dx + self.c[i] * dx * dx + self.d[i] * dx * dx * dx
+
+
+class _LinearSpline:
+    """Port of autoware::experimental::trajectory::interpolator::Linear (needs >= 2 pts)."""
+
+    def build(self, bases: NDArray, values: NDArray) -> None:
+        self.bases = np.asarray(bases, dtype=np.float64)
+        self.values = np.asarray(values, dtype=np.float64)
+
+    def _index(self, s: float) -> int:
+        if s == self.bases[-1]:
+            return len(self.bases) - 2
+        distance = int(np.searchsorted(self.bases, s, side="right"))
+        idx = distance - 1 if distance != 0 else 0
+        return int(np.clip(idx, 0, len(self.bases) - 1))
+
+    def compute(self, s: float) -> float:
+        i = self._index(s)
+        x0 = self.bases[i]
+        x1 = self.bases[i + 1]
+        y0 = self.values[i]
+        y1 = self.values[i + 1]
+        return y0 + (y1 - y0) * (s - x0) / (x1 - x0)
+
+
+def _resample_line_string(points: NDArray, num_points: int, max_step_m: float = 5.0):
+    """Port of the C++ resample_line_string: arc-length resampling with Akima/Linear splines,
+    splitting one line string into one or more segments of num_points each."""
+    points = np.asarray(points, dtype=np.float64)
+    if len(points) < 2 or num_points < 2:
+        return [points]
+
+    arc_lengths = np.zeros(len(points), dtype=np.float64)
+    for i in range(1, len(points)):
+        arc_lengths[i] = arc_lengths[i - 1] + np.linalg.norm(points[i] - points[i - 1])
+    total_length = arc_lengths[-1]
+
+    k_epsilon = 1e-6
+    if total_length < k_epsilon:
+        return [np.repeat(points[0:1], num_points, axis=0)]
+
+    step_m = total_length / (num_points - 1)
+    safe_max_step_m = max(max_step_m, k_epsilon)
+    n_segments = int(max(1.0, np.ceil(step_m / safe_max_step_m)))
+
+    # Akima needs >= 5 input points; otherwise fall back to linear (matches C++).
+    use_akima = len(points) >= 5
+    splines = []
+    for axis in range(3):
+        sp = _AkimaSpline() if use_akima else _LinearSpline()
+        sp.build(arc_lengths, points[:, axis])
+        splines.append(sp)
+
+    def compute_point(s):
+        return np.array([splines[0].compute(s), splines[1].compute(s), splines[2].compute(s)])
+
+    segment_length = total_length / n_segments
+    result = []
+    for i in range(n_segments):
+        s_start = i * segment_length
+        inner_step = segment_length / (num_points - 1)
+        lane_points = []
+        for j in range(num_points):
+            if i == 0 and j == 0:
+                lane_points.append(points[0])
+            elif i == n_segments - 1 and j == num_points - 1:
+                lane_points.append(points[-1])
+            else:
+                s = min(max(s_start + j * inner_step, 0.0), total_length)
+                lane_points.append(compute_point(s))
+        result.append(np.array(lane_points))
+    return result
+
+
 def _identify_current_light_status(turn_direction: int, traffic_light_elements: list) -> int:
     """
     Identify the current traffic light status based on turn direction and traffic light elements.
@@ -159,7 +270,16 @@ def convert_lanelet(filename: str) -> LaneletMap:
     lanelets: dict[int, Lanelet] = {}
     for lanelet in lanelet_map.laneletLayer:
         lanelet_subtype = _get_attribute(lanelet.attributes, "subtype", "")
-        if lanelet_subtype not in ("road", "highway", "road_shoulder", "bicycle_lane"):
+        # Match the C++ converter's ACCEPTABLE_LANE_SUBTYPES (conversion/lanelet.hpp).
+        if lanelet_subtype not in (
+            "bicycle_lane",
+            "crosswalk",
+            "highway",
+            "pedestrian_lane",
+            "road",
+            "road_shoulder",
+            "walkway",
+        ):
             continue
 
         centerline = _interpolate_lane(
@@ -224,16 +344,20 @@ def convert_lanelet(filename: str) -> LaneletMap:
     for line_string in lanelet_map.lineStringLayer:
         line_string_type = _get_attribute(line_string.attributes, "type", "")
         line_string_subtype = _get_attribute(line_string.attributes, "subtype", "")
-        if line_string_type not in ("stop_line",):
+        if line_string_type not in ("stop_line", "road_border"):
             continue
-        line_string_points = np.array([(point.x, point.y, point.z) for point in line_string])
-        line_string_points = _interpolate_lane(line_string_points, POINTS_PER_LINE_STRING)
-        line_strings[line_string.id] = LineString(
-            id=line_string.id,
-            polyline=line_string_points,
-            type=line_string_type,
-            subtype=line_string_subtype,
-        )
+        raw_points = np.array([(point.x, point.y, point.z) for point in line_string])
+        # The C++ converter resamples each line string into one or more fixed-resolution
+        # segments (Akima/linear spline), so a single line string may yield several entries.
+        for seg_idx, seg_points in enumerate(
+            _resample_line_string(raw_points, POINTS_PER_LINE_STRING)
+        ):
+            line_strings[(line_string.id, seg_idx)] = LineString(
+                id=line_string.id,
+                polyline=seg_points,
+                type=line_string_type,
+                subtype=line_string_subtype,
+            )
 
     print(f"{len(lanelets)} lanelets are loaded.")
     print(f"{len(polygons)} polygons are loaded.")
@@ -278,10 +402,13 @@ def process_lanelet(
     left_boundary = lanelet.left_boundary
     right_boundary = lanelet.right_boundary
 
-    inside_center = judge_inside(center_x, center_y, lanelet.center[0], lanelet.center[1])
-    inside_first = judge_inside(center_x, center_y, centerline[0, 0], centerline[0, 1])
-    inside_last = judge_inside(center_x, center_y, centerline[-1, 0], centerline[-1, 1])
-    if (not inside_center) and (not inside_first) and (not inside_last):
+    # Match the C++ is_segment_inside: a segment is inside if ANY centerline point is within
+    # the square mask range (inclusive), not just the center/first/last points.
+    inside = np.any(
+        (np.abs(centerline[:, 0] - center_x) <= LANE_MASK_RANGE_M)
+        & (np.abs(centerline[:, 1] - center_y) <= LANE_MASK_RANGE_M)
+    )
+    if not inside:
         return None
 
     # Convert to base_link
@@ -416,6 +543,16 @@ def create_lane_tensor(
     return lanes_tensor, lanes_speed_limit, lanes_has_speed_limit
 
 
+# Mask range for selecting nearby lane segments (matches C++ constants::LANE_MASK_RANGE_M).
+LANE_MASK_RANGE_M = 100.0
+
+# Type one-hot encodings, matching the C++ converter (conversion/lanelet.hpp).
+POLYGON_TYPE_MAP = {"intersection_area": 0}
+POLYGON_TYPE_NUM = 1
+LINE_STRING_TYPE_MAP = {"stop_line": 0, "road_border": 1}
+LINE_STRING_TYPE_NUM = 2
+
+
 def create_line_tensor(
     polygons: dict[int, Polygon],
     map2bl_mat4x4: NDArray,
@@ -424,8 +561,11 @@ def create_line_tensor(
     num_elements: int,
     num_points: int,
     dev: torch.device,
+    type_map: dict[str, int],
+    num_types: int,
 ) -> list[np.ndarray]:
-    result_list = []
+    point_dim = 2 + num_types
+    result_list = []  # (xy (num_points, 2), type_id, min_distance)
     for polygon in polygons:
         polyline = polygon.polyline
         inside_at_least_one = False
@@ -435,20 +575,25 @@ def create_line_tensor(
                 break
         if not inside_at_least_one:
             continue
-        polyline = transform(map2bl_mat4x4, polyline)
-        result_list.append(polyline[:, 0:2])
+        type_id = type_map.get(polygon.type)
+        if type_id is None:
+            continue
+        polyline = transform(map2bl_mat4x4, polyline)[:, 0:2]
+        min_distance = np.linalg.norm(polyline, axis=1).min()
+        result_list.append((polyline, type_id, min_distance))
 
-    # sort by distance from the first and last point
-    def key_func(item):
-        return np.linalg.norm(item[:, 0:2], axis=1).min()
-
-    result_list = sorted(result_list, key=key_func)
+    # sort by nearest point distance (matches C++ ElementWithDistance ordering)
+    result_list = sorted(result_list, key=lambda item: item[2])
     result_list = result_list[0:num_elements]
-    result_list += [np.zeros((num_points, 2), dtype=np.float32)] * (num_elements - len(result_list))
-    result_list = np.array(result_list, dtype=np.float32)
+
+    out = np.zeros((num_elements, num_points, point_dim), dtype=np.float32)
+    for i, (polyline, type_id, _) in enumerate(result_list):
+        m = min(num_points, polyline.shape[0])
+        out[i, :m, 0:2] = polyline[:m]
+        out[i, :m, 2 + type_id] = 1.0
     tensor_data = (
-        torch.from_numpy(result_list)
-        .reshape((1, num_elements, num_points, 2))
+        torch.from_numpy(out)
+        .reshape((1, num_elements, num_points, point_dim))
         .to(torch.float32)
         .to(dev)
     )

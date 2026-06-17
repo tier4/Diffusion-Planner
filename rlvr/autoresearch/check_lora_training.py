@@ -4,6 +4,7 @@
 Usage:
     python3 rlvr/scripts/check_lora_training.py <experiment_dir> [--scene <npz_path>]
 """
+
 import argparse
 import glob
 import json
@@ -35,6 +36,7 @@ def load_model_with_lora(base_model_path, lora_path=None):
 
     if lora_path:
         from preference_optimization.lora_utils import load_lora_checkpoint
+
         model = load_lora_checkpoint(model, lora_path)
         model.eval()
 
@@ -67,6 +69,7 @@ def check_lora_weights(exp_dir):
 
         if adapter_path.endswith(".safetensors"):
             from safetensors.torch import load_file
+
             weights = load_file(adapter_path)
         else:
             weights = torch.load(adapter_path, map_location="cpu")
@@ -76,7 +79,7 @@ def check_lora_weights(exp_dir):
         for k, v in weights.items():
             total_norm += v.float().norm().item() ** 2
             n_params += v.numel()
-        total_norm = total_norm ** 0.5
+        total_norm = total_norm**0.5
 
         print(f"  {os.path.basename(lora_dir)}: {n_params} params, norm={total_norm:.6f}")
         if total_norm < 1e-6:
@@ -106,8 +109,10 @@ def compare_trajectories(base_model_path, exp_dir, npz_path):
             max_diff = diff.max()
             mean_diff = diff.mean()
 
-            print(f"  {os.path.basename(lora_dir)}: path={pl_lora:.1f}m (base={pl_base:.1f}m), "
-                  f"max_diff={max_diff:.3f}m, mean_diff={mean_diff:.3f}m")
+            print(
+                f"  {os.path.basename(lora_dir)}: path={pl_lora:.1f}m (base={pl_base:.1f}m), "
+                f"max_diff={max_diff:.3f}m, mean_diff={mean_diff:.3f}m"
+            )
             if max_diff < 0.01:
                 print("    WARNING: trajectory barely changed — LoRA may not be training!")
 

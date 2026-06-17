@@ -62,6 +62,14 @@ struct ConverterOptions
   bool write_skipped_npz;
 };
 
+// Apply a single "--key=value" argument to opts.
+// Returns true if the argument was recognized, false otherwise.
+bool apply_named_arg(ConverterOptions & opts, const std::string & arg);
+
+// Validate options after all arguments have been applied.
+// Returns an error message string if invalid, nullopt if valid.
+std::optional<std::string> validate_options(const ConverterOptions & opts);
+
 std::optional<ConverterOptions> parse_arguments(int argc, char ** argv);
 
 #endif  // CLI__CONVERTER_OPTIONS_HPP_

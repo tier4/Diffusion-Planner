@@ -24,8 +24,7 @@ from scenario_generation.scene_context import Agent, AgentType, SceneContext
 # Set LANELET2_MAP_PATH to override; otherwise fall back to a conventional
 # per-user location. Tests that need the map skip when it's absent.
 MAP_PATH = Path(
-    os.environ.get("LANELET2_MAP_PATH")
-    or (Path.home() / "autoware_map" / "lanelet2_map.osm")
+    os.environ.get("LANELET2_MAP_PATH") or (Path.home() / "autoware_map" / "lanelet2_map.osm")
 )
 
 
@@ -54,17 +53,20 @@ def test_spawn_config_ignores_unknown_keys(tmp_path: Path) -> None:
     assert c.max_active_npcs == 4
 
 
-@pytest.mark.parametrize("kwargs,needle", [
-    ({"ego_length": -1.0}, "ego dimensions must be positive"),
-    ({"ego_width": 0.0}, "ego dimensions must be positive"),
-    ({"ego_wheelbase": -0.1}, "ego dimensions must be positive"),
-    ({"ego_length": 3.0, "ego_wheelbase": 4.0}, "ego_wheelbase must be <= ego_length"),
-    ({"ego_max_steer": 0.0}, "ego_max_steer must be in"),
-    ({"ego_max_steer": 1.6}, "ego_max_steer must be in"),
-    ({"inference_delay": -1}, "inference_delay must be non-negative"),
-    ({"max_steps": 0}, "max_steps must be >= 1"),
-    ({"ego_init_speed": -0.5}, "ego_init_speed must be >= 0"),
-])
+@pytest.mark.parametrize(
+    "kwargs,needle",
+    [
+        ({"ego_length": -1.0}, "ego dimensions must be positive"),
+        ({"ego_width": 0.0}, "ego dimensions must be positive"),
+        ({"ego_wheelbase": -0.1}, "ego dimensions must be positive"),
+        ({"ego_length": 3.0, "ego_wheelbase": 4.0}, "ego_wheelbase must be <= ego_length"),
+        ({"ego_max_steer": 0.0}, "ego_max_steer must be in"),
+        ({"ego_max_steer": 1.6}, "ego_max_steer must be in"),
+        ({"inference_delay": -1}, "inference_delay must be non-negative"),
+        ({"max_steps": 0}, "max_steps must be >= 1"),
+        ({"ego_init_speed": -0.5}, "ego_init_speed must be >= 0"),
+    ],
+)
 def test_spawn_config_validate_rejects_invalid_values(kwargs: dict, needle: str) -> None:
     """__post_init__ should fail fast on out-of-range fields."""
     with pytest.raises(ValueError, match=needle):
@@ -90,12 +92,12 @@ def test_spawn_config_validate_accepts_valid_ego_init_speed() -> None:
 def test_spawn_config_defaults_match_user_spec() -> None:
     """User-required values from the April 2026 planning session."""
     c = SpawnConfig()
-    assert c.max_active_npcs == 8          # user confirmed default
-    assert c.despawn_distance == 120.0     # user-required
-    assert c.goal_tolerance_m == 2.0       # user: "within 2 meters"
-    assert c.max_steps == 6000             # user: "more than 6000 timesteps"
-    assert c.ego_overlap_ratio == 0.3      # user: "mixed 70/30"
-    assert c.goal_pass_window_m == 25.0    # added when v3 showed ego passing goal at d=16.5m
+    assert c.max_active_npcs == 8  # user confirmed default
+    assert c.despawn_distance == 120.0  # user-required
+    assert c.goal_tolerance_m == 2.0  # user: "within 2 meters"
+    assert c.max_steps == 6000  # user: "more than 6000 timesteps"
+    assert c.ego_overlap_ratio == 0.3  # user: "mixed 70/30"
+    assert c.goal_pass_window_m == 25.0  # added when v3 showed ego passing goal at d=16.5m
 
 
 # ── SceneNPCManager with a real map ──────────────────────────────────────────
@@ -106,6 +108,7 @@ def builder():
     if not MAP_PATH.exists():
         pytest.skip(f"Lanelet2 map not found at {MAP_PATH}")
     from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
+
     return LaneletSceneBuilder(str(MAP_PATH))
 
 
@@ -120,7 +123,9 @@ def _make_ego_scene(builder, start_ll_id: int) -> tuple[SceneContext, list[int]]
     ego = Agent(
         id="ego",
         agent_type=AgentType.VEHICLE,
-        length=4.5, width=1.9, wheelbase=2.9,
+        length=4.5,
+        width=1.9,
+        wheelbase=2.9,
         past_trajectory=history,
         past_velocities=np.zeros((history.shape[0], 2), dtype=np.float32),
         acceleration=np.zeros(2, dtype=np.float32),
@@ -142,8 +147,11 @@ def test_spawn_one_produces_valid_neighbor(builder) -> None:
     scene, ego_route = _make_ego_scene(builder, start_id)
 
     cfg = SpawnConfig(
-        max_active_npcs=4, spawn_probability=1.0, seed=42,
-        min_spawn_distance=5.0, max_spawn_distance=80.0,
+        max_active_npcs=4,
+        spawn_probability=1.0,
+        seed=42,
+        min_spawn_distance=5.0,
+        max_spawn_distance=80.0,
         forward_bias=0.5,
     )
     mgr = SceneNPCManager(builder, ego_route, cfg)
@@ -188,14 +196,18 @@ def test_despawn_drops_far_neighbors(builder) -> None:
     near_pos = np.array([ego_pos[0] + 10.0, ego_pos[1] + 0.0, 0.0], dtype=np.float32)
     near_history = np.tile(near_pos, (31, 1))
     for label, hist in (("far", far_history), ("near", near_history)):
-        scene.agents.append(Agent(
-            id=label,
-            agent_type=AgentType.VEHICLE,
-            length=4.5, width=1.9, wheelbase=2.9,
-            past_trajectory=hist,
-            past_velocities=np.zeros((31, 2), dtype=np.float32),
-            acceleration=np.zeros(2, dtype=np.float32),
-        ))
+        scene.agents.append(
+            Agent(
+                id=label,
+                agent_type=AgentType.VEHICLE,
+                length=4.5,
+                width=1.9,
+                wheelbase=2.9,
+                past_trajectory=hist,
+                past_velocities=np.zeros((31, 2), dtype=np.float32),
+                acceleration=np.zeros(2, dtype=np.float32),
+            )
+        )
 
     mgr.tick(scene)
     ids = [a.id for a in scene.agents]
@@ -214,7 +226,9 @@ def test_overlap_ratio_biases_neighbor_routes(builder) -> None:
     ego_set = set(ego_route)
 
     cfg = SpawnConfig(
-        max_active_npcs=6, spawn_probability=1.0, seed=7,
+        max_active_npcs=6,
+        spawn_probability=1.0,
+        seed=7,
         ego_overlap_ratio=1.0,
     )
     mgr = SceneNPCManager(builder, ego_route, cfg)

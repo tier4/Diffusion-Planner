@@ -67,7 +67,7 @@ class LateralGuidance(BaseGuidance):
         # Reference heading → unit normal (left-perpendicular)
         cos_h = ref[..., 2]  # [B, T]
         sin_h = ref[..., 3]
-        h_norm = (cos_h ** 2 + sin_h ** 2).sqrt().clamp_min(1e-6)
+        h_norm = (cos_h**2 + sin_h**2).sqrt().clamp_min(1e-6)
         cos_h = cos_h / h_norm
         sin_h = sin_h / h_norm
         # n⊥ = (-sin, cos) — left-perpendicular
@@ -76,7 +76,7 @@ class LateralGuidance(BaseGuidance):
 
         # Ego position relative to reference
         ego_pos = x[:, 0, 1:, :2]  # [B, T, 2]
-        ref_pos = ref[..., :2]      # [B, T, 2]
+        ref_pos = ref[..., :2]  # [B, T, 2]
         dx = ego_pos[..., 0] - ref_pos[..., 0]  # [B, T]
         dy = ego_pos[..., 1] - ref_pos[..., 1]
 

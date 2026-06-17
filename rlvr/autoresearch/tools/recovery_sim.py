@@ -70,15 +70,27 @@ _VIEW_HALF_M = 50.0
 # ---------------------------------------------------------------------------
 
 
-def _draw_agent_box(ax, x, y, heading, length, width, color,
-                    alpha=0.85, lw=1.5, zorder=20, wheelbase=None) -> None:
+def _draw_agent_box(
+    ax, x, y, heading, length, width, color, alpha=0.85, lw=1.5, zorder=20, wheelbase=None
+) -> None:
     """OBB footprint at world (x, y, heading). Delegates to the central
     ``scenario_generation.visualize.draw_agent_box``: pass ``wheelbase`` for the
     ego (rear-axle convention, box offset forward); leave None for neighbors
     (centroid convention).
     """
-    _viz_draw_agent_box(ax, x, y, heading, length, width, color,
-                        alpha=alpha, lw=lw, zorder=zorder, wheelbase=wheelbase)
+    _viz_draw_agent_box(
+        ax,
+        x,
+        y,
+        heading,
+        length,
+        width,
+        color,
+        alpha=alpha,
+        lw=lw,
+        zorder=zorder,
+        wheelbase=wheelbase,
+    )
 
 
 def _ego_obb_corners(ex, ey, heading, length, width, wheelbase) -> np.ndarray:
@@ -93,7 +105,9 @@ def _ego_obb_corners(ex, ey, heading, length, width, wheelbase) -> np.ndarray:
     return (R @ local.T).T + np.array([ex, ey], dtype=np.float64)
 
 
-def _lane_polylines(lanes: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+def _lane_polylines(
+    lanes: np.ndarray,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     """Centerline + left/right border polylines from a [S, P, >=8] tensor."""
     centerlines, lefts, rights = [], [], []
     for i in range(lanes.shape[0]):
@@ -158,8 +172,7 @@ def _nearest_border_point(
         seg = p2 - p1
         seg_len2 = (seg * seg).sum(axis=1)
         seg_len2[seg_len2 < 1e-9] = 1e-9
-        t = (((px - p1[:, 0]) * seg[:, 0] + (py - p1[:, 1]) * seg[:, 1])
-             / seg_len2)
+        t = ((px - p1[:, 0]) * seg[:, 0] + (py - p1[:, 1]) * seg[:, 1]) / seg_len2
         t = np.clip(t, 0.0, 1.0)
         closest = p1 + t[:, None] * seg
         dists = np.hypot(closest[:, 0] - px, closest[:, 1] - py)
@@ -183,10 +196,29 @@ def closed_loop_rollout_with_plans(
     n_steps: int = 80,
     advance_k: int = 0,
     dt: float = 0.1,
+    predict_fn=None,
+    sg_smooth: bool = True,
+    sg_window: int = 11,
+    sg_order: int = 3,
+    trim_backward: bool = False,
 ) -> dict:
     """Run the closed-loop rollout and capture per-step predictions in the
     initial ego frame. Direct extension of recovery_test.closed_loop_rollout —
     forked because we need extra outputs (yaw + per-step world-frame plans).
+
+    sg_smooth: Savitzky-Golay smooth every per-step plan before the tracker
+    consumes it — same filter (and 11/3 defaults) scenario_generation.replay
+    applies via SpawnConfig.sg_smooth_enabled. Raw diffusion/guided output can
+    place the first plan point slightly behind the ego, which an unfiltered
+    advance_k=0 tracker turns into a backwards step.
+
+    trim_backward: drop a leading run of plan points that sit BEHIND the ego
+    (longitudinal x < 0) before tracking, advancing to the first forward
+    point. Guidance gradients are strongest on the points nearest an
+    obstacle and can bend the plan's near-field a few cm backwards at
+    standstill; SG smoothing preserves that systematic offset, and the
+    literal advance_k=0 tracker would reverse — a lookahead tracker (real
+    vehicle) would not.
 
     Returns dict:
         positions: [n_steps + 1, 3] (x, y, yaw) in initial ego frame
@@ -194,8 +226,7 @@ def closed_loop_rollout_with_plans(
                      length == n_steps. plans_world[i] is taken at step i.
         velocities: [n_steps + 1] speed in m/s estimated from finite diffs
     """
-    data = {k: v.clone() if isinstance(v, torch.Tensor) else v
-            for k, v in init_data.items()}
+    data = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in init_data.items()}
 
     # Cumulative pose of "current" ego in the INITIAL frame
     cum_x, cum_y = 0.0, 0.0
@@ -204,6 +235,7 @@ def closed_loop_rollout_with_plans(
     positions = [np.array([0.0, 0.0, 0.0])]
     velocities = [0.0]
     plans_world: list[np.ndarray] = []
+    extra_plans_world: list[list[np.ndarray]] = []
 
     # Initial speed from ego_current_state (channels 4=vx, 5=vy in current frame)
     ecs0 = data["ego_current_state"]
@@ -213,7 +245,23 @@ def closed_loop_rollout_with_plans(
     velocities[0] = init_speed
 
     for step_i in range(n_steps):
-        pred = deterministic_predict(model, model_args, data)  # [T, 4] in CURRENT frame
+        # predict_fn lets callers swap the per-step planner call (e.g.
+        # explorer-guided generation); default = plain deterministic forward.
+        # It may return (pred, [candidate_plans...]) — candidates are
+        # transformed alongside and stored in extra_plans_world.
+        _out = (predict_fn or deterministic_predict)(model, model_args, data)
+        if isinstance(_out, tuple):
+            pred, _cands = _out
+        else:
+            pred, _cands = _out, []
+        if sg_smooth:
+            from rlvr.grpo_sft_trainer import _smooth_trajectory
+
+            pred = _smooth_trajectory(pred, sg_window, sg_order)
+        if trim_backward and pred[0, 0] < -1e-3:
+            fwd = np.nonzero(pred[:, 0] > 0.05)[0]
+            if len(fwd):
+                pred = pred[int(fwd[0]) :]
 
         # Re-express the ENTIRE plan in the INITIAL frame for visualization.
         # current frame -> initial frame: p_init = (cum_x, cum_y) + R(cum) @ p_cur
@@ -225,6 +273,20 @@ def closed_loop_rollout_with_plans(
         cum_yaw = math.atan2(cum_sin, cum_cos)
         wh = (cur_h + cum_yaw).astype(np.float64)
         plans_world.append(np.stack([wx, wy, wh], axis=-1))
+
+        step_extra = []
+        for c in _cands:
+            cxy = c[:, :2].astype(np.float64)
+            step_extra.append(
+                np.stack(
+                    [
+                        cum_x + cum_cos * cxy[:, 0] - cum_sin * cxy[:, 1],
+                        cum_y + cum_sin * cxy[:, 0] + cum_cos * cxy[:, 1],
+                    ],
+                    axis=-1,
+                )
+            )
+        extra_plans_world.append(step_extra)
 
         if pred.shape[0] <= advance_k:
             advance_k = pred.shape[0] - 1
@@ -253,22 +315,19 @@ def closed_loop_rollout_with_plans(
         new_cum_cos = cum_cos * ncos_loc - cum_sin * nsin_loc
         new_cum_sin = cum_sin * ncos_loc + cum_cos * nsin_loc
 
-        positions.append(np.array([new_world_x, new_world_y,
-                                   math.atan2(new_cum_sin, new_cum_cos)]))
+        positions.append(np.array([new_world_x, new_world_y, math.atan2(new_cum_sin, new_cum_cos)]))
         velocities.append(float(np.hypot(new_vx, new_vy)))
 
-        cum_x, cum_y, cum_cos, cum_sin = (
-            new_world_x, new_world_y, new_cum_cos, new_cum_sin
-        )
+        cum_x, cum_y, cum_cos, cum_sin = (new_world_x, new_world_y, new_cum_cos, new_cum_sin)
 
         # Roll past, append old origin so the model history stays consistent
         if "ego_agent_past" in data:
             eap = data["ego_agent_past"].clone()
-            old_origin = torch.tensor([0.0, 0.0, 1.0, 0.0],
-                                      dtype=eap.dtype, device=eap.device)
+            old_origin = torch.tensor([0.0, 0.0, 1.0, 0.0], dtype=eap.dtype, device=eap.device)
             T = eap.shape[1]
-            eap = torch.cat([eap[:, 1:T],
-                             old_origin.view(1, 1, 4).expand(eap.shape[0], 1, 4)], dim=1)
+            eap = torch.cat(
+                [eap[:, 1:T], old_origin.view(1, 1, 4).expand(eap.shape[0], 1, 4)], dim=1
+            )
             data["ego_agent_past"] = eap
 
         # Re-express world in the new ego frame
@@ -285,7 +344,8 @@ def closed_loop_rollout_with_plans(
 
     return {
         "positions": np.stack(positions, axis=0),  # [N+1, 3]
-        "plans_world": plans_world,                # len N
+        "plans_world": plans_world,
+        "extra_plans_world": extra_plans_world,  # len N
         "velocities": np.array(velocities),
     }
 
@@ -300,15 +360,15 @@ def _render_step(
     *,
     step: int,
     n_steps: int,
-    ego_pose: np.ndarray,           # (3,) x, y, yaw in initial frame
+    ego_pose: np.ndarray,  # (3,) x, y, yaw in initial frame
     ego_speed: float,
-    plan_world: np.ndarray,         # (T, 3) predicted future in initial frame
+    plan_world: np.ndarray,  # (T, 3) predicted future in initial frame
     centerlines: list[np.ndarray],
     lefts: list[np.ndarray],
     rights: list[np.ndarray],
     border_polylines: list[np.ndarray],
     route_polylines: list[np.ndarray],
-    centerline_segments: np.ndarray,    # (N_seg, 2, 2) for nearest-distance label
+    centerline_segments: np.ndarray,  # (N_seg, 2, 2) for nearest-distance label
     ego_length: float,
     ego_width: float,
     ego_wheelbase: float = 4.76,
@@ -325,20 +385,35 @@ def _render_step(
 
     # 1) Lane network (centerline + left/right markings, gray)
     if centerlines:
-        ax.add_collection(LineCollection(
-            centerlines, colors=_LANE_COLOR, linewidths=0.6,
-            alpha=0.7 * 0.4, zorder=1,
-        ))
+        ax.add_collection(
+            LineCollection(
+                centerlines,
+                colors=_LANE_COLOR,
+                linewidths=0.6,
+                alpha=0.7 * 0.4,
+                zorder=1,
+            )
+        )
     if lefts:
-        ax.add_collection(LineCollection(
-            lefts, colors=_LANE_BORDER_COLOR, linewidths=1.1,
-            alpha=0.7, zorder=2,
-        ))
+        ax.add_collection(
+            LineCollection(
+                lefts,
+                colors=_LANE_BORDER_COLOR,
+                linewidths=1.1,
+                alpha=0.7,
+                zorder=2,
+            )
+        )
     if rights:
-        ax.add_collection(LineCollection(
-            rights, colors=_LANE_BORDER_COLOR, linewidths=1.1,
-            alpha=0.7, zorder=2,
-        ))
+        ax.add_collection(
+            LineCollection(
+                rights,
+                colors=_LANE_BORDER_COLOR,
+                linewidths=1.1,
+                alpha=0.7,
+                zorder=2,
+            )
+        )
 
     # 1b) Road borders (red) — AABB-filtered to the viewport
     half = view_half_m * 1.5
@@ -347,46 +422,79 @@ def _render_step(
         if pl.shape[0] < 2:
             continue
         in_view = (
-            (pl[:, 0] >= ex - half) & (pl[:, 0] <= ex + half)
-            & (pl[:, 1] >= ey - half) & (pl[:, 1] <= ey + half)
+            (pl[:, 0] >= ex - half)
+            & (pl[:, 0] <= ex + half)
+            & (pl[:, 1] >= ey - half)
+            & (pl[:, 1] <= ey + half)
         )
         if in_view.any():
             filtered_borders.append(pl)
     if filtered_borders:
-        ax.add_collection(LineCollection(
-            filtered_borders, colors=_ROAD_BORDER_COLOR, linewidths=2.0,
-            alpha=0.9, zorder=5,
-        ))
+        ax.add_collection(
+            LineCollection(
+                filtered_borders,
+                colors=_ROAD_BORDER_COLOR,
+                linewidths=2.0,
+                alpha=0.9,
+                zorder=5,
+            )
+        )
 
     # 2) Route polylines (blue)
     for pl in route_polylines:
         if pl.shape[0] >= 2:
-            ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR,
-                    lw=2.5, alpha=0.6, zorder=3)
+            ax.plot(pl[:, 0], pl[:, 1], "-", color=_ROUTE_COLOR, lw=2.5, alpha=0.6, zorder=3)
 
     # 3) Ego footprint + heading arrow
-    _draw_agent_box(ax, ex, ey, eh, ego_length, ego_width, _EGO_COLOR,
-                    alpha=0.85, lw=2, zorder=20, wheelbase=ego_wheelbase)
+    _draw_agent_box(
+        ax,
+        ex,
+        ey,
+        eh,
+        ego_length,
+        ego_width,
+        _EGO_COLOR,
+        alpha=0.85,
+        lw=2,
+        zorder=20,
+        wheelbase=ego_wheelbase,
+    )
     arrow_len = max(ego_length, 2.5)
     ax.annotate(
         "",
         xy=(ex + arrow_len * math.cos(eh), ey + arrow_len * math.sin(eh)),
         xytext=(ex, ey),
-        arrowprops=dict(arrowstyle="-|>", color=_EGO_COLOR, lw=1.5,
-                        mutation_scale=12),
+        arrowprops=dict(arrowstyle="-|>", color=_EGO_COLOR, lw=1.5, mutation_scale=12),
         zorder=21,
     )
 
     # 4) Predicted plan ahead
     if plan_world is not None and plan_world.shape[0] > 1:
-        ax.plot(plan_world[:, 0], plan_world[:, 1], "-",
-                color=_PRED_COLOR, lw=1.8, alpha=0.6, zorder=25)
-        ax.plot(plan_world[::3, 0], plan_world[::3, 1], "o",
-                color=_PRED_COLOR, ms=2.5, alpha=0.8, mew=0, zorder=26)
+        ax.plot(
+            plan_world[:, 0], plan_world[:, 1], "-", color=_PRED_COLOR, lw=1.8, alpha=0.6, zorder=25
+        )
+        ax.plot(
+            plan_world[::3, 0],
+            plan_world[::3, 1],
+            "o",
+            color=_PRED_COLOR,
+            ms=2.5,
+            alpha=0.8,
+            mew=0,
+            zorder=26,
+        )
         # End-of-plan footprint (faint)
         _draw_agent_box(
-            ax, plan_world[-1, 0], plan_world[-1, 1], plan_world[-1, 2],
-            ego_length, ego_width, _PRED_COLOR, alpha=0.25, lw=1.0, zorder=24,
+            ax,
+            plan_world[-1, 0],
+            plan_world[-1, 1],
+            plan_world[-1, 2],
+            ego_length,
+            ego_width,
+            _PRED_COLOR,
+            alpha=0.25,
+            lw=1.0,
+            zorder=24,
             wheelbase=ego_wheelbase,
         )
 
@@ -394,28 +502,44 @@ def _render_step(
     border_pt = _nearest_border_point(np.array([ex, ey]), border_polylines)
     if border_pt is not None:
         corners = _ego_obb_corners(ex, ey, eh, ego_length, ego_width, ego_wheelbase)
-        d_corner = np.hypot(corners[:, 0] - border_pt[0],
-                            corners[:, 1] - border_pt[1])
+        d_corner = np.hypot(corners[:, 0] - border_pt[0], corners[:, 1] - border_pt[1])
         start = corners[int(d_corner.argmin())]
         body_d = float(np.hypot(start[0] - border_pt[0], start[1] - border_pt[1]))
-        ax.plot([start[0], border_pt[0]], [start[1], border_pt[1]],
-                "k--", linewidth=1.3, alpha=0.7, zorder=29)
-        ax.plot(border_pt[0], border_pt[1], "ko", markersize=6, zorder=30,
-                markeredgecolor="white", markeredgewidth=0.8)
+        ax.plot(
+            [start[0], border_pt[0]],
+            [start[1], border_pt[1]],
+            "k--",
+            linewidth=1.3,
+            alpha=0.7,
+            zorder=29,
+        )
+        ax.plot(
+            border_pt[0],
+            border_pt[1],
+            "ko",
+            markersize=6,
+            zorder=30,
+            markeredgecolor="white",
+            markeredgewidth=0.8,
+        )
         mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
         ax.annotate(
             f"{body_d:.2f} m",
-            xy=(mx, my), fontsize=8, color="black",
-            ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
-                      edgecolor="black", alpha=0.7),
+            xy=(mx, my),
+            fontsize=8,
+            color="black",
+            ha="center",
+            va="center",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="black", alpha=0.7),
             zorder=31,
         )
 
     # 6) Lateral offset to centerline
-    cur_lateral = float(_point_to_segments_dist(
-        np.array([[ex, ey]]), centerline_segments
-    )[0]) if centerline_segments.shape[0] else float("nan")
+    cur_lateral = (
+        float(_point_to_segments_dist(np.array([[ex, ey]]), centerline_segments)[0])
+        if centerline_segments.shape[0]
+        else float("nan")
+    )
 
     # 7) Viewport
     ax.set_xlim(ex - view_half_m, ex + view_half_m)
@@ -454,16 +578,13 @@ def _apply_perturbation(
     """Apply the requested perturbation; returns (perturbed_data, label)."""
     if kind == "parallel":
         signed = side * magnitude
-        return apply_lateral_shift(data, n_unit, signed), \
-               f"parallel {signed:+.2f} m"
+        return apply_lateral_shift(data, n_unit, signed), f"parallel {signed:+.2f} m"
     if kind == "yaw":
         signed = side * magnitude
-        return apply_yaw_perturbation(data, np.deg2rad(signed)), \
-               f"yaw {signed:+.1f}°"
+        return apply_yaw_perturbation(data, np.deg2rad(signed)), f"yaw {signed:+.1f}°"
     if kind == "velocity":
         scale = 1.0 + (side * magnitude / 100.0)
-        return apply_velocity_perturbation(data, scale), \
-               f"velocity x{scale:.2f}"
+        return apply_velocity_perturbation(data, scale), f"velocity x{scale:.2f}"
     if kind == "combined":
         signed_off = side * magnitude
         signed_yaw = side * combined_yaw_deg
@@ -480,13 +601,16 @@ def _apply_perturbation(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", type=str, required=True,
-                        help="Path to a single NPZ scene")
-    parser.add_argument("--kind", type=str, default="parallel",
-                        choices=["parallel", "yaw", "velocity", "combined"])
-    parser.add_argument("--magnitude", type=float, default=0.5,
-                        help="Magnitude (m for parallel/combined-offset, deg for yaw, "
-                             "pct for velocity)")
+    parser.add_argument("--scene", type=str, required=True, help="Path to a single NPZ scene")
+    parser.add_argument(
+        "--kind", type=str, default="parallel", choices=["parallel", "yaw", "velocity", "combined"]
+    )
+    parser.add_argument(
+        "--magnitude",
+        type=float,
+        default=0.5,
+        help="Magnitude (m for parallel/combined-offset, deg for yaw, pct for velocity)",
+    )
     parser.add_argument("--side", type=str, default="+", choices=["+", "-"])
     parser.add_argument("--combined_yaw_deg", type=float, default=5.0)
     parser.add_argument("--model_path", type=str, required=True)
@@ -498,8 +622,9 @@ def main():
     parser.add_argument("--ego_width", type=float, default=2.29156)
     parser.add_argument("--ego_wheelbase", type=float, default=4.76)
     parser.add_argument("--view_half_m", type=float, default=_VIEW_HALF_M)
-    parser.add_argument("--make_webm", action="store_true",
-                        help="Encode the PNG sequence as a vp9 WebM at 10 fps")
+    parser.add_argument(
+        "--make_webm", action="store_true", help="Encode the PNG sequence as a vp9 WebM at 10 fps"
+    )
     parser.add_argument("--webm_fps", type=int, default=10)
     args = parser.parse_args()
 
@@ -532,18 +657,25 @@ def main():
     # Apply the perturbation
     side_val = +1.0 if args.side == "+" else -1.0
     shifted, perturbation_label = _apply_perturbation(
-        data, n_unit, args.kind, args.magnitude, side_val,
+        data,
+        n_unit,
+        args.kind,
+        args.magnitude,
+        side_val,
         combined_yaw_deg=args.combined_yaw_deg,
     )
 
     # Run the rollout (capturing per-step plans in the initial frame)
     rollout = closed_loop_rollout_with_plans(
-        model, model_args, shifted,
-        n_steps=args.steps, advance_k=args.advance_k,
+        model,
+        model_args,
+        shifted,
+        n_steps=args.steps,
+        advance_k=args.advance_k,
     )
-    positions = rollout["positions"]            # [N+1, 3]
-    plans_world = rollout["plans_world"]        # len N
-    velocities = rollout["velocities"]          # [N+1]
+    positions = rollout["positions"]  # [N+1, 3]
+    plans_world = rollout["plans_world"]  # len N
+    velocities = rollout["velocities"]  # [N+1]
 
     # Render-time scene geometry pulled from the SHIFTED data so the
     # perturbation is visible (lanes/borders translate with the shift). For
@@ -572,9 +704,11 @@ def main():
     centerline_segments = _build_segments(shifted["route_lanes"])
 
     # Initial lateral (t=0) — should match |magnitude| for parallel kinds.
-    init_lateral = float(_point_to_segments_dist(
-        np.array([[0.0, 0.0]]), centerline_segments
-    )[0]) if centerline_segments.shape[0] else float("nan")
+    init_lateral = (
+        float(_point_to_segments_dist(np.array([[0.0, 0.0]]), centerline_segments)[0])
+        if centerline_segments.shape[0]
+        else float("nan")
+    )
 
     # ---- Render every step ----
     n_render = len(plans_world)
@@ -602,13 +736,14 @@ def main():
         )
         if (i + 1) % 10 == 0 or i == 0:
             ex, ey, _ = positions[i]
-            print(f"  step {i:04d}/{n_render}  ego=({ex:.2f},{ey:.2f})  "
-                  f"v={velocities[i]:.2f} m/s")
+            print(f"  step {i:04d}/{n_render}  ego=({ex:.2f},{ey:.2f})  v={velocities[i]:.2f} m/s")
 
     # ---- Meta JSON ----
-    lat_per_step = _point_to_segments_dist(
-        positions[:, :2], centerline_segments
-    ) if centerline_segments.shape[0] else np.full(positions.shape[0], np.nan)
+    lat_per_step = (
+        _point_to_segments_dist(positions[:, :2], centerline_segments)
+        if centerline_segments.shape[0]
+        else np.full(positions.shape[0], np.nan)
+    )
     meta = {
         "scene": str(args.scene),
         "model_path": str(args.model_path),
@@ -630,9 +765,7 @@ def main():
             "width": float(args.ego_width),
         },
         "lateral_per_step": [float(x) for x in lat_per_step.tolist()],
-        "trajectory_xy_yaw": [
-            [float(p[0]), float(p[1]), float(p[2])] for p in positions.tolist()
-        ],
+        "trajectory_xy_yaw": [[float(p[0]), float(p[1]), float(p[2])] for p in positions.tolist()],
         "velocity_per_step": [float(v) for v in velocities.tolist()],
     }
     with open(out_dir / "meta.json", "w") as f:
@@ -643,12 +776,20 @@ def main():
         webm_path = out_dir / "rollout.webm"
         # libvpx-vp9 with crf 32 — same recipe used elsewhere in our pipelines.
         cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(args.webm_fps),
-            "-i", str(out_dir / "step_%04d.png"),
-            "-c:v", "libvpx-vp9",
-            "-b:v", "0", "-crf", "32",
-            "-pix_fmt", "yuv420p",
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(args.webm_fps),
+            "-i",
+            str(out_dir / "step_%04d.png"),
+            "-c:v",
+            "libvpx-vp9",
+            "-b:v",
+            "0",
+            "-crf",
+            "32",
+            "-pix_fmt",
+            "yuv420p",
             str(webm_path),
         ]
         print(f"\n[recovery_sim] encoding webm: {webm_path}")

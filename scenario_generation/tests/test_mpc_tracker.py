@@ -16,7 +16,6 @@ from scenario_generation.mpc_tracker import (
     postprocess_reference,
 )
 
-
 # ── MPCTracker ──────────────────────────────────────────────────────────────
 
 
@@ -216,29 +215,33 @@ class TestMPCGradient:
         return MPCTracker(wheelbase=2.79, horizon_steps=20, n_knots=5)
 
     def _rand_problem(self, rng):
-        x0 = np.array([
-            float(rng.uniform(-10, 10)),
-            float(rng.uniform(-10, 10)),
-            float(rng.uniform(-1, 1)),
-            float(rng.uniform(0.5, 8.0)),
-        ])
+        x0 = np.array(
+            [
+                float(rng.uniform(-10, 10)),
+                float(rng.uniform(-10, 10)),
+                float(rng.uniform(-1, 1)),
+                float(rng.uniform(0.5, 8.0)),
+            ]
+        )
         ref = np.zeros((20, 3), dtype=np.float64)
         for i in range(20):
             ref[i, 0] = x0[0] + (i + 1) * 0.5
             ref[i, 1] = x0[1] + (i + 1) * 0.05
             ref[i, 2] = x0[2] + 0.01 * i
-        knot_flat = np.array([
-            rng.uniform(-1.0, 1.0),   # a0
-            rng.uniform(-0.2, 0.2),   # d0
-            rng.uniform(-1.0, 1.0),   # a1
-            rng.uniform(-0.2, 0.2),
-            rng.uniform(-1.0, 1.0),
-            rng.uniform(-0.2, 0.2),
-            rng.uniform(-1.0, 1.0),
-            rng.uniform(-0.2, 0.2),
-            rng.uniform(-1.0, 1.0),
-            rng.uniform(-0.2, 0.2),
-        ])
+        knot_flat = np.array(
+            [
+                rng.uniform(-1.0, 1.0),  # a0
+                rng.uniform(-0.2, 0.2),  # d0
+                rng.uniform(-1.0, 1.0),  # a1
+                rng.uniform(-0.2, 0.2),
+                rng.uniform(-1.0, 1.0),
+                rng.uniform(-0.2, 0.2),
+                rng.uniform(-1.0, 1.0),
+                rng.uniform(-0.2, 0.2),
+                rng.uniform(-1.0, 1.0),
+                rng.uniform(-0.2, 0.2),
+            ]
+        )
         return x0, ref, knot_flat
 
     @staticmethod
@@ -248,10 +251,11 @@ class TestMPCGradient:
         stable across scipy versions."""
         g = np.zeros_like(knot)
         for i in range(len(knot)):
-            k_plus = knot.copy(); k_plus[i] += h
-            k_minus = knot.copy(); k_minus[i] -= h
-            g[i] = (tracker._cost(k_plus, x0, ref)
-                    - tracker._cost(k_minus, x0, ref)) / (2 * h)
+            k_plus = knot.copy()
+            k_plus[i] += h
+            k_minus = knot.copy()
+            k_minus[i] -= h
+            g[i] = (tracker._cost(k_plus, x0, ref) - tracker._cost(k_minus, x0, ref)) / (2 * h)
         return g
 
     def test_gradient_matches_numerical(self):

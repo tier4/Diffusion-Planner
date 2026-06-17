@@ -32,11 +32,13 @@ from dataclasses import dataclass
 
 import gradio as gr
 import numpy as np
-
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
+
 from guidance_gui.visualization import render_prototype_gallery
 
-_DEFAULT_PROTOTYPES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prototypes_k16.npy")
+_DEFAULT_PROTOTYPES_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "prototypes_k16.npy"
+)
 
 
 @functools.lru_cache(maxsize=4)
@@ -96,14 +98,23 @@ class GuidancePanelComponents:
         """
         return [
             self.enable_cb,
-            self.collision_cb,   self.collision_scale,
-            self.route_cb,       self.route_scale,
-            self.lane_cb,        self.lane_scale,
-            self.centerline_cb,  self.centerline_scale,
-            self.anchor_cb,      self.anchor_scale,
-            self.road_border_cb, self.road_border_scale,
-            self.speed_cb,       self.speed_scale,    self.speed_limit,
-            self.anchor_index,   self.anchor_path,
+            self.collision_cb,
+            self.collision_scale,
+            self.route_cb,
+            self.route_scale,
+            self.lane_cb,
+            self.lane_scale,
+            self.centerline_cb,
+            self.centerline_scale,
+            self.anchor_cb,
+            self.anchor_scale,
+            self.road_border_cb,
+            self.road_border_scale,
+            self.speed_cb,
+            self.speed_scale,
+            self.speed_limit,
+            self.anchor_index,
+            self.anchor_path,
             self.global_scale,
         ]
 
@@ -150,7 +161,10 @@ def build_guidance_panel(
                 info="Penalise trajectories that collide with neighbouring agents",
             )
             collision_scale = gr.Slider(
-                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                minimum=0.1,
+                maximum=5.0,
+                value=1.0,
+                step=0.1,
                 label="Collision Scale",
             )
         with gr.Column():
@@ -160,7 +174,10 @@ def build_guidance_panel(
                 info="Penalise trajectories that stray from the planned route",
             )
             route_scale = gr.Slider(
-                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                minimum=0.1,
+                maximum=5.0,
+                value=1.0,
+                step=0.1,
                 label="Route Following Scale",
             )
         with gr.Column():
@@ -170,7 +187,10 @@ def build_guidance_panel(
                 info="Penalise trajectories where the vehicle protrudes beyond lane boundaries",
             )
             lane_scale = gr.Slider(
-                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                minimum=0.1,
+                maximum=5.0,
+                value=1.0,
+                step=0.1,
                 label="Lane Keeping Scale",
             )
         with gr.Column():
@@ -180,7 +200,10 @@ def build_guidance_panel(
                 info="Continuously attract the trajectory toward the nearest lane centerline (quadratic cost)",
             )
             centerline_scale = gr.Slider(
-                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                minimum=0.1,
+                maximum=5.0,
+                value=1.0,
+                step=0.1,
                 label="Centerline Scale",
             )
         with gr.Column():
@@ -190,7 +213,10 @@ def build_guidance_panel(
                 info="Repel trajectory from road border line_strings using ego perimeter sampling",
             )
             road_border_scale = gr.Slider(
-                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                minimum=0.1,
+                maximum=5.0,
+                value=1.0,
+                step=0.1,
                 label="Road Border Scale",
             )
         with gr.Column():
@@ -200,11 +226,17 @@ def build_guidance_panel(
                 info="Penalise path speed outside [0, v_high] m/s (squared hinge)",
             )
             speed_scale = gr.Slider(
-                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                minimum=0.1,
+                maximum=5.0,
+                value=1.0,
+                step=0.1,
                 label="Speed guidance scale",
             )
             speed_limit = gr.Slider(
-                minimum=2.0, maximum=40.0, value=14.0, step=0.5,
+                minimum=2.0,
+                maximum=40.0,
+                value=14.0,
+                step=0.5,
                 label="Speed upper bound v_high (m/s)",
                 info="Lower bound v_low is fixed at 0 m/s",
             )
@@ -217,7 +249,10 @@ def build_guidance_panel(
                 info="Guide trajectory toward a prototype motion mode",
             )
             anchor_scale = gr.Slider(
-                minimum=0.1, maximum=5.0, value=1.0, step=0.1,
+                minimum=0.1,
+                maximum=5.0,
+                value=1.0,
+                step=0.1,
                 label="Anchor Scale",
             )
             anchor_index = gr.Slider(
@@ -306,14 +341,23 @@ def build_guidance_panel(
 
 def make_guidance_set_config(
     eg: bool,
-    uc: bool,   ucs: float,
-    urf: bool,  urfs: float,
-    ulk: bool,  ulks: float,
-    ucf: bool,  ucfs: float,
-    ua: bool,   uas: float,
-    urb: bool,  urbs: float,
-    u_speed: bool, u_speed_scale: float, u_speed_limit: float,
-    ai: int,    ap: str,
+    uc: bool,
+    ucs: float,
+    urf: bool,
+    urfs: float,
+    ulk: bool,
+    ulks: float,
+    ucf: bool,
+    ucfs: float,
+    ua: bool,
+    uas: float,
+    urb: bool,
+    urbs: float,
+    u_speed: bool,
+    u_speed_scale: float,
+    u_speed_limit: float,
+    ai: int,
+    ap: str,
     gs: float,
 ) -> GuidanceSetConfig | None:
     """Convert flat Gradio component values into a ``GuidanceSetConfig``.
@@ -348,18 +392,26 @@ def make_guidance_set_config(
         return None
 
     fns = [
-        GuidanceConfig("collision",            enabled=bool(uc),  scale=float(ucs)),
-        GuidanceConfig("route_following",      enabled=bool(urf), scale=float(urfs)),
-        GuidanceConfig("lane_keeping",         enabled=bool(ulk), scale=float(ulks)),
+        GuidanceConfig("collision", enabled=bool(uc), scale=float(ucs)),
+        GuidanceConfig("route_following", enabled=bool(urf), scale=float(urfs)),
+        GuidanceConfig("lane_keeping", enabled=bool(ulk), scale=float(ulks)),
         GuidanceConfig("centerline_following", enabled=bool(ucf), scale=float(ucfs)),
-        GuidanceConfig("speed", enabled=bool(u_speed), scale=float(u_speed_scale),
-                params={"v_low": 0.0, "v_high": u_speed_limit, "dt": 0.1}),
+        GuidanceConfig(
+            "speed",
+            enabled=bool(u_speed),
+            scale=float(u_speed_scale),
+            params={"v_low": 0.0, "v_high": u_speed_limit, "dt": 0.1},
+        ),
         GuidanceConfig("road_border", enabled=bool(urb), scale=float(urbs)),
     ]
     if ua and ap and os.path.exists(str(ap)):
         k = _get_prototype_k(str(ap))
-        fns.append(GuidanceConfig(
-            "anchor_following", enabled=True, scale=float(uas),
-            params={"prototypes_path": str(ap), "anchor_index": max(0, min(int(ai), k - 1))},
-        ))
+        fns.append(
+            GuidanceConfig(
+                "anchor_following",
+                enabled=True,
+                scale=float(uas),
+                params={"prototypes_path": str(ap), "anchor_index": max(0, min(int(ai), k - 1))},
+            )
+        )
     return GuidanceSetConfig(global_scale=float(gs), functions=fns)

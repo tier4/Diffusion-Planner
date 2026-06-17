@@ -1,7 +1,7 @@
 import argparse
 import json
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +18,10 @@ from autoware_planning_msgs.msg import LaneletRoute
 from autoware_vehicle_msgs.msg import TurnIndicatorsReport
 from diffusion_planner.dimensions import *
 from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
+    LINE_STRING_TYPE_MAP,
+    LINE_STRING_TYPE_NUM,
+    POLYGON_TYPE_MAP,
+    POLYGON_TYPE_NUM,
     convert_lanelet,
     create_lane_tensor,
     create_line_tensor,
@@ -61,6 +65,9 @@ turn_indicators             int32   (INPUT_T + 1)
 """
 PAST_TIME_STEPS = INPUT_T + 1
 
+# Synthetic clock period for frame assembly (10 Hz), matching the C++ build_sequences.
+CLOCK_PERIOD_NS = 100_000_000
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -94,6 +101,93 @@ class SequenceData:
 
     data_list: list[FrameData]
     route: LaneletRoute
+
+
+def _stamp_to_sec(stamp) -> float:
+    return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+
+def _slerp_quat(q0: np.ndarray, q1: np.ndarray, ratio: float) -> np.ndarray:
+    """Shortest-arc quaternion slerp ([x, y, z, w]), matching tf2::slerp."""
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    if dot > 0.9995:
+        res = q0 + ratio * (q1 - q0)
+        return res / np.linalg.norm(res)
+    theta0 = np.arccos(dot)
+    sin0 = np.sin(theta0)
+    s0 = np.sin((1.0 - ratio) * theta0) / sin0
+    s1 = np.sin(ratio * theta0) / sin0
+    return s0 * q0 + s1 * q1
+
+
+def _interpolated_pose_mat4x4(pose0, pose1, ratio: float) -> np.ndarray:
+    """Linear position + slerp orientation, matching calc_interpolated_pose(..., false)."""
+    ratio = min(max(ratio, 0.0), 1.0)
+    p0 = np.array([pose0.position.x, pose0.position.y, pose0.position.z])
+    p1 = np.array([pose1.position.x, pose1.position.y, pose1.position.z])
+    q0 = np.array(
+        [pose0.orientation.x, pose0.orientation.y, pose0.orientation.z, pose0.orientation.w]
+    )
+    q1 = np.array(
+        [pose1.orientation.x, pose1.orientation.y, pose1.orientation.z, pose1.orientation.w]
+    )
+    mat = np.eye(4)
+    mat[:3, :3] = Rotation.from_quat(_slerp_quat(q0, q1, ratio)).as_matrix()
+    mat[:3, 3] = p0 + ratio * (p1 - p0)
+    return mat
+
+
+def create_ego_sequence_interp(
+    data_list, start_idx, num_timesteps, map2bl_matrix_4x4, reference_time_sec
+):
+    """Time-based ego sequence matching C++ create_ego_sequence + create_ego_agent_past.
+
+    Collects odom from start_idx until its header stamp reaches reference_time, then samples
+    num_timesteps poses at PREDICTION_TIME_STEP_S (0.1 s) spacing ending at reference_time,
+    linearly interpolating by header stamp. Returns (num_timesteps, 3) of [x, y, yaw] in ego
+    frame, or None if the data does not cover reference_time.
+    """
+    odoms = []
+    for j in range(max(0, start_idx), len(data_list)):
+        odoms.append(data_list[j].kinematic_state)
+        if _stamp_to_sec(data_list[j].kinematic_state.header.stamp) >= reference_time_sec:
+            break
+    if len(odoms) == 0 or _stamp_to_sec(odoms[-1].header.stamp) < reference_time_sec:
+        return None
+
+    dt = 0.1  # PREDICTION_TIME_STEP_S
+    first_sec = _stamp_to_sec(odoms[0].header.stamp)
+    last_sec = _stamp_to_sec(odoms[-1].header.stamp)
+
+    out = np.zeros((num_timesteps, 3), dtype=np.float64)
+    search_start = 0
+    for t in range(num_timesteps):
+        # t=0 is the oldest, t=num_timesteps-1 is the reference time.
+        target_sec = reference_time_sec - (num_timesteps - 1 - t) * dt
+        if target_sec <= first_sec:
+            pose_mat = pose_to_mat4x4(odoms[0].pose.pose)
+        elif target_sec >= last_sec:
+            pose_mat = pose_to_mat4x4(odoms[-1].pose.pose)
+        else:
+            while search_start + 1 < len(odoms):
+                t_next = _stamp_to_sec(odoms[search_start + 1].header.stamp)
+                if target_sec <= t_next:
+                    break
+                search_start += 1
+            t0 = _stamp_to_sec(odoms[search_start].header.stamp)
+            t1 = _stamp_to_sec(odoms[search_start + 1].header.stamp)
+            ratio = (target_sec - t0) / (t1 - t0) if t1 > t0 else 0.0
+            pose_mat = _interpolated_pose_mat4x4(
+                odoms[search_start].pose.pose, odoms[search_start + 1].pose.pose, ratio
+            )
+        pose_ego = map2bl_matrix_4x4 @ pose_mat
+        out[t, 0] = pose_ego[0, 3]
+        out[t, 1] = pose_ego[1, 3]
+        out[t, 2] = np.arctan2(pose_ego[1, 0], pose_ego[0, 0])
+    return out
 
 
 def create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4):
@@ -131,6 +225,178 @@ def create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4):
         axis=1,
     )
     return ego_future_np
+
+
+# --- Neighbor-agent processing, ported from the C++ AgentData (conversion/agent.{hpp,cpp}) ---
+# Autoware ObjectClassification labels.
+_CLS_UNKNOWN = 0
+_CLS_CAR = 1
+_CLS_TRUCK = 2
+_CLS_BUS = 3
+_CLS_TRAILER = 4
+_CLS_MOTORCYCLE = 5
+_CLS_BICYCLE = 6
+_CLS_PEDESTRIAN = 7
+
+# Model labels.
+_AGENT_VEHICLE = 0
+_AGENT_PEDESTRIAN = 1
+_AGENT_BICYCLE = 2
+
+
+def _highest_prob_label(classification) -> int:
+    """Mirror autoware object_recognition_utils::getHighestProbLabel (first strict max wins)."""
+    best_label = _CLS_UNKNOWN
+    best_prob = -1.0
+    for c in classification:
+        if c.probability > best_prob:
+            best_prob = c.probability
+            best_label = c.label
+    return best_label
+
+
+def _get_model_label(classification) -> int:
+    label = _highest_prob_label(classification)
+    if label in (_CLS_CAR, _CLS_TRUCK, _CLS_BUS, _CLS_MOTORCYCLE, _CLS_TRAILER):
+        return _AGENT_VEHICLE
+    if label == _CLS_BICYCLE:
+        return _AGENT_BICYCLE
+    if label == _CLS_PEDESTRIAN:
+        return _AGENT_PEDESTRIAN
+    return _AGENT_VEHICLE
+
+
+def _is_unknown_object(classification) -> bool:
+    return _highest_prob_label(classification) == _CLS_UNKNOWN
+
+
+def _agent_state_from_object(obj):
+    """Capture the raw per-state info (pose in map frame + attributes)."""
+    pose_map = pose_to_mat4x4(obj.kinematics.pose_with_covariance.pose)
+    twist = obj.kinematics.twist_with_covariance.twist.linear
+    return {
+        "pose_map": pose_map,
+        "vx": twist.x,
+        "vy": twist.y,
+        "width": obj.shape.dimensions.y,
+        "length": obj.shape.dimensions.x,
+        "label": _get_model_label(obj.classification),
+    }
+
+
+def _agent_state_array(state, map2bl_matrix_4x4):
+    """C++ AgentState::as_array, computed after transform to ego frame (11 features)."""
+    pose_bl = map2bl_matrix_4x4 @ state["pose_map"]
+    cos_yaw = pose_bl[0, 0]
+    sin_yaw = pose_bl[1, 0]
+    # Normalize to a pure heading cos/sin, matching rotation_matrix_to_cos_sin (atan2 then cos/sin).
+    yaw = np.arctan2(sin_yaw, cos_yaw)
+    cos_yaw = np.cos(yaw)
+    sin_yaw = np.sin(yaw)
+    velocity_norm = np.hypot(state["vx"], state["vy"])
+    label = state["label"]
+    return (
+        pose_bl[0, 3],
+        pose_bl[1, 3],
+        cos_yaw,
+        sin_yaw,
+        velocity_norm * cos_yaw,
+        velocity_norm * sin_yaw,
+        state["width"],
+        state["length"],
+        float(label == _AGENT_VEHICLE),
+        float(label == _AGENT_PEDESTRIAN),
+        float(label == _AGENT_BICYCLE),
+    )
+
+
+def _latest_state_distance(history, map2bl_matrix_4x4):
+    pose_bl = map2bl_matrix_4x4 @ history[-1]["pose_map"]
+    return np.hypot(pose_bl[0, 3], pose_bl[1, 3])
+
+
+def build_neighbor_past(data_list, i, map2bl_matrix_4x4, max_num_objects, time_length):
+    """Port of AgentData.update_histories + transformed_and_trimmed_histories + flatten.
+
+    Returns (tensor (max_num_objects, time_length, 11), agent_ids) where agents are sorted
+    by latest-state ego distance and trimmed to max_num_objects, matching the C++ converter.
+    agent_ids is the ordered list of object ids kept (used for the future, which must share
+    the same ordering).
+    """
+    start_idx = max(0, i - time_length + 1)
+    histories = {}  # object_id(bytes) -> deque[state] (max time_length)
+    for frame_idx in range(start_idx, i + 1):
+        objects = data_list[frame_idx].tracked_objects.objects
+        found_ids = set()
+        for obj in objects:
+            if _is_unknown_object(obj.classification):
+                continue
+            oid = bytes(obj.object_id.uuid)
+            state = _agent_state_from_object(obj)
+            if oid in histories:
+                dq = histories[oid]
+                if len(dq) >= time_length:
+                    dq.popleft()
+                dq.append(state)
+            else:
+                # New agent: fill the whole history with the first observation.
+                histories[oid] = deque([state] * time_length, maxlen=time_length)
+            found_ids.add(oid)
+        # Drop agents not present in this frame.
+        for oid in [k for k in histories if k not in found_ids]:
+            del histories[oid]
+
+    items = list(histories.items())
+    items.sort(key=lambda kv: _latest_state_distance(kv[1], map2bl_matrix_4x4))
+    items = items[:max_num_objects]
+
+    out = np.zeros((max_num_objects, time_length, 11), dtype=np.float32)
+    for a, (_oid, history) in enumerate(items):
+        for t, state in enumerate(history):
+            out[a, t] = _agent_state_array(state, map2bl_matrix_4x4)
+    agent_ids = [oid for oid, _ in items]
+    return out, agent_ids
+
+
+def build_neighbor_future(data_list, i, map2bl_matrix_4x4, agent_ids, max_num_objects, out_t):
+    """Port of process_neighbor_agents_and_future's future half.
+
+    For each past agent (same order), seed an OUTPUT_T-length history with the current-frame
+    state, then walk future frames appending the same id until it disappears. Returns
+    (max_num_objects, out_t, 3) of [x, y, heading] in ego frame.
+    """
+    current_objs = {bytes(o.object_id.uuid): o for o in data_list[i].tracked_objects.objects}
+    # Pre-index future frames by object id.
+    future_maps = []
+    for t in range(1, out_t + 1):
+        fidx = i + t
+        if fidx >= len(data_list):
+            future_maps.append(None)
+        else:
+            future_maps.append(
+                {bytes(o.object_id.uuid): o for o in data_list[fidx].tracked_objects.objects}
+            )
+
+    out = np.zeros((max_num_objects, out_t, 3), dtype=np.float32)
+    for a, oid in enumerate(agent_ids):
+        seed_obj = current_objs.get(oid)
+        if seed_obj is None:
+            continue
+        dq = deque(maxlen=out_t)
+        dq.append(_agent_state_from_object(seed_obj))
+        for fmap in future_maps:
+            if fmap is None:
+                break
+            fo = fmap.get(oid)
+            if fo is None:
+                break
+            dq.append(_agent_state_from_object(fo))
+        for t, state in enumerate(dq):
+            arr = _agent_state_array(state, map2bl_matrix_4x4)
+            out[a, t, 0] = arr[0]
+            out[a, t, 1] = arr[1]
+            out[a, t, 2] = np.arctan2(arr[3], arr[2])
+    return out
 
 
 def create_neighbor_future(
@@ -235,7 +501,7 @@ def get_relative_goal_pose(goal_pose, map2bl_matrix_4x4):
     pose_in_bl = map2bl_matrix_4x4 @ pose_in_map
     x = pose_in_bl[0, 3]
     y = pose_in_bl[1, 3]
-    yaw = Rotation.from_matrix(pose_in_bl[0:3, 0:3]).as_euler("xyz")[2]
+    yaw = np.arctan2(pose_in_bl[1, 0], pose_in_bl[0, 0])
     return np.array([x, y, yaw], dtype=np.float32)
 
 
@@ -289,126 +555,142 @@ def main(
     storage_filter = rosbag2_py.StorageFilter(topics=target_topic_list)
     reader.set_filter(storage_filter)
 
-    topic_name_to_data = defaultdict(list)
+    # Read all messages, keeping each message's rosbag (recording) time `t`.
+    # The C++ build_sequences keys every topic off the rosbag time, NOT the header stamp.
+    topic_name_to_timed = {topic: [] for topic in target_topic_list}
     parse_num = 0
     while reader.has_next():
         (topic, data, t) = reader.read_next()
+        if topic not in target_topic_list:
+            continue
         msg_type = get_message(type_map[topic])
         msg = deserialize_message(data, msg_type)
-        if topic in target_topic_list:
-            topic_name_to_data[topic].append(msg)
-            parse_num += 1
-            if limit > 0 and parse_num >= limit:
-                break
+        topic_name_to_timed[topic].append((t, msg))
+        parse_num += 1
+        if limit > 0 and parse_num >= limit:
+            break
 
-    for key, value in topic_name_to_data.items():
+    for key, value in topic_name_to_timed.items():
         logger.info(f"{key}: {len(value)} msgs")
 
-    route_msgs = topic_name_to_data["/planning/mission_planning/route"]
-    sequence_data_list = [SequenceData([], route_msg) for route_msg in route_msgs]
+    kinematic_states = topic_name_to_timed["/localization/kinematic_state"]
+    accelerations = topic_name_to_timed["/localization/acceleration"]
+    tracked_objects_msgs = topic_name_to_timed["/perception/object_recognition/tracking/objects"]
+    turn_indicators = topic_name_to_timed["/vehicle/status/turn_indicators_status"]
+    traffic_signals = topic_name_to_timed["/perception/traffic_light_recognition/traffic_signals"]
+    route_entries = topic_name_to_timed["/planning/mission_planning/route"]
 
-    # convert to FrameData
-    # The base topic is "/perception/object_recognition/tracking/objects" (10Hz)
-    n = len(topic_name_to_data["/perception/object_recognition/tracking/objects"])
-    logger.info(f"{n=}")
-    progress_bar = tqdm(total=n)
-    for i in range(n):
-        tracking = topic_name_to_data["/perception/object_recognition/tracking/objects"][i]
-        timestamp = parse_timestamp(tracking.header.stamp)
-        latest_msgs = {
-            "/localization/kinematic_state": None,
-            "/localization/acceleration": None,
-            "/perception/traffic_light_recognition/traffic_signals": None,
-            "/vehicle/status/turn_indicators_status": None,
-        }
+    if len(route_entries) == 0:
+        logger.info("No route messages; nothing to build.")
+        return
 
-        ok = True
-        for key in latest_msgs.keys():
-            curr_msg, curr_index = get_nearest_msg(topic_name_to_data[key], tracking.header.stamp)
-            if curr_msg is None:
-                logger.info(f"Cannot find {key} msg")
-                ok = False
-                break
-            topic_name_to_data[key] = topic_name_to_data[key][curr_index:]
-            latest_msgs[key] = curr_msg
-            msg_stamp = curr_msg.header.stamp if hasattr(curr_msg, "header") else curr_msg.stamp
-            msg_stamp_int = parse_timestamp(msg_stamp)
-            diff = abs(timestamp - msg_stamp_int)
-            if diff > int(0.2 * 1e9):
-                logger.info(f"Over 200 msec: {key} {len(topic_name_to_data[key])=}, {diff=:,}")
-                ok = False
+    required_topics = [kinematic_states, accelerations, tracked_objects_msgs, turn_indicators]
+    if any(len(timed) == 0 for timed in required_topics):
+        logger.info("A required topic has no messages; nothing to build.")
+        return
 
-        # check kinematic_state
-        if ok:
-            kinematic_state = latest_msgs["/localization/kinematic_state"]
-            covariance = kinematic_state.pose.covariance
-            covariance_xx = covariance[0]
-            covariance_yy = covariance[7]
-            if covariance_xx > 1e-1 or covariance_yy > 1e-1:
-                logger.info(f"Invalid kinematic_state {covariance_xx=:.5f}, {covariance_yy=:.5f}")
-                ok = False
-
-        # check route
-        if search_nearest_route:
-            # find the latest route msg
-            max_route_index = -1
-            max_route_timestamp = 0
-            for j in range(len(route_msgs)):
-                route_msg = route_msgs[j]
-                route_stamp = parse_timestamp(route_msg.header.stamp)
-                if max_route_timestamp <= route_stamp <= timestamp:
-                    max_route_timestamp = route_stamp
-                    max_route_index = j
-            if max_route_index == -1:
-                logger.info(f"Cannot find route msg at {i}")
-                continue
+    # Merge consecutive routes that share a start_pose (FreeSpacePlanner sometimes only
+    # changes goal_pose, so such routes belong to one sequence). route_to_group maps a
+    # route index -> its merged-sequence index.
+    sequence_data_list = []
+    route_to_group = [0] * len(route_entries)
+    for j in range(len(route_entries)):
+        if j > 0 and route_entries[j][1].start_pose == route_entries[j - 1][1].start_pose:
+            route_to_group[j] = len(sequence_data_list) - 1
         else:
-            # use the first route msg
-            max_route_index = 0
+            route_to_group[j] = len(sequence_data_list)
+            sequence_data_list.append(SequenceData([], route_entries[j][1]))
 
-        sequence = sequence_data_list[max_route_index]
+    # Build per-route sequences of fixed-rate (10 Hz) frames. Pure assembly: every tick
+    # produces exactly one frame carrying the latest message at-or-before the tick for each
+    # topic (zero-order hold). Skip decisions happen later in the per-frame loop.
+    earliest_route = min(t for t, _ in route_entries)
+    clock_start = max(
+        kinematic_states[0][0],
+        accelerations[0][0],
+        tracked_objects_msgs[0][0],
+        turn_indicators[0][0],
+        earliest_route,
+    )
+    # End once any required topic is exhausted; beyond its last message we could only carry
+    # stale data forward. Traffic is drop-tolerated and does not gate the clock.
+    clock_end = min(
+        kinematic_states[-1][0],
+        accelerations[-1][0],
+        tracked_objects_msgs[-1][0],
+        turn_indicators[-1][0],
+    )
+    logger.info(f"clock_start={clock_start} clock_end={clock_end} period_ns={CLOCK_PERIOD_NS}")
 
-        if not ok:
-            if len(sequence.data_list) == 0:
-                # At the beginning of recording, some msgs may be missing
-                # Skip this frame
-                logger.info(f"Skip this frame {i=}/{n=}")
-                continue
-            else:
-                # If the msg is missing in the middle of recording, we can use the msgs to this point
-                logger.info(f"Finish at this frame {i=}/{n=}")
-                break
+    def advance_cursor(timed, cursor, tick):
+        # Advance to the largest index whose rosbag_time is <= tick.
+        while cursor + 1 < len(timed) and timed[cursor + 1][0] <= tick:
+            cursor += 1
+        return cursor
 
-        sequence.data_list.append(
+    kin_cursor = accel_cursor = tracked_cursor = turn_ind_cursor = traffic_high_cursor = -1
+    traffic_low_cursor = 0
+    # Persistent traffic-light state (group_id -> (stamp_ns, elements)), maintained at 10 Hz
+    # with a 5 s TTL exactly like the C++ build_sequences / process_traffic_signals.
+    traffic_map = {}
+    traffic_ttl_ns = int(5.0 * 1e9)
+    tick = clock_start
+    while tick <= clock_end:
+        kin_cursor = advance_cursor(kinematic_states, kin_cursor, tick)
+        accel_cursor = advance_cursor(accelerations, accel_cursor, tick)
+        tracked_cursor = advance_cursor(tracked_objects_msgs, tracked_cursor, tick)
+        turn_ind_cursor = advance_cursor(turn_indicators, turn_ind_cursor, tick)
+        traffic_high_cursor = advance_cursor(traffic_signals, traffic_high_cursor, tick)
+
+        kinematic = kinematic_states[kin_cursor][1]
+        accel = accelerations[accel_cursor][1]
+        tracked = tracked_objects_msgs[tracked_cursor][1]
+        turn_ind = turn_indicators[turn_ind_cursor][1]
+
+        # Fold the traffic msgs that arrived since the previous tick into the persistent map
+        # (latest stamp per light group), then expire entries older than the TTL.
+        for k in range(traffic_low_cursor, traffic_high_cursor + 1):
+            msg = traffic_signals[k][1]
+            msg_stamp = parse_timestamp(msg.stamp)
+            for signal in msg.traffic_light_groups:
+                gid = signal.traffic_light_group_id
+                if gid not in traffic_map or msg_stamp > traffic_map[gid][0]:
+                    traffic_map[gid] = (msg_stamp, signal.elements)
+        traffic_low_cursor = traffic_high_cursor + 1
+        for gid in [g for g, (stamp, _) in traffic_map.items() if tick - stamp > traffic_ttl_ns]:
+            del traffic_map[gid]
+        # Snapshot the current recognition state (group_id -> elements) for this frame.
+        traffic = {gid: elements for gid, (_stamp, elements) in traffic_map.items()}
+
+        # Resolve the route for this tick (latest route with rosbag_time <= tick).
+        max_route_index = 0
+        if search_nearest_route:
+            best_route_time = None
+            for j in range(len(route_entries)):
+                route_time = route_entries[j][0]
+                if route_time <= tick and (
+                    best_route_time is None or route_time >= best_route_time
+                ):
+                    best_route_time = route_time
+                    max_route_index = j
+
+        group = route_to_group[max_route_index]
+        sequence_data_list[group].data_list.append(
             FrameData(
-                timestamp=timestamp,
-                route=sequence.route,
-                tracked_objects=tracking,
-                kinematic_state=latest_msgs["/localization/kinematic_state"],
-                acceleration=latest_msgs["/localization/acceleration"],
-                traffic_signals=latest_msgs[
-                    "/perception/traffic_light_recognition/traffic_signals"
-                ],
-                turn_indicator=latest_msgs["/vehicle/status/turn_indicators_status"],
+                timestamp=tick,
+                route=sequence_data_list[group].route,
+                tracked_objects=tracked,
+                kinematic_state=kinematic,
+                acceleration=accel,
+                traffic_signals=traffic,
+                turn_indicator=turn_ind,
             )
         )
-        progress_bar.update(1)
+        tick += CLOCK_PERIOD_NS
 
-    # FreeSpacePlannerの影響で、最後の方でgoal_poseだけ微妙に変わることがある
-    # そういうものは結合する
-    for i in range(len(sequence_data_list) - 2, -1, -1):
-        route_msg_l = sequence_data_list[i].route
-        route_msg_r = sequence_data_list[i + 1].route
-        if route_msg_l.start_pose != route_msg_r.start_pose:
-            logger.info(
-                f"Route start pose mismatch: {route_msg_l.start_pose} != {route_msg_r.start_pose}"
-            )
-            continue
-        logger.info(f"Concatenate sequence {i} and {i + 1}")
-        logger.info(f"Before {len(sequence_data_list[i].data_list)=} frames")
-        sequence_data_list[i].data_list.extend(sequence_data_list[i + 1].data_list)
-        logger.info(f"After {len(sequence_data_list[i].data_list)=} frames")
-        sequence_data_list.pop(i + 1)
+    # Frames are pushed in tick order; keep each sequence ascending by timestamp.
+    for seq in sequence_data_list:
+        seq.data_list.sort(key=lambda fd: fd.timestamp)
 
     map_name = rosbag_path.stem
     sequence_num = len(sequence_data_list)
@@ -420,6 +702,12 @@ def main(
         data_list = seq.data_list
         n = len(data_list)
         logger.info(f"Total {n} frames")
+
+        if n == 0:
+            continue
+        # Match the C++ converter: use the sequence's last frame ego pose as the goal pose
+        # (FreeSpacePlanner only updates goal_pose, so the route's own goal is unreliable).
+        goal_pose = data_list[-1].kinematic_state.pose.pose
 
         # if less than min_frames (default 3 min), skip this sequence
         if n < min_frames:
@@ -439,9 +727,8 @@ def main(
                 data_list[i].kinematic_state
             )
 
-            traffic_light_recognition = parse_traffic_light_recognition(
-                data_list[i].traffic_signals
-            )
+            # traffic_signals already holds the persistent {group_id: elements} snapshot.
+            traffic_light_recognition = data_list[i].traffic_signals
 
             # lanes
             lanes_tensor, lanes_speed_limit, lanes_has_speed_limit = create_lane_tensor(
@@ -471,17 +758,30 @@ def main(
                 dev="cpu",
                 do_sort=False,
             )
-            goal_pose = data_list[i].route.goal_pose
             goal_pose_bl = get_relative_goal_pose(goal_pose, map2bl_matrix_4x4)
 
-            # ego
-            ego_past_np = create_ego_sequence(
-                data_list, i - PAST_TIME_STEPS, PAST_TIME_STEPS, map2bl_matrix_4x4
+            # ego (time-based interpolation, matching the C++ converter)
+            past_reference_sec = _stamp_to_sec(data_list[i].kinematic_state.header.stamp)
+            ego_past_np = create_ego_sequence_interp(
+                data_list,
+                i - PAST_TIME_STEPS + 1,
+                PAST_TIME_STEPS,
+                map2bl_matrix_4x4,
+                past_reference_sec,
             )
+            if ego_past_np is None:
+                logger.info(f"Failed to create ego past at frame {i}")
+                break
             ego_tensor = create_current_ego_state(
-                data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.79
+                data_list[i].kinematic_state, data_list[i].acceleration, wheel_base=2.75
             ).squeeze(0)
-            ego_future_np = create_ego_sequence(data_list, i, OUTPUT_T, map2bl_matrix_4x4)
+            future_reference_sec = past_reference_sec + OUTPUT_T * 0.1
+            ego_future_np = create_ego_sequence_interp(
+                data_list, i + 1, OUTPUT_T, map2bl_matrix_4x4, future_reference_sec
+            )
+            if ego_future_np is None:
+                logger.info(f"Reached end of sequence at frame {i}")
+                break
 
             # (1)自車が止まっている
             # (2)目の前のlanelet segmentが赤信号である
@@ -517,29 +817,25 @@ def main(
                 )
                 continue
 
-            # neighbor
-            tracking_past, tracking_future = tracking_past_and_future(
-                data_list, i, map2bl_matrix_4x4
-            )
-            neighbor_past_tensor = convert_tracked_objects_to_tensor(
-                tracked_objs=tracking_past,
-                map2bl_matrix_4x4=map2bl_matrix_4x4,
+            # neighbor (ported from the C++ AgentData / process_neighbor_agents_and_future)
+            neighbor_past_np, neighbor_agent_ids = build_neighbor_past(
+                data_list,
+                i,
+                map2bl_matrix_4x4,
                 max_num_objects=MAX_NUM_NEIGHBORS,
-                max_timesteps=PAST_TIME_STEPS,
-            ).squeeze(0)
-            neighbor_future_tensor = create_neighbor_future(
-                tracked_objs=tracking_future,
-                map2bl_matrix_4x4=map2bl_matrix_4x4,
-                max_num_objects=MAX_NUM_NEIGHBORS,
-                max_timesteps=OUTPUT_T,
-            ).squeeze(0)
-            # (32, 80, 11) -> (32, 80, 3)
-            neighbor_future_tensor = neighbor_future_tensor[:, :, :4]
-            # fixed cos(2) sin(3) -> heading
-            neighbor_future_tensor[:, :, 2] = np.arctan2(
-                neighbor_future_tensor[:, :, 3], neighbor_future_tensor[:, :, 2]
+                time_length=PAST_TIME_STEPS,
             )
-            neighbor_future_tensor = neighbor_future_tensor[:, :, :3]
+            neighbor_past_tensor = torch.from_numpy(neighbor_past_np)
+            neighbor_future_tensor = torch.from_numpy(
+                build_neighbor_future(
+                    data_list,
+                    i,
+                    map2bl_matrix_4x4,
+                    neighbor_agent_ids,
+                    max_num_objects=MAX_NUM_NEIGHBORS,
+                    out_t=OUTPUT_T,
+                )
+            )
 
             # polygon
             polygon_tensor = create_line_tensor(
@@ -550,6 +846,8 @@ def main(
                 num_elements=NUM_POLYGONS,
                 num_points=POINTS_PER_POLYGON,
                 dev="cpu",
+                type_map=POLYGON_TYPE_MAP,
+                num_types=POLYGON_TYPE_NUM,
             )
 
             # line_string
@@ -561,6 +859,8 @@ def main(
                 num_elements=NUM_LINE_STRINGS,
                 num_points=POINTS_PER_LINE_STRING,
                 dev="cpu",
+                type_map=LINE_STRING_TYPE_MAP,
+                num_types=LINE_STRING_TYPE_NUM,
             )
 
             # turn_indicators
@@ -580,6 +880,8 @@ def main(
                 "neighbor_agents_past": neighbor_past_tensor.numpy(),
                 "neighbor_agents_future": neighbor_future_tensor.numpy(),
                 "static_objects": np.zeros((5, 10), dtype=np.float32),
+                # (wheel_base, length, width); matches the C++ converter's ego_shape option
+                "ego_shape": np.array([2.75, 4.34, 1.70], dtype=np.float32),
                 "lanes": lanes_tensor.squeeze(0).numpy(),
                 "lanes_speed_limit": lanes_speed_limit.squeeze(0).numpy(),
                 "lanes_has_speed_limit": lanes_has_speed_limit.squeeze(0).numpy(),

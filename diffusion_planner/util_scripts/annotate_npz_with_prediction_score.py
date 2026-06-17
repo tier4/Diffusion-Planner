@@ -23,16 +23,27 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
-        "--valid_data_list", type=Path, required=True,
-        help="The exact path_list.json passed to valid_run.sh (defines sample order).")
+        "--valid_data_list",
+        type=Path,
+        required=True,
+        help="The exact path_list.json passed to valid_run.sh (defines sample order).",
+    )
     parser.add_argument(
-        "--predictions_dir", type=Path, required=True,
-        help="<MODEL_DIR>/validation_result/predictions (holds loss{i}.json).")
+        "--predictions_dir",
+        type=Path,
+        required=True,
+        help="<MODEL_DIR>/validation_result/predictions (holds loss{i}.json).",
+    )
     parser.add_argument(
-        "--model_tag", type=str, default=None,
-        help="Key under which scores are stored. Default: last 3 path parts of MODEL_DIR.")
+        "--model_tag",
+        type=str,
+        default=None,
+        help="Key under which scores are stored. Default: last 3 path parts of MODEL_DIR.",
+    )
     parser.add_argument("--dry_run", action="store_true", help="Check counts only; write nothing.")
     return parser.parse_args()
 
@@ -48,7 +59,8 @@ def main() -> None:
         raise SystemExit(
             f"count mismatch: {len(npz_list)} npz in list vs {len(loss_files)} loss files.\n"
             "The --valid_data_list must be exactly the one passed to valid_run.sh "
-            "(single-GPU, shuffle=False) so the positional mapping holds.")
+            "(single-GPU, shuffle=False) so the positional mapping holds."
+        )
 
     model_tag = args.model_tag
     if model_tag is None:
@@ -57,8 +69,11 @@ def main() -> None:
         model_tag = "_".join(model_dir.parts[-3:])
 
     print(f"model_tag = {model_tag}")
-    print(f"annotating {len(npz_list)} sidecar jsons"
-          + (" (dry run)" if args.dry_run else "") + " ...")
+    print(
+        f"annotating {len(npz_list)} sidecar jsons"
+        + (" (dry run)" if args.dry_run else "")
+        + " ..."
+    )
 
     n_written = 0
     n_missing = 0
@@ -74,8 +89,10 @@ def main() -> None:
             sidecar.write_text(json.dumps(meta, indent=2, sort_keys=True))
         n_written += 1
 
-    print(f"done: {'would write' if args.dry_run else 'wrote'} {n_written}, "
-          f"missing sidecar {n_missing}")
+    print(
+        f"done: {'would write' if args.dry_run else 'wrote'} {n_written}, "
+        f"missing sidecar {n_missing}"
+    )
 
 
 if __name__ == "__main__":

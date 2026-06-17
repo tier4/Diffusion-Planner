@@ -53,7 +53,9 @@ def main():
         if result:
             ego_pct = fmt_pct(result["ego"], args.baseline_ego)
             neigh_pct = fmt_pct(result["neigh"], args.baseline_neigh)
-            print(f"{stem:<40s} {result['ego']:>8.4f} {ego_pct:>8s} {result['neigh']:>8.4f} {neigh_pct:>8s}")
+            print(
+                f"{stem:<40s} {result['ego']:>8.4f} {ego_pct:>8s} {result['neigh']:>8.4f} {neigh_pct:>8s}"
+            )
 
     print("=" * 72)
 

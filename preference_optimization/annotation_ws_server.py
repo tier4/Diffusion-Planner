@@ -13,6 +13,7 @@ import base64
 import io
 import json
 import math
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -23,7 +24,6 @@ import torch
 import websockets
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
-import sys
 
 # Ensure parent directory is in path for diffusion_planner imports
 parent_dir = Path(__file__).resolve().parent.parent
@@ -137,7 +137,11 @@ class AnnotationWsServer:
             return {"full": metrics_text, "ade_fde": ""}
 
         ade_fde_lines = [line for line in table_lines if "ADE" in line or "FDE" in line]
-        ade_fde_table = "\n".join([table_lines[0], table_lines[1], *ade_fde_lines]) if len(table_lines) >= 2 else ""
+        ade_fde_table = (
+            "\n".join([table_lines[0], table_lines[1], *ade_fde_lines])
+            if len(table_lines) >= 2
+            else ""
+        )
 
         return {"full": "\n".join(table_lines), "ade_fde": ade_fde_table}
 
@@ -235,7 +239,9 @@ class AnnotationWsServer:
             "w": math.cos(heading / 2.0),
         }
 
-    def _build_predicted_trajectory_message(self, trajectory: Any, frame_id: str = "map") -> dict | None:
+    def _build_predicted_trajectory_message(
+        self, trajectory: Any, frame_id: str = "map"
+    ) -> dict | None:
         if trajectory is None:
             return None
         traj_np = torch.tensor(trajectory).cpu().numpy()
@@ -324,8 +330,12 @@ class AnnotationWsServer:
     def _refresh_from_tuple(self, result_tuple: tuple[Any, ...]) -> dict:
         # Keep visualization in sync with current UI time_step/zoom after any regeneration/navigation.
         plots = self.annotator.update_time_display(self.params.time_step, self.params.zoom_level)
-        metric_text, progress_text, metrics_text, sidebar_status, history_display = result_tuple[3:8]
-        return self._build_state_payload(plots, metric_text, progress_text, metrics_text, sidebar_status, history_display)
+        metric_text, progress_text, metrics_text, sidebar_status, history_display = result_tuple[
+            3:8
+        ]
+        return self._build_state_payload(
+            plots, metric_text, progress_text, metrics_text, sidebar_status, history_display
+        )
 
     async def _broadcast(self, message: dict) -> None:
         if not self.clients:
@@ -583,14 +593,18 @@ class AnnotationWsServer:
         self.clients.add(websocket)
         peer = f"{websocket.remote_address}"
         try:
-            await websocket.send(json.dumps(self._build_state_payload(
-                None,
-                self.state.metric_text,
-                self.state.progress_text,
-                self.state.metrics_text,
-                self.state.sidebar_status,
-                self.state.history_display,
-            )))
+            await websocket.send(
+                json.dumps(
+                    self._build_state_payload(
+                        None,
+                        self.state.metric_text,
+                        self.state.progress_text,
+                        self.state.metrics_text,
+                        self.state.sidebar_status,
+                        self.state.history_display,
+                    )
+                )
+            )
         except ConnectionClosed:
             # Client disconnected before initial state delivery.
             self.clients.discard(websocket)
@@ -608,14 +622,17 @@ class AnnotationWsServer:
                     response = self._with_request_id(response, request_id)
                     await self._broadcast(response)
                 except Exception as exc:  # noqa: BLE001
-                    error_payload = {"type": "error", "payload": {"message": str(exc), "protocol": "annotation.websocket.v1"}}
+                    error_payload = {
+                        "type": "error",
+                        "payload": {"message": str(exc), "protocol": "annotation.websocket.v1"},
+                    }
                     await websocket.send(json.dumps(error_payload))
         except ConnectionClosedOK:
             # Normal close handshake.
             pass
         except ConnectionClosedError as exc:
             # Abrupt close (e.g., browser/tab killed) should not be treated as server error.
-           pass
+            pass
         except ConnectionClosed as exc:
             # Any remaining close-related condition.
             print(f"WebSocket client disconnected: {peer} ({exc})")
@@ -658,7 +675,9 @@ class AnnotationWsServer:
     def reset_annotation_round(self, target_count: int | None = None) -> None:
         if target_count is None:
             target_count = len(self.npz_paths)
-        self.annotator = PreferenceAnnotator(self.policy_model, self.model_args, self.npz_paths, target_count)
+        self.annotator = PreferenceAnnotator(
+            self.policy_model, self.model_args, self.npz_paths, target_count
+        )
         self.params.time_step = 40
         self.training_status = {
             "phase": "annotation",
@@ -706,10 +725,21 @@ class AnnotationWsServer:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Annotation WebSocket server for Lichtblick UI.")
-    parser.add_argument("--model-path", type=Path, required=True, help="Path to model checkpoint (.pth)")
-    parser.add_argument("--npz-list", type=Path, required=True, help="Path to JSON list of NPZ files")
-    parser.add_argument("--target-count", type=int, default=None, help="Target preference count (default: len(npz list))")
-    parser.add_argument("--device", type=str, default="cuda:0", help="Torch device (e.g., cuda:0 or cpu)")
+    parser.add_argument(
+        "--model-path", type=Path, required=True, help="Path to model checkpoint (.pth)"
+    )
+    parser.add_argument(
+        "--npz-list", type=Path, required=True, help="Path to JSON list of NPZ files"
+    )
+    parser.add_argument(
+        "--target-count",
+        type=int,
+        default=None,
+        help="Target preference count (default: len(npz list))",
+    )
+    parser.add_argument(
+        "--device", type=str, default="cuda:0", help="Torch device (e.g., cuda:0 or cpu)"
+    )
     parser.add_argument("--host", type=str, default="127.0.0.1", help="WebSocket host")
     parser.add_argument("--port", type=int, default=8765, help="WebSocket port")
     return parser.parse_args()

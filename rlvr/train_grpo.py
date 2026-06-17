@@ -49,18 +49,20 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="GRPO Training for Diffusion Planner"
-    )
+    parser = argparse.ArgumentParser(description="GRPO Training for Diffusion Planner")
 
-    parser.add_argument("--model_path", type=Path, required=True,
-                        help="Path to model checkpoint (.pth)")
-    parser.add_argument("--train_npz_list", type=Path, required=True,
-                        help="JSON list of training .npz paths")
-    parser.add_argument("--valid_npz_list", type=Path, required=True,
-                        help="JSON list of validation .npz paths")
-    parser.add_argument("--config", type=Path, required=True,
-                        help="Path to GRPO config JSON (required)")
+    parser.add_argument(
+        "--model_path", type=Path, required=True, help="Path to model checkpoint (.pth)"
+    )
+    parser.add_argument(
+        "--train_npz_list", type=Path, required=True, help="JSON list of training .npz paths"
+    )
+    parser.add_argument(
+        "--valid_npz_list", type=Path, required=True, help="JSON list of validation .npz paths"
+    )
+    parser.add_argument(
+        "--config", type=Path, required=True, help="Path to GRPO config JSON (required)"
+    )
     parser.add_argument("--exp_name", type=str, default="grpo_experiment")
     parser.add_argument("--mode", type=str, choices=["rule", "gui"], default="rule")
     parser.add_argument("--port", type=int, default=7863)
@@ -78,7 +80,9 @@ def _find_lora_dir(search_dir: Path) -> Path | None:
     return None
 
 
-def setup_experiment(args: argparse.Namespace, config: GRPOConfig) -> tuple[Path, Path, Path | None]:
+def setup_experiment(
+    args: argparse.Namespace, config: GRPOConfig
+) -> tuple[Path, Path, Path | None]:
     if not args.model_path.exists():
         raise FileNotFoundError(f"Model not found: {args.model_path}")
 
@@ -119,8 +123,10 @@ def main():
     print(f"Loaded config from {args.config}")
 
     mode_str = "multi-epoch" if config.uses_importance_sampling else "on-policy"
-    print(f"Mode: {mode_str} (N={config.num_generations}, M={config.inner_epochs}, "
-          f"clip={config.ppo_clip_epsilon}, kl={config.kl_coef})")
+    print(
+        f"Mode: {mode_str} (N={config.num_generations}, M={config.inner_epochs}, "
+        f"clip={config.ppo_clip_epsilon}, kl={config.kl_coef})"
+    )
 
     run_dir, checkpoint_path, seed_lora_dir = setup_experiment(args, config)
 
@@ -131,12 +137,16 @@ def main():
     if config.use_lora:
         if seed_lora_dir is not None:
             from preference_optimization.lora_utils import load_lora_checkpoint
+
             policy_model = load_lora_checkpoint(
-                policy_model, str(seed_lora_dir), is_trainable=True,
+                policy_model,
+                str(seed_lora_dir),
+                is_trainable=True,
             )
             policy_model.print_trainable_parameters()
         else:
             from preference_optimization.lora_utils import apply_lora
+
             policy_model = apply_lora(
                 policy_model,
                 r=config.lora_rank,
@@ -187,8 +197,7 @@ def _run_rule_mode(
     train_npz_paths: list[str],
     valid_npz_paths: list[str],
 ):
-    args_dict = {k: str(v) if isinstance(v, Path) else v
-                 for k, v in vars(args).items()}
+    args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     drift_info = ""
 
     # Fix evaluation scenes from validation set (sampled once, reused every epoch)
@@ -196,6 +205,7 @@ def _run_rule_mode(
 
     # Initialize wandb logging (no-op if disabled in config)
     from rlvr.wandb_logger import WandbLogger
+
     wandb_log = WandbLogger.from_config(
         trainer.config,
         run_dir=str(trainer.run_dir),

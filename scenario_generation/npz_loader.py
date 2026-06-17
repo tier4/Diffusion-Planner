@@ -52,7 +52,7 @@ def _correct_heading_flip(
         else:
             continue
 
-        speed = np.sqrt(vx ** 2 + vy ** 2)
+        speed = np.sqrt(vx**2 + vy**2)
         if speed < speed_threshold:
             continue
 
@@ -73,7 +73,7 @@ def _correct_heading_flip(
     if future_traj is not None and future_traj.shape[0] >= 2:
         dx = future_traj[1, 0] - future_traj[0, 0]
         dy = future_traj[1, 1] - future_traj[0, 1]
-        speed = np.sqrt(dx ** 2 + dy ** 2) / 0.1
+        speed = np.sqrt(dx**2 + dy**2) / 0.1
         if speed >= speed_threshold:
             move_heading = np.arctan2(dy, dx)
             agent_heading = past_traj[-1, 2]
@@ -112,11 +112,14 @@ def _extract_ego_agent(
     if ego_past.shape[-1] == 3:
         past_traj = ego_past.astype(np.float32)
     else:
-        past_traj = np.stack([
-            ego_past[:, 0],
-            ego_past[:, 1],
-            _cos_sin_to_heading(ego_past[:, 2], ego_past[:, 3]),
-        ], axis=-1).astype(np.float32)
+        past_traj = np.stack(
+            [
+                ego_past[:, 0],
+                ego_past[:, 1],
+                _cos_sin_to_heading(ego_past[:, 2], ego_past[:, 3]),
+            ],
+            axis=-1,
+        ).astype(np.float32)
 
     # ego_current_state: (10,) [x, y, cos, sin, vx, vy, ax, ay, steer, yaw_rate]
     eco = data.get("ego_current_state")
@@ -145,18 +148,24 @@ def _extract_ego_agent(
     if future is not None:
         future = future.astype(np.float32)
         if future.shape[-1] == 4:
-            future = np.stack([
-                future[:, 0], future[:, 1],
-                _cos_sin_to_heading(future[:, 2], future[:, 3]),
-            ], axis=-1).astype(np.float32)
+            future = np.stack(
+                [
+                    future[:, 0],
+                    future[:, 1],
+                    _cos_sin_to_heading(future[:, 2], future[:, 3]),
+                ],
+                axis=-1,
+            ).astype(np.float32)
 
     # Goal pose: (3,) or (4,) [x, y, heading] or [x, y, cos, sin]
     goal = data.get("goal_pose")
     if goal is not None:
         goal = goal.flatten()
         if goal.shape[0] == 4:
-            goal = np.array([goal[0], goal[1], _cos_sin_to_heading(goal[2:3], goal[3:4]).item()],
-                            dtype=np.float32)
+            goal = np.array(
+                [goal[0], goal[1], _cos_sin_to_heading(goal[2:3], goal[3:4]).item()],
+                dtype=np.float32,
+            )
         else:
             goal = goal[:3].astype(np.float32)
 
@@ -247,30 +256,37 @@ def _extract_neighbors(data: dict[str, np.ndarray]) -> list[Agent]:
             if np.any(fut_i != 0):
                 future = fut_i.astype(np.float32)
                 if future.shape[-1] == 4:
-                    future = np.stack([
-                        future[:, 0], future[:, 1],
-                        _cos_sin_to_heading(future[:, 2], future[:, 3]),
-                    ], axis=-1).astype(np.float32)
+                    future = np.stack(
+                        [
+                            future[:, 0],
+                            future[:, 1],
+                            _cos_sin_to_heading(future[:, 2], future[:, 3]),
+                        ],
+                        axis=-1,
+                    ).astype(np.float32)
 
         _correct_heading_flip(past_traj, past_vel, future)
 
-        agents.append(Agent(
-            id=f"neighbor_{i}",
-            agent_type=atype,
-            length=length,
-            width=width,
-            wheelbase=wheelbase,
-            past_trajectory=past_traj,
-            past_velocities=past_vel,
-            acceleration=accel,
-            future_trajectory=future,
-        ))
+        agents.append(
+            Agent(
+                id=f"neighbor_{i}",
+                agent_type=atype,
+                length=length,
+                width=width,
+                wheelbase=wheelbase,
+                past_trajectory=past_traj,
+                past_velocities=past_vel,
+                acceleration=accel,
+                future_trajectory=future,
+            )
+        )
 
     return agents
 
 
 def _extract_map_data(data: dict[str, np.ndarray]) -> MapData:
     """Build MapData from NPZ arrays."""
+
     def _get(key: str, default_shape: tuple[int, ...]) -> np.ndarray:
         arr = data.get(key)
         if arr is None:

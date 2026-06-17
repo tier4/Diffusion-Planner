@@ -56,6 +56,11 @@ int main(int argc, char ** argv)
 
   const auto missing_topics_skip = check_missing_topics(bag_data);
   if (missing_topics_skip) {
+    std::cout << "Skipping rosbag due to missing required topics:" << std::endl;
+    for (const auto & t : missing_topics_skip->missing_topic_types) {
+      std::cout << "  - " << to_topic_name(t) << std::endl;
+    }
+    std::cout << "No training samples will be generated from this rosbag." << std::endl;
     save_route_json(
       options.save_dir, options.rosbag_dir_name, "missing_topics", 0, 0.0, 0, 0,
       missing_topics_skip.value(), bag_data.timestamp_stats_map);

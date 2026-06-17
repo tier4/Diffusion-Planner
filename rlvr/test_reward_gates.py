@@ -17,16 +17,16 @@ import torch
 
 from rlvr.reward import (
     RewardConfig,
+    _classify_outer_boundaries,
     _point_to_segments_signed_min_dist,
     _points_inside_intersection_areas,
-    _classify_outer_boundaries,
     compute_kinematic_gate,
 )
-
 
 # ---------------------------------------------------------------------------
 # _point_to_segments_signed_min_dist
 # ---------------------------------------------------------------------------
+
 
 def test_signed_dist_sign_convention():
     # Single vertical segment at x=1, y∈[0,2], outward pointing +x (to the right).
@@ -70,11 +70,14 @@ def test_signed_dist_empty_segments():
 # _points_inside_intersection_areas
 # ---------------------------------------------------------------------------
 
+
 def test_inside_square_polygon():
     # Unit square polygon (Np=1, P=4 vertices, K=0 extra channels beyond xy).
-    verts = torch.tensor([
-        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-    ])  # (1, 4, 2)
+    verts = torch.tensor(
+        [
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        ]
+    )  # (1, 4, 2)
     points = torch.tensor([[0.5, 0.5], [1.5, 0.5], [0.5, -0.5]])
     inside = _points_inside_intersection_areas(points, verts)
     assert inside[0].item()
@@ -95,6 +98,7 @@ def test_intersection_ignores_degenerate_polygon():
 # _classify_outer_boundaries returns outward vector
 # ---------------------------------------------------------------------------
 
+
 def test_classify_returns_outward():
     # Build a 2-lane strip: lane 0 is y∈[0,1], lane 1 is y∈[1,2], each x∈[0,10].
     # Each lane has 4 boundary segments (left=x=0, right=x=10, bottom=y=low, top=y=high).
@@ -108,18 +112,20 @@ def test_classify_returns_outward():
     seg_dir = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
     seg_lane = torch.tensor([0, 0], dtype=torch.int64)
     # Edge vertices — 4 polygon edges (the lane polygon), each defined as 2 endpoints.
-    edge_v1 = torch.tensor([
-        [0.0, 0.0], [10.0, 0.0], [10.0, 1.0], [0.0, 1.0]
-    ])
-    edge_v2 = torch.tensor([
-        [10.0, 0.0], [10.0, 1.0], [0.0, 1.0], [0.0, 0.0]
-    ])
+    edge_v1 = torch.tensor([[0.0, 0.0], [10.0, 0.0], [10.0, 1.0], [0.0, 1.0]])
+    edge_v2 = torch.tensor([[10.0, 0.0], [10.0, 1.0], [0.0, 1.0], [0.0, 0.0]])
     edge_poly_id = torch.zeros(4, dtype=torch.int64)
     n_polys = 1
 
     is_outer, outward = _classify_outer_boundaries(
-        seg_p1, seg_p2, seg_dir, seg_lane,
-        edge_v1, edge_v2, edge_poly_id, n_polys,
+        seg_p1,
+        seg_p2,
+        seg_dir,
+        seg_lane,
+        edge_v1,
+        edge_v2,
+        edge_poly_id,
+        n_polys,
     )
     assert is_outer.shape == (2,)
     assert outward.shape == (2, 2)
@@ -132,6 +138,7 @@ def test_classify_returns_outward():
 # ---------------------------------------------------------------------------
 # compute_kinematic_gate
 # ---------------------------------------------------------------------------
+
 
 def _straight_traj(speed_mps: float = 5.0, T: int = 80, dt: float = 0.1) -> torch.Tensor:
     """(1, T, 4) trajectory going straight along +x at constant speed, heading=0."""
@@ -206,6 +213,7 @@ def test_kinematic_gate_short_traj_passes():
 # Config defaults: verify removed fields don't resurrect
 # ---------------------------------------------------------------------------
 
+
 def test_reward_config_no_dead_fields():
     cfg = RewardConfig()
     # These used to exist but are now removed because nothing consumed them.
@@ -222,6 +230,7 @@ def test_reward_config_baseline_reference_default():
 # ---------------------------------------------------------------------------
 # underprogress_reference="baseline" — end-to-end against compute_reward_batch
 # ---------------------------------------------------------------------------
+
 
 def _trivial_lane():
     """Single straight lane, x∈[0,100], width 4m. Channels: x, y, dx, dy, then 8 zeros (12 total)."""
@@ -260,6 +269,7 @@ def test_underprogress_reference_baseline_path():
     """When underprogress_reference='baseline', the frozen anchor (not traj[0]) drives
     the underprogress penalty."""
     from rlvr.reward import compute_reward_batch
+
     K, T = 2, 80
     ego_trajs = _minimal_scene_data(K=K, T=T)
     # Bare-minimum data dict — most reward terms degenerate to zero on this synthetic input.
@@ -294,6 +304,7 @@ def test_underprogress_reference_baseline_falls_back_when_key_missing():
     """If underprogress_reference='baseline' but data has no 'baseline_path_len',
     the code falls back to 'det' (traj[0] path)."""
     from rlvr.reward import compute_reward_batch
+
     K, T = 2, 80
     ego_trajs = _minimal_scene_data(K=K, T=T)
     data = {
@@ -322,8 +333,10 @@ def test_underprogress_reference_baseline_falls_back_when_key_missing():
 
 def test_underprogress_baseline_accepts_python_scalar():
     """data['baseline_path_len'] should accept Python/numpy scalars, not just tensors."""
-    from rlvr.reward import compute_reward_batch
     import numpy as np
+
+    from rlvr.reward import compute_reward_batch
+
     K, T = 2, 80
     ego_trajs = _minimal_scene_data(K=K, T=T)
     base = {
@@ -354,4 +367,5 @@ def test_underprogress_baseline_accepts_python_scalar():
 
 if __name__ == "__main__":
     import pytest
+
     sys.exit(pytest.main([__file__, "-x", "-q"]))

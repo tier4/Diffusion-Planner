@@ -108,9 +108,9 @@ def main():
                 hw = ego_shape[2].item() / 2 if ego_shape is not None else 0.85
                 rb_min_dists.append(float((d - hw).min().clamp(min=0).item()))
             else:
-                rb_min_dists.append(float('inf'))
+                rb_min_dists.append(float("inf"))
         else:
-            rb_min_dists.append(float('inf'))
+            rb_min_dists.append(float("inf"))
 
         # Lane departure
         lane_gate, lane_near, lane_wide, _, lane_cont = compute_lane_departure_penalty(
@@ -129,15 +129,17 @@ def main():
             lane_min_clearances.append(0.50)  # safe
 
         if (i + 1) % 20 == 0:
-            print(f"  Processed {i+1}/{len(scene_paths)} scenes...")
+            print(f"  Processed {i + 1}/{len(scene_paths)} scenes...")
 
     n = len(scene_paths)
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"LANE + BORDER METRICS — {args.tag} ({n} scenes)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"  Road border crossings:  {rb_crossings}/{n}")
     print(f"  Lane departures:        {lane_crossings}/{n}")
-    print(f"  RB min dist (approx):   mean={np.mean(rb_min_dists):.3f}m  min={np.min(rb_min_dists):.3f}m")
+    print(
+        f"  RB min dist (approx):   mean={np.mean(rb_min_dists):.3f}m  min={np.min(rb_min_dists):.3f}m"
+    )
     print(f"  Lane safe scenes:       {sum(1 for c in lane_min_clearances if c > 0.40)}/{n}")
 
     if args.output_dir:

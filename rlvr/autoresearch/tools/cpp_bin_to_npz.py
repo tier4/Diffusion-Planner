@@ -43,7 +43,9 @@ NUM_LINE_STRINGS = 60
 POINTS_PER_SEGMENT = 20
 POINTS_PER_POLYGON = 40
 POINTS_PER_LINE_STRING = 20
-SEGMENT_POINT_DIM = 33  # 13 + 10 + 10 = X,Y,dX,dY,LB_X,LB_Y,RB_X,RB_Y,TL(5) + LeftType(10) + RightType(10)
+SEGMENT_POINT_DIM = (
+    33  # 13 + 10 + 10 = X,Y,dX,dY,LB_X,LB_Y,RB_X,RB_Y,TL(5) + LeftType(10) + RightType(10)
+)
 POLYGON_DIM = 3  # 2 + POLYGON_TYPE_NUM=1
 LS_DIM = 4  # 2 + LINE_STRING_TYPE_NUM=2
 
@@ -64,12 +66,14 @@ EXPECTED_BIN_SIZE = (
         + NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * LS_DIM
         + POSE_DIM  # goal_pose
         + 3  # ego_shape
-    ) * 4  # floats
+    )
+    * 4  # floats
     + (
         NUM_SEGMENTS_IN_LANE  # lanes_has_speed_limit int32
         + NUM_SEGMENTS_IN_ROUTE  # route_lanes_has_speed_limit int32
         + INPUT_T_WITH_CURRENT  # turn_indicators int32
-    ) * 4
+    )
+    * 4
 )
 assert EXPECTED_BIN_SIZE == 1309172, EXPECTED_BIN_SIZE
 
@@ -112,37 +116,45 @@ def decode_bin(raw: bytes) -> dict[str, np.ndarray]:
 
     version = take_u32(1)[0]  # noqa: F841  -- structural cross-check only
 
-    ego_past_xyc = take_f32(INPUT_T_WITH_CURRENT * POSE_DIM).reshape(
-        INPUT_T_WITH_CURRENT, POSE_DIM
-    )
+    ego_past_xyc = take_f32(INPUT_T_WITH_CURRENT * POSE_DIM).reshape(INPUT_T_WITH_CURRENT, POSE_DIM)
     ego_current = take_f32(10).copy()
     ego_future_xyc = take_f32(OUTPUT_T * POSE_DIM).reshape(OUTPUT_T, POSE_DIM)
-    neighbor_past = take_f32(
-        MAX_NUM_NEIGHBORS * INPUT_T_WITH_CURRENT * NEIGHBOR_PAST_DIM
-    ).reshape(MAX_NUM_NEIGHBORS, INPUT_T_WITH_CURRENT, NEIGHBOR_PAST_DIM).copy()
-    neighbor_future_xyc = take_f32(
-        MAX_NUM_NEIGHBORS * OUTPUT_T * NEIGHBOR_FUTURE_DIM
-    ).reshape(MAX_NUM_NEIGHBORS, OUTPUT_T, NEIGHBOR_FUTURE_DIM)
+    neighbor_past = (
+        take_f32(MAX_NUM_NEIGHBORS * INPUT_T_WITH_CURRENT * NEIGHBOR_PAST_DIM)
+        .reshape(MAX_NUM_NEIGHBORS, INPUT_T_WITH_CURRENT, NEIGHBOR_PAST_DIM)
+        .copy()
+    )
+    neighbor_future_xyc = take_f32(MAX_NUM_NEIGHBORS * OUTPUT_T * NEIGHBOR_FUTURE_DIM).reshape(
+        MAX_NUM_NEIGHBORS, OUTPUT_T, NEIGHBOR_FUTURE_DIM
+    )
     static_objects = take_f32(STATIC_N * STATIC_DIM).reshape(STATIC_N, STATIC_DIM).copy()
 
-    lanes = take_f32(
-        NUM_SEGMENTS_IN_LANE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM
-    ).reshape(NUM_SEGMENTS_IN_LANE, POINTS_PER_SEGMENT, SEGMENT_POINT_DIM).copy()
+    lanes = (
+        take_f32(NUM_SEGMENTS_IN_LANE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM)
+        .reshape(NUM_SEGMENTS_IN_LANE, POINTS_PER_SEGMENT, SEGMENT_POINT_DIM)
+        .copy()
+    )
     lanes_speed_limit = take_f32(NUM_SEGMENTS_IN_LANE).reshape(NUM_SEGMENTS_IN_LANE, 1).copy()
     lanes_has_sl = take_i32(NUM_SEGMENTS_IN_LANE).astype(bool).reshape(NUM_SEGMENTS_IN_LANE, 1)
 
-    route_lanes = take_f32(
-        NUM_SEGMENTS_IN_ROUTE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM
-    ).reshape(NUM_SEGMENTS_IN_ROUTE, POINTS_PER_SEGMENT, SEGMENT_POINT_DIM).copy()
+    route_lanes = (
+        take_f32(NUM_SEGMENTS_IN_ROUTE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM)
+        .reshape(NUM_SEGMENTS_IN_ROUTE, POINTS_PER_SEGMENT, SEGMENT_POINT_DIM)
+        .copy()
+    )
     route_speed_limit = take_f32(NUM_SEGMENTS_IN_ROUTE).reshape(NUM_SEGMENTS_IN_ROUTE, 1).copy()
     route_has_sl = take_i32(NUM_SEGMENTS_IN_ROUTE).astype(bool).reshape(NUM_SEGMENTS_IN_ROUTE, 1)
 
-    polygons = take_f32(NUM_POLYGONS * POINTS_PER_POLYGON * POLYGON_DIM).reshape(
-        NUM_POLYGONS, POINTS_PER_POLYGON, POLYGON_DIM
-    ).copy()
-    line_strings = take_f32(NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * LS_DIM).reshape(
-        NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, LS_DIM
-    ).copy()
+    polygons = (
+        take_f32(NUM_POLYGONS * POINTS_PER_POLYGON * POLYGON_DIM)
+        .reshape(NUM_POLYGONS, POINTS_PER_POLYGON, POLYGON_DIM)
+        .copy()
+    )
+    line_strings = (
+        take_f32(NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * LS_DIM)
+        .reshape(NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, LS_DIM)
+        .copy()
+    )
     goal_pose_xyc = take_f32(POSE_DIM)
     turn_indicators = take_i32(INPUT_T_WITH_CURRENT).copy()
     ego_shape = take_f32(3).copy()
@@ -204,7 +216,9 @@ def convert_dir(src_dir: Path, dst_dir: Path, skip_existing: bool = True) -> dic
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", type=Path, required=True, help="dir of .bin/.json pairs from cpp data_converter")
+    ap.add_argument(
+        "--src", type=Path, required=True, help="dir of .bin/.json pairs from cpp data_converter"
+    )
     ap.add_argument("--dst", type=Path, required=True, help="dir to write .npz files")
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()

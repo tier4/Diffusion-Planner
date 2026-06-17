@@ -27,6 +27,7 @@ Usage:
         --config /path/to/reward_config.json \\
         --output /path/to/heatmap.png
 """
+
 from __future__ import annotations
 
 import argparse
@@ -53,7 +54,9 @@ _NPZ_RE = re.compile(r"replay_step_(\d+)\.npz$")
 
 
 def _cluster_encounters(
-    arcs: np.ndarray, clrs: np.ndarray, gap: float = 20.0,
+    arcs: np.ndarray,
+    clrs: np.ndarray,
+    gap: float = 20.0,
 ) -> list[dict]:
     """Group consecutive arc positions into encounters."""
     if len(arcs) == 0:
@@ -64,28 +67,33 @@ def _cluster_encounters(
     start = 0
     for i in range(1, len(arcs)):
         if arcs[i] - arcs[i - 1] > gap:
-            encounters.append({
-                "arc_mean": float(np.mean(arcs[start:i])),
-                "arc_lo": float(arcs[start]),
-                "arc_hi": float(arcs[i - 1]),
-                "min": float(np.min(clrs[start:i])),
-                "mean": float(np.mean(clrs[start:i])),
-                "n": i - start,
-            })
+            encounters.append(
+                {
+                    "arc_mean": float(np.mean(arcs[start:i])),
+                    "arc_lo": float(arcs[start]),
+                    "arc_hi": float(arcs[i - 1]),
+                    "min": float(np.min(clrs[start:i])),
+                    "mean": float(np.mean(clrs[start:i])),
+                    "n": i - start,
+                }
+            )
             start = i
-    encounters.append({
-        "arc_mean": float(np.mean(arcs[start:])),
-        "arc_lo": float(arcs[start]),
-        "arc_hi": float(arcs[-1]),
-        "min": float(np.min(clrs[start:])),
-        "mean": float(np.mean(clrs[start:])),
-        "n": len(arcs) - start,
-    })
+    encounters.append(
+        {
+            "arc_mean": float(np.mean(arcs[start:])),
+            "arc_lo": float(arcs[start]),
+            "arc_hi": float(arcs[-1]),
+            "min": float(np.min(clrs[start:])),
+            "mean": float(np.mean(clrs[start:])),
+            "n": len(arcs) - start,
+        }
+    )
     return encounters
 
 
 def _match_encounters(
-    enc_a: list[dict], enc_b: list[dict],
+    enc_a: list[dict],
+    enc_b: list[dict],
 ) -> list[tuple[dict | None, dict | None]]:
     """Match encounters from two runs by arc overlap."""
     matched: list[tuple[dict | None, dict | None]] = []
@@ -141,9 +149,7 @@ def _score_run_ego_actual(
     npz_dir = run_dir / "npz"
     if not npz_dir.exists():
         npz_dir = run_dir
-    npz_paths = sorted(
-        p for p in npz_dir.glob("*.npz") if _NPZ_RE.search(p.name)
-    )
+    npz_paths = sorted(p for p in npz_dir.glob("*.npz") if _NPZ_RE.search(p.name))
     if stride > 1:
         npz_paths = npz_paths[::stride]
     if max_steps:
@@ -202,9 +208,7 @@ def _score_run_ego_actual(
             nc, ns_ = float(nb_cos[j]), float(nb_sin[j])
             nw, nl = float(nb_w[j]), float(nb_l[j])
             if nw < 0.1 or nl < 0.1:
-                raise ValueError(
-                    f"Neighbor {j} has invalid dimensions (w={nw}, l={nl})"
-                )
+                raise ValueError(f"Neighbor {j} has invalid dimensions (w={nw}, l={nl})")
             npc_corners = _build_obb_corners(nx, ny, nc, ns_, nl, nw, 0.0)
 
             pt1, pt2 = _closest_points_between_rects(ego_corners, npc_corners)
@@ -224,7 +228,7 @@ def _score_run_ego_actual(
         min_clearances.append(best_d)
 
         if (i + 1) % 200 == 0:
-            print(f"    scored {i+1}/{len(npz_paths)}")
+            print(f"    scored {i + 1}/{len(npz_paths)}")
 
     return np.array(arc_positions), np.array(min_clearances)
 
@@ -260,10 +264,7 @@ def _score_run(
     npz_dir = run_dir / "npz"
     if not npz_dir.exists():
         npz_dir = run_dir
-    npz_paths = sorted(
-        p for p in npz_dir.glob("*.npz")
-        if _NPZ_RE.search(p.name)
-    )
+    npz_paths = sorted(p for p in npz_dir.glob("*.npz") if _NPZ_RE.search(p.name))
     if stride > 1:
         npz_paths = npz_paths[::stride]
     if max_steps:
@@ -285,7 +286,11 @@ def _score_run(
 
         scene = from_npz(str(path))
         preds = _predict_batch(
-            model, model_args, scene, [scene.ego_agent_id], device,
+            model,
+            model_args,
+            scene,
+            [scene.ego_agent_id],
+            device,
             inference_delay=inference_delay,
         )
         ego_pred = preds.get(scene.ego_agent_id)
@@ -299,7 +304,7 @@ def _score_run(
         min_clearances.append(result["sc_min_dist"])
 
         if (i + 1) % 100 == 0:
-            print(f"    scored {i+1}/{len(npz_paths)}")
+            print(f"    scored {i + 1}/{len(npz_paths)}")
 
     return np.array(arc_positions), np.array(min_clearances)
 
@@ -311,23 +316,39 @@ def main():
     p.add_argument("--model_a", type=Path, default=None)
     p.add_argument("--run_b", type=Path, default=None)
     p.add_argument("--model_b", type=Path, default=None)
-    p.add_argument("--config", type=Path, default=None,
-                   help="Reward config JSON (required for --mode predicted)")
-    p.add_argument("--mode", choices=["predicted", "ego_actual"], default="ego_actual",
-                   help="'ego_actual' scores the real ego pose at each step (no model). "
-                        "'predicted' scores the model's 80-step prediction (needs --model_a/b + --config).")
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Reward config JSON (required for --mode predicted)",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["predicted", "ego_actual"],
+        default="ego_actual",
+        help="'ego_actual' scores the real ego pose at each step (no model). "
+        "'predicted' scores the model's 80-step prediction (needs --model_a/b + --config).",
+    )
     p.add_argument("--label_a", default="A")
     p.add_argument("--label_b", default="B")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--bin_m", type=float, default=5.0)
     p.add_argument("--stride", type=int, default=1)
     p.add_argument("--max_steps", type=int, default=None)
-    p.add_argument("--safe_thresh", type=float, default=1.0,
-                   help="Above this clearance both models are considered safe — "
-                        "no winner is highlighted. Default 1.0m.")
-    p.add_argument("--relevance_m", type=float, default=3.0,
-                   help="Only record steps where closest parked vehicle is within "
-                        "this distance (m). Default 3.")
+    p.add_argument(
+        "--safe_thresh",
+        type=float,
+        default=1.0,
+        help="Above this clearance both models are considered safe — "
+        "no winner is highlighted. Default 1.0m.",
+    )
+    p.add_argument(
+        "--relevance_m",
+        type=float,
+        default=3.0,
+        help="Only record steps where closest parked vehicle is within "
+        "this distance (m). Default 3.",
+    )
     p.add_argument("--min_arc_m", type=float, default=None)
     p.add_argument("--max_arc_m", type=float, default=None)
     p.add_argument("--inference_delay", type=int, default=0)
@@ -345,39 +366,73 @@ def main():
         if args.model_a is None or args.config is None:
             raise SystemExit("--mode predicted requires --model_a and --config")
 
-    print(f"[{args.label_a}] scoring {args.run_a} (mode={args.mode}, relevance={args.relevance_m}m)")
+    print(
+        f"[{args.label_a}] scoring {args.run_a} (mode={args.mode}, relevance={args.relevance_m}m)"
+    )
     if args.mode == "ego_actual":
         arc_a, clr_a = _score_run_ego_actual(
-            args.run_a, route, pts, s, args.stride, args.max_steps,
+            args.run_a,
+            route,
+            pts,
+            s,
+            args.stride,
+            args.max_steps,
             args.relevance_m,
         )
     else:
         arc_a, clr_a = _score_run(
-            args.run_a, args.model_a, route, args.config,
-            pts, s, device, args.stride, args.max_steps, args.inference_delay,
+            args.run_a,
+            args.model_a,
+            route,
+            args.config,
+            pts,
+            s,
+            device,
+            args.stride,
+            args.max_steps,
+            args.inference_delay,
         )
     if len(arc_a) == 0:
         raise SystemExit("No steps had a parked vehicle within relevance range.")
-    print(f"  {len(arc_a)} relevant steps, clearance min={clr_a.min():.3f} "
-          f"mean={clr_a.mean():.3f} p5={np.percentile(clr_a, 5):.3f}")
+    print(
+        f"  {len(arc_a)} relevant steps, clearance min={clr_a.min():.3f} "
+        f"mean={clr_a.mean():.3f} p5={np.percentile(clr_a, 5):.3f}"
+    )
 
     has_b = args.run_b is not None
     if has_b:
-        print(f"[{args.label_b}] scoring {args.run_b} (mode={args.mode}, relevance={args.relevance_m}m)")
+        print(
+            f"[{args.label_b}] scoring {args.run_b} (mode={args.mode}, relevance={args.relevance_m}m)"
+        )
         if args.mode == "ego_actual":
             arc_b, clr_b = _score_run_ego_actual(
-                args.run_b, route, pts, s, args.stride, args.max_steps,
+                args.run_b,
+                route,
+                pts,
+                s,
+                args.stride,
+                args.max_steps,
                 args.relevance_m,
             )
         else:
             if args.model_b is None:
                 raise SystemExit("--mode predicted with --run_b requires --model_b")
             arc_b, clr_b = _score_run(
-                args.run_b, args.model_b, route, args.config,
-                pts, s, device, args.stride, args.max_steps, args.inference_delay,
+                args.run_b,
+                args.model_b,
+                route,
+                args.config,
+                pts,
+                s,
+                device,
+                args.stride,
+                args.max_steps,
+                args.inference_delay,
             )
-        print(f"  {len(arc_b)} scored steps, clearance min={clr_b.min():.3f} "
-              f"mean={clr_b.mean():.3f} p5={np.percentile(clr_b, 5):.3f}")
+        print(
+            f"  {len(arc_b)} scored steps, clearance min={clr_b.min():.3f} "
+            f"mean={clr_b.mean():.3f} p5={np.percentile(clr_b, 5):.3f}"
+        )
 
     if args.min_arc_m is not None:
         mask_a = arc_a >= args.min_arc_m
@@ -406,7 +461,7 @@ def main():
     labels, min_a_v, mean_a_v, min_b_v, mean_b_v = [], [], [], [], []
     for ea, eb in matched:
         arc = ea["arc_mean"] if ea else eb["arc_mean"]
-        labels.append(f"#{len(labels)+1}\n{arc:.0f}m")
+        labels.append(f"#{len(labels) + 1}\n{arc:.0f}m")
         min_a_v.append(ea["min"] if ea else np.nan)
         mean_a_v.append(ea["mean"] if ea else np.nan)
         min_b_v.append(eb["min"] if eb else np.nan)
@@ -425,15 +480,29 @@ def main():
         arc = ea["arc_mean"] if ea else eb["arc_mean"]
         idx = min(int(np.searchsorted(s, arc)), len(pts) - 1)
         tightest = min(
-            ea["min"] if ea else 99.0, eb["min"] if eb else 99.0,
+            ea["min"] if ea else 99.0,
+            eb["min"] if eb else 99.0,
         )
         c = "#cc0000" if tightest < 0.4 else "#ff8800" if tightest < safe_thresh else "#228B22"
-        ax_map.plot(pts[idx, 0], pts[idx, 1], "o", color=c, ms=8, zorder=10,
-                    markeredgecolor="black", markeredgewidth=0.8)
+        ax_map.plot(
+            pts[idx, 0],
+            pts[idx, 1],
+            "o",
+            color=c,
+            ms=8,
+            zorder=10,
+            markeredgecolor="black",
+            markeredgewidth=0.8,
+        )
         ax_map.annotate(
-            f"{i+1}", (pts[idx, 0], pts[idx, 1]),
-            fontsize=7, fontweight="bold", ha="center", va="bottom",
-            xytext=(0, 7), textcoords="offset points",
+            f"{i + 1}",
+            (pts[idx, 0], pts[idx, 1]),
+            fontsize=7,
+            fontweight="bold",
+            ha="center",
+            va="bottom",
+            xytext=(0, 7),
+            textcoords="offset points",
             bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="black", lw=0.4),
         )
     ax_map.set_title("Route", fontsize=9)
@@ -441,23 +510,71 @@ def main():
 
     x = np.arange(n_enc)
     w = 0.18
-    ax_bars.bar(x - 1.5 * w, min_a_v, w, label=f"{args.label_a} min",
-                color="#d62728", alpha=0.9, edgecolor="black", lw=0.4)
-    ax_bars.bar(x - 0.5 * w, mean_a_v, w, label=f"{args.label_a} mean",
-                color="#d62728", alpha=0.35, edgecolor="black", lw=0.4)
+    ax_bars.bar(
+        x - 1.5 * w,
+        min_a_v,
+        w,
+        label=f"{args.label_a} min",
+        color="#d62728",
+        alpha=0.9,
+        edgecolor="black",
+        lw=0.4,
+    )
+    ax_bars.bar(
+        x - 0.5 * w,
+        mean_a_v,
+        w,
+        label=f"{args.label_a} mean",
+        color="#d62728",
+        alpha=0.35,
+        edgecolor="black",
+        lw=0.4,
+    )
     if has_b:
-        ax_bars.bar(x + 0.5 * w, min_b_v, w, label=f"{args.label_b} min",
-                    color="#2166ac", alpha=0.9, edgecolor="black", lw=0.4)
-        ax_bars.bar(x + 1.5 * w, mean_b_v, w, label=f"{args.label_b} mean",
-                    color="#2166ac", alpha=0.35, edgecolor="black", lw=0.4)
+        ax_bars.bar(
+            x + 0.5 * w,
+            min_b_v,
+            w,
+            label=f"{args.label_b} min",
+            color="#2166ac",
+            alpha=0.9,
+            edgecolor="black",
+            lw=0.4,
+        )
+        ax_bars.bar(
+            x + 1.5 * w,
+            mean_b_v,
+            w,
+            label=f"{args.label_b} mean",
+            color="#2166ac",
+            alpha=0.35,
+            edgecolor="black",
+            lw=0.4,
+        )
 
     for xi, va, vb in zip(x, min_a_v, min_b_v if has_b else [np.nan] * n_enc):
         if not np.isnan(va):
-            ax_bars.text(xi - 1.5 * w, va + 0.02, f"{va:.2f}", ha="center",
-                         va="bottom", fontsize=6.5, color="#d62728", fontweight="bold")
+            ax_bars.text(
+                xi - 1.5 * w,
+                va + 0.02,
+                f"{va:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=6.5,
+                color="#d62728",
+                fontweight="bold",
+            )
         if has_b and not np.isnan(vb):
-            ax_bars.text(xi + 0.5 * w, vb + 0.02, f"{vb:.2f}", ha="center",
-                         va="bottom", fontsize=6.5, color="#2166ac", fontweight="bold")
+            ax_bars.text(
+                xi + 0.5 * w,
+                vb + 0.02,
+                f"{vb:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=6.5,
+                color="#2166ac",
+                fontweight="bold",
+            )
 
     ax_bars.axhspan(0, 0.2, alpha=0.07, color="red")
     ax_bars.axhspan(0.2, 0.4, alpha=0.04, color="orange")
@@ -472,27 +589,47 @@ def main():
                 continue
             y_top = max(mean_a_v[i], mean_b_v[i]) + 0.12
             if ma >= safe_thresh and mb >= safe_thresh:
-                ax_bars.text(x[i], y_top, "both safe", ha="center", fontsize=6,
-                             color="#228B22", fontstyle="italic")
+                ax_bars.text(
+                    x[i],
+                    y_top,
+                    "both safe",
+                    ha="center",
+                    fontsize=6,
+                    color="#228B22",
+                    fontstyle="italic",
+                )
             elif mb > ma:
-                ax_bars.text(x[i], y_top, args.label_b, ha="center", fontsize=6,
-                             color="#2166ac", fontweight="bold")
+                ax_bars.text(
+                    x[i],
+                    y_top,
+                    args.label_b,
+                    ha="center",
+                    fontsize=6,
+                    color="#2166ac",
+                    fontweight="bold",
+                )
             elif ma > mb:
-                ax_bars.text(x[i], y_top, args.label_a, ha="center", fontsize=6,
-                             color="#d62728", fontweight="bold")
+                ax_bars.text(
+                    x[i],
+                    y_top,
+                    args.label_a,
+                    ha="center",
+                    fontsize=6,
+                    color="#d62728",
+                    fontweight="bold",
+                )
 
     ax_bars.set_xticks(x)
     ax_bars.set_xticklabels(labels, fontsize=7)
     ax_bars.set_ylabel("Clearance (m)", fontsize=10)
     ax_bars.legend(fontsize=7, ncol=4, loc="upper right")
     ax_bars.grid(axis="y", alpha=0.15)
-    all_v = np.concatenate(
-        [v[~np.isnan(v)] for v in [min_a_v, mean_a_v, min_b_v, mean_b_v]]
-    )
+    all_v = np.concatenate([v[~np.isnan(v)] for v in [min_a_v, mean_a_v, min_b_v, mean_b_v]])
     ax_bars.set_ylim(0, min(3.5, float(all_v.max()) * 1.2))
 
     tight = sum(
-        1 for i in range(n_enc)
+        1
+        for i in range(n_enc)
         if not np.isnan(min_a_v[i])
         and (not has_b or not np.isnan(min_b_v[i]))
         and (min_a_v[i] < safe_thresh or (has_b and min_b_v[i] < safe_thresh))
@@ -504,7 +641,8 @@ def main():
     ]
     fig.suptitle(
         "Parked vehicle avoidance: " + ", ".join(title_parts),
-        fontsize=12, fontweight="bold",
+        fontsize=12,
+        fontweight="bold",
     )
     fig.subplots_adjust(left=0.04, right=0.98, bottom=0.1, top=0.90)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -513,9 +651,11 @@ def main():
 
     np.savez(
         args.output.with_suffix(".npz"),
-        arc_a=arc_a, clr_a=clr_a,
+        arc_a=arc_a,
+        clr_a=clr_a,
         **({"arc_b": arc_b, "clr_b": clr_b} if has_b else {}),
-        route_pts=pts, route_s=s,
+        route_pts=pts,
+        route_s=s,
     )
     print(f"Saved {args.output.with_suffix('.npz')}")
 

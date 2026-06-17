@@ -1,4 +1,5 @@
 """Validation tests for GRPOConfig string-enum fields."""
+
 from __future__ import annotations
 
 import pytest

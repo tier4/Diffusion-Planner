@@ -53,9 +53,7 @@ def build_route_polyline(route) -> tuple[np.ndarray, np.ndarray]:
                 continue
         pts_list.append(cl)
     if not pts_list:
-        raise SystemExit(
-            "Route produced no centerline points — bad route or map mismatch."
-        )
+        raise SystemExit("Route produced no centerline points — bad route or map mismatch.")
     pts = np.concatenate(pts_list, axis=0)
     seg = np.diff(pts, axis=0)
     seg_len = np.sqrt((seg * seg).sum(axis=1))
@@ -85,9 +83,7 @@ def project_to_polyline(
     return s_arc, sign * float(d[i]), float(d[i])
 
 
-def project_points_to_polyline(
-    xys: np.ndarray, pts: np.ndarray, s: np.ndarray
-) -> np.ndarray:
+def project_points_to_polyline(xys: np.ndarray, pts: np.ndarray, s: np.ndarray) -> np.ndarray:
     """Batch projection via per-point loop. xys: (M, 2). Returns (M, 3) = (arc, signed, |lat|).
 
     O(M*N); fine up to a few hundred thousand points.
@@ -98,9 +94,7 @@ def project_points_to_polyline(
     return out
 
 
-def recover_ego_world_pose_from_goal(
-    goal_pose: np.ndarray, route
-) -> tuple[float, float, float]:
+def recover_ego_world_pose_from_goal(goal_pose: np.ndarray, route) -> tuple[float, float, float]:
     """Recover (ex, ey, eyaw) in world frame from NPZ goal_pose + Route goal.
 
     goal_pose is the route goal expressed in the current ego frame:
@@ -124,9 +118,7 @@ def recover_ego_world_pose_from_goal(
     return ex, ey, eyaw
 
 
-def deviation_series(
-    xys: np.ndarray, pts: np.ndarray, s: np.ndarray
-) -> np.ndarray:
+def deviation_series(xys: np.ndarray, pts: np.ndarray, s: np.ndarray) -> np.ndarray:
     """For each (x, y) in xys, return (arc, signed_lateral, |lat|). Shape (M, 3)."""
     return project_points_to_polyline(xys, pts, s)
 
@@ -149,7 +141,10 @@ def bin_by_arc(
 
 
 def bin_scalar_by_arc(
-    arc_s: np.ndarray, values: np.ndarray, s_max: float, bin_m: float,
+    arc_s: np.ndarray,
+    values: np.ndarray,
+    s_max: float,
+    bin_m: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Bin an arbitrary per-point scalar by arc-length.
 
@@ -174,9 +169,7 @@ def bin_scalar_by_arc(
     return bin_s_mid, mean_val, min_val
 
 
-def segments_from_polyline(
-    pts: np.ndarray, s: np.ndarray, bin_m: float, n_bins: int
-) -> list:
+def segments_from_polyline(pts: np.ndarray, s: np.ndarray, bin_m: float, n_bins: int) -> list:
     """For each arc-length bin, collect the sub-polyline that falls in it."""
     segs = [[] for _ in range(n_bins)]
     for i in range(len(pts) - 1):
@@ -184,7 +177,7 @@ def segments_from_polyline(
         b0 = int(s0 // bin_m)
         b1 = int(s1 // bin_m)
         if b0 == b1 and 0 <= b0 < n_bins:
-            segs[b0].append(pts[i:i + 2])
+            segs[b0].append(pts[i : i + 2])
         else:
             curr_s = s0
             curr_pt = pts[i]
@@ -224,8 +217,11 @@ def plot_route_heatmap(ax, pts, bin_segments, bin_values, title, vmin, vmax, cma
                 lc_lines.append([segs[i], segs[i + 1]])
                 lc_colors.append(v)
         lc = LineCollection(
-            lc_lines, array=np.array(lc_colors), cmap=cmap,
-            norm=plt.Normalize(vmin=vmin, vmax=vmax), linewidths=4.0,
+            lc_lines,
+            array=np.array(lc_colors),
+            cmap=cmap,
+            norm=plt.Normalize(vmin=vmin, vmax=vmax),
+            linewidths=4.0,
         )
         ax.add_collection(lc)
     ax.set_title(title, fontsize=10)

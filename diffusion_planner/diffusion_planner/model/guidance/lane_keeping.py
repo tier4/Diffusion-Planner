@@ -60,10 +60,10 @@ class LaneKeepingGuidance(BaseGuidance):
         lanes = inputs["lanes"]  # [B, N_seg, N_pts, 33]
         N = lanes.shape[1] * lanes.shape[2]
 
-        lane_centers = lanes[..., _X:_Y + 1].reshape(B, N, 2)
-        lane_dirs    = lanes[..., _DX:_DY + 1].reshape(B, N, 2)
-        lane_left    = lanes[..., _LBX:_LBY + 1].reshape(B, N, 2)
-        lane_right   = lanes[..., _RBX:_RBY + 1].reshape(B, N, 2)
+        lane_centers = lanes[..., _X : _Y + 1].reshape(B, N, 2)
+        lane_dirs = lanes[..., _DX : _DY + 1].reshape(B, N, 2)
+        lane_left = lanes[..., _LBX : _LBY + 1].reshape(B, N, 2)
+        lane_right = lanes[..., _RBX : _RBY + 1].reshape(B, N, 2)
 
         lane_dirs_n = lane_dirs / (lane_dirs.norm(dim=-1, keepdim=True) + 1e-6)
         lane_lat = torch.stack([-lane_dirs_n[..., 1], lane_dirs_n[..., 0]], dim=-1)  # [B, N, 2]
@@ -72,30 +72,29 @@ class LaneKeepingGuidance(BaseGuidance):
 
         dist = (ego_pos.unsqueeze(2) - lane_centers.unsqueeze(1)).norm(dim=-1)  # [B, T, N]
         dist = dist.masked_fill(~lane_valid.unsqueeze(1).expand(-1, T, -1), 1e6)
-        nearest = dist.argmin(dim=-1)      # [B, T]
+        nearest = dist.argmin(dim=-1)  # [B, T]
         min_dist = dist.min(dim=-1).values  # [B, T]
 
         def gather2(tensor):
             idx = nearest.unsqueeze(-1).expand(-1, -1, 2)
-            return tensor.unsqueeze(1).expand(-1, T, -1, -1) \
-                         .gather(2, idx.unsqueeze(2)).squeeze(2)
+            return tensor.unsqueeze(1).expand(-1, T, -1, -1).gather(2, idx.unsqueeze(2)).squeeze(2)
 
-        c   = gather2(lane_centers)
+        c = gather2(lane_centers)
         lat = gather2(lane_lat)
-        lb  = gather2(lane_left)   # offset vectors from centerline, not absolute positions
-        rb  = gather2(lane_right)  # offset vectors from centerline, not absolute positions
+        lb = gather2(lane_left)  # offset vectors from centerline, not absolute positions
+        rb = gather2(lane_right)  # offset vectors from centerline, not absolute positions
 
-        ego_lat  = ((ego_pos - c) * lat).sum(dim=-1)    # [B, T]
-        left_hw  = (lb * lat).sum(dim=-1)                 # [B, T]
-        right_hw = (rb * lat).sum(dim=-1)                 # [B, T]
+        ego_lat = ((ego_pos - c) * lat).sum(dim=-1)  # [B, T]
+        left_hw = (lb * lat).sum(dim=-1)  # [B, T]
+        right_hw = (rb * lat).sum(dim=-1)  # [B, T]
 
-        half_w = inputs["ego_shape"][:, 2:3] / 2         # [B, 1]
+        half_w = inputs["ego_shape"][:, 2:3] / 2  # [B, 1]
 
-        viol_left  = F.relu(ego_lat + half_w - left_hw  + _MARGIN)
+        viol_left = F.relu(ego_lat + half_w - left_hw + _MARGIN)
         viol_right = F.relu(right_hw - ego_lat + half_w + _MARGIN)
 
         no_lane = min_dist > _MAX_LANE_DIST
-        viol_left  = viol_left.masked_fill(no_lane, 0.0)
+        viol_left = viol_left.masked_fill(no_lane, 0.0)
         viol_right = viol_right.masked_fill(no_lane, 0.0)
 
         reward = -(viol_left + viol_right).sum(dim=-1)  # [B]
@@ -106,8 +105,10 @@ class LaneKeepingGuidance(BaseGuidance):
 # Backward-compatible module-level function alias
 # ---------------------------------------------------------------------------
 
+
 def lane_keeping_fn(x, t, cond, inputs, *args, **kwargs) -> torch.Tensor:
     """Deprecated. Use LaneKeepingGuidance via GuidanceComposer."""
     from .config import GuidanceConfig
+
     fn = LaneKeepingGuidance(GuidanceConfig(name="lane_keeping"))
     return fn.energy(x, t, inputs)

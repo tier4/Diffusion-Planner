@@ -44,24 +44,32 @@ def _make_large_scene(n_agents: int = 8) -> SceneContext:
         vels = np.zeros((T_past, 2), dtype=np.float32)
         for t in range(T_past):
             frac = t / (T_past - 1)
-            traj[t] = [x - (1 - frac) * 3 * np.cos(angle),
-                        y - (1 - frac) * 3 * np.sin(angle), angle]
+            traj[t] = [
+                x - (1 - frac) * 3 * np.cos(angle),
+                y - (1 - frac) * 3 * np.sin(angle),
+                angle,
+            ]
             vels[t] = [3 * np.cos(angle), 3 * np.sin(angle)]
 
         route = np.random.randn(25, 20, 33).astype(np.float32) * 0.1
-        agents.append(Agent(
-            id=f"agent_{i}",
-            agent_type=AgentType.VEHICLE,
-            length=4.5, width=1.8, wheelbase=2.9,
-            past_trajectory=traj,
-            past_velocities=vels,
-            goal_pose=np.array([x + 50 * np.cos(angle),
-                                y + 50 * np.sin(angle), angle], dtype=np.float32),
-            route_lanes=route,
-            route_speed_limit=np.zeros((25, 1), dtype=np.float32),
-            route_has_speed_limit=np.zeros((25, 1), dtype=bool),
-            turn_indicators=np.zeros(T_past, dtype=np.int32),
-        ))
+        agents.append(
+            Agent(
+                id=f"agent_{i}",
+                agent_type=AgentType.VEHICLE,
+                length=4.5,
+                width=1.8,
+                wheelbase=2.9,
+                past_trajectory=traj,
+                past_velocities=vels,
+                goal_pose=np.array(
+                    [x + 50 * np.cos(angle), y + 50 * np.sin(angle), angle], dtype=np.float32
+                ),
+                route_lanes=route,
+                route_speed_limit=np.zeros((25, 1), dtype=np.float32),
+                route_has_speed_limit=np.zeros((25, 1), dtype=bool),
+                turn_indicators=np.zeros(T_past, dtype=np.int32),
+            )
+        )
 
     # Dense map: populate all 140 lanes, 10 polygons, 60 line strings
     lanes = np.random.randn(140, 20, 33).astype(np.float32) * 10
@@ -214,15 +222,17 @@ class TestBatchInferenceProfile:
         n_agents = 8
         dicts = []
         for _ in range(n_agents):
-            dicts.append({
-                "ego_agent_past": torch.randn(1, 31, 4),
-                "neighbor_agents_past": torch.randn(1, 32, 31, 11),
-                "lanes": torch.randn(1, 140, 20, 33),
-                "route_lanes": torch.randn(1, 25, 20, 33),
-                "polygons": torch.randn(1, 10, 40, 3),
-                "line_strings": torch.randn(1, 60, 20, 4),
-                "static_objects": torch.randn(1, 5, 10),
-            })
+            dicts.append(
+                {
+                    "ego_agent_past": torch.randn(1, 31, 4),
+                    "neighbor_agents_past": torch.randn(1, 32, 31, 11),
+                    "lanes": torch.randn(1, 140, 20, 33),
+                    "route_lanes": torch.randn(1, 25, 20, 33),
+                    "polygons": torch.randn(1, 10, 40, 3),
+                    "line_strings": torch.randn(1, 60, 20, 4),
+                    "static_objects": torch.randn(1, 5, 10),
+                }
+            )
 
         n_iter = 100
 
@@ -232,7 +242,7 @@ class TestBatchInferenceProfile:
         cat_time = time.perf_counter() - t0
 
         print(f"\n[PROFILE] _cat_tensor_dicts ({n_agents} agents, {n_iter} iters)")
-        print(f"  Time: {cat_time:.3f}s ({cat_time/n_iter*1000:.1f}ms/call)")
+        print(f"  Time: {cat_time:.3f}s ({cat_time / n_iter * 1000:.1f}ms/call)")
 
 
 class TestFullSimulationSmoke:
@@ -258,10 +268,16 @@ class TestFullSimulationSmoke:
         args.observation_normalizer = lambda x: x
 
         from scenario_generation.simulate import run_simulation
+
         run_simulation(
-            model, args, synthetic_scene, n_steps=2,
-            output_dir=tmp_output_dir, device="cpu",
-            per_agent=True, mode="closed_loop",
+            model,
+            args,
+            synthetic_scene,
+            n_steps=2,
+            output_dir=tmp_output_dir,
+            device="cpu",
+            per_agent=True,
+            mode="closed_loop",
         )
 
         # Verify output structure

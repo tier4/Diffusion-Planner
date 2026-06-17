@@ -17,10 +17,16 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import rclpy
 import torch
-import numpy as np
-from autoware_perception_msgs.msg import ObjectClassification, Shape, TrackedObject, TrackedObjectKinematics, TrackedObjects
+from autoware_perception_msgs.msg import (
+    ObjectClassification,
+    Shape,
+    TrackedObject,
+    TrackedObjectKinematics,
+    TrackedObjects,
+)
 from autoware_planning_msgs.msg import Trajectory, TrajectoryPoint
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point, TransformStamped, Vector3
@@ -96,7 +102,6 @@ class AnnotationRosNode(Node):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
 
-
         cmd_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10,
@@ -106,14 +111,30 @@ class AnnotationRosNode(Node):
 
         self.state_pub = self.create_publisher(String, "/annotation/state", latched_qos)
         self.cmd_sub = self.create_subscription(String, "/annotation/cmd", self._on_cmd, cmd_qos)
-        self.det_pub = self.create_publisher(Trajectory, "/annotation/data/trajectory/deterministic", latched_qos)
-        self.stoch_pub = self.create_publisher(Trajectory, "/annotation/data/trajectory/stochastic", latched_qos)
-        self.gt_pub = self.create_publisher(Trajectory, "/annotation/data/trajectory/ground_truth", latched_qos)
-        self.ego_hist_pub = self.create_publisher(Trajectory, "/annotation/data/trajectory/ego_history", latched_qos)
-        self.gt_snippet_pub = self.create_publisher(Trajectory, "/annotation/data/trajectory/gt_snippet", latched_qos)
-        self.map_marker_pub = self.create_publisher(MarkerArray, "/annotation/data/map_markers", latched_qos)
-        self.footprint_pub = self.create_publisher(MarkerArray, "/annotation/data/footprints", latched_qos)
-        self.tracked_objects_pub = self.create_publisher(TrackedObjects, "/annotation/data/tracked_objects", latched_qos)
+        self.det_pub = self.create_publisher(
+            Trajectory, "/annotation/data/trajectory/deterministic", latched_qos
+        )
+        self.stoch_pub = self.create_publisher(
+            Trajectory, "/annotation/data/trajectory/stochastic", latched_qos
+        )
+        self.gt_pub = self.create_publisher(
+            Trajectory, "/annotation/data/trajectory/ground_truth", latched_qos
+        )
+        self.ego_hist_pub = self.create_publisher(
+            Trajectory, "/annotation/data/trajectory/ego_history", latched_qos
+        )
+        self.gt_snippet_pub = self.create_publisher(
+            Trajectory, "/annotation/data/trajectory/gt_snippet", latched_qos
+        )
+        self.map_marker_pub = self.create_publisher(
+            MarkerArray, "/annotation/data/map_markers", latched_qos
+        )
+        self.footprint_pub = self.create_publisher(
+            MarkerArray, "/annotation/data/footprints", latched_qos
+        )
+        self.tracked_objects_pub = self.create_publisher(
+            TrackedObjects, "/annotation/data/tracked_objects", latched_qos
+        )
         self.tf_broadcaster = TransformBroadcaster(self)
         self.tf_timer = self.create_timer(0.1, self._publish_dynamic_streams_tick)
         self.static_timer = self.create_timer(0.1, self._publish_static_streams_tick)
@@ -127,7 +148,7 @@ class AnnotationRosNode(Node):
         self._pending_marker_clear = False
         self._last_sample_index = -1
         self._load_sample()
-    
+
     def wait_for_annotation_complete(self, poll_interval_sec: float = 0.5) -> list[dict]:
         while not self.annotator.annotation_complete:
             time.sleep(poll_interval_sec)
@@ -250,7 +271,10 @@ class AnnotationRosNode(Node):
         now = self.get_clock().now().to_msg()
         msg.header.stamp = now
         msg.header.frame_id = "map"
-        if self.annotator.current_data is None or "ego_agent_future" not in self.annotator.current_data:
+        if (
+            self.annotator.current_data is None
+            or "ego_agent_future" not in self.annotator.current_data
+        ):
             return msg
         gt_np = self.annotator.current_data["ego_agent_future"][0].cpu().numpy()
         for i, row in enumerate(gt_np):
@@ -272,12 +296,18 @@ class AnnotationRosNode(Node):
         return msg
 
     def _ego_history_to_msg(self) -> Trajectory:
-        if self.annotator.current_data is None or "ego_agent_past" not in self.annotator.current_data:
+        if (
+            self.annotator.current_data is None
+            or "ego_agent_past" not in self.annotator.current_data
+        ):
             return Trajectory()
         return self._trajectory_from_rows(self.annotator.current_data["ego_agent_past"][0])
 
     def _gt_snippet_to_msg(self) -> Trajectory:
-        if self.annotator.current_data is None or "ego_agent_future" not in self.annotator.current_data:
+        if (
+            self.annotator.current_data is None
+            or "ego_agent_future" not in self.annotator.current_data
+        ):
             return Trajectory()
         gt = self.annotator.current_data["ego_agent_future"][0]
         idx = max(0, min(int(self.params["time_step"]), int(gt.shape[0]) - 1))
@@ -294,7 +324,14 @@ class AnnotationRosNode(Node):
         map_z = -0.01
 
         def _add_polyline(
-            marker_id: int, pts: Any, ns: str, r: float, g: float, b: float, width: float = 0.25, z: float = map_z
+            marker_id: int,
+            pts: Any,
+            ns: str,
+            r: float,
+            g: float,
+            b: float,
+            width: float = 0.25,
+            z: float = map_z,
         ) -> int:
             arr = torch.as_tensor(pts).cpu().numpy()
             if arr.ndim > 2:
@@ -338,16 +375,24 @@ class AnnotationRosNode(Node):
                         continue
                     left = np.stack((lane[:, 0] + lane[:, 4], lane[:, 1] + lane[:, 5]), axis=1)
                     right = np.stack((lane[:, 0] + lane[:, 6], lane[:, 1] + lane[:, 7]), axis=1)
-                    marker_id = _add_polyline(marker_id, left, "lane_left", 0.25, 0.75, 1.0, width=0.16)
-                    marker_id = _add_polyline(marker_id, right, "lane_right", 0.25, 0.75, 1.0, width=0.16)
+                    marker_id = _add_polyline(
+                        marker_id, left, "lane_left", 0.25, 0.75, 1.0, width=0.16
+                    )
+                    marker_id = _add_polyline(
+                        marker_id, right, "lane_right", 0.25, 0.75, 1.0, width=0.16
+                    )
 
         if "route_lanes" in data:
             route_np = torch.as_tensor(data["route_lanes"]).cpu().numpy()
             if route_np.ndim >= 4:
                 for route in route_np[0]:
-                    marker_id = _add_polyline(marker_id, route[:, :2], "route_lanes", 0.55, 0.55, 0.0, width=0.28)
+                    marker_id = _add_polyline(
+                        marker_id, route[:, :2], "route_lanes", 0.55, 0.55, 0.0, width=0.28
+                    )
             else:
-                marker_id = _add_polyline(marker_id, route_np, "route_lanes", 0.55, 0.55, 0.0, width=0.28)
+                marker_id = _add_polyline(
+                    marker_id, route_np, "route_lanes", 0.55, 0.55, 0.0, width=0.28
+                )
 
         if "line_strings" in data:
             line_np = torch.as_tensor(data["line_strings"]).cpu().numpy()
@@ -419,9 +464,7 @@ class AnnotationRosNode(Node):
                 markers.append(marker)
                 marker_id += 1
 
-        for key, color in (
-            ("map_polylines", (0.6, 0.6, 0.6)),
-        ):
+        for key, color in (("map_polylines", (0.6, 0.6, 0.6)),):
             if key not in data:
                 continue
             tensor = torch.as_tensor(data[key]).cpu().numpy()
@@ -517,7 +560,11 @@ class AnnotationRosNode(Node):
             kinematics = TrackedObjectKinematics()
             kinematics.pose_with_covariance.pose.position.x = float(row[0]) if len(row) > 0 else 0.0
             kinematics.pose_with_covariance.pose.position.y = float(row[1]) if len(row) > 1 else 0.0
-            heading = math.atan2(float(row[3]), float(row[2])) if len(row) > 3 else (float(row[2]) if len(row) > 2 else 0.0)
+            heading = (
+                math.atan2(float(row[3]), float(row[2]))
+                if len(row) > 3
+                else (float(row[2]) if len(row) > 2 else 0.0)
+            )
             qx, qy, qz, qw = self._quat_from_heading(heading)
             kinematics.pose_with_covariance.pose.orientation.x = qx
             kinematics.pose_with_covariance.pose.orientation.y = qy
@@ -542,7 +589,9 @@ class AnnotationRosNode(Node):
         self.ego_hist_pub.publish(self._ego_history_to_msg())
         self.gt_snippet_pub.publish(self._gt_snippet_to_msg())
 
-    def _marker_for_base_link(self, frame_id: str, marker_id: int, color: tuple[float, float, float]) -> Marker:
+    def _marker_for_base_link(
+        self, frame_id: str, marker_id: int, color: tuple[float, float, float]
+    ) -> Marker:
         marker = Marker()
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.header.frame_id = frame_id
@@ -592,7 +641,9 @@ class AnnotationRosNode(Node):
         ego_marker = self._ego_current_marker()
         if ego_marker is not None:
             msg.markers.append(ego_marker)
-        msg.markers.append(self._marker_for_base_link("deterministic_base_link", 0, (0.1, 0.9, 0.1)))
+        msg.markers.append(
+            self._marker_for_base_link("deterministic_base_link", 0, (0.1, 0.9, 0.1))
+        )
         msg.markers.append(self._marker_for_base_link("stochastic_base_link", 1, (1.0, 0.6, 0.0)))
         self.footprint_pub.publish(msg)
 
@@ -606,7 +657,11 @@ class AnnotationRosNode(Node):
         row = arr[i]
         x = float(row[0]) if len(row) > 0 else 0.0
         y = float(row[1]) if len(row) > 1 else 0.0
-        heading = math.atan2(float(row[3]), float(row[2])) if len(row) > 3 else (float(row[2]) if len(row) > 2 else 0.0)
+        heading = (
+            math.atan2(float(row[3]), float(row[2]))
+            if len(row) > 3
+            else (float(row[2]) if len(row) > 2 else 0.0)
+        )
         return (x, y, heading)
 
     def _broadcast_tf(self, child_frame_id: str, x: float, y: float, heading: float) -> None:
@@ -635,7 +690,9 @@ class AnnotationRosNode(Node):
         self._publish_tf_links()
         self._publish_footprint_markers()
 
-    def _state_payload(self, plots, metric_text, progress_text, metrics_text, sidebar_status, history_display) -> dict[str, Any]:
+    def _state_payload(
+        self, plots, metric_text, progress_text, metrics_text, sidebar_status, history_display
+    ) -> dict[str, Any]:
         if plots is None:
             plot_payload = self.last_payload.get(
                 "plots",
@@ -715,9 +772,15 @@ class AnnotationRosNode(Node):
             self._pending_marker_clear = True
             self._static_markers_dirty = True
         self._last_sample_index = self.annotator.current_index
-        plots = self.annotator.update_time_display(self.params["time_step"], self.params["zoom_level"])
-        metric_text, progress_text, metrics_text, sidebar_status, history_display = result_tuple[3:8]
-        payload = self._state_payload(plots, metric_text, progress_text, metrics_text, sidebar_status, history_display)
+        plots = self.annotator.update_time_display(
+            self.params["time_step"], self.params["zoom_level"]
+        )
+        metric_text, progress_text, metrics_text, sidebar_status, history_display = result_tuple[
+            3:8
+        ]
+        payload = self._state_payload(
+            plots, metric_text, progress_text, metrics_text, sidebar_status, history_display
+        )
         self._publish_all(payload)
 
     def _publish_current(self) -> None:
@@ -732,7 +795,9 @@ class AnnotationRosNode(Node):
         self._publish_all(payload)
 
     def _publish_current_with_refreshed_plots(self) -> None:
-        plots = self.annotator.update_time_display(self.params["time_step"], self.params["zoom_level"])
+        plots = self.annotator.update_time_display(
+            self.params["time_step"], self.params["zoom_level"]
+        )
         payload = self._state_payload(
             plots,
             self.last_payload.get("texts", {}).get("metric", ""),
@@ -963,12 +1028,15 @@ class AnnotationRosNode(Node):
                 self.params["time_step"] = int(payload.get("time_step", self.params["time_step"]))
                 self._publish_time_step_update()
             elif action == "update_zoom":
-                self.params["zoom_level"] = int(payload.get("zoom_level", self.params["zoom_level"]))
+                self.params["zoom_level"] = int(
+                    payload.get("zoom_level", self.params["zoom_level"])
+                )
                 self._publish_current_with_refreshed_plots()
             elif action == "launch_training":
                 self._refresh(self.annotator.launch_training())
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(f"Failed handling command: {exc}")
+
 
 class AnnotationRosServer:
     """Background runner wrapper to keep train_dpo integration compact."""
@@ -1027,6 +1095,7 @@ class AnnotationRosServer:
             return
         self.node.update_training_status(**kwargs)
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ROS2 annotation server node.")
     parser.add_argument("--model-path", type=Path, required=True)
@@ -1056,4 +1125,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

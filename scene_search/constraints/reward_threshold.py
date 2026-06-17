@@ -19,28 +19,49 @@ from scene_search.constraints.registry import register
 @register("reward_threshold")
 class RewardThresholdConstraint(BaseConstraint):
     name = "Reward Thresholds"
-    description = ("Filter replay scenes by live drift metrics (rb / cl / "
-                   "lane gate / lane_near_frac). Requires replay runs loaded "
-                   "via --replay_runs.")
+    description = (
+        "Filter replay scenes by live drift metrics (rb / cl / "
+        "lane gate / lane_near_frac). Requires replay runs loaded "
+        "via --replay_runs."
+    )
 
     def get_params_spec(self) -> dict:
         return {
-            "rb_min_dist_max": {"type": "float", "default": 0.6,
-                                "label": "Max rb_min_dist (m)  [drift if ≤]",
-                                "min": 0.0, "max": 10.0, "step": 0.05},
-            "abs_cl_score_min": {"type": "float", "default": 0.5,
-                                 "label": "Min |cl_score|  [drift if ≥]",
-                                 "min": 0.0, "max": 3.0, "step": 0.05},
-            "require_lane_cross": {"type": "float", "default": 0.0,
-                                   "label": "Require lane_gate=0? (1=yes, 0=no)",
-                                   "min": 0.0, "max": 1.0, "step": 1.0},
-            "lane_near_frac_min": {"type": "float", "default": 0.0,
-                                   "label": "Min lane_near_frac  [drift if ≥]",
-                                   "min": 0.0, "max": 1.0, "step": 0.05},
+            "rb_min_dist_max": {
+                "type": "float",
+                "default": 0.6,
+                "label": "Max rb_min_dist (m)  [drift if ≤]",
+                "min": 0.0,
+                "max": 10.0,
+                "step": 0.05,
+            },
+            "abs_cl_score_min": {
+                "type": "float",
+                "default": 0.5,
+                "label": "Min |cl_score|  [drift if ≥]",
+                "min": 0.0,
+                "max": 3.0,
+                "step": 0.05,
+            },
+            "require_lane_cross": {
+                "type": "float",
+                "default": 0.0,
+                "label": "Require lane_gate=0? (1=yes, 0=no)",
+                "min": 0.0,
+                "max": 1.0,
+                "step": 1.0,
+            },
+            "lane_near_frac_min": {
+                "type": "float",
+                "default": 0.0,
+                "label": "Min lane_near_frac  [drift if ≥]",
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.05,
+            },
         }
 
-    def filter(self, npz_path: str, npz_data, params: dict,
-               entry: dict | None = None) -> bool:
+    def filter(self, npz_path: str, npz_data, params: dict, entry: dict | None = None) -> bool:
         # npz_data kept for BaseConstraint signature compatibility but
         # unused here — reward_threshold reads from entry["metrics"] only.
         if entry is None:

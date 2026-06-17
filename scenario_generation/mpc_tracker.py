@@ -279,13 +279,10 @@ class MPCTracker:
             # df/dstate[t]^T @ adj
             adj_x = ax
             adj_y = ay
-            adj_yaw = (-v * sin_yaw * dt) * ax \
-                    + (v * cos_yaw * dt) * ay \
-                    + ayaw
-            adj_v = (cos_yaw * dt) * ax \
-                  + (sin_yaw * dt) * ay \
-                  + (tan_d / wb * dt) * ayaw \
-                  + dv_dv * av
+            adj_yaw = (-v * sin_yaw * dt) * ax + (v * cos_yaw * dt) * ay + ayaw
+            adj_v = (
+                (cos_yaw * dt) * ax + (sin_yaw * dt) * ay + (tan_d / wb * dt) * ayaw + dv_dv * av
+            )
 
             # df/dctrl[t]^T @ adj — only a affects v, only delta affects yaw.
             dJ_dctrl[t, 0] = dv_da * av
@@ -346,23 +343,20 @@ class MPCTracker:
         # full 8 s.
         cur_speed = float(x0[3]) if len(x0) > 3 else 0.0
         full_n = len(ref_world)
-        full_tail_reach = float(
-            np.hypot(ref_world[-1, 0] - x0[0], ref_world[-1, 1] - x0[1])
-        ) if full_n > 0 else 0.0
-        full_horizon_time = full_n * self.dt
-        avg_plan_speed = (
-            full_tail_reach / full_horizon_time if full_horizon_time > 0 else 0.0
+        full_tail_reach = (
+            float(np.hypot(ref_world[-1, 0] - x0[0], ref_world[-1, 1] - x0[1]))
+            if full_n > 0
+            else 0.0
         )
+        full_horizon_time = full_n * self.dt
+        avg_plan_speed = full_tail_reach / full_horizon_time if full_horizon_time > 0 else 0.0
         # Stay in recovery mode until the ego reaches a reasonable fraction
         # of the plan's average speed — without this the push fires for one
         # step (ego bumps from 0 → 0.3 m/s), then next step cur_speed > 0.1
         # drops recovery off, MPC sees the flat near-horizon ref again,
         # commands -accel, ego decelerates back to 0. Hysteresis via
         # half-target gate keeps the launch continuous.
-        idle_but_plan_moves = (
-            cur_speed < max(0.1, 0.5 * avg_plan_speed)
-            and avg_plan_speed > 0.5
-        )
+        idle_but_plan_moves = cur_speed < max(0.1, 0.5 * avg_plan_speed) and avg_plan_speed > 0.5
 
         # Build the reference fed to MPC. Two modes:
         # - normal: first `horizon` steps of the model's plan (truncate/pad).
@@ -376,7 +370,8 @@ class MPCTracker:
             stride = full_n / self.horizon
             indices = np.clip(
                 (np.arange(self.horizon) * stride).astype(int),
-                0, full_n - 1,
+                0,
+                full_n - 1,
             )
             ref[:] = ref_world[indices, :3]
         else:
@@ -461,6 +456,7 @@ class MPCTracker:
 # Reference trajectory post-processing
 # ----------------------------------------------------------------------
 
+
 def postprocess_reference(
     ref_xy: np.ndarray,
     ref_h: np.ndarray,
@@ -523,6 +519,7 @@ def postprocess_reference(
 # Perfect tracker (simple Euler integration, no optimisation)
 # ----------------------------------------------------------------------
 
+
 class PerfectTracker:
     """Velocity-limited Euler trajectory follower.
 
@@ -577,14 +574,16 @@ class PerfectTracker:
         # = avg over the full plan.
         cur_speed = float(x0[3]) if len(x0) > 3 else 0.0
         full_n = len(ref_world)
-        full_tail_reach = math.hypot(
-            ref_world[-1, 0] - x0[0],
-            ref_world[-1, 1] - x0[1],
-        ) if full_n > 0 else 0.0
-        full_horizon_time = full_n * self.dt
-        avg_plan_speed = (
-            full_tail_reach / full_horizon_time if full_horizon_time > 0 else 0.0
+        full_tail_reach = (
+            math.hypot(
+                ref_world[-1, 0] - x0[0],
+                ref_world[-1, 1] - x0[1],
+            )
+            if full_n > 0
+            else 0.0
         )
+        full_horizon_time = full_n * self.dt
+        avg_plan_speed = full_tail_reach / full_horizon_time if full_horizon_time > 0 else 0.0
         if cur_speed < 0.1 and avg_plan_speed > 0.5:
             v_target = max(v_target, min(self.max_speed, avg_plan_speed))
 

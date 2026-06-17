@@ -49,17 +49,28 @@ def main():
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--lora_path", type=str, default=None)
-    parser.add_argument("--config", type=str, required=True,
-                        help="GRPO training config JSON (reward weights + generation_variant)")
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="GRPO training config JSON (reward weights + generation_variant)",
+    )
     parser.add_argument("--K", type=int, default=16)
-    parser.add_argument("--generation_variant", type=str, default=None,
-                        help="Override variant from config (default: use config's setting)")
+    parser.add_argument(
+        "--generation_variant",
+        type=str,
+        default=None,
+        help="Override variant from config (default: use config's setting)",
+    )
     parser.add_argument("--noise_min", type=float, default=0.5)
     parser.add_argument("--noise_max", type=float, default=2.0)
     parser.add_argument("--tag", type=str, default="model")
     parser.add_argument("--dump_json", type=str, default=None)
-    parser.add_argument("--per_scene", action="store_true",
-                        help="Print per-scene breakdown in addition to aggregate")
+    parser.add_argument(
+        "--per_scene",
+        action="store_true",
+        help="Print per-scene breakdown in addition to aggregate",
+    )
     args = parser.parse_args()
 
     device = torch.device(DEVICE)
@@ -123,9 +134,13 @@ def main():
 
         # Generate K trajectories [1, K, T, 4]
         trajs = generate_all_scenes_batched(
-            model, model_args, norm_batch,
-            K=args.K, noise_range=(args.noise_min, args.noise_max),
-            device=device, gen_chunk_size=args.K,
+            model,
+            model_args,
+            norm_batch,
+            K=args.K,
+            noise_range=(args.noise_min, args.noise_max),
+            device=device,
+            gen_chunk_size=args.K,
             gt_max_speed=gt_v_high,
             generation_variant=variant,
         )
@@ -134,17 +149,23 @@ def main():
         # Score each traj
         rewards = []
         for k_i in range(K_trajs.shape[0]):
-            r = compute_reward_batch(K_trajs[k_i:k_i+1], data, rcfg)[0]
-            rewards.append({
-                "k": k_i, "slot": slot_labels[k_i] if k_i < len(slot_labels) else f"slot_{k_i}",
-                "total": r.total,
-                "progress": r.progress, "smoothness": r.smoothness,
-                "safety": r.safety, "feasibility": r.feasibility,
-                "centerline": r.centerline,
-                "lane_crossing": bool(r.lane_crossing),
-                "rb_crossing": bool(r.rb_crossing),
-                "rb_near": r.rb_near_penalty, "rb_wide": r.rb_wide_penalty,
-            })
+            r = compute_reward_batch(K_trajs[k_i : k_i + 1], data, rcfg)[0]
+            rewards.append(
+                {
+                    "k": k_i,
+                    "slot": slot_labels[k_i] if k_i < len(slot_labels) else f"slot_{k_i}",
+                    "total": r.total,
+                    "progress": r.progress,
+                    "smoothness": r.smoothness,
+                    "safety": r.safety,
+                    "feasibility": r.feasibility,
+                    "centerline": r.centerline,
+                    "lane_crossing": bool(r.lane_crossing),
+                    "rb_crossing": bool(r.rb_crossing),
+                    "rb_near": r.rb_near_penalty,
+                    "rb_wide": r.rb_wide_penalty,
+                }
+            )
 
         # Rank-1 by total
         by_total = sorted(rewards, key=lambda x: -x["total"])
@@ -156,31 +177,39 @@ def main():
         rank_of_best_cl = next(i for i, r in enumerate(by_total) if r["k"] == best_cl_traj["k"])
 
         cl_values = [r["centerline"] for r in rewards]
-        per_scene_results.append({
-            "scene_idx": si,
-            "scene_name": Path(path).stem[-30:],
-            "top1_k": top1["k"],
-            "top1_slot": top1["slot"],
-            "top1_total": top1["total"],
-            "top1_centerline": top1["centerline"],
-            "best_centerline_k": best_cl_traj["k"],
-            "best_centerline": best_cl_traj["centerline"],
-            "best_cl_rank_by_total": rank_of_best_cl,
-            "cl_spread": max(cl_values) - min(cl_values),
-            "cl_mean": float(np.mean(cl_values)),
-            "cl_median": float(np.median(cl_values)),
-            "all_centerlines": cl_values,
-            "w_cl_contribution_top1": rcfg.w_centerline * top1["centerline"],
-        })
+        per_scene_results.append(
+            {
+                "scene_idx": si,
+                "scene_name": Path(path).stem[-30:],
+                "top1_k": top1["k"],
+                "top1_slot": top1["slot"],
+                "top1_total": top1["total"],
+                "top1_centerline": top1["centerline"],
+                "best_centerline_k": best_cl_traj["k"],
+                "best_centerline": best_cl_traj["centerline"],
+                "best_cl_rank_by_total": rank_of_best_cl,
+                "cl_spread": max(cl_values) - min(cl_values),
+                "cl_mean": float(np.mean(cl_values)),
+                "cl_median": float(np.median(cl_values)),
+                "all_centerlines": cl_values,
+                "w_cl_contribution_top1": rcfg.w_centerline * top1["centerline"],
+            }
+        )
 
         if args.per_scene:
             print(f"\n--- Scene {si} [{Path(path).stem[-24:]}] ---")
-            print(f"  CL spread across K: [{min(cl_values):+.3f}, {max(cl_values):+.3f}]  mean={np.mean(cl_values):+.3f}")
-            print(f"  Top-1 (rank by total): k={top1['k']} slot={top1['slot']}  total={top1['total']:+.1f}  cl={top1['centerline']:+.3f}")
-            print(f"  Best CL:               k={best_cl_traj['k']} slot={best_cl_traj['slot']}  cl={best_cl_traj['centerline']:+.3f}  rank_by_total={rank_of_best_cl+1}/{args.K}")
+            print(
+                f"  CL spread across K: [{min(cl_values):+.3f}, {max(cl_values):+.3f}]  mean={np.mean(cl_values):+.3f}"
+            )
+            print(
+                f"  Top-1 (rank by total): k={top1['k']} slot={top1['slot']}  total={top1['total']:+.1f}  cl={top1['centerline']:+.3f}"
+            )
+            print(
+                f"  Best CL:               k={best_cl_traj['k']} slot={best_cl_traj['slot']}  cl={best_cl_traj['centerline']:+.3f}  rank_by_total={rank_of_best_cl + 1}/{args.K}"
+            )
 
         if (si + 1) % 10 == 0:
-            print(f"  processed {si+1}/{len(scene_paths)}")
+            print(f"  processed {si + 1}/{len(scene_paths)}")
 
     # ----- Aggregate -----
     n = len(per_scene_results)
@@ -195,9 +224,9 @@ def main():
     best_cl_over_05 = sum(1 for v in best_cl if v >= -0.5)
     w_cl_contribution = [r["w_cl_contribution_top1"] for r in per_scene_results]
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Rank-centerline signal — {args.tag} ({n} scenes, K={args.K}, variant={variant})")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"\n--- Top-1 (by total reward) centerline scores ---")
     print(f"  mean:   {np.mean(top1_cl):+.3f}")
     print(f"  median: {np.median(top1_cl):+.3f}")
@@ -218,45 +247,51 @@ def main():
     print(f"  max:    +{np.max(gaps):.3f}  (scene {int(np.argmax(gaps))})")
 
     print(f"\n--- Rank agreement ---")
-    print(f"  top1_by_total == top1_by_centerline: {agree}/{n} ({100*agree/n:.0f}%)")
+    print(f"  top1_by_total == top1_by_centerline: {agree}/{n} ({100 * agree / n:.0f}%)")
     avg_rank_of_best_cl = np.mean([r["best_cl_rank_by_total"] for r in per_scene_results])
-    print(f"  avg rank of best-CL traj in total ordering: {avg_rank_of_best_cl+1:.1f}/{args.K}")
+    print(f"  avg rank of best-CL traj in total ordering: {avg_rank_of_best_cl + 1:.1f}/{args.K}")
 
     print(f"\n--- CL spread across K trajs (signal strength within a scene) ---")
     print(f"  mean spread:   {np.mean(cl_spreads):.3f}")
     print(f"  median spread: {np.median(cl_spreads):.3f}")
 
     print(f"\n--- Centerline contribution to top-1 total reward ---")
-    print(f"  w_centerline * top1_cl: mean={np.mean(w_cl_contribution):+.2f}, "
-          f"median={np.median(w_cl_contribution):+.2f}  "
-          f"(w_centerline={rcfg.w_centerline})")
+    print(
+        f"  w_centerline * top1_cl: mean={np.mean(w_cl_contribution):+.2f}, "
+        f"median={np.median(w_cl_contribution):+.2f}  "
+        f"(w_centerline={rcfg.w_centerline})"
+    )
 
     if args.dump_json:
         with open(args.dump_json, "w") as f:
-            json.dump({
-                "tag": args.tag,
-                "variant": variant,
-                "K": args.K,
-                "n_scenes": n,
-                "reward_config": {
-                    "w_centerline": rcfg.w_centerline,
-                    "reward_mode": rcfg.reward_mode,
+            json.dump(
+                {
+                    "tag": args.tag,
+                    "variant": variant,
+                    "K": args.K,
+                    "n_scenes": n,
+                    "reward_config": {
+                        "w_centerline": rcfg.w_centerline,
+                        "reward_mode": rcfg.reward_mode,
+                    },
+                    "aggregate": {
+                        "top1_cl_mean": float(np.mean(top1_cl)),
+                        "top1_cl_median": float(np.median(top1_cl)),
+                        "best_cl_mean": float(np.mean(best_cl)),
+                        "best_cl_median": float(np.median(best_cl)),
+                        "gap_mean": float(np.mean(gaps)),
+                        "gap_median": float(np.median(gaps)),
+                        "agreement_count": int(agree),
+                        "top1_floored_count": int(top1_is_floored),
+                        "best_cl_floored_count": int(best_cl_is_floored),
+                        "avg_rank_of_best_cl": float(avg_rank_of_best_cl),
+                        "cl_spread_mean": float(np.mean(cl_spreads)),
+                    },
+                    "per_scene": per_scene_results,
                 },
-                "aggregate": {
-                    "top1_cl_mean": float(np.mean(top1_cl)),
-                    "top1_cl_median": float(np.median(top1_cl)),
-                    "best_cl_mean": float(np.mean(best_cl)),
-                    "best_cl_median": float(np.median(best_cl)),
-                    "gap_mean": float(np.mean(gaps)),
-                    "gap_median": float(np.median(gaps)),
-                    "agreement_count": int(agree),
-                    "top1_floored_count": int(top1_is_floored),
-                    "best_cl_floored_count": int(best_cl_is_floored),
-                    "avg_rank_of_best_cl": float(avg_rank_of_best_cl),
-                    "cl_spread_mean": float(np.mean(cl_spreads)),
-                },
-                "per_scene": per_scene_results,
-            }, f, indent=2)
+                f,
+                indent=2,
+            )
         print(f"\nDumped results to {args.dump_json}")
 
 

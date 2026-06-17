@@ -30,9 +30,7 @@ from datetime import datetime
 def is_experiment_running(name):
     """Check if an experiment process is still alive by name."""
     try:
-        result = subprocess.run(
-            ["ps", "aux"], capture_output=True, text=True, timeout=5
-        )
+        result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
         for line in result.stdout.split("\n"):
             if name in line and "watchdog" not in line and "grep" not in line:
                 if any(k in line for k in ["run_experiment", "train_grpo", "grpo_sft"]):
@@ -120,11 +118,15 @@ def check_add_file(add_file, exp_dir, tracked, status_file):
 
 def main():
     parser = argparse.ArgumentParser(description="Experiment watchdog")
-    parser.add_argument("--exp_dir", required=True, help="Experiment directory containing .log files")
+    parser.add_argument(
+        "--exp_dir", required=True, help="Experiment directory containing .log files"
+    )
     parser.add_argument("--names", nargs="*", default=[], help="Initial experiment names to track")
     parser.add_argument("--interval", type=int, default=60, help="Check interval in seconds")
     parser.add_argument("--status_file", default="/tmp/experiment_status.log", help="Output file")
-    parser.add_argument("--add_file", default="/tmp/watchdog_add.txt", help="File to write new experiment names to")
+    parser.add_argument(
+        "--add_file", default="/tmp/watchdog_add.txt", help="File to write new experiment names to"
+    )
     args = parser.parse_args()
 
     tracked = {}

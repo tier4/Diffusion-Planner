@@ -27,6 +27,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,10 +46,14 @@ def parse_args():
     parser.add_argument("--scenes", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--lora_path", type=Path, default=None)
-    parser.add_argument("--config", type=Path, required=True,
-                        help="GRPO training config JSON. Reward thresholds "
-                             "and weights match the live run (enable_lane_departure "
-                             "is always forced on).")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="GRPO training config JSON. Reward thresholds "
+        "and weights match the live run (enable_lane_departure "
+        "is always forced on).",
+    )
     parser.add_argument("--tag", type=str, default="analysis")
     parser.add_argument("--top_k", type=int, default=50, help="Number of problem scenes to output")
     parser.add_argument("--batch_size", type=int, default=100)
@@ -68,6 +73,7 @@ def main():
     model, model_args = load_model(args.model_path, device=DEVICE)
     if args.lora_path:
         from preference_optimization.lora_utils import load_lora_checkpoint
+
         model = load_lora_checkpoint(model, args.lora_path)
     model.eval()
 
@@ -78,7 +84,7 @@ def main():
     # Evaluate all scenes in batches
     results = []
     for chunk_start in range(0, len(scene_paths), args.batch_size):
-        chunk_paths = scene_paths[chunk_start:chunk_start + args.batch_size]
+        chunk_paths = scene_paths[chunk_start : chunk_start + args.batch_size]
         chunk_data = []
         for sp in chunk_paths:
             try:
@@ -104,20 +110,21 @@ def main():
                 batch[k] = vals[0]
 
         normalizer = copy.deepcopy(model_args.observation_normalizer)
-        norm_batch = {k: (v.clone() if isinstance(v, torch.Tensor) else v)
-                      for k, v in batch.items()}
+        norm_batch = {
+            k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in batch.items()
+        }
         norm_batch = normalizer(norm_batch)
 
         with torch.no_grad():
             det_trajs = _batched_generate(
-                model, model_args, norm_batch,
-                noise_scale=0.0, composer=None, device=DEVICE)
+                model, model_args, norm_batch, noise_scale=0.0, composer=None, device=DEVICE
+            )
 
         # Score each scene
         for local_i, global_i in enumerate(valid_indices):
             sp = chunk_paths[global_i]
             data_i = valid_data[local_i]
-            traj = det_trajs[local_i:local_i + 1]
+            traj = det_trajs[local_i : local_i + 1]
             r = compute_reward_batch(traj, data_i, eval_config)[0]
 
             traj_np = det_trajs[local_i].cpu().numpy()
@@ -131,22 +138,26 @@ def main():
             dh = end_yaw - start_yaw
             heading_chg = float(np.arctan2(np.sin(dh), np.cos(dh)))
 
-            results.append({
-                "path": sp,
-                "name": Path(sp).stem,
-                "bag": Path(sp).parent.name,
-                "total_reward": float(r.total),
-                "rb_crossing": bool(r.rb_crossing),
-                "rb_min_dist": float(r.rb_min_dist),
-                "lane_crossing": bool(r.lane_crossing),
-                "lane_near_frac": float(r.lane_near_frac),
-                "collision_step": int(r.collision_step) if r.collision_step is not None else None,
-                "off_road_frac": float(r.off_road_fraction),
-                "centerline_score": float(r.centerline),
-                "path_length": float(pl),
-                "heading_change": heading_chg,
-                "stopped": bool(pl < 1.0),
-            })
+            results.append(
+                {
+                    "path": sp,
+                    "name": Path(sp).stem,
+                    "bag": Path(sp).parent.name,
+                    "total_reward": float(r.total),
+                    "rb_crossing": bool(r.rb_crossing),
+                    "rb_min_dist": float(r.rb_min_dist),
+                    "lane_crossing": bool(r.lane_crossing),
+                    "lane_near_frac": float(r.lane_near_frac),
+                    "collision_step": int(r.collision_step)
+                    if r.collision_step is not None
+                    else None,
+                    "off_road_frac": float(r.off_road_fraction),
+                    "centerline_score": float(r.centerline),
+                    "path_length": float(pl),
+                    "heading_change": heading_chg,
+                    "stopped": bool(pl < 1.0),
+                }
+            )
 
         print(f"  Processed {chunk_start + len(chunk_paths)}/{len(scene_paths)} scenes...")
 
@@ -164,16 +175,18 @@ def main():
     stopped = sum(1 for r in results if r["stopped"])
     rb_dists = [r["rb_min_dist"] for r in results]
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"PROBLEM AREA ANALYSIS — {args.tag}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Total scenes: {n}")
-    print(f"  rb_crossings: {rb_cross}/{n} ({rb_cross/n*100:.1f}%)")
-    print(f"  lane_departures: {lane_dep}/{n} ({lane_dep/n*100:.1f}%)")
-    print(f"  collisions: {collisions}/{n} ({collisions/n*100:.1f}%)")
-    print(f"  stopped: {stopped}/{n} ({stopped/n*100:.1f}%)")
-    print(f"  rb_dist: min={min(rb_dists):.3f} p5={np.percentile(rb_dists,5):.3f} "
-          f"med={np.median(rb_dists):.3f}")
+    print(f"  rb_crossings: {rb_cross}/{n} ({rb_cross / n * 100:.1f}%)")
+    print(f"  lane_departures: {lane_dep}/{n} ({lane_dep / n * 100:.1f}%)")
+    print(f"  collisions: {collisions}/{n} ({collisions / n * 100:.1f}%)")
+    print(f"  stopped: {stopped}/{n} ({stopped / n * 100:.1f}%)")
+    print(
+        f"  rb_dist: min={min(rb_dists):.3f} p5={np.percentile(rb_dists, 5):.3f} "
+        f"med={np.median(rb_dists):.3f}"
+    )
     print(f"  reward: mean={np.mean([r['total_reward'] for r in results]):.1f}")
 
     # Sort by severity (lowest reward = worst)
@@ -192,8 +205,10 @@ def main():
         col_bag = sum(1 for r in scenes_in_bag if r["collision_step"] is not None)
         avg_reward = np.mean([r["total_reward"] for r in scenes_in_bag])
         avg_rb_dist = np.mean([r["rb_min_dist"] for r in scenes_in_bag])
-        print(f"  {bag}: {n_bag} scenes, rb_cross={rb_bag}, ld={ld_bag}, "
-              f"collision={col_bag}, reward={avg_reward:.1f}, rb_dist={avg_rb_dist:.2f}")
+        print(
+            f"  {bag}: {n_bag} scenes, rb_cross={rb_bag}, ld={ld_bag}, "
+            f"collision={col_bag}, reward={avg_reward:.1f}, rb_dist={avg_rb_dist:.2f}"
+        )
 
     # Generate summary figure (distributions + per-bag counts + scatter)
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -202,17 +217,27 @@ def main():
     # 1. Reward distribution
     rewards = [r["total_reward"] for r in results]
     axes[0, 0].hist(rewards, bins=50, color="steelblue", edgecolor="black")
-    axes[0, 0].axvline(np.mean(rewards), color="red", linestyle="--", label=f"mean={np.mean(rewards):.1f}")
+    axes[0, 0].axvline(
+        np.mean(rewards), color="red", linestyle="--", label=f"mean={np.mean(rewards):.1f}"
+    )
     axes[0, 0].set_title("Total Reward Distribution")
     axes[0, 0].set_xlabel("Reward")
     axes[0, 0].legend()
 
     # 2. RB min distance distribution
     axes[0, 1].hist(rb_dists, bins=50, color="coral", edgecolor="black")
-    axes[0, 1].axvline(eval_config.rb_near_thresh, color="orange", linestyle="--",
-                       label=f"near ({eval_config.rb_near_thresh:.2f}m)")
-    axes[0, 1].axvline(eval_config.rb_cross_thresh, color="red", linestyle="--",
-                       label=f"cross ({eval_config.rb_cross_thresh:.2f}m)")
+    axes[0, 1].axvline(
+        eval_config.rb_near_thresh,
+        color="orange",
+        linestyle="--",
+        label=f"near ({eval_config.rb_near_thresh:.2f}m)",
+    )
+    axes[0, 1].axvline(
+        eval_config.rb_cross_thresh,
+        color="red",
+        linestyle="--",
+        label=f"cross ({eval_config.rb_cross_thresh:.2f}m)",
+    )
     axes[0, 1].set_title("Road Border Min Distance")
     axes[0, 1].set_xlabel("Distance (m)")
     axes[0, 1].legend()
@@ -242,8 +267,9 @@ def main():
 
     # 5. Heading change vs rb_dist scatter
     headings = [r["heading_change"] for r in results]
-    colors = ["red" if r["rb_crossing"] else ("orange" if r["lane_crossing"] else "blue")
-              for r in results]
+    colors = [
+        "red" if r["rb_crossing"] else ("orange" if r["lane_crossing"] else "blue") for r in results
+    ]
     axes[1, 1].scatter(headings, rb_dists, c=colors, alpha=0.5, s=10)
     axes[1, 1].set_xlabel("Heading Change (rad)")
     axes[1, 1].set_ylabel("RB Min Dist (m)")
@@ -271,7 +297,7 @@ def main():
     print(f"\nSaved summary figure: {fig_path}")
 
     # Save top-K problem scenes
-    problem_scenes = [r["path"] for r in results[:args.top_k]]
+    problem_scenes = [r["path"] for r in results[: args.top_k]]
     prob_path = os.path.join(args.output_dir, f"{args.tag}_problem_scenes.json")
     with open(prob_path, "w") as f:
         json.dump(problem_scenes, f, indent=2)
@@ -296,9 +322,11 @@ def main():
         if r["stopped"]:
             flags.append("STOP")
         flag_str = " ".join(flags) if flags else "ok"
-        print(f"  {r['name']}: reward={r['total_reward']:.1f}, "
-              f"rb_dist={r['rb_min_dist']:.3f}, path={r['path_length']:.1f}m "
-              f"[{flag_str}]")
+        print(
+            f"  {r['name']}: reward={r['total_reward']:.1f}, "
+            f"rb_dist={r['rb_min_dist']:.3f}, path={r['path_length']:.1f}m "
+            f"[{flag_str}]"
+        )
 
 
 if __name__ == "__main__":

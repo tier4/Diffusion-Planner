@@ -45,12 +45,19 @@ _TYPE_BASE = 8  # one-hot [vehicle, pedestrian, bicycle] occupies columns 8..10
 # ~180-deg reversal from the agent's own past), which is unpredictable from its history. Every
 # type gets a cap, looser for the more agile ones (pedestrian < bicycle < vehicle).
 _TYPES = {
-    "vehicle": dict(speed=(0.0, 14.0), accel_max=2.5, idx=0,
-                    size=((1.84, 4.34), (2.5649, 10.7462)), min_turn_radius=5.0),
-    "pedestrian": dict(speed=(0.0, 2.0), accel_max=1.0, idx=1, width=0.7, length=0.7,
-                       min_turn_radius=1.0),
-    "bicycle": dict(speed=(0.0, 7.0), accel_max=1.5, idx=2, width=0.6, length=1.8,
-                    min_turn_radius=2.0),
+    "vehicle": dict(
+        speed=(0.0, 14.0),
+        accel_max=2.5,
+        idx=0,
+        size=((1.84, 4.34), (2.5649, 10.7462)),
+        min_turn_radius=5.0,
+    ),
+    "pedestrian": dict(
+        speed=(0.0, 2.0), accel_max=1.0, idx=1, width=0.7, length=0.7, min_turn_radius=1.0
+    ),
+    "bicycle": dict(
+        speed=(0.0, 7.0), accel_max=1.5, idx=2, width=0.6, length=1.8, min_turn_radius=2.0
+    ),
 }
 
 
@@ -75,9 +82,11 @@ class SyntheticColliderInjector:
         self.pedestrian_prob = pedestrian_prob
         self.bicycle_prob = bicycle_prob
         self.vehicle_prob = max(0.0, 1.0 - pedestrian_prob - bicycle_prob)
-        self.type_probs = {"vehicle": self.vehicle_prob,
-                           "pedestrian": pedestrian_prob,
-                           "bicycle": bicycle_prob}
+        self.type_probs = {
+            "vehicle": self.vehicle_prob,
+            "pedestrian": pedestrian_prob,
+            "bicycle": bicycle_prob,
+        }
         self.min_collision_time = 0.8
         # the synthetic path must stay this far from the ego's t=0 pose (origin), so a
         # stationary ego is never hit -> the forced collision is always avoidable.
@@ -89,7 +98,7 @@ class SyntheticColliderInjector:
         # colliders (curved approaches, capped by each type's min_turn_radius).
         self.straight_line = straight_line
 
-        self._tau_past = torch.arange(-INPUT_T, 1, dtype=torch.float32) * dt   # [31] in [-3,0]
+        self._tau_past = torch.arange(-INPUT_T, 1, dtype=torch.float32) * dt  # [31] in [-3,0]
         self._tau_future = torch.arange(1, OUTPUT_T + 1, dtype=torch.float32) * dt  # [80] in [.1,8]
 
     def _rand(self, lo, hi, device):
@@ -145,8 +154,12 @@ class SyntheticColliderInjector:
             t_c = float(tau_f[k_c])
             target = ego_xy[k_c]  # [2]
 
-            p0 = torch.stack([self._rand(self.x_lo, self.x_hi, device),
-                              self._rand(-self.y_half_width, self.y_half_width, device)])
+            p0 = torch.stack(
+                [
+                    self._rand(self.x_lo, self.x_hi, device),
+                    self._rand(-self.y_half_width, self.y_half_width, device),
+                ]
+            )
 
             if self.straight_line:
                 # Constant velocity straight at the target: v0 = (target - p0) / t_c, a = 0.
@@ -201,8 +214,8 @@ class SyntheticColliderInjector:
             vel = v0[None, :] + a[None, :] * t
             return pos, vel
 
-        past_pos, past_vel = motion(tau_p)   # [31,2]
-        fut_pos, fut_vel = motion(tau_f)      # [80,2]
+        past_pos, past_vel = motion(tau_p)  # [31,2]
+        fut_pos, fut_vel = motion(tau_f)  # [80,2]
 
         # reference heading for ~stationary steps (atan2 of a ~0 vector is noisy): prefer the
         # initial-velocity direction, else the acceleration direction (handles v0 == 0).
@@ -244,9 +257,9 @@ class SyntheticColliderInjector:
         Call on a *raw* batch before ``heading_to_cos_sin`` / normalization. The boolean mask
         of slots actually written is stored on ``self.last_injected_mask`` ([B, Pn]).
         """
-        neighbor_past = inputs["neighbor_agents_past"]      # [B, Pn, 31, 11]
+        neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 11]
         neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3]
-        ego_future = inputs["ego_agent_future"]             # [B, 80, 3] (x, y, heading)
+        ego_future = inputs["ego_agent_future"]  # [B, 80, 3] (x, y, heading)
         device = neighbor_past.device
         B, Pn = neighbor_past.shape[:2]
 
