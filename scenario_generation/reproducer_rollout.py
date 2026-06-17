@@ -267,6 +267,30 @@ class _SegState:
     max_steps: int = (
         0  # sim-step cap (decoupled from segment length so a slow ego can still finish)
     )
+    # Unstick: when the ego makes no forward progress for ``unstick_after`` steps
+    # (e.g. it stops at a yellow light and never proceeds), snap it forward to the
+    # recorded GT ego pose ~``unstick_advance_m`` ahead instead of stalling forever.
+    unstick_after: int = 0
+    unstick_advance_m: float = 5.0
+    ego_stuck: int = 0
+    n_snaps: int = 0
+
+
+def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
+    """Build (live_pose, ego_hist (31,3 world), dyn) from recorded frame ``idx``.
+
+    Reconstructs the live ego world pose + recent history + speed from the frame's
+    recorded ego pose and ego_agent_past. Used to seed a segment and to snap the
+    ego back onto the recorded GT pose when it gets stuck."""
+    pose = tl.poses[idx].copy()
+    ep = np.asarray(tl.npz(idx)["ego_agent_past"]).astype(np.float32)
+    c, s = math.cos(pose[2]), math.sin(pose[2])
+    hist_xy = np.stack(
+        [pose[0] + ep[:, 0] * c - ep[:, 1] * s, pose[1] + ep[:, 0] * s + ep[:, 1] * c],
+        axis=-1,
+    )
+    ego_hist = np.column_stack([hist_xy, ep[:, 2] + pose[2]]).astype(np.float64)
+    return pose, ego_hist, _EgoDyn(speed=float(tl.speeds[idx]))
 
 
 def _seed_state(
@@ -280,6 +304,8 @@ def _seed_state(
     max_stuck_steps,
     timers,
     max_steps=None,
+    unstick_after=0,
+    unstick_advance_m=5.0,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import PerfectTracker
 
@@ -289,19 +315,7 @@ def _seed_state(
 
     cursor = PerceptionReproducer(tl, search_radius=search_radius, timers=timers)
     cursor.reset(start)
-    live_pose = tl.poses[start].copy()
-    npz0 = tl.npz(start)
-    ep0 = np.asarray(npz0["ego_agent_past"]).astype(np.float32)  # (31,3) recorded-ego frame
-    c0, s0 = math.cos(live_pose[2]), math.sin(live_pose[2])
-    hist_xy = np.stack(
-        [
-            live_pose[0] + ep0[:, 0] * c0 - ep0[:, 1] * s0,
-            live_pose[1] + ep0[:, 0] * s0 + ep0[:, 1] * c0,
-        ],
-        axis=-1,
-    )
-    ego_hist = np.column_stack([hist_xy, ep0[:, 2] + live_pose[2]]).astype(np.float64)
-    ec0 = np.asarray(npz0["ego_current_state"]).reshape(-1)
+    live_pose, ego_hist, dyn = _ego_state_from_frame(tl, start)
     return _SegState(
         tl=tl,
         start=start,
@@ -314,13 +328,15 @@ def _seed_state(
         tracker=PerfectTracker(dt=DT),
         live_pose=live_pose,
         ego_hist=ego_hist,
-        dyn=_EgoDyn(speed=float(np.hypot(ec0[4], ec0[5]))),
-        ego_shape=np.asarray(npz0["ego_shape"]).reshape(-1)[:3].astype(np.float32),
+        dyn=dyn,
+        ego_shape=np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32),
         goal_xy=tl.poses[end - 1, :2],
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
         prev_max_idx=cursor.max_idx_reached,
         max_steps=cap,
+        unstick_after=int(unstick_after),
+        unstick_advance_m=float(unstick_advance_m),
     )
 
 
@@ -385,6 +401,25 @@ def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, time
         s.sim_time += DT
         s.k += 1
 
+        # Unstick: if the ego has been (near-)stopped for too long (e.g. it halted
+        # at a yellow light and won't proceed), snap it forward onto the recorded
+        # GT ego pose ~unstick_advance_m ahead so the rollout continues.
+        if s.unstick_after > 0:
+            s.ego_stuck = s.ego_stuck + 1 if s.dyn.speed < 0.5 else 0
+            if s.ego_stuck >= s.unstick_after:
+                n = len(s.tl)
+                tgt = min(max(s.cursor.max_idx_reached, 0) + 1, n - 1)
+                while tgt < n - 1 and (
+                    float(np.linalg.norm(s.tl.poses[tgt, :2] - s.live_pose[:2]))
+                    < s.unstick_advance_m
+                ):
+                    tgt += 1
+                s.live_pose, s.ego_hist, s.dyn = _ego_state_from_frame(s.tl, tgt)
+                s.cursor.reset(tgt)
+                s.prev_max_idx = s.cursor.max_idx_reached
+                s.ego_stuck = 0
+                s.n_snaps += 1
+
 
 def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
     valid_cl = s.clearances[: s.k][np.isfinite(s.clearances[: s.k])]
@@ -403,6 +438,7 @@ def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
         if valid_cl.size
         else -1,
         "progress_m": progress,
+        "n_snaps": int(s.n_snaps),
     }
     return SegmentResult(
         metrics=metrics, clearances=s.clearances, collisions=s.collisions, timers=timers
@@ -540,14 +576,18 @@ def render_segment(
     goal_reach_m: float = 5.0,
     max_stuck_steps: int = 0,
     color_by_uuid: bool = True,
+    unstick_after: int = 300,
+    unstick_advance_m: float = 5.0,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``), or the
-    step cap, or (if enabled) the stuck cutoff. ``max_steps`` defaults to
-    ``2*(end-start)`` so a slow ego (e.g. waiting out a long red light) still has
-    room to drive to the end — not just the segment length. ``max_stuck_steps``=0
-    (default) disables the stuck cutoff so light-waiting isn't mistaken for stuck.
+    step cap. ``max_steps`` defaults to ``2*(end-start)`` so a slow ego (e.g.
+    waiting out a long red light) still has room to drive to the end. The stuck
+    *cutoff* (``max_stuck_steps``) is disabled by default; instead ``unstick_after``
+    (default 300 steps ~30 s of no progress) snaps the ego forward onto the
+    recorded GT pose ~``unstick_advance_m`` ahead — so a model that halts at a
+    yellow light is nudged past it rather than ending the render.
 
     ``window`` = (lo, hi) step range to render (default: all). ``color_by_uuid``:
     color neighbors by their stable track UUID from the sidecar when available
@@ -570,6 +610,8 @@ def render_segment(
         max_stuck_steps,
         timers,
         max_steps=cap,
+        unstick_after=unstick_after,
+        unstick_advance_m=unstick_advance_m,
     )
     route = out_dir.name
     while not s.done:
