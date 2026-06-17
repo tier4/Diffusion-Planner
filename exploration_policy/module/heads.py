@@ -37,9 +37,21 @@ class GuidanceHead(nn.Module):
         init_mode: str = "zeros",
         init_std: float = 0.01,
         raw_scale: float = 1.0,
+        max_conc: float = 10.0,
     ):
         super().__init__()
         self.n_heads = n_heads
+        # Cap on the Beta concentration (alpha/beta). With the default 10.0 the
+        # deterministic Beta mean saturates at ~10/11, so the mapped eta cannot
+        # exceed ~0.82 — scenes whose swept-best guidance sits at the grid edge
+        # (|eta|=1.0) are then unreachable. Raise it to let the policy emit more
+        # extreme etas on tight scenes (the gate still controls engagement).
+        self.max_conc = float(max_conc)
+        # The clamp caps softplus(.)+1.0 (always >= 1.0) at max_conc; a cap below
+        # 1.0 (or NaN) would push params under 1.0 and break the unimodal-Beta
+        # invariant. Fail loudly rather than emit invalid Beta shapes.
+        if not (self.max_conc >= 1.0):
+            raise ValueError(f"max_conc must be >= 1.0 (got {max_conc!r})")
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.act = nn.GELU()
         # bias=False removes a direct global offset at the output layer:
@@ -78,10 +90,42 @@ class GuidanceHead(nn.Module):
         scaled = raw * self.raw_scale
 
         # softplus + 1.0 ensures params >= 1.0 (unimodal Beta)
-        # Clamp to max_conc to prevent distribution collapse (alpha=10 → high concentration)
-        max_conc = 10.0
-        params = torch.clamp(F.softplus(scaled) + 1.0, max=max_conc)
+        # Clamp to max_conc to prevent distribution collapse (higher = more
+        # extreme reachable eta; see __init__).
+        params = torch.clamp(F.softplus(scaled) + 1.0, max=self.max_conc)
         return [Beta(params[:, 2 * i], params[:, 2 * i + 1]) for i in range(self.n_heads)]
+
+
+class StrengthHead(nn.Module):
+    """Scalar guidance-strength gate g in (0, 1) (sigmoid).
+
+    The policy emits ONE number per scene that controls how strongly the whole
+    guidance field is applied: at inference the composer multiplies the total
+    guidance energy (hence the guidance gradient) by g, so g=0 -> exactly the
+    unguided plan, g=1 -> the full envelope push. This decouples "engage? / how
+    hard" (this scalar) from "which way to swerve" (the per-head etas), and
+    gives an intrinsic false-positive gate: on a scene with nothing to avoid the
+    network can drive g->0 directly instead of relying on every eta head landing
+    on exactly 0.
+
+    Supervised target: 1.0 on real-avoidance scenes, 0.0 on zero-target scenes
+    (no obstacle in the ego's path — including far-distractor-only scenes).
+
+    Zero-initialized output layer -> raw 0 -> sigmoid(0)=0.5 at init (an
+    unbiased, mild gate before any learning).
+    """
+
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden_dim, 1)
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, fused: torch.Tensor) -> torch.Tensor:
+        """fused [B, H] -> [B] strength in (0, 1)."""
+        return torch.sigmoid(self.fc2(self.act(self.fc1(fused))).squeeze(-1))
 
 
 class ValueHead(nn.Module):

@@ -87,6 +87,25 @@ SkippingInfo call_decide(const FrameSkipInputs & inputs, const ZeroVectors & vec
     vecs.neighbor_past, vecs.line_strings, vecs.lanes, make_default_filter_params());
 }
 
+// Fill ego_future with a straight forward trajectory whose per-step speed ramps
+// linearly from v_start to v_end (m/s). v_start==v_end gives a constant-speed creep.
+// Speed at step j is (x[j+1]-x[j]) / dt, which is what compute_future_accel reads.
+void set_linear_future(std::vector<float> & ego_future, float v_start, float v_end)
+{
+  using autoware::diffusion_planner::OUTPUT_T;
+  using autoware::diffusion_planner::POSE_DIM;
+  constexpr float dt = 0.1f;
+  float x = 0.0f;
+  for (int64_t j = 0; j < OUTPUT_T; ++j) {
+    ego_future[j * POSE_DIM + 0] = x;
+    ego_future[j * POSE_DIM + 1] = 0.0f;
+    ego_future[j * POSE_DIM + 2] = 1.0f;  // cos
+    ego_future[j * POSE_DIM + 3] = 0.0f;  // sin
+    const float speed = v_start + (v_end - v_start) * static_cast<float>(j) / (OUTPUT_T - 1);
+    x += speed * dt;
+  }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -143,6 +162,59 @@ TEST(DecideFrameSkipTest, RedOrYellowLightSkip)
 
   const SkippingInfo info = call_decide(inputs, vecs);
   EXPECT_EQ(info.label, SkippingLabel::RedOrYellowLight);
+}
+
+TEST(DecideFrameSkipTest, AcceleratingIntoRedLightSkipsEvenWhenMoving)
+{
+  // Ego is NOT stopped (is_stop = false), so the original stopped-only gate would miss
+  // this — but the GT future clearly accelerates (~0 -> ~9 m/s) into a red/yellow light,
+  // so the dedicated AcceleratingAtTrafficLight trigger fires.
+  ZeroVectors vecs;
+  vecs.lanes[0] = 1.0f;
+  set_linear_future(vecs.ego_future, 0.2f, 9.0f);
+
+  FrameSkipInputs inputs = make_clear_inputs();
+  inputs.is_stop = false;
+  inputs.is_red_or_yellow = true;
+  inputs.is_future_forward = true;
+
+  const SkippingInfo info = call_decide(inputs, vecs);
+  EXPECT_EQ(info.label, SkippingLabel::AcceleratingAtTrafficLight);
+}
+
+TEST(DecideFrameSkipTest, StoppedThenAcceleratingKeepsRedOrYellowLabel)
+{
+  // When the ego is fully stopped AND the future accelerates away, the original stopped
+  // gate is checked first, so the frame keeps the RedOrYellowLight label (not the new one).
+  ZeroVectors vecs;
+  vecs.lanes[0] = 1.0f;
+  set_linear_future(vecs.ego_future, 0.2f, 9.0f);
+
+  FrameSkipInputs inputs = make_clear_inputs();
+  inputs.is_stop = true;
+  inputs.is_red_or_yellow = true;
+  inputs.is_future_forward = true;
+
+  const SkippingInfo info = call_decide(inputs, vecs);
+  EXPECT_EQ(info.label, SkippingLabel::RedOrYellowLight);
+}
+
+TEST(DecideFrameSkipTest, CreepingIntoRedWhileMovingIsKept)
+{
+  // Moving slowly at a near-constant ~1 m/s (a creep, peak < 3 m/s) toward a red light:
+  // neither the stopped gate (is_stop = false) nor the acceleration trigger fires, so the
+  // frame is accepted rather than dropped.
+  ZeroVectors vecs;
+  vecs.lanes[0] = 1.0f;
+  set_linear_future(vecs.ego_future, 1.0f, 1.0f);
+
+  FrameSkipInputs inputs = make_clear_inputs();
+  inputs.is_stop = false;
+  inputs.is_red_or_yellow = true;
+  inputs.is_future_forward = true;
+
+  const SkippingInfo info = call_decide(inputs, vecs);
+  EXPECT_EQ(info.label, SkippingLabel::NotSkipped);
 }
 
 TEST(DecideFrameSkipTest, StoppedAtTrafficLightSkip)

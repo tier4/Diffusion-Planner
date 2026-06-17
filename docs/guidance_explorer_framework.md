@@ -17,6 +17,25 @@ numbers.
   through a composer. The contract per head: eta = 0 must be EXACTLY inert
   (zero energy and zero gradient), magnitude must mean roughly the same
   thing in every scene, and commands must be O(1).
+- **Optional learned strength gate (`use_strength_head`).** Instead of (or
+  alongside) relying on every eta head reaching exactly 0 to be inert, the
+  policy can emit ONE extra scalar `g in (0,1)` that the composer multiplies
+  into the *total* guidance energy (`g -> 0` = exactly the unguided plan).
+  Supervise it as a per-scene gate (target 1 when guidance is wanted, 0 when
+  not — including scenes that contain obstacles the ego does NOT need to
+  avoid). This decouples "engage? / how hard" (the scalar) from "which way"
+  (the etas) and is a strong false-positive suppressor: a single dedicated
+  gate is easier to drive to 0 than two noisy heads, and an inference-time
+  multiplier on `g` (a deploy knob) then amplifies guidance ONLY where the
+  gate is already open, so it cannot wake guidance on non-avoidance scenes.
+- **Reachable eta range (`head_max_conc`).** The deterministic Beta mean
+  saturates at the concentration cap (default 10 -> |eta| <~ 0.82), so
+  scenes whose best guidance sits at the grid edge (|eta| = 1) are
+  unreachable and stay marginal. Note this: a residual contact whose swept
+  solution needs |eta| ~ 1 is an architecture ceiling, NOT a data problem,
+  and raising `g` (energy) does NOT fix it — energy scales how hard the plan
+  tracks a target *offset* that eta itself sets, so more energy just
+  oscillates. Raise the concentration cap to let the mean reach near +-1.
 
 ## 2. Calibrate the guidances FIRST (most failures start here)
 
@@ -130,6 +149,45 @@ Findings to expect and fix:
   `--lat_thresh`/`--col_thresh`, rule any/both). Useful for mining avoidance
   scenes from large unlabeled pools and for auditing dataset composition; the
   inertness contract makes the signal bimodal, so the threshold is forgiving.
+
+## 8b. False-detection–robust recipe (discrimination data + learned gate)
+
+The most common deployment complaint is the explorer firing when nothing needs
+avoiding (false positives on normal driving). A policy trained only to react to
+the PRESENCE of a stopped agent learns the wrong invariant; the fix is to make
+the data and the architecture both encode PROXIMITY-TO-PATH instead.
+
+Data — three zero-target classes plus the positives, deliberately inert-heavy:
+- positives: a real in-path obstacle, PLUS far "distractor" stopped agents the
+  ego must ignore (place them beside the planned path, kept only if the whole
+  plan clears them by a margin via the canonical OBB clearance — so they are
+  provably non-candidates: `add_distractor_neighbors_npz`);
+- anchors: the same scenes with the in-path obstacle removed
+  (`strip_neighbors_npz`) and/or distractor-only — stopped agents present, none
+  to avoid, target 0;
+- real normals: genuine driving, target 0 (the real-domain anchor — sim-built
+  zeros ALONE teach domain blindness; real zeros keep it honest).
+Balance is normal-heavy (engage ≈ 1 : inert ≈ 5), because restraint is the hard
+skill; counter the imbalance with the avoid-weight so positives still drive
+aggressive swerves. Mix distractor / no-distractor within each class so the
+learned invariant is proximity, not distractor-presence.
+
+Architecture — a learned strength GATE (`use_strength_head`): the policy emits
+one extra scalar g in (0,1) that the composer multiplies into the TOTAL guidance
+energy (g->0 = exactly the unguided plan). Supervise it as the engage signal
+(1 on positives, 0 on every zero-target class). This is a stronger FP suppressor
+than relying on the eta heads alone (one dedicated gate drives to 0 far more
+reliably than two heads both landing on 0), and it replaces the envelope's
+hand-tuned "how aggressive" constant with a learned per-scene decision. A
+deploy-time multiplier on g is FP-safe (g~0 on normals) but pushing it above 1
+is closed-loop NEGATIVE (over-strong per-step guidance oscillates).
+
+Closing the residual avoidance gap WITHOUT regressing FPs: do NOT add energy
+gain or mid-maneuver "roll" data (both reawaken FPs / oscillate here). The
+limiter is usually eta REACHABILITY — the deterministic Beta mean saturates
+below |eta|=1 at the concentration cap, so scenes whose swept solution sits at
+the grid edge stay marginal; raise the cap (`head_max_conc`) so the mean can
+reach near +-1 while the gate keeps it FP-safe.
 
 ## 8. Failure modes checklist
 

@@ -2,7 +2,7 @@
 name = "diffusion-planner-workspace"
 version = "4.0.0"
 description = "Diffusion Planner workspace"
-requires-python = ">=3.13"
+requires-python = ">=3.10,<3.11"
 dependencies = [
     "diffusion-planner",
     "exploration-policy",

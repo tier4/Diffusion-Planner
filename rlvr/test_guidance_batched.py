@@ -316,3 +316,79 @@ def test_dit_memo_context_manager_installs_and_restores():
     except RuntimeError:
         pass
     assert dec.dit is orig
+
+
+# ---------------------------------------------------------------------------
+# FastGuidanceComposer learned strength gate (guidance_strength)
+# ---------------------------------------------------------------------------
+
+
+def test_fast_composer_strength_gate():
+    from rlvr.guidance_batched import build_head_composer
+
+    etas = {"lateral": torch.tensor([0.5, 0.5]), "collision": torch.tensor([0.5, 0.5])}
+
+    # strength=None -> gate is a no-op (prior behavior preserved)
+    comp = build_head_composer(etas, guidance_strength=None)
+    assert comp._strength is None
+    assert not comp._strength_inert()
+
+    # g==0 forces the whole batch inert even though the etas are active
+    comp = build_head_composer(etas, guidance_strength=torch.zeros(2))
+    assert comp._strength_inert()
+
+    # g below eta_eps is treated as inert; a real gate value is active
+    assert build_head_composer(etas, guidance_strength=torch.full((2,), 1e-4))._strength_inert()
+    assert not build_head_composer(etas, guidance_strength=torch.tensor(0.5))._strength_inert()
+    assert not build_head_composer(
+        etas, guidance_strength=torch.tensor([0.9, 0.9])
+    )._strength_inert()
+
+
+def test_fast_composer_strength_scaling_and_shape_guard():
+    """The gate scales summed energy per-sample (g constant w.r.t. x) and a
+    wrong-length strength raises instead of silently misbroadcasting."""
+    from rlvr.guidance_batched import FastGuidanceComposer
+
+    class _E:  # minimal active function: energy = sum over the trajectory
+        _eta_lat = 1.0  # recognized, non-inert -> composer stays active
+
+        def energy(self, x, t, inputs):
+            return x.reshape(x.shape[0], -1).sum(dim=-1)
+
+    def _mk(strength):
+        c = FastGuidanceComposer.__new__(FastGuidanceComposer)
+        c._functions = [_E()]
+        c._eta_eps = 1e-3
+        c._skip_x0 = True
+        c._inputs_phys = {}
+        c._strength = strength
+        return c
+
+    B, P, T = 2, 1, 4
+
+    class _Norm:
+        std = torch.ones(4)  # broadcasts over the last (feature) dim of [B,P,T,4]
+
+        def inverse(self, x):
+            return x
+
+    kwargs = dict(state_normalizer=_Norm(), observation_normalizer=_Norm(), inputs={})
+    # x_in is reshaped to [B, P, -1, 4] inside __call__, so it must be [B, P, T*4].
+    x = torch.arange(B * P * T * 4, dtype=torch.float32).reshape(B, P, T * 4) + 1.0
+    t = torch.zeros(B)
+
+    g1 = _mk(None)(x, t, {}, **kwargs)
+    g2 = _mk(torch.tensor([2.0, 2.0]))(x, t, {}, **kwargs)
+    # surrogate is linear in the energy scale, so 2x strength -> 2x surrogate
+    assert torch.allclose(g2, 2.0 * g1)
+
+    # scalar strength broadcasts to the batch
+    assert torch.allclose(_mk(torch.tensor(2.0))(x, t, {}, **kwargs), g2)
+
+    # wrong-length strength must raise (no silent misbroadcast)
+    try:
+        _mk(torch.tensor([2.0, 2.0, 2.0]))(x, t, {}, **kwargs)
+        raise AssertionError("expected ValueError for strength length != B")
+    except ValueError:
+        pass

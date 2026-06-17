@@ -404,13 +404,9 @@ def build_sequences_from_rosbag(
 
     kinematic_states = topic_name_to_timed["/localization/kinematic_state"]
     accelerations = topic_name_to_timed["/localization/acceleration"]
-    tracked_objects_msgs = topic_name_to_timed[
-        "/perception/object_recognition/tracking/objects"
-    ]
+    tracked_objects_msgs = topic_name_to_timed["/perception/object_recognition/tracking/objects"]
     turn_indicators = topic_name_to_timed["/vehicle/status/turn_indicators_status"]
-    traffic_signals = topic_name_to_timed[
-        "/perception/traffic_light_recognition/traffic_signals"
-    ]
+    traffic_signals = topic_name_to_timed["/perception/traffic_light_recognition/traffic_signals"]
     route_entries = topic_name_to_timed["/planning/mission_planning/route"]
 
     if len(route_entries) == 0:
