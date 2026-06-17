@@ -30,6 +30,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import optim
 
 from exploration_policy.model import ExplorationPolicy, ExplorationPolicyConfig
@@ -224,6 +225,12 @@ def main():
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--head_raw_scale", type=float, default=10.0)
     parser.add_argument(
+        "--head_max_conc",
+        type=float,
+        default=10.0,
+        help="Beta concentration cap (default 10 caps |eta|≈0.82; raise to reach near-±1.0 etas)",
+    )
+    parser.add_argument(
         "--guidance_envelope",
         default=None,
         help="JSON file with the guidance envelope the --labels were swept at "
@@ -238,6 +245,21 @@ def main():
         help="warm-start: load this exploration_policy.pth before training (heads/arch must match)",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--use_strength_head",
+        action="store_true",
+        help="add a learned scalar guidance-strength gate g in (0,1); target 1 "
+        "on solved avoidance scenes, 0 on every zero-target scene. At inference "
+        "the composer multiplies the total guidance energy by g (an intrinsic "
+        "false-positive gate). Replaces relying on the hand-set envelope for "
+        "engagement strength.",
+    )
+    parser.add_argument(
+        "--strength_weight",
+        type=float,
+        default=1.0,
+        help="BCE loss weight for the strength gate (only with --use_strength_head)",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -292,6 +314,8 @@ def main():
         device=device,
     )
     is_avoid = torch.tensor([cls == "avoid" for _, _, cls in entries], device=device)
+    # Strength-gate target: 1.0 on real-avoidance scenes, 0.0 on zero-target.
+    strength_target = is_avoid.float()
 
     # --- Stratified train/val split (keep avoidance scenes in both) ---
     g = torch.Generator().manual_seed(args.seed)
@@ -316,7 +340,9 @@ def main():
         dropout=args.dropout,
         encoder_hidden_dim=model_args.hidden_dim,
         head_raw_scale=args.head_raw_scale,
+        head_max_conc=args.head_max_conc,
         heads=heads,
+        use_strength_head=args.use_strength_head,
         guidance_envelope=guidance_envelope,
     )
     policy = ExplorationPolicy(ep_config, ref_seq_len=model_args.future_len).to(device)
@@ -342,18 +368,27 @@ def main():
         print(f"[warm-start] loaded {args.init_from}")
     optimizer = optim.AdamW(policy.parameters(), lr=args.lr)
 
-    def pred_etas(idx_batch):
+    def pred_out(idx_batch):
         out = policy(enc[idx_batch], xref[idx_batch], deterministic=True)
-        return torch.stack([2.0 * out.dists[h].mean - 1.0 for h in heads], dim=-1)
+        etas = torch.stack([2.0 * out.dists[h].mean - 1.0 for h in heads], dim=-1)
+        return etas, out.strength
 
     def eval_split(idx_split):
         policy.eval()
         with torch.no_grad():
-            pred = pred_etas(idx_split)
+            pred, pred_s = pred_out(idx_split)
             err = (pred - targets[idx_split]) ** 2
             mse = (err.mean(dim=-1) * weights[idx_split]).mean()
             av = is_avoid[idx_split]
-            metrics = {"weighted_mse": float(mse)}
+            metrics = {"weighted_mse": float(mse), "sel_loss": float(mse)}
+            if args.use_strength_head:
+                bce = F.binary_cross_entropy(pred_s, strength_target[idx_split])
+                metrics["strength_bce"] = float(bce)
+                metrics["sel_loss"] = float(mse + args.strength_weight * bce)
+                if av.any():
+                    metrics["avoid_g_mean"] = float(pred_s[av].mean())
+                if (~av).any():
+                    metrics["inert_g_mean"] = float(pred_s[~av].mean())
             if av.any():
                 # sign accuracy of the dominant (largest-|target|) head per scene
                 t_a, p_a = targets[idx_split][av], pred[av]
@@ -377,8 +412,12 @@ def main():
         ep_loss, n_b = 0.0, 0
         for s in range(0, len(perm), args.batch_size):
             b = perm[s : s + args.batch_size]
-            pred = pred_etas(b)
+            pred, pred_s = pred_out(b)
             loss = (((pred - targets[b]) ** 2).mean(dim=-1) * weights[b]).mean()
+            if args.use_strength_head:
+                loss = loss + args.strength_weight * F.binary_cross_entropy(
+                    pred_s, strength_target[b]
+                )
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
@@ -396,16 +435,23 @@ def main():
         }
         log_rows.append(row)
         if epoch % 10 == 0 or epoch == 1:
+            gate = ""
+            if args.use_strength_head:
+                gate = (
+                    f" g_avoid={val_m.get('avoid_g_mean', -1):.3f} "
+                    f"g_inert={val_m.get('inert_g_mean', -1):.3f} "
+                    f"g_bce={val_m.get('strength_bce', -1):.4f}"
+                )
             print(
                 f"  ep{epoch:3d} train={row['train_loss']:.4f} "
                 f"val_mse={val_m['weighted_mse']:.4f} "
                 f"avoid_sign={val_m.get('avoid_sign_acc', -1):.2f} "
                 f"avoid_|p|={val_m.get('avoid_pred_absmean', -1):.3f} "
-                f"inert_|p|={val_m.get('inert_pred_absmean', -1):.4f}"
+                f"inert_|p|={val_m.get('inert_pred_absmean', -1):.4f}" + gate
             )
 
-        if val_m["weighted_mse"] < best_val - 1e-5:
-            best_val = val_m["weighted_mse"]
+        if val_m["sel_loss"] < best_val - 1e-5:
+            best_val = val_m["sel_loss"]
             best_epoch = epoch
             torch.save(policy.state_dict(), run_dir / "exploration_policy.pth")
         if epoch - best_epoch >= args.patience:
@@ -417,8 +463,9 @@ def main():
         json.dump(log_rows, f, indent=1)
     with open(run_dir / "train_args.json", "w") as f:
         json.dump(vars(args), f, indent=1)
+    sel_name = "sel_loss" if args.use_strength_head else "val_mse"
     print(
-        f"[done] best val_mse={best_val:.4f} @ ep{best_epoch}; "
+        f"[done] best {sel_name}={best_val:.4f} @ ep{best_epoch}; "
         f"saved {run_dir / 'exploration_policy.pth'}"
     )
 

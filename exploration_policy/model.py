@@ -31,7 +31,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Beta
 
-from exploration_policy.module.heads import GuidanceHead, ValueHead
+from exploration_policy.module.heads import GuidanceHead, StrengthHead, ValueHead
 from exploration_policy.module.ref_fusion import RefFusionAttention
 from exploration_policy.module.ref_mixer import RefTrajectoryMixer
 
@@ -75,12 +75,20 @@ class ExplorationPolicyConfig:
     # flow through the softplus compression. Default 1.0 (no scaling).
     # Set to 10.0 to make the policy learn ~12x faster.
     head_raw_scale: float = 1.0
+    # Cap on Beta concentration in GuidanceHead. Default 10.0 caps |eta|≈0.82;
+    # raise (e.g. 50) to let the policy reach near-±1.0 etas on tight scenes.
+    head_max_conc: float = 10.0
     # Guidance heads, one Beta distribution (-> eta in [-1, 1]) each. The
     # policy itself is head-name agnostic — names define count, ordering, and
     # the dict keys of ExplorationPolicyOutput; mapping eta -> guidance params
     # is the caller's job. Default matches the original 2-head layout, so old
     # checkpoints (fc2 [4, H]) load unchanged.
     heads: list[str] = field(default_factory=lambda: ["lateral", "longitudinal"])
+    # If True, add a StrengthHead: the policy emits one extra scalar g in (0,1)
+    # that the composer multiplies into the total guidance energy (a learned
+    # per-scene guidance-strength gate; see StrengthHead). Default False so old
+    # checkpoints/configs are unchanged.
+    use_strength_head: bool = False
     # Guidance envelope the eta labels were swept against — the calibration the
     # policy's outputs are bound to. Persisted here so eval/deploy load it
     # instead of relying on (divergent) per-tool CLI defaults. Defaults to the
@@ -113,6 +121,7 @@ class ExplorationPolicyOutput:
     log_probs: dict[str, torch.Tensor]  # head -> [B] log prob of sampled eta
     value: torch.Tensor  # [B] state value estimate (Phase 2)
     dists: dict[str, Beta]  # head -> Beta distribution object
+    strength: torch.Tensor | None = None  # [B] guidance-strength gate in (0,1), or None
 
     @property
     def eta_lat(self) -> torch.Tensor:
@@ -175,8 +184,10 @@ class ExplorationPolicy(nn.Module):
             init_mode=config.head_init,
             init_std=config.head_init_std,
             raw_scale=config.head_raw_scale,
+            max_conc=config.head_max_conc,
         )
         self.value_head = ValueHead(config.hidden_dim)
+        self.strength_head = StrengthHead(config.hidden_dim) if config.use_strength_head else None
 
     def forward(
         self,
@@ -206,6 +217,9 @@ class ExplorationPolicy(nn.Module):
         # Get value estimate
         value = self.value_head(fused)  # [B]
 
+        # Optional learned guidance-strength gate
+        strength = self.strength_head(fused) if self.strength_head is not None else None
+
         etas: dict[str, torch.Tensor] = {}
         log_probs: dict[str, torch.Tensor] = {}
         dists: dict[str, Beta] = {}
@@ -220,4 +234,5 @@ class ExplorationPolicy(nn.Module):
             log_probs=log_probs,
             value=value,
             dists=dists,
+            strength=strength,
         )

@@ -56,6 +56,8 @@ def make_guided_predict(policy, heads, args, device):
         enc = run_frozen_encoder(model, norm)
         out = policy(enc, x_ref, deterministic=True)
         etas = {h: (2.0 * out.dists[h].mean - 1.0).reshape(1) for h in heads}
+        gain = float(getattr(args, "strength_gain", 1.0))
+        strength = out.strength * gain if out.strength is not None else None
         return (
             _batched_generate_varied_noise(
                 model,
@@ -65,7 +67,10 @@ def make_guided_predict(policy, heads, args, device):
                 noise_max=0.0,
                 first_deterministic=False,
                 composer=make_composer(
-                    etas, args, envelope=getattr(policy, "guidance_envelope", None)
+                    etas,
+                    args,
+                    envelope=getattr(policy, "guidance_envelope", None),
+                    strength=strength,
                 ),
                 device=device,
                 use_dit_memo=not args.no_dit_memo,
@@ -138,6 +143,13 @@ def main():
     parser.add_argument("--lambda_spd", type=float, default=None)
     parser.add_argument("--stretch_scale", type=float, default=None)
     parser.add_argument("--guidance_scale", type=float, default=None)
+    parser.add_argument(
+        "--strength_gain",
+        type=float,
+        default=1.0,
+        help="deploy-time multiplier on the learned strength gate g (FP-safe: g≈0 "
+        "on non-avoidance scenes). No effect on policies without a strength head.",
+    )
     parser.add_argument(
         "--no_dit_memo",
         action="store_true",
