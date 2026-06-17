@@ -805,3 +805,214 @@ def run_segments_batched(
     finally:
         pool.shutdown(wait=True)
     return results
+
+
+# --------------------------------------------------------------------------- #
+# Collision-scene extractor
+# --------------------------------------------------------------------------- #
+def _min_clearance_any(neighbors_live: np.ndarray, ego_shape: np.ndarray, device: str) -> float:
+    """Min OBB clearance ego(at origin) to ANY valid neighbor (m). inf if none.
+
+    Unlike score_step (which gates on stopped neighbors via the sc reward), this is
+    the raw distance to the nearest neighbor of any kind — the collision trigger
+    for extraction ("<= thresh m to a neighbor").
+    """
+    from diffusion_planner.metrics.geometry import (
+        _build_ego_bbox_corners,
+        _closest_points_between_rects,
+    )
+    from diffusion_planner.model.guidance.collision import center_rect_to_points
+
+    valid = np.abs(neighbors_live[:, :6]).sum(axis=1) > 0
+    if not valid.any():
+        return float("inf")
+    nb = neighbors_live[valid]
+    et = torch.zeros((1, 1, 4), dtype=torch.float32, device=device)
+    et[0, 0, 2] = 1.0
+    ego_c = _build_ego_bbox_corners(
+        et, torch.tensor(ego_shape[:3], dtype=torch.float32, device=device)
+    )[:, :1].reshape(1, 4, 2)
+    rects = torch.tensor(
+        np.stack([nb[:, 0], nb[:, 1], nb[:, 2], nb[:, 3], nb[:, 7], nb[:, 6]], axis=-1),
+        dtype=torch.float32,
+        device=device,
+    )  # x,y,cos,sin,length,width
+    corns = center_rect_to_points(rects)
+    p1, p2 = _closest_points_between_rects(ego_c.expand(nb.shape[0], 4, 2), corns)
+    return float((p1 - p2).norm(dim=-1).min())
+
+
+def _recenter_neighbor_future(naf: np.ndarray, dx: float, dy: float, dyaw: float) -> np.ndarray:
+    """Re-center a recorded neighbor_agents_future onto the live ego.
+
+    naf: (Pn, T, 3) [x, y, heading] (or (Pn, T, 4) [x,y,cos,sin]) in the recorded-ego
+    frame. (dx, dy, dyaw) is the live ego pose in the recorded-ego frame. Returns
+    (Pn, T, 3) [x, y, heading] in the live-ego frame; invalid (zero) entries stay zero.
+    """
+    from scenario_generation.transforms import transform_positions
+
+    naf = np.asarray(naf, dtype=np.float32)
+    if naf.shape[-1] == 4:
+        head = np.arctan2(naf[..., 3], naf[..., 2])
+        naf = np.concatenate([naf[..., :2], head[..., None]], axis=-1)
+    out = naf.copy()
+    R = _rotation_matrix(dyaw)
+    mask = np.abs(naf[..., :2]).sum(-1) == 0
+    out[..., :2] = transform_positions(naf[..., :2], R, np.array([dx, dy], dtype=np.float64))
+    out[..., 2] = naf[..., 2] - dyaw
+    out[mask] = 0.0
+    return out
+
+
+def _world_pose_to_ego(world_pose: np.ndarray, ref_pose: np.ndarray) -> tuple[float, float, float]:
+    """Express a world ego pose in the live-ego frame of ``ref_pose`` -> (x, y, heading)."""
+    R = _rotation_matrix(float(ref_pose[2]))
+    d = R @ (world_pose[:2] - ref_pose[:2])
+    return float(d[0]), float(d[1]), float(world_pose[2] - ref_pose[2])
+
+
+def _scene_npz_from_np_dict(np_dict: dict) -> dict:
+    """Squeeze a [1,...] live-ego model-input dict into an un-batched training NPZ
+    dict (drops the batch dim; keeps every key)."""
+    return {k: np.asarray(v)[0] for k, v in np_dict.items()}
+
+
+@torch.no_grad()
+def extract_collision_scenes(
+    model,
+    model_args,
+    tl: RouteTimeline,
+    start: int,
+    end: int,
+    out_dir,
+    device: str = "cuda",
+    collision_thresh: float = 0.2,
+    pre_steps: int = 80,
+    search_radius: float = 1.5,
+    warmup_steps: int = 0,
+    unstick_after: int = 300,
+    unstick_advance_m: float = 5.0,
+    max_steps: int | None = None,
+) -> dict | None:
+    """Mine the batch of scenes leading up to the FIRST collision in a segment.
+
+    Runs the closed-loop reproducer over [start, end); on the first sim-step T_c
+    whose ego↔any-neighbor OBB clearance <= ``collision_thresh`` (default 0.2 m),
+    saves the ``pre_steps`` (default 80) scenes BEFORE the collision as training
+    NPZs. Each saved scene is a full model-input snapshot centered on the ego at
+    that step, with:
+      * ego_agent_past + ego_current_state (backtracked live history),
+      * neighbor_agents_past (recorded neighbors re-centered),
+      * neighbor_agents_future (recorded GT, re-centered),
+      * the full map (lanes/route/borders/polygons/goal/ego_shape/turn_indicators),
+      * ego_agent_future = the realized live ego path truncated AT the collision
+        (zeros for timesteps after T_c).
+
+    When the collision is early (T_c < pre_steps), the window reaches before the
+    segment start: those earlier scenes are taken straight from the RECORDED NPZs
+    of frames before ``start`` (real GT context — ego/neighbor history + GT
+    futures), which the full-route timeline still holds. So the batch always has
+    ``pre_steps`` scenes with real, continuous ego history (subject to the route
+    start). Returns a manifest dict, or None if no collision occurred.
+    """
+    import json
+    from collections import deque
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    cap = max_steps if max_steps is not None else 3 * (end - start)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        start,
+        end,
+        search_radius,
+        warmup_steps,
+        0.5,
+        5.0,
+        0,
+        timers,
+        max_steps=cap,
+        unstick_after=unstick_after,
+        unstick_advance_m=unstick_advance_m,
+    )
+    # Rolling buffer of the last pre_steps+1 live steps; each: (k, idx, live_pose, np_dict).
+    buf: deque = deque(maxlen=pre_steps + 1)
+    live_poses: dict[int, np.ndarray] = {}  # step k -> world pose (for ego_future)
+    t_c = None
+    while not s.done:
+        k = s.k
+        pre = _pre_step(s)
+        if pre is None:
+            break
+        np_dict, neighbors_live, idx = pre
+        data = _to_torch_batch([np_dict], model_args, device)
+        _, outputs = model(data)
+        pred = outputs["prediction"][0, 0].cpu().numpy()
+        clr = _min_clearance_any(neighbors_live, s.ego_shape, device)
+        buf.append((k, idx, s.live_pose.copy(), np_dict))
+        live_poses[k] = s.live_pose.copy()
+        if clr <= collision_thresh:
+            t_c = k
+            break
+        _post_step(s, pred, neighbors_live, idx, device, timers)
+    if t_c is None:
+        return None
+
+    # Record the collision-step world pose too (needed for ego_future of late scenes).
+    live_poses[t_c] = s.live_pose.copy()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    live_by_step = {rec[0]: rec for rec in buf}
+    saved = []
+    fut_len = int(model_args.future_len)
+
+    for step_k in range(t_c - pre_steps, t_c):
+        if step_k >= 0 and step_k in live_by_step:
+            _, idx, live_pose, np_dict = live_by_step[step_k]
+            scene = _scene_npz_from_np_dict(np_dict)
+            # Match the canonical recorded NPZ format: 3-col (x, y, heading) ego
+            # past + goal (np_dict carries them as cos/sin 4-col).
+            ep = scene["ego_agent_past"]
+            scene["ego_agent_past"] = np.column_stack(
+                [ep[:, 0], ep[:, 1], np.arctan2(ep[:, 3], ep[:, 2])]
+            ).astype(np.float32)
+            g = scene["goal_pose"]
+            scene["goal_pose"] = np.array([g[0], g[1], math.atan2(g[3], g[2])], dtype=np.float32)
+            # neighbor GT future (recorded), re-centered onto the live ego.
+            with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
+                naf = z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
+            if naf is not None:
+                dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
+                scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
+            # ego_agent_future = realized live path up to the collision (zeros after).
+            eaf = np.zeros((fut_len, 3), dtype=np.float32)
+            for j in range(1, fut_len + 1):
+                fk = step_k + j
+                if fk > t_c or fk not in live_poses:
+                    break
+                eaf[j - 1] = _world_pose_to_ego(live_poses[fk], live_pose)
+            scene["ego_agent_future"] = eaf
+            scene["origin"] = np.array("live")
+        else:
+            # Backtrack: a recorded frame before the segment start (real GT scene).
+            frame = start + step_k
+            if frame < 0 or frame >= len(tl):
+                continue
+            with np.load(tl.npz_paths[frame], allow_pickle=True) as z:
+                scene = {key: z[key] for key in z.files if key not in ("map_name", "token")}
+            scene["origin"] = np.array("recorded")
+        token = f"{step_k - t_c:+05d}"  # offset from collision, e.g. -00080 .. -00001
+        np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
+        saved.append(int(step_k))
+
+    manifest = {
+        "segment": [int(start), int(end)],
+        "collision_step": int(t_c),
+        "collision_thresh": float(collision_thresh),
+        "n_scenes": len(saved),
+        "steps_saved": saved,
+        "n_live": sum(1 for k in saved if k >= 0),
+        "n_recorded": sum(1 for k in saved if k < 0),
+    }
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
