@@ -14,7 +14,7 @@ import torch
 
 # ---------------------------------------------------------------------------
 # Issue #130: the raw subscore / geometry / config code now lives in the
-# neutral diffusion_planner.metrics package. This module keeps the reward
+# neutral planner_metrics workspace library. This module keeps the reward
 # *shaping* (RewardBreakdown, compute_reward_batch, GRPO advantages) and
 # re-exports every moved symbol so `from rlvr.reward import ...` keeps working.
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ def _shape_reward(
     """Apply reward shaping (weights, hard gates, survival/gate aggregation) to the
     raw subscores from ``compute_subscores_batch`` and build the RewardBreakdown
     list. RLVR-specific; the raw subscore computation is neutral (lives in
-    ``diffusion_planner.metrics``)."""
+    ``planner_metrics``)."""
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
 

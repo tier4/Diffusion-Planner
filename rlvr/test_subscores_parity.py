@@ -1,4 +1,4 @@
-"""Drift guard for ``diffusion_planner.metrics.compute_subscores_batch``.
+"""Drift guard for ``planner_metrics.compute_subscores_batch``.
 
 ``compute_subscores_batch`` (used by the validation loop) re-runs the same input
 marshalling + per-subscore computation as ``rlvr.reward.compute_reward_batch``
