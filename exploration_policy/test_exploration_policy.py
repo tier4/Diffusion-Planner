@@ -410,3 +410,74 @@ def test_loss_multi_head_dists():
     assert "exploration_eta_collision_mean" in metrics
     assert "exploration_eta_lat_mean" in metrics  # legacy alias
     assert metrics["exploration_action_cost"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Strength gate (use_strength_head) + configurable Beta-concentration cap
+# ---------------------------------------------------------------------------
+
+
+def test_strength_head_disabled_by_default():
+    """Default config has no strength head; forward emits strength=None."""
+    config = ExplorationPolicyConfig(hidden_dim=64, n_attn_heads=2, encoder_hidden_dim=128)
+    assert config.use_strength_head is False
+    assert config.head_max_conc == 10.0
+    policy = ExplorationPolicy(config, ref_seq_len=20)
+    assert policy.strength_head is None
+    out = policy(torch.randn(3, 8, 128), torch.randn(3, 20, 4), deterministic=True)
+    assert out.strength is None
+
+
+def test_strength_head_enabled_shape_and_range():
+    """With the head on, strength is [B] in (0,1)."""
+    config = ExplorationPolicyConfig(
+        hidden_dim=64, n_attn_heads=2, encoder_hidden_dim=128, use_strength_head=True
+    )
+    policy = ExplorationPolicy(config, ref_seq_len=20)
+    assert policy.strength_head is not None
+    out = policy(torch.randn(5, 8, 128), torch.randn(5, 20, 4), deterministic=True)
+    assert out.strength is not None
+    assert out.strength.shape == (5,)
+    assert (out.strength > 0).all() and (out.strength < 1).all()
+    # zero-init output layer -> sigmoid(0) = 0.5 at init
+    assert torch.allclose(out.strength, torch.full((5,), 0.5), atol=1e-5)
+
+
+def test_strength_head_config_roundtrip(tmp_path):
+    """use_strength_head + head_max_conc survive JSON round-trip and rebuild."""
+    config = ExplorationPolicyConfig(
+        hidden_dim=64,
+        n_attn_heads=2,
+        encoder_hidden_dim=128,
+        use_strength_head=True,
+        head_max_conc=50.0,
+    )
+    p = tmp_path / "cfg.json"
+    config.to_json(p)
+    loaded = ExplorationPolicyConfig.from_json(p)
+    assert loaded.use_strength_head is True
+    assert loaded.head_max_conc == 50.0
+    policy = ExplorationPolicy(loaded, ref_seq_len=20)
+    assert policy.strength_head is not None
+    assert policy.guidance_head.max_conc == 50.0
+
+
+def test_head_max_conc_raises_reachable_eta():
+    """A higher concentration cap lets the deterministic |eta| exceed the
+    default-cap ceiling (~0.82) when the head is pushed off zero-init."""
+    from exploration_policy.module.heads import GuidanceHead
+
+    torch.manual_seed(0)
+    fused = torch.randn(64, 32)
+    low = GuidanceHead(
+        32, n_heads=2, init_mode="normal", init_std=1.0, raw_scale=10.0, max_conc=10.0
+    )
+    high = GuidanceHead(
+        32, n_heads=2, init_mode="normal", init_std=1.0, raw_scale=10.0, max_conc=100.0
+    )
+    # copy weights so only the cap differs
+    high.load_state_dict(low.state_dict())
+    eta_low = (2.0 * low(fused)[0].mean - 1.0).abs().max().item()
+    eta_high = (2.0 * high(fused)[0].mean - 1.0).abs().max().item()
+    assert eta_low <= 0.83  # default cap ceiling
+    assert eta_high > eta_low  # raising the cap extends reachable eta

@@ -69,6 +69,21 @@ def _empty_slots(nb_past: np.ndarray) -> list[int]:
     return [int(i) for i in np.where(mask)[0]]
 
 
+def _existing_boxes(nb_past: np.ndarray) -> list[tuple[float, float, float, float, float]]:
+    """(x,y,heading,length,width) of every non-empty neighbor (used to reject
+    distractors that would overlap a real agent)."""
+    boxes = []
+    for i in range(nb_past.shape[0]):
+        xy = nb_past[i, -1, :2]
+        if abs(float(xy[0])) + abs(float(xy[1])) < 1e-6:
+            continue
+        h = math.atan2(float(nb_past[i, -1, 3]), float(nb_past[i, -1, 2]))
+        boxes.append(
+            (float(xy[0]), float(xy[1]), h, float(nb_past[i, -1, 7]), float(nb_past[i, -1, 6]))
+        )
+    return boxes
+
+
 def _valid_path_indices(plan: np.ndarray) -> np.ndarray:
     """Indices of the ego plan with a non-zero (valid) waypoint."""
     return np.where(np.abs(plan[:, :2]).sum(axis=-1) > 1e-6)[0]
@@ -146,6 +161,13 @@ def main():
         help="distractor rejected if the t=0 ego pose clears it by less",
     )
     parser.add_argument(
+        "--min_neighbor_clearance",
+        type=float,
+        default=0.5,
+        help="reject a distractor whose OBB clears existing neighbors / already-placed "
+        "distractors by less than this (avoids overlapping/physically-impossible scenes)",
+    )
+    parser.add_argument(
         "--max_tries", type=int, default=20, help="resample attempts per distractor"
     )
     parser.add_argument("--seed", type=int, required=True)
@@ -195,19 +217,36 @@ def main():
                 continue
             n_target = int(rng.integers(nd_lo, nd_hi + 1))
             placed = []
+            placed_boxes = []  # (x,y,h,l,w) of distractors placed in THIS variant
+            existing = _existing_boxes(nb_past)  # real agents already in the scene
             for _ in range(min(n_target, len(slots))):
                 box = None
                 for _try in range(args.max_tries):
                     cand = _sample_distractor(plan, valid_idx, lat_lo, lat_hi, rng)
                     path_clr = float(plan_static_clearance(plan, [cand], ego_shape, device))
                     t0_clr = float(plan_static_clearance(t0_pose, [cand], ego_shape, device))
-                    if path_clr >= args.min_path_clearance and t0_clr >= args.min_t0_clearance:
-                        box = cand
-                        break
+                    if path_clr < args.min_path_clearance or t0_clr < args.min_t0_clearance:
+                        continue
+                    # Reject if it overlaps a real agent or an already-placed distractor.
+                    # Canonical OBB (no centroid-to-centroid): the candidate's own pose as
+                    # a 2-step plan, ego footprint as a conservative (larger) proxy box.
+                    others = existing + placed_boxes
+                    cand_pose = np.array(
+                        [[cand[0], cand[1], math.cos(cand[2]), math.sin(cand[2])]] * 2,
+                        dtype=np.float32,
+                    )
+                    if others and (
+                        float(plan_static_clearance(cand_pose, others, ego_shape, device))
+                        < args.min_neighbor_clearance
+                    ):
+                        continue
+                    box = cand
+                    break
                 if box is None:
                     continue  # could not find a safe far placement this try-budget
                 slot = slots.pop()
                 _write_distractor(nb_past, nb_fut, slot, box)
+                placed_boxes.append(box)
                 placed.append(
                     {
                         "slot": slot,
