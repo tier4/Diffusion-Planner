@@ -1,11 +1,9 @@
-"""Batched EPDMS-style subscore computations for ``diffusion_planner.metrics``.
+"""Batched EPDMS-style subscores: safety, TTC, drivable-area / road-border, lane-keeping,
+progress, comfort/smoothness, feasibility, kinematic gate, red-light, static-collision,
+lane-departure.
 
-Moved verbatim from ``rlvr.reward`` (issue #130): the raw physical-quantity
-subscores (safety, TTC, drivable-area / road-border, lane-keeping, progress,
-comfort/smoothness, feasibility, kinematic gate, red-light, static-collision,
-lane-departure). No logic change. Reward shaping (weights, gates, GRPO
-aggregation) stays in ``rlvr.reward``; ``rlvr.reward`` re-exports every symbol
-here for backward compatibility.
+Raw physical quantities only — reward shaping (weights, gates, GRPO aggregation) lives
+in ``rlvr.reward``. Must not import from ``rlvr``.
 """
 
 from __future__ import annotations

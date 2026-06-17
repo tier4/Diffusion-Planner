@@ -1,8 +1,8 @@
-"""Geometry primitives for ``diffusion_planner.metrics`` subscores.
+"""Geometry primitives for the metrics subscores: ego bbox, polygon / point-to-segment
+distance, lane-polygon builders, and Savitzky-Golay kernels.
 
-Moved verbatim from ``rlvr.reward`` (issue #130). Pure math / numpy / torch
-helpers — no dependency on ``rlvr``. ``rlvr.reward`` re-exports every symbol
-here for backward compatibility.
+Dependency-free (math / numpy / torch + guidance.collision only) — must not import
+from ``rlvr``, so the base-SFT validation loop can use it without pulling in RLVR.
 """
 
 from __future__ import annotations

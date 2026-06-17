@@ -1,10 +1,4 @@
-"""Metric configuration thresholds for ``diffusion_planner.metrics``.
-
-Moved verbatim from ``rlvr.reward`` as part of issue #130 (carve the EPDMS-style
-subscore suite into a neutral shared library that both the base-SFT validation
-loop and RLVR can import). No logic change — ``rlvr.reward`` re-exports
-``RewardConfig`` for backward compatibility.
-"""
+"""Configuration thresholds for the ``diffusion_planner.metrics`` subscores."""
 
 from __future__ import annotations
 

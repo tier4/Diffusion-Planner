@@ -1,9 +1,5 @@
-"""Neutral shared metrics library (issue #130).
-
-Raw EPDMS-style subscores + geometry + config, carved out of ``rlvr.reward`` so
-the base-SFT validation loop can import them without depending on ``rlvr``.
-``rlvr.reward`` re-exports the same symbols for backward compatibility.
-"""
+"""Neutral metrics library: raw EPDMS-style subscores + geometry + config,
+importable without depending on ``rlvr``."""
 
 from __future__ import annotations
 
