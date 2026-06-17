@@ -25,8 +25,14 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
-from diffusion_planner.metrics.config import RewardConfig
-from diffusion_planner.metrics.subscores import compute_static_collision_penalty
+from diffusion_planner.metrics.geometry import (
+    _build_ego_bbox_corners,
+    _closest_points_between_rects,
+)
+from diffusion_planner.model.guidance.collision import (
+    batch_signed_distance_rect,
+    center_rect_to_points,
+)
 
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
@@ -182,48 +188,58 @@ def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
 # --------------------------------------------------------------------------- #
 # scoring (canonical OBB)
 # --------------------------------------------------------------------------- #
+def _ego_neighbor_obb(neighbors_live: np.ndarray, ego_shape: np.ndarray, device: str):
+    """Build ego corners (at origin) + valid-neighbor corners; return (ego_b, npc_corners, M).
+
+    Canonical OBB geometry (``_build_ego_bbox_corners`` + ``center_rect_to_points``).
+    Returns (None, None, 0) if there are no valid neighbors.
+    """
+    valid = np.abs(neighbors_live[:, :6]).sum(axis=1) > 0
+    if not valid.any():
+        return None, None, 0
+    nb = neighbors_live[valid]
+    M = nb.shape[0]
+    et = torch.zeros((1, 1, 4), dtype=torch.float32, device=device)
+    et[0, 0, 2] = 1.0
+    ego_c = _build_ego_bbox_corners(
+        et, torch.tensor(ego_shape[:3], dtype=torch.float32, device=device)
+    )[:, :1].reshape(1, 4, 2)
+    rects = torch.tensor(
+        np.stack([nb[:, 0], nb[:, 1], nb[:, 2], nb[:, 3], nb[:, 7], nb[:, 6]], axis=-1),
+        dtype=torch.float32,
+        device=device,
+    )  # x, y, cos, sin, length, width
+    return ego_c.expand(M, 4, 2), center_rect_to_points(rects), M
+
+
 def score_step(
     neighbors_live: np.ndarray,
     ego_shape: np.ndarray,
     ego_speed: float,
     device: str,
-    config: RewardConfig | None = None,
 ) -> tuple[float, bool, int]:
     """Min ego-neighbor clearance (m), collision flag, and #valid neighbors.
 
-    Uses the SAME function the avoidance (RSFT) reward / eval use:
-    ``compute_static_collision_penalty`` (metrics.subscores) — its
-    ``per_timestep_min`` is the canonical sc OBB clearance (SAT penetration for
-    overlap + closest-point Euclidean distance for separated boxes). We feed the
-    instantaneous reproduced neighbor snapshot as a 2-frame "stopped" obstacle set
-    (replicated, so v0=0 → stopped-mask passes) and read the t=0 clearance.
+    RAW oriented-bounding-box check against EVERY valid neighbor — moving and
+    static alike, with NO direction/rear-end or ego-speed gating. Collision =
+    the ego box overlaps any neighbor box (canonical ``batch_signed_distance_rect``
+    < 0); clearance = exact closest-point distance to the nearest neighbor
+    (``_closest_points_between_rects``). This deliberately differs from the
+    avoidance reward's ``compute_static_collision_penalty``, which only scores
+    *stopped* neighbors and filters out rear-end hits — for mining we want to
+    catch collisions with moving neighbors AND the ego being struck from behind.
 
     neighbors_live: (320, 11) in live-ego frame [x,y,cos,sin,vx,vy,w,l,type...].
+    ``ego_speed`` is unused (kept for signature stability); collisions are counted
+    regardless of ego speed.
     """
-    config = config or RewardConfig()
-    valid = np.abs(neighbors_live[:, :6]).sum(axis=1) > 0
-    if not valid.any():
+    ego_b, npc_corners, M = _ego_neighbor_obb(neighbors_live, ego_shape, device)
+    if M == 0:
         return float("inf"), False, 0
-    nb = neighbors_live[valid]
-    M = nb.shape[0]
-
-    # Ego at origin, heading +x; 2 identical frames so ego_moving etc. are defined.
-    ego_trajs = torch.zeros((1, 2, 4), dtype=torch.float32, device=device)
-    ego_trajs[0, :, 2] = 1.0
-    ego_shape_t = torch.tensor(ego_shape[:3], dtype=torch.float32, device=device)
-
-    nb_xycs = torch.tensor(nb[:, :4], dtype=torch.float32, device=device)  # x,y,cos,sin
-    neighbor_futures = nb_xycs[:, None, :].expand(M, 2, 4).contiguous()  # (M,2,4) static
-    # (M,2) [width, length] — columns 6,7 are already contiguous, slice (no extra copy).
-    neighbor_shapes = torch.tensor(nb[:, 6:8], dtype=torch.float32, device=device)
-    neighbor_valid = torch.ones((M, 2), dtype=torch.bool, device=device)
-
-    out = compute_static_collision_penalty(
-        ego_trajs, ego_shape_t, neighbor_futures, neighbor_shapes, neighbor_valid, config
-    )
-    clr = float(out["per_timestep_min"][0, 0])
-    collision = bool((ego_speed > config.sc_ego_min_speed) and (clr < config.sc_cross_thresh))
-    return clr, collision, M
+    p1, p2 = _closest_points_between_rects(ego_b, npc_corners)
+    clr = (p1 - p2).norm(dim=-1)  # exact closest-point distance per neighbor
+    signed = batch_signed_distance_rect(ego_b, npc_corners)  # < 0 => overlap
+    return float(clr.min()), bool((signed < 0).any()), M
 
 
 # --------------------------------------------------------------------------- #
@@ -813,32 +829,14 @@ def run_segments_batched(
 def _min_clearance_any(neighbors_live: np.ndarray, ego_shape: np.ndarray, device: str) -> float:
     """Min OBB clearance ego(at origin) to ANY valid neighbor (m). inf if none.
 
-    Unlike score_step (which gates on stopped neighbors via the sc reward), this is
-    the raw distance to the nearest neighbor of any kind — the collision trigger
-    for extraction ("<= thresh m to a neighbor").
+    Raw distance to the nearest neighbor of any kind (moving or static, any
+    direction) — the collision trigger for extraction ("<= thresh m to a
+    neighbor"). Same all-neighbor geometry score_step uses.
     """
-    from diffusion_planner.metrics.geometry import (
-        _build_ego_bbox_corners,
-        _closest_points_between_rects,
-    )
-    from diffusion_planner.model.guidance.collision import center_rect_to_points
-
-    valid = np.abs(neighbors_live[:, :6]).sum(axis=1) > 0
-    if not valid.any():
+    ego_b, npc_corners, M = _ego_neighbor_obb(neighbors_live, ego_shape, device)
+    if M == 0:
         return float("inf")
-    nb = neighbors_live[valid]
-    et = torch.zeros((1, 1, 4), dtype=torch.float32, device=device)
-    et[0, 0, 2] = 1.0
-    ego_c = _build_ego_bbox_corners(
-        et, torch.tensor(ego_shape[:3], dtype=torch.float32, device=device)
-    )[:, :1].reshape(1, 4, 2)
-    rects = torch.tensor(
-        np.stack([nb[:, 0], nb[:, 1], nb[:, 2], nb[:, 3], nb[:, 7], nb[:, 6]], axis=-1),
-        dtype=torch.float32,
-        device=device,
-    )  # x,y,cos,sin,length,width
-    corns = center_rect_to_points(rects)
-    p1, p2 = _closest_points_between_rects(ego_c.expand(nb.shape[0], 4, 2), corns)
+    p1, p2 = _closest_points_between_rects(ego_b, npc_corners)
     return float((p1 - p2).norm(dim=-1).min())
 
 

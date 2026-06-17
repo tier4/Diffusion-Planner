@@ -2,9 +2,10 @@
 
 Runs a checkpoint closed-loop over recorded routes (ego driven by the planner +
 PerfectTracker; neighbors replayed from the log via the autoware-style cursor),
-scores every step with the canonical avoidance OBB
-(``compute_static_collision_penalty``), and writes a ranked index of the segments
-where the model collides or nearly collides.
+scores every step with a raw all-neighbor OBB overlap check (``score_step`` —
+collision = the ego box overlaps ANY neighbor box, moving or static, including
+rear-end hits; no stopped-only / ego-speed / direction gates), and writes a ranked
+index of the segments where the model collides or nearly collides.
 
 Work unit = one route (bag-prefix group) sliced into ~60 s segments. Output is one
 compact JSONL row per segment; ``--dump_hits`` optionally renders flagged ones.
