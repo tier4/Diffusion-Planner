@@ -18,6 +18,7 @@ import torch
 # *shaping* (RewardBreakdown, compute_reward_batch, GRPO advantages) and
 # re-exports every moved symbol so `from rlvr.reward import ...` keeps working.
 # ---------------------------------------------------------------------------
+from diffusion_planner.metrics.aggregate import compute_subscores_batch  # noqa: F401
 from diffusion_planner.metrics.config import RewardConfig  # noqa: F401  (re-export)
 from diffusion_planner.metrics.geometry import *  # noqa: F401,F403
 from diffusion_planner.metrics.subscores import *  # noqa: F401,F403
@@ -65,6 +66,12 @@ def compute_reward_batch(
 ) -> list[RewardBreakdown]:
     """Compute reward breakdowns for N trajectories in a single batched pass.
 
+    Thin wrapper: the raw subscores (input marshalling + per-subscore
+    computation) come from ``compute_subscores_batch``; reward shaping (weights,
+    hard gates, survival/gate aggregation) is applied by ``_shape_reward``.
+    Output is byte-identical to the pre-split implementation (pinned by the
+    golden tests).
+
     Args:
         ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
         data: Observation dict from load_npz_data (with batch dim).
@@ -73,170 +80,51 @@ def compute_reward_batch(
     Returns:
         List of N RewardBreakdown instances.
     """
+    return _shape_reward(compute_subscores_batch(ego_trajs, data, config), ego_trajs, data, config)
+
+
+@torch.no_grad()
+def _shape_reward(
+    subs: dict,
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    config: RewardConfig = RewardConfig(),
+) -> list[RewardBreakdown]:
+    """Apply reward shaping (weights, hard gates, survival/gate aggregation) to the
+    raw subscores from ``compute_subscores_batch`` and build the RewardBreakdown
+    list. RLVR-specific; the raw subscore computation is neutral (lives in
+    ``diffusion_planner.metrics``)."""
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
 
-    # --- Ego shape ---
-    # No silent fallback: the wrong default footprint silently undersized RB /
-    # lane / collision gates by ~3 m of length and 0.5 m of width on larger
-    # platforms, letting trajectories that visibly crossed the border pass the
-    # gate. The NPZ MUST carry the correct ego_shape (wheel_base, length,
-    # width); callers (parse-from-bag, disturb_and_replay, etc.) are
-    # responsible for writing it.
-    if "ego_shape" not in data:
-        raise ValueError(
-            "compute_reward_batch: data is missing 'ego_shape' (wheel_base, "
-            "length, width). Refusing to fall back to a hardcoded default — "
-            "this previously caused silent footprint undersizing. Populate "
-            "ego_shape upstream (parse-from-bag / disturb_and_replay / scene "
-            "builder) and re-run."
-        )
-    es = data["ego_shape"]
-    if es.dim() == 2:
-        es = es[0]
-    if es.numel() < 3:
-        raise ValueError(
-            f"compute_reward_batch: ego_shape has shape {tuple(es.shape)}; "
-            "expected at least 3 elements (wheel_base, length, width)."
-        )
-    ego_shape = es[:3].to(device)
-
-    # --- Neighbor data for collision ---
-    neighbor_futures = torch.zeros(0, T, 4, device=device)
-    neighbor_shapes = torch.zeros(0, 2, device=device)
-    neighbor_valid = torch.zeros(0, T, dtype=torch.bool, device=device)
-
-    if "neighbor_agents_future" in data:
-        nf = data["neighbor_agents_future"]
-        if nf.dim() == 4:
-            nf = nf[0]
-        if nf.shape[1] >= T and nf.shape[2] >= 4:
-            nf_data = nf[:, :T, :4]  # (N_nb, T, 4) = x, y, cos, sin
-        elif nf.shape[0] > 0 and nf.shape[1] >= T and nf.shape[2] == 3:
-            raise ValueError(
-                f"neighbor_agents_future has 3 columns (x, y, heading_rad) but "
-                f"4 columns (x, y, cos, sin) are required. Re-generate the NPZ "
-                f"with the updated tensor_converter / _backfill_neighbor_futures."
-            )
-        if nf.shape[1] >= T and nf.shape[2] >= 4:
-            slot_valid = nf_data[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6
-            if slot_valid.any():
-                neighbor_futures = nf_data[slot_valid]
-                neighbor_valid = neighbor_futures[:, :, :2].abs().sum(dim=-1) > 1e-6
-
-                if "neighbor_agents_past" in data:
-                    nap = data["neighbor_agents_past"]
-                    if nap.dim() == 4:
-                        nap = nap[0]
-                    ns = nap[slot_valid, -1, :]
-                    if ns.shape[-1] >= 8:
-                        neighbor_shapes = ns[:, [6, 7]]  # width, length
-                    else:
-                        neighbor_shapes = torch.full(
-                            (neighbor_futures.shape[0], 2), 2.0, device=device
-                        )
-                else:
-                    neighbor_shapes = torch.full((neighbor_futures.shape[0], 2), 2.0, device=device)
-
-    zero_shapes = neighbor_shapes.abs().sum(dim=-1) < 1e-3
-    if zero_shapes.any():
-        neighbor_shapes[zero_shapes] = torch.tensor([2.0, 4.5], device=device)
-
-    # --- Goal pose ---
-    goal_pose = torch.zeros(4, device=device)
-    if "goal_pose" in data:
-        gp = data["goal_pose"]
-        if gp.dim() == 2:
-            gp = gp[0]
-        if gp.numel() >= 4:
-            goal_pose = gp[:4].to(device)
-
-    # --- Batched score computation ---
-    safety_scores, collision_steps = compute_safety_score_batch(
-        ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid, config
-    )
-    progress_scores = compute_progress_score_batch(ego_trajs, goal_pose, data)
-    smoothness_scores = compute_smoothness_score_batch(ego_trajs, config)
-    feasibility_scores, off_road_fractions = compute_feasibility_score_batch(
-        ego_trajs, ego_shape, data, config
-    )
-    centerline_scores = compute_centerline_score_batch(
-        ego_trajs,
-        ego_shape,
-        data,
-        usage_mode=config.centerline_usage_mode,
-        time_weight_min=config.centerline_time_weight_min,
-    )
-    red_light_scores = compute_red_light_score_batch(ego_trajs, data, config)
-    ttc_scores = compute_ttc_score_batch(
-        ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
-    )
-
-    # Road border penalty using ego perimeter sampling
-    # Returns fracs or survival penalties depending on config.rb_penalty_mode
-    (
-        rb_crossing_gate,
-        rb_near_pen,
-        rb_wide_pen,
-        rb_crossing_steps,
-        rb_cont_penalty,
-        rb_per_ts_min,
-    ) = compute_road_border_penalty(
-        ego_trajs,
-        ego_shape,
-        data,
-        config=config,
-    )
-
-    # Lane departure penalty
-    if config.enable_lane_departure:
-        (
-            lane_crossing_gate,
-            lane_near_frac,
-            lane_wide_frac,
-            lane_crossing_steps,
-            lane_cont_penalty,
-        ) = compute_lane_departure_penalty(
-            ego_trajs,
-            ego_shape,
-            data,
-            config=config,
-        )
-    else:
-        lane_crossing_gate = torch.ones(N, device=device)
-        lane_near_frac = torch.zeros(N, device=device)
-        lane_wide_frac = torch.zeros(N, device=device)
-        lane_crossing_steps: list[int | None] = [None] * N
-        lane_cont_penalty = torch.zeros(N, device=device)
-
-    # Static-collision penalty (stopped-neighbor OBB clearance).
-    # Default-off: when disabled, returns safe zeros + no gate effect.
-    if config.static_collision_enabled:
-        # Check the predicted trajectory as usual.
-        sc_result = compute_static_collision_penalty(
-            ego_trajs,
-            ego_shape,
-            neighbor_futures,
-            neighbor_shapes,
-            neighbor_valid,
-            config,
-        )
-        sc_crossing_gate = sc_result["crossing_gate"]
-        sc_near_pen = sc_result["near_penalty"]
-        sc_wide_pen = sc_result["wide_penalty"]
-        sc_cont_pen = sc_result["cont_penalty"]
-        sc_crossing_steps = sc_result["first_crossing_steps"]
-        sc_per_ts_min = sc_result["per_timestep_min"]
-        sc_n_stopped_scene = int(sc_result["stopped_mask"].sum().item())
-
-    else:
-        sc_crossing_gate = torch.ones(N, device=device)
-        sc_near_pen = torch.zeros(N, device=device)
-        sc_wide_pen = torch.zeros(N, device=device)
-        sc_cont_pen = torch.zeros(N, device=device)
-        sc_crossing_steps: list[int | None] = [None] * N
-        sc_per_ts_min = torch.full((N, T), 99.0, device=device)
-        sc_n_stopped_scene = 0
+    safety_scores = subs["safety"]
+    collision_steps = subs["collision_step"]
+    red_light_scores = subs["red_light"]
+    progress_scores = subs["progress"]
+    smoothness_scores = subs["comfort"]
+    centerline_scores = subs["centerline"]
+    feasibility_scores = subs["feasibility"]
+    off_road_fractions = subs["off_road_fraction"]
+    ttc_scores = subs["ttc"]
+    kinematic_gate = subs["kinematic_gate"]
+    rb_crossing_gate = subs["rb_crossing_gate"]
+    rb_near_pen = subs["rb_near_penalty"]
+    rb_wide_pen = subs["rb_wide_penalty"]
+    rb_cont_penalty = subs["rb_cont_penalty"]
+    rb_crossing_steps = subs["rb_crossing_steps"]
+    rb_min_dist_t = subs["rb_min_dist"]
+    lane_crossing_gate = subs["lane_crossing_gate"]
+    lane_near_frac = subs["lane_near_frac"]
+    lane_wide_frac = subs["lane_wide_frac"]
+    lane_cont_penalty = subs["lane_cont_penalty"]
+    lane_crossing_steps = subs["lane_crossing_steps"]
+    sc_crossing_gate = subs["sc_crossing_gate"]
+    sc_near_pen = subs["sc_near_penalty"]
+    sc_wide_pen = subs["sc_wide_penalty"]
+    sc_cont_pen = subs["sc_cont_penalty"]
+    sc_crossing_steps = subs["sc_crossing_steps"]
+    sc_min_dist_scalar = subs["sc_min_dist"]
+    sc_n_stopped_scene = int(subs["sc_n_stopped"][0].item()) if N > 0 else 0
 
     # NAVSIM PDMS-style multiplicative reward aggregation.
     # Safety gates: binary 0/1 multipliers. If any gate is 0, total is 0.
@@ -469,20 +357,11 @@ def compute_reward_batch(
     # Kinematic feasibility hard gate: trajectories violating yaw-rate or
     # bicycle-model curvature bounds get floored. Applied after survival/gate
     # aggregation so it overrides any otherwise-positive reward.
-    kinematic_gate = compute_kinematic_gate(ego_trajs, config, ego_shape)
     totals = totals * kinematic_gate + (1.0 - kinematic_gate) * _OFFROAD_FLOOR
 
     # Also compute additive total for backward compat in breakdown
     on_road_factor = 1.0 - off_road_fractions
     adjusted_progress = progress_scores * on_road_factor
-
-    # Breakdown-friendly static-collision min-distance: min across t>=1 only.
-    # (Full per-step values live in sc_per_ts_min; the scalar breakdown
-    # field excludes t=0 since it's not model-controllable, same as rb_min_dist.)
-    if T > 1:
-        sc_min_dist_scalar = sc_per_ts_min[:, 1:].min(dim=1).values
-    else:
-        sc_min_dist_scalar = torch.full((N,), 99.0, device=device)
 
     results: list[RewardBreakdown] = []
     for i in range(N):
@@ -502,7 +381,7 @@ def compute_reward_batch(
                 rb_crossing=bool(rb_crossing_gate[i] < 0.5),
                 rb_near_penalty=float(rb_near_pen[i]),
                 rb_wide_penalty=float(rb_wide_pen[i]),
-                rb_min_dist=float(rb_per_ts_min[i, 1:].min().item()),
+                rb_min_dist=float(rb_min_dist_t[i].item()),
                 lane_crossing=bool(lane_crossing_gate[i] < 0.5),
                 lane_near_frac=float(lane_near_frac[i]),
                 lane_wide_frac=float(lane_wide_frac[i]),
