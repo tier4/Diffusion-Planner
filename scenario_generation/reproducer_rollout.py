@@ -466,13 +466,14 @@ def _uuid_color(uuid: str) -> str:
 def _draw_step(
     np_dict, neighbors_live, pred, ego_shape, near_miss_thresh, title, path, neighbor_ids=None
 ):
-    """Save a PNG of one reproducer step using the perfect-tracker sim viz style.
+    """Save a PNG of one reproducer step using the FULL sim renderer.
 
     Rebuilds a SceneContext (ego + reproduced neighbors + map) in the live-ego
-    frame from the un-normalized input dict and renders it with the shared
-    ``draw_scene`` (same look as scenario_generation.simulate), then overlays the
-    ego plan (blue) and a red line on the closest ego-neighbor pair when within
-    ``near_miss_thresh``.
+    frame from the un-normalized input dict and renders it with
+    ``scene_render.render_scene_at_step`` — the same renderer the perfect-tracker
+    sim uses (traffic-light colored lanes, route, neighbor OBBs, and the road
+    border + closest-neighbor distance lines). The ego plan is overlaid as
+    ``det_traj``.
 
     ``neighbor_ids``: per-slot track UUIDs (from the sidecar). When given, each
     neighbor is colored by a stable hash of its UUID instead of its
@@ -482,15 +483,10 @@ def _draw_step(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from diffusion_planner.metrics.geometry import (
-        _build_ego_bbox_corners,
-        _closest_points_between_rects,
-    )
-    from diffusion_planner.model.guidance.collision import center_rect_to_points
 
     from scenario_generation import npz_loader as nl
     from scenario_generation.scene_context import SceneContext
-    from scenario_generation.visualize import draw_scene, draw_trajectory
+    from scenario_generation.scene_render import render_scene_at_step
 
     # Un-batch the [1,...] model-input dict and reuse the NPZ loader's extractors.
     data = {k: np.asarray(v)[0] for k, v in np_dict.items()}
@@ -507,51 +503,22 @@ def _draw_step(
     # aligned to the sidecar neighbor_ids order).
     color_map = None
     if neighbor_ids:
-        color_map = {}
-        for a in neighbors:
-            slot = int(a.id.rsplit("_", 1)[1])
-            if slot < len(neighbor_ids):
-                color_map[a.id] = _uuid_color(neighbor_ids[slot])
+        color_map = {
+            a.id: _uuid_color(neighbor_ids[int(a.id.rsplit("_", 1)[1])])
+            for a in neighbors
+            if int(a.id.rsplit("_", 1)[1]) < len(neighbor_ids)
+        }
 
-    fig, ax = plt.subplots(figsize=(9, 9))
-    draw_scene(ax, scene, "ego", color_map=color_map)
-
-    # Ego plan (model prediction), (T,3) [x, y, heading].
+    # Ego plan (model prediction) as det_traj overlay, (T,3) [x, y, heading].
     plan = np.column_stack([pred[:, 0], pred[:, 1], np.arctan2(pred[:, 3], pred[:, 2])])
-    draw_trajectory(ax, plan, "#3366cc", label="plan", lw=2, zorder=25)
-
-    # Closest ego-neighbor pair → red line + min clearance in the title.
-    et = torch.zeros((1, 1, 4))
-    et[0, 0, 2] = 1.0
-    ego_c = _build_ego_bbox_corners(et, torch.tensor(es[:3]))[:, :1].reshape(1, 4, 2)
-    valid = np.abs(neighbors_live[:, :6]).sum(1) > 0
-    nb = neighbors_live[valid]
-    min_clr = float("inf")
-    if len(nb):
-        rects = torch.tensor(
-            np.stack([nb[:, 0], nb[:, 1], nb[:, 2], nb[:, 3], nb[:, 7], nb[:, 6]], axis=-1),
-            dtype=torch.float32,
-        )
-        corns = center_rect_to_points(rects)  # (M,4,2)
-        p1, p2 = _closest_points_between_rects(ego_c.expand(len(nb), 4, 2), corns)
-        d = (p1 - p2).norm(dim=-1)
-        j = int(d.argmin())
-        min_clr = float(d[j])
-        if min_clr <= near_miss_thresh:
-            ax.plot(
-                [float(p1[j, 0]), float(p2[j, 0])],
-                [float(p1[j, 1]), float(p2[j, 1])],
-                "-",
-                color="red",
-                lw=2,
-                zorder=30,
-            )
-
-    ax.set_aspect("equal")
-    ax.set_xlim(-25, 45)
-    ax.set_ylim(-30, 30)
-    ax.set_title(f"{title}  min_clr={min_clr:.2f}m", fontsize=11)
-    fig.tight_layout()
+    fig = render_scene_at_step(
+        scene,
+        det_traj=plan,
+        show_rb_dist=True,
+        show_nb_dist=True,
+        color_map=color_map,
+    )
+    fig.axes[0].set_title(title, fontsize=11)
     fig.savefig(path, dpi=90)
     plt.close(fig)
 
