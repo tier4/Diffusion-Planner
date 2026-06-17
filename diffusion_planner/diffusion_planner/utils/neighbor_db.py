@@ -46,22 +46,47 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Build a real-neighbor DB for collision-search augmentation during GRPO."
     )
-    parser.add_argument("--train_set_list", type=str, required=True,
-                        help="JSON list (or {'files': [...]}) of scene .npz paths")
-    parser.add_argument("--output_path", type=str, required=True,
-                        help="destination .npz for the pattern database")
-    parser.add_argument("--max_per_scene", type=int, default=10,
-                        help="keep at most this many of the closest valid neighbors per scene")
-    parser.add_argument("--min_future_steps", type=int, default=40,
-                        help="require at least this many non-padding future waypoints to keep a "
-                             "neighbor (so the pasted agent actually moves through the scene)")
-    parser.add_argument("--max_patterns", type=int, default=50_000,
-                        help="global cap on stored patterns (random subsample if exceeded)")
+    parser.add_argument(
+        "--train_set_list",
+        type=str,
+        required=True,
+        help="JSON list (or {'files': [...]}) of scene .npz paths",
+    )
+    parser.add_argument(
+        "--output_path", type=str, required=True, help="destination .npz for the pattern database"
+    )
+    parser.add_argument(
+        "--max_per_scene",
+        type=int,
+        default=10,
+        help="keep at most this many of the closest valid neighbors per scene",
+    )
+    parser.add_argument(
+        "--min_future_steps",
+        type=int,
+        default=40,
+        help="require at least this many non-padding future waypoints to keep a "
+        "neighbor (so the pasted agent actually moves through the scene)",
+    )
+    parser.add_argument(
+        "--max_patterns",
+        type=int,
+        default=50_000,
+        help="global cap on stored patterns (random subsample if exceeded)",
+    )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--num_workers", type=int, default=os.cpu_count(),
-                        help="parallel worker processes for scanning (default: all cores)")
-    parser.add_argument("--chunk_size", type=int, default=256,
-                        help="scenes handed to a worker per task (IPC granularity)")
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=os.cpu_count(),
+        help="parallel worker processes for scanning (default: all cores)",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=256,
+        help="scenes handed to a worker per task (IPC granularity)",
+    )
     return parser.parse_args()
 
 
@@ -193,8 +218,11 @@ class NeighborPatternDB:
         # the origin would hit a *stationary* ego, so the forced collision would be unavoidable;
         # such patterns are excluded from the search below. Intrinsic to the pattern (ego frame).
         cur_dist = self.past[:, -1, :2].norm(dim=-1)  # [M] neighbor current pos -> origin
-        fut_dist = torch.where(self.future_valid, self.future_xy.norm(dim=-1),
-                               torch.full_like(self.future_valid, float("inf"), dtype=torch.float32))
+        fut_dist = torch.where(
+            self.future_valid,
+            self.future_xy.norm(dim=-1),
+            torch.full_like(self.future_valid, float("inf"), dtype=torch.float32),
+        )
         self.track_clear = torch.minimum(cur_dist, fut_dist.min(dim=1).values)  # [M]
 
         self.collision_margin = collision_margin
@@ -226,9 +254,9 @@ class NeighborPatternDB:
         Must be called on a *raw* batch (before heading_to_cos_sin / normalization). The mask of
         slots actually written is stored on ``self.last_injected_mask`` ([B, Pn]).
         """
-        neighbor_past = inputs["neighbor_agents_past"]      # [B, Pn, 31, 11]
+        neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 11]
         neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3]
-        ego_future = inputs["ego_agent_future"]             # [B, 80, 3] (x, y, heading)
+        ego_future = inputs["ego_agent_future"]  # [B, 80, 3] (x, y, heading)
         device = neighbor_past.device
         self._to(device)
         B, Pn = neighbor_past.shape[:2]
@@ -255,7 +283,11 @@ class NeighborPatternDB:
             # search the DB (optionally a random subsample) for tracks that collide.
             if 0 < self.search_subsample < self.num_patterns:
                 sidx = torch.randperm(self.num_patterns, device=device)[: self.search_subsample]
-                fxy, fvalid, clear = self.future_xy[sidx], self.future_valid[sidx], self.track_clear[sidx]
+                fxy, fvalid, clear = (
+                    self.future_xy[sidx],
+                    self.future_valid[sidx],
+                    self.track_clear[sidx],
+                )
             else:
                 sidx = None
                 fxy, fvalid, clear = self.future_xy, self.future_valid, self.track_clear
