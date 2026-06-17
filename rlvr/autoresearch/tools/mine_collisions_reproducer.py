@@ -56,6 +56,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--max_routes", type=int, default=-1, help="limit routes (debug)")
     p.add_argument("--max_segments", type=int, default=-1, help="limit total segments (debug)")
+    # Throughput / coverage levers (forwarded to run_segments_batched).
+    p.add_argument("--n_build_threads", type=int, default=8, help="threads for the CPU input build")
+    p.add_argument(
+        "--max_steps_mult",
+        type=int,
+        default=3,
+        help="step cap = this x seg_len (the only timeout; default 3x)",
+    )
+    p.add_argument(
+        "--unstick_after",
+        type=int,
+        default=300,
+        help="snap the ego to the GT pose ahead after this many no-progress steps (0=off)",
+    )
+    p.add_argument("--unstick_advance_m", type=float, default=5.0)
+    p.add_argument(
+        "--dump_hits",
+        type=int,
+        default=0,
+        help="render the top-N ranked hit segments to PNGs under <out>.renders/ (0=off)",
+    )
     return p.parse_args()
 
 
@@ -102,6 +123,10 @@ def main() -> None:
             near_miss_thresh=args.near_miss_thresh,
             search_radius=args.search_radius,
             warmup_steps=args.warmup_steps,
+            unstick_after=args.unstick_after,
+            unstick_advance_m=args.unstick_advance_m,
+            max_steps_mult=args.max_steps_mult,
+            n_build_threads=args.n_build_threads,
             timers=timers,
         )
         for key, res in zip(buf_keys, res_list):
@@ -149,6 +174,32 @@ def main() -> None:
         )
     print("\n" + timers.report(n_seg))
     print(f"\nwrote {len(rows)} rows -> {args.out}")
+
+    # Optionally render the top-N ranked hit segments to PNGs for inspection.
+    if args.dump_hits > 0:
+        from scenario_generation.reproducer_rollout import render_segment
+
+        render_root = args.out.with_suffix(".renders")
+        render_root.mkdir(parents=True, exist_ok=True)
+        for r in hits[: args.dump_hits]:
+            if r["n_collision_steps"] == 0 and r["n_near_miss_steps"] == 0:
+                continue  # nothing interesting to render
+            s0, e0 = r["segment"]
+            tl = RouteTimeline(routes[r["route"]], sidecar_dir=args.sidecar_root)
+            od = render_root / f"{r['route']}_{s0}_{e0}"
+            print(f"  rendering hit {r['route']} [{s0},{e0}] -> {od}")
+            render_segment(
+                model,
+                model_args,
+                tl,
+                s0,
+                e0,
+                od,
+                device=device,
+                near_miss_thresh=args.near_miss_thresh,
+                search_radius=args.search_radius,
+            )
+        print(f"rendered {args.dump_hits} hit segment(s) -> {render_root}")
 
 
 if __name__ == "__main__":

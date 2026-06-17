@@ -21,11 +21,10 @@ converter output). For the 12k-val corpus the 320-padded NPZs dropped the
 sidecar, so pass ``sidecar_dir`` pointing at the original conversion tree
 (``npz_val/<date>/<bag-time>/``) — frames are matched by filename stem.
 
-NOTE (v1): the cursor *snaps* to whole recorded frames (autoware-faithful, both
-the log and the sim are 10 Hz). Temporal interpolation between frames needs
-per-neighbor track IDs (the NPZ slots are distance-sorted, not ID-stable); those
-will be written into the sidecar when the corpus is regenerated, at which point
-an interpolation mode can be enabled. See the campaign plan.
+The cursor snaps to whole recorded frames (autoware-faithful; both the log and the
+sim are 10 Hz). The render path additionally interpolates neighbor poses between
+their real detections using the sidecar ``neighbor_ids`` (track UUIDs) to smooth
+the perception's freeze-then-jump stutter — see ``reproducer_rollout``.
 """
 
 from __future__ import annotations

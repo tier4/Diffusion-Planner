@@ -24,13 +24,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import torch
-from diffusion_planner.dimensions import INPUT_T, MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
+from diffusion_planner.dimensions import INPUT_T, POSE_DIM
 from diffusion_planner.metrics.config import RewardConfig
 from diffusion_planner.metrics.subscores import compute_static_collision_penalty
 
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
+from scenario_generation.tensor_converter import _heading_to_cos_sin
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
 DT = 0.1
@@ -40,10 +41,6 @@ PAST = INPUT_T + 1  # 31
 # --------------------------------------------------------------------------- #
 # small geometry helpers
 # --------------------------------------------------------------------------- #
-def _heading_to_cos_sin(h: np.ndarray) -> np.ndarray:
-    return np.stack([np.cos(h), np.sin(h)], axis=-1).astype(np.float32)
-
-
 def _ego_pred_to_world(pred_xy, pred_cos_sin, ex, ey, eyaw):
     c, s = math.cos(eyaw), math.sin(eyaw)
     wx = ex + pred_xy[..., 0] * c - pred_xy[..., 1] * s
@@ -174,8 +171,10 @@ def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
         else:
             data[k] = torch.from_numpy(arr.astype(np.float32)).to(device)
     data["delay"] = torch.zeros((N,), dtype=torch.long, device=device)
+    # Match to_model_tensors: P = 1 ego + predicted neighbors, T = future_len (+1).
+    n_agents = 1 + model_args.predicted_neighbor_num
     data["sampled_trajectories"] = torch.zeros(
-        (N, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM), dtype=torch.float32, device=device
+        (N, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
     )
     return model_args.observation_normalizer(data)
 
@@ -215,9 +214,8 @@ def score_step(
 
     nb_xycs = torch.tensor(nb[:, :4], dtype=torch.float32, device=device)  # x,y,cos,sin
     neighbor_futures = nb_xycs[:, None, :].expand(M, 2, 4).contiguous()  # (M,2,4) static
-    neighbor_shapes = torch.tensor(
-        np.stack([nb[:, 6], nb[:, 7]], axis=-1), dtype=torch.float32, device=device
-    )  # (M,2) [width, length]
+    # (M,2) [width, length] — columns 6,7 are already contiguous, slice (no extra copy).
+    neighbor_shapes = torch.tensor(nb[:, 6:8], dtype=torch.float32, device=device)
     neighbor_valid = torch.ones((M, 2), dtype=torch.bool, device=device)
 
     out = compute_static_collision_penalty(

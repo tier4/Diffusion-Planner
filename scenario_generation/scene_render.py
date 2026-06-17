@@ -112,15 +112,8 @@ def render_scene_at_step(
     show_traj_rb: bool = False,
     show_traj_nb: bool = False,
     nb_pred_trajs: np.ndarray | None = None,
-    color_map: dict[str, str] | None = None,
 ) -> matplotlib.figure.Figure:
-    """Render a scene with placed obstacles overlaid, matching replay sim style.
-
-    ``color_map``: optional ``{agent_id: color}`` override for neighbors. When a
-    neighbor's id is present, that color is used instead of its (distance-sorted)
-    slot-index color — pass a stable ``track_uuid -> color`` mapping to keep one
-    color per track across frames.
-    """
+    """Render a scene with placed obstacles overlaid, matching replay sim style."""
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     fig.patch.set_facecolor("#f8f8f8")
 
@@ -235,8 +228,6 @@ def render_scene_at_step(
             color = _PLACED_COLOR
         elif _dimmed:
             color = "#bbbbbb"
-        elif color_map is not None and agent.id in color_map:
-            color = color_map[agent.id]
         else:
             color = _agent_color(agent.agent_type, nb_idx)
         if is_neighbor:

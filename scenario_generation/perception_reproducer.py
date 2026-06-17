@@ -14,12 +14,10 @@ perception is replayed **keyed on the live ego pose**, not wall-clock. Each step
 3. A **speed-gap guard** repeats the previous frame when the recorded ego was
    much faster here than the live ego (avoids teleporting objects forward).
 
-This snaps to whole 10 Hz frames (no interpolation) — both the log and the sim
-are 10 Hz; temporal interpolation would require per-neighbor track IDs the NPZ
-lacks (see RouteTimeline docstring / campaign plan).
-
-The cursor only decides *which recorded frame* to reproduce; transforming that
-frame's neighbors/map onto the live ego and scoring happens in the rollout.
+The cursor snaps to whole 10 Hz frames (both the log and the sim are 10 Hz). It
+only decides *which recorded frame* to reproduce; transforming that frame's
+neighbors/map onto the live ego, optional per-track interpolation, and scoring
+happen in the rollout.
 """
 
 from __future__ import annotations
