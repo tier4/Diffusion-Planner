@@ -491,72 +491,64 @@ def run_segment(
 # --------------------------------------------------------------------------- #
 # rendering (off the mining hot path) — draw the live-ego-frame scene per step
 # --------------------------------------------------------------------------- #
-def _uuid_color(uuid: str) -> str:
-    """Stable color for a track UUID (so the same car keeps one color across frames)."""
-    import matplotlib
+def _polylines_from_tensor(t: np.ndarray, border_only: bool = False) -> list[np.ndarray]:
+    """Extract (P,2) xy polylines (live-ego frame) from a lane/line_string tensor."""
+    out = []
+    for seg in t:
+        v = np.abs(seg[:, :2]).sum(1) > 0.1
+        if v.sum() < 2:
+            continue
+        if border_only and seg[:, 3].max() <= 0.5:  # line_strings channel 3 = road border
+            continue
+        out.append(seg[v, :2].astype(np.float64))
+    return out
 
-    h = int(hashlib.md5(uuid.encode()).hexdigest(), 16) % 20
-    return matplotlib.colormaps["tab20"](h)
 
-
-def _draw_step(
-    np_dict, neighbors_live, pred, ego_shape, near_miss_thresh, title, path, neighbor_ids=None
-):
-    """Save a PNG of one reproducer step using the FULL sim renderer.
+def _draw_step(np_dict, pred, ego_shape, path, neighbor_ids=None, step=0, total=1):
+    """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
     Rebuilds a SceneContext (ego + reproduced neighbors + map) in the live-ego
-    frame from the un-normalized input dict and renders it with
-    ``scene_render.render_scene_at_step`` — the same renderer the perfect-tracker
-    sim uses (traffic-light colored lanes, route, neighbor OBBs, and the road
-    border + closest-neighbor distance lines). The ego plan is overlaid as
-    ``det_traj``.
+    frame and calls ``replay.save_step_figure`` — the same function the route sim
+    uses. That gives the fixed viewport + fixed tick spacing (no per-frame
+    rescale), traffic-light-colored lanes, the road-border distance line, the
+    ego↔nearest static-NPC (red) and moving-NPC (blue) distance lines, the ego
+    plan overlay, and stable colors (it hashes ``agent.id``).
 
-    ``neighbor_ids``: per-slot track UUIDs (from the sidecar). When given, each
-    neighbor is colored by a stable hash of its UUID instead of its
-    (distance-sorted) slot index — so the same car keeps one color across frames.
+    ``neighbor_ids``: per-slot track UUIDs from the sidecar. When given, neighbor
+    agents are renamed to their UUID so the sim's own ``_stable_color`` keeps one
+    color per track across frames (vs the flickering distance-sorted slot colors).
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    from pathlib import Path
 
     from scenario_generation import npz_loader as nl
+    from scenario_generation.replay import save_step_figure
     from scenario_generation.scene_context import SceneContext
-    from scenario_generation.scene_render import render_scene_at_step
 
-    # Un-batch the [1,...] model-input dict and reuse the NPZ loader's extractors.
     data = {k: np.asarray(v)[0] for k, v in np_dict.items()}
     es = np.asarray(ego_shape).reshape(-1)
     ego = nl._extract_ego_agent(data, float(es[0]), float(es[1]), float(es[2]))
     neighbors = nl._extract_neighbors(data)
-    scene = SceneContext(
-        agents=[ego] + neighbors,
-        map_data=nl._extract_map_data(data),
-        ego_agent_id="ego",
-    )
 
-    # Stable per-track colors keyed on UUID (neighbor agent id is "neighbor_<slot>",
-    # aligned to the sidecar neighbor_ids order).
-    color_map = None
+    # Rename neighbors to their track UUID so save_step_figure's _stable_color
+    # gives one stable color per track across frames.
     if neighbor_ids:
-        color_map = {
-            a.id: _uuid_color(neighbor_ids[int(a.id.rsplit("_", 1)[1])])
-            for a in neighbors
-            if int(a.id.rsplit("_", 1)[1]) < len(neighbor_ids)
-        }
+        for a in neighbors:
+            slot = int(a.id.rsplit("_", 1)[1])
+            if slot < len(neighbor_ids):
+                a.id = f"nb_{str(neighbor_ids[slot])[:8]}"
 
-    # Ego plan (model prediction) as det_traj overlay, (T,3) [x, y, heading].
-    plan = np.column_stack([pred[:, 0], pred[:, 1], np.arctan2(pred[:, 3], pred[:, 2])])
-    fig = render_scene_at_step(
-        scene,
-        det_traj=plan,
-        show_rb_dist=True,
-        show_nb_dist=True,
-        color_map=color_map,
+    scene = SceneContext(
+        agents=[ego] + neighbors, map_data=nl._extract_map_data(data), ego_agent_id="ego"
     )
-    fig.axes[0].set_title(title, fontsize=11)
-    fig.savefig(path, dpi=90)
-    plt.close(fig)
+    save_step_figure(
+        scene,
+        {"ego": pred},  # ego-frame (80,4) prediction -> drawn as the ego plan
+        Path(path),
+        step,
+        total,
+        route_polylines=_polylines_from_tensor(data["route_lanes"]),
+        road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
+    )
 
 
 @torch.no_grad()
@@ -624,18 +616,15 @@ def render_segment(
         _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
         if window is None or (window[0] <= k <= window[1]):
-            _, col, _ = score_step(neighbors_live, s.ego_shape, s.dyn.speed, device)
-            tag = "COLLISION" if col else ""
             nids = tl.neighbor_ids(idx) if color_by_uuid else None
             _draw_step(
                 np_dict,
-                neighbors_live,
                 pred,
                 s.ego_shape,
-                near_miss_thresh,
-                f"{route} step {k:04d} rec={idx} {tag}",
                 out_dir / f"{k:05d}.png",
                 neighbor_ids=nids,
+                step=k,
+                total=cap,
             )
         _post_step(s, pred, neighbors_live, idx, device, timers)
     return _finalize(s, timers).metrics
