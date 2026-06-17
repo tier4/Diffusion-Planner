@@ -40,7 +40,7 @@ def compute_subscores_batch(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
     config: RewardConfig = RewardConfig(),
-) -> dict:
+) -> dict[str, torch.Tensor | list[int | None]]:
     """Raw per-trajectory subscores + diagnostics for ``ego_trajs`` ``(N, T, 4)``.
 
     Marshals ``data`` (ego_shape / neighbors / goal) and calls every subscore —

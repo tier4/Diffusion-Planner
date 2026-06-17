@@ -83,6 +83,7 @@ def compute_reward_batch(
     return _shape_reward(compute_subscores_batch(ego_trajs, data, config), ego_trajs, data, config)
 
 
+@torch.no_grad()
 def _shape_reward(
     subs: dict,
     ego_trajs: torch.Tensor,
