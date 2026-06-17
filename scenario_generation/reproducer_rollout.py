@@ -19,6 +19,7 @@ No rendering here (``--no_render`` is the mining default); every stage is timed.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 
@@ -454,7 +455,17 @@ def run_segment(
 # --------------------------------------------------------------------------- #
 # rendering (off the mining hot path) — draw the live-ego-frame scene per step
 # --------------------------------------------------------------------------- #
-def _draw_step(np_dict, neighbors_live, pred, ego_shape, near_miss_thresh, title, path):
+def _uuid_color(uuid: str) -> str:
+    """Stable color for a track UUID (so the same car keeps one color across frames)."""
+    import matplotlib
+
+    h = int(hashlib.md5(uuid.encode()).hexdigest(), 16) % 20
+    return matplotlib.colormaps["tab20"](h)
+
+
+def _draw_step(
+    np_dict, neighbors_live, pred, ego_shape, near_miss_thresh, title, path, neighbor_ids=None
+):
     """Save a PNG of one reproducer step using the perfect-tracker sim viz style.
 
     Rebuilds a SceneContext (ego + reproduced neighbors + map) in the live-ego
@@ -462,6 +473,10 @@ def _draw_step(np_dict, neighbors_live, pred, ego_shape, near_miss_thresh, title
     ``draw_scene`` (same look as scenario_generation.simulate), then overlays the
     ego plan (blue) and a red line on the closest ego-neighbor pair when within
     ``near_miss_thresh``.
+
+    ``neighbor_ids``: per-slot track UUIDs (from the sidecar). When given, each
+    neighbor is colored by a stable hash of its UUID instead of its
+    (distance-sorted) slot index — so the same car keeps one color across frames.
     """
     import matplotlib
 
@@ -481,14 +496,25 @@ def _draw_step(np_dict, neighbors_live, pred, ego_shape, near_miss_thresh, title
     data = {k: np.asarray(v)[0] for k, v in np_dict.items()}
     es = np.asarray(ego_shape).reshape(-1)
     ego = nl._extract_ego_agent(data, float(es[0]), float(es[1]), float(es[2]))
+    neighbors = nl._extract_neighbors(data)
     scene = SceneContext(
-        agents=[ego] + nl._extract_neighbors(data),
+        agents=[ego] + neighbors,
         map_data=nl._extract_map_data(data),
         ego_agent_id="ego",
     )
 
+    # Stable per-track colors keyed on UUID (neighbor agent id is "neighbor_<slot>",
+    # aligned to the sidecar neighbor_ids order).
+    color_map = None
+    if neighbor_ids:
+        color_map = {}
+        for a in neighbors:
+            slot = int(a.id.rsplit("_", 1)[1])
+            if slot < len(neighbor_ids):
+                color_map[a.id] = _uuid_color(neighbor_ids[slot])
+
     fig, ax = plt.subplots(figsize=(9, 9))
-    draw_scene(ax, scene, "ego")
+    draw_scene(ax, scene, "ego", color_map=color_map)
 
     # Ego plan (model prediction), (T,3) [x, y, heading].
     plan = np.column_stack([pred[:, 0], pred[:, 1], np.arctan2(pred[:, 3], pred[:, 2])])
@@ -546,18 +572,25 @@ def render_segment(
     max_steps: int | None = None,
     goal_reach_m: float = 5.0,
     max_stuck_steps: int = 0,
+    color_by_uuid: bool = True,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
-    ``window`` = (lo, hi) step range to render (default: all). ``max_steps``
-    overrides the step cap so a slow ego can drive to the segment end (it stops
-    on goal-reach). ``max_stuck_steps``=0 (default) disables the stuck cutoff so
-    the full run is rendered. Returns the SegmentResult metrics.
+    Runs until the ego reaches the segment end (within ``goal_reach_m``), or the
+    step cap, or (if enabled) the stuck cutoff. ``max_steps`` defaults to
+    ``2*(end-start)`` so a slow ego (e.g. waiting out a long red light) still has
+    room to drive to the end — not just the segment length. ``max_stuck_steps``=0
+    (default) disables the stuck cutoff so light-waiting isn't mistaken for stuck.
+
+    ``window`` = (lo, hi) step range to render (default: all). ``color_by_uuid``:
+    color neighbors by their stable track UUID from the sidecar when available
+    (falls back to slot-index colors otherwise). Returns the SegmentResult metrics.
     """
     from pathlib import Path
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    cap = max_steps if max_steps is not None else 2 * (end - start)
     timers = Timers()
     s = _seed_state(
         tl,
@@ -569,7 +602,7 @@ def render_segment(
         goal_reach_m,
         max_stuck_steps,
         timers,
-        max_steps=max_steps,
+        max_steps=cap,
     )
     route = out_dir.name
     while not s.done:
@@ -582,8 +615,9 @@ def render_segment(
         _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
         if window is None or (window[0] <= k <= window[1]):
-            cl, col, _ = score_step(neighbors_live, s.ego_shape, s.dyn.speed, device)
+            _, col, _ = score_step(neighbors_live, s.ego_shape, s.dyn.speed, device)
             tag = "COLLISION" if col else ""
+            nids = tl.neighbor_ids(idx) if color_by_uuid else None
             _draw_step(
                 np_dict,
                 neighbors_live,
@@ -592,6 +626,7 @@ def render_segment(
                 near_miss_thresh,
                 f"{route} step {k:04d} rec={idx} {tag}",
                 out_dir / f"{k:05d}.png",
+                neighbor_ids=nids,
             )
         _post_step(s, pred, neighbors_live, idx, device, timers)
     return _finalize(s, timers).metrics

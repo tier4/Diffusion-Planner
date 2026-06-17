@@ -237,13 +237,18 @@ def draw_trajectory(
             )
 
 
-def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
+def draw_scene(
+    ax, scene: SceneContext, ego_id: str | None = None, color_map: dict[str, str] | None = None
+):
     """Draw a full scene on a matplotlib axes.
 
     Args:
         ax: Matplotlib axes.
         scene: The SceneContext to visualize.
         ego_id: Agent to highlight as ego. Defaults to scene.ego_agent_id.
+        color_map: Optional ``{agent_id: color}`` override. When given, a
+            neighbor's color comes from this map instead of its (distance-sorted)
+            slot index — use it to keep one stable color per track across frames.
     """
     if ego_id is None:
         ego_id = scene.ego_agent_id
@@ -278,7 +283,10 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
             label = f"ego ({agent.id})"
             zorder = 20
         else:
-            color = _agent_color(agent.agent_type, nb_idx)
+            if color_map is not None and agent.id in color_map:
+                color = color_map[agent.id]
+            else:
+                color = _agent_color(agent.agent_type, nb_idx)
             label = f"{agent.id} ({agent.agent_type.value})"
             zorder = 15
             nb_idx += 1
