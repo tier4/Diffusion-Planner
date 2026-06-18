@@ -581,16 +581,18 @@ class PreferenceAnnotator:
     def _get_gt_trajectory(self) -> np.ndarray | None:
         """Return the GT trajectory as [T, 4] (x, y, cos, sin).
 
-        The NPZ ego_agent_future is stored as [T, 3] (x, y, heading in radians) and comes
-        directly from Autoware's EKF localization with no additional smoothing applied during
-        rosbag-to-NPZ conversion (verified in both the Python and C++ converter paths). The
-        model trains on this raw EKF output as GT, so no further smoothing is applied here.
+        ``ego_agent_future`` may be 4-col [x, y, cos, sin] (current converter / scene-gen)
+        or legacy 3-col [x, y, heading_rad]; both are handled. It comes directly from
+        Autoware's EKF localization with no additional smoothing during rosbag-to-NPZ
+        conversion, and the model trains on that raw output, so none is applied here.
 
         Returns:
             GT trajectory as [T, 4] numpy array, or None on error.
         """
         try:
-            gt_raw = self.current_data["ego_agent_future"][0].cpu().numpy()  # [T, 3]
+            gt_raw = self.current_data["ego_agent_future"][0].cpu().numpy()
+            if gt_raw.shape[-1] == 4:  # already [x, y, cos, sin]
+                return gt_raw.astype(np.float32)
             cos_yaw = np.cos(gt_raw[:, 2:3])
             sin_yaw = np.sin(gt_raw[:, 2:3])
             return np.concatenate([gt_raw[:, :2], cos_yaw, sin_yaw], axis=1).astype(np.float32)

@@ -8,14 +8,15 @@ reference NPZs.
 
 Key transforms:
 - ego_agent_past:    cpp (31, 4) [x,y,cos,sin] → npz (31, 3) [x,y,yaw]
-- ego_agent_future:  cpp (80, 4) [x,y,cos,sin] → npz (80, 3) [x,y,yaw]
+- ego_agent_future:  cpp (80, 4) [x,y,cos,sin] → npz (80, 4) [x,y,cos,sin]  (kept 4-col)
 - goal_pose:         cpp (4,)   [x,y,cos,sin] → npz (3,)   [x,y,yaw]
-- neighbor_agents_future: cpp (320, 80, 4) → npz (320, 80, 3) [x,y,yaw]
+- neighbor_agents_future: cpp (320, 80, 4) → npz (320, 80, 4) [x,y,cos,sin]  (kept 4-col)
 - speed-limit fields: (N,) → (N, 1), int32 has-flag → bool
 
-heading is recovered with atan2(sin, cos). This avoids a double-conversion bug:
-Python `load_npz_data` applies `heading_to_cos_sin` once at load time on 3-channel
-inputs, so emit 3-channel heading here (do NOT pre-convert to cos/sin).
+FUTURES are kept 4-col [x,y,cos,sin]: the trainable/reward schema requires it and the
+reward path hard-fails on 3-col. ego_agent_past and goal_pose stay 3-col [x,y,yaw] (the
+canonical schema — the loader/model widen them, and `heading_to_cos_sin` is idempotent so
+a 4-col input would also pass through unchanged).
 """
 
 import argparse
@@ -165,9 +166,10 @@ def decode_bin(raw: bytes) -> dict[str, np.ndarray]:
     return {
         "ego_agent_past": _xyc_to_xyy(ego_past_xyc).astype(np.float32),
         "ego_current_state": ego_current.astype(np.float32),
-        "ego_agent_future": _xyc_to_xyy(ego_future_xyc).astype(np.float32),
+        # Futures stay 4-col [x,y,cos,sin] (trainable/reward schema; never 3-col).
+        "ego_agent_future": ego_future_xyc.astype(np.float32),
         "neighbor_agents_past": neighbor_past.astype(np.float32),
-        "neighbor_agents_future": _xyc_to_xyy(neighbor_future_xyc).astype(np.float32),
+        "neighbor_agents_future": neighbor_future_xyc.astype(np.float32),
         "static_objects": static_objects.astype(np.float32),
         "lanes": lanes.astype(np.float32),
         "lanes_speed_limit": lanes_speed_limit.astype(np.float32),
