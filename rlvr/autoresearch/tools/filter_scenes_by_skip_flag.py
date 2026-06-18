@@ -1,14 +1,19 @@
-"""Filter a training scene list by the converter's per-frame skip flag.
+"""Filter a training scene list by the converter's per-frame skip flag (CLI pre-pass).
 
-When a corpus is generated with the cpp converter's ``--write_skipped_npz=1``
-(so the closed-loop reproducer gets a gap-free timeline), every 10 Hz frame is
-written, including the ones the production filter would normally drop (stopped at
-a red light, no future progress, ...). Each frame's JSON sidecar carries
-``is_skipped`` (and ``skipping_info.label``). TRAINING must not learn from those
-frames, so this tool rewrites a scene list keeping only ``is_skipped == false``.
+When a corpus is generated with the cpp converter's ``--write_skipped_npz=1`` (so the
+closed-loop reproducer gets a gap-free timeline), every 10 Hz frame is written,
+including the ones the production filter would normally drop (stopped at a red light,
+no future progress, ...). Each frame's JSON sidecar carries ``is_skipped``. TRAINING
+must not learn from those frames.
 
-Backward-compatible: a sidecar without the field (older corpora) is treated as
-NOT skipped, so existing lists pass through unchanged.
+Most training/eval paths now drop them automatically (the loader and scene-list
+intakes call ``diffusion_planner.utils.scene_skip.filter_scene_list`` by default). This
+tool stays as an explicit pre-pass for cases where you want a pre-filtered list on disk
+(e.g. handing a list to an external script). It is a thin wrapper over the same shared
+helper, so the filtering logic lives in exactly one place.
+
+Backward-compatible: a sidecar without the field (older corpora) is treated as NOT
+skipped, so existing lists pass through unchanged.
 
 Example::
 
@@ -23,42 +28,9 @@ import argparse
 import json
 from pathlib import Path
 
-# stem -> path index per sidecar_root, built once (one rglob) and reused for every
-# scene, so a large scene list doesn't pay an O(files) rglob per entry.
-_SIDECAR_INDEX_CACHE: dict[Path, dict[str, Path]] = {}
-
-
-def _sidecar_index(sidecar_root: Path) -> dict[str, Path]:
-    key = sidecar_root.resolve()
-    idx = _SIDECAR_INDEX_CACHE.get(key)
-    if idx is None:
-        idx = {p.stem: p for p in sidecar_root.rglob("*.json")}
-        _SIDECAR_INDEX_CACHE[key] = idx
-    return idx
-
-
-def _sidecar_for(npz_path: Path, sidecar_root: Path | None) -> Path | None:
-    sib = npz_path.with_suffix(".json")
-    if sib.is_file():
-        return sib
-    if sidecar_root is not None:
-        cand = sidecar_root / f"{npz_path.stem}.json"
-        if cand.is_file():
-            return cand
-        return _sidecar_index(sidecar_root).get(npz_path.stem)
-    return None
-
-
-def is_skipped(npz_path: str | Path, sidecar_root: Path | None = None) -> bool:
-    """True if the frame's sidecar marks it skip_for_training (missing flag => False)."""
-    sc = _sidecar_for(Path(npz_path), sidecar_root)
-    if sc is None:
-        return False
-    try:
-        d = json.loads(sc.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-    return bool(d.get("is_skipped", False))
+# Re-exported so existing importers keep working; the implementation lives in the
+# shared, dependency-light helper at the lowest package layer.
+from diffusion_planner.utils.scene_skip import filter_scene_list, is_skipped  # noqa: F401
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,18 +54,10 @@ def main() -> None:
     scenes = json.loads(args.scenes.read_text())
     if not isinstance(scenes, list):
         raise ValueError(f"{args.scenes} is not a JSON list of npz paths")
-    kept, dropped = [], 0
-    for entry in scenes:
-        path = entry if isinstance(entry, str) else (entry.get("path") or entry.get("npz"))
-        if is_skipped(path, args.sidecar_root):
-            dropped += 1
-        else:
-            kept.append(entry)
+    kept = filter_scene_list(scenes, sidecar_root=args.sidecar_root, label=str(args.scenes))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(kept))
-    print(
-        f"kept {len(kept)} / {len(scenes)} scenes (dropped {dropped} skip_for_training) -> {args.out}"
-    )
+    print(f"wrote {len(kept)} scenes -> {args.out}")
 
 
 if __name__ == "__main__":

@@ -41,6 +41,8 @@ def load_npz_data(npz_path, device):
     return data
 
 
+from diffusion_planner.utils.scene_skip import filter_scene_list
+
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_trainer import GRPOTrainer
 from rlvr.reward import RewardConfig, compute_reward_batch
@@ -559,6 +561,14 @@ def run(
         train_paths = create_training_set(prob_100, curated_pool, n_prob, n_normal)
     else:
         train_paths = create_training_set(prob_100, normal_pool, n_prob, n_normal)
+    # Drop converter-flagged skip_for_training frames from everything we train/eval on
+    # (default on; reproducer-only frames are not valid supervision). Single chokepoint
+    # so every scene source above is covered.
+    _sk = grpo_config.skip_filtered_scenes
+    _sr = grpo_config.sidecar_root
+    train_paths = filter_scene_list(train_paths, sidecar_root=_sr, enabled=_sk, label="train")
+    prob_eval = filter_scene_list(prob_eval, sidecar_root=_sr, enabled=_sk, label="prob_eval")
+    val_50 = filter_scene_list(val_50, sidecar_root=_sr, enabled=_sk, label="val")
     n_unique = len(set(train_paths))
     n_total = len(train_paths)
     dup_msg = f" ({n_total - n_unique} DUPLICATES!)" if n_unique < n_total else ""

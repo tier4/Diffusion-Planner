@@ -98,6 +98,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def _enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
+    # OPT-OUT of skip-filtering on purpose: the reproducer is the ONE consumer that needs
+    # the converter's skip_for_training frames (red-light dwell etc.) so the timeline is
+    # gap-free. We deliberately do NOT call scene_skip.filter_scene_list here — every
+    # frame under npz_root is replayed (skip_filter=False is implicit).
     paths = sorted(npz_root.rglob("*.npz"))
     if not paths:
         raise FileNotFoundError(f"No .npz under {npz_root}")
