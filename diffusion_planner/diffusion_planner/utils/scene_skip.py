@@ -38,11 +38,12 @@ def _sidecar_index(sidecar_root: Path) -> dict[str, Path]:
 
 
 def scene_entry_path(entry) -> str:
-    """The npz path of a scene-list entry: a bare string, or a dict with path/npz."""
+    """The npz path of a scene-list entry: a bare string, or a dict keyed
+    path / npz / scene_path (the forms used across the scene-list tools)."""
     if isinstance(entry, str):
         return entry
     if isinstance(entry, dict):
-        return entry.get("path") or entry.get("npz") or ""
+        return entry.get("path") or entry.get("npz") or entry.get("scene_path") or ""
     return ""
 
 
