@@ -192,6 +192,20 @@ class RouteTimeline:
         self._npz_cache[idx] = data
         return data
 
+    def prefetch(self, indices) -> None:
+        """Decompress + cache the given recorded frames if not already cached.
+
+        Called from a background thread while the GPU runs the model forward, so the
+        next rollout tick's input build hits the cache instead of paying the np.load
+        decompress on the critical path. ``npz`` already caches; loading an
+        already-cached or out-of-range frame is a benign no-op (double-decompress at
+        worst, same value), so this is safe to call concurrently with the build
+        threads."""
+        n = len(self.npz_paths)
+        for i in indices:
+            if 0 <= i < n and i not in self._npz_cache:
+                self.npz(i)
+
     def pose(self, idx: int) -> np.ndarray:
         """World ego pose [x, y, yaw] at recorded frame ``idx``."""
         return self.poses[idx]

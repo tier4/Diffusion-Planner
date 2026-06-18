@@ -759,6 +759,7 @@ def run_segments_batched(
     unstick_advance_m: float = 5.0,
     max_steps_mult: int = 3,
     n_build_threads: int = 8,
+    prefetch_ahead: int = 2,
     timers: Timers | None = None,
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
@@ -776,7 +777,13 @@ def run_segments_batched(
     Two amortizations per tick: (1) the per-segment NUMPY input build (np.load +
     world_to_ego_frame, GIL-releasing) runs across ``n_build_threads`` threads;
     (2) the torch conversion + normalization + model.forward run ONCE on the
-    stacked batch.
+    stacked batch. (3) I/O overlap: while the GPU runs the forward (CPU otherwise
+    idle), background threads prefetch the next ``prefetch_ahead`` recorded frames
+    of each active segment into the npz cache, so the following tick's input build
+    is a cache hit instead of paying the decompress on the critical path. The cursor
+    is ~monotonic, so frame ``max_idx_reached + 1`` is almost always the next one
+    consumed. Set ``prefetch_ahead=0`` to disable (A/B; results are identical either
+    way — prefetch only warms the cache).
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -812,6 +819,13 @@ def run_segments_batched(
                     with timers("to_torch"):
                         data = _to_torch_batch([b[1] for b in built], model_args, device)
                     with timers("model_forward"):
+                        # Fire-and-forget prefetch of each segment's upcoming frames
+                        # so they decompress on background threads while the GPU is
+                        # busy below (overlaps the npz I/O with the forward).
+                        if prefetch_ahead > 0:
+                            for s in active:
+                                nxt = s.cursor.max_idx_reached + 1
+                                pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
                         _, outputs = model(data)
                         preds = outputs["prediction"][:, 0].cpu().numpy()  # (B,80,4)
                     for i, (s, _np, nb, idx) in enumerate(built):

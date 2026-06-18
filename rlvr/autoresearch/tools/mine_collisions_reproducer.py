@@ -60,6 +60,13 @@ def parse_args() -> argparse.Namespace:
     # Throughput / coverage levers (forwarded to run_segments_batched).
     p.add_argument("--n_build_threads", type=int, default=8, help="threads for the CPU input build")
     p.add_argument(
+        "--prefetch_ahead",
+        type=int,
+        default=2,
+        help="prefetch this many upcoming frames per segment during the GPU forward "
+        "(overlaps npz I/O with compute; 0=off, results unchanged)",
+    )
+    p.add_argument(
         "--max_steps_mult",
         type=int,
         default=3,
@@ -128,6 +135,7 @@ def main() -> None:
             unstick_advance_m=args.unstick_advance_m,
             max_steps_mult=args.max_steps_mult,
             n_build_threads=args.n_build_threads,
+            prefetch_ahead=args.prefetch_ahead,
             timers=timers,
         )
         for key, res in zip(buf_keys, res_list):
