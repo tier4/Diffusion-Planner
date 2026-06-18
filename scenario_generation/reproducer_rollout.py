@@ -25,15 +25,15 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
-from diffusion_planner.metrics.geometry import (
-    _build_ego_bbox_corners,
-    _closest_points_between_rects,
-)
 from diffusion_planner.model.guidance.collision import (
     batch_signed_distance_rect,
     center_rect_to_points,
 )
 
+from planner_metrics.geometry import (
+    _build_ego_bbox_corners,
+    _closest_points_between_rects,
+)
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
@@ -1005,6 +1005,16 @@ def _scene_npz_from_np_dict(np_dict: dict) -> dict:
 
 
 @torch.no_grad()
+def _precollision_window_start(t_c: int, pre_steps: int, last_snap_step: int | None) -> int:
+    """First step of the pre-collision window, clamped so it never crosses an unstick
+    snap. Normally ``t_c - pre_steps`` (may be negative — the backtrack path then reads
+    recorded frames before the segment start). If an unstick snap fired within that window
+    (``last_snap_step`` is not None and >= the base start), start at the post-snap step
+    instead so no saved scene's realized ego_future or ego_past spans the ~5 m teleport."""
+    base = t_c - pre_steps
+    return base if last_snap_step is None else max(base, last_snap_step)
+
+
 def extract_collision_scenes(
     model,
     model_args,
@@ -1067,6 +1077,10 @@ def extract_collision_scenes(
     buf: deque = deque(maxlen=pre_steps + 1)
     live_poses: dict[int, np.ndarray] = {}  # step k -> world pose (for ego_future)
     t_c = None
+    # Step right after the most recent unstick snap (None = no snap yet). The pre-collision
+    # window must not cross a snap, or a saved scene's realized ego_future/ego_past would
+    # span the ~5 m teleport.
+    last_snap_step = None
     while not s.done:
         k = s.k
         pre = _pre_step(s)
@@ -1082,7 +1096,10 @@ def extract_collision_scenes(
         if clr <= collision_thresh:
             t_c = k
             break
+        prev_snaps = s.n_snaps
         _post_step(s, pred, neighbors_live, idx, device, timers)
+        if s.n_snaps > prev_snaps:  # an unstick snap fired advancing k -> s.k
+            last_snap_step = s.k
     if t_c is None:
         return None
 
@@ -1093,7 +1110,16 @@ def extract_collision_scenes(
     saved = []
     fut_len = int(model_args.future_len)
 
-    for step_k in range(t_c - pre_steps, t_c):
+    # Clamp the window so it never crosses an unstick teleport: start no earlier than the
+    # step right after the last snap, keeping every saved scene's realized ego_future AND
+    # ego_past on one continuous (snap-free) segment.
+    start_k = _precollision_window_start(t_c, pre_steps, last_snap_step)
+    if start_k > t_c - pre_steps:
+        print(
+            f"  [extract] window clamped {t_c - pre_steps} -> {start_k} "
+            f"(unstick snap within the {pre_steps}-step pre-collision window)"
+        )
+    for step_k in range(start_k, t_c):
         if step_k >= 0 and step_k in live_by_step:
             _, idx, live_pose, np_dict = live_by_step[step_k]
             scene = _scene_npz_from_np_dict(np_dict)
