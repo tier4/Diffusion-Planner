@@ -74,7 +74,7 @@ TrainingDataBinary build_training_data(
 
 nlohmann::json build_frame_json(
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info)
+  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids)
 {
   std::vector<int> incomplete_types;
   for (const auto & t : skipping_info.incomplete_data_types) {
@@ -82,6 +82,9 @@ nlohmann::json build_frame_json(
   }
 
   nlohmann::json j;
+  // is_skipped (+ skipping_info.label) is the per-frame "skip_for_training" tag:
+  // with --write_skipped_npz the frame is still written for the closed-loop
+  // reproducer (gap-free), and training filters on this flag.
   j["is_skipped"] = (skipping_info.label != SkippingLabel::NotSkipped);
   j["timestamp"] = timestamp;
   j["x"] = kinematic_state.pose.pose.position.x;
@@ -95,6 +98,9 @@ nlohmann::json build_frame_json(
     {"label", static_cast<int>(skipping_info.label)},
     {"details", skipping_info.details},
     {"incomplete_data_types", incomplete_types}};
+  // Perception track UUIDs aligned 1:1 with the neighbor_past slots (for the
+  // reproducer's cross-frame association / interpolation).
+  j["neighbor_ids"] = neighbor_ids;
   return j;
 }
 
@@ -189,13 +195,14 @@ void save_frame_data(
 void save_frame_json(
   const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info)
+  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids)
 {
   namespace fs = std::filesystem;
 
   fs::create_directories(output_path);
 
-  const nlohmann::json j = build_frame_json(kinematic_state, timestamp, skipping_info);
+  const nlohmann::json j =
+    build_frame_json(kinematic_state, timestamp, skipping_info, neighbor_ids);
 
   const std::string json_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".json";
   std::ofstream json_file(json_filename);
