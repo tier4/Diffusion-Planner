@@ -24,7 +24,9 @@ import json
 from pathlib import Path
 
 # stem -> sidecar path index per sidecar_root, built once (one rglob) and reused for
-# every scene, so a large scene list doesn't pay an O(files) rglob per entry.
+# every scene, so a large scene list doesn't pay an O(files) rglob per entry. Cached for
+# the process lifetime (never invalidated) — correct for the batch train/eval CLIs here;
+# a long-lived process that writes new sidecars after the first lookup won't see them.
 _SIDECAR_INDEX_CACHE: dict[Path, dict[str, Path]] = {}
 
 

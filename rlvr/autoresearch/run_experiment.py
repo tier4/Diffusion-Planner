@@ -569,6 +569,7 @@ def run(
     train_paths = filter_scene_list(train_paths, sidecar_root=_sr, enabled=_sk, label="train")
     prob_eval = filter_scene_list(prob_eval, sidecar_root=_sr, enabled=_sk, label="prob_eval")
     val_50 = filter_scene_list(val_50, sidecar_root=_sr, enabled=_sk, label="val")
+    prob_100 = filter_scene_list(prob_100, sidecar_root=_sr, enabled=_sk, label="prob_viz")
     n_unique = len(set(train_paths))
     n_total = len(train_paths)
     dup_msg = f" ({n_total - n_unique} DUPLICATES!)" if n_unique < n_total else ""
