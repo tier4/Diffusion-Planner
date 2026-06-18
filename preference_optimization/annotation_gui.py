@@ -1646,10 +1646,14 @@ class PreferenceAnnotator:
         if not np.any(valid_mask):
             return None
 
-        # Get headings - ground truth has direct heading angle in radians
-        # Include ego state heading (computed from cos/sin)
+        # Future headings: 4-col [x,y,cos,sin] -> atan2(sin,cos); legacy 3-col
+        # [x,y,heading] -> col 2 directly. Include ego state heading (from cos/sin).
+        if ego_future.shape[-1] == 4:
+            fut_headings = np.arctan2(ego_future[:, 3], ego_future[:, 2])
+        else:
+            fut_headings = ego_future[:, 2]
         ego_heading = np.arctan2(ego_state[3], ego_state[2])
-        headings = np.concatenate([[ego_heading], ego_future[:, 2]])
+        headings = np.concatenate([[ego_heading], fut_headings])
 
         # Get positions (ego + trajectory = 81 points)
         positions = np.vstack([ego_state[:2], ego_future[:, :2]])
