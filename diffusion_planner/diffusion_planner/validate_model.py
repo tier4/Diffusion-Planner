@@ -17,6 +17,52 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
+from planner_metrics import RewardConfig, compute_subscores_batch
+
+# Reward subscores logged as additive validation metrics (valid_loss/ego_subscore_*).
+# These are the RLVR reward's subscores (EPDMS-INSPIRED — custom thresholds,
+# goal-based ego-progress, penalty signs), NOT a faithful EPDMS port (that lives
+# in OnePlanner; see issue #142). Logging them lets best-model selection see the
+# same physical quantities the reward is built from. Best-model selection itself
+# is unchanged.
+_VAL_SUBSCORE_KEYS = (
+    "safety",
+    "ttc",
+    "progress",
+    "comfort",
+    "centerline",
+    "red_light",
+    "feasibility",
+)
+_VAL_SUBSCORE_CFG = RewardConfig()
+
+
+@torch.no_grad()
+def _reward_subscores_per_scene(ego_pred, data_batched, config, keys):
+    """Per-scene reward subscores for a validation batch.
+
+    ``compute_subscores_batch`` is single-scene / N-trajectory (its map + neighbor
+    terms use one scene's tensors), so this loops over the ``B`` scenes — each with
+    one ego prediction — and stacks the requested subscores.
+
+    Args:
+        ego_pred: ``(B, T, 4)`` ego predictions, metre ego-frame.
+        data_batched: dict of ``(B, ...)`` tensors (ego_shape / neighbors / map /
+            goal); each is sliced ``[b:b+1]`` per scene.
+        config: RewardConfig (thresholds; weights are irrelevant to raw subscores).
+        keys: subscore names to return.
+
+    Returns:
+        ``{name: (B,) tensor}`` for each requested key.
+    """
+    n = ego_pred.shape[0]
+    acc = {name: [] for name in keys}
+    for b in range(n):
+        data_b = {k: v[b : b + 1] for k, v in data_batched.items()}
+        subs_b = compute_subscores_batch(ego_pred[b : b + 1], data_b, config)
+        for name in keys:
+            acc[name].append(subs_b[name])
+    return {name: torch.cat(vals) for name, vals in acc.items()}
 
 
 @torch.no_grad()
@@ -148,6 +194,23 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             margin=args.road_border_margin,
         )
         total_result_dict["ego_road_border_loss"].append(rb_penalty.cpu())
+
+        # Reward subscores as additive validation metrics (logged via the ego_*
+        # machinery as valid_loss/ego_subscore_*). Same metre ego-frame tensors
+        # the rb / neighbor metrics above use; one scene per prediction.
+        data_batched = {
+            "ego_shape": inputs["ego_shape"],
+            "neighbor_agents_future": neighbors_future,
+            "neighbor_agents_past": denorm_inputs["neighbor_agents_past"],
+        }
+        for k in ("lanes", "route_lanes", "line_strings", "polygons", "goal_pose"):
+            if k in denorm_inputs:
+                data_batched[k] = denorm_inputs[k]
+        subscores = _reward_subscores_per_scene(
+            prediction[:, 0], data_batched, _VAL_SUBSCORE_CFG, _VAL_SUBSCORE_KEYS
+        )
+        for name, val in subscores.items():
+            total_result_dict[f"ego_subscore_{name}"].append(val.cpu())  # (B,)
 
     avg_loss_ego = total_loss_ego / total_samples_ego
     avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)
