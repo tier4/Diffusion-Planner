@@ -22,6 +22,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import time
 from pathlib import Path
@@ -58,6 +59,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--max_routes", type=int, default=-1, help="limit routes (debug)")
     p.add_argument("--max_segments", type=int, default=-1, help="limit total segments (debug)")
+    p.add_argument(
+        "--top_k",
+        type=int,
+        default=200,
+        help="how many top-ranked segments to keep in memory for the summary/render "
+        "(every segment is still streamed to the JSONL; bounds RAM on huge corpora)",
+    )
     # Throughput / coverage levers (forwarded to run_segments_batched).
     p.add_argument("--n_build_threads", type=int, default=8, help="threads for the CPU input build")
     p.add_argument(
@@ -112,11 +120,25 @@ def main() -> None:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     timers = Timers()
-    rows: list[dict] = []
+    # Every segment is streamed to the JSONL on disk; in memory we keep only a bounded
+    # top-K heap for the ranked summary + optional renders, so RAM stays flat over
+    # millions of segments. Heap key = (collisions, -min_clearance, seq) -> the heap's
+    # smallest is the least interesting kept row and is evicted first.
+    top_k = max(args.top_k, args.dump_hits)
+    heap: list[tuple] = []
     n_seg = 0
+    seq = 0
     t0 = time.perf_counter()
 
     fout = open(args.out, "w")
+
+    def _keep(row: dict) -> None:
+        nonlocal seq
+        key = (row["n_collision_steps"], -row["min_clearance"], seq)
+        seq += 1
+        heapq.heappush(heap, (key, row))
+        if len(heap) > top_k:
+            heapq.heappop(heap)  # drop the least interesting
 
     def _flush(buf_units, buf_keys):
         """Run a buffered batch of work units through the batched rollout."""
@@ -141,8 +163,8 @@ def main() -> None:
         )
         for key, res in zip(buf_keys, res_list):
             row = {"route": key, **res.metrics}
-            rows.append(row)
             fout.write(json.dumps(row, default=float) + "\n")
+            _keep(row)
             n_seg += 1
         fout.flush()
 
@@ -170,8 +192,8 @@ def main() -> None:
     fout.close()
 
     elapsed = time.perf_counter() - t0
-    # Rank: collisions first, then tightest clearance.
-    hits = sorted(rows, key=lambda r: (-r["n_collision_steps"], r["min_clearance"]))
+    # Rank the kept top-K: collisions desc, then tightest clearance (heap key desc).
+    hits = [row for _key, row in sorted(heap, reverse=True)]
     print(
         f"\n=== mined {n_seg} segments in {elapsed:.1f}s ({elapsed / max(1, n_seg):.2f}s/seg) ==="
     )
@@ -183,7 +205,7 @@ def main() -> None:
             f"term={r['terminated']}"
         )
     print("\n" + timers.report(n_seg))
-    print(f"\nwrote {len(rows)} rows -> {args.out}")
+    print(f"\nwrote {n_seg} rows -> {args.out} (kept top {len(hits)} in memory for ranking)")
 
     # Optionally render the top-N ranked hit segments to PNGs for inspection.
     if args.dump_hits > 0:

@@ -94,8 +94,26 @@ def group_routes(npz_paths: list[Path]) -> dict[str, list[Path]]:
     return routes
 
 
+# stem -> path index per sidecar_dir, built once and reused across every frame and
+# every route (avoids an O(N_files) rglob per frame on large nested corpora).
+_SIDECAR_INDEX_CACHE: dict[Path, dict[str, Path]] = {}
+
+
+def _sidecar_index(sidecar_dir: Path) -> dict[str, Path]:
+    key = sidecar_dir.resolve()
+    idx = _SIDECAR_INDEX_CACHE.get(key)
+    if idx is None:
+        idx = {p.stem: p for p in sidecar_dir.rglob("*.json")}
+        _SIDECAR_INDEX_CACHE[key] = idx
+    return idx
+
+
 def _resolve_sidecar(npz_path: Path, sidecar_dir: Path | None) -> Path:
-    """Locate the pose JSON for an NPZ: sibling first, then sidecar_dir by stem."""
+    """Locate the pose JSON for an NPZ: sibling first, then sidecar_dir by stem.
+
+    The under-``sidecar_dir`` lookup uses a one-time stem->path index (built by a
+    single rglob, cached per directory) so nested corpora don't pay a recursive glob
+    per frame."""
     sib = npz_path.with_suffix(".json")
     if sib.is_file():
         return sib
@@ -104,9 +122,9 @@ def _resolve_sidecar(npz_path: Path, sidecar_dir: Path | None) -> Path:
         cand = sidecar_dir / f"{npz_path.stem}.json"
         if cand.is_file():
             return cand
-        matches = list(sidecar_dir.rglob(f"{npz_path.stem}.json"))
-        if matches:
-            return matches[0]
+        hit = _sidecar_index(sidecar_dir).get(npz_path.stem)
+        if hit is not None:
+            return hit
     raise FileNotFoundError(
         f"No pose sidecar for {npz_path.name} "
         f"(looked next to it{' and under ' + str(sidecar_dir) if sidecar_dir else ''})"
