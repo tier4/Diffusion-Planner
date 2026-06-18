@@ -13,9 +13,9 @@ compact JSONL row per segment; ``--dump_hits`` optionally renders flagged ones.
 Example::
 
     python -m rlvr.autoresearch.tools.mine_collisions_reproducer \
-        --npz_root  $SSD/x2-rlvr-data/npz_val_padded320 \
-        --sidecar_root $SSD/x2-rlvr-data/npz_val \
-        --model_path $SSD/x2_model_base/best_model.pth \
+        --npz_root  /path/to/npz_padded \
+        --sidecar_root /path/to/npz_sidecars \
+        --model_path /path/to/model.pth \
         --out /tmp/repro_hits.jsonl --seg_len 600
 """
 
@@ -40,7 +40,8 @@ def parse_args() -> argparse.Namespace:
         "--sidecar_root",
         type=Path,
         default=None,
-        help="dir tree of pose JSON sidecars (if not next to the NPZ, e.g. npz_val for padded320)",
+        help="dir tree of pose JSON sidecars (if not next to the NPZ, e.g. the "
+        "pre-padding conversion tree when the padded NPZs dropped their sidecars)",
     )
     p.add_argument("--model_path", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True, help="output JSONL of per-segment metrics")

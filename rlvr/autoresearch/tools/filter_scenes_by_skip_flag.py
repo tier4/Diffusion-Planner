@@ -13,8 +13,8 @@ NOT skipped, so existing lists pass through unchanged.
 Example::
 
     python -m rlvr.autoresearch.tools.filter_scenes_by_skip_flag \
-        --scenes j6_train_all.json --sidecar_root $SSD/.../npz_dir \
-        --out j6_train_all_noskip.json
+        --scenes train_all.json --sidecar_root /path/to/npz_dir \
+        --out train_all_noskip.json
 """
 
 from __future__ import annotations
@@ -60,7 +60,8 @@ def parse_args() -> argparse.Namespace:
         "--sidecar_root",
         type=Path,
         default=None,
-        help="root of pose/skip JSON sidecars if not next to the NPZ (e.g. npz_val for padded320)",
+        help="root of pose/skip JSON sidecars if not next to the NPZ (e.g. the "
+        "pre-padding conversion tree when the padded NPZs dropped their sidecars)",
     )
     return p.parse_args()
 

@@ -17,7 +17,7 @@ Example::
     python -m rlvr.autoresearch.tools.extract_collision_scenes \
         --npz_root  $SSD/.../npz_dir \
         --hits_jsonl /tmp/repro_hits.jsonl \
-        --model_path $SSD/x2_model_base/best_model.pth \
+        --model_path /path/to/model.pth \
         --out_dir /tmp/collision_batches
 """
 

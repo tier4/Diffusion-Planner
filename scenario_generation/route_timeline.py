@@ -17,9 +17,9 @@ rollout re-centers that frame's baked tensors onto the live ego — so no lanele
 map is needed in the hot path.
 
 Sidecar resolution: by default the ``.json`` sits next to the ``.npz`` (fresh
-converter output). For the 12k-val corpus the 320-padded NPZs dropped the
-sidecar, so pass ``sidecar_dir`` pointing at the original conversion tree
-(``npz_val/<date>/<bag-time>/``) — frames are matched by filename stem.
+converter output). When a padded corpus dropped the sidecars, pass ``sidecar_dir``
+pointing at the original conversion tree (nested ``<date>/<bag-time>/``) — frames
+are matched by filename stem.
 
 The cursor snaps to whole recorded frames (autoware-faithful; both the log and the
 sim are 10 Hz). The render path additionally interpolates neighbor poses between
