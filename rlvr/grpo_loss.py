@@ -341,14 +341,16 @@ def compute_batched_trajectory_losses(
     neighbor_future_valid = None
     nf_pn = 0
     if Pn > 0 and "neighbor_agents_future" in batch_data:
-        nf = batch_data["neighbor_agents_future"]  # [N, Pn_data, T, 3] — x, y, heading_rad
+        nf = batch_data["neighbor_agents_future"]  # [N, Pn, T, 4] x,y,cos,sin (or legacy 3-col)
         nf_pn = min(nf.shape[1], Pn)
         nf_4d = torch.zeros(N, nf_pn, future_len, 4, device=device)
         nf_4d[..., :2] = nf[:, :nf_pn, :future_len, :2]  # x, y
-        if nf.shape[-1] >= 3:
-            heading = nf[:, :nf_pn, :future_len, 2]  # heading_rad
-            nf_4d[..., 2] = torch.cos(heading)  # cos_yaw
-            nf_4d[..., 3] = torch.sin(heading)  # sin_yaw
+        if nf.shape[-1] == 4:  # already cos/sin — copy directly (do NOT cos() it again)
+            nf_4d[..., 2:4] = nf[:, :nf_pn, :future_len, 2:4]
+        elif nf.shape[-1] == 3:  # legacy heading_rad -> cos/sin
+            heading = nf[:, :nf_pn, :future_len, 2]
+            nf_4d[..., 2] = torch.cos(heading)
+            nf_4d[..., 3] = torch.sin(heading)
         nf_4d_norm = (nf_4d - ego_mean) / ego_std
         gt_future[:, 1 : 1 + nf_pn, :, :] = nf_4d_norm
         # Track validity for neighbor loss
@@ -617,7 +619,9 @@ def _compute_neighbor_reg_loss(
         nf_pn = min(nf.shape[1], Pn)
         nf_4d = torch.zeros(1, nf_pn, future_len, 4, device=device)
         nf_4d[..., :2] = nf[:, :nf_pn, :future_len, :2]
-        if nf.shape[-1] >= 3:
+        if nf.shape[-1] == 4:  # already cos/sin — copy directly (do NOT cos() it again)
+            nf_4d[..., 2:4] = nf[:, :nf_pn, :future_len, 2:4]
+        elif nf.shape[-1] == 3:  # legacy heading_rad -> cos/sin
             heading = nf[:, :nf_pn, :future_len, 2]
             nf_4d[..., 2] = torch.cos(heading)
             nf_4d[..., 3] = torch.sin(heading)

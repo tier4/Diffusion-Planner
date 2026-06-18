@@ -69,7 +69,9 @@ def _build_model_inputs(
         nf_pn = min(nf.shape[1], Pn)
         nf_4d = torch.zeros(N, nf_pn, future_len, 4, device=device)
         nf_4d[..., :2] = nf[:, :nf_pn, :future_len, :2]
-        if nf.shape[-1] >= 3:
+        if nf.shape[-1] == 4:  # already cos/sin — copy directly (do NOT cos() it again)
+            nf_4d[..., 2:4] = nf[:, :nf_pn, :future_len, 2:4]
+        elif nf.shape[-1] == 3:  # legacy heading_rad -> cos/sin
             heading = nf[:, :nf_pn, :future_len, 2]
             nf_4d[..., 2] = torch.cos(heading)
             nf_4d[..., 3] = torch.sin(heading)
@@ -190,7 +192,9 @@ def collect_logprob_rollout(
         nf_pn = min(nf.shape[1], Pn)
         nf_4d = torch.zeros(N, nf_pn, future_len, 4, device=device)
         nf_4d[..., :2] = nf[:, :nf_pn, :future_len, :2]
-        if nf.shape[-1] >= 3:
+        if nf.shape[-1] == 4:  # already cos/sin — copy directly (do NOT cos() it again)
+            nf_4d[..., 2:4] = nf[:, :nf_pn, :future_len, 2:4]
+        elif nf.shape[-1] == 3:  # legacy heading_rad -> cos/sin
             heading = nf[:, :nf_pn, :future_len, 2]
             nf_4d[..., 2] = torch.cos(heading)
             nf_4d[..., 3] = torch.sin(heading)
