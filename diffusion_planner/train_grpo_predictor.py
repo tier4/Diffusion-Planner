@@ -135,6 +135,14 @@ def get_args():
         "ego trajectory and the scene's own GT ego future (0 disables)",
     )
     parser.add_argument(
+        "--w_kinematic",
+        type=float,
+        default=1.0,
+        help="weight on the kinematic-feasibility penalty: per-waypoint L2 drift between "
+        "the generated ego trajectory and the same trajectory after a round-trip through "
+        "the (accel, curvature) action space (0 disables)",
+    )
+    parser.add_argument(
         "--sft_prob",
         type=float,
         default=0.5,
@@ -347,6 +355,9 @@ def model_training(args):
 
     if global_rank == 0 and args.w_gt_l2 > 0.0:
         print(f"GT-L2 realism reward enabled: w_gt_l2={args.w_gt_l2}")
+
+    if global_rank == 0 and args.w_kinematic > 0.0:
+        print(f"Kinematic-feasibility reward enabled: w_kinematic={args.w_kinematic}")
 
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)

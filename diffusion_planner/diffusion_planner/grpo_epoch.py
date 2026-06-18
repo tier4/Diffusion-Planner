@@ -24,6 +24,7 @@ from diffusion_planner.grpo_utils import (
     compute_group_advantages,
     compute_grpo_loss,
     compute_gt_l2_distance,
+    compute_kinematic_consistency_penalty,
     expand_batch,
     sample_group,
 )
@@ -113,6 +114,15 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector):
         gt_l2_dist = compute_gt_l2_distance(ego_world, exp["ego_agent_future"])
         reward = reward - args.w_gt_l2 * gt_l2_dist
 
+    # Optional kinematic-feasibility term: penalise the drift incurred when the generated
+    # trajectory is converted to an (accel, curvature) action sequence and integrated back.
+    kinematic_drift = torch.zeros_like(reward)
+    if args.w_kinematic > 0.0:
+        kinematic_drift = compute_kinematic_consistency_penalty(
+            ego_world, exp["ego_agent_past"], exp["ego_current_state"]
+        )
+        reward = reward - args.w_kinematic * kinematic_drift
+
     advantages = compute_group_advantages(reward, num_scenes, n, args.advantage_eps)
 
     optimizer.zero_grad()
@@ -132,6 +142,7 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector):
         "neighbor_collision_penalty": nc_penalty.sum(dim=-1).mean().detach(),
         "road_border_penalty": rb_penalty.sum(dim=-1).mean().detach(),
         "gt_l2_distance": gt_l2_dist.mean().detach(),
+        "kinematic_drift": kinematic_drift.mean().detach(),
         "abs_advantage": loss_dict["abs_advantage"],
         "is_grpo": torch.tensor(1.0),
     }
