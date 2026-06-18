@@ -278,14 +278,15 @@ def score_step_batched(
     npc_all = center_rect_to_points(rects)  # (K, 4, 2)
 
     # Ego box at origin (heading +x), one per segment, repeated per its neighbors.
-    counts_t = torch.tensor(counts, device=device)
+    # K from the CPU list (avoids a per-tick GPU->CPU sync that int(counts_t.sum()) forces).
+    K = sum(counts)
     et = torch.zeros((len(neighbors_list), 1, 4), dtype=torch.float32, device=device)
     et[:, 0, 2] = 1.0
     if all(np.array_equal(ego_shapes[0], sh) for sh in ego_shapes):
         ego1 = _build_ego_bbox_corners(
             et[:1], torch.tensor(ego_shapes[0][:3], dtype=torch.float32, device=device)
         ).reshape(1, 4, 2)
-        ego_all = ego1.expand(int(counts_t.sum()), 4, 2)
+        ego_all = ego1.expand(K, 4, 2)
     else:
         ego_each = torch.stack(
             [
@@ -296,6 +297,7 @@ def score_step_batched(
             ],
             dim=0,
         )  # (B, 4, 2)
+        counts_t = torch.tensor(counts, device=device)
         ego_all = ego_each.repeat_interleave(counts_t, dim=0)  # (K, 4, 2)
 
     p1, p2 = _closest_points_between_rects(ego_all, npc_all)
@@ -909,7 +911,9 @@ def run_segments_batched(
                         # so they decompress on background threads while the GPU is
                         # busy below (overlaps the npz I/O with the forward).
                         if prefetch_ahead > 0:
-                            for s in active:
+                            # Only the segments actually running this tick (built); ones
+                            # that terminated in _pre_step won't consume more frames.
+                            for s, *_ in built:
                                 nxt = s.cursor.max_idx_reached + 1
                                 pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
                         _, outputs = model(data)

@@ -23,6 +23,19 @@ import argparse
 import json
 from pathlib import Path
 
+# stem -> path index per sidecar_root, built once (one rglob) and reused for every
+# scene, so a large scene list doesn't pay an O(files) rglob per entry.
+_SIDECAR_INDEX_CACHE: dict[Path, dict[str, Path]] = {}
+
+
+def _sidecar_index(sidecar_root: Path) -> dict[str, Path]:
+    key = sidecar_root.resolve()
+    idx = _SIDECAR_INDEX_CACHE.get(key)
+    if idx is None:
+        idx = {p.stem: p for p in sidecar_root.rglob("*.json")}
+        _SIDECAR_INDEX_CACHE[key] = idx
+    return idx
+
 
 def _sidecar_for(npz_path: Path, sidecar_root: Path | None) -> Path | None:
     sib = npz_path.with_suffix(".json")
@@ -32,9 +45,7 @@ def _sidecar_for(npz_path: Path, sidecar_root: Path | None) -> Path | None:
         cand = sidecar_root / f"{npz_path.stem}.json"
         if cand.is_file():
             return cand
-        matches = list(sidecar_root.rglob(f"{npz_path.stem}.json"))
-        if matches:
-            return matches[0]
+        return _sidecar_index(sidecar_root).get(npz_path.stem)
     return None
 
 

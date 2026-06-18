@@ -62,11 +62,19 @@ def main() -> None:
     model, model_args = load_model(args.model_path, device)
 
     routes = group_routes(sorted(args.npz_root.rglob("*.npz")))
-    rows = [json.loads(line) for line in args.hits_jsonl.read_text().splitlines() if line.strip()]
-    # Only segments that actually collided are worth extracting.
-    hits = [r for r in rows if r.get("n_collision_steps", 0) > 0]
-    if args.max_hits > 0:
-        hits = hits[: args.max_hits]
+    # Stream the (potentially huge) hits JSONL, keeping only segments that actually
+    # collided and stopping early at --max_hits — never hold the whole file in memory.
+    hits: list[dict] = []
+    with open(args.hits_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            if r.get("n_collision_steps", 0) > 0:
+                hits.append(r)
+                if args.max_hits > 0 and len(hits) >= args.max_hits:
+                    break
     print(f"collision segments to extract: {len(hits)} | device: {device}")
 
     # Group by route so each RouteTimeline is built once.
