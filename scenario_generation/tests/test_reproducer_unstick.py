@@ -92,3 +92,19 @@ def test_unstick_jump_ego_past_uses_recorded_npz_history(tmp_path):
     assert not np.allclose(s.ego_hist, ego_hist_before)
     # Sanity: the last history row is the (recorded) current pose.
     assert np.allclose(s.ego_hist[-1], s.live_pose)
+
+
+def test_precollision_window_clamps_across_unstick_snap():
+    """The pre-collision window must not cross an unstick snap (else a saved scene's
+    realized ego_future/ego_past would span the ~5m teleport)."""
+    from scenario_generation.reproducer_rollout import _precollision_window_start
+
+    t_c, pre = 579, 80  # window would be [499, 579)
+    # no snap -> full window
+    assert _precollision_window_start(t_c, pre, None) == 499
+    # snap BEFORE the window -> not clamped (full window)
+    assert _precollision_window_start(t_c, pre, 400) == 499
+    # snap INSIDE the window -> clamp to the post-snap step (shorter, snap-free window)
+    assert _precollision_window_start(t_c, pre, 540) == 540
+    # early collision, no snap -> negative start preserved (backtrack path handles <0)
+    assert _precollision_window_start(50, pre, None) == -30
