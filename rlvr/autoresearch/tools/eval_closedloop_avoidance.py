@@ -171,6 +171,9 @@ def main():
 
     with open(args.scenes) as f:
         paths = json.load(f)
+        from diffusion_planner.utils.scene_skip import filter_scene_list
+
+        paths = filter_scene_list(paths, label="eval_closedloop_avoidance")
 
     rows = []
     for sp in paths:

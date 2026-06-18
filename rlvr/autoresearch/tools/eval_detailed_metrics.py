@@ -183,6 +183,9 @@ def main():
 
     with open(args.scenes) as f:
         scenes = json.load(f)
+        from diffusion_planner.utils.scene_skip import filter_scene_list
+
+        scenes = filter_scene_list(scenes, label="eval_detailed_metrics")
 
     labels = args.labels or [Path(l).parent.name + "/" + Path(l).name for l in args.loras]
     assert len(labels) == len(args.loras), "labels must match --loras count"

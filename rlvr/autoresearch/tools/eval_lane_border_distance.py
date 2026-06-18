@@ -65,6 +65,9 @@ def main():
 
     with open(args.scenes) as f:
         scene_paths = json.load(f)
+        from diffusion_planner.utils.scene_skip import filter_scene_list
+
+        scene_paths = filter_scene_list(scene_paths, label="eval_lane_border_distance")
 
     print(f"Evaluating {len(scene_paths)} scenes [{args.tag}]")
 

@@ -290,6 +290,9 @@ def main():
 
     with open(args.scenes) as f:
         scene_paths = json.load(f)
+    from diffusion_planner.utils.scene_skip import filter_scene_list
+
+    scene_paths = filter_scene_list(scene_paths, label="eval_det_avoidance")
     print(f"[eval_det_avoidance] {len(scene_paths)} scenes, model={args.model_path}")
 
     model, model_args = load_model(args.model_path, device)
