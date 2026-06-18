@@ -156,12 +156,12 @@ class RolloutManager:
         if "neighbor_agents_future" in data:
             nf = data["neighbor_agents_future"]
             if nf.dim() == 3:
-                neighbor_futures = nf  # [1, N_nb, T_future, 3] or [N_nb, T_future, 3]
+                neighbor_futures = nf  # [N_nb, T_future, C] (C=4 x,y,cos,sin; legacy 3)
             if nf.dim() == 4:
                 neighbor_futures = nf[0]  # remove batch dim
             else:
                 neighbor_futures = nf
-        # Ensure [N_nb, T_future, 3]
+        # Ensure [N_nb, T_future, C]  (last dim forwarded as-is; 4-col x,y,cos,sin)
         if neighbor_futures is not None and neighbor_futures.dim() == 4:
             neighbor_futures = neighbor_futures[0]
 

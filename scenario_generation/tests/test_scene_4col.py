@@ -65,3 +65,14 @@ def test_load_npz_data_skips_origin_string(tmp_path):
     data = load_npz_data(p, torch.device("cpu"))  # must not crash on the string key
     assert "origin" not in data
     assert "neighbor_agents_future" in data and data["neighbor_agents_future"].shape[-1] == 4
+
+
+def test_heading_to_cos_sin_is_idempotent():
+    """4-col [x,y,cos,sin] must pass through unchanged (no cos(cos) double-convert)."""
+    import torch
+    from diffusion_planner.train_epoch import heading_to_cos_sin
+
+    three = torch.tensor([[[1.0, 2.0, 0.0]]])  # x,y,heading=0
+    assert torch.allclose(heading_to_cos_sin(three), torch.tensor([[[1.0, 2.0, 1.0, 0.0]]]))
+    four = torch.tensor([[[1.0, 2.0, 0.7, 0.71]]])  # already cos/sin
+    assert torch.equal(heading_to_cos_sin(four), four)  # unchanged
