@@ -86,4 +86,6 @@ def test_batched_scorer_matches_per_segment():
         single = [score_step(nb, sh, 5.0, "cpu") for nb, sh in zip(segs, shapes)]
         batched = score_step_batched(segs, shapes, "cpu")
         for a, b in zip(single, batched):
-            assert np.isclose(a[0], b[0], equal_nan=True) and a[1] == b[1] and a[2] == b[2]
+            # Same ops in the same order -> exact equality, not just close ("bit-identical").
+            assert a[0] == b[0] or (a[0] != a[0] and b[0] != b[0])  # equal, or both NaN/inf
+            assert a[1] == b[1] and a[2] == b[2]
