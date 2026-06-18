@@ -952,24 +952,41 @@ def _min_clearance_any(neighbors_live: np.ndarray, ego_shape: np.ndarray, device
     return float((p1 - p2).norm(dim=-1).min())
 
 
+def _future_to_4col(arr: np.ndarray) -> np.ndarray:
+    """Heading future -> cos/sin future: (..., 3) [x, y, heading] -> (..., 4)
+    [x, y, cos, sin]. Already-4-col input passes through. Zero (invalid) rows stay zero.
+    The trainable / reward schema is ALWAYS 4-col for futures — never save 3-col."""
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.shape[-1] == 4:
+        return arr
+    mask = np.abs(arr[..., :2]).sum(-1) == 0
+    h = arr[..., 2]
+    out = np.concatenate(
+        [arr[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
+    ).astype(np.float32)
+    out[mask] = 0.0
+    return out
+
+
 def _recenter_neighbor_future(naf: np.ndarray, dx: float, dy: float, dyaw: float) -> np.ndarray:
     """Re-center a recorded neighbor_agents_future onto the live ego.
 
     naf: (Pn, T, 3) [x, y, heading] (or (Pn, T, 4) [x,y,cos,sin]) in the recorded-ego
     frame. (dx, dy, dyaw) is the live ego pose in the recorded-ego frame. Returns
-    (Pn, T, 3) [x, y, heading] in the live-ego frame; invalid (zero) entries stay zero.
+    (Pn, T, 4) [x, y, cos, sin] in the live-ego frame (the trainable/reward schema —
+    never 3-col); invalid (zero) entries stay zero.
     """
     from scenario_generation.transforms import transform_positions
 
     naf = np.asarray(naf, dtype=np.float32)
-    if naf.shape[-1] == 4:
-        head = np.arctan2(naf[..., 3], naf[..., 2])
-        naf = np.concatenate([naf[..., :2], head[..., None]], axis=-1)
-    out = naf.copy()
-    R = _rotation_matrix(dyaw)
+    head = np.arctan2(naf[..., 3], naf[..., 2]) if naf.shape[-1] == 4 else naf[..., 2]
     mask = np.abs(naf[..., :2]).sum(-1) == 0
-    out[..., :2] = transform_positions(naf[..., :2], R, np.array([dx, dy], dtype=np.float64))
-    out[..., 2] = naf[..., 2] - dyaw
+    R = _rotation_matrix(dyaw)
+    xy = transform_positions(naf[..., :2], R, np.array([dx, dy], dtype=np.float64))
+    h = head - dyaw
+    out = np.concatenate(
+        [xy.astype(np.float32), np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
+    ).astype(np.float32)
     out[mask] = 0.0
     return out
 
@@ -1094,13 +1111,15 @@ def extract_collision_scenes(
             if naf is not None:
                 dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
                 scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
-            # ego_agent_future = realized live path up to the collision (zeros after).
-            eaf = np.zeros((fut_len, 3), dtype=np.float32)
+            # ego_agent_future = realized live path up to the collision (zeros after),
+            # 4-col [x, y, cos, sin] (trainable/reward schema; never 3-col).
+            eaf = np.zeros((fut_len, 4), dtype=np.float32)
             for j in range(1, fut_len + 1):
                 fk = step_k + j
                 if fk > t_c or fk not in live_poses:
                     break
-                eaf[j - 1] = _world_pose_to_ego(live_poses[fk], live_pose)
+                ex, ey, eh = _world_pose_to_ego(live_poses[fk], live_pose)
+                eaf[j - 1] = (ex, ey, math.cos(eh), math.sin(eh))
             scene["ego_agent_future"] = eaf
             scene["origin"] = np.array("live")
         else:
@@ -1110,6 +1129,10 @@ def extract_collision_scenes(
                 continue
             with np.load(tl.npz_paths[frame], allow_pickle=True) as z:
                 scene = {key: z[key] for key in z.files if key not in ("map_name", "token")}
+            # Recorded corpora may store 3-col futures; the saved scene must be 4-col.
+            for fk in ("neighbor_agents_future", "ego_agent_future"):
+                if fk in scene:
+                    scene[fk] = _future_to_4col(scene[fk])
             scene["origin"] = np.array("recorded")
         token = f"{step_k - t_c:+06d}"  # offset from collision, e.g. -00080 .. -00001
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)

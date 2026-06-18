@@ -532,6 +532,19 @@ def _apply_inverse_rigid_to_spatial(
         a = (a + np.pi) % (2 * np.pi) - np.pi
         arr[..., idx] = a.astype(arr.dtype)
 
+    def _future_to_4col(arr: np.ndarray) -> np.ndarray:
+        # Futures are ALWAYS 4-col [x,y,cos,sin]; widen legacy 3-col [x,y,heading].
+        # 4-col passes through; invalid (zero) rows stay zero.
+        if arr.shape[-1] == 4:
+            return arr
+        mask = np.abs(arr[..., :2]).sum(-1) == 0
+        h = arr[..., 2]
+        out4 = np.concatenate(
+            [arr[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
+        ).astype(np.float32)
+        out4[mask] = 0.0
+        return out4
+
     # --- ego_agent_past (T, 3) [x, y, yaw] ---
     if "ego_agent_past" in out:
         past = out["ego_agent_past"]
@@ -539,13 +552,14 @@ def _apply_inverse_rigid_to_spatial(
         _xy_inv(past, 0, 1)
         _wrap_yaw_inplace(past, 2)
 
-    # --- ego_agent_future (T, 3) [x, y, yaw] — zeros mark invalid steps ---
+    # --- ego_agent_future (T, 4) [x, y, cos, sin] — zeros mark invalid steps.
+    # Legacy 3-col [x,y,yaw] is widened first; we never keep/emit 3-col futures. ---
     if "ego_agent_future" in out:
-        fut = out["ego_agent_future"]
+        fut = _future_to_4col(np.asarray(out["ego_agent_future"], dtype=np.float32))
+        out["ego_agent_future"] = fut
         valid = (fut[:, 0] != 0) | (fut[:, 1] != 0)
         _xy_inv(fut, 0, 1)
-        _wrap_yaw_inplace(fut, 2)
-        # Restore zeros for originally-invalid slots
+        _dir_inv(fut, 2, 3)  # rotate the (cos,sin) heading vector, not wrap a yaw scalar
         fut[~valid] = 0
 
     # --- neighbor_agents_past (N, T, 11) ---
@@ -560,12 +574,14 @@ def _apply_inverse_rigid_to_spatial(
         # Zero out invalid slots (per parse_rosbag.py the inactive slots are all zero)
         nap[~valid] = 0
 
-    # --- neighbor_agents_future (N, T, 3) [x, y, yaw] ---
+    # --- neighbor_agents_future (N, T, 4) [x, y, cos, sin] — legacy 3-col [x,y,yaw]
+    # is widened first; never keep/emit 3-col futures. ---
     if "neighbor_agents_future" in out:
-        naf = out["neighbor_agents_future"]
+        naf = _future_to_4col(np.asarray(out["neighbor_agents_future"], dtype=np.float32))
+        out["neighbor_agents_future"] = naf
         valid = (naf[..., 0] != 0) | (naf[..., 1] != 0)
         _xy_inv(naf, 0, 1)
-        _wrap_yaw_inplace(naf, 2)
+        _dir_inv(naf, 2, 3)  # rotate the (cos,sin) heading vector, not wrap a yaw scalar
         naf[~valid] = 0
 
     # --- static_objects (5, 10) ---
