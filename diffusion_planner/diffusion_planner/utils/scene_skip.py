@@ -67,6 +67,10 @@ def resolve_sidecar(npz_path: str | Path, sidecar_root: str | Path | None = None
 
 def _sidecar_state(npz_path: str | Path, sidecar_root) -> tuple[bool, bool]:
     """(is_skipped, sidecar_resolved). Missing sidecar/field => (False, resolved?)."""
+    # Empty/invalid entry path (e.g. an unrecognized scene-list dict) -> treat as
+    # unresolved (kept, counted no-sidecar); never let Path("") resolve a cwd .json.
+    if not npz_path or str(npz_path) in ("", "."):
+        return False, False
     sc = resolve_sidecar(npz_path, sidecar_root)
     if sc is None:
         return False, False
@@ -123,5 +127,16 @@ def load_scene_list(
         scenes: list = sorted(str(f) for f in p.rglob("*.npz"))
     else:
         data = json.loads(p.read_text())
-        scenes = data["files"] if isinstance(data, dict) else data
+        if isinstance(data, dict):
+            files = data.get("files")
+            if not isinstance(files, list):
+                raise ValueError(
+                    f"{path_or_dir}: scene-list JSON must be a list, or a dict with a list "
+                    f"'files' key (got dict keys {sorted(data)})"
+                )
+            scenes = files
+        elif isinstance(data, list):
+            scenes = data
+        else:
+            raise ValueError(f"{path_or_dir}: scene-list JSON must be a list or {{'files': [...]}}")
     return filter_scene_list(scenes, sidecar_root, enabled=skip_filter, label=str(path_or_dir))
