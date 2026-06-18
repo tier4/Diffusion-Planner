@@ -901,6 +901,11 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     with open(args.scenes) as f:
         scenes = json.load(f)
+    # Don't perturb/train on converter-flagged skip_for_training frames (default on;
+    # sibling-sidecar lookup, no-op on older corpora).
+    from diffusion_planner.utils.scene_skip import filter_scene_list
+
+    scenes = filter_scene_list(scenes, label="disturb_and_replay")
     if not isinstance(scenes, list) or not scenes:
         raise ValueError(f"--scenes must be a non-empty JSON list; got {type(scenes)}")
 
