@@ -32,33 +32,40 @@ struct TrainingDataBinary
   uint32_t version;  // Data format version
 
   // Fixed size data arrays
-  float ego_agent_past[autoware::diffusion_planner::EGO_HISTORY_SHAPE[1] *
-                       autoware::diffusion_planner::EGO_HISTORY_SHAPE[2]];
+  float ego_agent_past
+    [autoware::diffusion_planner::EGO_HISTORY_SHAPE[1] *
+     autoware::diffusion_planner::EGO_HISTORY_SHAPE[2]];
   float ego_current_state[autoware::diffusion_planner::EGO_CURRENT_STATE_SHAPE[1]];
-  float ego_agent_future[autoware::diffusion_planner::OUTPUT_T *
-                         autoware::diffusion_planner::EGO_HISTORY_SHAPE[2]];
-  float neighbor_agents_past[autoware::diffusion_planner::MAX_NUM_NEIGHBORS *
-                             autoware::diffusion_planner::INPUT_T_WITH_CURRENT * NEIGHBOR_PAST_DIM];
-  float neighbor_agents_future[autoware::diffusion_planner::MAX_NUM_NEIGHBORS *
-                               autoware::diffusion_planner::OUTPUT_T * NEIGHBOR_FUTURE_DIM];
-  float static_objects[autoware::diffusion_planner::STATIC_OBJECTS_SHAPE[1] *
-                       autoware::diffusion_planner::STATIC_OBJECTS_SHAPE[2]];
-  float lanes[autoware::diffusion_planner::NUM_SEGMENTS_IN_LANE *
-              autoware::diffusion_planner::POINTS_PER_SEGMENT *
-              autoware::diffusion_planner::SEGMENT_POINT_DIM];
+  float ego_agent_future
+    [autoware::diffusion_planner::OUTPUT_T * autoware::diffusion_planner::EGO_HISTORY_SHAPE[2]];
+  float neighbor_agents_past
+    [autoware::diffusion_planner::MAX_NUM_NEIGHBORS *
+     autoware::diffusion_planner::INPUT_T_WITH_CURRENT * NEIGHBOR_PAST_DIM];
+  float neighbor_agents_future
+    [autoware::diffusion_planner::MAX_NUM_NEIGHBORS * autoware::diffusion_planner::OUTPUT_T *
+     NEIGHBOR_FUTURE_DIM];
+  float static_objects
+    [autoware::diffusion_planner::STATIC_OBJECTS_SHAPE[1] *
+     autoware::diffusion_planner::STATIC_OBJECTS_SHAPE[2]];
+  float lanes
+    [autoware::diffusion_planner::NUM_SEGMENTS_IN_LANE *
+     autoware::diffusion_planner::POINTS_PER_SEGMENT *
+     autoware::diffusion_planner::SEGMENT_POINT_DIM];
   float lanes_speed_limit[autoware::diffusion_planner::NUM_SEGMENTS_IN_LANE];
   int32_t lanes_has_speed_limit[autoware::diffusion_planner::NUM_SEGMENTS_IN_LANE];
-  float route_lanes[autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE *
-                    autoware::diffusion_planner::POINTS_PER_SEGMENT *
-                    autoware::diffusion_planner::SEGMENT_POINT_DIM];
+  float route_lanes
+    [autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE *
+     autoware::diffusion_planner::POINTS_PER_SEGMENT *
+     autoware::diffusion_planner::SEGMENT_POINT_DIM];
   float route_lanes_speed_limit[autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE];
   int32_t route_lanes_has_speed_limit[autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE];
-  float polygons[autoware::diffusion_planner::NUM_POLYGONS *
-                 autoware::diffusion_planner::POINTS_PER_POLYGON *
-                 (2 + autoware::diffusion_planner::POLYGON_TYPE_NUM)];
-  float line_strings[autoware::diffusion_planner::NUM_LINE_STRINGS *
-                     autoware::diffusion_planner::POINTS_PER_LINE_STRING *
-                     (2 + autoware::diffusion_planner::LINE_STRING_TYPE_NUM)];
+  float polygons
+    [autoware::diffusion_planner::NUM_POLYGONS * autoware::diffusion_planner::POINTS_PER_POLYGON *
+     (2 + autoware::diffusion_planner::POLYGON_TYPE_NUM)];
+  float line_strings
+    [autoware::diffusion_planner::NUM_LINE_STRINGS *
+     autoware::diffusion_planner::POINTS_PER_LINE_STRING *
+     (2 + autoware::diffusion_planner::LINE_STRING_TYPE_NUM)];
   float goal_pose[NEIGHBOR_FUTURE_DIM];
   int32_t turn_indicators[autoware::diffusion_planner::INPUT_T_WITH_CURRENT];
   float ego_shape[autoware::diffusion_planner::EGO_SHAPE_SHAPE[1]];

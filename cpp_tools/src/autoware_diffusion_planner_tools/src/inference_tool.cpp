@@ -33,11 +33,11 @@
 #include <geometry_msgs/msg/accel_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
-#include <lanelet2_io/Io.h>
-#include <rcl_yaml_param_parser/parser.h>
-
 #include <boost/geometry/algorithms/distance.hpp>
 #include <boost/geometry/algorithms/intersects.hpp>
+
+#include <lanelet2_io/Io.h>
+#include <rcl_yaml_param_parser/parser.h>
 
 #include <cmath>
 #include <deque>
@@ -658,11 +658,11 @@ int main(int argc, char ** argv)
     }
 
     // Extract road_border linestrings from input data (before normalization, in ego frame)
-    // line_strings shape: [1, NUM_LINE_STRINGS(60), POINTS_PER_LINE_STRING(20), 2+LINE_STRING_TYPE_NUM(4)]
-    // last dim: (x, y, stop_line_type, road_border_type)
+    // line_strings shape: [1, NUM_LINE_STRINGS(60), POINTS_PER_LINE_STRING(20),
+    // 2+LINE_STRING_TYPE_NUM(4)] last dim: (x, y, stop_line_type, road_border_type)
     std::vector<autoware_utils_geometry::LineString2d> frame_road_borders;
     if (metrics_file.is_open()) {
-      constexpr int64_t feat_dim = 2 + LINE_STRING_TYPE_NUM;  // 4
+      constexpr int64_t feat_dim = 2 + LINE_STRING_TYPE_NUM;                 // 4
       constexpr int64_t road_border_idx = 2 + LINE_STRING_TYPE_ROAD_BORDER;  // 3
       const auto & ls_data = input_data_map.at("line_strings");
       const Eigen::Matrix4d & ego_to_map = frame_context->ego_to_map_transform;
@@ -784,10 +784,8 @@ int main(int argc, char ** argv)
             sum_disp += std::sqrt(dx * dx + dy * dy);
           }
           ade = sum_disp / static_cast<double>(n);
-          const double fdx =
-            pred_pts[n - 1].pose.position.x - gt_pts[n - 1].pose.position.x;
-          const double fdy =
-            pred_pts[n - 1].pose.position.y - gt_pts[n - 1].pose.position.y;
+          const double fdx = pred_pts[n - 1].pose.position.x - gt_pts[n - 1].pose.position.x;
+          const double fdy = pred_pts[n - 1].pose.position.y - gt_pts[n - 1].pose.position.y;
           fde = std::sqrt(fdx * fdx + fdy * fdy);
         }
       }

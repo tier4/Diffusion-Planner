@@ -22,7 +22,6 @@
 #include <string>
 #include <vector>
 
-std::vector<SequenceData> build_sequences(
-  ParsedBagData & data, const int64_t search_nearest_route);
+std::vector<SequenceData> build_sequences(ParsedBagData & data, const int64_t search_nearest_route);
 
 #endif  // PROCESSING__SEQUENCE_BUILDER_HPP_

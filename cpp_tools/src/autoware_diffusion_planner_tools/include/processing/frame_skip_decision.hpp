@@ -53,14 +53,10 @@ struct FrameFilterParams
 // Pure skip-reason computation — no I/O, no ROS time, no file system.
 // Returns the first matching SkippingInfo in priority order, or accepted().
 SkippingInfo decide_frame_skip(
-  const FrameSkipInputs & inputs,
-  const std::vector<float> & ego_future,
-  const std::vector<float> & ego_shape,
-  const std::vector<float> & static_objects,
-  const std::vector<float> & neighbor_future,
-  const std::vector<float> & neighbor_past,
-  const std::vector<float> & line_strings,
-  const std::vector<float> & lanes,
+  const FrameSkipInputs & inputs, const std::vector<float> & ego_future,
+  const std::vector<float> & ego_shape, const std::vector<float> & static_objects,
+  const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
+  const std::vector<float> & line_strings, const std::vector<float> & lanes,
   const FrameFilterParams & filter_params);
 
 }  // namespace frame_processor
