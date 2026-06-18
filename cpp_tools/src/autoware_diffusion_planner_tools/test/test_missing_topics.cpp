@@ -151,6 +151,5 @@ TEST(CheckMissingTopicsTest, MultipleMissingTopicsReported)
   const auto & types = result->missing_topic_types;
   EXPECT_TRUE(
     std::find(types.begin(), types.end(), MissingTopicType::KinematicState) != types.end());
-  EXPECT_TRUE(
-    std::find(types.begin(), types.end(), MissingTopicType::Route) != types.end());
+  EXPECT_TRUE(std::find(types.begin(), types.end(), MissingTopicType::Route) != types.end());
 }

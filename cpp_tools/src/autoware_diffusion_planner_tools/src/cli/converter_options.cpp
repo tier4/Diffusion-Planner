@@ -125,8 +125,9 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
     }
   }
 
-  std::cout << "Ego wheel base: " << options.ego_wheel_base << ", Ego length: " << options.ego_length
-            << ", Ego width: " << options.ego_width << std::endl;
+  std::cout << "Ego wheel base: " << options.ego_wheel_base
+            << ", Ego length: " << options.ego_length << ", Ego width: " << options.ego_width
+            << std::endl;
   if (const auto err = validate_options(options)) {
     std::cerr << *err << std::endl;
     return std::nullopt;

@@ -38,11 +38,9 @@ constexpr double TRAFFIC_TTL_S = 5.0;
 
 // Advance `cursor` (initially -1) to the largest index whose rosbag_time is <= tick.
 template <typename T>
-void advance_cursor(
-  const std::deque<TimedMsg<T>> & msgs, int64_t & cursor, const int64_t tick)
+void advance_cursor(const std::deque<TimedMsg<T>> & msgs, int64_t & cursor, const int64_t tick)
 {
-  while (cursor + 1 < static_cast<int64_t>(msgs.size()) &&
-         msgs[cursor + 1].first <= tick) {
+  while (cursor + 1 < static_cast<int64_t>(msgs.size()) && msgs[cursor + 1].first <= tick) {
     ++cursor;
   }
 }
@@ -61,16 +59,15 @@ void advance_cursor(
 // The clock starts only once every required topic has produced a message and a route
 // exists, so each tick has real (possibly stale) data and a route bin; this removes both
 // the "no route yet" and "missing data" early-outs the loop used to have.
-std::vector<SequenceData> build_sequences(
-  ParsedBagData & data, const int64_t search_nearest_route)
+std::vector<SequenceData> build_sequences(ParsedBagData & data, const int64_t search_nearest_route)
 {
+  using autoware::diffusion_planner::preprocess::process_traffic_signals;
+  using autoware::diffusion_planner::preprocess::TrafficSignalStamped;
   using autoware_perception_msgs::msg::TrackedObjects;
   using autoware_perception_msgs::msg::TrafficLightGroupArray;
   using autoware_vehicle_msgs::msg::TurnIndicatorsReport;
   using geometry_msgs::msg::AccelWithCovarianceStamped;
   using nav_msgs::msg::Odometry;
-  using autoware::diffusion_planner::preprocess::process_traffic_signals;
-  using autoware::diffusion_planner::preprocess::TrafficSignalStamped;
 
   if (data.route_msgs.empty()) {
     std::cout << "No route messages; nothing to build." << std::endl;
@@ -83,9 +80,7 @@ std::vector<SequenceData> build_sequences(
   std::vector<SequenceData> sequences;
   std::vector<int64_t> route_to_group(data.route_msgs.size());
   for (size_t j = 0; j < data.route_msgs.size(); ++j) {
-    if (
-      j > 0 &&
-      data.route_msgs[j].second.start_pose == data.route_msgs[j - 1].second.start_pose) {
+    if (j > 0 && data.route_msgs[j].second.start_pose == data.route_msgs[j - 1].second.start_pose) {
       route_to_group[j] = static_cast<int64_t>(sequences.size()) - 1;
     } else {
       route_to_group[j] = static_cast<int64_t>(sequences.size());
@@ -105,14 +100,14 @@ std::vector<SequenceData> build_sequences(
   for (const auto & route_entry : data.route_msgs) {
     earliest_route = std::min(earliest_route, route_entry.first);
   }
-  const int64_t clock_start = std::max({
-    first_or_max(data.kinematic_states), first_or_max(data.accelerations),
-    first_or_max(data.tracked_objects_msgs), first_or_max(data.turn_indicators), earliest_route});
+  const int64_t clock_start = std::max(
+    {first_or_max(data.kinematic_states), first_or_max(data.accelerations),
+     first_or_max(data.tracked_objects_msgs), first_or_max(data.turn_indicators), earliest_route});
   // End once any required topic is exhausted: beyond its last message the loop could only
   // carry stale data forward. Symmetric with clock_start; traffic does not gate the clock.
-  const int64_t clock_end = std::min({
-    last_or_min(data.kinematic_states), last_or_min(data.accelerations),
-    last_or_min(data.tracked_objects_msgs), last_or_min(data.turn_indicators)});
+  const int64_t clock_end = std::min(
+    {last_or_min(data.kinematic_states), last_or_min(data.accelerations),
+     last_or_min(data.tracked_objects_msgs), last_or_min(data.turn_indicators)});
   std::cout << "clock_start=" << clock_start << " clock_end=" << clock_end
             << " period_ns=" << CLOCK_PERIOD_NS << std::endl;
 
@@ -143,11 +138,11 @@ std::vector<SequenceData> build_sequences(
     const TrackedObjects & tracked = data.tracked_objects_msgs[tracked_cursor].second;
     const TurnIndicatorsReport & turn_ind = data.turn_indicators[turn_ind_cursor].second;
 
-    const int64_t max_msg_age_ns = std::max({
-      tick - data.kinematic_states[kin_cursor].first,
-      tick - data.accelerations[accel_cursor].first,
-      tick - data.tracked_objects_msgs[tracked_cursor].first,
-      tick - data.turn_indicators[turn_ind_cursor].first});
+    const int64_t max_msg_age_ns = std::max(
+      {tick - data.kinematic_states[kin_cursor].first,
+       tick - data.accelerations[accel_cursor].first,
+       tick - data.tracked_objects_msgs[tracked_cursor].first,
+       tick - data.turn_indicators[turn_ind_cursor].first});
 
     // Traffic: consume every msg that arrived since the previous tick into the persistent
     // map (latest-per-light + TTL), then snapshot the current state for this frame.
@@ -159,7 +154,8 @@ std::vector<SequenceData> build_sequences(
     traffic_low_cursor = traffic_high_cursor + 1;
     // Use RCL_ROS_TIME to match the msg header stamps (process_traffic_signals subtracts
     // current_time from each signal's stamp; mixing clock sources throws).
-    process_traffic_signals(new_traffic, traffic_map, rclcpp::Time(tick, RCL_ROS_TIME), TRAFFIC_TTL_S);
+    process_traffic_signals(
+      new_traffic, traffic_map, rclcpp::Time(tick, RCL_ROS_TIME), TRAFFIC_TTL_S);
 
     // Resolve the route for this tick (latest route with rosbag_time <= tick).
     int64_t max_route_index = 0;

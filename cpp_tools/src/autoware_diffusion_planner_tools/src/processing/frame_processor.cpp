@@ -174,14 +174,12 @@ void process_sequence(
     // Create has_speed_limit flags based on speed_limit values
     std::vector<bool> lanes_has_speed_limit(lanes_speed_limit.size());
     for (size_t idx = 0; idx < lanes_speed_limit.size(); ++idx) {
-      lanes_has_speed_limit[idx] =
-        (lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon());
+      lanes_has_speed_limit[idx] = (lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon());
     }
 
     // Get route lanes data with speed limits
-    const std::vector<int64_t> segment_indices =
-      lane_segment_context.select_route_segment_indices(
-        seq.route, center_x, center_y, center_z, NUM_SEGMENTS_IN_ROUTE);
+    const std::vector<int64_t> segment_indices = lane_segment_context.select_route_segment_indices(
+      seq.route, center_x, center_y, center_z, NUM_SEGMENTS_IN_ROUTE);
     const auto [route_lanes, route_lanes_speed_limit] =
       lane_segment_context.create_tensor_data_from_indices(
         map2bl, traffic_light_id_map, segment_indices, NUM_SEGMENTS_IN_ROUTE);
@@ -259,8 +257,8 @@ void process_sequence(
 
     std::vector<int32_t> turn_indicators(INPUT_T_WITH_CURRENT);
     for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
-      turn_indicators[t] = seq.data_list[std::max(int64_t(0), i - INPUT_T_WITH_CURRENT + 1 + t)]
-                             .turn_indicator.report;
+      turn_indicators[t] =
+        seq.data_list[std::max(int64_t(0), i - INPUT_T_WITH_CURRENT + 1 + t)].turn_indicator.report;
     }
 
     // Decide whether this frame is skipped — delegate to the pure decide_frame_skip function.
@@ -276,12 +274,8 @@ void process_sequence(
       no_future_progress_count * options.step};
 
     const frame_processor::FrameFilterParams filter_params{
-      options.static_object_margin,
-      options.neighbor_margin,
-      options.road_border_margin,
-      options.collision_time_stride,
-      options.offlane_max_score,
-      options.offlane_time_stride};
+      options.static_object_margin,  options.neighbor_margin,   options.road_border_margin,
+      options.collision_time_stride, options.offlane_max_score, options.offlane_time_stride};
 
     const SkippingInfo skipping_info = frame_processor::decide_frame_skip(
       skip_inputs, ego_future, options.ego_shape, static_objects, neighbor_future, neighbor_past,

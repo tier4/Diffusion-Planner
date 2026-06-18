@@ -28,8 +28,8 @@ NeighborResult process_neighbor_agents_and_future(
   const std::vector<FrameData> & data_list, const int64_t current_idx,
   const Eigen::Matrix4d & map2bl_matrix)
 {
-  using autoware::diffusion_planner::AgentHistory;
   using autoware::diffusion_planner::AGENT_STATE_DIM;
+  using autoware::diffusion_planner::AgentHistory;
   using autoware::diffusion_planner::flatten_histories_to_vector;
   using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
   using autoware::diffusion_planner::MAX_NUM_NEIGHBORS;
