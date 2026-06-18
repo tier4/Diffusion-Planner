@@ -43,8 +43,7 @@ TrainingDataBinary build_training_data(
 
 nlohmann::json build_frame_json(
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info,
-  const std::vector<std::string> & neighbor_ids = {});
+  const SkippingInfo & skipping_info);
 
 nlohmann::json build_route_json(
   const int64_t num_frames, const double traveled_distance_m, const int64_t start_timestamp,
@@ -70,7 +69,7 @@ void save_frame_data(
 void save_frame_json(
   const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids = {});
+  const SkippingInfo & skipping_info);
 
 void save_route_json(
   const std::string & output_path, const std::string & rosbag_dir_name,

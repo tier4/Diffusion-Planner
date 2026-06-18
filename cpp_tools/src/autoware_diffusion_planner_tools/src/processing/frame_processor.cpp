@@ -149,9 +149,8 @@ void process_sequence(
       seq.data_list[i].kinematic_state, seq.data_list[i].acceleration, options.ego_wheel_base);
 
     // Process neighbor agents (both past and future with consistent agent ordering)
-    const auto neighbor_result = process_neighbor_agents_and_future(seq.data_list, i, map2bl);
-    const auto & neighbor_past = neighbor_result.neighbor_past;
-    const auto & neighbor_future = neighbor_result.neighbor_future;
+    const auto [neighbor_past, neighbor_future] =
+      process_neighbor_agents_and_future(seq.data_list, i, map2bl);
 
     // Process lanes and routes
     const auto & ego_pos = seq.data_list[i].kinematic_state.pose.pose.position;
@@ -298,7 +297,7 @@ void process_sequence(
     }
     save_frame_json(
       options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-      seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids);
+      seq.data_list[i].timestamp, skipping_info);
 
     if (i % 100 == 0) {
       std::cout << "Processed frame " << i << "/" << n << std::endl;
