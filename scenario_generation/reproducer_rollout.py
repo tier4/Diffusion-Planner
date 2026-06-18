@@ -1107,7 +1107,7 @@ def extract_collision_scenes(
             with np.load(tl.npz_paths[frame], allow_pickle=True) as z:
                 scene = {key: z[key] for key in z.files if key not in ("map_name", "token")}
             scene["origin"] = np.array("recorded")
-        token = f"{step_k - t_c:+05d}"  # offset from collision, e.g. -00080 .. -00001
+        token = f"{step_k - t_c:+06d}"  # offset from collision, e.g. -00080 .. -00001
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
         saved.append(int(step_k))
 

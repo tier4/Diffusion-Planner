@@ -171,25 +171,27 @@ def main() -> None:
     buf_units: list[tuple] = []
     buf_keys: list[str] = []
     stop = False
-    for ri, key in enumerate(route_keys):
-        with timers("timeline_build"):
-            tl = RouteTimeline(routes[key], sidecar_dir=args.sidecar_root, timers=timers)
-        for start, end in tl.iter_segments(args.seg_len):
-            buf_units.append((tl, start, end))
-            buf_keys.append(key)
-            if args.max_segments > 0 and (n_seg + len(buf_units)) >= args.max_segments:
-                stop = True
+    try:
+        for ri, key in enumerate(route_keys):
+            with timers("timeline_build"):
+                tl = RouteTimeline(routes[key], sidecar_dir=args.sidecar_root, timers=timers)
+            for start, end in tl.iter_segments(args.seg_len):
+                buf_units.append((tl, start, end))
+                buf_keys.append(key)
+                if args.max_segments > 0 and (n_seg + len(buf_units)) >= args.max_segments:
+                    stop = True
+                    break
+            # Flush once the buffer holds at least one full batch (keeps the GPU fed
+            # without holding every route's NPZ cache in memory at once).
+            if len(buf_units) >= args.batch_size or stop:
+                _flush(buf_units, buf_keys)
+                buf_units, buf_keys = [], []
+            print(f"[{ri + 1}/{len(route_keys)}] {key}: {n_seg} segments done")
+            if stop:
                 break
-        # Flush once the buffer holds at least one full batch (keeps the GPU fed
-        # without holding every route's NPZ cache in memory at once).
-        if len(buf_units) >= args.batch_size or stop:
-            _flush(buf_units, buf_keys)
-            buf_units, buf_keys = [], []
-        print(f"[{ri + 1}/{len(route_keys)}] {key}: {n_seg} segments done")
-        if stop:
-            break
-    _flush(buf_units, buf_keys)
-    fout.close()
+        _flush(buf_units, buf_keys)
+    finally:
+        fout.close()  # don't leak the handle / lose buffered rows on an error mid-run
 
     elapsed = time.perf_counter() - t0
     # Rank the kept top-K: collisions desc, then tightest clearance (heap key desc).
