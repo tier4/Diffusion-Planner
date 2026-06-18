@@ -94,6 +94,21 @@ def _wrap_angle(rad: float) -> float:
     return float((rad + math.pi) % (2 * math.pi) - math.pi)
 
 
+def _future_to_4col(arr: np.ndarray) -> np.ndarray:
+    """Futures are ALWAYS 4-col [x,y,cos,sin]; widen legacy 3-col [x,y,heading].
+    4-col passes through; invalid (zero) rows stay zero."""
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.shape[-1] == 4:
+        return arr
+    mask = np.abs(arr[..., :2]).sum(-1) == 0
+    h = arr[..., 2]
+    out = np.concatenate(
+        [arr[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
+    ).astype(np.float32)
+    out[mask] = 0.0
+    return out
+
+
 def _rotate_past_about_pivot(
     past: np.ndarray, pivot_x: float, pivot_y: float, yaw_rad: float
 ) -> np.ndarray:
@@ -531,19 +546,6 @@ def _apply_inverse_rigid_to_spatial(
         # vectorised wrap
         a = (a + np.pi) % (2 * np.pi) - np.pi
         arr[..., idx] = a.astype(arr.dtype)
-
-    def _future_to_4col(arr: np.ndarray) -> np.ndarray:
-        # Futures are ALWAYS 4-col [x,y,cos,sin]; widen legacy 3-col [x,y,heading].
-        # 4-col passes through; invalid (zero) rows stay zero.
-        if arr.shape[-1] == 4:
-            return arr
-        mask = np.abs(arr[..., :2]).sum(-1) == 0
-        h = arr[..., 2]
-        out4 = np.concatenate(
-            [arr[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
-        ).astype(np.float32)
-        out4[mask] = 0.0
-        return out4
 
     # --- ego_agent_past (T, 3) [x, y, yaw] ---
     if "ego_agent_past" in out:
@@ -1058,7 +1060,8 @@ def main(argv: Iterable[str] | None = None) -> None:
                 except Exception:
                     pass
 
-                perturbed["ego_agent_future"] = fut.astype(np.float32)
+                # Widen the legacy baseline prediction to 4-col; never save 3-col.
+                perturbed["ego_agent_future"] = _future_to_4col(fut.astype(np.float32))
                 np.savez(out_path, **perturbed)
             else:
                 # Skip baseline inference. Source NPZ's ego_agent_future
