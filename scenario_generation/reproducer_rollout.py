@@ -242,6 +242,82 @@ def score_step(
     return float(clr.min()), bool((signed < 0).any()), M
 
 
+def score_step_batched(
+    neighbors_list: list[np.ndarray],
+    ego_shapes: list[np.ndarray],
+    device: str,
+) -> list[tuple[float, bool, int]]:
+    """``score_step`` for many segments at once: ONE batched OBB pass over all pairs.
+
+    The OBB primitives (``_closest_points_between_rects`` / ``batch_signed_distance_rect``)
+    are per-pair independent, so we concatenate every segment's (ego, neighbor) box
+    pairs into one big batch, run the geometry once, then slice the result back per
+    segment. Bit-identical to calling ``score_step`` per segment (no cross-segment
+    interaction), but collapses N tiny GPU launches per tick into one — including the
+    box construction: ONE host->device transfer + ONE ``center_rect_to_points`` for
+    every neighbor across all segments (ego corners built once when shapes match, else
+    per segment and repeat-interleaved). Returns a list aligned to the inputs:
+    (min_clearance, collision, n_valid_neighbors)."""
+    valids = [np.abs(nb[:, :6]).sum(axis=1) > 0 for nb in neighbors_list]
+    counts = [int(v.sum()) for v in valids]
+    if sum(counts) == 0:
+        return [(float("inf"), False, 0) for _ in neighbors_list]
+
+    # All valid neighbors across all segments -> one transfer -> one corner build.
+    nb_all = np.concatenate(
+        [nb[v] for nb, v in zip(neighbors_list, valids) if v.any()], axis=0
+    )  # (K, 11)
+    rects = torch.tensor(
+        np.stack(
+            [nb_all[:, 0], nb_all[:, 1], nb_all[:, 2], nb_all[:, 3], nb_all[:, 7], nb_all[:, 6]],
+            axis=-1,
+        ),
+        dtype=torch.float32,
+        device=device,
+    )  # (K, 6) x, y, cos, sin, length, width
+    npc_all = center_rect_to_points(rects)  # (K, 4, 2)
+
+    # Ego box at origin (heading +x), one per segment, repeated per its neighbors.
+    counts_t = torch.tensor(counts, device=device)
+    et = torch.zeros((len(neighbors_list), 1, 4), dtype=torch.float32, device=device)
+    et[:, 0, 2] = 1.0
+    if all(np.array_equal(ego_shapes[0], sh) for sh in ego_shapes):
+        ego1 = _build_ego_bbox_corners(
+            et[:1], torch.tensor(ego_shapes[0][:3], dtype=torch.float32, device=device)
+        ).reshape(1, 4, 2)
+        ego_all = ego1.expand(int(counts_t.sum()), 4, 2)
+    else:
+        ego_each = torch.stack(
+            [
+                _build_ego_bbox_corners(
+                    et[i : i + 1], torch.tensor(sh[:3], dtype=torch.float32, device=device)
+                ).reshape(4, 2)
+                for i, sh in enumerate(ego_shapes)
+            ],
+            dim=0,
+        )  # (B, 4, 2)
+        ego_all = ego_each.repeat_interleave(counts_t, dim=0)  # (K, 4, 2)
+
+    p1, p2 = _closest_points_between_rects(ego_all, npc_all)
+    clr_all = (p1 - p2).norm(dim=-1)  # (K,)
+    signed_all = batch_signed_distance_rect(ego_all, npc_all)  # (K,)
+    out: list[tuple[float, bool, int]] = []
+    off = 0
+    for m in counts:
+        if m == 0:
+            out.append((float("inf"), False, 0))
+        else:
+            out.append(
+                (
+                    float(clr_all[off : off + m].min()),
+                    bool((signed_all[off : off + m] < 0).any()),
+                    m,
+                )
+            )
+            off += m
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # rollout — per-segment state so many segments can run in lock-step on the GPU
 # --------------------------------------------------------------------------- #
@@ -379,14 +455,18 @@ def _pre_step(s: _SegState):
     return np_dict, neighbors_live, idx
 
 
-def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers):
-    """Score this step and advance the ego (perfect tracking of the prediction)."""
-    from scenario_generation.mpc_tracker import postprocess_reference
-
+def _score_into(s: _SegState, neighbors_live, device, timers):
+    """Score this step's ego↔neighbor clearance/collision into the segment state."""
     with timers("score"):
         cl, col, _ = score_step(neighbors_live, s.ego_shape, s.dyn.speed, device)
         s.clearances[s.k] = cl
         s.collisions[s.k] = col
+
+
+def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers):
+    """Advance the ego one step (perfect tracking of the prediction) + unstick."""
+    from scenario_generation.mpc_tracker import postprocess_reference
+
     with timers("advance"):
         if s.k < s.warmup_steps:
             tgt = min(idx + 1, len(s.tl) - 1)
@@ -432,6 +512,12 @@ def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, time
                 s.prev_max_idx = s.cursor.max_idx_reached
                 s.ego_stuck = 0
                 s.n_snaps += 1
+
+
+def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers):
+    """Score this step and advance the ego (sequential path: run_segment + extractor)."""
+    _score_into(s, neighbors_live, device, timers)
+    _advance_step(s, pred, idx, device, timers)
 
 
 def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
@@ -828,8 +914,16 @@ def run_segments_batched(
                                 pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
                         _, outputs = model(data)
                         preds = outputs["prediction"][:, 0].cpu().numpy()  # (B,80,4)
+                    # Score ALL segments in one batched OBB pass, then advance each.
+                    with timers("score"):
+                        score_list = score_step_batched(
+                            [b[2] for b in built], [b[0].ego_shape for b in built], device
+                        )
+                    for (s, _np, nb, idx), (cl, col, _M) in zip(built, score_list):
+                        s.clearances[s.k] = cl
+                        s.collisions[s.k] = col
                     for i, (s, _np, nb, idx) in enumerate(built):
-                        _post_step(s, preds[i], nb, idx, device, timers)
+                        _advance_step(s, preds[i], idx, device, timers)
                 active = [s for s in active if not s.done]
             results.extend(_finalize(s, timers) for s in states)
     finally:

@@ -9,7 +9,7 @@ that a model that drifts into a moving car or gets rear-ended is flagged.
 
 import numpy as np
 
-from scenario_generation.reproducer_rollout import score_step
+from scenario_generation.reproducer_rollout import score_step, score_step_batched
 
 EGO_SHAPE = np.array([4.76, 7.24, 2.29], dtype=np.float32)  # wheelbase, length, width
 
@@ -55,3 +55,35 @@ def test_collision_counted_even_when_ego_stopped():
 def test_no_valid_neighbors_returns_inf():
     clr, collision, m = score_step(np.zeros((3, 11), np.float32), EGO_SHAPE, 5.0, "cpu")
     assert m == 0 and collision is False and clr == float("inf")
+
+
+def _rand_segment(rng, k):
+    nb = np.zeros((320, 11), np.float32)
+    if k:
+        idx = rng.choice(320, k, replace=False)
+        nb[idx, 0] = rng.uniform(-15, 15, k)
+        nb[idx, 1] = rng.uniform(-8, 8, k)
+        th = rng.uniform(-np.pi, np.pi, k)
+        nb[idx, 2], nb[idx, 3] = np.cos(th), np.sin(th)
+        nb[idx, 4] = rng.uniform(-5, 5, k)
+        nb[idx, 6] = rng.uniform(1.5, 2.5, k)
+        nb[idx, 7] = rng.uniform(3, 5, k)
+        nb[idx, 8] = 1.0
+    return nb
+
+
+def test_batched_scorer_matches_per_segment():
+    """score_step_batched must be bit-identical to per-segment score_step."""
+    rng = np.random.default_rng(1)
+    segs = [_rand_segment(rng, int(rng.integers(0, 40))) for _ in range(8)]
+    segs[2] = _rand_segment(rng, 0)  # include a segment with no valid neighbors
+
+    # same ego shape for all (the fast path) and differing shapes (repeat-interleave).
+    for shapes in (
+        [EGO_SHAPE] * 8,
+        [np.array([4.76 + 0.1 * i, 7.24, 2.29], np.float32) for i in range(8)],
+    ):
+        single = [score_step(nb, sh, 5.0, "cpu") for nb, sh in zip(segs, shapes)]
+        batched = score_step_batched(segs, shapes, "cpu")
+        for a, b in zip(single, batched):
+            assert np.isclose(a[0], b[0], equal_nan=True) and a[1] == b[1] and a[2] == b[2]
