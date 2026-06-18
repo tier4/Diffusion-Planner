@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import torch
 
-from diffusion_planner.metrics.config import RewardConfig
-from diffusion_planner.metrics.subscores import (
+from planner_metrics.config import RewardConfig
+from planner_metrics.subscores import (
     compute_centerline_score_batch,
     compute_feasibility_score_batch,
     compute_kinematic_gate,
