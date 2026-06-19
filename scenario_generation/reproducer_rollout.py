@@ -1312,6 +1312,13 @@ def extract_collision_scenes(
     from collections import deque
     from pathlib import Path
 
+    if max_scenes < pre_steps + 1:
+        # Same invariant the one-pass saver enforces: the window is >= pre_steps frames
+        # plus the collision step, so a smaller cap would silently truncate it.
+        raise ValueError(
+            f"max_scenes ({max_scenes}) must be >= pre_steps + 1 ({pre_steps + 1}); "
+            "otherwise the saved window is silently truncated."
+        )
     out_dir = Path(out_dir)
     cap = max_steps if max_steps is not None else 3 * (end - start)
     timers = Timers()

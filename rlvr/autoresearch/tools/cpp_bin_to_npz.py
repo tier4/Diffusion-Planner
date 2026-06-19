@@ -223,6 +223,12 @@ def convert_dir(
                 stats["skipped_invalid"] += 1
                 continue
         out = dst_dir / f"{stem}.npz"
+        # Carry the sidecar across (for EVERY kept frame, skipped or not) so is_skipped
+        # detection + the reproducer's pose timeline survive into dst. Done BEFORE the
+        # skip_existing check so an incremental re-run still backfills the sidecar for a
+        # frame whose .npz an earlier (non-keep_skipped) pass already wrote.
+        if keep_skipped and jpath.exists():
+            shutil.copy2(jpath, dst_dir / f"{stem}.json")
         if skip_existing and out.exists():
             stats["skipped_existing"] += 1
             continue
@@ -234,9 +240,6 @@ def convert_dir(
             stats["ok"] += 1
             if is_skip:
                 stats["kept_skipped"] += 1
-            # Carry the sidecar across so is_skipped detection + pose survive into dst.
-            if keep_skipped and jpath.exists():
-                shutil.copy2(jpath, dst_dir / f"{stem}.json")
         except Exception as exc:
             print(f"ERROR on {fp}: {exc}")
             stats["errors"] += 1
