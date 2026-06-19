@@ -136,6 +136,14 @@ def compute_collision_reward(
     else:
         rb_penalty = torch.zeros_like(nc_penalty)
 
+    # Once a collision/border violation occurs it cannot be "undone": carry each penalty forward
+    # as a running max over time (penalty_t = max(penalty_{0..t})). This makes the per-timestep
+    # penalty monotonically non-decreasing, so a trajectory that briefly hits then speeds through
+    # is never cheaper than one that stops at the hit -- it removes the "plow through quickly"
+    # exploit. (Equivalently, the per-step reward -penalty is a running min.)
+    nc_penalty = torch.cummax(nc_penalty, dim=-1).values
+    rb_penalty = torch.cummax(rb_penalty, dim=-1).values
+
     reward = -(
         args.w_collision * nc_penalty.sum(dim=-1) + args.w_road_border * rb_penalty.sum(dim=-1)
     )
