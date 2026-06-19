@@ -199,7 +199,7 @@ def get_args():
     parser.add_argument(
         "--neighbor_db_path",
         type=str,
-        default="",
+        default="/mnt/nvme/dataset/basic_dataset/neighbor_db.npz",
         help="path to a neighbor-pattern DB (built by neighbor_db.py); "
         "empty = use the synthetic collider generator instead",
     )
