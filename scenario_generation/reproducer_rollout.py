@@ -365,6 +365,13 @@ class _SegState:
     unstick_advance_m: float = 5.0
     ego_stuck: int = 0
     n_snaps: int = 0
+    # One-pass collision-scene save (set when run_segments_batched gets save_dir).
+    # save_buf rolls the last save_pre_steps+1 (k, idx, live_pose, np_dict) snapshots;
+    # it is CLEARED on an unstick teleport so a saved window never crosses the jump.
+    save_buf: object = None
+    saved_collision: bool = False
+    last_snap_step: int | None = None
+    save_out_dir: object = None
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -849,12 +856,29 @@ def run_segments_batched(
     n_build_threads: int = 8,
     prefetch_ahead: int = 2,
     timers: Timers | None = None,
+    save_dir=None,
+    save_pre_steps: int = 80,
+    save_thresh: float | None = None,
+    save_pre_arc_m: float = 1.0,
+    save_max_scenes: int = 160,
+    save_min_post_snap_frames: int = 30,
+    route_keys: list[str] | None = None,
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
     work_units: list of (RouteTimeline, start, end). Processed in chunks of
     ``batch_size`` (bound GPU memory). Segments terminate raggedly (goal / step
     cap); finished ones drop out while the rest continue.
+
+    ONE-PASS collision-scene save: when ``save_dir`` is given, each segment keeps a
+    rolling buffer of its last ``save_pre_steps`` scene snapshots and, on the FIRST
+    step within ``save_thresh`` m of a neighbor, dumps that window (+ manifest) to
+    ``save_dir/<route>_<start>_<end>/``. The scenes come from THIS run — the same one
+    that detected the collision — so they always match the hit (the legacy two-pass
+    ``extract_collision_scenes`` re-ran the rollout, which is batch-sensitive and so
+    could anchor a different/empty window). The buffer is cleared on an unstick
+    teleport so a saved window never spans the jump. ``route_keys`` (aligned to
+    ``work_units``) names the output dirs; if None it is derived from each timeline.
 
     Unstick is on by default (snap the ego forward onto the recorded GT pose after
     ``unstick_after`` steps of no progress), so a segment isn't bailed out at a
@@ -898,6 +922,14 @@ def run_segments_batched(
                 )
                 for (tl, start, end) in chunk
             ]
+            if save_dir is not None:
+                from collections import deque
+                from pathlib import Path
+
+                for off, s in enumerate(states):
+                    key = route_keys[c0 + off] if route_keys else _route_key(s.tl)
+                    s.save_buf = deque(maxlen=save_max_scenes + 1)
+                    s.save_out_dir = Path(save_dir) / f"{key}_{s.start}_{s.end}"
             active = list(states)
             while active:
                 with timers("input_build"):
@@ -926,8 +958,42 @@ def run_segments_batched(
                     for (s, _np, nb, idx), (cl, col, _M) in zip(built, score_list):
                         s.clearances[s.k] = cl
                         s.collisions[s.k] = col
+                        # One-pass save: buffer this step, then dump the window on the
+                        # FIRST collision — from THIS run, so the scenes match the hit.
+                        if s.save_buf is not None:
+                            s.save_buf.append((s.k, idx, s.live_pose.copy(), _np))
+                            if (
+                                not s.saved_collision
+                                and save_thresh is not None
+                                and cl <= save_thresh
+                            ):
+                                mani = _dump_precollision_window(
+                                    s.save_out_dir,
+                                    s.tl,
+                                    model_args,
+                                    s.k,
+                                    list(s.save_buf),
+                                    s.last_snap_step,
+                                    save_pre_steps,
+                                    save_thresh,
+                                    s.start,
+                                    s.end,
+                                    pre_arc_m=save_pre_arc_m,
+                                    max_scenes=save_max_scenes,
+                                    min_post_snap_frames=save_min_post_snap_frames,
+                                )
+                                # Consume the segment's one save only on an ACTUAL write; a
+                                # snap-skipped hit stays open for a later, settled collision.
+                                if mani is not None:
+                                    s.saved_collision = True
                     for i, (s, _np, nb, idx) in enumerate(built):
+                        prev_snaps = s.n_snaps
                         _advance_step(s, preds[i], idx, device, timers)
+                        # Clear the buffer on an unstick teleport: pre-jump frames belong
+                        # to a different ego path and must never enter a saved window.
+                        if s.save_buf is not None and s.n_snaps > prev_snaps:
+                            s.save_buf.clear()
+                            s.last_snap_step = s.k
                 active = [s for s in active if not s.done]
             results.extend(_finalize(s, timers) for s in states)
     finally:
@@ -1004,15 +1070,173 @@ def _scene_npz_from_np_dict(np_dict: dict) -> dict:
     return {k: np.asarray(v)[0] for k, v in np_dict.items()}
 
 
-@torch.no_grad()
-def _precollision_window_start(t_c: int, pre_steps: int, last_snap_step: int | None) -> int:
-    """First step of the pre-collision window, clamped so it never crosses an unstick
-    snap. Normally ``t_c - pre_steps`` (may be negative — the backtrack path then reads
-    recorded frames before the segment start). If an unstick snap fired within that window
-    (``last_snap_step`` is not None and >= the base start), start at the post-snap step
-    instead so no saved scene's realized ego_future or ego_past spans the ~5 m teleport."""
+def _precollision_window_start(
+    t_c: int,
+    pre_steps: int,
+    last_snap_step: int | None,
+    poses_by_step: dict | None = None,
+    pre_arc_m: float = 0.0,
+    max_scenes: int | None = None,
+) -> int:
+    """First step of the pre-collision window.
+
+    Baseline: ``t_c - pre_steps`` (>= ``pre_steps`` frames; may be negative -> the
+    backtrack path reads recorded frames before the segment start). Never crosses an
+    unstick snap (clamped to ``last_snap_step``).
+
+    MIN-MOVEMENT EXTEND: if ``pre_arc_m > 0`` and the ego's cumulative arc length over
+    the baseline window is below ``pre_arc_m`` (slow creep, e.g. queueing into a stopped
+    car), the window is extended further back — frame by frame — until the ego has
+    travelled ``pre_arc_m`` of arc length OR the window hits ``max_scenes`` frames (incl.
+    t_c) OR the snap / buffer start. ``poses_by_step`` maps step -> world pose (from the
+    live buffer) and supplies the arc length."""
     base = t_c - pre_steps
-    return base if last_snap_step is None else max(base, last_snap_step)
+    if last_snap_step is not None:
+        base = max(base, last_snap_step)
+    if not poses_by_step or pre_arc_m <= 0:
+        return base
+    live_ks = sorted(k for k in poses_by_step if k <= t_c)
+    if not live_ks:
+        return base
+    floor = live_ks[0]
+    if max_scenes is not None:
+        floor = max(floor, t_c - (max_scenes - 1))
+    if last_snap_step is not None:
+        floor = max(floor, last_snap_step)
+    if base <= floor:  # can't extend (early collision / snap clamp already binds)
+        return base
+
+    def _cumarc(a: int) -> float:
+        ks = [k for k in live_ks if a <= k <= t_c]
+        s = 0.0
+        for i in range(len(ks) - 1):
+            p, q = poses_by_step[ks[i]], poses_by_step[ks[i + 1]]
+            s += float(((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) ** 0.5)
+        return s
+
+    start_k = base
+    while start_k > floor and _cumarc(start_k) < pre_arc_m:
+        start_k -= 1
+    return start_k
+
+
+def _route_key(tl: RouteTimeline) -> str:
+    """Route key from a timeline's NPZ names, e.g. '16-24-07_00000000_00000038' -> '16-24-07_00000000'."""
+    from pathlib import Path
+
+    return "_".join(Path(tl.npz_paths[0]).stem.split("_")[:2])
+
+
+def _dump_precollision_window(
+    out_dir,
+    tl: RouteTimeline,
+    model_args,
+    t_c: int,
+    buf,
+    last_snap_step: int | None,
+    pre_steps: int,
+    collision_thresh: float,
+    seg_start: int,
+    seg_end: int,
+    pre_arc_m: float = 0.0,
+    max_scenes: int | None = None,
+    min_post_snap_frames: int = 0,
+) -> dict | None:
+    """Write the scenes before collision step ``t_c`` from a live buffer.
+
+    ``buf`` is an iterable of ``(k, idx, live_pose, np_dict)`` snapshots captured DURING
+    the rollout that detected the collision (so the saved scenes match that exact run —
+    no re-simulation). Steps before the segment start are filled from the recorded NPZs.
+    The window is >= ``pre_steps`` frames, extended backward to cover ``pre_arc_m`` of ego
+    arc length when the ego barely moved (capped at ``max_scenes``), and never crosses an
+    unstick teleport (``last_snap_step``). Returns the manifest, or None if skipped.
+
+    SKIP rule: if an unstick teleport fired fewer than ``min_post_snap_frames`` steps
+    before the collision, the ego had too little settled history after the jump — the
+    contact is likely teleport-induced, so nothing is saved (returns None).
+    """
+    import json
+    from pathlib import Path
+
+    if (
+        min_post_snap_frames > 0
+        and last_snap_step is not None
+        and (t_c - last_snap_step) < min_post_snap_frames
+    ):
+        print(
+            f"  [save] SKIP collision@{t_c}: only {t_c - last_snap_step} frames "
+            f"({(t_c - last_snap_step) * DT:.1f}s) of history since the unstick snap"
+        )
+        return None
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    live_by_step = {rec[0]: rec for rec in buf}
+    poses_by_step = {rec[0]: rec[2] for rec in buf}  # step k -> world pose (for ego_future)
+    fut_len = int(model_args.future_len)
+    saved: list[int] = []
+
+    start_k = _precollision_window_start(
+        t_c, pre_steps, last_snap_step, poses_by_step, pre_arc_m, max_scenes
+    )
+    if start_k < t_c - pre_steps:
+        print(
+            f"  [save] window extended {t_c - pre_steps} -> {start_k} "
+            f"(slow ego: {t_c - start_k} frames to cover {pre_arc_m} m arc)"
+        )
+    elif start_k > t_c - pre_steps:
+        print(f"  [save] window clamped {t_c - pre_steps} -> {start_k} (unstick snap in window)")
+    # Inclusive of t_c: the LAST saved frame (collision+00000) IS the collision step, so the
+    # window ends exactly on the contact (its current neighbor box is the one within thresh).
+    for step_k in range(start_k, t_c + 1):
+        if step_k >= 0 and step_k in live_by_step:
+            _, idx, live_pose, np_dict = live_by_step[step_k]
+            scene = _scene_npz_from_np_dict(np_dict)
+            ep = scene["ego_agent_past"]
+            scene["ego_agent_past"] = np.column_stack(
+                [ep[:, 0], ep[:, 1], np.arctan2(ep[:, 3], ep[:, 2])]
+            ).astype(np.float32)
+            g = scene["goal_pose"]
+            scene["goal_pose"] = np.array([g[0], g[1], math.atan2(g[3], g[2])], dtype=np.float32)
+            with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
+                naf = z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
+            if naf is not None:
+                dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
+                scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
+            eaf = np.zeros((fut_len, 4), dtype=np.float32)
+            for j in range(1, fut_len + 1):
+                fk = step_k + j
+                if fk > t_c or fk not in poses_by_step:
+                    break
+                ex, ey, eh = _world_pose_to_ego(poses_by_step[fk], live_pose)
+                eaf[j - 1] = (ex, ey, math.cos(eh), math.sin(eh))
+            scene["ego_agent_future"] = eaf
+            scene["origin"] = np.array("live")
+        else:
+            frame = seg_start + step_k
+            if frame < 0 or frame >= len(tl):
+                continue
+            with np.load(tl.npz_paths[frame], allow_pickle=True) as z:
+                scene = {key: z[key] for key in z.files if key not in ("map_name", "token")}
+            for fk in ("neighbor_agents_future", "ego_agent_future"):
+                if fk in scene:
+                    scene[fk] = _future_to_4col(scene[fk])
+            scene["origin"] = np.array("recorded")
+        token = f"{step_k - t_c:+06d}"
+        np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
+        saved.append(int(step_k))
+
+    manifest = {
+        "segment": [int(seg_start), int(seg_end)],
+        "collision_step": int(t_c),
+        "collision_thresh": float(collision_thresh),
+        "n_scenes": len(saved),
+        "steps_saved": saved,
+        "n_live": sum(1 for k in saved if k >= 0),
+        "n_recorded": sum(1 for k in saved if k < 0),
+    }
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
 
 
 def extract_collision_scenes(
@@ -1030,6 +1254,9 @@ def extract_collision_scenes(
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
     max_steps: int | None = None,
+    pre_arc_m: float = 1.0,
+    max_scenes: int = 160,
+    min_post_snap_frames: int = 30,
 ) -> dict | None:
     """Mine the batch of scenes leading up to the FIRST collision in a segment.
 
@@ -1051,8 +1278,13 @@ def extract_collision_scenes(
     futures), which the full-route timeline still holds. So the batch always has
     ``pre_steps`` scenes with real, continuous ego history (subject to the route
     start). Returns a manifest dict, or None if no collision occurred.
+
+    NOTE: this is the legacy SECOND-PASS path — it re-runs the rollout to reconstruct
+    the window, so the collision it finds can differ from the one the miner detected
+    (the closed-loop rollout is sensitive to GPU batch composition). Prefer the
+    ONE-PASS save in ``run_segments_batched`` (``save_dir=...``), which dumps the
+    buffer from the SAME run that detected the collision. Kept for backward compat.
     """
-    import json
     from collections import deque
     from pathlib import Path
 
@@ -1073,9 +1305,8 @@ def extract_collision_scenes(
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
     )
-    # Rolling buffer of the last pre_steps+1 live steps; each: (k, idx, live_pose, np_dict).
-    buf: deque = deque(maxlen=pre_steps + 1)
-    live_poses: dict[int, np.ndarray] = {}  # step k -> world pose (for ego_future)
+    # Rolling buffer of the last max_scenes+1 live steps; each: (k, idx, live_pose, np_dict).
+    buf: deque = deque(maxlen=max_scenes + 1)
     t_c = None
     # Step right after the most recent unstick snap (None = no snap yet). The pre-collision
     # window must not cross a snap, or a saved scene's realized ego_future/ego_past would
@@ -1092,7 +1323,6 @@ def extract_collision_scenes(
         pred = outputs["prediction"][0, 0].cpu().numpy()
         clr = _min_clearance_any(neighbors_live, s.ego_shape, device)
         buf.append((k, idx, s.live_pose.copy(), np_dict))
-        live_poses[k] = s.live_pose.copy()
         if clr <= collision_thresh:
             t_c = k
             break
@@ -1103,75 +1333,20 @@ def extract_collision_scenes(
     if t_c is None:
         return None
 
-    # Record the collision-step world pose too (needed for ego_future of late scenes).
-    live_poses[t_c] = s.live_pose.copy()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    live_by_step = {rec[0]: rec for rec in buf}
-    saved = []
-    fut_len = int(model_args.future_len)
-
-    # Clamp the window so it never crosses an unstick teleport: start no earlier than the
-    # step right after the last snap, keeping every saved scene's realized ego_future AND
-    # ego_past on one continuous (snap-free) segment.
-    start_k = _precollision_window_start(t_c, pre_steps, last_snap_step)
-    if start_k > t_c - pre_steps:
-        print(
-            f"  [extract] window clamped {t_c - pre_steps} -> {start_k} "
-            f"(unstick snap within the {pre_steps}-step pre-collision window)"
-        )
-    for step_k in range(start_k, t_c):
-        if step_k >= 0 and step_k in live_by_step:
-            _, idx, live_pose, np_dict = live_by_step[step_k]
-            scene = _scene_npz_from_np_dict(np_dict)
-            # Match the canonical recorded NPZ format: 3-col (x, y, heading) ego
-            # past + goal (np_dict carries them as cos/sin 4-col).
-            ep = scene["ego_agent_past"]
-            scene["ego_agent_past"] = np.column_stack(
-                [ep[:, 0], ep[:, 1], np.arctan2(ep[:, 3], ep[:, 2])]
-            ).astype(np.float32)
-            g = scene["goal_pose"]
-            scene["goal_pose"] = np.array([g[0], g[1], math.atan2(g[3], g[2])], dtype=np.float32)
-            # neighbor GT future (recorded), re-centered onto the live ego.
-            with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
-                naf = z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
-            if naf is not None:
-                dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
-                scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
-            # ego_agent_future = realized live path up to the collision (zeros after),
-            # 4-col [x, y, cos, sin] (trainable/reward schema; never 3-col).
-            eaf = np.zeros((fut_len, 4), dtype=np.float32)
-            for j in range(1, fut_len + 1):
-                fk = step_k + j
-                if fk > t_c or fk not in live_poses:
-                    break
-                ex, ey, eh = _world_pose_to_ego(live_poses[fk], live_pose)
-                eaf[j - 1] = (ex, ey, math.cos(eh), math.sin(eh))
-            scene["ego_agent_future"] = eaf
-            scene["origin"] = np.array("live")
-        else:
-            # Backtrack: a recorded frame before the segment start (real GT scene).
-            frame = start + step_k
-            if frame < 0 or frame >= len(tl):
-                continue
-            with np.load(tl.npz_paths[frame], allow_pickle=True) as z:
-                scene = {key: z[key] for key in z.files if key not in ("map_name", "token")}
-            # Recorded corpora may store 3-col futures; the saved scene must be 4-col.
-            for fk in ("neighbor_agents_future", "ego_agent_future"):
-                if fk in scene:
-                    scene[fk] = _future_to_4col(scene[fk])
-            scene["origin"] = np.array("recorded")
-        token = f"{step_k - t_c:+06d}"  # offset from collision, e.g. -00080 .. -00001
-        np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
-        saved.append(int(step_k))
-
-    manifest = {
-        "segment": [int(start), int(end)],
-        "collision_step": int(t_c),
-        "collision_thresh": float(collision_thresh),
-        "n_scenes": len(saved),
-        "steps_saved": saved,
-        "n_live": sum(1 for k in saved if k >= 0),
-        "n_recorded": sum(1 for k in saved if k < 0),
-    }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    return manifest
+    # buf's last entry is the collision step t_c (appended before the break), so it
+    # already carries the t_c world pose needed for the late scenes' ego_future.
+    return _dump_precollision_window(
+        out_dir,
+        tl,
+        model_args,
+        t_c,
+        list(buf),
+        last_snap_step,
+        pre_steps,
+        collision_thresh,
+        start,
+        end,
+        pre_arc_m=pre_arc_m,
+        max_scenes=max_scenes,
+        min_post_snap_frames=min_post_snap_frames,
+    )
