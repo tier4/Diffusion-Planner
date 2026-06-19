@@ -69,6 +69,24 @@ def parse_args() -> argparse.Namespace:
     # Throughput / coverage levers (forwarded to run_segments_batched).
     p.add_argument("--n_build_threads", type=int, default=8, help="threads for the CPU input build")
     p.add_argument(
+        "--preload",
+        action="store_true",
+        help="decompress every recorded frame of each route into the in-RAM npz cache "
+        "BEFORE rolling it out, so np.load/zlib never lands on the per-step critical path. "
+        "OFF by default: it front-loads the whole route's decompress (and holds it in RAM), "
+        "which is a net loss for short/few-segment jobs where prefetch already hides the I/O; "
+        "turn on for large multi-pass mining where the I/O half dominates.",
+    )
+    p.add_argument(
+        "--gpu_transform",
+        action="store_true",
+        help="run world_to_ego_frame on-device (one batched op) instead of per-segment numpy "
+        "on the CPU build threads. OFF by default: the transform is a small, already-overlapped "
+        "slice of the wall (the model forward dominates), and when --save_dir is set the saved "
+        "scenes must be materialized back to CPU each step, so the gain is marginal; results are "
+        "numerically equivalent to the CPU path (~1e-5, float-ordering).",
+    )
+    p.add_argument(
         "--prefetch_ahead",
         type=int,
         default=2,
@@ -133,6 +151,23 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.2,
         help="m-to-neighbor trigger for saving a scene batch (use 0.5 to also catch near-misses)",
+    )
+    p.add_argument(
+        "--save_min_pre_frames",
+        type=int,
+        default=30,
+        help="skip a hit if fewer than this many LIVE frames precede the contact. The saver "
+        "no longer backfills recorded frames (that spliced a discontinuous prefix onto the "
+        "live rollout), so an early contact yields a shorter all-live window — and is dropped "
+        "entirely below this floor.",
+    )
+    p.add_argument(
+        "--save_min_ego_speed",
+        type=float,
+        default=0.5,
+        help="exclude collisions where the ego is not moving: only save a hit if ego speed at "
+        "the contact step exceeds this (m/s). Filters out the ego being rear-ended / sitting "
+        "stopped against a neighbor — not a model-caused avoidance failure. 0 disables.",
     )
     return p.parse_args()
 
@@ -210,7 +245,10 @@ def main() -> None:
             save_pre_arc_m=args.save_pre_arc_m,
             save_max_scenes=args.save_max_scenes,
             save_min_post_snap_frames=int(round(args.save_min_post_snap_s / 0.1)),
+            save_min_pre_frames=args.save_min_pre_frames,
+            save_min_ego_speed=args.save_min_ego_speed,
             route_keys=buf_keys,
+            gpu_transform=args.gpu_transform,
         )
         for key, res in zip(buf_keys, res_list):
             row = {"route": key, **res.metrics}
@@ -226,6 +264,10 @@ def main() -> None:
         for ri, key in enumerate(route_keys):
             with timers("timeline_build"):
                 tl = RouteTimeline(routes[key], sidecar_dir=args.sidecar_root, timers=timers)
+            if args.preload:
+                # Warm the whole route into the npz cache up front (opt-in; see flag help).
+                with timers("preload"):
+                    tl.prefetch(range(len(tl)))
             for start, end in tl.iter_segments(args.seg_len):
                 buf_units.append((tl, start, end))
                 buf_keys.append(key)
