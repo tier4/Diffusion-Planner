@@ -177,6 +177,31 @@ def build_input_raw(
     return base, dxyz, live_past, live_cur, idx
 
 
+def _arrays_to_device(arrays: dict, device: str) -> dict:
+    """H2D each model-input array with the correct dtype: the speed-limit has-flags stay
+    bool, ``turn_indicators`` is long, everything else is float32. Shared by both batch
+    builders so the two paths can't drift on dtype handling."""
+    out: dict = {}
+    for k, arr in arrays.items():
+        if k in ("lanes_has_speed_limit", "route_lanes_has_speed_limit"):
+            out[k] = torch.from_numpy(arr).to(device)
+        elif k == "turn_indicators":
+            out[k] = torch.from_numpy(arr).long().to(device)
+        else:
+            out[k] = torch.from_numpy(arr.astype(np.float32)).to(device)
+    return out
+
+
+def _add_static_inputs(data: dict, model_args, n: int, device: str) -> None:
+    """Add the per-batch ``delay`` + zero ``sampled_trajectories`` the model expects
+    (P = 1 ego + predicted neighbors, T = future_len + 1). In place."""
+    data["delay"] = torch.zeros((n,), dtype=torch.long, device=device)
+    n_agents = 1 + model_args.predicted_neighbor_num
+    data["sampled_trajectories"] = torch.zeros(
+        (n, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
+    )
+
+
 def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
     """Concat N single-sample numpy dicts -> one batched, normalized torch dict.
 
@@ -185,21 +210,9 @@ def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
     normalizer call.
     """
     N = len(np_dicts)
-    data = {}
-    for k in np_dicts[0]:
-        arr = np.concatenate([d[k] for d in np_dicts], axis=0)
-        if k in ("lanes_has_speed_limit", "route_lanes_has_speed_limit"):
-            data[k] = torch.from_numpy(arr).to(device)
-        elif k == "turn_indicators":
-            data[k] = torch.from_numpy(arr).long().to(device)
-        else:
-            data[k] = torch.from_numpy(arr.astype(np.float32)).to(device)
-    data["delay"] = torch.zeros((N,), dtype=torch.long, device=device)
-    # Match to_model_tensors: P = 1 ego + predicted neighbors, T = future_len (+1).
-    n_agents = 1 + model_args.predicted_neighbor_num
-    data["sampled_trajectories"] = torch.zeros(
-        (N, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
-    )
+    arrays = {k: np.concatenate([d[k] for d in np_dicts], axis=0) for k in np_dicts[0]}
+    data = _arrays_to_device(arrays, device)
+    _add_static_inputs(data, model_args, N, device)
     return model_args.observation_normalizer(data)
 
 
@@ -215,21 +228,13 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
     ``want_np_dicts`` materializes per-segment un-normalized dicts for the save buffer; it
     forces a D2H of the full model input each step, so it is only requested when saving.
     """
-    import torch
-
     from scenario_generation.transforms import world_to_ego_frame_torch
 
     bases = [p[0] for p in raw_payloads]
     N = len(bases)
-    batch: dict = {}
-    for k in bases[0]:
-        arr = np.concatenate([b[k] for b in bases], axis=0)
-        if k in ("lanes_has_speed_limit", "route_lanes_has_speed_limit"):
-            batch[k] = torch.from_numpy(arr).to(device)
-        elif k == "turn_indicators":
-            batch[k] = torch.from_numpy(arr).long().to(device)
-        else:
-            batch[k] = torch.from_numpy(arr.astype(np.float32)).to(device)
+    batch = _arrays_to_device(
+        {k: np.concatenate([b[k] for b in bases], axis=0) for k in bases[0]}, device
+    )
 
     dx = torch.tensor([p[1][0] for p in raw_payloads], dtype=torch.float32, device=device)
     dy = torch.tensor([p[1][1] for p in raw_payloads], dtype=torch.float32, device=device)
@@ -255,11 +260,7 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
             {k: batch[k][i : i + 1].detach().cpu().numpy() for k in batch} for i in range(N)
         ]
 
-    batch["delay"] = torch.zeros((N,), dtype=torch.long, device=device)
-    n_agents = 1 + model_args.predicted_neighbor_num
-    batch["sampled_trajectories"] = torch.zeros(
-        (N, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
-    )
+    _add_static_inputs(batch, model_args, N, device)
     return model_args.observation_normalizer(batch), neighbors_live, np_dicts
 
 
@@ -1284,8 +1285,8 @@ def _dump_precollision_window(
     SKIP rules (return None):
     - an unstick teleport fired fewer than ``min_post_snap_frames`` steps before the
       collision (too little settled history; the contact is likely teleport-induced);
-    - fewer than ``min_pre_frames`` live frames precede the contact (too short a approach to
-      be a useful pre-collision scene now that recorded backfill is disabled).
+    - fewer than ``min_pre_frames`` live frames precede the contact (too short an approach
+      to be a useful pre-collision scene now that recorded backfill is disabled).
     """
     import json
     from pathlib import Path
@@ -1341,39 +1342,37 @@ def _dump_precollision_window(
     # Inclusive of t_c: the LAST saved frame (collision+00000) IS the collision step, so the
     # window ends exactly on the contact (its current neighbor box is the one within thresh).
     for step_k in range(start_k, t_c + 1):
-        if step_k >= 0 and step_k in live_by_step:
-            _, idx, live_pose, np_dict = live_by_step[step_k]
-            scene = _scene_npz_from_np_dict(np_dict)
-            ep = scene["ego_agent_past"]
-            scene["ego_agent_past"] = np.column_stack(
-                [ep[:, 0], ep[:, 1], np.arctan2(ep[:, 3], ep[:, 2])]
-            ).astype(np.float32)
-            g = scene["goal_pose"]
-            scene["goal_pose"] = np.array([g[0], g[1], math.atan2(g[3], g[2])], dtype=np.float32)
-            with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
-                naf = z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
-            if naf is not None:
-                dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
-                scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
-            eaf = np.zeros((fut_len, 4), dtype=np.float32)
-            for j in range(1, fut_len + 1):
-                fk = step_k + j
-                if fk > t_c or fk not in poses_by_step:
-                    break
-                ex, ey, eh = _world_pose_to_ego(poses_by_step[fk], live_pose)
-                eaf[j - 1] = (ex, ey, math.cos(eh), math.sin(eh))
-            scene["ego_agent_future"] = eaf
-            scene["origin"] = np.array("live")
-        else:
-            frame = seg_start + step_k
-            if frame < 0 or frame >= len(tl):
-                continue
-            with np.load(tl.npz_paths[frame], allow_pickle=True) as z:
-                scene = {key: z[key] for key in z.files if key not in ("map_name", "token")}
-            for fk in ("neighbor_agents_future", "ego_agent_future"):
-                if fk in scene:
-                    scene[fk] = _future_to_4col(scene[fk])
-            scene["origin"] = np.array("recorded")
+        # The window is clamped all-live (start_k >= the live buffer floor; no recorded
+        # backfill). Every step in [start_k, t_c] must therefore be in the buffer — a miss
+        # means the clamp/buffer invariant regressed, so fail loudly rather than silently
+        # splice recorded frames back in (the discontinuous seam this change removed).
+        if step_k < 0 or step_k not in live_by_step:
+            raise AssertionError(
+                f"all-live pre-collision window expected step {step_k} in the live buffer "
+                f"[{start_k}, {t_c}] but it is absent (window-clamp / buffer regression)"
+            )
+        _, idx, live_pose, np_dict = live_by_step[step_k]
+        scene = _scene_npz_from_np_dict(np_dict)
+        ep = scene["ego_agent_past"]
+        scene["ego_agent_past"] = np.column_stack(
+            [ep[:, 0], ep[:, 1], np.arctan2(ep[:, 3], ep[:, 2])]
+        ).astype(np.float32)
+        g = scene["goal_pose"]
+        scene["goal_pose"] = np.array([g[0], g[1], math.atan2(g[3], g[2])], dtype=np.float32)
+        with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
+            naf = z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
+        if naf is not None:
+            dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
+            scene["neighbor_agents_future"] = _recenter_neighbor_future(naf, dx, dy, dyaw)
+        eaf = np.zeros((fut_len, 4), dtype=np.float32)
+        for j in range(1, fut_len + 1):
+            fk = step_k + j
+            if fk > t_c or fk not in poses_by_step:
+                break
+            ex, ey, eh = _world_pose_to_ego(poses_by_step[fk], live_pose)
+            eaf[j - 1] = (ex, ey, math.cos(eh), math.sin(eh))
+        scene["ego_agent_future"] = eaf
+        scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
         saved.append(int(step_k))
@@ -1384,8 +1383,7 @@ def _dump_precollision_window(
         "collision_thresh": float(collision_thresh),
         "n_scenes": len(saved),
         "steps_saved": saved,
-        "n_live": sum(1 for k in saved if k >= 0),
-        "n_recorded": sum(1 for k in saved if k < 0),
+        "n_live": len(saved),  # all-live by construction (no recorded backfill)
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
@@ -1424,12 +1422,12 @@ def extract_collision_scenes(
       * ego_agent_future = the realized live ego path truncated AT the collision
         (zeros for timesteps after T_c).
 
-    When the collision is early (T_c < pre_steps), the window reaches before the
-    segment start: those earlier scenes are taken straight from the RECORDED NPZs
-    of frames before ``start`` (real GT context — ego/neighbor history + GT
-    futures), which the full-route timeline still holds. So the batch always has
-    ``pre_steps`` scenes with real, continuous ego history (subject to the route
-    start). Returns a manifest dict, or None if no collision occurred.
+    When the collision is early (T_c < pre_steps) the window is SHORTER (all-live): it
+    shares ``_dump_precollision_window``, which no longer backfills recorded frames
+    before the rollout start (splicing the recorded ego/perception onto the live state
+    produced a discontinuous clearance seam) and skips a hit with fewer than
+    ``min_pre_frames`` (default 30) live frames before the contact. Returns a manifest
+    dict, or None if no collision occurred / the window was too short.
 
     NOTE: this is the legacy SECOND-PASS path — it re-runs the rollout to reconstruct
     the window, so the collision it finds can differ from the one the miner detected
