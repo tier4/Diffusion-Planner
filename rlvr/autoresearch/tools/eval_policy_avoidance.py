@@ -448,8 +448,11 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     def run_set(scene_list_path, tag):
+        from diffusion_planner.utils.scene_skip import filter_scene_list
+
         with open(scene_list_path) as f:
             paths = json.load(f)
+        paths = filter_scene_list(paths, label=f"eval_policy_avoidance:{tag}")
         rows = []
         render_dir = out_dir / f"render_{tag}"
         if args.render:

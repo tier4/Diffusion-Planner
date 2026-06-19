@@ -12,12 +12,12 @@ import math
 
 import torch
 
-from diffusion_planner.metrics.config import RewardConfig
-from diffusion_planner.metrics.geometry import *  # noqa: F401,F403  geometry primitives
-from diffusion_planner.model.guidance.collision import (
+from planner_metrics.collision_geometry import (
     batch_signed_distance_rect,
     center_rect_to_points,
 )
+from planner_metrics.config import RewardConfig
+from planner_metrics.geometry import *  # noqa: F401,F403  geometry primitives
 
 
 @torch.no_grad()

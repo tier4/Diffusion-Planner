@@ -97,8 +97,7 @@ inline bool rect_overlap_sat(const Corners & a, const Corners & b)
   return true;
 }
 
-inline float point_segment_dist(
-  float px, float py, float ax, float ay, float bx, float by)
+inline float point_segment_dist(float px, float py, float ax, float ay, float bx, float by)
 {
   const float abx = bx - ax;
   const float aby = by - ay;
@@ -113,7 +112,10 @@ inline float point_segment_dist(
   return std::sqrt(dx * dx + dy * dy + 1e-12f);
 }
 
-inline float cross2(float ux, float uy, float vx, float vy) { return ux * vy - uy * vx; }
+inline float cross2(float ux, float uy, float vx, float vy)
+{
+  return ux * vy - uy * vx;
+}
 
 // Proper (general-position) segment intersection test, matching _segments_intersect_any().
 inline bool segments_intersect(
@@ -160,7 +162,8 @@ inline bool check_static_object_collision(
   for (int64_t n = 0; n < num; ++n) {
     const float * o = &static_objects[n * dim];  // [x, y, cos, sin, w, l, type x4]
     if (std::fabs(o[0]) + std::fabs(o[1]) + std::fabs(o[2]) + std::fabs(o[3]) <= 1e-6f) continue;
-    const Corners oc = make_rect(o[0], o[1], o[2], o[3], o[5] + 2.0f * margin, o[4] + 2.0f * margin);
+    const Corners oc =
+      make_rect(o[0], o[1], o[2], o[3], o[5] + 2.0f * margin, o[4] + 2.0f * margin);
     for (const auto & ec : ego) {
       if (rect_overlap_sat(ec, oc)) return true;
     }
@@ -183,7 +186,8 @@ inline bool check_neighbor_collision(
   for (int64_t n = 0; n < MAX_NUM_NEIGHBORS; ++n) {
     const float * lp = &neighbor_past[(n * past + last) * np_dim];
     // neighbor valid iff its last past frame is non-zero
-    if (std::fabs(lp[0]) + std::fabs(lp[1]) + std::fabs(lp[2]) + std::fabs(lp[3]) <= 1e-6f) continue;
+    if (std::fabs(lp[0]) + std::fabs(lp[1]) + std::fabs(lp[2]) + std::fabs(lp[3]) <= 1e-6f)
+      continue;
     const float nw = std::max(lp[6] + 2.0f * margin, 1e-3f);  // width
     const float nl = std::max(lp[7] + 2.0f * margin, 1e-3f);  // length
 
@@ -206,9 +210,9 @@ inline bool check_road_border_collision(
   using autoware::diffusion_planner::LINE_STRING_TYPE_NUM;
   using autoware::diffusion_planner::NUM_LINE_STRINGS;
   using autoware::diffusion_planner::POINTS_PER_LINE_STRING;
-  const int64_t dim = 2 + LINE_STRING_TYPE_NUM;     // per-point channels: [x, y, type0, type1]
+  const int64_t dim = 2 + LINE_STRING_TYPE_NUM;  // per-point channels: [x, y, type0, type1]
   const int64_t pts = POINTS_PER_LINE_STRING;
-  constexpr int64_t border_channel = 3;            // channel 3 > 0.5 marks a road border
+  constexpr int64_t border_channel = 3;  // channel 3 > 0.5 marks a road border
 
   std::vector<std::array<float, 4>> segments;  // {ax, ay, bx, by}
   for (int64_t n = 0; n < NUM_LINE_STRINGS; ++n) {

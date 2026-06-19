@@ -127,6 +127,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, model_args = load_model(args.model_path, device)
     scenes = json.load(open(args.scenes))
+    from diffusion_planner.utils.scene_skip import filter_scene_list
+
+    scenes = filter_scene_list(scenes, label="eval_plan_comfort")
     la95, jk95, cspd = eval_plan_comfort(
         model, model_args, scenes, device, args.dt, args.batch_size, args.curve_lat
     )

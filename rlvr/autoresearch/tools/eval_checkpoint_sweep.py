@@ -126,6 +126,9 @@ def main():
 
     with open(args.scenes) as f:
         scenes = json.load(f)
+        from diffusion_planner.utils.scene_skip import filter_scene_list
+
+        scenes = filter_scene_list(scenes, label="eval_checkpoint_sweep")
 
     from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 

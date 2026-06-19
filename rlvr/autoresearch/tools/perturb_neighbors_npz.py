@@ -8,11 +8,14 @@ through ego offsets. This tool varies the OTHER side: it shifts the STOPPED
 each neighbor's own heading frame — producing new ego-to-obstacle geometries
 from the same base scene.
 
-Only stopped neighbors are moved (the avoidance-relevant obstacles, same
-detection convention as ghost_sim_common.extract_stopped_neighbors: non-empty
-slot, future displacement < 0.5 m, valid box dims). Moving traffic, map,
-ego past/future and all other fields are copied verbatim. Zero rows are
-padding and are never touched.
+By default only stopped neighbors are moved (the avoidance-relevant obstacles,
+same detection convention as ghost_sim_common.extract_stopped_neighbors:
+non-empty slot, future displacement < 0.5 m, valid box dims). With
+``--include_moving`` the MOVING neighbors are also shifted — e.g. the colliding
+NPC in a perception-reproducer moving collision — by the SAME rigid translation
+(a constant world offset applied to every past+future timestep, which preserves
+the track's shape, per-step headings and velocities). Map, ego past/future and
+all other fields are copied verbatim. Zero rows are padding and never touched.
 
 Safety screens (canonical reward-path geometry, no hand-rolled OBB math):
   - t0-clean: the ego pose at t=0 (origin of the ego frame) must clear the
@@ -41,29 +44,47 @@ import torch
 
 from scenario_generation.explorer_runner import plan_static_clearance
 
+_MOVING_DISP_THRESH = 0.5  # m of future displacement separating stopped vs moving
 
-def _stopped_neighbor_indices(nb_past: np.ndarray, nb_fut: np.ndarray) -> list[int]:
-    """Indices of stopped neighbors (same criteria as extract_stopped_neighbors)."""
-    idxs = []
+
+def _neighbor_future_disp(nb_fut_i: np.ndarray) -> float:
+    """Bounding-box future displacement (m) of one neighbor's future track."""
+    fut_xy = nb_fut_i[:, :2]
+    fut_valid = np.abs(fut_xy).sum(axis=-1) > 1e-6
+    if fut_valid.sum() < 2:
+        return 0.0
+    return float(np.linalg.norm(fut_xy[fut_valid].max(0) - fut_xy[fut_valid].min(0)))
+
+
+def _selected_neighbor_indices(
+    nb_past: np.ndarray, nb_fut: np.ndarray, include_moving: bool
+) -> tuple[list[int], set[int]]:
+    """Indices of perturbable neighbors + the subset classified as moving.
+
+    Always returns STOPPED neighbors (future displacement < 0.5 m — the
+    avoidance-relevant parked/blocking obstacles, same convention as
+    extract_stopped_neighbors). When ``include_moving`` is set, MOVING neighbors
+    (displacement >= 0.5 m, e.g. the colliding NPC in a reproducer moving
+    collision) are also selected. Empty (padding) slots and degenerate boxes are
+    excluded. Returns (selected_indices, moving_index_set).
+    """
+    selected: list[int] = []
+    moving: set[int] = set()
     for i in range(nb_past.shape[0]):
         xy0 = nb_past[i, -1, :2]
         if abs(float(xy0[0])) + abs(float(xy0[1])) < 1e-6:
             continue  # empty slot (padding)
-        fut_xy = nb_fut[i, :, :2]
-        fut_valid = np.abs(fut_xy).sum(axis=-1) > 1e-6
-        disp = (
-            0.0
-            if fut_valid.sum() < 2
-            else float(np.linalg.norm(fut_xy[fut_valid].max(0) - fut_xy[fut_valid].min(0)))
-        )
-        if disp >= 0.5:
-            continue  # moving traffic — not an avoidance obstacle
         w = float(nb_past[i, -1, 6])
         length = float(nb_past[i, -1, 7])
         if w < 0.1 or length < 0.1:
             continue
-        idxs.append(i)
-    return idxs
+        is_moving = _neighbor_future_disp(nb_fut[i]) >= _MOVING_DISP_THRESH
+        if is_moving and not include_moving:
+            continue  # moving traffic — skipped unless --include_moving
+        selected.append(i)
+        if is_moving:
+            moving.add(i)
+    return selected, moving
 
 
 def _boxes_from_arrays(nb_past: np.ndarray, idxs: list[int]):
@@ -129,6 +150,12 @@ def main():
     )
     parser.add_argument("--n_per_scene", type=int, required=True)
     parser.add_argument(
+        "--include_moving",
+        action="store_true",
+        help="also perturb MOVING neighbors (future displacement >= 0.5 m), e.g. the "
+        "colliding NPC in a reproducer moving collision. Default: stopped neighbors only.",
+    )
+    parser.add_argument(
         "--min_t0_clearance",
         type=float,
         required=True,
@@ -161,10 +188,11 @@ def main():
         nb_fut0 = base["neighbor_agents_future"]
         if nb_past0.ndim == 4:
             raise ValueError(f"{sp}: batched neighbor array — expected unbatched NPZ")
-        idxs = _stopped_neighbor_indices(nb_past0, nb_fut0)
+        idxs, moving_idxs = _selected_neighbor_indices(nb_past0, nb_fut0, args.include_moving)
         if not idxs:
             n_no_stopped += 1
-            print(f"  [skip] {Path(sp).name}: no stopped neighbors to perturb")
+            kind = "stopped/moving" if args.include_moving else "stopped"
+            print(f"  [skip] {Path(sp).name}: no {kind} neighbors to perturb")
             continue
         gt_plan = _future_as_plan(base["ego_agent_future"])
         pool = Path(sp).parent.name
@@ -177,13 +205,23 @@ def main():
                 dlon = float(rng.uniform(lon_lo, lon_hi)) * float(rng.choice([-1.0, 1.0]))
                 _shift_neighbor(nb_past, nb_fut, i, dlat, dlon)
                 offsets[int(i)] = {"dlat": round(dlat, 3), "dlon": round(dlon, 3)}
+            # t0-clean: ego at origin must clear EVERY shifted box (stopped or
+            # moving — the box is each neighbor's t=0 pose, so this is valid for both).
             boxes = _boxes_from_arrays(nb_past, idxs)
             t0_clr = float(plan_static_clearance(t0_pose, boxes, ego_shape, device))
             if t0_clr < args.min_t0_clearance:
                 n_t0_drop += 1
                 continue
-            gt_clr = float(plan_static_clearance(gt_plan, boxes, ego_shape, device))
-            if gt_clr < 0.0:
+            # GT-future-cross warning is a STATIC-obstacle concept (the GT future
+            # shouldn't pass through a parked car). It is meaningless against a
+            # moving box, so score it only over the STOPPED subset; None if all moving.
+            stopped_boxes = _boxes_from_arrays(nb_past, [i for i in idxs if i not in moving_idxs])
+            gt_clr = (
+                float(plan_static_clearance(gt_plan, stopped_boxes, ego_shape, device))
+                if stopped_boxes
+                else None
+            )
+            if gt_clr is not None and gt_clr < 0.0:
                 n_gt_cross += 1
             out = dict(base)
             out["neighbor_agents_past"] = nb_past
@@ -196,8 +234,9 @@ def main():
                     "source": sp,
                     "variant": v,
                     "offsets": offsets,
+                    "moving_slots": sorted(moving_idxs),
                     "t0_clearance": round(t0_clr, 3),
-                    "gt_future_clearance": round(gt_clr, 3),
+                    "gt_future_clearance": (round(gt_clr, 3) if gt_clr is not None else None),
                     "out": str(out_path),
                 }
             )
@@ -207,7 +246,8 @@ def main():
     with open(out_dir / "manifest.json", "w") as f:
         json.dump(manifest, f, indent=1)
     print(f"\n[perturb_nbr] {len(written)} variants from {len(paths)} scenes -> {args.out_list}")
-    print(f"  dropped: {n_t0_drop} t0-violating; skipped: {n_no_stopped} scenes w/o stopped nbrs")
+    kind = "stopped/moving" if args.include_moving else "stopped"
+    print(f"  dropped: {n_t0_drop} t0-violating; skipped: {n_no_stopped} scenes w/o {kind} nbrs")
     print(
         f"  WARNING: {n_gt_cross} variants have GT future crossing the shifted obstacle "
         "(future must be replaced by distillation before curated SFT)"

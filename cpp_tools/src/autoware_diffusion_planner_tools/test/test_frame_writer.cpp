@@ -251,8 +251,7 @@ TEST(BuildRouteJsonTest, BasicFieldsPresent)
   const SkippingInfo info = SkippingInfo::accepted();
   timestamp_stats::TimestampStatsMap stats_map({});  // empty map
 
-  const nlohmann::json j =
-    build_route_json(42, 150.5, 1000000LL, 2000000LL, info, stats_map);
+  const nlohmann::json j = build_route_json(42, 150.5, 1000000LL, 2000000LL, info, stats_map);
 
   EXPECT_FALSE(j["is_skipped"].get<bool>());
   EXPECT_EQ(j["num_frames"].get<int64_t>(), 42);
@@ -264,8 +263,7 @@ TEST(BuildRouteJsonTest, BasicFieldsPresent)
 
 TEST(BuildRouteJsonTest, SkippedRouteFieldsPresent)
 {
-  const SkippingInfo info =
-    SkippingInfo::insufficient_frames(100, 1700);
+  const SkippingInfo info = SkippingInfo::insufficient_frames(100, 1700);
   timestamp_stats::TimestampStatsMap stats_map({});
 
   const nlohmann::json j = build_route_json(100, 10.0, 0LL, 1000LL, info, stats_map);

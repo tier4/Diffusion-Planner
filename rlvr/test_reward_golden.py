@@ -10,7 +10,7 @@ This is the PR0 safety net for issue #130 ("carve reward subscores into a shared
 metrics library"): it lets the subsequent
 
   * PR1 — pure *move* of the subscore / geometry / config code into
-    ``diffusion_planner.metrics`` (``reward.py`` re-exports), and
+    ``planner_metrics`` (``reward.py`` re-exports), and
   * PR2 — behavior-preserving *split* of ``compute_reward_batch`` into
     ``compute_subscores_batch`` (raw) + ``_shape_reward`` (weighting / gates)
 

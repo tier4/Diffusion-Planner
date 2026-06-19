@@ -16,6 +16,7 @@ dependencies = [
     "opencv-python",
     "pandas>=2,<3",
     "peft",
+    "planner-metrics",
     "protobuf",
     "pydantic",
     "pytorch-lightning",
@@ -29,3 +30,6 @@ dependencies = [
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+[tool.uv.sources]
+planner-metrics = { workspace = true }

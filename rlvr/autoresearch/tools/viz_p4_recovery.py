@@ -218,6 +218,9 @@ def main() -> None:
 
     with open(args.scenes) as f:
         scene_paths = json.load(f)
+    from diffusion_planner.utils.scene_skip import filter_scene_list
+
+    scene_paths = filter_scene_list(scene_paths, label="viz_p4_recovery")
     if args.max_scenes is not None:
         scene_paths = scene_paths[: args.max_scenes]
 

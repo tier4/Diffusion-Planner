@@ -49,6 +49,9 @@ def main():
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cli_es = np.array([float(x) for x in args.ego_shape.split(",")])
     paths = json.load(open(args.scenes))
+    from diffusion_planner.utils.scene_skip import filter_scene_list
+
+    paths = filter_scene_list(paths, label="open_loop_per_arc")
     routes = {}
     polys = {}
     for k, rp in [("m2t", args.m2t_route), ("t2m", args.t2m_route)]:

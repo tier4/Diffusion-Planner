@@ -1,4 +1,4 @@
-"""Configuration thresholds for the ``diffusion_planner.metrics`` subscores."""
+"""Configuration thresholds for the ``planner_metrics`` subscores."""
 
 from __future__ import annotations
 

@@ -440,3 +440,34 @@ python -m pytest scenario_generation/tests/ -v
 - **Heading correction**: On NPZ load, neighbor headings are checked against velocity direction. If off by >90 degrees, all headings are flipped by pi.
 - **Static agents**: Vehicles with speed <0.5 m/s and goal distance <1.0m are kept in the scene but not simulated (no model forward pass, no position update).
 - **Misdetection filtering**: When using `--use_gt_goals`, agents with fewer than 10 valid GT future timesteps are removed from the scene.
+
+## Skip-for-training filtering (unified corpus)
+
+The data converter can emit **every** 10 Hz frame (`--write_skipped_npz=1`), tagging the
+ones the production filter would normally drop (red/yellow-light creep, no-future-progress,
+GT collision, off-lane, stale data) with `is_skipped` in each frame's JSON sidecar. This
+yields **one corpus** that serves two consumers:
+
+- the **closed-loop perception reproducer** (collision miner) needs those frames for a
+  gap-free timeline, so it replays *all* of them; and
+- **training / eval / data-gen** must never learn from / score on them.
+
+`diffusion_planner/diffusion_planner/utils/scene_skip.py` is the single shared helper that
+resolves a frame's sidecar and reads the flag. Filtering is **on by default** everywhere
+that reads scenes for training/eval:
+
+- `DiffusionPlannerData(data_list, skip_filter=True, sidecar_root=None)` — the training
+  loader drops flagged frames, so the SFT/GRPO/validation entry points (and their launch
+  scripts) skip them automatically.
+- The autoresearch runner (`GRPOConfig.skip_filtered_scenes=True`, `sidecar_root`), the
+  preference-optimization datasets, and the eval/PRiSM tools filter at scene-list intake.
+- `filter_scenes_by_skip_flag` remains as an explicit CLI pre-pass for producing a filtered
+  list on disk.
+
+Resolution is sibling-`.json` first, then by stem under `sidecar_root` (a one-time cached
+index). **Backward-compatible:** a frame with no resolvable sidecar (older corpora) is kept,
+and the kept/dropped/no-sidecar counts are logged so a silent no-op is visible.
+
+**Opt-out:** the reproducer/miner (`mine_collisions_reproducer`) globs the corpus directly
+and intentionally does **not** filter (it needs the skipped frames). Programmatically, pass
+`skip_filter=False` to `load_scene_list` / the loader to keep all frames.

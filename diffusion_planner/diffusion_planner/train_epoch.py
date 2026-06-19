@@ -15,7 +15,13 @@ def heading_to_cos_sin(x):
         x: [B, T, 3] where last dimension is (x, y, heading)
     Output:
         x: [B, T, 4] where last dimension is (x, y, cos(heading), sin(heading))
+
+    Idempotent: a [..., 4] input that is already (x, y, cos, sin) is returned
+    unchanged. This guards against double-conversion (cos(cos)) now that scene-gen
+    emits 4-col futures — callers can hand it either layout safely.
     """
+    if x.shape[-1] == 4:
+        return x
     return torch.cat(
         [
             x[..., :2],

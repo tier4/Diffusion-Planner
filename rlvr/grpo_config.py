@@ -53,6 +53,12 @@ class GRPOConfig:
         lora_dropout: LoRA dropout probability.
     """
 
+    # Scene filtering: drop frames the converter flagged skip_for_training (red-light
+    # creep, no-future-progress, ...) — valid only for the reproducer, never training.
+    # sidecar_root: where the per-frame JSON sidecars live if not next to the NPZ.
+    skip_filtered_scenes: bool = True
+    sidecar_root: str | None = None
+
     # Core GRPO
     num_generations: int = 32
     train_epochs: int = 10
