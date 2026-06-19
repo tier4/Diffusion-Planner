@@ -1,9 +1,11 @@
 """world_to_ego_frame_torch (batched, on-device) must match the numpy world_to_ego_frame.
 
 The reproducer's ``--gpu_transform`` path replaces the per-segment numpy re-centering with
-ONE batched torch op. This test asserts the two are numerically equivalent (float32 ordering,
-~1e-4) across all model-input keys, including the transform-then-zero-invalid handling of
-padding rows.
+ONE batched torch op. This test asserts the two are numerically equivalent (float32 ordering, ~1e-5; asserted at
+1e-3) across all the SPATIAL model-input keys the transform touches — ego/neighbor/lane/
+route/polygon/line-string/static/goal — including the transform-then-zero-invalid handling
+of padding rows. Non-spatial keys (speed limits, has-flags, turn indicators, ego_shape) are
+passed through untouched and so are out of scope here.
 """
 
 import numpy as np

@@ -256,10 +256,12 @@ def world_to_ego_frame_torch(
         tt = tb.view(tb.shape[0], *([1] * (vec.dim() - 2)), 2)
         return _rot(vec - tt, Rb)
 
-    if batch:
-        ref = next(iter(batch.values()))
-        R = R.to(ref.dtype)
-        t = t.to(ref.dtype)
+    # Match the float dtype of the spatial tensors. Pick the first FLOATING tensor (not just
+    # the first key) — the batch also holds bool (*_has_speed_limit) / long (turn_indicators)
+    # tensors, and R/t must stay float regardless of dict order.
+    ref_dtype = next((v.dtype for v in batch.values() if v.is_floating_point()), torch.float32)
+    R = R.to(ref_dtype)
+    t = t.to(ref_dtype)
 
     if "ego_agent_past" in batch:
         ep = batch["ego_agent_past"]

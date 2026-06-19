@@ -946,6 +946,7 @@ def run_segments_batched(
     save_max_scenes: int = 160,
     save_min_post_snap_frames: int = 30,
     save_min_pre_frames: int = 30,
+    save_min_ego_speed: float = 0.5,
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
 ) -> list[SegmentResult]:
@@ -1077,6 +1078,7 @@ def run_segments_batched(
                                 not s.saved_collision
                                 and save_thresh is not None
                                 and cl <= save_thresh
+                                and s.dyn.speed > save_min_ego_speed
                             ):
                                 mani = _dump_precollision_window(
                                     s.save_out_dir,
@@ -1192,8 +1194,9 @@ def _precollision_window_start(
 ) -> int:
     """First step of the pre-collision window.
 
-    Baseline: ``t_c - pre_steps`` (>= ``pre_steps`` frames; may be negative -> the
-    backtrack path reads recorded frames before the segment start). Never crosses an
+    Baseline: ``t_c - pre_steps``, then clamped UP to the earliest live buffer step
+    (``min(poses_by_step)``, >= 0) — recorded backfill is disabled, so the window is
+    all-live and may be shorter than ``pre_steps`` for an early contact. Never crosses an
     unstick snap (clamped to ``last_snap_step``).
 
     MIN-MOVEMENT EXTEND: if ``pre_arc_m > 0`` and the ego's cumulative arc length over
@@ -1407,6 +1410,7 @@ def extract_collision_scenes(
     pre_arc_m: float = 1.0,
     max_scenes: int = 160,
     min_post_snap_frames: int = 30,
+    min_pre_frames: int = 30,
 ) -> dict | None:
     """Mine the batch of scenes leading up to the FIRST collision in a segment.
 
@@ -1506,4 +1510,5 @@ def extract_collision_scenes(
         pre_arc_m=pre_arc_m,
         max_scenes=max_scenes,
         min_post_snap_frames=min_post_snap_frames,
+        min_pre_frames=min_pre_frames,
     )

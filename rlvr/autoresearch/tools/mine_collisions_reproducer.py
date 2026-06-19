@@ -161,6 +161,14 @@ def parse_args() -> argparse.Namespace:
         "live rollout), so an early contact yields a shorter all-live window — and is dropped "
         "entirely below this floor.",
     )
+    p.add_argument(
+        "--save_min_ego_speed",
+        type=float,
+        default=0.5,
+        help="exclude collisions where the ego is not moving: only save a hit if ego speed at "
+        "the contact step exceeds this (m/s). Filters out the ego being rear-ended / sitting "
+        "stopped against a neighbor — not a model-caused avoidance failure. 0 disables.",
+    )
     return p.parse_args()
 
 
@@ -238,6 +246,7 @@ def main() -> None:
             save_max_scenes=args.save_max_scenes,
             save_min_post_snap_frames=int(round(args.save_min_post_snap_s / 0.1)),
             save_min_pre_frames=args.save_min_pre_frames,
+            save_min_ego_speed=args.save_min_ego_speed,
             route_keys=buf_keys,
             gpu_transform=args.gpu_transform,
         )
