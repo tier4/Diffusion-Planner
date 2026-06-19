@@ -94,6 +94,46 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="render the top-N ranked hit segments to PNGs under <out>.renders/ (0=off)",
     )
+    # One-pass collision-scene save (no second extract pass). When --save_dir is set,
+    # each segment buffers its last --save_pre_steps scenes during THIS rollout and dumps
+    # them to <save_dir>/<route>_<start>_<end>/ on the first step within --save_thresh of a
+    # neighbor — so the saved scenes match the collision THIS run detected (reproducible).
+    p.add_argument(
+        "--save_dir",
+        type=Path,
+        default=None,
+        help="if set, save pre-collision scene batches in one pass (no separate extractor)",
+    )
+    p.add_argument(
+        "--save_pre_steps", type=int, default=80, help="MIN scenes saved before each hit"
+    )
+    p.add_argument(
+        "--save_pre_arc_m",
+        type=float,
+        default=1.0,
+        help="extend the window past --save_pre_steps until the ego has travelled this much "
+        "arc length (m) — so a slow creep into a stopped car still captures real approach, "
+        "not 80 near-identical frames. Capped at --save_max_scenes.",
+    )
+    p.add_argument(
+        "--save_max_scenes",
+        type=int,
+        default=160,
+        help="hard cap on scenes saved per hit (bounds buffer RAM ~1.25MB/scene/segment)",
+    )
+    p.add_argument(
+        "--save_min_post_snap_s",
+        type=float,
+        default=3.0,
+        help="DROP a hit if an unstick teleport fired less than this many seconds before it "
+        "(too little settled history; the contact is likely teleport-induced). 0=keep all.",
+    )
+    p.add_argument(
+        "--save_thresh",
+        type=float,
+        default=0.2,
+        help="m-to-neighbor trigger for saving a scene batch (use 0.5 to also catch near-misses)",
+    )
     return p.parse_args()
 
 
@@ -164,6 +204,13 @@ def main() -> None:
             n_build_threads=args.n_build_threads,
             prefetch_ahead=args.prefetch_ahead,
             timers=timers,
+            save_dir=args.save_dir,
+            save_pre_steps=args.save_pre_steps,
+            save_thresh=(args.save_thresh if args.save_dir is not None else None),
+            save_pre_arc_m=args.save_pre_arc_m,
+            save_max_scenes=args.save_max_scenes,
+            save_min_post_snap_frames=int(round(args.save_min_post_snap_s / 0.1)),
+            route_keys=buf_keys,
         )
         for key, res in zip(buf_keys, res_list):
             row = {"route": key, **res.metrics}

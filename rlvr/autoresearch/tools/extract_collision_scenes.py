@@ -44,6 +44,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model_path", type=Path, required=True)
     p.add_argument("--out_dir", type=Path, required=True, help="root for the per-segment batches")
     p.add_argument("--collision_thresh", type=float, default=0.2, help="m to any neighbor")
+    p.add_argument(
+        "--include_near_miss",
+        action="store_true",
+        help="also extract NEAR-MISS segments (n_collision_steps==0 but "
+        "n_near_miss_steps>0). Those segments trigger the pre-window at "
+        "--near_miss_thresh (the closest approach) instead of --collision_thresh.",
+    )
+    p.add_argument(
+        "--near_miss_thresh",
+        type=float,
+        default=0.5,
+        help="m: trigger threshold for near-miss segments (matches the miner's "
+        "near_miss_thresh). Only used with --include_near_miss.",
+    )
     p.add_argument("--pre_steps", type=int, default=80)
     p.add_argument("--search_radius", type=float, default=1.5)
     p.add_argument("--unstick_after", type=int, default=300)
@@ -71,16 +85,28 @@ def main() -> None:
             if not line:
                 continue
             r = json.loads(line)
-            if r.get("n_collision_steps", 0) > 0:
+            is_collision = r.get("n_collision_steps", 0) > 0
+            is_near_miss = (not is_collision) and r.get("n_near_miss_steps", 0) > 0
+            if is_collision or (args.include_near_miss and is_near_miss):
+                # Collision segments trigger the pre-window at collision_thresh; a
+                # near-miss segment never gets that close, so trigger at its closest
+                # approach (near_miss_thresh).
+                r["_trigger_thresh"] = (
+                    args.collision_thresh if is_collision else args.near_miss_thresh
+                )
                 hits.append(r)
                 if args.max_hits > 0 and len(hits) >= args.max_hits:
                     break
-    print(f"collision segments to extract: {len(hits)} | device: {device}")
+    n_coll = sum(1 for r in hits if r.get("n_collision_steps", 0) > 0)
+    print(
+        f"segments to extract: {len(hits)} ({n_coll} collision, {len(hits) - n_coll} near-miss) "
+        f"| device: {device}"
+    )
 
     # Group by route so each RouteTimeline is built once.
     by_route: dict[str, list] = defaultdict(list)
     for r in hits:
-        by_route[r["route"]].append(tuple(r["segment"]))
+        by_route[r["route"]].append((*r["segment"], r["_trigger_thresh"]))
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     n_ok = 0
@@ -90,7 +116,7 @@ def main() -> None:
             print(f"  WARN route {route_key} not under --npz_root; skipping {len(segs)} segs")
             continue
         tl = RouteTimeline(routes[route_key], sidecar_dir=args.sidecar_root)
-        for start, end in segs:
+        for start, end, thresh in segs:
             od = args.out_dir / f"{route_key}_{start}_{end}"
             mani = extract_collision_scenes(
                 model,
@@ -100,14 +126,14 @@ def main() -> None:
                 end,
                 od,
                 device=device,
-                collision_thresh=args.collision_thresh,
+                collision_thresh=thresh,
                 pre_steps=args.pre_steps,
                 search_radius=args.search_radius,
                 unstick_after=args.unstick_after,
                 unstick_advance_m=args.unstick_advance_m,
             )
             if mani is None:
-                print(f"  {route_key} [{start},{end}]: no collision <= {args.collision_thresh}m")
+                print(f"  {route_key} [{start},{end}]: no approach <= {thresh}m")
                 continue
             n_ok += 1
             summary.append({"route": route_key, **mani})
