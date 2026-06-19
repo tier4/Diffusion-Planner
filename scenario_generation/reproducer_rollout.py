@@ -1177,6 +1177,15 @@ def _dump_precollision_window(
     import json
     from pathlib import Path
 
+    out_dir = Path(out_dir)
+    # Clear any prior batch in this dir FIRST — before the skip early-return — so that a
+    # re-mine which now SKIPS this segment (or writes a shorter window) never leaves stale
+    # older-offset collision*.npz behind to be mistaken for a fresh save. Don't create the
+    # dir on a skip (avoid littering empty dirs); only clear if it already exists.
+    if out_dir.exists():
+        for stale in out_dir.glob("collision*.npz"):
+            stale.unlink()
+
     if (
         min_post_snap_frames > 0
         and last_snap_step is not None
@@ -1188,13 +1197,7 @@ def _dump_precollision_window(
         )
         return None
 
-    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Clear any prior batch in this dir: the window length now varies (arc-length extend /
-    # snap clamp / max_scenes), so a re-run could otherwise leave stale older-offset
-    # collision*.npz mixed in with the new window.
-    for stale in out_dir.glob("collision*.npz"):
-        stale.unlink()
     live_by_step = {rec[0]: rec for rec in buf}
     poses_by_step = {rec[0]: rec[2] for rec in buf}  # step k -> world pose (for ego_future)
     fut_len = int(model_args.future_len)
