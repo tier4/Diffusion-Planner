@@ -206,7 +206,7 @@ def get_args():
     parser.add_argument(
         "--neighbor_db_collision_margin",
         type=float,
-        default=2.0,
+        default=4.0,
         help="(DB) max distance [m] from an ego GT waypoint to count as a "
         "colliding track during the DB search",
     )
