@@ -152,6 +152,15 @@ def parse_args() -> argparse.Namespace:
         default=0.2,
         help="m-to-neighbor trigger for saving a scene batch (use 0.5 to also catch near-misses)",
     )
+    p.add_argument(
+        "--save_min_pre_frames",
+        type=int,
+        default=30,
+        help="skip a hit if fewer than this many LIVE frames precede the contact. The saver "
+        "no longer backfills recorded frames (that spliced a discontinuous prefix onto the "
+        "live rollout), so an early contact yields a shorter all-live window — and is dropped "
+        "entirely below this floor.",
+    )
     return p.parse_args()
 
 
@@ -228,6 +237,7 @@ def main() -> None:
             save_pre_arc_m=args.save_pre_arc_m,
             save_max_scenes=args.save_max_scenes,
             save_min_post_snap_frames=int(round(args.save_min_post_snap_s / 0.1)),
+            save_min_pre_frames=args.save_min_pre_frames,
             route_keys=buf_keys,
             gpu_transform=args.gpu_transform,
         )

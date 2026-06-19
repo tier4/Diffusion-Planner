@@ -944,6 +944,7 @@ def run_segments_batched(
     save_pre_arc_m: float = 1.0,
     save_max_scenes: int = 160,
     save_min_post_snap_frames: int = 30,
+    save_min_pre_frames: int = 30,
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
 ) -> list[SegmentResult]:
@@ -1090,6 +1091,7 @@ def run_segments_batched(
                                     pre_arc_m=save_pre_arc_m,
                                     max_scenes=save_max_scenes,
                                     min_post_snap_frames=save_min_post_snap_frames,
+                                    min_pre_frames=save_min_pre_frames,
                                 )
                                 # Consume the segment's one save only on an ACTUAL write; a
                                 # snap-skipped hit stays open for a later, settled collision.
@@ -1200,11 +1202,16 @@ def _precollision_window_start(
     t_c) OR the snap / buffer start. ``poses_by_step`` maps step -> world pose (from the
     live buffer) and supplies the arc length."""
     base = t_c - pre_steps
+    # NEVER backfill recorded frames: clamp to the earliest LIVE step held in the buffer
+    # (>= 0; after an unstick teleport the buffer was cleared, so its min step is the
+    # post-snap floor). An early contact therefore yields a SHORTER all-live window rather
+    # than a recorded prefix that doesn't physically connect to the live rollout.
+    live_floor = min(poses_by_step) if poses_by_step else 0
+    base = max(base, live_floor)
     if last_snap_step is not None:
         base = max(base, last_snap_step)
     # Cap to max_scenes frames even on the no-extend path, so we never request a step
-    # that was already evicted from the (max_scenes+1)-deep buffer (which would silently
-    # splice recorded GT frames into a window that should be all-live).
+    # that was already evicted from the (max_scenes+1)-deep buffer.
     if max_scenes is not None:
         base = max(base, t_c - (max_scenes - 1))
     if not poses_by_step or pre_arc_m <= 0:
@@ -1260,19 +1267,25 @@ def _dump_precollision_window(
     pre_arc_m: float = 0.0,
     max_scenes: int | None = None,
     min_post_snap_frames: int = 0,
+    min_pre_frames: int = 30,
 ) -> dict | None:
     """Write the scenes before collision step ``t_c`` from a live buffer.
 
     ``buf`` is an iterable of ``(k, idx, live_pose, np_dict)`` snapshots captured DURING
     the rollout that detected the collision (so the saved scenes match that exact run —
-    no re-simulation). Steps before the segment start are filled from the recorded NPZs.
-    The window is >= ``pre_steps`` frames, extended backward to cover ``pre_arc_m`` of ego
-    arc length when the ego barely moved (capped at ``max_scenes``), and never crosses an
-    unstick teleport (``last_snap_step``). Returns the manifest, or None if skipped.
+    no re-simulation). The window is ALL-LIVE: it spans at most ``pre_steps`` frames before
+    the contact, extended backward to cover ``pre_arc_m`` of ego arc length when the ego
+    barely moved (capped at ``max_scenes``), clamped to the live buffer and never crossing
+    an unstick teleport (``last_snap_step``). Recorded frames before the rollout start are
+    NOT backfilled — splicing the recorded ego/perception onto the model-driven live state
+    produced a discontinuous clearance jump at the seam, so an early contact just yields a
+    shorter all-live window. Returns the manifest, or None if skipped.
 
-    SKIP rule: if an unstick teleport fired fewer than ``min_post_snap_frames`` steps
-    before the collision, the ego had too little settled history after the jump — the
-    contact is likely teleport-induced, so nothing is saved (returns None).
+    SKIP rules (return None):
+    - an unstick teleport fired fewer than ``min_post_snap_frames`` steps before the
+      collision (too little settled history; the contact is likely teleport-induced);
+    - fewer than ``min_pre_frames`` live frames precede the contact (too short a approach to
+      be a useful pre-collision scene now that recorded backfill is disabled).
     """
     import json
     from pathlib import Path
@@ -1306,13 +1319,25 @@ def _dump_precollision_window(
     start_k = _precollision_window_start(
         t_c, pre_steps, last_snap_step, poses_by_step, pre_arc_m, max_scenes
     )
+    # All-live window: never backfill recorded frames (start_k is clamped to the live
+    # floor). Skip the hit if too few live frames precede the contact.
+    n_pre = t_c - start_k
+    if n_pre < min_pre_frames:
+        print(
+            f"  [save] SKIP collision@{t_c}: only {n_pre} live pre-frames "
+            f"(< {min_pre_frames}); not backfilling recorded frames"
+        )
+        return None
     if start_k < t_c - pre_steps:
         print(
             f"  [save] window extended {t_c - pre_steps} -> {start_k} "
             f"(slow ego: {t_c - start_k} frames to cover {pre_arc_m} m arc)"
         )
     elif start_k > t_c - pre_steps:
-        print(f"  [save] window clamped {t_c - pre_steps} -> {start_k} (unstick snap in window)")
+        print(
+            f"  [save] window shortened {t_c - pre_steps} -> {start_k} "
+            f"(all-live: no recorded backfill / unstick floor)"
+        )
     # Inclusive of t_c: the LAST saved frame (collision+00000) IS the collision step, so the
     # window ends exactly on the contact (its current neighbor box is the one within thresh).
     for step_k in range(start_k, t_c + 1):
