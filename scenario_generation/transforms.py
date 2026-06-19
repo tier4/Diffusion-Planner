@@ -215,3 +215,97 @@ def world_to_ego_frame(
             gp[0, 2:4] = transform_cos_sin(gp[0, 2:4].reshape(1, 2), R).flatten()
 
     return out
+
+
+def world_to_ego_frame_torch(
+    batch: dict,  # dict[str, torch.Tensor], each [B, ...] on `device`
+    dx,  # torch.Tensor [B]  ego_x per sample (scene frame)
+    dy,  # torch.Tensor [B]  ego_y per sample
+    dyaw,  # torch.Tensor [B] ego_heading per sample (radians)
+) -> dict:
+    """Batched, on-device mirror of :func:`world_to_ego_frame`.
+
+    Applies the SAME rigid transform as the numpy version, but to a stacked batch of
+    ``B`` frames each with its own ``(dx, dy, dyaw)``, entirely in torch on the tensors'
+    device. Used by the reproducer's ``--gpu_transform`` path: the recorded frames are
+    H2D'd untransformed and re-centered on the GPU (one batched op) instead of per-segment
+    numpy on the CPU. Numerically equivalent to N calls of ``world_to_ego_frame`` (verified
+    by ``scenario_generation/tests``); kept bit-for-bit faithful, INCLUDING the
+    transform-then-zero-invalid order (translated zeros are non-zero, so masked padding is
+    re-zeroed AFTER the transform).
+
+    Operates in place on the tensors in ``batch`` and returns it. Only the spatial keys
+    present are touched; non-spatial features (types, speeds, traffic lights) are untouched.
+    """
+    import torch
+
+    c = torch.cos(dyaw)
+    s = torch.sin(dyaw)
+    # R[b] = [[c, s], [-s, c]] (rotate by -heading), matching _rotation_matrix.
+    R = torch.stack(
+        [torch.stack([c, s], dim=-1), torch.stack([-s, c], dim=-1)], dim=-2
+    )  # [B, 2, 2]
+    t = torch.stack([dx, dy], dim=-1)  # [B, 2]
+
+    def _rot(vec, Rb):
+        # vec [B, ..., 2], Rb [B, 2, 2]; out[...,k] = sum_j vec[...,j] * R[k,j]
+        return torch.einsum("b...j,bkj->b...k", vec, Rb)
+
+    def _pos(vec, Rb, tb):
+        # broadcast t over the middle dims
+        tt = tb.view(tb.shape[0], *([1] * (vec.dim() - 2)), 2)
+        return _rot(vec - tt, Rb)
+
+    if batch:
+        ref = next(iter(batch.values()))
+        R = R.to(ref.dtype)
+        t = t.to(ref.dtype)
+
+    if "ego_agent_past" in batch:
+        ep = batch["ego_agent_past"]
+        ep[:, :, :2] = _pos(ep[:, :, :2], R, t)
+        ep[:, :, 2:4] = _rot(ep[:, :, 2:4], R)
+    if "ego_current_state" in batch:
+        ec = batch["ego_current_state"]
+        ec[:, :2] = _pos(ec[:, :2].unsqueeze(1), R, t).squeeze(1)
+        ec[:, 2:4] = _rot(ec[:, 2:4].unsqueeze(1), R).squeeze(1)
+        ec[:, 4:6] = _rot(ec[:, 4:6].unsqueeze(1), R).squeeze(1)
+        ec[:, 6:8] = _rot(ec[:, 6:8].unsqueeze(1), R).squeeze(1)
+    if "neighbor_agents_past" in batch:
+        nb = batch["neighbor_agents_past"]  # [B, N, T, 11]
+        m = nb[:, :, :, :6].abs().sum(-1) == 0  # pre-transform padding mask [B,N,T]
+        nb[:, :, :, :2] = _pos(nb[:, :, :, :2], R, t)
+        nb[:, :, :, 2:4] = _rot(nb[:, :, :, 2:4], R)
+        nb[:, :, :, 4:6] = _rot(nb[:, :, :, 4:6], R)
+        nb[m] = 0.0
+    for key in ("lanes", "route_lanes"):
+        if key in batch:
+            la = batch[key]  # [B, N, P, 33]
+            m = la[:, :, :, :8].abs().sum(-1) == 0
+            la[:, :, :, :2] = _pos(la[:, :, :, :2], R, t)
+            la[:, :, :, 2:4] = _rot(la[:, :, :, 2:4], R)
+            la[:, :, :, 4:6] = _rot(la[:, :, :, 4:6], R)
+            la[:, :, :, 6:8] = _rot(la[:, :, :, 6:8], R)
+            la[m] = 0.0
+    if "polygons" in batch:
+        pg = batch["polygons"]  # [B, N, 40, 3]
+        m = pg.abs().sum(-1) == 0
+        pg[:, :, :, :2] = _pos(pg[:, :, :, :2], R, t)
+        pg[m] = 0.0
+    if "line_strings" in batch:
+        ls = batch["line_strings"]  # [B, N, 20, 4]
+        m = ls.abs().sum(-1) == 0
+        ls[:, :, :, :2] = _pos(ls[:, :, :, :2], R, t)
+        ls[m] = 0.0
+    if "static_objects" in batch:
+        so = batch["static_objects"]  # [B, 5, 10]
+        m = so[:, :, :10].abs().sum(-1) == 0
+        so[:, :, :2] = _pos(so[:, :, :2], R, t)
+        so[:, :, 2:4] = _rot(so[:, :, 2:4], R)
+        so[m] = 0.0
+    if "goal_pose" in batch:
+        gp = batch["goal_pose"]  # [B, 4]
+        gp[:, :2] = _pos(gp[:, :2].unsqueeze(1), R, t).squeeze(1)
+        gp[:, 2:4] = _rot(gp[:, 2:4].unsqueeze(1), R).squeeze(1)
+
+    return batch

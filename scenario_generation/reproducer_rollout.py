@@ -159,6 +159,24 @@ def build_input_np(
     return recen, neighbors_live
 
 
+def build_input_raw(
+    tl: RouteTimeline,
+    idx: int,
+    live_pose: np.ndarray,
+    ego_hist_world: np.ndarray,
+    dyn: _EgoDyn,
+) -> tuple:
+    """gpu_transform variant of :func:`build_input_np`: skip the numpy
+    ``world_to_ego_frame`` (it runs once, batched, on the GPU in ``_to_torch_batch_gpu``)
+    and return the UN-transformed recorded base + the relative pose + the live-ego arrays.
+    Still threadable (only ``np.load`` + cheap live-ego construction)."""
+    base = _npz_to_model_base(tl.npz(idx))
+    dxyz = _rel_pose(tl.poses[idx], live_pose)
+    live_past = _live_ego_past(ego_hist_world, live_pose)  # (1, PAST, 4), already ego-frame
+    live_cur = _live_ego_current(dyn)  # (1, 10), already ego-frame
+    return base, dxyz, live_past, live_cur, idx
+
+
 def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
     """Concat N single-sample numpy dicts -> one batched, normalized torch dict.
 
@@ -183,6 +201,66 @@ def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
         (N, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
     )
     return model_args.observation_normalizer(data)
+
+
+def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want_np_dicts: bool):
+    """gpu_transform build: stack the UN-transformed recorded frames, H2D once, run
+    ``world_to_ego_frame_torch`` on the whole batch on-device, swap in the live ego, then
+    normalize — so the per-segment numpy ``world_to_ego_frame`` is replaced by ONE batched
+    GPU op. Returns ``(data, neighbors_live_list, np_dict_list_or_None)`` so the caller's
+    score/save/advance path is byte-for-byte the same as the CPU build (the saved scenes
+    and ``neighbors_live`` are extracted here, pre-normalization, exactly as build_input_np
+    produced them — only the float ordering of the transform differs, ~1e-5).
+
+    ``want_np_dicts`` materializes per-segment un-normalized dicts for the save buffer; it
+    forces a D2H of the full model input each step, so it is only requested when saving.
+    """
+    import torch
+
+    from scenario_generation.transforms import world_to_ego_frame_torch
+
+    bases = [p[0] for p in raw_payloads]
+    N = len(bases)
+    batch: dict = {}
+    for k in bases[0]:
+        arr = np.concatenate([b[k] for b in bases], axis=0)
+        if k in ("lanes_has_speed_limit", "route_lanes_has_speed_limit"):
+            batch[k] = torch.from_numpy(arr).to(device)
+        elif k == "turn_indicators":
+            batch[k] = torch.from_numpy(arr).long().to(device)
+        else:
+            batch[k] = torch.from_numpy(arr.astype(np.float32)).to(device)
+
+    dx = torch.tensor([p[1][0] for p in raw_payloads], dtype=torch.float32, device=device)
+    dy = torch.tensor([p[1][1] for p in raw_payloads], dtype=torch.float32, device=device)
+    dyaw = torch.tensor([p[1][2] for p in raw_payloads], dtype=torch.float32, device=device)
+    world_to_ego_frame_torch(batch, dx, dy, dyaw)
+
+    # Swap in the live ego (already in the live-ego frame, NOT transformed) — matches
+    # build_input_np, which overwrites these AFTER world_to_ego_frame.
+    batch["ego_agent_past"] = torch.from_numpy(
+        np.concatenate([p[2] for p in raw_payloads], axis=0).astype(np.float32)
+    ).to(device)
+    batch["ego_current_state"] = torch.from_numpy(
+        np.concatenate([p[3] for p in raw_payloads], axis=0).astype(np.float32)
+    ).to(device)
+
+    # Extract scoring inputs (+ optional save dicts) BEFORE normalization, so they match
+    # the un-normalized arrays build_input_np returns.
+    nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()  # (N,320,11)
+    neighbors_live = [nb_all[i].copy() for i in range(N)]
+    np_dicts = None
+    if want_np_dicts:
+        np_dicts = [
+            {k: batch[k][i : i + 1].detach().cpu().numpy() for k in batch} for i in range(N)
+        ]
+
+    batch["delay"] = torch.zeros((N,), dtype=torch.long, device=device)
+    n_agents = 1 + model_args.predicted_neighbor_num
+    batch["sampled_trajectories"] = torch.zeros(
+        (N, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
+    )
+    return model_args.observation_normalizer(batch), neighbors_live, np_dicts
 
 
 # --------------------------------------------------------------------------- #
@@ -439,12 +517,13 @@ def _seed_state(
     )
 
 
-def _pre_step(s: _SegState):
-    """Advance the cursor + build this segment's NUMPY model input, or terminate it.
+def _pre_step(s: _SegState, gpu_transform: bool = False):
+    """Advance the cursor + build this segment's model input, or terminate it.
 
-    Returns (np_dict, neighbors_live, idx) when the segment should run this tick, or
-    None when it just terminated (s.done set, s.terminated explains why). CPU-only /
-    threadable — torch conversion happens once per batch in the caller."""
+    Returns (np_dict, neighbors_live, idx) normally, or — when ``gpu_transform`` — the raw
+    payload tuple (base, pose, live_past, live_cur, idx) for a batched on-device transform
+    (see ``_to_torch_batch_gpu``). None when the segment just terminated (s.done set).
+    CPU-only / threadable; torch conversion happens once per batch in the caller."""
     if s.done:
         return None
     if s.k >= s.max_steps:
@@ -461,6 +540,8 @@ def _pre_step(s: _SegState):
     if s.max_stuck_steps > 0 and s.stuck >= s.max_stuck_steps:
         s.terminated, s.done = "stuck", True
         return None
+    if gpu_transform:
+        return build_input_raw(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
     np_dict, neighbors_live = build_input_np(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
     return np_dict, neighbors_live, idx
 
@@ -864,6 +945,7 @@ def run_segments_batched(
     save_max_scenes: int = 160,
     save_min_post_snap_frames: int = 30,
     route_keys: list[str] | None = None,
+    gpu_transform: bool = False,
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -942,11 +1024,29 @@ def run_segments_batched(
             active = list(states)
             while active:
                 with timers("input_build"):
-                    pre_list = list(pool.map(_pre_step, active))
-                built = [(s, *pre) for s, pre in zip(active, pre_list) if pre is not None]
-                if built:
-                    with timers("to_torch"):
-                        data = _to_torch_batch([b[1] for b in built], model_args, device)
+                    pre_list = list(pool.map(lambda s: _pre_step(s, gpu_transform), active))
+                live = [(s, pre) for s, pre in zip(active, pre_list) if pre is not None]
+                if live:
+                    if gpu_transform:
+                        # ONE batched on-device world_to_ego_frame; downstream identical.
+                        raw_payloads = [pre for _s, pre in live]
+                        with timers("to_torch"):
+                            data, nb_list, npd_list = _to_torch_batch_gpu(
+                                raw_payloads, model_args, device, want_np_dicts=save_dir is not None
+                            )
+                        built = [
+                            (
+                                s,
+                                npd_list[i] if npd_list is not None else None,
+                                nb_list[i],
+                                raw_payloads[i][4],  # idx
+                            )
+                            for i, (s, _pre) in enumerate(live)
+                        ]
+                    else:
+                        built = [(s, *pre) for s, pre in live]
+                        with timers("to_torch"):
+                            data = _to_torch_batch([b[1] for b in built], model_args, device)
                     with timers("model_forward"):
                         # Fire-and-forget prefetch of each segment's upcoming frames
                         # so they decompress on background threads while the GPU is
