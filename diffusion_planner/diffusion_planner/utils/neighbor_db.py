@@ -37,6 +37,10 @@ from tqdm import tqdm
 from diffusion_planner.dimensions import OUTPUT_T
 from diffusion_planner.utils.train_utils import openjson
 
+# Default real-neighbor pattern DB used as the collision-search augmentation source (training
+# and visualization both default to DB-based / copy-paste colliders).
+DEFAULT_NEIGHBOR_DB_PATH = "/mnt/nvme/dataset/basic_dataset/neighbor_db.npz"
+
 # Column indices within a neighbor past row (see neighbor preprocessing / loss.py).
 _PAST_X = 0
 _PAST_Y = 1

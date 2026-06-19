@@ -42,6 +42,10 @@ from diffusion_planner.loss import (  # noqa: E402
 from diffusion_planner.model.guidance.collision import center_rect_to_points  # noqa: E402
 from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
 from diffusion_planner.utils.dataset import DiffusionPlannerData  # noqa: E402
+from diffusion_planner.utils.neighbor_db import (  # noqa: E402
+    DEFAULT_NEIGHBOR_DB_PATH,
+    NeighborPatternDB,
+)
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector  # noqa: E402
 from matplotlib.patches import Polygon  # noqa: E402
 from torch.utils.data import default_collate  # noqa: E402
@@ -81,15 +85,24 @@ def parse_viz_args():
     p.add_argument(
         "--aug_mode",
         type=str,
-        default="synthetic",
-        choices=["synthetic", "none"],
-        help="neighbor augmentation: synthetic colliders / none",
+        default="db",
+        choices=["db", "synthetic", "none"],
+        help="neighbor augmentation: DB copy-paste (default) / synthetic colliders / none",
     )
+    p.add_argument(
+        "--neighbor_db_path",
+        type=str,
+        default=DEFAULT_NEIGHBOR_DB_PATH,
+        help="(db) real-neighbor pattern DB to copy-paste colliding tracks from",
+    )
+    p.add_argument("--neighbor_db_collision_margin", type=float, default=4.0)
+    p.add_argument("--neighbor_min_collision_time", type=float, default=0.8)
+    p.add_argument("--neighbor_search_subsample", type=int, default=0)
     p.add_argument("--neighbor_inject_max", type=int, default=1)
     p.add_argument("--neighbor_inject_prob", type=float, default=1.0)
     p.add_argument("--pedestrian_prob", type=float, default=0.3)
     p.add_argument("--bicycle_prob", type=float, default=0.2)
-    p.add_argument("--keep_clear_radius", type=float, default=3.0)
+    p.add_argument("--keep_clear_radius", type=float, default=6.0)
     p.add_argument(
         "--collider_straight_line",
         type=boolean,
@@ -153,12 +166,21 @@ def main():
 
     injected_mask = np.zeros(raw["neighbor_agents_past"].shape[1], dtype=bool)
     if v.aug_mode != "none":
-        injector = SyntheticColliderInjector(
-            pedestrian_prob=v.pedestrian_prob,
-            bicycle_prob=v.bicycle_prob,
-            keep_clear_radius=v.keep_clear_radius,
-            straight_line=v.collider_straight_line,
-        )
+        if v.aug_mode == "db":
+            injector = NeighborPatternDB(
+                db_path=v.neighbor_db_path,
+                collision_margin=v.neighbor_db_collision_margin,
+                keep_clear_radius=v.keep_clear_radius,
+                min_collision_time=v.neighbor_min_collision_time,
+                search_subsample=v.neighbor_search_subsample,
+            )
+        else:
+            injector = SyntheticColliderInjector(
+                pedestrian_prob=v.pedestrian_prob,
+                bicycle_prob=v.bicycle_prob,
+                keep_clear_radius=v.keep_clear_radius,
+                straight_line=v.collider_straight_line,
+            )
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
         injected_mask = injector.last_injected_mask.cpu().numpy()[0]
         print(f"Augmentation '{v.aug_mode}' applied; injected {int(injected_mask.sum())} neighbors")

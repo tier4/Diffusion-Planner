@@ -30,7 +30,10 @@ import torch  # noqa: E402
 from diffusion_planner.grpo_epoch import _neighbor_future_world  # noqa: E402
 from diffusion_planner.grpo_utils import compute_collision_reward, sample_group  # noqa: E402
 from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
-from diffusion_planner.utils.neighbor_db import NeighborPatternDB  # noqa: E402
+from diffusion_planner.utils.neighbor_db import (  # noqa: E402
+    DEFAULT_NEIGHBOR_DB_PATH,
+    NeighborPatternDB,
+)
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector  # noqa: E402
 
 # reuse the loaders / drawing helpers from the sample-group visualizer.
@@ -73,7 +76,7 @@ def parse_viz_args():
     p.add_argument("--neighbor_inject_prob", type=float, default=1.0)
     p.add_argument("--pedestrian_prob", type=float, default=0.3)
     p.add_argument("--bicycle_prob", type=float, default=0.2)
-    p.add_argument("--keep_clear_radius", type=float, default=3.0)
+    p.add_argument("--keep_clear_radius", type=float, default=6.0)
     p.add_argument(
         "--collider_straight_line",
         type=boolean,
@@ -83,9 +86,9 @@ def parse_viz_args():
     p.add_argument(
         "--neighbor_db_path",
         type=str,
-        default="",
-        help="if set, inject real colliding neighbors searched from this DB "
-        "(matches DB-trained models) instead of synthetic colliders",
+        default=DEFAULT_NEIGHBOR_DB_PATH,
+        help="DB of real colliding neighbors to inject (copy-paste); the default. "
+        'Pass "" to fall back to synthetic colliders instead.',
     )
     p.add_argument(
         "--neighbor_db_collision_margin",
