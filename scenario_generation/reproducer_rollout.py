@@ -366,8 +366,9 @@ class _SegState:
     ego_stuck: int = 0
     n_snaps: int = 0
     # One-pass collision-scene save (set when run_segments_batched gets save_dir).
-    # save_buf rolls the last save_pre_steps+1 (k, idx, live_pose, np_dict) snapshots;
-    # it is CLEARED on an unstick teleport so a saved window never crosses the jump.
+    # save_buf rolls the last save_max_scenes+1 (k, idx, live_pose, np_dict) snapshots
+    # (deep enough for the min-movement window extension); it is CLEARED on an unstick
+    # teleport so a saved window never crosses the jump.
     save_buf: object = None
     saved_collision: bool = False
     last_snap_step: int | None = None
@@ -1093,6 +1094,11 @@ def _precollision_window_start(
     base = t_c - pre_steps
     if last_snap_step is not None:
         base = max(base, last_snap_step)
+    # Cap to max_scenes frames even on the no-extend path, so we never request a step
+    # that was already evicted from the (max_scenes+1)-deep buffer (which would silently
+    # splice recorded GT frames into a window that should be all-live).
+    if max_scenes is not None:
+        base = max(base, t_c - (max_scenes - 1))
     if not poses_by_step or pre_arc_m <= 0:
         return base
     live_ks = sorted(k for k in poses_by_step if k <= t_c)

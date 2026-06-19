@@ -111,7 +111,11 @@ def render_scene(
     ego_valid = (np.abs(ego_fut[:, 0]) + np.abs(ego_fut[:, 1])) > 1e-6
     T = int(np.where(ego_valid)[0].max()) + 1 if ego_valid.any() else 0
     if T < 2:
-        raise ValueError("ego_agent_future has <2 valid steps — nothing to render")
+        raise ValueError(
+            f"{npz_path}: ego_agent_future has <2 valid steps — nothing to perfect-track. "
+            "This is the collision frame (collision+00000, truncated at contact). Render the "
+            "whole saved batch with --batch_dir <dir> (current-state renderer) instead."
+        )
 
     for k in range(T):
         pose = _pose_from_4col(ego_fut[k])
