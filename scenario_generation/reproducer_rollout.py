@@ -901,6 +901,14 @@ def run_segments_batched(
     from concurrent.futures import ThreadPoolExecutor
 
     timers = timers or Timers()
+    if save_dir is not None and save_max_scenes < save_pre_steps + 1:
+        # The buffer is save_max_scenes+1 deep and the window is >= save_pre_steps frames
+        # plus the collision step. A smaller cap would silently truncate the window — fail
+        # loudly rather than save shorter-than-requested batches.
+        raise ValueError(
+            f"save_max_scenes ({save_max_scenes}) must be >= save_pre_steps + 1 "
+            f"({save_pre_steps + 1}); otherwise the saved window is silently truncated."
+        )
     results: list[SegmentResult] = []
     pool = ThreadPoolExecutor(max_workers=max(1, n_build_threads))
     try:
@@ -1127,10 +1135,15 @@ def _precollision_window_start(
 
 
 def _route_key(tl: RouteTimeline) -> str:
-    """Route key from a timeline's NPZ names, e.g. '16-24-07_00000000_00000038' -> '16-24-07_00000000'."""
+    """Route key from a timeline, using the SAME derivation as group_routes/the miner
+    (``route_timeline.route_prefix`` — strip the trailing ``_<frameidx>``), so the
+    output dir name matches the hits.jsonl ``route`` field and distinct routes that
+    only share a leading token are not collapsed together."""
     from pathlib import Path
 
-    return "_".join(Path(tl.npz_paths[0]).stem.split("_")[:2])
+    from scenario_generation.route_timeline import route_prefix
+
+    return route_prefix(Path(tl.npz_paths[0]))
 
 
 def _dump_precollision_window(
@@ -1177,6 +1190,11 @@ def _dump_precollision_window(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Clear any prior batch in this dir: the window length now varies (arc-length extend /
+    # snap clamp / max_scenes), so a re-run could otherwise leave stale older-offset
+    # collision*.npz mixed in with the new window.
+    for stale in out_dir.glob("collision*.npz"):
+        stale.unlink()
     live_by_step = {rec[0]: rec for rec in buf}
     poses_by_step = {rec[0]: rec[2] for rec in buf}  # step k -> world pose (for ego_future)
     fut_len = int(model_args.future_len)
