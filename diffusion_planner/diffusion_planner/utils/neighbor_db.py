@@ -40,6 +40,11 @@ from diffusion_planner.utils.train_utils import openjson
 # Column indices within a neighbor past row (see neighbor preprocessing / loss.py).
 _PAST_X = 0
 _PAST_Y = 1
+# One-hot agent type occupies columns 8..10 = [vehicle, pedestrian, bicycle]
+# (matches synthetic_neighbors._TYPE_BASE).
+_TYPE_BASE = 8
+_TYPE_PEDESTRIAN = 1
+_TYPE_BICYCLE = 2
 
 
 def parse_args():
@@ -213,6 +218,13 @@ class NeighborPatternDB:
         self.future_xy = self.future[:, :, :2].contiguous()  # [M, 80, 2]
         self.future_valid = self.future_xy.abs().sum(dim=-1) > 1e-6  # [M, 80]
 
+        # Precompute past xy + validity + agent type. Pedestrians/bicycles are only injected when
+        # their *past* track overlaps the ego's future path (see inject); vehicles are unrestricted.
+        self.past_xy = self.past[:, :, :2].contiguous()  # [M, 31, 2]
+        self.past_valid = self.past_xy.abs().sum(dim=-1) > 1e-6  # [M, 31]
+        type_idx = self.past[:, -1, _TYPE_BASE : _TYPE_BASE + 3].argmax(dim=-1)  # [M]
+        self.is_vru = (type_idx == _TYPE_PEDESTRIAN) | (type_idx == _TYPE_BICYCLE)  # [M]
+
         # Closest approach of each track to the origin (= the ego's t=0 pose), over the current
         # pose and every valid future step. A track that ever comes within keep_clear_radius of
         # the origin would hit a *stationary* ego, so the forced collision would be unavoidable;
@@ -244,6 +256,9 @@ class NeighborPatternDB:
         self.future_xy = self.future_xy.to(device)
         self.future_valid = self.future_valid.to(device)
         self.track_clear = self.track_clear.to(device)
+        self.past_xy = self.past_xy.to(device)
+        self.past_valid = self.past_valid.to(device)
+        self.is_vru = self.is_vru.to(device)
         self._tau_future = self._tau_future.to(device)
         self._device = device
 
@@ -301,6 +316,28 @@ class NeighborPatternDB:
                 continue
             if sidx is not None:
                 cand = sidx[cand]  # map back to global pattern indices
+
+            # Pedestrians/bicycles: keep only patterns whose *past* track overlaps the ego's
+            # future path (a VRU already on the ego's route), so we don't paste VRUs that merely
+            # happen to cross the route in their future. Vehicles are unrestricted. Computed on
+            # the (small) candidate set only, to avoid an [M, 31, 80] distance tensor.
+            is_vru = self.is_vru[cand]  # [C]
+            if is_vru.any():
+                ego_valid = ego_xy.abs().sum(dim=-1) > 1e-6  # [80]
+                cand_past_xy = self.past_xy[cand]  # [C, 31, 2]
+                cand_past_valid = self.past_valid[cand]  # [C, 31]
+                past_dist = torch.linalg.norm(
+                    cand_past_xy[:, :, None, :] - ego_xy[None, None, :, :], dim=-1
+                )  # [C, 31, 80]
+                past_overlap = (
+                    (past_dist < self.collision_margin)
+                    & cand_past_valid[:, :, None]
+                    & ego_valid[None, None, :]
+                ).any(dim=(1, 2))  # [C]
+                keep = (~is_vru) | past_overlap
+                cand = cand[keep]
+                if cand.numel() == 0:
+                    continue
 
             # write into a random index in [0, first_empty] inclusive (overwrite a real neighbor
             # or take the first empty slot), so injected agents are interspersed, not back-packed.

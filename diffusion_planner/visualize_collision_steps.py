@@ -133,7 +133,11 @@ def main():
     device = v.device
 
     args = build_train_args(v)
-    margin = args.neighbor_collision_margin
+    margin = (
+        f"veh={args.neighbor_collision_margin_vehicle} "
+        f"ped={args.neighbor_collision_margin_pedestrian} "
+        f"bike={args.neighbor_collision_margin_bicycle}"
+    )
     model = load_model(args, v.resume_model_path, v.use_ema, device)
     print(f"Model loaded from {v.resume_model_path} (ema={v.use_ema})")
 

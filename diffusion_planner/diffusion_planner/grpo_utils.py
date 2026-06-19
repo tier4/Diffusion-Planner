@@ -122,7 +122,9 @@ def compute_collision_reward(
         neighbors_future,
         neighbors_future_valid,
         denorm_inputs["neighbor_agents_past"],
-        margin=args.neighbor_collision_margin,
+        margin_vehicle=args.neighbor_collision_margin_vehicle,
+        margin_pedestrian=args.neighbor_collision_margin_pedestrian,
+        margin_bicycle=args.neighbor_collision_margin_bicycle,
     )  # [B*N, T]
 
     if args.w_road_border > 0.0:

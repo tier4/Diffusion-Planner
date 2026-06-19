@@ -235,7 +235,24 @@ def get_args():
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
     parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
-    parser.add_argument("--neighbor_collision_margin", type=float, default=0.25)
+    parser.add_argument(
+        "--neighbor_collision_margin_vehicle",
+        type=float,
+        default=0.25,
+        help="per-side neighbor box inflation [m] for vehicles",
+    )
+    parser.add_argument(
+        "--neighbor_collision_margin_pedestrian",
+        type=float,
+        default=1.0,
+        help="per-side neighbor box inflation [m] for pedestrians",
+    )
+    parser.add_argument(
+        "--neighbor_collision_margin_bicycle",
+        type=float,
+        default=0.5,
+        help="per-side neighbor box inflation [m] for bicycles",
+    )
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)

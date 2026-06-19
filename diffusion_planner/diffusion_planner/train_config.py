@@ -92,7 +92,9 @@ class TrainConfig:
     road_border_n_interp: int = 2
 
     coeff_neighbor_collision_loss: float = 0.0
-    neighbor_collision_margin: float = 0.25
+    neighbor_collision_margin_vehicle: float = 0.25
+    neighbor_collision_margin_pedestrian: float = 1.0
+    neighbor_collision_margin_bicycle: float = 0.5
 
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1

@@ -6,6 +6,13 @@ from diffusion_planner.model.guidance.collision import center_rect_to_points
 
 _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
 
+# One-hot agent type occupies columns 8..10 = [vehicle, pedestrian, bicycle]
+# (matches synthetic_neighbors._TYPE_BASE / neighbor_db).
+_TYPE_BASE = 8
+_TYPE_VEHICLE = 0
+_TYPE_PEDESTRIAN = 1
+_TYPE_BICYCLE = 2
+
 
 # ---------------------------------------------------------------------------
 # Velocity (delta) representation utilities  (HDP paper, Section IV-B)
@@ -389,16 +396,21 @@ def compute_neighbor_collision_penalty(
     neighbors_future: torch.Tensor,
     neighbors_future_valid: torch.Tensor,
     neighbor_agents_past: torch.Tensor,
-    margin: float,
+    margin_vehicle: float,
+    margin_pedestrian: float,
+    margin_bicycle: float,
 ) -> torch.Tensor:
     """Compute neighbor collision penalty for ego trajectory.
 
-    The neighbor box is inflated by ``margin`` on every side and the penalty is the SAT
-    penetration depth of the ego box into that inflated box. This is equivalent to a
-    ``relu(margin - distance)`` proximity hinge while a buffer remains, smoothly continuing into
-    a true overlap-depth penalty once the boxes actually touch -- and, unlike a point-to-segment
-    distance, it does not depend on any discrete edge-point sampling (so it never misses shallow
-    overlaps or a small agent sitting inside the ego footprint).
+    The neighbor box is inflated per agent type and the penalty is the SAT penetration depth of
+    the ego box into that inflated box. This is equivalent to a ``relu(margin - distance)``
+    proximity hinge while a buffer remains, smoothly continuing into a true overlap-depth penalty
+    once the boxes actually touch -- and, unlike a point-to-segment distance, it does not depend
+    on any discrete edge-point sampling (so it never misses shallow overlaps or a small agent
+    sitting inside the ego footprint).
+
+    The inflation amount is set independently per agent type (one-hot type in past cols 8..10);
+    all three must be specified explicitly by the caller.
 
     Args:
         ego_edge_points: [B, T, K, 2] sample points on ego bbox edges (only the 4 corners,
@@ -406,7 +418,9 @@ def compute_neighbor_collision_penalty(
         neighbors_future: [B, Pn, T, 4] neighbor future trajectories in world frame.
         neighbors_future_valid: [B, Pn, T] validity mask for neighbor timesteps.
         neighbor_agents_past: [B, Pn_max, T_past, D] denormalized neighbor past states.
-        margin: clearance threshold (meters); neighbor boxes are inflated by this amount.
+        margin_vehicle: per-side inflation (meters) for vehicles.
+        margin_pedestrian: per-side inflation (meters) for pedestrians.
+        margin_bicycle: per-side inflation (meters) for bicycles.
 
     Returns:
         penalty: [B, T] non-negative penalty per timestep.
@@ -425,10 +439,21 @@ def compute_neighbor_collision_penalty(
     # Ego box corners at eval timesteps (corners are every K // 4-th edge sample point).
     ego_corners = ego_edge_points[:, steps][:, :, :: K // 4, :]  # [B, S, 4, 2]
 
-    # Neighbor sizes from last past timestep, inflated by `margin` on each side.
+    # Per-neighbor inflation margin selected by the agent type one-hot (cols 8..10).
     neighbor_sizes = neighbor_agents_past[:, :Pn, -1, :]
-    neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3) + 2.0 * margin  # [B, Pn]
-    neighbor_length = torch.clamp(neighbor_sizes[..., 7], min=1e-3) + 2.0 * margin  # [B, Pn]
+    margin_by_type = torch.tensor(
+        [margin_vehicle, margin_pedestrian, margin_bicycle],
+        device=device,
+        dtype=neighbor_sizes.dtype,
+    )  # ordered [vehicle, pedestrian, bicycle]
+    type_idx = neighbor_sizes[..., _TYPE_BASE : _TYPE_BASE + 3].argmax(dim=-1)  # [B, Pn]
+    neighbor_margin = margin_by_type[type_idx]  # [B, Pn]
+
+    # Neighbor sizes from last past timestep, inflated by the per-type margin on each side.
+    neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3) + 2.0 * neighbor_margin  # [B, Pn]
+    neighbor_length = (
+        torch.clamp(neighbor_sizes[..., 7], min=1e-3) + 2.0 * neighbor_margin
+    )  # [B, Pn]
 
     # Neighbor pose at eval timesteps.
     neighbor_pos = neighbors_future[:, :, steps, :2]  # [B, Pn, S, 2]
