@@ -106,5 +106,6 @@ def test_precollision_window_clamps_across_unstick_snap():
     assert _precollision_window_start(t_c, pre, 400) == 499
     # snap INSIDE the window -> clamp to the post-snap step (shorter, snap-free window)
     assert _precollision_window_start(t_c, pre, 540) == 540
-    # early collision, no snap -> negative start preserved (backtrack path handles <0)
-    assert _precollision_window_start(50, pre, None) == -30
+    # early collision, no snap -> clamped to the live floor (0); recorded backfill is disabled,
+    # so the window is shorter/all-live rather than starting at a negative (pre-segment) step.
+    assert _precollision_window_start(50, pre, None) == 0
