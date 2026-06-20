@@ -90,7 +90,7 @@ def get_args():
 
     # Training
     parser.add_argument("--seed", type=int, default=3407)
-    parser.add_argument("--train_epochs", type=int, default=50)
+    parser.add_argument("--train_epochs", type=int, default=40)
     parser.add_argument("--batch_size", type=int, default=64, help="number of scenes per step")
     parser.add_argument("--save_utd", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
