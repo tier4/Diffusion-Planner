@@ -374,7 +374,7 @@ class BatchedRolloutManager:
                 if "neighbor_agents_future" in data:
                     nf = data["neighbor_agents_future"]
                     if nf.dim() == 4:
-                        nf = nf[0]  # [N_nb, T, 3]
+                        nf = nf[0]  # [N_nb, T, C] (4-col x,y,cos,sin; legacy 3 tolerated)
                 scene_data.append(data)
                 scene_paths.append(path)
                 nb_futures.append(nf)

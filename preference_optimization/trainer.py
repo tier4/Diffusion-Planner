@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.scene_skip import is_skipped
 from torch import optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -294,7 +295,8 @@ class DPOTrainer:
 
         for pref in preferences:
             npz_path = pref.get("npz_path")
-            if npz_path is None or npz_path in seen:
+            # Skip converter-flagged frames (consistent with the DPODataset training filter).
+            if npz_path is None or npz_path in seen or is_skipped(npz_path):
                 continue
             try:
                 obs = load_npz_data(npz_path, self.device)

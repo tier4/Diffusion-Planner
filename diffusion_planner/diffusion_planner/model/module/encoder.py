@@ -304,6 +304,7 @@ class Encoder(nn.Module):
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
         encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
+        encoder_outputs = encoder_outputs.masked_fill(encoding_mask.view(B, self.token_num, 1), 0.0)
 
         return encoder_outputs
 

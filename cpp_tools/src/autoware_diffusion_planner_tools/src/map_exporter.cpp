@@ -110,11 +110,12 @@ json to_json_raw_lanelet_map(const lanelet::LaneletMapConstPtr & map_ptr)
     if (center.empty() || left.empty() || right.empty()) {
       continue;
     }
-    root["lane_segments"].push_back(json{
-      {"id", static_cast<int64_t>(ll.id())},
-      {"centerline", center},
-      {"left_boundary", left},
-      {"right_boundary", right}});
+    root["lane_segments"].push_back(
+      json{
+        {"id", static_cast<int64_t>(ll.id())},
+        {"centerline", center},
+        {"left_boundary", left},
+        {"right_boundary", right}});
   }
 
   root["polygons"] = json::array();
@@ -196,8 +197,8 @@ int main(int argc, char ** argv)
 
       const lanelet::GPSPoint position{lat, lon, alt};
       const lanelet::Origin origin{position};
-      projector = std::make_unique<lanelet::projection::TransverseMercatorProjector>(
-        origin, scale_factor);
+      projector =
+        std::make_unique<lanelet::projection::TransverseMercatorProjector>(origin, scale_factor);
     } else {
       return fail_and_shutdown(
         "Unsupported projector_type in map_projector_info.yaml: " + projector_type +

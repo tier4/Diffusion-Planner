@@ -232,6 +232,9 @@ def main():
 
     with open(args.scenes) as f:
         scene_paths = json.load(f)
+        from diffusion_planner.utils.scene_skip import filter_scene_list
+
+        scene_paths = filter_scene_list(scene_paths, label="eval_centerline_metrics")
     print(f"Evaluating centerline on {len(scene_paths)} scenes [{args.tag}]")
 
     cfg = RewardConfig()  # defaults: usage_mode="baselink", time_weight_min=0.3

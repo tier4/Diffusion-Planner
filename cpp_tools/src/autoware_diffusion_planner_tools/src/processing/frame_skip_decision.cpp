@@ -33,14 +33,10 @@ constexpr int64_t kStuckThresholdTicks = 30;
 }  // namespace
 
 SkippingInfo decide_frame_skip(
-  const FrameSkipInputs & inputs,
-  const std::vector<float> & ego_future,
-  const std::vector<float> & ego_shape,
-  const std::vector<float> & static_objects,
-  const std::vector<float> & neighbor_future,
-  const std::vector<float> & neighbor_past,
-  const std::vector<float> & line_strings,
-  const std::vector<float> & lanes,
+  const FrameSkipInputs & inputs, const std::vector<float> & ego_future,
+  const std::vector<float> & ego_shape, const std::vector<float> & static_objects,
+  const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
+  const std::vector<float> & line_strings, const std::vector<float> & lanes,
   const FrameFilterParams & filter_params)
 {
   using autoware::diffusion_planner::INPUT_T;
@@ -76,17 +72,19 @@ SkippingInfo decide_frame_skip(
     return SkippingInfo::no_future_progress(sustained_s);
   }
 
-  if (const frame_filters::CollisionResult collision = frame_filters::check_collision(
-        ego_future, ego_shape, static_objects, neighbor_future, neighbor_past, line_strings,
-        filter_params.static_object_margin, filter_params.neighbor_margin,
-        filter_params.road_border_margin, filter_params.collision_time_stride);
-      collision.collided()) {
+  if (
+    const frame_filters::CollisionResult collision = frame_filters::check_collision(
+      ego_future, ego_shape, static_objects, neighbor_future, neighbor_past, line_strings,
+      filter_params.static_object_margin, filter_params.neighbor_margin,
+      filter_params.road_border_margin, filter_params.collision_time_stride);
+    collision.collided()) {
     return SkippingInfo::collision(collision.reasons);
   }
 
-  if (const frame_filters::OffLaneResult offlane =
-        frame_filters::compute_offlane_score(ego_future, lanes, filter_params.offlane_time_stride);
-      frame_filters::is_off_lane(offlane, filter_params.offlane_max_score)) {
+  if (
+    const frame_filters::OffLaneResult offlane =
+      frame_filters::compute_offlane_score(ego_future, lanes, filter_params.offlane_time_stride);
+    frame_filters::is_off_lane(offlane, filter_params.offlane_max_score)) {
     return SkippingInfo::off_lane(offlane.mean_distance, offlane.max_distance);
   }
 

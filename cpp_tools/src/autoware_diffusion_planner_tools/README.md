@@ -60,3 +60,22 @@ on a rosbag and writes results to an output rosbag.
 ros2 run autoware_diffusion_planner_tools inference_tool \
   <rosbag_path> <vector_map_path> <output_rosbag_path>
 ```
+
+## Per-frame JSON sidecar (data converter)
+
+The data converter writes one JSON sidecar next to each frame's `.npz`, carrying the
+absolute map ego pose plus two fields used by downstream tooling:
+
+| field | meaning |
+| --- | --- |
+| `is_skipped` (bool) | `true` if the production filter would have dropped this frame (stopped at a red/yellow light, no future progress, GT collision, off-lane, stale data). See also `skipping_info.label`. |
+| `neighbor_ids` (list[str]) | perception track UUIDs of the kept neighbors, aligned 1:1 with the `neighbor_past` slots (sorted by ego distance, trimmed). Lets a consumer associate the same agent across frames. |
+
+By default the converter **drops** flagged frames (writes only accepted ones). Pass
+`--write_skipped_npz=1` to instead write **every** 10 Hz frame, flagged in the sidecar —
+producing one unified corpus that the closed-loop perception reproducer can replay
+gap-free while training/eval skip the flagged frames (see "Skip-for-training filtering"
+in `scenario_generation/README.md`).
+
+Both fields are additive and backward-compatible: the `.npz` tensors are unchanged, and
+a sidecar lacking them is treated as "not skipped" / "no track ids".

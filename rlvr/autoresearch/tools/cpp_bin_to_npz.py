@@ -8,20 +8,22 @@ reference NPZs.
 
 Key transforms:
 - ego_agent_past:    cpp (31, 4) [x,y,cos,sin] → npz (31, 3) [x,y,yaw]
-- ego_agent_future:  cpp (80, 4) [x,y,cos,sin] → npz (80, 3) [x,y,yaw]
+- ego_agent_future:  cpp (80, 4) [x,y,cos,sin] → npz (80, 4) [x,y,cos,sin]  (kept 4-col)
 - goal_pose:         cpp (4,)   [x,y,cos,sin] → npz (3,)   [x,y,yaw]
-- neighbor_agents_future: cpp (320, 80, 4) → npz (320, 80, 3) [x,y,yaw]
+- neighbor_agents_future: cpp (320, 80, 4) → npz (320, 80, 4) [x,y,cos,sin]  (kept 4-col)
 - speed-limit fields: (N,) → (N, 1), int32 has-flag → bool
 
-heading is recovered with atan2(sin, cos). This avoids a double-conversion bug:
-Python `load_npz_data` applies `heading_to_cos_sin` once at load time on 3-channel
-inputs, so emit 3-channel heading here (do NOT pre-convert to cos/sin).
+FUTURES are kept 4-col [x,y,cos,sin]: the trainable/reward schema requires it and the
+reward path hard-fails on 3-col. ego_agent_past and goal_pose stay 3-col [x,y,yaw] (the
+canonical schema — the loader/model widen them, and `heading_to_cos_sin` is idempotent so
+a 4-col input would also pass through unchanged).
 """
 
 import argparse
 import glob
 import json
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -165,9 +167,10 @@ def decode_bin(raw: bytes) -> dict[str, np.ndarray]:
     return {
         "ego_agent_past": _xyc_to_xyy(ego_past_xyc).astype(np.float32),
         "ego_current_state": ego_current.astype(np.float32),
-        "ego_agent_future": _xyc_to_xyy(ego_future_xyc).astype(np.float32),
+        # Futures stay 4-col [x,y,cos,sin] (trainable/reward schema; never 3-col).
+        "ego_agent_future": ego_future_xyc.astype(np.float32),
         "neighbor_agents_past": neighbor_past.astype(np.float32),
-        "neighbor_agents_future": _xyc_to_xyy(neighbor_future_xyc).astype(np.float32),
+        "neighbor_agents_future": neighbor_future_xyc.astype(np.float32),
         "static_objects": static_objects.astype(np.float32),
         "lanes": lanes.astype(np.float32),
         "lanes_speed_limit": lanes_speed_limit.astype(np.float32),
@@ -184,21 +187,50 @@ def decode_bin(raw: bytes) -> dict[str, np.ndarray]:
     }
 
 
-def convert_dir(src_dir: Path, dst_dir: Path, skip_existing: bool = True) -> dict[str, int]:
+def convert_dir(
+    src_dir: Path, dst_dir: Path, skip_existing: bool = True, keep_skipped: bool = False
+) -> dict[str, int]:
+    """Decode every ``.bin`` in ``src_dir`` to a 320-model ``.npz`` in ``dst_dir``.
+
+    ``keep_skipped``: by DEFAULT, frames the cpp converter flagged ``is_skipped`` in their
+    sibling ``.json`` (red-light dwell, no progress, stale perception, ...) are dropped — the
+    training/eval default. Set True to KEEP them: the frame is still converted AND its ``.json``
+    sidecar is copied next to the ``.npz``, so (a) the perception reproducer gets a GAP-FREE
+    timeline and (b) the training filter (``scene_skip.is_skipped``, which reads the sibling
+    sidecar) can still exclude them. Without copying the sidecar the kept frames would lose the
+    flag and silently leak into training.
+    """
     dst_dir.mkdir(parents=True, exist_ok=True)
     bins = sorted(glob.glob(str(src_dir / "*.bin")))
-    stats = {"total": len(bins), "ok": 0, "skipped_existing": 0, "skipped_invalid": 0, "errors": 0}
+    stats = {
+        "total": len(bins),
+        "ok": 0,
+        "skipped_existing": 0,
+        "skipped_invalid": 0,
+        "kept_skipped": 0,
+        "errors": 0,
+    }
     for fp in bins:
         stem = Path(fp).stem
-        # Each .bin has a sibling .json with skipping_info — skip rejected frames
+        # Each .bin has a sibling .json with skipping_info.
         jpath = Path(fp).with_suffix(".json")
+        is_skip = False
         if jpath.exists():
             with open(jpath) as f:
                 meta = json.load(f)
-            if meta.get("is_skipped", False):
+            is_skip = bool(meta.get("is_skipped", False))
+            if is_skip and not keep_skipped:
                 stats["skipped_invalid"] += 1
                 continue
         out = dst_dir / f"{stem}.npz"
+        # Carry the sidecar across for every kept frame THAT HAS ONE (skipped or not) so
+        # is_skipped detection + the reproducer's pose timeline survive into dst. Frames
+        # whose source .bin has no sibling .json get no sidecar in dst (resolve_sidecar then
+        # falls back to sidecar_root / treats them as not-skipped). Done BEFORE the
+        # skip_existing check so an incremental re-run still backfills the sidecar for a
+        # frame whose .npz an earlier (non-keep_skipped) pass already wrote.
+        if keep_skipped and jpath.exists():
+            shutil.copy2(jpath, dst_dir / f"{stem}.json")
         if skip_existing and out.exists():
             stats["skipped_existing"] += 1
             continue
@@ -208,6 +240,8 @@ def convert_dir(src_dir: Path, dst_dir: Path, skip_existing: bool = True) -> dic
             arrs = decode_bin(raw)
             np.savez_compressed(out, **arrs)
             stats["ok"] += 1
+            if is_skip:
+                stats["kept_skipped"] += 1
         except Exception as exc:
             print(f"ERROR on {fp}: {exc}")
             stats["errors"] += 1
@@ -221,9 +255,18 @@ def main() -> None:
     )
     ap.add_argument("--dst", type=Path, required=True, help="dir to write .npz files")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument(
+        "--keep_skipped",
+        action="store_true",
+        help="keep converter-flagged is_skipped frames (and copy their .json sidecar) so the "
+        "perception reproducer gets a gap-free timeline; training/eval still filter them via "
+        "the sidecar. Default: drop them (training/eval default).",
+    )
     args = ap.parse_args()
 
-    stats = convert_dir(args.src, args.dst, skip_existing=not args.overwrite)
+    stats = convert_dir(
+        args.src, args.dst, skip_existing=not args.overwrite, keep_skipped=args.keep_skipped
+    )
     print(json.dumps(stats, indent=2))
 
 

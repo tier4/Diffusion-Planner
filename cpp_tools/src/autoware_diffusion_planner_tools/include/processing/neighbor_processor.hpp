@@ -20,10 +20,24 @@
 #include <Eigen/Core>
 
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
-std::pair<std::vector<float>, std::vector<float>> process_neighbor_agents_and_future(
+// Result of neighbor processing. ``neighbor_ids`` are the perception track UUIDs
+// (hex strings) of the kept agents, in the SAME order as the neighbor_past slots
+// (sorted by ego distance, trimmed to MAX_NUM_NEIGHBORS). They are persisted in
+// the per-frame JSON sidecar so the closed-loop Perception Reproducer can
+// associate the same agent across frames (enables temporal interpolation; the
+// raw neighbor arrays are slot-sorted per frame and not ID-stable on their own).
+struct NeighborResult
+{
+  std::vector<float> neighbor_past;
+  std::vector<float> neighbor_future;
+  std::vector<std::string> neighbor_ids;
+};
+
+NeighborResult process_neighbor_agents_and_future(
   const std::vector<FrameData> & data_list, const int64_t current_idx,
   const Eigen::Matrix4d & map2bl_matrix);
 

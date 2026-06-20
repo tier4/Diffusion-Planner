@@ -196,7 +196,8 @@ def model_training(args: TrainConfig):
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
-        diffusion_planner, optimizer, scheduler, init_epoch, wandb_id, model_ema = resume_model(
+        # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
+        diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
             args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
         )
 
@@ -207,24 +208,20 @@ def model_training(args: TrainConfig):
 
     else:
         init_epoch = 0
-        wandb_id = None
-
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
-        # if resume_model_path is none, this is pretraining
-        # if wandb_run_id is not none, the wandb run is injected from outside
-        if args.resume_model_path is None and args.wandb_run_id is not None:
-            wandb_id = args.wandb_run_id
 
+        # if wandb_run_id is given, the training will be logged to the existing run instead of creating a new one.
         wandb.init(
             project=args.wandb_project_name,
             name=args.exp_name,
             notes=args.notes,
             resume="allow",
-            id=wandb_id,
+            id=args.wandb_run_id,
             dir=f"{save_path}",
         )
+
         wandb.config.update(args_dict)
 
         # this function creates dataset artifacts and associate them with wandb run
@@ -344,7 +341,8 @@ def model_training(args: TrainConfig):
                 "optimizer": optimizer.state_dict(),
                 "schedule": scheduler.state_dict(),
                 "loss": valid_loss_ego,
-                "wandb_id": wandb_id,
+                # We always use new wandb run for each training session, so we don't need to save the wandb_id in the model_dict.
+                "wandb_id": None,
             }
             torch.save(model_dict, f"{save_path}/latest.pth")
 
@@ -370,3 +368,6 @@ def model_training(args: TrainConfig):
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
+
+    if global_rank == 0 and wandb.run is not None:
+        wandb.finish()

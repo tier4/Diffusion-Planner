@@ -13,9 +13,11 @@
 // limitations under the License.
 
 #include "timestamp_stats.hpp"
+
 #include <gtest/gtest.h>
-#include <vector>
+
 #include <string>
+#include <vector>
 
 using namespace timestamp_stats;
 
