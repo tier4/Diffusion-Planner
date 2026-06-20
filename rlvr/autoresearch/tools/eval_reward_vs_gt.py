@@ -99,6 +99,9 @@ def main():
 
     with open(args.scenes) as f:
         scenes = json.load(f)
+        from diffusion_planner.utils.scene_skip import filter_scene_list
+
+        scenes = filter_scene_list(scenes, label="eval_reward_vs_gt")
 
     if args.indices:
         scene_indices = args.indices

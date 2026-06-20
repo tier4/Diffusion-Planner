@@ -28,7 +28,12 @@ def load_npz_data(
         data: dict[str, torch.Tensor] = {}
 
         for key, value in loaded.items():
-            if key in {"map_name", "token", "delay"}:
+            if key in {"map_name", "token", "delay", "origin"}:
+                continue
+            value = np.asarray(value)
+            # Skip string/object metadata (e.g. the reproducer extractor's "origin"
+            # tag) — only numeric model-input arrays become tensors.
+            if value.dtype.kind in ("U", "S", "O"):
                 continue
             data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
 

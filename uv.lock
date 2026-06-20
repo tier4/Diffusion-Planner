@@ -10,7 +10,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-10T05:31:35.207100564Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -19,6 +19,7 @@ members = [
     "diffusion-planner-workspace",
     "exploration-policy",
     "guidance-gui",
+    "planner-metrics",
     "preference-optimization",
     "rlvr",
     "scenario-generation",
@@ -363,6 +364,7 @@ dependencies = [
     { name = "opencv-python" },
     { name = "pandas" },
     { name = "peft" },
+    { name = "planner-metrics" },
     { name = "protobuf" },
     { name = "pydantic" },
     { name = "pytorch-lightning" },
@@ -386,6 +388,7 @@ requires-dist = [
     { name = "opencv-python" },
     { name = "pandas", specifier = ">=2,<3" },
     { name = "peft" },
+    { name = "planner-metrics", editable = "planner_metrics" },
     { name = "protobuf" },
     { name = "pydantic" },
     { name = "pytorch-lightning" },
@@ -404,6 +407,7 @@ dependencies = [
     { name = "diffusion-planner" },
     { name = "exploration-policy" },
     { name = "guidance-gui" },
+    { name = "planner-metrics" },
     { name = "preference-optimization" },
     { name = "rlvr" },
     { name = "scenario-generation" },
@@ -422,6 +426,7 @@ requires-dist = [
     { name = "diffusion-planner", editable = "diffusion_planner" },
     { name = "exploration-policy", editable = "exploration_policy" },
     { name = "guidance-gui", editable = "guidance_gui" },
+    { name = "planner-metrics", editable = "planner_metrics" },
     { name = "preference-optimization", editable = "preference_optimization" },
     { name = "rlvr", editable = "rlvr" },
     { name = "scenario-generation", editable = "scenario_generation" },
@@ -1353,6 +1358,21 @@ wheels = [
 ]
 
 [[package]]
+name = "planner-metrics"
+version = "0.1.0"
+source = { editable = "planner_metrics" }
+dependencies = [
+    { name = "numpy" },
+    { name = "torch" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=1.26,<2" },
+    { name = "torch" },
+]
+
+[[package]]
 name = "platformdirs"
 version = "4.9.6"
 source = { registry = "https://pypi.flatt.tech/simple/" }
@@ -1712,6 +1732,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
+    { name = "planner-metrics" },
     { name = "preference-optimization" },
     { name = "safetensors" },
     { name = "scenario-generation" },
@@ -1728,6 +1749,7 @@ requires-dist = [
     { name = "matplotlib" },
     { name = "numpy", specifier = ">=1.26,<2" },
     { name = "pandas", specifier = ">=2,<3" },
+    { name = "planner-metrics", editable = "planner_metrics" },
     { name = "preference-optimization", editable = "preference_optimization" },
     { name = "safetensors" },
     { name = "scenario-generation", editable = "scenario_generation" },

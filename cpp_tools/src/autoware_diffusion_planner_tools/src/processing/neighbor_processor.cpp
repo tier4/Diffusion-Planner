@@ -24,12 +24,12 @@
 #include <string>
 #include <unordered_map>
 
-std::pair<std::vector<float>, std::vector<float>> process_neighbor_agents_and_future(
+NeighborResult process_neighbor_agents_and_future(
   const std::vector<FrameData> & data_list, const int64_t current_idx,
   const Eigen::Matrix4d & map2bl_matrix)
 {
-  using autoware::diffusion_planner::AgentHistory;
   using autoware::diffusion_planner::AGENT_STATE_DIM;
+  using autoware::diffusion_planner::AgentHistory;
   using autoware::diffusion_planner::flatten_histories_to_vector;
   using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
   using autoware::diffusion_planner::MAX_NUM_NEIGHBORS;
@@ -54,6 +54,13 @@ std::pair<std::vector<float>, std::vector<float>> process_neighbor_agents_and_fu
 
   // Build id -> AgentHistory map for future filling
   const std::vector<AgentHistory> agent_histories = transformed_histories;
+  // Ordered track UUIDs, aligned 1:1 with the neighbor_past slots (same sorted +
+  // trimmed order as flatten_histories_to_vector above). Persisted to the sidecar.
+  std::vector<std::string> neighbor_ids;
+  neighbor_ids.reserve(agent_histories.size());
+  for (const auto & h : agent_histories) {
+    neighbor_ids.push_back(h.get_latest_state().object_id);
+  }
   std::unordered_map<std::string, AgentHistory> id_to_history;
   for (size_t i = 0; i < agent_histories.size(); ++i) {
     const auto object_id = agent_histories[i].get_latest_state().object_id;
@@ -104,5 +111,5 @@ std::pair<std::vector<float>, std::vector<float>> process_neighbor_agents_and_fu
     }
   }
 
-  return std::make_pair(neighbor_past, neighbor_future);
+  return NeighborResult{neighbor_past, neighbor_future, neighbor_ids};
 }

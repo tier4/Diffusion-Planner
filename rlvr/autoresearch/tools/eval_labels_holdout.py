@@ -43,6 +43,9 @@ def main():
 
     with open(args.holdout) as f:
         rows = json.load(f)["scenes"]
+        from diffusion_planner.utils.scene_skip import filter_scene_list
+
+        rows = filter_scene_list(rows, label="eval_labels_holdout")
 
     preds, targs, kinds = [], [], []
     for r in rows:

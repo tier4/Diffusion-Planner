@@ -186,11 +186,11 @@ TEST(OfflaneScoreTest, EmptyLanesNoCenterline)
 
 TEST(CheckCollisionTest, NoObjectsNoCollision)
 {
+  using autoware::diffusion_planner::INPUT_T;
   using autoware::diffusion_planner::MAX_NUM_NEIGHBORS;
   using autoware::diffusion_planner::OUTPUT_T;
   using autoware::diffusion_planner::POSE_DIM;
   using autoware::diffusion_planner::STATIC_OBJECTS_SHAPE;
-  using autoware::diffusion_planner::INPUT_T;
 
   const std::vector<float> ego_future(OUTPUT_T * POSE_DIM, 0.0f);
   const std::vector<float> ego_shape = {2.75f, 4.34f, 1.70f};
@@ -207,7 +207,7 @@ TEST(CheckCollisionTest, NoObjectsNoCollision)
   const std::vector<float> line_strings(NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * ls_dim, 0.0f);
 
   const CollisionResult r = check_collision(
-    ego_future, ego_shape, static_objects, neighbor_future, neighbor_past, line_strings,
-    0.0f, 0.0f, 0.0f, 5);
+    ego_future, ego_shape, static_objects, neighbor_future, neighbor_past, line_strings, 0.0f, 0.0f,
+    0.0f, 5);
   EXPECT_FALSE(r.collided());
 }

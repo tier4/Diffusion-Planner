@@ -24,7 +24,6 @@
 #include <autoware/diffusion_planner/dimensions.hpp>
 #include <autoware/diffusion_planner/inference/tensorrt_inference.hpp>
 #include <autoware/diffusion_planner/preprocessing/preprocessing_utils.hpp>
-
 #include <rclcpp/parameter.hpp>
 #include <rclcpp/parameter_map.hpp>
 
