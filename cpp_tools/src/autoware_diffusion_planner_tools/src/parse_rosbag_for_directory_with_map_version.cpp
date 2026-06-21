@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/**
+ * @file parse_rosbag_for_directory_with_map_version.cpp
+ * @brief Convert rosbag directories to Diffusion Planner npz files with map version resolution.
+ */
+
 #include "cli/converter_options.hpp"
 #include "conversion/data_converter.hpp"
 
@@ -40,39 +45,29 @@ namespace fs = std::filesystem;
 namespace
 {
 
-enum class MapVersionSource {
-  Metadata,
-  LogFileInfo,
-};
-
+/**
+ * @brief Parsed command-line options for directory-based rosbag conversion.
+ */
 struct DirectoryOptions
 {
   std::vector<fs::path> target_dir_list;
   fs::path save_root;
   ConverterOptions converter;
   int64_t num_workers{32};
-  MapVersionSource map_version_source{MapVersionSource::LogFileInfo};
 };
 
-MapVersionSource parse_map_version_source(const std::string & value)
-{
-  if (value == "metadata") {
-    return MapVersionSource::Metadata;
-  }
-  if (value == "log_file_info") {
-    return MapVersionSource::LogFileInfo;
-  }
-  throw std::invalid_argument("map_version_source must be one of: metadata, log_file_info");
-}
-
+/**
+ * @brief Parse command-line arguments and build a DirectoryOptions.
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ * @return Parsed options, or std::nullopt if parsing failed.
+ */
 std::optional<DirectoryOptions> parse_directory_arguments(int argc, char ** argv)
 {
   DirectoryOptions options;
   options.converter = ConverterOptions::default_converter_options();
   std::vector<std::string> target_dir_list;
   std::string save_root;
-  std::string map_version_source{"log_file_info"};
-
   CLI::App app{"Convert rosbag directories to Diffusion Planner npz files"};
   app
     .add_option(
@@ -87,11 +82,6 @@ std::optional<DirectoryOptions> parse_directory_arguments(int argc, char ** argv
       "are written.")
     ->required();
   app.add_option("--num_workers", options.num_workers, "Number of worker threads to run.");
-  app
-    .add_option(
-      "--map_version_source", map_version_source,
-      "File used to read area_map_version_id: metadata or log_file_info.")
-    ->check(CLI::IsMember({"metadata", "log_file_info"}));
   options.converter.add_converter_options(app);
 
   try {
@@ -104,7 +94,6 @@ std::optional<DirectoryOptions> parse_directory_arguments(int argc, char ** argv
     options.target_dir_list.emplace_back(target_dir);
   }
   options.save_root = save_root;
-  options.map_version_source = parse_map_version_source(map_version_source);
 
   if (options.target_dir_list.empty() || options.save_root.empty()) {
     return std::nullopt;
@@ -122,6 +111,11 @@ std::optional<DirectoryOptions> parse_directory_arguments(int argc, char ** argv
   return options;
 }
 
+/**
+ * @brief Recursively find rosbag directories by locating metadata.yaml files.
+ * @param target_dir_list List of root directories to search.
+ * @return Sorted, unique list of bag directory paths.
+ */
 std::vector<fs::path> find_bag_directories(const std::vector<fs::path> & target_dir_list)
 {
   std::vector<fs::path> bag_dirs;
@@ -141,6 +135,11 @@ std::vector<fs::path> find_bag_directories(const std::vector<fs::path> & target_
   return bag_dirs;
 }
 
+/**
+ * @brief Extract area_map_version_id from a rosbag metadata.yaml file.
+ * @param metadata_path Path to metadata.yaml.
+ * @return The map version string, or std::nullopt if not found or unreadable.
+ */
 std::optional<std::string> load_map_version_from_metadata(const fs::path & metadata_path)
 {
   if (!fs::is_regular_file(metadata_path)) {
@@ -163,6 +162,11 @@ std::optional<std::string> load_map_version_from_metadata(const fs::path & metad
   return std::nullopt;
 }
 
+/**
+ * @brief Extract area_map_version_id from a log_file_info.json file.
+ * @param info_path Path to log_file_info.json.
+ * @return The map version string, or std::nullopt if not found or unreadable.
+ */
 std::optional<std::string> load_map_version_from_log_file_info(const fs::path & info_path)
 {
   if (!fs::is_regular_file(info_path)) {
@@ -181,33 +185,34 @@ std::optional<std::string> load_map_version_from_log_file_info(const fs::path & 
   return std::nullopt;
 }
 
-std::optional<std::string> load_map_version_id(
-  const fs::path & bag_path, const MapVersionSource map_version_source)
+/**
+ * @brief Load area_map_version_id, trying log_file_info.json first, then metadata.yaml.
+ * @param bag_path Path to the bag directory.
+ * @return The map version string, or std::nullopt if neither source has it.
+ */
+std::optional<std::string> load_map_version_id(const fs::path & bag_path)
 {
-  if (map_version_source == MapVersionSource::Metadata) {
-    return load_map_version_from_metadata(bag_path / "metadata.yaml");
+  auto version = load_map_version_from_log_file_info(bag_path / "log_file_info.json");
+  if (version) {
+    return version;
   }
-  return load_map_version_from_log_file_info(bag_path / "log_file_info.json");
+  return load_map_version_from_metadata(bag_path / "metadata.yaml");
 }
 
-std::string map_version_source_name(const MapVersionSource map_version_source)
-{
-  if (map_version_source == MapVersionSource::Metadata) {
-    return "metadata";
-  }
-  return "log_file_info";
-}
-
-fs::path resolve_vector_map_path(
-  const fs::path & bag_path, const MapVersionSource map_version_source)
+/**
+ * @brief Resolve the lanelet2_map.osm path for a bag using map version and date-based heuristics.
+ * @param bag_path Path to the bag directory.
+ * @return Path to the resolved lanelet2_map.osm file.
+ * @throws std::runtime_error if no matching map file is found.
+ */
+fs::path resolve_vector_map_path(const fs::path & bag_path)
 {
   const fs::path metadata_path = bag_path / "metadata.yaml";
   const fs::path log_file_info_path = bag_path / "log_file_info.json";
   const fs::path date = bag_path.parent_path().filename();
   const fs::path bag_time = bag_path.filename();
 
-  const std::optional<std::string> map_version_id =
-    load_map_version_id(bag_path, map_version_source);
+  const std::optional<std::string> map_version_id = load_map_version_id(bag_path);
 
   std::vector<fs::path> candidate_bases;
   fs::path parent = bag_path.parent_path();
@@ -255,7 +260,6 @@ fs::path resolve_vector_map_path(
   error << "lanelet2_map.osm was not found for bag: " << bag_path.string() << "\n"
         << "metadata: " << metadata_path.string() << "\n"
         << "log_file_info: " << log_file_info_path.string() << "\n"
-        << "map_version_source: " << map_version_source_name(map_version_source) << "\n"
         << "area_map_version_id: "
         << (map_version_id ? map_version_id.value() : std::string("(none)")) << "\n"
         << "searched:\n"
@@ -263,6 +267,11 @@ fs::path resolve_vector_map_path(
   throw std::runtime_error(error.str());
 }
 
+/**
+ * @brief Format a duration as HH:MM:SS string.
+ * @param elapsed The duration to format.
+ * @return Formatted time string.
+ */
 std::string format_elapsed(std::chrono::steady_clock::duration elapsed)
 {
   const auto total_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
@@ -272,6 +281,11 @@ std::string format_elapsed(std::chrono::steady_clock::duration elapsed)
   return fmt::format("{:02}:{:02}:{:02}", hours, minutes, seconds);
 }
 
+/**
+ * @brief Check that a relative path does not escape its root with ".." components.
+ * @param relative_path The relative path to validate.
+ * @return true if the path stays within the root, false otherwise.
+ */
 bool is_relative_inside_root(const fs::path & relative_path)
 {
   if (relative_path.empty()) {
@@ -285,6 +299,13 @@ bool is_relative_inside_root(const fs::path & relative_path)
   return true;
 }
 
+/**
+ * @brief Compute the output directory for a bag by mirroring its relative path under save_root.
+ * @param save_root Root directory for output.
+ * @param bag_path Path to the bag directory.
+ * @param target_dir_list List of target directories used to compute relative paths.
+ * @return Output directory path for the bag.
+ */
 fs::path make_save_dir(
   const fs::path & save_root, const fs::path & bag_path,
   const std::vector<fs::path> & target_dir_list)
@@ -315,9 +336,16 @@ fs::path make_save_dir(
   return fs::absolute(save_root / bag_path.filename());
 }
 
+/**
+ * @brief Convert a single rosbag directory and write the output.
+ * @param bag_path Path to the bag directory.
+ * @param save_root Root directory for output.
+ * @param base_options Converter options.
+ * @param target_dir_list List of target directories used for relative path calculation.
+ */
 void process_single_bag(
   const fs::path & bag_path, const fs::path & save_root, const ConverterOptions & base_options,
-  const std::vector<fs::path> & target_dir_list, const MapVersionSource map_version_source)
+  const std::vector<fs::path> & target_dir_list)
 {
   const fs::path save_dir = make_save_dir(save_root, bag_path, target_dir_list);
   fs::create_directories(save_dir.parent_path());
@@ -328,7 +356,7 @@ void process_single_bag(
   try {
     ConverterPaths paths;
     paths.rosbag_path = fs::absolute(bag_path).string();
-    paths.vector_map_path = resolve_vector_map_path(bag_path, map_version_source).string();
+    paths.vector_map_path = resolve_vector_map_path(bag_path).string();
     paths.save_dir = save_dir.string();
 
     run_data_converter(paths, base_options);
@@ -371,8 +399,7 @@ int main(int argc, char ** argv)
           break;
         }
         process_single_bag(
-          bag_dir_list[index], save_root, options.converter, options.target_dir_list,
-          options.map_version_source);
+          bag_dir_list[index], save_root, options.converter, options.target_dir_list);
       }
     });
   }
