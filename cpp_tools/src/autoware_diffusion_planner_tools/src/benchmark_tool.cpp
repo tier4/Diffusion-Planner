@@ -22,7 +22,7 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <autoware/diffusion_planner/dimensions.hpp>
-#include <autoware/diffusion_planner/inference/tensorrt_inference.hpp>
+#include <autoware/diffusion_planner/inference/single_step_inference.hpp>
 #include <autoware/diffusion_planner/preprocessing/preprocessing_utils.hpp>
 #include <rclcpp/parameter.hpp>
 #include <rclcpp/parameter_map.hpp>
@@ -207,7 +207,7 @@ int main(int argc, char ** argv)
   // All host-side optimizations come from the linked library automatically.
   std::cout << "  Loading engine..." << std::flush;
   auto t_load_start = std::chrono::high_resolution_clock::now();
-  auto inference_ptr = std::make_unique<TensorrtInference>(model_path, plugins_path, batch_size);
+  auto inference_ptr = std::make_unique<SingleStepInference>(model_path, plugins_path, batch_size);
   auto & inference = *inference_ptr;
   auto t_load_end = std::chrono::high_resolution_clock::now();
   const double load_s = std::chrono::duration<double>(t_load_end - t_load_start).count();
@@ -233,8 +233,8 @@ int main(int argc, char ** argv)
     auto t1 = std::chrono::high_resolution_clock::now();
     latencies[i] = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-    if (!result.outputs) {
-      std::cerr << "\n  ERROR at iteration " << i << ": " << result.error_msg << "\n";
+    if (!result.has_value()) {
+      std::cerr << "\n  ERROR at iteration " << i << ": " << result.error() << "\n";
       return 1;
     }
   }

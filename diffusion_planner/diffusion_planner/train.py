@@ -94,7 +94,7 @@ def model_training(args: TrainConfig):
             else v.to_dict()
             for k, v in args_dict.items()
         }
-        args_dict["major_version"] = 4
+        args_dict["major_version"] = 5
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
