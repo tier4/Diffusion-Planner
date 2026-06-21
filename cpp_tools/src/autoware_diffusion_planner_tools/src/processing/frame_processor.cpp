@@ -175,9 +175,10 @@ void process_sequence(
       map2bl, traffic_light_id_map, lane_segment_indices, NUM_SEGMENTS_IN_LANE);
 
     // Create has_speed_limit flags based on speed_limit values
-    std::vector<bool> lanes_has_speed_limit(lanes_speed_limit.size());
+    std::vector<uint8_t> lanes_has_speed_limit(lanes_speed_limit.size());
     for (size_t idx = 0; idx < lanes_speed_limit.size(); ++idx) {
-      lanes_has_speed_limit[idx] = (lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon());
+      lanes_has_speed_limit[idx] =
+        (lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon()) ? 1 : 0;
     }
 
     // Get route lanes data with speed limits
@@ -188,10 +189,10 @@ void process_sequence(
         map2bl, traffic_light_id_map, segment_indices, NUM_SEGMENTS_IN_ROUTE);
 
     // Create route_lanes_has_speed_limit based on speed_limit values
-    std::vector<bool> route_lanes_has_speed_limit(route_lanes_speed_limit.size());
+    std::vector<uint8_t> route_lanes_has_speed_limit(route_lanes_speed_limit.size());
     for (size_t idx = 0; idx < route_lanes_speed_limit.size(); ++idx) {
       route_lanes_has_speed_limit[idx] =
-        (route_lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon());
+        (route_lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon()) ? 1 : 0;
     }
 
     const std::vector<float> polygons =

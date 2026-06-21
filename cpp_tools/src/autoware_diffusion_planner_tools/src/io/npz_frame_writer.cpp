@@ -81,9 +81,9 @@ void save_frame_data_npz(
   const std::vector<float> & ego_future, const std::vector<float> & neighbor_past,
   const std::vector<float> & neighbor_future, const std::vector<float> & static_objects,
   const std::vector<float> & lanes, const std::vector<float> & lanes_speed_limit,
-  const std::vector<bool> & lanes_has_speed_limit, const std::vector<float> & route_lanes,
+  const std::vector<uint8_t> & lanes_has_speed_limit, const std::vector<float> & route_lanes,
   const std::vector<float> & route_lanes_speed_limit,
-  const std::vector<bool> & route_lanes_has_speed_limit, const std::vector<float> & polygons,
+  const std::vector<uint8_t> & route_lanes_has_speed_limit, const std::vector<float> & polygons,
   const std::vector<float> & line_strings, const std::vector<float> & goal_pose,
   const std::vector<int32_t> & turn_indicators, const std::vector<float> & ego_shape)
 {
@@ -143,13 +143,9 @@ void save_frame_data_npz(
   cnpy::npz_save_compressed(
     npz_filename, "lanes_speed_limit", lanes_speed_limit.data(), {NUM_SEGMENTS_IN_LANE, 1}, "a");
 
-  std::vector<int32_t> lanes_has_speed_limit_int(lanes_has_speed_limit.size());
-  for (size_t i = 0; i < lanes_has_speed_limit.size(); ++i) {
-    lanes_has_speed_limit_int[i] = static_cast<int32_t>(lanes_has_speed_limit[i]);
-  }
   cnpy::npz_save_compressed(
-    npz_filename, "lanes_has_speed_limit", lanes_has_speed_limit_int.data(),
-    {NUM_SEGMENTS_IN_LANE, 1}, "a");
+    npz_filename, "lanes_has_speed_limit",
+    reinterpret_cast<const bool *>(lanes_has_speed_limit.data()), {NUM_SEGMENTS_IN_LANE, 1}, "a");
 
   cnpy::npz_save_compressed(
     npz_filename, "route_lanes", route_lanes.data(),
@@ -159,13 +155,10 @@ void save_frame_data_npz(
     npz_filename, "route_lanes_speed_limit", route_lanes_speed_limit.data(),
     {NUM_SEGMENTS_IN_ROUTE, 1}, "a");
 
-  std::vector<int32_t> route_lanes_has_speed_limit_int(route_lanes_has_speed_limit.size());
-  for (size_t i = 0; i < route_lanes_has_speed_limit.size(); ++i) {
-    route_lanes_has_speed_limit_int[i] = static_cast<int32_t>(route_lanes_has_speed_limit[i]);
-  }
   cnpy::npz_save_compressed(
-    npz_filename, "route_lanes_has_speed_limit", route_lanes_has_speed_limit_int.data(),
-    {NUM_SEGMENTS_IN_ROUTE, 1}, "a");
+    npz_filename, "route_lanes_has_speed_limit",
+    reinterpret_cast<const bool *>(route_lanes_has_speed_limit.data()), {NUM_SEGMENTS_IN_ROUTE, 1},
+    "a");
 
   cnpy::npz_save_compressed(
     npz_filename, "polygons", polygons.data(),
