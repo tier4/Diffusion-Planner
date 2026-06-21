@@ -18,6 +18,7 @@
   <depend>ament_index_cpp</depend>
   <depend>autoware_diffusion_planner</depend>
   <depend>autoware_vehicle_info_utils</depend>
+  <depend>fmt</depend>
   <depend>rosbag2_cpp</depend>
   <depend>yaml-cpp</depend>
 

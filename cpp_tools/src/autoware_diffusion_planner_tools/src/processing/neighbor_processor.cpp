@@ -14,8 +14,6 @@
 
 #include "processing/neighbor_processor.hpp"
 
-#include "types/training_data_binary.hpp"
-
 #include <autoware/diffusion_planner/conversion/agent.hpp>
 #include <autoware/diffusion_planner/dimensions.hpp>
 #include <autoware_utils_uuid/uuid_helper.hpp>
@@ -23,6 +21,8 @@
 #include <algorithm>
 #include <string>
 #include <unordered_map>
+
+constexpr int64_t NEIGHBOR_FUTURE_DIM = 4;  // x, y, cos(yaw), sin(yaw)
 
 NeighborResult process_neighbor_agents_and_future(
   const std::vector<FrameData> & data_list, const int64_t current_idx,

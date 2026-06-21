@@ -1,10 +1,6 @@
 import argparse
 import subprocess
-import sys
 from pathlib import Path
-
-from convert_cpp_bin_to_python_npz import process_single_file
-from tqdm import tqdm
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,13 +98,6 @@ def main(
 
     print("C++ binary execution completed successfully.")
 
-    bin_files = list(save_dir.glob("*.bin"))
-    print(f"Processing {len(bin_files)} files")
-
-    for bin_file in tqdm(bin_files, desc="bin to npz"):
-        process_single_file(bin_file, save_dir)
-
-    # 処理後の.npzファイル数を表示
     npz_files = list(save_dir.glob("*.npz"))
     print(f"Generated {len(npz_files)} .npz files in {save_dir}")
 
