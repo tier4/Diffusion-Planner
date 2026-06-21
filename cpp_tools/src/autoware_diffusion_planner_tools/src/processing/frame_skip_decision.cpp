@@ -67,7 +67,7 @@ SkippingInfo decide_frame_skip(
     return SkippingInfo::stopped_at_traffic_light();
   }
 
-  if (inputs.no_future_progress_x_step > kStuckThresholdTicks) {
+  if (!inputs.is_red_or_yellow && inputs.no_future_progress_x_step > kStuckThresholdTicks) {
     const double sustained_s = static_cast<double>(inputs.no_future_progress_x_step) / 10.0;
     return SkippingInfo::no_future_progress(sustained_s);
   }
