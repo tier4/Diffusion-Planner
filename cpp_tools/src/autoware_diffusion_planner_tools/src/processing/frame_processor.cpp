@@ -299,7 +299,7 @@ void process_sequence(
     }
     save_frame_json(
       paths.save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-      seq.data_list[i].timestamp, skipping_info);
+      seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids);
 
     if (i % 100 == 0) {
       std::cout << "Processed frame " << i << "/" << n << std::endl;

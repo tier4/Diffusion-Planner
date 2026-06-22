@@ -250,6 +250,14 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
         np.concatenate([p[3] for p in raw_payloads], axis=0).astype(np.float32)
     ).to(device)
 
+    # Corrected neighbor context: replace the transformed recorded neighbor block with the
+    # simulated (shown-motion) one, already built in the live-ego frame — matches the CPU
+    # override in _pre_step. p[5] is None in recorded mode (payload is a 5-tuple).
+    if len(raw_payloads[0]) > 5 and raw_payloads[0][5] is not None:
+        batch["neighbor_agents_past"] = torch.from_numpy(
+            np.concatenate([p[5] for p in raw_payloads], axis=0).astype(np.float32)
+        ).to(device)
+
     # Extract scoring inputs (+ optional save dicts) BEFORE normalization, so they match
     # the un-normalized arrays build_input_np returns.
     nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()  # (N,320,11)
@@ -452,6 +460,9 @@ class _SegState:
     saved_collision: bool = False
     last_snap_step: int | None = None
     save_out_dir: object = None
+    # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
+    # each step from the SIMULATED shown motion (velocity from shown deltas, frozen->v~0).
+    nbr_tracker: object = None
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -484,6 +495,7 @@ def _seed_state(
     max_steps=None,
     unstick_after=0,
     unstick_advance_m=5.0,
+    neighbor_history_mode="recorded",
 ) -> _SegState:
     from scenario_generation.mpc_tracker import PerfectTracker
 
@@ -494,6 +506,13 @@ def _seed_state(
     cursor = PerceptionReproducer(tl, search_radius=search_radius, timers=timers)
     cursor.reset(start)
     live_pose, ego_hist, dyn = _ego_state_from_frame(tl, start)
+    # Corrected neighbor context: one timeline sample per 0.1 s sim step (real time on a
+    # step=1 corpus). Raises if the corpus has no neighbor tracks.
+    nbr_tracker = (
+        SimNeighborTracker(tl, start, max_rec_advance=1.0)
+        if neighbor_history_mode == "sim"
+        else None
+    )
     return _SegState(
         tl=tl,
         start=start,
@@ -515,6 +534,7 @@ def _seed_state(
         max_steps=cap,
         unstick_after=int(unstick_after),
         unstick_advance_m=float(unstick_advance_m),
+        nbr_tracker=nbr_tracker,
     )
 
 
@@ -541,9 +561,18 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     if s.max_stuck_steps > 0 and s.stuck >= s.max_stuck_steps:
         s.terminated, s.done = "stuck", True
         return None
+    sim_nb = None
+    if s.nbr_tracker is not None:
+        s.nbr_tracker.step(idx)
+        sim_nb = s.nbr_tracker.build(s.live_pose)  # (1,320,31,11) live-ego frame
     if gpu_transform:
-        return build_input_raw(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
+        # 6-tuple (..., sim_nb); sim_nb overrides the recorded neighbor block AFTER the
+        # batched world_to_ego transform (None = recorded mode, payload stays a 5-tuple).
+        return (*build_input_raw(s.tl, idx, s.live_pose, s.ego_hist, s.dyn), sim_nb)
     np_dict, neighbors_live = build_input_np(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
+    if sim_nb is not None:
+        np_dict["neighbor_agents_past"] = sim_nb
+        neighbors_live = sim_nb[0, :, -1, :].copy()
     return np_dict, neighbors_live, idx
 
 
@@ -652,6 +681,7 @@ def run_segment(
     max_steps: int | None = None,
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
+    neighbor_history_mode: str = "recorded",
     timers: Timers | None = None,
 ) -> SegmentResult:
     """Single-segment closed-loop reproducer rollout over recorded frames [start, end).
@@ -674,6 +704,7 @@ def run_segment(
         max_steps=max_steps if max_steps is not None else 3 * (end - start),
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
+        neighbor_history_mode=neighbor_history_mode,
     )
     while not s.done:
         with timers("input_build"):
@@ -775,6 +806,162 @@ def _apply_neighbor_interp(np_dict, neighbor_ids, live_pose, idx, interp):
         lh = wh - eyaw
         nb[slot, -1, 2] = math.cos(lh)
         nb[slot, -1, 3] = math.sin(lh)
+
+
+# --------------------------------------------------------------------------- #
+# Simulated neighbor history (corrected closed-loop neighbor context)
+# --------------------------------------------------------------------------- #
+def _build_nbr_world_tracks(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.05):
+    """Per-UUID recorded WORLD trajectory + box attrs + array-index span.
+
+    Scans recorded frames and, keyed by the sidecar ``neighbor_ids`` (track UUIDs),
+    collects each track's world pose, box attributes (width, length, is_veh, is_ped,
+    is_bike) and the (first, last) array index where it appears. Returns
+    ``(interp, attrs, span)`` (interp[uuid] = (idx_arr, xy_arr (N,2), heading_arr (N,))).
+    """
+    raw: dict[str, list] = {}
+    attrs: dict[str, np.ndarray] = {}
+    for idx in range(lo, hi):
+        ids = tl.neighbor_ids(idx)
+        if not ids:
+            continue
+        pose = tl.poses[idx]
+        c, s = math.cos(pose[2]), math.sin(pose[2])
+        nb = tl.npz(idx)["neighbor_agents_past"][:, -1]  # (320, 11) recorded-ego frame
+        for slot in range(min(len(ids), nb.shape[0])):
+            row = nb[slot]
+            if np.abs(row[:6]).sum() == 0:
+                continue
+            u = ids[slot]
+            wx = pose[0] + row[0] * c - row[1] * s
+            wy = pose[1] + row[0] * s + row[1] * c
+            wh = math.atan2(row[3], row[2]) + pose[2]
+            raw.setdefault(u, []).append((idx, wx, wy, wh))
+            if u not in attrs:
+                attrs[u] = row[6:11].astype(np.float32)  # width,length,is_veh,is_ped,is_bike
+    interp: dict[str, tuple] = {}
+    span: dict[str, tuple] = {}
+    for u, lst in raw.items():
+        if len(lst) < 2:
+            continue
+        kept = [lst[0]]
+        for samp in lst[1:]:
+            if math.hypot(samp[1] - kept[-1][1], samp[2] - kept[-1][2]) > eps:
+                kept.append(samp)
+        if kept[-1][0] != lst[-1][0]:
+            kept.append(lst[-1])
+        interp[u] = (
+            np.array([k[0] for k in kept]),
+            np.array([[k[1], k[2]] for k in kept], dtype=np.float64),
+            np.unwrap(np.array([k[3] for k in kept])),
+        )
+        span[u] = (int(lst[0][0]), int(lst[-1][0]))
+    return interp, attrs, span
+
+
+def _route_nbr_tracks(tl: RouteTimeline):
+    """Per-route UUID world tracks, built once and cached on the timeline."""
+    cached = getattr(tl, "_nbr_tracks", None)
+    if cached is None:
+        cached = _build_nbr_world_tracks(tl, 0, len(tl))
+        tl._nbr_tracks = cached
+    return cached
+
+
+class SimNeighborTracker:
+    """Build the model's neighbor context from the SIMULATED (shown) neighbor motion.
+
+    Recorded mode copies each cursor frame's own 31-step history verbatim, so a
+    cursor-frozen car still reads its recorded velocity (e.g. a moving car held in
+    place because the ego crept still shows ~11 m/s while it visibly never moves —
+    input and replay disagree, producing phantom collisions).
+
+    This tracker follows each neighbor by track UUID, advances a continuous
+    recorded-time cursor ``rec_t`` toward the position-keyed cursor's target frame
+    (capped at ``max_rec_advance`` array-indices per 0.1 s sim step → interpolates
+    between recorded anchors), and keeps a rolling per-sim-step world history per
+    UUID. ``neighbor_agents_past`` is rebuilt from that shown history each step:
+    velocity is the finite difference of the shown positions, so a frozen neighbor
+    reads v approx 0 (a static obstacle) and a moving one its true speed. Step 0 is
+    seeded from the recorded history so the first frame equals the original context.
+    """
+
+    def __init__(self, tl: RouteTimeline, start: int, max_rec_advance: float = 1.0):
+        self.tl = tl
+        self.interp, self.attrs, self.span = _route_nbr_tracks(tl)
+        if not self.interp:
+            raise ValueError(
+                "SimNeighborTracker: no neighbor tracks (sidecar neighbor_ids empty). Reconvert "
+                "the corpus with populated neighbor_ids, or use neighbor_history_mode=recorded."
+            )
+        self.rec_t = float(start)
+        self.max_adv = float(max_rec_advance)
+        self.hist: dict[str, list] = {}  # uuid -> rolling list[(wx,wy,wh)], len <= PAST
+        self._seed_start(start)
+
+    def _present(self, u: str, t: float) -> bool:
+        lo, hi = self.span[u]
+        return lo - 0.5 <= t <= hi + 0.5
+
+    def _seed_start(self, start: int) -> None:
+        """Seed each track present at ``start`` with the recorded 0.1 s history leading
+        up to ``start`` (from its world anchors) so step 0 reproduces the original context."""
+        for u in self.interp:
+            if not self._present(u, start):
+                continue
+            self.hist[u] = [
+                _interp_pose(self.interp[u], start - (PAST - 1) + k) for k in range(PAST - 1)
+            ]
+
+    def step(self, target_idx: int) -> None:
+        """Advance ``rec_t`` toward the cursor target (capped, never backward) and push the
+        current interpolated world pose of every present track into its rolling history."""
+        self.rec_t += min(max(float(target_idx) - self.rec_t, 0.0), self.max_adv)
+        for u in self.interp:
+            if not self._present(u, self.rec_t):
+                continue
+            p = _interp_pose(self.interp[u], self.rec_t)
+            dq = self.hist.get(u)
+            if dq is None:
+                dq = [p] * (PAST - 1)  # newly appeared -> no motion history yet (v approx 0)
+                self.hist[u] = dq
+            dq.append(p)
+            if len(dq) > PAST:
+                del dq[0]
+
+    def build(self, live_pose: np.ndarray) -> np.ndarray:
+        """(1, 320, 31, 11) neighbor_agents_past in the live-ego frame, from shown history."""
+        ex, ey, eyaw = float(live_pose[0]), float(live_pose[1]), float(live_pose[2])
+        R = _rotation_matrix(eyaw)  # world delta -> ego frame (rotates by -eyaw)
+        present = [u for u in self.hist if len(self.hist[u]) > 0 and self._present(u, self.rec_t)]
+
+        def _cur_d2(u):
+            wx, wy, _ = self.hist[u][-1]
+            d = R @ np.array([wx - ex, wy - ey])
+            return float(d[0] * d[0] + d[1] * d[1])
+
+        present.sort(key=_cur_d2)  # nearest-first, mirroring the recorded slot order
+        out = np.zeros((320, PAST, 11), dtype=np.float32)
+        for slot, u in enumerate(present[:320]):
+            dq = self.hist[u]
+            n = len(dq)
+            poses = ([dq[0]] * (PAST - n)) + list(dq) if n < PAST else list(dq)
+            world = np.asarray(poses, dtype=np.float64)  # (PAST, 3) wx, wy, wh
+            d = (world[:, :2] - np.array([ex, ey])) @ R.T  # (PAST, 2) ego-frame xy
+            lh = world[:, 2] - eyaw
+            out[slot, :, 0] = d[:, 0]
+            out[slot, :, 1] = d[:, 1]
+            out[slot, :, 2] = np.cos(lh)
+            out[slot, :, 3] = np.sin(lh)
+            vw = np.zeros((PAST, 2))
+            if PAST > 1:
+                vw[1:] = np.diff(world[:, :2], axis=0) / DT
+                vw[0] = vw[1]
+            ve = vw @ R.T  # world velocity -> ego frame
+            out[slot, :, 4] = ve[:, 0]
+            out[slot, :, 5] = ve[:, 1]
+            out[slot, :, 6:11] = self.attrs[u]
+        return out[None]
 
 
 def _polylines_from_tensor(t: np.ndarray, border_only: bool = False) -> list[np.ndarray]:
@@ -949,6 +1136,7 @@ def run_segments_batched(
     save_min_ego_speed: float = 0.5,
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
+    neighbor_history_mode: str = "recorded",
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -1013,6 +1201,7 @@ def run_segments_batched(
                     max_steps=max_steps_mult * (end - start),
                     unstick_after=unstick_after,
                     unstick_advance_m=unstick_advance_m,
+                    neighbor_history_mode=neighbor_history_mode,
                 )
                 for (tl, start, end) in chunk
             ]
