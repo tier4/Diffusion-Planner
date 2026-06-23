@@ -17,7 +17,13 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
-from planner_metrics import RewardConfig, compute_subscores_batch
+from planner_metrics import (
+    EPDMSLikeConfig,
+    RewardConfig,
+    compute_subscores_batch,
+    epdms_like_aggregate,
+    gt_path_length,
+)
 
 # Reward subscores logged as additive validation metrics (valid_loss/ego_subscore_*).
 # These are the RLVR reward's subscores (EPDMS-INSPIRED — custom thresholds,
@@ -35,10 +41,29 @@ _VAL_SUBSCORE_KEYS = (
     "feasibility",
 )
 _VAL_SUBSCORE_CFG = RewardConfig()
+_VAL_EPDMS_LIKE_CFG = EPDMSLikeConfig()
+# Components returned by epdms_like_aggregate, logged as ``ego_subscore_<key>``.
+# ``epdms_like`` is the single [0,1] EPDMS-structured proxy score (NOT a faithful
+# NAVSIM EPDMS; see #142); the rest are its binary gates and normalized quality
+# terms, kept for debugging why a checkpoint scores the way it does.
+_VAL_EPDMS_LIKE_KEYS = (
+    "epdms_like",
+    "gate_nc",
+    "gate_dac",
+    "gate_tlc",
+    "gate_kin",
+    "q_ttc",
+    "q_progress",
+    "q_comfort",
+    "q_lane",
+    "quality",
+)
 
 
 @torch.no_grad()
-def _reward_subscores_per_scene(ego_pred, data_batched, config, keys):
+def _reward_subscores_per_scene(
+    ego_pred, data_batched, config, keys, gt_progress=None, epdms_cfg=None
+):
     """Per-scene reward subscores for a validation batch.
 
     ``compute_subscores_batch`` is single-scene / N-trajectory (its map + neighbor
@@ -53,16 +78,26 @@ def _reward_subscores_per_scene(ego_pred, data_batched, config, keys):
         keys: subscore names to return.
 
     Returns:
-        ``{name: (B,) tensor}`` for each requested key.
+        ``{name: (B,) tensor}`` for each requested key. When ``gt_progress`` is
+        provided, the dict also includes the EPDMS-like component keys (``epdms_like``
+        plus its gates / normalized quality terms; see ``_VAL_EPDMS_LIKE_KEYS``).
     """
     n = ego_pred.shape[0]
     acc = {name: [] for name in keys}
+    want_epdms = gt_progress is not None
+    epdms_acc = {k: [] for k in _VAL_EPDMS_LIKE_KEYS} if want_epdms else {}
     for b in range(n):
         data_b = {k: v[b : b + 1] for k, v in data_batched.items()}
         subs_b = compute_subscores_batch(ego_pred[b : b + 1], data_b, config)
         for name in keys:
             acc[name].append(subs_b[name])
-    return {name: torch.cat(vals) for name, vals in acc.items()}
+        if want_epdms:
+            _, comp_b = epdms_like_aggregate(subs_b, gt_progress[b : b + 1], epdms_cfg)
+            for k in _VAL_EPDMS_LIKE_KEYS:
+                epdms_acc[k].append(comp_b[k])
+    out = {name: torch.cat(vals) for name, vals in acc.items()}
+    out.update({k: torch.cat(vals) for k, vals in epdms_acc.items()})
+    return out
 
 
 @torch.no_grad()
@@ -206,8 +241,14 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         for k in ("lanes", "route_lanes", "line_strings", "polygons", "goal_pose"):
             if k in denorm_inputs:
                 data_batched[k] = denorm_inputs[k]
+        gt_progress = gt_path_length(ego_future)  # (B,) expert path length, metres
         subscores = _reward_subscores_per_scene(
-            prediction[:, 0], data_batched, _VAL_SUBSCORE_CFG, _VAL_SUBSCORE_KEYS
+            prediction[:, 0],
+            data_batched,
+            _VAL_SUBSCORE_CFG,
+            _VAL_SUBSCORE_KEYS,
+            gt_progress=gt_progress,
+            epdms_cfg=_VAL_EPDMS_LIKE_CFG,
         )
         for name, val in subscores.items():
             total_result_dict[f"ego_subscore_{name}"].append(val.cpu())  # (B,)
