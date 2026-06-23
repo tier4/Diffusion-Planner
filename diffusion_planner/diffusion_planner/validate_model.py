@@ -235,6 +235,11 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         # the rb / neighbor metrics above use; one scene per prediction.
         data_batched = {
             "ego_shape": inputs["ego_shape"],
+            # GT ego future (same frame as `prediction`/`all_gt`); lets
+            # compute_progress_score_batch fall back to the goal-directed GT
+            # endpoint instead of the predicted path length when goal_pose is
+            # absent/far (>100 m). Keeps the `progress`/`q_progress` term honest.
+            "ego_agent_future": ego_future,
             "neighbor_agents_future": neighbors_future,
             "neighbor_agents_past": denorm_inputs["neighbor_agents_past"],
         }
