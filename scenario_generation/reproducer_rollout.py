@@ -1341,10 +1341,14 @@ def run_segments_batched(
                     # dirs behind and the extract step would ingest superseded scenes. Clear this
                     # segment's stale episode dirs up front so each run starts clean. Match by
                     # literal prefix (not glob) so a metacharacter in the route key can't mis-match.
+                    # save_dir may not exist yet on the first run (window dirs are created lazily
+                    # only after gating), so guard the scan — nothing to clean if it's absent.
+                    save_root = Path(save_dir)
                     stale_prefix = f"{key}_{s.start}_{s.end}_tc"
-                    for stale in Path(save_dir).iterdir():
-                        if stale.is_dir() and stale.name.startswith(stale_prefix):
-                            shutil.rmtree(stale, ignore_errors=True)
+                    if save_root.is_dir():
+                        for stale in save_root.iterdir():
+                            if stale.is_dir() and stale.name.startswith(stale_prefix):
+                                shutil.rmtree(stale, ignore_errors=True)
             active = list(states)
             while active:
                 with timers("input_build"):
