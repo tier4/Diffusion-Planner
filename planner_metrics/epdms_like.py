@@ -95,9 +95,7 @@ def _collision_gate(subscores: dict, n: int, device, dtype) -> torch.Tensor:
     if torch.is_tensor(coll):
         # Convention upstream: a negative / sentinel value means "no collision".
         return (coll.reshape(-1) < 0).to(device=device, dtype=dtype)
-    return torch.tensor(
-        [1.0 if c is None else 0.0 for c in coll], device=device, dtype=dtype
-    )
+    return torch.tensor([1.0 if c is None else 0.0 for c in coll], device=device, dtype=dtype)
 
 
 def epdms_like_aggregate(
@@ -130,9 +128,9 @@ def epdms_like_aggregate(
     gt_progress = torch.as_tensor(gt_progress, device=device, dtype=dtype).reshape(-1)
 
     # ---- gates (binary, multiplicative) ----
-    nc = _collision_gate(subscores, n, device, dtype)               # no collision
+    nc = _collision_gate(subscores, n, device, dtype)  # no collision
     dac = _as_gate(subscores, "rb_crossing_gate", n, device, dtype)  # drivable area
-    kin = _as_gate(subscores, "kinematic_gate", n, device, dtype)    # feasibility
+    kin = _as_gate(subscores, "kinematic_gate", n, device, dtype)  # feasibility
     red_light = subscores.get("red_light")
     if red_light is None:
         tlc = torch.ones(n, device=device, dtype=dtype)

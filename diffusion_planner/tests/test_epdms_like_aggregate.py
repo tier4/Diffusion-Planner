@@ -20,8 +20,8 @@ def _subscores():
     return {
         "ttc": torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=f),
         "progress": torch.tensor([10.0, 10.0, 5.0, 10.0], dtype=f),
-        "comfort": torch.tensor([0.0, 0.0, -5.0, 0.0], dtype=f),       # -mean|jerk|
-        "centerline": torch.tensor([0.0, 0.0, -4.0, 0.0], dtype=f),    # -lane_usage^2
+        "comfort": torch.tensor([0.0, 0.0, -5.0, 0.0], dtype=f),  # -mean|jerk|
+        "centerline": torch.tensor([0.0, 0.0, -4.0, 0.0], dtype=f),  # -lane_usage^2
         "red_light": torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=f),
         "rb_crossing_gate": torch.tensor([1.0, 1.0, 1.0, 0.0], dtype=f),
         "kinematic_gate": torch.tensor([1.0, 1.0, 1.0, 1.0], dtype=f),
