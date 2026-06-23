@@ -253,7 +253,8 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
 
     # Corrected neighbor context: replace the transformed recorded neighbor block with the
     # simulated (shown-motion) one, already built in the live-ego frame — matches the CPU
-    # override in _pre_step. p[5] is None in recorded mode (payload is a 5-tuple).
+    # override in _pre_step. The gpu _pre_step always returns an 8-tuple; p[5] (sim_nb) is
+    # None in recorded mode, so the length check is just defensive.
     if len(raw_payloads[0]) > 5 and raw_payloads[0][5] is not None:
         batch["neighbor_agents_past"] = torch.from_numpy(
             np.concatenate([p[5] for p in raw_payloads], axis=0).astype(np.float32)
@@ -334,22 +335,27 @@ def score_step_batched(
     neighbors_list: list[np.ndarray],
     ego_shapes: list[np.ndarray],
     device: str,
-) -> list[tuple[float, bool, int]]:
+) -> list[tuple[float, bool, int, int]]:
     """``score_step`` for many segments at once: ONE batched OBB pass over all pairs.
 
     The OBB primitives (``_closest_points_between_rects`` / ``batch_signed_distance_rect``)
     are per-pair independent, so we concatenate every segment's (ego, neighbor) box
     pairs into one big batch, run the geometry once, then slice the result back per
-    segment. Bit-identical to calling ``score_step`` per segment (no cross-segment
-    interaction), but collapses N tiny GPU launches per tick into one — including the
-    box construction: ONE host->device transfer + ONE ``center_rect_to_points`` for
-    every neighbor across all segments (ego corners built once when shapes match, else
-    per segment and repeat-interleaved). Returns a list aligned to the inputs:
-    (min_clearance, collision, n_valid_neighbors)."""
+    segment. The (min_clearance, collision, n_valid) values are bit-identical to calling
+    ``score_step`` per segment (no cross-segment interaction), but this collapses N tiny
+    GPU launches per tick into one — including the box construction: ONE host->device
+    transfer + ONE ``center_rect_to_points`` for every neighbor across all segments (ego
+    corners built once when shapes match, else per segment and repeat-interleaved).
+    Returns a list aligned to the inputs:
+    (min_clearance, collision, n_valid_neighbors, collider_slot), where ``collider_slot``
+    is the ORIGINAL neighbor index (same order as the input ``neighbors_list`` rows, i.e.
+    the build()/slot_uuids order) achieving ``min_clearance`` — or -1 when no valid
+    neighbor. Callers use it to identify the actually-colliding agent (the OBB-closest one,
+    which can differ from the centroid-nearest slot 0)."""
     valids = [np.abs(nb[:, :6]).sum(axis=1) > 0 for nb in neighbors_list]
     counts = [int(v.sum()) for v in valids]
     if sum(counts) == 0:
-        return [(float("inf"), False, 0) for _ in neighbors_list]
+        return [(float("inf"), False, 0, -1) for _ in neighbors_list]
 
     # All valid neighbors across all segments -> one transfer -> one corner build.
     nb_all = np.concatenate(
@@ -391,17 +397,22 @@ def score_step_batched(
     p1, p2 = _closest_points_between_rects(ego_all, npc_all)
     clr_all = (p1 - p2).norm(dim=-1)  # (K,)
     signed_all = batch_signed_distance_rect(ego_all, npc_all)  # (K,)
-    out: list[tuple[float, bool, int]] = []
+    out: list[tuple[float, bool, int, int]] = []
     off = 0
-    for m in counts:
+    for seg_i, m in enumerate(counts):
         if m == 0:
-            out.append((float("inf"), False, 0))
+            out.append((float("inf"), False, 0, -1))
         else:
+            seg_clr = clr_all[off : off + m]
+            amin = int(seg_clr.argmin().item())  # index within this segment's VALID subset
+            # Map the valid-subset argmin back to the original neighbor slot (build() order).
+            collider_slot = int(np.flatnonzero(valids[seg_i])[amin])
             out.append(
                 (
-                    float(clr_all[off : off + m].min()),
+                    float(seg_clr.min()),
                     bool((signed_all[off : off + m] < 0).any()),
                     m,
+                    collider_slot,
                 )
             )
             off += m
@@ -540,7 +551,15 @@ def _seed_state(
         live_pose=live_pose,
         ego_hist=ego_hist,
         dyn=dyn,
-        turn_hist=np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64),
+        # Closed-loop turn indicators are a SIM-mode feature: seed from the recorded frame,
+        # then feed the model's own prediction back each step (phasing the seed out). In
+        # recorded mode turn_hist stays None so the recorded turn_indicators flow through
+        # unchanged (the _pre_step override is gated on `turn_hist is not None`).
+        turn_hist=(
+            np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
+            if neighbor_history_mode == "sim"
+            else None
+        ),
         ego_shape=np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32),
         goal_xy=tl.poses[end - 1, :2],
         clearances=np.full(cap, np.inf, dtype=np.float32),
@@ -602,6 +621,19 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     if s.turn_hist is not None:
         np_dict["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop, not recorded
     return np_dict, neighbors_live, idx, slot_uuids, world_by_uuid
+
+
+def _feed_turn_indicator(s: _SegState, outputs) -> None:
+    """Closed-loop turn-signal feedback for the single-segment rollout paths.
+
+    Appends the model's predicted turn indicator to ``turn_hist`` (recorded seed scrolls
+    out within PAST steps). No-op in recorded mode (``turn_hist`` is None there). Mirrors
+    the per-batch feedback in ``run_segments_batched`` so every sim-mode rollout — batched
+    or single-segment — evolves the turn signal identically instead of holding the seed."""
+    if s.turn_hist is None:
+        return
+    ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
+    s.turn_hist = np.append(s.turn_hist[1:], np.int64(np.asarray(ti).reshape(-1)[0]))
 
 
 def _score_into(s: _SegState, neighbors_live, device, timers):
@@ -759,6 +791,7 @@ def run_segment(
         with timers("model_forward"):
             _, outputs = model(data)
             pred = outputs["prediction"][0, 0].cpu().numpy()
+        _feed_turn_indicator(s, outputs)  # closed-loop turn signal (sim mode)
         _post_step(s, pred, neighbors_live, idx, device, timers)
     return _finalize(s, timers)
 
@@ -1176,6 +1209,7 @@ def render_segment(
         data = _to_torch_batch([np_dict], model_args, device)
         _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
+        _feed_turn_indicator(s, outputs)  # closed-loop turn signal (sim mode)
         nids = tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
@@ -1341,13 +1375,21 @@ def run_segments_batched(
                         # Model's predicted turn indicator per segment, decoded with the SAME
                         # C++-style keep-bias logic as the perfect-tracker sim (reused helper),
                         # then fed back into turn_hist below (closed-loop, no recorded leak).
-                        ti_pred = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
+                        # Only sim-mode segments carry turn_hist; skip the decode (a GPU->CPU
+                        # sync) entirely when none do (e.g. recorded mode).
+                        ti_pred = (
+                            decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
+                            if any(st.turn_hist is not None for st, *_ in built)
+                            else None
+                        )
                     # Score ALL segments in one batched OBB pass, then advance each.
                     with timers("score"):
                         score_list = score_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
-                    for (s, _np, nb, idx, suuid, wbu), (cl, col, _M) in zip(built, score_list):
+                    for (s, _np, nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
+                        built, score_list
+                    ):
                         s.clearances[s.k] = cl
                         s.collisions[s.k] = col
                         # One-pass save: buffer this step, then dump the window on the
@@ -1364,16 +1406,22 @@ def run_segments_batched(
                             # every step until the FIRST clean-start window saves (the contact onset
                             # may have <80 clear steps before it, but a slightly-later step in the
                             # same episode often has a clean 80-step approach), then stop for that
-                            # episode. The colliding (nearest) neighbor is slot 0 (build() sorts
-                            # nearest-first), so its UUID is suuid[0]. Each save -> its own per-
-                            # episode dir tagged by the save step. Gates (t0-clean / ego-moved /
-                            # min-pre-frames) still apply, and the UUID is only consumed on an ACTUAL
-                            # save (a dropped degenerate contact must not block a later savable one).
+                            # episode. The colliding vehicle is the OBB-CLOSEST neighbor at contact
+                            # (score_step_batched returns its slot, which can differ from the
+                            # centroid-nearest slot 0 for long/rotated boxes), so its UUID is
+                            # suuid[collider_slot]. Each save -> its own per-episode dir tagged by
+                            # the save step. Gates (t0-clean / ego-moved / min-pre-frames) still
+                            # apply, and the UUID is only consumed on an ACTUAL save (a dropped
+                            # degenerate contact must not block a later savable one).
                             in_contact = save_thresh is not None and cl <= save_thresh
                             if not in_contact:
                                 s.in_episode = False  # episode ended; the next contact is new
                             else:
-                                colliding_uuid = suuid[0] if suuid else None
+                                colliding_uuid = (
+                                    suuid[collider_slot]
+                                    if (suuid and 0 <= collider_slot < len(suuid))
+                                    else None
+                                )
                                 if not s.in_episode:  # entering contact from a clear -> new episode
                                     s.in_episode = True
                                     s.episode_saved = False
@@ -1421,7 +1469,7 @@ def run_segments_batched(
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
                         # context then carries the sim's own signals, never the recorded ones.
-                        if s.turn_hist is not None:
+                        if s.turn_hist is not None and ti_pred is not None:
                             s.turn_hist = np.append(s.turn_hist[1:], np.int64(ti_pred[i]))
                         # Clear the buffer on an unstick teleport: pre-jump frames belong
                         # to a different ego path and must never enter a saved window.
@@ -1869,6 +1917,7 @@ def extract_collision_scenes(
         data = _to_torch_batch([np_dict], model_args, device)
         _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
+        _feed_turn_indicator(s, outputs)  # closed-loop turn signal (sim mode)
         clr = _min_clearance_any(neighbors_live, s.ego_shape, device)
         # 6-tuple to match the batched buffer / _dump_precollision_window unpacking; this
         # legacy extractor path is recorded-mode (no sim tracker) -> slot_uuids/world None.
