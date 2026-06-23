@@ -577,6 +577,19 @@ def _predict_as_ego(
 
 
 @torch.no_grad()
+def decode_turn_indicator(ti_logit, keep_bias: float = 0.25):
+    """Model ``turn_indicator_logit`` -> class id(s), C++ ``TurnIndicatorManager`` style.
+
+    Subtracts ``keep_bias`` (0.25 = the cpp planner's value) from the KEEP (class 4) logit
+    before argmax, then returns the argmax over the last dim as a numpy array. Shared by
+    ``_predict_batch`` (perfect-tracker sim) and the perception reproducer so both decode the
+    closed-loop turn signal identically. Classes: 0 NONE / 1 DISABLE / 2 LEFT / 3 RIGHT / 4 KEEP."""
+    biased = ti_logit.clone()
+    if keep_bias != 0.0 and biased.shape[-1] > 4:
+        biased[..., 4] -= keep_bias
+    return biased.argmax(dim=-1).cpu().numpy()
+
+
 def _predict_batch(
     model,
     model_args,
@@ -639,10 +652,7 @@ def _predict_batch(
         ti_logit = outputs.get("turn_indicator_logit")
         ti = {}
         if ti_logit is not None:
-            biased = ti_logit[0].clone()
-            if turn_indicator_keep_bias != 0.0 and biased.shape[-1] > 4:
-                biased[..., 4] -= turn_indicator_keep_bias
-            ti[agent_ids[0]] = int(biased.argmax(dim=-1).cpu().item())
+            ti[agent_ids[0]] = int(decode_turn_indicator(ti_logit[0], turn_indicator_keep_bias))
         return preds, ti
 
     batched = _cat_tensor_dicts(tensor_dicts)
@@ -654,10 +664,7 @@ def _predict_batch(
     ti_logit = outputs.get("turn_indicator_logit")
     ti: dict[str, int] = {}
     if ti_logit is not None:
-        biased = ti_logit.clone()
-        if turn_indicator_keep_bias != 0.0 and biased.shape[-1] > 4:
-            biased[..., 4] -= turn_indicator_keep_bias
-        ti_cls = biased.argmax(dim=-1).cpu().numpy()
+        ti_cls = decode_turn_indicator(ti_logit, turn_indicator_keep_bias)
         for i, aid in enumerate(agent_ids):
             ti[aid] = int(ti_cls[i])
     return preds, ti
