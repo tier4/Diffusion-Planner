@@ -25,6 +25,7 @@ class TrainConfig:
     save_dir: str
     train_set_list: str
     valid_set_list: str
+    train_subsample_step: int
 
     # ---------------------------------------------------------
     # Data Dimensions

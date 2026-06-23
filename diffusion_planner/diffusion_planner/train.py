@@ -123,6 +123,8 @@ def model_training(args: TrainConfig):
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
 
+    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
+
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
     )
