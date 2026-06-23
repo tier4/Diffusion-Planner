@@ -1015,30 +1015,37 @@ class SimNeighborTracker:
             return float(d[0] * d[0] + d[1] * d[1])
 
         present.sort(key=_cur_d2)  # nearest-first, mirroring the recorded slot order
+        present = present[:320]
         out = np.zeros((320, PAST, 11), dtype=np.float32)
-        slot_uuids: list[str] = []  # slot -> track UUID (for sim-future assembly across frames)
-        world_by_uuid: dict[str, tuple] = {}  # UUID -> current shown world pose (wx, wy, wh)
-        for slot, u in enumerate(present[:320]):
-            slot_uuids.append(u)
-            world_by_uuid[u] = self.hist[u][-1]
-            dq = self.hist[u]
-            n = len(dq)
-            poses = ([dq[0]] * (PAST - n)) + list(dq) if n < PAST else list(dq)
-            world = np.asarray(poses, dtype=np.float64)  # (PAST, 3) wx, wy, wh
-            d = (world[:, :2] - np.array([ex, ey])) @ R.T  # (PAST, 2) ego-frame xy
-            lh = world[:, 2] - eyaw
-            out[slot, :, 0] = d[:, 0]
-            out[slot, :, 1] = d[:, 1]
-            out[slot, :, 2] = np.cos(lh)
-            out[slot, :, 3] = np.sin(lh)
-            vw = np.zeros((PAST, 2))
+        slot_uuids = list(present)  # slot -> track UUID (for sim-future assembly across frames)
+        world_by_uuid = {u: self.hist[u][-1] for u in present}  # UUID -> current shown world pose
+        m = len(present)
+        if m:
+            # Stack all present tracks' padded (PAST,3) world histories into (M,PAST,3) and do
+            # the world->ego transform ONCE (vectorized), instead of a per-slot Python loop +
+            # per-slot matmul (this loop was a chunk of input_build). Front-pad short histories
+            # with their oldest pose (same as the old per-slot path).
+            world = np.empty((m, PAST, 3), dtype=np.float64)
+            for i, u in enumerate(present):
+                dq = self.hist[u]
+                n = len(dq)
+                world[i] = np.asarray(
+                    ([dq[0]] * (PAST - n)) + list(dq) if n < PAST else dq, np.float64
+                )
+            d = (world[:, :, :2] - np.array([ex, ey])) @ R.T  # (M,PAST,2) ego-frame xy
+            lh = world[:, :, 2] - eyaw  # (M,PAST)
+            vw = np.zeros((m, PAST, 2))
             if PAST > 1:
-                vw[1:] = np.diff(world[:, :2], axis=0) / DT
-                vw[0] = vw[1]
-            ve = vw @ R.T  # world velocity -> ego frame
-            out[slot, :, 4] = ve[:, 0]
-            out[slot, :, 5] = ve[:, 1]
-            out[slot, :, 6:11] = self.attrs[u]
+                vw[:, 1:] = np.diff(world[:, :, :2], axis=1) / DT
+                vw[:, 0] = vw[:, 1]
+            ve = vw @ R.T  # world velocity -> ego frame (M,PAST,2)
+            out[:m, :, 0] = d[:, :, 0]
+            out[:m, :, 1] = d[:, :, 1]
+            out[:m, :, 2] = np.cos(lh)
+            out[:m, :, 3] = np.sin(lh)
+            out[:m, :, 4] = ve[:, :, 0]
+            out[:m, :, 5] = ve[:, :, 1]
+            out[:m, :, 6:11] = np.stack([self.attrs[u] for u in present])[:, None, :]
         return out[None], slot_uuids, world_by_uuid
 
 
