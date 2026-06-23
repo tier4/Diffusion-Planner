@@ -869,7 +869,7 @@ def _build_nbr_world_tracks(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.
             continue
         pose = tl.poses[idx]
         c, s = math.cos(pose[2]), math.sin(pose[2])
-        nb = tl.npz(idx)["neighbor_agents_past"][:, -1]  # (320, 11) recorded-ego frame
+        nb = tl.neighbor_last(idx)  # (320, 11) recorded-ego frame — single-key load (fast)
         for slot in range(min(len(ids), nb.shape[0])):
             row = nb[slot]
             if np.abs(row[:6]).sum() == 0:

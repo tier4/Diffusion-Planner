@@ -220,6 +220,17 @@ class RouteTimeline:
             self._npz_cache.popitem(last=False)  # evict least-recently-used
         return data
 
+    def neighbor_last(self, idx: int) -> np.ndarray:
+        """Load ONLY ``neighbor_agents_past[:, -1]`` (current neighbor row, (320, 11)) for a frame.
+
+        The sim-mode track-build scans EVERY frame of the route and needs only this slice — not
+        the lanes/routes/polygons/etc. that ``npz()`` decompresses. ``np.load`` is lazy per-key,
+        so reading just this one key is ~10x cheaper per frame (it dominated timeline_load_npz).
+        Not cached: the track-build touches each frame once."""
+        with self.timers("timeline_load_npz"):
+            with np.load(self.npz_paths[idx], allow_pickle=True) as z:
+                return z["neighbor_agents_past"][:, -1]
+
     def prefetch(self, indices) -> None:
         """Decompress + cache the given recorded frames if not already cached.
 
