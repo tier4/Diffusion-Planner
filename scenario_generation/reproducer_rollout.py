@@ -1374,7 +1374,19 @@ def run_segments_batched(
                                         colliding_uuid is None
                                         or colliding_uuid != s.last_collision_uuid
                                     )
-                                if s.episode_eligible and not s.episode_saved:
+                                # Cheap pre-check before the (expensive) save attempt: only try
+                                # when the window's nominal start frame is CLEAR (> save_thresh).
+                                # In a sustained contact the lookback start is still in-contact, so
+                                # t0-clean would drop it anyway — skipping the _dump (npz-load +
+                                # OBB clearance) here avoids a per-step save-spam that starved the
+                                # GPU. When the prior contact scrolls out of the lookback the start
+                                # clears and we attempt (so a later clean window in the same episode
+                                # is still caught). Buffer/snap floor matches _precollision_window_start.
+                                ws = s.k - save_pre_steps
+                                if s.last_snap_step is not None:
+                                    ws = max(ws, s.last_snap_step)
+                                start_clear = ws < 0 or s.clearances[ws] > save_thresh
+                                if s.episode_eligible and not s.episode_saved and start_clear:
                                     episode_dir = Path(f"{s.save_out_dir}_tc{s.k:05d}")
                                     mani = _dump_precollision_window(
                                         episode_dir,

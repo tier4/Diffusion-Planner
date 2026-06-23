@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -167,7 +168,13 @@ class RouteTimeline:
         # frames don't inflate the speed. Used by the cursor's speed-gap guard.
         self.speeds = self._compute_speeds()
 
-        self._npz_cache: dict[int, dict[str, np.ndarray]] = {}
+        # BOUNDED LRU cache of decompressed frames. Unbounded caching loaded the WHOLE route
+        # into RAM (~1.5MB/frame x 18k frames ~= 27GB on the big route), which capped mining to
+        # one route at a time and OOM'd any cross-route batch. The rollout only touches a sliding
+        # window (cursor + prefetch_ahead) and the track-build scans sequentially, so a few hundred
+        # frames is plenty; evicting the rest keeps per-route RAM ~<1GB so many routes can batch.
+        self._npz_cache: OrderedDict[int, dict[str, np.ndarray]] = OrderedDict()
+        self._npz_cache_max = 768
 
     def _compute_speeds(self, base_dt: float = 0.1) -> np.ndarray:
         n = len(self.npz_paths)
@@ -202,12 +209,15 @@ class RouteTimeline:
         """Lazy-load + cache the model-input arrays for recorded frame ``idx``."""
         cached = self._npz_cache.get(idx)
         if cached is not None:
+            self._npz_cache.move_to_end(idx)  # LRU touch
             return cached
         with self.timers("timeline_load_npz"):
             with np.load(self.npz_paths[idx], allow_pickle=True) as z:
                 # Only decompress the keys we need (skip GT futures) — lazy npz access.
                 data = {k: z[k] for k in _NEEDED_KEYS if k in z.files}
         self._npz_cache[idx] = data
+        if len(self._npz_cache) > self._npz_cache_max:
+            self._npz_cache.popitem(last=False)  # evict least-recently-used
         return data
 
     def prefetch(self, indices) -> None:
