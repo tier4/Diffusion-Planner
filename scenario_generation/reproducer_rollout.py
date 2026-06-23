@@ -1339,9 +1339,12 @@ def run_segments_batched(
                     # Per-episode dirs are tagged by save step (..._tc#####), so a re-mine that
                     # lands collisions at different steps would otherwise leave the previous run's
                     # dirs behind and the extract step would ingest superseded scenes. Clear this
-                    # segment's stale episode dirs up front so each run starts clean.
-                    for stale in Path(save_dir).glob(f"{key}_{s.start}_{s.end}_tc*"):
-                        shutil.rmtree(stale, ignore_errors=True)
+                    # segment's stale episode dirs up front so each run starts clean. Match by
+                    # literal prefix (not glob) so a metacharacter in the route key can't mis-match.
+                    stale_prefix = f"{key}_{s.start}_{s.end}_tc"
+                    for stale in Path(save_dir).iterdir():
+                        if stale.is_dir() and stale.name.startswith(stale_prefix):
+                            shutil.rmtree(stale, ignore_errors=True)
             active = list(states)
             while active:
                 with timers("input_build"):
