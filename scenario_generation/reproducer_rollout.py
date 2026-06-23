@@ -395,8 +395,11 @@ def score_step_batched(
         ego_all = ego_each.repeat_interleave(counts_t, dim=0)  # (K, 4, 2)
 
     p1, p2 = _closest_points_between_rects(ego_all, npc_all)
-    clr_all = (p1 - p2).norm(dim=-1)  # (K,)
-    signed_all = batch_signed_distance_rect(ego_all, npc_all)  # (K,)
+    # Move both result vectors to host ONCE, then slice/reduce per segment in numpy — avoids
+    # the per-segment GPU->CPU syncs that min()/any()/argmin() would each force. min/argmin are
+    # pure selection, so the per-segment values stay bit-identical to the on-device reduction.
+    clr_all = (p1 - p2).norm(dim=-1).cpu().numpy()  # (K,)
+    signed_neg = (batch_signed_distance_rect(ego_all, npc_all) < 0).cpu().numpy()  # (K,)
     out: list[tuple[float, bool, int, int]] = []
     off = 0
     for seg_i, m in enumerate(counts):
@@ -404,13 +407,13 @@ def score_step_batched(
             out.append((float("inf"), False, 0, -1))
         else:
             seg_clr = clr_all[off : off + m]
-            amin = int(seg_clr.argmin().item())  # index within this segment's VALID subset
+            amin = int(seg_clr.argmin())  # index within this segment's VALID subset
             # Map the valid-subset argmin back to the original neighbor slot (build() order).
             collider_slot = int(np.flatnonzero(valids[seg_i])[amin])
             out.append(
                 (
                     float(seg_clr.min()),
-                    bool((signed_all[off : off + m] < 0).any()),
+                    bool(signed_neg[off : off + m].any()),
                     m,
                     collider_slot,
                 )
@@ -482,7 +485,7 @@ class _SegState:
     # (deep enough for the min-movement window extension); it is CLEARED on an unstick
     # teleport so a saved window never crosses the jump.
     save_buf: object = None
-    saved_collision: bool = False
+    saved_collision: bool = False  # recorded-mode latch: at most one saved window per segment
     last_snap_step: int | None = None
     save_out_dir: object = None
     # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
@@ -624,12 +627,13 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
 
 
 def _feed_turn_indicator(s: _SegState, outputs) -> None:
-    """Closed-loop turn-signal feedback for the single-segment rollout paths.
+    """Closed-loop turn-signal feedback for the single-segment ``run_segment`` rollout.
 
     Appends the model's predicted turn indicator to ``turn_hist`` (recorded seed scrolls
     out within PAST steps). No-op in recorded mode (``turn_hist`` is None there). Mirrors
-    the per-batch feedback in ``run_segments_batched`` so every sim-mode rollout — batched
-    or single-segment — evolves the turn signal identically instead of holding the seed."""
+    the per-batch feedback in ``run_segments_batched`` so a sim-mode single-segment rollout
+    evolves the turn signal identically instead of holding the seed. (``render_segment`` /
+    ``extract_collision_scenes`` are recorded-only — no ``turn_hist`` — so they don't call it.)"""
     if s.turn_hist is None:
         return
     ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
@@ -1209,7 +1213,6 @@ def render_segment(
         data = _to_torch_batch([np_dict], model_args, device)
         _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
-        _feed_turn_indicator(s, outputs)  # closed-loop turn signal (sim mode)
         nids = tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
@@ -1325,6 +1328,7 @@ def run_segments_batched(
                 for (tl, start, end) in chunk
             ]
             if save_dir is not None:
+                import shutil
                 from collections import deque
                 from pathlib import Path
 
@@ -1332,6 +1336,12 @@ def run_segments_batched(
                     key = route_keys[c0 + off] if route_keys else _route_key(s.tl)
                     s.save_buf = deque(maxlen=save_max_scenes + 1)
                     s.save_out_dir = Path(save_dir) / f"{key}_{s.start}_{s.end}"
+                    # Per-episode dirs are tagged by save step (..._tc#####), so a re-mine that
+                    # lands collisions at different steps would otherwise leave the previous run's
+                    # dirs behind and the extract step would ingest superseded scenes. Clear this
+                    # segment's stale episode dirs up front so each run starts clean.
+                    for stale in Path(save_dir).glob(f"{key}_{s.start}_{s.end}_tc*"):
+                        shutil.rmtree(stale, ignore_errors=True)
             active = list(states)
             while active:
                 with timers("input_build"):
@@ -1425,10 +1435,14 @@ def run_segments_batched(
                                 if not s.in_episode:  # entering contact from a clear -> new episode
                                     s.in_episode = True
                                     s.episode_saved = False
-                                    s.episode_eligible = (
-                                        colliding_uuid is None
-                                        or colliding_uuid != s.last_collision_uuid
-                                    )
+                                    if colliding_uuid is None:
+                                        # Recorded mode (no track UUIDs): can't tell distinct
+                                        # vehicles apart, so fall back to ONE saved window per
+                                        # segment (the pre-sim-mode behavior) instead of one per
+                                        # clear-separated contact.
+                                        s.episode_eligible = not s.saved_collision
+                                    else:
+                                        s.episode_eligible = colliding_uuid != s.last_collision_uuid
                                 # Cheap pre-check before the (expensive) save attempt: only try
                                 # when the window's nominal start frame is CLEAR (> save_thresh).
                                 # In a sustained contact the lookback start is still in-contact, so
@@ -1462,6 +1476,7 @@ def run_segments_batched(
                                     )
                                     if mani is not None:
                                         s.episode_saved = True
+                                        s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
                     for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
                         prev_snaps = s.n_snaps
@@ -1795,6 +1810,24 @@ def _dump_precollision_window(
                 naf_sim[slots, j - 1, 1] = d[:, 1]
                 naf_sim[slots, j - 1, 2] = np.cos(h)
                 naf_sim[slots, j - 1, 3] = np.sin(h)
+            # Hold a neighbor's pose across a momentary shown-future gap (perception drop):
+            # an interior [0,0,0,0] would read as an invalid/padding slot embedded in valid
+            # motion. Forward-fill interior gaps from the prior shown pose and back-fill a
+            # leading gap from the first shown pose; trailing zeros (after the neighbor's last
+            # appearance) stay zero = gone. Only present (non-all-zero) slots are touched.
+            for slot in range(320):
+                traj = naf_sim[slot]
+                present = np.flatnonzero(np.abs(traj).sum(axis=1) > 0)
+                if len(present) == 0:
+                    continue
+                last = None
+                for j in range(present[-1] + 1):
+                    if np.abs(traj[j]).sum() > 0:
+                        last = traj[j].copy()
+                    elif last is not None:
+                        traj[j] = last
+                if present[0] > 0:  # leading gap before the first shown pose
+                    traj[: present[0]] = traj[present[0]]
             scene["neighbor_agents_future"] = naf_sim
         else:
             with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
@@ -1917,7 +1950,6 @@ def extract_collision_scenes(
         data = _to_torch_batch([np_dict], model_args, device)
         _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
-        _feed_turn_indicator(s, outputs)  # closed-loop turn signal (sim mode)
         clr = _min_clearance_any(neighbors_live, s.ego_shape, device)
         # 6-tuple to match the batched buffer / _dump_precollision_window unpacking; this
         # legacy extractor path is recorded-mode (no sim tracker) -> slot_uuids/world None.
