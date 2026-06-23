@@ -247,14 +247,13 @@ class RouteTimeline:
 
         Called from a background thread while the GPU runs the model forward, so the
         next rollout tick's input build hits the cache instead of paying the np.load
-        decompress on the critical path. ``npz`` is internally locked, so this is safe
-        to call concurrently with the build threads; loading an already-cached or
-        out-of-range frame is a benign no-op (a rare double-decompress at worst, same
-        value). The ``in`` check is a best-effort skip — ``npz`` re-checks under the
-        lock, so a race here only risks a redundant (idempotent) decompress."""
+        decompress on the critical path. Delegates straight to ``npz`` (which does the
+        cached-check, insert and eviction under ``_cache_lock``) — no unlocked cache read
+        here — so it's safe to call concurrently with the build threads; an already-cached
+        frame is a cheap locked hit and an out-of-range index is skipped."""
         n = len(self.npz_paths)
         for i in indices:
-            if 0 <= i < n and i not in self._npz_cache:
+            if 0 <= i < n:
                 self.npz(i)
 
     def pose(self, idx: int) -> np.ndarray:

@@ -826,6 +826,8 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             row = nb[slot]
             if np.abs(row[:6]).sum() == 0:
                 continue
+            if not ids[slot]:  # skip blank UUIDs so they don't merge into one bogus track
+                continue
             wx = pose[0] + row[0] * c - row[1] * s
             wy = pose[1] + row[0] * s + row[1] * c
             wh = math.atan2(row[3], row[2]) + pose[2]
@@ -912,6 +914,8 @@ def _build_nbr_world_tracks(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.
             if np.abs(row[:6]).sum() == 0:
                 continue
             u = ids[slot]
+            if not u:  # skip blank UUIDs so they don't merge into one bogus track
+                continue
             wx = pose[0] + row[0] * c - row[1] * s
             wy = pose[1] + row[0] * s + row[1] * c
             wh = math.atan2(row[3], row[2]) + pose[2]
