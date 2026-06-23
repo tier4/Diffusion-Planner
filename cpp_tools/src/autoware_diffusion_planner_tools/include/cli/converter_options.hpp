@@ -59,6 +59,15 @@ struct ConverterOptions
   // their skip reason. Intended for inspection/testing only; off in production.
   bool write_skipped_npz;
 
+  // Sidecar-only mode: run the identical conversion pipeline (sequence build, neighbor
+  // association, skip decision) but write ONLY the per-frame JSON sidecars (pose +
+  // neighbor_ids + is_skipped), skipping the npz tensor serialization/compression entirely.
+  // Used to (re)generate neighbor_ids sidecars for an existing npz set produced by this same
+  // converter: the slot ordering and skip decision are byte-identical (same code path), so the
+  // emitted sidecars align to those npzs by token — and it is faster than a full re-convert
+  // because it skips the npz write. Off in production (a normal convert already emits sidecars).
+  bool sidecar_only;
+
   // Build converter defaults shared by all converter entry points.
   static ConverterOptions default_converter_options();
 

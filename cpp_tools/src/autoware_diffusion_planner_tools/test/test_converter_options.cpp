@@ -39,6 +39,7 @@ static ConverterOptions make_default_opts()
   o.offlane_max_score = 6.0f;
   o.offlane_time_stride = 1;
   o.write_skipped_npz = false;
+  o.sidecar_only = false;
   return o;
 }
 
@@ -57,6 +58,8 @@ TEST(DefaultConverterOptionsTest, UsesSharedDefaults)
   EXPECT_FLOAT_EQ(opts.ego_length, -1.0f);
   EXPECT_FLOAT_EQ(opts.ego_width, -1.0f);
   EXPECT_TRUE(opts.use_interpolation);
+  EXPECT_FALSE(opts.write_skipped_npz);
+  EXPECT_FALSE(opts.sidecar_only);  // full conversion (writes npz) by default
 }
 
 // ---------------------------------------------------------------------------
