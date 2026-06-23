@@ -9,7 +9,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("rosbag_path", type=Path)
     parser.add_argument("vector_map_path", type=Path)
     parser.add_argument("save_dir", type=Path)
-    parser.add_argument("--step", type=int, default=3)
+    parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
     parser.add_argument("--min_distance", type=float, default=50.0)
@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--collision_time_stride", type=int, default=5)
     parser.add_argument("--offlane_max_score", type=float, default=6.0)
     parser.add_argument("--offlane_time_stride", type=int, default=1)
-    parser.add_argument("--write_skipped_npz", type=int, default=0)
+    parser.add_argument("--write_skipped_npz", type=int, default=1)
     return parser.parse_args()
 
 
