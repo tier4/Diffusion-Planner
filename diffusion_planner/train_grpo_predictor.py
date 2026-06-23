@@ -112,7 +112,8 @@ def get_args():
         "--grpo_noise_scale",
         type=float,
         default=3.0,
-        help="multiplier on the initial diffusion noise during sampling",
+        help="MAX initial-noise std during sampling; each row draws its own scale from "
+        "U[0, this] every step (0 = deterministic)",
     )
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
     parser.add_argument(

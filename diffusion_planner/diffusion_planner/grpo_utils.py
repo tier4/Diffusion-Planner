@@ -59,8 +59,10 @@ def sample_group(
     Args:
         model: the Diffusion_Planner (or DDP-wrapped) model.
         norm_inputs: observation-normalized inputs, batch dimension already expanded.
-        noise_scale: multiplier on the standard-normal initial diffusion noise. Larger
-            values give more diverse trajectories within a group.
+        noise_scale: the *maximum* initial-noise std. Each row draws its own scale uniformly
+            from ``U[0, noise_scale]`` (fresh every call), so a group spans a range of
+            diversities rather than all sharing one fixed scale. ``noise_scale=0`` stays
+            deterministic (temperature 0).
         device: target device.
 
     Returns:
@@ -72,8 +74,11 @@ def sample_group(
 
     B = norm_inputs["ego_current_state"].shape[0]
     inference_inputs = dict(norm_inputs)
+    # Per-row noise std ~ U[0, noise_scale]: each generated trajectory uses its own initial-noise
+    # magnitude, drawn fresh each call.
+    per_row_scale = torch.rand(B, 1, 1, 1, device=device) * noise_scale
     inference_inputs["sampled_trajectories"] = (
-        torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device) * noise_scale
+        torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device) * per_row_scale
     )
     inference_inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
 
