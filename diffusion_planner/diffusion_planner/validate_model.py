@@ -42,22 +42,10 @@ _VAL_SUBSCORE_KEYS = (
 )
 _VAL_SUBSCORE_CFG = RewardConfig()
 _VAL_EPDMS_LIKE_CFG = EPDMSLikeConfig()
-# Components returned by epdms_like_aggregate, logged as ``ego_subscore_<key>``.
-# ``epdms_like`` is the single [0,1] EPDMS-structured proxy score (NOT a faithful
-# NAVSIM EPDMS; see #142); the rest are its binary gates and normalized quality
-# terms, kept for debugging why a checkpoint scores the way it does.
-_VAL_EPDMS_LIKE_KEYS = (
-    "epdms_like",
-    "gate_nc",
-    "gate_dac",
-    "gate_tlc",
-    "gate_kin",
-    "q_ttc",
-    "q_progress",
-    "q_comfort",
-    "q_lane",
-    "quality",
-)
+# epdms_like_aggregate returns the EPDMS-like components -- ``epdms_like`` (the single
+# [0,1] EPDMS-structured proxy score, NOT a faithful NAVSIM EPDMS; see #142) plus its
+# binary gates and normalized quality terms. They are logged as ``ego_subscore_<key>``;
+# the aggregate function is the single source of truth for which keys exist.
 
 
 @torch.no_grad()
@@ -80,12 +68,13 @@ def _reward_subscores_per_scene(
     Returns:
         ``{name: (B,) tensor}`` for each requested key. When ``gt_progress`` is
         provided, the dict also includes the EPDMS-like component keys (``epdms_like``
-        plus its gates / normalized quality terms; see ``_VAL_EPDMS_LIKE_KEYS``).
+        plus its gates / normalized quality terms) as returned by
+        ``epdms_like_aggregate``.
     """
     n = ego_pred.shape[0]
     acc = {name: [] for name in keys}
     want_epdms = gt_progress is not None
-    epdms_acc = {k: [] for k in _VAL_EPDMS_LIKE_KEYS} if want_epdms else {}
+    epdms_acc: dict[str, list] = {}
     for b in range(n):
         data_b = {k: v[b : b + 1] for k, v in data_batched.items()}
         subs_b = compute_subscores_batch(ego_pred[b : b + 1], data_b, config)
@@ -93,8 +82,8 @@ def _reward_subscores_per_scene(
             acc[name].append(subs_b[name])
         if want_epdms:
             _, comp_b = epdms_like_aggregate(subs_b, gt_progress[b : b + 1], epdms_cfg)
-            for k in _VAL_EPDMS_LIKE_KEYS:
-                epdms_acc[k].append(comp_b[k])
+            for k, v in comp_b.items():
+                epdms_acc.setdefault(k, []).append(v)
     out = {name: torch.cat(vals) for name, vals in acc.items()}
     out.update({k: torch.cat(vals) for k, vals in epdms_acc.items()})
     return out
