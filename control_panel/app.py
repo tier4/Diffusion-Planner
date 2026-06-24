@@ -21,8 +21,19 @@ from . import presets as P
 from . import runner as R
 from . import workflows as W
 
-CUSTOM = "custom…"
 NONE = "(none)"
+ADD = "➕ Browse to add…"  # sentinel: selecting it opens the OS picker to register a new asset
+
+_TYPE_ICON = {
+    "models": "🧠",
+    "loras": "🧩",
+    "policies": "🛰",
+    "reward_configs": "⚙️",
+    "maps": "🗺",
+    "route_datasets": "📁",
+    "scene_datasets": "🎬",
+    "run_dirs": "📦",
+}
 
 
 # --------------------------------------------------------------------------------------
@@ -65,7 +76,7 @@ def _browse_button(textbox, mode: str):
 
 def _list_choices(library: dict, asset_type: str, required: bool) -> list[str]:
     base = P.entry_names(library, asset_type)
-    return ([] if required else [NONE]) + base + [CUSTOM]
+    return ([] if required else [NONE]) + base + [ADD]
 
 
 def _plain_widget(spec: W.ArgSpec, default=None):
@@ -111,35 +122,53 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
         fields.append({"name": "__run__", "spec": None, "role": "runname", "comps": [run_tb]})
         flat.append(run_tb)
 
-    for spec in wf.args:
+    def _list_widget(spec, scale=None):
+        """One dropdown over the library for a shared-list field (+ an inline 'Browse to add')."""
+        names = _list_choices(library, spec.shared, spec.required)
+        base = P.entry_names(library, spec.shared)
+        value = names[0] if (spec.required and base) else (NONE if not spec.required else None)
+        icon = _TYPE_ICON.get(spec.shared, "")
+        dd = gr.Dropdown(
+            choices=names,
+            value=value,
+            label=f"{icon} {spec.label}" + (" *" if spec.required else ""),
+            info=spec.help or None,
+            scale=scale,
+        )
+        last = gr.State(value)  # last valid selection, for cancel-revert
+        pick_mode = "dir" if spec.shared in ("policies", "run_dirs", "route_datasets") else "file"
+        asset_dropdowns.setdefault(spec.shared, []).append((dd, spec.required, last, pick_mode))
+        return dd
+
+    specs = list(wf.args)
+    i = 0
+    while i < len(specs):
+        spec = specs[i]
         role = _field_role(spec)
+        nxt = specs[i + 1] if i + 1 < len(specs) else None
+        # Group a model field with the LoRA that immediately follows it on one row.
+        if (
+            role == "list"
+            and spec.shared == "models"
+            and nxt is not None
+            and _field_role(nxt) == "list"
+            and nxt.shared == "loras"
+        ):
+            with gr.Row():
+                dd_m = _list_widget(spec, scale=3)
+                dd_l = _list_widget(nxt, scale=2)
+            fields.append({"name": spec.name, "spec": spec, "role": "list", "comps": [dd_m]})
+            flat.append(dd_m)
+            fields.append({"name": nxt.name, "spec": nxt, "role": "list", "comps": [dd_l]})
+            flat.append(dd_l)
+            i += 2
+            continue
+
         comps = []
         if role in ("hidden", "auto", "derive", "ego"):
             comps = []  # not rendered; resolved at Run
         elif role == "list":
-            names = _list_choices(library, spec.shared, spec.required)
-            base = P.entry_names(library, spec.shared)
-            value = (
-                names[0] if (spec.required and base) else (NONE if not spec.required else CUSTOM)
-            )
-            dd = gr.Dropdown(
-                choices=names,
-                value=value,
-                label=spec.label + (" *" if spec.required else "") + f"  ({spec.shared})",
-                info=spec.help or None,
-            )
-            pick_mode = "dir" if spec.shared in ("policies", "run_dirs") else "file"
-            with gr.Row():
-                custom = gr.Textbox(
-                    value="",
-                    label=f"{spec.label} — custom path",
-                    visible=(value == CUSTOM),
-                    scale=8,
-                )
-                _browse_button(custom, pick_mode)
-            dd.change(lambda v: gr.update(visible=(v == CUSTOM)), dd, custom)
-            asset_dropdowns.setdefault(spec.shared, []).append((dd, spec.required))
-            comps = [dd, custom]
+            comps = [_list_widget(spec)]
         elif role == "plain" and spec.kind in ("file", "dir", "path"):
             with gr.Row():
                 tb = _plain_widget(spec, default=dev_defaults.get(spec.name))
@@ -149,6 +178,7 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
             comps = [_plain_widget(spec)]
         fields.append({"name": spec.name, "spec": spec, "role": role, "comps": comps})
         flat.extend(comps)
+        i += 1
     return fields, flat
 
 
@@ -213,12 +243,9 @@ def resolve_values(
         elif role in ("auto", "derive"):
             pass  # filled in the second pass
         elif role == "list":
-            sel, custom = vals[0], vals[1]
-            if sel in (NONE, None, ""):
+            sel = vals[0]
+            if sel in (NONE, ADD, None, ""):
                 values[name] = ""
-                entry = {}
-            elif sel == CUSTOM:
-                values[name] = (custom or "").strip()
                 entry = {}
             else:
                 entry = P.find_entry(library, spec.shared, sel) or {}
@@ -766,7 +793,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         flat_dropdowns: list = []
         flat_meta: list = []  # (type, required) parallel to flat_dropdowns
         for t in P.LIST_TYPES:
-            for dd, req in asset_dropdowns.get(t, []):
+            for dd, req, *_ in asset_dropdowns.get(t, []):
                 flat_dropdowns.append(dd)
                 flat_meta.append((t, req))
 
@@ -942,6 +969,65 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         reg_btn.click(
             _register_ckpt, [reg_name, ckpt_dd, run_scan_state, library_state], add_outputs
         )
+
+        # ---- inline "Browse to add…" on every asset dropdown ----------------------
+        def _auto_name(library, asset_type, path):
+            stem = Path(path.rstrip("/")).stem or Path(path.rstrip("/")).name or asset_type
+            existing = set(P.entry_names(library, asset_type))
+            name, n = stem, 2
+            while name in existing:
+                name, n = f"{stem}-{n}", n + 1
+            return name
+
+        def _make_add_handler(asset_type, my_idx, type_dds, type_reqs, pick_mode):
+            def on_change(sel, last, library):
+                # type choices refresh (no value) for every dropdown of this type
+                def type_ups(value_for_me=None):
+                    ups = []
+                    for i, req in enumerate(type_reqs):
+                        ch = _list_choices(library, asset_type, req)
+                        ups.append(
+                            gr.update(choices=ch, value=value_for_me)
+                            if (i == my_idx and value_for_me is not None)
+                            else gr.update(choices=ch)
+                        )
+                    return ups
+
+                if sel != ADD:  # normal selection (or the revert echo) — just record it
+                    return (library, sel, gr.update(), gr.update(), *type_ups())
+                start = library.get("workspace_root") or library.get("ssd_root") or ""
+                path, _note = _os_pick(pick_mode, start)
+                if not path:  # cancelled → revert this dropdown to its last valid value
+                    ups = type_ups()
+                    ups[my_idx] = gr.update(
+                        choices=_list_choices(library, asset_type, type_reqs[my_idx]), value=last
+                    )
+                    return (library, last, gr.update(), gr.update(), *ups)
+                entry, _n = _resolve_asset(asset_type, path)
+                entry["name"] = _auto_name(library, asset_type, path)
+                library.setdefault(asset_type, []).append(entry)
+                P.save_library(library)
+                new = entry["name"]
+                return (
+                    library,
+                    new,
+                    _library_html(library),
+                    gr.update(choices=_remove_choices(library)),
+                    *type_ups(value_for_me=new),
+                )
+
+            return on_change
+
+        for t in P.LIST_TYPES:
+            entries = asset_dropdowns.get(t, [])
+            type_dds = [dd for dd, *_ in entries]
+            type_reqs = [req for _, req, *_ in entries]
+            for idx, (dd, _req, last, pick_mode) in enumerate(entries):
+                dd.change(
+                    _make_add_handler(t, idx, type_dds, type_reqs, pick_mode),
+                    inputs=[dd, last, library_state],
+                    outputs=[library_state, last, lib_view, remove_dd, *type_dds],
+                )
 
         # initialise the remove dropdown choices
         demo.load(lambda lib: gr.update(choices=_remove_choices(lib)), library_state, remove_dd)
