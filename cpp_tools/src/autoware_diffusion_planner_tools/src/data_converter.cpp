@@ -37,13 +37,14 @@ void print_options(const ConverterPaths & paths, const ConverterOptions & conver
     "Collision filter static_object_margin: {}, neighbor_margin: {}, road_border_margin: {}, "
     "collision_time_stride: {}\n"
     "Off-lane filter max_score: {}, offlane_time_stride: {}\n"
-    "Write skipped npz: {}\n",
+    "Write skipped npz: {}, Sidecar only: {}\n",
     converter.ego_wheel_base, converter.ego_length, converter.ego_width, paths.rosbag_path,
     paths.vector_map_path, paths.save_dir, converter.step, converter.limit, converter.min_frames,
     converter.min_distance, converter.search_nearest_route, converter.convert_yellow,
     converter.convert_red, converter.use_interpolation, converter.static_object_margin,
     converter.neighbor_margin, converter.road_border_margin, converter.collision_time_stride,
-    converter.offlane_max_score, converter.offlane_time_stride, converter.write_skipped_npz);
+    converter.offlane_max_score, converter.offlane_time_stride, converter.write_skipped_npz,
+    converter.sidecar_only);
 }
 
 bool parse_arguments(int argc, char ** argv, ConverterPaths & paths, ConverterOptions & converter)

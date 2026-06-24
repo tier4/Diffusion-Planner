@@ -75,6 +75,11 @@ void ConverterOptions::add_converter_options(CLI::App & app)
     "--write_skipped_npz", write_skipped_npz,
     "Also write npz files for skipped frames when non-zero. "
     "Intended for inspection.");
+  app.add_flag(
+    "--sidecar_only", sidecar_only,
+    "Write ONLY the per-frame JSON sidecars (pose + neighbor_ids + is_skipped), skipping all "
+    "npz output. Same pipeline/slot-ordering as a full convert, so the sidecars align to an "
+    "existing npz set from this converter; faster than re-converting (no npz write).");
 }
 
 std::string ConverterPaths::get_rosbag_dir_name() const
@@ -109,6 +114,8 @@ ConverterOptions ConverterOptions::default_converter_options()
 
   // Inspection-only: production keeps this off so skipped frames write no npz.
   options.write_skipped_npz = false;
+  // Full conversion by default (write npz); --sidecar_only flips to sidecar-only output.
+  options.sidecar_only = false;
   options.use_interpolation = static_cast<bool>(options.interpolation);
   return options;
 }

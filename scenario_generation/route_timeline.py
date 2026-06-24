@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -167,7 +169,18 @@ class RouteTimeline:
         # frames don't inflate the speed. Used by the cursor's speed-gap guard.
         self.speeds = self._compute_speeds()
 
-        self._npz_cache: dict[int, dict[str, np.ndarray]] = {}
+        # BOUNDED LRU cache of decompressed frames. Unbounded caching loaded the WHOLE route
+        # into RAM (~1.5MB/frame x 18k frames ~= 27GB on the big route), which capped mining to
+        # one route at a time and OOM'd any cross-route batch. The rollout only touches a sliding
+        # window (cursor + prefetch_ahead) and the track-build scans sequentially, so a few hundred
+        # frames is plenty; evicting the rest keeps per-route RAM ~<1GB so many routes can batch.
+        self._npz_cache: OrderedDict[int, dict[str, np.ndarray]] = OrderedDict()
+        self._npz_cache_max = 768
+        # The cache is read by the build threads (pool.map(_pre_step)) AND mutated by the
+        # background prefetch threads concurrently, all sharing one timeline. OrderedDict's
+        # move_to_end / popitem are not mutually atomic, so a get()+touch can race an evicting
+        # popitem (KeyError on the touch / corrupted link order). Guard every cache access.
+        self._cache_lock = threading.Lock()
 
     def _compute_speeds(self, base_dt: float = 0.1) -> np.ndarray:
         n = len(self.npz_paths)
@@ -200,28 +213,47 @@ class RouteTimeline:
 
     def npz(self, idx: int) -> dict[str, np.ndarray]:
         """Lazy-load + cache the model-input arrays for recorded frame ``idx``."""
-        cached = self._npz_cache.get(idx)
-        if cached is not None:
-            return cached
+        with self._cache_lock:
+            cached = self._npz_cache.get(idx)
+            if cached is not None:
+                self._npz_cache.move_to_end(idx)  # LRU touch
+                return cached
+        # Decompress OUTSIDE the lock (the expensive part) so concurrent build threads
+        # don't serialize on np.load; a rare double-decompress of the same idx is benign.
         with self.timers("timeline_load_npz"):
             with np.load(self.npz_paths[idx], allow_pickle=True) as z:
                 # Only decompress the keys we need (skip GT futures) — lazy npz access.
                 data = {k: z[k] for k in _NEEDED_KEYS if k in z.files}
-        self._npz_cache[idx] = data
+        with self._cache_lock:
+            self._npz_cache[idx] = data
+            self._npz_cache.move_to_end(idx)  # mark MRU even if another thread inserted it
+            while len(self._npz_cache) > self._npz_cache_max:
+                self._npz_cache.popitem(last=False)  # evict least-recently-used
         return data
+
+    def neighbor_last(self, idx: int) -> np.ndarray:
+        """Load ONLY ``neighbor_agents_past[:, -1]`` (current neighbor row, (320, 11)) for a frame.
+
+        The sim-mode track-build scans EVERY frame of the route and needs only this slice — not
+        the lanes/routes/polygons/etc. that ``npz()`` decompresses. ``np.load`` is lazy per-key,
+        so reading just this one key is ~10x cheaper per frame (it dominated timeline_load_npz).
+        Not cached: the track-build touches each frame once."""
+        with self.timers("timeline_load_npz"):
+            with np.load(self.npz_paths[idx], allow_pickle=True) as z:
+                return z["neighbor_agents_past"][:, -1]
 
     def prefetch(self, indices) -> None:
         """Decompress + cache the given recorded frames if not already cached.
 
         Called from a background thread while the GPU runs the model forward, so the
         next rollout tick's input build hits the cache instead of paying the np.load
-        decompress on the critical path. ``npz`` already caches; loading an
-        already-cached or out-of-range frame is a benign no-op (double-decompress at
-        worst, same value), so this is safe to call concurrently with the build
-        threads."""
+        decompress on the critical path. Delegates straight to ``npz`` (which does the
+        cached-check, insert and eviction under ``_cache_lock``) — no unlocked cache read
+        here — so it's safe to call concurrently with the build threads; an already-cached
+        frame is a cheap locked hit and an out-of-range index is skipped."""
         n = len(self.npz_paths)
         for i in indices:
-            if 0 <= i < n and i not in self._npz_cache:
+            if 0 <= i < n:
                 self.npz(i)
 
     def pose(self, idx: int) -> np.ndarray:
