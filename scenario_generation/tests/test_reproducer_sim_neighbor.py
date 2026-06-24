@@ -13,7 +13,11 @@ import json
 import numpy as np
 import torch
 
-from scenario_generation.reproducer_rollout import SimNeighborTracker, decode_turn_indicator
+from scenario_generation.reproducer_rollout import (
+    SimNeighborTracker,
+    _build_nbr_world_tracks,
+    decode_turn_indicator,
+)
 from scenario_generation.route_timeline import RouteTimeline
 
 EGO_SHAPE = np.array([4.76, 7.24, 2.29], dtype=np.float32)
@@ -105,3 +109,44 @@ def test_sim_neighbor_velocity_from_shown_motion(tmp_path):
     assert mover_v > 1.0, f"moving neighbor must read its shown velocity (got {mover_v})"
     # And the held-still neighbor's shown position stayed put.
     assert abs(float(nb[fi, -1, 0]) - 10.0) < 0.5 and abs(float(nb[fi, -1, 1])) < 0.5
+
+
+def test_sim_neighbor_keeps_single_frame_track(tmp_path):
+    """A neighbor present in only ONE recorded frame must still be tracked (kept as a constant,
+    v~0) instead of dropped, so step 0 reproduces the recorded context."""
+    blip = "blip-uuid"
+    blip_frame = 3
+    paths = []
+    for i in range(6):
+        nb = np.zeros((320, 31, 11), dtype=np.float32)
+        ids = [""] * 320
+        if i == blip_frame:  # the neighbor appears in exactly one frame
+            nb[0, :, :] = _nbr_row(8.0, 1.0, recorded_vx=0.0)
+            ids[0] = blip
+        p = tmp_path / f"r_{i:010d}.npz"
+        np.savez_compressed(
+            p,
+            neighbor_agents_past=nb,
+            ego_agent_past=np.zeros((31, 3), dtype=np.float32),
+            ego_shape=EGO_SHAPE,
+        )
+        (tmp_path / f"r_{i:010d}.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": float(i),
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.0,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.0,
+                    "qw": 1.0,
+                    "neighbor_ids": ids,
+                }
+            )
+        )
+        paths.append(p)
+    tl = RouteTimeline(paths)
+    interp, _attrs, span = _build_nbr_world_tracks(tl, 0, len(tl))
+    assert blip in interp, "single-frame neighbor was dropped (should be kept as a constant track)"
+    assert span[blip] == (blip_frame, blip_frame)

@@ -925,8 +925,9 @@ def _build_nbr_world_tracks(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.
     interp: dict[str, tuple] = {}
     span: dict[str, tuple] = {}
     for u, lst in raw.items():
-        if len(lst) < 2:
-            continue
+        # Keep even 1-sample tracks (constant pose -> v~0). A neighbor present only at/near the
+        # segment start must still appear in sim mode so step 0 reproduces the recorded context
+        # (matches _build_neighbor_interp); _interp_pose handles a single anchor by clamping.
         kept = [lst[0]]
         for samp in lst[1:]:
             if math.hypot(samp[1] - kept[-1][1], samp[2] - kept[-1][2]) > eps:
