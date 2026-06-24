@@ -547,7 +547,7 @@ _register(
         args=[
             _model_path(),
             _lora(),
-            _scenes(label="Perturbed scenes JSON", shared=None),
+            _scenes(label="Perturbed scenes (dataset)"),
             _reward_config(),
             _output_dir(),
             ArgSpec("manifest", "file", label="disturb manifest.json (optional)"),
@@ -605,25 +605,23 @@ _register(
         "Writes ranked hits JSONL; --save_dir saves pre-collision training NPZ batches one-pass.",
         args=[
             ArgSpec(
-                "npz_root", "dir", label="NPZ corpus root", shared="route_datasets", required=True
+                "npz_root", "dir", label="Route corpus", shared="route_datasets", required=True
             ),
-            ArgSpec("sidecar_root", "dir", label="Sidecar root (optional)"),
             _model_path(),
             ArgSpec("out", "file", auto="file:hits.jsonl", required=True),
+            ArgSpec(
+                "save_thresh",
+                "float",
+                label="Collision distance (m) — flag a scene when ego↔neighbor ≤ this",
+                default=0.2,
+            ),
             ArgSpec("seg_len", "int", label="Segment length (frames)", default=600),
             ArgSpec("batch_size", "int", label="Segment batch size", default=8),
-            ArgSpec(
-                "neighbor_history_mode",
-                "choice",
-                label="Neighbor history",
-                default="recorded",
-                choices=["recorded", "sim"],
-            ),
             ArgSpec("save_dir", "dir", auto="dir:collision_batches"),
             ArgSpec("save_pre_steps", "int", label="Pre-steps to save", default=80),
             ArgSpec("save_min_ego_speed", "float", label="Min ego speed (m/s)", default=0.5),
             ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),
-            ArgSpec("dump_hits", "int", label="Render top-N hit segments", default=0),
+            ArgSpec("dump_hits", "int", label="Render top-N hit segments to PNGs", default=0),
             ArgSpec("max_routes", "int", label="Max routes (debug)", default=-1),
             ArgSpec("max_segments", "int", label="Max segments (debug)", default=-1),
             ArgSpec("device", "str", label="Device (optional)"),
@@ -694,17 +692,18 @@ _register(
         key="render_npz_dir",
         title="Viz: render NPZ dir",
         module="scenario_generation.render_npz_dir",
-        description="Render every NPZ in a directory to a PNG (perfect-tracker renderer with neighbors).",
+        description="Render a route dir, a single-scene dir, or a parent of collision-window "
+        "subfolders to PNGs (perfect-tracker renderer with neighbors). Ego dims are read from "
+        "each NPZ — no need to enter them.",
         args=[
-            ArgSpec("npz_dir", "dir", label="NPZ dir", shared="route_datasets", required=True),
+            ArgSpec(
+                "npz_dir", "dir", label="NPZ dir / route", shared="route_datasets", required=True
+            ),
             _output_dir(),
             ArgSpec("route_pkl", "file", label="Route pickle (optional, adds borders/route)"),
             ArgSpec("workers", "int", default=8),
             ArgSpec("stride", "int", default=1),
             ArgSpec("limit", "int", default=-1),
-            ArgSpec("ego_length", "float", label="Ego length (m, optional)"),
-            ArgSpec("ego_width", "float", label="Ego width (m, optional)"),
-            ArgSpec("ego_wheelbase", "float", label="Ego wheelbase (m, optional)"),
         ],
         outputs=lambda v: {"dir": v.get("output_dir")},
     )
