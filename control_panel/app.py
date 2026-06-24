@@ -353,11 +353,20 @@ def workflow_panel(wf: W.Workflow, library0: dict, library_state, asset_dropdown
     status = gr.Textbox(label="Status", interactive=False)
     log = gr.Textbox(label="Log", lines=20, max_lines=20, autoscroll=True, interactive=False)
 
-    run_btn.click(_run_handler(wf, fields), [library_state, *flat], [log, status, err, job_state])
+    run_evt = run_btn.click(
+        _run_handler(wf, fields), [library_state, *flat], [log, status, err, job_state]
+    )
     stop_btn.click(_stop_handler(), job_state, status)
     prev_btn.click(_preview_handler(wf, fields), [library_state, *flat], log)
     attach_btn.click(_attach_handler(wf.key), None, [log, status, job_state])
-    return {"fields": fields, "flat": flat, "log": log, "status": status}
+    return {
+        "fields": fields,
+        "flat": flat,
+        "log": log,
+        "status": status,
+        "run_evt": run_evt,
+        "wf": wf,
+    }
 
 
 # --------------------------------------------------------------------------------------
@@ -602,6 +611,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             "Run launches a detached subprocess (survives closing this panel); ■ Stop ends it."
         )
         library_state = gr.State(library0)
+        creating_panels: list = []  # panels whose tool writes a dataset → auto-rescan on finish
 
         # ---- Workspace -------------------------------------------------------------
         with gr.Tab("Workspace"):
@@ -739,7 +749,9 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             }
             for k in ("disturb_and_replay", "viz_p4_recovery", "percentile_filter_perturbed"):
                 with gr.Tab(_prism_labels[k]):
-                    workflow_panel(wf(k), library0, library_state, asset_dropdowns)
+                    p = workflow_panel(wf(k), library0, library_state, asset_dropdowns)
+                    if wf(k).creates:
+                        creating_panels.append(p)
 
         def _viz_with_viewer(vwf):
             """A workflow panel plus a 'Load rendered outputs' WebM/PNG viewer."""
@@ -1028,6 +1040,29 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                     inputs=[dd, last, library_state],
                     outputs=[library_state, last, lib_view, remove_dd, *type_dds],
                 )
+
+        # ---- auto-rescan: a tool that wrote a dataset → merge new workspace datasets in ----
+        def _merge_workspace_datasets(library):
+            """Add any workspace scene/route datasets not already in the library (keep one-offs)."""
+            root = library.get("workspace_root")
+            if root:
+                scanned = P.scan_workspace(root)
+                for t in ("scene_datasets", "route_datasets"):
+                    have = {e.get("path") for e in library.get(t, [])}
+                    for e in scanned.get(t, []):
+                        if e.get("path") not in have:
+                            library.setdefault(t, []).append(e)
+                P.save_library(library)
+            return (
+                library,
+                _library_html(library),
+                gr.update(choices=_remove_choices(library)),
+                *_dropdown_updates(library),
+            )
+
+        _rescan_outputs = [library_state, lib_view, remove_dd, *flat_dropdowns]
+        for p in creating_panels:
+            p["run_evt"].then(_merge_workspace_datasets, library_state, _rescan_outputs)
 
         # initialise the remove dropdown choices
         demo.load(lambda lib: gr.update(choices=_remove_choices(lib)), library_state, remove_dd)
