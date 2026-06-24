@@ -50,6 +50,12 @@ class ArgSpec:
     derive_field: str | None = None
     # Not rendered; its ``default`` is always used (e.g. a fixed flag the user shouldn't fiddle).
     hidden: bool = False
+    # Auto-derived output path under <workspace output_dir>/<workflow key>/<run name>. Not
+    # rendered; the app shows a single "Run name" field and fills these. Values:
+    #   "dir"          -> the run folder itself
+    #   "dir:<sub>"    -> a subfolder inside the run folder
+    #   "file:<name>"  -> a file inside the run folder
+    auto: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -186,14 +192,8 @@ def _reward_config(name: str = "config", label: str = "Reward config JSON") -> A
 
 
 def _output_dir(required: bool = True) -> ArgSpec:
-    return ArgSpec(
-        "output_dir",
-        "dir",
-        label="Output dir",
-        shared="output_dir",
-        required=required,
-        help="Directory for this tool's outputs.",
-    )
+    # Auto-derived: <workspace output_dir>/<workflow key>/<run name>. Not typed per-run.
+    return ArgSpec("output_dir", "dir", auto="dir", required=required)
 
 
 def _scenes(
@@ -308,15 +308,23 @@ _register(
         module="rlvr.autoresearch.tools.eval_full_metrics",
         description="One deterministic forward pass per scene scored against ALL reward metrics: "
         "avoidance (sc clearance + crossings), road border, lane, centerline, path length, "
-        "collision + kinematic flags — with full distribution stats. Optional LoRA. Use an "
-        "SC-enabled reward config so avoidance (sc) is actually measured. Writes summary.json.",
+        "collision + kinematic flags — with full distribution stats. Optional LoRA. Add a 2nd "
+        "model for a head-to-head A/B table, and tick Render scenes to dump per-scene PNGs. Use "
+        "an SC-enabled reward config so avoidance (sc) is actually measured. Writes summary.json.",
         args=[
-            _model_path(),
-            _lora(),
+            _model_path(name="model_path", label="Model A (.pth)"),
+            _lora(name="lora_path", label="LoRA A"),
+            _model_path(
+                name="model_b", label="Model B (.pth, optional head-to-head)", required=False
+            ),
+            _lora(name="lora_b", label="LoRA B"),
+            ArgSpec("label_a", "str", default="A"),
+            ArgSpec("label_b", "str", default="B"),
             _scenes(),
             _reward_config(),
             _ego_shape(),
             _output_dir(),
+            ArgSpec("render", "bool", label="Render per-scene PNGs"),
             ArgSpec("batch_size", "int", default=32),
         ],
         outputs=lambda v: (
@@ -449,7 +457,7 @@ _register(
         args=[
             _model_path(label="Base / warmstart model (.pth)"),
             _lora(name="lora_dir", label="LoRA to merge"),
-            ArgSpec("output", "file", label="Output merged .pth (default <model_dir>/merged.pth)"),
+            ArgSpec("output", "file", auto="file:merged.pth"),
         ],
         outputs=lambda v: {"merged": v.get("output")},
     )
@@ -497,7 +505,7 @@ _register(
         args=[
             _scenes(label="Warm scenes JSON"),
             _output_dir(),
-            ArgSpec("output_scene_list", "file", label="Output scene list JSON", required=True),
+            ArgSpec("output_scene_list", "file", auto="file:scenes.json", required=True),
             ArgSpec(
                 "kind",
                 "choice",
@@ -570,8 +578,8 @@ _register(
         description="Filter scenes by top1_cl percentile with no-poison guards; write the SFT scene list.",
         args=[
             ArgSpec("summary", "file", label="viz_p4 summary.json", required=True),
-            ArgSpec("output_scenes", "file", label="Output filtered scenes JSON", required=True),
-            ArgSpec("output_report", "file", label="Output report JSON (optional)"),
+            ArgSpec("output_scenes", "file", auto="file:filtered_scenes.json", required=True),
+            ArgSpec("output_report", "file", auto="file:filter_report.json"),
             ArgSpec("percentile", "float", label="Percentile to keep", default=50.0),
             ArgSpec("det_cl_max", "float", label="det_cl_max (optional)"),
             ArgSpec("top1_cl_min", "float", label="top1_cl_min (optional)"),
@@ -594,7 +602,7 @@ _register(
             ArgSpec("npz_root", "dir", label="NPZ corpus root", required=True),
             ArgSpec("sidecar_root", "dir", label="Sidecar root (optional)"),
             _model_path(),
-            ArgSpec("out", "file", label="Hits JSONL out", required=True),
+            ArgSpec("out", "file", auto="file:hits.jsonl", required=True),
             ArgSpec("seg_len", "int", label="Segment length (frames)", default=600),
             ArgSpec("batch_size", "int", label="Segment batch size", default=8),
             ArgSpec(
@@ -604,7 +612,7 @@ _register(
                 default="recorded",
                 choices=["recorded", "sim"],
             ),
-            ArgSpec("save_dir", "dir", label="Save pre-collision NPZs to (optional)"),
+            ArgSpec("save_dir", "dir", auto="dir:collision_batches"),
             ArgSpec("save_pre_steps", "int", label="Pre-steps to save", default=80),
             ArgSpec("save_min_ego_speed", "float", label="Min ego speed (m/s)", default=0.5),
             ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),

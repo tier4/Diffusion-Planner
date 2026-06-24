@@ -48,15 +48,22 @@ def _coerce(spec: W.ArgSpec, v):
 def _field_role(spec: W.ArgSpec) -> str:
     if spec.hidden:
         return "hidden"
+    if spec.auto:
+        return "auto"
     if spec.derive_from:
         return "derive"
     if spec.shared == "ego_shape":
         return "ego"
-    if spec.shared == "output_dir":
-        return "outdir"
     if spec.shared in P.LIST_TYPES:
         return "list"
     return "plain"
+
+
+def _browse_button(textbox, mode: str):
+    """Attach a 📂 button that opens the OS picker and fills ``textbox``."""
+    b = gr.Button("📂", scale=1, min_width=44)
+    b.click(lambda cur, _m=mode: _os_pick(_m, cur or "")[0] or cur, textbox, textbox)
+    return b
 
 
 def _list_choices(library: dict, asset_type: str, required: bool) -> list[str]:
@@ -95,11 +102,21 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
     asset_dropdowns[type] collects dropdowns for cross-tab refresh.
     """
     fields, flat = [], []
+    # Workflows with auto-derived outputs get a single "Run name" field; everything else
+    # (the run folder + output files) is placed under <workspace output_dir>/<key>/<run>.
+    if any(a.auto for a in wf.args):
+        run_tb = gr.Textbox(
+            value=wf.key,
+            label="Run name → outputs go to <workspace output dir>/" + wf.key + "/<run name>/",
+        )
+        fields.append({"name": "__run__", "spec": None, "role": "runname", "comps": [run_tb]})
+        flat.append(run_tb)
+
     for spec in wf.args:
         role = _field_role(spec)
         comps = []
-        if role == "hidden":
-            comps = []  # not rendered; resolve uses spec.default
+        if role in ("hidden", "auto", "derive", "ego"):
+            comps = []  # not rendered; resolved at Run
         elif role == "list":
             names = _list_choices(library, spec.shared, spec.required)
             base = P.entry_names(library, spec.shared)
@@ -112,43 +129,64 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
                 label=spec.label + (" *" if spec.required else "") + f"  ({spec.shared})",
                 info=spec.help or None,
             )
-            custom = gr.Textbox(
-                value="", label=f"{spec.label} — custom path", visible=(value == CUSTOM)
-            )
+            pick_mode = "dir" if spec.shared in ("policies", "run_dirs") else "file"
+            with gr.Row():
+                custom = gr.Textbox(
+                    value="",
+                    label=f"{spec.label} — custom path",
+                    visible=(value == CUSTOM),
+                    scale=8,
+                )
+                _browse_button(custom, pick_mode)
             dd.change(lambda v: gr.update(visible=(v == CUSTOM)), dd, custom)
             asset_dropdowns.setdefault(spec.shared, []).append((dd, spec.required))
             comps = [dd, custom]
-        elif role == "outdir":
-            comps = [
-                gr.Textbox(
-                    value=library.get("output_dir", ""),
-                    label=spec.label + (" *" if spec.required else ""),
-                    info=spec.help or None,
-                )
-            ]
-        elif role in ("derive", "ego"):
-            comps = []  # not rendered; resolved from library / sibling model at Run
-        else:  # plain
+        elif role == "plain" and spec.kind in ("file", "dir", "path"):
+            with gr.Row():
+                tb = _plain_widget(spec)
+                _browse_button(tb, "dir" if spec.kind == "dir" else "file")
+            comps = [tb]
+        else:  # plain non-path (str/int/float/bool/choice)
             comps = [_plain_widget(spec)]
         fields.append({"name": spec.name, "spec": spec, "role": role, "comps": comps})
         flat.extend(comps)
     return fields, flat
 
 
-def resolve_values(wf: W.Workflow, fields: list, library: dict, flat_values: tuple) -> dict:
-    """Reconstruct the CLI values dict from the flat form values + the live library."""
+def _auto_path(base_out: str, wf_key: str, run: str, spec: W.ArgSpec) -> str:
+    """Derive an output path: <base_out>/<wf_key>/<run>[/sub | /file]."""
+    run_dir = Path(base_out) / wf_key / (run or "run")
+    kind, _, rest = spec.auto.partition(":")
+    if kind == "dir":
+        return str(run_dir / rest) if rest else str(run_dir)
+    if kind == "file":
+        return str(run_dir / rest)
+    raise ValueError(f"{spec.name}: bad auto spec {spec.auto!r}")
+
+
+def resolve_values(
+    wf: W.Workflow, fields: list, library: dict, flat_values: tuple, make_dirs: bool = False
+) -> dict:
+    """Reconstruct the CLI values dict from the flat form values + the live library.
+
+    Auto-output fields are placed under <workspace output_dir>/<wf.key>/<run name>. When
+    make_dirs is True (at Run, not Preview) the run folder is created so file outputs land.
+    """
     it = iter(flat_values)
     values: dict = {}
-    model_entries: dict = {}  # arg name -> selected model library entry
+    model_entries: dict = {}
+    run_name = ""
     for f in fields:
         spec, role, name = f["spec"], f["role"], f["name"]
         vals = [next(it) for _ in f["comps"]]
-        if role == "hidden":
+        if role == "runname":
+            run_name = (vals[0] or "run").strip()
+        elif role == "hidden":
             values[name] = spec.default
         elif role == "ego":
             values[name] = library.get("ego_shape", "")
-        elif role == "outdir":
-            values[name] = vals[0] if (vals[0] not in (None, "")) else library.get("output_dir", "")
+        elif role in ("auto", "derive"):
+            pass  # filled in the second pass
         elif role == "list":
             sel, custom = vals[0], vals[1]
             if sel in (NONE, None, ""):
@@ -162,16 +200,20 @@ def resolve_values(wf: W.Workflow, fields: list, library: dict, flat_values: tup
                 values[name] = entry.get("path", "")
             if spec.shared == "models":
                 model_entries[name] = entry
-        elif role == "derive":
-            pass  # second pass
         else:
             values[name] = _coerce(spec, vals[0])
+
+    base_out = library.get("output_dir", "")
+    run_dir = Path(base_out) / wf.key / (run_name or "run") if base_out else None
+    if make_dirs and run_dir is not None:
+        run_dir.mkdir(parents=True, exist_ok=True)
     for f in fields:
-        if f["role"] != "derive":
-            continue
         spec = f["spec"]
-        entry = model_entries.get(spec.derive_from, {})
-        values[f["name"]] = entry.get(spec.derive_field, "") or ""
+        if f["role"] == "auto":
+            values[f["name"]] = _auto_path(base_out, wf.key, run_name, spec) if base_out else ""
+        elif f["role"] == "derive":
+            entry = model_entries.get(spec.derive_from, {})
+            values[f["name"]] = entry.get(spec.derive_field, "") or ""
     return values
 
 
@@ -182,9 +224,20 @@ def _err(msg: str) -> str:
     return f"<span style='color:#d33'>⚠ {msg}</span>"
 
 
+def _needs_output_dir(wf, library) -> str:
+    """Red error if the workflow auto-derives outputs but no workspace output dir is set."""
+    if any(a.auto for a in wf.args) and not library.get("output_dir"):
+        return _err("Set 'Default output dir' in the Workspace tab first (outputs go there).")
+    return ""
+
+
 def _run_handler(wf, fields):
     def run(library, *flat):
-        values = resolve_values(wf, fields, library, flat)
+        guard = _needs_output_dir(wf, library)
+        if guard:
+            yield "", "not started", guard, None
+            return
+        values = resolve_values(wf, fields, library, flat, make_dirs=True)
         try:
             job = R.launch(wf, values)
         except ValueError as e:  # missing required asset(s)
@@ -200,6 +253,9 @@ def _run_handler(wf, fields):
 
 def _preview_handler(wf, fields):
     def preview(library, *flat):
+        guard = _needs_output_dir(wf, library)
+        if guard:
+            return guard
         values = resolve_values(wf, fields, library, flat)
         try:
             return "$ " + shlex.join(R.build_full_command(wf, values))
@@ -579,19 +635,29 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                     ev = workflow_panel(
                         wf("eval_full_metrics"), library0, library_state, asset_dropdowns
                     )
-                    load_btn = gr.Button("Load summary.json")
+                    with gr.Row():
+                        load_btn = gr.Button("Load summary.json")
+                        viz_btn = gr.Button("Load scene viz (tick Render first)")
                     summ = gr.JSON(label="summary.json")
+                    ev_gallery = gr.Gallery(label="Rendered scenes", columns=3, height=520)
 
-                    def _load_summary(library, *flat, _ev=ev):
-                        v = resolve_values(wf("eval_full_metrics"), _ev["fields"], library, flat)
-                        p = (wf("eval_full_metrics").outputs or (lambda _: {}))(v).get(
-                            "summary_json"
-                        )
-                        if p and Path(p).exists():
-                            return json.loads(Path(p).read_text())
-                        return {"error": f"not found: {p}"}
+                    def _eval_out(library, flat):
+                        v = resolve_values(wf("eval_full_metrics"), ev["fields"], library, flat)
+                        return v.get("output_dir", "")
+
+                    def _load_summary(library, *flat):
+                        out = _eval_out(library, flat)
+                        p = Path(out) / "summary.json" if out else None
+                        if p and p.exists():
+                            return json.loads(p.read_text())
+                        return {"error": f"not found: {p} (run the eval first)"}
+
+                    def _load_viz(library, *flat):
+                        out = _eval_out(library, flat)
+                        return _scan_outputs(out)[1] if out else []
 
                     load_btn.click(_load_summary, [library_state, *ev["flat"]], summ)
+                    viz_btn.click(_load_viz, [library_state, *ev["flat"]], ev_gallery)
                 with gr.Group(visible=False) as guid_grp:
                     workflow_panel(
                         wf("eval_policy_avoidance"), library0, library_state, asset_dropdowns

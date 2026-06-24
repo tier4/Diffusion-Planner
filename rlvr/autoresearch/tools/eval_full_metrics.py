@@ -54,8 +54,12 @@ def _dist(vals: list[float]) -> dict:
 
 
 def score_scenes(model, model_args, scene_paths, rcfg, ego_shape, device, batch_size=32):
-    """Det inference + full reward scoring. Returns per-scene metric rows."""
+    """Det inference + full reward scoring. Returns (rows, trajs_by_path).
+
+    trajs_by_path maps scene_path -> [T,4] numpy trajectory (for optional rendering).
+    """
     rows: list[dict] = []
+    trajs_by_path: dict[str, np.ndarray] = {}
     for start in range(0, len(scene_paths), batch_size):
         batch = scene_paths[start : start + batch_size]
         datas, valid = [], []
@@ -82,6 +86,8 @@ def score_scenes(model, model_args, scene_paths, rcfg, ego_shape, device, batch_
         for bi, p in enumerate(valid):
             t = trajs[bi : bi + 1]
             r = compute_reward_batch(t, datas[bi], rcfg)[0]
+            traj_np = t[0].cpu().numpy()
+            trajs_by_path[str(p)] = traj_np
             rows.append(
                 {
                     "scene": Path(p).name,
@@ -100,11 +106,62 @@ def score_scenes(model, model_args, scene_paths, rcfg, ego_shape, device, batch_
                     "off_road_fraction": float(r.off_road_fraction),
                     "collision": r.collision_step is not None,
                     "kin_violated": bool(r.kinematic_violated),
-                    "path_len": _path_len(t[0].cpu().numpy()),
+                    "path_len": _path_len(traj_np),
                     "total": float(r.total),
                 }
             )
-    return rows
+    return rows, trajs_by_path
+
+
+def _load(model_path, lora_path, device):
+    model, model_args = load_model(model_path, device)
+    if lora_path:
+        from preference_optimization.lora_utils import load_lora_checkpoint
+
+        model = load_lora_checkpoint(model, lora_path)
+        model.to(device).eval()
+        print(f"[eval_full_metrics] applied LoRA: {lora_path}")
+    return model, model_args
+
+
+def render_scenes(rows_a, trajs_a, label_a, rows_b, trajs_b, label_b, out_dir):
+    """Per-scene PNGs of the det trajectory(ies) on each scene, using the canonical renderers."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base, draw_traj
+
+    viz_dir = Path(out_dir) / "scenes"
+    viz_dir.mkdir(parents=True, exist_ok=True)
+    rows_b_by_path = {r["scene_path"]: r for r in (rows_b or [])}
+    for ra in rows_a:
+        sp = ra["scene_path"]
+        name = Path(sp).stem
+        ta = trajs_a.get(sp)
+        if ta is None:
+            continue
+        fig, ax = plt.subplots(1, 1, figsize=(11, 11))
+        draw_scene_base(ax, sp)
+        draw_traj(ax, ta, f"{label_a} (sc={ra['sc_min_dist']:.2f}m)", "#1f77b4", sp)
+        pts = [ta[:, :2], np.zeros((1, 2))]
+        if trajs_b and sp in trajs_b:
+            tb = trajs_b[sp]
+            rb = rows_b_by_path.get(sp, {})
+            draw_traj(ax, tb, f"{label_b} (sc={rb.get('sc_min_dist', 99):.2f}m)", "#d62728", sp)
+            pts.append(tb[:, :2])
+        allp = np.vstack(pts)
+        cx, cy = float(allp[:, 0].mean()), float(allp[:, 1].mean())
+        half = max(np.ptp(allp[:, 0]), np.ptp(allp[:, 1])) * 0.6 + 6
+        ax.set_xlim(cx - half, cx + half)
+        ax.set_ylim(cy - half, cy + half)
+        ax.set_aspect("equal")
+        ax.legend(fontsize=9, loc="upper left")
+        ax.set_title(name, fontsize=10)
+        fig.savefig(viz_dir / f"{name}.png", dpi=110, bbox_inches="tight")
+        plt.close(fig)
+    print(f"  rendered {len(rows_a)} scene PNGs -> {viz_dir}")
 
 
 def aggregate(rows: list[dict]) -> dict:
@@ -169,17 +226,42 @@ def print_summary(agg: dict) -> None:
         )
 
 
+def print_h2h(agg_a, agg_b, label_a, label_b):
+    """Compact A-vs-B comparison of the headline metrics."""
+    print("\n" + "=" * 70)
+    print(f"  Head-to-head:  A={label_a}   B={label_b}")
+    print("=" * 70)
+    n = agg_a["n_scenes"]
+
+    def row(name, a, b, fmt="{:+.3f}"):
+        print(f"  {name:<22} A={fmt.format(a):>10}   B={fmt.format(b):>10}")
+
+    row("collisions", agg_a["collisions"], agg_b["collisions"], "{:d}/" + str(n))
+    row("static_crossings", agg_a["static_crossings"], agg_b["static_crossings"], "{:d}/" + str(n))
+    row("rb_crossings", agg_a["rb_crossings"], agg_b["rb_crossings"], "{:d}/" + str(n))
+    row("lane_crossings", agg_a["lane_crossings"], agg_b["lane_crossings"], "{:d}/" + str(n))
+    for key in ("sc_min_dist", "rb_min_dist", "centerline", "path_len"):
+        a, b = agg_a[key].get("mean"), agg_b[key].get("mean")
+        if a is not None and b is not None:
+            row(f"{key} mean", a, b)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--model_path", required=True)
     ap.add_argument("--lora_path", default=None, help="Optional LoRA adapter dir to apply")
+    ap.add_argument("--model_b", default=None, help="Optional 2nd model for head-to-head")
+    ap.add_argument("--lora_b", default=None, help="Optional LoRA for model B")
+    ap.add_argument("--label_a", default="A")
+    ap.add_argument("--label_b", default="B")
     ap.add_argument("--scenes", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--ego_shape", required=True, help="WB,L,W e.g. 4.76,7.24,2.29")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--batch_size", type=int, default=32)
+    ap.add_argument("--render", action="store_true", help="Render per-scene PNGs to <out>/scenes")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -191,29 +273,55 @@ def main():
     from diffusion_planner.utils.scene_skip import filter_scene_list
 
     scene_paths = filter_scene_list(scene_paths, label="eval_full_metrics")
-    print(f"[eval_full_metrics] {len(scene_paths)} scenes, model={args.model_path}")
+    print(f"[eval_full_metrics] {len(scene_paths)} scenes, model A={args.model_path}")
 
-    model, model_args = load_model(args.model_path, device)
-    if args.lora_path:
-        from preference_optimization.lora_utils import load_lora_checkpoint
-
-        model = load_lora_checkpoint(model, args.lora_path)
-        model.to(device).eval()
-        print(f"[eval_full_metrics] applied LoRA: {args.lora_path}")
-
-    rows = score_scenes(model, model_args, scene_paths, rcfg, ego_shape, device, args.batch_size)
-    if not rows:
+    model_a, margs_a = _load(args.model_path, args.lora_path, device)
+    rows_a, trajs_a = score_scenes(
+        model_a, margs_a, scene_paths, rcfg, ego_shape, device, args.batch_size
+    )
+    if not rows_a:
         raise SystemExit(
             f"All {len(scene_paths)} scenes were skipped (ego_shape mismatch or missing). "
             f"Check --ego_shape={args.ego_shape} matches the NPZs."
         )
+    agg_a = aggregate(rows_a)
+    print(f"\n--- {args.label_a} ---")
+    print_summary(agg_a)
 
-    agg = aggregate(rows)
-    print_summary(agg)
+    rows_b, trajs_b, agg_b = None, None, None
+    if args.model_b:
+        print(f"\n[eval_full_metrics] model B={args.model_b}")
+        model_b, margs_b = _load(args.model_b, args.lora_b, device)
+        rows_b, trajs_b = score_scenes(
+            model_b, margs_b, scene_paths, rcfg, ego_shape, device, args.batch_size
+        )
+        agg_b = aggregate(rows_b)
+        print(f"\n--- {args.label_b} ---")
+        print_summary(agg_b)
+        print_h2h(agg_a, agg_b, args.label_a, args.label_b)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    summary = {"model": args.model_path, "lora": args.lora_path, "aggregate": agg, "scenes": rows}
+    if args.render:
+        render_scenes(rows_a, trajs_a, args.label_a, rows_b, trajs_b, args.label_b, out_dir)
+
+    summary = {
+        "model_a": args.model_path,
+        "lora_a": args.lora_path,
+        "label_a": args.label_a,
+        "aggregate": agg_a,
+        "scenes": rows_a,
+    }
+    if args.model_b:
+        summary.update(
+            {
+                "model_b": args.model_b,
+                "lora_b": args.lora_b,
+                "label_b": args.label_b,
+                "aggregate_b": agg_b,
+                "scenes_b": rows_b,
+            }
+        )
     out_path = out_dir / "summary.json"
     with open(out_path, "w") as f:
         json.dump(summary, f, indent=2)
