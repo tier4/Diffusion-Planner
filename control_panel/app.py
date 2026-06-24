@@ -392,31 +392,52 @@ def _attach_handler(key):
     return attach
 
 
-def _preview_scenes_handler():
-    def preview(library, sel):
+_PREVIEW_BATCH = 60  # stills rendered per click; "Load more" appends the next batch
+
+
+def _preview_scenes_handler(more: bool):
+    """Render cached stills for the selected scene dataset, batch by batch (scrollable).
+
+    more=False → (re)start at the top; more=True → render the next batch and append.
+    Returns (gallery_pngs, state). state tracks {ds, npzs, cache, shown, pngs}.
+    """
+
+    def preview(library, sel, state):
         names = sel if isinstance(sel, list) else [sel]
         names = [n for n in names if n and n not in (NONE, ADD)]
         if not names:
-            return []
-        ds = names[0]  # glance at the first selected dataset
-        listp = P.resolve_path(library, "scene_datasets", ds)
-        if not listp or not Path(listp).exists():
-            return []
-        try:
-            data = json.loads(Path(listp).read_text())
-            npzs = data.get("files", data) if isinstance(data, dict) else data
-        except (json.JSONDecodeError, OSError):
-            return []
-        if not npzs:
-            return []
-        ws = library.get("workspace_root") or str(Path.home())
-        cache = Path(ws) / "renders" / ds
-        try:
-            from scenario_generation.render_npz_dir import render_stills
+            return [], {}
+        ds = names[0]
+        if (not more) or (state or {}).get("ds") != ds:
+            listp = P.resolve_path(library, "scene_datasets", ds)
+            npzs = []
+            if listp and Path(listp).exists():
+                try:
+                    data = json.loads(Path(listp).read_text())
+                    npzs = data.get("files", data) if isinstance(data, dict) else data
+                except (json.JSONDecodeError, OSError):
+                    npzs = []
+            ws = library.get("workspace_root") or str(Path.home())
+            state = {
+                "ds": ds,
+                "npzs": npzs,
+                "cache": str(Path(ws) / "renders" / ds),
+                "shown": 0,
+                "pngs": [],
+            }
+        npzs = state.get("npzs", [])
+        start = state.get("shown", 0)
+        batch = npzs[start : start + _PREVIEW_BATCH]
+        if batch:
+            try:
+                from scenario_generation.render_npz_dir import render_stills
 
-            return render_stills(npzs, cache, limit=24)  # cached stills (skip existing)
-        except Exception:  # noqa: BLE001 - renderer/env issue → empty gallery
-            return []
+                new = render_stills(batch, state["cache"])
+                state["pngs"] = state.get("pngs", []) + new
+                state["shown"] = start + len(batch)
+            except Exception:  # noqa: BLE001 - renderer/env issue → keep what we have
+                pass
+        return state.get("pngs", []), state
 
     return preview
 
@@ -449,10 +470,21 @@ def workflow_panel(wf: W.Workflow, library0: dict, library_state, asset_dropdown
     ]
     if scene_fields:
         scene_dd = scene_fields[0]["comps"][0]
+        prev_state = gr.State({})
         with gr.Row():
             prev_scene_btn = gr.Button("👁 Preview scenes (first selected dataset)")
-        prev_gallery = gr.Gallery(label="Scene preview (cached stills)", columns=4, height=420)
-        prev_scene_btn.click(_preview_scenes_handler(), [library_state, scene_dd], prev_gallery)
+            prev_more_btn = gr.Button(f"Load more (+{_PREVIEW_BATCH})")
+        prev_gallery = gr.Gallery(label="Scene preview (cached stills)", columns=6, height=620)
+        prev_scene_btn.click(
+            _preview_scenes_handler(more=False),
+            [library_state, scene_dd, prev_state],
+            [prev_gallery, prev_state],
+        )
+        prev_more_btn.click(
+            _preview_scenes_handler(more=True),
+            [library_state, scene_dd, prev_state],
+            [prev_gallery, prev_state],
+        )
 
     return {
         "fields": fields,
