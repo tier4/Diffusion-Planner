@@ -392,6 +392,35 @@ def _attach_handler(key):
     return attach
 
 
+def _preview_scenes_handler():
+    def preview(library, sel):
+        names = sel if isinstance(sel, list) else [sel]
+        names = [n for n in names if n and n not in (NONE, ADD)]
+        if not names:
+            return []
+        ds = names[0]  # glance at the first selected dataset
+        listp = P.resolve_path(library, "scene_datasets", ds)
+        if not listp or not Path(listp).exists():
+            return []
+        try:
+            data = json.loads(Path(listp).read_text())
+            npzs = data.get("files", data) if isinstance(data, dict) else data
+        except (json.JSONDecodeError, OSError):
+            return []
+        if not npzs:
+            return []
+        ws = library.get("workspace_root") or str(Path.home())
+        cache = Path(ws) / "renders" / ds
+        try:
+            from scenario_generation.render_npz_dir import render_stills
+
+            return render_stills(npzs, cache, limit=24)  # cached stills (skip existing)
+        except Exception:  # noqa: BLE001 - renderer/env issue → empty gallery
+            return []
+
+    return preview
+
+
 def workflow_panel(wf: W.Workflow, library0: dict, library_state, asset_dropdowns: dict):
     """Standard form + buttons + live log for one workflow. Returns key refs."""
     gr.Markdown(f"**{wf.title}** — {wf.description}")
@@ -412,6 +441,19 @@ def workflow_panel(wf: W.Workflow, library0: dict, library_state, asset_dropdown
     stop_btn.click(_stop_handler(), job_state, status)
     prev_btn.click(_preview_handler(wf, fields), [library_state, *flat], log)
     attach_btn.click(_attach_handler(wf.key), None, [log, status, job_state])
+
+    # 👁 Preview: render one cached still per scene of the selected dataset (glance at scenes,
+    # e.g. what PRiSM is about to perturb). Shared cache so other tools show the same renders.
+    scene_fields = [
+        f for f in fields if f["spec"] and f["spec"].shared == "scene_datasets" and f["comps"]
+    ]
+    if scene_fields:
+        scene_dd = scene_fields[0]["comps"][0]
+        with gr.Row():
+            prev_scene_btn = gr.Button("👁 Preview scenes (first selected dataset)")
+        prev_gallery = gr.Gallery(label="Scene preview (cached stills)", columns=4, height=420)
+        prev_scene_btn.click(_preview_scenes_handler(), [library_state, scene_dd], prev_gallery)
+
     return {
         "fields": fields,
         "flat": flat,

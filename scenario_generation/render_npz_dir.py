@@ -197,6 +197,30 @@ def _render_one(args):
     return None
 
 
+def render_stills(npz_paths, out_dir, route_pkl=None, limit: int = 0):
+    """Render ONE still PNG per NPZ into ``out_dir/<stem>.png`` (cache: skips existing).
+
+    Reusable single-image renderer (perfect-tracker style with neighbors + the ego's predicted
+    plan). Returns the list of PNG paths. Used for quick scene previews/glances.
+    """
+    from pathlib import Path as _P
+
+    out_dir = _P(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = [_P(p) for p in npz_paths]
+    if limit > 0:
+        paths = paths[:limit]
+    route_pl, rb = _build_map_overlays(_P(route_pkl) if route_pkl else None)
+    _pool_init(route_pl, rb, None, 1)
+    out_pngs = []
+    for i, p in enumerate(paths):
+        out = out_dir / f"{p.stem}.png"
+        if not out.exists():
+            _render_one((i, p, out))
+        out_pngs.append(str(out))
+    return out_pngs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--npz_dir", type=Path, required=True)
