@@ -55,6 +55,15 @@ def _dev_library() -> dict | None:
     return DEV_LIBRARY
 
 
+def field_defaults() -> dict:
+    """Pre-fill values for plain form fields, {workflow_key: {arg_name: value}} (gitignored)."""
+    try:
+        from ._dev_presets import DEV_FIELD_DEFAULTS  # type: ignore
+    except Exception:
+        return {}
+    return DEV_FIELD_DEFAULTS
+
+
 def _normalize(data: dict) -> dict:
     """Backfill any missing top-level keys without dropping user content."""
     for k, v in _EMPTY.items():

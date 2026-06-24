@@ -102,6 +102,7 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
     asset_dropdowns[type] collects dropdowns for cross-tab refresh.
     """
     fields, flat = [], []
+    dev_defaults = P.field_defaults().get(wf.key, {})  # gitignored testing pre-fills
     # Workflows with auto-derived outputs get a single "Run name" field; everything else
     # (the run folder + output files) is placed under <workspace output_dir>/<key>/<run>.
     if any(a.auto for a in wf.args):
@@ -143,7 +144,7 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
             comps = [dd, custom]
         elif role == "plain" and spec.kind in ("file", "dir", "path"):
             with gr.Row():
-                tb = _plain_widget(spec)
+                tb = _plain_widget(spec, default=dev_defaults.get(spec.name))
                 _browse_button(tb, "dir" if spec.kind == "dir" else "file")
             comps = [tb]
         else:  # plain non-path (str/int/float/bool/choice)
