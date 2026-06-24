@@ -770,7 +770,9 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         with gr.Tab("Reproducer / Viz"):
             with gr.Tab("Mine collisions"):
-                workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
+                mp = workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
+                if wf("mine_collisions").creates:
+                    creating_panels.append(mp)
             with gr.Tab("Ghost A/B"):
                 cl_check = gr.Checkbox(
                     value=False,

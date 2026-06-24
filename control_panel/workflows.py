@@ -602,6 +602,7 @@ _register(
         key="mine_collisions",
         title="Reproducer: mine collisions",
         module="rlvr.autoresearch.tools.mine_collisions_reproducer",
+        creates="scenes",  # collision windows land in datasets/scenes/<name>/ → scannable dataset
         description="Closed-loop perception reproducer over a pre-converted NPZ corpus (map-free). "
         "Writes ranked hits JSONL; --save_dir saves pre-collision training NPZ batches one-pass.",
         args=[

@@ -192,6 +192,29 @@ def _scan_files(root: Path, glob: str) -> list[dict]:
     return [{"name": f.stem, "path": str(f)} for f in sorted(root.glob(glob))]
 
 
+def _scan_scene_datasets(root: Path) -> list[dict]:
+    """Scene datasets = datasets/scenes/*.json lists, PLUS any subfolder of NPZs (e.g. mined
+    collision windows or editor saves) — for which we auto-materialize a <name>.json list so it
+    is usable by every tool that takes a --scenes JSON.
+    """
+    if not root.is_dir():
+        return []
+    out = [{"name": f.stem, "path": str(f)} for f in sorted(root.glob("*.json"))]
+    have = {e["name"] for e in out}
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        if d.name in have:
+            continue
+        npzs = sorted(str(p) for p in d.rglob("*.npz"))
+        if not npzs:
+            continue
+        listf = root / f"{d.name}.json"
+        if not listf.exists():
+            with open(listf, "w") as fh:
+                json.dump(npzs, fh, indent=2)
+        out.append({"name": d.name, "path": str(listf)})
+    return out
+
+
 def create_workspace(root: str | Path) -> str:
     """Create the standard (empty) workspace folder structure at ``root``."""
     root = Path(root).expanduser()
@@ -221,7 +244,7 @@ def scan_workspace(root: str | Path) -> dict:
     )
     lib["reward_configs"] = _scan_files(root / WORKSPACE_DIRS["reward_configs"], "*.json")
     lib["maps"] = _scan_files(root / WORKSPACE_DIRS["maps"], "*.osm")
-    lib["scene_datasets"] = _scan_files(root / WORKSPACE_DIRS["scene_datasets"], "*.json")
+    lib["scene_datasets"] = _scan_scene_datasets(root / WORKSPACE_DIRS["scene_datasets"])
     routes_root = root / WORKSPACE_DIRS["route_datasets"]
     if routes_root.is_dir():
         lib["route_datasets"] = [
