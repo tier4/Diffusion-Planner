@@ -13,7 +13,11 @@ from diffusion_planner.dimensions import (
     POINTS_PER_LINE_STRING,
     POINTS_PER_POLYGON,
 )
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 
 
 @dataclass
@@ -103,6 +107,14 @@ class TrainConfig:
     hybrid_loss_omega: float = 0.1
     hybrid_loss_window: int = 10
 
+    # Output Mode & Control Loss
+    output_mode: Literal["trajectory", "control", "trajectory_and_control"] = (
+        "trajectory_and_control"
+    )
+    coeff_control_loss: float = 1.0
+    control_traj_loss_horizon: int = 80
+    coeff_control_traj_loss: float = 0.3
+
     guidance_scale: float = 0.5
     device: str = "cuda"
     use_ema: bool = True
@@ -134,3 +146,5 @@ class TrainConfig:
     # ---------------------------------------------------------
     state_normalizer: Optional[StateNormalizer] = None
     observation_normalizer: Optional[ObservationNormalizer] = None
+    control_normalizer: Optional[ControlNormalizer] = None
+    neighbor_control_normalizer: Optional[ControlNormalizer] = None

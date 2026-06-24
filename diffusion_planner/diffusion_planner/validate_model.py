@@ -7,11 +7,18 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
+from diffusion_planner.dimensions import (
+    MAX_NUM_AGENTS,
+    OUTPUT_MODE_TRAJECTORY_AND_CONTROL,
+    OUTPUT_T,
+    POSE_DIM,
+    output_dim_for_mode,
+)
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
+    control_to_waypoints,
     loss_func,
     make_turn_indicator_gt,
 )
@@ -47,8 +54,10 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
         turn_indicator_seq = inputs["turn_indicators"]
 
+        output_mode = args.output_mode
+        D = output_dim_for_mode(output_mode)
         inputs["sampled_trajectories"] = torch.zeros(
-            B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+            B, MAX_NUM_AGENTS, OUTPUT_T + 1, D, dtype=torch.float32
         )
         inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
 
@@ -106,6 +115,25 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         if return_pred:
             predictions.append(prediction.cpu())
             turn_indicators.append(turn_indicator.cpu())
+
+        # Ego loss from control prediction (trajectory_and_control mode)
+        if output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
+            denoised = outputs["denoised"]  # [B, P, T+1, 6]
+            ego_ctrl_norm = denoised[:, 0, 1:, POSE_DIM:]  # [B, T, 2]
+            ego_ctrl = args.control_normalizer.inverse(ego_ctrl_norm)
+            raw_inputs = args.observation_normalizer.inverse(inputs)
+            ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1]
+            ego_traj_from_ctrl = control_to_waypoints(
+                ego_ctrl,
+                raw_inputs["ego_agent_past"],
+                t0_states={"v": ego_v0.squeeze(-1)},
+            )  # [B, T, 4]
+            # Compute detailed losses (lat, lon, l2, etc.) for control-derived trajectory
+            ctrl_pred = ego_traj_from_ctrl[:, None]  # [B, 1, T, 4]
+            ctrl_gt = ego_future[:, None]  # [B, 1, T, 4]
+            ctrl_loss_dict = loss_func(ctrl_pred, ctrl_gt)
+            for key, val in ctrl_loss_dict.items():
+                total_result_dict[f"ego_control_{key}"].append(val[:, 0, :].cpu())  # (B, T)
 
         neighbors_future_valid = ~neighbor_future_mask
         all_gt = all_gt[:, :, 1:, :]  # (B, Pn + 1, T, 4)

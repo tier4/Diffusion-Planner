@@ -86,6 +86,21 @@ plt.tight_layout()
 plt.savefig(original_save_path, dpi=100)
 plt.close()
 
+DT = 0.1
+MPS_TO_KMH = 3.6
+
+
+def compute_speed_kmh(ego_future_np):
+    xy = ego_future_np[:, :2]
+    vx = np.gradient(xy[:, 0], DT)
+    vy = np.gradient(xy[:, 1], DT)
+    return np.sqrt(vx**2 + vy**2) * MPS_TO_KMH
+
+
+original_ego_future_np = ego_future.squeeze(0).detach().cpu().numpy()
+original_speed_kmh = compute_speed_kmh(original_ego_future_np)
+timesteps = np.arange(1, original_speed_kmh.shape[0] + 1)
+
 trial_num = 10
 elapsed_times = []
 for i in range(trial_num):
@@ -117,6 +132,20 @@ for i in range(trial_num):
     visualize_inputs(
         deepcopy(aug_data), save_dir / f"augmented_{i:08d}.png", view_ranges=[view_range]
     )
+
+    aug_speed_kmh = compute_speed_kmh(data_dict["ego_agent_future"])
+    fig_s, ax_s = plt.subplots(figsize=(8, 5))
+    ax_s.plot(timesteps, original_speed_kmh, label="original", color="black", linewidth=2)
+    ax_s.plot(timesteps, aug_speed_kmh, label=f"augmented_{i:08d}", color="red", linewidth=2)
+    ax_s.set_xlim(0, 80)
+    ax_s.set_xlabel("timestep")
+    ax_s.set_ylabel("speed [km/h]")
+    ax_s.set_title("GT future trajectory speed")
+    ax_s.grid(True)
+    ax_s.legend()
+    plt.tight_layout()
+    plt.savefig(save_dir / f"augmented_{i:08d}_speed.png", dpi=100)
+    plt.close()
 
 print(f"Augmented data saved: {trial_num} files to {save_dir}")
 print(

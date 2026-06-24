@@ -21,7 +21,11 @@ from diffusion_planner.utils.data_augmentation_bridge import (
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.normalizer import (
+    ControlNormalizer,
+    ObservationNormalizer,
+    StateNormalizer,
+)
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.validate_model import validate_model
 
@@ -85,7 +89,9 @@ def model_training(args: TrainConfig):
         # Save args
         args_dict = vars(args)
         args_dict = {
-            k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
+            k: v
+            if not isinstance(v, (StateNormalizer, ObservationNormalizer, ControlNormalizer))
+            else v.to_dict()
             for k, v in args_dict.items()
         }
         args_dict["major_version"] = 5

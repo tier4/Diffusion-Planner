@@ -3,6 +3,11 @@ import torch.nn.functional as F
 
 from diffusion_planner.dimensions import INPUT_T, OUTPUT_T, TURN_INDICATOR_OUTPUT_KEEP
 from diffusion_planner.model.guidance.collision import center_rect_to_points
+from diffusion_planner.utils.unicycle_accel_curvature import (
+    UnicycleAccelCurvatureActionSpace,
+    action_to_traj4d,
+    traj4d_to_action,
+)
 
 _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
 
@@ -102,6 +107,196 @@ def hybrid_loss(
     l_wpt = torch.sum((pred_pos - gt_pos) ** 2, dim=-1)  # [..., T]
 
     return l_v + omega * l_wpt
+
+
+# ---------------------------------------------------------------------------
+# Control (accel, curvature) representation utilities
+# ---------------------------------------------------------------------------
+
+_ACTION_SPACE = UnicycleAccelCurvatureActionSpace(n_waypoints=OUTPUT_T)
+
+
+def waypoints_to_control(
+    traj_history_4d: torch.Tensor,
+    traj_future_4d: torch.Tensor,
+    t0_states: dict[str, torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Convert absolute waypoints to control (accel, curvature).
+
+    This is a GT-side conversion (no gradient; traj4d_to_action uses @no_grad).
+
+    Args:
+        traj_history_4d: [..., T_hist, 4] past trajectory (x,y,cos,sin).
+        traj_future_4d: [..., T, 4] future trajectory (x,y,cos,sin).
+        t0_states: optional initial state estimate ({"v": ...}).
+            If None, estimated from history.
+
+    Returns:
+        control: [..., T, 2] (accel, curvature) per timestep.
+    """
+    return traj4d_to_action(_ACTION_SPACE, traj_history_4d, traj_future_4d, t0_states=t0_states)
+
+
+def control_to_waypoints(
+    control: torch.Tensor,
+    traj_history_4d: torch.Tensor,
+    t0_states: dict[str, torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Convert control (accel, curvature) back to absolute waypoints.
+
+    This IS differentiable (action_to_traj4d does not use @no_grad).
+
+    Args:
+        control: [..., T, 2] (accel, curvature).
+        traj_history_4d: [..., T_hist, 4] past trajectory.
+        t0_states: optional initial state estimate ({"v": ...}).
+
+    Returns:
+        waypoints: [..., T, 4] (x, y, cos, sin).
+    """
+    return action_to_traj4d(_ACTION_SPACE, traj_history_4d, control, t0_states=t0_states)
+
+
+def compute_control_traj_loss(
+    ego_ctrl_pred: torch.Tensor,
+    ego_future: torch.Tensor,
+    ego_current: torch.Tensor,
+    ego_v0: torch.Tensor,
+    control_normalizer: "ControlNormalizer",
+    horizon: int,
+) -> torch.Tensor:
+    """Compute trajectory-space loss from predicted ego control using sliding windows.
+
+    For each starting point *t*, the reference pose/velocity at *t* is obtained
+    by rolling out predicted control[0:t] from ``ego_current`` (this rollout is
+    detached). The control control[t:t+horizon] is then integrated from that
+    detached reference pose and compared with the ground-truth trajectory in
+    the local frame of the (detached predicted) reference pose.
+
+    Args:
+        ego_ctrl_pred: [B, T, 2] predicted ego control in ControlNormalizer space.
+        ego_future: [B, T, 4] GT ego future (x, y, cos, sin) in raw coordinates.
+        ego_current: [B, 4] current ego state (x, y, cos, sin) in raw coordinates.
+        ego_v0: [B] initial ego longitudinal velocity (raw).
+        control_normalizer: normalizer used for training control channels.
+        horizon: number of future steps to integrate per window.
+
+    Returns:
+        Scalar loss (mean over batch, windows, and horizon steps).
+    """
+    B, T = ego_ctrl_pred.shape[:2]
+    device = ego_ctrl_pred.device
+
+    n_win = T - horizon + 1
+    if n_win <= 0:
+        return torch.tensor(0.0, device=device)
+
+    # --- Denormalize predicted control to raw physical values ---
+    ctrl_denorm = control_normalizer.inverse(ego_ctrl_pred)  # [B, T, 2]
+    accel = ctrl_denorm[..., 0] * _ACTION_SPACE.accel_std.to(device) + _ACTION_SPACE.accel_mean.to(
+        device
+    )
+    kappa = ctrl_denorm[..., 1] * _ACTION_SPACE.curvature_std.to(
+        device
+    ) + _ACTION_SPACE.curvature_mean.to(device)
+
+    dt = _ACTION_SPACE.dt
+    dt2_half = 0.5 * dt * dt
+    half_dt = 0.5 * dt
+
+    # --- GT positions / headings in world frame ---
+    all_pos = torch.cat([ego_current[:, None, :2], ego_future[..., :2]], dim=1)  # [B, T+1, 2]
+    all_cos = torch.cat([ego_current[:, None, 2:3], ego_future[..., 2:3]], dim=1)  # [B, T+1, 1]
+    all_sin = torch.cat([ego_current[:, None, 3:4], ego_future[..., 3:4]], dim=1)  # [B, T+1, 1]
+    all_heading = torch.atan2(all_sin.squeeze(-1), all_cos.squeeze(-1))  # [B, T+1]
+
+    # --- Full predicted rollout from ego_current (used as detached reference) ---
+    # vel_full[k] = v at step k (k = 0..T)
+    cum_accel_full = torch.cumsum(accel * dt, dim=-1)  # [B, T]
+    vel_full = torch.cat([ego_v0[:, None], ego_v0[:, None] + cum_accel_full], dim=-1)  # [B, T+1]
+
+    # theta_full[k] = heading at step k in world frame
+    theta0 = torch.atan2(ego_current[:, 3], ego_current[:, 2])  # [B]
+    cum_theta_full = torch.cumsum(
+        kappa * vel_full[:, :-1] * dt + kappa * accel * dt2_half, dim=-1
+    )  # [B, T]
+    theta_full = torch.cat([theta0[:, None], theta0[:, None] + cum_theta_full], dim=-1)  # [B, T+1]
+
+    # pos_full[k] = (x, y) at step k in world frame (trapezoidal integration)
+    dx_step = (
+        vel_full[:, :-1] * torch.cos(theta_full[:, :-1]) * half_dt
+        + vel_full[:, 1:] * torch.cos(theta_full[:, 1:]) * half_dt
+    )  # [B, T]
+    dy_step = (
+        vel_full[:, :-1] * torch.sin(theta_full[:, :-1]) * half_dt
+        + vel_full[:, 1:] * torch.sin(theta_full[:, 1:]) * half_dt
+    )  # [B, T]
+    pos_full_x = torch.cat(
+        [ego_current[:, 0:1], ego_current[:, 0:1] + torch.cumsum(dx_step, dim=-1)], dim=-1
+    )  # [B, T+1]
+    pos_full_y = torch.cat(
+        [ego_current[:, 1:2], ego_current[:, 1:2] + torch.cumsum(dy_step, dim=-1)], dim=-1
+    )  # [B, T+1]
+
+    # Detached reference state at each window's starting step
+    v0_win = vel_full[:, :n_win].detach()  # [B, n_win]
+    ref_pos_x = pos_full_x[:, :n_win].detach()  # [B, n_win]
+    ref_pos_y = pos_full_y[:, :n_win].detach()  # [B, n_win]
+    ref_heading = theta_full[:, :n_win].detach()  # [B, n_win]
+
+    # --- Sliding windows of control [B, n_win, H] (gradient flows here) ---
+    accel_win = accel.unfold(1, horizon, 1)  # [B, n_win, H]
+    kappa_win = kappa.unfold(1, horizon, 1)  # [B, n_win, H]
+
+    # --- Unicycle integration in local frame of each window's reference pose ---
+    cum_accel = torch.cumsum(accel_win * dt, dim=-1)
+    vel = torch.cat(
+        [v0_win.unsqueeze(-1), v0_win.unsqueeze(-1) + cum_accel], dim=-1
+    )  # [B, n_win, H+1]
+
+    cum_theta = torch.cumsum(
+        kappa_win * vel[..., :-1] * dt + kappa_win * accel_win * dt2_half, dim=-1
+    )
+    theta = torch.cat(
+        [torch.zeros(B, n_win, 1, device=device), cum_theta], dim=-1
+    )  # [B, n_win, H+1]
+
+    x_pred = torch.cumsum(
+        vel[..., :-1] * torch.cos(theta[..., :-1]) * half_dt
+        + vel[..., 1:] * torch.cos(theta[..., 1:]) * half_dt,
+        dim=-1,
+    )  # [B, n_win, H]
+    y_pred = torch.cumsum(
+        vel[..., :-1] * torch.sin(theta[..., :-1]) * half_dt
+        + vel[..., 1:] * torch.sin(theta[..., 1:]) * half_dt,
+        dim=-1,
+    )  # [B, n_win, H]
+    theta_pred = theta[..., 1:]  # [B, n_win, H]
+
+    # --- GT trajectory in local frame of each window's (detached predicted) reference pose ---
+    # Window t: reference = predicted state at t (detached), GT target = GT pos[t+1 : t+H+1]
+    idx = torch.arange(1, horizon + 1, device=device).unsqueeze(0) + torch.arange(
+        n_win, device=device
+    ).unsqueeze(1)  # [n_win, H]
+
+    gt_pos_win = all_pos[:, idx]  # [B, n_win, H, 2]
+    gt_heading_win = all_heading[:, idx]  # [B, n_win, H]
+
+    dx = gt_pos_win[..., 0] - ref_pos_x[..., None]  # [B, n_win, H]
+    dy = gt_pos_win[..., 1] - ref_pos_y[..., None]  # [B, n_win, H]
+    cos_h = torch.cos(ref_heading)[..., None]  # [B, n_win, 1]
+    sin_h = torch.sin(ref_heading)[..., None]  # [B, n_win, 1]
+    x_gt = dx * cos_h + dy * sin_h
+    y_gt = -dx * sin_h + dy * cos_h
+    theta_gt = gt_heading_win - ref_heading[..., None]
+
+    # --- L2 loss: position + heading (cos/sin) ---
+    pos_loss = (x_pred - x_gt) ** 2 + (y_pred - y_gt) ** 2
+    heading_loss = (torch.cos(theta_pred) - torch.cos(theta_gt)) ** 2 + (
+        torch.sin(theta_pred) - torch.sin(theta_gt)
+    ) ** 2
+
+    return (pos_loss + heading_loss).mean()
 
 
 def make_turn_indicator_gt(
