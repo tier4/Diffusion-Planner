@@ -262,10 +262,10 @@ _register(
                 help="GRPOConfig JSON (must set n_prob_scenes / n_normal_scenes explicitly).",
             ),
             ArgSpec("name", "str", label="Experiment name", required=True),
-            _model_path(),
-            _scenes(name="prob_scenes", label="Problem scenes JSON"),
-            _scenes(name="normal_scenes", label="Normal scenes JSON"),
-            _scenes(name="val_scenes", label="Validation scenes JSON"),
+            _model_path(label="Baseline model (warmstart from)"),
+            _scenes(name="prob_scenes", label="Problem / behavior scenes"),
+            _scenes(name="normal_scenes", label="Normal anchor scenes (real, preserves L2)"),
+            _scenes(name="val_scenes", label="Validation scenes"),
             _output_dir(),
             # Always skip the in-training baseline eval (use the dedicated Evaluate tab instead).
             ArgSpec("skip_baseline", "bool", default=True, hidden=True),
@@ -537,10 +537,12 @@ _register(
 _register(
     Workflow(
         key="viz_p4_recovery",
-        title="PRiSM: viz_p4_recovery (rank K=N)",
+        title="PRiSM: rank candidates (K=N) → recovery score",
         module="rlvr.autoresearch.tools.viz_p4_recovery",
-        description="Score K=N generations per scene; pick rank-1 by total reward; write summary.json "
-        "with t0_cl / det_cl / top1_cl + safety flags. Use --no_viz for speed.",
+        description="PRiSM step 2 — for each perturbed scene, generate K candidate trajectories "
+        "under the model and rank by reward; records how well rank-1 recovers (t0_cl/det_cl/top1_cl "
+        "+ safety flags) into summary.json. Feeds the percentile filter, which keeps only the "
+        "scenes worth RSFT-training on.",
         args=[
             _model_path(),
             _lora(),

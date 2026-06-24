@@ -735,26 +735,13 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             run_cfg = gr.JSON(label="grpo_config.json")
 
         # ---- workflow tabs ---------------------------------------------------------
-        with gr.Tab("Train"):
-            with gr.Tab("RSFT"):
-                workflow_panel(wf("train_ranked_sft"), library0, library_state, asset_dropdowns)
-                gr.Markdown("### Per-epoch metrics (from the latest train log)")
-                refresh_btn = gr.Button("Refresh epoch table")
-                ep_status = gr.Textbox(label="", interactive=False)
-                ep_table = gr.Dataframe(headers=_EPOCH_HEADERS)
-                refresh_btn.click(
-                    lambda: _epoch_table("train_ranked_sft"), None, [ep_table, ep_status]
-                )
-            with gr.Tab("PRiSM"):
-                gr.Markdown(
-                    "Perturbation-Recovery Self-Mining: disturb warm scenes → rank K=N → filter → "
-                    "RSFT-train. Run the steps in order."
-                )
-                for k in ("disturb_and_replay", "viz_p4_recovery", "percentile_filter_perturbed"):
-                    with gr.Tab(k.replace("_perturbed", "").replace("_", " ")):
-                        p = workflow_panel(wf(k), library0, library_state, asset_dropdowns)
-                        if wf(k).creates:
-                            creating_panels.append(p)
+        with gr.Tab("Train (RSFT)"):
+            workflow_panel(wf("train_ranked_sft"), library0, library_state, asset_dropdowns)
+            gr.Markdown("### Per-epoch metrics (from the latest train log)")
+            refresh_btn = gr.Button("Refresh epoch table")
+            ep_status = gr.Textbox(label="", interactive=False)
+            ep_table = gr.Dataframe(headers=_EPOCH_HEADERS)
+            refresh_btn.click(lambda: _epoch_table("train_ranked_sft"), None, [ep_table, ep_status])
 
         with gr.Tab("Evaluate"):
             with gr.Tab("Metrics"):
@@ -821,14 +808,26 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
             show_btn.click(_show, [library_state, *vp["flat"]], [vid, gallery, vmsg])
 
-        with gr.Tab("Scenario mining"):
-            gr.Markdown(
-                "Mine scenes from a route corpus by driving a model closed-loop and flagging "
-                "collisions/near-misses. Saved windows become a scene dataset automatically."
-            )
-            mp = workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
-            if wf("mine_collisions").creates:
-                creating_panels.append(mp)
+        with gr.Tab("Data generation"):
+            with gr.Tab("Collision mining"):
+                gr.Markdown(
+                    "Mine scenes from a route corpus by driving a model closed-loop and flagging "
+                    "collisions/near-misses. Saved windows become a scene dataset automatically."
+                )
+                mp = workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
+                if wf("mine_collisions").creates:
+                    creating_panels.append(mp)
+            with gr.Tab("PRiSM (perturb → rank → filter)"):
+                gr.Markdown(
+                    "Perturbation-Recovery Self-Mining — a data-generation pipeline (not training): "
+                    "perturb warm scenes → rank K=N candidates per scene by reward → keep the scenes "
+                    "worth training on. The filtered set is then used in the Train (RSFT) tab."
+                )
+                for k in ("disturb_and_replay", "viz_p4_recovery", "percentile_filter_perturbed"):
+                    with gr.Tab(k.replace("_perturbed", "").replace("_", " ")):
+                        pp = workflow_panel(wf(k), library0, library_state, asset_dropdowns)
+                        if wf(k).creates:
+                            creating_panels.append(pp)
 
         with gr.Tab("Visualization"):
             with gr.Tab("Closed-loop A/B sim"):
