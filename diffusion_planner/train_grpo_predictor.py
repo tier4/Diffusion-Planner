@@ -19,6 +19,10 @@ from diffusion_planner.dimensions import *
 from diffusion_planner.grpo_epoch import train_grpo_epoch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation_bridge import (
+    StatePerturbation as BridgeStatePerturbation,
+)
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.neighbor_db import NeighborPatternDB
@@ -87,6 +91,27 @@ def get_args():
     parser.add_argument("--pin-mem", action="store_true")
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
+
+    # Data augmentation (StatePerturbation, shared with the supervised trainer). Applied to both
+    # the SFT and GRPO steps (see grpo_epoch).
+    parser.add_argument("--use_data_augment", default=True, type=boolean)
+    parser.add_argument("--augment_prob", type=float, default=0.5, help="augmentation probability")
+    parser.add_argument("--augment_type", type=str, choices=["quintic", "bridge"], default="quintic")
+    parser.add_argument(
+        "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
+    )
+    parser.add_argument(
+        "--ego_past_noise_std",
+        type=float,
+        default=0.1,
+        help="std of noise applied to ego past trajectory during augmentation",
+    )
+    parser.add_argument(
+        "--use_smoothing_future_trajectory",
+        default=True,
+        type=boolean,
+        help="whether to apply smoothing to future trajectory during augmentation",
+    )
 
     # Training
     parser.add_argument("--seed", type=int, default=3407)
@@ -377,6 +402,24 @@ def model_training(args):
     if global_rank == 0 and args.w_kinematic > 0.0:
         print(f"Kinematic-feasibility reward enabled: w_kinematic={args.w_kinematic}")
 
+    # StatePerturbation data augmentation (same as the supervised trainer), applied to both the
+    # SFT and GRPO steps. None disables it.
+    if args.use_data_augment:
+        if args.augment_type == "bridge":
+            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        else:
+            aug = StatePerturbation(
+                augment_prob=args.augment_prob,
+                num_refine=args.num_refine,
+                device=args.device,
+                ego_past_noise_std=args.ego_past_noise_std,
+                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
+            )
+        if global_rank == 0:
+            print(f"Data augmentation enabled: type={args.augment_type} prob={args.augment_prob}")
+    else:
+        aug = None
+
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
 
@@ -477,6 +520,7 @@ def model_training(args):
             args,
             model_ema,
             collider_injector,
+            aug,
         )
 
         if global_rank == 0:
