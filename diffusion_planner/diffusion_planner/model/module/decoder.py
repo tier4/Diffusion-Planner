@@ -95,7 +95,13 @@ def compute_training_loss(
     current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
     eps = 1e-3
-    t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
+    # _fixed_diffusion_t lets a driver request a deterministic low-noise forward (used by
+    # the cross-frame consistency A/B to read a near-clean prediction); None => random.
+    _fixed_t = getattr(args, "_fixed_diffusion_t", None)
+    if _fixed_t is None:
+        t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
+    else:
+        t = torch.full((B,), float(_fixed_t), device=gt_future.device)
     t = t.view(B, 1, 1, 1)
     t = t.expand(B, P, T + 1, 1)
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
@@ -115,8 +121,24 @@ def compute_training_loss(
         all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
 
+    # SDEdit-aware training (gated, default-off): noise the diffusion INPUT from a PRIOR
+    # (the previous frame's propagated plan, already in normalized x_start space) for the
+    # ego row, while the supervision target below stays GT (all_gt). This teaches the model
+    # to correct a prior-init toward the scene-appropriate plan (keep it where the scene is
+    # unchanged, fix it where it changed). Absent => noise_src is all_gt (byte-identical).
+    _sdedit_prior = getattr(args, "_sdedit_train_prior", None)
+    if _sdedit_prior is not None:
+        noise_src = all_gt.clone()
+        noise_src[:, 0:1, 1:, :] = _sdedit_prior[:, 0:1, 1:, :]  # ego future row only
+        if not getattr(args, "_sdedit_sanity_done", False):  # one-time correctness sanity
+            _d = (noise_src[:, 0, 1:, :] - all_gt[:, 0, 1:, :]).abs().mean().item()
+            print(f"[sdedit-sanity] noise_src ego vs GT ego mean|delta|={_d:.4f} (>0 => prior injected)", flush=True)
+            args._sdedit_sanity_done = True
+    else:
+        noise_src = all_gt
+
     if model_type == "x_start":
-        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+        mean, std = VPSDE_linear().marginal_prob(noise_src[..., 1:, :], t[..., 1:, :])
         # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
         xT = mean + std * z
 
@@ -206,11 +228,16 @@ def compute_training_loss(
 
     loss["ego_planning_loss"] = dpm_loss[:, 0, : args.ego_prediction_horizon].mean()
 
-    # Compute ego edge points for penalty losses
+    # Compute the predicted ego world trajectory for the geometric + JEPA penalties.
+    coeff_jepa = getattr(args, "coeff_jepa_consistency_loss", 0.0)
     need_ego_edge = model_type == "x_start" and (
         args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
     )
-    if need_ego_edge:
+    # _return_ego_pred_world lets a training driver (e.g. the cross-frame temporal-
+    # consistency A/B) read the predicted ego world trajectory; off in production.
+    return_ego_world = getattr(args, "_return_ego_pred_world", False) and model_type == "x_start"
+    need_ego_world = need_ego_edge or (coeff_jepa > 0 and model_type == "x_start") or return_ego_world
+    if need_ego_world:
         ego_pred = model_output[:, 0]  # [B, T, 4]
         if use_velocity:
             ego_current_raw = current_states[:, 0]  # [B, 4]
@@ -220,6 +247,9 @@ def compute_training_loss(
             ego_pred_world = ego_pred * norm.std[0].to(model_output.device) + norm.mean[0].to(
                 model_output.device
             )  # [B, T, 4]
+        if return_ego_world:
+            loss["ego_pred_world"] = ego_pred_world
+    if need_ego_edge:
         ego_edge_points = compute_ego_edge_points(
             ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp
         )
@@ -249,6 +279,18 @@ def compute_training_loss(
     else:
         loss["neighbor_collision_loss"] = torch.tensor(0.0, device=dpm_loss.device)
 
+    # JEPA latent-consistency loss (ego-only energy; SAGE-JEPA Use A). Default-off: when
+    # coeff_jepa_consistency_loss == 0 this is tensor(0.) and training is bit-identical.
+    # Gradient flows through ego_pred_world into the planner; the JEPA modules are frozen.
+    if coeff_jepa > 0 and model_type == "x_start":
+        ego_current_phys = current_states[:, 0]  # [B, 4] physical ego pose (ego-centric)
+        jepa_energy = args.jepa_energy.energy(
+            ego_current_phys, ego_pred_world, K=getattr(args, "jepa_prefix_K", 10)
+        )  # [B]
+        loss["jepa_consistency_loss"] = jepa_energy.mean()
+    else:
+        loss["jepa_consistency_loss"] = torch.tensor(0.0, device=dpm_loss.device)
+
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
     turn_indicator_logit = decoder_output["turn_indicator_logit"]  # [B, TURN_INDICATOR_OUTPUT_KEEP]
@@ -270,6 +312,51 @@ def compute_training_loss(
     return loss
 
 
+class PriorEncoder(nn.Module):
+    """Encodes a propagated previous-frame ego plan [B, T, 4] into K conditioning tokens
+    [B, K, hidden] that are appended to the DiT cross-attention context. The DiT auto-masks
+    all-zero cross_c tokens, so these (non-zero) tokens are attended; dropped samples have
+    their tokens zeroed by the caller and are thus auto-masked (no prior). Gated/default-off:
+    only used when inputs carry 'prior_traj'."""
+
+    def __init__(self, future_len: int, hidden: int, num_tokens: int = 8):
+        super().__init__()
+        self.K = num_tokens
+        self.hidden = hidden
+        self.net = nn.Sequential(
+            nn.Linear(future_len * 4, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, num_tokens * hidden),
+        )
+
+    def forward(self, prior_traj: torch.Tensor) -> torch.Tensor:
+        B = prior_traj.shape[0]
+        x = self.net(prior_traj.reshape(B, -1))
+        return x.reshape(B, self.K, self.hidden)
+
+
+class HistoryEncoder(nn.Module):
+    """Encodes the PREVIOUS frame's pooled scene encoding [B, hidden] into K conditioning
+    tokens [B, K, hidden] appended to the DiT cross-attention context. Unlike PriorEncoder
+    (which feeds the previous PLAN — a trajectory the model can copy), this feeds the previous
+    frame's SCENE CONTEXT (the encoder's latent gist): temporal context for stability with NO
+    plan to echo. Gated/default-off: only used when inputs carry 'hist_ctx'."""
+
+    def __init__(self, hidden: int, num_tokens: int = 8):
+        super().__init__()
+        self.K = num_tokens
+        self.hidden = hidden
+        self.net = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, num_tokens * hidden),
+        )
+
+    def forward(self, hist_ctx: torch.Tensor) -> torch.Tensor:
+        B = hist_ctx.shape[0]
+        return self.net(hist_ctx).reshape(B, self.K, self.hidden)
+
+
 class Decoder(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -277,6 +364,14 @@ class Decoder(nn.Module):
         dpr = config.decoder_drop_path_rate
         self._predicted_neighbor_num = config.predicted_neighbor_num
         self._future_len = config.future_len
+
+        # Explicit prior-conditioning module (gated, default-off): encodes the previous
+        # frame's propagated plan into cross-attention tokens. Unused unless inputs carry
+        # 'prior_traj', so a normal forward is unaffected (the params are just idle).
+        self.prior_encoder = PriorEncoder(config.future_len, config.hidden_dim)
+        # History-context module (gated, default-off): encodes the previous frame's pooled scene
+        # encoding into cross-attention tokens. Unused unless inputs carry 'hist_ctx' (idle params).
+        self.history_encoder = HistoryEncoder(config.hidden_dim)
 
         self.dit = DiT(
             depth=config.decoder_depth,
@@ -504,7 +599,19 @@ class Decoder(nn.Module):
 
         dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint)
 
-        x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
+        # SDEdit-init (gated, default-off): start denoising from the propagated previous
+        # plan instead of the zero init. _prior is in the same normalized x_start space as
+        # xT; scale by alpha(t0) to place it at noise level t0, then start the solver there.
+        _prior = inputs.get("sdedit_prior", None)
+        _t0 = inputs.get("sdedit_t_start", None)
+        if _prior is not None and _t0 is not None:
+            _alpha = noise_schedule.marginal_alpha(torch.tensor(float(_t0), device=xT.device))
+            xT = (_alpha * _prior.reshape(B, P, (1 + self._future_len) * 4)).to(xT.dtype)
+            x0 = dpm_solver.sample(
+                xT, steps=10, prefix_mask=mask, skip_type="logSNR", t_T_start=float(_t0)
+            )
+        else:
+            x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
 
         x0 = x0.reshape(B, P, (1 + self._future_len), 4)
         ego_trajectory = x0[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
@@ -598,8 +705,32 @@ class Decoder(nn.Module):
         B, P, _ = current_states.shape
         assert P == (1 + self._predicted_neighbor_num)
 
-        # Pool encoding to get a fixed-size representation
+        # Pool encoding to get a fixed-size representation (scene-only, for turn indicator)
         encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]
+
+        # Explicit prior-conditioning (gated, default-off): append K tokens encoding the
+        # previous frame's propagated plan to the cross-attention context. The DiT auto-masks
+        # all-zero cross_c tokens, so non-zero prior tokens are attended; dropped samples
+        # (prior_keep == False) get their tokens zeroed -> auto-masked -> no prior. Absent
+        # 'prior_traj' => nothing appended => byte-identical to the base model.
+        _prior_traj = inputs.get("prior_traj", None)
+        if _prior_traj is not None:
+            prior_tokens = self.prior_encoder(_prior_traj)  # [B, K, D]
+            _keep = inputs.get("prior_keep", None)
+            if _keep is not None:
+                prior_tokens = prior_tokens * _keep.view(-1, 1, 1).to(prior_tokens.dtype)
+            encoding = torch.cat([encoding, prior_tokens], dim=1)  # [B, N+K, D]
+
+        # History-context conditioning (gated, default-off): append K tokens encoding the
+        # PREVIOUS frame's pooled scene encoding (temporal context, NO plan to copy). Same
+        # auto-mask + per-sample dropout as the prior block. Absent 'hist_ctx' => byte-identical.
+        _hist_ctx = inputs.get("hist_ctx", None)
+        if _hist_ctx is not None:
+            hist_tokens = self.history_encoder(_hist_ctx)  # [B, K, D]
+            _hkeep = inputs.get("hist_keep", None)
+            if _hkeep is not None:
+                hist_tokens = hist_tokens * _hkeep.view(-1, 1, 1).to(hist_tokens.dtype)
+            encoding = torch.cat([encoding, hist_tokens], dim=1)  # [B, N+K, D]
 
         # Dispatch to training or inference
         if self.training:

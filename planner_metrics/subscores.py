@@ -684,6 +684,78 @@ def compute_smoothness_score_batch(
     return -jerk_mag.mean(dim=1)  # [N]
 
 
+def compute_curvature_rate_score_batch(
+    ego_trajs: torch.Tensor,
+    config: RewardConfig,
+) -> torch.Tensor:
+    """Batched negative mean |d(curvature)/dt| (curvature rate) via Savitzky-Golay.
+
+    Temporal-stability companion to ``compute_smoothness_score_batch`` (jerk): jerk
+    captures how fast the *position* derivative changes; this captures how fast the
+    *path curvature* changes. The distinction matters — a steady circular turn has
+    large curvature but ~zero curvature-rate, so a steady-state turn is not penalised
+    while a wobbling / curvature-ramping path is. Used by the SAGE-JEPA temporal-
+    stability probe (plan §4).
+
+    Curvature is the signed path curvature κ = (vx·ay − vy·ax) / |v|³, derived from
+    SG-filtered velocity / acceleration of the (x, y) path (same SG family as the
+    lat-accel and jerk terms — raw finite differences amplify 10 Hz noise). Its rate
+    dκ/dt is then taken with an SG first-derivative kernel. Low-speed steps (|v| <
+    0.5 m/s) are zeroed so a near-stationary ego doesn't produce a spurious 1/|v|³ spike.
+
+    Args:
+        ego_trajs: (N, T, 4) x, y, cos_yaw, sin_yaw.
+        config: RewardConfig for dt.
+
+    Returns:
+        (N,) scores (negative, closer to 0 = steadier curvature).
+    """
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+    if T < 12:
+        return torch.zeros(N, device=device)
+
+    _sg_window = min(11, T - (1 if T % 2 == 0 else 0))
+    if _sg_window < 5:
+        return torch.zeros(N, device=device)
+    pad = _sg_window // 2
+
+    vel_kernel = _build_sg_diff_kernel(window=_sg_window, poly=3, deriv=1, delta=config.dt).to(
+        device
+    )
+    accel_kernel = _build_sg_diff_kernel(window=_sg_window, poly=3, deriv=2, delta=config.dt).to(
+        device
+    )
+
+    # pos: [N, T, 2] -> [N, 2, T] for conv1d
+    pos = ego_trajs[:, :, :2].detach().permute(0, 2, 1)
+    pos_padded = torch.nn.functional.pad(pos, (pad, pad), mode="replicate")
+    vel = torch.nn.functional.conv1d(
+        pos_padded, vel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2
+    )  # [N, 2, T]
+    accel = torch.nn.functional.conv1d(
+        pos_padded, accel_kernel.view(1, 1, -1).expand(2, 1, -1), groups=2
+    )  # [N, 2, T]
+
+    vx, vy = vel[:, 0], vel[:, 1]  # [N, T]
+    ax, ay = accel[:, 0], accel[:, 1]
+    speed = (vx**2 + vy**2).sqrt()  # [N, T]
+    # signed path curvature κ = (vx·ay − vy·ax) / |v|³
+    kappa = (vx * ay - vy * ax) / speed.clamp(min=0.5) ** 3  # [N, T]
+    kappa = torch.where(speed > 0.5, kappa, torch.zeros_like(kappa))
+
+    # curvature rate dκ/dt via SG first-derivative kernel on κ(t).
+    # The rate kernel is the same SG first-derivative kernel as vel_kernel
+    # (deriv=1, same window/delta), so reuse it instead of rebuilding.
+    kappa_padded = torch.nn.functional.pad(kappa.unsqueeze(1), (pad, pad), mode="replicate")
+    dkappa = torch.nn.functional.conv1d(kappa_padded, vel_kernel.view(1, 1, -1)).squeeze(1)
+
+    # Trim SG edge artifacts (pad from each side)
+    if dkappa.shape[1] > 2 * pad + 1:
+        dkappa = dkappa[:, pad:-pad]
+    return -dkappa.abs().mean(dim=1)  # [N]
+
+
 _TL_GREEN = 8
 _TL_YELLOW = 9
 _TL_RED = 10

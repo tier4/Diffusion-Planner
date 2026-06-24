@@ -106,6 +106,20 @@ def get_args(args_list=None):
     parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
     parser.add_argument("--neighbor_collision_margin", type=float, default=0.25)
 
+    # Cross-frame temporal-consistency loss (reduces frame-to-frame flicker). Default-off.
+    parser.add_argument("--coeff_temporal_consistency", type=float, default=0.0)
+    parser.add_argument("--tc_step_g", type=int, default=3)
+    parser.add_argument("--tc_fixed_t", type=float, default=0.5)
+    parser.add_argument("--tc_cons_scale", type=float, default=10.0)
+    parser.add_argument("--tc_w_heading", type=float, default=1.0)
+    parser.add_argument("--sdedit_train", type=boolean, default=False)
+    parser.add_argument("--prior_cond_train", type=boolean, default=False)
+    parser.add_argument("--history_cond_train", type=boolean, default=False)
+    parser.add_argument("--tc_scene_gate", type=boolean, default=False)
+    parser.add_argument("--tc_gate_q", type=float, default=0.5)
+    parser.add_argument("--tc_gate_tau", type=float, default=6.0)
+    parser.add_argument("--tf32", type=boolean, default=True)
+
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
@@ -149,6 +163,10 @@ def get_args(args_list=None):
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
+    parser.add_argument(
+        "--init_weights_path", type=str, default=None,
+        help="weights-only warm start (model weights, fresh optimizer/schedule)",
+    )
 
     parser.add_argument("--use_wandb", default=False, type=boolean)
     parser.add_argument(
@@ -159,6 +177,10 @@ def get_args(args_list=None):
         type=str,
         default="Diffusion-Planner",
         help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb_step_log_interval", type=int, default=0,
+        help="log train metrics every N steps (0 = per-epoch only)",
     )
     parser.add_argument("--notes", default="", type=str)
 

@@ -20,6 +20,7 @@ import torch
 from planner_metrics.config import RewardConfig
 from planner_metrics.subscores import (
     compute_centerline_score_batch,
+    compute_curvature_rate_score_batch,
     compute_feasibility_score_batch,
     compute_kinematic_gate,
     compute_lane_departure_penalty,
@@ -126,6 +127,7 @@ def compute_subscores_batch(
     )
     progress_scores = compute_progress_score_batch(ego_trajs, goal_pose, data)
     smoothness_scores = compute_smoothness_score_batch(ego_trajs, config)
+    curvature_rate_scores = compute_curvature_rate_score_batch(ego_trajs, config)
     feasibility_scores, off_road_fractions = compute_feasibility_score_batch(
         ego_trajs, ego_shape, data, config
     )
@@ -200,6 +202,7 @@ def compute_subscores_batch(
         "ttc": ttc_scores,
         "progress": progress_scores,
         "comfort": smoothness_scores,
+        "curvature_rate": curvature_rate_scores,  # temporal-stability probe (SAGE-JEPA §4)
         "feasibility": feasibility_scores,
         "centerline": centerline_scores,
         "red_light": red_light_scores,

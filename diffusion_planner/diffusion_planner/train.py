@@ -68,6 +68,17 @@ def mean_ego_loss(loss_dict):
 def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
+    # H100 perf: route fp32 matmuls through TF32 tensor cores (~2x faster). TF32 is
+    # numerically ~= fp32 for training convergence (it only changes matmul internals, not
+    # the loss math), so valid_loss/ego stays directly comparable to the fp32 base run.
+    # args.tf32=False forces strict fp32 ("highest") — used by the TF32-vs-fp32 benchmark.
+    if getattr(args, "tf32", True):
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
+    else:
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.allow_tf32 = False
+
     # init ddp
     global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
@@ -119,9 +130,23 @@ def model_training(args: TrainConfig):
     else:
         aug = None
 
-    # prepare dataset
-    train_set = DiffusionPlannerData(args.train_set_list)
-    valid_set = DiffusionPlannerData(args.valid_set_list)
+    # prepare dataset — paired consecutive frames when the temporal-consistency loss is on.
+    # skip_filter=False (no skip-filter): the base run (iou8430w, 06-08) predates the
+    # converter skip-filter (PR #149, 06-18), so it trained on the FULL unfiltered list.
+    # We match that here both for a fair data comparison and to avoid the 5.47M per-frame
+    # sidecar reads that otherwise stall startup for ~15 min.
+    if getattr(args, "coeff_temporal_consistency", 0.0) > 0:
+        from diffusion_planner.utils.dataset import DiffusionPlannerPairData
+
+        train_set = DiffusionPlannerPairData(
+            args.train_set_list, step_g=args.tc_step_g, skip_filter=False
+        )
+        if global_rank == 0:
+            print(f"[temporal-consistency] paired training: {len(train_set)} pairs "
+                  f"(g={args.tc_step_g}, coeff={args.coeff_temporal_consistency})")
+    else:
+        train_set = DiffusionPlannerData(args.train_set_list, skip_filter=False)
+    valid_set = DiffusionPlannerData(args.valid_set_list, skip_filter=False)
 
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
@@ -159,6 +184,37 @@ def model_training(args: TrainConfig):
     # set up model
     diffusion_planner = Diffusion_Planner(args)
     diffusion_planner = diffusion_planner.to(rank if args.device == "cuda" else args.device)
+
+    # Weights-only warm start: load model weights from a checkpoint but keep a fresh
+    # optimizer/scheduler/epoch (for fine-tuning with a new objective). Distinct from
+    # --resume_model_path, which continues the original run's optimizer/schedule/epoch.
+    if getattr(args, "init_weights_path", None) and args.resume_model_path is None:
+        _ck = torch.load(args.init_weights_path, map_location="cpu", weights_only=False)
+        _sd = _ck.get("ema_state_dict", _ck.get("model", _ck)) if isinstance(_ck, dict) else _ck
+        _sd = {k.replace("module.", "", 1): v for k, v in _sd.items()}
+        # strict=False so newly-added modules (e.g. the prior-conditioning encoder) load as
+        # random init while everything in the checkpoint is restored; print any gap.
+        _missing, _unexpected = diffusion_planner.load_state_dict(_sd, strict=False)
+        if global_rank == 0:
+            print(f"[init] weights-only warm start from {args.init_weights_path}")
+            if _missing:
+                print(f"[init] missing (random-init) keys: {len(_missing)} e.g. {_missing[:4]}")
+            if _unexpected:
+                print(f"[init] unexpected (ignored) keys: {len(_unexpected)} e.g. {_unexpected[:4]}")
+
+    # Frozen JEPA energy for the Use-A consistency loss (default-off). No-grad module,
+    # so no DDP wrapping needed (mirrors the normalizer placeholder pattern).
+    args.jepa_energy = None
+    if getattr(args, "coeff_jepa_consistency_loss", 0.0) > 0:
+        from diffusion_planner.model.jepa.energy_module import JEPAEnergy
+
+        dev = rank if args.device == "cuda" else args.device
+        args.jepa_energy = JEPAEnergy.from_ckpts(
+            args.jepa_encoder_ckpt, args.jepa_predictor_ckpt, device=dev, prefix_K=args.jepa_prefix_K
+        )
+        if global_rank == 0:
+            print(f"[JEPA] loaded frozen ego-only energy (K={args.jepa_prefix_K}) "
+                  f"coeff={args.coeff_jepa_consistency_loss}")
 
     if args.ddp:
         diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
@@ -262,9 +318,11 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
-        # Adjust learning rate for final 10 epochs
+        # Adjust learning rate for final 10 epochs. Only for runs LONGER than that window —
+        # otherwise a short fine-tune (train_epochs <= 10) would have its lr crushed by 1/100
+        # from epoch 0 (effective ~1e-6), which starves a random-init module of signal.
         final_epoch_count = 10
-        if epoch >= train_epochs - final_epoch_count:
+        if train_epochs > final_epoch_count and epoch >= train_epochs - final_epoch_count:
             base_lr = args.learning_rate
             if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
                 adjusted_lr = base_lr * 0.01
@@ -306,18 +364,23 @@ def model_training(args: TrainConfig):
             )
 
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
-            wandb.log(
-                {
-                    **{f"train_loss/{k}": v for k, v in train_loss.items()},
-                    **{f"lr/{k}": v for k, v in lr_dict.items()},
-                    "valid_loss/ego": valid_loss_ego,
-                    "valid_loss/neighbors": valid_loss_neighbor,
-                    "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
-                    "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
-                    **mean_ego_loss_dict,
-                },
-                step=epoch + 1,
-            )
+            _epoch_payload = {
+                **{f"train_loss/{k}": v for k, v in train_loss.items()},
+                **{f"lr/{k}": v for k, v in lr_dict.items()},
+                "valid_loss/ego": valid_loss_ego,
+                "valid_loss/neighbors": valid_loss_neighbor,
+                "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
+                "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                "epoch": epoch + 1,
+                **mean_ego_loss_dict,
+            }
+            if getattr(args, "wandb_step_log_interval", 0) > 0:
+                # auto-step + commit so it flushes immediately and shares the per-step
+                # log's auto step axis (explicit step=epoch+1 would buffer until the
+                # next epoch and clash with the per-step auto steps).
+                wandb.log(_epoch_payload, commit=True)
+            else:
+                wandb.log(_epoch_payload, step=epoch + 1)  # production: per-epoch axis
 
             curr_data = {
                 "epoch": epoch + 1,

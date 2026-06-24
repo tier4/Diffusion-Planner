@@ -439,7 +439,7 @@ class DPM_Solver:
         else:
             raise ValueError("Solver order must be 1 or 2, got {}".format(order))
 
-    def sample(self, x, steps, prefix_mask, skip_type="time_uniform"):
+    def sample(self, x, steps, prefix_mask, skip_type="time_uniform", t_T_start=None):
         """
         Compute the sample at time `t_end` by DPM-Solver, given the initial `x` at time `t_start`.
 
@@ -490,7 +490,9 @@ class DPM_Solver:
         denoise_to_zero = True
 
         t_0 = 1.0 / self.noise_schedule.total_N
-        t_T = self.noise_schedule.T
+        # SDEdit-init: optionally start the reverse process at a mid noise level t_T_start
+        # (with x already noised to that level by the caller) instead of full noise T.
+        t_T = self.noise_schedule.T if t_T_start is None else float(t_T_start)
         assert t_0 > 0 and t_T > 0, (
             "Time range needs to be greater than 0. For discrete-time DPMs, it needs to be in [1 / N, 1], where N is the length of betas array"
         )
