@@ -25,6 +25,7 @@ LIST_TYPES = (
     "policies",
     "scene_datasets",
     "route_datasets",
+    "grpo_configs",
     "reward_configs",
     "maps",
     "run_dirs",
@@ -38,7 +39,8 @@ _EMPTY: dict = {
     "policies": [],  # {name, path}  exploration / guidance policy dirs
     "scene_datasets": [],  # {name, path}  individual-scene list JSON
     "route_datasets": [],  # {name, path}  contiguous per-frame NPZ dir
-    "reward_configs": [],  # {name, path}
+    "grpo_configs": [],  # {name, path}  GRPO / generation+training configs
+    "reward_configs": [],  # {name, path}  reward / metrics-eval scoring configs
     "maps": [],  # {name, path}
     "run_dirs": [],  # {name, path}
     "ego_shape": "4.76,7.24,2.29",
@@ -138,7 +140,8 @@ WORKSPACE_DIRS = {
     "models": "models",
     "loras": "loras",
     "policies": "policies",
-    "reward_configs": "configs",
+    "grpo_configs": "configs/grpo",
+    "reward_configs": "configs/reward",
     "maps": "maps",
     "scene_datasets": "datasets/scenes",
     "route_datasets": "datasets/routes",
@@ -242,6 +245,7 @@ def scan_workspace(root: str | Path) -> dict:
     lib["policies"] = _scan_dirs_with(
         root / WORKSPACE_DIRS["policies"], "exploration_policy_config.json"
     )
+    lib["grpo_configs"] = _scan_files(root / WORKSPACE_DIRS["grpo_configs"], "*.json")
     lib["reward_configs"] = _scan_files(root / WORKSPACE_DIRS["reward_configs"], "*.json")
     lib["maps"] = _scan_files(root / WORKSPACE_DIRS["maps"], "*.osm")
     lib["scene_datasets"] = _scan_scene_datasets(root / WORKSPACE_DIRS["scene_datasets"])

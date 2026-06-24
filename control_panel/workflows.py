@@ -187,6 +187,17 @@ def _ego_shape(required: bool = True) -> ArgSpec:
     )
 
 
+def _grpo_config(name: str = "config", label: str = "GRPO / generation config") -> ArgSpec:
+    return ArgSpec(
+        name,
+        "file",
+        label=label,
+        shared="grpo_configs",
+        required=True,
+        help="GRPOConfig JSON (configs/grpo/). Generation + training settings.",
+    )
+
+
 def _reward_config(name: str = "config", label: str = "Reward config JSON") -> ArgSpec:
     return ArgSpec(
         name,
@@ -254,15 +265,7 @@ _register(
         "the winner (set ranked_sft_mode in the config). PRiSM is RSFT on perturbation-mined "
         "scenes. Writes a timestamped run dir with per-epoch LoRA + eval.",
         args=[
-            ArgSpec(
-                "config",
-                "file",
-                label="GRPO / experiment config",
-                shared="reward_configs",
-                required=True,
-                help="GRPOConfig JSON (configs/ folder). Must set ranked_sft_mode + "
-                "n_prob_scenes / n_normal_scenes.",
-            ),
+            _grpo_config(label="GRPO / experiment config (set ranked_sft_mode + n_*_scenes)"),
             ArgSpec("name", "str", label="Experiment name", required=True),
             _model_path(label="Baseline model (warmstart from)"),
             _scenes(name="prob_scenes", label="Problem / behavior scenes"),
@@ -549,7 +552,7 @@ _register(
             _model_path(),
             _lora(),
             _scenes(label="Perturbed scenes (dataset)"),
-            _reward_config(),
+            _grpo_config(label="GRPO / generation config (guidance)"),
             _output_dir(),
             ArgSpec("manifest", "file", label="disturb manifest.json (optional)"),
             ArgSpec("K", "int", label="K (generations)", default=8),

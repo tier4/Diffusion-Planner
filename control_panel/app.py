@@ -28,6 +28,7 @@ _TYPE_ICON = {
     "models": "🧠",
     "loras": "🧩",
     "policies": "🛰",
+    "grpo_configs": "🎛",
     "reward_configs": "⚙️",
     "maps": "🗺",
     "route_datasets": "📁",
