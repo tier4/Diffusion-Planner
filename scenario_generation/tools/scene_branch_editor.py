@@ -754,8 +754,15 @@ def build_interface(
     map_borders: list[np.ndarray] | None = None,
     map_builder=None,
     reward_config=None,
+    export_dir_default: str = "",
+    rsft_dir_default: str = "",
 ):
-    """Build the Gradio interface for the scene branch editor."""
+    """Build the Gradio interface for the scene branch editor.
+
+    export_dir_default / rsft_dir_default pre-fill the Export-Dir (contiguous NPZs) and
+    RSFT-Dir (individual scene + guided-traj) text fields — e.g. a workspace
+    datasets/routes/ and datasets/scenes/ subfolder.
+    """
 
     # NOTE: css is passed to demo.launch() (Gradio 6 dropped css from the Blocks
     # constructor); see _GUI_CSS and main().
@@ -987,13 +994,19 @@ def build_interface(
                 with gr.Accordion("Export / Save for RSFT", open=False):
                     with gr.Row():
                         export_dir = gr.Textbox(
-                            label="Export Dir", placeholder="/path/to/export", scale=3
+                            label="Export Dir (contiguous NPZs)",
+                            value=export_dir_default,
+                            placeholder="/path/to/export",
+                            scale=3,
                         )
                         export_btn = gr.Button("Export NPZs", variant="secondary", scale=1)
                     export_status = gr.Markdown("")
                     with gr.Row():
                         rsft_dir = gr.Textbox(
-                            label="RSFT Dir", placeholder="/path/to/rsft_curated", scale=3
+                            label="RSFT Dir (individual scenes)",
+                            value=rsft_dir_default,
+                            placeholder="/path/to/rsft_curated",
+                            scale=3,
                         )
                         rsft_save_btn = gr.Button(
                             "Save Scene + Guided Traj",
@@ -4217,6 +4230,8 @@ def build_demo_from_paths(
     ego_shape: str | None = None,
     map_path: str | None = None,
     tree_json: str | None = None,
+    export_dir: str = "",
+    rsft_dir: str = "",
 ):
     """Build the Scene Editor Blocks from plain paths (no argparse).
 
@@ -4270,6 +4285,8 @@ def build_demo_from_paths(
         map_borders=map_border_polylines,
         map_builder=builder,
         reward_config=reward_cfg,
+        export_dir_default=export_dir or "",
+        rsft_dir_default=rsft_dir or "",
     )
     demo.css = _GUI_CSS  # so a mounting caller keeps the editor's styling
     return demo
@@ -4298,6 +4315,12 @@ def main():
         help="Path to lanelet2 .osm map (for road border overlays)",
     )
     parser.add_argument("--port", type=int, default=7870)
+    parser.add_argument(
+        "--export_dir", type=str, default="", help="Default Export Dir (contiguous NPZs)"
+    )
+    parser.add_argument(
+        "--rsft_dir", type=str, default="", help="Default RSFT Dir (individual scenes)"
+    )
     args = parser.parse_args()
 
     demo = build_demo_from_paths(
@@ -4307,6 +4330,8 @@ def main():
         ego_shape=args.ego_shape,
         map_path=args.map_path,
         tree_json=args.tree_json,
+        export_dir=args.export_dir,
+        rsft_dir=args.rsft_dir,
     )
     demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True, css=_GUI_CSS)
 

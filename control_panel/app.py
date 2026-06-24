@@ -536,6 +536,12 @@ def _open_editor(library, host, editor_port, fields, *flat):
     if not values.get("npz_dir"):
         return "", "⚠ Select a Replay NPZ dir (route) before opening the editor."
     values["port"] = int(editor_port)
+    # Pre-point the editor's export/save dirs into the workspace: Export NPZs = contiguous
+    # (→ datasets/routes), Save Scene + Guided Traj = individual scenes (→ datasets/scenes).
+    ws = _ws_base(library)
+    if ws:
+        values["export_dir"] = str(Path(ws) / "datasets" / "routes" / "editor_export")
+        values["rsft_dir"] = str(Path(ws) / "datasets" / "scenes" / "editor_curated")
     # Stop a previous editor (interactive server, restartable) before relaunching.
     prev = R.latest_job("scene_branch_editor")
     if prev is not None and R.is_alive(prev.pid):
@@ -573,10 +579,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         # ---- Workspace -------------------------------------------------------------
         with gr.Tab("Workspace"):
             gr.Markdown(
-                "### Workspace — point at your workspace root and **Scan** to load all assets\n"
-                "Layout: `models/  loras/  policies/  configs/  maps/  datasets/scenes/  "
-                "datasets/routes/  runs/`. Scan auto-detects each asset (follows symlinks) and "
-                "fills every dropdown. Created datasets auto-place under `datasets/scenes|routes/`."
+                "### Workspace — point at your workspace root and **Scan** to load all assets"
             )
             with gr.Row():
                 ws_root_box = gr.Textbox(

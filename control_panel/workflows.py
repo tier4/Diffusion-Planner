@@ -739,6 +739,10 @@ _register(
             ArgSpec("map_path", "file", label="Lanelet2 .osm map (optional)", shared="maps"),
             ArgSpec("tree_json", "file", label="Existing scene tree JSON (optional)"),
             ArgSpec("port", "int", default=7870, label="Port"),
+            # Pre-filled by the panel from the workspace (Export = contiguous → routes;
+            # RSFT save = individual scenes → scenes). Hidden; injected in _open_editor.
+            ArgSpec("export_dir", "dir", default="", hidden=True),
+            ArgSpec("rsft_dir", "dir", default="", hidden=True),
         ],
     )
 )
