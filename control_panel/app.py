@@ -264,7 +264,11 @@ def resolve_values(
             values[f["name"]] = _auto_path(library, wf, run_name, spec)
         elif f["role"] == "derive":
             entry = model_entries.get(spec.derive_from, {})
-            values[f["name"]] = entry.get(spec.derive_field, "") or ""
+            if spec.derive_field == "dir":  # the model's folder (deploy dir)
+                p = entry.get("path", "")
+                values[f["name"]] = str(Path(p).parent) if p else ""
+            else:
+                values[f["name"]] = entry.get(spec.derive_field, "") or ""
     return values
 
 

@@ -479,27 +479,24 @@ _register(
         key="torch2onnx",
         title="Export ONNX",
         script_path="ros_scripts/torch2onnx.py",
-        description="Export a deploy dir (best_model.pth + args.json) to ONNX.",
+        description="Export a model to ONNX (written into the model's own dir). Just pick the "
+        "model — its folder (best_model.pth + args.json) is the deploy dir.",
         args=[
+            # UI-only selector: a registered model = a deploy dir. Not emitted to argv
+            # (launcher_only); root_dir below is derived from its folder.
             ArgSpec(
-                "root_dir",
-                "dir",
-                label="Deploy dir (best_model.pth + args.json)",
+                "model",
+                "file",
+                label="Model to export",
+                shared="models",
                 required=True,
-                positional=True,
+                launcher_only=True,
             ),
-            ArgSpec("eval_npz", "file", label="Sample NPZ (optional)"),
-            ArgSpec("use_ema", "bool", label="Use EMA weights"),
+            ArgSpec("root_dir", "dir", positional=True, derive_from="model", derive_field="dir"),
             ArgSpec(
-                "output_prefix",
-                "str",
-                label="Output prefix",
-                flag="--output-prefix",
-                default="diffusion_planner",
+                "use_simplify", "bool", label="Simplify graph (onnxsim)", flag="--use-simplify"
             ),
-            ArgSpec("use_simplify", "bool", label="onnxsim simplify", flag="--use-simplify"),
-            ArgSpec("opset_version", "int", label="Opset", flag="--opset-version", default=20),
-            ArgSpec("external_data", "bool", label="External data files", flag="--external-data"),
+            ArgSpec("opset_version", "int", flag="--opset-version", default=20, hidden=True),
         ],
     )
 )
