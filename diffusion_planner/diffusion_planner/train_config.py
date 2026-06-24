@@ -77,7 +77,7 @@ class TrainConfig:
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
-    ego_history_dropout_rate: float = 0.4
+    ego_history_dropout_rate: float = 0.6
     use_turn_indicators: bool = True
 
     # Loss Coefficients
