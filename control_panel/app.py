@@ -579,33 +579,37 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         with gr.Tab("Evaluate"):
             gr.Markdown(_baseline_md(library0))
-            with gr.Tab("Det avoidance (sc)"):
+            use_guid = gr.Checkbox(
+                value=False,
+                label="Use guidance policy (guided eval) — unchecked = plain deterministic",
+            )
+            with gr.Group(visible=True) as det_grp:
                 ev = workflow_panel(
-                    wf("eval_det_avoidance"), library0, library_state, asset_dropdowns
+                    wf("eval_full_metrics"), library0, library_state, asset_dropdowns
                 )
                 load_btn = gr.Button("Load summary.json")
                 summ = gr.JSON(label="summary.json")
 
                 def _load_summary(library, *flat, _ev=ev):
-                    v = resolve_values(wf("eval_det_avoidance"), _ev["fields"], library, flat)
-                    p = (wf("eval_det_avoidance").outputs or (lambda _: {}))(v).get("summary_json")
+                    v = resolve_values(wf("eval_full_metrics"), _ev["fields"], library, flat)
+                    p = (wf("eval_full_metrics").outputs or (lambda _: {}))(v).get("summary_json")
                     if p and Path(p).exists():
                         return json.loads(Path(p).read_text())
                     return {"error": f"not found: {p}"}
 
                 load_btn.click(_load_summary, [library_state, *ev["flat"]], summ)
-            with gr.Tab("Guided avoidance (policy)"):
+            with gr.Group(visible=False) as guid_grp:
                 workflow_panel(
                     wf("eval_policy_avoidance"), library0, library_state, asset_dropdowns
                 )
-            with gr.Tab("L2 (valid_predictor)"):
-                workflow_panel(wf("eval_l2"), library0, library_state, asset_dropdowns)
-            with gr.Tab("Road border"):
-                workflow_panel(wf("eval_border_distance"), library0, library_state, asset_dropdowns)
-            with gr.Tab("Detailed metrics"):
-                workflow_panel(
-                    wf("eval_detailed_metrics"), library0, library_state, asset_dropdowns
-                )
+            use_guid.change(
+                lambda c: (gr.update(visible=not c), gr.update(visible=c)),
+                use_guid,
+                [det_grp, guid_grp],
+            )
+
+        with gr.Tab("L2"):
+            workflow_panel(wf("eval_l2"), library0, library_state, asset_dropdowns)
 
         with gr.Tab("Merge + Export"):
             with gr.Tab("Merge LoRA"):
@@ -615,9 +619,9 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         with gr.Tab("PRiSM"):
             _prism_labels = {
-                "disturb_and_replay": "1 · disturb_and_replay",
-                "viz_p4_recovery": "2 · viz_p4_recovery",
-                "percentile_filter_perturbed": "3 · percentile_filter",
+                "disturb_and_replay": "disturb_and_replay",
+                "viz_p4_recovery": "viz_p4_recovery",
+                "percentile_filter_perturbed": "percentile_filter",
             }
             for k in ("disturb_and_replay", "viz_p4_recovery", "percentile_filter_perturbed"):
                 with gr.Tab(_prism_labels[k]):

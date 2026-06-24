@@ -279,12 +279,40 @@ _register(
 _register(
     Workflow(
         key="eval_det_avoidance",
-        title="Eval: det avoidance (sc)",
+        title="Eval: det avoidance (sc only)",
         module="rlvr.autoresearch.tools.eval_det_avoidance",
-        description="Single forward pass per scene; static-collision clearance + RB/lane/centerline. "
-        "Writes summary.json with per-scene + aggregate distribution stats.",
+        description="Avoidance-focused det eval (sc + rb + cl). Superseded in the UI by the unified "
+        "Model evaluation tab; kept for scripts.",
         args=[
             _model_path(),
+            _lora(),
+            _scenes(),
+            _reward_config(),
+            _ego_shape(),
+            _output_dir(),
+            ArgSpec("batch_size", "int", default=32),
+        ],
+        outputs=lambda v: (
+            {"summary_json": str(Path(v["output_dir"]) / "summary.json")}
+            if v.get("output_dir")
+            else {}
+        ),
+    )
+)
+
+# --- Eval: unified full metrics (deterministic) ---------------------------------------
+_register(
+    Workflow(
+        key="eval_full_metrics",
+        title="Model evaluation — full metrics",
+        module="rlvr.autoresearch.tools.eval_full_metrics",
+        description="One deterministic forward pass per scene scored against ALL reward metrics: "
+        "avoidance (sc clearance + crossings), road border, lane, centerline, path length, "
+        "collision + kinematic flags — with full distribution stats. Optional LoRA. Use an "
+        "SC-enabled reward config so avoidance (sc) is actually measured. Writes summary.json.",
+        args=[
+            _model_path(),
+            _lora(),
             _scenes(),
             _reward_config(),
             _ego_shape(),
@@ -462,7 +490,7 @@ _register(
 _register(
     Workflow(
         key="disturb_and_replay",
-        title="PRiSM step 1 — disturb_and_replay",
+        title="PRiSM: disturb_and_replay",
         module="rlvr.autoresearch.tools.disturb_and_replay",
         description="Generate perturbed variants (parallel offset / yaw / jitter) of warm scenes. "
         "All output NPZ fields are in the perturbed-ego frame. Emits manifest.json.",
@@ -499,7 +527,7 @@ _register(
 _register(
     Workflow(
         key="viz_p4_recovery",
-        title="PRiSM step 2 — viz_p4_recovery (rank K=N)",
+        title="PRiSM: viz_p4_recovery (rank K=N)",
         module="rlvr.autoresearch.tools.viz_p4_recovery",
         description="Score K=N generations per scene; pick rank-1 by total reward; write summary.json "
         "with t0_cl / det_cl / top1_cl + safety flags. Use --no_viz for speed.",
@@ -537,7 +565,7 @@ _register(
 _register(
     Workflow(
         key="percentile_filter_perturbed",
-        title="PRiSM step 3 — percentile_filter",
+        title="PRiSM: percentile_filter",
         module="rlvr.autoresearch.tools.percentile_filter_perturbed",
         description="Filter scenes by top1_cl percentile with no-poison guards; write the SFT scene list.",
         args=[
