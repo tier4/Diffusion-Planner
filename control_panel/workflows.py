@@ -267,13 +267,8 @@ _register(
             _scenes(name="normal_scenes", label="Normal scenes JSON"),
             _scenes(name="val_scenes", label="Validation scenes JSON"),
             _output_dir(),
-            ArgSpec(
-                "skip_baseline",
-                "bool",
-                label="Skip baseline eval",
-                default=True,
-                help="Reuse known baseline numbers instead of re-evaluating the base model.",
-            ),
+            # Always skip the in-training baseline eval (use the dedicated Evaluate tab instead).
+            ArgSpec("skip_baseline", "bool", default=True, hidden=True),
             ArgSpec(
                 "baseline_cache",
                 "file",
@@ -358,8 +353,7 @@ _register(
             ArgSpec(
                 "policy_dir", "dir", label="Guidance policy dir", shared="policies", required=True
             ),
-            _scenes(label="Avoidance scenes JSON"),
-            _scenes(name="normal_scenes", label="Normal scenes JSON (optional)", required=False),
+            _scenes(label="Scenes"),
             _reward_config(),
             _ego_shape(),
             _output_dir(),

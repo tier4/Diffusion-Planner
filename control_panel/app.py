@@ -74,8 +74,10 @@ def _browse_button(textbox, mode: str):
     return b
 
 
-def _list_choices(library: dict, asset_type: str, required: bool) -> list[str]:
+def _list_choices(library: dict, asset_type: str, required: bool, multi: bool = False) -> list[str]:
     base = P.entry_names(library, asset_type)
+    if multi:  # multi-select: just the registered names (add via Workspace/scan)
+        return base
     return ([] if required else [NONE]) + base + [ADD]
 
 
@@ -123,21 +125,36 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
         flat.append(run_tb)
 
     def _list_widget(spec, scale=None):
-        """One dropdown over the library for a shared-list field (+ an inline 'Browse to add')."""
-        names = _list_choices(library, spec.shared, spec.required)
-        base = P.entry_names(library, spec.shared)
-        value = names[0] if (spec.required and base) else (NONE if not spec.required else None)
+        """A dropdown over the library for a shared-list field.
+
+        Multi-select fields (scene datasets) pick several entries (merged at Run); single fields
+        carry an inline '➕ Browse to add'.
+        """
+        multi = spec.multi_select
         icon = _TYPE_ICON.get(spec.shared, "")
-        dd = gr.Dropdown(
-            choices=names,
-            value=value,
-            label=f"{icon} {spec.label}" + (" *" if spec.required else ""),
-            info=spec.help or None,
-            scale=scale,
-        )
-        last = gr.State(value)  # last valid selection, for cancel-revert
+        names = _list_choices(library, spec.shared, spec.required, multi)
+        label = f"{icon} {spec.label}" + (" *" if spec.required else "")
+        if multi:
+            dd = gr.Dropdown(
+                choices=names,
+                value=[],
+                multiselect=True,
+                label=label,
+                info=spec.help or None,
+                scale=scale,
+            )
+            last = gr.State([])
+        else:
+            base = P.entry_names(library, spec.shared)
+            value = names[0] if (spec.required and base) else (NONE if not spec.required else None)
+            dd = gr.Dropdown(
+                choices=names, value=value, label=label, info=spec.help or None, scale=scale
+            )
+            last = gr.State(value)
         pick_mode = "dir" if spec.shared in ("policies", "run_dirs", "route_datasets") else "file"
-        asset_dropdowns.setdefault(spec.shared, []).append((dd, spec.required, last, pick_mode))
+        asset_dropdowns.setdefault(spec.shared, []).append(
+            (dd, spec.required, last, pick_mode, multi)
+        )
         return dd
 
     specs = list(wf.args)
@@ -180,6 +197,27 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
         flat.extend(comps)
         i += 1
     return fields, flat
+
+
+def _merge_scene_lists(paths: list[str], dest_dir: Path | None, argname: str) -> str:
+    """Concatenate several scene-list JSONs (dedup, order-preserving) into one combined JSON."""
+    merged: list = []
+    seen: set = set()
+    for p in paths:
+        try:
+            data = json.loads(Path(p).read_text())
+            items = data.get("files", data) if isinstance(data, dict) else data
+        except (json.JSONDecodeError, OSError):
+            items = []
+        for it in items:
+            if it not in seen:
+                seen.add(it)
+                merged.append(it)
+    dest = dest_dir or Path.home() / ".diffusion_planner_jobs"
+    dest.mkdir(parents=True, exist_ok=True)
+    out = dest / f"_merged_{argname}.json"
+    out.write_text(json.dumps(merged, indent=2))
+    return str(out)
 
 
 def _ws_base(library: dict) -> str:
@@ -242,6 +280,17 @@ def resolve_values(
             values[name] = library.get("ego_shape", "")
         elif role in ("auto", "derive"):
             pass  # filled in the second pass
+        elif role == "list" and spec.multi_select:
+            sels = vals[0] or []
+            if isinstance(sels, str):
+                sels = [sels]
+            paths = [p for p in (P.resolve_path(library, spec.shared, s) for s in sels) if p]
+            if len(paths) <= 1:
+                values[name] = paths[0] if paths else ""
+            elif make_dirs:
+                values[name] = _merge_scene_lists(paths, _run_dir(library, wf, run_name), name)
+            else:
+                values[name] = f"<merge {len(paths)} datasets at Run>"
         elif role == "list":
             sel = vals[0]
             if sel in (NONE, ADD, None, ""):
@@ -818,14 +867,17 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         # ---- wire Workspace handlers (now that all dropdowns are collected) --------
         flat_dropdowns: list = []
-        flat_meta: list = []  # (type, required) parallel to flat_dropdowns
+        flat_meta: list = []  # (type, required, multi) parallel to flat_dropdowns
         for t in P.LIST_TYPES:
-            for dd, req, *_ in asset_dropdowns.get(t, []):
+            for dd, req, _last, _pm, multi in asset_dropdowns.get(t, []):
                 flat_dropdowns.append(dd)
-                flat_meta.append((t, req))
+                flat_meta.append((t, req, multi))
 
         def _dropdown_updates(library):
-            return [gr.update(choices=_list_choices(library, t, req)) for (t, req) in flat_meta]
+            return [
+                gr.update(choices=_list_choices(library, t, req, multi))
+                for (t, req, multi) in flat_meta
+            ]
 
         def _remove_choices(library):
             out = []
@@ -1047,9 +1099,13 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         for t in P.LIST_TYPES:
             entries = asset_dropdowns.get(t, [])
+            # multi-select types (scene datasets) have no inline-add sentinel; they refresh via
+            # Workspace scan / auto-rescan, not a per-dropdown change handler.
+            if entries and entries[0][4]:
+                continue
             type_dds = [dd for dd, *_ in entries]
             type_reqs = [req for _, req, *_ in entries]
-            for idx, (dd, _req, last, pick_mode) in enumerate(entries):
+            for idx, (dd, _req, last, pick_mode, _multi) in enumerate(entries):
                 dd.change(
                     _make_add_handler(t, idx, type_dds, type_reqs, pick_mode),
                     inputs=[dd, last, library_state],
