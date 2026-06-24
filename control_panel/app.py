@@ -683,12 +683,25 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         # ---- workflow tabs ---------------------------------------------------------
         with gr.Tab("Train"):
-            workflow_panel(wf("train_ranked_sft"), library0, library_state, asset_dropdowns)
-            gr.Markdown("### Per-epoch metrics (from the latest train log)")
-            refresh_btn = gr.Button("Refresh epoch table")
-            ep_status = gr.Textbox(label="", interactive=False)
-            ep_table = gr.Dataframe(headers=_EPOCH_HEADERS)
-            refresh_btn.click(lambda: _epoch_table("train_ranked_sft"), None, [ep_table, ep_status])
+            with gr.Tab("RSFT"):
+                workflow_panel(wf("train_ranked_sft"), library0, library_state, asset_dropdowns)
+                gr.Markdown("### Per-epoch metrics (from the latest train log)")
+                refresh_btn = gr.Button("Refresh epoch table")
+                ep_status = gr.Textbox(label="", interactive=False)
+                ep_table = gr.Dataframe(headers=_EPOCH_HEADERS)
+                refresh_btn.click(
+                    lambda: _epoch_table("train_ranked_sft"), None, [ep_table, ep_status]
+                )
+            with gr.Tab("PRiSM"):
+                gr.Markdown(
+                    "Perturbation-Recovery Self-Mining: disturb warm scenes → rank K=N → filter → "
+                    "RSFT-train. Run the steps in order."
+                )
+                for k in ("disturb_and_replay", "viz_p4_recovery", "percentile_filter_perturbed"):
+                    with gr.Tab(k.replace("_perturbed", "").replace("_", " ")):
+                        p = workflow_panel(wf(k), library0, library_state, asset_dropdowns)
+                        if wf(k).creates:
+                            creating_panels.append(p)
 
         with gr.Tab("Evaluate"):
             with gr.Tab("Metrics"):
@@ -740,18 +753,6 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 workflow_panel(wf("merge_lora"), library0, library_state, asset_dropdowns)
             with gr.Tab("Export ONNX"):
                 workflow_panel(wf("torch2onnx"), library0, library_state, asset_dropdowns)
-
-        with gr.Tab("PRiSM"):
-            _prism_labels = {
-                "disturb_and_replay": "disturb_and_replay",
-                "viz_p4_recovery": "viz_p4_recovery",
-                "percentile_filter_perturbed": "percentile_filter",
-            }
-            for k in ("disturb_and_replay", "viz_p4_recovery", "percentile_filter_perturbed"):
-                with gr.Tab(_prism_labels[k]):
-                    p = workflow_panel(wf(k), library0, library_state, asset_dropdowns)
-                    if wf(k).creates:
-                        creating_panels.append(p)
 
         def _viz_with_viewer(vwf):
             """A workflow panel plus a 'Load rendered outputs' WebM/PNG viewer."""
