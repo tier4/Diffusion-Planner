@@ -768,26 +768,34 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
             show_btn.click(_show, [library_state, *vp["flat"]], [vid, gallery, vmsg])
 
-        with gr.Tab("Reproducer / Viz"):
-            with gr.Tab("Mine collisions"):
-                mp = workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
-                if wf("mine_collisions").creates:
-                    creating_panels.append(mp)
-            with gr.Tab("Ghost A/B"):
-                cl_check = gr.Checkbox(
-                    value=False,
-                    label="Closed-loop (re-inference each step). Unchecked = open-loop perfect-track.",
+        with gr.Tab("Scenario mining"):
+            gr.Markdown(
+                "Mine scenes from a route corpus by driving a model closed-loop and flagging "
+                "collisions/near-misses. Saved windows become a scene dataset automatically."
+            )
+            mp = workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
+            if wf("mine_collisions").creates:
+                creating_panels.append(mp)
+
+        with gr.Tab("Visualization"):
+            with gr.Tab("Closed-loop A/B sim"):
+                gr.Markdown(
+                    "Simulate ~8s closed-loop from each individual scene (re-inference each step), "
+                    "two models overlaid. PNGs + optional WebM."
                 )
-                with gr.Group(visible=True) as open_grp:
-                    _viz_with_viewer(wf("ghost_replay_openloop"))
-                with gr.Group(visible=False) as closed_grp:
-                    _viz_with_viewer(wf("compare_models_ghost"))
-                cl_check.change(
-                    lambda c: (gr.update(visible=not c), gr.update(visible=c)),
-                    cl_check,
-                    [open_grp, closed_grp],
+                _viz_with_viewer(wf("compare_models_ghost"))
+            with gr.Tab("Open-loop A/B (perfect-track)"):
+                gr.Markdown(
+                    "One deterministic plan per scene, perfect-tracked; two models overlaid. "
+                    "PNG seq + WebM per scene."
                 )
-            with gr.Tab("Render NPZ dir"):
+                _viz_with_viewer(wf("ghost_replay_openloop"))
+            with gr.Tab("Render route / scenes"):
+                gr.Markdown(
+                    "Render a route dir, a single-scene dir, or a parent of collision-window "
+                    "subfolders to PNGs (one per frame). Ego dims + a route pickle in the folder "
+                    "are auto-detected."
+                )
                 _viz_with_viewer(wf("render_npz_dir"))
 
         with gr.Tab("Scene Editor"):

@@ -237,43 +237,58 @@ def main():
         ego_dims = (args.ego_length, args.ego_width, args.ego_wheelbase)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    files = sorted(args.npz_dir.glob("*.npz"))
-    if args.stride > 1:
-        files = files[:: args.stride]
-    if args.limit > 0:
-        files = files[: args.limit]
-    n_steps = len(files)
-    print(
-        f"Rendering {n_steps} files from {args.npz_dir} -> {args.output_dir} "
-        f"with {args.workers} workers"
-    )
 
-    # Building the route polylines + road borders pulls in lanelet2 (heavy);
-    # do it once in the parent and ship to workers via a Pool initializer
-    # rather than duplicating into every task tuple.
-    route_polylines, road_border_polylines = _build_map_overlays(args.route_pkl)
+    # Auto-detect a route pickle dropped in the folder (so it's not entered by hand).
+    route_pkl = args.route_pkl
+    if route_pkl is None:
+        pkls = sorted(args.npz_dir.glob("*.pkl"))
+        if pkls:
+            route_pkl = pkls[0]
+            print(f"  auto-detected route pickle: {route_pkl}")
+
+    # Building the route polylines + road borders pulls in lanelet2 (heavy); do it once.
+    route_polylines, road_border_polylines = _build_map_overlays(route_pkl)
     if route_polylines:
         print(f"  loaded {len(route_polylines)} route lanelet centerlines")
     if road_border_polylines:
         print(f"  loaded {len(road_border_polylines)} road-border polylines")
     if ego_dims:
-        print(
-            f"  overriding ego dims: length={ego_dims[0]} width={ego_dims[1]} "
-            f"wheelbase={ego_dims[2]}"
-        )
+        print(f"  overriding ego dims: {ego_dims}")
 
-    tasks = [(i, f, args.output_dir / f"step_{i:04d}.png") for i, f in enumerate(files)]
+    # Group 1: NPZs directly under npz_dir -> render into output_dir. Otherwise (a parent of
+    # collision-window subfolders) -> render each subdir into output_dir/<subdir>/.
+    groups: list[tuple[Path, Path]] = []
+    direct = sorted(args.npz_dir.glob("*.npz"))
+    if direct:
+        groups.append((args.npz_dir, args.output_dir))
+    else:
+        for sub in sorted(p for p in args.npz_dir.iterdir() if p.is_dir()):
+            if any(sub.rglob("*.npz")):
+                groups.append((sub, args.output_dir / sub.name))
+        if not groups:
+            print(f"No NPZs found under {args.npz_dir} (directly or in subfolders).")
+            return
 
-    with mp.Pool(
-        args.workers,
-        initializer=_pool_init,
-        initargs=(route_polylines, road_border_polylines, ego_dims, n_steps),
-    ) as pool:
-        for j, err in enumerate(pool.imap_unordered(_render_one, tasks, chunksize=4)):
-            if err:
-                print(err)
-            if (j + 1) % 100 == 0:
-                print(f"  {j + 1}/{n_steps}")
+    for src, out in groups:
+        files = sorted(src.glob("*.npz")) or sorted(src.rglob("*.npz"))
+        if args.stride > 1:
+            files = files[:: args.stride]
+        if args.limit > 0:
+            files = files[: args.limit]
+        n_steps = len(files)
+        out.mkdir(parents=True, exist_ok=True)
+        print(f"Rendering {n_steps} files from {src} -> {out} with {args.workers} workers")
+        tasks = [(i, f, out / f"step_{i:04d}.png") for i, f in enumerate(files)]
+        with mp.Pool(
+            args.workers,
+            initializer=_pool_init,
+            initargs=(route_polylines, road_border_polylines, ego_dims, n_steps),
+        ) as pool:
+            for j, err in enumerate(pool.imap_unordered(_render_one, tasks, chunksize=4)):
+                if err:
+                    print(err)
+                if (j + 1) % 100 == 0:
+                    print(f"  {j + 1}/{n_steps}")
     print("Done.")
 
 

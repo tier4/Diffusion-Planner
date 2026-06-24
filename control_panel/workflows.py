@@ -56,6 +56,9 @@ class ArgSpec:
     #   "dir:<sub>"    -> a subfolder inside the run folder
     #   "file:<name>"  -> a file inside the run folder
     auto: str | None = None
+    # For a shared-list field: allow picking MULTIPLE library entries (a multiselect dropdown).
+    # At Run the panel merges the selected datasets' scene lists into one combined JSON.
+    multi_select: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -207,6 +210,7 @@ def _scenes(
     shared: str | None = "scene_datasets",
     required: bool = True,
 ) -> ArgSpec:
+    # Scene-dataset dropdowns are multi-select (pick several datasets; merged at Run).
     return ArgSpec(
         name,
         "file",
@@ -214,7 +218,8 @@ def _scenes(
         required=required,
         multi=multi,
         shared=shared,
-        help="JSON list of NPZ scene paths (registered dataset, or custom).",
+        multi_select=(shared == "scene_datasets"),
+        help="Pick one or more registered scene datasets (merged into one list at Run).",
     )
 
 
