@@ -892,17 +892,29 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 mp = workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
                 if wf("mine_collisions").creates:
                     creating_panels.append(mp)
-            with gr.Tab("PRiSM (perturb → rank → filter)"):
+            with gr.Tab("PRiSM (self-improvement mining)"):
                 gr.Markdown(
-                    "Perturbation-Recovery Self-Mining — a data-generation pipeline (not training): "
-                    "perturb warm scenes → rank K=N candidates per scene by reward → keep the scenes "
-                    "worth training on. The filtered set is then used in the Train (RSFT) tab."
+                    "Perturbation-Recovery Self-Mining — a data-generation pipeline (not training). "
+                    "Run the three steps in order; the final filtered scene set is then used in the "
+                    "Train (RSFT) tab.\n\n"
+                    "1. **Perturb** warm scenes (shift them off-centre).\n"
+                    "2. **Rank** K candidate trajectories per scene by reward.\n"
+                    "3. **Filter** — keep the top percentile by reward and drop scenes no candidate "
+                    "improved."
                 )
-                for k in ("disturb_and_replay", "viz_p4_recovery", "percentile_filter_perturbed"):
-                    with gr.Tab(k.replace("_perturbed", "").replace("_", " ")):
-                        pp = workflow_panel(wf(k), library0, library_state, asset_dropdowns)
-                        if wf(k).creates:
-                            creating_panels.append(pp)
+                _PRISM_STEPS = [
+                    ("### Step 1 — Perturb warm scenes", "disturb_and_replay"),
+                    ("### Step 2 — Rank K candidates per scene by reward", "viz_p4_recovery"),
+                    (
+                        "### Step 3 — Filter to the scenes worth training on",
+                        "percentile_filter_perturbed",
+                    ),
+                ]
+                for heading, k in _PRISM_STEPS:
+                    gr.Markdown(heading)
+                    pp = workflow_panel(wf(k), library0, library_state, asset_dropdowns)
+                    if wf(k).creates:
+                        creating_panels.append(pp)
 
         with gr.Tab("Render"):
             _MODES = [

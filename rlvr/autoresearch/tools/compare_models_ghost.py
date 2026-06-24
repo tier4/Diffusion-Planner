@@ -75,10 +75,21 @@ def main() -> None:
         "--show_lateral", action="store_true", help="Show lateral offset to route centerline"
     )
     parser.add_argument(
+        "--policy_a",
+        default=None,
+        help="exploration-policy dir applied to side A (model A + guidance, per-step policy "
+        "etas via composer). Combine freely with --model_a/--lora_a.",
+    )
+    parser.add_argument(
+        "--policy_b",
+        default=None,
+        help="exploration-policy dir applied to side B (model B + guidance). When --model_b is "
+        "omitted, side B reuses model A so 'model vs model + guidance' works.",
+    )
+    parser.add_argument(
         "--policy_dir",
         default=None,
-        help="exploration-policy dir: model B = model A + guidance "
-        "(per-step policy etas via composer); --model_b ignored",
+        help="[deprecated alias for --policy_b] model B = model A + guidance.",
     )
     parser.add_argument(
         "--no_sg_smooth",
@@ -121,22 +132,40 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # --policy_dir is a back-compat alias for --policy_b.
+    policy_b_dir = args.policy_b or args.policy_dir
+
     print(f"[compare] loading model A: {args.label_a}")
     model_a, args_a = load_model(args.model_a, args.lora_a, device)
-    policy = None
-    if args.policy_dir:
-        from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
 
-        policy, policy_heads = load_policy(args.policy_dir, args_a, device)
-        model_b, args_b = model_a, args_a
-        print(f"[compare] model B = model A + explorer ({args.policy_dir})")
-    elif args.model_b:
+    # Side B: an explicit model, or (when only a B-policy is given) model A reused so
+    # "model vs model + guidance" works. Each side independently adds an optional policy.
+    if args.model_b:
         print(f"[compare] loading model B: {args.label_b}")
         model_b, args_b = load_model(args.model_b, args.lora_b, device)
+    elif policy_b_dir:
+        model_b, args_b = model_a, args_a
     else:
-        raise SystemExit("pass either --model_b or --policy_dir")
+        raise SystemExit("pass --model_b, --policy_b (or the legacy --policy_dir)")
 
-    def make_predict_fn(eta_log):
+    def _load_policy(policy_dir, model_args):
+        if not policy_dir:
+            return None, None
+        from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
+
+        pol, heads = load_policy(policy_dir, model_args, device)
+        return pol, heads
+
+    policy_a, heads_a = _load_policy(args.policy_a, args_a)
+    policy_b, heads_b = _load_policy(policy_b_dir, args_b)
+    if policy_a:
+        print(f"[compare] side A = model A + explorer ({args.policy_a})")
+    if policy_b:
+        print(
+            f"[compare] side B = model {'A' if not args.model_b else 'B'} + explorer ({policy_b_dir})"
+        )
+
+    def make_predict_fn(eta_log, policy, policy_heads):
         """predict_b: explorer-guided prediction for leg B (SG happens in
         the rollout itself, on whatever the predict fn returns). Leg A uses
         run_ghost_sim's built-in det path (predict_fn_a=None)."""
@@ -245,15 +274,20 @@ def main() -> None:
         scene_out = out_root / scene_name if len(args.scenes) > 1 else out_root
         cfg.subtitle = scene_name
 
-        eta_log: list[dict] = []
-        predict_b = make_predict_fn(eta_log)
+        eta_log_a: list[dict] = []
+        eta_log_b: list[dict] = []
+        predict_a = make_predict_fn(eta_log_a, policy_a, heads_a) if policy_a else None
+        predict_b = make_predict_fn(eta_log_b, policy_b, heads_b) if policy_b else None
 
         def eta_title(step, a_pose, b_pose):
-            if not eta_log or step >= len(eta_log):
-                return ""
-            e = eta_log[step]
-            return "  explorer η: " + " ".join(f"{h[:3]}={v:+.2f}" for h, v in e.items())
+            parts = []
+            for tag, log in (("A", eta_log_a), ("B", eta_log_b)):
+                if log and step < len(log):
+                    e = log[step]
+                    parts.append(f"{tag} η: " + " ".join(f"{h[:3]}={v:+.2f}" for h, v in e.items()))
+            return "  " + "   ".join(parts) if parts else ""
 
+        any_policy = policy_a is not None or policy_b is not None
         run_ghost_sim(
             scene_path=scene_path,
             model_a=model_a,
@@ -265,9 +299,9 @@ def main() -> None:
             cfg=cfg,
             neighbor_boxes=nb_boxes,
             make_webm=args.make_webm,
-            extra_title_fn=eta_title if policy is not None else None,
-            predict_fn_a=None,
-            predict_fn_b=predict_b if policy is not None else None,
+            extra_title_fn=eta_title if any_policy else None,
+            predict_fn_a=predict_a,
+            predict_fn_b=predict_b,
             sg_smooth=not args.no_sg_smooth,
         )
 

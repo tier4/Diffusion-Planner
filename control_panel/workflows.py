@@ -265,21 +265,14 @@ _register(
         "the winner (set ranked_sft_mode in the config). PRiSM is RSFT on perturbation-mined "
         "scenes. Writes a timestamped run dir with per-epoch LoRA + eval.",
         args=[
-            _grpo_config(label="GRPO / experiment config (set ranked_sft_mode + n_*_scenes)"),
+            _grpo_config(label="GRPO / experiment config (set ranked_sft_mode)"),
             ArgSpec("name", "str", label="Experiment name", required=True),
             _model_path(label="Baseline model (warmstart from)"),
-            _scenes(name="prob_scenes", label="Problem / behavior scenes"),
-            _scenes(name="normal_scenes", label="Normal anchor scenes (real, preserves L2)"),
+            _scenes(name="train_scenes", label="Training scenes"),
             _scenes(name="val_scenes", label="Validation scenes"),
             _output_dir(),
             # Always skip the in-training baseline eval (use the dedicated Evaluate tab instead).
             ArgSpec("skip_baseline", "bool", default=True, hidden=True),
-            ArgSpec(
-                "baseline_cache",
-                "file",
-                label="Baseline cache JSON (optional)",
-                help="Precomputed baseline/GT path lengths for progress-ratio metrics.",
-            ),
         ],
         outputs=lambda v: {"run_root": v.get("output_dir")},
     )
@@ -582,18 +575,39 @@ _register(
 _register(
     Workflow(
         key="percentile_filter_perturbed",
-        title="PRiSM: percentile_filter",
+        title="PRiSM: filter scenes",
         module="rlvr.autoresearch.tools.percentile_filter_perturbed",
-        description="Filter scenes by top1_cl percentile with no-poison guards; write the SFT scene list.",
+        description="Keep only the scenes worth training on: the top X% by best-candidate reward, "
+        "dropping scenes that no candidate improved. Writes the SFT scene list.",
         args=[
-            ArgSpec("summary", "file", label="viz_p4 summary.json", required=True),
+            ArgSpec(
+                "summary",
+                "file",
+                label="Ranking summary.json (from Step 2)",
+                required=True,
+                help="The summary.json written by the rank step.",
+            ),
             ArgSpec("output_scenes", "file", auto="file:filtered_scenes.json", required=True),
             ArgSpec("output_report", "file", auto="file:filter_report.json"),
-            ArgSpec("percentile", "float", label="Percentile to keep", default=50.0),
-            ArgSpec("det_cl_max", "float", label="det_cl_max (optional)"),
-            ArgSpec("top1_cl_min", "float", label="top1_cl_min (optional)"),
-            ArgSpec("min_top1_vs_det", "float", label="min top1 vs det", default=0.0),
-            ArgSpec("eligible_t0_max", "float", label="eligible t0 max", default=0.0),
+            ArgSpec(
+                "percentile",
+                "float",
+                label="Keep top percentile by reward (0–100)",
+                default=50.0,
+                help="e.g. 50 keeps the better-recovering half of the scenes.",
+            ),
+            ArgSpec(
+                "min_top1_vs_det",
+                "float",
+                label="Min improvement over baseline (drops non-improving scenes)",
+                default=0.0,
+                help="A scene is kept only if its best candidate beats the deterministic plan by "
+                "at least this much. 0 drops scenes that got worse.",
+            ),
+            # Advanced no-poison guards — fixed at their canonical defaults, not shown.
+            ArgSpec("det_cl_max", "float", hidden=True),
+            ArgSpec("top1_cl_min", "float", hidden=True),
+            ArgSpec("eligible_t0_max", "float", default=0.0, hidden=True),
         ],
         outputs=lambda v: {"scene_list": v.get("output_scenes")},
     )
@@ -668,16 +682,19 @@ _register(
         key="compare_models_ghost",
         title="Viz: closed-loop ghost (A/B)",
         module="rlvr.autoresearch.tools.compare_models_ghost",
-        description="Per-step closed-loop A/B comparison with both ego footprints + stopped-neighbor OBBs. "
-        "Optional WebM.",
+        description="Per-step closed-loop A/B comparison with both ego footprints + stopped-neighbor "
+        "OBBs. Each side is model + optional LoRA + optional guidance policy — compare any "
+        "combination (e.g. plain model vs model+LoRA, or model+LoRA vs model+guidance). When only a "
+        "B-side guidance policy is set and Model B is left empty, side B reuses Model A. Optional WebM.",
         args=[
             _model_path(name="model_a", label="Model A (.pth)"),
             _lora(name="lora_a", label="LoRA A"),
-            ArgSpec("label_a", "str", default="baseline"),
-            _model_path(name="model_b", label="Model B (.pth)", required=False),
+            ArgSpec("policy_a", "dir", label="Guidance policy A (optional)", shared="policies"),
+            ArgSpec("label_a", "str", default="A"),
+            _model_path(name="model_b", label="Model B (.pth, optional)", required=False),
             _lora(name="lora_b", label="LoRA B"),
-            ArgSpec("label_b", "str", default="trained"),
-            ArgSpec("policy_dir", "dir", label="Guidance policy (instead of B)", shared="policies"),
+            ArgSpec("policy_b", "dir", label="Guidance policy B (optional)", shared="policies"),
+            ArgSpec("label_b", "str", default="B"),
             _scenes(label="Scenes (space-separated NPZ paths)", multi=True, shared=None),
             _output_dir(),
             ArgSpec("steps", "int", default=80),

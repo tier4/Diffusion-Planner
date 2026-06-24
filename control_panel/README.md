@@ -58,12 +58,12 @@ manual scan needed.
 | Tab | Tools |
 |---|---|
 | **Workspace** | set root, Create folders, Scan, register one-offs, load a training run → register a checkpoint |
-| **Train** | `run_experiment` (ranked-SFT) + live per-epoch metric table |
+| **Train** | `run_experiment` (ranked-SFT): just **Training scenes** + **Validation scenes** + live per-epoch metric table |
 | **Evaluate → Metrics** | `eval_full_metrics` (all metrics on the det trajectory; optional 2nd model for A/B; **Render** dumps per-scene PNGs) — or tick **Use guidance policy** for `eval_policy_avoidance` |
 | **Evaluate → L2 loss** | `valid_predictor` (DDP) |
 | **Merge + Export** | `merge_lora` → `torch2onnx` |
-| **PRiSM** | `disturb_and_replay` → `viz_p4_recovery` → `percentile_filter` |
-| **Reproducer / Viz** | `mine_collisions_reproducer` (route corpus → collision windows), Ghost A/B (open/closed-loop), `render_npz_dir` |
+| **Data generation → PRiSM** | one tab, three ordered steps: perturb → rank K candidates by reward → filter (keep top percentile, drop scenes no candidate improved) |
+| **Render** | one tab, a mode dropdown: closed-loop A/B · open-loop A/B · generated candidates · render route/scenes. A/B sides each take model + optional LoRA + optional guidance policy (any combination) |
 | **Scene Editor** | the Scene Branch Editor, launched as a subprocess (lanelet env) + embedded via iframe; export/save dirs pre-pointed into the workspace |
 
 ## Reward config & the SC gotcha

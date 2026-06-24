@@ -483,6 +483,7 @@ def run(
     name: str,
     skip_baseline: bool = False,
     baseline_cache_path: Path | None = None,
+    train_scenes_override: Path | None = None,
 ):
     # Load baseline cache (precomputed baseline/GT paths per scene)
     # Auto-detect if not specified: look for baseline_cache_val50.json in output dir
@@ -509,19 +510,29 @@ def run(
         config_data = json.load(f)
 
     config_data_raw = dict(config_data)  # save before popping
-    if "n_prob_scenes" not in config_data or "n_normal_scenes" not in config_data:
-        raise ValueError(
-            "Config MUST explicitly set 'n_prob_scenes' and 'n_normal_scenes'. "
-            "Omitting these leads to silent scene duplication bugs. "
-            "Use n_prob_scenes=50, n_normal_scenes=0 for prob-only, "
-            "or n_prob_scenes=50, n_normal_scenes=450 for 500-scene training."
-        )
-    n_prob = config_data.pop("n_prob_scenes")
-    n_normal = config_data.pop("n_normal_scenes")
     curated_normal_path = config_data.pop("curated_normal_path", None)
     prob_scenes_path = config_data.pop("prob_scenes_path", None)
     seed_lora_path = config_data.pop("seed_lora_path", None)
     train_scenes_path = config_data.pop("train_scenes_path", None)
+    # --train_scenes (a single, already-assembled training set) overrides the config field.
+    if train_scenes_override is not None:
+        train_scenes_path = str(train_scenes_override)
+    # When an exact training set is supplied, prob/normal sampling is bypassed entirely, so
+    # n_prob_scenes / n_normal_scenes are not required. Otherwise they MUST be explicit (the
+    # sampler silently duplicates scenes without them).
+    using_exact_train = bool(train_scenes_path and Path(train_scenes_path).exists())
+    if not using_exact_train and (
+        "n_prob_scenes" not in config_data or "n_normal_scenes" not in config_data
+    ):
+        raise ValueError(
+            "Config MUST explicitly set 'n_prob_scenes' and 'n_normal_scenes'. "
+            "Omitting these leads to silent scene duplication bugs. "
+            "Use n_prob_scenes=50, n_normal_scenes=0 for prob-only, "
+            "or n_prob_scenes=50, n_normal_scenes=450 for 500-scene training. "
+            "(Not needed when a single --train_scenes set is supplied.)"
+        )
+    n_prob = config_data.pop("n_prob_scenes", 0)
+    n_normal = config_data.pop("n_normal_scenes", 0)
 
     grpo_config = GRPOConfig()
     for k, v in config_data.items():
@@ -1057,10 +1068,25 @@ def main():
     parser.add_argument("--name", type=str, required=True, help="Experiment name")
     parser.add_argument("--model_path", type=Path, required=True, help="Path to base model .pth")
     parser.add_argument(
-        "--prob_scenes", type=Path, required=True, help="JSON list of problem scene NPZ paths"
+        "--train_scenes",
+        type=Path,
+        default=None,
+        help="JSON list of training scene NPZ paths (single combined set). When given, this is "
+        "used verbatim as the SFT training set and --prob_scenes/--normal_scenes are not needed.",
     )
     parser.add_argument(
-        "--normal_scenes", type=Path, required=True, help="JSON list of normal scene NPZ paths"
+        "--prob_scenes",
+        type=Path,
+        default=None,
+        help="JSON list of problem scene NPZ paths (advanced: prob/normal split sampling). "
+        "Not needed when --train_scenes is given.",
+    )
+    parser.add_argument(
+        "--normal_scenes",
+        type=Path,
+        default=None,
+        help="JSON list of normal scene NPZ paths (advanced: prob/normal split sampling). "
+        "Not needed when --train_scenes is given.",
     )
     parser.add_argument(
         "--val_scenes", type=Path, required=True, help="JSON list of validation scene NPZ paths"
@@ -1087,11 +1113,19 @@ def main():
         print(f"Config not found: {args.config}")
         sys.exit(1)
 
-    # Set module-level paths from CLI args
+    # Either a single --train_scenes set, or the advanced --prob_scenes/--normal_scenes pair.
+    if args.train_scenes is None and (args.prob_scenes is None or args.normal_scenes is None):
+        parser.error(
+            "provide either --train_scenes <list.json> OR both "
+            "--prob_scenes <list.json> and --normal_scenes <list.json>"
+        )
+
+    # Set module-level paths from CLI args. In single-set mode the prob/normal globals point at
+    # the training set so eval/viz subsampling derives from it (sampling itself is bypassed).
     global BASE_MODEL, PROB_SCENES_PATH, NORMAL_POOL_PATH, VALID_SCENES_PATH, OUTPUT_DIR
     BASE_MODEL = args.model_path
-    PROB_SCENES_PATH = args.prob_scenes
-    NORMAL_POOL_PATH = args.normal_scenes
+    PROB_SCENES_PATH = args.prob_scenes or args.train_scenes
+    NORMAL_POOL_PATH = args.normal_scenes or args.train_scenes
     VALID_SCENES_PATH = args.val_scenes
     OUTPUT_DIR = args.output_dir
 
@@ -1101,6 +1135,7 @@ def main():
             args.name,
             skip_baseline=args.skip_baseline,
             baseline_cache_path=args.baseline_cache,
+            train_scenes_override=args.train_scenes,
         )
     except Exception as e:
         print(f"\n---")
