@@ -18,12 +18,13 @@ from pathlib import Path
 LIBRARY_PATH = Path.home() / ".diffusion_planner_presets.json"
 
 # Asset types that are lists of {name, path, ...} entries.
-LIST_TYPES = ("models", "policies", "datasets", "reward_configs", "maps", "run_dirs")
+LIST_TYPES = ("models", "loras", "policies", "datasets", "reward_configs", "maps", "run_dirs")
 # Scalar shared settings.
 SCALAR_KEYS = ("ego_shape", "output_dir", "ssd_root")
 
 _EMPTY: dict = {
     "models": [],  # {name, path, args_json?, lora_dir?}
+    "loras": [],  # {name, path}  LoRA adapter dirs (combine with any base model)
     "policies": [],  # {name, path}  exploration / guidance policy dirs
     "datasets": [],  # {name, path, role?}
     "reward_configs": [],  # {name, path}

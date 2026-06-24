@@ -22,6 +22,7 @@ from . import runner as R
 from . import workflows as W
 
 CUSTOM = "custom…"
+NONE = "(none)"
 
 # Holds the in-process Scene Editor sub-server so Reload can close the previous one.
 _EDITOR: dict = {"demo": None, "port": None}
@@ -45,6 +46,8 @@ def _coerce(spec: W.ArgSpec, v):
 
 
 def _field_role(spec: W.ArgSpec) -> str:
+    if spec.hidden:
+        return "hidden"
     if spec.derive_from:
         return "derive"
     if spec.shared == "ego_shape":
@@ -54,6 +57,11 @@ def _field_role(spec: W.ArgSpec) -> str:
     if spec.shared in P.LIST_TYPES:
         return "list"
     return "plain"
+
+
+def _list_choices(library: dict, asset_type: str, required: bool) -> list[str]:
+    base = P.entry_names(library, asset_type)
+    return ([] if required else [NONE]) + base + [CUSTOM]
 
 
 def _plain_widget(spec: W.ArgSpec, default=None):
@@ -90,9 +98,14 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
     for spec in wf.args:
         role = _field_role(spec)
         comps = []
-        if role == "list":
-            names = P.entry_names(library, spec.shared) + [CUSTOM]
-            value = names[0] if len(names) > 1 else CUSTOM
+        if role == "hidden":
+            comps = []  # not rendered; resolve uses spec.default
+        elif role == "list":
+            names = _list_choices(library, spec.shared, spec.required)
+            base = P.entry_names(library, spec.shared)
+            value = (
+                names[0] if (spec.required and base) else (NONE if not spec.required else CUSTOM)
+            )
             dd = gr.Dropdown(
                 choices=names,
                 value=value,
@@ -103,7 +116,7 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
                 value="", label=f"{spec.label} — custom path", visible=(value == CUSTOM)
             )
             dd.change(lambda v: gr.update(visible=(v == CUSTOM)), dd, custom)
-            asset_dropdowns.setdefault(spec.shared, []).append(dd)
+            asset_dropdowns.setdefault(spec.shared, []).append((dd, spec.required))
             comps = [dd, custom]
         elif role == "outdir":
             comps = [
@@ -130,13 +143,18 @@ def resolve_values(wf: W.Workflow, fields: list, library: dict, flat_values: tup
     for f in fields:
         spec, role, name = f["spec"], f["role"], f["name"]
         vals = [next(it) for _ in f["comps"]]
-        if role == "ego":
+        if role == "hidden":
+            values[name] = spec.default
+        elif role == "ego":
             values[name] = library.get("ego_shape", "")
         elif role == "outdir":
             values[name] = vals[0] if (vals[0] not in (None, "")) else library.get("output_dir", "")
         elif role == "list":
             sel, custom = vals[0], vals[1]
-            if sel == CUSTOM or not sel:
+            if sel in (NONE, None, ""):
+                values[name] = ""
+                entry = {}
+            elif sel == CUSTOM:
                 values[name] = (custom or "").strip()
                 entry = {}
             else:
@@ -307,27 +325,87 @@ def _resolve_asset(asset_type: str, sel_path: str) -> tuple[dict, str]:
     return entry, (", ".join(notes) if notes else "")
 
 
-def _library_md(library: dict) -> str:
-    """Readable summary of the library (instead of raw JSON)."""
-    lines = []
+_TYPE_COLOR = {
+    "models": "#2563eb",
+    "loras": "#7c3aed",
+    "policies": "#0891b2",
+    "datasets": "#16a34a",
+    "reward_configs": "#d97706",
+    "maps": "#dc2626",
+    "run_dirs": "#475569",
+}
+
+
+def _library_html(library: dict) -> str:
+    """Styled card view of the asset library."""
+    import html as _h
+
+    out = ["<div style='font-family:system-ui,sans-serif;font-size:13px'>"]
+    total = 0
     for t in P.LIST_TYPES:
         entries = library.get(t, [])
         if not entries:
             continue
-        lines.append(f"**{t}** ({len(entries)})")
-        lines.append("| name | path | extra |")
-        lines.append("|---|---|---|")
+        total += len(entries)
+        c = _TYPE_COLOR.get(t, "#475569")
+        out.append(
+            f"<div style='margin:10px 0 4px'><span style='background:{c};color:#fff;"
+            f"padding:2px 10px;border-radius:12px;font-weight:600'>{t} · {len(entries)}</span></div>"
+        )
         for e in entries:
-            extra = " ".join(f"`{k}`" for k in ("args_json", "lora_dir", "role") if e.get(k))
-            path = e.get("path", "")
-            short = path if len(path) < 70 else "…" + path[-67:]
-            lines.append(f"| **{e.get('name', '?')}** | `{short}` | {extra} |")
-        lines.append("")
-    lines.append(
-        f"_scalars:_ ego_shape=`{library.get('ego_shape', '')}` · "
-        f"output_dir=`{library.get('output_dir', '')}`"
+            badges = "".join(
+                f"<span style='background:#eef;color:#334;border-radius:6px;padding:1px 6px;"
+                f"margin-left:6px;font-size:11px'>{k}</span>"
+                for k in ("args_json", "lora_dir", "role")
+                if e.get(k)
+            )
+            path = _h.escape(e.get("path", ""))
+            name = _h.escape(e.get("name", "?"))
+            out.append(
+                f"<div style='border-left:3px solid {c};padding:3px 10px;margin:3px 0 3px 4px'>"
+                f"<b>{name}</b>{badges}<br>"
+                f"<code style='font-size:11px;color:#777'>{path}</code></div>"
+            )
+    es = _h.escape(library.get("ego_shape", ""))
+    od = _h.escape(library.get("output_dir", ""))
+    out.append(
+        f"<div style='margin-top:10px;color:#555'>ego_shape <code>{es}</code> · "
+        f"output_dir <code>{od}</code></div>"
     )
-    return "\n".join(lines) if lines else "_Library empty — register assets above._"
+    if total == 0:
+        return "<i>Library empty — browse a file and click an <b>Add</b> button.</i>"
+    return "".join(out) + "</div>"
+
+
+def _list_dir(path: str, query: str = "") -> tuple[list, str]:
+    """Navigable directory listing for the file browser.
+
+    Returns (radio choices as (label, full_path), normalised dir). Folders first, then files;
+    a leading '⬆ ..' entry; substring filter; capped so huge dirs stay responsive.
+    """
+    p = Path(path).expanduser() if path else Path.home()
+    if not p.is_dir():
+        p = p.parent if p.parent.is_dir() else Path.home()
+    q = (query or "").lower()
+    dirs, files = [], []
+    try:
+        for e in sorted(p.iterdir(), key=lambda x: x.name.lower()):
+            if q and q not in e.name.lower():
+                continue
+            try:
+                is_dir = e.is_dir()
+            except OSError:
+                continue
+            (dirs if is_dir else files).append(
+                (f"📁 {e.name}/" if is_dir else f"📄 {e.name}", str(e))
+            )
+    except (PermissionError, OSError):
+        pass
+    choices = []
+    if p.parent != p:
+        choices.append(("⬆ ..", str(p.parent)))
+    choices += dirs[:400] + files[:400]
+    return choices, str(p)
 
 
 def _scan_run(run_dir: str):
@@ -422,19 +500,28 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         # ---- Workspace -------------------------------------------------------------
         with gr.Tab("Workspace"):
             gr.Markdown(
-                "### Asset library — register models / policies / datasets / configs / maps"
+                "### File browser — navigate your PC / SSDs, select a file or folder, then **Add**"
             )
+            _root = library0.get("ssd_root") or str(Path.home())
+            _init_choices, _root = _list_dir(_root)
             with gr.Row():
                 with gr.Column(scale=2):
-                    explorer = gr.FileExplorer(
-                        root_dir=library0.get("ssd_root") or str(Path.home()),
-                        file_count="single",
-                        label="Browse (pick a file/dir, name it, then 'Add as …')",
-                        height=320,
+                    with gr.Row():
+                        fb_path = gr.Textbox(
+                            value=_root, label="Folder (type a path + Enter to jump)", scale=4
+                        )
+                        fb_up = gr.Button("⬆ Up", scale=1)
+                    fb_query = gr.Textbox(value="", label="Filter (substring)")
+                    fb_list = gr.Radio(
+                        choices=_init_choices, label="Contents (📁 folders / 📄 files)"
                     )
+                    fb_open = gr.Button("Open selected folder")
+                    fb_selected = gr.Textbox(label="Selected path", interactive=False)
                 with gr.Column(scale=1):
                     add_name = gr.Textbox(label="Name for the selected asset")
-                    add_model = gr.Button("Add as Model")
+                    gr.Markdown("Adds the **selected path** (or current folder if none selected):")
+                    add_model = gr.Button("Add as Model", variant="primary")
+                    add_lora = gr.Button("Add as LoRA")
                     add_policy = gr.Button("Add as Guidance policy")
                     add_dataset = gr.Button("Add as Dataset")
                     add_reward = gr.Button("Add as Reward config")
@@ -450,13 +537,40 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 )
             remove_dd = gr.Dropdown(label="Remove entry (type/name)", choices=[])
             remove_btn = gr.Button("Remove selected entry")
-            lib_view = gr.Markdown(value=_library_md(library0))
+            gr.Markdown("### Loaded assets")
+            lib_view = gr.HTML(value=_library_html(library0))
+
+            # file-browser navigation
+            def _refresh_list(path, query):
+                choices, norm = _list_dir(path, query)
+                return gr.update(choices=choices, value=None), norm
+
+            fb_path.submit(_refresh_list, [fb_path, fb_query], [fb_list, fb_path])
+            fb_query.change(_refresh_list, [fb_path, fb_query], [fb_list, fb_path])
+            fb_list.change(lambda v: v or "", fb_list, fb_selected)
+
+            def _go_up(path):
+                parent = str(Path(path).expanduser().parent)
+                choices, norm = _list_dir(parent)
+                return gr.update(choices=choices, value=None), norm, ""
+
+            fb_up.click(_go_up, fb_path, [fb_list, fb_path, fb_selected])
+
+            def _open_sel(selected, path, query):
+                target = selected if selected and Path(selected).is_dir() else path
+                choices, norm = _list_dir(target, query)
+                return gr.update(choices=choices, value=None), norm, ""
+
+            fb_open.click(
+                _open_sel, [fb_selected, fb_path, fb_query], [fb_list, fb_path, fb_selected]
+            )
 
             gr.Markdown(
-                "### Load a training run → register a checkpoint as a Model\n"
+                "### Load a training run → register a checkpoint\n"
                 "A **run dir** is a `run_experiment` output folder (holds `lora_epoch_NNN/`, "
-                "`latest.pth`, `args.json`, `grpo_config.json`). Scan it to register one of its "
-                "checkpoints as a Model — it then appears in every model dropdown."
+                "`latest.pth`, `args.json`, `grpo_config.json`). Scan it and register a checkpoint: "
+                "a `lora_epoch_*` becomes a **LoRA** (pair it with any base model), a "
+                "`merged.pth`/`best_model.pth` becomes a **Model**."
             )
             with gr.Row():
                 run_dir_box = gr.Textbox(label="Run dir", scale=3)
@@ -464,8 +578,8 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             run_scan_state = gr.State({})
             ckpt_dd = gr.Dropdown(label="Checkpoint", choices=[])
             with gr.Row():
-                reg_name = gr.Textbox(label="Register as model name", scale=3)
-                reg_btn = gr.Button("Register epoch as Model")
+                reg_name = gr.Textbox(label="Register as name", scale=3)
+                reg_btn = gr.Button("Register checkpoint")
             run_status = gr.Textbox(label="", interactive=False)
             run_cfg = gr.JSON(label="grpo_config.json")
 
@@ -569,14 +683,14 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         # ---- wire Workspace handlers (now that all dropdowns are collected) --------
         flat_dropdowns: list = []
-        flat_types: list = []
+        flat_meta: list = []  # (type, required) parallel to flat_dropdowns
         for t in P.LIST_TYPES:
-            for dd in asset_dropdowns.get(t, []):
+            for dd, req in asset_dropdowns.get(t, []):
                 flat_dropdowns.append(dd)
-                flat_types.append(t)
+                flat_meta.append((t, req))
 
         def _dropdown_updates(library):
-            return [gr.update(choices=P.entry_names(library, t) + [CUSTOM]) for t in flat_types]
+            return [gr.update(choices=_list_choices(library, t, req)) for (t, req) in flat_meta]
 
         def _remove_choices(library):
             out = []
@@ -584,13 +698,14 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 out += [f"{t}/{n}" for n in P.entry_names(library, t)]
             return out
 
-        def _add(asset_type, name, sel_path, library):
+        def _add(asset_type, name, selected, curdir, library):
             name = (name or "").strip()
+            sel_path = (selected or "").strip() or (curdir or "").strip()
             if not name or not sel_path:
                 return (
                     library,
-                    _library_md(library),
-                    "⚠ pick a path in the explorer and enter a name",
+                    _library_html(library),
+                    "⚠ select a path in the browser and enter a name",
                     gr.update(),
                     *_dropdown_updates(library),
                 )
@@ -601,7 +716,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             msg = f"added {asset_type}: {name}" + (f"  ({note})" if note else "")
             return (
                 library,
-                _library_md(library),
+                _library_html(library),
                 msg,
                 gr.update(choices=_remove_choices(library)),
                 *_dropdown_updates(library),
@@ -610,6 +725,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         add_outputs = [library_state, lib_view, ws_status, remove_dd, *flat_dropdowns]
         for btn, typ in (
             (add_model, "models"),
+            (add_lora, "loras"),
             (add_policy, "policies"),
             (add_dataset, "datasets"),
             (add_reward, "reward_configs"),
@@ -617,8 +733,8 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             (add_run, "run_dirs"),
         ):
             btn.click(
-                lambda name, sel, lib, _t=typ: _add(_t, name, sel, lib),
-                [add_name, explorer, library_state],
+                lambda name, sel, cur, lib, _t=typ: _add(_t, name, sel, cur, lib),
+                [add_name, fb_selected, fb_path, library_state],
                 add_outputs,
             )
 
@@ -632,7 +748,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 msg = "nothing selected"
             return (
                 library,
-                _library_md(library),
+                _library_html(library),
                 msg,
                 gr.update(choices=_remove_choices(library)),
                 *_dropdown_updates(library),
@@ -643,7 +759,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         def _set_scalar(key, val, library):
             library[key] = val
             P.save_library(library)
-            return library, _library_md(library)
+            return library, _library_html(library)
 
         ego_box.change(
             lambda v, lib: _set_scalar("ego_shape", v, lib),
@@ -665,23 +781,29 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             if not ckpt_label or ckpt_label not in found:
                 return (
                     library,
-                    _library_md(library),
+                    _library_html(library),
                     "⚠ scan a run and pick a checkpoint",
                     gr.update(),
                     *_dropdown_updates(library),
                 )
             info = found[ckpt_label]
-            entry = {"name": (name or ckpt_label).strip(), "path": info["path"]}
-            if info.get("args_json"):
-                entry["args_json"] = info["args_json"]
+            nm = (name or ckpt_label).strip()
+            # A lora_epoch checkpoint registers as a LoRA (combine with any base model);
+            # a merged/best_model.pth registers as a Model.
             if info.get("lora_dir"):
-                entry["lora_dir"] = info["lora_dir"]
-            library.setdefault("models", []).append(entry)
+                library.setdefault("loras", []).append({"name": nm, "path": info["lora_dir"]})
+                kind = "LoRA"
+            else:
+                entry = {"name": nm, "path": info["path"]}
+                if info.get("args_json"):
+                    entry["args_json"] = info["args_json"]
+                library.setdefault("models", []).append(entry)
+                kind = "model"
             P.save_library(library)
             return (
                 library,
-                _library_md(library),
-                f"registered model: {entry['name']}",
+                _library_html(library),
+                f"registered {kind}: {nm}",
                 gr.update(choices=_remove_choices(library)),
                 *_dropdown_updates(library),
             )

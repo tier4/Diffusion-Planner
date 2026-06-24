@@ -48,6 +48,8 @@ class ArgSpec:
     # ("args_json" | "lora_dir"). Lets a chosen model carry its args.json / LoRA automatically.
     derive_from: str | None = None
     derive_field: str | None = None
+    # Not rendered; its ``default`` is always used (e.g. a fixed flag the user shouldn't fiddle).
+    hidden: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -212,6 +214,16 @@ def _scenes(
     )
 
 
+def _lora(name: str = "lora_path", label: str = "LoRA") -> ArgSpec:
+    return ArgSpec(
+        name,
+        "dir",
+        label=label,
+        shared="loras",
+        help="Registered LoRA adapter dir (optional). Combine freely with any base model.",
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Registry
 # --------------------------------------------------------------------------------------
@@ -332,7 +344,8 @@ _register(
             ),
             _scenes(name="valid_set_list", label="Validation set JSON"),
             ArgSpec("batch_size", "int", default=32),
-            ArgSpec("ddp", "bool", label="DDP", default=True, bool_style="value"),
+            # valid_predictor only runs under torch DDP (even on 1 GPU); always on, hidden.
+            ArgSpec("ddp", "bool", default=True, bool_style="value", hidden=True),
             ArgSpec(
                 "master_port",
                 "str",
@@ -354,13 +367,7 @@ _register(
         description="Road-border clearance distribution. Optionally visualise the worst scenes.",
         args=[
             _model_path(),
-            ArgSpec(
-                "lora_path",
-                "dir",
-                label="LoRA dir",
-                derive_from="model_path",
-                derive_field="lora_dir",
-            ),
+            _lora(),
             ArgSpec(
                 "args_json",
                 "file",
@@ -413,13 +420,7 @@ _register(
         description="Fuse a LoRA adapter into the base weights, producing a deployable .pth.",
         args=[
             _model_path(label="Base / warmstart model (.pth)"),
-            ArgSpec(
-                "lora_dir",
-                "dir",
-                label="LoRA dir",
-                derive_from="model_path",
-                derive_field="lora_dir",
-            ),
+            _lora(name="lora_dir", label="LoRA to merge"),
             ArgSpec("output", "file", label="Output merged .pth (default <model_dir>/merged.pth)"),
         ],
         outputs=lambda v: {"merged": v.get("output")},
@@ -504,13 +505,7 @@ _register(
         "with t0_cl / det_cl / top1_cl + safety flags. Use --no_viz for speed.",
         args=[
             _model_path(),
-            ArgSpec(
-                "lora_path",
-                "dir",
-                label="LoRA dir",
-                derive_from="model_path",
-                derive_field="lora_dir",
-            ),
+            _lora(),
             _scenes(label="Perturbed scenes JSON", shared=None),
             _reward_config(),
             _output_dir(),
@@ -631,14 +626,10 @@ _register(
         "Optional WebM.",
         args=[
             _model_path(name="model_a", label="Model A (.pth)"),
-            ArgSpec(
-                "lora_a", "dir", label="LoRA A", derive_from="model_a", derive_field="lora_dir"
-            ),
+            _lora(name="lora_a", label="LoRA A"),
             ArgSpec("label_a", "str", default="baseline"),
             _model_path(name="model_b", label="Model B (.pth)", required=False),
-            ArgSpec(
-                "lora_b", "dir", label="LoRA B", derive_from="model_b", derive_field="lora_dir"
-            ),
+            _lora(name="lora_b", label="LoRA B"),
             ArgSpec("label_b", "str", default="trained"),
             ArgSpec("policy_dir", "dir", label="Guidance policy (instead of B)", shared="policies"),
             _scenes(label="Scenes (space-separated NPZ paths)", multi=True, shared=None),
