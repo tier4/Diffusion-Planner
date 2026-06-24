@@ -578,38 +578,40 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             refresh_btn.click(lambda: _epoch_table("train_ranked_sft"), None, [ep_table, ep_status])
 
         with gr.Tab("Evaluate"):
-            gr.Markdown(_baseline_md(library0))
-            use_guid = gr.Checkbox(
-                value=False,
-                label="Use guidance policy (guided eval) — unchecked = plain deterministic",
-            )
-            with gr.Group(visible=True) as det_grp:
-                ev = workflow_panel(
-                    wf("eval_full_metrics"), library0, library_state, asset_dropdowns
+            with gr.Tab("Metrics"):
+                gr.Markdown(_baseline_md(library0))
+                use_guid = gr.Checkbox(
+                    value=False,
+                    label="Use guidance policy (guided eval) — unchecked = plain deterministic",
                 )
-                load_btn = gr.Button("Load summary.json")
-                summ = gr.JSON(label="summary.json")
+                with gr.Group(visible=True) as det_grp:
+                    ev = workflow_panel(
+                        wf("eval_full_metrics"), library0, library_state, asset_dropdowns
+                    )
+                    load_btn = gr.Button("Load summary.json")
+                    summ = gr.JSON(label="summary.json")
 
-                def _load_summary(library, *flat, _ev=ev):
-                    v = resolve_values(wf("eval_full_metrics"), _ev["fields"], library, flat)
-                    p = (wf("eval_full_metrics").outputs or (lambda _: {}))(v).get("summary_json")
-                    if p and Path(p).exists():
-                        return json.loads(Path(p).read_text())
-                    return {"error": f"not found: {p}"}
+                    def _load_summary(library, *flat, _ev=ev):
+                        v = resolve_values(wf("eval_full_metrics"), _ev["fields"], library, flat)
+                        p = (wf("eval_full_metrics").outputs or (lambda _: {}))(v).get(
+                            "summary_json"
+                        )
+                        if p and Path(p).exists():
+                            return json.loads(Path(p).read_text())
+                        return {"error": f"not found: {p}"}
 
-                load_btn.click(_load_summary, [library_state, *ev["flat"]], summ)
-            with gr.Group(visible=False) as guid_grp:
-                workflow_panel(
-                    wf("eval_policy_avoidance"), library0, library_state, asset_dropdowns
+                    load_btn.click(_load_summary, [library_state, *ev["flat"]], summ)
+                with gr.Group(visible=False) as guid_grp:
+                    workflow_panel(
+                        wf("eval_policy_avoidance"), library0, library_state, asset_dropdowns
+                    )
+                use_guid.change(
+                    lambda c: (gr.update(visible=not c), gr.update(visible=c)),
+                    use_guid,
+                    [det_grp, guid_grp],
                 )
-            use_guid.change(
-                lambda c: (gr.update(visible=not c), gr.update(visible=c)),
-                use_guid,
-                [det_grp, guid_grp],
-            )
-
-        with gr.Tab("L2"):
-            workflow_panel(wf("eval_l2"), library0, library_state, asset_dropdowns)
+            with gr.Tab("L2 loss"):
+                workflow_panel(wf("eval_l2"), library0, library_state, asset_dropdowns)
 
         with gr.Tab("Merge + Export"):
             with gr.Tab("Merge LoRA"):
