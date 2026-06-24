@@ -462,7 +462,7 @@ _register(
 _register(
     Workflow(
         key="disturb_and_replay",
-        title="PRiSM 1: disturb_and_replay",
+        title="PRiSM step 1 — disturb_and_replay",
         module="rlvr.autoresearch.tools.disturb_and_replay",
         description="Generate perturbed variants (parallel offset / yaw / jitter) of warm scenes. "
         "All output NPZ fields are in the perturbed-ego frame. Emits manifest.json.",
@@ -499,7 +499,7 @@ _register(
 _register(
     Workflow(
         key="viz_p4_recovery",
-        title="PRiSM 2: viz_p4_recovery (rank K=N)",
+        title="PRiSM step 2 — viz_p4_recovery (rank K=N)",
         module="rlvr.autoresearch.tools.viz_p4_recovery",
         description="Score K=N generations per scene; pick rank-1 by total reward; write summary.json "
         "with t0_cl / det_cl / top1_cl + safety flags. Use --no_viz for speed.",
@@ -537,7 +537,7 @@ _register(
 _register(
     Workflow(
         key="percentile_filter_perturbed",
-        title="PRiSM 3: percentile_filter",
+        title="PRiSM step 3 — percentile_filter",
         module="rlvr.autoresearch.tools.percentile_filter_perturbed",
         description="Filter scenes by top1_cl percentile with no-poison guards; write the SFT scene list.",
         args=[

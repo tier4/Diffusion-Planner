@@ -377,35 +377,47 @@ def _library_html(library: dict) -> str:
     return "".join(out) + "</div>"
 
 
-def _list_dir(path: str, query: str = "") -> tuple[list, str]:
-    """Navigable directory listing for the file browser.
+_TK_PICK = (
+    "import sys, tkinter as tk\n"
+    "from tkinter import filedialog\n"
+    "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
+    "mode, start = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else '')\n"
+    "p = filedialog.askdirectory(initialdir=start or None) if mode == 'dir' "
+    "else filedialog.askopenfilename(initialdir=start or None)\n"
+    "print(p or '')\n"
+)
 
-    Returns (radio choices as (label, full_path), normalised dir). Folders first, then files;
-    a leading '⬆ ..' entry; substring filter; capped so huge dirs stay responsive.
+
+def _os_pick(mode: str, start: str = "") -> tuple[str, str]:
+    """Open the native OS file/folder picker on the server's desktop. Returns (path, note).
+
+    Prefers zenity (GTK), falls back to a tkinter subprocess. Runs the dialog in a short-lived
+    subprocess so it never blocks/wedges the Gradio worker thread. Empty path = cancelled.
     """
-    p = Path(path).expanduser() if path else Path.home()
-    if not p.is_dir():
-        p = p.parent if p.parent.is_dir() else Path.home()
-    q = (query or "").lower()
-    dirs, files = [], []
+    import shutil
+    import subprocess
+    import sys
+
+    zenity = shutil.which("zenity")
     try:
-        for e in sorted(p.iterdir(), key=lambda x: x.name.lower()):
-            if q and q not in e.name.lower():
-                continue
-            try:
-                is_dir = e.is_dir()
-            except OSError:
-                continue
-            (dirs if is_dir else files).append(
-                (f"📁 {e.name}/" if is_dir else f"📄 {e.name}", str(e))
-            )
-    except (PermissionError, OSError):
-        pass
-    choices = []
-    if p.parent != p:
-        choices.append(("⬆ ..", str(p.parent)))
-    choices += dirs[:400] + files[:400]
-    return choices, str(p)
+        if zenity:
+            cmd = [zenity, "--file-selection", "--title", f"Select {mode}"]
+            if mode == "dir":
+                cmd.append("--directory")
+            if start:
+                cmd += ["--filename", start.rstrip("/") + "/"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            return (r.stdout.strip(), "") if r.returncode == 0 else ("", "cancelled")
+        r = subprocess.run(
+            [sys.executable, "-c", _TK_PICK, mode, start],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        path = r.stdout.strip()
+        return (path, "") if path else ("", "cancelled")
+    except Exception as e:  # noqa: BLE001 - surface picker/display problems to the UI
+        return "", f"picker unavailable ({e}); paste the path instead"
 
 
 def _scan_run(run_dir: str):
@@ -500,26 +512,16 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         # ---- Workspace -------------------------------------------------------------
         with gr.Tab("Workspace"):
             gr.Markdown(
-                "### File browser — navigate your PC / SSDs, select a file or folder, then **Add**"
+                "### Register assets — **Browse** opens your OS file picker, then click an **Add**"
             )
-            _root = library0.get("ssd_root") or str(Path.home())
-            _init_choices, _root = _list_dir(_root)
             with gr.Row():
                 with gr.Column(scale=2):
                     with gr.Row():
-                        fb_path = gr.Textbox(
-                            value=_root, label="Folder (type a path + Enter to jump)", scale=4
-                        )
-                        fb_up = gr.Button("⬆ Up", scale=1)
-                    fb_query = gr.Textbox(value="", label="Filter (substring)")
-                    fb_list = gr.Radio(
-                        choices=_init_choices, label="Contents (📁 folders / 📄 files)"
-                    )
-                    fb_open = gr.Button("Open selected folder")
-                    fb_selected = gr.Textbox(label="Selected path", interactive=False)
+                        pick_file_btn = gr.Button("📂 Browse file…")
+                        pick_dir_btn = gr.Button("📁 Browse folder…")
+                    picked = gr.Textbox(label="Selected path (Browse, or paste/type)")
                 with gr.Column(scale=1):
-                    add_name = gr.Textbox(label="Name for the selected asset")
-                    gr.Markdown("Adds the **selected path** (or current folder if none selected):")
+                    add_name = gr.Textbox(label="Name for the asset")
                     add_model = gr.Button("Add as Model", variant="primary")
                     add_lora = gr.Button("Add as LoRA")
                     add_policy = gr.Button("Add as Guidance policy")
@@ -540,30 +542,13 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             gr.Markdown("### Loaded assets")
             lib_view = gr.HTML(value=_library_html(library0))
 
-            # file-browser navigation
-            def _refresh_list(path, query):
-                choices, norm = _list_dir(path, query)
-                return gr.update(choices=choices, value=None), norm
+            # native OS file picker
+            def _pick(mode, current, _start=library0.get("ssd_root") or ""):
+                path, note = _os_pick(mode, _start)
+                return (path, f"selected {path}") if path else (current, note or "cancelled")
 
-            fb_path.submit(_refresh_list, [fb_path, fb_query], [fb_list, fb_path])
-            fb_query.change(_refresh_list, [fb_path, fb_query], [fb_list, fb_path])
-            fb_list.change(lambda v: v or "", fb_list, fb_selected)
-
-            def _go_up(path):
-                parent = str(Path(path).expanduser().parent)
-                choices, norm = _list_dir(parent)
-                return gr.update(choices=choices, value=None), norm, ""
-
-            fb_up.click(_go_up, fb_path, [fb_list, fb_path, fb_selected])
-
-            def _open_sel(selected, path, query):
-                target = selected if selected and Path(selected).is_dir() else path
-                choices, norm = _list_dir(target, query)
-                return gr.update(choices=choices, value=None), norm, ""
-
-            fb_open.click(
-                _open_sel, [fb_selected, fb_path, fb_query], [fb_list, fb_path, fb_selected]
-            )
+            pick_file_btn.click(lambda cur: _pick("file", cur), picked, [picked, ws_status])
+            pick_dir_btn.click(lambda cur: _pick("dir", cur), picked, [picked, ws_status])
 
             gr.Markdown(
                 "### Load a training run → register a checkpoint\n"
@@ -629,8 +614,13 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 workflow_panel(wf("torch2onnx"), library0, library_state, asset_dropdowns)
 
         with gr.Tab("PRiSM"):
+            _prism_labels = {
+                "disturb_and_replay": "1 · disturb_and_replay",
+                "viz_p4_recovery": "2 · viz_p4_recovery",
+                "percentile_filter_perturbed": "3 · percentile_filter",
+            }
             for k in ("disturb_and_replay", "viz_p4_recovery", "percentile_filter_perturbed"):
-                with gr.Tab(wf(k).title.split(":")[0]):
+                with gr.Tab(_prism_labels[k]):
                     workflow_panel(wf(k), library0, library_state, asset_dropdowns)
 
         def _viz_with_viewer(vwf):
@@ -698,9 +688,9 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 out += [f"{t}/{n}" for n in P.entry_names(library, t)]
             return out
 
-        def _add(asset_type, name, selected, curdir, library):
+        def _add(asset_type, name, selected, library):
             name = (name or "").strip()
-            sel_path = (selected or "").strip() or (curdir or "").strip()
+            sel_path = (selected or "").strip()
             if not name or not sel_path:
                 return (
                     library,
@@ -733,8 +723,8 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             (add_run, "run_dirs"),
         ):
             btn.click(
-                lambda name, sel, cur, lib, _t=typ: _add(_t, name, sel, cur, lib),
-                [add_name, fb_selected, fb_path, library_state],
+                lambda name, sel, lib, _t=typ: _add(_t, name, sel, lib),
+                [add_name, picked, library_state],
                 add_outputs,
             )
 
