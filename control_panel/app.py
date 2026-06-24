@@ -1254,7 +1254,22 @@ def main():
     ap.add_argument("--share", action="store_true")
     args = ap.parse_args()
     demo = build_app(host="localhost", default_editor_port=args.editor_port)
-    demo.launch(server_name=args.host, server_port=args.port, share=args.share, inbrowser=True)
+    # Gradio will only serve files from CWD/tmp unless explicitly allowed. Renders, previews
+    # and WebMs live under the workspace + the jobs dir, so allow those (and home, since the
+    # workspace root can be re-pointed at runtime via the Workspace tab).
+    lib = P.load_library()
+    allowed = {str(Path.home()), str(R.JOBS_DIR), "/tmp"}
+    if lib.get("workspace_root"):
+        allowed.add(str(Path(lib["workspace_root"]).expanduser()))
+    if lib.get("output_dir"):
+        allowed.add(str(Path(lib["output_dir"]).expanduser()))
+    demo.launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share,
+        inbrowser=True,
+        allowed_paths=sorted(allowed),
+    )
 
 
 if __name__ == "__main__":

@@ -484,6 +484,7 @@ def run(
     skip_baseline: bool = False,
     baseline_cache_path: Path | None = None,
     train_scenes_override: Path | None = None,
+    train_epochs_override: int | None = None,
 ):
     # Load baseline cache (precomputed baseline/GT paths per scene)
     # Auto-detect if not specified: look for baseline_cache_val50.json in output dir
@@ -538,6 +539,9 @@ def run(
     for k, v in config_data.items():
         if hasattr(grpo_config, k):
             setattr(grpo_config, k, v)
+    # CLI --train_epochs overrides whatever the config declares.
+    if train_epochs_override is not None:
+        grpo_config.train_epochs = train_epochs_override
     # Re-run __post_init__ to normalize legacy loss type names
     grpo_config.__post_init__()
 
@@ -1107,6 +1111,12 @@ def main():
         "If not provided, progress ratios are not reported. "
         "Generate with: python -m rlvr.autoresearch.tools.compute_baseline_cache",
     )
+    parser.add_argument(
+        "--train_epochs",
+        type=int,
+        default=None,
+        help="Override the config's train_epochs (otherwise the value from --config is used).",
+    )
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -1136,6 +1146,7 @@ def main():
             skip_baseline=args.skip_baseline,
             baseline_cache_path=args.baseline_cache,
             train_scenes_override=args.train_scenes,
+            train_epochs_override=args.train_epochs,
         )
     except Exception as e:
         print(f"\n---")

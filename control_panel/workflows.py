@@ -265,11 +265,17 @@ _register(
         "the winner (set ranked_sft_mode in the config). PRiSM is RSFT on perturbation-mined "
         "scenes. Writes a timestamped run dir with per-epoch LoRA + eval.",
         args=[
-            _grpo_config(label="GRPO / experiment config (set ranked_sft_mode)"),
+            _grpo_config(label="Experiment config (sets ranked_sft_mode, lr, train_epochs, …)"),
             ArgSpec("name", "str", label="Experiment name", required=True),
             _model_path(label="Baseline model (warmstart from)"),
             _scenes(name="train_scenes", label="Training scenes"),
             _scenes(name="val_scenes", label="Validation scenes"),
+            ArgSpec(
+                "train_epochs",
+                "int",
+                label="Epochs (optional override)",
+                help="Leave blank to use the train_epochs set in the experiment config above.",
+            ),
             _output_dir(),
             # Always skip the in-training baseline eval (use the dedicated Evaluate tab instead).
             ArgSpec("skip_baseline", "bool", default=True, hidden=True),
@@ -355,7 +361,7 @@ _register(
             _reward_config(),
             _ego_shape(),
             _output_dir(),
-            ArgSpec("render", "bool", label="Render verdict PNGs"),
+            ArgSpec("render", "bool", label="Render per-scene PNGs"),
         ],
         outputs=lambda v: {"dir": v.get("output_dir")},
     )
