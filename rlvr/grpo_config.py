@@ -491,7 +491,10 @@ class GRPOConfig:
     #   }
     schedules: dict = field(default_factory=dict)
 
-    # Early-stop collapse thresholds (run_experiment.py)
+    # Early-stop on safety collapse (run_experiment.py). OFF by default — training runs all
+    # epochs and you pick the best checkpoint yourself. Set early_stop_on_collapse=true to
+    # re-enable the rb/collision-rate kill switch below.
+    early_stop_on_collapse: bool = False
     collapse_rb_threshold: float = 0.3
     collapse_collision_threshold: float = 0.1
 

@@ -1015,7 +1015,7 @@ def run(
             _n_val = max(val_eval["n_scenes"], 1)
             _rb_cross_rate = val_eval["rb_crossings"] / _n_val
             _collision_rate = val_eval["collision_rate"]
-            if (
+            if grpo_config.early_stop_on_collapse and (
                 _rb_cross_rate > grpo_config.collapse_rb_threshold
                 or _collision_rate > grpo_config.collapse_collision_threshold
             ):
