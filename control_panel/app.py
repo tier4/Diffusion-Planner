@@ -271,6 +271,65 @@ def _baseline_md(library: dict) -> str:
     return "**Frozen baseline (never recomputed):**\n\n| metric | value |\n|---|---|\n" + rows
 
 
+def _resolve_asset(asset_type: str, sel_path: str) -> tuple[dict, str]:
+    """Turn a browsed path into a smart library entry.
+
+    Models: if a dir, pick best_model.pth (else first *.pth); auto-attach a sibling args.json
+    (same dir or parent) and a lora_dir if an adapter is alongside. Maps: find the .osm if a
+    dir was picked. Returns (entry-without-name, note describing what was auto-detected).
+    """
+    p = Path(sel_path)
+    entry: dict = {"path": sel_path}
+    notes: list[str] = []
+    if asset_type == "models":
+        pth = p
+        if p.is_dir():
+            cands = list(p.glob("best_model.pth")) or sorted(p.glob("*.pth"))
+            if cands:
+                pth = cands[0]
+                entry["path"] = str(pth)
+                notes.append(f"model={pth.name}")
+        for cand in (pth.parent / "args.json", pth.parent.parent / "args.json"):
+            if cand.exists():
+                entry["args_json"] = str(cand)
+                notes.append("args.json ✓")
+                break
+        else:
+            notes.append("⚠ no args.json found nearby")
+        if (pth.parent / "adapter_config.json").exists():
+            entry["lora_dir"] = str(pth.parent)
+            notes.append("lora ✓")
+    elif asset_type == "maps" and p.is_dir():
+        osm = sorted(p.glob("*.osm"))
+        if osm:
+            entry["path"] = str(osm[0])
+            notes.append(f"map={osm[0].name}")
+    return entry, (", ".join(notes) if notes else "")
+
+
+def _library_md(library: dict) -> str:
+    """Readable summary of the library (instead of raw JSON)."""
+    lines = []
+    for t in P.LIST_TYPES:
+        entries = library.get(t, [])
+        if not entries:
+            continue
+        lines.append(f"**{t}** ({len(entries)})")
+        lines.append("| name | path | extra |")
+        lines.append("|---|---|---|")
+        for e in entries:
+            extra = " ".join(f"`{k}`" for k in ("args_json", "lora_dir", "role") if e.get(k))
+            path = e.get("path", "")
+            short = path if len(path) < 70 else "…" + path[-67:]
+            lines.append(f"| **{e.get('name', '?')}** | `{short}` | {extra} |")
+        lines.append("")
+    lines.append(
+        f"_scalars:_ ego_shape=`{library.get('ego_shape', '')}` · "
+        f"output_dir=`{library.get('output_dir', '')}`"
+    )
+    return "\n".join(lines) if lines else "_Library empty — register assets above._"
+
+
 def _scan_run(run_dir: str):
     """List registerable checkpoints in a training run dir."""
     if not run_dir or not Path(run_dir).exists():
@@ -351,7 +410,6 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
     library0 = P.load_library()
     wf = W.get_workflow
     asset_dropdowns: dict[str, list] = {}
-    remove_dd_holder: dict = {}
 
     with gr.Blocks(title="Autoresearch Control Panel") as demo:
         gr.Markdown(
@@ -391,11 +449,15 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                     value=library0.get("output_dir", ""), label="Default output dir"
                 )
             remove_dd = gr.Dropdown(label="Remove entry (type/name)", choices=[])
-            remove_dd_holder["dd"] = remove_dd
             remove_btn = gr.Button("Remove selected entry")
-            lib_view = gr.JSON(value=library0, label="Library")
+            lib_view = gr.Markdown(value=_library_md(library0))
 
-            gr.Markdown("### Load a training run → register a checkpoint as a Model")
+            gr.Markdown(
+                "### Load a training run → register a checkpoint as a Model\n"
+                "A **run dir** is a `run_experiment` output folder (holds `lora_epoch_NNN/`, "
+                "`latest.pth`, `args.json`, `grpo_config.json`). Scan it to register one of its "
+                "checkpoints as a Model — it then appears in every model dropdown."
+            )
             with gr.Row():
                 run_dir_box = gr.Textbox(label="Run dir", scale=3)
                 scan_btn = gr.Button("Scan run")
@@ -457,23 +519,39 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 with gr.Tab(wf(k).title.split(":")[0]):
                     workflow_panel(wf(k), library0, library_state, asset_dropdowns)
 
+        def _viz_with_viewer(vwf):
+            """A workflow panel plus a 'Load rendered outputs' WebM/PNG viewer."""
+            vp = workflow_panel(vwf, library0, library_state, asset_dropdowns)
+            show_btn = gr.Button("Load rendered outputs")
+            vid = gr.Video(label="WebM")
+            gallery = gr.Gallery(label="PNGs", columns=4, height=460)
+            vmsg = gr.Textbox(label="", interactive=False)
+
+            def _show(library, *flat, _wf=vwf, _vp=vp):
+                v = resolve_values(_wf, _vp["fields"], library, flat)
+                return _scan_outputs(v.get("output_dir", ""))
+
+            show_btn.click(_show, [library_state, *vp["flat"]], [vid, gallery, vmsg])
+
         with gr.Tab("Reproducer / Viz"):
             with gr.Tab("Mine collisions"):
                 workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
-            for viz_key in ("ghost_replay_openloop", "compare_models_ghost", "render_npz_dir"):
-                vwf = wf(viz_key)
-                with gr.Tab(vwf.title.replace("Viz: ", "")):
-                    vp = workflow_panel(vwf, library0, library_state, asset_dropdowns)
-                    show_btn = gr.Button("Load rendered outputs")
-                    vid = gr.Video(label="WebM")
-                    gallery = gr.Gallery(label="PNGs", columns=4, height=460)
-                    vmsg = gr.Textbox(label="", interactive=False)
-
-                    def _show(library, *flat, _wf=vwf, _vp=vp):
-                        v = resolve_values(_wf, _vp["fields"], library, flat)
-                        return _scan_outputs(v.get("output_dir", ""))
-
-                    show_btn.click(_show, [library_state, *vp["flat"]], [vid, gallery, vmsg])
+            with gr.Tab("Ghost A/B"):
+                cl_check = gr.Checkbox(
+                    value=False,
+                    label="Closed-loop (re-inference each step). Unchecked = open-loop perfect-track.",
+                )
+                with gr.Group(visible=True) as open_grp:
+                    _viz_with_viewer(wf("ghost_replay_openloop"))
+                with gr.Group(visible=False) as closed_grp:
+                    _viz_with_viewer(wf("compare_models_ghost"))
+                cl_check.change(
+                    lambda c: (gr.update(visible=not c), gr.update(visible=c)),
+                    cl_check,
+                    [open_grp, closed_grp],
+                )
+            with gr.Tab("Render NPZ dir"):
+                _viz_with_viewer(wf("render_npz_dir"))
 
         with gr.Tab("Scene Editor"):
             sewf = wf("scene_branch_editor")
@@ -511,18 +589,19 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             if not name or not sel_path:
                 return (
                     library,
-                    library,
-                    "⚠ pick a path and enter a name",
+                    _library_md(library),
+                    "⚠ pick a path in the explorer and enter a name",
                     gr.update(),
                     *_dropdown_updates(library),
                 )
-            entry = {"name": name, "path": sel_path}
+            entry, note = _resolve_asset(asset_type, sel_path)
+            entry["name"] = name
             library.setdefault(asset_type, []).append(entry)
             P.save_library(library)
-            msg = f"added {asset_type}: {name}"
+            msg = f"added {asset_type}: {name}" + (f"  ({note})" if note else "")
             return (
                 library,
-                library,
+                _library_md(library),
                 msg,
                 gr.update(choices=_remove_choices(library)),
                 *_dropdown_updates(library),
@@ -553,7 +632,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 msg = "nothing selected"
             return (
                 library,
-                library,
+                _library_md(library),
                 msg,
                 gr.update(choices=_remove_choices(library)),
                 *_dropdown_updates(library),
@@ -564,7 +643,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         def _set_scalar(key, val, library):
             library[key] = val
             P.save_library(library)
-            return library, library
+            return library, _library_md(library)
 
         ego_box.change(
             lambda v, lib: _set_scalar("ego_shape", v, lib),
@@ -586,7 +665,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             if not ckpt_label or ckpt_label not in found:
                 return (
                     library,
-                    library,
+                    _library_md(library),
                     "⚠ scan a run and pick a checkpoint",
                     gr.update(),
                     *_dropdown_updates(library),
@@ -601,7 +680,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             P.save_library(library)
             return (
                 library,
-                library,
+                _library_md(library),
                 f"registered model: {entry['name']}",
                 gr.update(choices=_remove_choices(library)),
                 *_dropdown_updates(library),

@@ -138,15 +138,37 @@ def launch(wf: Workflow, values: dict) -> Job:
 
 
 def is_alive(pid: int) -> bool:
+    """True iff ``pid`` is a live process.
+
+    A detached child we launched becomes a *zombie* when it exits until something reaps it;
+    ``os.kill(pid, 0)`` reports a zombie as alive, which would wedge the log stream on
+    "running" forever and make Stop fail. So we read /proc state and treat 'Z' as dead
+    (reaping it with waitpid if it's our own child).
+    """
     if pid <= 0:
         return False
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+        # Fields after the (comm) parenthesis; state is the first token there.
+        state = stat[stat.rfind(")") + 2]
+        if state == "Z":
+            try:
+                os.waitpid(pid, os.WNOHANG)  # reap if it's our child; ignore otherwise
+            except (ChildProcessError, OSError):
+                pass
+            return False
         return True
-    return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
 
 def stop(job: Job, kill_grace: float = 3.0) -> bool:
