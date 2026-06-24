@@ -257,9 +257,11 @@ _register(
             ArgSpec(
                 "config",
                 "file",
-                label="Experiment config JSON",
+                label="GRPO / experiment config",
+                shared="reward_configs",
                 required=True,
-                help="GRPOConfig JSON (must set n_prob_scenes / n_normal_scenes explicitly).",
+                help="GRPOConfig JSON (configs/ folder). Must set ranked_sft_mode + "
+                "n_prob_scenes / n_normal_scenes.",
             ),
             ArgSpec("name", "str", label="Experiment name", required=True),
             _model_path(label="Baseline model (warmstart from)"),
