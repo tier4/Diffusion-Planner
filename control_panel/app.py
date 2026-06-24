@@ -281,14 +281,6 @@ def _scan_outputs(output_dir: str):
     return video, [str(p) for p in pngs[:60]], f"{len(webms)} webm, {len(pngs)} png."
 
 
-def _baseline_md(library: dict) -> str:
-    bm = library.get("baseline_metrics", {}) or {}
-    if not any(v is not None for v in bm.values()):
-        return "_Baseline column unset — fill `baseline_metrics` in the library file._"
-    rows = "\n".join(f"| {k} | {v} |" for k, v in bm.items())
-    return "**Frozen baseline (never recomputed):**\n\n| metric | value |\n|---|---|\n" + rows
-
-
 def _resolve_asset(asset_type: str, sel_path: str) -> tuple[dict, str]:
     """Turn a browsed path into a smart library entry.
 
@@ -579,7 +571,6 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         with gr.Tab("Evaluate"):
             with gr.Tab("Metrics"):
-                gr.Markdown(_baseline_md(library0))
                 use_guid = gr.Checkbox(
                     value=False,
                     label="Use guidance policy (guided eval) — unchecked = plain deterministic",
