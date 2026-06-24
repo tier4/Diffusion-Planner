@@ -583,6 +583,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                     value=library0.get("workspace_root", ""), label="Workspace root", scale=4
                 )
                 ws_browse_btn = gr.Button("📁", scale=1, min_width=44)
+                ws_create_btn = gr.Button("🆕 Create folders", scale=2)
                 scan_btn2 = gr.Button("🔄 Scan workspace", variant="primary", scale=2)
 
             gr.Markdown("### Or register a one-off asset outside the workspace")
@@ -852,6 +853,18 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             [ws_root_box, library_state],
             [library_state, lib_view],
         )
+
+        def _create_ws(root):
+            if not (root or "").strip():
+                return "⚠ enter a path for the new workspace first"
+            try:
+                P.create_workspace(root)
+            except OSError as e:
+                return _err(f"could not create workspace: {e}")
+            subs = ", ".join(P.WORKSPACE_DIRS.values())
+            return f"created workspace at {root} ({subs}, runs) — drop assets in & Scan"
+
+        ws_create_btn.click(_create_ws, ws_root_box, ws_status)
 
         def _remove(sel, library):
             if sel and "/" in sel:

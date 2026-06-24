@@ -192,6 +192,15 @@ def _scan_files(root: Path, glob: str) -> list[dict]:
     return [{"name": f.stem, "path": str(f)} for f in sorted(root.glob(glob))]
 
 
+def create_workspace(root: str | Path) -> str:
+    """Create the standard (empty) workspace folder structure at ``root``."""
+    root = Path(root).expanduser()
+    for sub in WORKSPACE_DIRS.values():
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    (root / "runs").mkdir(parents=True, exist_ok=True)
+    return str(root)
+
+
 def scan_workspace(root: str | Path) -> dict:
     """Walk the standard workspace layout and return a library dict (auto-detected assets).
 
