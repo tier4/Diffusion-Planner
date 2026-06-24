@@ -1,0 +1,710 @@
+"""Workflow registry: declarative descriptions of the autoresearch CLI tools.
+
+Each :class:`Workflow` declares the module / script to run, the environment it needs,
+and an ordered list of :class:`ArgSpec` form fields. The panel auto-generates a form
+from these specs and :func:`build_command` turns the filled form into an argv list.
+
+Nothing here imports torch or runs inference — this module is a pure description of how
+the existing CLI tools are invoked, so it stays cheap to import and easy to audit.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+# Argument "kind" controls the Gradio widget the panel renders and how the value is
+# serialised into argv. Booleans carry an extra ``bool_style`` (see ArgSpec).
+KINDS = ("path", "file", "dir", "str", "int", "float", "bool", "choice")
+
+
+@dataclass
+class ArgSpec:
+    """One CLI argument / form field."""
+
+    name: str  # python identifier, e.g. "model_path"
+    kind: str = "str"
+    label: str = ""  # display label; defaults to a prettified ``name``
+    flag: str | None = None  # literal CLI token; defaults to f"--{name}". None+positional.
+    default: object = None
+    required: bool = False
+    help: str = ""
+    choices: list[str] | None = None
+    positional: bool = False  # positional arg (no flag), emitted in declaration order
+    multi: bool = False  # nargs="+": value is whitespace-separated, each emitted as a token
+    launcher_only: bool = (
+        False  # consumed by the runner (e.g. torchrun port), never in the tool argv
+    )
+    # bool serialisation: "store_true" → emit flag when True; "value" → "--flag true/false";
+    # "optional" → argparse.BooleanOptionalAction ("--flag" / "--no-flag").
+    bool_style: str = "store_true"
+    # If set, this field is sourced from the central asset library rather than typed per-tab.
+    # One of: "models" | "datasets" | "reward_configs" | "maps" | "ego_shape" | "output_dir".
+    # The app renders a dropdown over registered names and resolves the path at Run.
+    shared: str | None = None
+    # If set, this field is NOT rendered; its value is derived at Run from a sibling model arg's
+    # selected library entry. derive_from = the sibling arg name; derive_field = entry key
+    # ("args_json" | "lora_dir"). Lets a chosen model carry its args.json / LoRA automatically.
+    derive_from: str | None = None
+    derive_field: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in KINDS:
+            raise ValueError(f"ArgSpec {self.name!r}: unknown kind {self.kind!r}")
+        if not self.label:
+            self.label = self.name.replace("_", " ").strip().capitalize()
+        if self.flag is None and not self.positional and not self.launcher_only:
+            self.flag = f"--{self.name}"
+
+
+@dataclass
+class Workflow:
+    """A runnable CLI tool."""
+
+    key: str
+    title: str
+    args: list[ArgSpec]
+    module: str | None = None  # "python -m <module>"
+    script_path: str | None = None  # repo-relative script (e.g. ros_scripts/torch2onnx.py)
+    env: str = "venv"  # "venv" | "ros"
+    torchrun: bool = False  # launch under torchrun (DDP) instead of plain python
+    server: bool = False  # long-lived interactive server (Scene Editor) vs fire-and-finish
+    description: str = ""
+    # Best-effort resolver: filled arg values -> dict of output locations the UI can show.
+    outputs: Callable[[dict], dict] | None = None
+
+    def spec(self, name: str) -> ArgSpec:
+        for a in self.args:
+            if a.name == name:
+                return a
+        raise KeyError(f"{self.key}: no arg {name!r}")
+
+
+def _missing_required(wf: Workflow, values: dict) -> list[str]:
+    out = []
+    for a in wf.args:
+        if not a.required:
+            continue
+        v = values.get(a.name)
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            out.append(a.name)
+    return out
+
+
+def build_command(wf: Workflow, values: dict) -> list[str]:
+    """Turn filled form ``values`` into the tool-specific argv tail (no python prefix).
+
+    Raises ``ValueError`` listing any blank required fields — the panel surfaces this
+    rather than launching a doomed subprocess. We never substitute a silent default for
+    a required arg (per the no-silent-fallbacks rule).
+    """
+    missing = _missing_required(wf, values)
+    if missing:
+        raise ValueError(f"{wf.title}: missing required field(s): {', '.join(missing)}")
+
+    positional: list[str] = []
+    optional: list[str] = []
+    for a in wf.args:
+        # Launcher-only meta args are consumed by the runner (e.g. torchrun master_port),
+        # not passed to the tool's argv.
+        if a.launcher_only:
+            continue
+        v = values.get(a.name, a.default)
+        if a.kind == "bool":
+            v = bool(v)
+            if a.bool_style == "store_true":
+                if v:
+                    optional.append(a.flag)
+            elif a.bool_style == "value":
+                optional += [a.flag, "true" if v else "false"]
+            elif a.bool_style == "optional":
+                optional.append(a.flag if v else a.flag.replace("--", "--no-", 1))
+            else:
+                raise ValueError(f"{a.name}: bad bool_style {a.bool_style!r}")
+            continue
+
+        # Skip unset optionals (blank string / None). Required blanks were caught above.
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            continue
+
+        if a.positional:
+            positional.append(str(v))
+            continue
+
+        if a.multi:
+            tokens = v if isinstance(v, (list, tuple)) else str(v).split()
+            if tokens:
+                optional.append(a.flag)
+                optional += [str(t) for t in tokens]
+            continue
+
+        optional += [a.flag, str(v)]
+
+    # Positionals first (argparse convention used by torch2onnx).
+    return positional + optional
+
+
+# --------------------------------------------------------------------------------------
+# Shared arg builders (preset-aware) so common fields stay consistent across workflows.
+# --------------------------------------------------------------------------------------
+def _model_path(
+    required: bool = True, name: str = "model_path", label: str = "Model (.pth)"
+) -> ArgSpec:
+    return ArgSpec(
+        name,
+        "file",
+        label=label,
+        shared="models",
+        required=required,
+        help="Registered model. args.json / lora_dir come from the chosen library entry.",
+    )
+
+
+def _ego_shape(required: bool = True) -> ArgSpec:
+    return ArgSpec(
+        "ego_shape",
+        "str",
+        label="Ego shape (WB,L,W)",
+        shared="ego_shape",
+        required=required,
+        help="Wheelbase,Length,Width in metres, e.g. 4.76,7.24,2.29",
+    )
+
+
+def _reward_config(name: str = "config", label: str = "Reward config JSON") -> ArgSpec:
+    return ArgSpec(
+        name,
+        "file",
+        label=label,
+        shared="reward_configs",
+        required=True,
+        help="Registered reward/GRPO config JSON. Must set centerline_usage_mode=baselink.",
+    )
+
+
+def _output_dir(required: bool = True) -> ArgSpec:
+    return ArgSpec(
+        "output_dir",
+        "dir",
+        label="Output dir",
+        shared="output_dir",
+        required=required,
+        help="Directory for this tool's outputs.",
+    )
+
+
+def _scenes(
+    name: str = "scenes",
+    label: str = "Scenes JSON",
+    multi: bool = False,
+    shared: str | None = "datasets",
+    required: bool = True,
+) -> ArgSpec:
+    return ArgSpec(
+        name,
+        "file",
+        label=label,
+        required=required,
+        multi=multi,
+        shared=shared,
+        help="JSON list of NPZ scene paths (registered dataset, or custom).",
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Registry
+# --------------------------------------------------------------------------------------
+WORKFLOWS: dict[str, Workflow] = {}
+
+
+def _register(wf: Workflow) -> Workflow:
+    WORKFLOWS[wf.key] = wf
+    return wf
+
+
+# --- Train: ranked-SFT ----------------------------------------------------------------
+_register(
+    Workflow(
+        key="train_ranked_sft",
+        title="Train (Ranked-SFT)",
+        module="rlvr.autoresearch.run_experiment",
+        description="Generate K trajectories per scene, rank by reward, SFT on the winner. "
+        "Writes a timestamped run dir under Output dir with per-epoch LoRA + eval.",
+        args=[
+            ArgSpec(
+                "config",
+                "file",
+                label="Experiment config JSON",
+                required=True,
+                help="GRPOConfig JSON (must set n_prob_scenes / n_normal_scenes explicitly).",
+            ),
+            ArgSpec("name", "str", label="Experiment name", required=True),
+            _model_path(),
+            _scenes(name="prob_scenes", label="Problem scenes JSON"),
+            _scenes(name="normal_scenes", label="Normal scenes JSON"),
+            _scenes(name="val_scenes", label="Validation scenes JSON"),
+            _output_dir(),
+            ArgSpec(
+                "skip_baseline",
+                "bool",
+                label="Skip baseline eval",
+                default=True,
+                help="Reuse known baseline numbers instead of re-evaluating the base model.",
+            ),
+            ArgSpec(
+                "baseline_cache",
+                "file",
+                label="Baseline cache JSON (optional)",
+                help="Precomputed baseline/GT path lengths for progress-ratio metrics.",
+            ),
+        ],
+        outputs=lambda v: {"run_root": v.get("output_dir")},
+    )
+)
+
+# --- Eval: deterministic avoidance ----------------------------------------------------
+_register(
+    Workflow(
+        key="eval_det_avoidance",
+        title="Eval: det avoidance (sc)",
+        module="rlvr.autoresearch.tools.eval_det_avoidance",
+        description="Single forward pass per scene; static-collision clearance + RB/lane/centerline. "
+        "Writes summary.json with per-scene + aggregate distribution stats.",
+        args=[
+            _model_path(),
+            _scenes(),
+            _reward_config(),
+            _ego_shape(),
+            _output_dir(),
+            ArgSpec("batch_size", "int", default=32),
+        ],
+        outputs=lambda v: (
+            {"summary_json": str(Path(v["output_dir"]) / "summary.json")}
+            if v.get("output_dir")
+            else {}
+        ),
+    )
+)
+
+# --- Eval: guided avoidance (exploration policy) --------------------------------------
+_register(
+    Workflow(
+        key="eval_policy_avoidance",
+        title="Eval: guided avoidance (policy)",
+        module="rlvr.autoresearch.tools.eval_policy_avoidance",
+        description="Avoidance eval under a guidance/exploration policy. The guidance envelope is "
+        "loaded from the policy dir — do NOT pass envelope flags (per the eval rule).",
+        args=[
+            _model_path(),
+            ArgSpec(
+                "policy_dir", "dir", label="Guidance policy dir", shared="policies", required=True
+            ),
+            _scenes(label="Avoidance scenes JSON"),
+            _scenes(name="normal_scenes", label="Normal scenes JSON (optional)", required=False),
+            _reward_config(),
+            _ego_shape(),
+            _output_dir(),
+            ArgSpec("render", "bool", label="Render verdict PNGs"),
+        ],
+        outputs=lambda v: {"dir": v.get("output_dir")},
+    )
+)
+
+# --- Eval: L2 (valid_predictor, torchrun DDP) -----------------------------------------
+_register(
+    Workflow(
+        key="eval_l2",
+        title="Eval: L2 (valid_predictor)",
+        script_path="diffusion_planner/valid_predictor.py",
+        torchrun=True,
+        description="DDP L2 validation. Vehicle must match the model (J6→J6 val, xx1→xx1 val). "
+        "Merge any LoRA into a .pth first (use the Merge+Export tab).",
+        args=[
+            _model_path(name="resume_model_path", label="Model (.pth)"),
+            ArgSpec(
+                "args_json_path",
+                "file",
+                label="args.json",
+                required=True,
+                derive_from="resume_model_path",
+                derive_field="args_json",
+            ),
+            _scenes(name="valid_set_list", label="Validation set JSON"),
+            ArgSpec("batch_size", "int", default=32),
+            ArgSpec("ddp", "bool", label="DDP", default=True, bool_style="value"),
+            ArgSpec(
+                "master_port",
+                "str",
+                label="torchrun master_port",
+                default="29505",
+                launcher_only=True,
+                help="Used by the torchrun launcher, not the script.",
+            ),
+        ],
+    )
+)
+
+# --- Eval: road border ----------------------------------------------------------------
+_register(
+    Workflow(
+        key="eval_border_distance",
+        title="Eval: road border",
+        module="rlvr.autoresearch.eval_border_distance",
+        description="Road-border clearance distribution. Optionally visualise the worst scenes.",
+        args=[
+            _model_path(),
+            ArgSpec(
+                "lora_path",
+                "dir",
+                label="LoRA dir",
+                derive_from="model_path",
+                derive_field="lora_dir",
+            ),
+            ArgSpec(
+                "args_json",
+                "file",
+                label="args.json",
+                derive_from="model_path",
+                derive_field="args_json",
+            ),
+            _scenes(),
+            ArgSpec("tag", "str", default="model"),
+            ArgSpec("visualize", "bool", label="Visualize worst scenes"),
+            ArgSpec("worst_n", "int", label="# worst to visualize", default=10),
+            _output_dir(required=False),
+        ],
+    )
+)
+
+# --- Eval: detailed metrics (multi-LoRA) ----------------------------------------------
+_register(
+    Workflow(
+        key="eval_detailed_metrics",
+        title="Eval: detailed metrics",
+        module="rlvr.autoresearch.tools.eval_detailed_metrics",
+        description="Per-scene centerline + RB distribution percentiles and threshold buckets "
+        "across one or more LoRA dirs.",
+        args=[
+            _model_path(),
+            _scenes(),
+            _reward_config(label="GRPO config JSON"),
+            ArgSpec(
+                "loras",
+                "str",
+                label="LoRA dirs (space-separated)",
+                required=True,
+                multi=True,
+                help="One or more LoRA dirs (lora_epoch_NNN/ or lora_latest/).",
+            ),
+            ArgSpec("labels", "str", label="Labels (space-separated, optional)", multi=True),
+            ArgSpec("batch_size", "int", default=150),
+            ArgSpec("dump_json", "file", label="Dump JSON (optional)"),
+        ],
+    )
+)
+
+# --- Merge LoRA -----------------------------------------------------------------------
+_register(
+    Workflow(
+        key="merge_lora",
+        title="Merge LoRA → .pth",
+        module="preference_optimization.merge_lora",
+        description="Fuse a LoRA adapter into the base weights, producing a deployable .pth.",
+        args=[
+            _model_path(label="Base / warmstart model (.pth)"),
+            ArgSpec(
+                "lora_dir",
+                "dir",
+                label="LoRA dir",
+                derive_from="model_path",
+                derive_field="lora_dir",
+            ),
+            ArgSpec("output", "file", label="Output merged .pth (default <model_dir>/merged.pth)"),
+        ],
+        outputs=lambda v: {"merged": v.get("output")},
+    )
+)
+
+# --- ONNX export ----------------------------------------------------------------------
+_register(
+    Workflow(
+        key="torch2onnx",
+        title="Export ONNX",
+        script_path="ros_scripts/torch2onnx.py",
+        description="Export a deploy dir (best_model.pth + args.json) to ONNX.",
+        args=[
+            ArgSpec(
+                "root_dir",
+                "dir",
+                label="Deploy dir (best_model.pth + args.json)",
+                required=True,
+                positional=True,
+            ),
+            ArgSpec("eval_npz", "file", label="Sample NPZ (optional)"),
+            ArgSpec("use_ema", "bool", label="Use EMA weights"),
+            ArgSpec(
+                "output_prefix",
+                "str",
+                label="Output prefix",
+                flag="--output-prefix",
+                default="diffusion_planner",
+            ),
+            ArgSpec("use_simplify", "bool", label="onnxsim simplify", flag="--use-simplify"),
+            ArgSpec("opset_version", "int", label="Opset", flag="--opset-version", default=20),
+            ArgSpec("external_data", "bool", label="External data files", flag="--external-data"),
+        ],
+    )
+)
+
+# --- PRiSM: disturb_and_replay --------------------------------------------------------
+_register(
+    Workflow(
+        key="disturb_and_replay",
+        title="PRiSM 1: disturb_and_replay",
+        module="rlvr.autoresearch.tools.disturb_and_replay",
+        description="Generate perturbed variants (parallel offset / yaw / jitter) of warm scenes. "
+        "All output NPZ fields are in the perturbed-ego frame. Emits manifest.json.",
+        args=[
+            _scenes(label="Warm scenes JSON"),
+            _output_dir(),
+            ArgSpec("output_scene_list", "file", label="Output scene list JSON", required=True),
+            ArgSpec(
+                "kind",
+                "choice",
+                label="Kind",
+                default="parallel_only",
+                choices=["default", "parallel_only", "yaw_only", "combined"],
+            ),
+            ArgSpec("n_per_scene", "int", label="Variants per scene", default=5),
+            ArgSpec("offsets", "str", label="Lateral offsets (m)", default="0.25,0.5,1.0"),
+            ArgSpec("yaw_degs", "str", label="Yaw magnitudes (deg)", default="5,10,15"),
+            ArgSpec(
+                "reject_out_of_lane",
+                "bool",
+                label="Reject out-of-lane",
+                default=True,
+                bool_style="optional",
+            ),
+            ArgSpec("reject_threshold", "float", label="Reject threshold (m)", default=0.15),
+            ArgSpec("seed", "int", default=0),
+            _ego_shape(),
+        ],
+        outputs=lambda v: {"scene_list": v.get("output_scene_list"), "dir": v.get("output_dir")},
+    )
+)
+
+# --- PRiSM: viz_p4_recovery -----------------------------------------------------------
+_register(
+    Workflow(
+        key="viz_p4_recovery",
+        title="PRiSM 2: viz_p4_recovery (rank K=N)",
+        module="rlvr.autoresearch.tools.viz_p4_recovery",
+        description="Score K=N generations per scene; pick rank-1 by total reward; write summary.json "
+        "with t0_cl / det_cl / top1_cl + safety flags. Use --no_viz for speed.",
+        args=[
+            _model_path(),
+            ArgSpec(
+                "lora_path",
+                "dir",
+                label="LoRA dir",
+                derive_from="model_path",
+                derive_field="lora_dir",
+            ),
+            _scenes(label="Perturbed scenes JSON", shared=None),
+            _reward_config(),
+            _output_dir(),
+            ArgSpec("manifest", "file", label="disturb manifest.json (optional)"),
+            ArgSpec("K", "int", label="K (generations)", default=8),
+            ArgSpec("noise_min", "float", default=0.5),
+            ArgSpec("noise_max", "float", default=2.0),
+            ArgSpec(
+                "scene_batch_size",
+                "int",
+                label="Scene batch size",
+                default=8,
+                help="Batched K-generation. Requires --no_viz when > 1.",
+            ),
+            ArgSpec("no_viz", "bool", label="No viz (summary.json only)", default=True),
+            ArgSpec("max_scenes", "int", label="Max scenes (optional)"),
+            ArgSpec("seed", "int", default=0),
+            _ego_shape(),
+        ],
+        outputs=lambda v: (
+            {"summary_json": str(Path(v["output_dir"]) / "summary.json")}
+            if v.get("output_dir")
+            else {}
+        ),
+    )
+)
+
+# --- PRiSM: percentile_filter_perturbed -----------------------------------------------
+_register(
+    Workflow(
+        key="percentile_filter_perturbed",
+        title="PRiSM 3: percentile_filter",
+        module="rlvr.autoresearch.tools.percentile_filter_perturbed",
+        description="Filter scenes by top1_cl percentile with no-poison guards; write the SFT scene list.",
+        args=[
+            ArgSpec("summary", "file", label="viz_p4 summary.json", required=True),
+            ArgSpec("output_scenes", "file", label="Output filtered scenes JSON", required=True),
+            ArgSpec("output_report", "file", label="Output report JSON (optional)"),
+            ArgSpec("percentile", "float", label="Percentile to keep", default=50.0),
+            ArgSpec("det_cl_max", "float", label="det_cl_max (optional)"),
+            ArgSpec("top1_cl_min", "float", label="top1_cl_min (optional)"),
+            ArgSpec("min_top1_vs_det", "float", label="min top1 vs det", default=0.0),
+            ArgSpec("eligible_t0_max", "float", label="eligible t0 max", default=0.0),
+        ],
+        outputs=lambda v: {"scene_list": v.get("output_scenes")},
+    )
+)
+
+# --- Reproducer: collision miner ------------------------------------------------------
+_register(
+    Workflow(
+        key="mine_collisions",
+        title="Reproducer: mine collisions",
+        module="rlvr.autoresearch.tools.mine_collisions_reproducer",
+        description="Closed-loop perception reproducer over a pre-converted NPZ corpus (map-free). "
+        "Writes ranked hits JSONL; --save_dir saves pre-collision training NPZ batches one-pass.",
+        args=[
+            ArgSpec("npz_root", "dir", label="NPZ corpus root", required=True),
+            ArgSpec("sidecar_root", "dir", label="Sidecar root (optional)"),
+            _model_path(),
+            ArgSpec("out", "file", label="Hits JSONL out", required=True),
+            ArgSpec("seg_len", "int", label="Segment length (frames)", default=600),
+            ArgSpec("batch_size", "int", label="Segment batch size", default=8),
+            ArgSpec(
+                "neighbor_history_mode",
+                "choice",
+                label="Neighbor history",
+                default="recorded",
+                choices=["recorded", "sim"],
+            ),
+            ArgSpec("save_dir", "dir", label="Save pre-collision NPZs to (optional)"),
+            ArgSpec("save_pre_steps", "int", label="Pre-steps to save", default=80),
+            ArgSpec("save_min_ego_speed", "float", label="Min ego speed (m/s)", default=0.5),
+            ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),
+            ArgSpec("dump_hits", "int", label="Render top-N hit segments", default=0),
+            ArgSpec("max_routes", "int", label="Max routes (debug)", default=-1),
+            ArgSpec("max_segments", "int", label="Max segments (debug)", default=-1),
+            ArgSpec("device", "str", label="Device (optional)"),
+        ],
+        outputs=lambda v: {"hits_jsonl": v.get("out"), "save_dir": v.get("save_dir")},
+    )
+)
+
+# --- Viz: open-loop dual-model perfect-track ------------------------------------------
+_register(
+    Workflow(
+        key="ghost_replay_openloop",
+        title="Viz: open-loop ghost (A/B)",
+        module="rlvr.autoresearch.tools.ghost_replay_openloop",
+        description="Per-scene perfect-tracking open-loop replay: baseline vs model, history + 80-step "
+        "plan, neighbor boxes. Outputs PNG seq + WebM per scene.",
+        args=[
+            _model_path(name="model_baseline", label="Baseline model (.pth)"),
+            _model_path(name="model_best", label="Best model (.pth)", required=False),
+            ArgSpec(
+                "policy_dir", "dir", label="Guidance policy (instead of best)", shared="policies"
+            ),
+            ArgSpec("label_baseline", "str", default="baseline"),
+            ArgSpec("label_best", "str", default="best"),
+            _scenes(),
+            _output_dir(),
+            _ego_shape(),
+            ArgSpec("view_half", "float", label="View half (m)", default=28.0),
+            ArgSpec("fps", "int", default=10),
+            ArgSpec("hist_steps", "int", label="History steps", default=30),
+        ],
+        outputs=lambda v: {"dir": v.get("output_dir")},
+    )
+)
+
+# --- Viz: closed-loop dual-model ghost ------------------------------------------------
+_register(
+    Workflow(
+        key="compare_models_ghost",
+        title="Viz: closed-loop ghost (A/B)",
+        module="rlvr.autoresearch.tools.compare_models_ghost",
+        description="Per-step closed-loop A/B comparison with both ego footprints + stopped-neighbor OBBs. "
+        "Optional WebM.",
+        args=[
+            _model_path(name="model_a", label="Model A (.pth)"),
+            ArgSpec(
+                "lora_a", "dir", label="LoRA A", derive_from="model_a", derive_field="lora_dir"
+            ),
+            ArgSpec("label_a", "str", default="baseline"),
+            _model_path(name="model_b", label="Model B (.pth)", required=False),
+            ArgSpec(
+                "lora_b", "dir", label="LoRA B", derive_from="model_b", derive_field="lora_dir"
+            ),
+            ArgSpec("label_b", "str", default="trained"),
+            ArgSpec("policy_dir", "dir", label="Guidance policy (instead of B)", shared="policies"),
+            _scenes(label="Scenes (space-separated NPZ paths)", multi=True, shared=None),
+            _output_dir(),
+            ArgSpec("steps", "int", default=80),
+            ArgSpec("view_half_m", "float", label="View half (m)", default=30.0),
+            ArgSpec("ego_wheelbase", "float", label="Ego wheelbase (m)", default=4.76),
+            ArgSpec("make_webm", "bool", label="Make WebM", default=True),
+            ArgSpec("webm_fps", "int", label="WebM fps", default=10),
+            ArgSpec("hist_steps", "int", label="History steps", default=0),
+        ],
+        outputs=lambda v: {"dir": v.get("output_dir")},
+    )
+)
+
+# --- Viz: static NPZ-dir render -------------------------------------------------------
+_register(
+    Workflow(
+        key="render_npz_dir",
+        title="Viz: render NPZ dir",
+        module="scenario_generation.render_npz_dir",
+        description="Render every NPZ in a directory to a PNG (perfect-tracker renderer with neighbors).",
+        args=[
+            ArgSpec("npz_dir", "dir", label="NPZ dir", required=True),
+            _output_dir(),
+            ArgSpec("route_pkl", "file", label="Route pickle (optional, adds borders/route)"),
+            ArgSpec("workers", "int", default=8),
+            ArgSpec("stride", "int", default=1),
+            ArgSpec("limit", "int", default=-1),
+            ArgSpec("ego_length", "float", label="Ego length (m, optional)"),
+            ArgSpec("ego_width", "float", label="Ego width (m, optional)"),
+            ArgSpec("ego_wheelbase", "float", label="Ego wheelbase (m, optional)"),
+        ],
+        outputs=lambda v: {"dir": v.get("output_dir")},
+    )
+)
+
+# --- Scene Branch Editor (interactive server) -----------------------------------------
+_register(
+    Workflow(
+        key="scene_branch_editor",
+        title="Scene Branch Editor",
+        module="scenario_generation.tools.scene_branch_editor",
+        server=True,
+        description="Interactive obstacle placement + curated-RSFT data authoring. Launched as its own "
+        "server and embedded via iframe so it keeps its full CSS/JS.",
+        args=[
+            ArgSpec("npz_dir", "dir", label="Replay NPZ dir", required=True),
+            _model_path(required=False, label="Model (.pth, optional)"),
+            ArgSpec(
+                "reward_config",
+                "file",
+                label="Reward config JSON (optional)",
+                shared="reward_configs",
+            ),
+            _ego_shape(required=False),
+            ArgSpec("map_path", "file", label="Lanelet2 .osm map (optional)", shared="maps"),
+            ArgSpec("tree_json", "file", label="Existing scene tree JSON (optional)"),
+        ],
+    )
+)
+
+
+def list_workflows() -> list[Workflow]:
+    return list(WORKFLOWS.values())
+
+
+def get_workflow(key: str) -> Workflow:
+    return WORKFLOWS[key]
