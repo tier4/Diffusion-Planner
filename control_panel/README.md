@@ -1,8 +1,8 @@
 # Autoresearch Control Panel
 
 A single Gradio app that wraps the existing autoresearch CLI tools in **forms + Run/Stop +
-live log**, with a central **asset library** so you register a model/dataset once and pick it
-from dropdowns everywhere. It adds no domain logic — every Run shells out to the existing
+live log**, driven by a **structured workspace folder** so you select assets from dropdowns
+instead of typing paths. It adds no domain logic — every Run shells out to the existing
 `python -m <tool>` and streams its output.
 
 ## Launch
@@ -13,59 +13,77 @@ python -m control_panel            # http://localhost:7888
 # options: --port 7888  --host 0.0.0.0  --editor_port 7899  --share
 ```
 
-## Workspace (register assets once)
+## Workspace — the one thing you set
 
-The first tab is the asset library. Browse with the file explorer, name a path, and **Add as
-→ Model / Guidance policy / Dataset / Reward config / Map / Run dir**. Set the global
-`ego_shape` and default `output_dir`. Every workflow tab then offers these as **dropdowns**
-(plus a `custom…` option). A registered **Model** entry can carry its `args_json` and a
-`lora_dir`, which downstream tools pick up automatically.
+Everything is organized under a single **workspace root** with a fixed layout:
 
-**Load a training run:** point "Run dir" at a `run_experiment` output, **Scan run** to list its
-`lora_epoch_*` / `merged.pth` / `best_model.pth`, then **Register epoch as Model** — it appears
-in every model dropdown immediately, so you can train → register → Evaluate/Viz it in seconds.
+```
+<workspace>/
+  models/<name>/        best_model.pth + args.json   (🧠)
+  loras/<name>/         adapter_config.json + weights (🧩)
+  policies/<name>/      exploration_policy_config.json + .pth (🛰 guidance)
+  configs/<name>.json   reward configs (⚙️)
+  maps/<name>.osm       lanelet2 maps (🗺)
+  datasets/scenes/<name>.json   individual-scene lists (🎬)
+  datasets/routes/<name>/       contiguous per-frame NPZ dirs (📁)
+  runs/<tool>/<name>/   eval / merge / mining outputs
+```
 
-The library persists to `~/.diffusion_planner_presets.json` (in `$HOME`, not the repo). On
-first run it is seeded from the gitignored `control_panel/_dev_presets.py` (`DEV_LIBRARY`) if
-present — temporary testing defaults; delete that file for a clean/shared setup.
+In the **Workspace** tab:
+- Set the **Workspace root** (📁 Browse), then **🆕 Create folders** (scaffold empty structure)
+  or **🔄 Scan workspace** (auto-detect every asset by its on-disk signature; follows symlinks).
+- Assets you can't move can be **symlinked** into the layout — Scan follows symlinks.
+- A one-off asset outside the workspace can still be added with the Browse + Add buttons.
+
+## Picking assets — one dropdown each
+
+Every asset field across the tabs is a **single dropdown** with a type icon, listing the
+scanned assets, plus:
+- **(none)** for optional fields, and
+- **➕ Browse to add…** — opens your OS file picker, registers the picked asset (named from its
+  stem; a model auto-attaches its `args.json`), and selects it. The new asset instantly appears
+  in that asset's dropdown in **every** tab.
+
+Model + LoRA sit on one row. Scene datasets (individual) and route datasets (contiguous frames)
+are **separate types**, so each tool only offers the right kind:
+- eval / train / PRiSM / ghost → **scene** datasets
+- mine collisions / render / scene editor → **route** datasets
+
+When a tool **creates** a dataset (e.g. `disturb_and_replay`) it lands in
+`datasets/scenes|routes/<name>/` and the dropdowns **auto-refresh** when the run finishes — no
+manual scan needed.
 
 ## Tabs
 
-| Tab | Wraps |
+| Tab | Tools |
 |---|---|
-| **Workspace** | asset library + file explorer + training-run loader |
+| **Workspace** | set root, Create folders, Scan, register one-offs, load a training run → register a checkpoint |
 | **Train** | `run_experiment` (ranked-SFT) + live per-epoch metric table |
-| **Evaluate** | `eval_det_avoidance` (+ summary viewer), guided `eval_policy_avoidance`, `valid_predictor` L2, `eval_border_distance`, `eval_detailed_metrics`; frozen baseline column |
+| **Evaluate → Metrics** | `eval_full_metrics` (all metrics on the det trajectory; optional 2nd model for A/B; **Render** dumps per-scene PNGs) — or tick **Use guidance policy** for `eval_policy_avoidance` |
+| **Evaluate → L2 loss** | `valid_predictor` (DDP) |
 | **Merge + Export** | `merge_lora` → `torch2onnx` |
-| **PRiSM** | `disturb_and_replay` → `viz_p4_recovery` → `percentile_filter_perturbed` |
-| **Reproducer / Viz** | `mine_collisions_reproducer` + `ghost_replay_openloop` / `compare_models_ghost` / `render_npz_dir` with a WebM/PNG viewer |
-| **Scene Editor** | the Scene Branch Editor, run in-process on its own port and shown via iframe |
+| **PRiSM** | `disturb_and_replay` → `viz_p4_recovery` → `percentile_filter` |
+| **Reproducer / Viz** | `mine_collisions_reproducer` (route corpus → collision windows), Ghost A/B (open/closed-loop), `render_npz_dir` |
+| **Scene Editor** | the Scene Branch Editor, launched as a subprocess (lanelet env) + embedded via iframe; export/save dirs pre-pointed into the workspace |
 
-Two-model comparisons (ghost A/B) take two model dropdowns; guidance/exploration policies are a
-first-class asset type usable in Eval and Viz.
+## Reward config & the SC gotcha
 
-## Jobs & Stop
+Avoidance (`sc`) metrics are only measured when the reward config enables static-collision
+scoring. Use the **SC-enabled** config (`static_collision_enabled=true`) — otherwise
+`sc_min_dist` reads 99 everywhere and the eval prints a NOTE telling you so.
 
-Each Run launches a **detached** subprocess writing to
-`~/.diffusion_planner_jobs/<ts>_<key>/run.log` with a `job.json`. Closing/restarting the panel
-does not kill it — **Attach to latest** re-attaches and resumes tailing. **■ Stop** ends the
-job (SIGTERM → SIGKILL) — a user-initiated stop, distinct from the never-auto-kill policy.
+## Jobs
 
-**Preview command** shows the exact argv so you can copy it to a terminal.
-
-## Scene Editor (in-process)
-
-The Scene Editor is the existing `scenario_generation.tools.scene_branch_editor`. Set its NPZ
-dir (+ optional model/reward/map from the library) and click **Open / Reload editor**: it is
-built and launched as a Gradio sub-server in this same process (`prevent_thread_lock=True`) on
-`--editor_port`, and embedded in the tab via an iframe. Reload rebuilds it for a new dataset.
-Reuses `scene_branch_editor.build_demo_from_paths`.
+Each Run launches a **detached** subprocess (survives closing the panel) writing to
+`~/.diffusion_planner_jobs/<ts>_<key>/run.log`. **Attach to latest** re-attaches; **■ Stop**
+ends the job (SIGTERM→SIGKILL). **Preview command** shows the exact argv.
 
 ## Architecture
 
-- `workflows.py` — declarative registry (`Workflow` + `ArgSpec`); `ArgSpec.shared` marks a field
-  as library-sourced; `derive_from`/`derive_field` pull args.json/lora from a chosen model.
-- `presets.py` — load/save the asset library (`~/.diffusion_planner_presets.json`).
-- `runner.py` — detached launch, log tail/stream, `stop`, per-epoch metric parsing, job listing.
-- `app.py` / `__main__.py` — the Gradio UI (form builder + Workspace + tab extras).
-- `_dev_presets.py` — gitignored temporary testing seed.
+- `workflows.py` — declarative registry (`Workflow` + `ArgSpec`). `shared` = which library type a
+  field draws from; `auto` = output path under the workspace; `creates` = scenes/routes/None;
+  `derive_from` pulls args.json/lora from a chosen model; `hidden` = fixed flag.
+- `presets.py` — the asset library + `scan_workspace` / `create_workspace`.
+- `runner.py` — detached launch, log tail/stream, Stop, per-epoch metric parse, `lanelet` env.
+- `app.py` / `__main__.py` — the Gradio UI (form builder, inline-add dropdowns, tab extras).
+- `_dev_presets.py` (gitignored) — points at a local dev workspace of symlinks for testing.

@@ -243,10 +243,11 @@ def _register(wf: Workflow) -> Workflow:
 _register(
     Workflow(
         key="train_ranked_sft",
-        title="Train (Ranked-SFT)",
+        title="Train (RSFT / Ranked-SFT)",
         module="rlvr.autoresearch.run_experiment",
-        description="Generate K trajectories per scene, rank by reward, SFT on the winner. "
-        "Writes a timestamped run dir under Output dir with per-epoch LoRA + eval.",
+        description="Ranked-SFT (RSFT): generate K trajectories per scene, rank by reward, SFT on "
+        "the winner (set ranked_sft_mode in the config). PRiSM is RSFT on perturbation-mined "
+        "scenes. Writes a timestamped run dir with per-epoch LoRA + eval.",
         args=[
             ArgSpec(
                 "config",
