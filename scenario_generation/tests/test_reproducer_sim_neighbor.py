@@ -13,12 +13,12 @@ import json
 import numpy as np
 import torch
 
-from scenario_generation.reproducer_rollout import (
-    SimNeighborTracker,
-    _build_nbr_world_tracks,
-    decode_turn_indicator,
-)
+from scenario_generation.reproducer_rollout import SimNeighborTracker, _build_nbr_world_tracks
 from scenario_generation.route_timeline import RouteTimeline
+
+# decode_turn_indicator is defined in simulate.py (shared by _predict_batch + the reproducer);
+# import it from there so these tests unambiguously cover that canonical implementation.
+from scenario_generation.simulate import decode_turn_indicator
 
 EGO_SHAPE = np.array([4.76, 7.24, 2.29], dtype=np.float32)
 N_FRAMES = 40
