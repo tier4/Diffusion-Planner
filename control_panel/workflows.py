@@ -78,6 +78,10 @@ class Workflow:
     env: str = "venv"  # "venv" | "ros"
     torchrun: bool = False  # launch under torchrun (DDP) instead of plain python
     server: bool = False  # long-lived interactive server (Scene Editor) vs fire-and-finish
+    # What this workflow produces, for auto-placement under the workspace:
+    #   "scenes" -> datasets/scenes/<name>/ (+ <name>.json list)  "routes" -> datasets/routes/<name>/
+    #   None     -> runs/<key>/<name>/
+    creates: str | None = None
     description: str = ""
     # Best-effort resolver: filled arg values -> dict of output locations the UI can show.
     outputs: Callable[[dict], dict] | None = None
@@ -200,7 +204,7 @@ def _scenes(
     name: str = "scenes",
     label: str = "Scenes JSON",
     multi: bool = False,
-    shared: str | None = "datasets",
+    shared: str | None = "scene_datasets",
     required: bool = True,
 ) -> ArgSpec:
     return ArgSpec(
@@ -500,6 +504,7 @@ _register(
         key="disturb_and_replay",
         title="PRiSM: disturb_and_replay",
         module="rlvr.autoresearch.tools.disturb_and_replay",
+        creates="scenes",
         description="Generate perturbed variants (parallel offset / yaw / jitter) of warm scenes. "
         "All output NPZ fields are in the perturbed-ego frame. Emits manifest.json.",
         args=[
@@ -599,7 +604,9 @@ _register(
         description="Closed-loop perception reproducer over a pre-converted NPZ corpus (map-free). "
         "Writes ranked hits JSONL; --save_dir saves pre-collision training NPZ batches one-pass.",
         args=[
-            ArgSpec("npz_root", "dir", label="NPZ corpus root", required=True),
+            ArgSpec(
+                "npz_root", "dir", label="NPZ corpus root", shared="route_datasets", required=True
+            ),
             ArgSpec("sidecar_root", "dir", label="Sidecar root (optional)"),
             _model_path(),
             ArgSpec("out", "file", auto="file:hits.jsonl", required=True),
@@ -689,7 +696,7 @@ _register(
         module="scenario_generation.render_npz_dir",
         description="Render every NPZ in a directory to a PNG (perfect-tracker renderer with neighbors).",
         args=[
-            ArgSpec("npz_dir", "dir", label="NPZ dir", required=True),
+            ArgSpec("npz_dir", "dir", label="NPZ dir", shared="route_datasets", required=True),
             _output_dir(),
             ArgSpec("route_pkl", "file", label="Route pickle (optional, adds borders/route)"),
             ArgSpec("workers", "int", default=8),
@@ -710,10 +717,17 @@ _register(
         title="Scene Branch Editor",
         module="scenario_generation.tools.scene_branch_editor",
         server=True,
-        description="Interactive obstacle placement + curated-RSFT data authoring. Launched as its own "
-        "server and embedded via iframe so it keeps its full CSS/JS.",
+        env="lanelet",  # needs lanelet2 shared libs on LD_LIBRARY_PATH (set before exec)
+        description="Interactive obstacle placement + curated-RSFT data authoring. Runs as a "
+        "subprocess with the lanelet env and is embedded via iframe.",
         args=[
-            ArgSpec("npz_dir", "dir", label="Replay NPZ dir", required=True),
+            ArgSpec(
+                "npz_dir",
+                "dir",
+                label="Replay NPZ dir (route)",
+                shared="route_datasets",
+                required=True,
+            ),
             _model_path(required=False, label="Model (.pth, optional)"),
             ArgSpec(
                 "reward_config",
@@ -724,6 +738,7 @@ _register(
             _ego_shape(required=False),
             ArgSpec("map_path", "file", label="Lanelet2 .osm map (optional)", shared="maps"),
             ArgSpec("tree_json", "file", label="Existing scene tree JSON (optional)"),
+            ArgSpec("port", "int", default=7870, label="Port"),
         ],
     )
 )

@@ -24,9 +24,6 @@ from . import workflows as W
 CUSTOM = "custom…"
 NONE = "(none)"
 
-# Holds the in-process Scene Editor sub-server so Reload can close the previous one.
-_EDITOR: dict = {"demo": None, "port": None}
-
 
 # --------------------------------------------------------------------------------------
 # Value coercion + form building
@@ -106,10 +103,11 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
     # Workflows with auto-derived outputs get a single "Run name" field; everything else
     # (the run folder + output files) is placed under <workspace output_dir>/<key>/<run>.
     if any(a.auto for a in wf.args):
-        run_tb = gr.Textbox(
-            value=wf.key,
-            label="Run name → outputs go to <workspace output dir>/" + wf.key + "/<run name>/",
-        )
+        if wf.creates in ("scenes", "routes"):
+            lbl = f"Dataset name → datasets/{wf.creates}/<name>/"
+        else:
+            lbl = f"Run name → runs/{wf.key}/<name>/"
+        run_tb = gr.Textbox(value=wf.key, label=lbl)
         fields.append({"name": "__run__", "spec": None, "role": "runname", "comps": [run_tb]})
         flat.append(run_tb)
 
@@ -154,14 +152,40 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
     return fields, flat
 
 
-def _auto_path(base_out: str, wf_key: str, run: str, spec: W.ArgSpec) -> str:
-    """Derive an output path: <base_out>/<wf_key>/<run>[/sub | /file]."""
-    run_dir = Path(base_out) / wf_key / (run or "run")
+def _ws_base(library: dict) -> str:
+    """Base dir for auto outputs: the workspace root (fallback: legacy output_dir)."""
+    return library.get("workspace_root") or library.get("output_dir", "")
+
+
+def _run_dir(library: dict, wf: W.Workflow, run: str) -> Path | None:
+    """The folder a run writes into, per wf.creates: datasets/scenes|routes/<run> or runs/<key>/<run>."""
+    base = _ws_base(library)
+    if not base:
+        return None
+    run = run or "run"
+    if wf.creates == "scenes":
+        return Path(base) / "datasets" / "scenes" / run
+    if wf.creates == "routes":
+        return Path(base) / "datasets" / "routes" / run
+    return Path(base) / "runs" / wf.key / run
+
+
+def _auto_path(library: dict, wf: W.Workflow, run: str, spec: W.ArgSpec) -> str:
+    """Derive an output path under the run folder.
+
+    For creates='scenes', a `file:*.json` (the scene list) is placed at the scenes/ level as
+    <run>.json (sibling of the npz dir) so the workspace scanner picks it up as a dataset.
+    """
+    rd = _run_dir(library, wf, run)
+    if rd is None:
+        return ""
     kind, _, rest = spec.auto.partition(":")
+    if wf.creates == "scenes" and kind == "file" and rest.endswith(".json"):
+        return str(rd.parent / f"{run or 'run'}.json")
     if kind == "dir":
-        return str(run_dir / rest) if rest else str(run_dir)
+        return str(rd / rest) if rest else str(rd)
     if kind == "file":
-        return str(run_dir / rest)
+        return str(rd / rest)
     raise ValueError(f"{spec.name}: bad auto spec {spec.auto!r}")
 
 
@@ -204,14 +228,13 @@ def resolve_values(
         else:
             values[name] = _coerce(spec, vals[0])
 
-    base_out = library.get("output_dir", "")
-    run_dir = Path(base_out) / wf.key / (run_name or "run") if base_out else None
+    run_dir = _run_dir(library, wf, run_name)
     if make_dirs and run_dir is not None:
         run_dir.mkdir(parents=True, exist_ok=True)
     for f in fields:
         spec = f["spec"]
         if f["role"] == "auto":
-            values[f["name"]] = _auto_path(base_out, wf.key, run_name, spec) if base_out else ""
+            values[f["name"]] = _auto_path(library, wf, run_name, spec)
         elif f["role"] == "derive":
             entry = model_entries.get(spec.derive_from, {})
             values[f["name"]] = entry.get(spec.derive_field, "") or ""
@@ -226,9 +249,9 @@ def _err(msg: str) -> str:
 
 
 def _needs_output_dir(wf, library) -> str:
-    """Red error if the workflow auto-derives outputs but no workspace output dir is set."""
-    if any(a.auto for a in wf.args) and not library.get("output_dir"):
-        return _err("Set 'Default output dir' in the Workspace tab first (outputs go there).")
+    """Red error if the workflow auto-derives outputs but no workspace root / output dir is set."""
+    if any(a.auto for a in wf.args) and not _ws_base(library):
+        return _err("Set the Workspace root in the Workspace tab first (outputs go there).")
     return ""
 
 
@@ -505,41 +528,30 @@ def _scan_run(run_dir: str):
 
 
 # --------------------------------------------------------------------------------------
-# Scene Editor (in-process sub-server)
+# Scene Editor (subprocess on its own port + iframe — needs the lanelet env)
 # --------------------------------------------------------------------------------------
 def _open_editor(library, host, editor_port, fields, *flat):
-    values = resolve_values(W.get_workflow("scene_branch_editor"), fields, library, flat)
-    npz_dir = values.get("npz_dir")
-    if not npz_dir:
-        return "", "⚠ Set the Replay NPZ dir before opening the editor."
+    sewf = W.get_workflow("scene_branch_editor")
+    values = resolve_values(sewf, fields, library, flat)
+    if not values.get("npz_dir"):
+        return "", "⚠ Select a Replay NPZ dir (route) before opening the editor."
+    values["port"] = int(editor_port)
+    # Stop a previous editor (interactive server, restartable) before relaunching.
+    prev = R.latest_job("scene_branch_editor")
+    if prev is not None and R.is_alive(prev.pid):
+        R.stop(prev)
     try:
-        from scenario_generation.tools.scene_branch_editor import build_demo_from_paths
-    except Exception as e:  # noqa: BLE001 - surface import/env issues to the UI
-        return "", f"⚠ Could not import scene editor: {e}"
-    prev = _EDITOR.get("demo")
-    if prev is not None:
-        try:
-            prev.close()
-        except Exception:
-            pass
-    demo = build_demo_from_paths(
-        npz_dir=npz_dir,
-        model_path=values.get("model_path") or None,
-        reward_config=values.get("reward_config") or None,
-        ego_shape=values.get("ego_shape") or None,
-        map_path=values.get("map_path") or None,
-        tree_json=values.get("tree_json") or None,
-    )
-    port = int(editor_port)
-    demo.launch(server_name="0.0.0.0", server_port=port, prevent_thread_lock=True, quiet=True)
-    _EDITOR["demo"], _EDITOR["port"] = demo, port
-    url = f"http://{host or 'localhost'}:{port}"
+        job = R.launch(sewf, values)
+    except ValueError as e:
+        return "", _err(str(e))
+    url = f"http://{host or 'localhost'}:{int(editor_port)}"
     html = (
-        f'<p><a href="{url}" target="_blank">Open in new tab ↗</a> (give it a few seconds)</p>'
+        f'<p><a href="{url}" target="_blank">Open in new tab ↗</a> '
+        f"(PID {job.pid}; give it ~10s to boot, then it appears below)</p>"
         f'<iframe src="{url}" width="100%" height="900" '
         'style="border:1px solid #ccc;border-radius:6px"></iframe>'
     )
-    return html, f"editor on {url}"
+    return html, f"editor launching on {url} (log: {job.logfile})"
 
 
 # --------------------------------------------------------------------------------------
@@ -561,8 +573,19 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         # ---- Workspace -------------------------------------------------------------
         with gr.Tab("Workspace"):
             gr.Markdown(
-                "### Register assets — **Browse** opens your OS file picker, then click an **Add**"
+                "### Workspace — point at your workspace root and **Scan** to load all assets\n"
+                "Layout: `models/  loras/  policies/  configs/  maps/  datasets/scenes/  "
+                "datasets/routes/  runs/`. Scan auto-detects each asset (follows symlinks) and "
+                "fills every dropdown. Created datasets auto-place under `datasets/scenes|routes/`."
             )
+            with gr.Row():
+                ws_root_box = gr.Textbox(
+                    value=library0.get("workspace_root", ""), label="Workspace root", scale=4
+                )
+                ws_browse_btn = gr.Button("📁", scale=1, min_width=44)
+                scan_btn2 = gr.Button("🔄 Scan workspace", variant="primary", scale=2)
+
+            gr.Markdown("### Or register a one-off asset outside the workspace")
             with gr.Row():
                 with gr.Column(scale=2):
                     with gr.Row():
@@ -574,10 +597,10 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                     add_model = gr.Button("Add as Model", variant="primary")
                     add_lora = gr.Button("Add as LoRA")
                     add_policy = gr.Button("Add as Guidance policy")
-                    add_dataset = gr.Button("Add as Dataset")
+                    add_scene_ds = gr.Button("Add as Scene dataset")
+                    add_route_ds = gr.Button("Add as Route dataset")
                     add_reward = gr.Button("Add as Reward config")
                     add_map = gr.Button("Add as Map")
-                    add_run = gr.Button("Add as Run dir")
                     ws_status = gr.Textbox(label="", interactive=False)
             with gr.Row():
                 ego_box = gr.Textbox(
@@ -723,7 +746,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         with gr.Tab("Scene Editor"):
             sewf = wf("scene_branch_editor")
-            gr.Markdown(f"**{sewf.title}** — {sewf.description} Runs in-process on its own port.")
+            gr.Markdown(f"**{sewf.title}** — {sewf.description}")
             se_fields, se_flat = build_form(sewf, library0, asset_dropdowns)
             ed_port = gr.Number(value=default_editor_port, precision=0, label="Editor port")
             open_btn = gr.Button("▶ Open / Reload editor", variant="primary")
@@ -781,16 +804,54 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             (add_model, "models"),
             (add_lora, "loras"),
             (add_policy, "policies"),
-            (add_dataset, "datasets"),
+            (add_scene_ds, "scene_datasets"),
+            (add_route_ds, "route_datasets"),
             (add_reward, "reward_configs"),
             (add_map, "maps"),
-            (add_run, "run_dirs"),
         ):
             btn.click(
                 lambda name, sel, lib, _t=typ: _add(_t, name, sel, lib),
                 [add_name, picked, library_state],
                 add_outputs,
             )
+
+        # Workspace root + Scan: rebuild the whole library from the folder layout.
+        ws_browse_btn.click(
+            lambda cur: _os_pick("dir", cur or "")[0] or cur, ws_root_box, ws_root_box
+        )
+
+        def _scan_ws(root, library):
+            if not root or not Path(root).is_dir():
+                return (
+                    library,
+                    _library_html(library),
+                    f"⚠ not a folder: {root}",
+                    gr.update(),
+                    *_dropdown_updates(library),
+                )
+            scanned = P.scan_workspace(root)
+            # keep scalars the user may have set
+            for k in ("ego_shape", "output_dir"):
+                if library.get(k):
+                    scanned[k] = library[k]
+            P.save_library(scanned)
+            counts = ", ".join(
+                f"{t}:{len(scanned.get(t, []))}" for t in P.LIST_TYPES if scanned.get(t)
+            )
+            return (
+                scanned,
+                _library_html(scanned),
+                f"scanned {root} → {counts or 'nothing found'}",
+                gr.update(choices=_remove_choices(scanned)),
+                *_dropdown_updates(scanned),
+            )
+
+        scan_btn2.click(_scan_ws, [ws_root_box, library_state], add_outputs)
+        ws_root_box.change(
+            lambda v, lib: _set_scalar("workspace_root", v, lib),
+            [ws_root_box, library_state],
+            [library_state, lib_view],
+        )
 
         def _remove(sel, library):
             if sel and "/" in sel:

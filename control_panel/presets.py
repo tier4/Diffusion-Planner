@@ -17,22 +17,34 @@ from pathlib import Path
 
 LIBRARY_PATH = Path.home() / ".diffusion_planner_presets.json"
 
-# Asset types that are lists of {name, path, ...} entries.
-LIST_TYPES = ("models", "loras", "policies", "datasets", "reward_configs", "maps", "run_dirs")
+# Asset types that are lists of {name, path, ...} entries. Datasets are split by form:
+# scene_datasets = individual-scene list JSONs; route_datasets = contiguous per-frame NPZ dirs.
+LIST_TYPES = (
+    "models",
+    "loras",
+    "policies",
+    "scene_datasets",
+    "route_datasets",
+    "reward_configs",
+    "maps",
+    "run_dirs",
+)
 # Scalar shared settings.
-SCALAR_KEYS = ("ego_shape", "output_dir", "ssd_root")
+SCALAR_KEYS = ("ego_shape", "output_dir", "ssd_root", "workspace_root")
 
 _EMPTY: dict = {
     "models": [],  # {name, path, args_json?, lora_dir?}
     "loras": [],  # {name, path}  LoRA adapter dirs (combine with any base model)
     "policies": [],  # {name, path}  exploration / guidance policy dirs
-    "datasets": [],  # {name, path, role?}
+    "scene_datasets": [],  # {name, path}  individual-scene list JSON
+    "route_datasets": [],  # {name, path}  contiguous per-frame NPZ dir
     "reward_configs": [],  # {name, path}
     "maps": [],  # {name, path}
     "run_dirs": [],  # {name, path}
     "ego_shape": "4.76,7.24,2.29",
     "output_dir": "",
     "ssd_root": "",
+    "workspace_root": "",
     # Frozen baseline numbers (fill from memory; the eval table joins these as the baseline
     # column and computes Δ — never re-simulated/re-scored).
     "baseline_metrics": {
@@ -84,7 +96,15 @@ def load_library() -> dict:
         except (json.JSONDecodeError, OSError) as e:
             raise RuntimeError(f"Could not read library at {LIBRARY_PATH}: {e}") from e
     seed = _dev_library()
-    data = _normalize(json.loads(json.dumps(seed)) if seed else json.loads(json.dumps(_EMPTY)))
+    if seed and seed.get("workspace_root") and not seed.get("models"):
+        # Dev seed points at a workspace → scan it to auto-populate, keep seed scalars.
+        data = scan_workspace(seed["workspace_root"])
+        for k in ("ego_shape", "output_dir"):
+            if seed.get(k):
+                data[k] = seed[k]
+        data = _normalize(data)
+    else:
+        data = _normalize(json.loads(json.dumps(seed)) if seed else json.loads(json.dumps(_EMPTY)))
     save_library(data)
     return data
 
@@ -110,3 +130,94 @@ def find_entry(library: dict, asset_type: str, name: str) -> dict | None:
 def resolve_path(library: dict, asset_type: str, name: str) -> str:
     e = find_entry(library, asset_type, name)
     return e.get("path", "") if e else ""
+
+
+# --- workspace scan -------------------------------------------------------------------
+# Standard workspace layout the scanner expects.
+WORKSPACE_DIRS = {
+    "models": "models",
+    "loras": "loras",
+    "policies": "policies",
+    "reward_configs": "configs",
+    "maps": "maps",
+    "scene_datasets": "datasets/scenes",
+    "route_datasets": "datasets/routes",
+}
+
+
+def _is_route_dir(d: Path) -> bool:
+    """A contiguous-route dir has per-frame NPZs named <prefix>_<frameidx>.npz."""
+    import re
+
+    pat = re.compile(r".+_\d+\.npz$")
+    for f in d.glob("*.npz"):
+        if pat.match(f.name):
+            return True
+    return False
+
+
+def _scan_models(root: Path) -> list[dict]:
+    out = []
+    if not root.is_dir():
+        return out
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        pth = next(iter(d.glob("best_model.pth")), None) or next(
+            iter(sorted(d.glob("*.pth"))), None
+        )
+        if not pth:
+            continue
+        entry = {"name": d.name, "path": str(pth)}
+        for cand in (d / "args.json", d.parent / "args.json"):
+            if cand.exists():
+                entry["args_json"] = str(cand)
+                break
+        out.append(entry)
+    return out
+
+
+def _scan_dirs_with(root: Path, marker: str) -> list[dict]:
+    """Subdirs containing a marker file (adapter_config.json / exploration_policy_config.json)."""
+    if not root.is_dir():
+        return []
+    return [
+        {"name": d.name, "path": str(d)}
+        for d in sorted(p for p in root.iterdir() if p.is_dir())
+        if (d / marker).exists()
+    ]
+
+
+def _scan_files(root: Path, glob: str) -> list[dict]:
+    if not root.is_dir():
+        return []
+    return [{"name": f.stem, "path": str(f)} for f in sorted(root.glob(glob))]
+
+
+def scan_workspace(root: str | Path) -> dict:
+    """Walk the standard workspace layout and return a library dict (auto-detected assets).
+
+    Detection by on-disk signature: model = .pth + args.json; LoRA = dir w/ adapter_config.json;
+    policy = dir w/ exploration_policy_config.json; reward config = configs/*.json; map = maps/*.osm;
+    scene dataset = datasets/scenes/*.json; route dataset = datasets/routes/<dir of *_<idx>.npz>.
+    Follows symlinks (so scattered assets can be linked into the workspace).
+    """
+    root = Path(root).expanduser()
+    lib = json.loads(json.dumps(_EMPTY))
+    lib["workspace_root"] = str(root)
+    if not root.is_dir():
+        return lib
+    lib["models"] = _scan_models(root / WORKSPACE_DIRS["models"])
+    lib["loras"] = _scan_dirs_with(root / WORKSPACE_DIRS["loras"], "adapter_config.json")
+    lib["policies"] = _scan_dirs_with(
+        root / WORKSPACE_DIRS["policies"], "exploration_policy_config.json"
+    )
+    lib["reward_configs"] = _scan_files(root / WORKSPACE_DIRS["reward_configs"], "*.json")
+    lib["maps"] = _scan_files(root / WORKSPACE_DIRS["maps"], "*.osm")
+    lib["scene_datasets"] = _scan_files(root / WORKSPACE_DIRS["scene_datasets"], "*.json")
+    routes_root = root / WORKSPACE_DIRS["route_datasets"]
+    if routes_root.is_dir():
+        lib["route_datasets"] = [
+            {"name": d.name, "path": str(d)}
+            for d in sorted(p for p in routes_root.iterdir() if p.is_dir())
+            if _is_route_dir(d)
+        ]
+    return lib

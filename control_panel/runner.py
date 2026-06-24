@@ -74,19 +74,35 @@ def _python_prefix(wf: Workflow, values: dict) -> list[str]:
     raise ValueError(f"{wf.key}: neither module nor script_path set")
 
 
+# lanelet2 needs its shared libs + python bindings on the path BEFORE the process starts
+# (LD_LIBRARY_PATH is read by the dynamic linker at exec). Do NOT `source setup.bash` — that
+# breaks lanelet under zsh (memory: reference_scene_editor_test_data). Set the vars explicitly.
+_LANELET_LD = "/opt/ros/humble/lib/x86_64-linux-gnu:/opt/ros/humble/lib"
+_LANELET_PY = (
+    "/opt/ros/humble/lib/python3.10/site-packages:"
+    "/opt/ros/humble/local/lib/python3.10/dist-packages"
+)
+
+
 def _wrap_env(wf: Workflow, inner: list[str]) -> list[str]:
-    """Wrap the command for the ROS env when required; venv runs inner directly."""
+    """Wrap the command for the ROS env when required; venv/lanelet run inner directly."""
     if wf.env == "ros":
         return ["bash", "-lc", f"source {_ROS_SETUP} && {shlex.join(inner)}"]
-    if wf.env != "venv":
+    if wf.env not in ("venv", "lanelet"):
         raise ValueError(f"{wf.key}: unknown env {wf.env!r}")
     return inner
 
 
-def _subprocess_env() -> dict:
+def _prepend(env: dict, key: str, value: str) -> None:
+    env[key] = f"{value}:{env[key]}" if env.get(key) else value
+
+
+def _subprocess_env(wf: Workflow) -> dict:
     env = os.environ.copy()
-    extra = f"{REPO_ROOT}:{REPO_ROOT / 'diffusion_planner'}"
-    env["PYTHONPATH"] = f"{extra}:{env['PYTHONPATH']}" if env.get("PYTHONPATH") else extra
+    _prepend(env, "PYTHONPATH", f"{REPO_ROOT}:{REPO_ROOT / 'diffusion_planner'}")
+    if wf.env == "lanelet":
+        _prepend(env, "LD_LIBRARY_PATH", _LANELET_LD)
+        _prepend(env, "PYTHONPATH", _LANELET_PY)
     env.setdefault("PYTHONUNBUFFERED", "1")  # so the log tail is live, not block-buffered
     return env
 
@@ -112,7 +128,7 @@ def launch(wf: Workflow, values: dict) -> Job:
         proc = subprocess.Popen(
             cmd,
             cwd=str(REPO_ROOT),
-            env=_subprocess_env(),
+            env=_subprocess_env(wf),
             stdout=logf,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
