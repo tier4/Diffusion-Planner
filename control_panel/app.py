@@ -903,26 +903,45 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                         if wf(k).creates:
                             creating_panels.append(pp)
 
-        with gr.Tab("Visualization"):
-            with gr.Tab("Closed-loop A/B sim"):
+        with gr.Tab("Render"):
+            _MODES = [
+                "Closed-loop A/B sim (re-infer each step, ~8s)",
+                "Open-loop A/B (perfect-track one plan)",
+                "Open-loop generated candidates (model + GRPO config + guidance)",
+                "Render route / scenes (frames → PNGs)",
+            ]
+            render_mode = gr.Dropdown(_MODES, value=_MODES[0], label="Render mode")
+            with gr.Group(visible=True) as g_closed:
                 gr.Markdown(
-                    "Simulate ~8s closed-loop from each individual scene (re-inference each step), "
-                    "two models overlaid. PNGs + optional WebM."
+                    "Simulate ~8s closed-loop from each scene (re-inference each step), two models "
+                    "overlaid. PNGs + optional WebM."
                 )
                 _viz_with_viewer(wf("compare_models_ghost"))
-            with gr.Tab("Open-loop A/B (perfect-track)"):
+            with gr.Group(visible=False) as g_openpt:
                 gr.Markdown(
-                    "One deterministic plan per scene, perfect-tracked; two models overlaid. "
-                    "PNG seq + WebM per scene."
+                    "One deterministic plan per scene, perfect-tracked (no re-inference); two models "
+                    "overlaid. Pick a guidance policy to see guided plans. PNG seq + WebM."
                 )
                 _viz_with_viewer(wf("ghost_replay_openloop"))
-            with gr.Tab("Render route / scenes"):
+            with gr.Group(visible=False) as g_gen:
+                gr.Markdown(
+                    "Generate K candidate trajectories per scene under the chosen model + GRPO "
+                    "config (guidance), and render them — so you can see what a model/guidance "
+                    "produces. (Untick 'No viz' to get the PNGs.)"
+                )
+                _viz_with_viewer(wf("viz_p4_recovery"))
+            with gr.Group(visible=False) as g_route:
                 gr.Markdown(
                     "Render a route dir, a single-scene dir, or a parent of collision-window "
-                    "subfolders to PNGs (one per frame). Ego dims + a route pickle in the folder "
-                    "are auto-detected."
+                    "subfolders to PNGs. Ego dims + a route pickle in the folder are auto-detected."
                 )
                 _viz_with_viewer(wf("render_npz_dir"))
+
+            def _toggle_mode(m):
+                idx = _MODES.index(m) if m in _MODES else 0
+                return [gr.update(visible=(i == idx)) for i in range(4)]
+
+            render_mode.change(_toggle_mode, render_mode, [g_closed, g_openpt, g_gen, g_route])
 
         with gr.Tab("Scene Editor"):
             sewf = wf("scene_branch_editor")
