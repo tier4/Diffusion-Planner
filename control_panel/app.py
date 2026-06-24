@@ -810,7 +810,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             run_cfg = gr.JSON(label="grpo_config.json")
 
         # ---- workflow tabs ---------------------------------------------------------
-        with gr.Tab("Train (RSFT)"):
+        with gr.Tab("Train (RSFT)") as train_tab:
             workflow_panel(wf("train_ranked_sft"), library0, library_state, asset_dropdowns)
             gr.Markdown("### Per-epoch metrics (from the latest train log)")
             refresh_btn = gr.Button("Refresh epoch table")
@@ -818,7 +818,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             ep_table = gr.Dataframe(headers=_EPOCH_HEADERS)
             refresh_btn.click(lambda: _epoch_table("train_ranked_sft"), None, [ep_table, ep_status])
 
-        with gr.Tab("Evaluate"):
+        with gr.Tab("Evaluate") as eval_tab:
             with gr.Tab("Metrics"):
                 use_guid = gr.Checkbox(
                     value=False,
@@ -863,7 +863,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             with gr.Tab("L2 loss"):
                 workflow_panel(wf("eval_l2"), library0, library_state, asset_dropdowns)
 
-        with gr.Tab("Merge + Export"):
+        with gr.Tab("Merge + Export") as merge_tab:
             with gr.Tab("Merge LoRA"):
                 workflow_panel(wf("merge_lora"), library0, library_state, asset_dropdowns)
             with gr.Tab("Export ONNX"):
@@ -883,7 +883,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
             show_btn.click(_show, [library_state, *vp["flat"]], [vid, gallery, vmsg])
 
-        with gr.Tab("Data generation"):
+        with gr.Tab("Data generation") as datagen_tab:
             with gr.Tab("Collision mining"):
                 gr.Markdown(
                     "Mine scenes from a route corpus by driving a model closed-loop and flagging "
@@ -916,7 +916,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                     if wf(k).creates:
                         creating_panels.append(pp)
 
-        with gr.Tab("Render"):
+        with gr.Tab("Render") as render_tab:
             _MODES = [
                 "Closed-loop A/B sim (re-infer each step, ~8s)",
                 "Open-loop A/B (perfect-track one plan)",
@@ -1015,6 +1015,30 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             )
 
         add_outputs = [library_state, lib_view, ws_status, remove_dd, *flat_dropdowns]
+
+        def _rescan_on_switch(library):
+            """Re-scan the workspace when a tab is opened so assets just created by another tab
+            (e.g. a finished RSFT run's lora_epoch dirs) appear in the dropdowns without a manual
+            Scan. Choices-only refresh — selected values are preserved. No-op without a workspace."""
+            root = (library or {}).get("workspace_root")
+            if not root or not Path(root).expanduser().is_dir():
+                return (library, _library_html(library), gr.update(), *_dropdown_updates(library))
+            scanned = P.scan_workspace(root)
+            for k in ("ego_shape", "output_dir"):
+                if library.get(k):
+                    scanned[k] = library[k]
+            P.save_library(scanned)
+            return (
+                scanned,
+                _library_html(scanned),
+                gr.update(choices=_remove_choices(scanned)),
+                *_dropdown_updates(scanned),
+            )
+
+        _switch_outputs = [library_state, lib_view, remove_dd, *flat_dropdowns]
+        for _tab in (train_tab, eval_tab, merge_tab, datagen_tab, render_tab):
+            _tab.select(_rescan_on_switch, library_state, _switch_outputs)
+
         for btn, typ in (
             (add_model, "models"),
             (add_lora, "loras"),

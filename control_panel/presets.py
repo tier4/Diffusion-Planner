@@ -195,6 +195,36 @@ def _scan_files(root: Path, glob: str) -> list[dict]:
     return [{"name": f.stem, "path": str(f)} for f in sorted(root.glob(glob))]
 
 
+def _scan_run_loras(runs_root: Path) -> list[dict]:
+    """LoRA epoch dirs produced by training runs anywhere under runs/.
+
+    A finished RSFT/GRPO run writes ``lora_epoch_NNN/`` (and ``lora_latest/``) inside its run
+    folder, NOT in the top-level ``loras/`` dir — so they are auto-discovered here and named
+    ``<run>_epNNN`` (timestamp prefix stripped) so a completed experiment's checkpoints appear
+    as selectable LoRAs without any manual registration.
+    """
+    import re
+
+    if not runs_root.is_dir():
+        return []
+    ts_re = re.compile(r"^\d{8}-\d{6}_")  # strip the "20260625-120000_" run-folder prefix
+    out: list[dict] = []
+    seen: set[str] = set()
+    dirs = sorted(runs_root.rglob("lora_epoch_*")) + sorted(runs_root.rglob("lora_latest"))
+    for d in dirs:
+        if not d.is_dir() or not (d / "adapter_config.json").exists():
+            continue
+        run_name = ts_re.sub("", d.parent.name)
+        ep = d.name.replace("lora_epoch_", "ep").replace("lora_latest", "latest")
+        base = f"{run_name}_{ep}"
+        name, n = base, 2
+        while name in seen:
+            name, n = f"{base}-{n}", n + 1
+        seen.add(name)
+        out.append({"name": name, "path": str(d)})
+    return out
+
+
 def _scan_scene_datasets(root: Path) -> list[dict]:
     """Scene datasets = datasets/scenes/*.json lists, PLUS any subfolder of NPZs (e.g. mined
     collision windows or editor saves) — for which we auto-materialize a <name>.json list so it
@@ -241,7 +271,18 @@ def scan_workspace(root: str | Path) -> dict:
     if not root.is_dir():
         return lib
     lib["models"] = _scan_models(root / WORKSPACE_DIRS["models"])
-    lib["loras"] = _scan_dirs_with(root / WORKSPACE_DIRS["loras"], "adapter_config.json")
+    # LoRAs come from the top-level loras/ dir AND from any training run under runs/ (the place
+    # RSFT/GRPO actually writes lora_epoch_NNN/). De-dup names across both sources.
+    loras = _scan_dirs_with(root / WORKSPACE_DIRS["loras"], "adapter_config.json")
+    taken = {e["name"] for e in loras}
+    for e in _scan_run_loras(root / "runs"):
+        name, n = e["name"], 2
+        while name in taken:
+            name, n = f"{e['name']}-{n}", n + 1
+        e["name"] = name
+        taken.add(name)
+        loras.append(e)
+    lib["loras"] = loras
     lib["policies"] = _scan_dirs_with(
         root / WORKSPACE_DIRS["policies"], "exploration_policy_config.json"
     )
