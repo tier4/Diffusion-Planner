@@ -66,6 +66,22 @@ manual scan needed.
 | **Render** | one tab, a mode dropdown: closed-loop A/B · open-loop A/B · generated candidates · render route/scenes. A/B sides each take model + optional LoRA + optional guidance policy (any combination) |
 | **Scene Editor** | the Scene Branch Editor, launched as a subprocess (lanelet env) + embedded via iframe; export/save dirs pre-pointed into the workspace |
 
+## Training config presets (Train → RSFT)
+
+The training **mode** lives inside the GRPO/experiment config JSON you pick (the `🎛` dropdown),
+not as a separate GUI toggle. Ready-made presets ship in `rlvr/configs/`:
+
+| Preset | `ranked_sft_mode` | What it does |
+|---|---|---|
+| `rsft_curated_sft_ego_gt` | `curated` | **Plain SFT on the ego GT** — no generation, no ranking; target = each NPZ's `ego_agent_future`. lr 1e-4. |
+| `rsft_curated_sft_ego_gt_lowlr` | `curated` | Same, gentler lr 5e-5 / 25 epochs (tighter L2 control). |
+| `rsft_ranked_gt_neighbor` | `gt_neighbor` | Ranked-SFT: generate K, rank by reward, train on the winner; GT neighbor targets. |
+| `rsft_ranked_baseline_neighbor` | `baseline_neighbor` | Ranked-SFT with base-model neighbor targets + neighbor reg (anti-drift). |
+
+All set `sft_velocity_weight=true` (required for curated, else longitudinal L2 drifts) and
+`lora_target=all` (train all blocks, ablate post-hoc). `ranked_sft_mode` also accepts the alias
+`"sft"`/`"gt"` for the curated path. Use the optional **Epochs** field to override per run.
+
 ## Reward config & the SC gotcha
 
 Avoidance (`sc`) metrics are only measured when the reward config enables static-collision
