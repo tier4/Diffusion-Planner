@@ -728,6 +728,10 @@ class GRPOConfig:
             self.grpo_loss_type = _loss_renames[self.grpo_loss_type]
         if self.exploration_loss_type in _loss_renames:
             self.exploration_loss_type = _loss_renames[self.exploration_loss_type]
+        # Plain supervised fine-tuning on the ego GT (no generation/ranking) is just the curated
+        # codepath (target = each NPZ's ego_agent_future). Accept self-documenting aliases.
+        if self.ranked_sft_mode in ("sft", "gt", "sft_gt", "gt_ego"):
+            self.ranked_sft_mode = "curated"
         # Validate: best_sample_mse is not compatible with PPO (inner_epochs > 1)
         if self.exploration_loss_type == "best_sample_mse" and self.exploration_inner_epochs > 1:
             raise ValueError(
