@@ -515,14 +515,29 @@ def _epoch_table(key: str):
     ], f"job {job.started_at}: {len(rows)} rows"
 
 
-def _scan_outputs(output_dir: str):
+def _scan_outputs(output_dir: str, one_still_per_scene: bool = False):
+    """Collect rendered outputs under ``output_dir``.
+
+    Returns ``(webm_paths, image_paths, message)``. With ``one_still_per_scene`` (the Render
+    viewer), images collapse to the FIRST png of each scene — one representative still per
+    scene folder (or the first frame of a flat single-scene sim) instead of every frame.
+    Otherwise (the Metrics viewer, where each png already IS a scene) all pngs are returned.
+    """
     if not output_dir or not Path(output_dir).exists():
-        return None, [], "Output dir not found."
+        return [], [], "Output dir not found."
     root = Path(output_dir)
-    webms = sorted(root.rglob("*.webm"))
+    webms = [str(w) for w in sorted(root.rglob("*.webm"))]
     pngs = sorted(root.rglob("*.png"))
-    video = str(webms[0]) if webms else None
-    return video, [str(p) for p in pngs[:60]], f"{len(webms)} webm, {len(pngs)} png."
+    if one_still_per_scene:
+        first_by_dir: dict = {}
+        for p in pngs:
+            first_by_dir.setdefault(p.parent, p)  # sorted → first frame per scene dir wins
+        imgs = [str(p) for p in first_by_dir.values()]
+        note = f"{len(imgs)} scene still(s)"
+    else:
+        imgs = [str(p) for p in pngs[:60]]
+        note = f"{len(pngs)} png"
+    return webms, imgs, f"{len(webms)} webm, {note}."
 
 
 def _resolve_asset(asset_type: str, sel_path: str) -> tuple[dict, str]:
@@ -870,18 +885,22 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                 workflow_panel(wf("torch2onnx"), library0, library_state, asset_dropdowns)
 
         def _viz_with_viewer(vwf):
-            """A workflow panel plus a 'Load rendered outputs' WebM/PNG viewer."""
+            """A workflow panel plus a 'Load rendered outputs' viewer with WebMs and stills
+            shown in SEPARATE galleries (stills = one representative frame per scene)."""
             vp = workflow_panel(vwf, library0, library_state, asset_dropdowns)
             show_btn = gr.Button("Load rendered outputs")
-            vid = gr.Video(label="WebM")
-            gallery = gr.Gallery(label="PNGs", columns=4, height=460)
+            webm_gallery = gr.Gallery(label="WebM clips (click to play)", columns=2, height=420)
+            png_gallery = gr.Gallery(label="One still per scene", columns=4, height=420)
             vmsg = gr.Textbox(label="", interactive=False)
 
             def _show(library, *flat, _wf=vwf, _vp=vp):
                 v = resolve_values(_wf, _vp["fields"], library, flat)
-                return _scan_outputs(v.get("output_dir", ""))
+                webms, stills, msg = _scan_outputs(
+                    v.get("output_dir", ""), one_still_per_scene=True
+                )
+                return webms, stills, msg
 
-            show_btn.click(_show, [library_state, *vp["flat"]], [vid, gallery, vmsg])
+            show_btn.click(_show, [library_state, *vp["flat"]], [webm_gallery, png_gallery, vmsg])
 
         with gr.Tab("Data generation") as datagen_tab:
             with gr.Tab("Collision mining"):
