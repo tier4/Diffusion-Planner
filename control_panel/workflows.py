@@ -665,7 +665,9 @@ _register(
         "plan, neighbor boxes. Outputs PNG seq + WebM per scene.",
         args=[
             _model_path(name="model_baseline", label="Baseline model (.pth)"),
+            _lora(name="lora_baseline", label="LoRA (baseline)"),
             _model_path(name="model_best", label="Best model (.pth)", required=False),
+            _lora(name="lora_best", label="LoRA (best)"),
             ArgSpec(
                 "policy_dir", "dir", label="Guidance policy (instead of best)", shared="policies"
             ),

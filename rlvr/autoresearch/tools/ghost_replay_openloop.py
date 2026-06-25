@@ -31,11 +31,12 @@ from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 
 from preference_optimization.utils import load_npz_data
-from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
+from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched
 from rlvr.autoresearch.tools.ghost_sim_common import (
     _NB_COLOR,
     extract_scene_polylines,
     extract_stopped_neighbors,
+    load_model,  # LoRA-capable loader (model_path, lora_path, device)
 )
 from rlvr.autoresearch.tools.recovery_sim import (
     _LANE_BORDER_COLOR,
@@ -158,9 +159,11 @@ def _render_frame(
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model_baseline", required=True)
+    p.add_argument("--lora_baseline", default=None, help="optional LoRA adapter dir for baseline")
     p.add_argument(
         "--model_best", default=None, help="second model .pth; omit when using --policy_dir"
     )
+    p.add_argument("--lora_best", default=None, help="optional LoRA adapter dir for the best model")
     p.add_argument(
         "--policy_dir",
         default=None,
@@ -202,7 +205,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ego_shape = [float(x) for x in args.ego_shape.split(",")]
-    m_base, a_base = load_model(args.model_baseline, device)
+    m_base, a_base = load_model(args.model_baseline, args.lora_baseline, device)
     policy = None
     if args.policy_dir:
         from exploration_policy.utils import run_frozen_encoder
@@ -212,7 +215,7 @@ def main():
         policy, heads = load_policy(args.policy_dir, a_base, device)
         m_best, a_best = m_base, a_base
     elif args.model_best:
-        m_best, a_best = load_model(args.model_best, device)
+        m_best, a_best = load_model(args.model_best, args.lora_best, device)
     else:
         raise SystemExit("pass either --model_best or --policy_dir")
     scenes = json.load(open(args.scenes))
