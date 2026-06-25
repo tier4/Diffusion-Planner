@@ -35,7 +35,6 @@ from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched
 from rlvr.autoresearch.tools.ghost_sim_common import (
     _NB_COLOR,
     extract_scene_polylines,
-    extract_stopped_neighbors,
     load_model,  # LoRA-capable loader (model_path, lora_path, device)
 )
 from rlvr.autoresearch.tools.recovery_sim import (
@@ -55,6 +54,47 @@ def _heading(row):
     if row.shape[-1] >= 4:
         return math.atan2(float(row[3]), float(row[2]))
     return float(row[2])
+
+
+def _real_neighbors(npz_path):
+    """Real (non-padding) neighbors + their dims. Returns (idx_dims, past[P,Tp,>=4], fut[P,Tf,>=4]).
+
+    idx_dims = list of (slot_index, length, width). Includes BOTH moving and stopped neighbors so
+    the open-loop replay animates every agent along its recorded track, not just parked ones.
+    """
+    d = dict(np.load(npz_path, allow_pickle=True))
+    nb_past = d.get("neighbor_agents_past")
+    nb_fut = d.get("neighbor_agents_future")
+    if nb_past is None or nb_fut is None:
+        return [], None, None
+    if nb_past.ndim == 4:
+        nb_past = nb_past[0]
+    if nb_fut.ndim == 4:
+        nb_fut = nb_fut[0]
+    idx_dims = []
+    for i in range(nb_past.shape[0]):
+        xy0 = nb_past[i, -1, :2]
+        if abs(float(xy0[0])) + abs(float(xy0[1])) < 1e-6:
+            continue  # padding slot
+        width = float(nb_past[i, -1, 6])
+        length = float(nb_past[i, -1, 7])
+        idx_dims.append((i, length, width))
+    return idx_dims, nb_past, nb_fut
+
+
+def _neighbor_boxes_at(nb_arr, step, idx_dims):
+    """OBBs (x, y, heading, length, width) for every present neighbor at time `step`."""
+    boxes = []
+    if nb_arr is None or step < 0 or step >= nb_arr.shape[1]:
+        return boxes
+    for i, length, width in idx_dims:
+        x = float(nb_arr[i, step, 0])
+        y = float(nb_arr[i, step, 1])
+        if abs(x) + abs(y) < 1e-6:
+            continue  # not present this frame
+        h = _heading(nb_arr[i, step])
+        boxes.append((x, y, h, length, width))
+    return boxes
 
 
 def _scene_base(ax, polylines, cx, cy, view_half):
@@ -188,14 +228,6 @@ def main():
     p.add_argument("--view_half", type=float, default=28.0)
     p.add_argument("--fps", type=int, default=10)
     p.add_argument("--hist_steps", type=int, default=30)
-    p.add_argument(
-        "--ahead_thresh",
-        type=float,
-        default=8.0,
-        help="stopped neighbors with t0 longitudinal x >= this are AHEAD "
-        "(ego approaching) -> appear at t=0; x < this are beside/behind "
-        "(post-avoidance/branch, were visible) -> shown during history too",
-    )
     # Guidance envelope (must match the policy's training labels)
     p.add_argument("--lambda_lat", type=float, default=5.0)
     p.add_argument("--lat_scale", type=float, default=2.0)
@@ -269,17 +301,15 @@ def main():
         label_baseline = f"{args.label_baseline} ({eta_a})" if eta_a else args.label_baseline
         label_best = f"{args.label_best} ({eta_b})" if eta_b else args.label_best
         past = np.load(sp, allow_pickle=True)["ego_agent_past"].astype(np.float32)
-        nb_boxes = extract_stopped_neighbors(sp)
         polylines = extract_scene_polylines(data)
-
-        # PER-NEIGHBOR: beside/behind (x < thresh) were visible -> show in history;
-        # ahead (x >= thresh, ego approaching) -> appear at t=0.
-        hist_nb = [b for b in nb_boxes if b[0] < args.ahead_thresh]
-        n_ahead = len(nb_boxes) - len(hist_nb)
-        hidden_note = f" — {n_ahead} neighbor(s) ahead appear at t=0" if n_ahead else ""
+        # ALL real neighbors (moving + stopped), animated along their recorded tracks: past during
+        # the history frames, future during the perfect-track frames.
+        idx_dims, nb_past_arr, nb_fut_arr = _real_neighbors(sp)
 
         H = min(args.hist_steps, past.shape[0])
         hist = past[past.shape[0] - H :]
+        # Align ego-history index to the neighbor-past time axis (both end at t=0).
+        nb_past_T = nb_past_arr.shape[1] if nb_past_arr is not None else H
         sc_dir = out_root / name
         sc_dir.mkdir(parents=True, exist_ok=True)
 
@@ -299,13 +329,14 @@ def main():
                     lw=2,
                 )
             ]
+            nb_step = nb_past_T - H + i  # aligned neighbor-past time index
             _render_frame(
                 sc_dir / f"f{fi:04d}.png",
                 egos,
                 polylines,
-                hist_nb,
+                _neighbor_boxes_at(nb_past_arr, nb_step, idx_dims),
                 True,
-                f"{name}   t={t:+.1f}s   HISTORY (model context){hidden_note}",
+                f"{name}   t={t:+.1f}s   HISTORY (model context)",
                 args.view_half,
                 ego_shape,
             )
@@ -331,7 +362,7 @@ def main():
                 sc_dir / f"f{fi:04d}.png",
                 egos,
                 polylines,
-                nb_boxes,
+                _neighbor_boxes_at(nb_fut_arr, i, idx_dims),
                 True,
                 f"{name}   t={i * 0.1:+.1f}s   PERFECT-TRACK (baseline vs best)",
                 args.view_half,
@@ -365,7 +396,8 @@ def main():
         )
         ok = "OK" if rc.returncode == 0 else f"FAIL {rc.stderr.decode()[-150:]}"
         print(
-            f"{name}: {fi} frames ({H} hist + {traj_base.shape[0]} track), {len(nb_boxes)} nb -> {webm.name} [{ok}]"
+            f"{name}: {fi} frames ({H} hist + {traj_base.shape[0]} track), "
+            f"{len(idx_dims)} nb -> {webm.name} [{ok}]"
         )
 
 
