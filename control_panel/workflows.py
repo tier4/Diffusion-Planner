@@ -389,8 +389,8 @@ _register(
         title="Eval: L2 (valid_predictor)",
         script_path="diffusion_planner/valid_predictor.py",
         torchrun=True,
-        description="DDP L2 validation. Vehicle must match the model (J6→J6 val, xx1→xx1 val). "
-        "Merge any LoRA into a .pth first (use the Merge+Export tab).",
+        description="DDP L2 validation. The validation set's vehicle/ego-shape must match the "
+        "model's training platform. Merge any LoRA into a .pth first (use the Merge+Export tab).",
         args=[
             _model_path(name="resume_model_path", label="Model (.pth)"),
             ArgSpec(
