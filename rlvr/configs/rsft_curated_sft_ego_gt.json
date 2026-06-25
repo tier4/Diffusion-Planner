@@ -6,8 +6,10 @@
   "lora_alpha": 32,
   "lora_dropout": 0.05,
   "lora_target": "all",
-  "learning_rate": 0.0001,
+  "learning_rate": 0.00007,
   "kl_coef": 0.1,
+  "neighbor_reg_weight": 1.0,
+  "neighbor_reg_only": false,
   "train_epochs": 15,
   "sg_filter_window": 11,
   "sg_filter_order": 3
