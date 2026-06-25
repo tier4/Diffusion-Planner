@@ -159,28 +159,38 @@ def build_form(wf: W.Workflow, library: dict, asset_dropdowns: dict):
         return dd
 
     specs = list(wf.args)
+    # One row per "model side": a models field plus the LoRA and/or guidance-policy fields that
+    # immediately follow it (each at most once). Gives clean "Model / LoRA / Guidance" rows for
+    # the A/B tools without per-tab layout code.
+    _GROUP_SCALE = {"models": 3, "loras": 2, "policies": 2}
     i = 0
     while i < len(specs):
         spec = specs[i]
         role = _field_role(spec)
-        nxt = specs[i + 1] if i + 1 < len(specs) else None
-        # Group a model field with the LoRA that immediately follows it on one row.
-        if (
-            role == "list"
-            and spec.shared == "models"
-            and nxt is not None
-            and _field_role(nxt) == "list"
-            and nxt.shared == "loras"
-        ):
-            with gr.Row():
-                dd_m = _list_widget(spec, scale=3)
-                dd_l = _list_widget(nxt, scale=2)
-            fields.append({"name": spec.name, "spec": spec, "role": "list", "comps": [dd_m]})
-            flat.append(dd_m)
-            fields.append({"name": nxt.name, "spec": nxt, "role": "list", "comps": [dd_l]})
-            flat.append(dd_l)
-            i += 2
-            continue
+        if role == "list" and spec.shared == "models":
+            group = [spec]
+            seen = {"models"}
+            j = i + 1
+            while j < len(specs):
+                f = specs[j]
+                if (
+                    _field_role(f) == "list"
+                    and f.shared in ("loras", "policies")
+                    and f.shared not in seen
+                ):
+                    group.append(f)
+                    seen.add(f.shared)
+                    j += 1
+                else:
+                    break
+            if len(group) > 1:
+                with gr.Row():
+                    for g in group:
+                        dd = _list_widget(g, scale=_GROUP_SCALE.get(g.shared, 2))
+                        fields.append({"name": g.name, "spec": g, "role": "list", "comps": [dd]})
+                        flat.append(dd)
+                i = j
+                continue
 
         comps = []
         if role in ("hidden", "auto", "derive", "ego"):

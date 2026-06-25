@@ -244,6 +244,23 @@ def _lora(name: str = "lora_path", label: str = "LoRA") -> ArgSpec:
     )
 
 
+def _policy(
+    name: str = "policy_dir", label: str = "Guidance model", required: bool = False
+) -> ArgSpec:
+    """A guidance / exploration-policy field. The single place to add 'guidance model' to any
+    tool — pair it after a model (+LoRA) and the form lays out model / LoRA / guidance on one row.
+    """
+    return ArgSpec(
+        name,
+        "dir",
+        label=label,
+        shared="policies",
+        required=required,
+        help="Exploration/guidance policy dir (optional). Adds learned guidance on top of the "
+        "model — combine freely with any base model and LoRA.",
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Registry
 # --------------------------------------------------------------------------------------
@@ -354,9 +371,7 @@ _register(
         "loaded from the policy dir — do NOT pass envelope flags (per the eval rule).",
         args=[
             _model_path(),
-            ArgSpec(
-                "policy_dir", "dir", label="Guidance policy dir", shared="policies", required=True
-            ),
+            _policy(name="policy_dir", label="Guidance model", required=True),
             _scenes(label="Scenes"),
             _reward_config(),
             _ego_shape(),
@@ -666,11 +681,10 @@ _register(
         args=[
             _model_path(name="model_baseline", label="Baseline model (.pth)"),
             _lora(name="lora_baseline", label="LoRA (baseline)"),
+            _policy(name="policy_baseline", label="Guidance (baseline)"),
             _model_path(name="model_best", label="Best model (.pth)", required=False),
             _lora(name="lora_best", label="LoRA (best)"),
-            ArgSpec(
-                "policy_dir", "dir", label="Guidance policy (instead of best)", shared="policies"
-            ),
+            _policy(name="policy_best", label="Guidance (best)"),
             ArgSpec("label_baseline", "str", default="baseline"),
             ArgSpec("label_best", "str", default="best"),
             _scenes(),
@@ -697,11 +711,11 @@ _register(
         args=[
             _model_path(name="model_a", label="Model A (.pth)"),
             _lora(name="lora_a", label="LoRA A"),
-            ArgSpec("policy_a", "dir", label="Guidance policy A (optional)", shared="policies"),
+            _policy(name="policy_a", label="Guidance A"),
             ArgSpec("label_a", "str", default="A"),
             _model_path(name="model_b", label="Model B (.pth, optional)", required=False),
             _lora(name="lora_b", label="LoRA B"),
-            ArgSpec("policy_b", "dir", label="Guidance policy B (optional)", shared="policies"),
+            _policy(name="policy_b", label="Guidance B"),
             ArgSpec("label_b", "str", default="B"),
             _scenes(label="Scenes (space-separated NPZ paths)", multi=True, shared=None),
             _output_dir(),
