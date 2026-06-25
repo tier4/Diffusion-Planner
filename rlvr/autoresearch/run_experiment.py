@@ -485,6 +485,7 @@ def run(
     baseline_cache_path: Path | None = None,
     train_scenes_override: Path | None = None,
     train_epochs_override: int | None = None,
+    sft_batch_size_override: int | None = None,
 ):
     # Load baseline cache (precomputed baseline/GT paths per scene)
     # Auto-detect if not specified: look for baseline_cache_val50.json in output dir
@@ -542,6 +543,21 @@ def run(
     # CLI --train_epochs overrides whatever the config declares.
     if train_epochs_override is not None:
         grpo_config.train_epochs = train_epochs_override
+    # CLI --sft_batch_size overrides scenes-per-forward-pass (the main speed knob). The trainer
+    # requires grad_accum_groups to be a multiple of it, so bump grad_accum_groups up to the
+    # nearest valid multiple (>= its current value) when needed, and say so.
+    if sft_batch_size_override is not None:
+        bs = max(1, sft_batch_size_override)
+        grpo_config.sft_batch_size = bs
+        if grpo_config.grad_accum_groups % bs != 0:
+            import math
+
+            new_ga = math.ceil(max(grpo_config.grad_accum_groups, bs) / bs) * bs
+            print(
+                f"  [sft_batch_size={bs}] grad_accum_groups {grpo_config.grad_accum_groups} "
+                f"-> {new_ga} (must be a multiple of the batch size)"
+            )
+            grpo_config.grad_accum_groups = new_ga
     # Re-run __post_init__ to normalize legacy loss type names
     grpo_config.__post_init__()
 
@@ -1117,6 +1133,13 @@ def main():
         default=None,
         help="Override the config's train_epochs (otherwise the value from --config is used).",
     )
+    parser.add_argument(
+        "--sft_batch_size",
+        type=int,
+        default=None,
+        help="Scenes per forward pass in ranked/curated SFT (speed knob; config default is 1 = "
+        "sequential). grad_accum_groups is auto-bumped to a multiple if needed.",
+    )
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -1147,6 +1170,7 @@ def main():
             baseline_cache_path=args.baseline_cache,
             train_scenes_override=args.train_scenes,
             train_epochs_override=args.train_epochs,
+            sft_batch_size_override=args.sft_batch_size,
         )
     except Exception as e:
         print(f"\n---")

@@ -293,6 +293,13 @@ _register(
                 label="Epochs (optional override)",
                 help="Leave blank to use the train_epochs set in the experiment config above.",
             ),
+            ArgSpec(
+                "sft_batch_size",
+                "int",
+                label="Batch size — scenes per forward pass (optional, speeds it up)",
+                help="Config default is 1 (sequential = slow). Try 8 or 16 to batch scenes per "
+                "forward pass. grad_accum_groups auto-adjusts. Lower it if you hit GPU OOM.",
+            ),
             _output_dir(),
             # Always skip the in-training baseline eval (use the dedicated Evaluate tab instead).
             ArgSpec("skip_baseline", "bool", default=True, hidden=True),
