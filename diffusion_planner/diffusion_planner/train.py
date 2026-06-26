@@ -65,6 +65,75 @@ def mean_ego_loss(loss_dict):
     return result
 
 
+def closed_loop_validate(model, args, epoch: int, save_path: str) -> None:
+    """Per-epoch closed-loop rendered rollout; logs metrics + the rollout video to wandb.
+
+    Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
+    (one route = one trial), renders an MP4, aggregates collision/clearance metrics, and logs both
+    to wandb at ``step=epoch+1``. No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass
+    the unwrapped model; it is switched to eval for the rollout (so the diffusion sampler runs and
+    produces ``prediction``) and restored afterwards.
+    """
+    if not args.closed_loop_npz_root:
+        return
+    import math
+
+    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+
+    net = ddp.get_model(model, args.ddp)
+    was_training = net.training
+    net.eval()
+    try:
+        out_dir = os.path.join(save_path, "closed_loop", f"epoch{epoch + 1:04d}")
+        summary = run_closed_loop_eval(
+            net,
+            args,
+            args.closed_loop_npz_root,
+            out_dir,
+            seg_len=args.closed_loop_seg_len,
+            device=args.device,
+            near_miss_thresh=args.closed_loop_near_miss_thresh,
+            search_radius=args.closed_loop_search_radius,
+            warmup_steps=args.closed_loop_warmup_steps,
+            unstick_after=args.closed_loop_unstick_after,
+            unstick_advance_m=args.closed_loop_unstick_advance_m,
+            fps=args.closed_loop_fps,
+            replan_interval=args.closed_loop_replan_interval,
+            draw_every=args.closed_loop_draw_every,
+            verbose=False,
+        )
+    finally:
+        net.train(was_training)
+
+    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
+    scalar_keys = [
+        "collision_segment_rate",
+        "collision_step_rate",
+        "near_miss_segment_rate",
+        "near_miss_step_rate",
+        "global_min_clearance",
+        "mean_segment_min_clearance",
+        "mean_segment_mean_clearance",
+        "total_collision_steps",
+        "total_near_miss_steps",
+        "total_snaps",
+        "total_steps",
+    ]
+    log = {
+        f"closed_loop/{k}": summary[k]
+        for k in scalar_keys
+        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
+    }
+    for mp4 in summary["route_mp4s"]:
+        log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
+    wandb.log(log, step=epoch + 1)
+    print(
+        f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
+        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
+        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['route_mp4s'])} video(s)"
+    )
+
+
 def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
@@ -317,6 +386,9 @@ def model_training(args: TrainConfig):
                 },
                 step=epoch + 1,
             )
+
+            if (epoch + 1) % args.closed_loop_valid_interval == 0:
+                closed_loop_validate(diffusion_planner, args, epoch, save_path)
 
             curr_data = {
                 "epoch": epoch + 1,
