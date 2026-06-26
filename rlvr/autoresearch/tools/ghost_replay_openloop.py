@@ -272,7 +272,7 @@ def main():
             _side_title(
                 args.label_best,
                 args.model_best or args.model_baseline,
-                args.lora_best,
+                args.lora_best if args.model_best else args.lora_baseline,
                 policy_best_dir,
             ),
         ]

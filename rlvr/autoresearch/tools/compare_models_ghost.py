@@ -301,7 +301,12 @@ def main() -> None:
     model_title = "\n".join(
         [
             _side_title(args.label_a, args.model_a, args.lora_a, args.policy_a),
-            _side_title(args.label_b, args.model_b or args.model_a, args.lora_b, policy_b_dir),
+            _side_title(
+                args.label_b,
+                args.model_b or args.model_a,
+                args.lora_b if args.model_b else args.lora_a,
+                policy_b_dir,
+            ),
         ]
     )
 

@@ -69,6 +69,13 @@ _BASELINE_COLOR = "#1f77b4"  # blue
 _PRISM_COLOR = "#d62728"  # red
 
 
+def _side_title(label: str, model_path: str | Path, lora_path: str | Path | None) -> str:
+    p = Path(model_path)
+    model_label = f"{p.parent.name}/{p.name}"
+    lora_label = Path(lora_path).name if lora_path else "none"
+    return f"{label}: model={model_label}  lora={lora_label}"
+
+
 def _render_ghost_step(
     output_path: Path,
     step: int,
@@ -94,6 +101,7 @@ def _render_ghost_step(
     neighbor_boxes: list[tuple[float, float, float, float, float]] | None = None,
     baseline_label: str = "baseline (LoRA-less)",
     trained_label: str = "PRiSM",
+    title_prefix: str | None = None,
 ) -> None:
     bx, by, bh = float(bl_pose[0]), float(bl_pose[1]), float(bl_pose[2])
     px, py, ph = float(pr_pose[0]), float(pr_pose[1]), float(pr_pose[2])
@@ -237,12 +245,17 @@ def _render_ghost_step(
     ax.grid(True, alpha=0.15)
     ax.set_xlabel("X (m, initial ego frame)")
     ax.set_ylabel("Y (m, initial ego frame)")
-    ax.set_title(
-        f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  perturb={perturbation_label}  init lat={init_lateral:.2f}m\n"
-        f"{baseline_label} lat={cur_lat_b:.2f}m   {trained_label} lat={cur_lat_p:.2f}m   "
-        f"Δ={cur_lat_b - cur_lat_p:+.2f}m (positive = {trained_label} closer to centerline)",
-        fontsize=10,
+    title = (
+        f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  "
+        f"perturb={perturbation_label}  init lat={init_lateral:.2f}m\n"
+        f"{baseline_label} lat={cur_lat_b:.2f}m   "
+        f"{trained_label} lat={cur_lat_p:.2f}m   "
+        f"Δ={cur_lat_b - cur_lat_p:+.2f}m "
+        f"(positive = {trained_label} closer to centerline)"
     )
+    if title_prefix:
+        title = f"{title_prefix}\n{title}"
+    ax.set_title(title, fontsize=10)
     fig.tight_layout()
     fig.savefig(output_path, dpi=100)
     fig.clf()
@@ -289,6 +302,12 @@ def main() -> None:
     print(f"[ghost-sim] loading 2 models...")
     bl_model, bl_args = _load_model(args.baseline_model, args.baseline_lora, device)
     pr_model, pr_args = _load_model(args.prism_model, args.prism_lora, device)
+    title_prefix = "\n".join(
+        [
+            _side_title(args.baseline_label, args.baseline_model, args.baseline_lora),
+            _side_title(args.trained_label, args.prism_model, args.prism_lora),
+        ]
+    )
 
     # Load + perturb
     data = load_npz_data(args.scene, device)
@@ -380,6 +399,7 @@ def main() -> None:
             neighbor_boxes=nb_boxes,
             baseline_label=args.baseline_label,
             trained_label=args.trained_label,
+            title_prefix=title_prefix,
         )
 
     if args.make_webm:
