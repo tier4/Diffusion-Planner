@@ -1501,6 +1501,7 @@ def save_step_figure(
     step: int,
     n_steps: int,
     route_polylines: list[np.ndarray] | None = None,
+    title_prefix: str | None = None,
     view_half_m: float = _VIEW_HALF_M,
     route_lanelet_ids: list[int] | None = None,
     sim_time: float = 0.0,
@@ -1735,6 +1736,8 @@ def save_step_figure(
         f"steer={steer_deg:+.1f}°  yawrate={yaw_rate_deg:+.1f}°/s  "
         f"turn={ti_label}  goal_d={goal_d:.1f} m"
     )
+    if title_prefix:
+        title = f"{title_prefix}\n{title}"
 
     if metrics is not None:
         gate_s = "IN" if metrics.get("lane_gate", 1.0) >= 0.5 else "CROSS"

@@ -1172,6 +1172,7 @@ def render_segment(
     unstick_advance_m: float = 5.0,
     interpolate: bool = True,
     neighbor_history_mode: str = "sim",
+    title_prefix: str | None = None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1240,6 +1241,7 @@ def render_segment(
                 neighbor_ids=nids if color_by_uuid else None,
                 step=k,
                 total=cap,
+                title_prefix=title_prefix,
             )
         _post_step(s, pred, neighbors_live, idx, device, timers)
     return _finalize(s, timers).metrics

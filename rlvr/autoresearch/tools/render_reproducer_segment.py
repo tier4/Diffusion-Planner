@@ -95,6 +95,7 @@ def main() -> None:
         warmup_steps=args.warmup_steps,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
+        title_prefix=route_key,
     )
     print(metrics)
     if args.make_webm:

@@ -364,6 +364,7 @@ def main() -> None:
                 device=device,
                 near_miss_thresh=args.near_miss_thresh,
                 search_radius=args.search_radius,
+                title_prefix=f"{r['route']}  {s0:05d}-{e0:05d}",
             )
             if args.render_webm:
                 webm = od / "hit_segment.webm"
