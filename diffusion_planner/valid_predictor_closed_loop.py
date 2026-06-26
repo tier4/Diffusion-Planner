@@ -149,11 +149,24 @@ def _build_mp4(png_dir: Path, mp4_path: Path, fps: int) -> None:
     """Encode the per-step PNG sequence in ``png_dir`` (00000.png ...) to an MP4."""
     subprocess.run(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-framerate", str(fps), "-start_number", "0",
-            "-i", str(png_dir / "%05d.png"),
-            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-framerate",
+            str(fps),
+            "-start_number",
+            "0",
+            "-i",
+            str(png_dir / "%05d.png"),
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "23",
             str(mp4_path),
         ],
         check=True,
@@ -167,8 +180,21 @@ def _concat_mp4(mp4_paths: list[Path], out_path: Path, work_dir: Path) -> None:
     list_file = work_dir / (out_path.stem + ".ffconcat.txt")
     list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in mp4_paths))
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-         "-i", str(list_file), "-c", "copy", str(out_path)],
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file),
+            "-c",
+            "copy",
+            str(out_path),
+        ],
         check=True,
     )
 
@@ -238,7 +264,9 @@ def main() -> None:
             # Concatenate this route's segment MP4s into one full-route video.
             full_mp4 = out_dir / f"{key}_full.mp4"
             _concat_mp4(seg_mp4s, full_mp4, out_dir)
-            print(f"[{ri + 1}/{len(route_keys)}] {key}: {len(seg_mp4s)} segments -> {full_mp4.name}")
+            print(
+                f"[{ri + 1}/{len(route_keys)}] {key}: {len(seg_mp4s)} segments -> {full_mp4.name}"
+            )
     finally:
         fout.close()
 
@@ -253,17 +281,23 @@ def main() -> None:
         json.dump(summary, f, indent=4)
 
     print(f"\n=== closed-loop validation: {n_seg} segments in {elapsed:.1f}s ===")
-    print(f"collision: {summary['n_segments_with_collision']}/{n_seg} segments "
-          f"(rate {summary['collision_segment_rate']:.4f}), "
-          f"{summary['total_collision_steps']} steps "
-          f"(rate {summary['collision_step_rate']:.6f})")
-    print(f"near-miss (<= {args.near_miss_thresh} m): "
-          f"{summary['n_segments_with_near_miss']}/{n_seg} segments "
-          f"(rate {summary['near_miss_segment_rate']:.4f}), "
-          f"{summary['total_near_miss_steps']} steps")
-    print(f"global_min_clearance={summary['global_min_clearance']:.3f} m  "
-          f"mean_segment_min_clearance={summary['mean_segment_min_clearance']:.3f} m  "
-          f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m")
+    print(
+        f"collision: {summary['n_segments_with_collision']}/{n_seg} segments "
+        f"(rate {summary['collision_segment_rate']:.4f}), "
+        f"{summary['total_collision_steps']} steps "
+        f"(rate {summary['collision_step_rate']:.6f})"
+    )
+    print(
+        f"near-miss (<= {args.near_miss_thresh} m): "
+        f"{summary['n_segments_with_near_miss']}/{n_seg} segments "
+        f"(rate {summary['near_miss_segment_rate']:.4f}), "
+        f"{summary['total_near_miss_steps']} steps"
+    )
+    print(
+        f"global_min_clearance={summary['global_min_clearance']:.3f} m  "
+        f"mean_segment_min_clearance={summary['mean_segment_min_clearance']:.3f} m  "
+        f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
+    )
     print(f"total_snaps={summary['total_snaps']}  terminated={summary['terminated_counts']}")
     print(f"\nwrote {n_seg} rows -> {out_path}\nwrote summary -> {summary_path}")
     print(f"videos: per-segment <route>_<s>_<e>.mp4 + per-route <route>_full.mp4 in {out_dir}")
