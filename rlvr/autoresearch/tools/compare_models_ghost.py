@@ -55,6 +55,17 @@ def _expand_scenes(scene_args: list[str]) -> list[str]:
     return scenes
 
 
+def _side_title(label: str, model_path: str | None, lora_path: str | None, policy_path: str | None):
+    if model_path:
+        p = Path(model_path)
+        model_label = f"{p.parent.name}/{p.name}"
+    else:
+        model_label = "model A"
+    lora_label = Path(lora_path).name if lora_path else "none"
+    policy_label = Path(policy_path).name if policy_path else "none"
+    return f"{label}: model={model_label}  lora={lora_label}  guidance={policy_label}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -287,6 +298,12 @@ def main() -> None:
         show_lateral=args.show_lateral,
         ego_wheelbase=args.ego_wheelbase,
     )
+    model_title = "\n".join(
+        [
+            _side_title(args.label_a, args.model_a, args.lora_a, args.policy_a),
+            _side_title(args.label_b, args.model_b or args.model_a, args.lora_b, policy_b_dir),
+        ]
+    )
 
     out_root = Path(args.output_dir)
 
@@ -300,7 +317,7 @@ def main() -> None:
             print(f"  {len(nb_boxes)} stopped neighbor(s)")
 
         scene_out = out_root / scene_name if len(args.scenes) > 1 else out_root
-        cfg.subtitle = scene_name
+        cfg.subtitle = f"{scene_name}\n{model_title}"
 
         eta_log_a: list[dict] = []
         eta_log_b: list[dict] = []

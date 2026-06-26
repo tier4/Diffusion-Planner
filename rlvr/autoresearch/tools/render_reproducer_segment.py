@@ -35,6 +35,12 @@ def _make_webm(frames_dir: Path, out_path: Path, fps: int) -> None:
     subprocess.run(cmd, check=True)
 
 
+def _model_lora_title(model_path: Path, lora_path: Path | None) -> str:
+    model_label = f"{model_path.parent.name}/{model_path.name}"
+    lora_label = lora_path.name if lora_path else "none"
+    return f"model: {model_label}  lora: {lora_label}"
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--npz_root", type=Path, required=True, help="One registered route dataset")
@@ -93,6 +99,7 @@ def main() -> None:
         raise SystemExit(f"Invalid segment start/end: {start}/{end} for {len(paths)} frames")
 
     out_dir = args.output_dir / f"{route_key}_{start:05d}_{end:05d}"
+    title_prefix = f"{route_key}\n{_model_lora_title(args.model_path, args.lora_path)}"
     print(f"Rendering {route_key}[{start}:{end}] -> {out_dir}")
     metrics = render_segment(
         model,
@@ -107,7 +114,7 @@ def main() -> None:
         warmup_steps=args.warmup_steps,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
-        title_prefix=route_key,
+        title_prefix=title_prefix,
         distance_label_offset_m=args.distance_label_offset_m,
         view_half_m=args.view_half_m,
     )

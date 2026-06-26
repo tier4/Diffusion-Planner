@@ -50,6 +50,17 @@ BEST_COLOR = "#d62728"  # red
 HIST_COLOR = "#555555"  # grey (shared history)
 
 
+def _side_title(label: str, model_path: str | None, lora_path: str | None, policy_path: str | None) -> str:
+    if model_path:
+        p = Path(model_path)
+        model_label = f"{p.parent.name}/{p.name}"
+    else:
+        model_label = "baseline model"
+    lora_label = Path(lora_path).name if lora_path else "none"
+    policy_label = Path(policy_path).name if policy_path else "none"
+    return f"{label}: model={model_label}  lora={lora_label}  guidance={policy_label}"
+
+
 def _heading(row):
     if row.shape[-1] >= 4:
         return math.atan2(float(row[3]), float(row[2]))
@@ -250,6 +261,22 @@ def main():
         m_best, a_best = m_base, a_base
     else:
         raise SystemExit("pass --model_best, --policy_best (or the legacy --policy_dir)")
+    title_meta = "\n".join(
+        [
+            _side_title(
+                args.label_baseline,
+                args.model_baseline,
+                args.lora_baseline,
+                args.policy_baseline,
+            ),
+            _side_title(
+                args.label_best,
+                args.model_best or args.model_baseline,
+                args.lora_best,
+                policy_best_dir,
+            ),
+        ]
+    )
 
     # Each side independently gets an optional guidance policy.
     policy_a = policy_b = heads_a = heads_b = None
@@ -336,7 +363,7 @@ def main():
                 polylines,
                 _neighbor_boxes_at(nb_past_arr, nb_step, idx_dims),
                 True,
-                f"{name}   t={t:+.1f}s   HISTORY (model context)",
+                f"{name}\n{title_meta}\nt={t:+.1f}s   HISTORY (model context)",
                 args.view_half,
                 ego_shape,
             )
@@ -364,7 +391,7 @@ def main():
                 polylines,
                 _neighbor_boxes_at(nb_fut_arr, i, idx_dims),
                 True,
-                f"{name}   t={i * 0.1:+.1f}s   PERFECT-TRACK (baseline vs best)",
+                f"{name}\n{title_meta}\nt={i * 0.1:+.1f}s   PERFECT-TRACK (baseline vs best)",
                 args.view_half,
                 ego_shape,
                 extra_lines=cand_lines,

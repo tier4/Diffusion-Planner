@@ -216,6 +216,12 @@ def _make_webm(frames_dir: Path, out_path: Path, fps: int) -> None:
     )
 
 
+def _model_lora_title(model_path: Path, lora_path: Path | None) -> str:
+    model_label = f"{model_path.parent.name}/{model_path.name}"
+    lora_label = lora_path.name if lora_path else "none"
+    return f"model: {model_label}  lora: {lora_label}"
+
+
 def _enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
     # OPT-OUT of skip-filtering on purpose: the reproducer is the ONE consumer that needs
     # the converter's skip_for_training frames (red-light dwell etc.) so the timeline is
@@ -359,6 +365,7 @@ def main() -> None:
 
         render_root = args.out.with_suffix(".renders")
         render_root.mkdir(parents=True, exist_ok=True)
+        model_title = _model_lora_title(args.model_path, args.lora_path)
         for r in hits[: args.dump_hits]:
             if r["n_collision_steps"] == 0 and r["n_near_miss_steps"] == 0:
                 continue  # nothing interesting to render
@@ -376,7 +383,7 @@ def main() -> None:
                 device=device,
                 near_miss_thresh=args.near_miss_thresh,
                 search_radius=args.search_radius,
-                title_prefix=f"{r['route']}  {s0:05d}-{e0:05d}",
+                title_prefix=f"{r['route']}  {s0:05d}-{e0:05d}\n{model_title}",
                 distance_label_offset_m=args.distance_label_offset_m,
                 view_half_m=args.view_half_m,
             )

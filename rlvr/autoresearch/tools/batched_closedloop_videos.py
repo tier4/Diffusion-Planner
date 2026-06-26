@@ -39,6 +39,13 @@ from rlvr.grpo_sft_trainer import _smooth_trajectory
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 
 
+def _model_policy_title(model_path: str | Path, policy_dir: str | Path | None) -> str:
+    p = Path(model_path)
+    model_label = f"{p.parent.name}/{p.name}"
+    policy_label = Path(policy_dir).name if policy_dir else "none"
+    return f"model: {model_label}  lora: none  guidance: {policy_label}"
+
+
 @torch.no_grad()
 def batched_closed_loop(
     model,
@@ -204,6 +211,7 @@ def _render_one(job):
         webm_fps,
         view_half_m,
         lambda_spd,
+        title_meta,
     ) = job
     import matplotlib
 
@@ -225,7 +233,7 @@ def _render_one(job):
         webm_fps=webm_fps,
         view_half_m=view_half_m,
     )
-    cfg.subtitle = scene_name
+    cfg.subtitle = f"{scene_name}\n{title_meta}"
     data = load_npz_data(scene_path, "cpu")
 
     def eta_title(step, a_pose, b_pose):
@@ -359,6 +367,7 @@ def main():
             args.webm_fps,
             args.view_half_m,
             args.lambda_spd,
+            _model_policy_title(args.model_path, args.policy_dir),
         )
         for i in range(len(paths))
     ]
