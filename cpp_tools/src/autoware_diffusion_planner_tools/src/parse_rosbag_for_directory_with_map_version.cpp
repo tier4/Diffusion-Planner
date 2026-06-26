@@ -136,6 +136,49 @@ std::vector<fs::path> find_bag_directories(const std::vector<fs::path> & target_
 }
 
 /**
+ * @brief Sum the sizes of regular files directly inside a bag directory.
+ * @param bag_dir Path to the bag directory.
+ * @return Total byte size of top-level regular files (data files are at this level).
+ */
+uintmax_t bag_directory_size(const fs::path & bag_dir)
+{
+  uintmax_t total = 0;
+  std::error_code ec;
+  for (const auto & entry : fs::directory_iterator(bag_dir, ec)) {
+    if (entry.is_regular_file()) {
+      const uintmax_t sz = entry.file_size(ec);
+      if (!ec) total += sz;
+    }
+  }
+  return total;
+}
+
+/**
+ * @brief Sort bag directories by descending size (LPT heuristic).
+ *
+ * Processing large bags first ensures that near the end of the run, only small
+ * bags remain, minimising idle workers caused by a few slow stragglers.
+ * Sizes are pre-computed once to avoid redundant filesystem calls during sort.
+ *
+ * @param bag_dirs List of bag directories to sort in-place.
+ */
+void sort_bags_lpt(std::vector<fs::path> & bag_dirs)
+{
+  std::vector<std::pair<uintmax_t, fs::path>> sized;
+  sized.reserve(bag_dirs.size());
+  for (auto & p : bag_dirs) {
+    sized.emplace_back(bag_directory_size(p), std::move(p));
+  }
+  std::sort(
+    sized.begin(), sized.end(), [](const auto & a, const auto & b) { return a.first > b.first; });
+  bag_dirs.clear();
+  bag_dirs.reserve(sized.size());
+  for (auto & [size, path] : sized) {
+    bag_dirs.push_back(std::move(path));
+  }
+}
+
+/**
  * @brief Extract area_map_version_id from a rosbag metadata.yaml file.
  * @param metadata_path Path to metadata.yaml.
  * @return The map version string, or std::nullopt if not found or unreadable.
@@ -380,8 +423,10 @@ int main(int argc, char ** argv)
   const fs::path save_root = fs::absolute(options.save_root);
   fs::create_directories(save_root);
 
-  const std::vector<fs::path> bag_dir_list = find_bag_directories(options.target_dir_list);
+  std::vector<fs::path> bag_dir_list = find_bag_directories(options.target_dir_list);
   std::cout << "Found " << bag_dir_list.size() << " bag directories to process" << std::endl;
+  sort_bags_lpt(bag_dir_list);
+  std::cout << "Bags sorted by descending size (LPT)" << std::endl;
   std::cout << "Using " << options.num_workers << " parallel workers" << std::endl;
 
   std::atomic<size_t> next_index{0};
