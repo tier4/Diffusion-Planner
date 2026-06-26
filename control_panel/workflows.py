@@ -709,10 +709,10 @@ _register(
             ArgSpec("save_min_ego_speed", "float", label="Min ego speed (m/s)", default=0.5),
             ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),
             ArgSpec(
-                "distance_label_offset_m",
+                "view_half_m",
                 "float",
-                label="Distance label offset (m)",
-                default=1.2,
+                label="Bird's-eye half-width (m)",
+                default=50.0,
             ),
             ArgSpec(
                 "dump_hits",
@@ -762,10 +762,10 @@ _register(
             ArgSpec("search_radius", "float", label="Neighbor search radius (m)", default=1.5),
             ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),
             ArgSpec(
-                "distance_label_offset_m",
+                "view_half_m",
                 "float",
-                label="Distance label offset (m)",
-                default=1.2,
+                label="Bird's-eye half-width (m)",
+                default=50.0,
             ),
             ArgSpec("make_webm", "bool", label="Make WebM", default=True),
             ArgSpec("webm_fps", "int", label="WebM fps", default=10),

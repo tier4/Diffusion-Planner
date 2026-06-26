@@ -1114,6 +1114,7 @@ def _draw_step(
     total=1,
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
+    view_half_m: float = 50.0,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1158,6 +1159,7 @@ def _draw_step(
         total,
         title_prefix=title_prefix,
         distance_label_offset_m=distance_label_offset_m,
+        view_half_m=view_half_m,
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
     )
@@ -1186,6 +1188,7 @@ def render_segment(
     neighbor_history_mode: str = "sim",
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
+    view_half_m: float = 50.0,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1256,6 +1259,7 @@ def render_segment(
                 total=cap,
                 title_prefix=title_prefix,
                 distance_label_offset_m=distance_label_offset_m,
+                view_half_m=view_half_m,
             )
         _post_step(s, pred, neighbors_live, idx, device, timers)
     return _finalize(s, timers).metrics

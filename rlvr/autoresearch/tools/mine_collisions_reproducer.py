@@ -112,6 +112,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--unstick_advance_m", type=float, default=5.0)
     p.add_argument(
+        "--view_half_m",
+        type=float,
+        default=50.0,
+        help="Half-width of the bird's-eye camera window around ego, in metres",
+    )
+    p.add_argument(
         "--dump_hits",
         type=int,
         default=0,
@@ -372,6 +378,7 @@ def main() -> None:
                 search_radius=args.search_radius,
                 title_prefix=f"{r['route']}  {s0:05d}-{e0:05d}",
                 distance_label_offset_m=args.distance_label_offset_m,
+                view_half_m=args.view_half_m,
             )
             if args.render_webm:
                 webm = od / "hit_segment.webm"

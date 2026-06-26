@@ -202,6 +202,7 @@ def _render_one(job):
         steps,
         hist_steps,
         webm_fps,
+        view_half_m,
         lambda_spd,
     ) = job
     import matplotlib
@@ -222,6 +223,7 @@ def _render_one(job):
         steps=steps,
         hist_steps=hist_steps,
         webm_fps=webm_fps,
+        view_half_m=view_half_m,
     )
     cfg.subtitle = scene_name
     data = load_npz_data(scene_path, "cpu")
@@ -270,6 +272,12 @@ def main():
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--hist_steps", type=int, default=30)
     parser.add_argument("--webm_fps", type=int, default=10)
+    parser.add_argument(
+        "--view_half_m",
+        type=float,
+        default=30.0,
+        help="Half-width of the bird's-eye camera window around ego, in metres",
+    )
     parser.add_argument("--label_a", default="baseline")
     parser.add_argument("--label_b", default="explorer")
     parser.add_argument(
@@ -349,6 +357,7 @@ def main():
             args.steps,
             args.hist_steps,
             args.webm_fps,
+            args.view_half_m,
             args.lambda_spd,
         )
         for i in range(len(paths))

@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--unstick_after", type=int, default=300)
     p.add_argument("--unstick_advance_m", type=float, default=5.0)
     p.add_argument(
+        "--view_half_m",
+        type=float,
+        default=50.0,
+        help="Half-width of the bird's-eye camera window around ego, in metres",
+    )
+    p.add_argument(
         "--distance_label_offset_m",
         type=float,
         default=1.2,
@@ -103,6 +109,7 @@ def main() -> None:
         unstick_advance_m=args.unstick_advance_m,
         title_prefix=route_key,
         distance_label_offset_m=args.distance_label_offset_m,
+        view_half_m=args.view_half_m,
     )
     print(metrics)
     if args.make_webm:
