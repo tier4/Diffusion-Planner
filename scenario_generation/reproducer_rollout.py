@@ -1368,7 +1368,13 @@ def render_segment(
                 total=cap,
             )
         _score_into(s, neighbors_live, device, timers)
+        snaps_before = s.n_snaps
         _advance_step(s, pred_cur, idx, device, timers, override=override)
+        if s.n_snaps > snaps_before:
+            # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
+            # world location, so executing it next step would drag the ego right back. Invalidate
+            # it to force a fresh inference at the snapped pose (else the snap never sticks).
+            plan_world = None
     dbg.close()
     return _finalize(s, timers).metrics
 
