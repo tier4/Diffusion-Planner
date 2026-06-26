@@ -337,6 +337,7 @@ def main() -> None:
                 device=device,
                 near_miss_thresh=args.near_miss_thresh,
                 search_radius=args.search_radius,
+                replan_interval=1,
             )
         print(f"rendered {args.dump_hits} hit segment(s) -> {render_root}")
 

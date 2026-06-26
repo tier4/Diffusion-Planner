@@ -56,6 +56,26 @@ def _ego_pred_to_world(pred_xy, pred_cos_sin, ex, ey, eyaw):
     return np.stack([wx, wy], axis=-1).astype(np.float32), wh.astype(np.float32)
 
 
+def _world_plan_to_ego(world_xy, world_h, ex, ey, eyaw):
+    """Inverse of ``_ego_pred_to_world``: express a fixed world-frame plan in the ego frame at
+    pose ``(ex, ey, eyaw)``.
+
+    Used to keep executing a cached prediction over several steps without re-inferring: the plan
+    is pinned in the world at inference time, and each subsequent step views it from where the
+    ego has actually moved to (i.e. relative to the new first point), so the ego progresses ALONG
+    the trajectory instead of re-anchoring the plan's start at its current pose.
+
+    Returns an ego-frame trajectory ``[T, 4]`` of ``(x, y, cos, sin)`` (same layout as ``pred``).
+    """
+    c, s = math.cos(eyaw), math.sin(eyaw)
+    dx = world_xy[..., 0] - ex
+    dy = world_xy[..., 1] - ey
+    px = dx * c + dy * s
+    py = -dx * s + dy * c
+    he = world_h - eyaw
+    return np.stack([px, py, np.cos(he), np.sin(he)], axis=-1).astype(np.float32)
+
+
 def _rel_pose(recorded_pose: np.ndarray, live_pose: np.ndarray) -> tuple[float, float, float]:
     """Live ego pose expressed in the recorded-ego frame (dx, dy, dyaw)."""
     R = _rotation_matrix(float(recorded_pose[2]))  # rotates world delta by -recorded_yaw
@@ -648,8 +668,15 @@ def _score_into(s: _SegState, neighbors_live, device, timers):
         s.collisions[s.k] = col
 
 
-def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers):
-    """Advance the ego one step (perfect tracking of the prediction) + unstick."""
+def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None):
+    """Advance the ego one step (perfect tracking of the prediction) + unstick.
+
+    ``override`` = ``(world_pose(3,), speed)`` places the ego exactly on a given world pose
+    instead of running the tracker. Used to execute a CACHED plan open-loop between replans:
+    PerfectTracker only tracks ``ref[0]`` using the current heading, so it cannot follow a
+    multi-step plan (heading/position mismatch compounds and diverges) — the plan poses are
+    applied directly, which is the faithful "perfect tracking" of the cached plan.
+    """
     from scenario_generation.mpc_tracker import postprocess_reference
 
     with timers("advance"):
@@ -657,6 +684,14 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers):
             tgt = min(idx + 1, len(s.tl) - 1)
             new_pose = s.tl.poses[tgt].copy()
             new_speed = float(s.tl.speeds[tgt])
+            yaw_rate = float(getattr(s.tracker, "last_yaw_rate", 0.0))
+            steering = float(getattr(s.tracker, "last_steering", 0.0))
+        elif override is not None:
+            new_pose = np.asarray(override[0], dtype=np.float64)
+            new_speed = float(override[1])
+            dh = (float(new_pose[2]) - float(s.live_pose[2]) + math.pi) % (2 * math.pi) - math.pi
+            yaw_rate = float(dh / DT)
+            steering = 0.0
         else:
             wxy, wh = _ego_pred_to_world(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
@@ -667,12 +702,14 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers):
             )
             new_pos, new_speed = s.tracker.track(x0, ref)
             new_pose = np.asarray(new_pos, dtype=np.float64)
+            yaw_rate = float(getattr(s.tracker, "last_yaw_rate", 0.0))
+            steering = float(getattr(s.tracker, "last_steering", 0.0))
         prev_speed = s.dyn.speed
         s.dyn = _EgoDyn(
             speed=float(new_speed),
             accel=float((new_speed - prev_speed) / DT),
-            yaw_rate=float(getattr(s.tracker, "last_yaw_rate", 0.0)),
-            steering=float(getattr(s.tracker, "last_steering", 0.0)),
+            yaw_rate=yaw_rate,
+            steering=steering,
         )
         s.live_pose = new_pose
         s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
@@ -1171,8 +1208,15 @@ def render_segment(
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
     interpolate: bool = True,
+    *,
+    replan_interval: int,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
+
+    ``replan_interval``: re-run the model every N steps (1 = every step). Between inferences the
+    cached plan keeps being executed — pinned in the world frame and re-expressed in the current
+    ego frame each step (``_world_plan_to_ego``), so the ego advances along the trajectory. The
+    ego still single-steps at 10 Hz; only the model call is throttled.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1209,29 +1253,61 @@ def render_segment(
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
     # margin covers any overrun without scanning the whole route.
     interp = _build_neighbor_interp(tl, start, min(end + 100, len(tl))) if interpolate else {}
+    plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     while not s.done:
         k = s.k
         pre = _pre_step(s)
         if pre is None:
             break
         np_dict, neighbors_live, idx, _suuid, _wbu = pre
-        data = _to_torch_batch([np_dict], model_args, device)
-        _, outputs = model(data)
-        pred = outputs["prediction"][0, 0].cpu().numpy()
+        # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
+        # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
+        # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
+        # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
+        # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
+        # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
+        offset = k % replan_interval
+        override = None
+        if plan_world is None or offset == 0:
+            data = _to_torch_batch([np_dict], model_args, device)
+            _, outputs = model(data)
+            pred = outputs["prediction"][0, 0].cpu().numpy()
+            plan_world = _ego_pred_to_world(
+                pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
+            )
+            pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
+        else:
+            # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
+            off = min(offset, len(plan_world[0]) - 1)
+            tx, ty, th = (
+                float(plan_world[0][off, 0]),
+                float(plan_world[0][off, 1]),
+                float(plan_world[1][off]),
+            )
+            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+            override = (np.array([tx, ty, th], dtype=np.float64), spd)
+            pred_cur = _world_plan_to_ego(
+                plan_world[0][off:],
+                plan_world[1][off:],
+                s.live_pose[0],
+                s.live_pose[1],
+                s.live_pose[2],
+            )
         nids = tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
         if window is None or (window[0] <= k <= window[1]):
             _draw_step(
                 np_dict,
-                pred,
+                pred_cur,
                 s.ego_shape,
                 out_dir / f"{k:05d}.png",
                 neighbor_ids=nids if color_by_uuid else None,
                 step=k,
                 total=cap,
             )
-        _post_step(s, pred, neighbors_live, idx, device, timers)
+        _score_into(s, neighbors_live, device, timers)
+        _advance_step(s, pred_cur, idx, device, timers, override=override)
     return _finalize(s, timers).metrics
 
 
