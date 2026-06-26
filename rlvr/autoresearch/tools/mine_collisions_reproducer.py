@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import heapq
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -45,6 +46,7 @@ def parse_args() -> argparse.Namespace:
         "pre-padding conversion tree when the padded NPZs dropped their sidecars)",
     )
     p.add_argument("--model_path", type=Path, required=True)
+    p.add_argument("--lora_path", type=Path, default=None)
     p.add_argument("--out", type=Path, required=True, help="output JSONL of per-segment metrics")
     p.add_argument("--seg_len", type=int, default=600, help="frames per segment (~60s @10Hz)")
     p.add_argument("--near_miss_thresh", type=float, default=0.5)
@@ -115,6 +117,8 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="render the top-N ranked hit segments to PNGs under <out>.renders/ (0=off)",
     )
+    p.add_argument("--render_webm", action="store_true", help="assemble dumped hit PNGs into WebM")
+    p.add_argument("--webm_fps", type=int, default=10)
     # One-pass collision-scene save (no second extract pass). When --save_dir is set,
     # each segment buffers its last --save_pre_steps scenes during THIS rollout and dumps
     # them to <save_dir>/<route>_<start>_<end>/ on the first step within --save_thresh of a
@@ -175,6 +179,31 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _make_webm(frames_dir: Path, out_path: Path, fps: int) -> None:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(fps),
+            "-i",
+            str(frames_dir / "%05d.png"),
+            "-c:v",
+            "libvpx-vp9",
+            "-b:v",
+            "0",
+            "-crf",
+            "32",
+            "-row-mt",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            str(out_path),
+        ],
+        check=True,
+    )
+
+
 def _enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
     # OPT-OUT of skip-filtering on purpose: the reproducer is the ONE consumer that needs
     # the converter's skip_for_training frames (red-light dwell etc.) so the timeline is
@@ -193,6 +222,12 @@ def main() -> None:
     from scenario_generation.simulate import load_model
 
     model, model_args = load_model(args.model_path, device)
+    if args.lora_path:
+        from preference_optimization.lora_utils import load_lora_checkpoint
+
+        print(f"loading LoRA: {args.lora_path}")
+        model = load_lora_checkpoint(model, str(args.lora_path))
+        model.eval()
 
     routes = _enumerate_routes(args.npz_root)
     route_keys = sorted(routes)
@@ -330,6 +365,10 @@ def main() -> None:
                 near_miss_thresh=args.near_miss_thresh,
                 search_radius=args.search_radius,
             )
+            if args.render_webm:
+                webm = od / "hit_segment.webm"
+                _make_webm(od, webm, args.webm_fps)
+                print(f"    webm -> {webm}")
         print(f"rendered {args.dump_hits} hit segment(s) -> {render_root}")
 
 

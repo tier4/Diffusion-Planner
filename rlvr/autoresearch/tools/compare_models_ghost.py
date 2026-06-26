@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,25 @@ from rlvr.autoresearch.tools.ghost_sim_common import (
 )
 
 
+def _expand_scenes(scene_args: list[str]) -> list[str]:
+    """Accept either raw NPZ paths or workspace scene-list JSONs."""
+    scenes: list[str] = []
+    for item in scene_args:
+        p = Path(item)
+        if p.suffix.lower() != ".json":
+            scenes.append(item)
+            continue
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            raise SystemExit(f"could not read scene list {p}: {e}") from e
+        entries = data.get("files", data) if isinstance(data, dict) else data
+        if not isinstance(entries, list):
+            raise SystemExit(f"scene list {p} must be a list or {{'files': [...]}}")
+        scenes.extend(str(x) for x in entries)
+    return scenes
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -45,7 +65,12 @@ def main() -> None:
     parser.add_argument("--model_b", default=None, help="Second model; omit with --policy_dir")
     parser.add_argument("--lora_b", default=None)
     parser.add_argument("--label_b", default="trained")
-    parser.add_argument("--scenes", nargs="+", required=True, help="NPZ scene paths")
+    parser.add_argument(
+        "--scenes",
+        nargs="+",
+        required=True,
+        help="NPZ scene paths or workspace scene-list JSON(s)",
+    )
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--advance_k", type=int, default=0)
@@ -130,6 +155,9 @@ def main() -> None:
     )
     parser.add_argument("--speed_scale", type=float, default=2.0)
     args = parser.parse_args()
+    args.scenes = _expand_scenes(args.scenes)
+    if not args.scenes:
+        raise SystemExit("no scenes after expanding --scenes")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # --policy_dir is a back-compat alias for --policy_b.

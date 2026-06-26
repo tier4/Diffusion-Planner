@@ -125,6 +125,8 @@ def build_command(wf: Workflow, values: dict) -> list[str]:
         # not passed to the tool's argv.
         if a.launcher_only:
             continue
+        if a.name == "save_dir" and values.get("save_collision_npzs") is False:
+            continue
         v = values.get(a.name, a.default)
         if a.kind == "bool":
             v = bool(v)
@@ -572,7 +574,7 @@ _register(
         args=[
             _model_path(),
             _lora(),
-            _scenes(label="Perturbed scenes (dataset)"),
+            _scenes(label="Scenes"),
             _grpo_config(label="GRPO / generation config (guidance)"),
             _output_dir(),
             ArgSpec("manifest", "file", label="disturb manifest.json (optional)"),
@@ -641,6 +643,34 @@ _register(
     )
 )
 
+# --- Reproducer: route materializer ---------------------------------------------------
+_register(
+    Workflow(
+        key="materialize_reproducer_routes",
+        title="Reproducer: import contiguous routes",
+        module="rlvr.autoresearch.tools.materialize_reproducer_routes",
+        creates="routes",
+        description="Split a flat converted NPZ corpus into contiguous route datasets for the "
+        "Perception Reproducer. Matches pose sidecars by filename stem, groups by sidecar route "
+        "directory with filename-prefix fallback, and symlinks NPZ+JSON pairs into the workspace.",
+        args=[
+            ArgSpec("npz_root", "dir", label="Converted NPZ corpus", required=True),
+            ArgSpec(
+                "sidecar_root",
+                "dir",
+                label="Sidecar source root",
+                help="Original conversion tree containing per-frame pose JSONs.",
+            ),
+            _output_dir(),
+            ArgSpec("route_prefix", "str", label="Route name prefix (optional)"),
+            ArgSpec("overwrite", "bool", label="Overwrite existing route links"),
+            ArgSpec("copy", "bool", label="Copy instead of symlink"),
+        ],
+        outputs=lambda v: {"dir": v.get("output_dir")},
+    )
+)
+
+
 # --- Reproducer: collision miner ------------------------------------------------------
 _register(
     Workflow(
@@ -655,6 +685,7 @@ _register(
                 "npz_root", "dir", label="Route corpus", shared="route_datasets", required=True
             ),
             _model_path(),
+            _lora(),
             ArgSpec("out", "file", auto="file:hits.jsonl", required=True),
             ArgSpec(
                 "save_thresh",
@@ -664,18 +695,107 @@ _register(
             ),
             ArgSpec("seg_len", "int", label="Segment length (frames)", default=600),
             ArgSpec("batch_size", "int", label="Segment batch size", default=8),
+            ArgSpec(
+                "save_collision_npzs",
+                "bool",
+                label="Extract collision NPZ batches",
+                default=True,
+                launcher_only=True,
+                help="When enabled, pass --save_dir so each detected hit saves its pre-collision "
+                "scene batch into the workspace.",
+            ),
             ArgSpec("save_dir", "dir", auto="dir:collision_batches"),
             ArgSpec("save_pre_steps", "int", label="Pre-steps to save", default=80),
             ArgSpec("save_min_ego_speed", "float", label="Min ego speed (m/s)", default=0.5),
             ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),
-            ArgSpec("dump_hits", "int", label="Render top-N hit segments to PNGs", default=0),
+            ArgSpec(
+                "dump_hits",
+                "int",
+                label="Render top-N collision/near-miss segments",
+                default=10,
+            ),
+            ArgSpec("render_webm", "bool", label="Make WebMs for rendered hits", default=True),
+            ArgSpec("webm_fps", "int", label="WebM fps", default=10),
             ArgSpec("max_routes", "int", label="Max routes (debug)", default=-1),
             ArgSpec("max_segments", "int", label="Max segments (debug)", default=-1),
             ArgSpec("device", "str", label="Device (optional)"),
         ],
-        outputs=lambda v: {"hits_jsonl": v.get("out"), "save_dir": v.get("save_dir")},
+        outputs=lambda v: {
+            "hits_jsonl": v.get("out"),
+            "save_dir": v.get("save_dir"),
+            "renders": str(Path(v["out"]).with_suffix(".renders")) if v.get("out") else "",
+        },
     )
 )
+
+# --- Reproducer: closed-loop route WebM -----------------------------------------------
+_register(
+    Workflow(
+        key="render_reproducer_segment",
+        title="Reproducer: closed-loop route WebM",
+        module="rlvr.autoresearch.tools.render_reproducer_segment",
+        description="Run the Perception Reproducer on one contiguous route segment, dump PNG "
+        "frames, and assemble a WebM. Uses the same route timeline/render_segment path as "
+        "collision mining, with optional LoRA on top of the selected model.",
+        args=[
+            ArgSpec(
+                "npz_root", "dir", label="Route corpus", shared="route_datasets", required=True
+            ),
+            _model_path(),
+            _lora(),
+            _output_dir(),
+            ArgSpec("start", "int", label="Start frame", default=0),
+            ArgSpec(
+                "end",
+                "int",
+                label="End frame (0 = start + steps)",
+                default=0,
+            ),
+            ArgSpec("steps", "int", label="Steps when end=0", default=120),
+            ArgSpec("near_miss_thresh", "float", label="Near-miss threshold (m)", default=0.5),
+            ArgSpec("search_radius", "float", label="Neighbor search radius (m)", default=1.5),
+            ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),
+            ArgSpec("make_webm", "bool", label="Make WebM", default=True),
+            ArgSpec("webm_fps", "int", label="WebM fps", default=10),
+            ArgSpec("device", "str", label="Device (optional)"),
+        ],
+        outputs=lambda v: {"dir": v.get("output_dir")},
+    )
+)
+
+# --- Viz: selected-scene deterministic stills -----------------------------------------
+_register(
+    Workflow(
+        key="render_det_stills",
+        title="Render selected scenes + predicted trajectories",
+        module="rlvr.autoresearch.tools.viz_det_compare",
+        description="PNG-only still renders for selected scene datasets: draw the scene geometry "
+        "plus deterministic predicted trajectory from Model A and optional Model B. Reuses the "
+        "existing deterministic viz path; no closed-loop sim and no WebM.",
+        args=[
+            _model_path(name="model_a", label="Model A (.pth)"),
+            _lora(name="lora_a", label="LoRA A"),
+            _model_path(name="model_b", label="Model B (.pth, optional)", required=False),
+            _lora(name="lora_b", label="LoRA B"),
+            ArgSpec("label_a", "str", default="A"),
+            ArgSpec("label_b", "str", default="B"),
+            _scenes(label="Scenes"),
+            _output_dir(),
+            ArgSpec(
+                "indices",
+                "str",
+                label="Scene indices (optional)",
+                multi=True,
+                help="Space-separated indices from the selected scene list. Blank renders all.",
+            ),
+            ArgSpec("max_scenes", "int", label="Max scenes (optional)"),
+            ArgSpec("show_gt", "bool", label="Show GT trajectory"),
+            ArgSpec("batch_size", "int", default=32),
+        ],
+        outputs=lambda v: {"dir": v.get("output_dir")},
+    )
+)
+
 
 # --- Viz: open-loop dual-model perfect-track ------------------------------------------
 _register(
@@ -724,7 +844,7 @@ _register(
             _lora(name="lora_b", label="LoRA B"),
             _policy(name="policy_b", label="Guidance B"),
             ArgSpec("label_b", "str", default="B"),
-            _scenes(label="Scenes (space-separated NPZ paths)", multi=True, shared=None),
+            _scenes(label="Scenes"),
             _output_dir(),
             ArgSpec("steps", "int", default=80),
             ArgSpec("view_half_m", "float", label="View half (m)", default=30.0),

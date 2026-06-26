@@ -293,8 +293,11 @@ def scan_workspace(root: str | Path) -> dict:
     routes_root = root / WORKSPACE_DIRS["route_datasets"]
     if routes_root.is_dir():
         lib["route_datasets"] = [
-            {"name": d.name, "path": str(d)}
-            for d in sorted(p for p in routes_root.iterdir() if p.is_dir())
+            {
+                "name": str(d.relative_to(routes_root)),
+                "path": str(d),
+            }
+            for d in sorted(p for p in routes_root.rglob("*") if p.is_dir())
             if _is_route_dir(d)
         ]
     return lib

@@ -754,6 +754,13 @@ def _open_editor(library, host, editor_port, fields, *flat):
 # --------------------------------------------------------------------------------------
 def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Blocks:
     library0 = P.load_library()
+    if library0.get("workspace_root") and Path(library0["workspace_root"]).expanduser().is_dir():
+        scanned0 = P.scan_workspace(library0["workspace_root"])
+        for k in ("ego_shape", "output_dir"):
+            if library0.get(k):
+                scanned0[k] = library0[k]
+        library0 = scanned0
+        P.save_library(library0)
     wf = W.get_workflow
     asset_dropdowns: dict[str, list] = {}
 
@@ -905,22 +912,53 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
             def _show(library, *flat, _wf=vwf, _vp=vp):
                 v = resolve_values(_wf, _vp["fields"], library, flat)
-                webms, stills, msg = _scan_outputs(
-                    v.get("output_dir", ""), one_still_per_scene=True
-                )
+                scan_dir = v.get("output_dir", "")
+                if not scan_dir and v.get("out"):
+                    scan_dir = str(Path(v["out"]).with_suffix(".renders"))
+                webms, stills, msg = _scan_outputs(scan_dir, one_still_per_scene=True)
                 return webms, stills, msg
 
             show_btn.click(_show, [library_state, *vp["flat"]], [webm_gallery, png_gallery, vmsg])
+            return vp
 
-        with gr.Tab("Data generation") as datagen_tab:
+        def _stills_only_viewer(vwf):
+            """Workflow panel plus a PNG-only output viewer."""
+            vp = workflow_panel(vwf, library0, library_state, asset_dropdowns)
+            show_btn = gr.Button("Load rendered PNGs")
+            png_gallery = gr.Gallery(label="Rendered scenes", columns=4, height=520)
+            vmsg = gr.Textbox(label="", interactive=False)
+
+            def _show(library, *flat, _wf=vwf, _vp=vp):
+                v = resolve_values(_wf, _vp["fields"], library, flat)
+                _, stills, msg = _scan_outputs(v.get("output_dir", ""), one_still_per_scene=False)
+                return stills, msg
+
+            show_btn.click(_show, [library_state, *vp["flat"]], [png_gallery, vmsg])
+
+        with gr.Tab("Reproducer") as reproducer_tab:
+            with gr.Tab("Route WebM"):
+                gr.Markdown(
+                    "Run closed-loop inference on a selected contiguous route segment with the "
+                    "Perception Reproducer. Outputs PNG frames plus WebM."
+                )
+                _viz_with_viewer(wf("render_reproducer_segment"))
+            with gr.Tab("Scene WebMs"):
+                gr.Markdown(
+                    "Run closed-loop inference from selected workspace scene datasets with "
+                    "model/LoRA/guidance controls. Use this for guidance-model videos."
+                )
+                _viz_with_viewer(wf("compare_models_ghost"))
             with gr.Tab("Collision mining"):
                 gr.Markdown(
-                    "Mine scenes from a route corpus by driving a model closed-loop and flagging "
-                    "collisions/near-misses. Saved windows become a scene dataset automatically."
+                    "Run the Perception Reproducer on a registered contiguous route dataset. "
+                    "It writes ranked hits, extracts pre-collision NPZ batches, and can render "
+                    "the top collision/near-miss segments as WebMs in this tab."
                 )
-                mp = workflow_panel(wf("mine_collisions"), library0, library_state, asset_dropdowns)
+                mp = _viz_with_viewer(wf("mine_collisions"))
                 if wf("mine_collisions").creates:
                     creating_panels.append(mp)
+
+        with gr.Tab("Data generation") as datagen_tab:
             with gr.Tab("PRiSM (self-improvement mining)"):
                 gr.Markdown(
                     "Perturbation-Recovery Self-Mining — a data-generation pipeline (not training). "
@@ -947,6 +985,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
         with gr.Tab("Render") as render_tab:
             _MODES = [
+                "Selected scenes + predicted trajectories (PNGs only)",
                 "Closed-loop A/B sim (re-infer each step, ~8s)",
                 "Open-loop A/B (perfect-track one plan)",
                 "Open-loop generated candidates (model + GRPO config + guidance)",
@@ -954,6 +993,12 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             ]
             render_mode = gr.Dropdown(_MODES, value=_MODES[0], label="Render mode")
             with gr.Group(visible=True) as g_closed:
+                gr.Markdown(
+                    "Render one still PNG per selected scene with deterministic predicted "
+                    "trajectory from Model A and optional Model B. No sim loop and no WebM."
+                )
+                _stills_only_viewer(wf("render_det_stills"))
+            with gr.Group(visible=False) as g_loop:
                 gr.Markdown(
                     "Simulate ~8s closed-loop from each scene (re-inference each step), two models "
                     "overlaid. PNGs + optional WebM."
@@ -981,9 +1026,11 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 
             def _toggle_mode(m):
                 idx = _MODES.index(m) if m in _MODES else 0
-                return [gr.update(visible=(i == idx)) for i in range(4)]
+                return [gr.update(visible=(i == idx)) for i in range(5)]
 
-            render_mode.change(_toggle_mode, render_mode, [g_closed, g_openpt, g_gen, g_route])
+            render_mode.change(
+                _toggle_mode, render_mode, [g_closed, g_loop, g_openpt, g_gen, g_route]
+            )
 
         with gr.Tab("Scene Editor"):
             sewf = wf("scene_branch_editor")
@@ -1065,7 +1112,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             )
 
         _switch_outputs = [library_state, lib_view, remove_dd, *flat_dropdowns]
-        for _tab in (train_tab, eval_tab, merge_tab, datagen_tab, render_tab):
+        for _tab in (train_tab, eval_tab, merge_tab, reproducer_tab, datagen_tab, render_tab):
             _tab.select(_rescan_on_switch, library_state, _switch_outputs)
 
         for btn, typ in (

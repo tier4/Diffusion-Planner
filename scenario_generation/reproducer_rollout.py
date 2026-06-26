@@ -1171,6 +1171,7 @@ def render_segment(
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
     interpolate: bool = True,
+    neighbor_history_mode: str = "sim",
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1183,6 +1184,9 @@ def render_segment(
     interpolating each track between its real detections (uses the sidecar track
     UUIDs) — removes the freeze-then-jump perception stutter. ``color_by_uuid``:
     stable per-track colors. ``window`` = (lo, hi) step range to render (all).
+    ``neighbor_history_mode="sim"`` matches the collision miner: neighbor history
+    is rebuilt from the shown simulated motion instead of copied from the recorded
+    cursor frame.
     Returns the SegmentResult metrics.
     """
     from pathlib import Path
@@ -1204,21 +1208,27 @@ def render_segment(
         max_steps=cap,
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
+        neighbor_history_mode=neighbor_history_mode,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
     # margin covers any overrun without scanning the whole route.
-    interp = _build_neighbor_interp(tl, start, min(end + 100, len(tl))) if interpolate else {}
+    interp = (
+        _build_neighbor_interp(tl, start, min(end + 100, len(tl)))
+        if interpolate and neighbor_history_mode != "sim"
+        else {}
+    )
     while not s.done:
         k = s.k
         pre = _pre_step(s)
         if pre is None:
             break
-        np_dict, neighbors_live, idx, _suuid, _wbu = pre
+        np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
         data = _to_torch_batch([np_dict], model_args, device)
         _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
-        nids = tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None
+        _feed_turn_indicator(s, outputs)
+        nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
         if window is None or (window[0] <= k <= window[1]):
