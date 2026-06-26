@@ -709,6 +709,12 @@ _register(
             ArgSpec("save_min_ego_speed", "float", label="Min ego speed (m/s)", default=0.5),
             ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),
             ArgSpec(
+                "distance_label_fontsize",
+                "int",
+                label="Distance label font size",
+                default=8,
+            ),
+            ArgSpec(
                 "dump_hits",
                 "int",
                 label="Render top-N collision/near-miss segments",
@@ -755,6 +761,12 @@ _register(
             ArgSpec("near_miss_thresh", "float", label="Near-miss threshold (m)", default=0.5),
             ArgSpec("search_radius", "float", label="Neighbor search radius (m)", default=1.5),
             ArgSpec("unstick_after", "int", label="Unstick after (steps)", default=300),
+            ArgSpec(
+                "distance_label_fontsize",
+                "int",
+                label="Distance label font size",
+                default=8,
+            ),
             ArgSpec("make_webm", "bool", label="Make WebM", default=True),
             ArgSpec("webm_fps", "int", label="WebM fps", default=10),
             ArgSpec("device", "str", label="Device (optional)"),

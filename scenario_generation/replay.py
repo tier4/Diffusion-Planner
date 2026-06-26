@@ -1502,6 +1502,7 @@ def save_step_figure(
     n_steps: int,
     route_polylines: list[np.ndarray] | None = None,
     title_prefix: str | None = None,
+    distance_label_fontsize: int = 8,
     view_half_m: float = _VIEW_HALF_M,
     route_lanelet_ids: list[int] | None = None,
     sim_time: float = 0.0,
@@ -1773,7 +1774,7 @@ def save_step_figure(
         ax.annotate(
             f"rb {body_d:.2f}m",
             xy=(mx, my),
-            fontsize=8,
+            fontsize=distance_label_fontsize,
             color="black",
             ha="center",
             va="center",
@@ -1823,7 +1824,7 @@ def save_step_figure(
         ax.annotate(
             f"{sc_d:.2f} m",
             xy=(mx + nx * label_off, my + ny * label_off),
-            fontsize=7,
+            fontsize=distance_label_fontsize,
             color="#cc0000",
             ha="center",
             va="center",
@@ -1864,7 +1865,7 @@ def save_step_figure(
         ax.annotate(
             f"{mv_d:.2f} m",
             xy=(mx + nx * 1.2, my + ny * 1.2),
-            fontsize=7,
+            fontsize=distance_label_fontsize,
             color="#0055cc",
             ha="center",
             va="center",

@@ -117,6 +117,7 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="render the top-N ranked hit segments to PNGs under <out>.renders/ (0=off)",
     )
+    p.add_argument("--distance_label_fontsize", type=int, default=8)
     p.add_argument("--render_webm", action="store_true", help="assemble dumped hit PNGs into WebM")
     p.add_argument("--webm_fps", type=int, default=10)
     # One-pass collision-scene save (no second extract pass). When --save_dir is set,
@@ -365,6 +366,7 @@ def main() -> None:
                 near_miss_thresh=args.near_miss_thresh,
                 search_radius=args.search_radius,
                 title_prefix=f"{r['route']}  {s0:05d}-{e0:05d}",
+                distance_label_fontsize=args.distance_label_fontsize,
             )
             if args.render_webm:
                 webm = od / "hit_segment.webm"
