@@ -174,3 +174,22 @@ void save_route_json(
     std::cerr << "Failed to close route JSON file: " << json_filename << std::endl;
   }
 }
+
+void save_sequence_frames_json(
+  const std::string & output_path, const std::string & rosbag_dir_name,
+  const std::string & sequence_id, const nlohmann::json & frames)
+{
+  namespace fs = std::filesystem;
+
+  fs::create_directories(output_path);
+
+  const std::string json_filename =
+    output_path + "/" + rosbag_dir_name + "_" + sequence_id + ".json";
+  std::ofstream json_file(json_filename);
+  if (json_file.is_open()) {
+    json_file << std::setw(2) << frames << std::endl;
+    json_file.close();
+  } else {
+    std::cerr << "Failed to open sequence JSON file for writing: " << json_filename << std::endl;
+  }
+}

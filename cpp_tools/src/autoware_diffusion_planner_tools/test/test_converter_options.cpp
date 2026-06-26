@@ -40,6 +40,7 @@ static ConverterOptions make_default_opts()
   o.offlane_time_stride = 1;
   o.write_skipped_npz = false;
   o.sidecar_only = false;
+  o.pack_sequence = false;
   return o;
 }
 
@@ -59,7 +60,34 @@ TEST(DefaultConverterOptionsTest, UsesSharedDefaults)
   EXPECT_FLOAT_EQ(opts.ego_width, -1.0f);
   EXPECT_TRUE(opts.use_interpolation);
   EXPECT_FALSE(opts.write_skipped_npz);
-  EXPECT_FALSE(opts.sidecar_only);  // full conversion (writes npz) by default
+  EXPECT_FALSE(opts.sidecar_only);   // full conversion (writes npz) by default
+  EXPECT_FALSE(opts.pack_sequence);  // one file per frame by default
+}
+
+TEST(NormalizeOptionsTest, PackSequenceForcesWriteSkippedNpz)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.pack_sequence = true;
+  opts.write_skipped_npz = false;
+  normalize_options(opts);
+  EXPECT_TRUE(opts.write_skipped_npz);  // requirement (3): packed sequence must be gap-free
+}
+
+TEST(NormalizeOptionsTest, LeavesWriteSkippedNpzWhenNotPacking)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.pack_sequence = false;
+  opts.write_skipped_npz = false;
+  normalize_options(opts);
+  EXPECT_FALSE(opts.write_skipped_npz);
+}
+
+TEST(ValidateOptionsTest, PackSequenceWithSidecarOnlyReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.pack_sequence = true;
+  opts.sidecar_only = true;
+  EXPECT_TRUE(validate_options(opts).has_value());
 }
 
 // ---------------------------------------------------------------------------
