@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
         "Pose JSON sidecars are read from next to each .npz, falling back to this same tree.",
     )
     # --- tunable knobs (default to the closed-loop mining config) ---
-    p.add_argument("--seg_len", type=int, default=600, help="frames per segment (~60s @10Hz)")
+    p.add_argument("--seg_len", type=int, default=6000, help="frames per segment (~60s @10Hz)")
     p.add_argument("--device", type=str, default="cuda", help="'cuda' or 'cpu'")
     p.add_argument("--near_miss_thresh", type=float, default=0.5, help="near-miss clearance (m)")
     p.add_argument(
@@ -87,14 +87,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--replan_interval",
         type=int,
-        default=1,
+        default=40,
         help="re-run the model every N steps (1 = every step). Between inferences the cached plan "
         "is executed, re-expressed in the current ego frame each step; the ego still steps at 10Hz",
     )
     p.add_argument(
         "--draw_every",
         type=int,
-        default=1,
+        default=8,
         help="render a PNG only every N steps (1 = every step). PNG rendering (matplotlib) is the "
         "dominant cost; this throttles it without touching the rollout. Frames are encoded at --fps "
         "regardless, so the video also plays N x faster (shorter). For real-time use --fps 10/N",
