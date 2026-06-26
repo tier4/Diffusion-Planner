@@ -51,7 +51,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup_steps", type=int, default=0)
     p.add_argument("--unstick_after", type=int, default=300)
     p.add_argument("--unstick_advance_m", type=float, default=5.0)
-    p.add_argument("--distance_label_fontsize", type=int, default=8)
+    p.add_argument(
+        "--distance_label_offset_m",
+        type=float,
+        default=1.2,
+        help="Offset the distance badges away from the line, in metres",
+    )
     p.add_argument("--make_webm", action="store_true")
     p.add_argument("--webm_fps", type=int, default=10)
     p.add_argument("--device", default=None)
@@ -97,7 +102,7 @@ def main() -> None:
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
         title_prefix=route_key,
-        distance_label_fontsize=args.distance_label_fontsize,
+        distance_label_offset_m=args.distance_label_offset_m,
     )
     print(metrics)
     if args.make_webm:
