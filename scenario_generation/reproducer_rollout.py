@@ -19,6 +19,7 @@ No rendering here (``--no_render`` is the mining default); every stage is timed.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 
@@ -1221,8 +1222,8 @@ def render_segment(
 
     ``draw_every``: write a PNG only every N steps (1 = every step). The rollout still single-steps
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
-    throttled. PNGs are named by step ``k`` (sparse), so build the video with ``draw_every`` folded
-    into the frame rate (``fps / draw_every``) to keep real-time playback.
+    throttled. PNGs are named by step ``k`` (sparse); encoding them at the raw fps makes the video
+    play ``draw_every`` x faster (shorter). For real-time playback use ``fps = 10 / draw_every``.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1260,12 +1261,66 @@ def render_segment(
     # margin covers any overrun without scanning the whole route.
     interp = _build_neighbor_interp(tl, start, min(end + 100, len(tl))) if interpolate else {}
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
+    # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
+    # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
+    # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
+    # reach). One JSONL line per step + a start header + a terminated line, next to the PNGs.
+    dbg = open(out_dir / "rollout.jsonl", "w", buffering=1)
+    dbg.write(
+        json.dumps(
+            {
+                "event": "start",
+                "start": int(start),
+                "end": int(end),
+                "goal_idx": int(end - 1),
+                "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
+                "goal_reach_m": float(s.goal_reach_m),
+                "max_steps": int(cap),
+                "unstick_after": int(s.unstick_after),
+                "len_tl": int(len(tl)),
+            }
+        )
+        + "\n"
+    )
     while not s.done:
         k = s.k
         pre = _pre_step(s)
         if pre is None:
+            dbg.write(
+                json.dumps(
+                    {
+                        "event": "terminated",
+                        "k": k,
+                        "reason": s.terminated,
+                        "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
+                        "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
+                        "max_idx_reached": int(s.cursor.max_idx_reached),
+                        "n_snaps": int(s.n_snaps),
+                    }
+                )
+                + "\n"
+            )
             break
         np_dict, neighbors_live, idx, _suuid, _wbu = pre
+        # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
+        # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
+        dbg.write(
+            json.dumps(
+                {
+                    "k": k,
+                    "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
+                    "yaw": round(float(s.live_pose[2]), 4),
+                    "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
+                    "speed": round(float(s.dyn.speed), 3),
+                    "rec_idx": int(idx),
+                    "max_idx_reached": int(s.cursor.max_idx_reached),
+                    "stuck": int(s.stuck),
+                    "ego_stuck": int(s.ego_stuck),
+                    "n_snaps": int(s.n_snaps),
+                }
+            )
+            + "\n"
+        )
         # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
         # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
         # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
@@ -1314,6 +1369,7 @@ def render_segment(
             )
         _score_into(s, neighbors_live, device, timers)
         _advance_step(s, pred_cur, idx, device, timers, override=override)
+    dbg.close()
     return _finalize(s, timers).metrics
 
 

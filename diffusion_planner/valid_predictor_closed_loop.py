@@ -95,8 +95,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="render a PNG only every N steps (1 = every step). PNG rendering (matplotlib) is the "
-        "dominant cost; this throttles it without touching the rollout. The video frame rate is "
-        "scaled to fps/draw_every so playback stays real-time (fewer, longer-held frames)",
+        "dominant cost; this throttles it without touching the rollout. Frames are encoded at --fps "
+        "regardless, so the video also plays N x faster (shorter). For real-time use --fps 10/N",
     )
     return p.parse_args()
 
@@ -158,7 +158,7 @@ def _build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
 
     PNGs are named by step ``k`` and may be sparse (``--draw_every`` skips frames), so glob the
     directory (gap-tolerant, name-sorted) instead of a contiguous ``%05d`` counter. ``fps`` is the
-    already-scaled frame rate (``--fps / --draw_every``) so playback stays real-time.
+    raw frame rate, so a sparse sequence plays faster than real time (shorter video).
     """
     subprocess.run(
         [
@@ -266,8 +266,10 @@ def main() -> None:
                 n_seg += 1
 
                 seg_mp4 = out_dir / f"{key}_{start}_{end}.mp4"
-                # Fold draw_every into the frame rate so the sparser PNGs still play in real time.
-                _build_mp4(png_dir, seg_mp4, args.fps / args.draw_every)
+                # Keep the raw fps: with only every draw_every-th frame drawn, the video plays
+                # draw_every x faster than real time (shorter video). Raise --draw_every or --fps
+                # to speed it up further; to restore real time use fps = 10 / draw_every.
+                _build_mp4(png_dir, seg_mp4, args.fps)
                 seg_mp4s.append(seg_mp4)
                 print(
                     f"  [{key}] segment [{start},{end}] -> {seg_mp4.name}  "
