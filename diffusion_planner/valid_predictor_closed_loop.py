@@ -33,6 +33,7 @@ import argparse
 import json
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -223,8 +224,7 @@ def main() -> None:
     route_keys = sorted(routes)
     print(f"routes: {len(route_keys)} | device: {args.device} | model: {args.model_path}")
 
-    # Outputs land next to the checkpoint: <model_path dir>/closed_loop/.
-    out_dir = args.model_path.parent / "closed_loop"
+    out_dir = args.model_path.parent / "closed_loop" / datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "segments.jsonl"
     summary_path = out_dir / "summary.json"
