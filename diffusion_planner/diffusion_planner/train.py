@@ -65,14 +65,15 @@ def mean_ego_loss(loss_dict):
     return result
 
 
-def closed_loop_validate(model, args, epoch: int, save_path: str) -> None:
-    """Per-epoch closed-loop rendered rollout; logs metrics + the rollout video to wandb.
+def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+    """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
 
     Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
-    (one route = one trial), renders an MP4, aggregates collision/clearance metrics, and logs both
-    to wandb at ``step=epoch+1``. No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass
-    the unwrapped model; it is switched to eval for the rollout (so the diffusion sampler runs and
-    produces ``prediction``) and restored afterwards.
+    (one route = one trial), renders an MP4 into ``out_dir``, aggregates collision/clearance
+    metrics, and logs both to wandb at ``step=epoch+1``. Called on the checkpoint-save cadence.
+    No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass the unwrapped model; it is
+    switched to eval for the rollout (so the diffusion sampler runs and produces ``prediction``)
+    and restored afterwards.
     """
     if not args.closed_loop_npz_root:
         return
@@ -84,7 +85,6 @@ def closed_loop_validate(model, args, epoch: int, save_path: str) -> None:
     was_training = net.training
     net.eval()
     try:
-        out_dir = os.path.join(save_path, "closed_loop", f"epoch{epoch + 1:04d}")
         summary = run_closed_loop_eval(
             net,
             args,
@@ -387,9 +387,6 @@ def model_training(args: TrainConfig):
                 step=epoch + 1,
             )
 
-            if (epoch + 1) % args.closed_loop_valid_interval == 0:
-                closed_loop_validate(diffusion_planner, args, epoch, save_path)
-
             curr_data = {
                 "epoch": epoch + 1,
                 "train_loss": train_total_loss,
@@ -422,6 +419,11 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
+                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
+                # (videos + metrics) land next to the saved weights they correspond to.
+                closed_loop_validate(
+                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                )
 
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")

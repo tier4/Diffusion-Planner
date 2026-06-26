@@ -173,10 +173,9 @@ def get_args(args_list=None):
         "--closed_loop_npz_root",
         type=str,
         default="",
-        help="dir tree of route NPZ frames for per-epoch closed-loop validation "
-        "(empty = disabled). One route per trial.",
+        help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
+        "cadence (save_utd). Empty = disabled. One route per trial.",
     )
-    parser.add_argument("--closed_loop_valid_interval", type=int, default=1, help="run every N epochs")
     parser.add_argument(
         "--closed_loop_seg_len",
         type=int,
