@@ -145,7 +145,7 @@ class TrainConfig:
     closed_loop_search_radius: float = 1.5
     closed_loop_warmup_steps: int = 0
     closed_loop_unstick_after: int = 300
-    closed_loop_unstick_advance_m: float = 5.0
+    closed_loop_unstick_advance_m: float = 2.5
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

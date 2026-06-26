@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
         help="snap the ego to the GT pose ahead after this many no-progress steps (0=off)",
     )
     p.add_argument(
-        "--unstick_advance_m", type=float, default=5.0, help="how far ahead to snap when unsticking"
+        "--closed_loop_seg_len", type=float, default=2.5, help="how far ahead to snap when unsticking"
     )
     p.add_argument("--fps", type=int, default=10, help="output video frame rate (10 = realtime)")
     p.add_argument(
