@@ -1210,6 +1210,7 @@ def render_segment(
     interpolate: bool = True,
     *,
     replan_interval: int,
+    draw_every: int,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1217,6 +1218,11 @@ def render_segment(
     cached plan keeps being executed — pinned in the world frame and re-expressed in the current
     ego frame each step (``_world_plan_to_ego``), so the ego advances along the trajectory. The
     ego still single-steps at 10 Hz; only the model call is throttled.
+
+    ``draw_every``: write a PNG only every N steps (1 = every step). The rollout still single-steps
+    at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
+    throttled. PNGs are named by step ``k`` (sparse), so build the video with ``draw_every`` folded
+    into the frame rate (``fps / draw_every``) to keep real-time playback.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1296,7 +1302,7 @@ def render_segment(
         nids = tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
-        if window is None or (window[0] <= k <= window[1]):
+        if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
             _draw_step(
                 np_dict,
                 pred_cur,
