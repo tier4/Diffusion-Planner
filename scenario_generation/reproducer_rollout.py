@@ -1104,7 +1104,16 @@ def _polylines_from_tensor(t: np.ndarray, border_only: bool = False) -> list[np.
     return out
 
 
-def _draw_step(np_dict, pred, ego_shape, path, neighbor_ids=None, step=0, total=1):
+def _draw_step(
+    np_dict,
+    pred,
+    ego_shape,
+    path,
+    neighbor_ids=None,
+    step=0,
+    total=1,
+    title_prefix: str | None = None,
+):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
     Rebuilds a SceneContext (ego + reproduced neighbors + map) in the live-ego
@@ -1146,6 +1155,7 @@ def _draw_step(np_dict, pred, ego_shape, path, neighbor_ids=None, step=0, total=
         Path(path),
         step,
         total,
+        title_prefix=title_prefix,
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
     )
