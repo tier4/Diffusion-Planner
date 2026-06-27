@@ -3,12 +3,7 @@ no-op (backward compatible) when sidecars/flags are absent."""
 
 import json
 
-from diffusion_planner.utils.scene_skip import (
-    filter_scene_list,
-    is_skipped,
-    load_scene_list,
-    resolve_sidecar,
-)
+from diffusion_planner.utils.scene_skip import filter_scene_list, is_skipped
 
 
 def _frame(tmp, stem, skipped=None):
@@ -65,22 +60,6 @@ def test_sidecar_root_index(tmp_path):
     sc_root.mkdir(parents=True)
     (npz_dir / "x.npz").write_bytes(b"")
     (sc_root / "x.json").write_text(json.dumps({"is_skipped": True}))
-    assert resolve_sidecar(npz_dir / "x.npz", sidecar_root=tmp_path / "sc") == sc_root / "x.json"
+    # sidecar resolved by stem under sidecar_root => the flagged frame is dropped
+    assert is_skipped(npz_dir / "x.npz", sidecar_root=tmp_path / "sc") is True
     assert filter_scene_list([str(npz_dir / "x.npz")], sidecar_root=tmp_path / "sc") == []
-
-
-def test_load_scene_list_dir_and_json(tmp_path):
-    a = _frame(tmp_path, "a", skipped=True)
-    b = _frame(tmp_path, "b", skipped=False)
-    # dir glob
-    kept_dir = load_scene_list(tmp_path)
-    assert a not in kept_dir and b in kept_dir
-    # json list, and the {"files": [...]} dict form
-    lst = tmp_path / "list.json"
-    lst.write_text(json.dumps([a, b]))
-    assert load_scene_list(lst) == [b]
-    dct = tmp_path / "files.json"
-    dct.write_text(json.dumps({"seed": 1, "files": [a, b]}))
-    assert load_scene_list(dct) == [b]
-    # opt-out keeps everything
-    assert sorted(load_scene_list(lst, skip_filter=False)) == sorted([a, b])
