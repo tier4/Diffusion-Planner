@@ -41,4 +41,5 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
   --valid_set_list ${VALID_SET_LIST} \
   --resume_model_path ${RESUME_MODEL_PATH} \
   --save_dir ${SAVE_PATH} \
+  --closed_loop_npz_root ${CLOSED_LOOP_NPZ_ROOT:-""} \
   2>&1 | tee ${SAVE_PATH}/grpo_log.txt
