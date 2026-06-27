@@ -119,7 +119,7 @@ def get_args():
     parser.add_argument("--train_epochs", type=int, default=40)
     parser.add_argument("--batch_size", type=int, default=64, help="number of scenes per step")
     parser.add_argument("--save_utd", type=int, default=1)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--warm_up_epoch", type=int, default=2)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
@@ -157,7 +157,7 @@ def get_args():
     parser.add_argument(
         "--w_gt_l2",
         type=float,
-        default=0.03,
+        default=0.1,
         help="weight on the realism penalty: ADE (mean L2) between the generated "
         "ego trajectory and the scene's own GT ego future (0 disables)",
     )
@@ -233,7 +233,7 @@ def get_args():
     parser.add_argument(
         "--neighbor_db_collision_margin",
         type=float,
-        default=4.0,
+        default=5.0,
         help="(DB) max distance [m] from an ego GT waypoint to count as a "
         "colliding track during the DB search",
     )
