@@ -19,6 +19,41 @@ def set_seed(CUR_SEED):
     torch.backends.cudnn.benchmark = False
 
 
+def compute_grad_stats(parameters, prefix="grad"):
+    """
+    Compute gradient statistics over all parameters to monitor
+    vanishing/exploding gradients during training.
+
+    The statistics are computed on the concatenation of every parameter's
+    gradient (i.e. the global gradient vector):
+        - L1 norm
+        - L2 norm
+        - Linf norm (max absolute value)
+        - mean
+        - standard deviation
+
+    Args:
+        parameters: iterable of model parameters (e.g. ``model.parameters()``).
+        prefix: key prefix for the returned dictionary.
+
+    Returns:
+        dict mapping ``f"{prefix}/<stat>"`` to a python float. Empty dict if
+        no parameter has a gradient.
+    """
+    grads = [p.grad.detach().flatten() for p in parameters if p.grad is not None]
+    if len(grads) == 0:
+        return {}
+
+    grads = torch.cat(grads)
+    return {
+        f"{prefix}/l1_norm": grads.abs().sum().item(),
+        f"{prefix}/l2_norm": grads.norm(2).item(),
+        f"{prefix}/linf_norm": grads.abs().max().item(),
+        f"{prefix}/mean": grads.mean().item(),
+        f"{prefix}/std": grads.std().item(),
+    }
+
+
 def get_epoch_mean_loss(epoch_loss):
     epoch_mean_loss = {}
     for current_loss in epoch_loss:

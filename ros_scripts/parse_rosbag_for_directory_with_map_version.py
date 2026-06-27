@@ -18,7 +18,7 @@ def parse_args():
     parser.add_argument("target_dir_list", type=Path, nargs="+")
     parser.add_argument("--save_root", type=Path, required=True)
     parser.add_argument("--cpp_binary_path", type=Path, default=DEFAULT_CPP_BINARY)
-    parser.add_argument("--step", type=int, default=3)
+    parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=0)
     parser.add_argument("--min_distance", type=float, default=50.0)
@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument("--collision_time_stride", type=int, default=5)
     parser.add_argument("--offlane_max_score", type=float, default=6.0)
     parser.add_argument("--offlane_time_stride", type=int, default=1)
-    parser.add_argument("--write_skipped_npz", type=int, default=0)
+    parser.add_argument("--write_skipped_npz", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=32)
     return parser.parse_args()
 

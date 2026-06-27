@@ -289,8 +289,9 @@ void process_sequence(
       line_strings, lanes, filter_params);
 
     const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
-    // Accepted frames are always written; skipped frames only on request.
-    if (!is_skipped || options.write_skipped_npz) {
+    // Accepted frames are always written; skipped frames only on request. In sidecar-only mode
+    // no npz is written at all (the sidecar below still carries the exact neighbor_ids/skip).
+    if (!options.sidecar_only && (!is_skipped || options.write_skipped_npz)) {
       save_frame_data_npz(
         paths.save_dir, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
         neighbor_future, static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit,
@@ -299,7 +300,7 @@ void process_sequence(
     }
     save_frame_json(
       paths.save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-      seq.data_list[i].timestamp, skipping_info);
+      seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids);
 
     if (i % 100 == 0) {
       std::cout << "Processed frame " << i << "/" << n << std::endl;

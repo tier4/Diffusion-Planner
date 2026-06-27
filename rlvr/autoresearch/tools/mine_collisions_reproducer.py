@@ -87,6 +87,17 @@ def parse_args() -> argparse.Namespace:
         "numerically equivalent to the CPU path (~1e-5, float-ordering).",
     )
     p.add_argument(
+        "--neighbor_history_mode",
+        type=str,
+        default="recorded",
+        choices=["recorded", "sim"],
+        help="'recorded' (default, original): copy each cursor frame's own 31-step neighbor "
+        "history verbatim — a cursor-frozen moving car still reads its recorded velocity. "
+        "'sim': rebuild neighbor_agents_past from the SIMULATED shown motion (track by UUID, "
+        "interpolate between recorded anchors, velocity = finite diff of shown positions) so a "
+        "frozen neighbor reads v~0 and a moving one its true speed. Needs sidecar neighbor_ids.",
+    )
+    p.add_argument(
         "--prefetch_ahead",
         type=int,
         default=2,
@@ -249,6 +260,7 @@ def main() -> None:
             save_min_ego_speed=args.save_min_ego_speed,
             route_keys=buf_keys,
             gpu_transform=args.gpu_transform,
+            neighbor_history_mode=args.neighbor_history_mode,
         )
         for key, res in zip(buf_keys, res_list):
             row = {"route": key, **res.metrics}
@@ -325,6 +337,8 @@ def main() -> None:
                 device=device,
                 near_miss_thresh=args.near_miss_thresh,
                 search_radius=args.search_radius,
+                replan_interval=1,
+                draw_every=1,
             )
         print(f"rendered {args.dump_hits} hit segment(s) -> {render_root}")
 

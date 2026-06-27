@@ -436,6 +436,19 @@ def compute_neighbor_collision_penalty(
     if S == 0:
         return torch.zeros(B, T_full, device=device)
 
+    # Drop neighbor slots that are invalid at every eval step across the whole batch.
+    # The penalty is an amax over neighbors and invalid neighbors contribute zero, so
+    # removing globally-invalid (padding) slots leaves the result unchanged while
+    # shrinking the SAT tensors from the padded Pn (e.g. 320) down to the real count.
+    neighbor_agents_past = neighbor_agents_past[:, :Pn]
+    keep = neighbors_future_valid[:, :, steps].any(dim=2).any(dim=0)  # [Pn]
+    if not bool(keep.any()):
+        return torch.zeros(B, T_full, device=device)
+    neighbors_future = neighbors_future[:, keep]
+    neighbors_future_valid = neighbors_future_valid[:, keep]
+    neighbor_agents_past = neighbor_agents_past[:, keep]
+    Pn = neighbors_future.shape[1]
+
     # Ego box corners at eval timesteps (corners are every K // 4-th edge sample point).
     ego_corners = ego_edge_points[:, steps][:, :, :: K // 4, :]  # [B, S, 4, 2]
 

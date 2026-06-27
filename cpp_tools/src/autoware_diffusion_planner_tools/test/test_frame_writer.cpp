@@ -34,7 +34,8 @@ TEST(BuildFrameJsonTest, AcceptedFrameFields)
   const SkippingInfo info = SkippingInfo::accepted();
   const int64_t ts = 123456789LL;
 
-  const nlohmann::json j = build_frame_json(odom, ts, info);
+  const std::vector<std::string> neighbor_ids = {"aaaa", "bbbb", "cccc"};
+  const nlohmann::json j = build_frame_json(odom, ts, info, neighbor_ids);
 
   EXPECT_FALSE(j["is_skipped"].get<bool>());
   EXPECT_EQ(j["timestamp"].get<int64_t>(), ts);
@@ -42,6 +43,7 @@ TEST(BuildFrameJsonTest, AcceptedFrameFields)
   EXPECT_DOUBLE_EQ(j["y"].get<double>(), 2.2);
   EXPECT_DOUBLE_EQ(j["z"].get<double>(), 3.3);
   EXPECT_EQ(j["skipping_info"]["label"].get<int>(), static_cast<int>(SkippingLabel::NotSkipped));
+  EXPECT_EQ(j["neighbor_ids"].get<std::vector<std::string>>(), neighbor_ids);
 }
 
 TEST(BuildFrameJsonTest, SkippedFrameIsSkippedTrue)
@@ -49,7 +51,7 @@ TEST(BuildFrameJsonTest, SkippedFrameIsSkippedTrue)
   nav_msgs::msg::Odometry odom;
   const SkippingInfo info = SkippingInfo::stale_data(600'000'000LL);
 
-  const nlohmann::json j = build_frame_json(odom, 0LL, info);
+  const nlohmann::json j = build_frame_json(odom, 0LL, info, std::vector<std::string>{});
 
   EXPECT_TRUE(j["is_skipped"].get<bool>());
   EXPECT_EQ(

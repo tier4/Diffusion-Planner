@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tqdm import tqdm
+
 # stem -> sidecar path index per sidecar_root, built once (one rglob) and reused for
 # every scene, so a large scene list doesn't pay an O(files) rglob per entry. Cached for
 # the process lifetime (never invalidated) — correct for the batch train/eval CLIs here;
@@ -98,7 +100,7 @@ def filter_scene_list(
     if not enabled or not scenes:
         return scenes
     kept, dropped, no_sidecar = [], 0, 0
-    for entry in scenes:
+    for entry in tqdm(scenes, desc=f"[skip-filter]", unit="scene"):
         skipped, resolved = _sidecar_state(scene_entry_path(entry), sidecar_root)
         if not resolved:
             no_sidecar += 1
