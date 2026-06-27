@@ -85,12 +85,24 @@ def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
     """
     subprocess.run(
         [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-framerate", str(fps),
-            "-pattern_type", "glob",
-            "-i", str(png_dir / "*.png"),
-            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-framerate",
+            str(fps),
+            "-pattern_type",
+            "glob",
+            "-i",
+            str(png_dir / "*.png"),
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "23",
             str(mp4_path),
         ],
         check=True,
@@ -104,8 +116,21 @@ def concat_mp4(mp4_paths: list[Path], out_path: Path, work_dir: Path) -> None:
     list_file = work_dir / (out_path.stem + ".ffconcat.txt")
     list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in mp4_paths))
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-         "-i", str(list_file), "-c", "copy", str(out_path)],
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file),
+            "-c",
+            "copy",
+            str(out_path),
+        ],
         check=True,
     )
 
@@ -201,7 +226,9 @@ def run_closed_loop_eval(
             concat_mp4(seg_mp4s, full_mp4, out_dir)
             route_mp4s.append(full_mp4)
             if verbose:
-                print(f"[{ri + 1}/{len(route_keys)}] {key}: {len(seg_mp4s)} segments -> {full_mp4.name}")
+                print(
+                    f"[{ri + 1}/{len(route_keys)}] {key}: {len(seg_mp4s)} segments -> {full_mp4.name}"
+                )
     finally:
         fout.close()
 
@@ -213,6 +240,8 @@ def run_closed_loop_eval(
     summary["segments"] = rows
 
     with open(out_dir / "summary.json", "w") as f:
-        json.dump({k: v for k, v in summary.items() if k not in ("route_mp4s", "segments")}, f, indent=4)
+        json.dump(
+            {k: v for k, v in summary.items() if k not in ("route_mp4s", "segments")}, f, indent=4
+        )
 
     return summary
