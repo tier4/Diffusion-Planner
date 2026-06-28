@@ -11,10 +11,9 @@ realized ego footprint is scored against those neighbors with the canonical OBB
 A *route* = one bag-prefix group of consecutive 10 Hz NPZ frames (``RouteTimeline``);
 each route is sliced into ``--seg_len`` segments and rolled out with ``render_segment``
 (one GPU forward per tick), which BOTH returns the segment metrics AND writes a per-step
-PNG of the live-ego scene. Every run therefore always produces video: per segment a PNG
-dir + an MP4, and per route a single concatenated ``<route>_full.mp4`` covering the whole
-route. Per-segment metrics are streamed to ``segments.jsonl`` and aggregated into
-``summary.json`` (both next to the checkpoint).
+PNG of the live-ego scene. Every run therefore always produces video: one MP4 per segment
+(``<route>_<start>_<end>.mp4``). Per-segment metrics are streamed to ``segments.jsonl`` and
+aggregated into ``summary.json`` (both next to the checkpoint).
 
 Only ``--model_path`` and ``--npz_root`` are required; all outputs are written next to
 the checkpoint (``<model_path dir>/closed_loop/``) and the rollout knobs default to the
@@ -158,7 +157,7 @@ def main() -> None:
         f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
     )
     print(f"total_snaps={summary['total_snaps']}  terminated={summary['terminated_counts']}")
-    print(f"videos: per-route <route>_full.mp4 in {out_dir}")
+    print(f"videos: per-segment <route>_<start>_<end>.mp4 in {out_dir}")
 
 
 if __name__ == "__main__":
