@@ -126,6 +126,8 @@ def run_closed_loop_eval(
     fps: float,
     replan_interval: int,
     draw_every: int,
+    unstick_radius_mult: float = 10.0,
+    unstick_teleport_after: int = 300,
     verbose: bool = True,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
@@ -171,6 +173,8 @@ def run_closed_loop_eval(
                     warmup_steps=warmup_steps,
                     unstick_after=unstick_after,
                     unstick_advance_m=unstick_advance_m,
+                    unstick_radius_mult=unstick_radius_mult,
+                    unstick_teleport_after=unstick_teleport_after,
                     replan_interval=replan_interval,
                     draw_every=draw_every,
                 )

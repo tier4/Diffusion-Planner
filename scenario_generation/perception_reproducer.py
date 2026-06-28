@@ -48,9 +48,34 @@ class PerceptionReproducer:
     ) -> None:
         self.tl = timeline
         self.search_radius = float(search_radius)
+        self._base_search_radius = float(search_radius)  # nominal radius to restore after unsticking
         self.cool_down_sec = float(cool_down_sec)
         self.timers = timers or Timers()
         self.reset()
+
+    def set_search_radius(self, radius: float) -> None:
+        """Change the neighborhood radius and force a queue rebuild on the next ``step``.
+
+        Used by the rollout's unstick escalation: temporarily widening the radius lets the
+        cursor reach recorded frames further ahead (where a phantom lead/blocker has cleared)
+        so the model can proceed on its own, then restore the nominal radius once it moves.
+        ``reset`` does NOT touch the radius, so a widened radius persists across a teleport
+        unless explicitly restored.
+        """
+        radius = float(radius)
+        if radius == self.search_radius:
+            return
+        self.search_radius = radius
+        self._queue.clear()
+        self._last_seq_pos = None  # force a neighborhood rebuild next step at the new radius
+
+    def widen(self, mult: float) -> None:
+        """Widen the search radius to ``mult`` x the nominal (base) radius."""
+        self.set_search_radius(self._base_search_radius * float(mult))
+
+    def restore_radius(self) -> None:
+        """Restore the nominal (base) search radius (no-op if already there)."""
+        self.set_search_radius(self._base_search_radius)
 
     def reset(self, start_idx: int = 0) -> None:
         self._queue: deque[int] = deque()
