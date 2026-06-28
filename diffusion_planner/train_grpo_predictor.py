@@ -118,7 +118,7 @@ def get_args():
 
     # Training
     parser.add_argument("--seed", type=int, default=3407)
-    parser.add_argument("--train_epochs", type=int, default=40)
+    parser.add_argument("--train_epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=64, help="number of scenes per step")
     parser.add_argument("--save_utd", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=5e-6)
@@ -235,7 +235,7 @@ def get_args():
     parser.add_argument(
         "--neighbor_db_collision_margin",
         type=float,
-        default=5.0,
+        default=10.0,
         help="(DB) max distance [m] from an ego GT waypoint to count as a "
         "colliding track during the DB search",
     )
