@@ -28,6 +28,7 @@ from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.neighbor_db import NeighborPatternDB
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from timm.utils import ModelEma
@@ -615,6 +616,17 @@ def model_training(args):
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
+                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(save_path, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=curr_dir,
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
                 # Closed-loop validation on the checkpoint-save cadence; videos + metrics land next
                 # to the saved weights and are logged to wandb at step=epoch+1.
                 closed_loop_validate(
@@ -629,6 +641,17 @@ def model_training(args):
                 curr_data["best_reward"] = best_reward
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
                     json.dump(curr_data, f, indent=4)
+                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(save_path, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=curr_dir,
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
