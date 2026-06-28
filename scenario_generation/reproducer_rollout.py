@@ -494,11 +494,20 @@ class _SegState:
     max_steps: int = (
         0  # sim-step cap (decoupled from segment length so a slow ego can still finish)
     )
-    # Unstick: when the ego makes no forward progress for ``unstick_after`` steps
-    # (e.g. it stops at a yellow light and never proceeds), snap it forward to the
-    # recorded GT ego pose ~``unstick_advance_m`` ahead instead of stalling forever.
+    # Unstick (two-stage escalation): when the ego makes no forward progress for
+    # ``unstick_after`` steps (e.g. it stops at a yellow light and never proceeds),
+    # FIRST widen the cursor search radius to ``unstick_radius_mult`` x nominal so it can
+    # reach recorded frames further ahead (where a phantom lead/blocker has cleared) and the
+    # model can proceed on its own — closed-loop continuity preserved. The widened radius is
+    # restored to nominal as soon as the ego moves again (speed >= 0.5). Only if the ego is
+    # STILL stuck ``unstick_teleport_after`` further steps later does the rollout fall back to
+    # snapping it forward onto the recorded GT pose ~``unstick_advance_m`` ahead (the hard last
+    # resort). Set ``unstick_radius_mult`` <= 1.0 to disable the gentle stage (teleport at
+    # ``unstick_after``, the legacy behavior).
     unstick_after: int = 0
     unstick_advance_m: float = 5.0
+    unstick_radius_mult: float = 3.0
+    unstick_teleport_after: int = 300
     ego_stuck: int = 0
     n_snaps: int = 0
     # One-pass collision-scene save (set when run_segments_batched gets save_dir).
@@ -544,6 +553,8 @@ def _seed_state(
     max_steps=None,
     unstick_after=0,
     unstick_advance_m=5.0,
+    unstick_radius_mult=3.0,
+    unstick_teleport_after=300,
     neighbor_history_mode="recorded",
 ) -> _SegState:
     from scenario_generation.mpc_tracker import PerfectTracker
@@ -592,6 +603,8 @@ def _seed_state(
         max_steps=cap,
         unstick_after=int(unstick_after),
         unstick_advance_m=float(unstick_advance_m),
+        unstick_radius_mult=float(unstick_radius_mult),
+        unstick_teleport_after=int(unstick_teleport_after),
         nbr_tracker=nbr_tracker,
     )
 
@@ -717,12 +730,29 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
         s.sim_time += DT
         s.k += 1
 
-        # Unstick: if the ego has been (near-)stopped for too long (e.g. it halted
-        # at a yellow light and won't proceed), snap it forward onto the recorded
-        # GT ego pose ~unstick_advance_m ahead so the rollout continues.
+        # Unstick (two-stage): if the ego has been (near-)stopped for too long (e.g. it
+        # halted at a yellow light and won't proceed), FIRST widen the cursor search radius
+        # so it reaches recorded frames further ahead (phantom blocker clears -> the model
+        # proceeds on its own, no teleport). Only if it is STILL stuck after a further grace
+        # window do we fall back to the hard snap onto the recorded GT pose ahead.
         if s.unstick_after > 0:
-            s.ego_stuck = s.ego_stuck + 1 if s.dyn.speed < 0.5 else 0
-            if s.ego_stuck >= s.unstick_after:
+            if s.dyn.speed >= 0.5:
+                # Moving again: clear the counter and undo any temporary cursor widening so
+                # frame selection returns to the nominal search_radius.
+                s.ego_stuck = 0
+                s.cursor.restore_radius()
+            else:
+                s.ego_stuck += 1
+            widen_on = s.unstick_radius_mult > 1.0
+            # Stage 1 (gentle): widen once, exactly when the stuck count first crosses the
+            # threshold (so it isn't re-applied every subsequent stuck step).
+            if widen_on and s.ego_stuck == s.unstick_after:
+                s.cursor.widen(s.unstick_radius_mult)
+            # Stage 2 (last resort): teleport. With widening on this is deferred by
+            # ``unstick_teleport_after`` extra steps; with it off it fires at ``unstick_after``
+            # (legacy behavior).
+            teleport_at = s.unstick_after + (s.unstick_teleport_after if widen_on else 0)
+            if s.ego_stuck >= teleport_at:
                 n = len(s.tl)
                 tgt = min(max(s.cursor.max_idx_reached, 0) + 1, n - 1)
                 while tgt < n - 1 and (
@@ -732,6 +762,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                     tgt += 1
                 s.live_pose, s.ego_hist, s.dyn = _ego_state_from_frame(s.tl, tgt)
                 s.cursor.reset(tgt)
+                s.cursor.restore_radius()  # teleport is a fresh start -> nominal radius
                 # Re-seed the sim machinery at the teleport target so post-snap recording is
                 # correct, not stale: the neighbor tracker's rec_t is capped at 1.0/step, so
                 # without this it would lag many steps behind the jumped ego (stale neighbors);
@@ -797,6 +828,8 @@ def run_segment(
     max_steps: int | None = None,
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
+    unstick_radius_mult: float = 3.0,
+    unstick_teleport_after: int = 300,
     neighbor_history_mode: str = "recorded",
     timers: Timers | None = None,
 ) -> SegmentResult:
@@ -820,6 +853,8 @@ def run_segment(
         max_steps=max_steps if max_steps is not None else 3 * (end - start),
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
+        unstick_radius_mult=unstick_radius_mult,
+        unstick_teleport_after=unstick_teleport_after,
         neighbor_history_mode=neighbor_history_mode,
     )
     while not s.done:
@@ -1208,6 +1243,8 @@ def render_segment(
     color_by_uuid: bool = True,
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
+    unstick_radius_mult: float = 3.0,
+    unstick_teleport_after: int = 300,
     interpolate: bool = True,
     *,
     replan_interval: int,
@@ -1255,6 +1292,8 @@ def render_segment(
         max_steps=cap,
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
+        unstick_radius_mult=unstick_radius_mult,
+        unstick_teleport_after=unstick_teleport_after,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -1393,6 +1432,8 @@ def run_segments_batched(
     max_stuck_steps: int = 0,
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
+    unstick_radius_mult: float = 3.0,
+    unstick_teleport_after: int = 300,
     max_steps_mult: int = 3,
     n_build_threads: int = 8,
     prefetch_ahead: int = 2,
@@ -1472,6 +1513,8 @@ def run_segments_batched(
                     max_steps=max_steps_mult * (end - start),
                     unstick_after=unstick_after,
                     unstick_advance_m=unstick_advance_m,
+                    unstick_radius_mult=unstick_radius_mult,
+                    unstick_teleport_after=unstick_teleport_after,
                     neighbor_history_mode=neighbor_history_mode,
                 )
                 for (tl, start, end) in chunk
@@ -2030,6 +2073,8 @@ def extract_collision_scenes(
     warmup_steps: int = 0,
     unstick_after: int = 300,
     unstick_advance_m: float = 5.0,
+    unstick_radius_mult: float = 3.0,
+    unstick_teleport_after: int = 300,
     max_steps: int | None = None,
     pre_arc_m: float = 1.0,
     max_scenes: int = 160,
@@ -2089,6 +2134,8 @@ def extract_collision_scenes(
         max_steps=cap,
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
+        unstick_radius_mult=unstick_radius_mult,
+        unstick_teleport_after=unstick_teleport_after,
     )
     # Rolling buffer of the last max_scenes+1 live steps; each: (k, idx, live_pose, np_dict).
     buf: deque = deque(maxlen=max_scenes + 1)

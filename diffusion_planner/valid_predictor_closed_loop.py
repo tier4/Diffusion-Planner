@@ -76,6 +76,21 @@ def parse_args() -> argparse.Namespace:
         default=2.5,
         help="how far ahead to snap when unsticking",
     )
+    p.add_argument(
+        "--unstick_radius_mult",
+        type=float,
+        default=3.0,
+        help="when stuck, first widen the cursor search_radius to this x nominal so it reaches "
+        "frames further ahead (model proceeds on its own); restored to nominal once the ego moves. "
+        "<=1 disables this gentle stage (teleport straight away at --unstick_after)",
+    )
+    p.add_argument(
+        "--unstick_teleport_after",
+        type=int,
+        default=300,
+        help="if still stuck this many steps AFTER the radius was widened, fall back to the hard "
+        "teleport onto the GT pose ahead (last resort)",
+    )
     p.add_argument("--fps", type=int, default=10, help="output video frame rate (10 = realtime)")
     p.add_argument(
         "--replan_interval",
@@ -117,6 +132,8 @@ def main() -> None:
         warmup_steps=args.warmup_steps,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
+        unstick_radius_mult=args.unstick_radius_mult,
+        unstick_teleport_after=args.unstick_teleport_after,
         fps=args.fps,
         replan_interval=args.replan_interval,
         draw_every=args.draw_every,
