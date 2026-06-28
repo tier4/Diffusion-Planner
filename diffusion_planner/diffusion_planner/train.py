@@ -124,13 +124,13 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
         for k in scalar_keys
         if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
     }
-    for mp4 in summary["route_mp4s"]:
+    for mp4 in summary["video_mp4s"]:
         log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
     wandb.log(log, step=epoch + 1)
     print(
         f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
         f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['route_mp4s'])} video(s)"
+        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
     )
 
 

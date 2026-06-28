@@ -3,12 +3,12 @@
 Shared by the standalone CLI (``diffusion_planner/valid_predictor_closed_loop.py``) and the
 per-epoch training validation (``diffusion_planner/diffusion_planner/train.py``): both drive the
 ego in CLOSED LOOP through ``reproducer_rollout.render_segment`` over the route NPZ frames under
-``npz_root``, write a per-step PNG, build a per-segment MP4 and one concatenated per-route MP4,
-and aggregate the per-segment metrics into a single summary.
+``npz_root``, write a per-step PNG, build one MP4 per segment, and aggregate the per-segment
+metrics into a single summary.
 
 ``run_closed_loop_eval`` takes an already-loaded ``(model, model_args)`` (so training can pass its
 live model + ``TrainConfig`` straight in, no checkpoint reload) and returns the summary dict plus
-the per-route MP4 paths (for wandb upload).
+the per-segment MP4 paths (for wandb upload).
 """
 
 from __future__ import annotations
@@ -109,32 +109,6 @@ def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
     )
 
 
-def concat_mp4(mp4_paths: list[Path], out_path: Path, work_dir: Path) -> None:
-    """Concatenate per-segment MP4s (same codec/size) into one route-level MP4."""
-    if not mp4_paths:
-        return
-    list_file = work_dir / (out_path.stem + ".ffconcat.txt")
-    list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in mp4_paths))
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(list_file),
-            "-c",
-            "copy",
-            str(out_path),
-        ],
-        check=True,
-    )
-
-
 def run_closed_loop_eval(
     model,
     model_args,
@@ -160,11 +134,11 @@ def run_closed_loop_eval(
     ``model`` must be an eval-mode Diffusion-Planner (callable ``model(data) -> (_, outputs)`` with
     ``outputs["prediction"]``); ``model_args`` provides ``observation_normalizer`` /
     ``predicted_neighbor_num`` / ``future_len`` (a ``Config`` or ``TrainConfig``). Per segment a PNG
-    dir + an MP4 are written, per route a concatenated ``<route>_full.mp4``. ``segments.jsonl`` and
+    dir + an MP4 (``<route>_<start>_<end>.mp4``) are written. ``segments.jsonl`` and
     ``summary.json`` are written into ``out_dir``.
 
-    Returns the summary dict with extra keys ``route_mp4s`` (list[Path]), ``segments`` (list[row]),
-    and ``elapsed_sec``.
+    Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-segment MP4),
+    ``segments`` (list[row]), and ``elapsed_sec``.
     """
     npz_root = Path(npz_root)
     out_dir = Path(out_dir)
@@ -175,14 +149,14 @@ def run_closed_loop_eval(
 
     timers = Timers()
     rows: list[dict] = []
-    route_mp4s: list[Path] = []
+    video_mp4s: list[Path] = []
     t0 = time.perf_counter()
 
     fout = open(out_dir / "segments.jsonl", "w")
     try:
         for ri, key in enumerate(route_keys):
             tl = RouteTimeline(routes[key], sidecar_dir=npz_root, timers=timers)
-            seg_mp4s: list[Path] = []
+            n_seg_videos = 0
             for start, end in tl.iter_segments(seg_len):
                 png_dir = out_dir / f"{key}_{start}_{end}"
                 metrics = render_segment(
@@ -218,7 +192,8 @@ def run_closed_loop_eval(
                 # Raw fps: with only every draw_every-th frame drawn, the video plays
                 # draw_every x faster than real time. For real time use fps = 10 / draw_every.
                 build_mp4(png_dir, seg_mp4, fps)
-                seg_mp4s.append(seg_mp4)
+                video_mp4s.append(seg_mp4)
+                n_seg_videos += 1
                 if verbose:
                     print(
                         f"  [{key}] segment [{start},{end}] -> {seg_mp4.name}  "
@@ -226,13 +201,8 @@ def run_closed_loop_eval(
                         f"min_clr={metrics['min_clearance']:.3f}"
                     )
 
-            full_mp4 = out_dir / f"{key}_full.mp4"
-            concat_mp4(seg_mp4s, full_mp4, out_dir)
-            route_mp4s.append(full_mp4)
             if verbose:
-                print(
-                    f"[{ri + 1}/{len(route_keys)}] {key}: {len(seg_mp4s)} segments -> {full_mp4.name}"
-                )
+                print(f"[{ri + 1}/{len(route_keys)}] {key}: {n_seg_videos} segment video(s)")
     finally:
         fout.close()
 
@@ -240,12 +210,12 @@ def run_closed_loop_eval(
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len(route_keys)
     summary["elapsed_sec"] = time.perf_counter() - t0
-    summary["route_mp4s"] = route_mp4s
+    summary["video_mp4s"] = video_mp4s
     summary["segments"] = rows
 
     with open(out_dir / "summary.json", "w") as f:
         json.dump(
-            {k: v for k, v in summary.items() if k not in ("route_mp4s", "segments")}, f, indent=4
+            {k: v for k, v in summary.items() if k not in ("video_mp4s", "segments")}, f, indent=4
         )
 
     return summary
