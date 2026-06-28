@@ -37,10 +37,7 @@ from diffusion_planner.utils.scene_skip import filter_scene_list
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--scenes",
-        type=Path,
-        required=True,
-        help="input scene list (.json: flat list of npz paths)",
+        "--scenes", type=Path, required=True, help="input scene list (.json: flat list of npz paths)"
     )
     p.add_argument("--out", type=Path, required=True, help="output filtered scene list")
     p.add_argument(
