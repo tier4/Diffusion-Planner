@@ -463,7 +463,9 @@ def compute_neighbor_collision_penalty(
     neighbor_margin = margin_by_type[type_idx]  # [B, Pn]
 
     # Neighbor sizes from last past timestep, inflated by the per-type margin on each side.
-    neighbor_width = torch.clamp(neighbor_sizes[..., 6], min=1e-3) + 2.0 * neighbor_margin  # [B, Pn]
+    neighbor_width = (
+        torch.clamp(neighbor_sizes[..., 6], min=1e-3) + 2.0 * neighbor_margin
+    )  # [B, Pn]
     neighbor_length = (
         torch.clamp(neighbor_sizes[..., 7], min=1e-3) + 2.0 * neighbor_margin
     )  # [B, Pn]

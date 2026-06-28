@@ -90,5 +90,7 @@ def filter_scene_list(
         else:
             kept.append(entry)
     tag = f"{label}: " if label else ""
-    print(f"[skip-filter] {tag}kept {len(kept)}/{len(scenes)} (dropped {dropped} skip_for_training)")
+    print(
+        f"[skip-filter] {tag}kept {len(kept)}/{len(scenes)} (dropped {dropped} skip_for_training)"
+    )
     return kept

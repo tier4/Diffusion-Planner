@@ -97,7 +97,9 @@ def get_args():
     # the SFT and GRPO steps (see grpo_epoch).
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, default=0.5, help="augmentation probability")
-    parser.add_argument("--augment_type", type=str, choices=["quintic", "bridge"], default="quintic")
+    parser.add_argument(
+        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+    )
     parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )

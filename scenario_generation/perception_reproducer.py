@@ -48,7 +48,9 @@ class PerceptionReproducer:
     ) -> None:
         self.tl = timeline
         self.search_radius = float(search_radius)
-        self._base_search_radius = float(search_radius)  # nominal radius to restore after unsticking
+        self._base_search_radius = float(
+            search_radius
+        )  # nominal radius to restore after unsticking
         self.cool_down_sec = float(cool_down_sec)
         self.timers = timers or Timers()
         self.reset()
