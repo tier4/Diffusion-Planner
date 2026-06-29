@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from collections import defaultdict
 from multiprocessing import Pool
 from pathlib import Path
@@ -9,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.train_epoch import heading_to_cos_sin
+from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from parse_prediction_results import calc_loss
 from tqdm import tqdm
@@ -36,18 +38,25 @@ if __name__ == "__main__":
     with open(valid_data_list, "r") as f:
         valid_data_path_list = json.load(f)
 
-    prediction_path_list = sorted(predictions_dir.glob("**/*.npz"))
-    loss_path_list = sorted(predictions_dir.glob("**/*.json"))
-
-    # prediction_path_list, loss_path_listとの対応付けを保ったままvalid_data_path_listをソート
-    list_of_tuple = [
-        (valid_data_path, prediction_path, loss_path)
-        for valid_data_path, prediction_path, loss_path in zip(
-            valid_data_path_list, prediction_path_list, loss_path_list
+    # Output files mirror the input hierarchy via data_path_to_rel, so map each input
+    # directly to its prediction/loss file instead of relying on a fragile sort-order
+    # correspondence. Skip inputs without a prediction file.
+    list_of_tuple = []
+    for valid_data_path in sorted(valid_data_path_list):
+        rel = data_path_to_rel(valid_data_path)
+        prediction_path = (predictions_dir / rel).with_suffix(".npz")
+        loss_path = (predictions_dir / rel).with_suffix(".json")
+        if not prediction_path.is_file():
+            continue
+        list_of_tuple.append((valid_data_path, prediction_path, loss_path))
+    if not list_of_tuple:
+        raise SystemExit(
+            f"No prediction .npz files found under {predictions_dir} for any entry in "
+            f"{valid_data_list}. Did the prediction step complete and write its outputs?"
         )
-    ]
-    list_of_tuple.sort(key=lambda x: x[0])
-    valid_data_path_list, prediction_path_list, loss_path_list = zip(*list_of_tuple)
+    valid_data_path_list, prediction_path_list, loss_path_list = (
+        list(x) for x in zip(*list_of_tuple)
+    )
 
     info_path_list = [
         Path(valid_data_path).parent / f"{Path(valid_data_path).stem}.json"
@@ -100,9 +109,7 @@ if __name__ == "__main__":
             return
         valid_data_path = Path(valid_data_path)
         prediction_path = Path(prediction_path)
-        valid_loss_path = (
-            prediction_path.parent / f"{prediction_path.stem.replace('prediction', 'loss')}.json"
-        )
+        valid_loss_path = prediction_path.with_suffix(".json")
         info_data_path = valid_data_path.parent / f"{valid_data_path.stem}.json"
         valid_data = np.load(valid_data_path)
         output_dict = np.load(prediction_path)
@@ -246,7 +253,7 @@ if __name__ == "__main__":
         plt.savefig(curr_save_dir / f"{valid_data_path.stem}.png")
         plt.close()
 
-    pool = Pool(16)
+    pool = Pool(os.cpu_count())
     with tqdm(total=len(valid_data_path_list)) as pbar:
         for _ in pool.imap_unordered(
             process_one_pair, zip(valid_data_path_list, prediction_path_list)

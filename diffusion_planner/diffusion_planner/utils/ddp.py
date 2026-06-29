@@ -97,6 +97,32 @@ def is_dist_avail_and_initialized():
     return True
 
 
+def all_reduce_sum(value, device):
+    """Sum a python scalar across all DDP ranks.
+
+    Collective: must be called by every rank. Returns ``value`` unchanged when DDP
+    is not initialized (single-process run), so callers work in both modes.
+    """
+    if not is_dist_avail_and_initialized():
+        return value
+    t = torch.tensor([value], dtype=torch.float64, device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return t.item()
+
+
+def all_reduce_min(value, device):
+    """Minimum of a python scalar across all DDP ranks.
+
+    Collective: must be called by every rank. Returns ``value`` unchanged when DDP
+    is not initialized (single-process run).
+    """
+    if not is_dist_avail_and_initialized():
+        return value
+    t = torch.tensor([value], dtype=torch.float64, device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.MIN)
+    return t.item()
+
+
 def reduce_and_average_losses(loss_dict, device):
     torch.distributed.barrier()
     world_size = dist.get_world_size()
