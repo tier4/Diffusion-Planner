@@ -3,9 +3,8 @@
 Each launch writes to ``~/.diffusion_planner_jobs/<ts>_<key>/run.log`` and records a
 ``job.json``. Jobs are started in their own session (``start_new_session=True``) so closing
 or restarting the panel does NOT kill them — the panel is a viewer that re-attaches by
-tailing the log file. There is intentionally no stop button for training/eval/mining jobs
-(per the never-kill-experiments rule); only the interactive Scene Editor server is
-restartable via :func:`stop`.
+tailing the log file. The user-initiated Stop button terminates the selected job's process
+group via :func:`stop`; autonomous panel restarts only stop restartable interactive servers.
 """
 
 from __future__ import annotations

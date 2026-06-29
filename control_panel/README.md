@@ -115,8 +115,8 @@ distinct output directories; the GUI derives one run directory per job to avoid 
 
 Each Run launches a **detached** subprocess (survives closing the panel) writing to
 `~/.diffusion_planner_jobs/<ts>_<key>/run.log`. **Attach to latest** re-attaches; **■ Stop**
-is limited to interactive server jobs such as the Scene Editor. **Preview command** shows the exact
-argv.
+terminates the selected job's process group after validating the recorded PID start time.
+**Preview command** shows the exact argv.
 
 ## Architecture
 

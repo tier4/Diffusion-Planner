@@ -433,8 +433,6 @@ def _stop_handler():
     def stop(job):
         if not job:
             return "no active job to stop"
-        if not getattr(job, "server", False):
-            return "Stop is only enabled for interactive server jobs; leave training/eval/mining jobs running."
         ok = R.stop(job)
         return f"stopped PID {job.pid}" if ok else f"stop failed for PID {job.pid}"
 
@@ -876,7 +874,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         gr.Markdown(
             "# Autoresearch Control Panel\n"
             "Register assets once in **Workspace**; pick them from dropdowns in each tab. "
-            "Run launches a detached subprocess (survives closing this panel); ■ Stop is for interactive servers."
+            "Run launches a detached subprocess (survives closing this panel); ■ Stop terminates the selected job."
         )
         library_state = gr.State(library0)
         creating_panels: list = []  # panels whose tool writes a dataset → auto-rescan on finish
