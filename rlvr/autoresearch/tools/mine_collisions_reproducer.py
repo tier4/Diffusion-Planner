@@ -30,6 +30,7 @@ from pathlib import Path
 
 import torch
 
+from rlvr.autoresearch.tools.render_metadata import render_tag, write_render_meta
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import run_segments_batched
 from scenario_generation.route_timeline import RouteTimeline, group_routes
@@ -366,13 +367,29 @@ def main() -> None:
         render_root = args.out.with_suffix(".renders")
         render_root.mkdir(parents=True, exist_ok=True)
         model_title = _model_lora_title(args.model_path, args.lora_path)
+        model_label = f"{args.model_path.parent.name}/{args.model_path.name}"
+        lora_label = (
+            f"{args.lora_path.parent.name}/{args.lora_path.name}" if args.lora_path else "none"
+        )
+        run_tag = render_tag(args.model_path, args.lora_path)
         for r in hits[: args.dump_hits]:
             if r["n_collision_steps"] == 0 and r["n_near_miss_steps"] == 0:
                 continue  # nothing interesting to render
             s0, e0 = r["segment"]
             tl = RouteTimeline(routes[r["route"]], sidecar_dir=args.sidecar_root)
-            od = render_root / f"{r['route']}_{s0}_{e0}"
+            od = render_root / f"{r['route']}_{s0}_{e0}__{run_tag}"
             print(f"  rendering hit {r['route']} [{s0},{e0}] -> {od}")
+            write_render_meta(
+                od,
+                tool="mine_collisions_reproducer",
+                route=r["route"],
+                start=s0,
+                end=e0,
+                model_path=str(args.model_path),
+                model_label=model_label,
+                lora_path=str(args.lora_path) if args.lora_path else "",
+                lora_label=lora_label,
+            )
             render_segment(
                 model,
                 model_args,

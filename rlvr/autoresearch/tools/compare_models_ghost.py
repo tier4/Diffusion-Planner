@@ -34,6 +34,7 @@ from rlvr.autoresearch.tools.ghost_sim_common import (
     load_model,
     run_ghost_sim,
 )
+from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
 
 
 def _expand_scenes(scene_args: list[str]) -> list[str]:
@@ -313,8 +314,19 @@ def main() -> None:
             ),
         ]
     )
+    effective_b_model = args.model_b or args.model_a
+    effective_b_lora = args.lora_b if args.model_b else args.lora_a
+    output_tag = render_tag(
+        args.model_a,
+        args.lora_a,
+        args.policy_a,
+        effective_b_model,
+        effective_b_lora,
+        policy_b_dir,
+    )
 
     out_root = Path(args.output_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
 
     for scene_path in args.scenes:
         scene_name = Path(scene_path).stem
@@ -325,7 +337,24 @@ def main() -> None:
         if nb_boxes:
             print(f"  {len(nb_boxes)} stopped neighbor(s)")
 
-        scene_out = out_root / scene_name if len(args.scenes) > 1 else out_root
+        scene_out = out_root / f"{scene_name}__{output_tag}"
+        write_render_meta(
+            scene_out,
+            tool="compare_models_ghost",
+            scene=scene_name,
+            model_a_path=args.model_a,
+            model_a_label=path_label(args.model_a),
+            lora_a_path=args.lora_a or "",
+            lora_a_label=path_label(args.lora_a),
+            policy_a_path=args.policy_a or "",
+            policy_a_label=path_label(args.policy_a),
+            model_b_path=effective_b_model,
+            model_b_label=path_label(effective_b_model),
+            lora_b_path=effective_b_lora or "",
+            lora_b_label=path_label(effective_b_lora),
+            policy_b_path=policy_b_dir or "",
+            policy_b_label=path_label(policy_b_dir),
+        )
         cfg.subtitle = f"{scene_name}\n{model_title}"
 
         eta_log_a: list[dict] = []

@@ -44,6 +44,7 @@ from rlvr.autoresearch.tools.recovery_sim import (
     _ROUTE_COLOR,
     _draw_agent_box,
 )
+from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
 
 BASELINE_COLOR = "#1f77b4"  # blue
 BEST_COLOR = "#d62728"  # red
@@ -265,6 +266,8 @@ def main():
         m_best, a_best = m_base, a_base
     else:
         raise SystemExit("pass --model_best, --policy_best (or the legacy --policy_dir)")
+    effective_best_model = args.model_best or args.model_baseline
+    effective_best_lora = args.lora_best if args.model_best else args.lora_baseline
     title_meta = "\n".join(
         [
             _side_title(
@@ -275,11 +278,19 @@ def main():
             ),
             _side_title(
                 args.label_best,
-                args.model_best or args.model_baseline,
-                args.lora_best if args.model_best else args.lora_baseline,
+                effective_best_model,
+                effective_best_lora,
                 policy_best_dir,
             ),
         ]
+    )
+    output_tag = render_tag(
+        args.model_baseline,
+        args.lora_baseline,
+        args.policy_baseline,
+        effective_best_model,
+        effective_best_lora,
+        policy_best_dir,
     )
 
     # Each side independently gets an optional guidance policy.
@@ -341,8 +352,25 @@ def main():
         hist = past[past.shape[0] - H :]
         # Align ego-history index to the neighbor-past time axis (both end at t=0).
         nb_past_T = nb_past_arr.shape[1] if nb_past_arr is not None else H
-        sc_dir = out_root / name
+        sc_dir = out_root / f"{name}__{output_tag}"
         sc_dir.mkdir(parents=True, exist_ok=True)
+        write_render_meta(
+            sc_dir,
+            tool="ghost_replay_openloop",
+            scene=name,
+            model_baseline_path=args.model_baseline,
+            model_baseline_label=path_label(args.model_baseline),
+            lora_baseline_path=args.lora_baseline or "",
+            lora_baseline_label=path_label(args.lora_baseline),
+            policy_baseline_path=args.policy_baseline or "",
+            policy_baseline_label=path_label(args.policy_baseline),
+            model_best_path=effective_best_model,
+            model_best_label=path_label(effective_best_model),
+            lora_best_path=effective_best_lora or "",
+            lora_best_label=path_label(effective_best_lora),
+            policy_best_path=policy_best_dir or "",
+            policy_best_label=path_label(policy_best_dir),
+        )
 
         fi = 0
         hist_trail = []
@@ -402,7 +430,7 @@ def main():
             )
             fi += 1
 
-        webm = out_root / f"{name}.webm"
+        webm = sc_dir / "openloop.webm"
         rc = subprocess.run(
             [
                 "ffmpeg",

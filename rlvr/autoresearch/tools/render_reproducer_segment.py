@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 
+from rlvr.autoresearch.tools.render_metadata import render_tag, write_render_meta
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
@@ -98,9 +99,23 @@ def main() -> None:
     if end <= start:
         raise SystemExit(f"Invalid segment start/end: {start}/{end} for {len(paths)} frames")
 
-    out_dir = args.output_dir / f"{route_key}_{start:05d}_{end:05d}"
+    tag = render_tag(args.model_path, args.lora_path)
+    out_dir = args.output_dir / f"{route_key}_{start:05d}_{end:05d}__{tag}"
     title_prefix = f"{route_key}\n{_model_lora_title(args.model_path, args.lora_path)}"
     print(f"Rendering {route_key}[{start}:{end}] -> {out_dir}")
+    write_render_meta(
+        out_dir,
+        tool="render_reproducer_segment",
+        route=route_key,
+        start=start,
+        end=end,
+        model_path=str(args.model_path),
+        model_label=f"{args.model_path.parent.name}/{args.model_path.name}",
+        lora_path=str(args.lora_path) if args.lora_path else "",
+        lora_label=(
+            f"{args.lora_path.parent.name}/{args.lora_path.name}" if args.lora_path else "none"
+        ),
+    )
     metrics = render_segment(
         model,
         model_args,

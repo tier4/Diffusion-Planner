@@ -38,6 +38,7 @@ from rlvr.autoresearch.tools.eval_det_avoidance import (
     print_summary,
     reward_breakdown_to_det_dict,
 )
+from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.autoresearch.tools.viz_cl_recovery import draw_scene_base, draw_traj
 from rlvr.reward import compute_reward_batch
@@ -162,8 +163,21 @@ def main():
         print(f"Loading model B: {args.model_b}")
         model_b, args_b = _load_model_with_lora(args.model_b, args.lora_b, device)
 
-    out_dir = Path(args.output_dir)
+    output_tag = render_tag(args.model_a, args.lora_a, args.model_b, args.lora_b)
+    out_dir = Path(args.output_dir) / output_tag
     out_dir.mkdir(parents=True, exist_ok=True)
+    write_render_meta(
+        out_dir,
+        tool="viz_det_compare",
+        model_a_path=args.model_a,
+        model_a_label=path_label(args.model_a),
+        lora_a_path=args.lora_a or "",
+        lora_a_label=path_label(args.lora_a),
+        model_b_path=args.model_b or "",
+        model_b_label=path_label(args.model_b),
+        lora_b_path=args.lora_b or "",
+        lora_b_label=path_label(args.lora_b),
+    )
 
     results_a, results_b = [], []
     cached_trajs_a, cached_trajs_b, cached_gt = [], [], []

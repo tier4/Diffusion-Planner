@@ -525,7 +525,37 @@ def _epoch_table(key: str):
     ], f"job {job.started_at}: {len(rows)} rows"
 
 
-def _scan_outputs(output_dir: str, one_still_per_scene: bool = False):
+def _render_meta_text(path: Path, root: Path) -> str:
+    parts = [str(path.relative_to(root)) if path.is_relative_to(root) else str(path)]
+    cur = path.parent
+    while True:
+        meta_path = cur / "render_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+                parts.extend(str(v) for v in meta.values() if v not in (None, ""))
+            except (json.JSONDecodeError, OSError):
+                pass
+            break
+        if cur == root or cur.parent == cur:
+            break
+        cur = cur.parent
+    return " ".join(parts).lower()
+
+
+def _matches_render_filters(path: Path, root: Path, model_filter: str = "", lora_filter: str = ""):
+    haystack = _render_meta_text(path, root)
+    model = (model_filter or "").strip().lower()
+    lora = (lora_filter or "").strip().lower()
+    return (not model or model in haystack) and (not lora or lora in haystack)
+
+
+def _scan_outputs(
+    output_dir: str,
+    one_still_per_scene: bool = False,
+    model_filter: str = "",
+    lora_filter: str = "",
+):
     """Collect rendered outputs under ``output_dir``.
 
     Returns ``(webm_paths, image_paths, message)``. With ``one_still_per_scene`` (the Render
@@ -536,8 +566,16 @@ def _scan_outputs(output_dir: str, one_still_per_scene: bool = False):
     if not output_dir or not Path(output_dir).exists():
         return [], [], "Output dir not found."
     root = Path(output_dir)
-    webms = [str(w) for w in sorted(root.rglob("*.webm"))]
-    pngs = sorted(root.rglob("*.png"))
+    webms = [
+        str(w)
+        for w in sorted(root.rglob("*.webm"))
+        if _matches_render_filters(w, root, model_filter, lora_filter)
+    ]
+    pngs = [
+        p
+        for p in sorted(root.rglob("*.png"))
+        if _matches_render_filters(p, root, model_filter, lora_filter)
+    ]
     if one_still_per_scene:
         first_by_dir: dict = {}
         for p in pngs:
@@ -547,7 +585,13 @@ def _scan_outputs(output_dir: str, one_still_per_scene: bool = False):
     else:
         imgs = [str(p) for p in pngs[:60]]
         note = f"{len(pngs)} png"
-    return webms, imgs, f"{len(webms)} webm, {note}."
+    filt = []
+    if (model_filter or "").strip():
+        filt.append(f"model contains {model_filter!r}")
+    if (lora_filter or "").strip():
+        filt.append(f"lora contains {lora_filter!r}")
+    suffix = f" Filter: {', '.join(filt)}." if filt else ""
+    return webms, imgs, f"{len(webms)} webm, {note}.{suffix}"
 
 
 def _resolve_asset(asset_type: str, sel_path: str) -> tuple[dict, str]:
@@ -905,35 +949,59 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             """A workflow panel plus a 'Load rendered outputs' viewer with WebMs and stills
             shown in SEPARATE galleries (stills = one representative frame per scene)."""
             vp = workflow_panel(vwf, library0, library_state, asset_dropdowns)
+            with gr.Row():
+                model_filter = gr.Textbox(label="Filter model", placeholder="e.g. j6_base")
+                lora_filter = gr.Textbox(label="Filter LoRA", placeholder="e.g. lowlr-codex")
             show_btn = gr.Button("Load rendered outputs")
             webm_gallery = gr.Gallery(label="WebM clips (click to play)", columns=2, height=420)
             png_gallery = gr.Gallery(label="One still per scene", columns=4, height=420)
             vmsg = gr.Textbox(label="", interactive=False)
 
-            def _show(library, *flat, _wf=vwf, _vp=vp):
+            def _show(library, model_q, lora_q, *flat, _wf=vwf, _vp=vp):
                 v = resolve_values(_wf, _vp["fields"], library, flat)
                 scan_dir = v.get("output_dir", "")
                 if not scan_dir and v.get("out"):
                     scan_dir = str(Path(v["out"]).with_suffix(".renders"))
-                webms, stills, msg = _scan_outputs(scan_dir, one_still_per_scene=True)
+                webms, stills, msg = _scan_outputs(
+                    scan_dir,
+                    one_still_per_scene=True,
+                    model_filter=model_q,
+                    lora_filter=lora_q,
+                )
                 return webms, stills, msg
 
-            show_btn.click(_show, [library_state, *vp["flat"]], [webm_gallery, png_gallery, vmsg])
+            show_btn.click(
+                _show,
+                [library_state, model_filter, lora_filter, *vp["flat"]],
+                [webm_gallery, png_gallery, vmsg],
+            )
             return vp
 
         def _stills_only_viewer(vwf):
             """Workflow panel plus a PNG-only output viewer."""
             vp = workflow_panel(vwf, library0, library_state, asset_dropdowns)
+            with gr.Row():
+                model_filter = gr.Textbox(label="Filter model", placeholder="e.g. j6_base")
+                lora_filter = gr.Textbox(label="Filter LoRA", placeholder="e.g. lowlr-codex")
             show_btn = gr.Button("Load rendered PNGs")
             png_gallery = gr.Gallery(label="Rendered scenes", columns=4, height=520)
             vmsg = gr.Textbox(label="", interactive=False)
 
-            def _show(library, *flat, _wf=vwf, _vp=vp):
+            def _show(library, model_q, lora_q, *flat, _wf=vwf, _vp=vp):
                 v = resolve_values(_wf, _vp["fields"], library, flat)
-                _, stills, msg = _scan_outputs(v.get("output_dir", ""), one_still_per_scene=False)
+                _, stills, msg = _scan_outputs(
+                    v.get("output_dir", ""),
+                    one_still_per_scene=False,
+                    model_filter=model_q,
+                    lora_filter=lora_q,
+                )
                 return stills, msg
 
-            show_btn.click(_show, [library_state, *vp["flat"]], [png_gallery, vmsg])
+            show_btn.click(
+                _show,
+                [library_state, model_filter, lora_filter, *vp["flat"]],
+                [png_gallery, vmsg],
+            )
 
         with gr.Tab("Reproducer") as reproducer_tab:
             with gr.Tab("Route WebM"):

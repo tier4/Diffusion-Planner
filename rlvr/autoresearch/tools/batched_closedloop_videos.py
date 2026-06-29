@@ -34,6 +34,7 @@ import rlvr.guidance_batched  # noqa: F401
 from exploration_policy.utils import run_frozen_encoder
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.recovery_test import transform_to_new_ego_frame
+from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
 from rlvr.closed_loop.batched_rollout import _batched_generate_varied_noise
 from rlvr.grpo_sft_trainer import _smooth_trajectory
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
@@ -212,6 +213,9 @@ def _render_one(job):
         view_half_m,
         lambda_spd,
         title_meta,
+        output_tag,
+        model_path,
+        policy_dir,
     ) = job
     import matplotlib
 
@@ -225,6 +229,18 @@ def _render_one(job):
     # Disambiguate same-basename scenes from different perturbation pools
     # (e.g. train_parallel/ and train_yaw/ both holding scene_0008_var02.npz).
     scene_name = f"{Path(scene_path).parent.name}__{Path(scene_path).stem}"
+    scene_out = Path(out_dir) / f"{scene_name}__{output_tag}"
+    write_render_meta(
+        scene_out,
+        tool="batched_closedloop_videos",
+        scene=scene_name,
+        model_path=model_path,
+        model_label=path_label(model_path),
+        lora_path="",
+        lora_label="none",
+        policy_path=policy_dir,
+        policy_label=path_label(policy_dir),
+    )
     cfg = GhostSimConfig(
         model_a_label=label_a,
         model_b_label=label_b,
@@ -255,7 +271,7 @@ def _render_one(job):
         model_b=None,
         model_b_args=None,
         scene_data=data,
-        output_dir=Path(out_dir) / scene_name,
+        output_dir=scene_out,
         cfg=cfg,
         neighbor_boxes=extract_stopped_neighbors(scene_path),
         make_webm=True,
@@ -353,6 +369,7 @@ def main():
             saved["etas"],
         )
 
+    output_tag = render_tag(args.model_path, args.policy_dir)
     jobs = [
         (
             paths[i],
@@ -368,6 +385,9 @@ def main():
             args.view_half_m,
             args.lambda_spd,
             _model_policy_title(args.model_path, args.policy_dir),
+            output_tag,
+            args.model_path,
+            args.policy_dir,
         )
         for i in range(len(paths))
     ]
