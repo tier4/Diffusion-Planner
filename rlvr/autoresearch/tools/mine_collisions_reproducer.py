@@ -218,7 +218,7 @@ def _make_webm(frames_dir: Path, out_path: Path, fps: int) -> None:
 
 def _model_lora_title(model_path: Path, lora_path: Path | None) -> str:
     model_label = f"{model_path.parent.name}/{model_path.name}"
-    lora_label = lora_path.name if lora_path else "none"
+    lora_label = f"{lora_path.parent.name}/{lora_path.name}" if lora_path else "none"
     return f"model: {model_label}  lora: {lora_label}"
 
 

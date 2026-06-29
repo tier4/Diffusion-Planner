@@ -56,7 +56,11 @@ def _side_title(label: str, model_path: str | None, lora_path: str | None, polic
         model_label = f"{p.parent.name}/{p.name}"
     else:
         model_label = "baseline model"
-    lora_label = Path(lora_path).name if lora_path else "none"
+    if lora_path:
+        lp = Path(lora_path)
+        lora_label = f"{lp.parent.name}/{lp.name}"
+    else:
+        lora_label = "none"
     policy_label = Path(policy_path).name if policy_path else "none"
     return f"{label}: model={model_label}  lora={lora_label}  guidance={policy_label}"
 

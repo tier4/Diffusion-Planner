@@ -68,7 +68,11 @@ _VIEW_HALF_M = 50.0
 def _model_lora_title(model_path: str | Path, lora_path: str | Path | None) -> str:
     p = Path(model_path)
     model_label = f"{p.parent.name}/{p.name}"
-    lora_label = Path(lora_path).name if lora_path else "none"
+    if lora_path:
+        lp = Path(lora_path)
+        lora_label = f"{lp.parent.name}/{lp.name}"
+    else:
+        lora_label = "none"
     return f"model: {model_label}  lora: {lora_label}"
 
 
