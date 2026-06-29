@@ -57,13 +57,13 @@ def parse_args() -> argparse.Namespace:
         "--max_steps",
         type=int,
         default=0,
-        help="Maximum simulated/rendered frames; 0 = end-start route-frame count",
+        help="Maximum simulated/rendered frames; 0 = default 3x route-frame count",
     )
     p.add_argument(
         "--goal_reach_m",
         type=float,
-        default=0.0,
-        help="Stop early when within this distance of the segment target; 0 disables early goal stop",
+        default=5.0,
+        help="Stop early when within this distance of the rendered route goal",
     )
     p.add_argument("--near_miss_thresh", type=float, default=0.5)
     p.add_argument("--search_radius", type=float, default=1.5)
@@ -110,7 +110,7 @@ def main() -> None:
     end = min(end, len(paths))
     if end <= start:
         raise SystemExit(f"Invalid segment start/end: {start}/{end} for {len(paths)} frames")
-    max_steps = args.max_steps if args.max_steps > 0 else end - start
+    max_steps = args.max_steps if args.max_steps > 0 else None
 
     tag = render_tag(args.model_path, args.lora_path)
     out_dir = args.output_dir / f"{route_key}_{start:05d}_{end:05d}__{tag}"
@@ -122,7 +122,7 @@ def main() -> None:
         route=route_key,
         start=start,
         end=end,
-        max_steps=max_steps,
+        max_steps=max_steps if max_steps is not None else 0,
         goal_reach_m=args.goal_reach_m,
         model_path=str(args.model_path),
         model_label=f"{args.model_path.parent.name}/{args.model_path.name}",
@@ -146,6 +146,7 @@ def main() -> None:
         goal_reach_m=args.goal_reach_m,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
+        goal_mode="route",
         title_prefix=title_prefix,
         distance_label_offset_m=args.distance_label_offset_m,
         view_half_m=args.view_half_m,

@@ -510,6 +510,22 @@ def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.n
     return pose, ego_hist, _EgoDyn(speed=float(tl.speeds[idx]))
 
 
+def _goal_xy_from_npz_goal(tl: RouteTimeline, idx: int, fallback_idx: int) -> np.ndarray:
+    """Recover the fixed world-frame route goal from an ego-frame NPZ goal_pose."""
+    try:
+        gp = np.asarray(tl.npz(idx)["goal_pose"]).reshape(-1).astype(np.float64)
+    except KeyError:
+        return tl.poses[fallback_idx, :2].copy()
+    if gp.shape[0] < 2 or float(np.linalg.norm(gp[:2])) < 1e-3:
+        return tl.poses[fallback_idx, :2].copy()
+    pose = tl.poses[idx]
+    c, s = math.cos(float(pose[2])), math.sin(float(pose[2]))
+    return np.array(
+        [pose[0] + gp[0] * c - gp[1] * s, pose[1] + gp[0] * s + gp[1] * c],
+        dtype=np.float64,
+    )
+
+
 def _seed_state(
     tl,
     start,
@@ -524,6 +540,7 @@ def _seed_state(
     unstick_after=0,
     unstick_advance_m=5.0,
     neighbor_history_mode="recorded",
+    goal_mode="segment",
 ) -> _SegState:
     from scenario_generation.mpc_tracker import PerfectTracker
 
@@ -541,6 +558,12 @@ def _seed_state(
         if neighbor_history_mode == "sim"
         else None
     )
+    if goal_mode == "segment":
+        goal_xy = tl.poses[end - 1, :2].copy()
+    elif goal_mode == "route":
+        goal_xy = _goal_xy_from_npz_goal(tl, start, end - 1)
+    else:
+        raise ValueError(f"Unknown goal_mode={goal_mode!r}; expected 'segment' or 'route'")
     return _SegState(
         tl=tl,
         start=start,
@@ -564,7 +587,7 @@ def _seed_state(
             else None
         ),
         ego_shape=np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32),
-        goal_xy=tl.poses[end - 1, :2],
+        goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
         prev_max_idx=cursor.max_idx_reached,
@@ -1186,6 +1209,7 @@ def render_segment(
     unstick_advance_m: float = 5.0,
     interpolate: bool = True,
     neighbor_history_mode: str = "sim",
+    goal_mode: str = "segment",
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
@@ -1203,7 +1227,8 @@ def render_segment(
     stable per-track colors. ``window`` = (lo, hi) step range to render (all).
     ``neighbor_history_mode="sim"`` matches the collision miner: neighbor history
     is rebuilt from the shown simulated motion instead of copied from the recorded
-    cursor frame.
+    cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
+    terminates at the NPZ route goal displayed in the render.
     Returns the SegmentResult metrics.
     """
     from pathlib import Path
@@ -1226,6 +1251,7 @@ def render_segment(
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
         neighbor_history_mode=neighbor_history_mode,
+        goal_mode=goal_mode,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
