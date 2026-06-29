@@ -52,7 +52,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--end", type=int, default=0, help="End index within the route timeline; 0 = start+steps"
     )
-    p.add_argument("--steps", type=int, default=120, help="Used when --end is 0")
+    p.add_argument("--steps", type=int, default=120, help="Route-frame count used when --end is 0")
+    p.add_argument(
+        "--max_steps",
+        type=int,
+        default=0,
+        help="Maximum simulated/rendered frames; 0 = end-start route-frame count",
+    )
+    p.add_argument(
+        "--goal_reach_m",
+        type=float,
+        default=0.0,
+        help="Stop early when within this distance of the segment target; 0 disables early goal stop",
+    )
     p.add_argument("--near_miss_thresh", type=float, default=0.5)
     p.add_argument("--search_radius", type=float, default=1.5)
     p.add_argument("--warmup_steps", type=int, default=0)
@@ -98,6 +110,7 @@ def main() -> None:
     end = min(end, len(paths))
     if end <= start:
         raise SystemExit(f"Invalid segment start/end: {start}/{end} for {len(paths)} frames")
+    max_steps = args.max_steps if args.max_steps > 0 else end - start
 
     tag = render_tag(args.model_path, args.lora_path)
     out_dir = args.output_dir / f"{route_key}_{start:05d}_{end:05d}__{tag}"
@@ -109,6 +122,8 @@ def main() -> None:
         route=route_key,
         start=start,
         end=end,
+        max_steps=max_steps,
+        goal_reach_m=args.goal_reach_m,
         model_path=str(args.model_path),
         model_label=f"{args.model_path.parent.name}/{args.model_path.name}",
         lora_path=str(args.lora_path) if args.lora_path else "",
@@ -127,6 +142,8 @@ def main() -> None:
         near_miss_thresh=args.near_miss_thresh,
         search_radius=args.search_radius,
         warmup_steps=args.warmup_steps,
+        max_steps=max_steps,
+        goal_reach_m=args.goal_reach_m,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
         title_prefix=title_prefix,

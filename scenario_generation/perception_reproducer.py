@@ -79,8 +79,9 @@ class PerceptionReproducer:
                 else float(np.linalg.norm(sim_xy - self._last_seq_pos))
             )
             if self.search_radius <= 0.0:
-                # Degenerate mode: always the single nearest recorded frame.
-                idx = self.tl.nearest(sim_xy)
+                # Degenerate mode: nearest recorded frame, but still never rewind
+                # once this cursor has reached a later recorded frame.
+                idx = max(self.tl.nearest(sim_xy), self.max_idx_reached)
                 self._last_idx = idx
                 self.max_idx_reached = max(self.max_idx_reached, idx)
                 return idx

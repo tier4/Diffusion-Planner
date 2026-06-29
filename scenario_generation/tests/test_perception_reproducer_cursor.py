@@ -87,3 +87,13 @@ def test_cursor_does_not_rewind_to_older_unserved_frames(tmp_path):
     # still not rewind the replay once frame 5 has been reached.
     assert cur.step(np.array([0.0, 0.0]), 0.0, 0.1) == 5
     assert cur.max_idx_reached == 5
+
+
+def test_nearest_only_cursor_does_not_rewind(tmp_path):
+    tl = _straight_route(tmp_path, n=12)
+    cur = PerceptionReproducer(tl, search_radius=0.0)
+    cur.reset(5)
+
+    assert cur.step(np.array([5 * SPACING_M, 0.0]), 5.0, 0.0) == 5
+    assert cur.step(np.array([0.0, 0.0]), 0.0, 0.1) == 5
+    assert cur.max_idx_reached == 5

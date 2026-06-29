@@ -325,7 +325,8 @@ def main():
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    pkl = out_dir / "rollouts.pkl"
+    output_tag = render_tag(args.model_path, args.policy_dir)
+    pkl = out_dir / f"rollouts__{output_tag}.pkl"
 
     with open(args.scenes) as f:
         paths = json.load(f)
@@ -369,7 +370,6 @@ def main():
             saved["etas"],
         )
 
-    output_tag = render_tag(args.model_path, args.policy_dir)
     jobs = [
         (
             paths[i],

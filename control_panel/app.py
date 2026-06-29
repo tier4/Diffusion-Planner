@@ -525,29 +525,41 @@ def _epoch_table(key: str):
     ], f"job {job.started_at}: {len(rows)} rows"
 
 
-def _render_meta_text(path: Path, root: Path) -> str:
-    parts = [str(path.relative_to(root)) if path.is_relative_to(root) else str(path)]
+def _render_filter_texts(path: Path, root: Path) -> tuple[str, str]:
+    fallback = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
     cur = path.parent
     while True:
         meta_path = cur / "render_meta.json"
         if meta_path.exists():
             try:
                 meta = json.loads(meta_path.read_text())
-                parts.extend(str(v) for v in meta.values() if v not in (None, ""))
+                model_parts = [
+                    str(v)
+                    for k, v in meta.items()
+                    if "model" in str(k).lower() and v not in (None, "")
+                ]
+                lora_parts = [
+                    str(v)
+                    for k, v in meta.items()
+                    if "lora" in str(k).lower() and v not in (None, "")
+                ]
+                return " ".join(model_parts).lower(), " ".join(lora_parts).lower()
             except (json.JSONDecodeError, OSError):
                 pass
             break
         if cur == root or cur.parent == cur:
             break
         cur = cur.parent
-    return " ".join(parts).lower()
+    # Legacy renders have no metadata; fall back to path matching for both filters.
+    fallback = fallback.lower()
+    return fallback, fallback
 
 
 def _matches_render_filters(path: Path, root: Path, model_filter: str = "", lora_filter: str = ""):
-    haystack = _render_meta_text(path, root)
+    model_haystack, lora_haystack = _render_filter_texts(path, root)
     model = (model_filter or "").strip().lower()
     lora = (lora_filter or "").strip().lower()
-    return (not model or model in haystack) and (not lora or lora in haystack)
+    return (not model or model in model_haystack) and (not lora or lora in lora_haystack)
 
 
 def _scan_outputs(

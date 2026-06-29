@@ -74,3 +74,27 @@ def test_scan_outputs_filters_with_metadata_and_path_fallback(tmp_path):
 
     assert webms == [str(legacy / "clip.webm")]
     assert stills == [str(legacy / "00000.png")]
+
+
+def test_lora_filter_does_not_match_model_metadata_field(tmp_path):
+    tagged = tmp_path / "scene_a__new"
+    tagged.mkdir()
+    (tagged / "render_meta.json").write_text(
+        json.dumps(
+            {
+                "model_label": "lowlr-codex-model/best_model.pth",
+                "lora_label": "none",
+            }
+        )
+    )
+    _touch(tagged / "clip.webm")
+    _touch(tagged / "00000.png")
+
+    webms, stills, _ = _scan_outputs(
+        str(tmp_path),
+        one_still_per_scene=True,
+        lora_filter="lowlr-codex",
+    )
+
+    assert webms == []
+    assert stills == []
