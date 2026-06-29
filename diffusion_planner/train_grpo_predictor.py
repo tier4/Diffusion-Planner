@@ -18,10 +18,17 @@ import wandb
 from diffusion_planner.dimensions import *
 from diffusion_planner.grpo_epoch import train_grpo_epoch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.train import closed_loop_validate
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation_bridge import (
+    StatePerturbation as BridgeStatePerturbation,
+)
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.neighbor_db import NeighborPatternDB
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from timm.utils import ModelEma
@@ -50,6 +57,13 @@ def get_args():
     # Data
     parser.add_argument("--train_set_list", type=str, required=True)
     parser.add_argument("--valid_set_list", type=str, required=True)
+    parser.add_argument(
+        "--train_subsample_step",
+        type=int,
+        default=10,
+        help="keep every Nth training sample (data_list[::N]); 1 = use all, "
+        "10 = use 1/10 for faster iteration",
+    )
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
@@ -80,12 +94,35 @@ def get_args():
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
 
+    # Data augmentation (StatePerturbation, shared with the supervised trainer). Applied to both
+    # the SFT and GRPO steps (see grpo_epoch).
+    parser.add_argument("--use_data_augment", default=True, type=boolean)
+    parser.add_argument("--augment_prob", type=float, default=0.5, help="augmentation probability")
+    parser.add_argument(
+        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+    )
+    parser.add_argument(
+        "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
+    )
+    parser.add_argument(
+        "--ego_past_noise_std",
+        type=float,
+        default=0.1,
+        help="std of noise applied to ego past trajectory during augmentation",
+    )
+    parser.add_argument(
+        "--use_smoothing_future_trajectory",
+        default=True,
+        type=boolean,
+        help="whether to apply smoothing to future trajectory during augmentation",
+    )
+
     # Training
     parser.add_argument("--seed", type=int, default=3407)
-    parser.add_argument("--train_epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=8, help="number of scenes per step")
-    parser.add_argument("--save_utd", type=int, default=5)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--train_epochs", type=int, default=30)
+    parser.add_argument("--batch_size", type=int, default=64, help="number of scenes per step")
+    parser.add_argument("--save_utd", type=int, default=1)
+    parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--warm_up_epoch", type=int, default=2)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
@@ -104,7 +141,8 @@ def get_args():
         "--grpo_noise_scale",
         type=float,
         default=3.0,
-        help="multiplier on the initial diffusion noise during sampling",
+        help="MAX initial-noise std during sampling; each row draws its own scale from "
+        "U[0, this] every step (0 = deterministic)",
     )
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
     parser.add_argument(
@@ -125,6 +163,14 @@ def get_args():
         default=0.1,
         help="weight on the realism penalty: ADE (mean L2) between the generated "
         "ego trajectory and the scene's own GT ego future (0 disables)",
+    )
+    parser.add_argument(
+        "--w_kinematic",
+        type=float,
+        default=1.0,
+        help="weight on the kinematic-feasibility penalty: per-waypoint L2 drift between "
+        "the generated ego trajectory and the same trajectory after a round-trip through "
+        "the (accel, curvature) action space (0 disables)",
     )
     parser.add_argument(
         "--sft_prob",
@@ -168,6 +214,44 @@ def get_args():
         help="min distance the collider path keeps from the ego t=0 pose "
         "(guarantees the forced collision is avoidable)",
     )
+    parser.add_argument(
+        "--collider_straight_line",
+        type=boolean,
+        default=True,
+        help="colliders drive at constant velocity straight at the collision "
+        "point (easy, history-predictable). False = random-heading "
+        "constant-accel (curved) colliders",
+    )
+
+    # Real-neighbor DB collision-search augmentation (utils/neighbor_db.py). When
+    # --neighbor_db_path is set, real neighbor tracks that already collide with the scene's ego
+    # GT are searched and pasted verbatim, instead of the synthetic colliders above.
+    parser.add_argument(
+        "--neighbor_db_path",
+        type=str,
+        default="/mnt/storage_rdma/diffusion_planner/dataset/basic_dataset/neighbor_db.npz",
+        help="path to a neighbor-pattern DB (built by neighbor_db.py); "
+        "empty = use the synthetic collider generator instead",
+    )
+    parser.add_argument(
+        "--neighbor_db_collision_margin",
+        type=float,
+        default=10.0,
+        help="(DB) max distance [m] from an ego GT waypoint to count as a "
+        "colliding track during the DB search",
+    )
+    parser.add_argument(
+        "--neighbor_min_collision_time",
+        type=float,
+        default=0.8,
+        help="(DB) earliest future time [s] a collision may occur at",
+    )
+    parser.add_argument(
+        "--neighbor_search_subsample",
+        type=int,
+        default=0,
+        help="(DB) cap the per-scene search to this many random patterns (0 = search the whole DB)",
+    )
 
     # Loss coefficients (shared with the supervised trainer / loss machinery)
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
@@ -181,7 +265,24 @@ def get_args():
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
     parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
-    parser.add_argument("--neighbor_collision_margin", type=float, default=0.25)
+    parser.add_argument(
+        "--neighbor_collision_margin_vehicle",
+        type=float,
+        default=0.25,
+        help="per-side neighbor box inflation [m] for vehicles",
+    )
+    parser.add_argument(
+        "--neighbor_collision_margin_pedestrian",
+        type=float,
+        default=1.0,
+        help="per-side neighbor box inflation [m] for pedestrians",
+    )
+    parser.add_argument(
+        "--neighbor_collision_margin_bicycle",
+        type=float,
+        default=0.5,
+        help="per-side neighbor box inflation [m] for bicycles",
+    )
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
@@ -213,11 +314,45 @@ def get_args():
         help="pretrained checkpoint to start GRPO from (recommended)",
     )
 
-    parser.add_argument("--use_wandb", default=False, type=boolean)
+    parser.add_argument("--use_wandb", default=True, type=boolean)
     parser.add_argument("--notes", default="", type=str)
 
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument("--port", default="22323", type=str)
+
+    # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
+    # (save_utd). Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ).
+    parser.add_argument(
+        "--closed_loop_npz_root",
+        type=str,
+        default="",
+        help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
+        "cadence (save_utd). Empty = disabled. One route per trial.",
+    )
+    parser.add_argument(
+        "--closed_loop_seg_len",
+        type=int,
+        default=100000,
+        help="frames per segment; large => one route = one segment = one trial",
+    )
+    parser.add_argument(
+        "--closed_loop_replan_interval",
+        type=int,
+        default=40,
+        help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
+    )
+    parser.add_argument(
+        "--closed_loop_draw_every",
+        type=int,
+        default=4,
+        help="render 1 of every N steps (matplotlib render is the dominant cost)",
+    )
+    parser.add_argument("--closed_loop_fps", type=int, default=10)
+    parser.add_argument("--closed_loop_near_miss_thresh", type=float, default=0.5)
+    parser.add_argument("--closed_loop_search_radius", type=float, default=1.5)
+    parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
+    parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
+    parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=2.5)
 
     args = parser.parse_args()
 
@@ -269,23 +404,64 @@ def model_training(args):
     batch_size = args.batch_size
     save_utd = args.save_utd
 
-    # Synthetic adversarial neighbor generator for GRPO augmentation.
-    collider_injector = SyntheticColliderInjector(
-        pedestrian_prob=args.pedestrian_prob,
-        bicycle_prob=args.bicycle_prob,
-        keep_clear_radius=args.collider_keep_clear_radius,
-    )
-    if global_rank == 0:
-        print(
-            f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
-            f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m"
+    # Adversarial neighbor generator for GRPO augmentation: either real tracks searched from a
+    # DB (collision-search) or synthetic constant-velocity/accel colliders.
+    if args.neighbor_db_path:
+        collider_injector = NeighborPatternDB(
+            db_path=args.neighbor_db_path,
+            collision_margin=args.neighbor_db_collision_margin,
+            keep_clear_radius=args.collider_keep_clear_radius,
+            min_collision_time=args.neighbor_min_collision_time,
+            search_subsample=args.neighbor_search_subsample,
         )
+        if global_rank == 0:
+            print(
+                f"Neighbor DB collision-search augmentation: "
+                f"{collider_injector.num_patterns} patterns, "
+                f"margin={args.neighbor_db_collision_margin}m "
+                f"keep_clear={args.collider_keep_clear_radius}m"
+            )
+    else:
+        collider_injector = SyntheticColliderInjector(
+            pedestrian_prob=args.pedestrian_prob,
+            bicycle_prob=args.bicycle_prob,
+            keep_clear_radius=args.collider_keep_clear_radius,
+            straight_line=args.collider_straight_line,
+        )
+        if global_rank == 0:
+            print(
+                f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
+                f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m"
+            )
 
     if global_rank == 0 and args.w_gt_l2 > 0.0:
         print(f"GT-L2 realism reward enabled: w_gt_l2={args.w_gt_l2}")
 
+    if global_rank == 0 and args.w_kinematic > 0.0:
+        print(f"Kinematic-feasibility reward enabled: w_kinematic={args.w_kinematic}")
+
+    # StatePerturbation data augmentation (same as the supervised trainer), applied to both the
+    # SFT and GRPO steps. None disables it.
+    if args.use_data_augment:
+        if args.augment_type == "bridge":
+            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        else:
+            aug = StatePerturbation(
+                augment_prob=args.augment_prob,
+                num_refine=args.num_refine,
+                device=args.device,
+                ego_past_noise_std=args.ego_past_noise_std,
+                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
+            )
+        if global_rank == 0:
+            print(f"Data augmentation enabled: type={args.augment_type} prob={args.augment_prob}")
+    else:
+        aug = None
+
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
+
+    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
@@ -382,6 +558,7 @@ def model_training(args):
             args,
             model_ema,
             collider_injector,
+            aug,
         )
 
         if global_rank == 0:
@@ -439,6 +616,22 @@ def model_training(args):
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
+                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(save_path, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=curr_dir,
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
+                # Closed-loop validation on the checkpoint-save cadence; videos + metrics land next
+                # to the saved weights and are logged to wandb at step=epoch+1.
+                closed_loop_validate(
+                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                )
 
             if train_reward > best_reward:
                 curr_dir = os.path.join(save_path, "best_model")
@@ -448,6 +641,17 @@ def model_training(args):
                 curr_data["best_reward"] = best_reward
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
                     json.dump(curr_data, f, indent=4)
+                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(save_path, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=curr_dir,
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)

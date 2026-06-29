@@ -30,6 +30,10 @@ import torch  # noqa: E402
 from diffusion_planner.grpo_epoch import _neighbor_future_world  # noqa: E402
 from diffusion_planner.grpo_utils import compute_collision_reward, sample_group  # noqa: E402
 from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
+from diffusion_planner.utils.neighbor_db import (  # noqa: E402
+    DEFAULT_NEIGHBOR_DB_PATH,
+    NeighborPatternDB,
+)
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector  # noqa: E402
 
 # reuse the loaders / drawing helpers from the sample-group visualizer.
@@ -72,7 +76,38 @@ def parse_viz_args():
     p.add_argument("--neighbor_inject_prob", type=float, default=1.0)
     p.add_argument("--pedestrian_prob", type=float, default=0.3)
     p.add_argument("--bicycle_prob", type=float, default=0.2)
-    p.add_argument("--keep_clear_radius", type=float, default=3.0)
+    p.add_argument("--keep_clear_radius", type=float, default=6.0)
+    p.add_argument(
+        "--collider_straight_line",
+        type=boolean,
+        default=True,
+        help="constant-velocity straight colliders (True) vs curved constant-accel (False)",
+    )
+    p.add_argument(
+        "--neighbor_db_path",
+        type=str,
+        default=DEFAULT_NEIGHBOR_DB_PATH,
+        help="DB of real colliding neighbors to inject (copy-paste); the default. "
+        'Pass "" to fall back to synthetic colliders instead.',
+    )
+    p.add_argument(
+        "--neighbor_db_collision_margin",
+        type=float,
+        default=2.0,
+        help="(DB) max distance [m] from an ego GT waypoint to count as a colliding track",
+    )
+    p.add_argument(
+        "--neighbor_min_collision_time",
+        type=float,
+        default=0.8,
+        help="(DB) earliest future time [s] a collision may occur at",
+    )
+    p.add_argument(
+        "--neighbor_search_subsample",
+        type=int,
+        default=0,
+        help="(DB) cap the per-scene search to this many random patterns (0 = all)",
+    )
     p.add_argument("--use_ema", type=boolean, default=False)
     p.add_argument(
         "--noise_scale",
@@ -88,6 +123,20 @@ def parse_viz_args():
         type=float,
         default=15.0,
         help="metres of padding around the trajectories+GT; <=0 disables zoom",
+    )
+    p.add_argument(
+        "--require_injected",
+        type=boolean,
+        default=True,
+        help="only visualize scenes where an adversarial collider was generated; "
+        "scenes with no collider are dropped and the failure rate is reported",
+    )
+    p.add_argument(
+        "--scene_pool_mult",
+        type=int,
+        default=5,
+        help="(require_injected) oversample this many x num_scenes candidate scenes, "
+        "then keep the first num_scenes that got a collider",
     )
     return p.parse_known_args()
 
@@ -121,19 +170,54 @@ def main():
     model_b = load_model(args, v.model_path_b, v.use_ema, device)
     print(f"Loaded A={v.model_path_a}\n       B={v.model_path_b} (ema={v.use_ema})")
 
-    raw, idx = select_batch(v.data_list, v.num_scenes, v.seed, device)
-    S = v.num_scenes
+    # When require_injected, oversample candidate scenes so we can drop the ones where no
+    # collider could be generated and still end up with num_scenes panels.
+    oversample = v.aug_mode != "none" and v.require_injected
+    n_select = v.num_scenes * v.scene_pool_mult if oversample else v.num_scenes
+    raw, idx = select_batch(v.data_list, n_select, v.seed, device)
 
-    injected_mask = np.zeros((S, raw["neighbor_agents_past"].shape[1]), dtype=bool)
+    injected_mask = np.zeros(
+        (raw["neighbor_agents_past"].shape[0], raw["neighbor_agents_past"].shape[1]), dtype=bool
+    )
     if v.aug_mode != "none":
-        injector = SyntheticColliderInjector(
-            pedestrian_prob=v.pedestrian_prob,
-            bicycle_prob=v.bicycle_prob,
-            keep_clear_radius=v.keep_clear_radius,
-        )
+        if v.neighbor_db_path:
+            injector = NeighborPatternDB(
+                db_path=v.neighbor_db_path,
+                collision_margin=v.neighbor_db_collision_margin,
+                keep_clear_radius=v.keep_clear_radius,
+                min_collision_time=v.neighbor_min_collision_time,
+                search_subsample=v.neighbor_search_subsample,
+            )
+        else:
+            injector = SyntheticColliderInjector(
+                pedestrian_prob=v.pedestrian_prob,
+                bicycle_prob=v.bicycle_prob,
+                keep_clear_radius=v.keep_clear_radius,
+                straight_line=v.collider_straight_line,
+            )
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
         injected_mask = injector.last_injected_mask.cpu().numpy()
-        print(f"Injected {int(injected_mask.sum())} synthetic colliders across {S} scenes")
+
+    if oversample:
+        has_collider = injected_mask.any(axis=1)
+        n_attempted, n_fail = len(has_collider), int((~has_collider).sum())
+        keep = np.nonzero(has_collider)[0][: v.num_scenes]
+        print(
+            f"Collider generation failed for {n_fail}/{n_attempted} candidate scenes "
+            f"({100.0 * n_fail / max(n_attempted, 1):.1f}%); "
+            f"keeping {len(keep)} scenes with a collider"
+        )
+        if len(keep) == 0:
+            print("No scene produced a collider; nothing to visualize.")
+            return
+        keep_t = torch.as_tensor(keep, device=device, dtype=torch.long)
+        raw = {k: val[keep_t] for k, val in raw.items()}
+        injected_mask = injected_mask[keep]
+        idx = idx[keep]
+
+    S = raw["neighbor_agents_past"].shape[0]
+    _src = "DB" if v.neighbor_db_path else "synthetic"
+    print(f"Injected {int(injected_mask.sum())} {_src} colliders across {S} scenes")
 
     raw_np = {k: val.detach().cpu().numpy() for k, val in raw.items()}
     neigh_past = raw_np["neighbor_agents_past"]

@@ -35,6 +35,7 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.decoder import generate_prefix_mask
+from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
 
 def expand_batch(inputs: dict[str, torch.Tensor], n: int) -> dict[str, torch.Tensor]:
@@ -58,8 +59,10 @@ def sample_group(
     Args:
         model: the Diffusion_Planner (or DDP-wrapped) model.
         norm_inputs: observation-normalized inputs, batch dimension already expanded.
-        noise_scale: multiplier on the standard-normal initial diffusion noise. Larger
-            values give more diverse trajectories within a group.
+        noise_scale: the *maximum* initial-noise std. Each row draws its own scale uniformly
+            from ``U[0, noise_scale]`` (fresh every call), so a group spans a range of
+            diversities rather than all sharing one fixed scale. ``noise_scale=0`` stays
+            deterministic (temperature 0).
         device: target device.
 
     Returns:
@@ -71,8 +74,11 @@ def sample_group(
 
     B = norm_inputs["ego_current_state"].shape[0]
     inference_inputs = dict(norm_inputs)
+    # Per-row noise std ~ U[0, noise_scale]: each generated trajectory uses its own initial-noise
+    # magnitude, drawn fresh each call.
+    per_row_scale = torch.rand(B, 1, 1, 1, device=device) * noise_scale
     inference_inputs["sampled_trajectories"] = (
-        torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device) * noise_scale
+        torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device) * per_row_scale
     )
     inference_inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
 
@@ -121,7 +127,9 @@ def compute_collision_reward(
         neighbors_future,
         neighbors_future_valid,
         denorm_inputs["neighbor_agents_past"],
-        margin=args.neighbor_collision_margin,
+        margin_vehicle=args.neighbor_collision_margin_vehicle,
+        margin_pedestrian=args.neighbor_collision_margin_pedestrian,
+        margin_bicycle=args.neighbor_collision_margin_bicycle,
     )  # [B*N, T]
 
     if args.w_road_border > 0.0:
@@ -132,6 +140,14 @@ def compute_collision_reward(
         )  # [B*N, T]
     else:
         rb_penalty = torch.zeros_like(nc_penalty)
+
+    # Once a collision/border violation occurs it cannot be "undone": carry each penalty forward
+    # as a running max over time (penalty_t = max(penalty_{0..t})). This makes the per-timestep
+    # penalty monotonically non-decreasing, so a trajectory that briefly hits then speeds through
+    # is never cheaper than one that stops at the hit -- it removes the "plow through quickly"
+    # exploit. (Equivalently, the per-step reward -penalty is a running min.)
+    nc_penalty = torch.cummax(nc_penalty, dim=-1).values
+    rb_penalty = torch.cummax(rb_penalty, dim=-1).values
 
     reward = -(
         args.w_collision * nc_penalty.sum(dim=-1) + args.w_road_border * rb_penalty.sum(dim=-1)
@@ -163,6 +179,35 @@ def compute_gt_l2_distance(
     dist = torch.linalg.norm(gen_xy - gt_xy, dim=-1)  # [B, T]
     valid = (gt_xy.abs().sum(dim=-1) > 1e-6).float()  # mask zero-padded GT waypoints
     return (dist * valid).sum(dim=-1) / valid.sum(dim=-1).clamp_min(1.0)  # [B]
+
+
+@torch.no_grad()
+def compute_kinematic_consistency_penalty(
+    ego_world: torch.Tensor,
+    ego_agent_past_4d: torch.Tensor,
+    ego_current_state: torch.Tensor,
+) -> torch.Tensor:
+    """Round-trip drift of a generated trajectory through the (accel, curvature) action space.
+
+    A kinematically feasible trajectory survives a trajectory -> action -> trajectory round-trip
+    almost unchanged, because the unicycle action space can represent it exactly. An infeasible /
+    jerky trajectory (e.g. teleporting, instantaneous heading flips) cannot be reproduced from any
+    smooth control sequence, so the reconstruction drifts away. Penalising this drift pushes the
+    policy toward dynamically realisable trajectories without needing a reference GT.
+
+    Args:
+        ego_world: [B, T, 4] generated ego trajectory (x, y, cos, sin), ego-centric frame, metres.
+        ego_agent_past_4d: [B, Th, 4] ego past trajectory (x, y, cos, sin), same frame. The last
+            history step is assumed to be the (zeroed) current pose.
+        ego_current_state: [B, >=5] ego current state; index 4 is the longitudinal velocity used
+            as the integration's initial speed.
+
+    Returns:
+        drift: [B] mean per-waypoint L2 distance between the trajectory and its round-trip.
+    """
+    smoothed = smoothing_future_trajectory(ego_agent_past_4d, ego_current_state, ego_world)
+    drift = torch.linalg.norm(ego_world[..., :2] - smoothed[..., :2], dim=-1)  # [B, T]
+    return drift.mean(dim=-1)  # [B]
 
 
 def compute_group_advantages(reward: torch.Tensor, num_scenes: int, n: int, eps: float):

@@ -25,7 +25,7 @@ def get_args(args_list=None):
     # Data
     parser.add_argument("--train_set_list", type=str, required=True)
     parser.add_argument("--valid_set_list", type=str, required=True)
-    parser.add_argument("--train_subsample_step", type=int, default=3)
+    parser.add_argument("--train_subsample_step", type=int, default=1)
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
@@ -105,7 +105,24 @@ def get_args(args_list=None):
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
     parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
-    parser.add_argument("--neighbor_collision_margin", type=float, default=0.25)
+    parser.add_argument(
+        "--neighbor_collision_margin_vehicle",
+        type=float,
+        default=0.25,
+        help="per-side neighbor box inflation [m] for vehicles",
+    )
+    parser.add_argument(
+        "--neighbor_collision_margin_pedestrian",
+        type=float,
+        default=1.0,
+        help="per-side neighbor box inflation [m] for pedestrians",
+    )
+    parser.add_argument(
+        "--neighbor_collision_margin_bicycle",
+        type=float,
+        default=0.5,
+        help="per-side neighbor box inflation [m] for bicycles",
+    )
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
@@ -166,6 +183,40 @@ def get_args(args_list=None):
     # distributed training parameters
     parser.add_argument("--ddp", default=True, type=boolean, help="use ddp or not")
     parser.add_argument("--port", default="22323", type=str, help="port")
+
+    # per-epoch closed-loop validation (rendered rollout + wandb video).
+    # Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ frames).
+    parser.add_argument(
+        "--closed_loop_npz_root",
+        type=str,
+        default="",
+        help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
+        "cadence (save_utd). Empty = disabled. One route per trial.",
+    )
+    parser.add_argument(
+        "--closed_loop_seg_len",
+        type=int,
+        default=100000,
+        help="frames per segment; large => one route = one segment = one trial",
+    )
+    parser.add_argument(
+        "--closed_loop_replan_interval",
+        type=int,
+        default=40,
+        help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
+    )
+    parser.add_argument(
+        "--closed_loop_draw_every",
+        type=int,
+        default=4,
+        help="render 1 of every N steps (matplotlib render is the dominant cost)",
+    )
+    parser.add_argument("--closed_loop_fps", type=int, default=10)
+    parser.add_argument("--closed_loop_near_miss_thresh", type=float, default=0.5)
+    parser.add_argument("--closed_loop_search_radius", type=float, default=1.5)
+    parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
+    parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
+    parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
 
     args = parser.parse_args(args_list)
     return args

@@ -403,6 +403,8 @@ def main() -> None:
                 title_prefix=f"{r['route']}  {s0:05d}-{e0:05d}\n{model_title}",
                 distance_label_offset_m=args.distance_label_offset_m,
                 view_half_m=args.view_half_m,
+                replan_interval=1,
+                draw_every=1,
             )
             if args.render_webm:
                 webm = od / "hit_segment.webm"
