@@ -1153,11 +1153,12 @@ def main():
             "--prob_scenes <list.json> and --normal_scenes <list.json>"
         )
 
-    # Set module-level paths from CLI args. In single-set mode the prob/normal globals point at
-    # the training set so eval/viz subsampling derives from it (sampling itself is bypassed).
+    # Set module-level paths from CLI args. In single-set mode, training comes from
+    # --train_scenes exactly, while deterministic per-epoch eval/checkpoint selection uses the
+    # held-out validation list instead of leaking the training list into prob_eval.
     global BASE_MODEL, PROB_SCENES_PATH, NORMAL_POOL_PATH, VALID_SCENES_PATH, OUTPUT_DIR
     BASE_MODEL = args.model_path
-    PROB_SCENES_PATH = args.prob_scenes or args.train_scenes
+    PROB_SCENES_PATH = args.prob_scenes or args.val_scenes
     NORMAL_POOL_PATH = args.normal_scenes or args.train_scenes
     VALID_SCENES_PATH = args.val_scenes
     OUTPUT_DIR = args.output_dir

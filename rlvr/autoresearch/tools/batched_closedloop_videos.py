@@ -307,6 +307,12 @@ def main():
     parser.add_argument(
         "--render_only", action="store_true", help="skip phase 1, render from saved rollouts.pkl"
     )
+    parser.add_argument(
+        "--rollouts_pkl",
+        type=Path,
+        default=None,
+        help="Explicit rollout pickle for --render_only, or save path for phase 1.",
+    )
     parser.add_argument("--lambda_lat", type=float, default=5.0)
     parser.add_argument("--lat_scale", type=float, default=2.0)
     parser.add_argument("--col_scale", type=float, default=9.0)
@@ -326,7 +332,7 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     output_tag = render_tag(args.model_path, args.policy_dir)
-    pkl = out_dir / f"rollouts__{output_tag}.pkl"
+    pkl = args.rollouts_pkl or out_dir / f"rollouts__{output_tag}.pkl"
 
     with open(args.scenes) as f:
         paths = json.load(f)
@@ -361,6 +367,14 @@ def main():
         del model, policy, datas
         torch.cuda.empty_cache()
     else:
+        if args.rollouts_pkl is None and not pkl.exists():
+            candidates = sorted(out_dir.glob("rollouts__*.pkl"), key=lambda p: p.stat().st_mtime)
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No rollout pickle found at {pkl}; pass --rollouts_pkl for --render_only"
+                )
+            pkl = candidates[-1]
+            print(f"[render_only] using latest rollout pickle: {pkl}")
         with open(pkl, "rb") as f:
             saved = pickle.load(f)
         paths, ro_base, ro_gui, eta_logs = (

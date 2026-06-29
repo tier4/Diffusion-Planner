@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 from pathlib import Path
 
@@ -35,6 +36,8 @@ _TYPE_ICON = {
     "scene_datasets": "🎬",
     "run_dirs": "📦",
 }
+
+_RUN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
 # --------------------------------------------------------------------------------------
@@ -218,8 +221,10 @@ def _merge_scene_lists(paths: list[str], dest_dir: Path | None, argname: str) ->
         try:
             data = json.loads(Path(p).read_text())
             items = data.get("files", data) if isinstance(data, dict) else data
-        except (json.JSONDecodeError, OSError):
-            items = []
+        except (json.JSONDecodeError, OSError) as e:
+            raise ValueError(f"{argname}: could not read scene list {p}: {e}") from e
+        if not isinstance(items, list):
+            raise ValueError(f"{argname}: scene list {p} must be a JSON list or {{'files': [...]}}")
         for it in items:
             if it not in seen:
                 seen.add(it)
@@ -236,6 +241,36 @@ def _ws_base(library: dict) -> str:
     return library.get("workspace_root") or library.get("output_dir", "")
 
 
+def _merge_scanned_library(current: dict, scanned: dict) -> dict:
+    """Merge a workspace scan into the persisted library without dropping one-off assets."""
+    merged = dict(scanned)
+    for k in P.SCALAR_KEYS:
+        if k == "workspace_root":
+            continue
+        if current.get(k):
+            merged[k] = current[k]
+    for asset_type in P.LIST_TYPES:
+        entries = list(scanned.get(asset_type, []))
+        seen_paths = {str(Path(e.get("path", "")).expanduser()) for e in entries if e.get("path")}
+        seen_names = {e.get("name", "") for e in entries if e.get("name")}
+        for old in current.get(asset_type, []):
+            old_path = old.get("path", "")
+            old_name = old.get("name", "")
+            if old_path and str(Path(old_path).expanduser()) in seen_paths:
+                continue
+            name = old_name
+            if name in seen_names:
+                base, n = name, 2
+                while name in seen_names:
+                    name, n = f"{base}-{n}", n + 1
+                old = {**old, "name": name}
+            if name:
+                seen_names.add(name)
+            entries.append(old)
+        merged[asset_type] = entries
+    return P._normalize(merged)
+
+
 def _run_dir(library: dict, wf: W.Workflow, run: str) -> Path | None:
     """The folder a run writes into, per wf.creates: datasets/scenes|routes/<run> or runs/<key>/<run>."""
     base = _ws_base(library)
@@ -247,6 +282,15 @@ def _run_dir(library: dict, wf: W.Workflow, run: str) -> Path | None:
     if wf.creates == "routes":
         return Path(base) / "datasets" / "routes" / run
     return Path(base) / "runs" / wf.key / run
+
+
+def _safe_run_name(run: str) -> str:
+    run = (run or "run").strip()
+    if not _RUN_NAME_RE.fullmatch(run):
+        raise ValueError(
+            "Run name must start with a letter/number and contain only letters, numbers, '.', '_', '+', or '-'"
+        )
+    return run
 
 
 def _auto_path(library: dict, wf: W.Workflow, run: str, spec: W.ArgSpec) -> str:
@@ -284,7 +328,7 @@ def resolve_values(
         spec, role, name = f["spec"], f["role"], f["name"]
         vals = [next(it) for _ in f["comps"]]
         if role == "runname":
-            run_name = (vals[0] or "run").strip()
+            run_name = _safe_run_name(vals[0] or "run")
         elif role == "hidden":
             values[name] = spec.default
         elif role == "ego":
@@ -352,8 +396,8 @@ def _run_handler(wf, fields):
         if guard:
             yield "", "not started", guard, None
             return
-        values = resolve_values(wf, fields, library, flat, make_dirs=True)
         try:
+            values = resolve_values(wf, fields, library, flat, make_dirs=True)
             job = R.launch(wf, values)
         except ValueError as e:  # missing required asset(s)
             yield "", "not started", _err(str(e)), None
@@ -361,7 +405,12 @@ def _run_handler(wf, fields):
         yield f"Launched PID {job.pid}\n  log: {job.logfile}\n", f"running (PID {job.pid})", "", job
         for text in R.stream(job):
             yield text, f"running (PID {job.pid})", "", job
-        yield R.read_log(job), f"finished (alive={R.is_alive(job.pid)})", "", job
+        yield (
+            R.read_log(job),
+            f"finished (alive={R.is_alive(job.pid, job.proc_starttime)})",
+            "",
+            job,
+        )
 
     return run
 
@@ -371,8 +420,8 @@ def _preview_handler(wf, fields):
         guard = _needs_output_dir(wf, library)
         if guard:
             return guard
-        values = resolve_values(wf, fields, library, flat)
         try:
+            values = resolve_values(wf, fields, library, flat)
             return "$ " + shlex.join(R.build_full_command(wf, values))
         except ValueError as e:
             return _err(str(e))
@@ -384,6 +433,8 @@ def _stop_handler():
     def stop(job):
         if not job:
             return "no active job to stop"
+        if not getattr(job, "server", False):
+            return "Stop is only enabled for interactive server jobs; leave training/eval/mining jobs running."
         ok = R.stop(job)
         return f"stopped PID {job.pid}" if ok else f"stop failed for PID {job.pid}"
 
@@ -397,7 +448,11 @@ def _attach_handler(key):
             yield "No prior job for this workflow.", "none", None
             return
         for text in R.stream(job):
-            yield text, f"attached PID {job.pid} (alive={R.is_alive(job.pid)})", job
+            yield (
+                text,
+                f"attached PID {job.pid} (alive={R.is_alive(job.pid, job.proc_starttime)})",
+                job,
+            )
         yield R.read_log(job), f"finished PID {job.pid}", job
 
     return attach
@@ -789,7 +844,7 @@ def _open_editor(library, host, editor_port, fields, *flat):
         values["rsft_dir"] = str(Path(ws) / "datasets" / "scenes" / "editor_curated")
     # Stop a previous editor (interactive server, restartable) before relaunching.
     prev = R.latest_job("scene_branch_editor")
-    if prev is not None and R.is_alive(prev.pid):
+    if prev is not None and R.is_alive(prev.pid, prev.proc_starttime):
         R.stop(prev)
     try:
         job = R.launch(sewf, values)
@@ -811,10 +866,7 @@ def _open_editor(library, host, editor_port, fields, *flat):
 def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Blocks:
     library0 = P.load_library()
     if library0.get("workspace_root") and Path(library0["workspace_root"]).expanduser().is_dir():
-        scanned0 = P.scan_workspace(library0["workspace_root"])
-        for k in ("ego_shape", "output_dir"):
-            if library0.get(k):
-                scanned0[k] = library0[k]
+        scanned0 = _merge_scanned_library(library0, P.scan_workspace(library0["workspace_root"]))
         library0 = scanned0
         P.save_library(library0)
     wf = W.get_workflow
@@ -824,7 +876,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
         gr.Markdown(
             "# Autoresearch Control Panel\n"
             "Register assets once in **Workspace**; pick them from dropdowns in each tab. "
-            "Run launches a detached subprocess (survives closing this panel); ■ Stop ends it."
+            "Run launches a detached subprocess (survives closing this panel); ■ Stop is for interactive servers."
         )
         library_state = gr.State(library0)
         creating_panels: list = []  # panels whose tool writes a dataset → auto-rescan on finish
@@ -1179,10 +1231,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
             root = (library or {}).get("workspace_root")
             if not root or not Path(root).expanduser().is_dir():
                 return (library, _library_html(library), gr.update(), *_dropdown_updates(library))
-            scanned = P.scan_workspace(root)
-            for k in ("ego_shape", "output_dir"):
-                if library.get(k):
-                    scanned[k] = library[k]
+            scanned = _merge_scanned_library(library, P.scan_workspace(root))
             P.save_library(scanned)
             return (
                 scanned,
@@ -1224,11 +1273,7 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
                     gr.update(),
                     *_dropdown_updates(library),
                 )
-            scanned = P.scan_workspace(root)
-            # keep scalars the user may have set
-            for k in ("ego_shape", "output_dir"):
-                if library.get(k):
-                    scanned[k] = library[k]
+            scanned = _merge_scanned_library(library, P.scan_workspace(root))
             P.save_library(scanned)
             counts = ", ".join(
                 f"{t}:{len(scanned.get(t, []))}" for t in P.LIST_TYPES if scanned.get(t)
@@ -1429,16 +1474,26 @@ def build_app(host: str = "localhost", default_editor_port: int = 7899) -> gr.Bl
 def main():
     ap = argparse.ArgumentParser(description="Autoresearch control panel")
     ap.add_argument("--port", type=int, default=7888)
-    ap.add_argument("--host", type=str, default="0.0.0.0")
+    ap.add_argument("--host", type=str, default="127.0.0.1")
+    ap.add_argument(
+        "--public_host",
+        type=str,
+        default=None,
+        help="Hostname/IP browsers should use for embedded links such as the Scene Editor.",
+    )
     ap.add_argument("--editor_port", type=int, default=7899)
     ap.add_argument("--share", action="store_true")
     args = ap.parse_args()
-    demo = build_app(host="localhost", default_editor_port=args.editor_port)
-    # Gradio will only serve files from CWD/tmp unless explicitly allowed. Renders, previews
-    # and WebMs live under the workspace + the jobs dir, so allow those (and home, since the
-    # workspace root can be re-pointed at runtime via the Workspace tab).
+    link_host = args.public_host or (
+        "localhost" if args.host in ("0.0.0.0", "::", "127.0.0.1") else args.host
+    )
+    demo = build_app(host=link_host, default_editor_port=args.editor_port)
+    # Gradio will only serve files from CWD/tmp unless explicitly allowed. Renders, previews,
+    # and WebMs live under the workspace, jobs dir, /tmp, and commonly the external SSD mount.
     lib = P.load_library()
-    allowed = {str(Path.home()), str(R.JOBS_DIR), "/tmp"}
+    allowed = {str(R.JOBS_DIR), "/tmp"}
+    if Path("/media").exists():
+        allowed.add("/media")
     if lib.get("workspace_root"):
         allowed.add(str(Path(lib["workspace_root"]).expanduser()))
     if lib.get("output_dir"):

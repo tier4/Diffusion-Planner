@@ -39,6 +39,7 @@ class Job:
     cmd: list[str]
     env: str
     started_at: str
+    proc_starttime: int | None = None
     server: bool = False
     port: int | None = None
 
@@ -107,6 +108,16 @@ def _subprocess_env(wf: Workflow) -> dict:
     return env
 
 
+def _proc_starttime(pid: int) -> int | None:
+    """Linux /proc starttime field, used to reject stale job PIDs after reuse."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+        return int(stat[stat.rfind(")") + 2 :].split()[19])
+    except (FileNotFoundError, OSError, ValueError, IndexError):
+        return None
+
+
 def build_full_command(wf: Workflow, values: dict) -> list[str]:
     """Full argv (interpreter + tool + args), env-wrapped. Raises on missing required args."""
     tail = build_command(wf, values)
@@ -117,7 +128,7 @@ def build_full_command(wf: Workflow, values: dict) -> list[str]:
 def launch(wf: Workflow, values: dict) -> Job:
     """Launch ``wf`` detached, streaming stdout+stderr to the job log."""
     cmd = build_full_command(wf, values)  # may raise ValueError (surfaced by the app)
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     job_dir = JOBS_DIR / f"{ts}_{wf.key}"
     job_dir.mkdir(parents=True, exist_ok=True)
     logfile = job_dir / "run.log"
@@ -145,6 +156,7 @@ def launch(wf: Workflow, values: dict) -> Job:
         cmd=cmd,
         env=wf.env,
         started_at=ts,
+        proc_starttime=_proc_starttime(proc.pid),
         server=wf.server,
         port=port,
     )
@@ -153,7 +165,7 @@ def launch(wf: Workflow, values: dict) -> Job:
     return job
 
 
-def is_alive(pid: int) -> bool:
+def is_alive(pid: int, proc_starttime: int | None = None) -> bool:
     """True iff ``pid`` is a live process.
 
     A detached child we launched becomes a *zombie* when it exits until something reaps it;
@@ -166,6 +178,13 @@ def is_alive(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat") as f:
             stat = f.read()
+        if proc_starttime is not None:
+            try:
+                current_start = int(stat[stat.rfind(")") + 2 :].split()[19])
+            except (ValueError, IndexError):
+                return False
+            if current_start != proc_starttime:
+                return False
         # Fields after the (comm) parenthesis; state is the first token there.
         state = stat[stat.rfind(")") + 2]
         if state == "Z":
@@ -193,7 +212,7 @@ def stop(job: Job, kill_grace: float = 3.0) -> bool:
     User-initiated (a Stop button) — the never-kill-experiments rule is about *autonomous*
     behavior, not the user stopping their own job. Returns True if the process is gone.
     """
-    if not is_alive(job.pid):
+    if not is_alive(job.pid, job.proc_starttime):
         return True
     try:
         pgid = os.getpgid(job.pid)
@@ -205,14 +224,14 @@ def stop(job: Job, kill_grace: float = 3.0) -> bool:
         return True
     deadline = time.monotonic() + kill_grace
     while time.monotonic() < deadline:
-        if not is_alive(job.pid):
+        if not is_alive(job.pid, job.proc_starttime):
             return True
         time.sleep(0.2)
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    return not is_alive(job.pid)
+    return not is_alive(job.pid, job.proc_starttime)
 
 
 def read_log(job: Job) -> str:
@@ -232,7 +251,7 @@ def stream(job: Job, poll: float = 1.0, grace: float = 2.0):
         if text != last:
             last = text
             yield text
-        if is_alive(job.pid):
+        if is_alive(job.pid, job.proc_starttime):
             settle_deadline = None
         else:
             # Process gone: do one more read after a short grace to catch final flushes.

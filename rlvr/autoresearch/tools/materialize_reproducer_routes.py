@@ -38,19 +38,32 @@ def _route_from_stem(path: Path) -> str:
     return _FRAME_RE.sub("", path.stem)
 
 
-def _sidecar_index(sidecar_root: Path | None) -> dict[str, Path]:
+def _sidecar_index(sidecar_root: Path | None) -> dict[str, list[Path]]:
     if sidecar_root is None:
         return {}
-    return {p.stem: p for p in sidecar_root.rglob("*.json")}
+    out: dict[str, list[Path]] = {}
+    for p in sidecar_root.rglob("*.json"):
+        out.setdefault(p.stem, []).append(p)
+    return out
 
 
-def _resolve_sidecar(npz_path: Path, sidecars_by_stem: dict[str, Path]) -> Path:
+def _resolve_sidecar(npz_path: Path, sidecars_by_stem: dict[str, list[Path]]) -> Path:
     sibling = npz_path.with_suffix(".json")
     if sibling.is_file():
         return sibling
-    hit = sidecars_by_stem.get(npz_path.stem)
-    if hit is not None:
-        return hit
+    hits = sidecars_by_stem.get(npz_path.stem, [])
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        route = _route_from_stem(npz_path)
+        route_hits = [p for p in hits if p.parent.name == route]
+        if len(route_hits) == 1:
+            return route_hits[0]
+        preview = ", ".join(str(p) for p in hits[:5])
+        raise ValueError(
+            f"Ambiguous sidecar JSON for {npz_path}: stem {npz_path.stem!r} matched "
+            f"{len(hits)} files ({preview}). Keep sibling sidecars or use unique stems."
+        )
     raise FileNotFoundError(f"No sidecar JSON found for {npz_path}")
 
 

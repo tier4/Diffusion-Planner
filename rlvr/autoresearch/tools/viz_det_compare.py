@@ -158,12 +158,26 @@ def main():
 
     print(f"Loading model A: {args.model_a}")
     model_a, args_a = _load_model_with_lora(args.model_a, args.lora_a, device)
-    model_b = args_b = None
-    if args.model_b:
-        print(f"Loading model B: {args.model_b}")
-        model_b, args_b = _load_model_with_lora(args.model_b, args.lora_b, device)
+    policy_a = heads_a = None
+    if args.policy_a:
+        from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
 
-    output_tag = render_tag(args.model_a, args.lora_a, args.model_b, args.lora_b)
+        print(f"Loading guidance policy A: {args.policy_a}")
+        policy_a, heads_a = load_policy(args.policy_a, args_a, device)
+
+    model_b = args_b = None
+    policy_b = heads_b = None
+    model_b_path = args.model_b or (args.model_a if args.lora_b or args.policy_b else None)
+    if model_b_path:
+        print(f"Loading model B: {model_b_path}")
+        model_b, args_b = _load_model_with_lora(model_b_path, args.lora_b, device)
+        if args.policy_b:
+            from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
+
+            print(f"Loading guidance policy B: {args.policy_b}")
+            policy_b, heads_b = load_policy(args.policy_b, args_b, device)
+
+    output_tag = render_tag(args.model_a, args.lora_a, model_b_path, args.lora_b)
     out_dir = Path(args.output_dir) / output_tag
     out_dir.mkdir(parents=True, exist_ok=True)
     write_render_meta(
@@ -173,10 +187,14 @@ def main():
         model_a_label=path_label(args.model_a),
         lora_a_path=args.lora_a or "",
         lora_a_label=path_label(args.lora_a),
-        model_b_path=args.model_b or "",
-        model_b_label=path_label(args.model_b),
+        model_b_path=model_b_path or "",
+        model_b_label=path_label(model_b_path),
         lora_b_path=args.lora_b or "",
         lora_b_label=path_label(args.lora_b),
+        policy_a_path=args.policy_a or "",
+        policy_a_label=path_label(args.policy_a),
+        policy_b_path=args.policy_b or "",
+        policy_b_label=path_label(args.policy_b),
     )
 
     results_a, results_b = [], []
@@ -206,9 +224,11 @@ def main():
         if not datas:
             continue
 
-        det_a = det_inference_batched(model_a, args_a, datas, device)
+        det_a = _plans(model_a, args_a, policy_a, heads_a, datas, device, args)
         det_b = (
-            det_inference_batched(model_b, args_b, datas, device) if model_b is not None else None
+            _plans(model_b, args_b, policy_b, heads_b, datas, device, args)
+            if model_b is not None
+            else None
         )
 
         for bi, sp in enumerate(valid_paths):

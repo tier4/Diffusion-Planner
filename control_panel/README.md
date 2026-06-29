@@ -10,7 +10,7 @@ instead of typing paths. It adds no domain logic — every Run shells out to the
 ```bash
 source .venv/bin/activate
 python -m control_panel            # http://localhost:7888
-# options: --port 7888  --host 0.0.0.0  --editor_port 7899  --share
+# options: --port 7888  --host 0.0.0.0  --public_host <server>  --editor_port 7899  --share
 ```
 
 ## Workspace — the one thing you set
@@ -22,7 +22,8 @@ Everything is organized under a single **workspace root** with a fixed layout:
   models/<name>/        best_model.pth + args.json   (🧠)
   loras/<name>/         adapter_config.json + weights (🧩)
   policies/<name>/      exploration_policy_config.json + .pth (🛰 guidance)
-  configs/<name>.json   reward configs (⚙️)
+  configs/grpo/<name>.json     generation/training configs
+  configs/reward/<name>.json   reward/metric configs
   maps/<name>.osm       lanelet2 maps (🗺)
   datasets/scenes/<name>.json   individual-scene lists (🎬)
   datasets/routes/<name>/       contiguous per-frame NPZ dirs (📁)
@@ -62,8 +63,9 @@ manual scan needed.
 | **Evaluate → Metrics** | `eval_full_metrics` (all metrics on the det trajectory; optional 2nd model for A/B; **Render** dumps per-scene PNGs) — or tick **Use guidance policy** for `eval_policy_avoidance` |
 | **Evaluate → L2 loss** | `valid_predictor` (DDP) |
 | **Merge + Export** | `merge_lora` → `torch2onnx` |
-| **Data generation → PRiSM** | one tab, three ordered steps: perturb → rank K candidates by reward → filter (keep top percentile, drop scenes no candidate improved) |
-| **Render** | one tab, a mode dropdown: closed-loop A/B · open-loop A/B · generated candidates · render route/scenes. A/B sides each take model + optional LoRA + optional guidance policy (any combination) |
+| **Data generation → PRiSM** | one tab, three ordered steps: perturb -> rank K candidates by reward -> filter (keep top percentile, drop scenes no candidate improved) |
+| **Data generation → Reproducer** | import contiguous route corpora, mine closed-loop collision/near-miss windows, and render route segments through the Perception Reproducer |
+| **Render** | one tab, a mode dropdown: closed-loop A/B, open-loop A/B, generated candidates, deterministic stills, or route/scenes. A/B sides each take model + optional LoRA + optional guidance policy (any combination) |
 | **Scene Editor** | the Scene Branch Editor, launched as a subprocess (lanelet env) + embedded via iframe; export/save dirs pre-pointed into the workspace |
 
 ## Training config presets (Train → RSFT)
@@ -88,11 +90,33 @@ Avoidance (`sc`) metrics are only measured when the reward config enables static
 scoring. Use the **SC-enabled** config (`static_collision_enabled=true`) — otherwise
 `sc_min_dist` reads 99 everywhere and the eval prints a NOTE telling you so.
 
+## Reproducer route workflows
+
+The Reproducer tools use **route** datasets: contiguous per-frame NPZ directories with matching
+sidecar JSON files. They are intentionally separate from **scene** datasets, which are JSON lists
+of independent NPZ scenes used by training/eval.
+
+The intended route workflow is:
+
+1. **Import contiguous routes** with `materialize_reproducer_routes`. This groups a converted flat
+   NPZ corpus by sidecar route, then symlinks or copies NPZ+JSON pairs into
+   `datasets/routes/<name>/`.
+2. **Mine collisions** with `mine_collisions`. Use `neighbor_history_mode=sim` in direct CLI usage;
+   the GUI workflow is wired around the simulation-state reproducer path. Optional extraction saves
+   pre-collision NPZ batches under `datasets/scenes/<name>/collision_batches/` so they become normal
+   scene datasets after scan/refresh.
+3. **Render route WebMs** with `render_reproducer_segment` for route-level audit videos. The title
+   metadata includes the route name, model, LoRA, frame range, and distance labels when present.
+
+Render outputs are always WebM/VP9 when a movie is requested. Parallel renders must write to
+distinct output directories; the GUI derives one run directory per job to avoid frame collisions.
+
 ## Jobs
 
 Each Run launches a **detached** subprocess (survives closing the panel) writing to
 `~/.diffusion_planner_jobs/<ts>_<key>/run.log`. **Attach to latest** re-attaches; **■ Stop**
-ends the job (SIGTERM→SIGKILL). **Preview command** shows the exact argv.
+is limited to interactive server jobs such as the Scene Editor. **Preview command** shows the exact
+argv.
 
 ## Architecture
 

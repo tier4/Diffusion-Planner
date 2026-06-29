@@ -261,7 +261,7 @@ def scan_workspace(root: str | Path) -> dict:
     """Walk the standard workspace layout and return a library dict (auto-detected assets).
 
     Detection by on-disk signature: model = .pth + args.json; LoRA = dir w/ adapter_config.json;
-    policy = dir w/ exploration_policy_config.json; reward config = configs/*.json; map = maps/*.osm;
+    policy = dir w/ exploration_policy_config.json; configs live under configs/grpo|reward;
     scene dataset = datasets/scenes/*.json; route dataset = datasets/routes/<dir of *_<idx>.npz>.
     Follows symlinks (so scattered assets can be linked into the workspace).
     """
