@@ -754,8 +754,15 @@ def build_interface(
     map_borders: list[np.ndarray] | None = None,
     map_builder=None,
     reward_config=None,
+    export_dir_default: str = "",
+    rsft_dir_default: str = "",
 ):
-    """Build the Gradio interface for the scene branch editor."""
+    """Build the Gradio interface for the scene branch editor.
+
+    export_dir_default / rsft_dir_default pre-fill the Export-Dir (contiguous NPZs) and
+    RSFT-Dir (individual scene + guided-traj) text fields — e.g. a workspace
+    datasets/routes/ and datasets/scenes/ subfolder.
+    """
 
     # NOTE: css is passed to demo.launch() (Gradio 6 dropped css from the Blocks
     # constructor); see _GUI_CSS and main().
@@ -987,13 +994,19 @@ def build_interface(
                 with gr.Accordion("Export / Save for RSFT", open=False):
                     with gr.Row():
                         export_dir = gr.Textbox(
-                            label="Export Dir", placeholder="/path/to/export", scale=3
+                            label="Export Dir (contiguous NPZs)",
+                            value=export_dir_default,
+                            placeholder="/path/to/export",
+                            scale=3,
                         )
                         export_btn = gr.Button("Export NPZs", variant="secondary", scale=1)
                     export_status = gr.Markdown("")
                     with gr.Row():
                         rsft_dir = gr.Textbox(
-                            label="RSFT Dir", placeholder="/path/to/rsft_curated", scale=3
+                            label="RSFT Dir (individual scenes)",
+                            value=rsft_dir_default,
+                            placeholder="/path/to/rsft_curated",
+                            scale=3,
                         )
                         rsft_save_btn = gr.Button(
                             "Save Scene + Guided Traj",
@@ -4210,6 +4223,75 @@ def _empty_image(text: str = "No scene loaded"):
     return img
 
 
+def build_demo_from_paths(
+    npz_dir: str,
+    model_path: str | None = None,
+    reward_config: str | None = None,
+    ego_shape: str | None = None,
+    map_path: str | None = None,
+    tree_json: str | None = None,
+    export_dir: str = "",
+    rsft_dir: str = "",
+):
+    """Build the Scene Editor Blocks from plain paths (no argparse).
+
+    Used by ``main()`` and by the control-panel, which mounts the returned Blocks in-process.
+    The returned demo carries ``_GUI_CSS`` on ``demo.css`` so callers that mount it (rather
+    than ``.launch(css=...)``) still get the editor's styling.
+    """
+    ego_shape_override = None
+    if ego_shape:
+        parts = [float(x) for x in ego_shape.split(",")]
+        if len(parts) == 3:
+            ego_shape_override = tuple(parts)
+
+    if tree_json:
+        tree = SceneTree.load(tree_json)
+    elif ego_shape_override:
+        tree = SceneTree.create_from_npz_dir_with_shape(npz_dir, ego_shape_override)
+    else:
+        tree = SceneTree.create_from_npz_dir(npz_dir)
+
+    if ego_shape_override:
+        tree.ego_shape = ego_shape_override
+
+    mc = _ModelCache(model_path) if model_path else None
+
+    # Load road border polylines from lanelet2 map if provided
+    map_border_polylines = None
+    builder = None
+    if map_path:
+        from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
+
+        builder = LaneletSceneBuilder(map_path)
+        map_border_polylines = builder.road_border_polylines()
+        if not map_border_polylines:
+            raise RuntimeError(
+                f"Map loaded from {map_path} but contains 0 road border polylines. "
+                "Check that the map has road_border line strings."
+            )
+        print(f"Loaded {len(map_border_polylines)} road border polylines from map")
+
+    reward_cfg = None
+    if reward_config:
+        from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
+
+        reward_cfg = load_reward_config(reward_config)
+        print(f"Loaded reward config from {reward_config}")
+
+    demo = build_interface(
+        tree,
+        model_cache=mc,
+        map_borders=map_border_polylines,
+        map_builder=builder,
+        reward_config=reward_cfg,
+        export_dir_default=export_dir or "",
+        rsft_dir_default=rsft_dir or "",
+    )
+    demo.css = _GUI_CSS  # so a mounting caller keeps the editor's styling
+    return demo
+
+
 def main():
     parser = argparse.ArgumentParser(description="Scene Branch Editor")
     parser.add_argument("--npz_dir", type=str, required=True, help="Path to replay NPZ directory")
@@ -4233,54 +4315,23 @@ def main():
         help="Path to lanelet2 .osm map (for road border overlays)",
     )
     parser.add_argument("--port", type=int, default=7870)
+    parser.add_argument(
+        "--export_dir", type=str, default="", help="Default Export Dir (contiguous NPZs)"
+    )
+    parser.add_argument(
+        "--rsft_dir", type=str, default="", help="Default RSFT Dir (individual scenes)"
+    )
     args = parser.parse_args()
 
-    ego_shape_override = None
-    if args.ego_shape:
-        parts = [float(x) for x in args.ego_shape.split(",")]
-        if len(parts) == 3:
-            ego_shape_override = tuple(parts)
-
-    if args.tree_json:
-        tree = SceneTree.load(args.tree_json)
-    elif ego_shape_override:
-        tree = SceneTree.create_from_npz_dir_with_shape(args.npz_dir, ego_shape_override)
-    else:
-        tree = SceneTree.create_from_npz_dir(args.npz_dir)
-
-    if ego_shape_override:
-        tree.ego_shape = ego_shape_override
-
-    mc = _ModelCache(args.model_path) if args.model_path else None
-
-    # Load road border polylines from lanelet2 map if provided
-    map_border_polylines = None
-    builder = None
-    if args.map_path:
-        from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
-
-        builder = LaneletSceneBuilder(args.map_path)
-        map_border_polylines = builder.road_border_polylines()
-        if not map_border_polylines:
-            raise RuntimeError(
-                f"Map loaded from {args.map_path} but contains 0 road border polylines. "
-                "Check that the map has road_border line strings."
-            )
-        print(f"Loaded {len(map_border_polylines)} road border polylines from map")
-
-    reward_cfg = None
-    if args.reward_config:
-        from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
-
-        reward_cfg = load_reward_config(args.reward_config)
-        print(f"Loaded reward config from {args.reward_config}")
-
-    demo = build_interface(
-        tree,
-        model_cache=mc,
-        map_borders=map_border_polylines,
-        map_builder=builder,
-        reward_config=reward_cfg,
+    demo = build_demo_from_paths(
+        npz_dir=args.npz_dir,
+        model_path=args.model_path,
+        reward_config=args.reward_config,
+        ego_shape=args.ego_shape,
+        map_path=args.map_path,
+        tree_json=args.tree_json,
+        export_dir=args.export_dir,
+        rsft_dir=args.rsft_dir,
     )
     demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True, css=_GUI_CSS)
 

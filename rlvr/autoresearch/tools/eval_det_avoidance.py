@@ -277,6 +277,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model_path", required=True)
+    parser.add_argument("--lora_path", default=None, help="Optional LoRA adapter dir to apply")
     parser.add_argument("--scenes", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--ego_shape", required=True, help="WB,L,W e.g. 4.76,7.24,2.29")
@@ -296,6 +297,12 @@ def main():
     print(f"[eval_det_avoidance] {len(scene_paths)} scenes, model={args.model_path}")
 
     model, model_args = load_model(args.model_path, device)
+    if args.lora_path:
+        from preference_optimization.lora_utils import load_lora_checkpoint
+
+        model = load_lora_checkpoint(model, args.lora_path)
+        model.to(device).eval()
+        print(f"[eval_det_avoidance] applied LoRA: {args.lora_path}")
 
     results = score_det_scenes(
         model,

@@ -540,6 +540,22 @@ def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.n
     return pose, ego_hist, _EgoDyn(speed=float(tl.speeds[idx]))
 
 
+def _goal_xy_from_npz_goal(tl: RouteTimeline, idx: int, fallback_idx: int) -> np.ndarray:
+    """Recover the fixed world-frame route goal from an ego-frame NPZ goal_pose."""
+    try:
+        gp = np.asarray(tl.npz(idx)["goal_pose"]).reshape(-1).astype(np.float64)
+    except KeyError:
+        return tl.poses[fallback_idx, :2].copy()
+    if gp.shape[0] < 2 or float(np.linalg.norm(gp[:2])) < 1e-3:
+        return tl.poses[fallback_idx, :2].copy()
+    pose = tl.poses[idx]
+    c, s = math.cos(float(pose[2])), math.sin(float(pose[2]))
+    return np.array(
+        [pose[0] + gp[0] * c - gp[1] * s, pose[1] + gp[0] * s + gp[1] * c],
+        dtype=np.float64,
+    )
+
+
 def _seed_state(
     tl,
     start,
@@ -556,6 +572,7 @@ def _seed_state(
     unstick_radius_mult=3.0,
     unstick_teleport_after=300,
     neighbor_history_mode="recorded",
+    goal_mode="segment",
 ) -> _SegState:
     from scenario_generation.mpc_tracker import PerfectTracker
 
@@ -573,6 +590,12 @@ def _seed_state(
         if neighbor_history_mode == "sim"
         else None
     )
+    if goal_mode == "segment":
+        goal_xy = tl.poses[end - 1, :2].copy()
+    elif goal_mode == "route":
+        goal_xy = _goal_xy_from_npz_goal(tl, start, end - 1)
+    else:
+        raise ValueError(f"Unknown goal_mode={goal_mode!r}; expected 'segment' or 'route'")
     return _SegState(
         tl=tl,
         start=start,
@@ -596,7 +619,7 @@ def _seed_state(
             else None
         ),
         ego_shape=np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32),
-        goal_xy=tl.poses[end - 1, :2],
+        goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
         prev_max_idx=cursor.max_idx_reached,
@@ -1177,7 +1200,18 @@ def _polylines_from_tensor(t: np.ndarray, border_only: bool = False) -> list[np.
     return out
 
 
-def _draw_step(np_dict, pred, ego_shape, path, neighbor_ids=None, step=0, total=1):
+def _draw_step(
+    np_dict,
+    pred,
+    ego_shape,
+    path,
+    neighbor_ids=None,
+    step=0,
+    total=1,
+    title_prefix: str | None = None,
+    distance_label_offset_m: float = 1.2,
+    view_half_m: float = 50.0,
+):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
     Rebuilds a SceneContext (ego + reproduced neighbors + map) in the live-ego
@@ -1219,6 +1253,9 @@ def _draw_step(np_dict, pred, ego_shape, path, neighbor_ids=None, step=0, total=
         Path(path),
         step,
         total,
+        title_prefix=title_prefix,
+        distance_label_offset_m=distance_label_offset_m,
+        view_half_m=view_half_m,
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
     )
@@ -1246,9 +1283,14 @@ def render_segment(
     unstick_radius_mult: float = 3.0,
     unstick_teleport_after: int = 300,
     interpolate: bool = True,
+    neighbor_history_mode: str = "sim",
+    goal_mode: str = "segment",
+    title_prefix: str | None = None,
+    distance_label_offset_m: float = 1.2,
+    view_half_m: float = 50.0,
     *,
-    replan_interval: int,
-    draw_every: int,
+    replan_interval: int = 1,
+    draw_every: int = 1,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1271,6 +1313,10 @@ def render_segment(
     interpolating each track between its real detections (uses the sidecar track
     UUIDs) — removes the freeze-then-jump perception stutter. ``color_by_uuid``:
     stable per-track colors. ``window`` = (lo, hi) step range to render (all).
+    ``neighbor_history_mode="sim"`` matches the collision miner: neighbor history
+    is rebuilt from the shown simulated motion instead of copied from the recorded
+    cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
+    terminates at the NPZ route goal displayed in the render.
     Returns the SegmentResult metrics.
     """
     from pathlib import Path
@@ -1294,11 +1340,17 @@ def render_segment(
         unstick_advance_m=unstick_advance_m,
         unstick_radius_mult=unstick_radius_mult,
         unstick_teleport_after=unstick_teleport_after,
+        neighbor_history_mode=neighbor_history_mode,
+        goal_mode=goal_mode,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
     # margin covers any overrun without scanning the whole route.
-    interp = _build_neighbor_interp(tl, start, min(end + 100, len(tl))) if interpolate else {}
+    interp = (
+        _build_neighbor_interp(tl, start, min(end + 100, len(tl)))
+        if interpolate and neighbor_history_mode != "sim"
+        else {}
+    )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
@@ -1340,7 +1392,7 @@ def render_segment(
                 + "\n"
             )
             break
-        np_dict, neighbors_live, idx, _suuid, _wbu = pre
+        np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
         # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
         # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
         dbg.write(
@@ -1376,6 +1428,7 @@ def render_segment(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
             )
             pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
+            _feed_turn_indicator(s, outputs)
         else:
             # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
             off = min(offset, len(plan_world[0]) - 1)
@@ -1393,7 +1446,7 @@ def render_segment(
                 s.live_pose[1],
                 s.live_pose[2],
             )
-        nids = tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None
+        nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
         if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
@@ -1405,6 +1458,9 @@ def render_segment(
                 neighbor_ids=nids if color_by_uuid else None,
                 step=k,
                 total=cap,
+                title_prefix=title_prefix,
+                distance_label_offset_m=distance_label_offset_m,
+                view_half_m=view_half_m,
             )
         _score_into(s, neighbors_live, device, timers)
         snaps_before = s.n_snaps

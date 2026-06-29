@@ -24,11 +24,13 @@ from __future__ import annotations
 import argparse
 import heapq
 import json
+import subprocess
 import time
 from pathlib import Path
 
 import torch
 
+from rlvr.autoresearch.tools.render_metadata import render_tag, write_render_meta
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import run_segments_batched
 from scenario_generation.route_timeline import RouteTimeline, group_routes
@@ -45,6 +47,7 @@ def parse_args() -> argparse.Namespace:
         "pre-padding conversion tree when the padded NPZs dropped their sidecars)",
     )
     p.add_argument("--model_path", type=Path, required=True)
+    p.add_argument("--lora_path", type=Path, default=None)
     p.add_argument("--out", type=Path, required=True, help="output JSONL of per-segment metrics")
     p.add_argument("--seg_len", type=int, default=600, help="frames per segment (~60s @10Hz)")
     p.add_argument("--near_miss_thresh", type=float, default=0.5)
@@ -86,17 +89,9 @@ def parse_args() -> argparse.Namespace:
         "scenes must be materialized back to CPU each step, so the gain is marginal; results are "
         "numerically equivalent to the CPU path (~1e-5, float-ordering).",
     )
-    p.add_argument(
-        "--neighbor_history_mode",
-        type=str,
-        default="recorded",
-        choices=["recorded", "sim"],
-        help="'recorded' (default, original): copy each cursor frame's own 31-step neighbor "
-        "history verbatim — a cursor-frozen moving car still reads its recorded velocity. "
-        "'sim': rebuild neighbor_agents_past from the SIMULATED shown motion (track by UUID, "
-        "interpolate between recorded anchors, velocity = finite diff of shown positions) so a "
-        "frozen neighbor reads v~0 and a moving one its true speed. Needs sidecar neighbor_ids.",
-    )
+    # Neighbor history is always rebuilt from the SIMULATED shown motion (track by UUID,
+    # interpolate between recorded anchors, velocity = finite diff of shown positions). The old
+    # "recorded" mode (copy each cursor frame's 31-step history verbatim) is removed.
     p.add_argument(
         "--prefetch_ahead",
         type=int,
@@ -118,11 +113,25 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--unstick_advance_m", type=float, default=5.0)
     p.add_argument(
+        "--view_half_m",
+        type=float,
+        default=50.0,
+        help="Half-width of the bird's-eye camera window around ego, in metres",
+    )
+    p.add_argument(
         "--dump_hits",
         type=int,
         default=0,
         help="render the top-N ranked hit segments to PNGs under <out>.renders/ (0=off)",
     )
+    p.add_argument(
+        "--distance_label_offset_m",
+        type=float,
+        default=1.2,
+        help="Offset the distance badges away from the line, in metres",
+    )
+    p.add_argument("--render_webm", action="store_true", help="assemble dumped hit PNGs into WebM")
+    p.add_argument("--webm_fps", type=int, default=10)
     # One-pass collision-scene save (no second extract pass). When --save_dir is set,
     # each segment buffers its last --save_pre_steps scenes during THIS rollout and dumps
     # them to <save_dir>/<route>_<start>_<end>/ on the first step within --save_thresh of a
@@ -183,6 +192,37 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _make_webm(frames_dir: Path, out_path: Path, fps: int) -> None:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(fps),
+            "-i",
+            str(frames_dir / "%05d.png"),
+            "-c:v",
+            "libvpx-vp9",
+            "-b:v",
+            "0",
+            "-crf",
+            "32",
+            "-row-mt",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            str(out_path),
+        ],
+        check=True,
+    )
+
+
+def _model_lora_title(model_path: Path, lora_path: Path | None) -> str:
+    model_label = f"{model_path.parent.name}/{model_path.name}"
+    lora_label = f"{lora_path.parent.name}/{lora_path.name}" if lora_path else "none"
+    return f"model: {model_label}  lora: {lora_label}"
+
+
 def _enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
     # OPT-OUT of skip-filtering on purpose: the reproducer is the ONE consumer that needs
     # the converter's skip_for_training frames (red-light dwell etc.) so the timeline is
@@ -201,6 +241,12 @@ def main() -> None:
     from scenario_generation.simulate import load_model
 
     model, model_args = load_model(args.model_path, device)
+    if args.lora_path:
+        from preference_optimization.lora_utils import load_lora_checkpoint
+
+        print(f"loading LoRA: {args.lora_path}")
+        model = load_lora_checkpoint(model, str(args.lora_path))
+        model.eval()
 
     routes = _enumerate_routes(args.npz_root)
     route_keys = sorted(routes)
@@ -260,7 +306,7 @@ def main() -> None:
             save_min_ego_speed=args.save_min_ego_speed,
             route_keys=buf_keys,
             gpu_transform=args.gpu_transform,
-            neighbor_history_mode=args.neighbor_history_mode,
+            neighbor_history_mode="sim",  # always sim (recorded mode removed)
         )
         for key, res in zip(buf_keys, res_list):
             row = {"route": key, **res.metrics}
@@ -320,13 +366,30 @@ def main() -> None:
 
         render_root = args.out.with_suffix(".renders")
         render_root.mkdir(parents=True, exist_ok=True)
+        model_title = _model_lora_title(args.model_path, args.lora_path)
+        model_label = f"{args.model_path.parent.name}/{args.model_path.name}"
+        lora_label = (
+            f"{args.lora_path.parent.name}/{args.lora_path.name}" if args.lora_path else "none"
+        )
+        run_tag = render_tag(args.model_path, args.lora_path)
         for r in hits[: args.dump_hits]:
             if r["n_collision_steps"] == 0 and r["n_near_miss_steps"] == 0:
                 continue  # nothing interesting to render
             s0, e0 = r["segment"]
             tl = RouteTimeline(routes[r["route"]], sidecar_dir=args.sidecar_root)
-            od = render_root / f"{r['route']}_{s0}_{e0}"
+            od = render_root / f"{r['route']}_{s0}_{e0}__{run_tag}"
             print(f"  rendering hit {r['route']} [{s0},{e0}] -> {od}")
+            write_render_meta(
+                od,
+                tool="mine_collisions_reproducer",
+                route=r["route"],
+                start=s0,
+                end=e0,
+                model_path=str(args.model_path),
+                model_label=model_label,
+                lora_path=str(args.lora_path) if args.lora_path else "",
+                lora_label=lora_label,
+            )
             render_segment(
                 model,
                 model_args,
@@ -337,9 +400,16 @@ def main() -> None:
                 device=device,
                 near_miss_thresh=args.near_miss_thresh,
                 search_radius=args.search_radius,
+                title_prefix=f"{r['route']}  {s0:05d}-{e0:05d}\n{model_title}",
+                distance_label_offset_m=args.distance_label_offset_m,
+                view_half_m=args.view_half_m,
                 replan_interval=1,
                 draw_every=1,
             )
+            if args.render_webm:
+                webm = od / "hit_segment.webm"
+                _make_webm(od, webm, args.webm_fps)
+                print(f"    webm -> {webm}")
         print(f"rendered {args.dump_hits} hit segment(s) -> {render_root}")
 
 

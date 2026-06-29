@@ -7,7 +7,10 @@ perception is replayed **keyed on the live ego pose**, not wall-clock. Each step
    built, rebuild a queue of recorded frames whose ego world xy is within
    ``search_radius`` of the live ego, **ordered chronologically** (by frame
    index = recorded time), excluding a **cool-down** set of recently-used frames
-   (TTL ``cool_down_sec``). Empty neighborhood -> fall back to the nearest frame.
+   (TTL ``cool_down_sec``). Frames earlier than the furthest frame already reached
+   are never re-entered, so a closed-loop ego that drifts near an old part of the
+   route cannot rewind the replay. Empty neighborhood -> fall back to the nearest
+   non-rewinding frame.
 2. Otherwise keep consuming the existing queue, so the recorded scene plays
    forward in time even while the ego is stopped (the red-light case: cross
    traffic / pedestrians keep moving).
@@ -103,8 +106,9 @@ class PerceptionReproducer:
                 else float(np.linalg.norm(sim_xy - self._last_seq_pos))
             )
             if self.search_radius <= 0.0:
-                # Degenerate mode: always the single nearest recorded frame.
-                idx = self.tl.nearest(sim_xy)
+                # Degenerate mode: nearest recorded frame, but still never rewind
+                # once this cursor has reached a later recorded frame.
+                idx = max(self.tl.nearest(sim_xy), self.max_idx_reached)
                 self._last_idx = idx
                 self.max_idx_reached = max(self.max_idx_reached, idx)
                 return idx
@@ -113,13 +117,16 @@ class PerceptionReproducer:
                 self._last_seq_pos = sim_xy.copy()
                 nearby = list(self.tl.query_radius(sim_xy, self.search_radius))
                 if not nearby:
-                    nearby = [self.tl.nearest(sim_xy)]
+                    nearest = self.tl.nearest(sim_xy)
+                    nearby = [nearest if nearest >= self.max_idx_reached else self.max_idx_reached]
                 # Expire cool-down entries past their TTL.
                 while self._cool_down and (sim_time - self._cool_down[0][1]) > self.cool_down_sec:
                     self._cool_down.popleft()
                 cooling = {i for i, _ in self._cool_down}
                 # Chronological order == ascending frame index (frame_indices is sorted).
-                self._queue = deque(sorted(i for i in nearby if i not in cooling))
+                self._queue = deque(
+                    sorted(i for i in nearby if i >= self.max_idx_reached and i not in cooling)
+                )
 
             repeat = len(self._queue) == 0
             if not repeat:

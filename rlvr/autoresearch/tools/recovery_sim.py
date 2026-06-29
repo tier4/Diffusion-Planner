@@ -65,6 +65,17 @@ _PRED_COLOR = "#3366cc"
 _VIEW_HALF_M = 50.0
 
 
+def _model_lora_title(model_path: str | Path, lora_path: str | Path | None) -> str:
+    p = Path(model_path)
+    model_label = f"{p.parent.name}/{p.name}"
+    if lora_path:
+        lp = Path(lora_path)
+        lora_label = f"{lp.parent.name}/{lp.name}"
+    else:
+        lora_label = "none"
+    return f"model: {model_label}  lora: {lora_label}"
+
+
 # ---------------------------------------------------------------------------
 # Geometry helpers (mirror scenario_generation.replay & .visualize)
 # ---------------------------------------------------------------------------
@@ -375,6 +386,7 @@ def _render_step(
     perturbation_label: str,
     init_lateral: float,
     view_half_m: float = _VIEW_HALF_M,
+    title_prefix: str | None = None,
 ) -> None:
     """Render and save one step's overview PNG."""
     ex, ey, eh = float(ego_pose[0]), float(ego_pose[1]), float(ego_pose[2])
@@ -556,6 +568,8 @@ def _render_step(
         f"yaw={math.degrees(eh):+.1f}°  "
         f"lat_off={cur_lateral:.2f} m  (init {init_lateral:.2f} m)"
     )
+    if title_prefix:
+        title = f"{title_prefix}\n{title}"
     ax.set_title(title, fontsize=10)
     fig.tight_layout()
     fig.savefig(output_path, dpi=100)
@@ -647,6 +661,7 @@ def main():
     if args.lora_path:
         model = load_lora_checkpoint(model, args.lora_path)
         model.eval()
+    title_prefix = _model_lora_title(args.model_path, args.lora_path)
 
     # ---- Load scene ----
     data = load_npz_data(args.scene, device)
@@ -733,6 +748,7 @@ def main():
             perturbation_label=perturbation_label,
             init_lateral=init_lateral,
             view_half_m=args.view_half_m,
+            title_prefix=title_prefix,
         )
         if (i + 1) % 10 == 0 or i == 0:
             ex, ey, _ = positions[i]

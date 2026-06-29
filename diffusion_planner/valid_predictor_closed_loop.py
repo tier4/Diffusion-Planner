@@ -19,7 +19,7 @@ Only ``--model_path`` and ``--npz_root`` are required; all outputs are written n
 the checkpoint (``<model_path dir>/closed_loop/``) and the rollout knobs default to the
 closed-loop mining config. Example (1st epoch of a GRPO run)::
 
-    NPZ=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/valid/2026-01-15/13-42-45
+    NPZ=/path/to/closed_loop_npz_dir
 
     python3 valid_predictor_closed_loop.py \
         --model_path /mnt/nvme/training_result/20260622-083517_per_sample_noise_grpo/epoch0001/best_model.pth \
