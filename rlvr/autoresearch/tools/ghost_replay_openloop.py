@@ -51,7 +51,9 @@ BEST_COLOR = "#d62728"  # red
 HIST_COLOR = "#555555"  # grey (shared history)
 
 
-def _side_title(label: str, model_path: str | None, lora_path: str | None, policy_path: str | None) -> str:
+def _side_title(
+    label: str, model_path: str | None, lora_path: str | None, policy_path: str | None
+) -> str:
     if model_path:
         p = Path(model_path)
         model_label = f"{p.parent.name}/{p.name}"
