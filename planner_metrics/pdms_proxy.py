@@ -132,6 +132,66 @@ class SyntheticEpdms:
     human_filtered: torch.Tensor
 
 
+@dataclass(frozen=True)
+class ProxyEpdms:
+    available: torch.Tensor
+    availability_ratio: torch.Tensor
+    multiplicative_metrics_prod: torch.Tensor
+    weighted_metrics: torch.Tensor
+    total: torch.Tensor
+
+
+def proxy_epdms(agent: dict[str, torch.Tensor]) -> ProxyEpdms:
+    """Best-effort EPDMS proxy over metrics that are actually available.
+
+    This is intentionally *not* the strict Autoware/C++ synthetic EPDMS. The
+    strict score requires every EPDMS input, including traffic-light compliance
+    and extended comfort, and remains exposed as ``synthetic_epdms_raw`` with an
+    availability flag.
+
+    For training-time model selection we still need a scalar planning-quality
+    proxy on current Diffusion-Planner NPZs. This proxy therefore:
+
+    * multiplies available multiplicative terms and treats missing terms as
+      "not evaluated" rather than as 0;
+    * averages available weighted terms using the sum of available weights as
+      the denominator;
+    * reports availability coverage so dashboards can show how much of the full
+      EPDMS formula was actually evaluated.
+    """
+    ref = agent["ego_progress"].float()
+
+    mult = torch.ones_like(ref)
+    available_count = torch.zeros_like(ref)
+    for key in MULTIPLICATIVE_TERMS:
+        av = _availability(agent, key, ref)
+        value = _metric_or_zero(agent, key, ref)
+        mult = mult * torch.where(av > 0.5, value, torch.ones_like(value))
+        available_count = available_count + av
+
+    weighted_num = torch.zeros_like(ref)
+    weighted_den = torch.zeros_like(ref)
+    total_term_count = float(len(MULTIPLICATIVE_TERMS) + len(WEIGHTED_TERMS))
+    for key, weight in WEIGHTED_TERMS:
+        av = _availability(agent, key, ref)
+        value = _metric_or_zero(agent, key, ref)
+        weighted_num = weighted_num + weight * torch.where(av > 0.5, value, torch.zeros_like(value))
+        weighted_den = weighted_den + weight * av
+        available_count = available_count + av
+
+    available = weighted_den > 0.0
+    weighted = torch.where(available, weighted_num / torch.clamp_min(weighted_den, 1.0), torch.zeros_like(ref))
+    total = mult * weighted
+    availability_ratio = available_count / total_term_count
+    return ProxyEpdms(
+        available=available.float(),
+        availability_ratio=availability_ratio,
+        multiplicative_metrics_prod=mult,
+        weighted_metrics=weighted,
+        total=total,
+    )
+
+
 def synthetic_epdms(
     agent: dict[str, torch.Tensor], human: dict[str, torch.Tensor] | None = None
 ) -> SyntheticEpdms:
@@ -216,6 +276,7 @@ def add_synthetic_epdms(
     out: dict[str, torch.Tensor], human: dict[str, torch.Tensor] | None = None
 ) -> dict[str, torch.Tensor]:
     synthetic = synthetic_epdms(out, human)
+    proxy = proxy_epdms(out)
     out["synthetic_epdms_raw_available"] = synthetic.raw_available
     out["synthetic_epdms_raw_multiplicative_metrics_prod"] = (
         synthetic.raw_multiplicative_metrics_prod
@@ -230,6 +291,15 @@ def add_synthetic_epdms(
         synthetic.human_filtered_weighted_metrics
     )
     out["synthetic_epdms_human_filtered"] = synthetic.human_filtered
+    out["proxy_epdms_available"] = proxy.available
+    out["proxy_epdms_availability_ratio"] = proxy.availability_ratio
+    out["proxy_epdms_multiplicative_metrics_prod"] = proxy.multiplicative_metrics_prod
+    out["proxy_epdms_weighted_metrics"] = proxy.weighted_metrics
+    out["proxy_epdms"] = proxy.total
+    # Dashboard-facing final score: usable best-effort proxy for current DP NPZs.
+    # Strict Autoware/C++ comparability remains exposed by synthetic_epdms_raw(_available).
+    out["total"] = proxy.total
+    out["total_available"] = proxy.available
     return out
 
 
@@ -425,8 +495,6 @@ def pdms_proxy(
             out[f"{alias}_available"] = out[f"{key}_available"]
 
     add_synthetic_epdms(out)
-    out["total"] = out["synthetic_epdms_raw"]
-    out["total_available"] = out["synthetic_epdms_raw_available"]
     return out
 
 

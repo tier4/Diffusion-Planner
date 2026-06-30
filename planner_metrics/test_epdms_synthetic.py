@@ -1,6 +1,6 @@
 import torch
 
-from planner_metrics.pdms_proxy import synthetic_epdms
+from planner_metrics.pdms_proxy import add_synthetic_epdms, synthetic_epdms
 
 _METRICS = {
     "no_at_fault_collision": 0.5,
@@ -52,3 +52,18 @@ def test_synthetic_epdms_is_unavailable_when_any_required_subscore_is_unavailabl
     result = synthetic_epdms(agent)
 
     assert torch.allclose(result.raw_available, torch.tensor([0.0]))
+
+
+def test_proxy_epdms_uses_available_terms_when_strict_synthetic_is_unavailable():
+    agent = _snapshot(_METRICS)
+    agent["traffic_light_compliance_available"] = torch.tensor([0.0])
+    agent["extended_comfort_available"] = torch.tensor([0.0])
+
+    add_synthetic_epdms(agent)
+
+    expected_mult = 0.5 * 1.0 * 0.5
+    expected_weighted = (5.0 * 0.8 + 5.0 * 1.0 + 2.0 * 0.0 + 2.0 * 1.0) / 14.0
+    assert torch.allclose(agent["synthetic_epdms_raw_available"], torch.tensor([0.0]))
+    assert torch.allclose(agent["proxy_epdms_available"], torch.tensor([1.0]))
+    assert torch.allclose(agent["proxy_epdms"], torch.tensor([expected_mult * expected_weighted]))
+    assert torch.allclose(agent["total"], agent["proxy_epdms"])
