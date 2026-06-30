@@ -19,7 +19,9 @@ import torch
 from rlvr.reward import (
     RewardConfig,
     _closest_points_between_rects,
+    compute_ego_neighbor_signed_clearance,
     compute_reward_batch,
+    compute_safety_score_batch,
     compute_static_collision_penalty,
 )
 
@@ -90,6 +92,30 @@ def _cfg(**kwargs) -> RewardConfig:
     return RewardConfig(**base)
 
 
+def _square_ego(center: tuple[float, float], steps: int = 1) -> torch.Tensor:
+    ego = torch.zeros(1, steps, 4)
+    ego[..., 0] = center[0]
+    ego[..., 1] = center[1]
+    ego[..., 2] = 1.0
+    return ego
+
+
+def _square_neighbor(
+    center: tuple[float, float], steps: int = 1
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    fut = torch.zeros(1, steps, 4)
+    fut[..., 0] = center[0]
+    fut[..., 1] = center[1]
+    fut[..., 2] = 1.0
+    shapes = torch.tensor([[2.0, 2.0]])
+    valid = torch.ones(1, steps, dtype=torch.bool)
+    return fut, shapes, valid
+
+
+def _square_ego_shape() -> torch.Tensor:
+    return torch.tensor([0.0, 2.0, 2.0])
+
+
 # ---------------------------------------------------------------------------
 # Closest-point helper
 # ---------------------------------------------------------------------------
@@ -104,6 +130,49 @@ def test_closest_points_non_overlapping():
     assert abs(float(p1[0, 0]) - 1.0) < 1e-4
     assert abs(float(p2[0, 0]) - 4.0) < 1e-4
     assert (p2 - p1).norm().item() == pytest.approx(3.0, abs=1e-4)
+
+
+def test_signed_clearance_overlap_is_negative():
+    ego = _square_ego((0.0, 0.0))
+    nf, ns, nv = _square_neighbor((0.5, 0.0))
+    dist = compute_ego_neighbor_signed_clearance(ego, _square_ego_shape(), nf, ns, nv)
+    assert dist.shape == (1, 1, 1)
+    assert dist[0, 0, 0].item() < 0.0
+
+
+def test_signed_clearance_side_by_side_exact_gap():
+    ego = _square_ego((0.0, 0.0))
+    nf, ns, nv = _square_neighbor((3.0, 0.0))
+    dist = compute_ego_neighbor_signed_clearance(ego, _square_ego_shape(), nf, ns, nv)
+    assert dist[0, 0, 0].item() == pytest.approx(1.0, abs=1e-4)
+
+
+def test_signed_clearance_diagonal_uses_euclidean_gap_not_sat_axis_gap():
+    ego = _square_ego((0.0, 0.0))
+    nf, ns, nv = _square_neighbor((3.0, 4.0))
+    dist = compute_ego_neighbor_signed_clearance(ego, _square_ego_shape(), nf, ns, nv)
+    # Axis gaps are 1m and 2m; true closest-point clearance is sqrt(1^2 + 2^2).
+    assert dist[0, 0, 0].item() == pytest.approx(float(torch.sqrt(torch.tensor(5.0))), abs=1e-4)
+
+
+def test_moving_and_stopped_wrappers_share_constant_neighbor_clearance():
+    ego = _square_ego((0.0, 0.0), steps=T)
+    nf, ns, nv = _square_neighbor((0.0, 2.5), steps=T)
+    expected_clearance = 0.5
+
+    sc = compute_static_collision_penalty(ego, _square_ego_shape(), nf, ns, nv, _cfg())
+    assert sc["per_timestep_min"][0, 0].item() == pytest.approx(expected_clearance, abs=1e-4)
+
+    safety_scores, collision_steps = compute_safety_score_batch(
+        ego,
+        _square_ego_shape(),
+        nf,
+        ns,
+        nv,
+        RewardConfig(),
+    )
+    assert collision_steps == [None]
+    assert safety_scores[0].item() == pytest.approx(-(1.0 - expected_clearance), abs=1e-4)
 
 
 # ---------------------------------------------------------------------------

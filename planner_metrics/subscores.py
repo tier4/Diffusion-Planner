@@ -21,6 +21,82 @@ from planner_metrics.geometry import *  # noqa: F401,F403  geometry primitives
 
 
 @torch.no_grad()
+def compute_ego_neighbor_signed_clearance(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    neighbor_futures: torch.Tensor,
+    neighbor_shapes: torch.Tensor,
+    neighbor_valid: torch.Tensor,
+    *,
+    return_closest_points: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Signed OBB clearance between ego trajectories and neighbor futures.
+
+    Returns one signed distance per ``(trajectory, neighbor, timestep)``.
+    Overlapping rectangles keep the SAT penetration depth (negative). Separated
+    rectangles use the exact Euclidean closest-point clearance; SAT alone only
+    gives the minimum separating-axis gap and under-reports diagonal/corner
+    clearances.
+    """
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+    N_nb = neighbor_futures.shape[0]
+
+    if N_nb == 0:
+        distances = torch.empty(N, 0, T, device=device, dtype=ego_trajs.dtype)
+        if return_closest_points:
+            pts = torch.empty(N, 0, T, 2, device=device, dtype=ego_trajs.dtype)
+            return distances, pts, pts
+        return distances
+
+    ego_corners = _build_ego_bbox_corners(ego_trajs, ego_shape)  # (N, T, 4, 2)
+
+    npc_pos = neighbor_futures[:, :, :2]
+    npc_cos = neighbor_futures[:, :, 2]
+    npc_sin = neighbor_futures[:, :, 3]
+    npc_norm = (npc_cos**2 + npc_sin**2).sqrt().clamp_min(1e-6)
+    npc_cos = npc_cos / npc_norm
+    npc_sin = npc_sin / npc_norm
+
+    npc_width = neighbor_shapes[:, 0].unsqueeze(1).expand(-1, T)
+    npc_length = neighbor_shapes[:, 1].unsqueeze(1).expand(-1, T)
+    npc_rect = torch.stack(
+        [
+            npc_pos[..., 0],
+            npc_pos[..., 1],
+            npc_cos,
+            npc_sin,
+            npc_length,
+            npc_width,
+        ],
+        dim=-1,
+    )  # (N_nb, T, 6)
+    npc_corners = center_rect_to_points(npc_rect.reshape(-1, 6)).reshape(N_nb, T, 4, 2)
+
+    ego_exp = ego_corners.unsqueeze(1).expand(-1, N_nb, -1, -1, -1)
+    npc_exp = npc_corners.unsqueeze(0).expand(N, -1, -1, -1, -1)
+    nv_exp = neighbor_valid.unsqueeze(0).expand(N, -1, -1)
+
+    ego_flat = ego_exp.reshape(-1, 4, 2)
+    npc_flat = npc_exp.reshape(-1, 4, 2)
+
+    sat_dist_flat = batch_signed_distance_rect(ego_flat, npc_flat)
+    pt_e_all, pt_n_all = _closest_points_between_rects(ego_flat, npc_flat)
+    euclid_dist_flat = (pt_e_all - pt_n_all).norm(dim=-1)
+    signed_dist_flat = torch.where(sat_dist_flat < 0, sat_dist_flat, euclid_dist_flat)
+
+    distances = signed_dist_flat.reshape(N, N_nb, T).masked_fill(~nv_exp, 1e6)
+    if not return_closest_points:
+        return distances
+
+    return (
+        distances,
+        pt_e_all.reshape(N, N_nb, T, 2),
+        pt_n_all.reshape(N, N_nb, T, 2),
+    )
+
+
+@torch.no_grad()
 def compute_safety_score_batch(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
@@ -61,45 +137,13 @@ def compute_safety_score_batch(
     if N_nb == 0:
         return torch.zeros(N, device=device), [None] * N
 
-    ego_corners = _build_ego_bbox_corners(ego_trajs, ego_shape)  # (N, T, 4, 2)
-
-    # Build NPC bounding box corners: (N_nb, T, 4, 2)
-    npc_pos = neighbor_futures[:, :, :2]
-    npc_cos = neighbor_futures[:, :, 2]
-    npc_sin = neighbor_futures[:, :, 3]
-    npc_norm = (npc_cos**2 + npc_sin**2).sqrt().clamp_min(1e-6)
-    npc_cos = npc_cos / npc_norm
-    npc_sin = npc_sin / npc_norm
-
-    npc_width = neighbor_shapes[:, 0].unsqueeze(1).expand(-1, T)  # (N_nb, T)
-    npc_length = neighbor_shapes[:, 1].unsqueeze(1).expand(-1, T)  # (N_nb, T)
-
-    npc_rect = torch.stack(
-        [
-            npc_pos[..., 0],
-            npc_pos[..., 1],
-            npc_cos,
-            npc_sin,
-            npc_length,
-            npc_width,
-        ],
-        dim=-1,
-    )  # (N_nb, T, 6)
-    npc_corners = center_rect_to_points(npc_rect.reshape(-1, 6)).reshape(N_nb, T, 4, 2)
-
-    # Cross product: ego (N, T) x NPC (N_nb, T) -> (N, N_nb, T)
-    ego_exp = ego_corners.unsqueeze(1).expand(-1, N_nb, -1, -1, -1)  # (N, N_nb, T, 4, 2)
-    npc_exp = npc_corners.unsqueeze(0).expand(N, -1, -1, -1, -1)  # (N, N_nb, T, 4, 2)
-    nv_exp = neighbor_valid.unsqueeze(0).expand(N, -1, -1)  # (N, N_nb, T)
-
-    # Flatten for batch_signed_distance_rect
-    ego_flat = ego_exp.reshape(-1, 4, 2)
-    npc_flat = npc_exp.reshape(-1, 4, 2)
-    distances = batch_signed_distance_rect(ego_flat, npc_flat)  # (N * N_nb * T,)
-    distances = distances.reshape(N, N_nb, T)
-
-    # Mask out invalid NPC timesteps
-    distances = distances.masked_fill(~nv_exp, 1e6)
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_trajs,
+        ego_shape,
+        neighbor_futures,
+        neighbor_shapes,
+        neighbor_valid,
+    )
 
     # Collision: negative signed distance = overlap
     collision_mask = distances < 0  # (N, N_nb, T)
@@ -1087,7 +1131,6 @@ def compute_static_collision_penalty(
 
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
-    dtype = ego_trajs.dtype
     N_nb = neighbor_futures.shape[0]
 
     def _safe_empty(_stopped_mask: torch.Tensor | None = None) -> dict:
@@ -1134,67 +1177,19 @@ def compute_static_collision_penalty(
     if not stopped_mask.any():
         return _safe_empty(_stopped_mask=stopped_mask)
 
-    # --- Ego + stopped-neighbor corners ---
+    # --- Ego × stopped-neighbor signed clearance ---
     nb_f_s = neighbor_futures[stopped_mask]  # (S, T, 4)
     nb_shapes_s = neighbor_shapes[stopped_mask]  # (S, 2) [width, length]
     nb_valid_s = neighbor_valid[stopped_mask]  # (S, T)
     S = nb_f_s.shape[0]
-
-    ego_corners = _build_ego_bbox_corners(ego_trajs, ego_shape)  # (N, T, 4, 2)
-
-    npc_cos = nb_f_s[:, :, 2]
-    npc_sin = nb_f_s[:, :, 3]
-    npc_norm = (npc_cos**2 + npc_sin**2).sqrt().clamp_min(1e-6)
-    npc_cos = npc_cos / npc_norm
-    npc_sin = npc_sin / npc_norm
-    npc_width = nb_shapes_s[:, 0].unsqueeze(1).expand(-1, T)  # (S, T)
-    npc_length = nb_shapes_s[:, 1].unsqueeze(1).expand(-1, T)
-
-    npc_rect = torch.stack(
-        [
-            nb_f_s[..., 0],
-            nb_f_s[..., 1],
-            npc_cos,
-            npc_sin,
-            npc_length,
-            npc_width,
-        ],
-        dim=-1,
-    )  # (S, T, 6)
-    npc_corners = center_rect_to_points(npc_rect.reshape(-1, 6)).reshape(S, T, 4, 2)
-
-    # --- Signed distance over all ego × stopped-nb × T pairs ---
-    # Two-step: SAT gives a reliable overlap sign (negative = penetration depth),
-    # but for separated rectangles SAT only returns the MIN axis gap, which
-    # under-reports true Euclidean clearance in the corner-to-corner case
-    # (e.g. x-gap 0.2m but y-gap 3m → true dist ≈ 3m, not 0.2m). So:
-    #   * overlapping pairs  → use SAT penetration depth (signed negative).
-    #   * separated pairs    → use true Euclidean closest-pair distance.
-    ego_exp = ego_corners.unsqueeze(1).expand(-1, S, -1, -1, -1)  # (N, S, T, 4, 2)
-    npc_exp = npc_corners.unsqueeze(0).expand(N, -1, -1, -1, -1)  # (N, S, T, 4, 2)
-    nv_exp = nb_valid_s.unsqueeze(0).expand(N, -1, -1)  # (N, S, T)
-
-    ego_flat = ego_exp.reshape(-1, 4, 2)
-    npc_flat = npc_exp.reshape(-1, 4, 2)
-
-    sat_dist_flat = batch_signed_distance_rect(ego_flat, npc_flat)  # (N*S*T,)
-    pt_e_all, pt_n_all = _closest_points_between_rects(ego_flat, npc_flat)
-    euclid_dist_flat = (pt_e_all - pt_n_all).norm(dim=-1)
-
-    # Overlap → use SAT penetration (negative). Separated → use true
-    # Euclidean closest-pair distance. SAT alone under-reports clearance
-    # in corner-to-corner separated cases (e.g. 0.2 m axis-gap with 3 m
-    # true distance), which would shift zone classifications and change
-    # absolute reward magnitudes — we need the Euclidean branch for both
-    # the training signal AND viz.
-    is_overlap = sat_dist_flat < 0
-    signed_dist_flat = torch.where(is_overlap, sat_dist_flat, euclid_dist_flat)
-
-    distances = signed_dist_flat.reshape(N, S, T)
-    pt_e_nst = pt_e_all.reshape(N, S, T, 2)
-    pt_n_nst = pt_n_all.reshape(N, S, T, 2)
-
-    distances = distances.masked_fill(~nv_exp, 1e6)
+    distances, pt_e_nst, pt_n_nst = compute_ego_neighbor_signed_clearance(
+        ego_trajs,
+        ego_shape,
+        nb_f_s,
+        nb_shapes_s,
+        nb_valid_s,
+        return_closest_points=True,
+    )
 
     # Per-timestep min across stopped neighbors, remember which offender
     per_ts_min, argmin_s = distances.min(dim=1)  # (N, T), (N, T)
@@ -1618,6 +1613,7 @@ def compute_lane_departure_penalty(
 
 __all__ = [
     "compute_safety_score_batch",
+    "compute_ego_neighbor_signed_clearance",
     "_TTC_HORIZON",
     "_TTC_DT",
     "compute_ttc_score_batch",
