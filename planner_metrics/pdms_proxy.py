@@ -58,7 +58,9 @@ def _zeros_like_lead(pred: torch.Tensor) -> torch.Tensor:
 
 
 def _tensor_from_array(values, pred: torch.Tensor) -> torch.Tensor:
-    return torch.as_tensor(values, dtype=torch.float32, device=pred.device).reshape(_leading_shape(pred))
+    return torch.as_tensor(values, dtype=torch.float32, device=pred.device).reshape(
+        _leading_shape(pred)
+    )
 
 
 def _available(pred: torch.Tensor, value: bool) -> torch.Tensor:
@@ -66,7 +68,9 @@ def _available(pred: torch.Tensor, value: bool) -> torch.Tensor:
     return torch.full(_leading_shape(pred), fill, dtype=torch.float32, device=pred.device)
 
 
-def _set_metric(out: dict[str, torch.Tensor], name: str, value: torch.Tensor, available=True) -> None:
+def _set_metric(
+    out: dict[str, torch.Tensor], name: str, value: torch.Tensor, available=True
+) -> None:
     out[name] = value.float()
     if torch.is_tensor(available):
         out[f"{name}_available"] = available.to(device=value.device, dtype=torch.float32)
@@ -95,7 +99,9 @@ def comfort_score(traj: torch.Tensor, dt: float = DT) -> torch.Tensor:
     return torch.as_tensor(np.asarray(out), dtype=torch.float32, device=traj.device)
 
 
-def _ego_progress_and_gate(pred: torch.Tensor, gt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _ego_progress_and_gate(
+    pred: torch.Tensor, gt: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     lead = pred.shape[:-2]
     T = pred.shape[-2]
     pred_n = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
@@ -211,14 +217,18 @@ def add_synthetic_epdms(
 ) -> dict[str, torch.Tensor]:
     synthetic = synthetic_epdms(out, human)
     out["synthetic_epdms_raw_available"] = synthetic.raw_available
-    out["synthetic_epdms_raw_multiplicative_metrics_prod"] = synthetic.raw_multiplicative_metrics_prod
+    out["synthetic_epdms_raw_multiplicative_metrics_prod"] = (
+        synthetic.raw_multiplicative_metrics_prod
+    )
     out["synthetic_epdms_raw_weighted_metrics"] = synthetic.raw_weighted_metrics
     out["synthetic_epdms_raw"] = synthetic.raw
     out["synthetic_epdms_human_filtered_available"] = synthetic.human_filtered_available
-    out[
-        "synthetic_epdms_human_filtered_multiplicative_metrics_prod"
-    ] = synthetic.human_filtered_multiplicative_metrics_prod
-    out["synthetic_epdms_human_filtered_weighted_metrics"] = synthetic.human_filtered_weighted_metrics
+    out["synthetic_epdms_human_filtered_multiplicative_metrics_prod"] = (
+        synthetic.human_filtered_multiplicative_metrics_prod
+    )
+    out["synthetic_epdms_human_filtered_weighted_metrics"] = (
+        synthetic.human_filtered_weighted_metrics
+    )
     out["synthetic_epdms_human_filtered"] = synthetic.human_filtered
     return out
 
@@ -259,7 +269,11 @@ def pdms_proxy(
     dac_arr = None
     if drivable_area_compliance_values is not None:
         dac_arr = np.asarray(drivable_area_compliance_values, dtype=np.float64).reshape(-1).copy()
-    if border_lines is not None and ego_dims is not None and (dac_arr is None or np.isnan(dac_arr).any()):
+    if (
+        border_lines is not None
+        and ego_dims is not None
+        and (dac_arr is None or np.isnan(dac_arr).any())
+    ):
         T = pred.shape[-2]
         pred_n = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
         dims = np.asarray(ego_dims, dtype=np.float64)
@@ -271,11 +285,17 @@ def pdms_proxy(
                 values.append(float(dac_arr[i]))
                 continue
             if dims.shape[1] == 3:
-                offset, length, width = float(dims[i][0]) / 2.0, float(dims[i][1]), float(dims[i][2])
+                offset, length, width = (
+                    float(dims[i][0]) / 2.0,
+                    float(dims[i][1]),
+                    float(dims[i][2]),
+                )
             else:
                 offset, length, width = 0.0, float(dims[i][0]), float(dims[i][1])
             values.append(
-                _ns.dac_from_road_borders(pred_n[i], border_lines[i], length, width, center_offset=offset)
+                _ns.dac_from_road_borders(
+                    pred_n[i], border_lines[i], length, width, center_offset=offset
+                )
             )
         dac_arr = np.asarray(values, dtype=np.float64)
     if dac_arr is not None and not np.isnan(dac_arr).any():
@@ -285,7 +305,10 @@ def pdms_proxy(
         T = pred.shape[-2]
         pred_n = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
         ddc = np.asarray(
-            [_ns.ddc_from_route_lanes(pred_n[i], route_polys[i], dt) for i in range(pred_n.shape[0])],
+            [
+                _ns.ddc_from_route_lanes(pred_n[i], route_polys[i], dt)
+                for i in range(pred_n.shape[0])
+            ],
             dtype=np.float64,
         )
         _set_metric(out, "driving_direction_compliance", _tensor_from_array(ddc, pred), True)
@@ -310,7 +333,12 @@ def pdms_proxy(
 
     if extended_comfort_values is not None:
         ec = np.asarray(extended_comfort_values, dtype=np.float64).reshape(-1)
-        _set_metric(out, "extended_comfort", _tensor_from_array(np.nan_to_num(ec, nan=0.0), pred), ~torch.isnan(_tensor_from_array(ec, pred)))
+        _set_metric(
+            out,
+            "extended_comfort",
+            _tensor_from_array(np.nan_to_num(ec, nan=0.0), pred),
+            ~torch.isnan(_tensor_from_array(ec, pred)),
+        )
 
     if traffic_light_compliance_values is not None:
         tlc = np.asarray(traffic_light_compliance_values, dtype=np.float64).reshape(-1)
@@ -331,7 +359,11 @@ def pdms_proxy(
         nc_list, ttc_list = [], []
         for i in range(pred_n.shape[0]):
             if dims.shape[1] == 3:
-                offset, length, width = float(dims[i][0]) / 2.0, float(dims[i][1]), float(dims[i][2])
+                offset, length, width = (
+                    float(dims[i][0]) / 2.0,
+                    float(dims[i][1]),
+                    float(dims[i][2]),
+                )
             else:
                 offset, length, width = 0.0, float(dims[i][0]), float(dims[i][1])
             states = _ns.states_from_poses(pred_n[i], dt)
@@ -360,7 +392,9 @@ def pdms_proxy(
                 )
             )
             ttc_list.append(
-                _ns.time_to_collision(states, boxes_t, length, width, dt, center_offset=offset, area_flags=area_flags)
+                _ns.time_to_collision(
+                    states, boxes_t, length, width, dt, center_offset=offset, area_flags=area_flags
+                )
             )
         dev = pred.device
         _set_metric(
@@ -428,9 +462,14 @@ def pdms_proxy_masked(
             gt[ai],
             agent_boxes_per_t=[agent_boxes_per_t[i] for i in ai],
             ego_dims=None if ego_dims is None else np.asarray(ego_dims)[ai],
-            agent_labels_per_t=None if agent_labels_per_t is None else [agent_labels_per_t[i] for i in ai],
+            agent_labels_per_t=None
+            if agent_labels_per_t is None
+            else [agent_labels_per_t[i] for i in ai],
             static_labels=static_labels,
-            **{k: ([v[i] for i in ai] if isinstance(v, list) and len(v) == B else v) for k, v in kwargs.items()},
+            **{
+                k: ([v[i] for i in ai] if isinstance(v, list) and len(v) == B else v)
+                for k, v in kwargs.items()
+            },
         )
         for key, val in p_av.items():
             if key not in p_all or p_all[key].shape[0] != B:
@@ -439,15 +478,21 @@ def pdms_proxy_masked(
     return p_all
 
 
-def epdms_human_filtered(agent: dict[str, torch.Tensor], human: dict[str, torch.Tensor]) -> torch.Tensor:
+def epdms_human_filtered(
+    agent: dict[str, torch.Tensor], human: dict[str, torch.Tensor]
+) -> torch.Tensor:
     """Return the C++ human-filtered synthetic EPDMS tensor."""
     return synthetic_epdms(agent, human).human_filtered
 
 
-def pdms_proxy_modes(pred_modes: torch.Tensor, gt: torch.Tensor, chosen_idx: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+def pdms_proxy_modes(
+    pred_modes: torch.Tensor, gt: torch.Tensor, chosen_idx: torch.Tensor | None = None
+) -> dict[str, torch.Tensor]:
     """Score each mode with the strict raw synthetic EPDMS when available."""
     b, m = pred_modes.shape[0], pred_modes.shape[1]
-    per_mode = torch.stack([pdms_proxy(pred_modes[:, i], gt)["synthetic_epdms_raw"] for i in range(m)], dim=1)
+    per_mode = torch.stack(
+        [pdms_proxy(pred_modes[:, i], gt)["synthetic_epdms_raw"] for i in range(m)], dim=1
+    )
     oracle = per_mode.max(dim=1).values
     if chosen_idx is None:
         chosen = per_mode[:, 0]
