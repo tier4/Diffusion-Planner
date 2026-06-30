@@ -343,7 +343,7 @@
       "sc_wide_penalty": 0.012658228166401386,
       "smoothness": -3.0790055461693555e-05,
       "static_crossing": false,
-      "total": 80.32427215576172
+      "total": 82.69927215576172
     }
   ],
   "static_collision_overlap": [
@@ -449,7 +449,7 @@
       "sc_wide_penalty": 0.0,
       "smoothness": -3.0790055461693555e-05,
       "static_crossing": false,
-      "total": -49.07343673706055
+      "total": -49.07500076293945
     }
   ],
   "underprogress_baseline": [
