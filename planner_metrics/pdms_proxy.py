@@ -1,4 +1,4 @@
-"""Autoware-aligned EPDMS validation wrapper for Diffusion-Planner tensors.
+"""Autoware-compatible EPDMS validation wrapper for Diffusion-Planner tensors.
 
 The aggregation in this module mirrors
 ``autoware_planning_data_analyzer/src/metrics/epdms/aggregation``:
@@ -12,8 +12,9 @@ The aggregation in this module mirrors
 
 Diffusion-Planner NPZs do not contain every Autoware ROS/lanelet input used by
 ``planning_data_analyzer``. Missing terms therefore remain unavailable instead of
-being silently treated as neutral. This keeps logged ``epdms_*`` values
-semantically compatible with the C++ evaluator.
+being silently treated as neutral. A logged synthetic score is C++ comparable
+only when its matching ``*_available`` flag is true; training logs use masked
+means over available samples and report coverage separately.
 """
 
 from __future__ import annotations

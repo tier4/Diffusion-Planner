@@ -68,8 +68,20 @@ def mean_ego_loss(loss_dict):
 def mean_epdms_metric(loss_dict):
     result = {}
     for key, val in loss_dict.items():
-        if key.startswith("epdms_"):
-            result[f"valid_epdms/{key.removeprefix('epdms_')}"] = val.float().mean().item()
+        if not key.startswith("epdms_"):
+            continue
+        metric = key.removeprefix("epdms_")
+        tensor = val.float()
+        if metric.endswith("_available"):
+            result[f"valid_epdms/{metric}"] = tensor.mean().item()
+            continue
+        available = loss_dict.get(f"{key}_available")
+        if available is None:
+            result[f"valid_epdms/{metric}"] = tensor.mean().item()
+            continue
+        mask = available.float() > 0.5
+        result[f"valid_epdms/{metric}_coverage"] = mask.float().mean().item()
+        result[f"valid_epdms/{metric}"] = tensor[mask].mean().item() if mask.any() else float("nan")
     return result
 
 
