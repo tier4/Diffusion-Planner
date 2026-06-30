@@ -74,6 +74,12 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
             + args.coeff_road_border_loss * loss["road_border_loss"]
             + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
         )
+        if getattr(args, "use_dfp_decoder", False):
+            loss["loss"] = loss["loss"] + (
+                args.dfp_lambda_future * loss["dfp_future_loss"]
+                + args.dfp_lambda_hist * loss["dfp_history_loss"]
+                + args.dfp_lambda_current * loss["dfp_current_loss"]
+            )
 
         # loss backward
         loss["loss"].backward()
