@@ -22,3 +22,4 @@ wandb/
 
 .vscode/
 *.egg-info
+control_panel/_dev_presets.py

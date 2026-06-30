@@ -59,6 +59,14 @@ def parse_args() -> argparse.Namespace:
         "near_miss_thresh). Only used with --include_near_miss.",
     )
     p.add_argument("--pre_steps", type=int, default=80)
+    p.add_argument(
+        "--min_pre_frames",
+        type=int,
+        default=30,
+        help="skip a hit with fewer than this many live frames before the contact (the window "
+        "is all-live — no recorded backfill — so an early contact yields a shorter window or, "
+        "below this floor, is dropped).",
+    )
     p.add_argument("--search_radius", type=float, default=1.5)
     p.add_argument("--unstick_after", type=int, default=300)
     p.add_argument("--unstick_advance_m", type=float, default=5.0)
@@ -128,6 +136,7 @@ def main() -> None:
                 device=device,
                 collision_thresh=thresh,
                 pre_steps=args.pre_steps,
+                min_pre_frames=args.min_pre_frames,
                 search_radius=args.search_radius,
                 unstick_after=args.unstick_after,
                 unstick_advance_m=args.unstick_advance_m,
@@ -139,7 +148,7 @@ def main() -> None:
             summary.append({"route": route_key, **mani})
             print(
                 f"  {route_key} [{start},{end}]: collision@{mani['collision_step']} -> "
-                f"{mani['n_scenes']} scenes ({mani['n_live']} live, {mani['n_recorded']} recorded)"
+                f"{mani['n_scenes']} scenes ({mani['n_live']} live)"
             )
 
     (args.out_dir / "extract_summary.json").write_text(json.dumps(summary, indent=2))

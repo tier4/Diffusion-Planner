@@ -5,7 +5,7 @@ from tqdm import tqdm
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.train_utils import get_epoch_mean_loss
+from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
 
 
 def heading_to_cos_sin(x):
@@ -77,6 +77,10 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         # loss backward
         loss["loss"].backward()
+
+        # Gradient statistics (computed before clipping so that exploding
+        # gradients are not masked by clip_grad_norm_).
+        loss.update(compute_grad_stats(model.parameters()))
 
         nn.utils.clip_grad_norm_(model.parameters(), 5)
         optimizer.step()

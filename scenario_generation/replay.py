@@ -1501,6 +1501,8 @@ def save_step_figure(
     step: int,
     n_steps: int,
     route_polylines: list[np.ndarray] | None = None,
+    title_prefix: str | None = None,
+    distance_label_offset_m: float = 1.2,
     view_half_m: float = _VIEW_HALF_M,
     route_lanelet_ids: list[int] | None = None,
     sim_time: float = 0.0,
@@ -1735,6 +1737,8 @@ def save_step_figure(
         f"steer={steer_deg:+.1f}°  yawrate={yaw_rate_deg:+.1f}°/s  "
         f"turn={ti_label}  goal_d={goal_d:.1f} m"
     )
+    if title_prefix:
+        title = f"{title_prefix}\n{title}"
 
     if metrics is not None:
         gate_s = "IN" if metrics.get("lane_gate", 1.0) >= 0.5 else "CROSS"
@@ -1806,9 +1810,7 @@ def save_step_figure(
             markeredgewidth=0.7,
         )
         # Offset the label perpendicular to the line so it doesn't sit on
-        # top of it. 1.2 m displacement is enough to clear even a 2 m
-        # separation. Compact format (just the distance) keeps the badge
-        # small — the offender id is visible in the neighbor label already.
+        # top of it. The offset is configurable in metres.
         mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
         dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
         seg_len = math.hypot(dx, dy)
@@ -1816,10 +1818,9 @@ def save_step_figure(
             nx, ny = -dy / seg_len, dx / seg_len
         else:
             nx, ny = 0.0, 1.0
-        label_off = 1.2  # metres, in world units
         ax.annotate(
             f"{sc_d:.2f} m",
-            xy=(mx + nx * label_off, my + ny * label_off),
+            xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
             fontsize=7,
             color="#cc0000",
             ha="center",
@@ -1860,7 +1861,7 @@ def save_step_figure(
             nx, ny = 0.0, 1.0
         ax.annotate(
             f"{mv_d:.2f} m",
-            xy=(mx + nx * 1.2, my + ny * 1.2),
+            xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
             fontsize=7,
             color="#0055cc",
             ha="center",

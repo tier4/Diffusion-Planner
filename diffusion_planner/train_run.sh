@@ -58,6 +58,7 @@ python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone trai
 --save_dir ${SAVE_PATH} \
 --train_epochs 80 \
 --save_utd 10 \
+--closed_loop_npz_root ${CLOSED_LOOP_NPZ_ROOT:-""} \
 "${OPTIONAL_ARGS[@]}" \
 2>&1 | tee ${SAVE_PATH}/train_log.txt
 

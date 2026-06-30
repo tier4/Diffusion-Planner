@@ -1,10 +1,6 @@
 import argparse
 import subprocess
-import sys
 from pathlib import Path
-
-from convert_cpp_bin_to_python_npz import process_single_file
-from tqdm import tqdm
 
 
 def parse_args() -> argparse.Namespace:
@@ -13,7 +9,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("rosbag_path", type=Path)
     parser.add_argument("vector_map_path", type=Path)
     parser.add_argument("save_dir", type=Path)
-    parser.add_argument("--step", type=int, default=3)
+    parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--limit", type=int, default=-1)
     parser.add_argument("--min_frames", type=int, default=1700)
     parser.add_argument("--min_distance", type=float, default=50.0)
@@ -30,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--collision_time_stride", type=int, default=5)
     parser.add_argument("--offlane_max_score", type=float, default=6.0)
     parser.add_argument("--offlane_time_stride", type=int, default=1)
-    parser.add_argument("--write_skipped_npz", type=int, default=0)
+    parser.add_argument("--write_skipped_npz", type=int, default=1)
     return parser.parse_args()
 
 
@@ -102,13 +98,6 @@ def main(
 
     print("C++ binary execution completed successfully.")
 
-    bin_files = list(save_dir.glob("*.bin"))
-    print(f"Processing {len(bin_files)} files")
-
-    for bin_file in tqdm(bin_files, desc="bin to npz"):
-        process_single_file(bin_file, save_dir)
-
-    # 処理後の.npzファイル数を表示
     npz_files = list(save_dir.glob("*.npz"))
     print(f"Generated {len(npz_files)} .npz files in {save_dir}")
 

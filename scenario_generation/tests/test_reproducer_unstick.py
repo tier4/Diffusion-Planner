@@ -66,6 +66,7 @@ def test_unstick_jump_ego_past_uses_recorded_npz_history(tmp_path):
         max_steps=1000,
         unstick_after=3,
         unstick_advance_m=0.05,
+        unstick_radius_mult=1.0,  # disable the gentle radius-widen stage: test the teleport path
     )
     pred = np.zeros((80, 4), dtype=np.float32)  # unused in the warmup branch
     neighbors = np.zeros((320, 11), dtype=np.float32)  # no valid neighbor -> inf clearance
@@ -94,6 +95,61 @@ def test_unstick_jump_ego_past_uses_recorded_npz_history(tmp_path):
     assert np.allclose(s.ego_hist[-1], s.live_pose)
 
 
+def test_unstick_widens_radius_before_teleporting(tmp_path):
+    """Two-stage escalation: a stalled ego first WIDENS the cursor search_radius (gentle,
+    no teleport), and only teleports if it is STILL stuck ``unstick_teleport_after`` steps
+    later. The widened radius is restored to nominal once the ego moves again."""
+    from scenario_generation.reproducer_rollout import _advance_step
+
+    tl = _make_route(tmp_path)
+    timers = Timers()
+    base_r, mult, after, teleport_after = 1.5, 3.0, 3, 5
+    s = _seed_state(
+        tl,
+        0,
+        N_FRAMES,
+        search_radius=base_r,
+        warmup_steps=1000,  # recorded-pose branch (no model); route speed << 0.5 -> always "stuck"
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+        unstick_after=after,
+        unstick_advance_m=0.05,
+        unstick_radius_mult=mult,
+        unstick_teleport_after=teleport_after,
+    )
+    pred = np.zeros((80, 4), dtype=np.float32)
+
+    # Step up to (not past) the teleport threshold: radius must have been widened, no snap yet.
+    for i in range(after + teleport_after - 1):
+        _advance_step(s, pred, idx=i, device="cpu", timers=timers)
+    assert s.cursor.search_radius == base_r * mult, "stuck ego must widen the cursor radius"
+    assert s.n_snaps == 0, "teleport must be deferred while only the radius has been widened"
+
+    # One more stuck step crosses unstick_after + unstick_teleport_after -> the teleport fires,
+    # and a fresh start restores the nominal radius.
+    _advance_step(s, pred, idx=after + teleport_after - 1, device="cpu", timers=timers)
+    assert s.n_snaps == 1, "still-stuck ego must teleport after the grace window"
+    assert s.cursor.search_radius == base_r, "teleport restores the nominal search_radius"
+
+
+def test_perception_reproducer_widen_and_restore(tmp_path):
+    """``widen``/``restore_radius`` set the radius and force a queue rebuild; restore is
+    relative to the nominal base, not whatever the radius happened to be."""
+    from scenario_generation.perception_reproducer import PerceptionReproducer
+
+    tl = _make_route(tmp_path)
+    cur = PerceptionReproducer(tl, search_radius=1.5)
+    cur.step(np.array([0.0, 0.0]), 0.0, 0.0)  # build a queue
+    cur.widen(4.0)
+    assert cur.search_radius == 6.0
+    assert len(cur._queue) == 0 and cur._last_seq_pos is None  # forced rebuild
+    cur.restore_radius()
+    assert cur.search_radius == 1.5
+
+
 def test_precollision_window_clamps_across_unstick_snap():
     """The pre-collision window must not cross an unstick snap (else a saved scene's
     realized ego_future/ego_past would span the ~5m teleport)."""
@@ -106,5 +162,6 @@ def test_precollision_window_clamps_across_unstick_snap():
     assert _precollision_window_start(t_c, pre, 400) == 499
     # snap INSIDE the window -> clamp to the post-snap step (shorter, snap-free window)
     assert _precollision_window_start(t_c, pre, 540) == 540
-    # early collision, no snap -> negative start preserved (backtrack path handles <0)
-    assert _precollision_window_start(50, pre, None) == -30
+    # early collision, no snap -> clamped to the live floor (0); recorded backfill is disabled,
+    # so the window is shorter/all-live rather than starting at a negative (pre-segment) step.
+    assert _precollision_window_start(50, pre, None) == 0

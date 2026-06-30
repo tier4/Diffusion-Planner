@@ -15,6 +15,7 @@
 #include "processing/frame_processor.hpp"
 
 #include "io/frame_writer.hpp"
+#include "io/npz_frame_writer.hpp"
 #include "processing/ego_sequence.hpp"
 #include "processing/frame_skip_decision.hpp"
 #include "processing/neighbor_processor.hpp"
@@ -43,7 +44,8 @@
 #include <vector>
 
 void process_sequence(
-  SequenceData & seq, const int64_t seq_id, const ConverterOptions & options,
+  SequenceData & seq, const int64_t seq_id, const ConverterPaths & paths,
+  const ConverterOptions & options,
   const autoware::diffusion_planner::preprocess::LaneSegmentContext & lane_segment_context,
   const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
 {
@@ -62,6 +64,7 @@ void process_sequence(
   namespace utils = autoware::diffusion_planner::utils;
 
   const int64_t n = static_cast<int64_t>(seq.data_list.size());
+  const std::string rosbag_dir_name = paths.get_rosbag_dir_name();
 
   std::cout << "Processing sequence " << seq_id + 1 << " with " << n << " frames" << std::endl;
 
@@ -85,8 +88,8 @@ void process_sequence(
     std::cout << "Skipping sequence with only " << n << " frames (min: " << options.min_frames
               << ")" << std::endl;
     save_route_json(
-      options.save_dir, options.rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts,
-      end_ts, SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map);
+      paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
+      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map);
     return;
   }
 
@@ -95,15 +98,15 @@ void process_sequence(
     std::cout << "Skipping sequence with traveled distance " << traveled_distance
               << " meters (min: " << options.min_distance << " meters)" << std::endl;
     save_route_json(
-      options.save_dir, options.rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts,
-      end_ts, SkippingInfo::insufficient_distance(traveled_distance, options.min_distance),
+      paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
+      SkippingInfo::insufficient_distance(traveled_distance, options.min_distance),
       timestamp_stats_map);
     return;
   }
 
   save_route_json(
-    options.save_dir, options.rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts,
-    end_ts, SkippingInfo::accepted(), timestamp_stats_map);
+    paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
+    SkippingInfo::accepted(), timestamp_stats_map);
 
   // Replace the goal pose with the last frame's pose
   seq.route.goal_pose = seq.data_list.back().kinematic_state.pose.pose;
@@ -172,9 +175,10 @@ void process_sequence(
       map2bl, traffic_light_id_map, lane_segment_indices, NUM_SEGMENTS_IN_LANE);
 
     // Create has_speed_limit flags based on speed_limit values
-    std::vector<bool> lanes_has_speed_limit(lanes_speed_limit.size());
+    std::vector<uint8_t> lanes_has_speed_limit(lanes_speed_limit.size());
     for (size_t idx = 0; idx < lanes_speed_limit.size(); ++idx) {
-      lanes_has_speed_limit[idx] = (lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon());
+      lanes_has_speed_limit[idx] =
+        (lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon()) ? 1 : 0;
     }
 
     // Get route lanes data with speed limits
@@ -185,10 +189,10 @@ void process_sequence(
         map2bl, traffic_light_id_map, segment_indices, NUM_SEGMENTS_IN_ROUTE);
 
     // Create route_lanes_has_speed_limit based on speed_limit values
-    std::vector<bool> route_lanes_has_speed_limit(route_lanes_speed_limit.size());
+    std::vector<uint8_t> route_lanes_has_speed_limit(route_lanes_speed_limit.size());
     for (size_t idx = 0; idx < route_lanes_speed_limit.size(); ++idx) {
       route_lanes_has_speed_limit[idx] =
-        (route_lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon());
+        (route_lanes_speed_limit[idx] > std::numeric_limits<float>::epsilon()) ? 1 : 0;
     }
 
     const std::vector<float> polygons =
@@ -277,21 +281,25 @@ void process_sequence(
       options.static_object_margin,  options.neighbor_margin,   options.road_border_margin,
       options.collision_time_stride, options.offlane_max_score, options.offlane_time_stride};
 
+    const std::vector<float> ego_shape = {
+      options.ego_wheel_base, options.ego_length, options.ego_width};
+
     const SkippingInfo skipping_info = frame_processor::decide_frame_skip(
-      skip_inputs, ego_future, options.ego_shape, static_objects, neighbor_future, neighbor_past,
+      skip_inputs, ego_future, ego_shape, static_objects, neighbor_future, neighbor_past,
       line_strings, lanes, filter_params);
 
     const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
-    // Accepted frames are always written; skipped frames only on request.
-    if (!is_skipped || options.write_skipped_npz) {
-      save_frame_data(
-        options.save_dir, options.rosbag_dir_name, token, ego_past, ego_current, ego_future,
-        neighbor_past, neighbor_future, static_objects, lanes, lanes_speed_limit,
-        lanes_has_speed_limit, route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit,
-        polygons, line_strings, goal_pose_vec, turn_indicators, options.ego_shape);
+    // Accepted frames are always written; skipped frames only on request. In sidecar-only mode
+    // no npz is written at all (the sidecar below still carries the exact neighbor_ids/skip).
+    if (!options.sidecar_only && (!is_skipped || options.write_skipped_npz)) {
+      save_frame_data_npz(
+        paths.save_dir, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
+        neighbor_future, static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit,
+        route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit, polygons, line_strings,
+        goal_pose_vec, turn_indicators, ego_shape);
     }
     save_frame_json(
-      options.save_dir, options.rosbag_dir_name, token, seq.data_list[i].kinematic_state,
+      paths.save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
       seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids);
 
     if (i % 100 == 0) {

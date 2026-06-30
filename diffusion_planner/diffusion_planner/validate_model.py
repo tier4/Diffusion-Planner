@@ -27,7 +27,6 @@ from diffusion_planner.loss import (
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
 
-
 EPDMS_DT = 0.1
 
 
@@ -172,7 +171,9 @@ def _epdms_eval_metrics(
             EPDMS_DT,
         )
 
-    lane_rings = _lane_tensor_to_polygons(denorm_inputs["lanes"]) if "lanes" in denorm_inputs else None
+    lane_rings = (
+        _lane_tensor_to_polygons(denorm_inputs["lanes"]) if "lanes" in denorm_inputs else None
+    )
     route_polys = (
         _lane_tensor_to_polygons(denorm_inputs["route_lanes"])
         if "route_lanes" in denorm_inputs
@@ -324,7 +325,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             neighbors_future,
             neighbors_future_valid,
             denorm_inputs["neighbor_agents_past"],
-            margin=args.neighbor_collision_margin,
+            margin_vehicle=args.neighbor_collision_margin_vehicle,
+            margin_pedestrian=args.neighbor_collision_margin_pedestrian,
+            margin_bicycle=args.neighbor_collision_margin_bicycle,
         )
         total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty.cpu())
 

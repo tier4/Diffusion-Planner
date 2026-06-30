@@ -73,3 +73,27 @@ def test_max_idx_reached_is_monotonic(tmp_path):
         cur.step(np.array([min(k, 11) * SPACING_M, 0.0]), 5.0, 0.1 * k)
         assert cur.max_idx_reached >= last
         last = cur.max_idx_reached
+
+
+def test_cursor_does_not_rewind_to_older_unserved_frames(tmp_path):
+    tl = _straight_route(tmp_path, n=12)
+    cur = PerceptionReproducer(tl, search_radius=1.5)
+    cur.reset(5)
+
+    assert cur.step(np.array([5 * SPACING_M, 0.0]), 5.0, 0.0) == 5
+
+    # The live ego is now physically close to old frames 0..3. Those frames were not served
+    # in this cursor instance, so cooldown alone would not block them. The reproducer should
+    # still not rewind the replay once frame 5 has been reached.
+    assert cur.step(np.array([0.0, 0.0]), 0.0, 0.1) == 5
+    assert cur.max_idx_reached == 5
+
+
+def test_nearest_only_cursor_does_not_rewind(tmp_path):
+    tl = _straight_route(tmp_path, n=12)
+    cur = PerceptionReproducer(tl, search_radius=0.0)
+    cur.reset(5)
+
+    assert cur.step(np.array([5 * SPACING_M, 0.0]), 5.0, 0.0) == 5
+    assert cur.step(np.array([0.0, 0.0]), 0.0, 0.1) == 5
+    assert cur.max_idx_reached == 5

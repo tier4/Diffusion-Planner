@@ -335,7 +335,7 @@
       "rb_near_penalty": 0.0,
       "rb_wide_penalty": 0.0,
       "red_light": 0.0,
-      "safety": -0.7014374732971191,
+      "safety": -0.17422406375408173,
       "sc_cont_penalty": 0.17642943561077118,
       "sc_min_dist": 0.30000007152557373,
       "sc_n_stopped": 1,
@@ -343,7 +343,7 @@
       "sc_wide_penalty": 0.012658228166401386,
       "smoothness": -3.0790055461693555e-05,
       "static_crossing": false,
-      "total": 77.68820190429688
+      "total": 82.69927215576172
     }
   ],
   "static_collision_overlap": [
@@ -449,7 +449,7 @@
       "sc_wide_penalty": 0.0,
       "smoothness": -3.0790055461693555e-05,
       "static_crossing": false,
-      "total": -49.07343673706055
+      "total": -49.07500076293945
     }
   ],
   "underprogress_baseline": [

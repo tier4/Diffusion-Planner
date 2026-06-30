@@ -22,6 +22,7 @@ from diffusion_planner.utils.data_augmentation_bridge import (
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.validate_model import validate_model
 
@@ -85,6 +86,76 @@ def mean_epdms_metric(loss_dict):
     return result
 
 
+def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+    """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
+
+    Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
+    (one route = one trial), renders an MP4 into ``out_dir``, aggregates collision/clearance
+    metrics, and logs both to wandb at ``step=epoch+1``. Called on the checkpoint-save cadence.
+    No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass the unwrapped model; it is
+    switched to eval for the rollout (so the diffusion sampler runs and produces ``prediction``)
+    and restored afterwards.
+    """
+    if not args.closed_loop_npz_root:
+        return
+    import math
+
+    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+
+    net = ddp.get_model(model, args.ddp)
+    was_training = net.training
+    net.eval()
+    try:
+        summary = run_closed_loop_eval(
+            net,
+            args,
+            args.closed_loop_npz_root,
+            out_dir,
+            seg_len=args.closed_loop_seg_len,
+            device=args.device,
+            near_miss_thresh=args.closed_loop_near_miss_thresh,
+            search_radius=args.closed_loop_search_radius,
+            warmup_steps=args.closed_loop_warmup_steps,
+            unstick_after=args.closed_loop_unstick_after,
+            unstick_advance_m=args.closed_loop_unstick_advance_m,
+            fps=args.closed_loop_fps,
+            replan_interval=args.closed_loop_replan_interval,
+            draw_every=args.closed_loop_draw_every,
+            neighbor_history_mode="recorded",
+            verbose=False,
+        )
+    finally:
+        net.train(was_training)
+
+    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
+    scalar_keys = [
+        "collision_segment_rate",
+        "collision_step_rate",
+        "near_miss_segment_rate",
+        "near_miss_step_rate",
+        "global_min_clearance",
+        "mean_segment_min_clearance",
+        "mean_segment_mean_clearance",
+        "total_collision_steps",
+        "total_near_miss_steps",
+        "total_snaps",
+        "total_steps",
+    ]
+    log = {
+        f"closed_loop/{k}": summary[k]
+        for k in scalar_keys
+        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
+    }
+    for mp4 in summary["video_mp4s"]:
+        log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
+    wandb.log(log, step=epoch + 1)
+    print(
+        f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
+        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
+        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+    )
+
+
 def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
@@ -108,7 +179,7 @@ def model_training(args: TrainConfig):
             k: v if not isinstance(v, (StateNormalizer, ObservationNormalizer)) else v.to_dict()
             for k, v in args_dict.items()
         }
-        args_dict["major_version"] = 4
+        args_dict["major_version"] = 5
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
@@ -142,6 +213,8 @@ def model_training(args: TrainConfig):
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
+
+    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
@@ -210,7 +283,8 @@ def model_training(args: TrainConfig):
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
-        diffusion_planner, optimizer, scheduler, init_epoch, wandb_id, model_ema = resume_model(
+        # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
+        diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
             args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
         )
 
@@ -221,24 +295,20 @@ def model_training(args: TrainConfig):
 
     else:
         init_epoch = 0
-        wandb_id = None
-
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
-        # if resume_model_path is none, this is pretraining
-        # if wandb_run_id is not none, the wandb run is injected from outside
-        if args.resume_model_path is None and args.wandb_run_id is not None:
-            wandb_id = args.wandb_run_id
 
+        # if wandb_run_id is given, the training will be logged to the existing run instead of creating a new one.
         wandb.init(
             project=args.wandb_project_name,
             name=args.exp_name,
             notes=args.notes,
             resume="allow",
-            id=wandb_id,
+            id=args.wandb_run_id,
             dir=f"{save_path}",
         )
+
         wandb.config.update(args_dict)
 
         # this function creates dataset artifacts and associate them with wandb run
@@ -361,7 +431,8 @@ def model_training(args: TrainConfig):
                 "optimizer": optimizer.state_dict(),
                 "schedule": scheduler.state_dict(),
                 "loss": valid_loss_ego,
-                "wandb_id": wandb_id,
+                # We always use new wandb run for each training session, so we don't need to save the wandb_id in the model_dict.
+                "wandb_id": None,
             }
             torch.save(model_dict, f"{save_path}/latest.pth")
 
@@ -373,6 +444,22 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
+                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(curr_dir, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=Path(curr_dir),
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
+                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
+                # (videos + metrics) land next to the saved weights they correspond to.
+                closed_loop_validate(
+                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                )
 
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
@@ -384,6 +471,20 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
+                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(curr_dir, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=Path(curr_dir),
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
+
+    if global_rank == 0 and wandb.run is not None:
+        wandb.finish()

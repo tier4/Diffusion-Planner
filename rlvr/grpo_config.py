@@ -491,7 +491,10 @@ class GRPOConfig:
     #   }
     schedules: dict = field(default_factory=dict)
 
-    # Early-stop collapse thresholds (run_experiment.py)
+    # Early-stop on safety collapse (run_experiment.py). OFF by default — training runs all
+    # epochs and you pick the best checkpoint yourself. Set early_stop_on_collapse=true to
+    # re-enable the rb/collision-rate kill switch below.
+    early_stop_on_collapse: bool = False
     collapse_rb_threshold: float = 0.3
     collapse_collision_threshold: float = 0.1
 
@@ -725,6 +728,10 @@ class GRPOConfig:
             self.grpo_loss_type = _loss_renames[self.grpo_loss_type]
         if self.exploration_loss_type in _loss_renames:
             self.exploration_loss_type = _loss_renames[self.exploration_loss_type]
+        # Plain supervised fine-tuning on the ego GT (no generation/ranking) is just the curated
+        # codepath (target = each NPZ's ego_agent_future). Accept self-documenting aliases.
+        if self.ranked_sft_mode in ("sft", "gt", "sft_gt", "gt_ego"):
+            self.ranked_sft_mode = "curated"
         # Validate: best_sample_mse is not compatible with PPO (inner_epochs > 1)
         if self.exploration_loss_type == "best_sample_mse" and self.exploration_inner_epochs > 1:
             raise ValueError(

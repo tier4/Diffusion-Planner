@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,41 @@ from rlvr.autoresearch.tools.ghost_sim_common import (
     load_model,
     run_ghost_sim,
 )
+from rlvr.autoresearch.tools.render_metadata import path_label, render_tag, write_render_meta
+
+
+def _expand_scenes(scene_args: list[str]) -> list[str]:
+    """Accept either raw NPZ paths or workspace scene-list JSONs."""
+    scenes: list[str] = []
+    for item in scene_args:
+        p = Path(item)
+        if p.suffix.lower() != ".json":
+            scenes.append(item)
+            continue
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            raise SystemExit(f"could not read scene list {p}: {e}") from e
+        entries = data.get("files", data) if isinstance(data, dict) else data
+        if not isinstance(entries, list):
+            raise SystemExit(f"scene list {p} must be a list or {{'files': [...]}}")
+        scenes.extend(str(x) for x in entries)
+    return scenes
+
+
+def _side_title(label: str, model_path: str | None, lora_path: str | None, policy_path: str | None):
+    if model_path:
+        p = Path(model_path)
+        model_label = f"{p.parent.name}/{p.name}"
+    else:
+        model_label = "model A"
+    if lora_path:
+        lp = Path(lora_path)
+        lora_label = f"{lp.parent.name}/{lp.name}"
+    else:
+        lora_label = "none"
+    policy_label = Path(policy_path).name if policy_path else "none"
+    return f"{label}: model={model_label}  lora={lora_label}  guidance={policy_label}"
 
 
 def main() -> None:
@@ -45,7 +81,12 @@ def main() -> None:
     parser.add_argument("--model_b", default=None, help="Second model; omit with --policy_dir")
     parser.add_argument("--lora_b", default=None)
     parser.add_argument("--label_b", default="trained")
-    parser.add_argument("--scenes", nargs="+", required=True, help="NPZ scene paths")
+    parser.add_argument(
+        "--scenes",
+        nargs="+",
+        required=True,
+        help="NPZ scene paths or workspace scene-list JSON(s)",
+    )
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--advance_k", type=int, default=0)
@@ -75,10 +116,21 @@ def main() -> None:
         "--show_lateral", action="store_true", help="Show lateral offset to route centerline"
     )
     parser.add_argument(
+        "--policy_a",
+        default=None,
+        help="exploration-policy dir applied to side A (model A + guidance, per-step policy "
+        "etas via composer). Combine freely with --model_a/--lora_a.",
+    )
+    parser.add_argument(
+        "--policy_b",
+        default=None,
+        help="exploration-policy dir applied to side B (model B + guidance). When --model_b is "
+        "omitted, side B reuses model A so 'model vs model + guidance' works.",
+    )
+    parser.add_argument(
         "--policy_dir",
         default=None,
-        help="exploration-policy dir: model B = model A + guidance "
-        "(per-step policy etas via composer); --model_b ignored",
+        help="[deprecated alias for --policy_b] model B = model A + guidance.",
     )
     parser.add_argument(
         "--no_sg_smooth",
@@ -119,24 +171,45 @@ def main() -> None:
     )
     parser.add_argument("--speed_scale", type=float, default=2.0)
     args = parser.parse_args()
+    args.scenes = _expand_scenes(args.scenes)
+    if not args.scenes:
+        raise SystemExit("no scenes after expanding --scenes")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # --policy_dir is a back-compat alias for --policy_b.
+    policy_b_dir = args.policy_b or args.policy_dir
+
     print(f"[compare] loading model A: {args.label_a}")
     model_a, args_a = load_model(args.model_a, args.lora_a, device)
-    policy = None
-    if args.policy_dir:
-        from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
 
-        policy, policy_heads = load_policy(args.policy_dir, args_a, device)
-        model_b, args_b = model_a, args_a
-        print(f"[compare] model B = model A + explorer ({args.policy_dir})")
-    elif args.model_b:
+    # Side B: an explicit model, or (when only a B-policy is given) model A reused so
+    # "model vs model + guidance" works. Each side independently adds an optional policy.
+    if args.model_b:
         print(f"[compare] loading model B: {args.label_b}")
         model_b, args_b = load_model(args.model_b, args.lora_b, device)
+    elif policy_b_dir:
+        model_b, args_b = model_a, args_a
     else:
-        raise SystemExit("pass either --model_b or --policy_dir")
+        raise SystemExit("pass --model_b, --policy_b (or the legacy --policy_dir)")
 
-    def make_predict_fn(eta_log):
+    def _load_policy(policy_dir, model_args):
+        if not policy_dir:
+            return None, None
+        from rlvr.autoresearch.tools.eval_policy_avoidance import load_policy
+
+        pol, heads = load_policy(policy_dir, model_args, device)
+        return pol, heads
+
+    policy_a, heads_a = _load_policy(args.policy_a, args_a)
+    policy_b, heads_b = _load_policy(policy_b_dir, args_b)
+    if policy_a:
+        print(f"[compare] side A = model A + explorer ({args.policy_a})")
+    if policy_b:
+        print(
+            f"[compare] side B = model {'A' if not args.model_b else 'B'} + explorer ({policy_b_dir})"
+        )
+
+    def make_predict_fn(eta_log, policy, policy_heads):
         """predict_b: explorer-guided prediction for leg B (SG happens in
         the rollout itself, on whatever the predict fn returns). Leg A uses
         run_ghost_sim's built-in det path (predict_fn_a=None)."""
@@ -230,8 +303,30 @@ def main() -> None:
         show_lateral=args.show_lateral,
         ego_wheelbase=args.ego_wheelbase,
     )
+    model_title = "\n".join(
+        [
+            _side_title(args.label_a, args.model_a, args.lora_a, args.policy_a),
+            _side_title(
+                args.label_b,
+                args.model_b or args.model_a,
+                args.lora_b if args.model_b else args.lora_a,
+                policy_b_dir,
+            ),
+        ]
+    )
+    effective_b_model = args.model_b or args.model_a
+    effective_b_lora = args.lora_b if args.model_b else args.lora_a
+    output_tag = render_tag(
+        args.model_a,
+        args.lora_a,
+        args.policy_a,
+        effective_b_model,
+        effective_b_lora,
+        policy_b_dir,
+    )
 
     out_root = Path(args.output_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
 
     for scene_path in args.scenes:
         scene_name = Path(scene_path).stem
@@ -242,18 +337,40 @@ def main() -> None:
         if nb_boxes:
             print(f"  {len(nb_boxes)} stopped neighbor(s)")
 
-        scene_out = out_root / scene_name if len(args.scenes) > 1 else out_root
-        cfg.subtitle = scene_name
+        scene_out = out_root / f"{scene_name}__{output_tag}"
+        write_render_meta(
+            scene_out,
+            tool="compare_models_ghost",
+            scene=scene_name,
+            model_a_path=args.model_a,
+            model_a_label=path_label(args.model_a),
+            lora_a_path=args.lora_a or "",
+            lora_a_label=path_label(args.lora_a),
+            policy_a_path=args.policy_a or "",
+            policy_a_label=path_label(args.policy_a),
+            model_b_path=effective_b_model,
+            model_b_label=path_label(effective_b_model),
+            lora_b_path=effective_b_lora or "",
+            lora_b_label=path_label(effective_b_lora),
+            policy_b_path=policy_b_dir or "",
+            policy_b_label=path_label(policy_b_dir),
+        )
+        cfg.subtitle = f"{scene_name}\n{model_title}"
 
-        eta_log: list[dict] = []
-        predict_b = make_predict_fn(eta_log)
+        eta_log_a: list[dict] = []
+        eta_log_b: list[dict] = []
+        predict_a = make_predict_fn(eta_log_a, policy_a, heads_a) if policy_a else None
+        predict_b = make_predict_fn(eta_log_b, policy_b, heads_b) if policy_b else None
 
         def eta_title(step, a_pose, b_pose):
-            if not eta_log or step >= len(eta_log):
-                return ""
-            e = eta_log[step]
-            return "  explorer η: " + " ".join(f"{h[:3]}={v:+.2f}" for h, v in e.items())
+            parts = []
+            for tag, log in (("A", eta_log_a), ("B", eta_log_b)):
+                if log and step < len(log):
+                    e = log[step]
+                    parts.append(f"{tag} η: " + " ".join(f"{h[:3]}={v:+.2f}" for h, v in e.items()))
+            return "  " + "   ".join(parts) if parts else ""
 
+        any_policy = policy_a is not None or policy_b is not None
         run_ghost_sim(
             scene_path=scene_path,
             model_a=model_a,
@@ -265,9 +382,9 @@ def main() -> None:
             cfg=cfg,
             neighbor_boxes=nb_boxes,
             make_webm=args.make_webm,
-            extra_title_fn=eta_title if policy is not None else None,
-            predict_fn_a=None,
-            predict_fn_b=predict_b if policy is not None else None,
+            extra_title_fn=eta_title if any_policy else None,
+            predict_fn_a=predict_a,
+            predict_fn_b=predict_b,
             sg_smooth=not args.no_sg_smooth,
         )
 

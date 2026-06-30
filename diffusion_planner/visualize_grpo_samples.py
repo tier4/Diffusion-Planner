@@ -39,6 +39,10 @@ from diffusion_planner.grpo_utils import (  # noqa: E402
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner  # noqa: E402
 from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
 from diffusion_planner.utils.dataset import DiffusionPlannerData  # noqa: E402
+from diffusion_planner.utils.neighbor_db import (  # noqa: E402
+    DEFAULT_NEIGHBOR_DB_PATH,
+    NeighborPatternDB,
+)
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector  # noqa: E402
 from diffusion_planner.utils.visualize_input import (  # noqa: E402
     draw_lanes,
@@ -123,10 +127,19 @@ def parse_viz_args():
     p.add_argument(
         "--aug_mode",
         type=str,
-        default="synthetic",
-        choices=["synthetic", "none"],
-        help="neighbor augmentation: synthetic colliders / none",
+        default="db",
+        choices=["db", "synthetic", "none"],
+        help="neighbor augmentation: DB copy-paste (default) / synthetic colliders / none",
     )
+    p.add_argument(
+        "--neighbor_db_path",
+        type=str,
+        default=DEFAULT_NEIGHBOR_DB_PATH,
+        help="(db) real-neighbor pattern DB to copy-paste colliding tracks from",
+    )
+    p.add_argument("--neighbor_db_collision_margin", type=float, default=4.0)
+    p.add_argument("--neighbor_min_collision_time", type=float, default=0.8)
+    p.add_argument("--neighbor_search_subsample", type=int, default=0)
     p.add_argument("--neighbor_inject_max", type=int, default=1)
     p.add_argument("--neighbor_inject_prob", type=float, default=1.0)
     p.add_argument(
@@ -146,6 +159,12 @@ def parse_viz_args():
         type=float,
         default=3.0,
         help="(synthetic) min distance the collider path keeps from the ego t=0 pose",
+    )
+    p.add_argument(
+        "--collider_straight_line",
+        type=boolean,
+        default=True,
+        help="constant-velocity straight colliders (True) vs curved constant-accel (False)",
     )
     p.add_argument(
         "--use_ema", type=boolean, default=False, help="load EMA weights instead of the raw policy"
@@ -315,11 +334,21 @@ def main():
 
     injected_mask = np.zeros((S, raw["neighbor_agents_past"].shape[1]), dtype=bool)
     if v.aug_mode != "none":
-        injector = SyntheticColliderInjector(
-            pedestrian_prob=v.pedestrian_prob,
-            bicycle_prob=v.bicycle_prob,
-            keep_clear_radius=v.keep_clear_radius,
-        )
+        if v.aug_mode == "db":
+            injector = NeighborPatternDB(
+                db_path=v.neighbor_db_path,
+                collision_margin=v.neighbor_db_collision_margin,
+                keep_clear_radius=v.keep_clear_radius,
+                min_collision_time=v.neighbor_min_collision_time,
+                search_subsample=v.neighbor_search_subsample,
+            )
+        else:
+            injector = SyntheticColliderInjector(
+                pedestrian_prob=v.pedestrian_prob,
+                bicycle_prob=v.bicycle_prob,
+                keep_clear_radius=v.keep_clear_radius,
+                straight_line=v.collider_straight_line,
+            )
         raw = injector.inject(raw, v.neighbor_inject_max, v.neighbor_inject_prob)
         # the injector reports exactly which slots it wrote (may overwrite a real neighbor)
         injected_mask = injector.last_injected_mask.cpu().numpy()

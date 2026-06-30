@@ -86,6 +86,9 @@ def test_batched_scorer_matches_per_segment():
         single = [score_step(nb, sh, 5.0, "cpu") for nb, sh in zip(segs, shapes)]
         batched = score_step_batched(segs, shapes, "cpu")
         for a, b in zip(single, batched):
-            # Same ops in the same order -> exact equality, not just close ("bit-identical").
+            # score_step returns a 3-tuple (min_clearance, collision, n_valid); score_step_batched
+            # intentionally returns a 4-tuple that appends collider_slot — its first three elements
+            # are bit-identical to score_step (same ops, same order), the 4th is extra.
+            assert len(a) == 3 and len(b) == 4
             assert a[0] == b[0] or (a[0] != a[0] and b[0] != b[0])  # equal, or both NaN/inf
             assert a[1] == b[1] and a[2] == b[2]

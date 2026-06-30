@@ -12,72 +12,82 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "conversion/data_converter.hpp"
+
 #include "cli/converter_options.hpp"
-#include "io/frame_writer.hpp"
-#include "io/projector_factory.hpp"
-#include "processing/frame_processor.hpp"
-#include "processing/sequence_builder.hpp"
-#include "rosbag/parsed_bag_data.hpp"
 
-#include <autoware/diffusion_planner/preprocessing/lane_segments.hpp>
-#include <rclcpp/rclcpp.hpp>
+#include <CLI/CLI.hpp>
 
-#include <lanelet2_core/LaneletMap.h>
-#include <lanelet2_io/Io.h>
+#include <fmt/core.h>
 
 #include <iostream>
-#include <memory>
-#include <vector>
+
+namespace
+{
+
+void print_options(const ConverterPaths & paths, const ConverterOptions & converter)
+{
+  fmt::print(
+    "Ego wheel base: {}, Ego length: {}, Ego width: {}\n"
+    "Processing rosbag: {}\n"
+    "Vector map: {}\n"
+    "Save directory: {}\n"
+    "Step: {}, Limit: {}, Min frames: {}, Min distance: {}, Search nearest route: {}, "
+    "Convert yellow: {}, Convert red: {}, Interpolation: {}\n"
+    "Collision filter static_object_margin: {}, neighbor_margin: {}, road_border_margin: {}, "
+    "collision_time_stride: {}\n"
+    "Off-lane filter max_score: {}, offlane_time_stride: {}\n"
+    "Write skipped npz: {}, Sidecar only: {}\n",
+    converter.ego_wheel_base, converter.ego_length, converter.ego_width, paths.rosbag_path,
+    paths.vector_map_path, paths.save_dir, converter.step, converter.limit, converter.min_frames,
+    converter.min_distance, converter.search_nearest_route, converter.convert_yellow,
+    converter.convert_red, converter.use_interpolation, converter.static_object_margin,
+    converter.neighbor_margin, converter.road_border_margin, converter.collision_time_stride,
+    converter.offlane_max_score, converter.offlane_time_stride, converter.write_skipped_npz,
+    converter.sidecar_only);
+}
+
+bool parse_arguments(int argc, char ** argv, ConverterPaths & paths, ConverterOptions & converter)
+{
+  converter = ConverterOptions::default_converter_options();
+
+  CLI::App app{"Convert one rosbag to Diffusion Planner npz files"};
+  app.add_option("rosbag_path", paths.rosbag_path, "Input rosbag directory.")->required();
+  app
+    .add_option(
+      "vector_map_path", paths.vector_map_path,
+      "Path to the Lanelet2 vector map file, typically lanelet2_map.osm.")
+    ->required();
+  app
+    .add_option(
+      "save_dir", paths.save_dir, "Directory where converted npz and json files are written.")
+    ->required();
+  converter.add_converter_options(app);
+
+  try {
+    app.parse(argc, argv);
+  } catch (const CLI::ParseError & e) {
+    app.exit(e);
+    return false;
+  }
+
+  if (const auto err = validate_options(converter)) {
+    std::cerr << *err << std::endl;
+    return false;
+  }
+  print_options(paths, converter);
+  return true;
+}
+
+}  // namespace
 
 int main(int argc, char ** argv)
 {
-  rclcpp::init(argc, argv);
-
-  const auto options_opt = parse_arguments(argc, argv);
-  if (!options_opt) {
+  ConverterPaths paths;
+  ConverterOptions converter;
+  if (!parse_arguments(argc, argv, paths, converter)) {
     return 1;
   }
-  const ConverterOptions & options = options_opt.value();
 
-  // Load Lanelet2 map using projector chosen by map_projector_info.yaml.
-  lanelet::ErrorMessages errors{};
-  const std::unique_ptr<lanelet::Projector> projector =
-    create_projector_from_yaml(options.vector_map_path);
-  const std::shared_ptr<lanelet::LaneletMap> lanelet_map_ptr =
-    lanelet::load(options.vector_map_path, *projector, &errors);
-
-  std::cout << "Loaded lanelet2 map with " << lanelet_map_ptr->laneletLayer.size() << " lanelets"
-            << std::endl;
-
-  const autoware::diffusion_planner::preprocess::LaneSegmentContext lane_segment_context(
-    lanelet_map_ptr);
-
-  ParsedBagData bag_data = load_rosbag(options.rosbag_path, options.limit);
-
-  const auto missing_topics_skip = check_missing_topics(bag_data);
-  if (missing_topics_skip) {
-    std::cout << "Skipping rosbag due to missing required topics:" << std::endl;
-    for (const auto & t : missing_topics_skip->missing_topic_types) {
-      std::cout << "  - " << to_topic_name(t) << std::endl;
-    }
-    std::cout << "No training samples will be generated from this rosbag." << std::endl;
-    save_route_json(
-      options.save_dir, options.rosbag_dir_name, "missing_topics", 0, 0.0, 0, 0,
-      missing_topics_skip.value(), bag_data.timestamp_stats_map);
-    rclcpp::shutdown();
-    return 0;
-  }
-
-  std::vector<SequenceData> sequences = build_sequences(bag_data, options.search_nearest_route);
-
-  std::cout << "Total " << sequences.size() << " sequences" << std::endl;
-
-  for (int64_t seq_id = 0; seq_id < static_cast<int64_t>(sequences.size()); ++seq_id) {
-    process_sequence(
-      sequences[seq_id], seq_id, options, lane_segment_context, bag_data.timestamp_stats_map);
-  }
-
-  std::cout << "Data conversion completed!" << std::endl;
-
-  rclcpp::shutdown();
+  return run_data_converter(paths, converter);
 }

@@ -39,7 +39,13 @@ def _stack_scene_data(all_data: list[dict], device: torch.device) -> dict[str, t
     for k in all_data[0]:
         vals = [d[k] for d in all_data]
         if isinstance(vals[0], torch.Tensor):
-            batch[k] = torch.cat(vals, dim=0)  # [N, ...]
+            t = torch.cat(vals, dim=0)  # [N, ...]
+            # CUDA can't index/gather uint16/32/64 tensors (e.g. the metadata `version`
+            # field psim/reproducer NPZs carry). It's never used in the model/reward, so
+            # cast to int64 to keep per-scene fancy-indexing (v[batch_idx]) working.
+            if str(t.dtype).startswith("torch.uint") and t.dtype != torch.uint8:
+                t = t.to(torch.int64)
+            batch[k] = t
         else:
             batch[k] = vals[0]
     return batch

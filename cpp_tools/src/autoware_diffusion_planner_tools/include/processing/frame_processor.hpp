@@ -24,7 +24,8 @@
 #include <cstdint>
 
 void process_sequence(
-  SequenceData & seq, const int64_t seq_id, const ConverterOptions & options,
+  SequenceData & seq, const int64_t seq_id, const ConverterPaths & paths,
+  const ConverterOptions & options,
   const autoware::diffusion_planner::preprocess::LaneSegmentContext & lane_segment_context,
   const timestamp_stats::TimestampStatsMap & timestamp_stats_map);
 

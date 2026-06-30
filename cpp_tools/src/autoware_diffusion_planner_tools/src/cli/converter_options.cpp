@@ -14,85 +14,83 @@
 
 #include "cli/converter_options.hpp"
 
+#include <CLI/CLI.hpp>
+
 #include <filesystem>
-#include <iostream>
-#include <stdexcept>
 #include <string>
 
-bool apply_named_arg(ConverterOptions & opts, const std::string & arg)
+void ConverterOptions::add_converter_options(CLI::App & app)
 {
-  try {
-    if (arg.find("--step=") == 0) {
-      opts.step = std::stoll(arg.substr(7));
-    } else if (arg.find("--limit=") == 0) {
-      opts.limit = std::stoll(arg.substr(8));
-    } else if (arg.find("--min_frames=") == 0) {
-      opts.min_frames = std::stoll(arg.substr(13));
-    } else if (arg.find("--min_distance=") == 0) {
-      opts.min_distance = std::stod(arg.substr(15));
-    } else if (arg.find("--search_nearest_route=") == 0) {
-      opts.search_nearest_route = std::stoll(arg.substr(23));
-    } else if (arg.find("--convert_yellow=") == 0) {
-      opts.convert_yellow = std::stoll(arg.substr(17));
-    } else if (arg.find("--convert_red=") == 0) {
-      opts.convert_red = std::stoll(arg.substr(14));
-    } else if (arg.find("--interpolation=") == 0) {
-      opts.interpolation = std::stoll(arg.substr(16));
-    } else if (arg.find("--ego_wheel_base=") == 0) {
-      opts.ego_wheel_base = std::stof(arg.substr(17));
-    } else if (arg.find("--ego_length=") == 0) {
-      opts.ego_length = std::stof(arg.substr(13));
-    } else if (arg.find("--ego_width=") == 0) {
-      opts.ego_width = std::stof(arg.substr(12));
-    } else if (arg.find("--static_object_margin=") == 0) {
-      opts.static_object_margin = std::stof(arg.substr(23));
-    } else if (arg.find("--neighbor_margin=") == 0) {
-      opts.neighbor_margin = std::stof(arg.substr(18));
-    } else if (arg.find("--road_border_margin=") == 0) {
-      opts.road_border_margin = std::stof(arg.substr(21));
-    } else if (arg.find("--collision_time_stride=") == 0) {
-      opts.collision_time_stride = std::stoll(arg.substr(24));
-    } else if (arg.find("--offlane_max_score=") == 0) {
-      opts.offlane_max_score = std::stof(arg.substr(20));
-    } else if (arg.find("--offlane_time_stride=") == 0) {
-      opts.offlane_time_stride = std::stoll(arg.substr(22));
-    } else if (arg.find("--write_skipped_npz=") == 0) {
-      opts.write_skipped_npz = static_cast<bool>(std::stoll(arg.substr(20)));
-    } else {
-      return false;
-    }
-    return true;
-  } catch (const std::exception &) {
-    return false;
-  }
+  app.add_option("--step", step, "Frame sampling interval in 10 Hz ticks.");
+  app.add_option(
+    "--limit", limit,
+    "Maximum number of rosbag messages to read. Use -1 to read "
+    "all messages.");
+  app.add_option(
+    "--min_frames", min_frames,
+    "Minimum number of assembled frames required to accept a sequence.");
+  app.add_option(
+    "--min_distance", min_distance,
+    "Minimum traveled ego distance in meters required to accept a sequence.");
+  app.add_option(
+    "--search_nearest_route", search_nearest_route,
+    "Use the latest route message at or before each frame "
+    "timestamp when non-zero.");
+  app.add_option(
+    "--convert_yellow", convert_yellow,
+    "Do not skip frames for yellow traffic lights when non-zero.");
+  app.add_option(
+    "--convert_red", convert_red, "Do not skip frames for red traffic lights when non-zero.");
+  app.add_option_function<int64_t>(
+    "--interpolation",
+    [this](const int64_t value) {
+      interpolation = value;
+      use_interpolation = static_cast<bool>(interpolation);
+    },
+    "Use timestamp-based interpolation for ego past and future "
+    "trajectories when non-zero.");
+  app.add_option("--ego_wheel_base", ego_wheel_base, "Ego vehicle wheel base in meters.");
+  app.add_option("--ego_length", ego_length, "Ego vehicle length in meters.");
+  app.add_option("--ego_width", ego_width, "Ego vehicle width in meters.");
+  app.add_option(
+    "--static_object_margin", static_object_margin,
+    "Additional margin in meters for static-object collision filtering.");
+  app.add_option(
+    "--neighbor_margin", neighbor_margin,
+    "Additional margin in meters for neighbor-agent collision filtering.");
+  app.add_option(
+    "--road_border_margin", road_border_margin,
+    "Additional margin in meters for road-border collision filtering.");
+  app.add_option(
+    "--collision_time_stride", collision_time_stride,
+    "Time stride used when checking trajectory collision filters.");
+  app.add_option(
+    "--offlane_max_score", offlane_max_score,
+    "Maximum average distance in meters from lane centerlines "
+    "before a frame is skipped.");
+  app.add_option(
+    "--offlane_time_stride", offlane_time_stride,
+    "Time stride used when checking the off-lane filter.");
+  app.add_option(
+    "--write_skipped_npz", write_skipped_npz,
+    "Also write npz files for skipped frames when non-zero. "
+    "Intended for inspection.");
+  app.add_flag(
+    "--sidecar_only", sidecar_only,
+    "Write ONLY the per-frame JSON sidecars (pose + neighbor_ids + is_skipped), skipping all "
+    "npz output. Same pipeline/slot-ordering as a full convert, so the sidecars align to an "
+    "existing npz set from this converter; faster than re-converting (no npz write).");
 }
 
-std::optional<std::string> validate_options(const ConverterOptions & opts)
+std::string ConverterPaths::get_rosbag_dir_name() const
 {
-  if (opts.ego_wheel_base < 0.0 || opts.ego_length < 0.0 || opts.ego_width < 0.0) {
-    return "Ego vehicle dimensions must be non-negative.";
-  }
-  return std::nullopt;
+  return std::filesystem::path(rosbag_path).filename();
 }
 
-std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
+ConverterOptions ConverterOptions::default_converter_options()
 {
-  if (argc < 4) {
-    std::cerr << "Usage: data_converter <rosbag_path> <vector_map_path> <save_dir> [--step=1] "
-                 "[--limit=-1] [--min_frames=1700] [--min_distance=50.0] [--convert_yellow=0] "
-                 "[--convert_red=0] [--interpolation=1] "
-                 "[--ego_wheel_base=2.75] [--ego_length=4.34] [--ego_width=1.70]"
-              << std::endl;
-    return std::nullopt;
-  }
-
   ConverterOptions options;
-  options.rosbag_path = argv[1];
-  options.vector_map_path = argv[2];
-  options.save_dir = argv[3];
-  options.rosbag_dir_name = std::filesystem::path(options.rosbag_path).filename();
-
-  options.step = 1;
+  options.step = 3;
   options.limit = -1;
   options.min_frames = 1700;
   options.search_nearest_route = 1;
@@ -100,9 +98,9 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
   options.convert_red = 0;
   options.interpolation = 1;
   options.min_distance = 50.0;
-  options.ego_wheel_base = -1.0;
-  options.ego_length = -1.0;
-  options.ego_width = -1.0;
+  options.ego_wheel_base = -1.0f;
+  options.ego_length = -1.0f;
+  options.ego_width = -1.0f;
 
   // Collision-free filter defaults match filter_collision_free_npz.py.
   options.static_object_margin = 0.0f;
@@ -116,41 +114,16 @@ std::optional<ConverterOptions> parse_arguments(int argc, char ** argv)
 
   // Inspection-only: production keeps this off so skipped frames write no npz.
   options.write_skipped_npz = false;
-
-  for (int64_t i = 4; i < argc; ++i) {
-    const std::string arg = argv[i];
-    std::cout << "arg[" << i << "] = " << arg << std::endl;
-    if (!apply_named_arg(options, arg)) {
-      std::cerr << "Warning: unrecognized or invalid argument: " << arg << std::endl;
-    }
-  }
-
-  std::cout << "Ego wheel base: " << options.ego_wheel_base
-            << ", Ego length: " << options.ego_length << ", Ego width: " << options.ego_width
-            << std::endl;
-  if (const auto err = validate_options(options)) {
-    std::cerr << *err << std::endl;
-    return std::nullopt;
-  }
-  options.ego_shape = {options.ego_wheel_base, options.ego_length, options.ego_width};
-
-  std::cout << "Processing rosbag: " << options.rosbag_path << std::endl;
-  std::cout << "Vector map: " << options.vector_map_path << std::endl;
-  std::cout << "Save directory: " << options.save_dir << std::endl;
+  // Full conversion by default (write npz); --sidecar_only flips to sidecar-only output.
+  options.sidecar_only = false;
   options.use_interpolation = static_cast<bool>(options.interpolation);
-  std::cout << "Step: " << options.step << ", Limit: " << options.limit
-            << ", Min frames: " << options.min_frames << ", Min distance: " << options.min_distance
-            << ", Search nearest route: " << options.search_nearest_route
-            << ", Convert yellow: " << options.convert_yellow
-            << ", Convert red: " << options.convert_red
-            << ", Interpolation: " << options.use_interpolation << std::endl;
-  std::cout << "Collision filter static_object_margin: " << options.static_object_margin
-            << ", neighbor_margin: " << options.neighbor_margin
-            << ", road_border_margin: " << options.road_border_margin
-            << ", collision_time_stride: " << options.collision_time_stride << std::endl;
-  std::cout << "Off-lane filter max_score: " << options.offlane_max_score
-            << ", offlane_time_stride: " << options.offlane_time_stride << std::endl;
-  std::cout << "Write skipped npz: " << options.write_skipped_npz << std::endl;
-
   return options;
+}
+
+std::optional<std::string> validate_options(const ConverterOptions & opts)
+{
+  if (opts.ego_wheel_base < 0.0 || opts.ego_length < 0.0 || opts.ego_width < 0.0) {
+    return "Ego vehicle dimensions must be non-negative.";
+  }
+  return std::nullopt;
 }

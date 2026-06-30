@@ -18,15 +18,14 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <vector>
+
+namespace CLI
+{
+class App;
+}  // namespace CLI
 
 struct ConverterOptions
 {
-  std::string rosbag_path;
-  std::string vector_map_path;
-  std::string save_dir;
-  std::string rosbag_dir_name;
-
   int64_t step;
   int64_t limit;
   int64_t min_frames;
@@ -39,7 +38,6 @@ struct ConverterOptions
   float ego_length;
   float ego_width;
 
-  std::vector<float> ego_shape;
   bool use_interpolation;
 
   // Collision-free filter (ported from filter_collision_free_npz.py), always applied.
@@ -60,16 +58,34 @@ struct ConverterOptions
   // off-lane, red/yellow light, vehicle stopped) so they can be visualised with
   // their skip reason. Intended for inspection/testing only; off in production.
   bool write_skipped_npz;
+
+  // Sidecar-only mode: run the identical conversion pipeline (sequence build, neighbor
+  // association, skip decision) but write ONLY the per-frame JSON sidecars (pose +
+  // neighbor_ids + is_skipped), skipping the npz tensor serialization/compression entirely.
+  // Used to (re)generate neighbor_ids sidecars for an existing npz set produced by this same
+  // converter: the slot ordering and skip decision are byte-identical (same code path), so the
+  // emitted sidecars align to those npzs by token — and it is faster than a full re-convert
+  // because it skips the npz write. Off in production (a normal convert already emits sidecars).
+  bool sidecar_only;
+
+  // Build converter defaults shared by all converter entry points.
+  static ConverterOptions default_converter_options();
+
+  // Register the converter-specific CLI options on an existing CLI11 app.
+  void add_converter_options(CLI::App & app);
 };
 
-// Apply a single "--key=value" argument to opts.
-// Returns true if the argument was recognized, false otherwise.
-bool apply_named_arg(ConverterOptions & opts, const std::string & arg);
+struct ConverterPaths
+{
+  std::string rosbag_path;
+  std::string vector_map_path;
+  std::string save_dir;
+
+  std::string get_rosbag_dir_name() const;
+};
 
 // Validate options after all arguments have been applied.
 // Returns an error message string if invalid, nullopt if valid.
 std::optional<std::string> validate_options(const ConverterOptions & opts);
-
-std::optional<ConverterOptions> parse_arguments(int argc, char ** argv);
 
 #endif  // CLI__CONVERTER_OPTIONS_HPP_
