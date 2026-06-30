@@ -36,7 +36,7 @@ def batch_signed_distance_rect(rect1, rect2):
 
     overlap = torch.cat([proj1_min - proj2_max, proj2_min - proj1_max], dim=1)  # [B, 8]
 
-    positive_distance = torch.where(overlap < 0, 1e5, overlap)
+    positive_distance = torch.where(overlap < 0, torch.full_like(overlap, 1e5), overlap)
 
     is_overlap = (overlap < 0).all(dim=1)
     distance = torch.where(

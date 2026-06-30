@@ -19,16 +19,29 @@ Usage:
         --scenes scenes.json --config reward_config.json \\
         --output_dir /tmp/scene_flags_det --trajectory det \\
         --model_path /path/to/best_model.pth --batch_size 32
+
+    python -m rlvr.autoresearch.tools.classify_scene_failures \\
+        --scenes scenes.json --config reward_config.json \\
+        --output_dir /tmp/scene_flags_saved --trajectory saved_pred \\
+        --predictions_dir /path/to/validation_result/predictions --batch_size 32
+
+    python -m rlvr.autoresearch.tools.classify_scene_failures \\
+        --config reward_config.json --output_dir /tmp/scene_flags_saved \\
+        --trajectory saved_pred \\
+        --predictions_dir /path/to/validation_result/predictions \\
+        --source_scene_root /path/to/dataset_root --batch_size 32
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 from planner_metrics.aggregate import compute_subscores_scene_batch
@@ -36,8 +49,6 @@ from planner_metrics.subscores import (
     compute_ego_neighbor_signed_clearance,
     compute_safety_score_batch,
 )
-from preference_optimization.utils import load_npz_data
-from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig
 
@@ -63,6 +74,87 @@ def _load_scene_paths(path: str | Path) -> list[str]:
     return [str(p) for p in paths]
 
 
+def _iter_prediction_npzs(
+    predictions_dir: Path,
+    *,
+    num_shards: int = 1,
+    shard_index: int = 0,
+):
+    """Yield saved prediction NPZs in deterministic path order."""
+    if num_shards < 1:
+        raise ValueError(f"num_shards must be >= 1, got {num_shards}")
+    if shard_index < 0 or shard_index >= num_shards:
+        raise ValueError(f"shard_index must be in [0, {num_shards}), got {shard_index}")
+    global_idx = 0
+    for dirpath, dirnames, filenames in os.walk(predictions_dir):
+        dirnames[:] = sorted(d for d in dirnames if d != "scene_mining")
+        for filename in sorted(filenames):
+            if filename.endswith(".npz") and not filename.startswith("loss"):
+                if global_idx % num_shards == shard_index:
+                    yield global_idx, Path(dirpath) / filename
+                global_idx += 1
+
+
+def _resolve_source_scene_for_prediction(
+    prediction_path: Path,
+    predictions_dir: Path,
+    candidate_source_roots: list[Path],
+) -> Path:
+    """Resolve a mirrored prediction path back to its source scene NPZ.
+
+    The saved predictions in some validation runs are stored as:
+        predictions/<scene_relpath>.npz
+
+    while source datasets may be:
+        source_root/<scene_relpath>.npz
+    or:
+        source_root/<dataset_group>/<scene_relpath>.npz
+    """
+    rel = prediction_path.relative_to(predictions_dir)
+    checked: list[Path] = []
+    for root in candidate_source_roots:
+        candidate = root / rel
+        checked.append(candidate)
+        if candidate.exists():
+            return candidate
+
+    sample = ", ".join(str(p) for p in checked[:5])
+    if len(checked) > 5:
+        sample += ", ..."
+    raise FileNotFoundError(
+        f"source scene not found for prediction {prediction_path}; checked {sample}"
+    )
+
+
+def _candidate_source_roots(source_roots: list[Path]) -> list[Path]:
+    candidates: list[Path] = []
+    for root in source_roots:
+        candidates.append(root)
+        if root.is_dir():
+            candidates.extend(sorted(p for p in root.iterdir() if p.is_dir()))
+    return candidates
+
+
+def _prediction_scene_pairs_from_dir(
+    predictions_dir: Path,
+    source_roots: list[Path],
+    *,
+    max_pairs: int | None = None,
+) -> list[tuple[str, Path]]:
+    pairs: list[tuple[str, Path]] = []
+    candidate_roots = _candidate_source_roots(source_roots)
+    for _, prediction_path in _iter_prediction_npzs(predictions_dir):
+        source_scene = _resolve_source_scene_for_prediction(
+            prediction_path,
+            predictions_dir,
+            candidate_roots,
+        )
+        pairs.append((str(source_scene), prediction_path))
+        if max_pairs is not None and len(pairs) >= max_pairs:
+            break
+    return pairs
+
+
 def _future_heading_to_cos_sin(fut: torch.Tensor) -> torch.Tensor:
     """Convert ``(..., T, 3)`` x/y/yaw futures to ``(..., T, 4)`` x/y/cos/sin."""
     if fut.shape[-1] >= 4:
@@ -70,6 +162,30 @@ def _future_heading_to_cos_sin(fut: torch.Tensor) -> torch.Tensor:
     if fut.shape[-1] != 3:
         raise ValueError(f"future tensor last dim must be 3 or >=4, got {tuple(fut.shape)}")
     return torch.cat([fut[..., :2], torch.cos(fut[..., 2:3]), torch.sin(fut[..., 2:3])], dim=-1)
+
+
+def _load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torch.Tensor]:
+    with np.load(str(npz_path)) as loaded:
+        data: dict[str, torch.Tensor] = {}
+        for key, value in loaded.items():
+            if key in {"map_name", "token", "delay", "origin"}:
+                continue
+            array = np.asarray(value)
+            if array.dtype.kind in ("U", "S", "O"):
+                continue
+            if array.dtype.kind == "u" and array.dtype != np.uint8:
+                array = array.astype(np.int64)
+            data[key] = torch.as_tensor(np.expand_dims(array, axis=0), device=device)
+
+    if "goal_pose" in data:
+        data["goal_pose"] = _future_heading_to_cos_sin(data["goal_pose"])
+    if "ego_agent_past" in data:
+        data["ego_agent_past"] = _future_heading_to_cos_sin(data["ego_agent_past"])
+    if "ego_shape" not in data:
+        raise ValueError(f"'{npz_path}' is missing required ego_shape")
+    if "delay" not in data:
+        data["delay"] = torch.zeros(1, dtype=torch.long, device=device)
+    return data
 
 
 def _prepare_scoring_data(data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -150,6 +266,63 @@ def _gt_trajectory(data: dict[str, torch.Tensor], device: torch.device) -> torch
         traj = traj[0]
     traj = _future_heading_to_cos_sin(traj)
     return traj[:, :4].to(device).unsqueeze(0)
+
+
+def _prediction_path_for_scene(
+    predictions_dir: Path,
+    scene_path: str,
+    scene_index: int,
+    *,
+    prediction_scene_root: Path | None = None,
+) -> Path:
+    """Resolve saved predictions from flat or source-path-mirrored layouts."""
+    flat = predictions_dir / f"prediction{scene_index:08d}.npz"
+    if flat.exists():
+        return flat
+
+    scene = Path(scene_path)
+    direct = predictions_dir / scene.name
+    if direct.exists():
+        return direct
+
+    if prediction_scene_root is not None:
+        try:
+            rooted = predictions_dir / scene.relative_to(prediction_scene_root)
+        except ValueError:
+            rooted = None
+        if rooted is not None and rooted.exists():
+            return rooted
+
+    parts = scene.parts
+    first_relative_part = 1 if scene.is_absolute() else 0
+    for start in range(first_relative_part, len(parts)):
+        candidate = predictions_dir.joinpath(*parts[start:])
+        if candidate.exists():
+            return candidate
+
+    return flat
+
+
+def _saved_prediction_trajectory(
+    prediction_path: str | Path,
+    device: torch.device,
+) -> torch.Tensor:
+    with np.load(prediction_path) as pred_npz:
+        if "prediction" not in pred_npz:
+            raise ValueError(f"{prediction_path} is missing 'prediction'")
+        pred = torch.as_tensor(pred_npz["prediction"], dtype=torch.float32, device=device)
+
+    if pred.dim() == 3:
+        pred = pred[0]
+    elif pred.dim() != 2:
+        raise ValueError(
+            f"{prediction_path} prediction must be shaped (A,T,4) or (T,4), got {tuple(pred.shape)}"
+        )
+    if pred.shape[0] == 0 or pred.shape[-1] < 4:
+        raise ValueError(
+            f"{prediction_path} prediction must have non-empty T and >=4 channels, got {tuple(pred.shape)}"
+        )
+    return pred[:, :4].unsqueeze(0)
 
 
 def _neighbor_inputs(
@@ -346,12 +519,13 @@ def _build_candidate_row(
     if lane_crossing:
         labels.append("lane_crossing")
 
-    sc_crossing = bool(subs["sc_crossing_gate"][bidx, candidate_idx].item() < 0.5)
-    sc_min_dist = float(subs["sc_min_dist"][bidx, candidate_idx].item())
-    sc_n_stopped = int(subs["sc_n_stopped"][bidx, candidate_idx].item())
-    if sc_crossing:
+    static_collision = bool(subs["sc_crossing_gate"][bidx, candidate_idx].item() < 0.5)
+    static_min_dist = float(subs["sc_min_dist"][bidx, candidate_idx].item())
+    static_neighbor_count = int(subs["sc_n_stopped"][bidx, candidate_idx].item())
+    static_collision_step = subs["sc_crossing_steps"][bidx][candidate_idx]
+    if static_collision:
         labels.append("static_collision")
-    elif sc_n_stopped > 0 and sc_min_dist < static_near_thresh:
+    elif static_neighbor_count > 0 and static_min_dist < static_near_thresh:
         labels.append("static_near_miss")
 
     if moving["moving_collision_step"] is not None:
@@ -376,10 +550,15 @@ def _build_candidate_row(
         "rb_crossing_step": subs["rb_crossing_steps"][bidx][candidate_idx],
         "lane_crossing": lane_crossing,
         "lane_crossing_step": subs["lane_crossing_steps"][bidx][candidate_idx],
-        "static_crossing": sc_crossing,
-        "sc_min_dist": sc_min_dist,
-        "sc_crossing_step": subs["sc_crossing_steps"][bidx][candidate_idx],
-        "sc_n_stopped": sc_n_stopped,
+        "static_collision": static_collision,
+        "static_min_dist": static_min_dist,
+        "static_collision_step": static_collision_step,
+        "static_neighbor_count": static_neighbor_count,
+        # Backward-compatible aliases for older consumers.
+        "static_crossing": static_collision,
+        "sc_min_dist": static_min_dist,
+        "sc_crossing_step": static_collision_step,
+        "sc_n_stopped": static_neighbor_count,
         "collision_step": subs["collision_step"][bidx][candidate_idx],
         "ttc_score": float(subs["ttc"][bidx, candidate_idx].item()),
         "ttc_first_unsafe_step": ttc_first_unsafe,
@@ -506,6 +685,32 @@ def _write_outputs(
     _write_json(output_dir / "summary.json", summary)
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def _merge_output_dirs(
+    input_dirs: list[Path], output_dir: Path, thresholds: dict[str, float]
+) -> None:
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for input_dir in input_dirs:
+        rows.extend(_read_jsonl(input_dir / "classified_scenes.jsonl"))
+        summary_path = input_dir / "summary.json"
+        if summary_path.exists():
+            with open(summary_path) as f:
+                summary = json.load(f)
+            errors.extend(summary.get("errors", []))
+    rows.sort(key=lambda row: str(row.get("prediction_path", row["scene_path"])))
+    _write_outputs(rows, errors, output_dir, thresholds)
+
+
 def _classify_gt(
     scene_paths: list[str],
     config: RewardConfig,
@@ -522,7 +727,7 @@ def _classify_gt(
         for offset, scene_path in enumerate(batch_paths):
             idx = start + offset
             try:
-                data = load_npz_data(scene_path, device)
+                data = _load_npz_data(scene_path, device)
                 datas.append(data)
                 ego_trajs.append(_gt_trajectory(_prepare_scoring_data(data), device))
                 valid_paths.append(scene_path)
@@ -564,6 +769,8 @@ def _classify_det(
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     if not args.model_path:
         raise ValueError("--trajectory det requires --model_path")
+    from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
+
     model, model_args = load_model(args.model_path, device)
 
     rows: list[dict[str, Any]] = []
@@ -574,7 +781,7 @@ def _classify_det(
         valid_paths: list[str] = []
         for scene_path in batch_paths:
             try:
-                datas.append(load_npz_data(scene_path, device))
+                datas.append(_load_npz_data(scene_path, device))
                 valid_paths.append(scene_path)
             except Exception as exc:  # noqa: BLE001
                 errors.append({"scene_path": scene_path, "error": str(exc)})
@@ -606,21 +813,252 @@ def _classify_det(
     return rows, errors
 
 
+def _classify_saved_predictions(
+    scene_paths: list[str],
+    config: RewardConfig,
+    args,
+    device: torch.device,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    if not args.predictions_dir:
+        raise ValueError("--trajectory saved_pred requires --predictions_dir")
+    predictions_dir = Path(args.predictions_dir)
+    if not predictions_dir.is_dir():
+        raise ValueError(f"--predictions_dir is not a directory: {predictions_dir}")
+    prediction_scene_root = (
+        Path(args.prediction_scene_root) if args.prediction_scene_root is not None else None
+    )
+
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for start in range(0, len(scene_paths), args.batch_size):
+        batch_paths = scene_paths[start : start + args.batch_size]
+        datas: list[dict[str, torch.Tensor]] = []
+        ego_trajs: list[torch.Tensor] = []
+        valid_paths: list[str] = []
+        for offset, scene_path in enumerate(batch_paths):
+            idx = start + offset
+            try:
+                prediction_path = _prediction_path_for_scene(
+                    predictions_dir,
+                    scene_path,
+                    idx,
+                    prediction_scene_root=prediction_scene_root,
+                )
+                if not prediction_path.exists():
+                    raise FileNotFoundError(f"saved prediction not found: {prediction_path}")
+                ego_trajs.append(_saved_prediction_trajectory(prediction_path, device))
+                datas.append(_load_npz_data(scene_path, device))
+                valid_paths.append(scene_path)
+            except Exception as exc:  # noqa: BLE001
+                errors.append({"scene_path": scene_path, "error": str(exc)})
+                print(f"  [{idx:4d}] ERROR {Path(scene_path).name}: {exc}")
+        if not datas:
+            continue
+        try:
+            batch_rows = classify_loaded_scenes_batch(
+                valid_paths,
+                torch.stack(ego_trajs, dim=0),
+                datas,
+                config,
+                moving_near_thresh=args.moving_near_thresh,
+                static_near_thresh=args.static_near_thresh,
+                rb_near_thresh=args.rb_near_thresh,
+                device=device,
+            )
+            for bi, row in enumerate(batch_rows):
+                row["trajectory_source"] = "saved_pred"
+                rows.append(row)
+                print(
+                    f"  [{start + bi:4d}] {Path(row['scene_path']).name}: {','.join(row['labels'])}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            for scene_path in valid_paths:
+                errors.append({"scene_path": scene_path, "error": str(exc)})
+            print(f"  [{start:4d}] ERROR batch {len(valid_paths)} scenes: {exc}")
+    return rows, errors
+
+
+def _classify_saved_prediction_pairs(
+    scene_prediction_pairs: list[tuple[str, Path]],
+    config: RewardConfig,
+    args,
+    device: torch.device,
+    *,
+    start_index_base: int = 0,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for start in range(0, len(scene_prediction_pairs), args.batch_size):
+        batch_pairs = scene_prediction_pairs[start : start + args.batch_size]
+        datas: list[dict[str, torch.Tensor]] = []
+        ego_trajs: list[torch.Tensor] = []
+        valid_paths: list[str] = []
+        valid_prediction_paths: list[Path] = []
+        for offset, (scene_path, prediction_path) in enumerate(batch_pairs):
+            idx = start_index_base + start + offset
+            try:
+                ego_trajs.append(_saved_prediction_trajectory(prediction_path, device))
+                datas.append(_load_npz_data(scene_path, device))
+                valid_paths.append(scene_path)
+                valid_prediction_paths.append(prediction_path)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    {
+                        "scene_path": scene_path,
+                        "prediction_path": str(prediction_path),
+                        "error": str(exc),
+                    }
+                )
+                print(f"  [{idx:4d}] ERROR {Path(scene_path).name}: {exc}")
+        if not datas:
+            continue
+        try:
+            batch_rows = classify_loaded_scenes_batch(
+                valid_paths,
+                torch.stack(ego_trajs, dim=0),
+                datas,
+                config,
+                moving_near_thresh=args.moving_near_thresh,
+                static_near_thresh=args.static_near_thresh,
+                rb_near_thresh=args.rb_near_thresh,
+                device=device,
+            )
+            for bi, row in enumerate(batch_rows):
+                row["trajectory_source"] = "saved_pred"
+                row["prediction_path"] = str(valid_prediction_paths[bi])
+                rows.append(row)
+                print(
+                    f"  [{start_index_base + start + bi:4d}] "
+                    f"{Path(row['scene_path']).name}: {','.join(row['labels'])}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            for scene_path, prediction_path in zip(valid_paths, valid_prediction_paths):
+                errors.append(
+                    {
+                        "scene_path": scene_path,
+                        "prediction_path": str(prediction_path),
+                        "error": str(exc),
+                    }
+                )
+            print(f"  [{start:4d}] ERROR batch {len(valid_paths)} scenes: {exc}")
+    return rows, errors
+
+
+def _classify_saved_prediction_dir(
+    predictions_dir: Path,
+    source_roots: list[Path],
+    config: RewardConfig,
+    args,
+    device: torch.device,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], int]:
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    candidate_roots = _candidate_source_roots(source_roots)
+    batch_pairs: list[tuple[str, Path]] = []
+    n_seen = 0
+
+    def flush_batch(start_index: int) -> None:
+        nonlocal rows, errors, batch_pairs
+        if not batch_pairs:
+            return
+        batch_rows, batch_errors = _classify_saved_prediction_pairs(
+            batch_pairs,
+            config,
+            args,
+            device,
+            start_index_base=start_index,
+        )
+        rows.extend(batch_rows)
+        errors.extend(batch_errors)
+        batch_pairs = []
+
+    batch_start = 0
+    for global_idx, prediction_path in _iter_prediction_npzs(
+        predictions_dir,
+        num_shards=args.num_shards,
+        shard_index=args.shard_index,
+    ):
+        if args.max_scenes is not None and global_idx >= args.max_scenes:
+            break
+        try:
+            scene_path = _resolve_source_scene_for_prediction(
+                prediction_path,
+                predictions_dir,
+                candidate_roots,
+            )
+            if not batch_pairs:
+                batch_start = global_idx
+            batch_pairs.append((str(scene_path), prediction_path))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(
+                {
+                    "scene_path": "",
+                    "prediction_path": str(prediction_path),
+                    "error": str(exc),
+                }
+            )
+            print(f"  [{global_idx:4d}] ERROR {prediction_path.name}: {exc}")
+        n_seen += 1
+        if len(batch_pairs) >= args.batch_size:
+            flush_batch(batch_start)
+
+    flush_batch(batch_start)
+    return rows, errors, n_seen
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--scenes", required=True, help="JSON list of NPZ scene paths")
+    parser.add_argument(
+        "--scenes",
+        default=None,
+        help=(
+            "JSON list of NPZ scene paths. Required for gt/det. Optional for saved_pred "
+            "when --source_scene_root is provided."
+        ),
+    )
     parser.add_argument("--config", required=True, help="Reward config JSON")
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--trajectory", choices=("gt", "det"), default="gt")
+    parser.add_argument("--trajectory", choices=("gt", "det", "saved_pred"), default="gt")
     parser.add_argument("--model_path", default=None, help="Required when --trajectory det")
+    parser.add_argument(
+        "--predictions_dir",
+        default=None,
+        help="Required when --trajectory saved_pred; valid_predictor saved predictions directory",
+    )
+    parser.add_argument(
+        "--prediction_scene_root",
+        default=None,
+        help=(
+            "Optional source scene root to strip when resolving mirrored saved predictions. "
+            "Flat predictionNNNNNNNN.npz resolution does not need this."
+        ),
+    )
+    parser.add_argument(
+        "--source_scene_root",
+        action="append",
+        default=None,
+        help=(
+            "Source dataset root for mirrored saved predictions. May be repeated. "
+            "When --trajectory saved_pred and --scenes is omitted, every prediction NPZ "
+            "under --predictions_dir is paired to this root by relative path."
+        ),
+    )
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--moving_near_thresh", type=float, default=1.0)
     parser.add_argument("--static_near_thresh", type=float, default=None)
     parser.add_argument("--rb_near_thresh", type=float, default=None)
     parser.add_argument("--max_scenes", type=int, default=None)
+    parser.add_argument("--num_shards", type=int, default=1)
+    parser.add_argument("--shard_index", type=int, default=0)
+    parser.add_argument(
+        "--merge_output_dirs",
+        nargs="+",
+        default=None,
+        help="Merge previously written shard output dirs into --output_dir and exit.",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -630,24 +1068,69 @@ def main() -> None:
     if args.rb_near_thresh is None:
         args.rb_near_thresh = float(config.rb_near_thresh)
 
-    scene_paths = _load_scene_paths(args.scenes)
-    if args.max_scenes is not None:
-        scene_paths = scene_paths[: args.max_scenes]
-
-    if args.trajectory == "gt":
-        rows, errors = _classify_gt(scene_paths, config, args, device)
-    else:
-        rows, errors = _classify_det(scene_paths, config, args, device)
-
     thresholds = {
         "moving_near_thresh": float(args.moving_near_thresh),
         "static_near_thresh": float(args.static_near_thresh),
         "rb_near_thresh": float(args.rb_near_thresh),
+        "static_collision_thresh": float(config.sc_cross_thresh),
         "sc_cross_thresh": float(config.sc_cross_thresh),
         "rb_cross_thresh": float(config.rb_cross_thresh),
     }
+    if args.merge_output_dirs is not None:
+        _merge_output_dirs(
+            [Path(p) for p in args.merge_output_dirs],
+            Path(args.output_dir),
+            thresholds,
+        )
+        print(f"Merged {len(args.merge_output_dirs)} dirs into {args.output_dir}")
+        return
+
+    scene_paths: list[str] = []
+    scene_prediction_pairs: list[tuple[str, Path]] | None = None
+    discovered_prediction_count: int | None = None
+    if args.trajectory == "saved_pred" and args.scenes is None:
+        if not args.predictions_dir:
+            raise ValueError("--trajectory saved_pred requires --predictions_dir")
+        if not args.source_scene_root:
+            raise ValueError(
+                "--trajectory saved_pred without --scenes requires at least one --source_scene_root"
+            )
+        predictions_dir = Path(args.predictions_dir)
+        source_roots = [Path(p) for p in args.source_scene_root]
+        rows, errors, discovered_prediction_count = _classify_saved_prediction_dir(
+            predictions_dir,
+            source_roots,
+            config,
+            args,
+            device,
+        )
+    else:
+        if args.scenes is None:
+            raise ValueError(f"--trajectory {args.trajectory} requires --scenes")
+        scene_paths = _load_scene_paths(args.scenes)
+        if args.max_scenes is not None:
+            scene_paths = scene_paths[: args.max_scenes]
+
+    if args.trajectory == "gt":
+        rows, errors = _classify_gt(scene_paths, config, args, device)
+    elif args.trajectory == "det":
+        rows, errors = _classify_det(scene_paths, config, args, device)
+    elif discovered_prediction_count is not None:
+        scene_paths = [str(row["scene_path"]) for row in rows] + [
+            str(err.get("scene_path", "")) for err in errors
+        ]
+    elif scene_prediction_pairs is not None:
+        rows, errors = _classify_saved_prediction_pairs(
+            scene_prediction_pairs, config, args, device
+        )
+    else:
+        rows, errors = _classify_saved_predictions(scene_paths, config, args, device)
+
     _write_outputs(rows, errors, Path(args.output_dir), thresholds)
-    print(f"\nClassified {len(rows)}/{len(scene_paths)} scenes; errors={len(errors)}")
+    total = (
+        discovered_prediction_count if discovered_prediction_count is not None else len(scene_paths)
+    )
+    print(f"\nClassified {len(rows)}/{total} scenes; errors={len(errors)}")
     print(f"Wrote {args.output_dir}")
 
 

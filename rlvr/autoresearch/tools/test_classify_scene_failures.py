@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import torch
 
 from planner_metrics.aggregate import compute_subscores_batch, compute_subscores_scene_batch
 from rlvr.autoresearch.tools.classify_scene_failures import (
+    _prediction_path_for_scene,
     _prepare_scoring_data,
+    _saved_prediction_trajectory,
     _stack_scene_data,
     _write_outputs,
     classify_loaded_scene,
@@ -75,6 +78,10 @@ def test_classify_scene_failures_converts_3col_future_and_flags_moving_collision
     assert row["moving_argmin_neighbor"] == 0
     assert row["moving_min_dist"] < 0.0
     assert row["ttc_first_collision_step"] == 30
+    assert "static_collision" in row
+    assert "static_min_dist" in row
+    assert "static_collision_step" in row
+    assert "static_neighbor_count" in row
 
 
 def test_compute_subscores_scene_batch_matches_per_scene_scoring():
@@ -143,3 +150,40 @@ def test_classify_scene_failures_writes_training_path_lists(tmp_path):
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["label_counts"]["moving_collision"] == 2
     assert summary["label_counts"]["clean"] == 2
+
+
+def test_saved_prediction_trajectory_extracts_ego_from_agent_major_npz(tmp_path):
+    pred = torch.zeros(3, T, 4).numpy()
+    pred[0, :, 0] = 1.5
+    pred[1, :, 0] = 9.0
+    pred_path = tmp_path / "prediction00000000.npz"
+
+    np.savez(pred_path, prediction=pred, turn_indicator=0)
+
+    ego = _saved_prediction_trajectory(pred_path, torch.device("cpu"))
+
+    assert ego.shape == (1, T, 4)
+    assert torch.allclose(ego[0, :, 0], torch.full((T,), 1.5))
+
+
+def test_prediction_path_for_scene_supports_flat_and_mirrored_layouts(tmp_path):
+    scene_path = "/data/root/dataset/train/date/time/frame_000123.npz"
+    flat_dir = tmp_path / "flat"
+    flat_dir.mkdir()
+    flat = flat_dir / "prediction00000007.npz"
+    flat.write_bytes(b"")
+    assert _prediction_path_for_scene(flat_dir, scene_path, 7) == flat
+
+    mirrored_dir = tmp_path / "mirrored"
+    mirrored = mirrored_dir / "dataset/train/date/time/frame_000123.npz"
+    mirrored.parent.mkdir(parents=True)
+    mirrored.write_bytes(b"")
+    assert (
+        _prediction_path_for_scene(
+            mirrored_dir,
+            scene_path,
+            7,
+            prediction_scene_root=tmp_path / "missing",
+        )
+        == mirrored
+    )
