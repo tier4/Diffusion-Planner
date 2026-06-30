@@ -642,26 +642,26 @@ def _write_outputs(
         for row in rows:
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
-    by_label: dict[str, list[str]] = defaultdict(list)
     path_labels: dict[str, set[str]] = defaultdict(set)
     path_order: list[str] = []
     for row in rows:
         path = row["scene_path"]
         if path not in path_labels:
             path_order.append(path)
-        labels = row["labels"]
-        path_labels[path].update(labels)
-        for label in labels:
-            if label != "clean" and path not in by_label[label]:
-                by_label[label].append(path)
+        path_labels[path].update(row["labels"])
 
+    by_label: dict[str, list[str]] = defaultdict(list)
     all_flagged: list[str] = []
     clean: list[str] = []
     for path in path_order:
-        if path_labels[path] == {"clean"}:
+        labels = path_labels[path]
+        if labels == {"clean"}:
             clean.append(path)
         else:
             all_flagged.append(path)
+            for label in sorted(labels):
+                if label != "clean":
+                    by_label[label].append(path)
 
     by_label["all_flagged"] = all_flagged
     by_label["clean"] = clean
