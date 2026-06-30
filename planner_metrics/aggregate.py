@@ -9,8 +9,8 @@ marshalling), and the validation loop logs the continuous subscores.
 
 These are reward-shaping subscores (custom thresholds, goal-based ego-progress,
 penalty signs), i.e. EPDMS-INSPIRED, NOT a faithful EPDMS port. Single scene /
-N trajectories (map + neighbor terms use one scene's tensors): callers scoring a
-multi-scene batch (validation) must call this per scene.
+N trajectories (map + neighbor terms use one scene's tensors). Use
+``compute_subscores_scene_batch`` when scoring a batch of independent scenes.
 """
 
 from __future__ import annotations
@@ -32,7 +32,42 @@ from planner_metrics.subscores import (
     compute_ttc_score_batch,
 )
 
-__all__ = ["compute_subscores_batch"]
+__all__ = ["compute_subscores_batch", "compute_subscores_scene_batch"]
+
+
+def _slice_scene_data(
+    data: dict[str, torch.Tensor],
+    scene_idx: int,
+    batch_size: int,
+) -> dict[str, torch.Tensor]:
+    """Return one scene from a scene-batched data dict, preserving batch dims."""
+    out: dict[str, torch.Tensor] = {}
+    for key, value in data.items():
+        if torch.is_tensor(value) and value.dim() > 0 and value.shape[0] == batch_size:
+            out[key] = value[scene_idx : scene_idx + 1]
+        else:
+            out[key] = value
+    return out
+
+
+def _stack_subscore_outputs(
+    per_scene: list[dict[str, torch.Tensor | list[int | None]]],
+) -> dict[str, torch.Tensor | list[list[int | None]]]:
+    """Stack per-scene outputs into B-major tensors/lists."""
+    if not per_scene:
+        return {}
+
+    stacked: dict[str, torch.Tensor | list[list[int | None]]] = {}
+    for key in per_scene[0]:
+        values = [scene_out[key] for scene_out in per_scene]
+        first = values[0]
+        if torch.is_tensor(first):
+            stacked[key] = torch.stack([v for v in values if torch.is_tensor(v)], dim=0)
+        elif isinstance(first, list):
+            stacked[key] = [list(v) for v in values if isinstance(v, list)]
+        else:
+            raise TypeError(f"unsupported subscore output type for {key}: {type(first)!r}")
+    return stacked
 
 
 @torch.no_grad()
@@ -233,3 +268,41 @@ def compute_subscores_batch(
         "sc_crossing_steps": sc_crossing_steps,
         "collision_step": collision_steps,
     }
+
+
+@torch.no_grad()
+def compute_subscores_scene_batch(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    config: RewardConfig = RewardConfig(),
+) -> dict[str, torch.Tensor | list[list[int | None]]]:
+    """Raw subscores for ``B`` scenes, each with ``N`` candidate trajectories.
+
+    ``compute_subscores_batch`` remains the single-scene primitive. This wrapper
+    gives callers a B-major API so scene classification can handle multiple NPZs
+    per batch while preserving all per-scene map and neighbor semantics.
+
+    Args:
+        ego_trajs: ``(B, N, T, 4)`` x/y/cos/sin trajectories.
+        data: Scene-batched observation dict. Tensor values whose leading dim is
+            ``B`` are sliced per scene; scalar/shared values are forwarded.
+        config: RewardConfig with subscore thresholds.
+
+    Returns:
+        Dict matching ``compute_subscores_batch`` but with tensor outputs
+        stacked as ``(B, N, ...)`` and step diagnostics as B-major nested lists.
+    """
+    if ego_trajs.dim() != 4:
+        raise ValueError(
+            "compute_subscores_scene_batch expects ego_trajs shaped (B, N, T, 4); "
+            f"got {tuple(ego_trajs.shape)}"
+        )
+    B = ego_trajs.shape[0]
+    if B == 0:
+        return {}
+
+    per_scene = [
+        compute_subscores_batch(ego_trajs[b], _slice_scene_data(data, b, B), config)
+        for b in range(B)
+    ]
+    return _stack_subscore_outputs(per_scene)

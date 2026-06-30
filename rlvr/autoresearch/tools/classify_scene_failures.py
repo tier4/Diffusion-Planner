@@ -31,6 +31,7 @@ from typing import Any
 
 import torch
 
+from planner_metrics.aggregate import compute_subscores_scene_batch
 from planner_metrics.subscores import (
     compute_ego_neighbor_signed_clearance,
     compute_safety_score_batch,
@@ -38,7 +39,7 @@ from planner_metrics.subscores import (
 from preference_optimization.utils import load_npz_data
 from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
-from rlvr.reward import RewardConfig, compute_subscores_batch
+from rlvr.reward import RewardConfig
 
 _ALWAYS_WRITE_LISTS = (
     "all_flagged",
@@ -82,6 +83,51 @@ def _prepare_scoring_data(data: dict[str, torch.Tensor]) -> dict[str, torch.Tens
         out["ego_agent_future"] = _future_heading_to_cos_sin(out["ego_agent_future"])
     if "neighbor_agents_future" in out:
         out["neighbor_agents_future"] = _future_heading_to_cos_sin(out["neighbor_agents_future"])
+    return out
+
+
+def _stack_scene_data(datas: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Stack loaded scene dicts into one B-major dict for batched scoring."""
+    if not datas:
+        raise ValueError("cannot stack an empty scene batch")
+
+    expected_keys = set(datas[0])
+    for idx, data in enumerate(datas[1:], start=1):
+        if set(data) != expected_keys:
+            missing = sorted(expected_keys - set(data))
+            extra = sorted(set(data) - expected_keys)
+            raise ValueError(
+                f"scene batch has inconsistent tensor keys at index {idx}; "
+                f"missing={missing}, extra={extra}"
+            )
+
+    stacked: dict[str, torch.Tensor] = {}
+    for key in datas[0]:
+        values = [data[key] for data in datas]
+        first = values[0]
+        if not torch.is_tensor(first):
+            stacked[key] = first
+            continue
+        if all(torch.is_tensor(v) and v.shape == first.shape for v in values):
+            if first.dim() > 0 and first.shape[0] == 1:
+                stacked[key] = torch.cat(values, dim=0)
+            else:
+                stacked[key] = torch.stack(values, dim=0)
+        else:
+            shapes = [tuple(v.shape) if torch.is_tensor(v) else type(v).__name__ for v in values]
+            raise ValueError(f"cannot batch key {key}: inconsistent shapes {shapes}")
+    return stacked
+
+
+def _slice_scene_data(
+    data: dict[str, torch.Tensor], scene_idx: int, batch_size: int
+) -> dict[str, torch.Tensor]:
+    out: dict[str, torch.Tensor] = {}
+    for key, value in data.items():
+        if torch.is_tensor(value) and value.dim() > 0 and value.shape[0] == batch_size:
+            out[key] = value[scene_idx : scene_idx + 1]
+        else:
+            out[key] = value
     return out
 
 
@@ -265,25 +311,44 @@ def classify_loaded_scene(
     rb_near_thresh: float,
     device: torch.device,
 ) -> dict[str, Any]:
-    data = _prepare_scoring_data(data)
-    subs = compute_subscores_batch(ego_traj, data, config)
-    moving = _moving_diagnostics(ego_traj, data, config, moving_near_thresh, device)
+    rows = classify_loaded_scenes_batch(
+        [scene_path],
+        ego_traj.unsqueeze(0),
+        [_prepare_scoring_data(data)],
+        config,
+        moving_near_thresh=moving_near_thresh,
+        static_near_thresh=static_near_thresh,
+        rb_near_thresh=rb_near_thresh,
+        device=device,
+    )
+    return rows[0]
 
+
+def _build_candidate_row(
+    scene_path: str,
+    candidate_idx: int,
+    subs: dict[str, torch.Tensor | list[list[int | None]]],
+    moving: dict[str, Any],
+    *,
+    bidx: int,
+    static_near_thresh: float,
+    rb_near_thresh: float,
+) -> dict[str, Any]:
     labels: list[str] = []
-    rb_crossing = bool(subs["rb_crossing_gate"][0].item() < 0.5)
-    rb_min_dist = float(subs["rb_min_dist"][0].item())
+    rb_crossing = bool(subs["rb_crossing_gate"][bidx, candidate_idx].item() < 0.5)
+    rb_min_dist = float(subs["rb_min_dist"][bidx, candidate_idx].item())
     if rb_crossing:
         labels.append("road_border_crossing")
     elif rb_min_dist < rb_near_thresh:
         labels.append("road_border_near")
 
-    lane_crossing = bool(subs["lane_crossing_gate"][0].item() < 0.5)
+    lane_crossing = bool(subs["lane_crossing_gate"][bidx, candidate_idx].item() < 0.5)
     if lane_crossing:
         labels.append("lane_crossing")
 
-    sc_crossing = bool(subs["sc_crossing_gate"][0].item() < 0.5)
-    sc_min_dist = float(subs["sc_min_dist"][0].item())
-    sc_n_stopped = int(subs["sc_n_stopped"][0].item())
+    sc_crossing = bool(subs["sc_crossing_gate"][bidx, candidate_idx].item() < 0.5)
+    sc_min_dist = float(subs["sc_min_dist"][bidx, candidate_idx].item())
+    sc_n_stopped = int(subs["sc_n_stopped"][bidx, candidate_idx].item())
     if sc_crossing:
         labels.append("static_collision")
     elif sc_n_stopped > 0 and sc_min_dist < static_near_thresh:
@@ -294,7 +359,7 @@ def classify_loaded_scene(
     elif moving["moving_near_miss"]:
         labels.append("moving_near_miss")
 
-    ttc_first_unsafe = subs["ttc_first_unsafe_steps"][0]
+    ttc_first_unsafe = subs["ttc_first_unsafe_steps"][bidx][candidate_idx]
     if ttc_first_unsafe is not None and moving["moving_collision_step"] is None:
         labels.append("moving_ttc")
 
@@ -303,23 +368,81 @@ def classify_loaded_scene(
 
     return {
         "scene_path": scene_path,
+        "candidate_index": candidate_idx,
         "labels": labels,
         "trajectory_source": None,  # filled by caller
         "rb_min_dist": rb_min_dist,
         "rb_crossing": rb_crossing,
-        "rb_crossing_step": subs["rb_crossing_steps"][0],
+        "rb_crossing_step": subs["rb_crossing_steps"][bidx][candidate_idx],
         "lane_crossing": lane_crossing,
-        "lane_crossing_step": subs["lane_crossing_steps"][0],
+        "lane_crossing_step": subs["lane_crossing_steps"][bidx][candidate_idx],
         "static_crossing": sc_crossing,
         "sc_min_dist": sc_min_dist,
-        "sc_crossing_step": subs["sc_crossing_steps"][0],
+        "sc_crossing_step": subs["sc_crossing_steps"][bidx][candidate_idx],
         "sc_n_stopped": sc_n_stopped,
-        "collision_step": subs["collision_step"][0],
-        "ttc_score": float(subs["ttc"][0].item()),
+        "collision_step": subs["collision_step"][bidx][candidate_idx],
+        "ttc_score": float(subs["ttc"][bidx, candidate_idx].item()),
         "ttc_first_unsafe_step": ttc_first_unsafe,
-        "ttc_first_collision_step": subs["ttc_first_collision_steps"][0],
+        "ttc_first_collision_step": subs["ttc_first_collision_steps"][bidx][candidate_idx],
         **moving,
     }
+
+
+def classify_loaded_scenes_batch(
+    scene_paths: list[str],
+    ego_trajs: torch.Tensor,
+    datas: list[dict[str, torch.Tensor]],
+    config: RewardConfig,
+    *,
+    moving_near_thresh: float,
+    static_near_thresh: float,
+    rb_near_thresh: float,
+    device: torch.device,
+) -> list[dict[str, Any]]:
+    """Classify a B-scene batch with one scored trajectory per scene."""
+    if ego_trajs.dim() != 4:
+        raise ValueError(
+            "classify_loaded_scenes_batch expects ego_trajs shaped (B,N,T,4); "
+            f"got {tuple(ego_trajs.shape)}"
+        )
+    if ego_trajs.shape[1] != 1:
+        raise ValueError(
+            "dangerous scene classification expects exactly one trajectory per scene; "
+            f"got N={ego_trajs.shape[1]}"
+        )
+    if len(scene_paths) != ego_trajs.shape[0] or len(datas) != ego_trajs.shape[0]:
+        raise ValueError(
+            "scene_paths, ego_trajs, and datas must have the same scene batch size; "
+            f"got {len(scene_paths)}, {ego_trajs.shape[0]}, {len(datas)}"
+        )
+
+    prepared_datas = [_prepare_scoring_data(data) for data in datas]
+    batched_data = _stack_scene_data(prepared_datas)
+    subs = compute_subscores_scene_batch(ego_trajs, batched_data, config)
+
+    rows: list[dict[str, Any]] = []
+    B = ego_trajs.shape[0]
+    for bidx, scene_path in enumerate(scene_paths):
+        scene_data = _slice_scene_data(batched_data, bidx, B)
+        moving = _moving_diagnostics(
+            ego_trajs[bidx, 0:1],
+            scene_data,
+            config,
+            moving_near_thresh,
+            device,
+        )
+        rows.append(
+            _build_candidate_row(
+                scene_path,
+                0,
+                subs,
+                moving,
+                bidx=bidx,
+                static_near_thresh=static_near_thresh,
+                rb_near_thresh=rb_near_thresh,
+            )
+        )
+    return rows
 
 
 def _write_json(path: Path, obj: Any) -> None:
@@ -341,14 +464,22 @@ def _write_outputs(
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
     by_label: dict[str, list[str]] = defaultdict(list)
-    all_flagged: list[str] = []
-    clean: list[str] = []
+    path_labels: dict[str, set[str]] = defaultdict(set)
+    path_order: list[str] = []
     for row in rows:
         path = row["scene_path"]
+        if path not in path_labels:
+            path_order.append(path)
         labels = row["labels"]
+        path_labels[path].update(labels)
         for label in labels:
-            by_label[label].append(path)
-        if labels == ["clean"]:
+            if label != "clean" and path not in by_label[label]:
+                by_label[label].append(path)
+
+    all_flagged: list[str] = []
+    clean: list[str] = []
+    for path in path_order:
+        if path_labels[path] == {"clean"}:
             clean.append(path)
         else:
             all_flagged.append(path)
@@ -383,26 +514,44 @@ def _classify_gt(
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     rows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-    for idx, scene_path in enumerate(scene_paths):
+    for start in range(0, len(scene_paths), args.batch_size):
+        batch_paths = scene_paths[start : start + args.batch_size]
+        datas: list[dict[str, torch.Tensor]] = []
+        ego_trajs: list[torch.Tensor] = []
+        valid_paths: list[str] = []
+        for offset, scene_path in enumerate(batch_paths):
+            idx = start + offset
+            try:
+                data = load_npz_data(scene_path, device)
+                datas.append(data)
+                ego_trajs.append(_gt_trajectory(_prepare_scoring_data(data), device))
+                valid_paths.append(scene_path)
+            except Exception as exc:  # noqa: BLE001
+                errors.append({"scene_path": scene_path, "error": str(exc)})
+                print(f"  [{idx:4d}] ERROR {Path(scene_path).name}: {exc}")
+        if not datas:
+            continue
         try:
-            data = _prepare_scoring_data(load_npz_data(scene_path, device))
-            ego_traj = _gt_trajectory(data, device)
-            row = classify_loaded_scene(
-                scene_path,
-                ego_traj,
-                data,
+            batch_rows = classify_loaded_scenes_batch(
+                valid_paths,
+                torch.stack(ego_trajs, dim=0),
+                datas,
                 config,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
             )
-            row["trajectory_source"] = "gt"
-            rows.append(row)
-            print(f"  [{idx:4d}] {Path(scene_path).name}: {','.join(row['labels'])}")
+            for bi, row in enumerate(batch_rows):
+                row["trajectory_source"] = "gt"
+                rows.append(row)
+                print(
+                    f"  [{start + bi:4d}] {Path(row['scene_path']).name}: {','.join(row['labels'])}"
+                )
         except Exception as exc:  # noqa: BLE001
-            errors.append({"scene_path": scene_path, "error": str(exc)})
-            print(f"  [{idx:4d}] ERROR {Path(scene_path).name}: {exc}")
+            for scene_path in valid_paths:
+                errors.append({"scene_path": scene_path, "error": str(exc)})
+            print(f"  [{start:4d}] ERROR batch {len(valid_paths)} scenes: {exc}")
     return rows, errors
 
 
@@ -433,24 +582,27 @@ def _classify_det(
         if not datas:
             continue
         det_trajs = det_inference_batched(model, model_args, datas, device)
-        for bi, scene_path in enumerate(valid_paths):
-            try:
-                row = classify_loaded_scene(
-                    scene_path,
-                    det_trajs[bi : bi + 1],
-                    _prepare_scoring_data(datas[bi]),
-                    config,
-                    moving_near_thresh=args.moving_near_thresh,
-                    static_near_thresh=args.static_near_thresh,
-                    rb_near_thresh=args.rb_near_thresh,
-                    device=device,
-                )
+        try:
+            batch_rows = classify_loaded_scenes_batch(
+                valid_paths,
+                det_trajs.unsqueeze(1),
+                datas,
+                config,
+                moving_near_thresh=args.moving_near_thresh,
+                static_near_thresh=args.static_near_thresh,
+                rb_near_thresh=args.rb_near_thresh,
+                device=device,
+            )
+            for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "det"
                 rows.append(row)
-                print(f"  [{start + bi:4d}] {Path(scene_path).name}: {','.join(row['labels'])}")
-            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"  [{start + bi:4d}] {Path(row['scene_path']).name}: {','.join(row['labels'])}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            for scene_path in valid_paths:
                 errors.append({"scene_path": scene_path, "error": str(exc)})
-                print(f"  [{start + bi:4d}] ERROR {Path(scene_path).name}: {exc}")
+            print(f"  [{start:4d}] ERROR batch {len(valid_paths)} scenes: {exc}")
     return rows, errors
 
 

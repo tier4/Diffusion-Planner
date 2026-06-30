@@ -18,7 +18,10 @@ import torch
 # *shaping* (RewardBreakdown, compute_reward_batch, GRPO advantages) and
 # re-exports every moved symbol so `from rlvr.reward import ...` keeps working.
 # ---------------------------------------------------------------------------
-from planner_metrics.aggregate import compute_subscores_batch  # noqa: F401
+from planner_metrics.aggregate import (  # noqa: F401
+    compute_subscores_batch,
+    compute_subscores_scene_batch,
+)
 from planner_metrics.config import RewardConfig  # noqa: F401  (re-export)
 from planner_metrics.geometry import *  # noqa: F401,F403
 from planner_metrics.subscores import *  # noqa: F401,F403
