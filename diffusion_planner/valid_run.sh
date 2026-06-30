@@ -12,7 +12,8 @@ MODEL_DIR=${1}
 VALID_SET_LIST_PATH=${2}
 MODEL_PATH="$MODEL_DIR/best_model.pth"
 ARGS_JSON_PATH="$MODEL_DIR/args.json"
-SAVE_DIR=$MODEL_DIR/validation_result/predictions
+TIME=$(date +%Y%m%d_%H%M%S)
+SAVE_DIR=$MODEL_DIR/validation_result_$TIME/predictions
 
 rm -f /tmp/tmp_dist_init
 
