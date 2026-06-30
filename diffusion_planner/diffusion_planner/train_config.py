@@ -94,6 +94,19 @@ class TrainConfig:
     coeff_neighbor_collision_loss: float = 0.0
     neighbor_collision_margin: float = 0.25
 
+    use_dfp_decoder: bool = False
+    dfp_use_inference: bool = False
+    dfp_history_len: int = 20
+    dfp_chunk_len: int = 20
+    dfp_lambda_hist: float = 1.0
+    dfp_lambda_future: float = 1.0
+    dfp_lambda_current: float = 0.0
+    dfp_history_beta_a: float = 0.5
+    dfp_history_beta_b: float = 0.5
+    dfp_guidance_w: float = 0.2
+    dfp_guidance_beta: float = 2.0
+    dfp_sampler_steps: int = 10
+
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
 

@@ -106,6 +106,19 @@ def get_args(args_list=None):
     parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
     parser.add_argument("--neighbor_collision_margin", type=float, default=0.25)
 
+    parser.add_argument("--use_dfp_decoder", default=False, type=boolean)
+    parser.add_argument("--dfp_use_inference", default=False, type=boolean)
+    parser.add_argument("--dfp_history_len", type=int, default=20)
+    parser.add_argument("--dfp_chunk_len", type=int, default=20)
+    parser.add_argument("--dfp_lambda_hist", type=float, default=1.0)
+    parser.add_argument("--dfp_lambda_future", type=float, default=1.0)
+    parser.add_argument("--dfp_lambda_current", type=float, default=0.0)
+    parser.add_argument("--dfp_history_beta_a", type=float, default=0.5)
+    parser.add_argument("--dfp_history_beta_b", type=float, default=0.5)
+    parser.add_argument("--dfp_guidance_w", type=float, default=0.2)
+    parser.add_argument("--dfp_guidance_beta", type=float, default=2.0)
+    parser.add_argument("--dfp_sampler_steps", type=int, default=10)
+
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 

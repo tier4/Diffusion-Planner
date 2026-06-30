@@ -23,6 +23,13 @@ from diffusion_planner.model.flow_matching_utils.ode_solver import (
     heun_integration,
     rk4_integration,
 )
+from diffusion_planner.model.module.dfp import (
+    DFPFinalLayer,
+    TimestepEmbedder,
+    inverse_normalize_ego_trajectory,
+    normalize_ego_trajectory,
+    vp_alpha_sigma,
+)
 from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
@@ -62,6 +69,61 @@ def add_current_xy(future: torch.Tensor, current_states: torch.Tensor) -> torch.
     return torch.cat([xy, future[..., 2:]], dim=-1)
 
 
+def build_dfp_training_inputs(
+    inputs: dict[str, torch.Tensor],
+    ego_future: torch.Tensor,
+    norm: StateNormalizer,
+    args: Namespace,
+    eps: float = 1e-3,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    """Build history-current-future chunk noising inputs for DFP ego decoding."""
+    B, T, _ = ego_future.shape
+    chunk_len = args.dfp_chunk_len
+    history_len = args.dfp_history_len
+    assert history_len == chunk_len, "DFP expects history_len == chunk_len"
+    assert T % chunk_len == 0, "future_len must be divisible by dfp_chunk_len"
+    future_chunks = T // chunk_len
+
+    raw_inputs = args.observation_normalizer.inverse(inputs)
+    ego_past = raw_inputs["ego_agent_past"][..., :4]
+    if ego_past.shape[1] >= history_len + 1:
+        history = ego_past[:, -history_len - 1 : -1]
+    else:
+        pad = ego_past[:, :1].expand(B, history_len + 1 - ego_past.shape[1], 4)
+        history = torch.cat([pad, ego_past], dim=1)[:, -history_len - 1 : -1]
+
+    current = raw_inputs["ego_current_state"][:, :4]
+    current = current[:, None, :].expand(B, chunk_len, 4)
+
+    history = normalize_ego_trajectory(norm, history)
+    current = normalize_ego_trajectory(norm, current)
+    future = normalize_ego_trajectory(norm, ego_future)
+
+    clean_chunks = torch.cat(
+        [
+            history[:, None],
+            current[:, None],
+            future.reshape(B, future_chunks, chunk_len, 4),
+        ],
+        dim=1,
+    )
+
+    beta = torch.distributions.Beta(args.dfp_history_beta_a, args.dfp_history_beta_b)
+    history_t = beta.sample((B, 1)).to(clean_chunks.device, dtype=clean_chunks.dtype)
+    history_t = history_t.clamp(eps, 1.0 - eps)
+    current_t = torch.zeros(B, 1, device=clean_chunks.device, dtype=clean_chunks.dtype)
+    future_t = torch.rand(B, future_chunks, device=clean_chunks.device, dtype=clean_chunks.dtype)
+    future_t = future_t * (1.0 - eps) + eps
+    t = torch.cat([history_t, current_t, future_t], dim=1)
+
+    alpha, sigma = vp_alpha_sigma(t)
+    sampled_chunks = alpha[:, :, None, None] * clean_chunks
+    sampled_chunks = sampled_chunks + sigma[:, :, None, None] * torch.randn_like(clean_chunks)
+    sampled_chunks[:, 1] = clean_chunks[:, 1]
+
+    return {"dfp_sampled_chunks": sampled_chunks, "dfp_diffusion_time": t}, clean_chunks
+
+
 def compute_training_loss(
     model: nn.Module,
     inputs: dict[str, torch.Tensor],
@@ -73,6 +135,10 @@ def compute_training_loss(
     use_velocity = args.use_velocity_representation
     hybrid_omega = args.hybrid_loss_omega
     hybrid_window = args.hybrid_loss_window
+    use_dfp_decoder = getattr(args, "use_dfp_decoder", False)
+    if use_dfp_decoder:
+        assert model_type == "x_start", "DFP decoder is implemented for x_start training"
+        assert not use_velocity, "DFP decoder expects waypoint, not velocity, targets"
 
     ego_future, neighbors_future, neighbor_future_mask = futures
     neighbors_future_valid = ~neighbor_future_mask  # [B, Pn, V]
@@ -114,6 +180,7 @@ def compute_training_loss(
     else:
         all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt[:, 1:][neighbor_mask] = 0.0
+    dfp_clean_chunks = None
 
     if model_type == "x_start":
         mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
@@ -122,6 +189,9 @@ def compute_training_loss(
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, 4]
+        dfp_inputs = {}
+        if use_dfp_decoder:
+            dfp_inputs, dfp_clean_chunks = build_dfp_training_inputs(inputs, ego_future, norm, args)
 
         merged_inputs = {
             **inputs,
@@ -129,6 +199,7 @@ def compute_training_loss(
             "sampled_trajectories": xT,
             "diffusion_time": t,
             "prefix_mask": prefix_mask,
+            **dfp_inputs,
         }
         _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
@@ -205,6 +276,12 @@ def compute_training_loss(
         loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
 
     loss["ego_planning_loss"] = dpm_loss[:, 0, : args.ego_prediction_horizon].mean()
+    if dfp_clean_chunks is not None:
+        dfp_pred = decoder_output["dfp_x0"]
+        dfp_loss = torch.sum((dfp_pred - dfp_clean_chunks) ** 2, dim=-1)
+        loss["dfp_history_loss"] = dfp_loss[:, 0].mean()
+        loss["dfp_current_loss"] = dfp_loss[:, 1].mean()
+        loss["dfp_future_loss"] = dfp_loss[:, 2:].mean()
 
     # Compute ego edge points for penalty losses
     need_ego_edge = model_type == "x_start" and (
@@ -277,6 +354,20 @@ class Decoder(nn.Module):
         dpr = config.decoder_drop_path_rate
         self._predicted_neighbor_num = config.predicted_neighbor_num
         self._future_len = config.future_len
+        self._use_dfp_decoder = getattr(config, "use_dfp_decoder", False)
+        self._dfp_use_inference = getattr(config, "dfp_use_inference", False)
+        self._dfp_history_len = getattr(config, "dfp_history_len", 20)
+        self._dfp_chunk_len = getattr(config, "dfp_chunk_len", 20)
+        self._dfp_guidance_w = getattr(config, "dfp_guidance_w", 0.2)
+        self._dfp_guidance_beta = getattr(config, "dfp_guidance_beta", 2.0)
+        self._dfp_sampler_steps = getattr(config, "dfp_sampler_steps", 10)
+        if self._use_dfp_decoder:
+            assert config.diffusion_model_type == "x_start", "DFP decoder is implemented for x_start"
+            assert not config.use_velocity_representation, "DFP decoder expects waypoint targets"
+            assert self._dfp_history_len == self._dfp_chunk_len
+            assert self._future_len % self._dfp_chunk_len == 0
+        self._dfp_future_chunks = self._future_len // self._dfp_chunk_len
+        self._dfp_num_chunks = 2 + self._dfp_future_chunks
 
         self.dit = DiT(
             depth=config.decoder_depth,
@@ -288,6 +379,21 @@ class Decoder(nn.Module):
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
         )
+        self.dfp_preproj = None
+        self.dfp_t_embedder = None
+        self.dfp_chunk_pos_embed = None
+        self.dfp_final_layer = None
+        if self._use_dfp_decoder:
+            self.dfp_preproj = nn.Sequential(
+                nn.Linear(self._dfp_chunk_len * 4, 512),
+                nn.GELU(approximate="tanh"),
+                nn.Linear(512, config.hidden_dim),
+            )
+            self.dfp_t_embedder = TimestepEmbedder(config.hidden_dim)
+            self.dfp_chunk_pos_embed = nn.Parameter(
+                torch.zeros(1, self._dfp_num_chunks, config.hidden_dim)
+            )
+            self.dfp_final_layer = DFPFinalLayer(config.hidden_dim, self._dfp_chunk_len * 4)
 
         self._state_normalizer: StateNormalizer = config.state_normalizer
         self._observation_normalizer: ObservationNormalizer = config.observation_normalizer
@@ -317,6 +423,10 @@ class Decoder(nn.Module):
         # Zero-out output layers:
         nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].bias, 0)
+        if self.dfp_final_layer is not None:
+            nn.init.normal_(self.dfp_chunk_pos_embed, std=0.02)
+            nn.init.constant_(self.dfp_final_layer.proj[-1].weight, 0)
+            nn.init.constant_(self.dfp_final_layer.proj[-1].bias, 0)
 
     def _prepare_current_states(self, inputs):
         """Extract and prepare current states for ego and neighbors.
@@ -355,6 +465,132 @@ class Decoder(nn.Module):
         turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
         return self.turn_indicator_predictor(turn_indicator_input)
 
+    def _has_dfp_path(self):
+        return self.dfp_final_layer is not None
+
+    def _dfp_future_from_chunks(self, dfp_x0):
+        return dfp_x0[:, 2:].reshape(dfp_x0.shape[0], self._future_len, 4)
+
+    def _decode_dfp_chunks(self, chunks, t, encoding):
+        """Decode DFP ego chunks while sharing the original DiT block stack."""
+        B, N, L, D = chunks.shape
+        assert N == self._dfp_num_chunks, f"{N=} expected {self._dfp_num_chunks}"
+        assert L == self._dfp_chunk_len, f"{L=} expected {self._dfp_chunk_len}"
+        assert D == 4
+
+        x = chunks.reshape(B, N, L * D)
+        x = self.dfp_preproj(x) + self.dfp_chunk_pos_embed[:, :N]
+        y = self.dfp_t_embedder(t.reshape(B * N)).reshape(B, N, -1)
+
+        attn_mask = torch.zeros((B, N), dtype=torch.bool, device=chunks.device)
+        cross_attn_mask = torch.all(encoding == 0, dim=-1)
+        all_masked = torch.all(cross_attn_mask, dim=1)
+        if torch.any(all_masked):
+            cross_attn_mask = cross_attn_mask.clone()
+            cross_attn_mask[all_masked, 0] = False
+
+        for block in self.dit.blocks:
+            x = block(x, encoding, y, attn_mask, cross_attn_mask)
+
+        x = self.dfp_final_layer(x, y)
+        return x.reshape(B, N, L, D)
+
+    def _dfp_clean_condition_chunks(self, inputs, B):
+        raw_inputs = self._observation_normalizer.inverse(inputs)
+        ego_past = raw_inputs["ego_agent_past"][..., :4]
+        if ego_past.shape[1] >= self._dfp_history_len + 1:
+            history = ego_past[:, -self._dfp_history_len - 1 : -1]
+        else:
+            pad = ego_past[:, :1].expand(B, self._dfp_history_len + 1 - ego_past.shape[1], 4)
+            history = torch.cat([pad, ego_past], dim=1)[:, -self._dfp_history_len - 1 : -1]
+
+        current = raw_inputs["ego_current_state"][:, :4]
+        current = current[:, None, :].expand(B, self._dfp_chunk_len, 4)
+        history = normalize_ego_trajectory(self._state_normalizer, history)
+        current = normalize_ego_trajectory(self._state_normalizer, current)
+        return history[:, None], current[:, None]
+
+    def _dfp_sample_ego_future(self, encoding, inputs, B, device, dtype):
+        history_chunk, current_chunk = self._dfp_clean_condition_chunks(inputs, B)
+        history_chunk = history_chunk.to(device=device, dtype=dtype)
+        current_chunk = current_chunk.to(device=device, dtype=dtype)
+        future_xt = torch.randn(
+            B,
+            self._dfp_future_chunks,
+            self._dfp_chunk_len,
+            4,
+            device=device,
+            dtype=dtype,
+        )
+        eps = 1.0e-3
+        timesteps = torch.linspace(
+            1.0, eps, self._dfp_sampler_steps + 1, device=device, dtype=dtype
+        )
+        x0_future = future_xt
+        for step in range(self._dfp_sampler_steps):
+            t_s = timesteps[step]
+            t_next = timesteps[step + 1]
+            future_t = t_s.expand(B, self._dfp_future_chunks)
+
+            hist_noise = torch.randn_like(history_chunk)
+            unguided_chunks = torch.cat([hist_noise, current_chunk, future_xt], dim=1)
+            unguided_t = torch.cat(
+                [
+                    torch.ones(B, 1, device=device, dtype=dtype),
+                    torch.zeros(B, 1, device=device, dtype=dtype),
+                    future_t,
+                ],
+                dim=1,
+            )
+            x0_unguided = self._decode_dfp_chunks(unguided_chunks, unguided_t, encoding)
+
+            t_hist = torch.clamp(t_s.pow(self._dfp_guidance_beta), min=eps)
+            hist_alpha, hist_sigma = vp_alpha_sigma(t_hist)
+            guided_history = hist_alpha * history_chunk + hist_sigma * torch.randn_like(
+                history_chunk
+            )
+            guided_chunks = torch.cat([guided_history, current_chunk, future_xt], dim=1)
+            guided_t = torch.cat(
+                [
+                    t_hist.expand(B, 1),
+                    torch.zeros(B, 1, device=device, dtype=dtype),
+                    future_t,
+                ],
+                dim=1,
+            )
+            x0_guided = self._decode_dfp_chunks(guided_chunks, guided_t, encoding)
+
+            x0 = x0_unguided + self._dfp_guidance_w * (x0_guided - x0_unguided)
+            x0_future = x0[:, 2:]
+            alpha_s, sigma_s = vp_alpha_sigma(t_s)
+            alpha_next, sigma_next = vp_alpha_sigma(t_next)
+            eps_pred = (future_xt - alpha_s * x0_future) / torch.clamp(sigma_s, min=1.0e-6)
+            future_xt = alpha_next * x0_future + sigma_next * eps_pred
+
+        future = x0_future.reshape(B, self._future_len, 4)
+        return inverse_normalize_ego_trajectory(self._state_normalizer, future)
+
+    def _maybe_apply_dfp_inference(self, output, encoding, inputs, encoding_pooled):
+        if not self._has_dfp_path() or not self._dfp_use_inference:
+            return output
+        B = encoding.shape[0]
+        prediction = output["prediction"].clone()
+        future = self._dfp_sample_ego_future(
+            encoding,
+            inputs,
+            B,
+            prediction.device,
+            prediction.dtype,
+        )
+        prediction[:, 0] = future
+        future_norm = normalize_ego_trajectory(self._state_normalizer, future)
+        ego_trajectory = future_norm[:, ::10, :2].reshape(B, 2 * (self._future_len // 10))
+        output = {**output, "prediction": prediction}
+        output["turn_indicator_logit"] = self._compute_turn_indicator(
+            ego_trajectory, encoding_pooled
+        )
+        return output
+
     def _forward_training(self, encoding, inputs, neighbor_current_mask, encoding_pooled):
         """Forward pass for training mode.
 
@@ -379,7 +615,7 @@ class Decoder(nn.Module):
         ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
-        return {
+        outputs = {
             "model_output": self.dit(
                 sampled_trajectories,
                 diffusion_time,
@@ -388,6 +624,23 @@ class Decoder(nn.Module):
             ).reshape(B, P, -1, 4),
             "turn_indicator_logit": turn_indicator_logit,
         }
+        if self._has_dfp_path() and "dfp_sampled_chunks" in inputs:
+            dfp_x0 = self._decode_dfp_chunks(
+                inputs["dfp_sampled_chunks"],
+                inputs["dfp_diffusion_time"],
+                encoding,
+            )
+            ego_dfp = self._dfp_future_from_chunks(dfp_x0)
+            unified_output = outputs["model_output"].clone()
+            unified_output[:, 0, 1:] = ego_dfp
+            outputs["model_output_orig"] = outputs["model_output"]
+            outputs["model_output"] = unified_output
+            outputs["dfp_x0"] = dfp_x0
+            ego_trajectory = ego_dfp[:, ::10, :2].reshape(B, 2 * (self._future_len // 10))
+            outputs["turn_indicator_logit"] = self._compute_turn_indicator(
+                ego_trajectory, encoding_pooled
+            )
+        return outputs
 
     def _inference_flow_matching(
         self,
@@ -541,7 +794,7 @@ class Decoder(nn.Module):
         )
 
         if self._model_type == "flow_matching":
-            return self._inference_flow_matching(
+            output = self._inference_flow_matching(
                 encoding,
                 inputs,
                 current_states,
@@ -550,7 +803,7 @@ class Decoder(nn.Module):
                 sampled_trajectories,
             )
         elif self._model_type == "x_start":
-            return self._inference_x_start(
+            output = self._inference_x_start(
                 encoding,
                 inputs,
                 current_states,
@@ -560,6 +813,7 @@ class Decoder(nn.Module):
             )
         else:
             raise NotImplementedError(f"Unknown model type {self._model_type}")
+        return self._maybe_apply_dfp_inference(output, encoding, inputs, encoding_pooled)
 
     def forward(self, encoding, inputs):
         """
