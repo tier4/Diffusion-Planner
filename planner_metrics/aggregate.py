@@ -137,9 +137,10 @@ def compute_subscores_batch(
         time_weight_min=config.centerline_time_weight_min,
     )
     red_light_scores = compute_red_light_score_batch(ego_trajs, data, config)
-    ttc_scores = compute_ttc_score_batch(
+    ttc_result = compute_ttc_score_batch(
         ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
     )
+    ttc_scores = ttc_result["score"]
     (
         rb_crossing_gate,
         rb_near_pen,
@@ -198,6 +199,10 @@ def compute_subscores_batch(
         # raw subscores (signs as produced by the subscore functions)
         "safety": safety_scores,
         "ttc": ttc_scores,
+        "ttc_unsafe_at_t": ttc_result["unsafe_at_t"],
+        "ttc_first_unsafe_steps": ttc_result["first_unsafe_steps"],
+        "ttc_first_collision_steps": ttc_result["first_collision_steps"],
+        "ttc_min_clearance": ttc_result["min_clearance"],
         "progress": progress_scores,
         "comfort": smoothness_scores,
         "feasibility": feasibility_scores,

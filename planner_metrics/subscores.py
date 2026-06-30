@@ -223,58 +223,82 @@ def compute_ttc_score_batch(
     neighbor_futures: torch.Tensor,
     neighbor_shapes: torch.Tensor,
     neighbor_valid: torch.Tensor,
-) -> torch.Tensor:
+) -> dict[str, torch.Tensor | list[int | None]]:
     """Check if ego would collide with NPCs within TTC_HORIZON seconds.
 
-    For each trajectory timestep, extrapolates ego and NPC positions forward
-    by TTC_HORIZON using current velocity. If the extrapolated positions would
-    collide (using simplified distance check), the timestep is marked unsafe.
+    For each trajectory timestep, looks forward over the time-aligned ego/NPC
+    future poses and uses the same OBB signed-clearance primitive as moving
+    collision scoring. If any OBB overlap occurs within the horizon, that base
+    timestep is marked unsafe.
 
     Returns:
-        (N,) score: fraction of timesteps that are TTC-safe (1.0 = all safe).
+        dict with:
+          score: (N,) fraction of timesteps that are TTC-safe (1.0 = all safe).
+          unsafe_at_t: (N, T) bool, base timestep has a collision within horizon.
+          first_unsafe_steps: list[N] earliest unsafe base timestep.
+          first_collision_steps: list[N] earliest actual OBB collision timestep.
+          min_clearance: (N, T) min OBB clearance within the horizon at each base timestep.
     """
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
     N_nb = neighbor_futures.shape[0]
 
-    if N_nb == 0 or T < 3:
-        return torch.ones(N, device=device)
+    def _safe_empty() -> dict[str, torch.Tensor | list[int | None]]:
+        return {
+            "score": torch.ones(N, device=device),
+            "unsafe_at_t": torch.zeros(N, T, dtype=torch.bool, device=device),
+            "first_unsafe_steps": [None] * N,
+            "first_collision_steps": [None] * N,
+            "min_clearance": torch.full((N, T), 99.0, device=device),
+        }
 
-    # Ego velocity at each timestep
-    ego_vel = (ego_trajs[:, 1:, :2] - ego_trajs[:, :-1, :2]) / _TTC_DT  # (N, T-1, 2)
-    # Pad to match T
-    ego_vel = torch.cat([ego_vel, ego_vel[:, -1:]], dim=1)  # (N, T, 2)
+    if N_nb == 0 or T == 0:
+        return _safe_empty()
 
-    # NPC velocity
-    npc_vel = (
-        neighbor_futures[:, 1:, :2] - neighbor_futures[:, :-1, :2]
-    ) / _TTC_DT  # (N_nb, T-1, 2)
-    npc_vel = torch.cat([npc_vel, npc_vel[:, -1:]], dim=1)  # (N_nb, T, 2)
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_trajs,
+        ego_shape,
+        neighbor_futures,
+        neighbor_shapes,
+        neighbor_valid,
+    )  # (N, N_nb, T)
+    collision_at_t = (distances < 0).any(dim=1)  # (N, T)
+    min_dist_at_t = distances.min(dim=1).values  # (N, T)
 
-    # Extrapolate positions TTC_HORIZON seconds ahead
-    n_steps = int(_TTC_HORIZON / _TTC_DT)
-    ego_future_pos = ego_trajs[:, :, :2] + ego_vel * _TTC_HORIZON  # (N, T, 2)
-    npc_future_pos = neighbor_futures[:, :, :2] + npc_vel * _TTC_HORIZON  # (N_nb, T, 2)
-
-    # Simple distance check between ego future and NPC future positions
-    # Use center-to-center distance with safety margin (half ego length + half NPC length)
-    ego_half_len = float(ego_shape[1]) / 2 + 0.5  # + 0.5m margin
-    npc_half_lens = neighbor_shapes[:, 1] / 2 + 0.5  # (N_nb,)
-
-    # Distance: (N, N_nb, T)
-    diff = ego_future_pos.unsqueeze(1) - npc_future_pos.unsqueeze(0)  # (N, N_nb, T, 2)
-    dist = diff.norm(dim=-1)  # (N, N_nb, T)
-
-    # Collision threshold per NPC
-    threshold = (ego_half_len + npc_half_lens).unsqueeze(0).unsqueeze(-1)  # (1, N_nb, 1)
-
-    # Mask invalid NPCs
-    ttc_collision = (dist < threshold) & neighbor_valid.unsqueeze(0)  # (N, N_nb, T)
-    ttc_unsafe_at_t = ttc_collision.any(dim=1)  # (N, T) — unsafe if ANY NPC collision predicted
+    horizon_steps = max(0, int(round(_TTC_HORIZON / _TTC_DT)))
+    ttc_unsafe_at_t = torch.zeros(N, T, dtype=torch.bool, device=device)
+    ttc_min_clearance = torch.full((N, T), float("inf"), device=device)
+    for offset in range(horizon_steps + 1):
+        if offset >= T:
+            break
+        ttc_unsafe_at_t[:, : T - offset] |= collision_at_t[:, offset:]
+        ttc_min_clearance[:, : T - offset] = torch.minimum(
+            ttc_min_clearance[:, : T - offset],
+            min_dist_at_t[:, offset:],
+        )
+    ttc_min_clearance = ttc_min_clearance.masked_fill(torch.isinf(ttc_min_clearance), 99.0)
 
     # Score: fraction of safe timesteps
     ttc_score = 1.0 - ttc_unsafe_at_t.float().mean(dim=1)  # (N,)
-    return ttc_score
+
+    has_unsafe = ttc_unsafe_at_t.any(dim=1)
+    first_unsafe_t = ttc_unsafe_at_t.float().argmax(dim=1)
+    has_collision = collision_at_t.any(dim=1)
+    first_collision_t = collision_at_t.float().argmax(dim=1)
+
+    first_unsafe_steps: list[int | None] = []
+    first_collision_steps: list[int | None] = []
+    for i in range(N):
+        first_unsafe_steps.append(int(first_unsafe_t[i].item()) if has_unsafe[i] else None)
+        first_collision_steps.append(int(first_collision_t[i].item()) if has_collision[i] else None)
+
+    return {
+        "score": ttc_score,
+        "unsafe_at_t": ttc_unsafe_at_t,
+        "first_unsafe_steps": first_unsafe_steps,
+        "first_collision_steps": first_collision_steps,
+        "min_clearance": ttc_min_clearance,
+    }
 
 
 def compute_feasibility_score_batch(
