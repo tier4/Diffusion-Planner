@@ -101,6 +101,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             fps=args.closed_loop_fps,
             replan_interval=args.closed_loop_replan_interval,
             draw_every=args.closed_loop_draw_every,
+            neighbor_history_mode="recorded",
             verbose=False,
         )
     finally:
