@@ -65,6 +65,14 @@ def mean_ego_loss(loss_dict):
     return result
 
 
+def mean_epdms_metric(loss_dict):
+    result = {}
+    for key, val in loss_dict.items():
+        if key.startswith("epdms_"):
+            result[f"valid_epdms/{key.removeprefix('epdms_')}"] = val.float().mean().item()
+    return result
+
+
 def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
@@ -285,6 +293,7 @@ def model_training(args: TrainConfig):
             valid_loss_ego = valid_dict["avg_loss_ego"]
             valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
             mean_ego_loss_dict = mean_ego_loss(valid_dict)
+            mean_epdms_dict = mean_epdms_metric(valid_dict)
             valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lat_loss", 0.0
             )
@@ -315,6 +324,7 @@ def model_training(args: TrainConfig):
                     "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
                     "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                     **mean_ego_loss_dict,
+                    **mean_epdms_dict,
                 },
                 step=epoch + 1,
             )
@@ -326,6 +336,7 @@ def model_training(args: TrainConfig):
                 "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
             data_list.append(curr_data)
             df = pd.DataFrame(data_list)

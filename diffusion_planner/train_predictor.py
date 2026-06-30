@@ -106,6 +106,11 @@ def get_args(args_list=None):
     parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
     parser.add_argument("--neighbor_collision_margin", type=float, default=0.25)
 
+    parser.add_argument("--enable_epdms_eval", default=False, type=boolean)
+    parser.add_argument("--enable_pdms_eval", default=False, type=boolean)
+    parser.add_argument("--epdms_eval_use_agent_boxes", default=True, type=boolean)
+    parser.add_argument("--epdms_eval_use_road_border", default=True, type=boolean)
+
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 

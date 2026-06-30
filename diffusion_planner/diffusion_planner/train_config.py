@@ -94,6 +94,14 @@ class TrainConfig:
     coeff_neighbor_collision_loss: float = 0.0
     neighbor_collision_margin: float = 0.25
 
+    # Validation-only Autoware-aligned EPDMS metrics. Default-off to keep
+    # existing training and validation behavior unchanged unless explicitly enabled.
+    enable_epdms_eval: bool = False
+    # Backward-compatible alias for local scripts that used PDMS naming.
+    enable_pdms_eval: bool = False
+    epdms_eval_use_agent_boxes: bool = True
+    epdms_eval_use_road_border: bool = True
+
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
 
