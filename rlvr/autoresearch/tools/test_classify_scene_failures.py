@@ -9,6 +9,7 @@ from planner_metrics.aggregate import compute_subscores_batch, compute_subscores
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _DEFAULT_THRESHOLD_CONFIG,
     _apply_scene_thresholds,
+    _load_npz_data,
     _load_scene_thresholds,
     _merge_output_dirs,
     _prediction_path_for_scene,
@@ -219,6 +220,17 @@ def test_saved_prediction_trajectory_extracts_ego_from_agent_major_npz(tmp_path)
 
     assert ego.shape == (1, T, 4)
     assert torch.allclose(ego[0, :, 0], torch.full((T,), 1.5))
+
+
+def test_load_npz_data_preserves_nonzero_delay(tmp_path):
+    scene_path = tmp_path / "scene.npz"
+    np.savez(scene_path, ego_shape=np.array([2.79, 4.34, 1.70]), delay=np.array(4))
+
+    data = _load_npz_data(scene_path, torch.device("cpu"))
+
+    assert data["delay"].dtype == torch.long
+    assert data["delay"].shape == (1,)
+    assert int(data["delay"].item()) == 4
 
 
 def test_prediction_path_for_scene_supports_flat_and_mirrored_layouts(tmp_path):

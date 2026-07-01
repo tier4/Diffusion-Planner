@@ -62,9 +62,13 @@ def _stack_subscore_outputs(
         values = [scene_out[key] for scene_out in per_scene]
         first = values[0]
         if torch.is_tensor(first):
-            stacked[key] = torch.stack([v for v in values if torch.is_tensor(v)], dim=0)
+            if not all(torch.is_tensor(v) for v in values):
+                raise TypeError(f"mixed subscore output types for {key}")
+            stacked[key] = torch.stack(values, dim=0)
         elif isinstance(first, list):
-            stacked[key] = [list(v) for v in values if isinstance(v, list)]
+            if not all(isinstance(v, list) for v in values):
+                raise TypeError(f"mixed subscore output types for {key}")
+            stacked[key] = [list(v) for v in values]
         else:
             raise TypeError(f"unsupported subscore output type for {key}: {type(first)!r}")
     return stacked

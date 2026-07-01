@@ -13,20 +13,25 @@ model prediction, then emits:
 Usage:
     python -m rlvr.autoresearch.tools.classify_scene_failures \\
         --scenes scenes.json --config reward_config.json \\
+        --threshold_config rlvr/configs/scene_failure_thresholds.json \\
         --output_dir /tmp/scene_flags --trajectory gt
 
     python -m rlvr.autoresearch.tools.classify_scene_failures \\
         --scenes scenes.json --config reward_config.json \\
+        --threshold_config rlvr/configs/scene_failure_thresholds.json \\
         --output_dir /tmp/scene_flags_det --trajectory det \\
         --model_path /path/to/best_model.pth --batch_size 32
 
     python -m rlvr.autoresearch.tools.classify_scene_failures \\
         --scenes scenes.json --config reward_config.json \\
+        --threshold_config rlvr/configs/scene_failure_thresholds.json \\
         --output_dir /tmp/scene_flags_saved --trajectory saved_pred \\
         --predictions_dir /path/to/validation_result/predictions --batch_size 32
 
     python -m rlvr.autoresearch.tools.classify_scene_failures \\
-        --config reward_config.json --output_dir /tmp/scene_flags_saved \\
+        --config reward_config.json \\
+        --threshold_config rlvr/configs/scene_failure_thresholds.json \\
+        --output_dir /tmp/scene_flags_saved \\
         --trajectory saved_pred \\
         --predictions_dir /path/to/validation_result/predictions \\
         --source_scene_root /path/to/dataset_root --batch_size 32
@@ -217,10 +222,13 @@ def _load_npz_data(npz_path: str | Path, device: torch.device) -> dict[str, torc
     with np.load(str(npz_path)) as loaded:
         data: dict[str, torch.Tensor] = {}
         for key, value in loaded.items():
-            if key in {"map_name", "token", "delay", "origin"}:
+            if key in {"map_name", "token", "origin"}:
                 continue
             array = np.asarray(value)
             if array.dtype.kind in ("U", "S", "O"):
+                continue
+            if key == "delay":
+                data[key] = torch.as_tensor(array.reshape(-1), dtype=torch.long, device=device)
                 continue
             if array.dtype.kind == "u" and array.dtype != np.uint8:
                 array = array.astype(np.int64)
@@ -1140,7 +1148,6 @@ def main() -> None:
         return
 
     scene_paths: list[str] = []
-    scene_prediction_pairs: list[tuple[str, Path]] | None = None
     discovered_prediction_count: int | None = None
     if args.trajectory == "saved_pred" and args.scenes is None:
         if not args.predictions_dir:
@@ -1173,10 +1180,6 @@ def main() -> None:
         scene_paths = [str(row["scene_path"]) for row in rows] + [
             str(err.get("scene_path", "")) for err in errors
         ]
-    elif scene_prediction_pairs is not None:
-        rows, errors = _classify_saved_prediction_pairs(
-            scene_prediction_pairs, config, args, device
-        )
     else:
         rows, errors = _classify_saved_predictions(scene_paths, config, args, device)
 

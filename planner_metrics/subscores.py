@@ -881,7 +881,19 @@ def compute_road_border_penalty(
     config: RewardConfig | None = None,
     *,
     return_closest_points: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor, torch.Tensor]:
+) -> (
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor, torch.Tensor]
+    | tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        list[int | None],
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]
+):
     """Compute per-trajectory road border penalties using ego perimeter sampling.
 
     Uses 80 points around the ego rectangle (20 per side) and checks min
