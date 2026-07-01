@@ -229,7 +229,14 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
     delay = 0
 
-    for inputs in tqdm(val_loader, desc="validate", disable=ddp.get_rank() != 0):
+    # Progress is driven by the SLOWEST rank: every `progress_sync_every` batches all
+    # ranks rendezvous on an all-reduce(MIN) of their completed-batch count and rank 0
+    # displays that minimum, so the bar reaches 100% only when every rank is done. The
+    # rendezvous also keeps a fast rank from racing far ahead (bounding memory imbalance).
+    progress_sync_every = 20
+    total_batches = len(val_loader)
+    pbar = tqdm(total=total_batches, desc="validate (slowest rank)", disable=ddp.get_rank() != 0)
+    for step, inputs in enumerate(val_loader):
         inputs = {key: value.to(device) for key, value in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
 
@@ -351,6 +358,13 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             for key, val in epdms_dict.items():
                 total_result_dict[f"epdms_{key}"].append(val.detach().cpu())
 
+        if (step + 1) % progress_sync_every == 0 or (step + 1) == total_batches:
+            min_done = int(ddp.all_reduce_min(step + 1, device))
+            if ddp.get_rank() == 0:
+                pbar.n = min_done
+                pbar.refresh()
+    pbar.close()
+
     avg_loss_ego = total_loss_ego / total_samples_ego
     avg_loss_neighbor = total_loss_neighbor / max(total_samples_neighbor, 1)
     loss_ego = torch.cat(loss_ego_list, dim=0)
@@ -378,5 +392,83 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         "turn_indicator_accuracy": turn_indicator_accuracy,
         "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
         "turn_indicator_change_total": turn_indicator_change_total,
+        # Raw per-rank accumulators, kept so callers that run validation on ALL ranks
+        # (DistributedSampler shards) can all-reduce them into globally-correct metrics
+        # via aggregate_valid_metrics(). validate_model itself stays collective-free so
+        # it remains safe to call on rank 0 only (as train.py / grpo do at some sites).
+        "_loss_ego_sum": total_loss_ego,
+        "_samples_ego": total_samples_ego,
+        "_loss_neighbor_sum": total_loss_neighbor,
+        "_samples_neighbor": total_samples_neighbor,
+        "_turn_correct": turn_indicator_correct,
+        "_turn_total": turn_indicator_total,
+        "_turn_change_correct": turn_indicator_change_correct,
         **total_result_dict,
+    }
+
+
+def aggregate_valid_metrics(valid_dict, device):
+    """All-reduce the scalar validation metrics across DDP ranks.
+
+    COLLECTIVE: must be called by every rank that participated in the matching
+    ``validate_model`` call. Returns a dict of globally-aggregated scalars; the
+    per-sample tensors in ``valid_dict`` are left untouched (callers still use them
+    to save per-data-point files). In single-process runs this is a no-op pass-through.
+
+    Note: with ``DistributedSampler`` the dataset is padded to be divisible by the world
+    size, so up to ``world_size - 1`` samples are duplicated across ranks. These averages
+    therefore carry a negligible padding bias; the per-data-point files are exact.
+    """
+    loss_ego_sum = ddp.all_reduce_sum(valid_dict["_loss_ego_sum"], device)
+    samples_ego = ddp.all_reduce_sum(valid_dict["_samples_ego"], device)
+    loss_nei_sum = ddp.all_reduce_sum(valid_dict["_loss_neighbor_sum"], device)
+    samples_nei = ddp.all_reduce_sum(valid_dict["_samples_neighbor"], device)
+    turn_correct = ddp.all_reduce_sum(valid_dict["_turn_correct"], device)
+    turn_total = ddp.all_reduce_sum(valid_dict["_turn_total"], device)
+    turn_change_correct = ddp.all_reduce_sum(valid_dict["_turn_change_correct"], device)
+    turn_change_total = ddp.all_reduce_sum(valid_dict["turn_indicator_change_total"], device)
+
+    ego_means = {}
+    for key, val in valid_dict.items():
+        if key.startswith("ego_"):
+            local_sum = ddp.all_reduce_sum(val.sum().item(), device)
+            local_cnt = ddp.all_reduce_sum(val.numel(), device)
+            ego_means[key] = local_sum / max(local_cnt, 1)
+
+    epdms_means = {}
+    for key, val in valid_dict.items():
+        if not key.startswith("epdms_"):
+            continue
+        metric = key.removeprefix("epdms_")
+        tensor = val.float()
+        if metric.endswith("_available"):
+            local_sum = ddp.all_reduce_sum(tensor.sum().item(), device)
+            local_cnt = ddp.all_reduce_sum(tensor.numel(), device)
+            epdms_means[metric] = local_sum / max(local_cnt, 1)
+            continue
+
+        available = valid_dict.get(f"{key}_available")
+        if available is None:
+            local_sum = ddp.all_reduce_sum(torch.nan_to_num(tensor).sum().item(), device)
+            local_cnt = ddp.all_reduce_sum(tensor.numel(), device)
+            epdms_means[metric] = local_sum / max(local_cnt, 1)
+            continue
+
+        mask = available.float() > 0.5
+        local_sum = ddp.all_reduce_sum(tensor[mask].sum().item() if mask.any() else 0.0, device)
+        local_cnt = ddp.all_reduce_sum(mask.sum().item(), device)
+        local_total = ddp.all_reduce_sum(mask.numel(), device)
+        epdms_means[f"{metric}_coverage"] = local_cnt / max(local_total, 1)
+        epdms_means[metric] = local_sum / local_cnt if local_cnt > 0 else float("nan")
+
+    return {
+        "avg_loss_ego": loss_ego_sum / max(samples_ego, 1),
+        "avg_loss_neighbor": loss_nei_sum / max(samples_nei, 1),
+        "turn_indicator_accuracy": (turn_correct / turn_total) if turn_total > 0 else 0.0,
+        "turn_indicator_change_accuracy": (
+            (turn_change_correct / turn_change_total) if turn_change_total > 0 else 0.0
+        ),
+        "turn_indicator_change_total": int(turn_change_total),
+        "ego_means": ego_means,
+        "epdms_means": epdms_means,
     }

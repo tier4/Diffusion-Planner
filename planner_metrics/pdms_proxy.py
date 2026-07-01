@@ -180,7 +180,9 @@ def proxy_epdms(agent: dict[str, torch.Tensor]) -> ProxyEpdms:
         available_count = available_count + av
 
     available = weighted_den > 0.0
-    weighted = torch.where(available, weighted_num / torch.clamp_min(weighted_den, 1.0), torch.zeros_like(ref))
+    weighted = torch.where(
+        available, weighted_num / torch.clamp_min(weighted_den, 1.0), torch.zeros_like(ref)
+    )
     total = mult * weighted
     availability_ratio = available_count / total_term_count
     return ProxyEpdms(

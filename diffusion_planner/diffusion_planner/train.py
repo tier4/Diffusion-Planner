@@ -24,7 +24,7 @@ from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
-from diffusion_planner.validate_model import validate_model
+from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
 
 
 def find_upward(start_file: str, target_name: str) -> Path:
@@ -228,20 +228,19 @@ def model_training(args: TrainConfig):
         drop_last=True,
     )
 
-    # Validation is only performed on rank 0 with full dataset
-    # Other ranks will get a dummy loader (not used)
-    if global_rank == 0:
-        valid_loader = DataLoader(
-            valid_set,
-            batch_size=batch_size // 4,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=False,
-            shuffle=False,
-        )
-    else:
-        # Dummy loader for non-main processes (won't be used)
-        valid_loader = None
+    # Validation is sharded across all ranks (DistributedSampler); each rank computes
+    # metrics on its shard and they are all-reduced via aggregate_valid_metrics.
+    valid_sampler = DistributedSampler(
+        valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
+    )
+    valid_loader = DataLoader(
+        valid_set,
+        sampler=valid_sampler,
+        batch_size=batch_size // ddp.get_world_size(),
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False,
+    )
 
     if global_rank == 0:
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
@@ -322,20 +321,22 @@ def model_training(args: TrainConfig):
     data_list = []
     best_loss = float("inf")
 
+    valid_dict = validate_model(diffusion_planner, valid_loader, args)
+    agg = aggregate_valid_metrics(valid_dict, args.device)
     if global_rank == 0:
-        valid_dict = validate_model(diffusion_planner, valid_loader, args)
-        valid_loss_ego = valid_dict["avg_loss_ego"]
-        valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
-        mean_ego_loss_dict = mean_ego_loss(valid_dict)
+        valid_loss_ego = agg["avg_loss_ego"]
+        valid_loss_neighbor = agg["avg_loss_neighbor"]
+        mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+        mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
         valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lat_loss", 0.0
         )
         valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lon_loss", 0.0
         )
-        turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
-        turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
-        turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
+        turn_indicator_accuracy = agg["turn_indicator_accuracy"]
+        turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
+        turn_indicator_change_total = agg["turn_indicator_change_total"]
         print(
             f"{valid_loss_ego=:.3f}\n"
             f"{valid_loss_neighbor=:.3f}\n"
@@ -370,21 +371,22 @@ def model_training(args: TrainConfig):
             train_loader, diffusion_planner, optimizer, args, model_ema, aug
         )
 
+        valid_dict = validate_model(diffusion_planner, valid_loader, args)
+        agg = aggregate_valid_metrics(valid_dict, args.device)
         if global_rank == 0:
-            valid_dict = validate_model(diffusion_planner, valid_loader, args)
-            valid_loss_ego = valid_dict["avg_loss_ego"]
-            valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
-            mean_ego_loss_dict = mean_ego_loss(valid_dict)
-            mean_epdms_dict = mean_epdms_metric(valid_dict)
+            valid_loss_ego = agg["avg_loss_ego"]
+            valid_loss_neighbor = agg["avg_loss_neighbor"]
+            mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+            mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
             valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lat_loss", 0.0
             )
             valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lon_loss", 0.0
             )
-            turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
-            turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
-            turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
+            turn_indicator_accuracy = agg["turn_indicator_accuracy"]
+            turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
+            turn_indicator_change_total = agg["turn_indicator_change_total"]
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"
                 f"{valid_loss_ego=:.3f}\n"
