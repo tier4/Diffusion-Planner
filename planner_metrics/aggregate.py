@@ -19,6 +19,7 @@ import torch
 
 from planner_metrics.config import RewardConfig
 from planner_metrics.subscores import (
+    ROAD_BORDER_NO_DATA_DISTANCE_M,
     compute_centerline_score_batch,
     compute_feasibility_score_batch,
     compute_kinematic_gate,
@@ -33,6 +34,12 @@ from planner_metrics.subscores import (
 )
 
 __all__ = ["compute_subscores_batch", "compute_subscores_scene_batch"]
+
+_NEIGHBOR_COORD_EPS_M = 1e-6
+_NEIGHBOR_SHAPE_EPS_M = 1e-3
+_UNKNOWN_NEIGHBOR_SHAPE_M = 2.0
+_DEFAULT_NEIGHBOR_WIDTH_M = 2.0
+_DEFAULT_NEIGHBOR_LENGTH_M = 4.5
 
 
 def _slice_scene_data(
@@ -127,10 +134,12 @@ def compute_subscores_batch(
                 "with the updated tensor_converter / _backfill_neighbor_futures."
             )
         if nf.shape[1] >= T and nf.shape[2] >= 4:
-            slot_valid = nf_data[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6
+            slot_valid = nf_data[:, :, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
             if slot_valid.any():
                 neighbor_futures = nf_data[slot_valid]
-                neighbor_valid = neighbor_futures[:, :, :2].abs().sum(dim=-1) > 1e-6
+                neighbor_valid = (
+                    neighbor_futures[:, :, :2].abs().sum(dim=-1) > _NEIGHBOR_COORD_EPS_M
+                )
 
                 if "neighbor_agents_past" in data:
                     nap = data["neighbor_agents_past"]
@@ -141,14 +150,23 @@ def compute_subscores_batch(
                         neighbor_shapes = ns[:, [6, 7]]  # width, length
                     else:
                         neighbor_shapes = torch.full(
-                            (neighbor_futures.shape[0], 2), 2.0, device=device
+                            (neighbor_futures.shape[0], 2),
+                            _UNKNOWN_NEIGHBOR_SHAPE_M,
+                            device=device,
                         )
                 else:
-                    neighbor_shapes = torch.full((neighbor_futures.shape[0], 2), 2.0, device=device)
+                    neighbor_shapes = torch.full(
+                        (neighbor_futures.shape[0], 2),
+                        _UNKNOWN_NEIGHBOR_SHAPE_M,
+                        device=device,
+                    )
 
-    zero_shapes = neighbor_shapes.abs().sum(dim=-1) < 1e-3
+    zero_shapes = neighbor_shapes.abs().sum(dim=-1) < _NEIGHBOR_SHAPE_EPS_M
     if zero_shapes.any():
-        neighbor_shapes[zero_shapes] = torch.tensor([2.0, 4.5], device=device)
+        neighbor_shapes[zero_shapes] = torch.tensor(
+            [_DEFAULT_NEIGHBOR_WIDTH_M, _DEFAULT_NEIGHBOR_LENGTH_M],
+            device=device,
+        )
 
     # --- Goal pose ---
     goal_pose = torch.zeros(4, device=device)
@@ -231,7 +249,7 @@ def compute_subscores_batch(
         rb_min_dist = rb_per_ts_min[:, 1:].min(dim=1).values
         sc_min_dist = sc_per_ts_min[:, 1:].min(dim=1).values
     else:
-        rb_min_dist = torch.full((N,), 99.0, device=device)
+        rb_min_dist = torch.full((N,), ROAD_BORDER_NO_DATA_DISTANCE_M, device=device)
         sc_min_dist = torch.full((N,), 99.0, device=device)
 
     return {

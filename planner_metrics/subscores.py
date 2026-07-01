@@ -19,6 +19,10 @@ from planner_metrics.collision_geometry import (
 from planner_metrics.config import RewardConfig
 from planner_metrics.geometry import *  # noqa: F401,F403  geometry primitives
 
+ROAD_BORDER_NO_DATA_DISTANCE_M = float("inf")
+_ROAD_BORDER_SEGMENT_LEN_EPS = 1e-9
+_ROAD_BORDER_CLOSEST_POINT_CHUNK_SIZE = 32768
+
 
 @torch.no_grad()
 def compute_ego_neighbor_signed_clearance(
@@ -932,7 +936,7 @@ def compute_road_border_penalty(
         torch.zeros(N, device=device),
         no_crossing_steps,
         torch.zeros(N, device=device),
-        torch.full((N, T), 99.0, device=device),
+        torch.full((N, T), ROAD_BORDER_NO_DATA_DISTANCE_M, device=device),
     )
     if return_closest_points:
         _safe_return = (
@@ -1036,8 +1040,8 @@ def compute_road_border_penalty(
         # and return the closest pair for the winning ego perimeter sample.
         closest_border_flat = torch.empty_like(world_flat)
         seg = seg_p2 - seg_p1
-        seg_len2 = (seg * seg).sum(dim=1).clamp_min(1e-9)
-        chunk = 32768
+        seg_len2 = (seg * seg).sum(dim=1).clamp_min(_ROAD_BORDER_SEGMENT_LEN_EPS)
+        chunk = _ROAD_BORDER_CLOSEST_POINT_CHUNK_SIZE
         for start in range(0, world_flat.shape[0], chunk):
             pts = world_flat[start : start + chunk]
             rel = pts[:, None, :] - seg_p1[None, :, :]
@@ -1716,6 +1720,7 @@ __all__ = [
     "_TL_NONE",
     "_RED_LIGHT_PROXIMITY",
     "_RED_LIGHT_HEADING_THRESH",
+    "ROAD_BORDER_NO_DATA_DISTANCE_M",
     "compute_red_light_score_batch",
     "compute_road_border_penalty",
     "compute_static_collision_penalty",

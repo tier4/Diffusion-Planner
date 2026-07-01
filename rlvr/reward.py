@@ -41,7 +41,7 @@ class RewardBreakdown:
     rb_crossing: bool = False
     rb_near_penalty: float = 0.0  # near-zone penalty (frac or survival-style depending on mode)
     rb_wide_penalty: float = 0.0  # wide-zone penalty (frac or survival-style depending on mode)
-    rb_min_dist: float = 99.0  # min ego-perimeter-to-border distance (metres, skip t=0)
+    rb_min_dist: float = ROAD_BORDER_NO_DATA_DISTANCE_M  # min ego-border distance (m, skip t=0)
     lane_crossing: bool = False
     lane_near_frac: float = 0.0
     lane_wide_frac: float = 0.0

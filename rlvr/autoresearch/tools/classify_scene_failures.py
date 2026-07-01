@@ -80,6 +80,14 @@ _REQUIRED_THRESHOLD_FIELDS = (
     "sc_cross_thresh",
     "rb_cross_thresh",
 )
+_UNKNOWN_NEIGHBOR_SHAPE_M = 2.0
+_DEFAULT_NEIGHBOR_WIDTH_M = 2.0
+_DEFAULT_NEIGHBOR_LENGTH_M = 4.5
+_NEIGHBOR_COORD_EPS_M = 1e-6
+_NEIGHBOR_SHAPE_EPS_M = 1e-3
+_NO_MOVING_NEIGHBOR_DISTANCE_M = float("inf")
+_THRESHOLD_MATCH_TOL = 1e-9
+_MISSING_SOURCE_SAMPLE_LIMIT = 5
 
 
 def _load_scene_thresholds(path: str | Path) -> dict[str, float]:
@@ -117,7 +125,9 @@ def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
 
 
 def _thresholds_match(a: dict[str, Any], b: dict[str, float]) -> bool:
-    return all(abs(float(a.get(k, float("nan"))) - float(v)) < 1e-9 for k, v in b.items())
+    return all(
+        abs(float(a.get(k, float("nan"))) - float(v)) < _THRESHOLD_MATCH_TOL for k, v in b.items()
+    )
 
 
 def _load_scene_paths(path: str | Path) -> list[str]:
@@ -172,8 +182,8 @@ def _resolve_source_scene_for_prediction(
         if candidate.exists():
             return candidate
 
-    sample = ", ".join(str(p) for p in checked[:5])
-    if len(checked) > 5:
+    sample = ", ".join(str(p) for p in checked[:_MISSING_SOURCE_SAMPLE_LIMIT])
+    if len(checked) > _MISSING_SOURCE_SAMPLE_LIMIT:
         sample += ", ..."
     raise FileNotFoundError(
         f"source scene not found for prediction {prediction_path}; checked {sample}"
@@ -406,12 +416,12 @@ def _neighbor_inputs(
         )
 
     nf_data = _future_heading_to_cos_sin(nf[:, :T])
-    slot_valid = nf_data[:, :, :2].abs().sum(dim=(1, 2)) > 1e-6
+    slot_valid = nf_data[:, :, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
     if not slot_valid.any():
         return neighbor_futures, neighbor_shapes, neighbor_valid
 
     neighbor_futures = nf_data[slot_valid].to(device)
-    neighbor_valid = neighbor_futures[:, :, :2].abs().sum(dim=-1) > 1e-6
+    neighbor_valid = neighbor_futures[:, :, :2].abs().sum(dim=-1) > _NEIGHBOR_COORD_EPS_M
 
     if "neighbor_agents_past" in data:
         nap = data["neighbor_agents_past"]
@@ -421,14 +431,25 @@ def _neighbor_inputs(
         if ns.shape[-1] >= 8:
             neighbor_shapes = ns[:, [6, 7]].to(device)  # width, length
         else:
-            neighbor_shapes = torch.full((neighbor_futures.shape[0], 2), 2.0, device=device)
+            neighbor_shapes = torch.full(
+                (neighbor_futures.shape[0], 2),
+                _UNKNOWN_NEIGHBOR_SHAPE_M,
+                device=device,
+            )
     else:
-        neighbor_shapes = torch.full((neighbor_futures.shape[0], 2), 2.0, device=device)
+        neighbor_shapes = torch.full(
+            (neighbor_futures.shape[0], 2),
+            _UNKNOWN_NEIGHBOR_SHAPE_M,
+            device=device,
+        )
 
-    zero_shapes = neighbor_shapes.abs().sum(dim=-1) < 1e-3
+    zero_shapes = neighbor_shapes.abs().sum(dim=-1) < _NEIGHBOR_SHAPE_EPS_M
     if zero_shapes.any():
         neighbor_shapes = neighbor_shapes.clone()
-        neighbor_shapes[zero_shapes] = torch.tensor([2.0, 4.5], device=device)
+        neighbor_shapes[zero_shapes] = torch.tensor(
+            [_DEFAULT_NEIGHBOR_WIDTH_M, _DEFAULT_NEIGHBOR_LENGTH_M],
+            device=device,
+        )
 
     return neighbor_futures, neighbor_shapes, neighbor_valid
 
@@ -488,7 +509,7 @@ def _moving_diagnostics(
     empty = {
         "moving_neighbor_count": moving_count,
         "stopped_neighbor_count": int(stopped_mask.sum().item()),
-        "moving_min_dist": 99.0,
+        "moving_min_dist": _NO_MOVING_NEIGHBOR_DISTANCE_M,
         "moving_argmin_neighbor": None,
         "moving_argmin_t": None,
         "moving_collision_step": None,

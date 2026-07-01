@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from rlvr.reward import (
+    ROAD_BORDER_NO_DATA_DISTANCE_M,
     RewardBreakdown,
     RewardConfig,
     compute_feasibility_score_batch,
@@ -411,7 +412,8 @@ def test_road_border_closest_points_no_data_safe_defaults():
     assert near_frac[0].item() == 0.0
     assert wide_frac[0].item() == 0.0
     assert cont_penalty[0].item() == 0.0
-    assert torch.all(per_ts_min == 99.0)
+    assert torch.all(torch.isinf(per_ts_min))
+    assert torch.isinf(torch.tensor(ROAD_BORDER_NO_DATA_DISTANCE_M))
     assert torch.all(ego_pts == 0.0)
     assert torch.all(border_pts == 0.0)
 

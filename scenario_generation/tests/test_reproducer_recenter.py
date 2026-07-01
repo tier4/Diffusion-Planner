@@ -84,6 +84,7 @@ def test_ego_border_distance_handles_empty_line_strings():
 
 
 def test_ego_border_distance_keeps_large_real_clearance():
+    far_border_y_m = 150.0
     ego = SimpleNamespace(
         current_position=np.array([0.0, 0.0], dtype=np.float32),
         current_heading=0.0,
@@ -92,12 +93,13 @@ def test_ego_border_distance_keeps_large_real_clearance():
         width=2.0,
     )
     line_strings = np.zeros((1, 20, 4), dtype=np.float32)
-    line_strings[0, 0, :2] = [-10.0, 150.0]
-    line_strings[0, 1, :2] = [10.0, 150.0]
+    line_strings[0, 0, :2] = [-10.0, far_border_y_m]
+    line_strings[0, 1, :2] = [10.0, far_border_y_m]
     line_strings[0, :2, 3] = 1.0
     map_data = SimpleNamespace(line_strings=line_strings)
 
     rb_info = _ego_border_distance(ego, map_data)
 
     assert rb_info is not None
-    assert rb_info[2] > 98.0
+    expected_clearance_m = far_border_y_m - ego.width / 2
+    assert np.isclose(rb_info[2], expected_clearance_m)

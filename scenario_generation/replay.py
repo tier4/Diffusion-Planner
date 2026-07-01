@@ -1172,6 +1172,12 @@ _ROAD_BORDER_COLOR = "#dd2222"
 _EGO_COLOR = "#3366cc"
 _ROUTE_COLOR = "#3366cc"
 _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
+_ROAD_BORDER_FLAG_THRESH = 0.5
+_ROAD_BORDER_COORD_EPS_M = 1e-3
+_DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M = 1e-6
+_DISTANCE_ENDPOINT_MARKER_SIZE = 5
+_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH = 0.7
+_DISTANCE_LABEL_FALLBACK_NORMAL = (0.0, 1.0)
 
 # Draw an ego ↔ stopped-NPC closest-pair line on each PNG when clearance
 # drops below this (mirrors the road-border distance viz). 2 m matches the
@@ -1442,11 +1448,13 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
     if line_strings.ndim != 3 or line_strings.shape[-1] < 4 or line_strings.size == 0:
         return None
     border_flag = line_strings[..., 3]
-    if border_flag.size == 0 or border_flag.max() <= 0.5:
+    if border_flag.size == 0 or border_flag.max() <= _ROAD_BORDER_FLAG_THRESH:
         return None
     border_xy = line_strings[..., :2]
-    has_coords = np.linalg.norm(border_xy, axis=-1) > 1e-3
-    valid_pair = (border_flag[:, :-1] > 0.5) & (border_flag[:, 1:] > 0.5)
+    has_coords = np.linalg.norm(border_xy, axis=-1) > _ROAD_BORDER_COORD_EPS_M
+    valid_pair = (border_flag[:, :-1] > _ROAD_BORDER_FLAG_THRESH) & (
+        border_flag[:, 1:] > _ROAD_BORDER_FLAG_THRESH
+    )
     valid_pair &= has_coords[:, :-1] & has_coords[:, 1:]
     if not valid_pair.any():
         return None
@@ -1476,7 +1484,7 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
         return_closest_points=True,
     )
     rb_dist = float(per_ts_min[0, 0].item())
-    if rb_dist == 99.0:
+    if not math.isfinite(rb_dist):
         return None
     return ego_pts[0, 0].numpy(), border_pts[0, 0].numpy(), rb_dist
 
@@ -1752,18 +1760,18 @@ def save_step_figure(
             [rb_ego_pt[1], rb_border_pt[1]],
             "o",
             color="black",
-            ms=5,
+            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
             zorder=30,
             markeredgecolor="white",
-            markeredgewidth=0.7,
+            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
         )
         mx, my = (rb_ego_pt[0] + rb_border_pt[0]) / 2, (rb_ego_pt[1] + rb_border_pt[1]) / 2
         dx, dy = rb_border_pt[0] - rb_ego_pt[0], rb_border_pt[1] - rb_ego_pt[1]
         seg_len = math.hypot(dx, dy)
-        if seg_len > 1e-6:
+        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
             nx, ny = -dy / seg_len, dx / seg_len
         else:
-            nx, ny = 0.0, 1.0
+            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
         ax.annotate(
             f"rb {rb_dist:.2f}m",
             xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
@@ -1794,20 +1802,20 @@ def save_step_figure(
             [pt_e[1], pt_n[1]],
             "o",
             color="#cc0000",
-            ms=5,
+            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
             zorder=30,
             markeredgecolor="white",
-            markeredgewidth=0.7,
+            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
         )
         # Offset the label perpendicular to the line so it doesn't sit on
         # top of it. The offset is configurable in metres.
         mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
         dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
         seg_len = math.hypot(dx, dy)
-        if seg_len > 1e-6:
+        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
             nx, ny = -dy / seg_len, dx / seg_len
         else:
-            nx, ny = 0.0, 1.0
+            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
         ax.annotate(
             f"{sc_d:.2f} m",
             xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
@@ -1837,18 +1845,18 @@ def save_step_figure(
             [pt_e[1], pt_n[1]],
             "o",
             color="#0055cc",
-            ms=5,
+            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
             zorder=30,
             markeredgecolor="white",
-            markeredgewidth=0.7,
+            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
         )
         mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
         dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
         seg_len = math.hypot(dx, dy)
-        if seg_len > 1e-6:
+        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
             nx, ny = -dy / seg_len, dx / seg_len
         else:
-            nx, ny = 0.0, 1.0
+            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
         ax.annotate(
             f"{mv_d:.2f} m",
             xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
