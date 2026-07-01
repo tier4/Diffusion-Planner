@@ -579,9 +579,7 @@ def _sat_intersects_one_to_many(
     ego = np.asarray(ego, dtype=np.float64).reshape(4, 2)
     ego_axes = np.stack([ego[0] - ego[1], ego[1] - ego[2]], axis=0)
     box_axes = np.stack([boxes[:, 0] - boxes[:, 1], boxes[:, 1] - boxes[:, 2]], axis=1)
-    axes = np.concatenate(
-        [np.broadcast_to(ego_axes, (boxes.shape[0], 2, 2)), box_axes], axis=1
-    )
+    axes = np.concatenate([np.broadcast_to(ego_axes, (boxes.shape[0], 2, 2)), box_axes], axis=1)
     axes = axes / np.clip(np.linalg.norm(axes, axis=-1, keepdims=True), 1.0e-12, None)
 
     ego_proj = np.einsum("nkd,vd->nkv", axes, ego)

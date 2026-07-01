@@ -406,6 +406,7 @@ def pdms_proxy(
         dims = np.asarray(ego_dims, dtype=np.float64)
         if dims.ndim == 1:
             dims = np.broadcast_to(dims, (pred_n.shape[0], dims.shape[0]))
+
         def _dac_one(i: int) -> float:
             if dac_arr is not None and not np.isnan(dac_arr[i]):
                 return float(dac_arr[i])
@@ -482,6 +483,7 @@ def pdms_proxy(
         dims = np.asarray(ego_dims, dtype=np.float64)
         if dims.ndim == 1:
             dims = np.broadcast_to(dims, (pred_n.shape[0], dims.shape[0]))
+
         def _collision_one(i: int) -> tuple[float, float]:
             if dims.shape[1] == 3:
                 offset, length, width = (
