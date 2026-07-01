@@ -97,8 +97,9 @@ class TrainConfig:
     neighbor_collision_margin_pedestrian: float = 1.0
     neighbor_collision_margin_bicycle: float = 0.5
 
-    # Validation-only Autoware-aligned EPDMS metrics. Default-off to keep
-    # existing training and validation behavior unchanged unless explicitly enabled.
+    # Validation-only Autoware-aligned EPDMS metrics. train_predictor.py reads
+    # these defaults when constructing argparse, so this remains the single
+    # default source while keeping existing behavior unchanged unless explicitly enabled.
     enable_epdms_eval: bool = False
     # Backward-compatible alias for local scripts that used PDMS naming.
     enable_pdms_eval: bool = False

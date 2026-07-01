@@ -17,6 +17,10 @@ def boolean(v):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
+def _train_config_default(name):
+    return TrainConfig.__dataclass_fields__[name].default
+
+
 def get_args(args_list=None):
     parser = argparse.ArgumentParser(description="Training")
     parser.add_argument("--exp_name", type=str, required=True)
@@ -124,10 +128,26 @@ def get_args(args_list=None):
         help="per-side neighbor box inflation [m] for bicycles",
     )
 
-    parser.add_argument("--enable_epdms_eval", default=False, type=boolean)
-    parser.add_argument("--enable_pdms_eval", default=False, type=boolean)
-    parser.add_argument("--epdms_eval_use_agent_boxes", default=True, type=boolean)
-    parser.add_argument("--epdms_eval_use_road_border", default=True, type=boolean)
+    parser.add_argument(
+        "--enable_epdms_eval",
+        default=_train_config_default("enable_epdms_eval"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--enable_pdms_eval",
+        default=_train_config_default("enable_pdms_eval"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--epdms_eval_use_agent_boxes",
+        default=_train_config_default("epdms_eval_use_agent_boxes"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--epdms_eval_use_road_border",
+        default=_train_config_default("epdms_eval_use_road_border"),
+        type=boolean,
+    )
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
