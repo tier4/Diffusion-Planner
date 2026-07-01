@@ -11,7 +11,5 @@ def data_path_to_rel(path) -> Path:
     ranks/GPUs never collide.
     """
     parts = Path(path).parts
-    split_idx = next(
-        (i for i, p in enumerate(parts) if p in ("valid", "train")), len(parts) - 4
-    )
+    split_idx = next((i for i, p in enumerate(parts) if p in ("valid", "train")), len(parts) - 4)
     return Path(*parts[split_idx - 1 :]).with_suffix("")  # drop .npz

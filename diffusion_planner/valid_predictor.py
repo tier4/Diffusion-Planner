@@ -156,7 +156,9 @@ def run_validation(valid_cfg: ValidConfig):
         else:
             print("turn_indicator_change_accuracy=0.0000 (num_samples=0)")
         if "ego_neighbor_margin_loss" in agg["ego_means"]:
-            print(f"ego_neighbor_margin_loss_mean={agg['ego_means']['ego_neighbor_margin_loss']:.4f}")
+            print(
+                f"ego_neighbor_margin_loss_mean={agg['ego_means']['ego_neighbor_margin_loss']:.4f}"
+            )
         if "ego_road_border_loss" in agg["ego_means"]:
             print(f"ego_road_border_loss_mean={agg['ego_means']['ego_road_border_loss']:.4f}")
 
