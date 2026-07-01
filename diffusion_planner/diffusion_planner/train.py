@@ -66,6 +66,26 @@ def mean_ego_loss(loss_dict):
     return result
 
 
+def mean_epdms_metric(loss_dict):
+    result = {}
+    for key, val in loss_dict.items():
+        if not key.startswith("epdms_"):
+            continue
+        metric = key.removeprefix("epdms_")
+        tensor = val.float()
+        if metric.endswith("_available"):
+            result[f"valid_epdms/{metric}"] = tensor.mean().item()
+            continue
+        available = loss_dict.get(f"{key}_available")
+        if available is None:
+            result[f"valid_epdms/{metric}"] = tensor.mean().item()
+            continue
+        mask = available.float() > 0.5
+        result[f"valid_epdms/{metric}_coverage"] = mask.float().mean().item()
+        result[f"valid_epdms/{metric}"] = tensor[mask].mean().item() if mask.any() else float("nan")
+    return result
+
+
 def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
 
@@ -307,6 +327,7 @@ def model_training(args: TrainConfig):
         valid_loss_ego = agg["avg_loss_ego"]
         valid_loss_neighbor = agg["avg_loss_neighbor"]
         mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+        mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
         valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lat_loss", 0.0
         )
@@ -356,6 +377,7 @@ def model_training(args: TrainConfig):
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
             mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+            mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
             valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lat_loss", 0.0
             )
@@ -386,6 +408,7 @@ def model_training(args: TrainConfig):
                     "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
                     "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                     **mean_ego_loss_dict,
+                    **mean_epdms_dict,
                 },
                 step=epoch + 1,
             )
@@ -397,6 +420,7 @@ def model_training(args: TrainConfig):
                 "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
             data_list.append(curr_data)
             df = pd.DataFrame(data_list)

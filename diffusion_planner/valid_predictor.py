@@ -30,6 +30,10 @@ def boolean(v):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
+def _valid_config_default(name):
+    return ValidConfig.__dataclass_fields__[name].default
+
+
 def get_args(args_list=None):
     """Parse command line arguments and return Namespace."""
     parser = argparse.ArgumentParser(description="Validation Entrypoint")
@@ -50,6 +54,26 @@ def get_args(args_list=None):
     parser.add_argument("--save_predictions_dir", type=str, default=None)
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument("--port", default="22323", type=str)
+    parser.add_argument(
+        "--enable_epdms_eval",
+        default=_valid_config_default("enable_epdms_eval"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--enable_pdms_eval",
+        default=_valid_config_default("enable_pdms_eval"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--epdms_eval_use_agent_boxes",
+        default=_valid_config_default("epdms_eval_use_agent_boxes"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--epdms_eval_use_road_border",
+        default=_valid_config_default("epdms_eval_use_road_border"),
+        type=boolean,
+    )
 
     return parser.parse_args(args_list)
 
@@ -64,6 +88,10 @@ def run_validation(valid_cfg: ValidConfig):
     # (Note: Depending on the Config class implementation, it is safer to pass DDP and device info here)
     config_obj.device = valid_cfg.device
     config_obj.ddp = valid_cfg.ddp
+    config_obj.enable_epdms_eval = valid_cfg.enable_epdms_eval
+    config_obj.enable_pdms_eval = valid_cfg.enable_pdms_eval
+    config_obj.epdms_eval_use_agent_boxes = valid_cfg.epdms_eval_use_agent_boxes
+    config_obj.epdms_eval_use_road_border = valid_cfg.epdms_eval_use_road_border
 
     # init ddp
     global_rank, rank, _ = ddp.ddp_setup_universal(True, valid_cfg)
@@ -178,6 +206,7 @@ def run_validation(valid_cfg: ValidConfig):
             "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
             "turn_indicator_change_total": turn_indicator_change_total,
             **agg["ego_means"],
+            **{f"epdms_{key}": value for key, value in agg["epdms_means"].items()},
         }
         with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:
             json.dump(valid_dict_to_save, f, indent=4)
