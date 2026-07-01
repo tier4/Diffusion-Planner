@@ -19,8 +19,12 @@ import torch
 from rlvr.reward import (
     RewardConfig,
     _closest_points_between_rects,
+    compute_ego_neighbor_signed_clearance,
     compute_reward_batch,
+    compute_safety_score_batch,
     compute_static_collision_penalty,
+    compute_subscores_batch,
+    compute_ttc_score_batch,
 )
 
 T = 80
@@ -90,6 +94,30 @@ def _cfg(**kwargs) -> RewardConfig:
     return RewardConfig(**base)
 
 
+def _square_ego(center: tuple[float, float], steps: int = 1) -> torch.Tensor:
+    ego = torch.zeros(1, steps, 4)
+    ego[..., 0] = center[0]
+    ego[..., 1] = center[1]
+    ego[..., 2] = 1.0
+    return ego
+
+
+def _square_neighbor(
+    center: tuple[float, float], steps: int = 1
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    fut = torch.zeros(1, steps, 4)
+    fut[..., 0] = center[0]
+    fut[..., 1] = center[1]
+    fut[..., 2] = 1.0
+    shapes = torch.tensor([[2.0, 2.0]])
+    valid = torch.ones(1, steps, dtype=torch.bool)
+    return fut, shapes, valid
+
+
+def _square_ego_shape() -> torch.Tensor:
+    return torch.tensor([0.0, 2.0, 2.0])
+
+
 # ---------------------------------------------------------------------------
 # Closest-point helper
 # ---------------------------------------------------------------------------
@@ -104,6 +132,141 @@ def test_closest_points_non_overlapping():
     assert abs(float(p1[0, 0]) - 1.0) < 1e-4
     assert abs(float(p2[0, 0]) - 4.0) < 1e-4
     assert (p2 - p1).norm().item() == pytest.approx(3.0, abs=1e-4)
+
+
+def test_signed_clearance_overlap_is_negative():
+    ego = _square_ego((0.0, 0.0))
+    nf, ns, nv = _square_neighbor((0.5, 0.0))
+    dist = compute_ego_neighbor_signed_clearance(ego, _square_ego_shape(), nf, ns, nv)
+    assert dist.shape == (1, 1, 1)
+    assert dist[0, 0, 0].item() < 0.0
+
+
+def test_signed_clearance_side_by_side_exact_gap():
+    ego = _square_ego((0.0, 0.0))
+    nf, ns, nv = _square_neighbor((3.0, 0.0))
+    dist = compute_ego_neighbor_signed_clearance(ego, _square_ego_shape(), nf, ns, nv)
+    assert dist[0, 0, 0].item() == pytest.approx(1.0, abs=1e-4)
+
+
+def test_signed_clearance_diagonal_uses_euclidean_gap_not_sat_axis_gap():
+    ego = _square_ego((0.0, 0.0))
+    nf, ns, nv = _square_neighbor((3.0, 4.0))
+    dist = compute_ego_neighbor_signed_clearance(ego, _square_ego_shape(), nf, ns, nv)
+    # Axis gaps are 1m and 2m; true closest-point clearance is sqrt(1^2 + 2^2).
+    assert dist[0, 0, 0].item() == pytest.approx(float(torch.sqrt(torch.tensor(5.0))), abs=1e-4)
+
+
+def test_moving_and_stopped_wrappers_share_constant_neighbor_clearance():
+    ego = _square_ego((0.0, 0.0), steps=T)
+    nf, ns, nv = _square_neighbor((0.0, 2.5), steps=T)
+    expected_clearance = 0.5
+
+    sc = compute_static_collision_penalty(ego, _square_ego_shape(), nf, ns, nv, _cfg())
+    assert sc["per_timestep_min"][0, 0].item() == pytest.approx(expected_clearance, abs=1e-4)
+
+    safety_scores, collision_steps = compute_safety_score_batch(
+        ego,
+        _square_ego_shape(),
+        nf,
+        ns,
+        nv,
+        RewardConfig(),
+    )
+    assert collision_steps == [None]
+    assert safety_scores[0].item() == pytest.approx(-(1.0 - expected_clearance), abs=1e-4)
+
+
+def test_ttc_uses_obb_clearance_not_center_distance():
+    ego = _square_ego((0.0, 0.0), steps=T)
+    nf, ns, nv = _square_neighbor((0.0, 3.0), steps=T)
+
+    ttc = compute_ttc_score_batch(ego, _square_ego_shape(), nf, ns, nv)
+
+    assert ttc["score"][0].item() == pytest.approx(1.0, abs=1e-6)
+    assert ttc["first_unsafe_steps"] == [None]
+    assert ttc["first_collision_steps"] == [None]
+    assert ttc["min_clearance"][0, 0].item() == pytest.approx(1.0, abs=1e-4)
+
+
+def test_ttc_reports_first_unsafe_and_collision_steps():
+    ego = _square_ego((1.0, 0.0), steps=T)
+    nf, ns, nv = _square_neighbor((100.0, 0.0), steps=T)
+    nf[0, 30, 0] = 1.0
+    nf[0, 30, 1] = 0.0
+
+    ttc = compute_ttc_score_batch(ego, _square_ego_shape(), nf, ns, nv)
+
+    assert ttc["first_collision_steps"] == [30]
+    assert ttc["first_unsafe_steps"] == [20]
+    assert ttc["score"][0].item() == pytest.approx(69.0 / 80.0, abs=1e-6)
+
+    data = {
+        "neighbor_agents_future": nf,
+        "neighbor_agents_past": torch.zeros(1, 1, 21, 11),
+        "ego_shape": _square_ego_shape().unsqueeze(0),
+    }
+    data["neighbor_agents_past"][0, 0, -1, 6] = ns[0, 0]
+    data["neighbor_agents_past"][0, 0, -1, 7] = ns[0, 1]
+    subs = compute_subscores_batch(ego, data, RewardConfig())
+    assert subs["ttc_first_collision_steps"] == [30]
+    assert subs["ttc_first_unsafe_steps"] == [20]
+
+
+def test_ttc_ignores_invalid_neighbor_overlap_timestep():
+    ego = _square_ego((1.0, 0.0), steps=T)
+    nf, ns, nv = _square_neighbor((100.0, 0.0), steps=T)
+    nf[0, 30, 0] = 1.0
+    nf[0, 30, 1] = 0.0
+    nv[0, 30] = False
+
+    ttc = compute_ttc_score_batch(ego, _square_ego_shape(), nf, ns, nv)
+
+    assert ttc["score"][0].item() == pytest.approx(1.0, abs=1e-6)
+    assert ttc["first_unsafe_steps"] == [None]
+    assert ttc["first_collision_steps"] == [None]
+
+
+def test_ttc_multiple_neighbors_uses_earliest_collision():
+    ego = _square_ego((1.0, 0.0), steps=T)
+    nf_clean, ns_clean, nv_clean = _square_neighbor((1.0, 4.0), steps=T)
+    nf_late, ns_late, nv_late = _square_neighbor((100.0, 0.0), steps=T)
+    nf_early, ns_early, nv_early = _square_neighbor((100.0, 0.0), steps=T)
+    nf_late[0, 40, 0] = 1.0
+    nf_late[0, 40, 1] = 0.0
+    nf_early[0, 25, 0] = 1.0
+    nf_early[0, 25, 1] = 0.0
+    nf = torch.cat([nf_clean, nf_late, nf_early], dim=0)
+    ns = torch.cat([ns_clean, ns_late, ns_early], dim=0)
+    nv = torch.cat([nv_clean, nv_late, nv_early], dim=0)
+
+    ttc = compute_ttc_score_batch(ego, _square_ego_shape(), nf, ns, nv)
+
+    assert ttc["first_collision_steps"] == [25]
+    assert ttc["first_unsafe_steps"] == [15]
+    assert ttc["score"][0].item() == pytest.approx(58.0 / 80.0, abs=1e-6)
+
+
+def test_ttc_unsafe_mask_matches_obb_overlap_horizon():
+    ego = _square_ego((1.0, 0.0), steps=T)
+    nf, ns, nv = _square_neighbor((100.0, 0.0), steps=T)
+    nf[0, 12, 0] = 1.0
+    nf[0, 12, 1] = 0.0
+    nf[0, 35, 0] = 1.0
+    nf[0, 35, 1] = 0.0
+
+    distances = compute_ego_neighbor_signed_clearance(ego, _square_ego_shape(), nf, ns, nv)
+    collision_at_t = (distances < 0).any(dim=1)
+    expected = torch.zeros(1, T, dtype=torch.bool)
+    horizon_steps = 10
+    for offset in range(horizon_steps + 1):
+        expected[:, : T - offset] |= collision_at_t[:, offset:]
+
+    ttc = compute_ttc_score_batch(ego, _square_ego_shape(), nf, ns, nv)
+
+    assert torch.equal(ttc["unsafe_at_t"], expected)
+    assert ttc["first_collision_steps"] == [12]
+    assert ttc["first_unsafe_steps"] == [2]
 
 
 # ---------------------------------------------------------------------------

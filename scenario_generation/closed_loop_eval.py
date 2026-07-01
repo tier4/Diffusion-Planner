@@ -125,6 +125,7 @@ def run_closed_loop_eval(
     fps: float,
     replan_interval: int,
     draw_every: int,
+    neighbor_history_mode: str,
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     verbose: bool = True,
@@ -176,6 +177,7 @@ def run_closed_loop_eval(
                     unstick_teleport_after=unstick_teleport_after,
                     replan_interval=replan_interval,
                     draw_every=draw_every,
+                    neighbor_history_mode=neighbor_history_mode,
                 )
                 row = {"route": key, **metrics}
                 fout.write(json.dumps(row, default=float) + "\n")

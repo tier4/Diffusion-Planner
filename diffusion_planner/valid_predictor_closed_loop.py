@@ -133,6 +133,7 @@ def main() -> None:
         fps=args.fps,
         replan_interval=args.replan_interval,
         draw_every=args.draw_every,
+        neighbor_history_mode="recorded",
     )
     summary["model_path"] = str(args.model_path)
 
