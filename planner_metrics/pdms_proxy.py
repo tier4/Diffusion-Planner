@@ -19,6 +19,8 @@ means over available samples and report coverage separately.
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -61,6 +63,26 @@ def _tensor_from_array(values, pred: torch.Tensor) -> torch.Tensor:
     return torch.as_tensor(values, dtype=torch.float32, device=pred.device).reshape(
         _leading_shape(pred)
     )
+
+
+def _pdms_num_threads(n_items: int) -> int:
+    if n_items < 8:
+        return 1
+    raw = os.environ.get("PDMS_PROXY_NUM_THREADS")
+    if raw is not None:
+        try:
+            return max(1, min(int(raw), n_items))
+        except ValueError:
+            return 1
+    return max(1, min(8, n_items))
+
+
+def _parallel_list(fn, n_items: int) -> list:
+    workers = _pdms_num_threads(n_items)
+    if workers <= 1:
+        return [fn(i) for i in range(n_items)]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(fn, range(n_items)))
 
 
 def _available(pred: torch.Tensor, value: bool) -> torch.Tensor:
@@ -321,6 +343,9 @@ def pdms_proxy(
     drivable_area_compliance_values: np.ndarray | None = None,
     extended_comfort_values: np.ndarray | None = None,
     traffic_light_compliance_values: np.ndarray | None = None,
+    precomputed_states: np.ndarray | None = None,
+    add_aggregation: bool = True,
+    self_reference_progress: bool = False,
     dt: float = DT,
 ) -> dict[str, torch.Tensor]:
     """Compute raw EPDMS subscores available from DP tensors.
@@ -331,11 +356,41 @@ def pdms_proxy(
     """
     out: dict[str, torch.Tensor] = {}
 
-    ep, ep_gated = _ego_progress_and_gate(pred, gt)
+    pred_n_cache = None
+    states_n_cache = None
+
+    def _pred_numpy() -> np.ndarray:
+        nonlocal pred_n_cache
+        if pred_n_cache is None:
+            T = pred.shape[-2]
+            pred_n_cache = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
+        return pred_n_cache
+
+    def _states_numpy() -> np.ndarray:
+        nonlocal states_n_cache
+        if states_n_cache is None:
+            T = pred.shape[-2]
+            if precomputed_states is None:
+                states_n_cache = _ns.states_from_poses(_pred_numpy(), dt)
+            else:
+                states_n_cache = np.asarray(precomputed_states, dtype=np.float64).reshape(
+                    -1, T, _ns.STATE_SIZE
+                )
+        return states_n_cache
+
+    if self_reference_progress:
+        ep = _ones_like_lead(pred)
+        ep_gated = _zeros_like_lead(pred)
+    else:
+        ep, ep_gated = _ego_progress_and_gate(pred, gt)
     _set_metric(out, "ego_progress", ep, True)
     out["ego_progress_gt_gate"] = ep_gated
 
-    hc = comfort_score(pred, dt)
+    hc = torch.as_tensor(
+        _ns.comfort_score_from_states(_states_numpy(), dt).reshape(_leading_shape(pred)),
+        dtype=torch.float32,
+        device=pred.device,
+    )
     _set_metric(out, "history_comfort", hc, True)
 
     dac_arr = None
@@ -347,15 +402,13 @@ def pdms_proxy(
         and (dac_arr is None or np.isnan(dac_arr).any())
     ):
         T = pred.shape[-2]
-        pred_n = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
+        pred_n = _pred_numpy()
         dims = np.asarray(ego_dims, dtype=np.float64)
         if dims.ndim == 1:
             dims = np.broadcast_to(dims, (pred_n.shape[0], dims.shape[0]))
-        values = []
-        for i in range(pred_n.shape[0]):
+        def _dac_one(i: int) -> float:
             if dac_arr is not None and not np.isnan(dac_arr[i]):
-                values.append(float(dac_arr[i]))
-                continue
+                return float(dac_arr[i])
             if dims.shape[1] == 3:
                 offset, length, width = (
                     float(dims[i][0]) / 2.0,
@@ -364,41 +417,41 @@ def pdms_proxy(
                 )
             else:
                 offset, length, width = 0.0, float(dims[i][0]), float(dims[i][1])
-            values.append(
-                _ns.dac_from_road_borders(
-                    pred_n[i], border_lines[i], length, width, center_offset=offset
-                )
+            return _ns.dac_from_road_borders(
+                pred_n[i], border_lines[i], length, width, center_offset=offset
             )
+
+        values = _parallel_list(_dac_one, pred_n.shape[0])
         dac_arr = np.asarray(values, dtype=np.float64)
     if dac_arr is not None and not np.isnan(dac_arr).any():
         _set_metric(out, "drivable_area_compliance", _tensor_from_array(dac_arr, pred), True)
 
     if route_polys is not None:
         T = pred.shape[-2]
-        pred_n = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
+        pred_n = _pred_numpy()
         ddc = np.asarray(
-            [
-                _ns.ddc_from_route_lanes(pred_n[i], route_polys[i], dt)
-                for i in range(pred_n.shape[0])
-            ],
+            _parallel_list(
+                lambda i: _ns.ddc_from_route_lanes(pred_n[i], route_polys[i], dt),
+                pred_n.shape[0],
+            ),
             dtype=np.float64,
         )
         _set_metric(out, "driving_direction_compliance", _tensor_from_array(ddc, pred), True)
 
     if route_centerlines is not None:
         T = pred.shape[-2]
-        pred_n = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
+        pred_n = _pred_numpy()
         lk = np.asarray(
-            [
-                _ns.lane_keeping_score(
+            _parallel_list(
+                lambda i: _ns.lane_keeping_score(
                     pred_n[i],
                     route_centerlines[i],
                     [] if intersection_rings is None else intersection_rings[i],
                     dt,
                     lane_change_exempt=bool(lk_exempt[i]) if lk_exempt is not None else False,
-                )
-                for i in range(pred_n.shape[0])
-            ],
+                ),
+                pred_n.shape[0],
+            ),
             dtype=np.float64,
         )
         _set_metric(out, "lane_keeping", _tensor_from_array(lk, pred), True)
@@ -424,12 +477,12 @@ def pdms_proxy(
     if agent_boxes_per_t is not None and ego_dims is not None:
         lead = pred.shape[:-2]
         T = pred.shape[-2]
-        pred_n = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
+        pred_n = _pred_numpy()
+        states_n = _states_numpy()
         dims = np.asarray(ego_dims, dtype=np.float64)
         if dims.ndim == 1:
             dims = np.broadcast_to(dims, (pred_n.shape[0], dims.shape[0]))
-        nc_list, ttc_list = [], []
-        for i in range(pred_n.shape[0]):
+        def _collision_one(i: int) -> tuple[float, float]:
             if dims.shape[1] == 3:
                 offset, length, width = (
                     float(dims[i][0]) / 2.0,
@@ -438,7 +491,7 @@ def pdms_proxy(
                 )
             else:
                 offset, length, width = 0.0, float(dims[i][0]), float(dims[i][1])
-            states = _ns.states_from_poses(pred_n[i], dt)
+            states = states_n[i]
             area_flags = None
             if lane_rings is not None or intersection_rings is not None:
                 area_flags = _ns.ego_area_flags(
@@ -451,23 +504,24 @@ def pdms_proxy(
                 )
             boxes_t = list(agent_boxes_per_t[i])[:T]
             labels_t = list(agent_labels_per_t[i])[:T] if agent_labels_per_t is not None else None
-            nc_list.append(
-                _ns.no_at_fault_collision(
-                    states,
-                    boxes_t,
-                    length,
-                    width,
-                    agent_labels_per_t=labels_t,
-                    static_labels=static_labels,
-                    center_offset=offset,
-                    area_flags=area_flags,
-                )
+            nc = _ns.no_at_fault_collision(
+                states,
+                boxes_t,
+                length,
+                width,
+                agent_labels_per_t=labels_t,
+                static_labels=static_labels,
+                center_offset=offset,
+                area_flags=area_flags,
             )
-            ttc_list.append(
-                _ns.time_to_collision(
-                    states, boxes_t, length, width, dt, center_offset=offset, area_flags=area_flags
-                )
+            ttc = _ns.time_to_collision(
+                states, boxes_t, length, width, dt, center_offset=offset, area_flags=area_flags
             )
+            return nc, ttc
+
+        nc_ttc = _parallel_list(_collision_one, pred_n.shape[0])
+        nc_list = [x[0] for x in nc_ttc]
+        ttc_list = [x[1] for x in nc_ttc]
         dev = pred.device
         _set_metric(
             out,
@@ -496,7 +550,8 @@ def pdms_proxy(
             out[alias] = out[key]
             out[f"{alias}_available"] = out[f"{key}_available"]
 
-    add_synthetic_epdms(out)
+    if add_aggregation:
+        add_synthetic_epdms(out)
     return out
 
 

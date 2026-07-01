@@ -198,8 +198,14 @@ def _epdms_eval_metrics(
         route_centerlines=route_centerlines,
         dt=EPDMS_DT,
     )
-    agent = pdms_proxy(ego_pred, ego_future, **kwargs)
-    human = pdms_proxy(ego_future, ego_future, **kwargs)
+    agent = pdms_proxy(ego_pred, ego_future, add_aggregation=False, **kwargs)
+    human = pdms_proxy(
+        ego_future,
+        ego_future,
+        add_aggregation=False,
+        self_reference_progress=True,
+        **kwargs,
+    )
     add_synthetic_epdms(agent, human)
     return {
         key: value if torch.is_tensor(value) else torch.as_tensor(value, device=ego_pred.device)
@@ -243,7 +249,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         turn_indicator_seq = inputs["turn_indicators"]
 
         inputs["sampled_trajectories"] = torch.zeros(
-            B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+            B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32, device=device
         )
         inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
 

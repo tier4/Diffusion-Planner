@@ -348,8 +348,19 @@ def comfort_score(poses: npt.NDArray[np.float64], dt: float) -> npt.NDArray[np.f
     T = poses.shape[-2]
     flat = poses.reshape(-1, T, 4)
     states = states_from_poses(flat, dt)  # [B, T, STATE_SIZE]
+    return comfort_score_from_states(states, dt).reshape(lead)
+
+
+def comfort_score_from_states(
+    states: npt.NDArray[np.float64], dt: float
+) -> npt.NDArray[np.float64]:
+    """Same output as :func:`comfort_score` when states came from the same poses."""
+    states = np.asarray(states, dtype=np.float64)
+    lead = states.shape[:-2]
+    T = states.shape[-2]
+    flat = states.reshape(-1, T, STATE_SIZE)
     time_point_s = np.arange(0, T).astype(np.float64) * dt
-    comfortable = ego_is_comfortable(states, time_point_s).all(axis=-1).astype(np.float64)
+    comfortable = ego_is_comfortable(flat, time_point_s).all(axis=-1).astype(np.float64)
     return np.asarray(comfortable.reshape(lead), dtype=np.float64)
 
 
@@ -488,6 +499,27 @@ def ego_corners(
     return np.array([rot(hl, hw), rot(-hl, hw), rot(-hl, -hw), rot(hl, -hw)], dtype=np.float64)
 
 
+def ego_corners_batch(
+    x: npt.NDArray[np.float64],
+    y: npt.NDArray[np.float64],
+    heading: npt.NDArray[np.float64],
+    length: float,
+    width: float,
+) -> npt.NDArray[np.float64]:
+    """Vectorized :func:`ego_corners` with identical corner ordering."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    heading = np.asarray(heading, dtype=np.float64)
+    hl, hw = length / 2.0, width / 2.0
+    c, s = np.cos(heading), np.sin(heading)
+    local = np.asarray([[hl, hw], [-hl, hw], [-hl, -hw], [hl, -hw]], dtype=np.float64)
+    fx, fy = local[:, 0], local[:, 1]
+    out = np.empty(x.shape + (4, 2), dtype=np.float64)
+    out[..., :, 0] = x[..., None] + fx * c[..., None] - fy * s[..., None]
+    out[..., :, 1] = y[..., None] + fx * s[..., None] + fy * c[..., None]
+    return out
+
+
 def box_corners(box: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Agent box corners from a ``[9] = (x,y,z,w,l,h,yaw,vx,vy)`` record.
 
@@ -512,6 +544,52 @@ def box_corners(box: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         return (cx + fx * c - fy * s, cy + fx * s + fy * c)
 
     return np.array([rot(hl, hw), rot(-hl, hw), rot(-hl, -hw), rot(hl, -hw)], dtype=np.float64)
+
+
+def box_corners_batch(boxes: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Vectorized :func:`box_corners` for ``[N, 9]`` boxes."""
+    boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 9)
+    cx, cy = boxes[:, 0], boxes[:, 1]
+    width, length = boxes[:, 3], boxes[:, 4]
+    yaw = boxes[:, 6]
+    hl, hw = length / 2.0, width / 2.0
+    c, s = np.cos(yaw), np.sin(yaw)
+    fx = np.stack([hl, -hl, -hl, hl], axis=-1)
+    fy = np.stack([hw, hw, -hw, -hw], axis=-1)
+    out = np.empty((boxes.shape[0], 4, 2), dtype=np.float64)
+    out[:, :, 0] = cx[:, None] + fx * c[:, None] - fy * s[:, None]
+    out[:, :, 1] = cy[:, None] + fx * s[:, None] + fy * c[:, None]
+    return out
+
+
+def _sat_intersects_one_to_many(
+    ego: npt.NDArray[np.float64],
+    boxes: npt.NDArray[np.float64],
+    eps: float = 1.0e-9,
+) -> npt.NDArray[np.bool_]:
+    """Exact-safe oriented-rectangle prefilter before expensive shapely calls.
+
+    A ``False`` result means the rectangles cannot intersect by the separating
+    axis theorem. ``True`` only means "possible"; callers still run shapely for
+    the authoritative ``intersects`` result, so this cannot change scores.
+    """
+    boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4, 2)
+    if boxes.shape[0] == 0:
+        return np.zeros((0,), dtype=bool)
+    ego = np.asarray(ego, dtype=np.float64).reshape(4, 2)
+    ego_axes = np.stack([ego[0] - ego[1], ego[1] - ego[2]], axis=0)
+    box_axes = np.stack([boxes[:, 0] - boxes[:, 1], boxes[:, 1] - boxes[:, 2]], axis=1)
+    axes = np.concatenate(
+        [np.broadcast_to(ego_axes, (boxes.shape[0], 2, 2)), box_axes], axis=1
+    )
+    axes = axes / np.clip(np.linalg.norm(axes, axis=-1, keepdims=True), 1.0e-12, None)
+
+    ego_proj = np.einsum("nkd,vd->nkv", axes, ego)
+    box_proj = np.einsum("nkd,nvd->nkv", axes, boxes)
+    overlap = (ego_proj.max(axis=-1) + eps >= box_proj.min(axis=-1)) & (
+        box_proj.max(axis=-1) + eps >= ego_proj.min(axis=-1)
+    )
+    return overlap.all(axis=-1)
 
 
 def _polygon(corners: npt.NDArray[np.float64]):
@@ -570,8 +648,7 @@ def get_collision_type(
     from shapely.geometry import LineString
 
     is_ego_stopped = float(ego_speed) <= COLLISION_STOPPED_SPEED_THRESHOLD
-    centroid = agent_poly.centroid
-    agent_xyh = (centroid.x, centroid.y, float(agent_box[6]))
+    agent_xyh = (float(agent_box[0]), float(agent_box[1]), float(agent_box[6]))
 
     if is_ego_stopped:
         return CollisionType.STOPPED_EGO_COLLISION
@@ -643,10 +720,16 @@ def no_at_fault_collision(
         cand = np.where(d <= ego_rad + 0.5 * np.hypot(boxes[:, 3], boxes[:, 4]))[0]
         if cand.size == 0:
             continue
-        ego_poly = _polygon(ego_corners(cxs, cys, h, ego_length, ego_width))
+        ego_corners_t = ego_corners(cxs, cys, h, ego_length, ego_width)
+        agent_corners = box_corners_batch(boxes[cand])
+        sat = _sat_intersects_one_to_many(ego_corners_t, agent_corners)
+        if not sat.any():
+            continue
+        ego_poly = _polygon(ego_corners_t)
         labels = agent_labels_per_t[t] if agent_labels_per_t is not None else None
-        for j in cand:
-            agent_poly = _polygon(box_corners(boxes[j]))
+        for local_j in np.where(sat)[0]:
+            j = cand[local_j]
+            agent_poly = _polygon(agent_corners[local_j])
             if not ego_poly.intersects(agent_poly):
                 continue
             ctype = get_collision_type((x, y, h), ego_speed, ego_poly, boxes[j], agent_poly)
@@ -736,14 +819,19 @@ def time_to_collision(
             # for is_agent_ahead). Using the projected pose would miss cases where
             # the ego reaches/passes a stopped agent within the window (the agent
             # ends up behind the projected centre though the boxes intersect).
-            ego_poly = _polygon(ego_corners(pcx, pcy, h, ego_length, ego_width))
+            ego_corners_t = ego_corners(pcx, pcy, h, ego_length, ego_width)
+            agent_corners = box_corners_batch(boxes[cand])
+            sat = _sat_intersects_one_to_many(ego_corners_t, agent_corners)
+            if not sat.any():
+                continue
+            ego_poly = _polygon(ego_corners_t)
             ego_xyh_current = (x0, y0, h)
-            for j in cand:
-                agent_poly = _polygon(box_corners(boxes[j]))
+            for local_j in np.where(sat)[0]:
+                j = cand[local_j]
+                agent_poly = _polygon(agent_corners[local_j])
                 if not ego_poly.intersects(agent_poly):
                     continue
-                centroid = agent_poly.centroid
-                agent_xyh = (centroid.x, centroid.y, float(boxes[j][6]))
+                agent_xyh = (float(boxes[j][0]), float(boxes[j][1]), float(boxes[j][6]))
                 # navsim widens the infraction when ego is in multiple lanes /
                 # non-drivable / an intersection: any projected collision with
                 # an agent NOT BEHIND counts (lateral included). Flags read at
@@ -916,9 +1004,7 @@ def dac_from_road_borders(
     ):
         return 1.0
 
-    corners = np.stack(
-        [ego_corners(cx[t], cy[t], heading[t], ego_length, ego_width) for t in range(T)]
-    )  # [T, 4, 2]
+    corners = ego_corners_batch(cx, cy, heading, ego_length, ego_width)  # [T, 4, 2]
     boxes = shapely.creation.polygons(corners)  # vectorized, one call
     return 0.0 if bool(shapely.intersects(boxes, mls).any()) else 1.0
 
@@ -1065,9 +1151,7 @@ def ego_area_flags(
     )
     cxs = xs + center_offset * np.cos(hs)
     cys = ys + center_offset * np.sin(hs)
-    corners = np.stack(
-        [ego_corners(cxs[t], cys[t], hs[t], ego_length, ego_width) for t in range(T)]
-    )  # [T, 4, 2]
+    corners = ego_corners_batch(cxs, cys, hs, ego_length, ego_width)  # [T, 4, 2]
     corner_pts = shapely.points(corners.reshape(-1, 2)).reshape(T, 4)
     pose_pts = shapely.points(np.stack([xs, ys], axis=-1))
 
