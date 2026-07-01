@@ -1,7 +1,9 @@
 #!/bin/bash
 set -ux
 cd $(dirname $0)
-export CUDA_VISIBLE_DEVICES=0
+
+# Number of GPUs to use. Auto-detects all visible GPUs; set NUM_GPUS=1 to force single-GPU.
+NUM_GPUS=$(nvidia-smi -L | wc -l)
 
 ###################################
 # User Configuration Section
@@ -17,7 +19,7 @@ SAVE_DIR=$MODEL_DIR/validation_result_$TIME/predictions
 
 rm -f /tmp/tmp_dist_init
 
-python3 -m torch.distributed.run --nnodes 1 --nproc-per-node 1 --standalone valid_predictor.py \
+python3 -m torch.distributed.run --nnodes 1 --nproc-per-node $NUM_GPUS --standalone valid_predictor.py \
 --valid_set_list  $VALID_SET_LIST_PATH \
 --resume_model_path $MODEL_PATH \
 --args_json_path $ARGS_JSON_PATH \

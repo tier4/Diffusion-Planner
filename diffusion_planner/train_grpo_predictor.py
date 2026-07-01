@@ -35,7 +35,7 @@ from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from valid_predictor import validate_model
+from valid_predictor import aggregate_valid_metrics, validate_model
 
 
 def boolean(v):
@@ -475,18 +475,21 @@ def model_training(args):
         drop_last=True,
     )
 
+    # Validation is sharded across all ranks (DistributedSampler) and the per-rank
+    # metrics are all-reduced via aggregate_valid_metrics.
+    valid_sampler = DistributedSampler(
+        valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
+    )
+    valid_loader = DataLoader(
+        valid_set,
+        sampler=valid_sampler,
+        batch_size=max(128 // ddp.get_world_size(), 1),
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False,
+    )
     if global_rank == 0:
-        valid_loader = DataLoader(
-            valid_set,
-            batch_size=128,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=False,
-            shuffle=False,
-        )
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
-    else:
-        valid_loader = None
 
     if args.ddp:
         torch.distributed.barrier()
@@ -561,11 +564,12 @@ def model_training(args):
             aug,
         )
 
+        valid_dict = validate_model(diffusion_planner, valid_loader, args)
+        agg = aggregate_valid_metrics(valid_dict, args.device)
         if global_rank == 0:
-            valid_dict = validate_model(diffusion_planner, valid_loader, args)
-            valid_loss_ego = valid_dict["avg_loss_ego"]
-            valid_neighbor_margin = valid_dict["ego_neighbor_margin_loss"].mean().item()
-            valid_road_border = valid_dict["ego_road_border_loss"].mean().item()
+            valid_loss_ego = agg["avg_loss_ego"]
+            valid_neighbor_margin = agg["ego_means"]["ego_neighbor_margin_loss"]
+            valid_road_border = agg["ego_means"]["ego_road_border_loss"]
             train_reward = train_loss["reward_mean"]
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"
