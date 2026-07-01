@@ -83,6 +83,7 @@ from rlvr.reward import (
     compute_centerline_score_batch,
     compute_reward_batch,
     compute_road_border_penalty,
+    reward_breakdown_to_json_dict,
 )
 from scenario_generation.gui.lanelet_scene_builder import (
     LaneletSceneBuilder,
@@ -1953,13 +1954,7 @@ def _score_step(
     # adding a new component only requires touching rlvr.reward — this
     # function stays untouched.
     out: dict = {"step": step}
-    for k, v in asdict(br).items():
-        if isinstance(v, (bool, int, float)) or v is None:
-            out[k] = v
-        elif isinstance(v, torch.Tensor):
-            out[k] = float(v.item())
-        # Anything else (should not happen for RewardBreakdown) gets dropped
-        # rather than breaking JSON serialization.
+    out.update(reward_breakdown_to_json_dict(br))
 
     # Derived convenience fields not in RewardBreakdown:
     #   collision: bool from collision_step
@@ -1984,11 +1979,8 @@ def _score_step(
             d,
             usage_mode="baselink",
         )
-        for k, v in asdict(br_p).items():
-            if isinstance(v, (bool, int, float)) or v is None:
-                out[f"pred_{k}"] = v
-            elif isinstance(v, torch.Tensor):
-                out[f"pred_{k}"] = float(v.item())
+        for k, v in reward_breakdown_to_json_dict(br_p).items():
+            out[f"pred_{k}"] = v
         out["pred_collision"] = out.get("pred_collision_step") is not None
         out["pred_lane_gate"] = 0.0 if out.get("pred_lane_crossing") else 1.0
         out["pred_cl_score"] = float(cl_p[0].item())

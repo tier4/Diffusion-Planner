@@ -7,7 +7,8 @@ functions from diffusion_planner.loss for proper vehicle-footprint-aware checks.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import asdict, dataclass
 
 import numpy as np
 import torch
@@ -59,6 +60,36 @@ class RewardBreakdown:
     # booleans on this dataclass (rb_crossing, lane_crossing, static_crossing):
     # True = violation occurred.
     kinematic_violated: bool = False
+
+
+def _json_safe_value(value):
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, np.floating):
+        value = float(value)
+        return value if math.isfinite(value) else None
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            raise ValueError(
+                f"cannot JSON-serialize non-scalar tensor with shape {tuple(value.shape)}"
+            )
+        return _json_safe_value(float(value.item()))
+    return value
+
+
+def reward_breakdown_to_json_dict(breakdown: RewardBreakdown) -> dict:
+    """Return a standards-compliant JSON dict for a reward breakdown.
+
+    Missing geometric measurements are represented internally as ``inf`` so
+    they cannot be confused with a valid large clearance. JSON has no standard
+    infinity value, so public serialized diagnostics use ``null`` for those
+    fields.
+    """
+    return {key: _json_safe_value(value) for key, value in asdict(breakdown).items()}
 
 
 @torch.no_grad()

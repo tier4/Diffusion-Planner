@@ -135,7 +135,11 @@ def test_classify_loaded_scenes_batch_handles_multiple_scenes_one_trajectory_eac
 
 def test_classify_scene_failures_writes_training_path_lists(tmp_path):
     rows = [
-        {"scene_path": "/tmp/a.npz", "labels": ["moving_collision", "road_border_crossing"]},
+        {
+            "scene_path": "/tmp/a.npz",
+            "labels": ["moving_collision", "road_border_crossing"],
+            "moving_min_dist": float("inf"),
+        },
         {"scene_path": "/tmp/a.npz", "labels": ["clean"]},
         {"scene_path": "/tmp/b.npz", "labels": ["clean"]},
         {"scene_path": "/tmp/c.npz", "labels": ["moving_collision"]},
@@ -155,6 +159,8 @@ def test_classify_scene_failures_writes_training_path_lists(tmp_path):
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["label_counts"]["moving_collision"] == 2
     assert summary["label_counts"]["clean"] == 2
+    first_row = json.loads((tmp_path / "classified_scenes.jsonl").read_text().splitlines()[0])
+    assert first_row["moving_min_dist"] is None
 
 
 def test_scene_failure_threshold_config_uses_requested_defaults():

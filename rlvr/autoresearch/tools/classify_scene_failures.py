@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -705,7 +706,19 @@ def classify_loaded_scenes_batch(
 def _write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
-        json.dump(obj, f, indent=2)
+        json.dump(_json_safe(obj), f, indent=2, allow_nan=False)
+
+
+def _json_safe(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    return obj
 
 
 def _write_outputs(
@@ -718,7 +731,7 @@ def _write_outputs(
     jsonl = output_dir / "classified_scenes.jsonl"
     with open(jsonl, "w") as f:
         for row in rows:
-            f.write(json.dumps(row, sort_keys=True) + "\n")
+            f.write(json.dumps(_json_safe(row), sort_keys=True, allow_nan=False) + "\n")
 
     path_labels: dict[str, set[str]] = defaultdict(set)
     path_order: list[str] = []
