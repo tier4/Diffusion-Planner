@@ -68,6 +68,16 @@ struct ConverterOptions
   // because it skips the npz write. Off in production (a normal convert already emits sidecars).
   bool sidecar_only;
 
+  // Pack-sequence mode: write ONE npz and ONE json per sequence instead of one per frame.
+  //   (1) Every frame's tensors are stacked along a leading frame axis into a single
+  //       <rosbag>_sequence_<id>.npz (e.g. ego_agent_past becomes {num_frames, 21, 3}).
+  //   (2) Every frame's per-frame json is collected, in frame order, into a single
+  //       <rosbag>_sequence_<id>.json array.
+  //   (3) write_skipped_npz is forced true in this mode so the packed sequence is gap-free
+  //       (every frame present), which is required by the closed-loop reproducer.
+  // Mutually exclusive with sidecar_only (which writes no npz at all).
+  bool pack_sequence;
+
   // Build converter defaults shared by all converter entry points.
   static ConverterOptions default_converter_options();
 
@@ -83,6 +93,10 @@ struct ConverterPaths
 
   std::string get_rosbag_dir_name() const;
 };
+
+// Apply cross-option constraints after parsing. In pack_sequence mode write_skipped_npz is
+// forced true so the packed sequence is gap-free. Call before validate_options.
+void normalize_options(ConverterOptions & opts);
 
 // Validate options after all arguments have been applied.
 // Returns an error message string if invalid, nullopt if valid.

@@ -80,6 +80,11 @@ void ConverterOptions::add_converter_options(CLI::App & app)
     "Write ONLY the per-frame JSON sidecars (pose + neighbor_ids + is_skipped), skipping all "
     "npz output. Same pipeline/slot-ordering as a full convert, so the sidecars align to an "
     "existing npz set from this converter; faster than re-converting (no npz write).");
+  app.add_flag(
+    "--pack_sequence", pack_sequence,
+    "Write ONE npz and ONE json per sequence (frames stacked along a leading frame axis) "
+    "instead of one file per frame. Forces write_skipped_npz on so the packed sequence is "
+    "gap-free. Mutually exclusive with --sidecar_only.");
 }
 
 std::string ConverterPaths::get_rosbag_dir_name() const
@@ -116,14 +121,28 @@ ConverterOptions ConverterOptions::default_converter_options()
   options.write_skipped_npz = false;
   // Full conversion by default (write npz); --sidecar_only flips to sidecar-only output.
   options.sidecar_only = false;
+  // One file per frame by default; --pack_sequence packs a whole sequence into one npz/json.
+  options.pack_sequence = false;
   options.use_interpolation = static_cast<bool>(options.interpolation);
   return options;
+}
+
+void normalize_options(ConverterOptions & opts)
+{
+  if (opts.pack_sequence) {
+    // Requirement (3): a packed sequence must be gap-free, so every frame is written.
+    opts.write_skipped_npz = true;
+  }
 }
 
 std::optional<std::string> validate_options(const ConverterOptions & opts)
 {
   if (opts.ego_wheel_base < 0.0 || opts.ego_length < 0.0 || opts.ego_width < 0.0) {
     return "Ego vehicle dimensions must be non-negative.";
+  }
+  if (opts.pack_sequence && opts.sidecar_only) {
+    return "--pack_sequence and --sidecar_only are mutually exclusive "
+           "(pack_sequence writes one npz per sequence; sidecar_only writes no npz).";
   }
   return std::nullopt;
 }

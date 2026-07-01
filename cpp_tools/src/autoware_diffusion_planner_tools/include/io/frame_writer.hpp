@@ -53,4 +53,10 @@ void save_route_json(
   const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info,
   const timestamp_stats::TimestampStatsMap & timestamp_stats_map);
 
+// Pack-sequence mode: write all of a sequence's per-frame json objects (in frame order) as a
+// single <rosbag>_<sequence_id>.json array. Each element is a build_frame_json object.
+void save_sequence_frames_json(
+  const std::string & output_path, const std::string & rosbag_dir_name,
+  const std::string & sequence_id, const nlohmann::json & frames);
+
 #endif  // IO__FRAME_WRITER_HPP_

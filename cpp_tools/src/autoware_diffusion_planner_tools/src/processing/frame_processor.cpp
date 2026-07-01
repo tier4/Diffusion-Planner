@@ -111,6 +111,11 @@ void process_sequence(
   // Replace the goal pose with the last frame's pose
   seq.route.goal_pose = seq.data_list.back().kinematic_state.pose.pose;
 
+  // Pack-sequence accumulators: in pack mode every frame is collected here (gap-free) and
+  // flushed once after the loop into a single npz + single json array for the sequence.
+  SequenceNpzData sequence_npz;
+  nlohmann::json sequence_frames_json = nlohmann::json::array();
+
   // Process frames with stopping count tracking
   int64_t stopping_count = 0;
   // Skip frames where the GT future has not advanced for >=3s (ego stuck / stationary
@@ -289,21 +294,43 @@ void process_sequence(
       line_strings, lanes, filter_params);
 
     const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
-    // Accepted frames are always written; skipped frames only on request. In sidecar-only mode
-    // no npz is written at all (the sidecar below still carries the exact neighbor_ids/skip).
-    if (!options.sidecar_only && (!is_skipped || options.write_skipped_npz)) {
-      save_frame_data_npz(
-        paths.save_dir, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
-        neighbor_future, static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit,
-        route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit, polygons, line_strings,
-        goal_pose_vec, turn_indicators, ego_shape);
+    if (options.pack_sequence) {
+      // Pack mode: every frame is stacked into the per-sequence npz (gap-free; write_skipped_npz
+      // is forced true for this mode) and appended to the per-sequence json array.
+      add_frame_to_sequence_npz(
+        sequence_npz, i, ego_past, ego_current, ego_future, neighbor_past, neighbor_future,
+        static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit, route_lanes,
+        route_lanes_speed_limit, route_lanes_has_speed_limit, polygons, line_strings, goal_pose_vec,
+        turn_indicators, ego_shape);
+      nlohmann::json frame_json = build_frame_json(
+        seq.data_list[i].kinematic_state, seq.data_list[i].timestamp, skipping_info,
+        neighbor_result.neighbor_ids);
+      frame_json["token"] = token;
+      sequence_frames_json.push_back(std::move(frame_json));
+    } else {
+      // Accepted frames are always written; skipped frames only on request. In sidecar-only mode
+      // no npz is written at all (the sidecar below still carries the exact neighbor_ids/skip).
+      if (!options.sidecar_only && (!is_skipped || options.write_skipped_npz)) {
+        save_frame_data_npz(
+          paths.save_dir, rosbag_dir_name, token, ego_past, ego_current, ego_future, neighbor_past,
+          neighbor_future, static_objects, lanes, lanes_speed_limit, lanes_has_speed_limit,
+          route_lanes, route_lanes_speed_limit, route_lanes_has_speed_limit, polygons, line_strings,
+          goal_pose_vec, turn_indicators, ego_shape);
+      }
+      save_frame_json(
+        paths.save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
+        seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids);
     }
-    save_frame_json(
-      paths.save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-      seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids);
 
     if (i % 100 == 0) {
       std::cout << "Processed frame " << i << "/" << n << std::endl;
     }
+  }
+
+  // Flush the packed sequence once all frames are collected.
+  if (options.pack_sequence && sequence_npz.num_frames > 0) {
+    save_sequence_data_npz(paths.save_dir, rosbag_dir_name, sequence_id_str, sequence_npz);
+    save_sequence_frames_json(
+      paths.save_dir, rosbag_dir_name, sequence_id_str, sequence_frames_json);
   }
 }

@@ -104,6 +104,7 @@ std::optional<DirectoryOptions> parse_directory_arguments(int argc, char ** argv
       options.num_workers = 1;
     }
   }
+  normalize_options(options.converter);
   if (const auto err = validate_options(options.converter)) {
     std::cerr << *err << std::endl;
     return std::nullopt;
