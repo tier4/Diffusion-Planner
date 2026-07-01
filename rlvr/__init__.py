@@ -1,9 +1,5 @@
 """RLVR -- Reinforcement Learning with Verifiable Rewards for Diffusion Planner."""
 
-from rlvr.grpo_config import GRPOConfig
-from rlvr.grpo_loss import compute_grpo_loss, compute_log_probs
-from rlvr.grpo_sampler import SampledTrajectory, SamplerConfig, generate_diverse_group
-from rlvr.grpo_trainer import GRPOTrainer
 from rlvr.reward import (
     RewardBreakdown,
     RewardConfig,
@@ -26,3 +22,23 @@ __all__ = [
     "compute_log_probs",
     "GRPOTrainer",
 ]
+
+
+def __getattr__(name):
+    if name == "GRPOConfig":
+        from rlvr.grpo_config import GRPOConfig
+
+        return GRPOConfig
+    if name in {"compute_grpo_loss", "compute_log_probs"}:
+        from rlvr import grpo_loss
+
+        return getattr(grpo_loss, name)
+    if name in {"SampledTrajectory", "SamplerConfig", "generate_diverse_group"}:
+        from rlvr import grpo_sampler
+
+        return getattr(grpo_sampler, name)
+    if name == "GRPOTrainer":
+        from rlvr.grpo_trainer import GRPOTrainer
+
+        return GRPOTrainer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

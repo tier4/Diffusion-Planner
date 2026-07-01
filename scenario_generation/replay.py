@@ -82,6 +82,8 @@ from rlvr.reward import (
     RewardConfig,
     compute_centerline_score_batch,
     compute_reward_batch,
+    compute_road_border_penalty,
+    reward_breakdown_to_json_dict,
 )
 from scenario_generation.gui.lanelet_scene_builder import (
     LaneletSceneBuilder,
@@ -1171,6 +1173,12 @@ _ROAD_BORDER_COLOR = "#dd2222"
 _EGO_COLOR = "#3366cc"
 _ROUTE_COLOR = "#3366cc"
 _VIEW_HALF_M = 50.0  # ±50 m window around ego keeps lane detail legible
+_ROAD_BORDER_FLAG_THRESH = 0.5
+_ROAD_BORDER_COORD_EPS_M = 1e-3
+_DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M = 1e-6
+_DISTANCE_ENDPOINT_MARKER_SIZE = 5
+_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH = 0.7
+_DISTANCE_LABEL_FALLBACK_NORMAL = (0.0, 1.0)
 
 # Draw an ego ↔ stopped-NPC closest-pair line on each PNG when clearance
 # drops below this (mirrors the road-border distance viz). 2 m matches the
@@ -1281,41 +1289,6 @@ def _draw_road_borders(ax, road_border_polylines, view_center=None, view_half_m=
             zorder=5,  # above lanes, below agents
         )
     )
-
-
-def _nearest_border_point(
-    probe_xy: np.ndarray,
-    border_polylines: list[np.ndarray] | None,
-) -> np.ndarray | None:
-    """Nearest point on any road-border polyline to ``probe_xy`` (world frame).
-
-    Pure geometry used only to position the viz pointer — the authoritative
-    body-to-border distance comes from ``rlvr.reward.compute_road_border_penalty``
-    via the per-step metrics log. Do not read the returned point's distance
-    as a metric.
-    """
-    if not border_polylines:
-        return None
-    best_pt: np.ndarray | None = None
-    best_d = float("inf")
-    px, py = float(probe_xy[0]), float(probe_xy[1])
-    for pl in border_polylines:
-        if pl is None or pl.shape[0] < 2:
-            continue
-        p1 = pl[:-1].astype(np.float64)
-        p2 = pl[1:].astype(np.float64)
-        seg = p2 - p1
-        seg_len2 = (seg * seg).sum(axis=1)
-        seg_len2[seg_len2 < 1e-9] = 1e-9
-        t = ((px - p1[:, 0]) * seg[:, 0] + (py - p1[:, 1]) * seg[:, 1]) / seg_len2
-        t = np.clip(t, 0.0, 1.0)
-        closest = p1 + t[:, None] * seg
-        dists = np.hypot(closest[:, 0] - px, closest[:, 1] - py)
-        idx = int(dists.argmin())
-        if dists[idx] < best_d:
-            best_d = float(dists[idx])
-            best_pt = closest[idx]
-    return best_pt
 
 
 def _ego_obb_corners(
@@ -1466,32 +1439,55 @@ def _ego_nearest_moving_npc(
     )
 
 
-def _ego_border_distance(
-    ego,
-    road_border_polylines: list[np.ndarray] | None,
-) -> tuple[np.ndarray, np.ndarray, float] | None:
-    """Closest ego-OBB corner to the nearest road-border point.
-
-    Returns ``(ego_corner_xy, border_pt_xy, distance_m)`` or ``None`` when
-    there is no border / no ego. Single source for both the live PNG overlay
-    and the clearance log, so the rb number drawn IS the number logged.
-    """
+def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """Road-border distance from the shared reward metric."""
     if ego is None:
         return None
-    border_pt = _nearest_border_point(ego.current_position, road_border_polylines)
-    if border_pt is None:
+    if map_data is None or map_data.line_strings is None:
         return None
-    corners = _ego_obb_corners(
-        float(ego.current_position[0]),
-        float(ego.current_position[1]),
-        float(ego.current_heading),
-        float(ego.length),
-        float(ego.width),
-        wheelbase=float(ego.wheelbase),
+    line_strings = np.asarray(map_data.line_strings, dtype=np.float32)
+    if line_strings.ndim != 3 or line_strings.shape[-1] < 4 or line_strings.size == 0:
+        return None
+    border_flag = line_strings[..., 3]
+    if border_flag.size == 0 or border_flag.max() <= _ROAD_BORDER_FLAG_THRESH:
+        return None
+    border_xy = line_strings[..., :2]
+    has_coords = np.linalg.norm(border_xy, axis=-1) > _ROAD_BORDER_COORD_EPS_M
+    valid_pair = (border_flag[:, :-1] > _ROAD_BORDER_FLAG_THRESH) & (
+        border_flag[:, 1:] > _ROAD_BORDER_FLAG_THRESH
     )
-    d_corner = np.hypot(corners[:, 0] - border_pt[0], corners[:, 1] - border_pt[1])
-    i = int(d_corner.argmin())
-    return corners[i], border_pt, float(d_corner[i])
+    valid_pair &= has_coords[:, :-1] & has_coords[:, 1:]
+    if not valid_pair.any():
+        return None
+    h = float(ego.current_heading)
+    ego_traj = torch.tensor(
+        [
+            [
+                [
+                    float(ego.current_position[0]),
+                    float(ego.current_position[1]),
+                    math.cos(h),
+                    math.sin(h),
+                ]
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    ego_shape = torch.tensor(
+        [float(ego.wheelbase), float(ego.length), float(ego.width)],
+        dtype=torch.float32,
+    )
+    _, _, _, _, _, per_ts_min, ego_pts, border_pts = compute_road_border_penalty(
+        ego_traj,
+        ego_shape,
+        {"line_strings": torch.from_numpy(line_strings).unsqueeze(0)},
+        RewardConfig(),
+        return_closest_points=True,
+    )
+    rb_dist = float(per_ts_min[0, 0].item())
+    if not math.isfinite(rb_dist):
+        return None
+    return ego_pts[0, 0].numpy(), border_pts[0, 0].numpy(), rb_dist
 
 
 def save_step_figure(
@@ -1749,31 +1745,37 @@ def save_step_figure(
             f"lane_near={metrics.get('lane_near_frac', 0.0):.2f}"
         )
 
-    # Road border distance line — always drawn (not gated on metrics).
-    rb_info = _ego_border_distance(ego, road_border_polylines)
+    rb_info = _ego_border_distance(ego, scene.map_data)
     if rb_info is not None:
-        start, border_pt, body_d = rb_info
+        rb_ego_pt, rb_border_pt, rb_dist = rb_info
         ax.plot(
-            [start[0], border_pt[0]],
-            [start[1], border_pt[1]],
+            [rb_ego_pt[0], rb_border_pt[0]],
+            [rb_ego_pt[1], rb_border_pt[1]],
             "k--",
             linewidth=1.3,
             alpha=0.7,
             zorder=29,
         )
         ax.plot(
-            border_pt[0],
-            border_pt[1],
-            "ko",
-            markersize=6,
+            [rb_ego_pt[0], rb_border_pt[0]],
+            [rb_ego_pt[1], rb_border_pt[1]],
+            "o",
+            color="black",
+            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
             zorder=30,
             markeredgecolor="white",
-            markeredgewidth=0.8,
+            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
         )
-        mx, my = (start[0] + border_pt[0]) / 2, (start[1] + border_pt[1]) / 2
+        mx, my = (rb_ego_pt[0] + rb_border_pt[0]) / 2, (rb_ego_pt[1] + rb_border_pt[1]) / 2
+        dx, dy = rb_border_pt[0] - rb_ego_pt[0], rb_border_pt[1] - rb_ego_pt[1]
+        seg_len = math.hypot(dx, dy)
+        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
+            nx, ny = -dy / seg_len, dx / seg_len
+        else:
+            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
         ax.annotate(
-            f"rb {body_d:.2f}m",
-            xy=(mx, my),
+            f"rb {rb_dist:.2f}m",
+            xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
             fontsize=8,
             color="black",
             ha="center",
@@ -1782,12 +1784,9 @@ def save_step_figure(
             zorder=31,
         )
 
-    # Ego ↔ nearest stopped-NPC closest-pair line. Drawn regardless of
-    # whether metrics are enabled — only gate is proximity < threshold so
-    # PNGs without any static NPC nearby aren't cluttered. The distance
-    # primitive is shared with the reward (rlvr.reward._closest_points_between_rects)
-    # so the line the user sees IS the same distance the audit scoring uses.
-    sc_pair = _ego_nearest_static_npc(scene, threshold_m=_STATIC_NPC_VIZ_THRESH_M)
+    # Ego ↔ nearest stopped-NPC closest-pair line. Always draw the nearest
+    # neighbor when present; the distance primitive is shared with the reward.
+    sc_pair = _ego_nearest_static_npc(scene, threshold_m=float("inf"))
     if sc_pair is not None:
         pt_e, pt_n, sc_d, sc_id = sc_pair
         ax.plot(
@@ -1804,20 +1803,20 @@ def save_step_figure(
             [pt_e[1], pt_n[1]],
             "o",
             color="#cc0000",
-            ms=5,
+            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
             zorder=30,
             markeredgecolor="white",
-            markeredgewidth=0.7,
+            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
         )
         # Offset the label perpendicular to the line so it doesn't sit on
         # top of it. The offset is configurable in metres.
         mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
         dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
         seg_len = math.hypot(dx, dy)
-        if seg_len > 1e-6:
+        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
             nx, ny = -dy / seg_len, dx / seg_len
         else:
-            nx, ny = 0.0, 1.0
+            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
         ax.annotate(
             f"{sc_d:.2f} m",
             xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
@@ -1830,7 +1829,7 @@ def save_step_figure(
         )
 
     # Ego ↔ nearest moving NPC closest-pair line (blue).
-    mv_pair = _ego_nearest_moving_npc(scene, threshold_m=5.0)
+    mv_pair = _ego_nearest_moving_npc(scene, threshold_m=float("inf"))
     if mv_pair is not None:
         pt_e, pt_n, mv_d, mv_id = mv_pair
         ax.plot(
@@ -1847,18 +1846,18 @@ def save_step_figure(
             [pt_e[1], pt_n[1]],
             "o",
             color="#0055cc",
-            ms=5,
+            ms=_DISTANCE_ENDPOINT_MARKER_SIZE,
             zorder=30,
             markeredgecolor="white",
-            markeredgewidth=0.7,
+            markeredgewidth=_DISTANCE_ENDPOINT_MARKER_EDGE_WIDTH,
         )
         mx, my = (pt_e[0] + pt_n[0]) / 2, (pt_e[1] + pt_n[1]) / 2
         dx, dy = pt_n[0] - pt_e[0], pt_n[1] - pt_e[1]
         seg_len = math.hypot(dx, dy)
-        if seg_len > 1e-6:
+        if seg_len > _DISTANCE_LABEL_DEGENERATE_SEGMENT_EPS_M:
             nx, ny = -dy / seg_len, dx / seg_len
         else:
-            nx, ny = 0.0, 1.0
+            nx, ny = _DISTANCE_LABEL_FALLBACK_NORMAL
         ax.annotate(
             f"{mv_d:.2f} m",
             xy=(mx + nx * distance_label_offset_m, my + ny * distance_label_offset_m),
@@ -1955,13 +1954,7 @@ def _score_step(
     # adding a new component only requires touching rlvr.reward — this
     # function stays untouched.
     out: dict = {"step": step}
-    for k, v in asdict(br).items():
-        if isinstance(v, (bool, int, float)) or v is None:
-            out[k] = v
-        elif isinstance(v, torch.Tensor):
-            out[k] = float(v.item())
-        # Anything else (should not happen for RewardBreakdown) gets dropped
-        # rather than breaking JSON serialization.
+    out.update(reward_breakdown_to_json_dict(br))
 
     # Derived convenience fields not in RewardBreakdown:
     #   collision: bool from collision_step
@@ -1986,11 +1979,8 @@ def _score_step(
             d,
             usage_mode="baselink",
         )
-        for k, v in asdict(br_p).items():
-            if isinstance(v, (bool, int, float)) or v is None:
-                out[f"pred_{k}"] = v
-            elif isinstance(v, torch.Tensor):
-                out[f"pred_{k}"] = float(v.item())
+        for k, v in reward_breakdown_to_json_dict(br_p).items():
+            out[f"pred_{k}"] = v
         out["pred_collision"] = out.get("pred_collision_step") is not None
         out["pred_lane_gate"] = 0.0 if out.get("pred_lane_crossing") else 1.0
         out["pred_cl_score"] = float(cl_p[0].item())
@@ -2757,7 +2747,7 @@ def run_route_replay(
             # numbers. Recorded every step regardless of NPZ dumping.
             ego_now = scene.ego_agent
             if ego_now is not None:
-                rb_info = _ego_border_distance(ego_now, road_border_polylines)
+                rb_info = _ego_border_distance(ego_now, scene.map_data)
                 sc_pair = _ego_nearest_static_npc(scene, threshold_m=_CLEARANCE_LOG_MAX_M)
                 mv_pair = _ego_nearest_moving_npc(scene, threshold_m=_CLEARANCE_LOG_MAX_M)
                 clearance_records.append(

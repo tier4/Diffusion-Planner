@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from rlvr.reward import (
+    ROAD_BORDER_NO_DATA_DISTANCE_M,
     RewardBreakdown,
     RewardConfig,
     compute_feasibility_score_batch,
@@ -377,6 +378,44 @@ def test_road_border_no_data():
     assert rb_gate[0].item() == 1.0, "No data should return gate=1 (safe)"
     assert near_frac[0].item() == 0.0, "No data should return near_frac=0"
     print(f"  PASS  road_border_no_data: gate={rb_gate[0]:.1f}")
+
+
+def test_road_border_closest_points_match_min_distance():
+    """Diagnostic closest-pair points should match the RB metric distance."""
+    ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    data = _make_road_border_data(border_y_left=5.0, border_y_right=-5.0)
+    _, _, _, _, _, per_ts_min, ego_pts, border_pts = compute_road_border_penalty(
+        ego,
+        _default_ego_shape(),
+        data,
+        return_closest_points=True,
+    )
+
+    point_dist = (ego_pts - border_pts).norm(dim=-1)
+    assert torch.allclose(point_dist, per_ts_min, atol=1e-4)
+
+
+def test_road_border_closest_points_no_data_safe_defaults():
+    """Closest-pair diagnostics should preserve safe defaults without borders."""
+    ego = _straight_line(speed_m_per_step=0.5).unsqueeze(0)
+    data = _make_lane_data()
+    rb_gate, near_frac, wide_frac, _, cont_penalty, per_ts_min, ego_pts, border_pts = (
+        compute_road_border_penalty(
+            ego,
+            _default_ego_shape(),
+            data,
+            return_closest_points=True,
+        )
+    )
+
+    assert rb_gate[0].item() == 1.0
+    assert near_frac[0].item() == 0.0
+    assert wide_frac[0].item() == 0.0
+    assert cont_penalty[0].item() == 0.0
+    assert torch.all(torch.isinf(per_ts_min))
+    assert torch.isinf(torch.tensor(ROAD_BORDER_NO_DATA_DISTANCE_M))
+    assert torch.all(ego_pts == 0.0)
+    assert torch.all(border_pts == 0.0)
 
 
 def test_road_border_batch():
@@ -1118,6 +1157,8 @@ if __name__ == "__main__":
         test_road_border_crossing,
         test_road_border_near_penalty,
         test_road_border_no_data,
+        test_road_border_closest_points_match_min_distance,
+        test_road_border_closest_points_no_data_safe_defaults,
         test_road_border_batch,
         test_batch_multiple_trajectories,
         test_batch_collision_mixed,
