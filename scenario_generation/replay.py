@@ -1439,7 +1439,16 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
     if map_data is None or map_data.line_strings is None:
         return None
     line_strings = np.asarray(map_data.line_strings, dtype=np.float32)
-    if line_strings.ndim != 3 or line_strings.shape[-1] < 4 or line_strings[..., 3].max() <= 0.5:
+    if line_strings.ndim != 3 or line_strings.shape[-1] < 4 or line_strings.size == 0:
+        return None
+    border_flag = line_strings[..., 3]
+    if border_flag.size == 0 or border_flag.max() <= 0.5:
+        return None
+    border_xy = line_strings[..., :2]
+    has_coords = np.linalg.norm(border_xy, axis=-1) > 1e-3
+    valid_pair = (border_flag[:, :-1] > 0.5) & (border_flag[:, 1:] > 0.5)
+    valid_pair &= has_coords[:, :-1] & has_coords[:, 1:]
+    if not valid_pair.any():
         return None
     h = float(ego.current_heading)
     ego_traj = torch.tensor(
@@ -1467,7 +1476,7 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
         return_closest_points=True,
     )
     rb_dist = float(per_ts_min[0, 0].item())
-    if rb_dist >= 98.0:
+    if rb_dist == 99.0:
         return None
     return ego_pts[0, 0].numpy(), border_pts[0, 0].numpy(), rb_dist
 
