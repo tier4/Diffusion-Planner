@@ -7,6 +7,10 @@ import torch
 
 from planner_metrics.aggregate import compute_subscores_batch, compute_subscores_scene_batch
 from rlvr.autoresearch.tools.classify_scene_failures import (
+    _DEFAULT_THRESHOLD_CONFIG,
+    _apply_scene_thresholds,
+    _load_scene_thresholds,
+    _merge_output_dirs,
     _prediction_path_for_scene,
     _prepare_scoring_data,
     _saved_prediction_trajectory,
@@ -150,6 +154,57 @@ def test_classify_scene_failures_writes_training_path_lists(tmp_path):
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["label_counts"]["moving_collision"] == 2
     assert summary["label_counts"]["clean"] == 2
+
+
+def test_scene_failure_threshold_config_uses_requested_defaults():
+    thresholds = _load_scene_thresholds(_DEFAULT_THRESHOLD_CONFIG)
+
+    assert thresholds == {
+        "moving_near_thresh": 0.7,
+        "static_near_thresh": 0.5,
+        "rb_near_thresh": 0.2,
+        "sc_cross_thresh": 0.2,
+        "rb_cross_thresh": 0.2,
+    }
+
+
+def test_scene_failure_thresholds_override_reward_config():
+    class Args:
+        threshold_config = _DEFAULT_THRESHOLD_CONFIG
+        moving_near_thresh = None
+        static_near_thresh = None
+        rb_near_thresh = None
+        sc_cross_thresh = None
+        rb_cross_thresh = None
+
+    config = RewardConfig(rb_cross_thresh=0.45, rb_near_thresh=0.45, sc_near_thresh=0.4)
+    thresholds = _apply_scene_thresholds(config, Args())
+
+    assert thresholds["moving_near_thresh"] == 0.7
+    assert thresholds["static_near_thresh"] == 0.5
+    assert thresholds["rb_near_thresh"] == 0.2
+    assert thresholds["sc_cross_thresh"] == 0.2
+    assert thresholds["rb_cross_thresh"] == 0.2
+    assert config.rb_cross_thresh == 0.2
+    assert config.rb_near_thresh == 0.2
+    assert config.sc_near_thresh == 0.5
+
+
+def test_merge_output_dirs_rejects_threshold_mismatch(tmp_path):
+    shard = tmp_path / "shard"
+    _write_outputs(
+        [{"scene_path": "/tmp/a.npz", "labels": ["moving_near_miss"]}],
+        [],
+        shard,
+        {"moving_near_thresh": 1.0},
+    )
+
+    try:
+        _merge_output_dirs([shard], tmp_path / "merged", {"moving_near_thresh": 0.7})
+    except ValueError as exc:
+        assert "do not match requested merge thresholds" in str(exc)
+    else:
+        raise AssertionError("expected threshold mismatch to fail")
 
 
 def test_saved_prediction_trajectory_extracts_ego_from_agent_major_npz(tmp_path):

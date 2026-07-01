@@ -879,6 +879,8 @@ def compute_road_border_penalty(
     ego_shape: torch.Tensor,
     data: dict[str, torch.Tensor],
     config: RewardConfig | None = None,
+    *,
+    return_closest_points: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor, torch.Tensor]:
     """Compute per-trajectory road border penalties using ego perimeter sampling.
 
@@ -901,6 +903,9 @@ def compute_road_border_penalty(
         - first_crossing_steps: list of N (int | None) — first timestep of crossing
         - cont_penalty: (N,) continuous proximity penalty (linear decay from cont_thresh)
         - per_timestep_min: (N, T) min ego-perimeter-to-border distance per timestep
+        When ``return_closest_points=True``, appends:
+        - ego_closest_pt: (N, T, 2) ego perimeter sample at the min distance
+        - border_closest_pt: (N, T, 2) closest point on the winning border segment
     """
     if config is None:
         config = RewardConfig()
@@ -917,6 +922,12 @@ def compute_road_border_penalty(
         torch.zeros(N, device=device),
         torch.full((N, T), 99.0, device=device),
     )
+    if return_closest_points:
+        _safe_return = (
+            *_safe_return,
+            torch.zeros(N, T, 2, device=device),
+            torch.zeros(N, T, 2, device=device),
+        )
 
     if "line_strings" not in data:
         return _safe_return
@@ -1007,6 +1018,32 @@ def compute_road_border_penalty(
     # returned `per_timestep_min[:, 0]` carries the real distance for any
     # downstream diagnostic (cleanse, viz, eval scripts).
     per_timestep_min = min_dists.min(dim=2).values  # (N, T)
+    closest_return = ()
+    if return_closest_points:
+        # Reuse the same reduced road-border segment set as the distance metric
+        # and return the closest pair for the winning ego perimeter sample.
+        closest_border_flat = torch.empty_like(world_flat)
+        seg = seg_p2 - seg_p1
+        seg_len2 = (seg * seg).sum(dim=1).clamp_min(1e-9)
+        chunk = 32768
+        for start in range(0, world_flat.shape[0], chunk):
+            pts = world_flat[start : start + chunk]
+            rel = pts[:, None, :] - seg_p1[None, :, :]
+            t = (rel * seg[None, :, :]).sum(dim=-1) / seg_len2[None, :]
+            t = t.clamp(0.0, 1.0)
+            closest = seg_p1[None, :, :] + t[:, :, None] * seg[None, :, :]
+            d2 = ((pts[:, None, :] - closest) ** 2).sum(dim=-1)
+            best_seg = d2.argmin(dim=1)
+            closest_border_flat[start : start + chunk] = closest[
+                torch.arange(pts.shape[0], device=device), best_seg
+            ]
+        border_closest_all = closest_border_flat.reshape(N, T, K_pts, 2)
+        best_perim = min_dists.argmin(dim=2)
+        n_idx = torch.arange(N, device=device).view(N, 1).expand(N, T)
+        t_idx = torch.arange(T, device=device).view(1, T).expand(N, T)
+        ego_closest_pt = world_pts[n_idx, t_idx, best_perim]
+        border_closest_pt = border_closest_all[n_idx, t_idx, best_perim]
+        closest_return = (ego_closest_pt, border_closest_pt)
 
     # Thresholds from config
     cross_thresh = config.rb_cross_thresh
@@ -1079,6 +1116,7 @@ def compute_road_border_penalty(
             first_crossing_steps,
             cont_penalty,
             per_timestep_min,
+            *closest_return,
         )
     else:
         # Original "frac" mode: fraction of timesteps in violation
@@ -1108,6 +1146,7 @@ def compute_road_border_penalty(
             first_crossing_steps,
             cont_penalty,
             per_timestep_min,
+            *closest_return,
         )
 
 

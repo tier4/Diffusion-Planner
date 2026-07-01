@@ -65,6 +65,55 @@ _ALWAYS_WRITE_LISTS = (
     "moving_ttc",
 )
 
+_DEFAULT_THRESHOLD_CONFIG = (
+    Path(__file__).resolve().parents[2] / "configs" / "scene_failure_thresholds.json"
+)
+_REQUIRED_THRESHOLD_FIELDS = (
+    "moving_near_thresh",
+    "static_near_thresh",
+    "rb_near_thresh",
+    "sc_cross_thresh",
+    "rb_cross_thresh",
+)
+
+
+def _load_scene_thresholds(path: str | Path) -> dict[str, float]:
+    with open(path) as f:
+        raw = json.load(f)
+    missing = [k for k in _REQUIRED_THRESHOLD_FIELDS if k not in raw]
+    if missing:
+        raise ValueError(f"Threshold config {path} is missing required fields: {missing}")
+    return {k: float(raw[k]) for k in _REQUIRED_THRESHOLD_FIELDS}
+
+
+def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
+    threshold_config = _load_scene_thresholds(args.threshold_config)
+
+    def resolve(name: str) -> float:
+        cli_value = getattr(args, name)
+        return float(cli_value) if cli_value is not None else threshold_config[name]
+
+    args.moving_near_thresh = resolve("moving_near_thresh")
+    args.static_near_thresh = resolve("static_near_thresh")
+    args.rb_near_thresh = resolve("rb_near_thresh")
+    config.sc_cross_thresh = resolve("sc_cross_thresh")
+    config.rb_cross_thresh = resolve("rb_cross_thresh")
+    config.sc_near_thresh = args.static_near_thresh
+    config.rb_near_thresh = args.rb_near_thresh
+
+    return {
+        "moving_near_thresh": float(args.moving_near_thresh),
+        "static_near_thresh": float(args.static_near_thresh),
+        "rb_near_thresh": float(args.rb_near_thresh),
+        "static_collision_thresh": float(config.sc_cross_thresh),
+        "sc_cross_thresh": float(config.sc_cross_thresh),
+        "rb_cross_thresh": float(config.rb_cross_thresh),
+    }
+
+
+def _thresholds_match(a: dict[str, Any], b: dict[str, float]) -> bool:
+    return all(abs(float(a.get(k, float("nan"))) - float(v)) < 1e-9 for k, v in b.items())
+
 
 def _load_scene_paths(path: str | Path) -> list[str]:
     with open(path) as f:
@@ -706,6 +755,12 @@ def _merge_output_dirs(
         if summary_path.exists():
             with open(summary_path) as f:
                 summary = json.load(f)
+            shard_thresholds = summary.get("thresholds")
+            if shard_thresholds is not None and not _thresholds_match(shard_thresholds, thresholds):
+                raise ValueError(
+                    f"{summary_path} thresholds {shard_thresholds} do not match requested "
+                    f"merge thresholds {thresholds}"
+                )
             errors.extend(summary.get("errors", []))
     rows.sort(key=lambda row: str(row.get("prediction_path", row["scene_path"])))
     _write_outputs(rows, errors, output_dir, thresholds)
@@ -1047,9 +1102,20 @@ def main() -> None:
         ),
     )
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--moving_near_thresh", type=float, default=1.0)
+    parser.add_argument(
+        "--threshold_config",
+        type=Path,
+        required=True,
+        help=(
+            "Scene-mining threshold JSON, for example "
+            f"{_DEFAULT_THRESHOLD_CONFIG}. CLI threshold flags override values in this file."
+        ),
+    )
+    parser.add_argument("--moving_near_thresh", type=float, default=None)
     parser.add_argument("--static_near_thresh", type=float, default=None)
     parser.add_argument("--rb_near_thresh", type=float, default=None)
+    parser.add_argument("--sc_cross_thresh", type=float, default=None)
+    parser.add_argument("--rb_cross_thresh", type=float, default=None)
     parser.add_argument("--max_scenes", type=int, default=None)
     parser.add_argument("--num_shards", type=int, default=1)
     parser.add_argument("--shard_index", type=int, default=0)
@@ -1063,19 +1129,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_reward_config(args.config)
-    if args.static_near_thresh is None:
-        args.static_near_thresh = float(config.sc_near_thresh)
-    if args.rb_near_thresh is None:
-        args.rb_near_thresh = float(config.rb_near_thresh)
-
-    thresholds = {
-        "moving_near_thresh": float(args.moving_near_thresh),
-        "static_near_thresh": float(args.static_near_thresh),
-        "rb_near_thresh": float(args.rb_near_thresh),
-        "static_collision_thresh": float(config.sc_cross_thresh),
-        "sc_cross_thresh": float(config.sc_cross_thresh),
-        "rb_cross_thresh": float(config.rb_cross_thresh),
-    }
+    thresholds = _apply_scene_thresholds(config, args)
     if args.merge_output_dirs is not None:
         _merge_output_dirs(
             [Path(p) for p in args.merge_output_dirs],
