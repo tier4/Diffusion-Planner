@@ -133,6 +133,34 @@ def test_classify_loaded_scenes_batch_handles_multiple_scenes_one_trajectory_eac
     assert rows[1]["labels"] == ["clean"]
 
 
+def test_classify_scene_failures_writes_null_rb_min_dist_without_borders(tmp_path):
+    ego = torch.zeros(1, T, 4)
+    ego[..., 2] = 1.0
+    data = {
+        "ego_shape": _ego_shape(),
+        "line_strings": torch.zeros(1, 0, 20, 4),
+    }
+
+    row = classify_loaded_scene(
+        "/tmp/no_road_borders.npz",
+        ego,
+        data,
+        RewardConfig(),
+        moving_near_thresh=1.0,
+        static_near_thresh=0.4,
+        rb_near_thresh=0.45,
+        device=torch.device("cpu"),
+    )
+    _write_outputs([row], [], tmp_path, {"moving_near_thresh": 1.0})
+
+    written = (tmp_path / "classified_scenes.jsonl").read_text()
+    assert "Infinity" not in written
+    assert "NaN" not in written
+    parsed = json.loads(written)
+    assert parsed["rb_min_dist"] is None
+    assert json.loads((tmp_path / "summary.json").read_text())["n_errors"] == 0
+
+
 def test_classify_scene_failures_writes_training_path_lists(tmp_path):
     rows = [
         {
