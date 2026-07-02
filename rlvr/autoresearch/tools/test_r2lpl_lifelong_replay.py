@@ -22,6 +22,7 @@ from rlvr.autoresearch.tools.mine_credit_window_scenes import (
 )
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _base_train_invocation,
+    _classify_cmd,
     _load_config,
     _lora_for_policy,
     _perception_mining_cmd,
@@ -276,6 +277,48 @@ def test_round_runner_perception_mining_defaults_video_off(tmp_path):
     assert "--render_webm" not in cmd
     assert "--danger_save_dir" in cmd
     assert save_dir == tmp_path / "round" / "perception_danger_windows"
+
+
+def test_round_runner_classify_cmd_can_save_det_predictions(tmp_path):
+    cfg = {
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "trajectory": "det",
+        "classify_save_predictions_dir": str(tmp_path / "saved_predictions"),
+    }
+
+    cmd = _classify_cmd(
+        cfg,
+        scene_pool=tmp_path / "scenes.json",
+        classify_dir=tmp_path / "classified",
+        model_path=tmp_path / "model.pth",
+    )
+
+    assert "--model_path" in cmd
+    assert "--save_predictions_dir" in cmd
+    assert cmd[cmd.index("--save_predictions_dir") + 1] == str(tmp_path / "saved_predictions")
+
+
+def test_round_runner_classify_cmd_can_reuse_saved_predictions(tmp_path):
+    cfg = {
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "trajectory": "saved_pred",
+        "classify_predictions_dir": str(tmp_path / "predictions"),
+        "classify_prediction_scene_root": str(tmp_path / "dataset_root"),
+    }
+
+    cmd = _classify_cmd(
+        cfg,
+        scene_pool=tmp_path / "scenes.json",
+        classify_dir=tmp_path / "classified",
+        model_path=tmp_path / "model.pth",
+    )
+
+    assert "--predictions_dir" in cmd
+    assert cmd[cmd.index("--predictions_dir") + 1] == str(tmp_path / "predictions")
+    assert "--prediction_scene_root" in cmd
+    assert "--model_path" not in cmd
 
 
 def test_shared_declustering_matches_replay_step_semantics():

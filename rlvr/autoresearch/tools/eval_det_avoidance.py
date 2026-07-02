@@ -56,7 +56,10 @@ def det_inference_batched(
     datas: list[dict],
     device: torch.device,
     norm_batch: dict | None = None,
-) -> torch.Tensor:
+    *,
+    return_full_prediction: bool = False,
+    return_turn_indicator: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, ...]:
     """Run deterministic inference (noise=0) on a batch of scenes.
 
     Args:
@@ -66,7 +69,11 @@ def det_inference_batched(
         device: Torch device.
         norm_batch: Pre-computed normalized batch (skip stacking if provided).
 
-    Returns (B, T, 4) tensor of ego trajectories.
+    Returns:
+        By default, a ``(B, T, 4)`` ego trajectory tensor.
+        When ``return_full_prediction`` and/or ``return_turn_indicator`` are set,
+        returns a tuple whose first element remains the ego trajectory tensor,
+        followed by the requested auxiliary tensors.
     """
     from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 
@@ -97,7 +104,16 @@ def det_inference_batched(
             device,
         )
         _, det_out = model(norm_batch_d)
-        return det_out["prediction"][:, 0].detach()  # (B, T, 4)
+        full_prediction = det_out["prediction"].detach()
+        outputs: list[torch.Tensor] = [full_prediction[:, 0]]  # (B, T, 4)
+        if return_full_prediction:
+            outputs.append(full_prediction)
+        if return_turn_indicator:
+            turn_indicator_logit = det_out.get("turn_indicator_logit")
+            if turn_indicator_logit is None:
+                raise KeyError("model output is missing turn_indicator_logit")
+            outputs.append(turn_indicator_logit.argmax(dim=-1).detach())
+        return outputs[0] if len(outputs) == 1 else tuple(outputs)
     finally:
         decoder._guidance_fn = saved_fn
 

@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
+import rlvr.autoresearch.tools.eval_det_avoidance as eval_det_avoidance
 from planner_metrics.aggregate import compute_subscores_batch, compute_subscores_scene_batch
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _DEFAULT_THRESHOLD_CONFIG,
     _apply_scene_thresholds,
+    _classify_det,
     _load_npz_data,
     _load_scene_thresholds,
     _merge_output_dirs,
     _prediction_path_for_scene,
     _prepare_scoring_data,
+    _save_prediction_batch,
     _saved_prediction_trajectory,
     _stack_scene_data,
     _write_outputs,
@@ -292,3 +297,72 @@ def test_prediction_path_for_scene_supports_flat_and_mirrored_layouts(tmp_path):
         )
         == mirrored
     )
+
+
+def test_save_prediction_batch_writes_valid_predictor_layout(tmp_path):
+    scene_path = tmp_path / "dataset" / "valid" / "2026-01-15" / "13-49-19" / "frame_000123.npz"
+    predictions_dir = tmp_path / "predictions"
+    pred = torch.zeros(1, 2, T, 4)
+    pred[0, 0, :, 0] = 1.25
+    pred[0, 1, :, 1] = 9.0
+    turn = torch.tensor([2], dtype=torch.long)
+
+    [saved_path] = _save_prediction_batch(predictions_dir, [str(scene_path)], pred, turn)
+
+    assert (
+        saved_path
+        == predictions_dir / "dataset" / "valid" / "2026-01-15" / "13-49-19" / "frame_000123.npz"
+    )
+    with np.load(saved_path) as saved:
+        assert saved["prediction"].shape == (2, T, 4)
+        assert np.allclose(saved["prediction"][0, :, 0], 1.25)
+        assert int(saved["turn_indicator"]) == 2
+
+    ego = _saved_prediction_trajectory(saved_path, torch.device("cpu"))
+    assert ego.shape == (1, T, 4)
+    assert torch.allclose(ego[0, :, 0], torch.full((T,), 1.25))
+
+
+def test_classify_det_can_save_compatible_predictions(monkeypatch, tmp_path):
+    _, data = _moving_collision_data_3col()
+    full_prediction = torch.zeros(1, 2, T, 4)
+    full_prediction[0, 0, :, 0] = 3.0
+    full_prediction[0, 1, :, 1] = 7.0
+    ego_prediction = full_prediction[:, 0]
+
+    monkeypatch.setattr(
+        "rlvr.autoresearch.tools.classify_scene_failures._load_npz_data",
+        lambda *_args, **_kwargs: _clone_data(data),
+    )
+    monkeypatch.setattr(
+        eval_det_avoidance, "load_model", lambda *_args, **_kwargs: (object(), object())
+    )
+    monkeypatch.setattr(
+        eval_det_avoidance,
+        "det_inference_batched",
+        lambda *_args, **_kwargs: (ego_prediction, full_prediction, torch.tensor([1])),
+    )
+
+    scene_path = str(
+        tmp_path / "dataset" / "valid" / "2026-01-15" / "13-49-19" / "frame_000123.npz"
+    )
+    args = SimpleNamespace(
+        model_path="/tmp/model.pth",
+        batch_size=4,
+        moving_near_thresh=1.0,
+        static_near_thresh=0.4,
+        rb_near_thresh=0.45,
+        save_predictions_dir=str(tmp_path / "saved_predictions"),
+    )
+
+    rows, errors = _classify_det([scene_path], RewardConfig(), args, torch.device("cpu"))
+
+    assert errors == []
+    assert len(rows) == 1
+    assert rows[0]["trajectory_source"] == "det"
+    saved_path = Path(rows[0]["prediction_path"])
+    assert saved_path.exists()
+    with np.load(saved_path) as saved:
+        assert saved["prediction"].shape == (2, T, 4)
+        assert np.allclose(saved["prediction"][0, :, 0], 3.0)
+        assert int(saved["turn_indicator"]) == 1

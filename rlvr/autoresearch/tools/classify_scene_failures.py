@@ -49,6 +49,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from diffusion_planner.utils.path_key import data_path_to_rel
 
 from planner_metrics.aggregate import compute_subscores_scene_batch
 from planner_metrics.subscores import (
@@ -431,6 +432,42 @@ def _saved_prediction_trajectory(
             f"{prediction_path} prediction must have non-empty T and >=4 channels, got {tuple(pred.shape)}"
         )
     return pred[:, :4].unsqueeze(0)
+
+
+def _prediction_output_base(save_predictions_dir: Path, scene_path: str | Path) -> Path:
+    return save_predictions_dir / data_path_to_rel(scene_path)
+
+
+def _save_prediction_batch(
+    save_predictions_dir: Path,
+    scene_paths: list[str],
+    predictions: torch.Tensor,
+    turn_indicators: torch.Tensor | None = None,
+) -> list[Path]:
+    if predictions.dim() != 4:
+        raise ValueError(f"predictions must be shaped (B,A,T,4), got {tuple(predictions.shape)}")
+    if predictions.shape[0] != len(scene_paths):
+        raise ValueError(
+            f"predictions batch size {predictions.shape[0]} does not match {len(scene_paths)} scenes"
+        )
+    if turn_indicators is not None and turn_indicators.shape[0] != len(scene_paths):
+        raise ValueError(
+            "turn_indicators batch size does not match scene_paths: "
+            f"{turn_indicators.shape[0]} vs {len(scene_paths)}"
+        )
+
+    out_paths: list[Path] = []
+    save_predictions_dir.mkdir(parents=True, exist_ok=True)
+    for idx, scene_path in enumerate(scene_paths):
+        out_base = _prediction_output_base(save_predictions_dir, scene_path)
+        out_base.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"prediction": predictions[idx].detach().cpu().numpy()}
+        if turn_indicators is not None:
+            payload["turn_indicator"] = turn_indicators[idx].detach().cpu().numpy()
+        out_path = out_base.with_suffix(".npz")
+        np.savez(out_path, **payload)
+        out_paths.append(out_path)
+    return out_paths
 
 
 def _neighbor_inputs(
@@ -949,6 +986,9 @@ def _classify_det(
     from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
 
     model, model_args = load_model(args.model_path, device)
+    save_predictions_dir = (
+        Path(args.save_predictions_dir).resolve() if args.save_predictions_dir is not None else None
+    )
 
     rows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -965,7 +1005,25 @@ def _classify_det(
                 print(f"  [err ] {Path(scene_path).name}: {exc}")
         if not datas:
             continue
-        det_trajs = det_inference_batched(model, model_args, datas, device)
+        if save_predictions_dir is None:
+            det_trajs = det_inference_batched(model, model_args, datas, device)
+            full_predictions = None
+            turn_indicators = None
+        else:
+            det_trajs, full_predictions, turn_indicators = det_inference_batched(
+                model,
+                model_args,
+                datas,
+                device,
+                return_full_prediction=True,
+                return_turn_indicator=True,
+            )
+            saved_prediction_paths = _save_prediction_batch(
+                save_predictions_dir,
+                valid_paths,
+                full_predictions,
+                turn_indicators,
+            )
         try:
             batch_rows = classify_loaded_scenes_batch(
                 valid_paths,
@@ -980,6 +1038,8 @@ def _classify_det(
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "det"
+                if save_predictions_dir is not None:
+                    row["prediction_path"] = str(saved_prediction_paths[bi])
                 rows.append(row)
                 print(
                     f"  [{start + bi:4d}] {Path(row['scene_path']).name}: {','.join(row['labels'])}"
@@ -1209,6 +1269,14 @@ def main() -> None:
         help="Required when --trajectory saved_pred; valid_predictor saved predictions directory",
     )
     parser.add_argument(
+        "--save_predictions_dir",
+        default=None,
+        help=(
+            "Only for --trajectory det. Save valid_predictor-compatible prediction NPZs "
+            "so later runs can use --trajectory saved_pred without rerunning model inference."
+        ),
+    )
+    parser.add_argument(
         "--prediction_scene_root",
         default=None,
         help=(
@@ -1258,6 +1326,8 @@ def main() -> None:
         help="Merge previously written shard output dirs into --output_dir and exit.",
     )
     args = parser.parse_args()
+    if args.save_predictions_dir is not None and args.trajectory != "det":
+        raise ValueError("--save_predictions_dir is only supported with --trajectory det")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_reward_config(args.config)

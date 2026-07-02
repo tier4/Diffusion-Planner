@@ -301,6 +301,51 @@ def _union_scene_lists(current_scenes: list[str], replay_scenes: list[str], out_
     _write_json(out_path, merged)
 
 
+def _classify_cmd(
+    cfg: dict[str, Any],
+    *,
+    scene_pool: Path,
+    classify_dir: Path,
+    model_path: Path,
+) -> list[str]:
+    trajectory = str(cfg.get("trajectory", "det"))
+    cmd = [
+        sys.executable,
+        "-m",
+        "rlvr.autoresearch.tools.classify_scene_failures",
+        "--scenes",
+        str(scene_pool),
+        "--config",
+        str(cfg["reward_config"]),
+        "--threshold_config",
+        str(cfg["threshold_config"]),
+        "--output_dir",
+        str(classify_dir),
+        "--trajectory",
+        trajectory,
+    ]
+    if trajectory == "det":
+        cmd.extend(["--model_path", str(model_path)])
+        if cfg.get("classify_save_predictions_dir"):
+            cmd.extend(["--save_predictions_dir", str(Path(cfg["classify_save_predictions_dir"]))])
+    elif trajectory == "saved_pred":
+        predictions_dir = cfg.get("classify_predictions_dir")
+        if not predictions_dir:
+            raise ValueError(
+                "trajectory=saved_pred requires classify_predictions_dir in the round config"
+            )
+        cmd.extend(["--predictions_dir", str(Path(predictions_dir))])
+        if cfg.get("classify_prediction_scene_root"):
+            cmd.extend(
+                ["--prediction_scene_root", str(Path(cfg["classify_prediction_scene_root"]))]
+            )
+    else:
+        raise ValueError(f"Unsupported trajectory mode {trajectory!r}")
+    if bool(cfg.get("enable_conflict_detector", False)):
+        cmd.append("--enable_conflict_detector")
+    return cmd
+
+
 def _repair_cmd(cfg: dict[str, Any], model_path: Path, credit_jsonl: Path, rdir: Path) -> list[str]:
     repair_cfg = dict(cfg.get("repair_config") or {})
     missing = [k for k in ("ego_shape", "min_margin") if k not in repair_cfg]
@@ -567,25 +612,12 @@ def main() -> None:
             use_perception_as_credit = False
         mine_labels = ",".join(cfg.get("mine_labels", []))
 
-        classify_cmd = [
-            sys.executable,
-            "-m",
-            "rlvr.autoresearch.tools.classify_scene_failures",
-            "--scenes",
-            str(scene_pool),
-            "--config",
-            str(cfg["reward_config"]),
-            "--threshold_config",
-            str(cfg["threshold_config"]),
-            "--output_dir",
-            str(classify_dir),
-            "--trajectory",
-            str(cfg.get("trajectory", "det")),
-            "--model_path",
-            str(model_path),
-        ]
-        if bool(cfg.get("enable_conflict_detector", False)):
-            classify_cmd.append("--enable_conflict_detector")
+        classify_cmd = _classify_cmd(
+            cfg,
+            scene_pool=scene_pool,
+            classify_dir=classify_dir,
+            model_path=model_path,
+        )
         mine_cmd = None
         if not use_perception_as_credit:
             if scene_pool_root is None:
